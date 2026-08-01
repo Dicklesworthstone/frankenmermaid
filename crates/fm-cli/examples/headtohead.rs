@@ -14,13 +14,13 @@
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Instant;
 
 use fm_core::MermaidParseMode;
 use fm_parser::{FlowchartBatchParsePlan, ParseResult, ParserConfig, parse};
 use fm_render_svg::{A11yConfig, SvgRenderConfig, render_svg_with_layout};
-use rayon::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 
 #[global_allocator]
@@ -35,9 +35,17 @@ struct CorpusItem {
     id: String,
     /// Every document the item renders, in order. Length 1 for single-shot items; for an edit trace,
     /// the successive full documents a live preview would re-render as the user types.
-    texts: Vec<String>,
+    #[serde(deserialize_with = "deserialize_texts")]
+    texts: Arc<[String]>,
     reps: usize,
     warmup: usize,
+}
+
+fn deserialize_texts<'de, D>(deserializer: D) -> Result<Arc<[String]>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<String>::deserialize(deserializer).map(Arc::from)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,13 +192,192 @@ fn process_affinity(available_parallelism: usize) -> ProcessAffinity {
     }
 }
 
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn wait_unpoisoned<'a, T>(condvar: &Condvar, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
+    condvar
+        .wait(guard)
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+struct FixedShardJob {
+    texts: Arc<[String]>,
+    config: Arc<SvgRenderConfig>,
+    parse_plan: Option<Arc<FlowchartBatchParsePlan>>,
+    workers_seen: Option<Arc<[AtomicBool]>>,
+}
+
+struct FixedShardState {
+    generation: u64,
+    remaining: usize,
+    shutdown: bool,
+    job: Option<Arc<FixedShardJob>>,
+}
+
+struct FixedShardShared {
+    state: Mutex<FixedShardState>,
+    start: Condvar,
+    done: Condvar,
+    output_shards: Vec<Mutex<Vec<String>>>,
+}
+
+struct FixedShardPool {
+    threads: usize,
+    shared: Arc<FixedShardShared>,
+    handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl FixedShardPool {
+    fn new(threads: usize) -> Result<Self, String> {
+        let shared = Arc::new(FixedShardShared {
+            state: Mutex::new(FixedShardState {
+                generation: 0,
+                remaining: 0,
+                shutdown: false,
+                job: None,
+            }),
+            start: Condvar::new(),
+            done: Condvar::new(),
+            output_shards: (0..threads).map(|_| Mutex::new(Vec::new())).collect(),
+        });
+        let mut handles = Vec::with_capacity(threads);
+        for worker_index in 0..threads {
+            let worker_shared = Arc::clone(&shared);
+            let spawn = std::thread::Builder::new()
+                .name(format!("fm-fixed-{worker_index}"))
+                .spawn(move || fixed_shard_worker(worker_index, threads, &worker_shared));
+            match spawn {
+                Ok(handle) => handles.push(handle),
+                Err(error) => {
+                    {
+                        let mut state = lock_unpoisoned(&shared.state);
+                        state.shutdown = true;
+                        state.generation = state.generation.wrapping_add(1);
+                    }
+                    shared.start.notify_all();
+                    for handle in handles {
+                        let _ = handle.join();
+                    }
+                    return Err(format!(
+                        "cannot start fixed-shard render worker {worker_index}: {error}"
+                    ));
+                }
+            }
+        }
+        Ok(Self {
+            threads,
+            shared,
+            handles,
+        })
+    }
+
+    fn render(&self, job: Arc<FixedShardJob>, sink: &mut Vec<String>) {
+        let output_len = job.texts.len();
+        {
+            let mut state = lock_unpoisoned(&self.shared.state);
+            while state.remaining != 0 {
+                state = wait_unpoisoned(&self.shared.done, state);
+            }
+            state.job = Some(job);
+            state.remaining = self.threads;
+            state.generation = state.generation.wrapping_add(1);
+        }
+        self.shared.start.notify_all();
+
+        {
+            let mut state = lock_unpoisoned(&self.shared.state);
+            while state.remaining != 0 {
+                state = wait_unpoisoned(&self.shared.done, state);
+            }
+            state.job = None;
+        }
+
+        sink.clear();
+        sink.reserve(output_len);
+        for shard in &self.shared.output_shards {
+            sink.append(&mut lock_unpoisoned(shard));
+        }
+    }
+}
+
+impl Drop for FixedShardPool {
+    fn drop(&mut self) {
+        {
+            let mut state = lock_unpoisoned(&self.shared.state);
+            state.shutdown = true;
+            state.generation = state.generation.wrapping_add(1);
+        }
+        self.shared.start.notify_all();
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn fixed_shard_worker(worker_index: usize, threads: usize, shared: &FixedShardShared) {
+    let mut observed_generation = 0;
+    loop {
+        let (generation, job) = {
+            let mut state = lock_unpoisoned(&shared.state);
+            while !state.shutdown && state.generation == observed_generation {
+                state = wait_unpoisoned(&shared.start, state);
+            }
+            if state.shutdown {
+                return;
+            }
+            observed_generation = state.generation;
+            (
+                state.generation,
+                Arc::clone(state.job.as_ref().expect("active fixed-shard job")),
+            )
+        };
+
+        let start = worker_index.saturating_mul(job.texts.len()) / threads;
+        let end = (worker_index + 1).saturating_mul(job.texts.len()) / threads;
+        let mut output = {
+            let mut slot = lock_unpoisoned(&shared.output_shards[worker_index]);
+            std::mem::take(&mut *slot)
+        };
+        output.clear();
+        output.reserve(end.saturating_sub(start));
+        if start != end
+            && let Some(workers_seen) = &job.workers_seen
+            && let Some(seen) = workers_seen.get(worker_index)
+        {
+            seen.store(true, Ordering::Relaxed);
+        }
+        for input_index in start..end {
+            let text = std::hint::black_box(job.texts[input_index].as_str());
+            let parsed = job
+                .parse_plan
+                .as_ref()
+                .map_or_else(|| parse(text), |plan| plan.parse(input_index, text));
+            output.push(full_pipeline_parsed(parsed, &job.config));
+        }
+        *lock_unpoisoned(&shared.output_shards[worker_index]) = output;
+
+        let mut state = lock_unpoisoned(&shared.state);
+        if state.generation == generation {
+            state.remaining = state.remaining.saturating_sub(1);
+            if state.remaining == 0 {
+                shared.done.notify_one();
+            }
+        }
+    }
+}
+
 /// Executes independent diagrams through either the scalar path or one persistent portable pool.
 ///
 /// The renderer's existing per-diagram scoped-thread cap is deliberately untouched: the negative
 /// evidence ledger shows that raising it above eight regresses because every render pays fresh
 /// thread startup. A CI batch is a different vein. Its diagrams are independent, so one pool can
-/// stay alive across every warmup, A/A arm, and measured sample. Rayon uses the native scheduler on
-/// x86_64 and aarch64; there are no ISA-specific assumptions in this harness.
+/// stay alive across every warmup, A/A arm, and measured sample. Fixed contiguous shards avoid
+/// work-stealing coordination for these similarly-sized independent diagrams; there are no
+/// ISA-specific assumptions in this harness.
 struct RenderExecutor {
     threads: usize,
     available_parallelism: usize,
@@ -198,7 +385,7 @@ struct RenderExecutor {
     calibration_target_ns: u64,
     thread_probe_enabled: bool,
     shared_prefix_reuse: bool,
-    pool: Option<rayon::ThreadPool>,
+    pool: Option<FixedShardPool>,
 }
 
 impl RenderExecutor {
@@ -225,17 +412,9 @@ impl RenderExecutor {
         let thread_probe_enabled =
             matches!(std::env::var("FM_H2H_THREAD_PROBE").as_deref(), Ok("1"));
         let shared_prefix_reuse = std::env::var_os("FM_H2H_DISABLE_SHARED_PREFIX").is_none();
-        let pool = if threads == 1 {
-            None
-        } else {
-            Some(
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(threads)
-                    .thread_name(|index| format!("fm-h2h-{index}"))
-                    .build()
-                    .map_err(|e| format!("cannot build {threads}-thread render pool: {e}"))?,
-            )
-        };
+        let pool = (threads != 1)
+            .then(|| FixedShardPool::new(threads))
+            .transpose()?;
         Ok(Self {
             threads,
             available_parallelism,
@@ -257,7 +436,7 @@ impl RenderExecutor {
 
     fn execution_model(&self) -> &'static str {
         if self.pool.is_some() {
-            "rayon_persistent_pool"
+            "fixed_shard_persistent_pool"
         } else {
             "scalar"
         }
@@ -269,62 +448,54 @@ impl RenderExecutor {
 
     /// Render every revision in deterministic input order.
     ///
-    /// `IndexedParallelIterator::collect::<Vec<_>>()` preserves input order, so concatenating the
-    /// result is byte-identical to the scalar path even though work completes out of order.
+    /// Each worker owns one contiguous input interval, and shards are concatenated in worker order,
+    /// so the result is byte-identical to the scalar path without a sort or shared output lock.
     fn render_all_observing(
         &self,
-        texts: &[String],
-        cfg: &SvgRenderConfig,
+        texts: &Arc<[String]>,
+        cfg: &Arc<SvgRenderConfig>,
         sink: &mut Vec<String>,
-        workers_seen: Option<&[AtomicBool]>,
+        workers_seen: Option<Arc<[AtomicBool]>>,
     ) {
         sink.clear();
         let input_refs = texts.iter().map(String::as_str).collect::<Vec<_>>();
         let parse_plan = self.shared_prefix_reuse.then(|| {
-            FlowchartBatchParsePlan::new(
+            Arc::new(FlowchartBatchParsePlan::new(
                 &input_refs,
                 MermaidParseMode::Compat,
                 &ParserConfig::default(),
-            )
+            ))
         });
-        let parse_input = |input_index: usize, text: &str| match &parse_plan {
-            Some(plan) => plan.parse(input_index, text),
-            None => parse(text),
-        };
         if let Some(pool) = &self.pool {
-            let rendered = pool.install(|| {
-                texts
-                    .par_iter()
-                    .enumerate()
-                    .map(|(input_index, text)| {
-                        if let Some(workers_seen) = workers_seen
-                            && let Some(index) = rayon::current_thread_index()
-                            && let Some(seen) = workers_seen.get(index)
-                        {
-                            seen.store(true, Ordering::Relaxed);
-                        }
-                        full_pipeline_parsed(
-                            parse_input(input_index, std::hint::black_box(text.as_str())),
-                            cfg,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            });
-            sink.extend(rendered);
+            pool.render(
+                Arc::new(FixedShardJob {
+                    texts: Arc::clone(texts),
+                    config: Arc::clone(cfg),
+                    parse_plan,
+                    workers_seen,
+                }),
+                sink,
+            );
         } else {
-            if let Some(seen) = workers_seen.and_then(|workers| workers.first()) {
+            if let Some(seen) = workers_seen.as_deref().and_then(|workers| workers.first()) {
                 seen.store(true, Ordering::Relaxed);
             }
             for (input_index, text) in texts.iter().enumerate() {
-                sink.push(full_pipeline_parsed(
-                    parse_input(input_index, std::hint::black_box(text.as_str())),
-                    cfg,
-                ));
+                let text = std::hint::black_box(text.as_str());
+                let parsed = parse_plan
+                    .as_ref()
+                    .map_or_else(|| parse(text), |plan| plan.parse(input_index, text));
+                sink.push(full_pipeline_parsed(parsed, cfg));
             }
         }
     }
 
-    fn render_all(&self, texts: &[String], cfg: &SvgRenderConfig, sink: &mut Vec<String>) {
+    fn render_all(
+        &self,
+        texts: &Arc<[String]>,
+        cfg: &Arc<SvgRenderConfig>,
+        sink: &mut Vec<String>,
+    ) {
         self.render_all_observing(texts, cfg, sink, None);
     }
 
@@ -335,16 +506,17 @@ impl RenderExecutor {
     /// Apple Silicon without relying on ISA- or OS-specific thread APIs.
     fn probe_operation_threads(
         &self,
-        texts: &[String],
-        cfg: &SvgRenderConfig,
+        texts: &Arc<[String]>,
+        cfg: &Arc<SvgRenderConfig>,
         batch: usize,
     ) -> usize {
-        let workers_seen = (0..self.threads)
+        let workers_seen: Arc<[AtomicBool]> = (0..self.threads)
             .map(|_| AtomicBool::new(false))
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+            .into();
         let mut sink = Vec::with_capacity(texts.len());
         for _ in 0..batch {
-            self.render_all_observing(texts, cfg, &mut sink, Some(&workers_seen));
+            self.render_all_observing(texts, cfg, &mut sink, Some(Arc::clone(&workers_seen)));
         }
         workers_seen
             .iter()
@@ -815,8 +987,8 @@ fn measure_parse(
 fn calibrate_batch(
     executor: &RenderExecutor,
     item: &CorpusItem,
-    cfg_a: &SvgRenderConfig,
-    cfg_b: &SvgRenderConfig,
+    cfg_a: &Arc<SvgRenderConfig>,
+    cfg_b: &Arc<SvgRenderConfig>,
 ) -> usize {
     let mut scratch: Vec<String> = Vec::with_capacity(item.texts.len());
     let mut fastest_warmup = u64::MAX;
@@ -860,7 +1032,7 @@ fn calibrate_batch(
 fn time_arm(
     executor: &RenderExecutor,
     item: &CorpusItem,
-    cfg: &SvgRenderConfig,
+    cfg: &Arc<SvgRenderConfig>,
     batch: usize,
     scratch: &mut Vec<String>,
     reference_len: usize,
@@ -887,8 +1059,8 @@ fn time_arm(
 fn paired(
     executor: &RenderExecutor,
     item: &CorpusItem,
-    cfg_a: &SvgRenderConfig,
-    cfg_b: &SvgRenderConfig,
+    cfg_a: &Arc<SvgRenderConfig>,
+    cfg_b: &Arc<SvgRenderConfig>,
     batch: usize,
     rounds: usize,
 ) -> Result<PairedMeasured, String> {
@@ -1044,9 +1216,15 @@ fn main() {
     // the process's instruction count proportional to that profile alone, which turns a load-sensitive
     // wall-clock A/B into a deterministic, load-immune one. Unset for normal runs.
     let (default_cfg, lean_cfg) = match std::env::var("FM_H2H_FORCE_PROFILE").as_deref() {
-        Ok("lean") => (lean_config(), lean_config()),
-        Ok("default") => (SvgRenderConfig::default(), SvgRenderConfig::default()),
-        _ => (SvgRenderConfig::default(), lean_config()),
+        Ok("lean") => (Arc::new(lean_config()), Arc::new(lean_config())),
+        Ok("default") => (
+            Arc::new(SvgRenderConfig::default()),
+            Arc::new(SvgRenderConfig::default()),
+        ),
+        _ => (
+            Arc::new(SvgRenderConfig::default()),
+            Arc::new(lean_config()),
+        ),
     };
     let mut failed = false;
 
@@ -1062,7 +1240,7 @@ fn main() {
         // describe a 40-diagram CI job by whichever diagram happened to be last. Single-shot items
         // have one revision, so both numbers equal the old one.
         let (mut nodes, mut edges, mut nodes_total, mut edges_total) = (0, 0, 0, 0);
-        for text in &item.texts {
+        for text in item.texts.iter() {
             let parsed = parse(text);
             nodes = nodes.max(parsed.ir.nodes.len());
             edges = edges.max(parsed.ir.edges.len());
@@ -1324,6 +1502,8 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use fm_parser::parse;
     use fm_render_svg::SvgRenderConfig;
 
@@ -1361,13 +1541,14 @@ mod tests {
 
     #[test]
     fn persistent_pool_preserves_scalar_output_order_and_bytes() {
-        let texts = vec![
+        let texts: Arc<[String]> = vec![
             "flowchart LR\nA[First]-->B[Second]".to_owned(),
             "sequenceDiagram\nAlice->>Bob: Hello".to_owned(),
             "classDiagram\nclass User".to_owned(),
             "stateDiagram-v2\n[*]-->Ready".to_owned(),
-        ];
-        let config = SvgRenderConfig::default();
+        ]
+        .into();
+        let config = Arc::new(SvgRenderConfig::default());
         let scalar = RenderExecutor::new(1).expect("scalar executor");
         let parallel = RenderExecutor::new(2).expect("parallel executor");
         let mut scalar_output = Vec::new();
@@ -1389,12 +1570,13 @@ mod tests {
             "    S1-->S2\n",
             "  end\n",
         );
-        let texts = (0..16)
+        let texts: Arc<[String]> = (0..16)
             .map(|index| {
                 format!("{prefix}  S2-->D{index}[\"Independent downstream consumer {index}\"]")
             })
-            .collect::<Vec<_>>();
-        let config = SvgRenderConfig::default();
+            .collect::<Vec<_>>()
+            .into();
+        let config = Arc::new(SvgRenderConfig::default());
         let expected = texts
             .iter()
             .map(|text| full_pipeline_parsed(parse(text), &config))
@@ -1409,10 +1591,11 @@ mod tests {
 
     #[test]
     fn operation_probe_reports_workers_that_execute_diagrams() {
-        let texts = (0..64)
+        let texts: Arc<[String]> = (0..64)
             .map(|index| format!("flowchart LR\nA{index}[First]-->B{index}[Second]"))
-            .collect::<Vec<_>>();
-        let config = SvgRenderConfig::default();
+            .collect::<Vec<_>>()
+            .into();
+        let config = Arc::new(SvgRenderConfig::default());
         let scalar = RenderExecutor::new(1).expect("scalar executor");
         let parallel = RenderExecutor::new(2).expect("parallel executor");
         assert_eq!(scalar.probe_operation_threads(&texts, &config, 2), 1);
@@ -1435,7 +1618,8 @@ mod tests {
             texts: vec![
                 "flowchart LR\nA[First]-->B[Second]".to_owned(),
                 "flowchart TD\nC[Third]-->D[Fourth]".to_owned(),
-            ],
+            ]
+            .into(),
             reps: 9,
             warmup: 1,
         };
