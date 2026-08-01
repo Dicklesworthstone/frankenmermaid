@@ -2050,3 +2050,83 @@ name/path/display constructions. Exact-final-ELF `strace -f -c` also measured `s
 - **Retry predicate.** Re-measure if session inputs, output naming, options identity, worker-count
   selection, executable identity, revision count, corpus, or output equivalence changes. Promote no
   competitive claim without a same-invocation incumbent null arm.
+
+## KEEP: default `render-batch` to physical cores, not logical — default path −26.7% on `docs_site_200` (2026-08-01)
+
+**Commit:** `adc4f55c`.
+**Campaign result class:** maintenance-self-speedup
+
+- **How it was found.** Not from a frame. After three byte-identical layout wins the per-diagram
+  profile went flat, so the next question was the axis the incumbent cannot follow at all: every
+  measurement so far had been `--jobs 1`, but the product ships `--jobs` defaulted to
+  `available_parallelism()`. Measuring the whole scaling curve on a **quiet host** (load 2.4, the
+  first genuinely quiet window of the session) showed the batch peaks at the physical core count and
+  then **regresses**:
+
+  | `--jobs` | `ci_docs_2000` best-of-5 | speedup | efficiency |
+  |---:|---:|---:|---:|
+  | 1 | 394.6 ms | 1.00x | 100% |
+  | 8 | 57.0 ms | 6.92x | 87% |
+  | 16 | 31.9 ms | 12.36x | 77% |
+  | **32** | **22.6 ms** | **17.47x** | 55% |
+  | 64 | 27.0 ms | 14.63x | 23% |
+
+  `docs_site_200` has the same shape: 7.86x at 32, falling to 5.66x at 64.
+- **Why, and why it is not just starvation.** The box is an AMD Threadripper PRO 5975WX: 32 physical
+  cores, 2 threads/core, 64 logical. `available_parallelism()` reports **logical** CPUs, so the
+  default asked for two workers per physical core. Batch workers are compute-bound and
+  cache-resident — each parses, lays out and renders an entire diagram — so a pair of SMT siblings
+  shares one core's L1/L2 and execution units without adding execution resources. Starvation was
+  ruled out by re-measuring at 10x the work per worker: `ci_docs_2000` gives each of 64 workers ~31
+  documents (~6 ms of work) and **still** regresses. Amdahl alone does not explain it either — a
+  2.7% serial fraction fitted at 32 predicts 23.8x at 64, and the measurement is 14.6x, so the
+  excess is contention, not serial work.
+- **The ONE lever.** Default to physical cores. `default_batch_workers()` counts distinct
+  `topology/thread_siblings_list` values in sysfs — every logical CPU publishes the sibling set it
+  shares a core with, so the number of distinct sets is the number of physical cores. One directory
+  walk per batch. Unreadable or unexpected topology yields `None` and the caller keeps the previous
+  `available_parallelism()` behaviour, which is also what non-Linux targets get; on a non-SMT machine
+  physical == logical and the default is unchanged.
+- **Byte-identity, proven BEFORE timing — and note WHAT was proven.** Worker count is output-neutral:
+  identical SHA-256 of the concatenated per-document SVG stream at `--jobs` **1 / 8 / 16 / 32 / 64**
+  (and 64 twice) across `docs_site_200`, `docs_site_50`, `schema_catalog_25`, `edit_trace_60x20` and
+  `ci_docs_2000`. This mattered more than usual: this CLI's layout guardrail is a function of
+  measured parse wall time, so a change that alters timing is exactly the kind that could move bytes.
+  It does not, at these sizes. Default-vs-default output was then re-verified identical per job.
+- **A/B on the DEFAULT path (no `--jobs`), arms alternated per round, quiet host.**
+
+  **Executing ELF SHA-256 (self-reported by process):**
+  `b6340019990e6aa4eb9164e889708348da747048407b1f488a7fea0c824329e3`
+  (candidate; baseline arm `de669423c011f5462e6b098dd383258645fc5da212518c15fd41d5c80654a6d2`).
+  The arms were confirmed to differ by exactly this change — 64 lines — by diffing the baseline
+  worktree's `main.rs` against the working tree, because a peer committed to that same file twice
+  during the build window.
+
+  **A/A null control (same invocation):** baseline binary against a byte-identical copy of itself,
+  alternated with the A/B arms in the same sweep.
+
+  **Counted mechanism:** requested workers 64 -> 32 on this host (self-reported by the batch: the
+  baseline prints `64 requested worker(s), 50 active worker(s)`, the candidate `32 requested, 32
+  active`). Identical work, identical output, fewer threads contending for the same 32 cores.
+
+  | workload | A/A null (median, range) | A/B (median, range) | verdict |
+  |---|---|---|---|
+  | `docs_site_200` | 1.0130 (0.8596–1.0789) | **0.7334** (0.691–0.840) | **−26.7%**; the A/B and A/A ranges are **disjoint** over 11 rounds |
+  | `docs_site_50` | 0.9983 (0.935–1.081) | **0.7550** (0.659–0.938) | **−24.5%** |
+  | `ci_docs_2000` | 0.9850 (0.933–1.044) | **0.9192** (0.837–0.948) | **−8.1%** |
+
+- **Why wall is the gate here, exceptionally.** This changes scheduling, not work: instruction count
+  is nearly unmoved by construction, so the usual instructions gate would measure nothing. Wall is
+  the mechanism. It is only admissible because this ran in the session's one quiet window (load
+  2.4–7 versus 30–44 earlier); the A/A null is reported per job precisely because wall nulls are
+  wide, and the headline row's A/B range does not overlap its null.
+- **Correctness.** `cargo clippy -p frankenmermaid-cli --all-targets -- -D warnings` clean.
+  `golden_svg_test::svg_golden_snapshots_are_stable` remains the pre-existing red documented in the
+  `b84ddd72` row (`dense_flowchart_stress`, red at `ebc323c3` before any of this work); no new
+  failures.
+- **Verdict: KEEP.** Output-neutral, and it makes the shipping default faster for every user who
+  does not pass `--jobs`.
+- **Retry / re-check predicate.** Re-open if (1) batch workers stop being compute-bound — a future
+  batch that blocks on I/O per document would want more threads than cores, not fewer, or (2) the
+  peak moves off the physical core count on some machine class, which this rule assumes. The
+  scaling curve above is the measurement to repeat; `--jobs` remains the escape hatch either way.
