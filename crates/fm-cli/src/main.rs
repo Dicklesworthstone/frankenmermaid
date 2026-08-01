@@ -65,8 +65,8 @@ use fm_parser::{
     parse_evidence_json, parse_with_mode, parse_with_mode_and_config,
 };
 use fm_render_svg::{
-    A11yConfig, CertifiedSvgBatchPrefix, SvgBatchRenderer, SvgRenderConfig, ThemePreset,
-    describe_diagram_with_layout, render_svg_with_layout,
+    A11yConfig, CertifiedSvgBatchPrefix, SvgBatchRenderer, SvgBatchRendererSeed, SvgRenderConfig,
+    ThemePreset, describe_diagram_with_layout, render_svg_with_layout,
 };
 use fm_render_term::{
     TermRenderConfig, diff_diagrams, render_diff_plain, render_diff_summary,
@@ -2723,6 +2723,13 @@ fn cmd_render_batch(
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("cannot create output directory {out_dir}"))?;
 
+    if std::env::var_os("FM_SELF_REPORT_ELF_SHA256").is_some() {
+        let executable = std::env::current_exe().context("cannot resolve executing ELF")?;
+        let bytes = std::fs::read(&executable)
+            .with_context(|| format!("cannot read executing ELF {}", executable.display()))?;
+        eprintln!("executing_elf_sha256={}", sha256_hex(&bytes));
+    }
+
     let requested = jobs.unwrap_or_else(|| {
         std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
     });
@@ -2884,28 +2891,64 @@ fn cmd_render_batch(
             },
         )
     };
+    // A Rayon worker normally has to cold-build the same certified prefix before its private
+    // renderer can reuse suffix deltas. Render one representative on the coordinator, then fork
+    // that immutable snapshot into every worker. The representative's output is retained in its
+    // original slot, so no diagram is rendered twice and output ordering is unchanged.
+    let seed_owner_index = if options.format == OutputFormat::Svg
+        && std::env::var_os("FM_DISABLE_BATCH_PREFIX_SEED").is_none()
+    {
+        pool.as_ref().and_then(|_| {
+            owner_indices.iter().copied().find(|&index| {
+                parse_plan
+                    .reusable_prefix_group(parse_plan_position[index])
+                    .is_some()
+            })
+        })
+    } else {
+        None
+    };
+    let mut coordinator_state = (
+        FlowchartBatchParseScratch::default(),
+        SvgBatchRenderer::default(),
+    );
+    let seeded_owner_result = seed_owner_index.map(|index| {
+        let result =
+            render_owner(&mut coordinator_state, index).map_err(|error| format!("{error:#}"));
+        (index, result)
+    });
+    let renderer_seed: Option<SvgBatchRendererSeed> = coordinator_state.1.seed();
+    let initial_state = || {
+        (
+            FlowchartBatchParseScratch::default(),
+            renderer_seed
+                .as_ref()
+                .map_or_else(SvgBatchRenderer::default, SvgBatchRenderer::from_seed),
+        )
+    };
+    let render_or_seeded = |state: &mut (FlowchartBatchParseScratch, SvgBatchRenderer),
+                            index: usize| {
+        if let Some((seeded_index, result)) = seeded_owner_result.as_ref()
+            && *seeded_index == index
+        {
+            return result
+                .as_ref()
+                .map(|(path, bytes)| (path.clone(), *bytes))
+                .map_err(|error| anyhow::anyhow!("{error}"));
+        }
+        render_owner(state, index)
+    };
     let owner_results: Vec<Result<(String, usize)>> = match &pool {
         None => {
-            let mut state = (
-                FlowchartBatchParseScratch::default(),
-                SvgBatchRenderer::default(),
-            );
+            let mut state = initial_state();
             (0..inputs.len())
-                .map(|index| render_owner(&mut state, index))
+                .map(|index| render_or_seeded(&mut state, index))
                 .collect()
         }
         Some(pool) => pool.install(|| {
             (0..inputs.len())
                 .into_par_iter()
-                .map_init(
-                    || {
-                        (
-                            FlowchartBatchParseScratch::default(),
-                            SvgBatchRenderer::default(),
-                        )
-                    },
-                    &render_owner,
-                )
+                .map_init(initial_state, render_or_seeded)
                 .collect()
         }),
     };

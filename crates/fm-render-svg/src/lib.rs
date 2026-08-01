@@ -300,7 +300,7 @@ struct RenderDetailProfile {
 
 const POST_PASS_MAX_SVG_BYTES: usize = 100_000;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct SvgBatchFragments {
     edge_svg: String,
     edge_ends: Vec<usize>,
@@ -314,7 +314,7 @@ struct SvgBatchFragments {
     active: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SvgBatchSnapshot {
     ir: Option<Arc<MermaidDiagramIr>>,
     layout: Arc<DiagramLayout>,
@@ -330,6 +330,17 @@ pub struct CertifiedSvgBatchPrefix {
     identity: Arc<str>,
     node_count: usize,
     edge_count: usize,
+}
+
+/// Immutable cold-start state that can initialize independent batch renderers.
+///
+/// A coordinator renders one representative of a parser-certified prefix group, then broadcasts
+/// this seed to its workers. Each worker receives private mutable state while the seed's layout is
+/// shared copy-on-write, replacing one full prefix layout/render per worker with a cheap snapshot
+/// clone. The ordinary stateless renderer and unseeded batch path are unchanged.
+#[derive(Debug, Clone)]
+pub struct SvgBatchRendererSeed {
+    snapshot: Arc<SvgBatchSnapshot>,
 }
 
 impl CertifiedSvgBatchPrefix {
@@ -356,6 +367,30 @@ pub struct SvgBatchRenderer {
 }
 
 impl SvgBatchRenderer {
+    /// Capture the current parser-certified snapshot for cold-start broadcast.
+    ///
+    /// Uncertified renders return `None`: a seed must never turn cache eligibility into a
+    /// correctness assumption.
+    #[must_use]
+    pub fn seed(&self) -> Option<SvgBatchRendererSeed> {
+        self.previous.as_ref().and_then(|snapshot| {
+            snapshot
+                .certified_prefix
+                .as_ref()
+                .map(|_| SvgBatchRendererSeed {
+                    snapshot: Arc::new(snapshot.clone()),
+                })
+        })
+    }
+
+    /// Create private worker state from a coordinator-produced seed.
+    #[must_use]
+    pub fn from_seed(seed: &SvgBatchRendererSeed) -> Self {
+        Self {
+            previous: Some(seed.snapshot.as_ref().clone()),
+        }
+    }
+
     /// Render one owned diagram, retaining it as the exact comparison source for the next call.
     #[must_use]
     pub fn render(
@@ -451,10 +486,10 @@ impl SvgBatchRenderer {
     /// Lay out and render a borrowed diagram while transplanting a certified LR path prefix.
     ///
     /// The first diagram uses the ordinary auto-layout pipeline and records an opaque geometry
-    /// proof. Later diagrams with the same parser certificate mutate the uniquely-owned prior
-    /// layout in place: prefix node boxes, edge paths, and their allocations stay untouched while
-    /// only the appended suffix is sized and routed. Every unsupported shape or ownership state
-    /// falls back to [`fm_layout::layout_diagram_traced`] before rendering.
+    /// proof. Later diagrams with the same parser certificate mutate a private or copy-on-write
+    /// prior layout: prefix node boxes and edge paths stay untouched while only the appended suffix
+    /// is sized and routed. Every unsupported shape falls back to
+    /// [`fm_layout::layout_diagram_traced`] before rendering.
     #[must_use]
     pub fn layout_and_render_borrowed(
         &mut self,
@@ -474,7 +509,6 @@ impl SvgBatchRenderer {
             if !same_identity
                 || previous_prefix.node_count != current_prefix.node_count
                 || previous_prefix.edge_count != current_prefix.edge_count
-                || Arc::strong_count(&snapshot.layout) != 1
             {
                 return None;
             }
@@ -12263,6 +12297,98 @@ mod tests {
         assert!(snapshot.layout_prefix.is_some());
         assert!(snapshot.fragments.reused_nodes >= 48);
         assert!(snapshot.fragments.reused_edges >= 47);
+    }
+
+    #[test]
+    fn certified_batch_seed_bootstraps_independent_worker_renderers() {
+        let inputs = [
+            concat!(
+                "flowchart LR\n",
+                "  subgraph Shared[\"Shared ingestion platform\"]\n",
+                "    S0[\"Receive & validate events\"]\n",
+                "    S1[\"Normalize payload safely\"]\n",
+                "    S2[\"Publish canonical records\"]\n",
+                "    S0-->S1\n",
+                "    S1-->S2\n",
+                "  end\n",
+                "  S2-->A[Alpha]",
+            ),
+            concat!(
+                "flowchart LR\n",
+                "  subgraph Shared[\"Shared ingestion platform\"]\n",
+                "    S0[\"Receive & validate events\"]\n",
+                "    S1[\"Normalize payload safely\"]\n",
+                "    S2[\"Publish canonical records\"]\n",
+                "    S0-->S1\n",
+                "    S1-->S2\n",
+                "  end\n",
+                "  S2-->B[Bravo]\n",
+                "  B-->C[Cache]",
+            ),
+            concat!(
+                "flowchart LR\n",
+                "  subgraph Shared[\"Shared ingestion platform\"]\n",
+                "    S0[\"Receive & validate events\"]\n",
+                "    S1[\"Normalize payload safely\"]\n",
+                "    S2[\"Publish canonical records\"]\n",
+                "    S0-->S1\n",
+                "    S1-->S2\n",
+                "  end\n",
+                "  S2-->D[Delta]\n",
+                "  D-->E[Event log]\n",
+                "  E-->F[Fanout]",
+            ),
+        ];
+        let plan = fm_parser::FlowchartBatchParsePlan::new(
+            &inputs,
+            fm_core::MermaidParseMode::Compat,
+            &fm_parser::ParserConfig::default(),
+        );
+        let config = SvgRenderConfig::default();
+        let mut coordinator_scratch = fm_parser::FlowchartBatchParseScratch::default();
+        let mut coordinator = SvgBatchRenderer::default();
+
+        plan.with_parse_scratch(0, inputs[0], &mut coordinator_scratch, |parsed| {
+            let prefix = parsed.reusable_prefix.expect("certified prefix");
+            let actual = coordinator.layout_and_render_borrowed(
+                parsed.ir,
+                &config,
+                Some(CertifiedSvgBatchPrefix::new(
+                    Arc::clone(&prefix.identity),
+                    prefix.node_count,
+                    prefix.edge_count,
+                )),
+            );
+            let expected_layout = fm_layout::layout_diagram_traced(parsed.ir).layout;
+            assert_eq!(
+                actual,
+                render_svg_with_layout(parsed.ir, &expected_layout, &config)
+            );
+        });
+        let seed = coordinator.seed().expect("coordinator seed");
+
+        for (index, input) in inputs.iter().enumerate().skip(1) {
+            let mut scratch = fm_parser::FlowchartBatchParseScratch::default();
+            let mut worker = SvgBatchRenderer::from_seed(&seed);
+            plan.with_parse_scratch(index, input, &mut scratch, |parsed| {
+                let prefix = parsed.reusable_prefix.expect("certified prefix");
+                let expected_layout = fm_layout::layout_diagram_traced(parsed.ir).layout;
+                let expected = render_svg_with_layout(parsed.ir, &expected_layout, &config);
+                let actual = worker.layout_and_render_borrowed(
+                    parsed.ir,
+                    &config,
+                    Some(CertifiedSvgBatchPrefix::new(
+                        Arc::clone(&prefix.identity),
+                        prefix.node_count,
+                        prefix.edge_count,
+                    )),
+                );
+                assert_eq!(actual, expected);
+            });
+            let snapshot = worker.previous.as_ref().expect("worker snapshot");
+            assert!(snapshot.fragments.reused_nodes >= 3);
+            assert!(snapshot.fragments.reused_edges >= 2);
+        }
     }
 
     /// The full-node fast path must render byte-identical to the `Element` slow path it replaces.

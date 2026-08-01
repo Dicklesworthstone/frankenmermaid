@@ -1585,3 +1585,43 @@ instructions** and **16.09% fewer cycles** (`1.3184x` and `1.1917x` ratios).
 - **Retry predicate.** Re-run only if the parser prefix certificate, directed-path tree arithmetic,
   layout ownership, shared-prefix corpus, worker placement, executing ELF, or equivalence contract
   changes.
+
+## KEEP: broadcast one certified cold-prefix renderer seed to batch workers (2026-08-01)
+
+**Bead:** `bd-v792`. **Lane:** cod (`BlackThrush`).
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `76dbeeb00d7c570e716546a336b60d855691093c35f7a7bdbf3f7e49c923a739`
+**A/A null control (same invocation):** 21 order-alternated candidate/candidate whole-job pairs
+measured 12.721 / 13.497 ms medians (ratio `0.942506`; paired-ratio median `1.036430`). This
+failed timing admission, so neither the effect timing nor the live-incumbent observation below is
+used as a competitive or wall-clock claim.
+**Counted mechanism:** 11 same-host `perf stat` repetitions over the exact 384-diagram,
+64-worker production `render-batch` job measured 1,074,824,383 instructions, 1,478,263,050 cycles,
+and 361,844,073 ns task-clock with cold-prefix broadcast disabled, versus 593,015,372 instructions,
+1,327,974,256 cycles, and 327,005,823 ns with it enabled: **44.83% fewer instructions, 10.17%
+fewer cycles, and 9.63% less CPU time** (`1.8125x`, `1.1132x`, and `1.1065x` ratios).
+
+- **Mechanism.** Production `render-batch` previously made every Rayon worker independently parse,
+  lay out, and render the same certified 48-node/47-edge prefix before it could reuse suffix
+  deltas. The coordinator now renders one real owner once, captures its immutable certified
+  snapshot, and initializes independent workers from that seed. Layout sharing is copy-on-write;
+  uncertified inputs and non-SVG formats retain the ordinary path, and the seeded owner's result
+  stays in its original output slot.
+- **Whole-job observation.** Twenty-one order-alternated disabled/enabled pairs measured 14.259 /
+  13.999 ms medians (`1.018573x`; paired-ratio median `1.011697x`). Because the A/A null above was
+  not admissible, this is provenance only; counted work is the KEEP criterion.
+- **Output identity.** Enabled and disabled production jobs emitted byte-identical files and the
+  same aggregate per-file manifest SHA-256
+  `35cde3ee0e6010d72b24da2c70e6b9edee94444e703cdae91778aac3f6e3b02f` across all 384 inputs.
+- **Live-incumbent corroboration.** In one invocation, the exact candidate ELF completed the
+  384-diagram production job in 23.930 ms and pinned live mermaid-js 11.15.0 completed the same
+  input corpus in 51,729.2 ms. Mermaid's runtime-verified bundle SHA-256 was
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`; the shared input SHA-256 was
+  `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`. The invocation had no
+  incumbent null arm, so this row remains maintenance-only and supports no competitive ratio.
+- **Validation.** Strict-RCH workspace check passed; the exact seed test proves independent worker
+  bootstrap against the ordinary full layout/render pipeline, and focused parser, renderer, and CLI
+  suites pass. Formatting, counted work, executing-ELF self-report, and exact output identity pass.
+- **Retry predicate.** Re-run only if parser prefix-group assignment, renderer certification,
+  copy-on-write layout ownership, Rayon worker initialization, shared-prefix corpus, executing ELF,
+  or equivalence contract changes.

@@ -366,6 +366,16 @@ impl FlowchartBatchParsePlan {
     pub const fn stats(&self) -> FlowchartBatchParseStats {
         self.stats
     }
+
+    /// Return the plan-local reusable-prefix group assigned to `index`.
+    ///
+    /// Batch executors can use this opaque index to keep one downstream layout/render state per
+    /// compiled prefix. The value is meaningful only for this plan and deliberately exposes no
+    /// parser internals; `None` means the input takes the ordinary full-parser path.
+    #[must_use]
+    pub fn reusable_prefix_group(&self, index: usize) -> Option<usize> {
+        self.assignment.get(index).copied().flatten()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
