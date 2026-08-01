@@ -258,6 +258,16 @@ enum Command {
         #[arg(long)]
         no_cache: bool,
 
+        /// Assert that `--changed-input` names the complete set of source or output paths changed
+        /// since the preceding successful batch. Unlisted entries may bypass per-file metadata.
+        #[arg(long, conflicts_with = "no_cache")]
+        trust_change_set: bool,
+
+        /// Input whose source or materialized output changed since the preceding successful batch.
+        /// Repeat for every change; requires `--trust-change-set`.
+        #[arg(long, value_name = "PATH", requires = "trust_change_set")]
+        changed_input: Vec<String>,
+
         /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
         #[arg(long, value_enum, default_value = "auto")]
         fnx_mode: FnxModeArg,
@@ -815,6 +825,13 @@ struct RenderOutcome {
 const BATCH_RENDER_CACHE_VERSION: u32 = 1;
 const BATCH_RENDER_CACHE_FILE: &str = ".frankenmermaid-batch-cache-v1.json";
 
+#[derive(Debug, Clone, Copy)]
+struct BatchCachePolicy<'a> {
+    use_cache: bool,
+    trust_change_set: bool,
+    changed_inputs: &'a [String],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BatchRenderCacheEntry {
     key: String,
@@ -853,6 +870,14 @@ fn batch_cache_entry_matches_early(
     output_modified: std::time::SystemTime,
     manifest_modified: std::time::SystemTime,
 ) -> bool {
+    batch_cache_entry_matches_key(entry, options_key)
+        && entry.source_bytes == source_bytes
+        && entry.source_modified_ns == source_modified_ns
+        && entry.bytes == output_bytes
+        && output_modified <= manifest_modified
+}
+
+fn batch_cache_entry_matches_key(entry: &BatchRenderCacheEntry, options_key: &str) -> bool {
     entry.source_digest.len() == 64
         && entry
             .key
@@ -860,15 +885,13 @@ fn batch_cache_entry_matches_early(
             .and_then(|suffix| suffix.strip_prefix(':'))
             == Some(entry.options_key.as_str())
         && entry.options_key == options_key
-        && entry.source_bytes == source_bytes
-        && entry.source_modified_ns == source_modified_ns
-        && entry.bytes == output_bytes
-        && output_modified <= manifest_modified
 }
 
 #[cfg(test)]
 mod batch_render_cache_tests {
-    use super::{BatchRenderCacheEntry, batch_cache_entry_matches_early};
+    use super::{
+        BatchRenderCacheEntry, batch_cache_entry_matches_early, batch_cache_entry_matches_key,
+    };
     use std::time::{Duration, UNIX_EPOCH};
 
     fn entry() -> BatchRenderCacheEntry {
@@ -915,6 +938,16 @@ mod batch_render_cache_tests {
             UNIX_EPOCH,
             UNIX_EPOCH,
         ));
+    }
+
+    #[test]
+    fn trusted_entry_still_requires_exact_binary_options_and_digest_key() {
+        let mut cached = entry();
+        assert!(batch_cache_entry_matches_key(&cached, "options"));
+        assert!(!batch_cache_entry_matches_key(&cached, "other-options"));
+
+        cached.key = format!("{}:options", "b".repeat(64));
+        assert!(!batch_cache_entry_matches_key(&cached, "options"));
     }
 
     #[test]
@@ -1247,6 +1280,8 @@ fn main() -> Result<()> {
             json,
             keep_going,
             no_cache,
+            trust_change_set,
+            changed_input,
             fnx_mode,
             fnx_projection,
             fnx_fallback,
@@ -1265,7 +1300,11 @@ fn main() -> Result<()> {
                 jobs,
                 keep_going,
                 json,
-                !no_cache,
+                BatchCachePolicy {
+                    use_cache: !no_cache,
+                    trust_change_set,
+                    changed_inputs: &changed_input,
+                },
                 RenderCommandOptions {
                     parse_mode: resolve_parse_mode(parse_mode, &loaded_config.file),
                     parser_config,
@@ -2823,10 +2862,16 @@ fn cmd_render_batch(
     jobs: Option<usize>,
     keep_going: bool,
     json: bool,
-    use_cache: bool,
+    cache_policy: BatchCachePolicy<'_>,
     options: RenderCommandOptions<'_>,
 ) -> Result<()> {
     use rayon::prelude::*;
+
+    let BatchCachePolicy {
+        use_cache,
+        trust_change_set,
+        changed_inputs,
+    } = cache_policy;
 
     if options.format == OutputFormat::Png {
         anyhow::bail!(
@@ -2837,6 +2882,24 @@ fn cmd_render_batch(
         anyhow::bail!(
             "render-batch reads files, not stdin; got {bad:?}. Pass explicit paths instead."
         );
+    }
+    if trust_change_set && !use_cache {
+        anyhow::bail!("--trust-change-set requires the persistent batch cache");
+    }
+
+    let input_set = inputs
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let changed_input_set = changed_inputs
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    if changed_input_set.len() != changed_inputs.len() {
+        anyhow::bail!("--changed-input contains a duplicate path");
+    }
+    if let Some(unknown) = changed_input_set.difference(&input_set).next() {
+        anyhow::bail!("--changed-input {unknown:?} is not one of this batch's inputs");
     }
 
     // Unique basenames, checked before any work: two inputs mapping to one output file would
@@ -2918,6 +2981,8 @@ fn cmd_render_batch(
     } else {
         (BatchRenderCacheManifest::default(), None)
     };
+    let change_set_optimization_enabled = std::env::var_os("FM_DISABLE_BATCH_CHANGE_SET").is_none();
+    let trusted_change_set_active = trust_change_set && change_set_optimization_enabled;
     let cache_key_for = |digest: &str| -> Option<String> {
         option_cache_digest
             .as_ref()
@@ -2932,19 +2997,30 @@ fn cmd_render_batch(
             .map(|duration| duration.as_nanos().to_string())
     };
 
-    // The hot incremental path is admitted before Rayon exists. Source size+mtime validates the
-    // content key recorded by the preceding successful render; destination size+freshness proves
-    // the materialized bytes have not subsequently changed. A fully unchanged batch therefore
-    // pays no source reads, parser plan, pressure probe, thread startup, layout or rendering.
+    // The hot incremental path is admitted before Rayon exists. A caller-certified complete
+    // change set turns every unlisted manifest entry into an O(1) key check; ordinary callers keep
+    // the source/output metadata proof. Either path can bypass source reads, parser planning,
+    // pressure sampling, thread startup, layout and rendering.
     let early_cached_results = inputs
         .iter()
         .map(|input| {
             let options_key = option_cache_digest.as_ref()?;
-            let manifest_modified = prior_cache_modified?;
-            let source_metadata = Path::new(input).metadata().ok()?;
             let destination = destination_for(input);
             let entry_name = destination.file_name()?.to_string_lossy();
             let entry = prior_cache.entries.get(entry_name.as_ref())?;
+
+            if trusted_change_set_active {
+                if changed_input_set.contains(input.as_str())
+                    || !batch_cache_entry_matches_key(entry, options_key)
+                {
+                    return None;
+                }
+                let bytes = usize::try_from(entry.bytes).ok()?;
+                return Some((destination.display().to_string(), bytes));
+            }
+
+            let manifest_modified = prior_cache_modified?;
+            let source_metadata = Path::new(input).metadata().ok()?;
             let output_metadata = destination.metadata().ok()?;
             if !batch_cache_entry_matches_early(
                 entry,
@@ -3313,6 +3389,15 @@ fn cmd_render_batch(
             let Ok((_, bytes)) = result else {
                 continue;
             };
+            if change_set_optimization_enabled
+                && sparse_cache_enabled
+                && early_cached_results[index].is_some()
+            {
+                // This entry was admitted from the prior manifest and its source was deliberately
+                // not reopened. Re-statting it here cannot change the entry; only misses need a
+                // refreshed source timestamp after materialization.
+                continue;
+            }
             let Ok((_, digest)) = &loaded[index] else {
                 continue;
             };

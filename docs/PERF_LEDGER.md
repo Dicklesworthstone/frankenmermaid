@@ -1705,3 +1705,52 @@ cycles, and 93.13% less CPU time** (`5.5259x`, `12.7941x`, and `14.5505x` ratios
 - **Retry predicate.** Re-measure only if source-digest integrity, early metadata admission,
   miss-count pool sizing, executing-binary identity, the 384-input corpus, or output equivalence
   changes.
+
+## KEEP: caller-certified change sets remove repository-wide cache validation (2026-08-01)
+
+**Bead:** `bd-nsgu`. **Lane:** cod (`BlackThrush`).
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `ebe425403369f7b133c238892135a49e819e9d2fe6bf2dae5ddf90c9dac8dd97`
+**A/A null control (same invocation):** invocation
+`fm-change-set-head-trj-1785604181108` ran 61 order-rotated candidate-A/candidate-B whole-process
+arms on quiet 128-CPU host `threadripperje`. Medians were 8,175,961 / 8,197,402 ns (ratio
+`0.997384`); the 20,000-resample median-ratio 95% CI was `[0.977605, 1.021870]` and includes one.
+**Counted mechanism:** the exact-binary control made 1,166 `statx` calls and 1,375 total syscalls;
+the change-set path made 15 `statx` calls and 206 total syscalls. Eleven order-rotated `perf stat`
+repetitions measured control/candidate medians of 39,455,535 / 27,310,954 instructions,
+35,808,777 / 21,751,483 cycles, and 9,196,841 / 5,608,366 ns task-clock: **30.78% fewer
+instructions, 39.26% fewer cycles, and 39.02% less CPU time** (`1.4447x`, `1.6463x`, and
+`1.6398x` ratios).
+
+- **Profile-first attribution.** The exact 384-input, one-content-miss process profile exposed
+  repository metadata validation as the structural gap: `statx` was 82.60% of traced syscall time
+  and ran three times per otherwise cached input. The live incumbent's in-memory render API does
+  not pay this repository-filesystem sweep; loader/startup work remained after the sweep vanished.
+- **Mechanism.** `render-batch --trust-change-set --changed-input PATH...` lets a repository
+  orchestrator assert its complete source/output change set. Unlisted manifest entries then need
+  only the existing executable/options/source-digest integrity check, while listed inputs take the
+  ordinary read/hash/render path. Duplicate or out-of-batch paths fail closed, ordinary callers
+  retain source/output metadata validation, and an exact-binary control disables only this new
+  admission path.
+- **Whole-job result.** The same 61-round invocation measured metadata-sweep control and pooled
+  candidate medians of 12,001,491 / 8,181,006 ns: **1.466995x**, with bootstrap 95% CI
+  `[1.436472, 1.491593]` and paired-effect median `1.481725x`. Every arm rebuilt one true content
+  change with one active worker and retained 383 outputs; candidate and control emitted identical
+  384-file SVG bytes with aggregate SHA-256
+  `3fadb42d114ff6b6c1b3d724cc3337884ac0a33048f0838ea6b15dfbe057880b`.
+- **Live-incumbent corroboration.** Invocation
+  `fm-change-set-head-live-trj-1785604271021` bracketed live pinned mermaid-js 11.15.0 with
+  this exact ELF on 128-CPU `threadripperje`. Both engines received input SHA-256
+  `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`; the candidate's external
+  observations were 9.997 / 18.240 ms and the runtime-verified single-main-thread incumbent
+  observed 50,562.5 ms. Its bundle SHA-256 was
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`. The incumbent arm was
+  render-once with no incumbent null, so this row remains maintenance-only and supports no new
+  competitive ratio.
+- **Validation.** Strict clean-overlay remote workspace clippy passed with warnings denied; focused
+  cache tests cover early metadata admission and exact key integrity. Formatting, exact-output
+  identity, executing-ELF self-report, counted work, quiet-host A/A, and live-incumbent bracketing
+  passed.
+- **Retry predicate.** Re-measure if the caller change-set completeness contract, manifest key
+  integrity, executable/options identity, destination ownership, 384-input corpus, or output
+  equivalence changes. Promote no competitive claim without a same-invocation incumbent null arm.
