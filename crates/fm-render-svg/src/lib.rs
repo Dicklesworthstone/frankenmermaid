@@ -38,7 +38,7 @@ use std::{
     borrow::Cow,
     cell::RefCell,
     collections::{BTreeMap, HashMap},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
 };
 
 use fm_core::{
@@ -105,7 +105,7 @@ pub struct CustomSvgIcon {
 }
 
 /// Configuration for SVG rendering.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SvgRenderConfig {
     /// Backend implementation used for rendering.
     pub backend: SvgBackend,
@@ -283,7 +283,7 @@ enum RenderDetailTier {
     Rich,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct RenderDetailProfile {
     tier: RenderDetailTier,
     show_node_labels: bool,
@@ -298,6 +298,86 @@ struct RenderDetailProfile {
 }
 
 const POST_PASS_MAX_SVG_BYTES: usize = 100_000;
+
+#[derive(Debug, Default)]
+struct SvgBatchFragments {
+    edge_svg: String,
+    edge_ends: Vec<usize>,
+    node_svg: String,
+    node_ends: Vec<usize>,
+    reused_edges: usize,
+    reused_nodes: usize,
+    detail: Option<RenderDetailProfile>,
+    offset_x_bits: u32,
+    offset_y_bits: u32,
+    active: bool,
+}
+
+#[derive(Debug)]
+struct SvgBatchSnapshot {
+    ir: Arc<MermaidDiagramIr>,
+    layout: Arc<DiagramLayout>,
+    config: SvgRenderConfig,
+    fragments: SvgBatchFragments,
+}
+
+/// Stateful renderer for a batch whose diagrams may share an unchanged flowchart prefix.
+///
+/// The ordinary renderer remains stateless. This opt-in surface retains the previous owned IR and
+/// layout so it can prove, with exact equality rather than a hash, which leading node and edge
+/// fragments are unchanged. Those already-serialized bytes are copied into the next SVG while only
+/// the distinct suffix is formatted. The cache is caller-owned and therefore shared-nothing: give
+/// each worker its own instance and no lock or cross-thread coordination is required.
+#[derive(Debug, Default)]
+pub struct SvgBatchRenderer {
+    previous: Option<SvgBatchSnapshot>,
+}
+
+impl SvgBatchRenderer {
+    /// Render one owned diagram, retaining it as the exact comparison source for the next call.
+    #[must_use]
+    pub fn render(
+        &mut self,
+        ir: Arc<MermaidDiagramIr>,
+        layout: Arc<DiagramLayout>,
+        config: &SvgRenderConfig,
+    ) -> String {
+        let previous = self.previous.take();
+        let same_config = previous
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.config == *config);
+        let mut next_fragments = SvgBatchFragments::default();
+        let reusable_snapshot =
+            same_config.then(|| previous.as_ref().expect("same config requires snapshot"));
+        let mut reuse = SvgBatchFragmentReuse {
+            previous_ir: reusable_snapshot.map(|snapshot| snapshot.ir.as_ref()),
+            previous_layout: reusable_snapshot.map(|snapshot| snapshot.layout.as_ref()),
+            previous: reusable_snapshot.map(|snapshot| &snapshot.fragments),
+            next: &mut next_fragments,
+        };
+        let svg = render_svg_with_layout_impl_reusing(&ir, &layout, config, true, Some(&mut reuse));
+        drop(reuse);
+        let stored_config = if same_config {
+            previous.expect("same config requires snapshot").config
+        } else {
+            config.clone()
+        };
+        self.previous = Some(SvgBatchSnapshot {
+            ir,
+            layout,
+            config: stored_config,
+            fragments: next_fragments,
+        });
+        svg
+    }
+}
+
+struct SvgBatchFragmentReuse<'a> {
+    previous_ir: Option<&'a MermaidDiagramIr>,
+    previous_layout: Option<&'a DiagramLayout>,
+    previous: Option<&'a SvgBatchFragments>,
+    next: &'a mut SvgBatchFragments,
+}
 
 /// Render an IR diagram to SVG string.
 #[must_use]
@@ -332,6 +412,16 @@ fn render_svg_with_layout_impl(
     config: &SvgRenderConfig,
     use_post_pass_cache: bool,
 ) -> String {
+    render_svg_with_layout_impl_reusing(ir, layout, config, use_post_pass_cache, None)
+}
+
+fn render_svg_with_layout_impl_reusing(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    config: &SvgRenderConfig,
+    use_post_pass_cache: bool,
+    mut batch_reuse: Option<&mut SvgBatchFragmentReuse<'_>>,
+) -> String {
     let direct_minified_css = matches!(config.backend, SvgBackend::LegacyLayout)
         && config.embed_theme_css
         && ir.diagram_type == DiagramType::Flowchart;
@@ -346,6 +436,7 @@ fn render_svg_with_layout_impl(
                     live_marker_mask,
                     direct_minified_css,
                     use_post_pass_cache,
+                    batch_reuse.as_deref_mut(),
                 ),
                 live_marker_mask,
             )
@@ -2830,6 +2921,222 @@ fn render_edges_serial(
     }
 }
 
+fn batch_fragment_globals_match(
+    reuse: &SvgBatchFragmentReuse<'_>,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    detail: RenderDetailProfile,
+    offset_x: f32,
+    offset_y: f32,
+) -> bool {
+    let (Some(previous_ir), Some(previous_layout), Some(previous)) =
+        (reuse.previous_ir, reuse.previous_layout, reuse.previous)
+    else {
+        return false;
+    };
+    previous.active
+        && previous.detail == Some(detail)
+        && previous.offset_x_bits == offset_x.to_bits()
+        && previous.offset_y_bits == offset_y.to_bits()
+        && previous_ir.diagram_type == DiagramType::Flowchart
+        && ir.diagram_type == DiagramType::Flowchart
+        && previous_ir.direction == ir.direction
+        && previous_ir.meta.theme_overrides == ir.meta.theme_overrides
+        && previous_ir.style_refs == ir.style_refs
+        && previous_ir.style_defs == ir.style_defs
+        && previous_ir.label_markup == ir.label_markup
+        && previous_layout.extensions.node_centrality == layout.extensions.node_centrality
+}
+
+fn node_label_matches(
+    previous_ir: &MermaidDiagramIr,
+    previous_node: &fm_core::IrNode,
+    ir: &MermaidDiagramIr,
+    node: &fm_core::IrNode,
+) -> bool {
+    previous_node.label.map(|label| label.0) == node.label.map(|label| label.0)
+        && previous_node
+            .label
+            .and_then(|label| previous_ir.labels.get(label.0))
+            == node.label.and_then(|label| ir.labels.get(label.0))
+}
+
+fn reusable_node_prefix_len(
+    reuse: &SvgBatchFragmentReuse<'_>,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    detail: RenderDetailProfile,
+    offset_x: f32,
+    offset_y: f32,
+) -> usize {
+    if !batch_fragment_globals_match(reuse, ir, layout, detail, offset_x, offset_y) {
+        return 0;
+    }
+    let previous_ir = reuse.previous_ir.expect("matched previous IR");
+    let previous_layout = reuse.previous_layout.expect("matched previous layout");
+    previous_layout
+        .nodes
+        .iter()
+        .zip(&layout.nodes)
+        .take_while(|(previous_box, node_box)| {
+            if previous_box != node_box || previous_box.node_index != node_box.node_index {
+                return false;
+            }
+            let Some(previous_node) = previous_ir.nodes.get(previous_box.node_index) else {
+                return false;
+            };
+            let Some(node) = ir.nodes.get(node_box.node_index) else {
+                return false;
+            };
+            previous_node == node && node_label_matches(previous_ir, previous_node, ir, node)
+        })
+        .count()
+}
+
+fn reusable_edge_prefix_len(
+    reuse: &SvgBatchFragmentReuse<'_>,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    detail: RenderDetailProfile,
+    offset_x: f32,
+    offset_y: f32,
+) -> usize {
+    if !batch_fragment_globals_match(reuse, ir, layout, detail, offset_x, offset_y) {
+        return 0;
+    }
+    let previous_ir = reuse.previous_ir.expect("matched previous IR");
+    let previous_layout = reuse.previous_layout.expect("matched previous layout");
+    previous_layout
+        .edges
+        .iter()
+        .zip(&layout.edges)
+        .take_while(|(previous_path, edge_path)| {
+            if previous_path != edge_path || previous_path.edge_index != edge_path.edge_index {
+                return false;
+            }
+            let Some(previous_edge) = previous_ir.edges.get(previous_path.edge_index) else {
+                return false;
+            };
+            let Some(edge) = ir.edges.get(edge_path.edge_index) else {
+                return false;
+            };
+            if previous_edge != edge
+                || previous_edge
+                    .label
+                    .and_then(|label| previous_ir.labels.get(label.0))
+                    != edge.label.and_then(|label| ir.labels.get(label.0))
+            {
+                return false;
+            }
+            edge_endpoint_accessible_labels(previous_edge, previous_ir, None)
+                == edge_endpoint_accessible_labels(edge, ir, None)
+        })
+        .count()
+}
+
+fn render_edges_with_batch_reuse(
+    out: &mut String,
+    edges: &[LayoutEdgePath],
+    context: &EdgeRenderContext<'_>,
+    layout: &DiagramLayout,
+    reuse: &mut SvgBatchFragmentReuse<'_>,
+) {
+    let common = reusable_edge_prefix_len(
+        reuse,
+        context.ir,
+        layout,
+        context.detail,
+        context.offset_x,
+        context.offset_y,
+    )
+    .min(
+        reuse
+            .previous
+            .map_or(0, |previous| previous.edge_ends.len()),
+    );
+    let prefix_end = common
+        .checked_sub(1)
+        .and_then(|index| reuse.previous?.edge_ends.get(index).copied())
+        .unwrap_or(0);
+    reuse.next.reused_edges = common;
+    let expected = edges.len().saturating_mul(480);
+    reuse.next.edge_svg.reserve(expected);
+    reuse.next.edge_ends.reserve(edges.len());
+    if let Some(previous) = reuse.previous {
+        reuse
+            .next
+            .edge_svg
+            .push_str(&previous.edge_svg[..prefix_end.min(previous.edge_svg.len())]);
+        reuse
+            .next
+            .edge_ends
+            .extend_from_slice(&previous.edge_ends[..common]);
+    }
+    for edge_path in &edges[common..] {
+        if !edge_path.bundled {
+            render_edge_into(&mut reuse.next.edge_svg, edge_path, context);
+        }
+        reuse.next.edge_ends.push(reuse.next.edge_svg.len());
+    }
+    out.push_str(&reuse.next.edge_svg);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_nodes_with_batch_reuse(
+    out: &mut String,
+    nodes: &[LayoutNodeBox],
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+    detail: RenderDetailProfile,
+    colors: &ThemeColors,
+    emit_classdef_classes: bool,
+    centrality_map: &HashMap<usize, CentralityTier>,
+    reuse: &mut SvgBatchFragmentReuse<'_>,
+) {
+    let common = reusable_node_prefix_len(reuse, ir, layout, detail, offset_x, offset_y).min(
+        reuse
+            .previous
+            .map_or(0, |previous| previous.node_ends.len()),
+    );
+    let prefix_end = common
+        .checked_sub(1)
+        .and_then(|index| reuse.previous?.node_ends.get(index).copied())
+        .unwrap_or(0);
+    reuse.next.reused_nodes = common;
+    let expected = nodes.len().saturating_mul(640);
+    reuse.next.node_svg.reserve(expected);
+    reuse.next.node_ends.reserve(nodes.len());
+    if let Some(previous) = reuse.previous {
+        reuse
+            .next
+            .node_svg
+            .push_str(&previous.node_svg[..prefix_end.min(previous.node_svg.len())]);
+        reuse
+            .next
+            .node_ends
+            .extend_from_slice(&previous.node_ends[..common]);
+    }
+    for node_box in &nodes[common..] {
+        render_node_into(
+            &mut reuse.next.node_svg,
+            node_box,
+            ir,
+            offset_x,
+            offset_y,
+            config,
+            detail,
+            colors,
+            emit_classdef_classes,
+            centrality_map,
+        );
+        reuse.next.node_ends.push(reuse.next.node_svg.len());
+    }
+    out.push_str(&reuse.next.node_svg);
+}
+
 fn render_layout_to_svg(
     layout: &DiagramLayout,
     ir: &MermaidDiagramIr,
@@ -2837,6 +3144,7 @@ fn render_layout_to_svg(
     known_live_marker_mask: Option<u16>,
     direct_minified_css: bool,
     cache_direct_minified_css: bool,
+    mut batch_reuse: Option<&mut SvgBatchFragmentReuse<'_>>,
 ) -> String {
     let padding = config.padding;
     let legend_enabled = is_c4_legend_enabled(ir);
@@ -3538,8 +3846,22 @@ fn render_layout_to_svg(
     #[cfg(target_arch = "wasm32")]
     let stream_fast_path = no_between_or_after_children;
     if stream_fast_path {
+        if let Some(reuse) = batch_reuse.as_deref_mut()
+            && ir.diagram_type == DiagramType::Flowchart
+        {
+            reuse.next.detail = Some(detail);
+            reuse.next.offset_x_bits = offset_x.to_bits();
+            reuse.next.offset_y_bits = offset_y.to_bits();
+            reuse.next.active = true;
+        }
         return doc.to_string_with_body(layout_svg_capacity_hint(ir, layout), |out| {
-            render_edges_serial(out, &layout.edges, &edge_context);
+            if let Some(reuse) = batch_reuse.as_deref_mut()
+                && ir.diagram_type == DiagramType::Flowchart
+            {
+                render_edges_with_batch_reuse(out, &layout.edges, &edge_context, layout, reuse);
+            } else {
+                render_edges_serial(out, &layout.edges, &edge_context);
+            }
             // Cardinality labels sit between edges and nodes in the slow path's child order; stream them in
             // the same position. Each writer self-guards (ER emits only for ER edges, class only for edges
             // with source/target cardinality), so both are no-ops for a plain flowchart.
@@ -3563,18 +3885,37 @@ fn render_layout_to_svg(
                 config,
                 &theme.colors,
             );
-            render_nodes_serial(
-                out,
-                &layout.nodes,
-                ir,
-                offset_x,
-                offset_y,
-                config,
-                detail,
-                &theme.colors,
-                emit_classdef_classes,
-                &centrality_map,
-            );
+            if let Some(reuse) = batch_reuse.as_deref_mut()
+                && ir.diagram_type == DiagramType::Flowchart
+            {
+                render_nodes_with_batch_reuse(
+                    out,
+                    &layout.nodes,
+                    ir,
+                    layout,
+                    offset_x,
+                    offset_y,
+                    config,
+                    detail,
+                    &theme.colors,
+                    emit_classdef_classes,
+                    &centrality_map,
+                    reuse,
+                );
+            } else {
+                render_nodes_serial(
+                    out,
+                    &layout.nodes,
+                    ir,
+                    offset_x,
+                    offset_y,
+                    config,
+                    detail,
+                    &theme.colors,
+                    emit_classdef_classes,
+                    &centrality_map,
+                );
+            }
             // Sequence mirror headers (participant boxes repeated at the bottom) sit AFTER the nodes in the
             // slow path's child order; stream each straight into `out` in the same position instead of
             // building it as a `doc.child` the final `to_string` copies a second time. Byte-identical: the
@@ -10668,21 +11009,11 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             // UML aggregation/composition put the diamond on the OWNING end, which is the source for
             // `o--`/`*--` and the target for the reversed `--o`/`--*` — hence marker-start vs -end
             // rather than one variant plus a flag. Hollow diamond = aggregation, filled = composition.
-            ArrowType::Aggregation => (
-                None,
-                Some("url(#arrow-diamond-open)"),
-                None,
-                &colors.edge,
-            ),
-            ArrowType::AggregationReverse => (
-                None,
-                None,
-                Some("url(#arrow-diamond-open)"),
-                &colors.edge,
-            ),
-            ArrowType::Composition => {
-                (None, Some("url(#arrow-diamond)"), None, &colors.edge)
+            ArrowType::Aggregation => (None, Some("url(#arrow-diamond-open)"), None, &colors.edge),
+            ArrowType::AggregationReverse => {
+                (None, None, Some("url(#arrow-diamond-open)"), &colors.edge)
             }
+            ArrowType::Composition => (None, Some("url(#arrow-diamond)"), None, &colors.edge),
             ArrowType::CompositionReverse => {
                 (None, None, Some("url(#arrow-diamond)"), &colors.edge)
             }
@@ -10694,12 +11025,9 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
                 None,
                 &colors.edge,
             ),
-            ArrowType::InheritanceReverse => (
-                None,
-                None,
-                Some("url(#arrow-triangle-open)"),
-                &colors.edge,
-            ),
+            ArrowType::InheritanceReverse => {
+                (None, None, Some("url(#arrow-triangle-open)"), &colors.edge)
+            }
         }
     };
 
@@ -11529,6 +11857,52 @@ fn endpoint_accessible_label<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batch_renderer_reuses_shared_flowchart_prefix_byte_identically() {
+        let inputs = [
+            concat!(
+                "flowchart LR\n",
+                "  subgraph Shared\n",
+                "    S0[Gateway]\n",
+                "    S1[Queue]\n",
+                "    S2[Worker]\n",
+                "    S0-->S1\n",
+                "    S1-->S2\n",
+                "  end\n",
+                "  D0[Alpha]\n",
+                "  D1[Store]\n",
+                "  S2-->D0\n",
+                "  D0-->D1",
+            ),
+            concat!(
+                "flowchart LR\n",
+                "  subgraph Shared\n",
+                "    S0[Gateway]\n",
+                "    S1[Queue]\n",
+                "    S2[Worker]\n",
+                "    S0-->S1\n",
+                "    S1-->S2\n",
+                "  end\n",
+                "  D0[Bravo]\n",
+                "  D1[Cache]\n",
+                "  S2-->D0\n",
+                "  D0-->D1",
+            ),
+        ];
+        let config = SvgRenderConfig::default();
+        let mut renderer = SvgBatchRenderer::default();
+        for input in inputs {
+            let ir = Arc::new(fm_parser::parse(input).ir);
+            let layout = fm_layout::layout_diagram_traced(&ir).layout;
+            let expected = render_svg_with_layout(&ir, &layout, &config);
+            let actual = renderer.render(ir, layout, &config);
+            assert_eq!(actual, expected);
+        }
+        let snapshot = renderer.previous.as_ref().expect("batch snapshot");
+        assert!(snapshot.fragments.reused_nodes >= 3);
+        assert!(snapshot.fragments.reused_edges >= 2);
+    }
 
     /// The full-node fast path must render byte-identical to the `Element` slow path it replaces.
     /// Pins the assembled `<g><rect/><text/><title/></g>` against the known-correct default-config
@@ -14438,8 +14812,11 @@ marker#arrow-future path { fill: red; }\n\
                             edge,
                         ))
                         .marker(
-                            ArrowheadMarker::triangle_open_marker("start-arrow-triangle-open", edge)
-                                .with_orient(MarkerOrient::AutoStartReverse),
+                            ArrowheadMarker::triangle_open_marker(
+                                "start-arrow-triangle-open",
+                                edge,
+                            )
+                            .with_orient(MarkerOrient::AutoStartReverse),
                         );
                 }
                 let new = DefsBuilder::new().raw_markers(marker_defs_body(edge, fancy));

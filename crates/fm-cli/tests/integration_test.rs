@@ -2588,9 +2588,9 @@ fn e2e_pipeline_class() {
 fn state_transition_labels_attach_to_the_edge_not_the_node() {
     let labels = [
         "plain label",
-        "Retry & backoff",   // top-level `&` read as a parallel endpoint list
-        "Parse <config>",    // `<` `>` read as asymmetric node delimiters
-        "Rate limit (429)",  // `(` `)` read as a rounded node delimiter
+        "Retry & backoff",  // top-level `&` read as a parallel endpoint list
+        "Parse <config>",   // `<` `>` read as asymmetric node delimiters
+        "Rate limit (429)", // `(` `)` read as a rounded node delimiter
         "Diff & merge",
         "Sign & upload",
     ];

@@ -19,7 +19,9 @@ use std::time::Instant;
 
 use fm_core::MermaidParseMode;
 use fm_parser::{FlowchartBatchParsePlan, ParseResult, ParserConfig, parse};
-use fm_render_svg::{A11yConfig, SvgRenderConfig, render_svg_with_layout};
+#[cfg(test)]
+use fm_render_svg::render_svg_with_layout;
+use fm_render_svg::{A11yConfig, SvgBatchRenderer, SvgRenderConfig};
 use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 
@@ -122,9 +124,20 @@ fn lean_config() -> SvgRenderConfig {
     }
 }
 
+#[cfg(test)]
 fn full_pipeline_parsed(parsed: ParseResult, cfg: &SvgRenderConfig) -> String {
     let layout = fm_layout::layout_diagram(&parsed.ir);
     render_svg_with_layout(&parsed.ir, &layout, cfg)
+}
+
+fn full_pipeline_parsed_batch(
+    parsed: ParseResult,
+    cfg: &SvgRenderConfig,
+    renderer: &mut SvgBatchRenderer,
+) -> String {
+    let ir = Arc::new(parsed.ir);
+    let layout = fm_layout::layout_diagram_traced(&ir).layout;
+    renderer.render(ir, layout, cfg)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -320,6 +333,7 @@ impl Drop for FixedShardPool {
 
 fn fixed_shard_worker(worker_index: usize, threads: usize, shared: &FixedShardShared) {
     let mut observed_generation = 0;
+    let mut renderer = SvgBatchRenderer::default();
     loop {
         let (generation, job) = {
             let mut state = lock_unpoisoned(&shared.state);
@@ -356,7 +370,11 @@ fn fixed_shard_worker(worker_index: usize, threads: usize, shared: &FixedShardSh
                 .parse_plan
                 .as_ref()
                 .map_or_else(|| parse(text), |plan| plan.parse(input_index, text));
-            output.push(full_pipeline_parsed(parsed, &job.config));
+            output.push(full_pipeline_parsed_batch(
+                parsed,
+                &job.config,
+                &mut renderer,
+            ));
         }
         *lock_unpoisoned(&shared.output_shards[worker_index]) = output;
 
@@ -477,6 +495,7 @@ impl RenderExecutor {
                 sink,
             );
         } else {
+            let mut renderer = SvgBatchRenderer::default();
             if let Some(seen) = workers_seen.as_deref().and_then(|workers| workers.first()) {
                 seen.store(true, Ordering::Relaxed);
             }
@@ -485,7 +504,7 @@ impl RenderExecutor {
                 let parsed = parse_plan
                     .as_ref()
                     .map_or_else(|| parse(text), |plan| plan.parse(input_index, text));
-                sink.push(full_pipeline_parsed(parsed, cfg));
+                sink.push(full_pipeline_parsed_batch(parsed, cfg, &mut renderer));
             }
         }
     }

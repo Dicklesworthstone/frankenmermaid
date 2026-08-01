@@ -30,6 +30,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -64,7 +65,8 @@ use fm_parser::{
     parse_with_mode, parse_with_mode_and_config,
 };
 use fm_render_svg::{
-    A11yConfig, SvgRenderConfig, ThemePreset, describe_diagram_with_layout, render_svg_with_layout,
+    A11yConfig, SvgBatchRenderer, SvgRenderConfig, ThemePreset, describe_diagram_with_layout,
+    render_svg_with_layout,
 };
 use fm_render_term::{
     TermRenderConfig, diff_diagrams, render_diff_plain, render_diff_summary,
@@ -2130,6 +2132,7 @@ fn render_source_with_pressure(
         budget_broker,
         options,
         pressure,
+        None,
     )
 }
 
@@ -2146,16 +2149,27 @@ fn render_parsed_source_with_pressure(
     mut budget_broker: MermaidBudgetLedger,
     options: &RenderCommandOptions<'_>,
     pressure: &MermaidPressureReport,
+    mut batch_renderer: Option<&mut SvgBatchRenderer>,
 ) -> Result<RenderOutcome> {
+    let fm_parser::ParseResult { ir, warnings, .. } = parsed;
+    // The batch renderer retains the previous IR for exact prefix equality. Move only batch IRs
+    // behind an Arc; the ordinary single-render path keeps its allocation-free owned value.
+    let mut owned_ir = Some(ir);
+    let shared_ir = batch_renderer
+        .as_ref()
+        .map(|_| Arc::new(owned_ir.take().expect("batch IR")));
+    let ir = shared_ir
+        .as_deref()
+        .unwrap_or_else(|| owned_ir.as_ref().expect("single-render IR"));
     debug!(
         "Parsed: type={:?}, nodes={}, edges={}, warnings={}",
-        parsed.ir.diagram_type,
-        parsed.ir.nodes.len(),
-        parsed.ir.edges.len(),
-        parsed.warnings.len()
+        ir.diagram_type,
+        ir.nodes.len(),
+        ir.edges.len(),
+        warnings.len()
     );
 
-    for warning in &parsed.warnings {
+    for warning in &warnings {
         warn!("Parse warning: {warning}");
     }
 
@@ -2171,7 +2185,7 @@ fn render_parsed_source_with_pressure(
         max_route_ops: budget_broker.route_budget(LayoutGuardrails::default().max_route_ops),
     };
     let traced_layout = fm_layout::layout_diagram_traced_with_config_and_guardrails(
-        &parsed.ir,
+        ir,
         options.layout_algorithm,
         layout_config,
         layout_guardrails,
@@ -2180,7 +2194,7 @@ fn render_parsed_source_with_pressure(
     let layout_time = layout_start.elapsed();
     budget_broker.record_layout(layout_time.as_millis().min(u128::from(u64::MAX)) as u64);
     let mut guard_report =
-        build_layout_guard_report_with_pressure(&parsed.ir, &traced_layout, pressure.clone());
+        build_layout_guard_report_with_pressure(ir, &traced_layout, pressure.clone());
     let (_cx, observability) = mermaid_layout_guard_observability(
         "cli.render",
         source,
@@ -2216,28 +2230,41 @@ fn render_parsed_source_with_pressure(
     let filtered_layout = (!options.show_back_edges).then(|| layout_without_back_edges(layout));
     let source_map_layout = filtered_layout.as_ref().unwrap_or(layout);
 
-    let (rendered, actual_width, actual_height) = render_format(
-        &parsed.ir,
-        layout,
-        options.format,
-        RenderSurfaceOptions {
-            theme: effective_theme,
-            font_size: options.font_size,
-            svg_base_config: options.svg_base_config.clone(),
-            term_base_config: options.term_base_config.clone(),
-            show_back_edges: options.show_back_edges,
-            show_minimap: options.show_minimap,
-            embed_source_spans: options.embed_source_spans,
-            dimensions: options.dimensions,
-            degradation: guard_report.degradation.clone(),
-        },
-    )?;
+    let surface_options = || RenderSurfaceOptions {
+        theme: effective_theme,
+        font_size: options.font_size,
+        svg_base_config: options.svg_base_config.clone(),
+        term_base_config: options.term_base_config.clone(),
+        show_back_edges: options.show_back_edges,
+        show_minimap: options.show_minimap,
+        embed_source_spans: options.embed_source_spans,
+        dimensions: options.dimensions,
+        degradation: guard_report.degradation.clone(),
+    };
+    let (rendered, actual_width, actual_height) = if options.format == OutputFormat::Svg
+        && options.show_back_edges
+        && let (Some(renderer), Some(shared_ir)) =
+            (batch_renderer.as_deref_mut(), shared_ir.as_ref())
+    {
+        let mut svg_config = build_svg_render_config(
+            &options.svg_base_config,
+            effective_theme,
+            options.font_size,
+            options.embed_source_spans,
+        );
+        svg_config.apply_degradation(&guard_report.degradation);
+        let svg = renderer.render(Arc::clone(shared_ir), Arc::clone(layout), &svg_config);
+        let (width, height) = extract_svg_dimensions(&svg);
+        (svg.into_bytes(), width, height)
+    } else {
+        render_format(ir, layout, options.format, surface_options())?
+    };
     let render_time = render_start.elapsed();
     budget_broker.record_render(render_time.as_millis().min(u128::from(u64::MAX)) as u64);
 
     let total_time = total_start.elapsed();
     let source_map = if options.json_output || options.source_map_out.is_some() {
-        Some(layout_source_map(&parsed.ir, source_map_layout))
+        Some(layout_source_map(ir, source_map_layout))
     } else {
         None
     };
@@ -2254,22 +2281,22 @@ fn render_parsed_source_with_pressure(
 
     info!(
         "Rendered {} via layout {}->{} with {} nodes, {} edges in {:.2}ms",
-        parsed.ir.diagram_type.as_str(),
+        ir.diagram_type.as_str(),
         traced_layout.trace.dispatch.requested.as_str(),
         traced_layout.trace.dispatch.selected.as_str(),
-        parsed.ir.nodes.len(),
-        parsed.ir.edges.len(),
+        ir.nodes.len(),
+        ir.edges.len(),
         total_time.as_secs_f64() * 1000.0
     );
 
     let render_result = if options.json_output {
-        let accessibility_summary = describe_diagram_with_layout(&parsed.ir, Some(layout));
+        let accessibility_summary = describe_diagram_with_layout(ir, Some(layout));
         let source_map = source_map.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Render metadata requested but source map was not generated")
         })?;
         guard_report.budget_broker = budget_broker.clone();
         let layout_decision_ledger =
-            build_layout_decision_ledger(&parsed.ir, &traced_layout, &guard_report);
+            build_layout_decision_ledger(ir, &traced_layout, &guard_report);
         let layout_decision_explanation = layout_decision_ledger
             .primary_explanation()
             .expect("layout decision ledger should contain a primary entry");
@@ -2309,9 +2336,9 @@ fn render_parsed_source_with_pressure(
             source_span_cluster_count: count_known_cluster_spans(source_map_layout),
             source_map_entry_count: source_map.entries.len(),
             source_map_out: options.source_map_out.map(str::to_string),
-            diagram_type: parsed.ir.diagram_type.as_str().to_string(),
-            node_count: parsed.ir.nodes.len(),
-            edge_count: parsed.ir.edges.len(),
+            diagram_type: ir.diagram_type.as_str().to_string(),
+            node_count: ir.nodes.len(),
+            edge_count: ir.edges.len(),
             pressure_source: guard_report.pressure.source.as_str().to_string(),
             pressure_tier: guard_report.pressure.tier.as_str().to_string(),
             pressure_telemetry_available: guard_report.pressure.telemetry_available,
@@ -2348,7 +2375,7 @@ fn render_parsed_source_with_pressure(
             layout_time_ms: layout_time.as_secs_f64() * 1000.0,
             render_time_ms: render_time.as_secs_f64() * 1000.0,
             total_time_ms: total_time.as_secs_f64() * 1000.0,
-            warnings: parsed.warnings,
+            warnings,
             fnx_witness,
         })
     } else {
@@ -2759,7 +2786,7 @@ fn cmd_render_batch(
     // Phase 3: render each owner once; keep bytes only for digests that repeat.
     let shared: std::sync::Mutex<std::collections::BTreeMap<String, std::sync::Arc<Vec<u8>>>> =
         std::sync::Mutex::new(std::collections::BTreeMap::new());
-    let render_owner = |index: usize| -> Result<(String, usize)> {
+    let render_owner = |renderer: &mut SvgBatchRenderer, index: usize| -> Result<(String, usize)> {
         let (source, digest) = match &loaded[index] {
             Ok(pair) => pair,
             Err(error) => return Err(anyhow::anyhow!("{error:#}")),
@@ -2781,6 +2808,7 @@ fn cmd_render_batch(
             budget_broker,
             &options,
             &pressure,
+            Some(renderer),
         )?;
         let destination = destination_for(&inputs[index]);
         std::fs::write(&destination, &outcome.rendered)
@@ -2794,7 +2822,20 @@ fn cmd_render_batch(
         }
         Ok((destination.display().to_string(), length))
     };
-    let owner_results = run_all(&render_owner);
+    let owner_results: Vec<Result<(String, usize)>> = match &pool {
+        None => {
+            let mut renderer = SvgBatchRenderer::default();
+            (0..inputs.len())
+                .map(|index| render_owner(&mut renderer, index))
+                .collect()
+        }
+        Some(pool) => pool.install(|| {
+            (0..inputs.len())
+                .into_par_iter()
+                .map_init(SvgBatchRenderer::default, &render_owner)
+                .collect()
+        }),
+    };
 
     // Phase 4: every non-owner duplicate copies its owner's bytes. No parse, no layout, no render.
     //

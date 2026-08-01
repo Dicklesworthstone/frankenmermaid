@@ -4785,15 +4785,11 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     let order_by_rank = rank_orders_from_key(ir, &tree.depth, &span_centers);
     let nodes = node_boxes_from_centers(ir, &node_sizes, &tree.depth, &order_by_rank, &centers);
-    let edges = build_directed_path_edge_paths(
-        ir,
-        &nodes,
-        &BTreeSet::new(),
-        EdgeRouting::default(),
-    )
-    .unwrap_or_else(|| {
-        build_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default())
-    });
+    let edges =
+        build_directed_path_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default())
+            .unwrap_or_else(|| {
+                build_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default())
+            });
     let clusters = build_cluster_boxes(ir, &nodes, spacing);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
@@ -8701,7 +8697,10 @@ fn compute_node_size(
 /// under-sizing here deletes content from the output, so the arithmetic below must stay in step with
 /// the renderer's. Over-sizing is harmless (the extra space renders as padding), so every term is
 /// rounded up rather than fitted tight.
-fn class_compartment_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> Option<(f32, f32)> {
+fn class_compartment_dimensions(
+    node: &IrNode,
+    metrics: &fm_core::FontMetrics,
+) -> Option<(f32, f32)> {
     let meta = node.class_meta.as_deref()?;
     if meta.attributes.is_empty() && meta.methods.is_empty() {
         return None;
@@ -12748,11 +12747,8 @@ fn build_directed_path_edge_paths(
     for (edge_index, edge) in ir.edges.iter().enumerate() {
         let source = endpoint_node_index(ir, edge.from)?;
         let target = endpoint_node_index(ir, edge.to)?;
-        let (source_anchor, target_anchor) = edge_anchors(
-            nodes.get(source)?,
-            nodes.get(target)?,
-            horizontal_ranks,
-        );
+        let (source_anchor, target_anchor) =
+            edge_anchors(nodes.get(source)?, nodes.get(target)?, horizontal_ranks);
         let points = match edge_routing {
             EdgeRouting::Orthogonal => route_edge_points_with_obstacle_index(
                 source_anchor,
@@ -14769,20 +14765,18 @@ mod tests {
         DirtySet, EdgeRouting, GraphMetrics, IncrementalLayoutEngine, IncrementalLayoutSession,
         LayoutAlgorithm, LayoutConfig, LayoutDependencyGraph, LayoutEdit, LayoutGuardrails,
         LayoutNodeBox, LayoutPoint, LayoutRect, LayoutSequenceLifecycleMarkerKind,
-        ObstacleSpatialIndex,
-        RegionInput, RegionMemoryBudget, RenderClip, RenderItem, RenderSource, SubgraphRegion,
-        SubgraphRegionId, SubgraphRegionKind, TracedLayout, build_layout_decision_ledger,
-        build_directed_path_edge_paths, build_edge_paths, build_layout_guard_report,
-        build_render_scene, dispatch_layout_algorithm,
+        ObstacleSpatialIndex, RegionInput, RegionMemoryBudget, RenderClip, RenderItem,
+        RenderSource, SubgraphRegion, SubgraphRegionId, SubgraphRegionKind, TracedLayout,
+        build_directed_path_edge_paths, build_edge_paths, build_layout_decision_ledger,
+        build_layout_guard_report, build_render_scene, dispatch_layout_algorithm,
         estimate_layout_cost, evaluate_layout_guardrails, find_obstacle_nudge_x,
-        find_obstacle_nudge_y,
-        incremental_overlap_alignment, layout, layout_diagram, layout_diagram_force,
-        layout_diagram_force_traced, layout_diagram_gantt, layout_diagram_grid,
-        layout_diagram_incremental_traced_with_config_and_guardrails, layout_diagram_radial,
-        layout_diagram_sankey, layout_diagram_sequence, layout_diagram_sequence_traced,
-        layout_diagram_timeline, layout_diagram_traced, layout_diagram_traced_with_algorithm,
-        layout_diagram_traced_with_algorithm_and_guardrails,
-        layout_diagram_traced_with_config_and_guardrails, layout_diagram_tree, is_directed_path,
+        find_obstacle_nudge_y, incremental_overlap_alignment, is_directed_path, layout,
+        layout_diagram, layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
+        layout_diagram_grid, layout_diagram_incremental_traced_with_config_and_guardrails,
+        layout_diagram_radial, layout_diagram_sankey, layout_diagram_sequence,
+        layout_diagram_sequence_traced, layout_diagram_timeline, layout_diagram_traced,
+        layout_diagram_traced_with_algorithm, layout_diagram_traced_with_algorithm_and_guardrails,
+        layout_diagram_traced_with_config_and_guardrails, layout_diagram_tree,
         layout_diagram_with_config, layout_diagram_with_cycle_strategy, layout_diagram_xychart,
         layout_source_map, route_edge_points, route_edge_points_with_obstacles,
     };
@@ -20517,11 +20511,8 @@ mod tests {
 
         let dispatch = dispatch_layout_algorithm(&chain, LayoutAlgorithm::Auto);
         assert_eq!(dispatch.selected, LayoutAlgorithm::Tree);
-        let guard = evaluate_layout_guardrails(
-            &chain,
-            dispatch.selected,
-            LayoutGuardrails::default(),
-        );
+        let guard =
+            evaluate_layout_guardrails(&chain, dispatch.selected, LayoutGuardrails::default());
         assert_eq!(guard.selected_algorithm, LayoutAlgorithm::Tree);
         assert!(!guard.fallback_applied);
 
@@ -20549,11 +20540,7 @@ mod tests {
             assert_eq!(specialized, generic, "direction={direction:?}");
         }
 
-        let branch = graph_ir(
-            DiagramType::Flowchart,
-            5,
-            &[(0, 1), (1, 2), (1, 3), (3, 4)],
-        );
+        let branch = graph_ir(DiagramType::Flowchart, 5, &[(0, 1), (1, 2), (1, 3), (3, 4)]);
         let cycle = graph_ir(DiagramType::Flowchart, 3, &[(0, 1), (1, 2), (2, 0)]);
         assert!(!is_directed_path(&branch));
         assert!(!is_directed_path(&cycle));
