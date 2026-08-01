@@ -332,14 +332,23 @@ fn render_svg_with_layout_impl(
     config: &SvgRenderConfig,
     use_post_pass_cache: bool,
 ) -> String {
-    let mut svg = match config.backend {
-        SvgBackend::LegacyLayout => render_layout_to_svg(layout, ir, config),
+    let (mut svg, known_live_marker_mask) = match config.backend {
+        SvgBackend::LegacyLayout => {
+            let live_marker_mask = flowchart_marker_mask(ir, layout);
+            (
+                render_layout_to_svg(layout, ir, config, live_marker_mask),
+                live_marker_mask,
+            )
+        }
         SvgBackend::Scene => {
             let scene = build_render_scene(ir, layout);
-            render_scene_document_with_ir(&scene, config, Some(ir))
+            (
+                render_scene_document_with_ir(&scene, config, Some(ir)),
+                None,
+            )
         }
     };
-    apply_output_post_passes(&mut svg, use_post_pass_cache);
+    apply_output_post_passes(&mut svg, use_post_pass_cache, known_live_marker_mask);
     svg
 }
 
@@ -571,8 +580,26 @@ fn strip_unused_markers(svg: &mut String) -> Option<u16> {
     cacheable.then_some(live_mask)
 }
 
+const MARKER_END: u16 = 1 << 0;
+const MARKER_FILLED: u16 = 1 << 1;
+const MARKER_OPEN: u16 = 1 << 2;
+const MARKER_HALF_TOP: u16 = 1 << 3;
+const MARKER_HALF_BOTTOM: u16 = 1 << 4;
+const MARKER_STICK_TOP: u16 = 1 << 5;
+const MARKER_STICK_BOTTOM: u16 = 1 << 6;
+const MARKER_START: u16 = 1 << 7;
+const MARKER_START_FILLED: u16 = 1 << 8;
+const MARKER_CIRCLE: u16 = 1 << 9;
+const MARKER_CROSS: u16 = 1 << 10;
+const MARKER_DIAMOND: u16 = 1 << 11;
+const MARKER_DIAMOND_OPEN: u16 = 1 << 12;
+const MARKER_TRIANGLE_OPEN: u16 = 1 << 13;
+const MARKER_START_TRIANGLE_OPEN: u16 = 1 << 14;
+const BASIC_MARKER_MASK: u16 = MARKER_END | MARKER_OPEN;
+const ALL_MARKER_MASK: u16 = (1 << 15) - 1;
+
 fn marker_id_bit(id: &str) -> Option<u16> {
-    const IDS: [&str; 12] = [
+    const IDS: [&str; 15] = [
         "arrow-end",
         "arrow-filled",
         "arrow-open",
@@ -585,6 +612,9 @@ fn marker_id_bit(id: &str) -> Option<u16> {
         "arrow-circle",
         "arrow-cross",
         "arrow-diamond",
+        "arrow-diamond-open",
+        "arrow-triangle-open",
+        "start-arrow-triangle-open",
     ];
     IDS.iter()
         .position(|candidate| *candidate == id)
@@ -873,11 +903,17 @@ fn clear_css_post_pass_cache() {
 /// with the same scanners as the legacy passes; label text and geometry are absent, so separate
 /// diagrams and label-only edits can hit without risking stale CSS. Any unknown marker identity
 /// takes the legacy path.
-fn apply_output_post_passes(svg: &mut String, use_cache: bool) {
+fn apply_output_post_passes(
+    svg: &mut String,
+    use_cache: bool,
+    known_live_marker_mask: Option<u16>,
+) {
     if !use_cache {
         strip_unused_state_css(svg);
         if svg.len() <= POST_PASS_MAX_SVG_BYTES {
-            let _ = strip_unused_markers(svg);
+            if known_live_marker_mask.is_none() {
+                let _ = strip_unused_markers(svg);
+            }
             strip_dead_marker_css(svg);
             minify_style_block(svg);
         }
@@ -893,7 +929,7 @@ fn apply_output_post_passes(svg: &mut String, use_cache: bool) {
 
     // Marker pruning changes only <defs>; doing it first exposes the live-marker feature mask while
     // leaving the raw stylesheet and every state/accent body observation unchanged.
-    let live_marker_mask = strip_unused_markers(svg);
+    let live_marker_mask = known_live_marker_mask.or_else(|| strip_unused_markers(svg));
     let Some((content_start, content_end, state_used, accent_mask, body_var_mask)) =
         css_post_pass_observation(svg)
     else {
@@ -945,79 +981,103 @@ const DEFAULT_EDGE_COLOR: &str = "#94a3b8";
 /// `ArrowheadMarker::…(id, edge_color).to_element()` sequence (same order + `emit_fancy` gating) that
 /// both render backends add via `DefsBuilder::marker`. Byte-identical to those children because it
 /// calls the same `Element::write_to_string`.
-fn build_marker_defs_body(edge_color: &str, emit_fancy: bool) -> String {
+fn build_marker_defs_body(edge_color: &str, marker_mask: u16) -> String {
     use crate::defs::MarkerOrient;
     let mut s = String::new();
-    let push = |s: &mut String, m: ArrowheadMarker| m.to_element().write_to_string(s);
-    push(&mut s, ArrowheadMarker::standard("arrow-end", edge_color));
-    if emit_fancy {
-        push(&mut s, ArrowheadMarker::filled("arrow-filled", edge_color));
-    }
-    push(&mut s, ArrowheadMarker::open("arrow-open", edge_color));
-    if emit_fancy {
-        push(
-            &mut s,
-            ArrowheadMarker::half_top("arrow-half-top", edge_color),
-        );
-        push(
-            &mut s,
-            ArrowheadMarker::half_bottom("arrow-half-bottom", edge_color),
-        );
-        push(
-            &mut s,
-            ArrowheadMarker::stick_top("arrow-stick-top", edge_color),
-        );
-        push(
-            &mut s,
-            ArrowheadMarker::stick_bottom("arrow-stick-bottom", edge_color),
-        );
-        push(
-            &mut s,
-            ArrowheadMarker::standard("arrow-start", edge_color)
-                .with_orient(MarkerOrient::AutoStartReverse),
-        );
-        push(
-            &mut s,
-            ArrowheadMarker::filled("arrow-start-filled", edge_color)
-                .with_orient(MarkerOrient::AutoStartReverse),
-        );
-        push(
-            &mut s,
-            ArrowheadMarker::circle_marker("arrow-circle", edge_color),
-        );
-        push(
-            &mut s,
-            ArrowheadMarker::cross_marker("arrow-cross", edge_color),
-        );
-        push(
-            &mut s,
-            ArrowheadMarker::diamond_marker("arrow-diamond", edge_color),
-        );
-        push(
-            &mut s,
-            ArrowheadMarker::diamond_open_marker("arrow-diamond-open", edge_color),
-        );
-        push(
-            &mut s,
-            ArrowheadMarker::triangle_open_marker("arrow-triangle-open", edge_color),
-        );
-        // Leading `start-` is LOAD-BEARING, not styling: the cross-engine checker recognises our
-        // inheritance markers by an anchored id pattern (`(?:^|-)arrow-(?:inheritance(-open)?|
-        // triangle-open)$`), so a trailing `-start` suffix would fall outside its vocabulary and the
-        // marker would score as `unknown` even though it renders correctly. Conform to the checker's
-        // contract rather than widening the checker.
-        //
-        // A triangle is NOT symmetric under 180 degrees, so the start slot needs its own
-        // auto-start-reverse def or `orient="auto"` rotates it to point INTO the path — which the
-        // cross-engine checker rejects as invalid:inheritance:points_into_path(slot=start). This
-        // mirrors the existing arrow-start / arrow-start-filled pair. The diamonds need no such
-        // twin because a diamond looks identical either way round.
-        push(
-            &mut s,
-            ArrowheadMarker::triangle_open_marker("start-arrow-triangle-open", edge_color)
-                .with_orient(MarkerOrient::AutoStartReverse),
-        );
-    }
+    let push = |s: &mut String, bit: u16, m: ArrowheadMarker| {
+        if marker_mask & bit != 0 {
+            m.to_element().write_to_string(s);
+        }
+    };
+    push(
+        &mut s,
+        MARKER_END,
+        ArrowheadMarker::standard("arrow-end", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_FILLED,
+        ArrowheadMarker::filled("arrow-filled", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_OPEN,
+        ArrowheadMarker::open("arrow-open", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_HALF_TOP,
+        ArrowheadMarker::half_top("arrow-half-top", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_HALF_BOTTOM,
+        ArrowheadMarker::half_bottom("arrow-half-bottom", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_STICK_TOP,
+        ArrowheadMarker::stick_top("arrow-stick-top", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_STICK_BOTTOM,
+        ArrowheadMarker::stick_bottom("arrow-stick-bottom", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_START,
+        ArrowheadMarker::standard("arrow-start", edge_color)
+            .with_orient(MarkerOrient::AutoStartReverse),
+    );
+    push(
+        &mut s,
+        MARKER_START_FILLED,
+        ArrowheadMarker::filled("arrow-start-filled", edge_color)
+            .with_orient(MarkerOrient::AutoStartReverse),
+    );
+    push(
+        &mut s,
+        MARKER_CIRCLE,
+        ArrowheadMarker::circle_marker("arrow-circle", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_CROSS,
+        ArrowheadMarker::cross_marker("arrow-cross", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_DIAMOND,
+        ArrowheadMarker::diamond_marker("arrow-diamond", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_DIAMOND_OPEN,
+        ArrowheadMarker::diamond_open_marker("arrow-diamond-open", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_TRIANGLE_OPEN,
+        ArrowheadMarker::triangle_open_marker("arrow-triangle-open", edge_color),
+    );
+    // Leading `start-` is LOAD-BEARING, not styling: the cross-engine checker recognises our
+    // inheritance markers by an anchored id pattern (`(?:^|-)arrow-(?:inheritance(-open)?|
+    // triangle-open)$`), so a trailing `-start` suffix would fall outside its vocabulary and the
+    // marker would score as `unknown` even though it renders correctly. Conform to the checker's
+    // contract rather than widening the checker.
+    //
+    // A triangle is NOT symmetric under 180 degrees, so the start slot needs its own
+    // auto-start-reverse def or `orient="auto"` rotates it to point INTO the path — which the
+    // cross-engine checker rejects as invalid:inheritance:points_into_path(slot=start). This
+    // mirrors the existing arrow-start / arrow-start-filled pair. The diamonds need no such
+    // twin because a diamond looks identical either way round.
+    push(
+        &mut s,
+        MARKER_START_TRIANGLE_OPEN,
+        ArrowheadMarker::triangle_open_marker("start-arrow-triangle-open", edge_color)
+            .with_orient(MarkerOrient::AutoStartReverse),
+    );
     s
 }
 
@@ -1030,19 +1090,42 @@ fn build_marker_defs_body(edge_color: &str, emit_fancy: bool) -> String {
 /// cache); custom themes build fresh (rare). The returned body is streamed as one
 /// `DefsBuilder::raw_markers`, byte-identical to the per-marker children it replaces.
 fn marker_defs_body(edge_color: &str, emit_fancy: bool) -> Cow<'static, str> {
+    marker_defs_body_for_mask(
+        edge_color,
+        if emit_fancy {
+            ALL_MARKER_MASK
+        } else {
+            BASIC_MARKER_MASK
+        },
+    )
+}
+
+fn marker_defs_body_for_mask(edge_color: &str, marker_mask: u16) -> Cow<'static, str> {
     if edge_color == DEFAULT_EDGE_COLOR {
+        static EMPTY: OnceLock<String> = OnceLock::new();
+        static END_ONLY: OnceLock<String> = OnceLock::new();
+        static OPEN_ONLY: OnceLock<String> = OnceLock::new();
         static BASIC: OnceLock<String> = OnceLock::new();
         static FANCY: OnceLock<String> = OnceLock::new();
-        let cell = if emit_fancy { &FANCY } else { &BASIC };
+        let cell = match marker_mask {
+            0 => Some(&EMPTY),
+            MARKER_END => Some(&END_ONLY),
+            MARKER_OPEN => Some(&OPEN_ONLY),
+            BASIC_MARKER_MASK => Some(&BASIC),
+            ALL_MARKER_MASK => Some(&FANCY),
+            _ => None,
+        };
         // Borrow the process-global memoized body instead of cloning it into a fresh `String` on
         // every render — `DefsBuilder::raw_markers` now streams it via `push_str`, so a borrow is
         // sufficient. Custom themes still build fresh (rare) as `Cow::Owned`.
-        return Cow::Borrowed(
-            cell.get_or_init(|| build_marker_defs_body(edge_color, emit_fancy))
-                .as_str(),
-        );
+        if let Some(cell) = cell {
+            return Cow::Borrowed(
+                cell.get_or_init(|| build_marker_defs_body(edge_color, marker_mask))
+                    .as_str(),
+            );
+        }
     }
-    Cow::Owned(build_marker_defs_body(edge_color, emit_fancy))
+    Cow::Owned(build_marker_defs_body(edge_color, marker_mask))
 }
 
 /// Render a target-agnostic scene to SVG string with custom configuration.
@@ -2592,6 +2675,58 @@ fn arrow_uses_only_basic_markers(arrow: fm_core::ArrowType) -> bool {
     )
 }
 
+fn arrow_marker_mask(arrow: fm_core::ArrowType) -> u16 {
+    use fm_core::ArrowType;
+    match arrow {
+        ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine => 0,
+        ArrowType::Arrow | ArrowType::DottedArrow => MARKER_END,
+        ArrowType::OpenArrow | ArrowType::DottedOpenArrow => MARKER_OPEN,
+        ArrowType::HalfArrowTop
+        | ArrowType::HalfArrowBottomReverse
+        | ArrowType::HalfArrowTopDotted
+        | ArrowType::HalfArrowBottomReverseDotted => MARKER_HALF_TOP,
+        ArrowType::HalfArrowBottom
+        | ArrowType::HalfArrowTopReverse
+        | ArrowType::HalfArrowBottomDotted
+        | ArrowType::HalfArrowTopReverseDotted => MARKER_HALF_BOTTOM,
+        ArrowType::StickArrowTop
+        | ArrowType::StickArrowBottomReverse
+        | ArrowType::StickArrowTopDotted
+        | ArrowType::StickArrowBottomReverseDotted => MARKER_STICK_TOP,
+        ArrowType::StickArrowBottom
+        | ArrowType::StickArrowTopReverse
+        | ArrowType::StickArrowBottomDotted
+        | ArrowType::StickArrowTopReverseDotted => MARKER_STICK_BOTTOM,
+        ArrowType::ThickArrow => MARKER_FILLED,
+        ArrowType::Circle => MARKER_CIRCLE,
+        ArrowType::Cross | ArrowType::DottedCross => MARKER_CROSS,
+        ArrowType::DoubleArrow | ArrowType::DoubleDottedArrow => MARKER_START | MARKER_END,
+        ArrowType::DoubleThickArrow => MARKER_START_FILLED | MARKER_FILLED,
+        ArrowType::Aggregation | ArrowType::AggregationReverse => MARKER_DIAMOND_OPEN,
+        ArrowType::Composition | ArrowType::CompositionReverse => MARKER_DIAMOND,
+        ArrowType::Inheritance => MARKER_START_TRIANGLE_OPEN,
+        ArrowType::InheritanceReverse => MARKER_TRIANGLE_OPEN,
+    }
+}
+
+/// Flowchart layout edges are the complete marker source, so derive the exact live set before SVG
+/// serialization. Other diagram families retain the drift-proof output scan because their renderers
+/// may synthesize markers outside `ir.edges`.
+fn flowchart_marker_mask(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Option<u16> {
+    (ir.diagram_type == fm_core::DiagramType::Flowchart).then(|| {
+        layout.edges.iter().fold(0, |mask, edge_path| {
+            let edge_mask = if edge_path.reversed {
+                MARKER_OPEN
+            } else {
+                ir.edges
+                    .get(edge_path.edge_index)
+                    .map_or(MARKER_END, |edge| arrow_marker_mask(edge.arrow))
+            };
+            mask | edge_mask
+        })
+    })
+}
+
 /// Serial node-render loop, shared by the WASM path and the below-threshold native path (and inlined
 /// per-chunk by the parallel native path). Factored out so all three render byte-identically.
 #[allow(clippy::too_many_arguments)]
@@ -2645,6 +2780,7 @@ fn render_layout_to_svg(
     layout: &DiagramLayout,
     ir: &MermaidDiagramIr,
     config: &SvgRenderConfig,
+    known_live_marker_mask: Option<u16>,
 ) -> String {
     let padding = config.padding;
     let legend_enabled = is_c4_legend_enabled(ir);
@@ -2746,7 +2882,10 @@ fn render_layout_to_svg(
     // `emit_fancy_markers`, memoized for the default theme (see `marker_defs_body`). Streamed in the
     // markers slot so the output is byte-identical to the per-marker `.marker()` children it replaces,
     // skipping the ~1-6 µs of Element construction + serialization rebuilt on every render.
-    defs = defs.raw_markers(marker_defs_body(edge_color, emit_fancy_markers));
+    defs = defs.raw_markers(known_live_marker_mask.map_or_else(
+        || marker_defs_body(edge_color, emit_fancy_markers),
+        |mask| marker_defs_body_for_mask(edge_color, mask),
+    ));
 
     // Add drop shadow filter if enabled. Skip the `<filter id="drop-shadow">` def when the theme
     // CSS is embedded: its only referrer is the inline `filter="url(#drop-shadow)"` on node shapes,
@@ -13964,9 +14103,9 @@ marker#arrow-future path { fill: red; }\n\
 </style><path marker-end=\"url(#arrow-future)\"/></svg>",
         );
         let mut expected = raw.clone();
-        apply_output_post_passes(&mut expected, false);
+        apply_output_post_passes(&mut expected, false, None);
         let mut actual = raw;
-        apply_output_post_passes(&mut actual, true);
+        apply_output_post_passes(&mut actual, true, None);
         assert_eq!(actual, expected);
     }
 
