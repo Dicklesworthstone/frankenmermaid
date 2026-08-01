@@ -366,7 +366,7 @@ function equivalenceDecidableDocs(count, seed) {
  * and attach a page-specific tail. Mermaid-js reparses that shared block for every diagram. This
  * corpus keeps every diagram distinct while making the repeated work explicit and pinnable.
  */
-function sharedSubgraphDocs(count, sharedNodes, seed) {
+function sharedSubgraphDocs(count, sharedNodes, seed, divergentBlocks = false) {
   const sharedRandom = rng(seed);
   const prefix = ['flowchart LR', '  subgraph Shared["Shared ingestion platform"]'];
   for (let i = 0; i < sharedNodes; i++) {
@@ -381,11 +381,20 @@ function sharedSubgraphDocs(count, sharedNodes, seed) {
     const documentRandom = rng(seed + (d + 1) * 104729);
     const uniqueNodes = 4 + (d % 9);
     const suffix = [];
+    if (divergentBlocks) suffix.push(`  subgraph Tenant${d}["Tenant ${d}"]`);
     for (let i = 0; i < uniqueNodes; i++) {
-      suffix.push(`  D${i}["${realisticLabel(documentRandom, d * 16 + i)}"]`);
+      const indent = divergentBlocks ? '    ' : '  ';
+      suffix.push(`${indent}D${i}["${realisticLabel(documentRandom, d * 16 + i)}"]`);
     }
-    suffix.push(`  S${sharedNodes - 1}-->D0`);
-    for (let i = 0; i < uniqueNodes - 1; i++) suffix.push(`  D${i}-->D${i + 1}`);
+    if (!divergentBlocks) suffix.push(`  S${sharedNodes - 1}-->D0`);
+    for (let i = 0; i < uniqueNodes - 1; i++) {
+      const indent = divergentBlocks ? '    ' : '  ';
+      suffix.push(`${indent}D${i}-->D${i + 1}`);
+    }
+    if (divergentBlocks) {
+      suffix.push('  end');
+      suffix.push(`  S${sharedNodes - 1}-->D0`);
+    }
     out.push([shared, ...suffix].join('\n'));
   }
   return out;
@@ -516,6 +525,8 @@ const GENERATORS = {
   docs_site: (p) => docsSite(p.count, p.seed),
   equivalence_decidable_docs: (p) => equivalenceDecidableDocs(p.count, p.seed),
   shared_subgraph_docs: (p) => sharedSubgraphDocs(p.count, p.shared_nodes, p.seed),
+  shared_subgraph_divergent_docs: (p) =>
+    sharedSubgraphDocs(p.count, p.shared_nodes, p.seed, true),
   typing_trace: (p) => typingTrace(p.nodes, p.phrase, p.seed),
   monorepo_architecture: (p) => monorepoArchitecture(p.services, p.domains, p.seed),
   schema_catalog: (p) => schemaCatalog(p.schemas, p.min_entities, p.max_entities, p.seed),
@@ -620,6 +631,9 @@ export const CORPUS = [
   // 384 distinct docs pages share one complete 48-node platform subgraph and attach independent
   // tails. The job exposes cross-diagram parser reuse while retaining one full render per page.
   { id: 'ci_shared_subgraph_384', gen: 'shared_subgraph_docs', params: { count: 384, shared_nodes: 48, seed: 20260731 }, class: 'doc_build', reps_js: 9, null_reps_js: 20, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 7200_000, dnf_allowed: true, effect_ci_required: true },
+  // The same platform block followed by a distinct complete tenant subgraph. The largest leading
+  // prefix differs per document, so only the linear common-boundary planner can reuse the platform.
+  { id: 'ci_shared_subgraph_divergent_64', gen: 'shared_subgraph_divergent_docs', params: { count: 64, shared_nodes: 48, seed: 20260731 }, class: 'doc_build', reps_js: 9, null_reps_js: 20, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 900_000, dnf_allowed: true, effect_ci_required: true },
   // 60 keystrokes inside one label: the re-render frequency a live preview actually generates.
   { id: 'typing_trace_60',      gen: 'typing_trace', params: { nodes: 40, phrase: 'Aggregate results from the upstream ingestion workers safely', seed: 20260728 }, class: 'edit_trace', reps_js: 2, warmup_js: 1, reps_rs: 20, warmup_rs: 2, js_budget_ms: 900_000, dnf_allowed: true },
   // One architecture-review export at two monorepo sizes. Degree and domain sizes are deliberately

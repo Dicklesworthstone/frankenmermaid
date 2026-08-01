@@ -1254,12 +1254,8 @@ fn lower_compiled_flow_document_item(
 /// suffix. This removes repeated parsing without cloning a populated IR or coordinating workers.
 pub(crate) struct CompiledFlowchartPrefix {
     prefix: String,
-    items: Vec<CompiledFlowDocumentItem>,
-    warnings: Vec<String>,
-    header_direction: Option<GraphDirection>,
+    seed: IrBuilder,
     detection: DetectedType,
-    parse_mode: MermaidParseMode,
-    parser_config: ParserConfig,
     line_offset: usize,
 }
 
@@ -1277,37 +1273,39 @@ impl CompiledFlowchartPrefix {
         }
 
         let document = parse_flowchart_document(prefix, 0, config);
+        let line_offset = memchr::memchr_iter(b'\n', prefix.as_bytes()).count();
+        let items = document
+            .items
+            .into_iter()
+            .map(CompiledFlowDocumentItem::from)
+            .collect::<Vec<_>>();
+        let mut seed = IrBuilder::with_capacity_hint(DiagramType::Flowchart, line_offset + 1);
+        seed.set_parse_mode(parse_mode);
+        seed.set_parser_config(*config);
+        for warning in &detection.warnings {
+            seed.add_warning(warning.clone());
+        }
+        if let Some(direction) = document.header_direction {
+            seed.set_direction(direction);
+        }
+        for warning in document.warnings {
+            seed.add_warning(warning);
+        }
+        for item in &items {
+            lower_compiled_flow_document_item(item, &mut seed, &[], &[]);
+        }
 
         Some(Self {
             prefix: prefix.to_owned(),
-            items: document.items.into_iter().map(Into::into).collect(),
-            warnings: document.warnings,
-            header_direction: document.header_direction,
+            seed,
             detection,
-            parse_mode,
-            parser_config: *config,
-            line_offset: memchr::memchr_iter(b'\n', prefix.as_bytes()).count(),
+            line_offset,
         })
     }
 
     pub(crate) fn parse(&self, input: &str) -> Option<ParseResult> {
         let suffix = input.strip_prefix(&self.prefix)?;
-        let input_lines = memchr::memchr_iter(b'\n', input.as_bytes()).count() + 1;
-        let mut builder = IrBuilder::with_capacity_hint(DiagramType::Flowchart, input_lines);
-        builder.set_parse_mode(self.parse_mode);
-        builder.set_parser_config(self.parser_config);
-        for warning in &self.detection.warnings {
-            builder.add_warning(warning.clone());
-        }
-        if let Some(direction) = self.header_direction {
-            builder.set_direction(direction);
-        }
-        for warning in &self.warnings {
-            builder.add_warning(warning.clone());
-        }
-        for item in &self.items {
-            lower_compiled_flow_document_item(item, &mut builder, &[], &[]);
-        }
+        let mut builder = self.seed.clone();
         parse_flowchart_with_line_offset(suffix, self.line_offset, &mut builder);
         if builder.node_count() == 0 && builder.edge_count() == 0 {
             builder.add_warning("No parseable nodes or edges were found");
@@ -1394,6 +1392,48 @@ pub(crate) fn reusable_flowchart_prefix(input: &str) -> Option<&str> {
         return None;
     }
     Some(&input[..end])
+}
+
+/// Return the largest reusable complete-subgraph prefix ending at or before `byte_limit`.
+///
+/// The caller has already found a common byte prefix across a batch. Reusing only a complete
+/// top-level subgraph boundary keeps the compiled fragment isomorphic to an ordinary full parse;
+/// partial lines and partial nested subgraphs are never admitted.
+pub(crate) fn reusable_flowchart_prefix_at_or_before(
+    input: &str,
+    byte_limit: usize,
+) -> Option<&str> {
+    let largest_prefix = reusable_flowchart_prefix(input)?;
+    let byte_limit = byte_limit.min(largest_prefix.len());
+    let mut offset = 0usize;
+    let mut saw_header = false;
+    let mut depth = 0usize;
+    let mut candidate_end = None;
+
+    for raw_line in largest_prefix.split_inclusive('\n') {
+        let source_line = raw_line
+            .strip_suffix("\r\n")
+            .or_else(|| raw_line.strip_suffix('\n'))
+            .unwrap_or(raw_line);
+        let trimmed = trim_fast(source_line);
+        let line_end = offset + raw_line.len();
+
+        if !saw_header {
+            if !trimmed.is_empty() && !is_comment(trimmed) {
+                saw_header = true;
+            }
+        } else if is_subgraph_block_start(trimmed) {
+            depth += 1;
+        } else if trimmed == "end" {
+            depth = depth.saturating_sub(1);
+            if depth == 0 && line_end >= 128 && line_end <= byte_limit {
+                candidate_end = Some(line_end);
+            }
+        }
+        offset = line_end;
+    }
+
+    candidate_end.map(|end| &input[..end])
 }
 
 /// Check another batch input against an already-validated reusable prefix.

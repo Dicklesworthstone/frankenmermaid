@@ -198,6 +198,49 @@ impl FlowchartBatchParsePlan {
             };
         }
 
+        // The largest reusable prefix can differ because later leading subgraphs are unique even
+        // when an earlier, expensive subgraph is shared by the entire batch. Find the byte LCP in
+        // one streaming pass, then snap it back to the last complete subgraph boundary. This keeps
+        // grouping O(total shared bytes), avoiding ordered comparisons of every long prefix.
+        if let Some(first) = inputs.first()
+            && inputs.len() >= 2
+        {
+            let first_bytes = first.as_bytes();
+            let common_len = inputs
+                .iter()
+                .skip(1)
+                .fold(first_bytes.len(), |limit, input| {
+                    let input_bytes = input.as_bytes();
+                    let compared = limit.min(input_bytes.len());
+                    first_bytes[..compared]
+                        .iter()
+                        .zip(&input_bytes[..compared])
+                        .position(|(left, right)| left != right)
+                        .unwrap_or(compared)
+                });
+            if let Some(prefix) =
+                mermaid_parser::reusable_flowchart_prefix_at_or_before(first, common_len)
+                && inputs
+                    .iter()
+                    .all(|input| mermaid_parser::can_reuse_flowchart_prefix(input, prefix))
+                && let Some(prefix_parser) =
+                    mermaid_parser::CompiledFlowchartPrefix::new(prefix, parse_mode, config)
+            {
+                return Self {
+                    compiled: vec![prefix_parser],
+                    assignment: vec![Some(0); inputs.len()],
+                    parse_mode,
+                    parser_config: *config,
+                    stats: FlowchartBatchParseStats {
+                        shared_prefix_groups: 1,
+                        shared_prefix_inputs: inputs.len(),
+                        reused_prefix_parses: inputs.len() - 1,
+                        reused_prefix_bytes: prefix.len().saturating_mul(inputs.len() - 1),
+                    },
+                };
+            }
+        }
+
         let mut groups: std::collections::BTreeMap<&str, Vec<usize>> =
             std::collections::BTreeMap::new();
         for (index, input) in inputs.iter().enumerate() {
@@ -1222,6 +1265,37 @@ mod tests {
         assert_eq!(plan.stats().shared_prefix_inputs, 2);
         assert_eq!(plan.stats().reused_prefix_parses, 1);
         assert_eq!(plan.stats().reused_prefix_bytes, prefix.len());
+        for (index, input) in inputs.iter().enumerate() {
+            assert_eq!(plan.parse(index, input), parse(input));
+        }
+    }
+
+    #[test]
+    fn batch_plan_reuses_common_early_subgraph_when_later_blocks_diverge() {
+        let shared = concat!(
+            "flowchart LR\n",
+            "  subgraph Shared[\"Shared ingestion platform\"]\n",
+            "    S0[\"Receive & validate events\"]\n",
+            "    S1[\"Normalize payload safely\"]\n",
+            "    S2[\"Publish canonical records\"]\n",
+            "    S0-->S1\n",
+            "    S1-->S2\n",
+            "  end\n",
+        );
+        let inputs = [
+            format!(
+                "{shared}  subgraph Analytics\n    A0[Warehouse]-->A1[Dashboard]\n  end\n  S2-->A0"
+            ),
+            format!("{shared}  subgraph Billing\n    B0[Ledger]-->B1[Invoice]\n  end\n  S2-->B0"),
+        ];
+        let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan =
+            FlowchartBatchParsePlan::new(&refs, MermaidParseMode::Compat, &ParserConfig::default());
+
+        assert_eq!(plan.stats().shared_prefix_groups, 1);
+        assert_eq!(plan.stats().shared_prefix_inputs, 2);
+        assert_eq!(plan.stats().reused_prefix_parses, 1);
+        assert_eq!(plan.stats().reused_prefix_bytes, shared.len());
         for (index, input) in inputs.iter().enumerate() {
             assert_eq!(plan.parse(index, input), parse(input));
         }

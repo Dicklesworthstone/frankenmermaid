@@ -4078,10 +4078,22 @@ fn estimate_layout_cost(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> La
             }
         }
         LayoutAlgorithm::Tree => LayoutCostEstimate {
-            time_ms: nodes
-                .saturating_mul(4)
-                .saturating_add(edges.saturating_mul(2))
-                .saturating_add(8),
+            // A directed path has a unique tree order. The tree implementation lays it out in
+            // linear passes, so charging the generic four-milliseconds-per-node estimate can
+            // incorrectly push it back through Sugiyama's cycle, rank, crossing, and coordinate
+            // pipeline. Keep the conservative generic estimate for branching trees, but price the
+            // path specialization by its actual linear work.
+            time_ms: if is_directed_path(ir) {
+                nodes
+                    .div_ceil(16)
+                    .saturating_add(edges.div_ceil(16))
+                    .saturating_add(1)
+            } else {
+                nodes
+                    .saturating_mul(4)
+                    .saturating_add(edges.saturating_mul(2))
+                    .saturating_add(8)
+            },
             iterations: nodes.saturating_add(4),
             route_ops: edges.saturating_mul(8).saturating_add(nodes),
         },
@@ -4132,6 +4144,52 @@ fn estimate_layout_cost(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> La
             route_ops: 0,
         },
     }
+}
+
+fn is_directed_path(ir: &MermaidDiagramIr) -> bool {
+    let node_count = ir.nodes.len();
+    if node_count < 3 {
+        return false;
+    }
+    if ir.edges.len() != node_count - 1 {
+        return false;
+    }
+
+    let mut next = vec![None; node_count];
+    let mut in_degree = vec![0_u8; node_count];
+    for edge in &ir.edges {
+        let (Some(source), Some(target)) = (
+            endpoint_node_index(ir, edge.from),
+            endpoint_node_index(ir, edge.to),
+        ) else {
+            return false;
+        };
+        if next[source].replace(target).is_some() {
+            return false;
+        }
+        in_degree[target] = in_degree[target].saturating_add(1);
+        if in_degree[target] > 1 {
+            return false;
+        }
+    }
+    let mut roots = in_degree
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &degree)| (degree == 0).then_some(index));
+    let Some(mut cursor) = roots.next() else {
+        return false;
+    };
+    if roots.next().is_some() {
+        return false;
+    }
+    for visited in 1..=node_count {
+        match next[cursor] {
+            Some(successor) if visited < node_count => cursor = successor,
+            None if visited == node_count => return true,
+            _ => return false,
+        }
+    }
+    false
 }
 
 fn fallback_candidates(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> Vec<LayoutAlgorithm> {
@@ -4727,7 +4785,15 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     let order_by_rank = rank_orders_from_key(ir, &tree.depth, &span_centers);
     let nodes = node_boxes_from_centers(ir, &node_sizes, &tree.depth, &order_by_rank, &centers);
-    let edges = build_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default());
+    let edges = build_directed_path_edge_paths(
+        ir,
+        &nodes,
+        &BTreeSet::new(),
+        EdgeRouting::default(),
+    )
+    .unwrap_or_else(|| {
+        build_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default())
+    });
     let clusters = build_cluster_boxes(ir, &nodes, spacing);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
@@ -12661,6 +12727,62 @@ fn build_edge_paths(
     )
 }
 
+/// Route an exact directed path without building or scanning an obstacle set.
+///
+/// Consecutive path nodes occupy consecutive tree depths, with no peer node in either rank. The
+/// open strip between their facing anchors therefore cannot contain a third node. Running the
+/// general router with an empty obstacle slice produces the same points while deleting the
+/// all-nodes scan for every edge.
+fn build_directed_path_edge_paths(
+    ir: &MermaidDiagramIr,
+    nodes: &[LayoutNodeBox],
+    highlighted_edge_indexes: &BTreeSet<usize>,
+    edge_routing: EdgeRouting,
+) -> Option<Vec<LayoutEdgePath>> {
+    if !is_directed_path(ir) {
+        return None;
+    }
+
+    let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
+    let mut paths = Vec::with_capacity(ir.edges.len());
+    for (edge_index, edge) in ir.edges.iter().enumerate() {
+        let source = endpoint_node_index(ir, edge.from)?;
+        let target = endpoint_node_index(ir, edge.to)?;
+        let (source_anchor, target_anchor) = edge_anchors(
+            nodes.get(source)?,
+            nodes.get(target)?,
+            horizontal_ranks,
+        );
+        let points = match edge_routing {
+            EdgeRouting::Orthogonal => route_edge_points_with_obstacle_index(
+                source_anchor,
+                target_anchor,
+                horizontal_ranks,
+                &[],
+                None,
+            ),
+            EdgeRouting::Spline => route_edge_points_spline_with_obstacle_index(
+                source_anchor,
+                target_anchor,
+                horizontal_ranks,
+                &[],
+                None,
+            ),
+        };
+        paths.push(LayoutEdgePath {
+            edge_index,
+            span: edge.span,
+            points,
+            reversed: highlighted_edge_indexes.contains(&edge_index),
+            is_self_loop: false,
+            parallel_offset: 0.0,
+            bundle_count: 1,
+            bundled: false,
+        });
+    }
+    Some(paths)
+}
+
 fn build_edge_paths_with_orientation(
     ir: &MermaidDiagramIr,
     nodes: &[LayoutNodeBox],
@@ -14644,20 +14766,23 @@ mod tests {
     )]
     use super::{
         CachedNodeSize, ConstraintSolverMode, CycleStrategy, DependencyGraph, DiagramLayout,
-        DirtySet, GraphMetrics, IncrementalLayoutEngine, IncrementalLayoutSession, LayoutAlgorithm,
-        LayoutConfig, LayoutDependencyGraph, LayoutEdit, LayoutGuardrails, LayoutNodeBox,
-        LayoutPoint, LayoutRect, LayoutSequenceLifecycleMarkerKind, ObstacleSpatialIndex,
+        DirtySet, EdgeRouting, GraphMetrics, IncrementalLayoutEngine, IncrementalLayoutSession,
+        LayoutAlgorithm, LayoutConfig, LayoutDependencyGraph, LayoutEdit, LayoutGuardrails,
+        LayoutNodeBox, LayoutPoint, LayoutRect, LayoutSequenceLifecycleMarkerKind,
+        ObstacleSpatialIndex,
         RegionInput, RegionMemoryBudget, RenderClip, RenderItem, RenderSource, SubgraphRegion,
         SubgraphRegionId, SubgraphRegionKind, TracedLayout, build_layout_decision_ledger,
-        build_layout_guard_report, build_render_scene, dispatch_layout_algorithm,
-        evaluate_layout_guardrails, find_obstacle_nudge_x, find_obstacle_nudge_y,
+        build_directed_path_edge_paths, build_edge_paths, build_layout_guard_report,
+        build_render_scene, dispatch_layout_algorithm,
+        estimate_layout_cost, evaluate_layout_guardrails, find_obstacle_nudge_x,
+        find_obstacle_nudge_y,
         incremental_overlap_alignment, layout, layout_diagram, layout_diagram_force,
         layout_diagram_force_traced, layout_diagram_gantt, layout_diagram_grid,
         layout_diagram_incremental_traced_with_config_and_guardrails, layout_diagram_radial,
         layout_diagram_sankey, layout_diagram_sequence, layout_diagram_sequence_traced,
         layout_diagram_timeline, layout_diagram_traced, layout_diagram_traced_with_algorithm,
         layout_diagram_traced_with_algorithm_and_guardrails,
-        layout_diagram_traced_with_config_and_guardrails, layout_diagram_tree,
+        layout_diagram_traced_with_config_and_guardrails, layout_diagram_tree, is_directed_path,
         layout_diagram_with_config, layout_diagram_with_cycle_strategy, layout_diagram_xychart,
         layout_source_map, route_edge_points, route_edge_points_with_obstacles,
     };
@@ -20369,6 +20494,69 @@ mod tests {
         assert!(!metrics.is_dense);
         assert_eq!(metrics.back_edge_count, 0);
         assert_eq!(metrics.root_count, 1);
+    }
+
+    #[test]
+    fn directed_path_specialization_is_exact_and_keeps_large_paths_on_tree_layout() {
+        let chain_edges = (0..59).map(|index| (index, index + 1)).collect::<Vec<_>>();
+        let mut chain = graph_ir(DiagramType::Flowchart, 60, &chain_edges);
+        for index in 0..chain.nodes.len() {
+            let label_index = chain.labels.len();
+            chain.labels.push(IrLabel {
+                text: if index % 2 == 0 {
+                    format!("short {index}")
+                } else {
+                    format!("a deliberately wider path node label {index}")
+                },
+                ..IrLabel::default()
+            });
+            chain.nodes[index].label = Some(IrLabelId(label_index));
+        }
+        assert!(is_directed_path(&chain));
+        assert!(estimate_layout_cost(&chain, LayoutAlgorithm::Tree).time_ms < 16);
+
+        let dispatch = dispatch_layout_algorithm(&chain, LayoutAlgorithm::Auto);
+        assert_eq!(dispatch.selected, LayoutAlgorithm::Tree);
+        let guard = evaluate_layout_guardrails(
+            &chain,
+            dispatch.selected,
+            LayoutGuardrails::default(),
+        );
+        assert_eq!(guard.selected_algorithm, LayoutAlgorithm::Tree);
+        assert!(!guard.fallback_applied);
+
+        for direction in [
+            GraphDirection::TB,
+            GraphDirection::LR,
+            GraphDirection::RL,
+            GraphDirection::BT,
+        ] {
+            chain.direction = direction;
+            let layout = layout_diagram_tree(&chain);
+            let specialized = build_directed_path_edge_paths(
+                &chain,
+                &layout.nodes,
+                &BTreeSet::new(),
+                EdgeRouting::default(),
+            )
+            .expect("directed path should take the obstacle-free router");
+            let generic = build_edge_paths(
+                &chain,
+                &layout.nodes,
+                &BTreeSet::new(),
+                EdgeRouting::default(),
+            );
+            assert_eq!(specialized, generic, "direction={direction:?}");
+        }
+
+        let branch = graph_ir(
+            DiagramType::Flowchart,
+            5,
+            &[(0, 1), (1, 2), (1, 3), (3, 4)],
+        );
+        let cycle = graph_ir(DiagramType::Flowchart, 3, &[(0, 1), (1, 2), (2, 0)]);
+        assert!(!is_directed_path(&branch));
+        assert!(!is_directed_path(&cycle));
     }
 
     #[test]
