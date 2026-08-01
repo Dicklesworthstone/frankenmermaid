@@ -4147,12 +4147,16 @@ fn estimate_layout_cost(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> La
 }
 
 fn is_directed_path(ir: &MermaidDiagramIr) -> bool {
+    directed_path_order(ir).is_some()
+}
+
+fn directed_path_order(ir: &MermaidDiagramIr) -> Option<Vec<usize>> {
     let node_count = ir.nodes.len();
     if node_count < 3 {
-        return false;
+        return None;
     }
     if ir.edges.len() != node_count - 1 {
-        return false;
+        return None;
     }
 
     let mut next = vec![None; node_count];
@@ -4162,34 +4166,34 @@ fn is_directed_path(ir: &MermaidDiagramIr) -> bool {
             endpoint_node_index(ir, edge.from),
             endpoint_node_index(ir, edge.to),
         ) else {
-            return false;
+            return None;
         };
         if next[source].replace(target).is_some() {
-            return false;
+            return None;
         }
         in_degree[target] = in_degree[target].saturating_add(1);
         if in_degree[target] > 1 {
-            return false;
+            return None;
         }
     }
     let mut roots = in_degree
         .iter()
         .enumerate()
         .filter_map(|(index, &degree)| (degree == 0).then_some(index));
-    let Some(mut cursor) = roots.next() else {
-        return false;
-    };
+    let mut cursor = roots.next()?;
     if roots.next().is_some() {
-        return false;
+        return None;
     }
+    let mut order = Vec::with_capacity(node_count);
     for visited in 1..=node_count {
+        order.push(cursor);
         match next[cursor] {
             Some(successor) if visited < node_count => cursor = successor,
-            None if visited == node_count => return true,
-            _ => return false,
+            None if visited == node_count => return Some(order),
+            _ => return None,
         }
     }
-    false
+    None
 }
 
 fn fallback_candidates(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> Vec<LayoutAlgorithm> {
@@ -4719,6 +4723,10 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         };
     }
 
+    if let Some(path_order) = directed_path_order(ir) {
+        return layout_directed_path_tree_traced(ir, path_order, node_sizes, spacing, trace);
+    }
+
     let tree = build_tree_layout_structure(ir);
     push_snapshot(
         &mut trace,
@@ -4803,6 +4811,124 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         0,
     );
 
+    let stats = LayoutStats {
+        node_count,
+        edge_count: ir.edges.len(),
+        crossing_count: 0,
+        crossing_count_before_refinement: 0,
+        reversed_edges: 0,
+        cycle_count: 0,
+        cycle_node_count: 0,
+        max_cycle_size: 0,
+        collapsed_clusters: 0,
+        reversed_edge_total_length,
+        total_edge_length,
+        phase_iterations: trace.snapshots.len(),
+    };
+
+    TracedLayout {
+        layout: Arc::new(DiagramLayout {
+            nodes,
+            clusters,
+            cycle_clusters: Vec::new(),
+            edges,
+            bounds,
+            stats,
+            extensions: LayoutExtensions::default(),
+            dirty_regions: Vec::new(),
+        }),
+        trace,
+    }
+}
+
+fn layout_directed_path_tree_traced(
+    ir: &MermaidDiagramIr,
+    path_order: Vec<usize>,
+    node_sizes: Vec<(f32, f32)>,
+    spacing: LayoutSpacing,
+    mut trace: LayoutTrace,
+) -> TracedLayout {
+    let node_count = ir.nodes.len();
+    let horizontal_depth_axis = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
+    let reverse_depth_axis = matches!(ir.direction, GraphDirection::RL | GraphDirection::BT);
+    let max_depth = node_count.saturating_sub(1);
+
+    push_snapshot(
+        &mut trace,
+        "tree_structure",
+        node_count,
+        ir.edges.len(),
+        0,
+        0,
+    );
+
+    let mut depth = vec![0_usize; node_count];
+    let mut depth_level_sizes = vec![0.0_f32; node_count];
+    let mut subtree_spans = vec![0.0_f32; node_count];
+    let mut running_span = 0.0_f32;
+    for (logical_depth, &node_index) in path_order.iter().enumerate().rev() {
+        depth[node_index] = logical_depth;
+        let (width, height) = node_sizes[node_index];
+        let depth_size = if horizontal_depth_axis { width } else { height };
+        let span_size = if horizontal_depth_axis { height } else { width };
+        depth_level_sizes[logical_depth] = depth_size.max(1.0);
+        running_span = span_size.max(1.0).max(running_span);
+        subtree_spans[node_index] = running_span;
+    }
+
+    // A path has one child at each non-leaf depth. Reproduce the generic tree center recurrence
+    // exactly, but without child adjacency, BFS queues, or per-rank buckets.
+    let mut span_centers = vec![0.0_f32; node_count];
+    let mut span_start = 0.0_f32;
+    for (logical_depth, &node_index) in path_order.iter().enumerate() {
+        let subtree_span = subtree_spans[node_index];
+        span_centers[node_index] = span_start + (subtree_span / 2.0);
+        if let Some(&child) = path_order.get(logical_depth + 1) {
+            let child_span = subtree_spans[child];
+            span_start += (subtree_span - child_span) / 2.0;
+        }
+    }
+
+    let depth_centers = depth_level_centers(&depth_level_sizes, spacing.rank_spacing);
+    let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
+    for node_index in 0..node_count {
+        let logical_depth = depth[node_index];
+        let mapped_depth = if reverse_depth_axis {
+            max_depth.saturating_sub(logical_depth)
+        } else {
+            logical_depth
+        };
+        let depth_center = depth_centers[mapped_depth];
+        let span_center = span_centers[node_index];
+        centers[node_index] = if horizontal_depth_axis {
+            (depth_center, span_center)
+        } else {
+            (span_center, depth_center)
+        };
+    }
+    normalize_center_positions(&mut centers, &node_sizes);
+
+    let order_by_rank = vec![0_usize; node_count];
+    let nodes = node_boxes_from_centers(ir, &node_sizes, &depth, &order_by_rank, &centers);
+    let edges = build_directed_path_edge_paths_unchecked(
+        ir,
+        &nodes,
+        &BTreeSet::new(),
+        EdgeRouting::default(),
+    )
+    .expect("validated directed path endpoints");
+    let clusters = build_cluster_boxes(ir, &nodes, spacing);
+    let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
+    let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
+
+    push_snapshot(
+        &mut trace,
+        "tree_post_processing",
+        node_count,
+        ir.edges.len(),
+        0,
+        0,
+    );
     let stats = LayoutStats {
         node_count,
         edge_count: ir.edges.len(),
@@ -12742,6 +12868,15 @@ fn build_directed_path_edge_paths(
         return None;
     }
 
+    build_directed_path_edge_paths_unchecked(ir, nodes, highlighted_edge_indexes, edge_routing)
+}
+
+fn build_directed_path_edge_paths_unchecked(
+    ir: &MermaidDiagramIr,
+    nodes: &[LayoutNodeBox],
+    highlighted_edge_indexes: &BTreeSet<usize>,
+    edge_routing: EdgeRouting,
+) -> Option<Vec<LayoutEdgePath>> {
     let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
     let mut paths = Vec::with_capacity(ir.edges.len());
     for (edge_index, edge) in ir.edges.iter().enumerate() {

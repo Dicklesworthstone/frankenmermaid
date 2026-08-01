@@ -19712,6 +19712,26 @@ with these C4 deltas, all confirmed against the `c4_basic.svg` golden:
 
   Agent: cc (CobaltFern)
 
+### REJECT: segmented SVG batch return/streaming (2026-08-01)
+
+**A/A null control (same invocation):** each old/candidate process ran the harness's internal
+nine-pair Rust null; baseline process median ratio `1.0143`, candidate process median ratio
+`1.0100`. Timing is recorded only as rejection evidence.
+**Counted mechanism:** nine alternating 64-worker whole-job pairs emitted the identical aggregate
+SVG SHA-256 `6410d31e4b9b9e96053fe237b7f45bc13eb50a80badb35dff06fa7d09f24a6ab`.
+
+- Prior contiguous output median: 1,167,082 ns. Segmented return/streaming median: 1,394,482 ns.
+  Result: **0.8369x**, or **19.48% slower**.
+- Decision: rejected and manually reverted before the directed-path lever.
+- Evidence SHA-256: prior JSONL
+  `4c8abc1a0f08e833ef021ce8f052b9a5585880e1dce31766ca186346bb9b5974`; candidate JSONL
+  `5cc8d808f3f102e5ddbc68147ee17fb636ed94783b0e51630e6f0bef9e1c637b`.
+- **Retry predicate:** retry only with an end consumer that accepts vectored/segmented output
+  without an additional per-diagram traversal, and count the eliminated copy against the added
+  sink traversal before timing.
+
+  Agent: cod (BlackThrush)
+
 ### ORACLE INTEGRITY: `typing_trace_60` flipped fail -> pass on byte-identical dumps (2026-07-31)
 
 - **Observation.** Two equivalence artifacts for `typing_trace_60` exist under

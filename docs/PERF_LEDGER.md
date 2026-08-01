@@ -1372,3 +1372,40 @@ instructions** and **16.92% fewer cycles** (`1.3723x` and `1.2037x` ratios).
   `0fa7da717f2d92253395deb5ed8bb330ddb6baa4c077aa7f44d8d11cd4624e7a`.
 - **Retry predicate.** Re-run only if fragment boundaries, exact-prefix equality, the shared-prefix
   corpus, worker ownership, executing ELF, or equivalence contract changes.
+
+## KEEP: one-pass closed-form directed-path tree layout (2026-08-01)
+
+**Bead:** `bd-07ml`. **Lane:** cod (`BlackThrush`).
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `34c3550fa644e2ada586e2654941821a11c7742ccfb683d448dbfdd8ce0847d7`
+**A/A null control (same invocation):** all 18 old/candidate processes ran their own nine-pair
+Rust null control. Two individual process CIs excluded 1, so short-run timing noise was not the
+acceptance gate; both arms emitted byte-identical null and result hashes.
+**Counted mechanism:** seven same-host `perf stat` repetitions over the exact 384-diagram,
+64-worker whole job measured 53,775,960,976 instructions and 39,013,420,444 cycles for the prior
+ELF, versus 49,196,548,570 instructions and 37,093,193,064 cycles for the candidate: **8.52% fewer
+instructions** and **4.92% fewer cycles** (`1.0931x` and `1.0518x` ratios).
+
+- **Mechanism.** A validated directed path now takes a closed-form layout route that computes path
+  order, suffix subtree spans, rank centers, node boxes, and direct edge paths in linear passes. It
+  skips the generic CSR tree, BFS queues, child/rank sorting, rank buckets, and a redundant path
+  validation pass while preserving the generic tree recurrence exactly.
+- **Whole-job result.** Nine alternating old/new process pairs on `thinkstation1`, pinned to CPUs
+  0-63 and self-reporting 64/64 workers, measured prior median 1,161,174 ns and candidate median
+  1,114,124 ns: **1.0422x**. Both ELFs emitted aggregate SVG SHA-256
+  `6410d31e4b9b9e96053fe237b7f45bc13eb50a80badb35dff06fa7d09f24a6ab`.
+- **Live-incumbent corroboration.** A fresh same-invocation whole-job structural run measured the
+  candidate and live mermaid-js 11.15.0 and passed **384/384** diagrams, with zero divergent and
+  zero unverified. Its scalar Rust observation was 15.550 ms and live mermaid-js was 53,760.8 ms;
+  this was an equivalence run rather than the corrected competitive gate, so this row remains
+  maintenance-only and supports no competitive ratio claim. Artifact SHA-256
+  `ee9bfb92cdf13d37e7e0802577662554d548c02603922086aebd1969a6b14ad2`.
+- **Evidence.** Interleaved prior/candidate JSONL SHA-256
+  `9efa6df34d99519613c8c943ef968ed4854908278887a94ee9300ee7da23c421` /
+  `fe3fb826b25f90067dd96ac878bbad5a375ebf1d2e19cc4ee87c1b168b49a31b`; counted prior/candidate
+  CSV SHA-256 `e6c65c480d220495711884850dbfdd71e3851cf3247bfa086183bee3f3e84a3b` /
+  `903b783780e765990137de16891fd53edb77c1b59ec5aa804a556aa2901e4438`.
+- **Validation.** Strict-RCH workspace check and clippy passed; all 442 `fm-layout` tests plus
+  doctests passed; formatting and diff checks passed.
+- **Retry predicate.** Re-run only if path validation, the tree center recurrence, edge routing,
+  shared-prefix corpus, worker ownership, executing ELF, or equivalence contract changes.
