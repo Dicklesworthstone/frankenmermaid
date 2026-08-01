@@ -1653,10 +1653,55 @@ writes. Both arms reported 20,685,143 output bytes.
   the exact ELF above and pinned mermaid-js 11.15.0 bundle
   `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de` on shared input SHA-256
   `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`. Candidate internal times
-  were 2.581 / 3.203 ms with 64 workers; the runtime-verified single-main-thread incumbent was
-  53,258.5 ms. Its render-once arm had no incumbent null, so this is not a competitive ratio claim.
+  were 2.581 / 3.203 ms with `--jobs 64` requested; full-hit admission created zero Rayon workers
+  and ran on the main thread. The runtime-verified single-main-thread incumbent was 53,258.5 ms.
+  Its render-once arm had no incumbent null, so this is not a competitive ratio claim.
 - **Validation.** Theme/config changes forced 384/384 misses before the next identical run returned
   to 384/384 hits. Strict remote workspace check and clippy passed; three focused invalidation tests
   passed twice (both CLI binary targets); formatting and exact output identity passed.
 - **Retry predicate.** Re-measure only if manifest admission, cache-key composition, destination
   freshness, executing-binary identity, the 384-input corpus, or output equivalence changes.
+
+## KEEP: sparse-miss repository batch rebuilds (2026-08-01)
+
+**Bead:** `bd-oaub`. **Lane:** cod (`BlackThrush`).
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `96314cd7fc38814719b9b2c3449f6a7b69b67581bf6a6f6ee7d14155008723d8`
+**A/A null control (same invocation):** invocation
+`fm-sparse-final-ab-1785587229267268127` ran 61 order-rotated sparse-A/sparse-B
+whole-process arms at 10,736,550 / 10,542,473 ns medians (ratio `1.018409`); the
+20,000-resample median-ratio 95% CI was `[0.989411, 1.040747]` and includes one.
+**Counted mechanism:** 11 same-host `perf stat` repetitions over the exact 384-input, one-file
+content-change job measured 232,665,813 instructions, 498,717,871 cycles, and 133,287,649 ns
+task-clock for the same binary's sparse path disabled, versus 42,104,396 instructions, 38,980,276
+cycles, and 9,160,328 ns with sparse execution enabled: **81.90% fewer instructions, 92.18% fewer
+cycles, and 93.13% less CPU time** (`5.5259x`, `12.7941x`, and `14.5505x` ratios).
+
+- **Mechanism.** A metadata-certified manifest hit now carries its separately validated source
+  digest into phase one without opening or hashing that source. Only early misses are read, and the
+  Rayon pool is capped at the miss count rather than the requested whole-batch width. A one-file
+  change in a 384-file repository therefore reads/renders one diagram with one active worker while
+  preserving the former read-all, 64-worker route as an exact-binary control. Missing or internally
+  inconsistent digest fields fail closed to the ordinary path.
+- **Whole-job result.** The same 61-process invocation measured read-all control and sparse medians
+  of 18,109,557 / 10,736,550 ns: **1.686720x**, with bootstrap 95% CI
+  `[1.650088, 1.728217]` and paired-ratio median `1.721399x`. Both routes reported 64 requested
+  workers; the control activated 64 and sparse execution activated one. They emitted byte-identical
+  384-file output with aggregate per-file manifest SHA-256
+  `7f5c3596ba29652cb0378ae4371cdf853961b6f0846b8df768a149f2d18d9b6a`.
+- **Live-incumbent corroboration.** Invocation
+  `fm-sparse-final-live-1785587290375861313` bracketed pinned live mermaid-js 11.15.0 with the exact
+  candidate ELF above on shared input SHA-256
+  `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`.
+  Candidate internal observations were 5.588 / 4.703 ms with 64 workers requested and one active;
+  the runtime-verified single-main-thread incumbent observed 50,861.2 ms. Its bundle SHA-256 was
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`. The render-once incumbent
+  arm had no null control, so this row remains maintenance-only and supports no competitive ratio.
+  Live artifact SHA-256 was
+  `258a247d0a3e94dc9147cceb6776e97a201329699ad60a46882d6c1efee6a612`.
+- **Validation.** Strict remote workspace clippy passed with warnings denied; all six focused cache
+  tests passed across both CLI binary targets. Formatting, executing-ELF self-report, sparse/control
+  exact-output identity, counted work, and pinned live-incumbent bracketing passed.
+- **Retry predicate.** Re-measure only if source-digest integrity, early metadata admission,
+  miss-count pool sizing, executing-binary identity, the 384-input corpus, or output equivalence
+  changes.

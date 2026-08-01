@@ -819,6 +819,8 @@ const BATCH_RENDER_CACHE_FILE: &str = ".frankenmermaid-batch-cache-v1.json";
 struct BatchRenderCacheEntry {
     key: String,
     #[serde(default)]
+    source_digest: String,
+    #[serde(default)]
     options_key: String,
     #[serde(default)]
     source_bytes: u64,
@@ -851,7 +853,13 @@ fn batch_cache_entry_matches_early(
     output_modified: std::time::SystemTime,
     manifest_modified: std::time::SystemTime,
 ) -> bool {
-    entry.options_key == options_key
+    entry.source_digest.len() == 64
+        && entry
+            .key
+            .strip_prefix(&entry.source_digest)
+            .and_then(|suffix| suffix.strip_prefix(':'))
+            == Some(entry.options_key.as_str())
+        && entry.options_key == options_key
         && entry.source_bytes == source_bytes
         && entry.source_modified_ns == source_modified_ns
         && entry.bytes == output_bytes
@@ -865,7 +873,8 @@ mod batch_render_cache_tests {
 
     fn entry() -> BatchRenderCacheEntry {
         BatchRenderCacheEntry {
-            key: "source:options".to_owned(),
+            key: format!("{}:options", "a".repeat(64)),
+            source_digest: "a".repeat(64),
             options_key: "options".to_owned(),
             source_bytes: 123,
             source_modified_ns: "456".to_owned(),
@@ -2952,6 +2961,7 @@ fn cmd_render_batch(
             Some((destination.display().to_string(), bytes))
         })
         .collect::<Vec<_>>();
+    let sparse_cache_enabled = std::env::var_os("FM_DISABLE_SPARSE_BATCH_CACHE").is_none();
     if !inputs.is_empty() && early_cached_results.iter().all(Option::is_some) {
         let elapsed = started.elapsed();
         let mut total_bytes = 0usize;
@@ -2970,7 +2980,7 @@ fn cmd_render_batch(
             eprintln!(
                 "rendered {}/{} diagram(s) ({} persistent hits, 0 identical renders reused, 0 \
                  shared prefix parses reused / 0 bytes), {total_bytes} bytes, {requested} \
-                 worker(s), {:.3} ms",
+                 requested worker(s), 0 active worker(s), {:.3} ms",
                 inputs.len(),
                 inputs.len(),
                 inputs.len(),
@@ -2985,21 +2995,44 @@ fn cmd_render_batch(
     // output never depends on, and its `/proc/self/status` read serializes concurrent workers.
     let pressure = MermaidNativePressureSignals::sample().into_report();
 
-    // Phase 1: read every source and content-address it. Reading is what we already had to do;
-    // the hash is the only added work.
-    let load_one = |input: &String| -> Result<(String, String)> {
+    // Phase 1: carry certified digests across metadata hits; read and content-address only misses.
+    // The disabled arm below preserves the former read-all path for exact-binary mechanism tests.
+    let cached_source_digest = |index: usize| -> Option<String> {
+        early_cached_results[index].as_ref()?;
+        let destination = destination_for(&inputs[index]);
+        let entry_name = destination.file_name()?.to_string_lossy();
+        prior_cache
+            .entries
+            .get(entry_name.as_ref())
+            .map(|entry| entry.source_digest.clone())
+    };
+    let load_one = |(index, input): (usize, &String)| -> Result<(String, String)> {
+        if sparse_cache_enabled && let Some(digest) = cached_source_digest(index) {
+            return Ok((String::new(), digest));
+        }
         let source = load_input(input, options.max_input_bytes)?;
         let digest = sha256_hex(source.as_bytes());
         Ok((source, digest))
     };
-    let pool = if requested == 1 {
+    let early_miss_count = early_cached_results
+        .iter()
+        .filter(|entry| entry.is_none())
+        .count();
+    let pool_threads = if sparse_cache_enabled {
+        requested.min(early_miss_count.max(1))
+    } else {
+        requested
+    };
+    let pool = if pool_threads == 1 {
         None
     } else {
         Some(
             rayon::ThreadPoolBuilder::new()
-                .num_threads(requested)
+                .num_threads(pool_threads)
                 .build()
-                .map_err(|e| anyhow::anyhow!("cannot build {requested}-thread render pool: {e}"))?,
+                .map_err(|e| {
+                    anyhow::anyhow!("cannot build {pool_threads}-thread render pool: {e}")
+                })?,
         )
     };
     let run_all =
@@ -3011,8 +3044,8 @@ fn cmd_render_batch(
         };
 
     let loaded: Vec<Result<(String, String)>> = match &pool {
-        None => inputs.iter().map(load_one).collect(),
-        Some(p) => p.install(|| inputs.par_iter().map(load_one).collect()),
+        None => inputs.iter().enumerate().map(load_one).collect(),
+        Some(p) => p.install(|| inputs.par_iter().enumerate().map(load_one).collect()),
     };
 
     // A hit is admitted only when the source+configuration+executable key matches, the destination
@@ -3022,6 +3055,9 @@ fn cmd_render_batch(
         .iter()
         .enumerate()
         .map(|(index, loaded)| {
+            if sparse_cache_enabled && let Some(cached) = early_cached_results[index].as_ref() {
+                return Some(cached.clone());
+            }
             let (_, digest) = loaded.as_ref().ok()?;
             let key = cache_key_for(digest)?;
             let manifest_modified = prior_cache_modified?;
@@ -3299,6 +3335,7 @@ fn cmd_render_batch(
             let entry_name = entry_name.to_string_lossy().into_owned();
             let entry = BatchRenderCacheEntry {
                 key,
+                source_digest: digest.clone(),
                 options_key: options_key.clone(),
                 source_bytes: source_metadata.len(),
                 source_modified_ns,
@@ -3354,7 +3391,8 @@ fn cmd_render_batch(
         eprintln!(
             "rendered {rendered}/{} diagram(s) ({cache_hit_count} persistent hits, {reused} \
              identical renders reused, {} shared \
-             prefix parses reused / {} bytes), {total_bytes} bytes, {} worker(s), {:.3} ms",
+             prefix parses reused / {} bytes), {total_bytes} bytes, {} requested worker(s), \
+             {pool_threads} active worker(s), {:.3} ms",
             inputs.len(),
             parse_plan_stats.reused_prefix_parses,
             parse_plan_stats.reused_prefix_bytes,
