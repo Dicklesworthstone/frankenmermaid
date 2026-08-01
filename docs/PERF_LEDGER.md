@@ -2002,3 +2002,51 @@ therefore not a hidden reduction in repository validation.
 - **Retry / re-check predicate.** Re-open if `apply_egraph_ordering_pass` ever mutates `ranks`
   (not just `ordering_by_rank`) between rank visits, which is the single invariant that lets the
   buckets be built once per pass.
+
+## KEEP: retain immutable batch topology across persistent edit epochs (2026-08-01)
+
+**Bead:** `bd-wiyw`. **Lane:** cod (`BlackThrush`).
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `faf21e816c8356f8178d7f8a5ee4f41211345f680123553d043220ab50775643`
+**A/A null control (same invocation):** invocation
+`fm-plan-final-trj-1785608614716965338` used one shared output/cache directory and six complete
+permutations of control/candidate-A/candidate-B, repeated for 36 whole-job rounds per arm on
+128-CPU `threadripperje`. Candidate A/B medians were 24,398,292 / 24,243,767 ns (ratio
+`1.006374`), with a 20,000-resample median-ratio 95% CI of `[0.985451, 1.026949]`, including one.
+**Counted mechanism:** a 20-epoch control rebuilt the 384-input plan 20 times; the candidate built
+it once. That deletes 19 full rebuilds: 7,296 owned input clones and input-set B-tree insertions,
+7,296 basename/stem extractions and collision-map B-tree insertions, and 7,296 destination
+name/path/display constructions. Exact-final-ELF `strace -f -c` also measured `statx` 974 -> 936,
+`readlink` 20 -> 1, `mkdir` 20 -> 1, and total syscalls 2,427 -> 2,351.
+
+- **Profile-first attribution.** After the process and manifest lifecycles became resident, the
+  whole-job control still rebuilt input membership, basename uniqueness, output paths, worker
+  count, executable identity, and the options digest for all 384 diagrams on every edit epoch.
+  The live incumbent's single resident browser page does not pay an analogous per-edit batch-plan
+  reconstruction, so this was structural gap work rather than a shared rendering cost.
+- **Mechanism.** `BatchRenderPlan` validates and owns the immutable input/output topology once when
+  the newline change-set session starts. Every epoch indexes its precomputed destination paths,
+  cache entry names, display strings, worker count, executable identity, and options digest. The
+  ordinary one-shot command still constructs the same plan locally, preserving its validation and
+  error behavior. `FM_DISABLE_IN_MEMORY_BATCH_PLAN=1` is the exact-binary control arm.
+- **Whole-job result.** Each round ran one process through the same 20 alternating one-file edits
+  over the full 384-diagram repository. The environment-disabled control median was 27,564,810.5
+  ns; resident-plan candidate median was 24,398,292 ns: **1.129784x**, bootstrap 95% CI
+  `[1.107768, 1.155169]`, with paired-effect median `1.143695x`. The shared directory emitted the
+  exact 384-SVG aggregate SHA-256
+  `bd2b9194e377ff60a471ee546bd5cd0a03aeda57e544f1afb35780cd3afcc56c`.
+- **Live-incumbent bracket.** The same invocation bracketed full uncached 384-diagram Rust renders
+  at 58.352 / 46.727 ms around live pinned mermaid-js 11.15.0 at 52,813.7 ms. Runtime provenance
+  reported one browser main execution thread, Chrome 151.0.7922.71, input SHA-256
+  `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`, and bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`. The incumbent was a
+  render-once arm without an incumbent A/A null, so this row remains maintenance-only and asserts
+  no competitive ratio.
+- **Validation.** Clean-overlay remote check and Clippy passed with warnings denied; seven focused
+  cache/stream tests passed in each CLI binary; package formatting passed. The exact release binary
+  was built in the dedicated repository-local target after `/data` reported 650 GiB free. The
+  timing host was admitted at load 5.74/128 CPUs and ended at 6.48/128. Exact output, balanced A/A,
+  executing-ELF self-report, counted work/syscalls, and the live incumbent bracket all passed.
+- **Retry predicate.** Re-measure if session inputs, output naming, options identity, worker-count
+  selection, executable identity, revision count, corpus, or output equivalence changes. Promote no
+  competitive claim without a same-invocation incumbent null arm.

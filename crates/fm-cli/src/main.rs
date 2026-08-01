@@ -840,6 +840,7 @@ struct BatchCachePolicy<'a> {
     trust_change_set: bool,
     changed_inputs: &'a [String],
     session: Option<&'a mut BatchRenderCacheSession>,
+    plan: Option<&'a BatchRenderPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -868,6 +869,108 @@ impl Default for BatchRenderCacheManifest {
             version: BATCH_RENDER_CACHE_VERSION,
             entries: std::collections::BTreeMap::new(),
         }
+    }
+}
+
+#[derive(Debug)]
+struct BatchRenderPlan {
+    input_set: std::collections::BTreeSet<String>,
+    destinations: Vec<PathBuf>,
+    destination_names: Vec<String>,
+    destination_displays: Vec<String>,
+    requested_workers: usize,
+    cache_path: PathBuf,
+    option_cache_digest: Option<String>,
+    cache_active: bool,
+}
+
+impl BatchRenderPlan {
+    fn new(
+        inputs: &[String],
+        out_dir: &str,
+        jobs: Option<usize>,
+        use_cache: bool,
+        options: &RenderCommandOptions<'_>,
+    ) -> Result<Self> {
+        if options.format == OutputFormat::Png {
+            anyhow::bail!(
+                "render-batch does not support --format png; rasterization is not batch-safe here"
+            );
+        }
+        if let Some(bad) = inputs.iter().find(|input| input.as_str() == "-") {
+            anyhow::bail!(
+                "render-batch reads files, not stdin; got {bad:?}. Pass explicit paths instead."
+            );
+        }
+
+        let requested_workers = jobs.unwrap_or_else(|| {
+            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+        });
+        if requested_workers == 0 {
+            anyhow::bail!("--jobs must be at least 1");
+        }
+
+        std::fs::create_dir_all(out_dir)
+            .with_context(|| format!("cannot create output directory {out_dir}"))?;
+        report_executing_elf_sha256_once()?;
+
+        let extension = batch_output_extension(options.format);
+        let out_root = Path::new(out_dir);
+        let mut destinations = Vec::with_capacity(inputs.len());
+        let mut destination_names = Vec::with_capacity(inputs.len());
+        let mut destination_displays = Vec::with_capacity(inputs.len());
+        let mut stems: std::collections::BTreeMap<String, &str> = std::collections::BTreeMap::new();
+        for input in inputs {
+            let stem = Path::new(input)
+                .file_stem()
+                .map(|value| value.to_string_lossy().into_owned())
+                .ok_or_else(|| anyhow::anyhow!("input {input:?} has no file name"))?;
+            if let Some(previous) = stems.insert(stem.clone(), input.as_str()) {
+                anyhow::bail!(
+                    "inputs {previous:?} and {input:?} share basename {stem:?}; \
+                     batch output would be order-dependent"
+                );
+            }
+            let destination_name = format!("{stem}.{extension}");
+            let destination = out_root.join(&destination_name);
+            destination_names.push(destination_name);
+            destination_displays.push(destination.display().to_string());
+            destinations.push(destination);
+        }
+
+        let cache_path = out_root.join(BATCH_RENDER_CACHE_FILE);
+        let executable_identity = use_cache
+            .then(|| {
+                let executable = std::env::current_exe().ok()?;
+                let metadata = executable.metadata().ok()?;
+                let modified = metadata
+                    .modified()
+                    .ok()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?;
+                Some(format!(
+                    "{}:{}:{}",
+                    env!("CARGO_PKG_VERSION"),
+                    metadata.len(),
+                    modified.as_nanos()
+                ))
+            })
+            .flatten();
+        let cache_active = use_cache && executable_identity.is_some();
+        let option_cache_digest = executable_identity
+            .as_ref()
+            .map(|identity| sha256_hex(format!("{identity}\0{options:?}").as_bytes()));
+
+        Ok(Self {
+            input_set: inputs.iter().cloned().collect(),
+            destinations,
+            destination_names,
+            destination_displays,
+            requested_workers,
+            cache_path,
+            option_cache_digest,
+            cache_active,
+        })
     }
 }
 
@@ -1457,6 +1560,7 @@ fn main() -> Result<()> {
                         trust_change_set,
                         changed_inputs: &changed_input,
                         session: None,
+                        plan: None,
                     },
                     options,
                 )
@@ -3000,6 +3104,10 @@ fn cmd_render_batch_change_set_stream(
 
     let stdin = io::stdin();
     let retain_manifest = std::env::var_os("FM_DISABLE_IN_MEMORY_BATCH_MANIFEST").is_none();
+    let retain_plan = std::env::var_os("FM_DISABLE_IN_MEMORY_BATCH_PLAN").is_none();
+    let batch_plan = retain_plan
+        .then(|| BatchRenderPlan::new(inputs, out_dir, jobs, true, &options))
+        .transpose()?;
     let mut cache_session = BatchRenderCacheSession::default();
     let mut epoch = 0usize;
     for (line_index, line) in stdin.lock().lines().enumerate() {
@@ -3023,6 +3131,7 @@ fn cmd_render_batch_change_set_stream(
                 trust_change_set: !retain_manifest || epoch > 1,
                 changed_inputs: &changed_inputs,
                 session: retain_manifest.then_some(&mut cache_session),
+                plan: batch_plan.as_ref(),
             },
             options.clone(),
         )
@@ -3103,26 +3212,20 @@ fn cmd_render_batch(
         trust_change_set,
         changed_inputs,
         session,
+        plan,
     } = cache_policy;
 
-    if options.format == OutputFormat::Png {
-        anyhow::bail!(
-            "render-batch does not support --format png; rasterization is not batch-safe here"
-        );
-    }
-    if let Some(bad) = inputs.iter().find(|i| i.as_str() == "-") {
-        anyhow::bail!(
-            "render-batch reads files, not stdin; got {bad:?}. Pass explicit paths instead."
-        );
-    }
     if trust_change_set && !use_cache {
         anyhow::bail!("--trust-change-set requires the persistent batch cache");
     }
 
-    let input_set = inputs
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::BTreeSet<_>>();
+    let owned_plan = plan
+        .is_none()
+        .then(|| BatchRenderPlan::new(inputs, out_dir, jobs, use_cache, &options))
+        .transpose()?;
+    let plan = plan
+        .or(owned_plan.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("internal error: batch plan was not constructed"))?;
     let changed_input_set = changed_inputs
         .iter()
         .map(String::as_str)
@@ -3130,77 +3233,25 @@ fn cmd_render_batch(
     if changed_input_set.len() != changed_inputs.len() {
         anyhow::bail!("--changed-input contains a duplicate path");
     }
-    if let Some(unknown) = changed_input_set.difference(&input_set).next() {
+    if let Some(unknown) = changed_input_set
+        .iter()
+        .find(|input| !plan.input_set.contains(**input))
+    {
         anyhow::bail!("--changed-input {unknown:?} is not one of this batch's inputs");
     }
 
-    // Unique basenames, checked before any work: two inputs mapping to one output file would
-    // make the result depend on completion order.
-    let mut stems: std::collections::BTreeMap<String, &str> = std::collections::BTreeMap::new();
-    for input in inputs {
-        let stem = Path::new(input)
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .ok_or_else(|| anyhow::anyhow!("input {input:?} has no file name"))?;
-        if let Some(previous) = stems.insert(stem.clone(), input.as_str()) {
-            anyhow::bail!(
-                "inputs {previous:?} and {input:?} share basename {stem:?}; \
-                 batch output would be order-dependent"
-            );
-        }
-    }
-
-    std::fs::create_dir_all(out_dir)
-        .with_context(|| format!("cannot create output directory {out_dir}"))?;
-
-    report_executing_elf_sha256_once()?;
-
-    let requested = jobs.unwrap_or_else(|| {
-        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
-    });
-    if requested == 0 {
-        anyhow::bail!("--jobs must be at least 1");
-    }
-    let extension = batch_output_extension(options.format);
-    let out_root = Path::new(out_dir);
-
-    let destination_for = |input: &String| -> PathBuf {
-        let stem = Path::new(input).file_stem().map_or_else(
-            || "diagram".to_owned(),
-            |s| s.to_string_lossy().into_owned(),
-        );
-        out_root.join(format!("{stem}.{extension}"))
-    };
-
+    let requested = plan.requested_workers;
     let started = Instant::now();
-    let cache_path = out_root.join(BATCH_RENDER_CACHE_FILE);
-    let executable_identity = use_cache.then(|| {
-        let executable = std::env::current_exe().ok()?;
-        let metadata = executable.metadata().ok()?;
-        let modified = metadata
-            .modified()
-            .ok()?
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?;
-        Some(format!(
-            "{}:{}:{}",
-            env!("CARGO_PKG_VERSION"),
-            metadata.len(),
-            modified.as_nanos()
-        ))
-    });
-    let executable_identity = executable_identity.flatten();
-    let cache_active = use_cache && executable_identity.is_some();
-    let option_cache_digest = executable_identity
-        .as_ref()
-        .map(|identity| sha256_hex(format!("{identity}\0{options:?}").as_bytes()));
+    let cache_path = &plan.cache_path;
+    let cache_active = plan.cache_active;
+    let option_cache_digest = &plan.option_cache_digest;
     let mut session_lease = if cache_active {
-        session.map(|session| session.lease(&cache_path))
+        session.map(|session| session.lease(cache_path))
     } else {
         None
     };
     let (mut disk_cache, disk_cache_modified) = if cache_active && session_lease.is_none() {
-        load_batch_render_cache(&cache_path)
+        load_batch_render_cache(cache_path)
     } else {
         (BatchRenderCacheManifest::default(), None)
     };
@@ -3231,11 +3282,11 @@ fn cmd_render_batch(
     // pressure sampling, thread startup, layout and rendering.
     let early_cached_results = inputs
         .iter()
-        .map(|input| {
+        .enumerate()
+        .map(|(index, input)| {
             let options_key = option_cache_digest.as_ref()?;
-            let destination = destination_for(input);
-            let entry_name = destination.file_name()?.to_string_lossy();
-            let entry = prior_cache.entries.get(entry_name.as_ref())?;
+            let destination = &plan.destinations[index];
+            let entry = prior_cache.entries.get(&plan.destination_names[index])?;
 
             if trusted_change_set_active {
                 if changed_input_set.contains(input.as_str())
@@ -3244,7 +3295,7 @@ fn cmd_render_batch(
                     return None;
                 }
                 let bytes = usize::try_from(entry.bytes).ok()?;
-                return Some((destination.display().to_string(), bytes));
+                return Some((plan.destination_displays[index].clone(), bytes));
             }
 
             let manifest_modified = prior_cache_modified?;
@@ -3262,7 +3313,7 @@ fn cmd_render_batch(
                 return None;
             }
             let bytes = usize::try_from(entry.bytes).ok()?;
-            Some((destination.display().to_string(), bytes))
+            Some((plan.destination_displays[index].clone(), bytes))
         })
         .collect::<Vec<_>>();
     let sparse_cache_enabled = std::env::var_os("FM_DISABLE_SPARSE_BATCH_CACHE").is_none();
@@ -3303,11 +3354,9 @@ fn cmd_render_batch(
     // The disabled arm below preserves the former read-all path for exact-binary mechanism tests.
     let cached_source_digest = |index: usize| -> Option<String> {
         early_cached_results[index].as_ref()?;
-        let destination = destination_for(&inputs[index]);
-        let entry_name = destination.file_name()?.to_string_lossy();
         prior_cache
             .entries
-            .get(entry_name.as_ref())
+            .get(&plan.destination_names[index])
             .map(|entry| entry.source_digest.clone())
     };
     let load_one = |(index, input): (usize, &String)| -> Result<(String, String)> {
@@ -3365,9 +3414,8 @@ fn cmd_render_batch(
             let (_, digest) = loaded.as_ref().ok()?;
             let key = cache_key_for(digest)?;
             let manifest_modified = prior_cache_modified?;
-            let destination = destination_for(&inputs[index]);
-            let entry_name = destination.file_name()?.to_string_lossy();
-            let entry = prior_cache.entries.get(entry_name.as_ref())?;
+            let destination = &plan.destinations[index];
+            let entry = prior_cache.entries.get(&plan.destination_names[index])?;
             if entry.key != key {
                 return None;
             }
@@ -3376,7 +3424,7 @@ fn cmd_render_batch(
                 return None;
             }
             let bytes = usize::try_from(entry.bytes).ok()?;
-            Some((destination.display().to_string(), bytes))
+            Some((plan.destination_displays[index].clone(), bytes))
         })
         .collect::<Vec<_>>();
     let cache_hit_count = cached_results.iter().flatten().count();
@@ -3490,8 +3538,8 @@ fn cmd_render_batch(
                     &pressure,
                     renderer,
                 )?;
-                let destination = destination_for(&inputs[index]);
-                std::fs::write(&destination, &outcome.rendered)
+                let destination = &plan.destinations[index];
+                std::fs::write(destination, &outcome.rendered)
                     .with_context(|| format!("cannot write {}", destination.display()))?;
                 let length = outcome.rendered.len();
                 if digest_counts.get(digest.as_str()).copied().unwrap_or(0) > 1 {
@@ -3500,7 +3548,7 @@ fn cmd_render_batch(
                         .map_err(|_| anyhow::anyhow!("render cache poisoned"))?
                         .insert(digest.clone(), std::sync::Arc::new(outcome.rendered));
                 }
-                Ok((destination.display().to_string(), length))
+                Ok((plan.destination_displays[index].clone(), length))
             },
         )
     };
@@ -3603,10 +3651,10 @@ fn cmd_render_batch(
                     "duplicate of an input that failed to render"
                 ));
             };
-            let destination = destination_for(&inputs[index]);
-            std::fs::write(&destination, bytes.as_slice())
+            let destination = &plan.destinations[index];
+            std::fs::write(destination, bytes.as_slice())
                 .with_context(|| format!("cannot write {}", destination.display()))?;
-            Ok((destination.display().to_string(), bytes.len()))
+            Ok((plan.destination_displays[index].clone(), bytes.len()))
         };
         run_all(&write_duplicate)
     };
@@ -3646,11 +3694,7 @@ fn cmd_render_batch(
                 let Some(source_modified_ns) = modified_key(&source_metadata) else {
                     continue;
                 };
-                let destination = destination_for(&inputs[index]);
-                let Some(entry_name) = destination.file_name() else {
-                    continue;
-                };
-                let entry_name = entry_name.to_string_lossy().into_owned();
+                let entry_name = &plan.destination_names[index];
                 let entry = BatchRenderCacheEntry {
                     key,
                     source_digest: digest.clone(),
@@ -3659,8 +3703,8 @@ fn cmd_render_batch(
                     source_modified_ns,
                     bytes: u64::try_from(*bytes).unwrap_or(u64::MAX),
                 };
-                commit_manifest |= next_cache.entries.get(&entry_name) != Some(&entry);
-                next_cache.entries.insert(entry_name, entry);
+                commit_manifest |= next_cache.entries.get(entry_name) != Some(&entry);
+                next_cache.entries.insert(entry_name.clone(), entry);
             }
         }
         if commit_manifest {
@@ -3668,7 +3712,7 @@ fn cmd_render_batch(
                 lease.dirty = true;
             } else {
                 let encoded = serde_json::to_vec(&disk_cache)?;
-                std::fs::write(&cache_path, encoded)
+                std::fs::write(cache_path, encoded)
                     .with_context(|| format!("cannot write {}", cache_path.display()))?;
             }
         }
