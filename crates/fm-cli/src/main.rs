@@ -834,11 +834,12 @@ struct RenderOutcome {
 const BATCH_RENDER_CACHE_VERSION: u32 = 1;
 const BATCH_RENDER_CACHE_FILE: &str = ".frankenmermaid-batch-cache-v1.json";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 struct BatchCachePolicy<'a> {
     use_cache: bool,
     trust_change_set: bool,
     changed_inputs: &'a [String],
+    session: Option<&'a mut BatchRenderCacheSession>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -870,6 +871,77 @@ impl Default for BatchRenderCacheManifest {
     }
 }
 
+#[derive(Debug, Default)]
+struct BatchRenderCacheSession {
+    manifest: Option<BatchRenderCacheManifest>,
+    manifest_modified: Option<std::time::SystemTime>,
+    dirty: bool,
+}
+
+impl BatchRenderCacheSession {
+    fn lease<'a>(&'a mut self, cache_path: &Path) -> BatchRenderCacheLease<'a> {
+        if self.manifest.is_none() {
+            let (manifest, modified) = load_batch_render_cache(cache_path);
+            self.manifest = Some(manifest);
+            self.manifest_modified = modified;
+        }
+        BatchRenderCacheLease {
+            manifest: self.manifest.take().unwrap_or_default(),
+            manifest_modified: self.manifest_modified,
+            dirty: false,
+            session: self,
+        }
+    }
+
+    fn flush(&mut self, out_dir: &Path) -> Result<()> {
+        if !self.dirty {
+            return Ok(());
+        }
+        let Some(manifest) = self.manifest.as_ref() else {
+            anyhow::bail!("batch cache session still has an active manifest lease");
+        };
+        let cache_path = out_dir.join(BATCH_RENDER_CACHE_FILE);
+        let encoded = serde_json::to_vec(manifest)?;
+        std::fs::write(&cache_path, encoded)
+            .with_context(|| format!("cannot write {}", cache_path.display()))?;
+        self.manifest_modified = cache_path
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        self.dirty = false;
+        Ok(())
+    }
+}
+
+struct BatchRenderCacheLease<'a> {
+    session: &'a mut BatchRenderCacheSession,
+    manifest: BatchRenderCacheManifest,
+    manifest_modified: Option<std::time::SystemTime>,
+    dirty: bool,
+}
+
+impl Drop for BatchRenderCacheLease<'_> {
+    fn drop(&mut self) {
+        self.session.manifest = Some(std::mem::take(&mut self.manifest));
+        self.session.dirty |= self.dirty;
+    }
+}
+
+fn load_batch_render_cache(
+    cache_path: &Path,
+) -> (BatchRenderCacheManifest, Option<std::time::SystemTime>) {
+    let manifest = std::fs::read(cache_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<BatchRenderCacheManifest>(&bytes).ok())
+        .filter(|manifest| manifest.version == BATCH_RENDER_CACHE_VERSION)
+        .unwrap_or_default();
+    let modified = cache_path
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok();
+    (manifest, modified)
+}
+
 fn batch_cache_entry_matches_early(
     entry: &BatchRenderCacheEntry,
     options_key: &str,
@@ -899,9 +971,11 @@ fn batch_cache_entry_matches_key(entry: &BatchRenderCacheEntry, options_key: &st
 #[cfg(test)]
 mod batch_render_cache_tests {
     use super::{
-        BatchRenderCacheEntry, batch_cache_entry_matches_early, batch_cache_entry_matches_key,
+        BatchRenderCacheEntry, BatchRenderCacheManifest, BatchRenderCacheSession,
+        batch_cache_entry_matches_early, batch_cache_entry_matches_key,
         parse_batch_change_set_line,
     };
+    use std::path::Path;
     use std::time::{Duration, UNIX_EPOCH};
 
     fn entry() -> BatchRenderCacheEntry {
@@ -996,6 +1070,29 @@ mod batch_render_cache_tests {
         let error = parse_batch_change_set_line(r#"{"changed":["a.mmd"]}"#, 7)
             .expect_err("objects are not complete change-set arrays");
         assert!(error.to_string().contains("input line 7"));
+    }
+
+    #[test]
+    fn process_cache_lease_restores_updated_manifest() {
+        let mut session = BatchRenderCacheSession {
+            manifest: Some(BatchRenderCacheManifest::default()),
+            ..BatchRenderCacheSession::default()
+        };
+        {
+            let mut lease = session.lease(Path::new("unused-while-manifest-is-loaded"));
+            lease
+                .manifest
+                .entries
+                .insert("diagram.svg".to_owned(), entry());
+            lease.dirty = true;
+        }
+        assert!(session.dirty);
+        assert!(
+            session
+                .manifest
+                .as_ref()
+                .is_some_and(|manifest| manifest.entries.contains_key("diagram.svg"))
+        );
     }
 }
 
@@ -1359,6 +1456,7 @@ fn main() -> Result<()> {
                         use_cache: !no_cache,
                         trust_change_set,
                         changed_inputs: &changed_input,
+                        session: None,
                     },
                     options,
                 )
@@ -2901,6 +2999,8 @@ fn cmd_render_batch_change_set_stream(
     use std::io::BufRead;
 
     let stdin = io::stdin();
+    let retain_manifest = std::env::var_os("FM_DISABLE_IN_MEMORY_BATCH_MANIFEST").is_none();
+    let mut cache_session = BatchRenderCacheSession::default();
     let mut epoch = 0usize;
     for (line_index, line) in stdin.lock().lines().enumerate() {
         let line_number = line_index + 1;
@@ -2918,8 +3018,11 @@ fn cmd_render_batch_change_set_stream(
             json,
             BatchCachePolicy {
                 use_cache: true,
-                trust_change_set: true,
+                // The first epoch validates the on-disk base in full. Later epochs can trust the
+                // process-owned manifest even if a preceding process died before flushing it.
+                trust_change_set: !retain_manifest || epoch > 1,
                 changed_inputs: &changed_inputs,
+                session: retain_manifest.then_some(&mut cache_session),
             },
             options.clone(),
         )
@@ -2936,6 +3039,9 @@ fn cmd_render_batch_change_set_stream(
         )?;
         writeln!(stdout)?;
         stdout.flush()?;
+    }
+    if retain_manifest {
+        cache_session.flush(Path::new(out_dir))?;
     }
     Ok(())
 }
@@ -2996,6 +3102,7 @@ fn cmd_render_batch(
         use_cache,
         trust_change_set,
         changed_inputs,
+        session,
     } = cache_policy;
 
     if options.format == OutputFormat::Png {
@@ -3087,19 +3194,20 @@ fn cmd_render_batch(
     let option_cache_digest = executable_identity
         .as_ref()
         .map(|identity| sha256_hex(format!("{identity}\0{options:?}").as_bytes()));
-    let (prior_cache, prior_cache_modified) = if cache_active {
-        let manifest = std::fs::read(&cache_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<BatchRenderCacheManifest>(&bytes).ok())
-            .filter(|manifest| manifest.version == BATCH_RENDER_CACHE_VERSION)
-            .unwrap_or_default();
-        let modified = cache_path
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .ok();
-        (manifest, modified)
+    let mut session_lease = if cache_active {
+        session.map(|session| session.lease(&cache_path))
+    } else {
+        None
+    };
+    let (mut disk_cache, disk_cache_modified) = if cache_active && session_lease.is_none() {
+        load_batch_render_cache(&cache_path)
     } else {
         (BatchRenderCacheManifest::default(), None)
+    };
+    let (prior_cache, prior_cache_modified) = if let Some(lease) = session_lease.as_ref() {
+        (&lease.manifest, lease.manifest_modified)
+    } else {
+        (&disk_cache, disk_cache_modified)
     };
     let change_set_optimization_enabled = std::env::var_os("FM_DISABLE_BATCH_CHANGE_SET").is_none();
     let trusted_change_set_active = trust_change_set && change_set_optimization_enabled;
@@ -3503,56 +3611,66 @@ fn cmd_render_batch(
         run_all(&write_duplicate)
     };
     if cache_active {
-        let mut next_cache = prior_cache.clone();
         let mut commit_manifest = false;
-        for (index, result) in results.iter().enumerate() {
-            let Ok((_, bytes)) = result else {
-                continue;
+        {
+            let next_cache = if let Some(lease) = session_lease.as_mut() {
+                &mut lease.manifest
+            } else {
+                &mut disk_cache
             };
-            if change_set_optimization_enabled
-                && sparse_cache_enabled
-                && early_cached_results[index].is_some()
-            {
-                // This entry was admitted from the prior manifest and its source was deliberately
-                // not reopened. Re-statting it here cannot change the entry; only misses need a
-                // refreshed source timestamp after materialization.
-                continue;
+            for (index, result) in results.iter().enumerate() {
+                let Ok((_, bytes)) = result else {
+                    continue;
+                };
+                if change_set_optimization_enabled
+                    && sparse_cache_enabled
+                    && early_cached_results[index].is_some()
+                {
+                    // This entry was admitted from the prior manifest and its source was
+                    // deliberately not reopened. Re-statting it here cannot change the entry;
+                    // only misses need a refreshed source timestamp after materialization.
+                    continue;
+                }
+                let Ok((_, digest)) = &loaded[index] else {
+                    continue;
+                };
+                let Some(key) = cache_key_for(digest) else {
+                    continue;
+                };
+                let Some(options_key) = option_cache_digest.as_ref() else {
+                    continue;
+                };
+                let Ok(source_metadata) = Path::new(&inputs[index]).metadata() else {
+                    continue;
+                };
+                let Some(source_modified_ns) = modified_key(&source_metadata) else {
+                    continue;
+                };
+                let destination = destination_for(&inputs[index]);
+                let Some(entry_name) = destination.file_name() else {
+                    continue;
+                };
+                let entry_name = entry_name.to_string_lossy().into_owned();
+                let entry = BatchRenderCacheEntry {
+                    key,
+                    source_digest: digest.clone(),
+                    options_key: options_key.clone(),
+                    source_bytes: source_metadata.len(),
+                    source_modified_ns,
+                    bytes: u64::try_from(*bytes).unwrap_or(u64::MAX),
+                };
+                commit_manifest |= next_cache.entries.get(&entry_name) != Some(&entry);
+                next_cache.entries.insert(entry_name, entry);
             }
-            let Ok((_, digest)) = &loaded[index] else {
-                continue;
-            };
-            let Some(key) = cache_key_for(digest) else {
-                continue;
-            };
-            let Some(options_key) = option_cache_digest.as_ref() else {
-                continue;
-            };
-            let Ok(source_metadata) = Path::new(&inputs[index]).metadata() else {
-                continue;
-            };
-            let Some(source_modified_ns) = modified_key(&source_metadata) else {
-                continue;
-            };
-            let destination = destination_for(&inputs[index]);
-            let Some(entry_name) = destination.file_name() else {
-                continue;
-            };
-            let entry_name = entry_name.to_string_lossy().into_owned();
-            let entry = BatchRenderCacheEntry {
-                key,
-                source_digest: digest.clone(),
-                options_key: options_key.clone(),
-                source_bytes: source_metadata.len(),
-                source_modified_ns,
-                bytes: u64::try_from(*bytes).unwrap_or(u64::MAX),
-            };
-            commit_manifest |= next_cache.entries.get(&entry_name) != Some(&entry);
-            next_cache.entries.insert(entry_name, entry);
         }
         if commit_manifest {
-            let encoded = serde_json::to_vec(&next_cache)?;
-            std::fs::write(&cache_path, encoded)
-                .with_context(|| format!("cannot write {}", cache_path.display()))?;
+            if let Some(lease) = session_lease.as_mut() {
+                lease.dirty = true;
+            } else {
+                let encoded = serde_json::to_vec(&disk_cache)?;
+                std::fs::write(&cache_path, encoded)
+                    .with_context(|| format!("cannot write {}", cache_path.display()))?;
+            }
         }
     }
     let elapsed = started.elapsed();

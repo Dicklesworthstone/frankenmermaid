@@ -1896,3 +1896,109 @@ same long-lived process and matched the external digest above.
 - **Retry predicate.** Re-measure if the newline protocol, epoch acknowledgement boundary,
   change-set completeness contract, executable/options identity, revision count, corpus, or output
   equivalence changes. Promote no competitive claim without a same-invocation incumbent null arm.
+
+## KEEP: retain the batch manifest across persistent edit epochs (2026-08-01)
+
+**Bead:** `bd-3gfw`. **Lane:** cod (`BlackThrush`).
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `22f2438c6b960cc504b4876cf8c75266d436630c44dbfc48bc8ffd3cc4cc92b7`
+**A/A null control (same invocation):** invocation
+`fm-memory-manifest-trj-1785606819181021462` ran 31 order-rotated whole-job rounds per arm on
+128-CPU `threadripperje`; candidate A/B medians were 30,111,169 / 30,162,936 ns (ratio
+`0.998284`), with a 20,000-resample median-ratio 95% CI of `[0.986108, 1.018195]`, including one.
+**Counted mechanism:** same-binary 20-epoch `strace -f -c` arms reduced `openat` 206 -> 168,
+`read` 432 -> 394, and `write` 520 -> 501: exactly 19 of the 20 repeated manifest reads and writes
+disappeared. The conservative first-epoch repair scan increased `statx` 243 -> 974; the speedup is
+therefore not a hidden reduction in repository validation.
+
+- **Profile-first attribution.** Once process startup was amortized, the exact persistent-session
+  profile still opened, parsed, cloned, serialized, and rewrote the complete 384-entry JSON
+  manifest on every one-file edit. The live incumbent's in-memory page has no analogous disk-backed
+  cache lifecycle.
+- **Mechanism.** The change-set process leases one manifest into process-owned state, mutates only
+  entries whose diagrams were reopened, and writes the full manifest once at graceful EOF. Its
+  first epoch deliberately runs the ordinary metadata validation path, so a manifest left stale by
+  a killed predecessor is repaired before trusted epochs begin. Output files are written before an
+  epoch acknowledgement; the manifest remains an optimization rather than output authority.
+- **Whole-job result.** Each arm used this exact ELF for the same 20 alternating revisions over the
+  full 384-diagram repository. The environment-disabled control measured 53,519,767 ns; pooled
+  in-memory candidates measured 30,159,079 ns: **1.774582x**, bootstrap 95% CI
+  `[1.740151, 1.806523]`, with paired-effect median `1.752662x`. All three arms emitted the identical
+  384-SVG aggregate SHA-256
+  `a41d9aaafab660560f1d486dc0129357f72ee02a7f78038ab8ea5866829d3f20`.
+- **Live-incumbent corroboration.** The same invocation bracketed a full uncached 384-diagram Rust
+  render at 74.475 / 93.892 ms around live pinned mermaid-js 11.15.0 at 53,290.9 ms. Runtime
+  provenance reported one browser main execution thread, Chrome 151.0.7922.71, input SHA-256
+  `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`, and bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`. The incumbent arm was
+  render-once with no incumbent null, so this row remains maintenance-only and asserts no
+  competitive ratio.
+- **Validation.** Strict clean-overlay remote check and Clippy passed with warnings denied; seven
+  focused cache/stream tests passed in each CLI binary. The timing host was admitted at load
+  8.26/128 CPUs. Mid-stream smoke proved the disk manifest stayed unchanged until EOF, then flushed;
+  exact output, executing-ELF self-report, quiet-host A/A, counted syscalls, and the same-invocation
+  live incumbent bracket passed.
+- **Retry predicate.** Re-measure if manifest versioning, first-epoch repair, graceful-EOF flush,
+  acknowledgement durability, change-set completeness, revision count, corpus, or output
+  equivalence changes. Promote no competitive claim without a same-invocation incumbent null arm.
+
+## KEEP: bucket adjacent-rank layer edges in one pass — `docs_site_50` −4.79%, `docs_site_200` −3.90% instructions (2026-08-01)
+
+**Commit:** `b84ddd72`.
+**Campaign result class:** maintenance-self-speedup
+
+- **Profile-first attribution.** Found by re-profiling a **different workload class** after the ER
+  catalog went flat: `docs_site_200` (200 small docs in one launch), non-LTO symbolized build,
+  `perf record -F 999 --call-graph=dwarf`, pinned core, 40 whole-job repetitions.
+  `layer_edges_between_ranks` measured **6.86% inclusive / 1.94% self** — the largest identifiable
+  frame on that job.
+- **Why a second class was needed.** The frame is **absent** from `er_schema_1000x6`: those ranks
+  exceed `should_use_egraph`'s 100-node cap, so `egraph_optimized_order_for_rank` early-returns
+  before it ever scans edges. It only bills on narrow-rank graphs. This is
+  `docs/LEDGER_RESURRECTION.md` §5 in its workload-class scope.
+- **The ONE lever.** Each request for a rank pair's edges walked **all** of `ir.edges`, doing two
+  `endpoint_node_index` resolutions and two `ranks` B-tree probes per edge plus a sort, then
+  discarded everything outside the single pair it wanted. `apply_egraph_ordering_pass` runs two
+  passes over every rank and asks twice per rank, so that is `4 * ranks` full scans —
+  **O(ranks · edges)** to produce O(edges) of data. Ranks are fixed for the whole pass (only the
+  within-rank ordering changes), so `layer_edges_by_rank_pair` buckets every adjacent pair in one
+  pass and each rank indexes it. This mirrors `build_pair_node_edges`, which the refinement path
+  already used — the bucketing existed, the e-graph pass just did not use it.
+- **Byte-identity, proven BEFORE timing.** 19 corpus jobs, comparing the SHA-256 of each job's
+  concatenated per-document SVG stream: **0 mismatches**, with a clean base-vs-base determinism
+  control on every item. The filter is unchanged, each bucket is pushed in `ir.edges` order and
+  sorted exactly as before, and a pair with no edges is simply absent from the map — which is what
+  the old `is_empty` check produced.
+- **A/B + A/A null, arms alternated per round, instructions (`perf stat`), pinned core, `--jobs 1`.**
+
+  **Executing ELF SHA-256 (self-reported by process):**
+  `6b2c6eda8a3648dfc5e7c30b075c097bba298bce27a0ec0bd1d65aa657b67f39`
+  (candidate; baseline arm at `1a1074ae`
+  `97a28d2a30bc40d521c8d5cf05487a16c3caad7fa322044807542f0c23d9c90f`).
+
+  **A/A null control (same invocation):** baseline binary against a byte-identical copy of itself,
+  alternated with the A/B arms in the same pinned sweep — `docs_site_200` median `1.000134`, range
+  `0.999490`–`1.004454`.
+
+  **Counted mechanism:** `4 * ranks` full scans of `ir.edges` (each with two endpoint resolutions
+  and two B-tree rank probes per edge, plus a per-request sort) replaced by one bucketing pass and
+  one sort per adjacent rank pair.
+
+  | workload | A/A null (median) | A/B (median) | verdict |
+  |---|---:|---:|---|
+  | `docs_site_50` | 0.9998 | **0.9521** | **−4.79%** |
+  | `docs_site_200` | 1.000134 (range 0.999490–1.004454) | **0.961038** | **−3.90%**, ~18x the null half-width; every one of 7 rounds outside it |
+  | `schema_catalog_25` | 1.000064 (range 0.999460–1.000742) | **0.991137** | −0.89%, ~14x the null half-width |
+  | 9 negative controls | ~0.9997–1.0014 | 0.9996–1.0013 | inside their own A/A null; no regression anywhere |
+
+- **Correctness.** `cargo clippy -p fm-layout --all-targets -- -D warnings` clean; 444 `fm-layout`
+  tests green. **`golden_svg_test::svg_golden_snapshots_are_stable` is RED on main and was already
+  red before this work** — `dense_flowchart_stress` produces `a8dd16e93853d93d` against a checked-in
+  `3c237445531e5ff4`. Bisected on clean detached checkouts of `ebc323c3` (session start), `2a8e6c01`,
+  `c18bc2e0` and `4a6473c3`: identical failure and identical produced hash at every one, so the
+  fixture is stale relative to main and this change does not move that output. Flagged, not adopted.
+- **Verdict: KEEP.** Byte-identical, strictly less work, and it removes a code path rather than
+  adding one — no parallel implementation to keep in lockstep.
+- **Retry / re-check predicate.** Re-open if `apply_egraph_ordering_pass` ever mutates `ranks`
+  (not just `ordering_by_rank`) between rank visits, which is the single invariant that lets the
+  buckets be built once per pass.
