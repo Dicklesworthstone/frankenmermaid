@@ -1852,3 +1852,47 @@ instructions, 39.26% fewer cycles, and 39.02% less CPU time** (`1.4447x`, `1.646
 - **Retry predicate.** Re-measure if the caller change-set completeness contract, manifest key
   integrity, executable/options identity, destination ownership, 384-input corpus, or output
   equivalence changes. Promote no competitive claim without a same-invocation incumbent null arm.
+
+## KEEP: one persistent renderer amortizes repeated edit-session startup (2026-08-01)
+
+**Bead:** `bd-0ga1`. **Lane:** cod (`BlackThrush`).
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `8596343e563ea2881cbd6155ec84a93b0a08196ab3349ad0e5d57b76bc7df046`
+**A/A null control (same invocation):** invocation
+`fm-persistent-stream-trj-1785606050620953831` ran 31 order-rotated whole-job rounds per arm on
+128-CPU `threadripperje`; the two independent persistent arms measured 54,893,512 / 55,163,438 ns
+(ratio `0.995107`), with a 20,000-resample median-ratio 95% CI of
+`[0.970523, 1.034325]`, including one.
+**Counted mechanism:** one 20-edit session executes the renderer once instead of 20 times. The
+process acknowledges every completed epoch, and its ELF digest was emitted once from inside that
+same long-lived process and matched the external digest above.
+
+- **Profile-first attribution.** After caller-certified change sets removed the repository-wide
+  metadata sweep, the remaining exact-process profile was dominated by `execve`, dynamic loading,
+  allocator/runtime initialization, and command/config construction. The live incumbent keeps a
+  JavaScript page alive and therefore does not repay those costs for every edit.
+- **Mechanism.** `render-batch --trust-change-set --change-set-stdin` accepts one complete change
+  set per newline-delimited JSON array, executes the existing fail-closed trusted-cache path, and
+  flushes a JSON epoch acknowledgement without restarting. Blank lines are ignored; malformed
+  JSON, duplicate paths, and paths outside the batch fail closed. Ordinary one-shot behavior is
+  unchanged.
+- **Whole-job result.** Each measured job alternated 20 real source revisions over the full
+  384-diagram repository. Repeated exact-binary processes measured a 140,568,508 ns median;
+  pooled persistent-process arms measured 54,918,524 ns: **2.559583x**, bootstrap 95% CI
+  `[2.511483, 2.590984]`, with paired-effect median `2.547699x`. All three arms ended on the same
+  source revision and emitted the identical 384-SVG aggregate SHA-256
+  `a41d9aaafab660560f1d486dc0129357f72ee02a7f78038ab8ea5866829d3f20`.
+- **Live-incumbent corroboration.** The same invocation bracketed a full uncached 384-diagram Rust
+  render at 86.718 / 97.260 ms around live pinned mermaid-js 11.15.0 at 52,927.3 ms. Runtime
+  provenance reported one browser main execution thread, Chrome 151.0.7922.71, input SHA-256
+  `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`, and bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`. The incumbent arm was
+  render-once with no incumbent null, so this row remains maintenance-only and asserts no
+  competitive ratio.
+- **Validation.** Strict clean-overlay remote check and Clippy passed with warnings denied; six
+  focused cache/stream tests passed in each CLI binary. The timing host was admitted at load
+  6.89/128 CPUs before the invocation. Stream protocol smoke, exact-output identity, executing-ELF
+  self-report, quiet-host A/A, and the same-invocation live incumbent bracket passed.
+- **Retry predicate.** Re-measure if the newline protocol, epoch acknowledgement boundary,
+  change-set completeness contract, executable/options identity, revision count, corpus, or output
+  equivalence changes. Promote no competitive claim without a same-invocation incumbent null arm.

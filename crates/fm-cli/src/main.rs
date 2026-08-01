@@ -268,6 +268,15 @@ enum Command {
         #[arg(long, value_name = "PATH", requires = "trust_change_set")]
         changed_input: Vec<String>,
 
+        /// Read complete change sets as newline-delimited JSON arrays from stdin and render one
+        /// epoch per line without restarting this process. Requires `--trust-change-set`.
+        #[arg(
+            long,
+            conflicts_with_all = ["no_cache", "changed_input"],
+            requires = "trust_change_set"
+        )]
+        change_set_stdin: bool,
+
         /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
         #[arg(long, value_enum, default_value = "auto")]
         fnx_mode: FnxModeArg,
@@ -891,6 +900,7 @@ fn batch_cache_entry_matches_key(entry: &BatchRenderCacheEntry, options_key: &st
 mod batch_render_cache_tests {
     use super::{
         BatchRenderCacheEntry, batch_cache_entry_matches_early, batch_cache_entry_matches_key,
+        parse_batch_change_set_line,
     };
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -970,6 +980,22 @@ mod batch_render_cache_tests {
             UNIX_EPOCH + Duration::from_secs(2),
             UNIX_EPOCH + Duration::from_secs(1),
         ));
+    }
+
+    #[test]
+    fn change_set_stream_accepts_arrays_and_ignores_blank_lines() {
+        assert_eq!(parse_batch_change_set_line("   ", 1).unwrap(), None);
+        assert_eq!(
+            parse_batch_change_set_line(r#"["a.mmd","b.mmd"]"#, 2).unwrap(),
+            Some(vec!["a.mmd".to_owned(), "b.mmd".to_owned()])
+        );
+    }
+
+    #[test]
+    fn change_set_stream_rejects_non_array_json_with_line_context() {
+        let error = parse_batch_change_set_line(r#"{"changed":["a.mmd"]}"#, 7)
+            .expect_err("objects are not complete change-set arrays");
+        assert!(error.to_string().contains("input line 7"));
     }
 }
 
@@ -1282,6 +1308,7 @@ fn main() -> Result<()> {
             no_cache,
             trust_change_set,
             changed_input,
+            change_set_stdin,
             fnx_mode,
             fnx_projection,
             fnx_fallback,
@@ -1294,41 +1321,48 @@ fn main() -> Result<()> {
             let term_base_config = build_base_term_render_config(&loaded_config.file)?;
             let show_back_edges = resolve_show_back_edges(&loaded_config.file);
             let show_minimap = term_base_config.show_minimap;
-            cmd_render_batch(
-                &inputs,
-                &out_dir,
-                jobs,
-                keep_going,
-                json,
-                BatchCachePolicy {
-                    use_cache: !no_cache,
-                    trust_change_set,
-                    changed_inputs: &changed_input,
-                },
-                RenderCommandOptions {
-                    parse_mode: resolve_parse_mode(parse_mode, &loaded_config.file),
-                    parser_config,
-                    layout_algorithm,
-                    layout_config,
-                    format,
-                    theme: &theme,
-                    font_size,
-                    // Batch writes one file per input; the shared `output` slot is unused.
-                    output: None,
-                    max_input_bytes,
-                    svg_base_config,
-                    term_base_config,
-                    show_back_edges,
-                    show_minimap,
-                    embed_source_spans: format == OutputFormat::Svg,
-                    source_map_out: None,
-                    dimensions: (None, None),
-                    json_output: false,
-                    fnx_mode,
-                    fnx_projection,
-                    fnx_fallback,
-                },
-            )
+            let options = RenderCommandOptions {
+                parse_mode: resolve_parse_mode(parse_mode, &loaded_config.file),
+                parser_config,
+                layout_algorithm,
+                layout_config,
+                format,
+                theme: &theme,
+                font_size,
+                // Batch writes one file per input; the shared `output` slot is unused.
+                output: None,
+                max_input_bytes,
+                svg_base_config,
+                term_base_config,
+                show_back_edges,
+                show_minimap,
+                embed_source_spans: format == OutputFormat::Svg,
+                source_map_out: None,
+                dimensions: (None, None),
+                json_output: false,
+                fnx_mode,
+                fnx_projection,
+                fnx_fallback,
+            };
+            if change_set_stdin {
+                cmd_render_batch_change_set_stream(
+                    &inputs, &out_dir, jobs, keep_going, json, options,
+                )
+            } else {
+                cmd_render_batch(
+                    &inputs,
+                    &out_dir,
+                    jobs,
+                    keep_going,
+                    json,
+                    BatchCachePolicy {
+                        use_cache: !no_cache,
+                        trust_change_set,
+                        changed_inputs: &changed_input,
+                    },
+                    options,
+                )
+            }
         }
 
         Command::Parse {
@@ -2847,6 +2881,97 @@ fn batch_output_extension(format: OutputFormat) -> &'static str {
     }
 }
 
+fn parse_batch_change_set_line(line: &str, line_number: usize) -> Result<Option<Vec<String>>> {
+    if line.trim().is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_str(line)
+        .with_context(|| format!("invalid change-set JSON array on input line {line_number}"))
+        .map(Some)
+}
+
+fn cmd_render_batch_change_set_stream(
+    inputs: &[String],
+    out_dir: &str,
+    jobs: Option<usize>,
+    keep_going: bool,
+    json: bool,
+    options: RenderCommandOptions<'_>,
+) -> Result<()> {
+    use std::io::BufRead;
+
+    let stdin = io::stdin();
+    let mut epoch = 0usize;
+    for (line_index, line) in stdin.lock().lines().enumerate() {
+        let line_number = line_index + 1;
+        let line =
+            line.with_context(|| format!("cannot read change set from input line {line_number}"))?;
+        let Some(changed_inputs) = parse_batch_change_set_line(&line, line_number)? else {
+            continue;
+        };
+        epoch += 1;
+        cmd_render_batch(
+            inputs,
+            out_dir,
+            jobs,
+            keep_going,
+            json,
+            BatchCachePolicy {
+                use_cache: true,
+                trust_change_set: true,
+                changed_inputs: &changed_inputs,
+            },
+            options.clone(),
+        )
+        .with_context(|| format!("change-set epoch {epoch} failed"))?;
+
+        let mut stdout = io::stdout().lock();
+        serde_json::to_writer(
+            &mut stdout,
+            &serde_json::json!({
+                "epoch": epoch,
+                "input_line": line_number,
+                "status": "ok"
+            }),
+        )?;
+        writeln!(stdout)?;
+        stdout.flush()?;
+    }
+    Ok(())
+}
+
+fn report_executing_elf_sha256_once() -> Result<()> {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    static DIGEST: OnceLock<std::result::Result<String, String>> = OnceLock::new();
+
+    if std::env::var_os("FM_SELF_REPORT_ELF_SHA256").is_none()
+        || REPORTED.swap(true, Ordering::Relaxed)
+    {
+        return Ok(());
+    }
+    let digest = DIGEST.get_or_init(|| {
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("cannot resolve executing ELF: {error}"))?;
+        let bytes = std::fs::read(&executable).map_err(|error| {
+            format!(
+                "cannot read executing ELF {}: {error}",
+                executable.display()
+            )
+        })?;
+        Ok(sha256_hex(&bytes))
+    });
+    match digest {
+        Ok(digest) => {
+            eprintln!("executing_elf_sha256={digest}");
+            Ok(())
+        }
+        Err(error) => anyhow::bail!("{error}"),
+    }
+}
+
 /// Render every input concurrently as one job.
 ///
 /// The incumbent renders on a single JavaScript main thread, so its cost for N diagrams is the
@@ -2921,12 +3046,7 @@ fn cmd_render_batch(
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("cannot create output directory {out_dir}"))?;
 
-    if std::env::var_os("FM_SELF_REPORT_ELF_SHA256").is_some() {
-        let executable = std::env::current_exe().context("cannot resolve executing ELF")?;
-        let bytes = std::fs::read(&executable)
-            .with_context(|| format!("cannot read executing ELF {}", executable.display()))?;
-        eprintln!("executing_elf_sha256={}", sha256_hex(&bytes));
-    }
+    report_executing_elf_sha256_once()?;
 
     let requested = jobs.unwrap_or_else(|| {
         std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
