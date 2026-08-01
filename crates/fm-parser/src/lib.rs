@@ -1407,6 +1407,35 @@ mod tests {
     }
 
     #[test]
+    fn batch_scratch_restores_full_prefix_after_a_mutating_suffix() {
+        let shared = concat!(
+            "flowchart LR\n",
+            "  subgraph Shared[\"Shared ingestion platform\"]\n",
+            "    S0[\"Receive events\"]\n",
+            "    S1[\"Publish records\"]\n",
+            "    S0-->S1\n",
+            "  end\n",
+        );
+        let inputs = [
+            format!("{shared}  S0((Changed shape))-->A"),
+            format!("{shared}  S1-->B[\"Independent suffix\"]"),
+        ];
+        let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan =
+            FlowchartBatchParsePlan::new(&refs, MermaidParseMode::Compat, &ParserConfig::default());
+        let mut scratch = FlowchartBatchParseScratch::default();
+
+        plan.with_parse_scratch(0, &inputs[0], &mut scratch, |actual| {
+            assert_eq!(actual.ir, &parse(&inputs[0]).ir);
+            assert!(actual.reusable_prefix.is_none());
+        });
+        plan.with_parse_scratch(1, &inputs[1], &mut scratch, |actual| {
+            assert_eq!(actual.ir, &parse(&inputs[1]).ir);
+            assert!(actual.reusable_prefix.is_some());
+        });
+    }
+
+    #[test]
     fn batch_plan_falls_back_when_global_directives_cross_the_prefix_boundary() {
         let prefix = concat!(
             "flowchart LR\n",

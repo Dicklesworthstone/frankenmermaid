@@ -1056,6 +1056,8 @@ fn flow_subgraph_lookup_key(id: &str, title: Option<&str>) -> String {
 #[derive(Default)]
 pub(crate) struct CompiledFlowchartScratch {
     builder: Option<IrBuilder>,
+    prefix_identity: Option<Arc<str>>,
+    prefix_unchanged: bool,
 }
 
 pub(crate) struct CompiledFlowchartPrefix {
@@ -1128,10 +1130,21 @@ impl CompiledFlowchartPrefix {
         scratch: &'a mut CompiledFlowchartScratch,
     ) -> Option<FlowchartBatchParseRef<'a>> {
         let suffix = input.strip_prefix(self.prefix.as_ref())?;
+        let same_prefix = scratch
+            .prefix_identity
+            .as_ref()
+            .is_some_and(|identity| Arc::ptr_eq(identity, &self.prefix));
         if let Some(builder) = scratch.builder.as_mut() {
-            builder.reset_from(&self.builder);
+            if same_prefix && scratch.prefix_unchanged {
+                builder.reset_reusable_suffix_from(&self.builder);
+            } else {
+                builder.reset_from(&self.builder);
+            }
         } else {
             scratch.builder = Some(self.builder.clone());
+        }
+        if !same_prefix {
+            scratch.prefix_identity = Some(Arc::clone(&self.prefix));
         }
         let builder = scratch.builder.as_mut()?;
         parse_flowchart_with_line_offset(suffix, self.line_offset, builder);
@@ -1139,9 +1152,8 @@ impl CompiledFlowchartPrefix {
             builder.add_warning("No parseable nodes or edges were found");
         }
         builder.finish_reusable();
-        let reusable_prefix = builder
-            .reusable_prefix_unchanged(&self.builder)
-            .then_some(&self.reusable_prefix);
+        scratch.prefix_unchanged = builder.reusable_prefix_unchanged(&self.builder);
+        let reusable_prefix = scratch.prefix_unchanged.then_some(&self.reusable_prefix);
         Some(FlowchartBatchParseRef {
             ir: builder.ir(),
             warnings: builder.warnings(),

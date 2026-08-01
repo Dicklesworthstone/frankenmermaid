@@ -367,6 +367,73 @@ fn clone_ir_reusing(target: &mut MermaidDiagramIr, source: &MermaidDiagramIr) {
 }
 
 impl IrBuilder {
+    /// Restore a builder whose last suffix left the compiled prefix byte-for-byte unchanged.
+    ///
+    /// [`Self::reusable_prefix_unchanged`] is the proof obligation for this path. Once it succeeds,
+    /// every large IR sequence starts with the immutable compiled snapshot, so restoring the slot
+    /// only needs to discard the appended suffix. The lookup indexes are still refreshed from the
+    /// snapshot because hash collisions can mix prefix and suffix IDs in one bucket; those maps are
+    /// small compared with cloning every prefix node, edge, label, and nested membership vector.
+    pub(crate) fn reset_reusable_suffix_from(&mut self, source: &Self) {
+        debug_assert!(self.reusable_prefix_unchanged(source));
+
+        self.ir.nodes.truncate(source.ir.nodes.len());
+        self.ir.edges.truncate(source.ir.edges.len());
+        self.ir.clusters.truncate(source.ir.clusters.len());
+        self.ir.graph.nodes.truncate(source.ir.graph.nodes.len());
+        self.ir.graph.edges.truncate(source.ir.graph.edges.len());
+        self.ir
+            .graph
+            .clusters
+            .truncate(source.ir.graph.clusters.len());
+        self.ir
+            .graph
+            .subgraphs
+            .truncate(source.ir.graph.subgraphs.len());
+        self.ir.labels.truncate(source.ir.labels.len());
+        self.ir
+            .label_markup
+            .retain(|label, _| label.0 < source.ir.labels.len());
+
+        // These fields are outside the certified flowchart-prefix equality surface. The admitted
+        // flowchart subset leaves them empty, but copying the snapshot here keeps the reset exact if
+        // that subset grows later without putting the large graph vectors back on the copy path.
+        self.ir.ports.clone_from(&source.ir.ports);
+        self.ir.constraints.clone_from(&source.ir.constraints);
+        self.ir.sequence_meta.clone_from(&source.ir.sequence_meta);
+        self.ir.gantt_meta.clone_from(&source.ir.gantt_meta);
+        self.ir.xy_chart_meta.clone_from(&source.ir.xy_chart_meta);
+        self.ir.pie_meta.clone_from(&source.ir.pie_meta);
+        self.ir.quadrant_meta.clone_from(&source.ir.quadrant_meta);
+        self.ir.state_notes.clone_from(&source.ir.state_notes);
+        self.ir.diagnostics.clone_from(&source.ir.diagnostics);
+
+        self.node_id_index
+            .buckets
+            .clone_from(&source.node_id_index.buckets);
+        self.cluster_index_by_key
+            .clone_from(&source.cluster_index_by_key);
+        self.subgraph_index_by_key
+            .clone_from(&source.subgraph_index_by_key);
+        self.cluster_member_set
+            .clone_from(&source.cluster_member_set);
+        self.subgraph_member_set
+            .clone_from(&source.subgraph_member_set);
+        self.label_index
+            .buckets
+            .clone_from(&source.label_index.buckets);
+        self.warnings.clone_from(&source.warnings);
+        self.auto_created_nodes
+            .clone_from(&source.auto_created_nodes);
+        self.activation_stacks.clone_from(&source.activation_stacks);
+        self.current_participant_group
+            .clone_from(&source.current_participant_group);
+        self.fragment_stack.clone_from(&source.fragment_stack);
+        self.current_class_node_id = source.current_class_node_id;
+        self.state_stack.clone_from(&source.state_stack);
+        self.parser_config = source.parser_config;
+    }
+
     pub(crate) fn reset_from(&mut self, source: &Self) {
         clone_ir_reusing(&mut self.ir, &source.ir);
         self.node_id_index

@@ -1454,3 +1454,47 @@ instructions** and **4.51% fewer cycles** (`1.0273x` and `1.0473x` ratios).
 - **Retry predicate.** Re-run only if reusable builder reset semantics, the borrowed-IR lifetime
   boundary, prefix certification, shared-prefix corpus, worker ownership, executing ELF, or
   equivalence contract changes.
+
+## KEEP: O(delta) reset for certified shared-prefix batch parsing (2026-08-01)
+
+**Bead:** `bd-znl1`. **Lane:** cod (`BlackThrush`).
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `df5abf5eb8446baa4855e198af7a584126403a54c2010c5e6df563161eb34949`
+**A/A null control (same invocation):** all nine alternating prior/candidate processes ran their
+own nine-pair Rust null control. The medians across those process-level null medians were
+`0.996873` for the prior ELF and `1.000426` for the candidate; counted work, exact output identity,
+and semantic equivalence were the acceptance evidence rather than short-run timing noise.
+**Counted mechanism:** seven same-host `perf stat` repetitions over the exact 384-diagram,
+64-worker whole job measured 258,015,731,624 instructions and 191,009,441,966 cycles for the prior
+ELF, versus 241,781,535,518 instructions and 178,873,648,573 cycles for the candidate: **6.29% fewer
+instructions** and **6.35% fewer cycles** (`1.0671x` and `1.0678x` ratios).
+
+- **Mechanism.** A worker slot whose previous suffix preserved the exact compiled prefix now
+  restores the builder by truncating appended suffix vectors and refreshing only lookup indexes
+  and cold non-flowchart fields. A pointer-stable `Arc` identity prevents reuse across compiled
+  prefix groups. Any suffix that mutates the prefix, or any group change, takes the existing full
+  reset path. This changes repeated restore work from O(prefix + suffix) to O(suffix) without
+  sharing mutable state across workers.
+- **Whole-job result.** Nine alternating prior/candidate process pairs on `thinkstation1`, pinned
+  to CPUs 0-63 and self-reporting 64/64 workers, measured prior median **966,737 ns** and candidate
+  median **934,466 ns**: **1.034534x**. Both ELFs emitted aggregate SVG SHA-256
+  `6410d31e4b9b9e96053fe237b7f45bc13eb50a80badb35dff06fa7d09f24a6ab`.
+- **Live-incumbent corroboration.** The exact candidate ELF and pinned live mermaid-js 11.15.0 ran
+  together over all 384 diagrams: the scalar Rust observation was **12.860 ms**, mermaid-js was
+  **51,715.9 ms**, and structural verification passed **384/384** with zero divergent and zero
+  unverified. This equivalence invocation has no incumbent null arm, so it supports no competitive
+  ratio and this row remains maintenance-only. Artifact SHA-256
+  `65277b0a405b04f2cf561d174aa7c4e67950d746f8728959d8690fb8abb4aacd`.
+- **Evidence.** Interleaved prior/candidate JSONL SHA-256
+  `a6cd5f78c0ba54ff0d41b61adc4b485fa92527376b85a36aa7011ca7d3cd1bbe` /
+  `3199aca31bf37ab7e7984e478b8dc698e4f9b9d01e4a9e2d07d705c11f9f5096`; counted prior/candidate
+  CSV SHA-256 `757f764aeeb48fc295b13ad7c0b1213868798c72d360b63191427651ff7d8d16` /
+  `b69dc4c7b00bdd84861482a08b76505d2a006d5a293d2ce692d743c9c63db426`.
+- **Validation.** Strict-RCH workspace check and clippy passed; all five shared-prefix batch parser
+  tests passed, including exact fallback after a suffix mutates a cached node. The full workspace
+  suite reached only the known stale `dense_flowchart_stress` golden mismatch after the changed
+  parser and other preceding suites passed. Formatting, diff checks, exact-output identity, and
+  live structural equivalence passed.
+- **Retry predicate.** Re-run only if certified-prefix equality, prefix-group identity, builder
+  index layout, shared-prefix corpus, worker ownership, executing ELF, or equivalence contract
+  changes.
