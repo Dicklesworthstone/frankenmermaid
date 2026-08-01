@@ -1254,8 +1254,12 @@ fn lower_compiled_flow_document_item(
 /// suffix. This removes repeated parsing without cloning a populated IR or coordinating workers.
 pub(crate) struct CompiledFlowchartPrefix {
     prefix: String,
-    seed: IrBuilder,
+    items: Vec<CompiledFlowDocumentItem>,
+    warnings: Vec<String>,
+    header_direction: Option<GraphDirection>,
     detection: DetectedType,
+    parse_mode: MermaidParseMode,
+    parser_config: ParserConfig,
     line_offset: usize,
 }
 
@@ -1273,39 +1277,37 @@ impl CompiledFlowchartPrefix {
         }
 
         let document = parse_flowchart_document(prefix, 0, config);
-        let line_offset = memchr::memchr_iter(b'\n', prefix.as_bytes()).count();
-        let items = document
-            .items
-            .into_iter()
-            .map(CompiledFlowDocumentItem::from)
-            .collect::<Vec<_>>();
-        let mut seed = IrBuilder::with_capacity_hint(DiagramType::Flowchart, line_offset + 1);
-        seed.set_parse_mode(parse_mode);
-        seed.set_parser_config(*config);
-        for warning in &detection.warnings {
-            seed.add_warning(warning.clone());
-        }
-        if let Some(direction) = document.header_direction {
-            seed.set_direction(direction);
-        }
-        for warning in document.warnings {
-            seed.add_warning(warning);
-        }
-        for item in &items {
-            lower_compiled_flow_document_item(item, &mut seed, &[], &[]);
-        }
 
         Some(Self {
             prefix: prefix.to_owned(),
-            seed,
+            items: document.items.into_iter().map(Into::into).collect(),
+            warnings: document.warnings,
+            header_direction: document.header_direction,
             detection,
-            line_offset,
+            parse_mode,
+            parser_config: *config,
+            line_offset: memchr::memchr_iter(b'\n', prefix.as_bytes()).count(),
         })
     }
 
     pub(crate) fn parse(&self, input: &str) -> Option<ParseResult> {
         let suffix = input.strip_prefix(&self.prefix)?;
-        let mut builder = self.seed.clone();
+        let input_lines = memchr::memchr_iter(b'\n', input.as_bytes()).count() + 1;
+        let mut builder = IrBuilder::with_capacity_hint(DiagramType::Flowchart, input_lines);
+        builder.set_parse_mode(self.parse_mode);
+        builder.set_parser_config(self.parser_config);
+        for warning in &self.detection.warnings {
+            builder.add_warning(warning.clone());
+        }
+        if let Some(direction) = self.header_direction {
+            builder.set_direction(direction);
+        }
+        for warning in &self.warnings {
+            builder.add_warning(warning.clone());
+        }
+        for item in &self.items {
+            lower_compiled_flow_document_item(item, &mut builder, &[], &[]);
+        }
         parse_flowchart_with_line_offset(suffix, self.line_offset, &mut builder);
         if builder.node_count() == 0 && builder.edge_count() == 0 {
             builder.add_warning("No parseable nodes or edges were found");

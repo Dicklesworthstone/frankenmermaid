@@ -44,12 +44,11 @@ struct StateCompositeContext {
 /// lookups verify the candidate against `ir.nodes[..].id` so a hash collision can never resolve to the
 /// wrong node (collisions land in `Many`). The map is never iterated (IR order comes from `ir.nodes`), so
 /// keying by hash is determinism-safe.
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct NodeIdIndex {
     buckets: FxHashMap<u64, NodeIdBucket>,
 }
 
-#[derive(Clone)]
 enum NodeIdBucket {
     One(IrNodeId),
     Many(Vec<IrNodeId>),
@@ -116,12 +115,11 @@ impl NodeIdIndex {
 /// time per distinct label purely for the dedup key. Keying by hash removes those clones; lookups verify
 /// the candidate against `ir.labels`/`ir.label_markup` so a hash collision can never dedup two distinct
 /// labels together (collisions land in `Many`). Never iterated, so hash-keying is determinism-safe.
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct LabelIndex {
     buckets: FxHashMap<u64, LabelBucket>,
 }
 
-#[derive(Clone)]
 enum LabelBucket {
     One(IrLabelId),
     Many(Vec<IrLabelId>),
@@ -187,7 +185,6 @@ impl LabelIndex {
     }
 }
 
-#[derive(Clone)]
 pub struct IrBuilder {
     ir: MermaidDiagramIr,
     // Lookups for uniqueness. These are read by key only (never iterated), so a hash
