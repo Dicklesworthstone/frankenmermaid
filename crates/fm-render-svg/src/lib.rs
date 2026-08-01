@@ -332,11 +332,21 @@ fn render_svg_with_layout_impl(
     config: &SvgRenderConfig,
     use_post_pass_cache: bool,
 ) -> String {
+    let direct_minified_css = matches!(config.backend, SvgBackend::LegacyLayout)
+        && config.embed_theme_css
+        && ir.diagram_type == DiagramType::Flowchart;
     let (mut svg, known_live_marker_mask) = match config.backend {
         SvgBackend::LegacyLayout => {
             let live_marker_mask = flowchart_marker_mask(ir, layout);
             (
-                render_layout_to_svg(layout, ir, config, live_marker_mask),
+                render_layout_to_svg(
+                    layout,
+                    ir,
+                    config,
+                    live_marker_mask,
+                    direct_minified_css,
+                    use_post_pass_cache,
+                ),
                 live_marker_mask,
             )
         }
@@ -348,6 +358,9 @@ fn render_svg_with_layout_impl(
             )
         }
     };
+    if direct_minified_css {
+        return svg;
+    }
     apply_output_post_passes(&mut svg, use_post_pass_cache, known_live_marker_mask);
     svg
 }
@@ -796,6 +809,47 @@ fn minify_css(css: &str) -> String {
     // A pure whitespace transformation over valid UTF-8 input is always valid UTF-8; the fallback
     // is defensive only.
     String::from_utf8(out).unwrap_or_else(|_| css.to_string())
+}
+
+const FULL_CSS_CACHE_CAPACITY: usize = 8;
+
+struct FullCssCacheEntry {
+    raw: Box<str>,
+    minified: Box<str>,
+}
+
+thread_local! {
+    /// Flowchart batches repeat a tiny set of theme/config combinations on each persistent worker.
+    /// Cache the directly-emitted minified stylesheet so the hot render path neither minifies nor
+    /// scans/moves the completed SVG. The bound keeps arbitrary custom themes from growing memory.
+    static FULL_CSS_CACHE: RefCell<Vec<FullCssCacheEntry>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+fn cached_minified_full_css(raw: String) -> String {
+    if let Some(hit) = FULL_CSS_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .iter()
+            .rev()
+            .find(|entry| entry.raw.as_ref() == raw)
+            .map(|entry| entry.minified.to_string())
+    }) {
+        return hit;
+    }
+
+    let minified = minify_css(&raw);
+    FULL_CSS_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() == FULL_CSS_CACHE_CAPACITY {
+            cache.remove(0);
+        }
+        cache.push(FullCssCacheEntry {
+            raw: raw.into_boxed_str(),
+            minified: minified.clone().into_boxed_str(),
+        });
+    });
+    minified
 }
 
 const CSS_POST_PASS_CACHE_CAPACITY: usize = 32;
@@ -2781,6 +2835,8 @@ fn render_layout_to_svg(
     ir: &MermaidDiagramIr,
     config: &SvgRenderConfig,
     known_live_marker_mask: Option<u16>,
+    direct_minified_css: bool,
+    cache_direct_minified_css: bool,
 ) -> String {
     let padding = config.padding;
     let legend_enabled = is_c4_legend_enabled(ir);
@@ -2952,6 +3008,13 @@ fn render_layout_to_svg(
         }
         if !classdef_css.is_empty() {
             css.push_str(&classdef_css);
+        }
+        if direct_minified_css {
+            css = if cache_direct_minified_css {
+                cached_minified_full_css(css)
+            } else {
+                minify_css(&css)
+            };
         }
 
         doc = doc.style(css);
