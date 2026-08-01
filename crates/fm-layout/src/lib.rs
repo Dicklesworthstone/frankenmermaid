@@ -11832,13 +11832,24 @@ fn nodes_by_rank(node_count: usize, ranks: &BTreeMap<usize, usize>) -> BTreeMap<
     nodes_by_rank
 }
 
-fn layer_edges_between_ranks(
+/// Every adjacent-rank pair's layer edges, bucketed in ONE pass over `ir.edges`.
+///
+/// This replaces a per-rank-pair full scan. `egraph_optimized_order_for_rank` asked for the
+/// `(rank - 1, rank)` and `(rank, rank + 1)` edge lists separately, and each request walked all of
+/// `ir.edges` doing two `endpoint_node_index` resolutions and two `ranks` B-tree probes per edge
+/// before discarding everything outside the one pair it wanted. `apply_egraph_ordering_pass` runs
+/// two passes over every rank, so that is `4 * ranks` full scans — O(ranks · edges) to produce
+/// O(edges) of data. On `docs_site_200` the scan measured 6.86% inclusive / 1.94% self.
+///
+/// Bucketing by `(source_rank, target_rank)` answers every request from one pass, mirroring what
+/// [`build_pair_node_edges`] already does for the refinement path. Byte-identical: the filter is
+/// unchanged, each bucket is pushed in `ir.edges` order and sorted exactly as before, and a pair
+/// with no edges is simply absent from the map — which is what the old empty check produced.
+fn layer_edges_by_rank_pair(
     ir: &MermaidDiagramIr,
     ranks: &BTreeMap<usize, usize>,
-    upper_rank: usize,
-    lower_rank: usize,
-) -> crate::egraph_ordering::LayerEdges {
-    let mut edges = Vec::new();
+) -> FxHashMap<(usize, usize), crate::egraph_ordering::LayerEdges> {
+    let mut by_pair: FxHashMap<(usize, usize), Vec<(usize, usize)>> = FxHashMap::default();
 
     for edge in &ir.edges {
         let Some(mut source) = endpoint_node_index(ir, edge.from) else {
@@ -11861,23 +11872,27 @@ fn layer_edges_between_ranks(
             std::mem::swap(&mut source, &mut target);
             std::mem::swap(&mut source_rank, &mut target_rank);
         }
-        if source_rank != upper_rank || target_rank != lower_rank {
-            continue;
-        }
         if target_rank != source_rank.saturating_add(1) {
             continue;
         }
 
-        edges.push((source, target));
+        by_pair
+            .entry((source_rank, target_rank))
+            .or_default()
+            .push((source, target));
     }
 
-    edges.sort_unstable();
-    crate::egraph_ordering::LayerEdges { edges }
+    by_pair
+        .into_iter()
+        .map(|(pair, mut edges)| {
+            edges.sort_unstable();
+            (pair, crate::egraph_ordering::LayerEdges { edges })
+        })
+        .collect()
 }
 
 fn egraph_optimized_order_for_rank(
-    ir: &MermaidDiagramIr,
-    ranks: &BTreeMap<usize, usize>,
+    layer_edges: &FxHashMap<(usize, usize), crate::egraph_ordering::LayerEdges>,
     ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
     rank: usize,
 ) -> Option<(usize, crate::egraph_ordering::LayerOptimizationResult)> {
@@ -11894,10 +11909,9 @@ fn egraph_optimized_order_for_rank(
             .cloned()
             .map(crate::egraph_ordering::LayerOrdering::new)
     });
-    let upper_edges = rank.checked_sub(1).and_then(|upper_rank| {
-        let edges = layer_edges_between_ranks(ir, ranks, upper_rank, rank);
-        (!edges.edges.is_empty()).then_some(edges)
-    });
+    let upper_edges =
+        rank.checked_sub(1)
+            .and_then(|upper_rank| layer_edges.get(&(upper_rank, rank)));
 
     let lower_ordering = rank.checked_add(1).and_then(|lower_rank| {
         ordering_by_rank
@@ -11905,10 +11919,9 @@ fn egraph_optimized_order_for_rank(
             .cloned()
             .map(crate::egraph_ordering::LayerOrdering::new)
     });
-    let lower_edges = rank.checked_add(1).and_then(|lower_rank| {
-        let edges = layer_edges_between_ranks(ir, ranks, rank, lower_rank);
-        (!edges.edges.is_empty()).then_some(edges)
-    });
+    let lower_edges = rank
+        .checked_add(1)
+        .and_then(|lower_rank| layer_edges.get(&(rank, lower_rank)));
 
     if upper_edges.is_none() && lower_edges.is_none() {
         return None;
@@ -11916,13 +11929,13 @@ fn egraph_optimized_order_for_rank(
 
     let local_crossings_before = crate::egraph_ordering::local_crossing_count(
         &current,
-        upper_ordering.as_ref().zip(upper_edges.as_ref()),
-        lower_ordering.as_ref().zip(lower_edges.as_ref()),
+        upper_ordering.as_ref().zip(upper_edges),
+        lower_ordering.as_ref().zip(lower_edges),
     );
     let result = crate::egraph_ordering::optimize_layer_ordering(
         &current,
-        upper_ordering.as_ref().zip(upper_edges.as_ref()),
-        lower_ordering.as_ref().zip(lower_edges.as_ref()),
+        upper_ordering.as_ref().zip(upper_edges),
+        lower_ordering.as_ref().zip(lower_edges),
     );
 
     (result.crossing_count < local_crossings_before).then_some((local_crossings_before, result))
@@ -11936,11 +11949,15 @@ fn apply_egraph_ordering_pass<const PACKED_CROSSINGS: bool>(
     scratch: &mut BarycenterScratch,
 ) -> usize {
     let rank_keys: Vec<usize> = ordering_by_rank.keys().copied().collect();
+    // Ranks move within this pass, but an edge's endpoints keep their ranks -- `ranks` is fixed
+    // here, only the within-rank ordering changes -- so the adjacent-pair edge buckets are built
+    // once for the whole pass instead of rescanning `ir.edges` per rank.
+    let layer_edges = layer_edges_by_rank_pair(ir, ranks);
     for _ in 0..2 {
         let mut improved = false;
         for &rank in &rank_keys {
             let Some((local_crossings_before, result)) =
-                egraph_optimized_order_for_rank(ir, ranks, ordering_by_rank, rank)
+                egraph_optimized_order_for_rank(&layer_edges, ordering_by_rank, rank)
             else {
                 continue;
             };
@@ -19466,8 +19483,9 @@ mod tests {
 
         let mut ordering_by_rank =
             BTreeMap::from([(0, vec![0, 1, 2]), (1, vec![4, 3, 5]), (2, vec![6, 7, 8])]);
+        let layer_edges = super::layer_edges_by_rank_pair(&ir, &ranks);
         let (local_crossings_before, result) =
-            super::egraph_optimized_order_for_rank(&ir, &ranks, &ordering_by_rank, 1)
+            super::egraph_optimized_order_for_rank(&layer_edges, &ordering_by_rank, 1)
                 .expect("middle rank should have an improving e-graph rewrite");
 
         assert_eq!(local_crossings_before, 1);
