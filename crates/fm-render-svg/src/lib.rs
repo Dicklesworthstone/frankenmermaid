@@ -315,10 +315,30 @@ struct SvgBatchFragments {
 
 #[derive(Debug)]
 struct SvgBatchSnapshot {
-    ir: Arc<MermaidDiagramIr>,
+    ir: Option<Arc<MermaidDiagramIr>>,
     layout: Arc<DiagramLayout>,
     config: SvgRenderConfig,
     fragments: SvgBatchFragments,
+    certified_prefix: Option<CertifiedSvgBatchPrefix>,
+}
+
+/// Parser-certified immutable IR prefix for allocation-reusing batch rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedSvgBatchPrefix {
+    identity: Arc<str>,
+    node_count: usize,
+    edge_count: usize,
+}
+
+impl CertifiedSvgBatchPrefix {
+    #[must_use]
+    pub const fn new(identity: Arc<str>, node_count: usize, edge_count: usize) -> Self {
+        Self {
+            identity,
+            node_count,
+            edge_count,
+        }
+    }
 }
 
 /// Stateful renderer for a batch whose diagrams may share an unchanged flowchart prefix.
@@ -351,9 +371,12 @@ impl SvgBatchRenderer {
             same_config.then(|| previous.as_ref().expect("same config requires snapshot"));
         let svg = {
             let mut reuse = SvgBatchFragmentReuse {
-                previous_ir: reusable_snapshot.map(|snapshot| snapshot.ir.as_ref()),
+                previous_ir: reusable_snapshot.and_then(|snapshot| snapshot.ir.as_deref()),
                 previous_layout: reusable_snapshot.map(|snapshot| snapshot.layout.as_ref()),
                 previous: reusable_snapshot.map(|snapshot| &snapshot.fragments),
+                previous_certified_prefix: reusable_snapshot
+                    .and_then(|snapshot| snapshot.certified_prefix.as_ref()),
+                current_certified_prefix: None,
                 next: &mut next_fragments,
             };
             render_svg_with_layout_impl_reusing(&ir, &layout, config, true, Some(&mut reuse))
@@ -364,10 +387,57 @@ impl SvgBatchRenderer {
             config.clone()
         };
         self.previous = Some(SvgBatchSnapshot {
-            ir,
+            ir: Some(ir),
             layout,
             config: stored_config,
             fragments: next_fragments,
+            certified_prefix: None,
+        });
+        svg
+    }
+
+    /// Render a borrowed batch IR whose immutable prefix was certified by the parser.
+    ///
+    /// Unlike [`Self::render`], this path does not retain the IR. The caller may therefore overwrite
+    /// its builder slot after return. Exact prefix identity plus layout-box equality replaces the
+    /// previous full-IR equality walk; a missing/mismatched certificate simply renders normally.
+    #[must_use]
+    pub fn render_borrowed(
+        &mut self,
+        ir: &MermaidDiagramIr,
+        layout: Arc<DiagramLayout>,
+        config: &SvgRenderConfig,
+        certified_prefix: Option<CertifiedSvgBatchPrefix>,
+    ) -> String {
+        let previous = self.previous.take();
+        let same_config = previous
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.config == *config);
+        let mut next_fragments = SvgBatchFragments::default();
+        let reusable_snapshot = same_config.then_some(previous.as_ref()).flatten();
+        let svg = {
+            let mut reuse = SvgBatchFragmentReuse {
+                previous_ir: reusable_snapshot.and_then(|snapshot| snapshot.ir.as_deref()),
+                previous_layout: reusable_snapshot.map(|snapshot| snapshot.layout.as_ref()),
+                previous: reusable_snapshot.map(|snapshot| &snapshot.fragments),
+                previous_certified_prefix: reusable_snapshot
+                    .and_then(|snapshot| snapshot.certified_prefix.as_ref()),
+                current_certified_prefix: certified_prefix.as_ref(),
+                next: &mut next_fragments,
+            };
+            render_svg_with_layout_impl_reusing(ir, &layout, config, true, Some(&mut reuse))
+        };
+        let stored_config = if same_config {
+            previous.expect("same config requires snapshot").config
+        } else {
+            config.clone()
+        };
+        self.previous = Some(SvgBatchSnapshot {
+            ir: None,
+            layout,
+            config: stored_config,
+            fragments: next_fragments,
+            certified_prefix,
         });
         svg
     }
@@ -377,6 +447,8 @@ struct SvgBatchFragmentReuse<'a> {
     previous_ir: Option<&'a MermaidDiagramIr>,
     previous_layout: Option<&'a DiagramLayout>,
     previous: Option<&'a SvgBatchFragments>,
+    previous_certified_prefix: Option<&'a CertifiedSvgBatchPrefix>,
+    current_certified_prefix: Option<&'a CertifiedSvgBatchPrefix>,
     next: &'a mut SvgBatchFragments,
 }
 
@@ -2949,6 +3021,30 @@ fn batch_fragment_globals_match(
         && previous_layout.extensions.node_centrality == layout.extensions.node_centrality
 }
 
+fn certified_batch_prefix_match<'a>(
+    reuse: &'a SvgBatchFragmentReuse<'_>,
+    layout: &DiagramLayout,
+    detail: RenderDetailProfile,
+    offset_x: f32,
+    offset_y: f32,
+) -> Option<&'a CertifiedSvgBatchPrefix> {
+    let previous = reuse.previous?;
+    let previous_layout = reuse.previous_layout?;
+    let previous_prefix = reuse.previous_certified_prefix?;
+    let current_prefix = reuse.current_certified_prefix?;
+    let same_identity = Arc::ptr_eq(&previous_prefix.identity, &current_prefix.identity)
+        || previous_prefix.identity == current_prefix.identity;
+    (same_identity
+        && previous_prefix.node_count == current_prefix.node_count
+        && previous_prefix.edge_count == current_prefix.edge_count
+        && previous.active
+        && previous.detail == Some(detail)
+        && previous.offset_x_bits == offset_x.to_bits()
+        && previous.offset_y_bits == offset_y.to_bits()
+        && previous_layout.extensions.node_centrality == layout.extensions.node_centrality)
+        .then_some(current_prefix)
+}
+
 fn node_label_matches(
     previous_ir: &MermaidDiagramIr,
     previous_node: &fm_core::IrNode,
@@ -2970,6 +3066,16 @@ fn reusable_node_prefix_len(
     offset_x: f32,
     offset_y: f32,
 ) -> usize {
+    if let Some(prefix) = certified_batch_prefix_match(reuse, layout, detail, offset_x, offset_y) {
+        let previous_layout = reuse.previous_layout.expect("certified previous layout");
+        return previous_layout
+            .nodes
+            .iter()
+            .zip(&layout.nodes)
+            .take(prefix.node_count)
+            .take_while(|(previous_box, node_box)| previous_box == node_box)
+            .count();
+    }
     if !batch_fragment_globals_match(reuse, ir, layout, detail, offset_x, offset_y) {
         return 0;
     }
@@ -3002,6 +3108,16 @@ fn reusable_edge_prefix_len(
     offset_x: f32,
     offset_y: f32,
 ) -> usize {
+    if let Some(prefix) = certified_batch_prefix_match(reuse, layout, detail, offset_x, offset_y) {
+        let previous_layout = reuse.previous_layout.expect("certified previous layout");
+        return previous_layout
+            .edges
+            .iter()
+            .zip(&layout.edges)
+            .take(prefix.edge_count)
+            .take_while(|(previous_path, edge_path)| previous_path == edge_path)
+            .count();
+    }
     if !batch_fragment_globals_match(reuse, ir, layout, detail, offset_x, offset_y) {
         return 0;
     }
@@ -11901,6 +12017,69 @@ mod tests {
             assert_eq!(actual, expected);
         }
         let snapshot = renderer.previous.as_ref().expect("batch snapshot");
+        assert!(snapshot.fragments.reused_nodes >= 3);
+        assert!(snapshot.fragments.reused_edges >= 2);
+    }
+
+    #[test]
+    fn borrowed_batch_renderer_reuses_certified_prefix_without_retaining_ir() {
+        let inputs = [
+            concat!(
+                "flowchart LR\n",
+                "  subgraph Shared[\"Shared ingestion platform\"]\n",
+                "    S0[\"Receive & validate events\"]\n",
+                "    S1[\"Normalize payload safely\"]\n",
+                "    S2[\"Publish canonical records\"]\n",
+                "    S0-->S1\n",
+                "    S1-->S2\n",
+                "  end\n",
+                "  S2-->A[\"Consumer 000\"]",
+            ),
+            concat!(
+                "flowchart LR\n",
+                "  subgraph Shared[\"Shared ingestion platform\"]\n",
+                "    S0[\"Receive & validate events\"]\n",
+                "    S1[\"Normalize payload safely\"]\n",
+                "    S2[\"Publish canonical records\"]\n",
+                "    S0-->S1\n",
+                "    S1-->S2\n",
+                "  end\n",
+                "  S2-->B[\"Consumer 111\"]",
+            ),
+        ];
+        let plan = fm_parser::FlowchartBatchParsePlan::new(
+            &inputs,
+            fm_core::MermaidParseMode::Compat,
+            &fm_parser::ParserConfig::default(),
+        );
+        let config = SvgRenderConfig::default();
+        let mut scratch = fm_parser::FlowchartBatchParseScratch::default();
+        let mut renderer = SvgBatchRenderer::default();
+        assert_eq!(plan.stats().shared_prefix_inputs, inputs.len());
+
+        for (index, input) in inputs.iter().enumerate() {
+            plan.with_parse_scratch(index, input, &mut scratch, |parsed| {
+                let prefix = parsed
+                    .reusable_prefix
+                    .expect("shared prefix should remain unchanged");
+                let layout = fm_layout::layout_diagram_traced(parsed.ir).layout;
+                let expected = render_svg_with_layout(parsed.ir, &layout, &config);
+                let actual = renderer.render_borrowed(
+                    parsed.ir,
+                    layout,
+                    &config,
+                    Some(CertifiedSvgBatchPrefix::new(
+                        Arc::clone(&prefix.identity),
+                        prefix.node_count,
+                        prefix.edge_count,
+                    )),
+                );
+                assert_eq!(actual, expected);
+            });
+        }
+
+        let snapshot = renderer.previous.as_ref().expect("batch snapshot");
+        assert!(snapshot.ir.is_none());
         assert!(snapshot.fragments.reused_nodes >= 3);
         assert!(snapshot.fragments.reused_edges >= 2);
     }

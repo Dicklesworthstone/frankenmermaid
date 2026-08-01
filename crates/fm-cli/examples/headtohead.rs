@@ -18,10 +18,13 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Instant;
 
 use fm_core::MermaidParseMode;
-use fm_parser::{FlowchartBatchParsePlan, ParseResult, ParserConfig, parse};
+use fm_parser::{
+    FlowchartBatchParsePlan, FlowchartBatchParseRef, FlowchartBatchParseScratch, ParseResult,
+    ParserConfig, parse,
+};
 #[cfg(test)]
 use fm_render_svg::render_svg_with_layout;
-use fm_render_svg::{A11yConfig, SvgBatchRenderer, SvgRenderConfig};
+use fm_render_svg::{A11yConfig, CertifiedSvgBatchPrefix, SvgBatchRenderer, SvgRenderConfig};
 use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 
@@ -138,6 +141,22 @@ fn full_pipeline_parsed_batch(
     let ir = Arc::new(parsed.ir);
     let layout = fm_layout::layout_diagram_traced(&ir).layout;
     renderer.render(ir, layout, cfg)
+}
+
+fn full_pipeline_borrowed_batch(
+    parsed: FlowchartBatchParseRef<'_>,
+    cfg: &SvgRenderConfig,
+    renderer: &mut SvgBatchRenderer,
+) -> String {
+    let layout = fm_layout::layout_diagram_traced(parsed.ir).layout;
+    let certified_prefix = parsed.reusable_prefix.map(|prefix| {
+        CertifiedSvgBatchPrefix::new(
+            Arc::clone(&prefix.identity),
+            prefix.node_count,
+            prefix.edge_count,
+        )
+    });
+    renderer.render_borrowed(parsed.ir, layout, cfg, certified_prefix)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -334,6 +353,7 @@ impl Drop for FixedShardPool {
 fn fixed_shard_worker(worker_index: usize, threads: usize, shared: &FixedShardShared) {
     let mut observed_generation = 0;
     let mut renderer = SvgBatchRenderer::default();
+    let mut parse_scratch = FlowchartBatchParseScratch::default();
     loop {
         let (generation, job) = {
             let mut state = lock_unpoisoned(&shared.state);
@@ -366,15 +386,20 @@ fn fixed_shard_worker(worker_index: usize, threads: usize, shared: &FixedShardSh
         }
         for input_index in start..end {
             let text = std::hint::black_box(job.texts[input_index].as_str());
-            let parsed = job
-                .parse_plan
-                .as_ref()
-                .map_or_else(|| parse(text), |plan| plan.parse(input_index, text));
-            output.push(full_pipeline_parsed_batch(
-                parsed,
-                &job.config,
-                &mut renderer,
-            ));
+            if let Some(plan) = &job.parse_plan {
+                output.push(plan.with_parse_scratch(
+                    input_index,
+                    text,
+                    &mut parse_scratch,
+                    |parsed| full_pipeline_borrowed_batch(parsed, &job.config, &mut renderer),
+                ));
+            } else {
+                output.push(full_pipeline_parsed_batch(
+                    parse(text),
+                    &job.config,
+                    &mut renderer,
+                ));
+            }
         }
         *lock_unpoisoned(&shared.output_shards[worker_index]) = output;
 
@@ -496,15 +521,22 @@ impl RenderExecutor {
             );
         } else {
             let mut renderer = SvgBatchRenderer::default();
+            let mut parse_scratch = FlowchartBatchParseScratch::default();
             if let Some(seen) = workers_seen.as_deref().and_then(|workers| workers.first()) {
                 seen.store(true, Ordering::Relaxed);
             }
             for (input_index, text) in texts.iter().enumerate() {
                 let text = std::hint::black_box(text.as_str());
-                let parsed = parse_plan
-                    .as_ref()
-                    .map_or_else(|| parse(text), |plan| plan.parse(input_index, text));
-                sink.push(full_pipeline_parsed_batch(parsed, cfg, &mut renderer));
+                if let Some(plan) = &parse_plan {
+                    sink.push(plan.with_parse_scratch(
+                        input_index,
+                        text,
+                        &mut parse_scratch,
+                        |parsed| full_pipeline_borrowed_batch(parsed, cfg, &mut renderer),
+                    ));
+                } else {
+                    sink.push(full_pipeline_parsed_batch(parse(text), cfg, &mut renderer));
+                }
             }
         }
     }

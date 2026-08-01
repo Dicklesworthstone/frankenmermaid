@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use chumsky::prelude::*;
 use fm_core::{
@@ -14,7 +15,7 @@ use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
-    DetectedType, ParseResult, ParserConfig,
+    DetectedType, FlowchartBatchParseRef, FlowchartBatchPrefix, ParseResult, ParserConfig,
     ir_builder::{IrBuilder, ParsedLabel},
     is_sankey_header, matches_keyword_header, normalize_identifier,
 };
@@ -1049,14 +1050,20 @@ fn flow_subgraph_lookup_key(id: &str, title: Option<&str>) -> String {
 
 /// Parsed syntax for a complete, closed flowchart-prefix subgraph.
 ///
-/// Every related diagram clones the immutable, already-lowered builder snapshot, then parses its
-/// unique suffix. This removes repeated tokenization, lowering, interning, and membership rebuilds
-/// without coordinating workers.
+/// Every related diagram seeds a worker-local reusable builder from the immutable, already-lowered
+/// snapshot, then parses its unique suffix. This removes repeated tokenization, lowering,
+/// interning, allocation, and membership rebuilds without coordinating workers.
+#[derive(Default)]
+pub(crate) struct CompiledFlowchartScratch {
+    builder: Option<IrBuilder>,
+}
+
 pub(crate) struct CompiledFlowchartPrefix {
-    prefix: String,
+    prefix: Arc<str>,
     builder: IrBuilder,
     detection: DetectedType,
     line_offset: usize,
+    reusable_prefix: FlowchartBatchPrefix,
 }
 
 impl CompiledFlowchartPrefix {
@@ -1090,22 +1097,58 @@ impl CompiledFlowchartPrefix {
             lower_flow_document_item(item, &mut builder, &[], &[]);
         }
 
+        let line_offset = memchr::memchr_iter(b'\n', prefix.as_bytes()).count();
+        let prefix: Arc<str> = Arc::from(prefix);
         Some(Self {
-            prefix: prefix.to_owned(),
+            reusable_prefix: FlowchartBatchPrefix {
+                identity: Arc::clone(&prefix),
+                node_count: builder.node_count(),
+                edge_count: builder.edge_count(),
+            },
+            prefix,
             builder,
             detection,
-            line_offset: memchr::memchr_iter(b'\n', prefix.as_bytes()).count(),
+            line_offset,
         })
     }
 
     pub(crate) fn parse(&self, input: &str) -> Option<ParseResult> {
-        let suffix = input.strip_prefix(&self.prefix)?;
+        let suffix = input.strip_prefix(self.prefix.as_ref())?;
         let mut builder = self.builder.clone();
         parse_flowchart_with_line_offset(suffix, self.line_offset, &mut builder);
         if builder.node_count() == 0 && builder.edge_count() == 0 {
             builder.add_warning("No parseable nodes or edges were found");
         }
         Some(builder.finish(self.detection.confidence, self.detection.method))
+    }
+
+    pub(crate) fn parse_with_scratch<'a>(
+        &'a self,
+        input: &str,
+        scratch: &'a mut CompiledFlowchartScratch,
+    ) -> Option<FlowchartBatchParseRef<'a>> {
+        let suffix = input.strip_prefix(self.prefix.as_ref())?;
+        if let Some(builder) = scratch.builder.as_mut() {
+            builder.reset_from(&self.builder);
+        } else {
+            scratch.builder = Some(self.builder.clone());
+        }
+        let builder = scratch.builder.as_mut()?;
+        parse_flowchart_with_line_offset(suffix, self.line_offset, builder);
+        if builder.node_count() == 0 && builder.edge_count() == 0 {
+            builder.add_warning("No parseable nodes or edges were found");
+        }
+        builder.finish_reusable();
+        let reusable_prefix = builder
+            .reusable_prefix_unchanged(&self.builder)
+            .then_some(&self.reusable_prefix);
+        Some(FlowchartBatchParseRef {
+            ir: builder.ir(),
+            warnings: builder.warnings(),
+            confidence: self.detection.confidence,
+            detection_method: self.detection.method,
+            reusable_prefix,
+        })
     }
 }
 

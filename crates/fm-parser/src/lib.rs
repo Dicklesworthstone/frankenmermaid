@@ -4,6 +4,8 @@ mod dot_parser;
 mod ir_builder;
 mod mermaid_parser;
 
+use std::sync::Arc;
+
 use fm_core::{
     DiagramType, MermaidDiagramIr, MermaidLensBinding, MermaidLensEdit, MermaidLensEditResult,
     MermaidLensError, MermaidParseMode, MermaidSourceMap, MermaidTextRange, Position, Span,
@@ -143,6 +145,36 @@ impl ParseResult {
     }
 }
 
+/// Exact immutable prefix certified by a batch parser for downstream layout/render reuse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowchartBatchPrefix {
+    /// Pointer-stable identity of the exact source prefix compiled by this plan.
+    pub identity: Arc<str>,
+    /// Number of leading IR nodes proven unchanged after suffix lowering.
+    pub node_count: usize,
+    /// Number of leading IR edges proven unchanged after suffix lowering.
+    pub edge_count: usize,
+}
+
+/// Borrowed parse result backed by a caller-owned reusable batch slot.
+#[derive(Debug, Clone, Copy)]
+pub struct FlowchartBatchParseRef<'a> {
+    pub ir: &'a MermaidDiagramIr,
+    pub warnings: &'a [String],
+    pub confidence: f32,
+    pub detection_method: DetectionMethod,
+    pub reusable_prefix: Option<&'a FlowchartBatchPrefix>,
+}
+
+/// Per-worker storage for [`FlowchartBatchParsePlan::with_parse_scratch`].
+///
+/// Keep one beside each batch renderer. Repeated suffix parses then overwrite the same builder
+/// slot, reusing prefix vector and string allocations without locks or cross-worker ownership.
+#[derive(Default)]
+pub struct FlowchartBatchParseScratch {
+    inner: mermaid_parser::CompiledFlowchartScratch,
+}
+
 /// Work eliminated by a [`FlowchartBatchParsePlan`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct FlowchartBatchParseStats {
@@ -160,9 +192,9 @@ pub struct FlowchartBatchParseStats {
 ///
 /// The ordinary parser remains the fallback for every ungrouped input. When two or more explicit
 /// flowcharts begin with the same complete, closed subgraph block, the plan lowers that prefix once
-/// and clones its already-interned builder state before parsing each suffix. Callers may invoke
-/// [`Self::parse`] concurrently; the compiled prefixes are immutable and contain no shared mutable
-/// state.
+/// and seeds a caller-owned builder slot before parsing each suffix. Callers may invoke
+/// [`Self::parse`] concurrently; callers pursuing allocation reuse give each worker an independent
+/// [`FlowchartBatchParseScratch`] through [`Self::with_parse_scratch`].
 pub struct FlowchartBatchParsePlan {
     compiled: Vec<mermaid_parser::CompiledFlowchartPrefix>,
     assignment: Vec<Option<usize>>,
@@ -296,6 +328,38 @@ impl FlowchartBatchParsePlan {
             .unwrap_or_else(|| {
                 parse_with_mode_and_config(input, self.parse_mode, &self.parser_config)
             })
+    }
+
+    /// Parse one input into a caller-owned reusable slot and borrow the result for `consume`.
+    ///
+    /// The borrowed result cannot escape `consume`, which lets the next diagram reuse its backing
+    /// allocations. Inputs outside a certified group transparently use the ordinary parser.
+    pub fn with_parse_scratch<R>(
+        &self,
+        index: usize,
+        input: &str,
+        scratch: &mut FlowchartBatchParseScratch,
+        consume: impl FnOnce(FlowchartBatchParseRef<'_>) -> R,
+    ) -> R {
+        let compiled = self
+            .assignment
+            .get(index)
+            .and_then(|entry| *entry)
+            .and_then(|compiled_index| self.compiled.get(compiled_index));
+        if let Some(compiled) = compiled
+            && let Some(parsed) = compiled.parse_with_scratch(input, &mut scratch.inner)
+        {
+            return consume(parsed);
+        }
+
+        let parsed = parse_with_mode_and_config(input, self.parse_mode, &self.parser_config);
+        consume(FlowchartBatchParseRef {
+            ir: &parsed.ir,
+            warnings: &parsed.warnings,
+            confidence: parsed.confidence,
+            detection_method: parsed.detection_method,
+            reusable_prefix: None,
+        })
     }
 
     #[must_use]
@@ -1235,9 +1299,9 @@ mod tests {
     use std::fmt::Write;
 
     use super::{
-        FlowchartBatchParsePlan, MermaidLineEndingStyle, MermaidWhitespaceKind, ParserConfig,
-        apply_parse_lens_edit, build_parse_lens, capture_format_complement, detect_type,
-        normalize_identifier, parse, parse_with_mode,
+        FlowchartBatchParsePlan, FlowchartBatchParseScratch, MermaidLineEndingStyle,
+        MermaidWhitespaceKind, ParserConfig, apply_parse_lens_edit, build_parse_lens,
+        capture_format_complement, detect_type, normalize_identifier, parse, parse_with_mode,
     };
 
     #[test]
@@ -1298,6 +1362,47 @@ mod tests {
         assert_eq!(plan.stats().reused_prefix_bytes, shared.len());
         for (index, input) in inputs.iter().enumerate() {
             assert_eq!(plan.parse(index, input), parse(input));
+        }
+    }
+
+    #[test]
+    fn batch_plan_reuses_builder_allocations_without_changing_parse_output() {
+        let shared = concat!(
+            "flowchart LR\n",
+            "  subgraph Shared[\"Shared ingestion platform\"]\n",
+            "    S0[\"Receive & validate events\"]\n",
+            "    S1[\"Normalize payload safely\"]\n",
+            "    S2[\"Publish canonical records\"]\n",
+            "    S0-->S1\n",
+            "    S1-->S2\n",
+            "  end\n",
+        );
+        let inputs = [
+            format!("{shared}  S2-->A[\"Analytics consumer\"]"),
+            format!("{shared}  S2-->B[\"Billing consumer\"]"),
+        ];
+        let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan =
+            FlowchartBatchParsePlan::new(&refs, MermaidParseMode::Compat, &ParserConfig::default());
+        let mut scratch = FlowchartBatchParseScratch::default();
+        let mut first_prefix_id_allocation = None;
+
+        for (index, input) in inputs.iter().enumerate() {
+            plan.with_parse_scratch(index, input, &mut scratch, |actual| {
+                let expected = parse(input);
+                assert_eq!(actual.ir, &expected.ir);
+                assert_eq!(actual.warnings, expected.warnings);
+                assert_eq!(actual.confidence, expected.confidence);
+                assert_eq!(actual.detection_method, expected.detection_method);
+                assert!(actual.reusable_prefix.is_some());
+
+                let prefix_id_allocation = actual.ir.nodes[0].id.as_ptr();
+                if let Some(first) = first_prefix_id_allocation {
+                    assert_eq!(prefix_id_allocation, first);
+                } else {
+                    first_prefix_id_allocation = Some(prefix_id_allocation);
+                }
+            });
         }
     }
 

@@ -60,13 +60,13 @@ use fm_layout::{
     layout_diagram_traced_with_config_and_guardrails, layout_source_map,
 };
 use fm_parser::{
-    FlowchartBatchParsePlan, ParserConfig, capture_format_complement,
-    detect_type_with_confidence_and_config, first_significant_line, parse_evidence_json,
-    parse_with_mode, parse_with_mode_and_config,
+    FlowchartBatchParsePlan, FlowchartBatchParseRef, FlowchartBatchParseScratch, ParserConfig,
+    capture_format_complement, detect_type_with_confidence_and_config, first_significant_line,
+    parse_evidence_json, parse_with_mode, parse_with_mode_and_config,
 };
 use fm_render_svg::{
-    A11yConfig, SvgBatchRenderer, SvgRenderConfig, ThemePreset, describe_diagram_with_layout,
-    render_svg_with_layout,
+    A11yConfig, CertifiedSvgBatchPrefix, SvgBatchRenderer, SvgRenderConfig, ThemePreset,
+    describe_diagram_with_layout, render_svg_with_layout,
 };
 use fm_render_term::{
     TermRenderConfig, diff_diagrams, render_diff_plain, render_diff_summary,
@@ -2134,7 +2134,6 @@ fn render_source_with_pressure(
         budget_broker,
         options,
         pressure,
-        None,
     )
 }
 
@@ -2152,25 +2151,67 @@ fn render_parsed_source_with_pressure(
     source: &str,
     parsed: fm_parser::ParseResult,
     timing: RenderTiming,
+    budget_broker: MermaidBudgetLedger,
+    options: &RenderCommandOptions<'_>,
+    pressure: &MermaidPressureReport,
+) -> Result<RenderOutcome> {
+    let fm_parser::ParseResult { ir, warnings, .. } = parsed;
+    render_parsed_ir_with_pressure(
+        source,
+        &ir,
+        &warnings,
+        timing,
+        budget_broker,
+        options,
+        pressure,
+        None,
+    )
+}
+
+/// Finish a parser-slot-backed diagram before that slot is overwritten by the next batch item.
+fn render_batch_parse_ref_with_pressure(
+    source: &str,
+    parsed: FlowchartBatchParseRef<'_>,
+    timing: RenderTiming,
+    budget_broker: MermaidBudgetLedger,
+    options: &RenderCommandOptions<'_>,
+    pressure: &MermaidPressureReport,
+    batch_renderer: &mut SvgBatchRenderer,
+) -> Result<RenderOutcome> {
+    let certified_prefix = parsed.reusable_prefix.map(|prefix| {
+        CertifiedSvgBatchPrefix::new(
+            Arc::clone(&prefix.identity),
+            prefix.node_count,
+            prefix.edge_count,
+        )
+    });
+    render_parsed_ir_with_pressure(
+        source,
+        parsed.ir,
+        parsed.warnings,
+        timing,
+        budget_broker,
+        options,
+        pressure,
+        Some((batch_renderer, certified_prefix)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_parsed_ir_with_pressure(
+    source: &str,
+    ir: &MermaidDiagramIr,
+    warnings: &[String],
+    timing: RenderTiming,
     mut budget_broker: MermaidBudgetLedger,
     options: &RenderCommandOptions<'_>,
     pressure: &MermaidPressureReport,
-    batch_renderer: Option<&mut SvgBatchRenderer>,
+    batch_renderer: Option<(&mut SvgBatchRenderer, Option<CertifiedSvgBatchPrefix>)>,
 ) -> Result<RenderOutcome> {
     let RenderTiming {
         parse_time,
         total_start,
     } = timing;
-    let fm_parser::ParseResult { ir, warnings, .. } = parsed;
-    // The batch renderer retains the previous IR for exact prefix equality. Move only batch IRs
-    // behind an Arc; the ordinary single-render path keeps its allocation-free owned value.
-    let mut owned_ir = Some(ir);
-    let shared_ir = batch_renderer
-        .as_ref()
-        .map(|_| Arc::new(owned_ir.take().expect("batch IR")));
-    let ir = shared_ir
-        .as_deref()
-        .unwrap_or_else(|| owned_ir.as_ref().expect("single-render IR"));
     debug!(
         "Parsed: type={:?}, nodes={}, edges={}, warnings={}",
         ir.diagram_type,
@@ -2179,7 +2220,7 @@ fn render_parsed_source_with_pressure(
         warnings.len()
     );
 
-    for warning in &warnings {
+    for warning in warnings {
         warn!("Parse warning: {warning}");
     }
 
@@ -2253,7 +2294,7 @@ fn render_parsed_source_with_pressure(
     };
     let (rendered, actual_width, actual_height) = if options.format == OutputFormat::Svg
         && options.show_back_edges
-        && let (Some(renderer), Some(shared_ir)) = (batch_renderer, shared_ir.as_ref())
+        && let Some((renderer, certified_prefix)) = batch_renderer
     {
         let mut svg_config = build_svg_render_config(
             &options.svg_base_config,
@@ -2262,7 +2303,7 @@ fn render_parsed_source_with_pressure(
             options.embed_source_spans,
         );
         svg_config.apply_degradation(&guard_report.degradation);
-        let svg = renderer.render(Arc::clone(shared_ir), Arc::clone(layout), &svg_config);
+        let svg = renderer.render_borrowed(ir, Arc::clone(layout), &svg_config, certified_prefix);
         let (width, height) = extract_svg_dimensions(&svg);
         (svg.into_bytes(), width, height)
     } else {
@@ -2384,7 +2425,7 @@ fn render_parsed_source_with_pressure(
             layout_time_ms: layout_time.as_secs_f64() * 1000.0,
             render_time_ms: render_time.as_secs_f64() * 1000.0,
             total_time_ms: total_time.as_secs_f64() * 1000.0,
-            warnings,
+            warnings: warnings.to_vec(),
             fnx_witness,
         })
     } else {
@@ -2795,7 +2836,9 @@ fn cmd_render_batch(
     // Phase 3: render each owner once; keep bytes only for digests that repeat.
     let shared: std::sync::Mutex<std::collections::BTreeMap<String, std::sync::Arc<Vec<u8>>>> =
         std::sync::Mutex::new(std::collections::BTreeMap::new());
-    let render_owner = |renderer: &mut SvgBatchRenderer, index: usize| -> Result<(String, usize)> {
+    let render_owner = |state: &mut (FlowchartBatchParseScratch, SvgBatchRenderer),
+                        index: usize|
+     -> Result<(String, usize)> {
         let (source, digest) = match &loaded[index] {
             Ok(pair) => pair,
             Err(error) => return Err(anyhow::anyhow!("{error:#}")),
@@ -2805,45 +2848,64 @@ fn cmd_render_batch(
         }
         let total_start = Instant::now();
         let parse_start = Instant::now();
-        let parsed = parse_plan.parse(parse_plan_position[index], source);
-        let parse_time = parse_start.elapsed();
-        let mut budget_broker = MermaidBudgetLedger::new(&pressure);
-        budget_broker.record_parse(u64::try_from(parse_time.as_millis()).unwrap_or(u64::MAX));
-        let outcome = render_parsed_source_with_pressure(
+        let (parse_scratch, renderer) = state;
+        parse_plan.with_parse_scratch(
+            parse_plan_position[index],
             source,
-            parsed,
-            RenderTiming {
-                parse_time,
-                total_start,
+            parse_scratch,
+            |parsed| {
+                let parse_time = parse_start.elapsed();
+                let mut budget_broker = MermaidBudgetLedger::new(&pressure);
+                budget_broker
+                    .record_parse(u64::try_from(parse_time.as_millis()).unwrap_or(u64::MAX));
+                let outcome = render_batch_parse_ref_with_pressure(
+                    source,
+                    parsed,
+                    RenderTiming {
+                        parse_time,
+                        total_start,
+                    },
+                    budget_broker,
+                    &options,
+                    &pressure,
+                    renderer,
+                )?;
+                let destination = destination_for(&inputs[index]);
+                std::fs::write(&destination, &outcome.rendered)
+                    .with_context(|| format!("cannot write {}", destination.display()))?;
+                let length = outcome.rendered.len();
+                if digest_counts.get(digest.as_str()).copied().unwrap_or(0) > 1 {
+                    shared
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("render cache poisoned"))?
+                        .insert(digest.clone(), std::sync::Arc::new(outcome.rendered));
+                }
+                Ok((destination.display().to_string(), length))
             },
-            budget_broker,
-            &options,
-            &pressure,
-            Some(renderer),
-        )?;
-        let destination = destination_for(&inputs[index]);
-        std::fs::write(&destination, &outcome.rendered)
-            .with_context(|| format!("cannot write {}", destination.display()))?;
-        let length = outcome.rendered.len();
-        if digest_counts.get(digest.as_str()).copied().unwrap_or(0) > 1 {
-            shared
-                .lock()
-                .map_err(|_| anyhow::anyhow!("render cache poisoned"))?
-                .insert(digest.clone(), std::sync::Arc::new(outcome.rendered));
-        }
-        Ok((destination.display().to_string(), length))
+        )
     };
     let owner_results: Vec<Result<(String, usize)>> = match &pool {
         None => {
-            let mut renderer = SvgBatchRenderer::default();
+            let mut state = (
+                FlowchartBatchParseScratch::default(),
+                SvgBatchRenderer::default(),
+            );
             (0..inputs.len())
-                .map(|index| render_owner(&mut renderer, index))
+                .map(|index| render_owner(&mut state, index))
                 .collect()
         }
         Some(pool) => pool.install(|| {
             (0..inputs.len())
                 .into_par_iter()
-                .map_init(SvgBatchRenderer::default, &render_owner)
+                .map_init(
+                    || {
+                        (
+                            FlowchartBatchParseScratch::default(),
+                            SvgBatchRenderer::default(),
+                        )
+                    },
+                    &render_owner,
+                )
                 .collect()
         }),
     };

@@ -250,7 +250,151 @@ impl ParsedLabel {
     }
 }
 
+fn clone_vec_reusing<T: Clone>(
+    target: &mut Vec<T>,
+    source: &[T],
+    mut clone_one: impl FnMut(&mut T, &T),
+) {
+    let shared_len = target.len().min(source.len());
+    for index in 0..shared_len {
+        clone_one(&mut target[index], &source[index]);
+    }
+    if target.len() > source.len() {
+        target.truncate(source.len());
+    } else {
+        target.extend(source[shared_len..].iter().cloned());
+    }
+}
+
+fn clone_node_reusing(target: &mut IrNode, source: &IrNode) {
+    target.id.clone_from(&source.id);
+    target.label = source.label;
+    target.shape = source.shape;
+    target.classes.clone_from(&source.classes);
+    target.interaction.clone_from(&source.interaction);
+    target.menu_links.clone_from(&source.menu_links);
+    target.span_primary = source.span_primary;
+    target.implicit = source.implicit;
+    target.members.clone_from(&source.members);
+    target.class_meta.clone_from(&source.class_meta);
+    target.requirement_meta.clone_from(&source.requirement_meta);
+    target.c4_meta.clone_from(&source.c4_meta);
+    target.inline_style.clone_from(&source.inline_style);
+}
+
+fn clone_label_reusing(target: &mut IrLabel, source: &IrLabel) {
+    target.text.clone_from(&source.text);
+    target.span = source.span;
+}
+
+fn clone_cluster_reusing(target: &mut IrCluster, source: &IrCluster) {
+    target.id = source.id;
+    target.title = source.title;
+    target.members.clone_from(&source.members);
+    target.grid_span = source.grid_span;
+    target.span = source.span;
+}
+
+fn clone_graph_node_reusing(target: &mut IrGraphNode, source: &IrGraphNode) {
+    target.node_id = source.node_id;
+    target.kind = source.kind;
+    target.clusters.clone_from(&source.clusters);
+    target.subgraphs.clone_from(&source.subgraphs);
+}
+
+fn clone_graph_cluster_reusing(target: &mut IrGraphCluster, source: &IrGraphCluster) {
+    target.cluster_id = source.cluster_id;
+    target.title = source.title;
+    target.members.clone_from(&source.members);
+    target.subgraph = source.subgraph;
+    target.grid_span = source.grid_span;
+    target.span = source.span;
+}
+
+fn clone_subgraph_reusing(target: &mut IrSubgraph, source: &IrSubgraph) {
+    target.id = source.id;
+    target.key.clone_from(&source.key);
+    target.title = source.title;
+    target.parent = source.parent;
+    target.children.clone_from(&source.children);
+    target.members.clone_from(&source.members);
+    target.cluster = source.cluster;
+    target.grid_span = source.grid_span;
+    target.span = source.span;
+    target.direction = source.direction;
+}
+
+fn clone_ir_reusing(target: &mut MermaidDiagramIr, source: &MermaidDiagramIr) {
+    target.diagram_type = source.diagram_type;
+    target.direction = source.direction;
+    clone_vec_reusing(&mut target.nodes, &source.nodes, clone_node_reusing);
+    target.edges.clone_from(&source.edges);
+    target.ports.clone_from(&source.ports);
+    clone_vec_reusing(
+        &mut target.clusters,
+        &source.clusters,
+        clone_cluster_reusing,
+    );
+    clone_vec_reusing(
+        &mut target.graph.nodes,
+        &source.graph.nodes,
+        clone_graph_node_reusing,
+    );
+    target.graph.edges.clone_from(&source.graph.edges);
+    clone_vec_reusing(
+        &mut target.graph.clusters,
+        &source.graph.clusters,
+        clone_graph_cluster_reusing,
+    );
+    clone_vec_reusing(
+        &mut target.graph.subgraphs,
+        &source.graph.subgraphs,
+        clone_subgraph_reusing,
+    );
+    clone_vec_reusing(&mut target.labels, &source.labels, clone_label_reusing);
+    target.label_markup.clone_from(&source.label_markup);
+    target.constraints.clone_from(&source.constraints);
+    target.style_refs.clone_from(&source.style_refs);
+    target.style_defs.clone_from(&source.style_defs);
+    target.meta.clone_from(&source.meta);
+    target.sequence_meta.clone_from(&source.sequence_meta);
+    target.gantt_meta.clone_from(&source.gantt_meta);
+    target.xy_chart_meta.clone_from(&source.xy_chart_meta);
+    target.pie_meta.clone_from(&source.pie_meta);
+    target.quadrant_meta.clone_from(&source.quadrant_meta);
+    target.state_notes.clone_from(&source.state_notes);
+    target.diagnostics.clone_from(&source.diagnostics);
+}
+
 impl IrBuilder {
+    pub(crate) fn reset_from(&mut self, source: &Self) {
+        clone_ir_reusing(&mut self.ir, &source.ir);
+        self.node_id_index
+            .buckets
+            .clone_from(&source.node_id_index.buckets);
+        self.cluster_index_by_key
+            .clone_from(&source.cluster_index_by_key);
+        self.subgraph_index_by_key
+            .clone_from(&source.subgraph_index_by_key);
+        self.cluster_member_set
+            .clone_from(&source.cluster_member_set);
+        self.subgraph_member_set
+            .clone_from(&source.subgraph_member_set);
+        self.label_index
+            .buckets
+            .clone_from(&source.label_index.buckets);
+        self.warnings.clone_from(&source.warnings);
+        self.auto_created_nodes
+            .clone_from(&source.auto_created_nodes);
+        self.activation_stacks.clone_from(&source.activation_stacks);
+        self.current_participant_group
+            .clone_from(&source.current_participant_group);
+        self.fragment_stack.clone_from(&source.fragment_stack);
+        self.current_class_node_id = source.current_class_node_id;
+        self.state_stack.clone_from(&source.state_stack);
+        self.parser_config = source.parser_config;
+    }
+
     pub(crate) fn new(diagram_type: DiagramType) -> Self {
         Self {
             ir: MermaidDiagramIr::empty(diagram_type),
@@ -872,6 +1016,14 @@ impl IrBuilder {
         &mut self.ir
     }
 
+    pub(crate) const fn ir(&self) -> &MermaidDiagramIr {
+        &self.ir
+    }
+
+    pub(crate) fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
     pub(crate) const fn node_count(&self) -> usize {
         self.ir.nodes.len()
     }
@@ -885,12 +1037,7 @@ impl IrBuilder {
         self.node_id_index.get(key, &self.ir.nodes)
     }
 
-    /// Finish building the IR, applying semantic recovery.
-    pub(crate) fn finish(
-        mut self,
-        confidence: f32,
-        detection_method: crate::DetectionMethod,
-    ) -> ParseResult {
+    fn finalize(&mut self) {
         // Close any remaining open fragments, activations, and participant groups
         while self.end_fragment() {}
         self.flush_open_activations();
@@ -901,6 +1048,53 @@ impl IrBuilder {
 
         // Populate structured style types from raw style_refs.
         self.ir.populate_structured_styles();
+    }
+
+    pub(crate) fn finish_reusable(&mut self) {
+        self.finalize();
+    }
+
+    pub(crate) fn reusable_prefix_unchanged(&self, source: &Self) -> bool {
+        self.ir.direction == source.ir.direction
+            && self.ir.meta == source.ir.meta
+            && self.ir.style_refs == source.ir.style_refs
+            && self.ir.style_defs == source.ir.style_defs
+            && self.ir.nodes.starts_with(&source.ir.nodes)
+            && self.ir.edges.starts_with(&source.ir.edges)
+            && self.ir.clusters.starts_with(&source.ir.clusters)
+            && self.ir.labels.starts_with(&source.ir.labels)
+            && self.ir.graph.nodes.starts_with(&source.ir.graph.nodes)
+            && self.ir.graph.edges.starts_with(&source.ir.graph.edges)
+            && self
+                .ir
+                .graph
+                .clusters
+                .starts_with(&source.ir.graph.clusters)
+            && self
+                .ir
+                .graph
+                .subgraphs
+                .starts_with(&source.ir.graph.subgraphs)
+            && source
+                .ir
+                .label_markup
+                .iter()
+                .all(|(label, markup)| self.ir.label_markup.get(label) == Some(markup))
+            && self
+                .ir
+                .label_markup
+                .keys()
+                .filter(|label| label.0 < source.ir.labels.len())
+                .all(|label| source.ir.label_markup.contains_key(label))
+    }
+
+    /// Finish building the IR, applying semantic recovery.
+    pub(crate) fn finish(
+        mut self,
+        confidence: f32,
+        detection_method: crate::DetectionMethod,
+    ) -> ParseResult {
+        self.finalize();
 
         ParseResult {
             ir: self.ir,

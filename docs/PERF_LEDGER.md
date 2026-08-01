@@ -1409,3 +1409,48 @@ instructions** and **4.92% fewer cycles** (`1.0931x` and `1.0518x` ratios).
   doctests passed; formatting and diff checks passed.
 - **Retry predicate.** Re-run only if path validation, the tree center recurrence, edge routing,
   shared-prefix corpus, worker ownership, executing ELF, or equivalence contract changes.
+
+## KEEP: reusable parser builder slots with borrowed batch rendering (2026-08-01)
+
+**Bead:** `bd-bb1r`. **Lane:** cod (`BlackThrush`).
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `8df8cb24e5ed61c7c433c4aedbc4cdaa0c42220a86ec7f5f80625c1a1ff350b9`
+**A/A null control (same invocation):** all nine alternating prior/candidate processes ran their
+own nine-pair Rust null control. The medians across those process-level null medians were
+`1.008130` for the prior ELF and `1.018052` for the candidate; counted work, exact output identity,
+and semantic equivalence were the acceptance evidence rather than short-run timing noise.
+**Counted mechanism:** seven same-host `perf stat` repetitions over the exact 384-diagram,
+64-worker whole job measured 49,818,218,844 instructions and 37,105,265,188 cycles for the prior
+ELF, versus 48,496,044,931 instructions and 35,430,022,894 cycles for the candidate: **2.65% fewer
+instructions** and **4.51% fewer cycles** (`1.0273x` and `1.0473x` ratios).
+
+- **Mechanism.** Each fixed-shard/Rayon worker now owns one `FlowchartBatchParseScratch` beside its
+  `SvgBatchRenderer`. The shared-prefix compiler resets that builder in place, recycling prefix IR
+  vectors and strings before parsing each distinct suffix. A lifetime-bounded parse reference lets
+  layout and rendering consume the slot without a full `MermaidDiagramIr` clone; the parser issues
+  an exact prefix certificate, and the renderer retains only layout/fragments rather than the prior
+  IR. The production `render-batch` command and the benchmark exercise the same shared-nothing API.
+- **Whole-job result.** Nine alternating prior/candidate process pairs on `thinkstation1`, pinned
+  to CPUs 0-63 and self-reporting 64/64 workers, measured prior median **1,091,959 ns** and candidate
+  median **1,005,521 ns**: **1.085963x**. Both ELFs emitted aggregate SVG SHA-256
+  `6410d31e4b9b9e96053fe237b7f45bc13eb50a80badb35dff06fa7d09f24a6ab`.
+- **Live-incumbent corroboration.** The exact candidate ELF and pinned live mermaid-js 11.15.0 ran
+  together over all 384 diagrams: the scalar Rust observation was **14.172 ms**, mermaid-js was
+  **54,426.3 ms**, and structural verification passed **384/384** with zero divergent and zero
+  unverified. This equivalence invocation has no incumbent null arm, so it supports no competitive
+  ratio and this row remains maintenance-only. Artifact SHA-256
+  `15ed825d29bba8184f6b49420810aeabff85185c15a756dc7f9bede940acbff2`.
+- **Evidence.** Interleaved prior/candidate JSONL SHA-256
+  `5191e4b2bed3baef7c638f6e9d61cc7cfa576bae2cfccb1be6b4304856675558` /
+  `5256a79130f590df023144cdf0695f0e66d5aa4b85c19a80a5bb29eaa5bdac74`; counted prior/candidate
+  CSV SHA-256 `b5f437f5308fd08dcd75f19a646e47bef58c55cc799d5f1a515105bd29d41c1a` /
+  `f567c318cfdd41c3fc336416a9c1b35634ec5485160a76ba4d2ba5384bb4a1bf`.
+- **Validation.** Strict-RCH workspace check and clippy passed; parser allocation reuse and borrowed
+  renderer parity tests passed. A production `render-batch --jobs 1` smoke reported one shared
+  prefix parse reused and emitted byte-identical per-file hashes to two ordinary `render` calls.
+  The full workspace suite reached the known stale
+  `dense_flowchart_stress` golden mismatch after the changed crate/unit tests passed. Formatting,
+  diff checks, exact-output identity, and live structural equivalence passed.
+- **Retry predicate.** Re-run only if reusable builder reset semantics, the borrowed-IR lifetime
+  boundary, prefix certification, shared-prefix corpus, worker ownership, executing ELF, or
+  equivalence contract changes.
