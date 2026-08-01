@@ -1147,6 +1147,7 @@ impl CompiledFlowchartPrefix {
             scratch.prefix_identity = Some(Arc::clone(&self.prefix));
         }
         let builder = scratch.builder.as_mut()?;
+        builder.begin_reusable_suffix(&self.builder);
         parse_flowchart_with_line_offset(suffix, self.line_offset, builder);
         if builder.node_count() == 0 && builder.edge_count() == 0 {
             builder.add_warning("No parseable nodes or edges were found");

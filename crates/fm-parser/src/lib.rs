@@ -1436,6 +1436,35 @@ mod tests {
     }
 
     #[test]
+    fn batch_scratch_invalidates_every_flowchart_prefix_mutation_family() {
+        let shared = concat!(
+            "flowchart LR\n",
+            "  subgraph Shared[\"Shared ingestion platform\"]\n",
+            "    S0[\"Receive events\"]\n",
+            "    S1[\"Publish records\"]\n",
+            "    S0-->S1\n",
+            "  end\n",
+        );
+        let inputs = [
+            format!("{shared}  direction TB\n  S1-->A"),
+            format!("{shared}  class S0 hot\n  S1-->B"),
+            format!("{shared}  click S0 \"https://example.com\"\n  S1-->C"),
+            format!("{shared}  subgraph Shared[\"Shared ingestion platform\"]\n    S1-->D\n  end"),
+        ];
+        let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan =
+            FlowchartBatchParsePlan::new(&refs, MermaidParseMode::Compat, &ParserConfig::default());
+        let mut scratch = FlowchartBatchParseScratch::default();
+
+        for (index, input) in inputs.iter().enumerate() {
+            plan.with_parse_scratch(index, input, &mut scratch, |actual| {
+                assert_eq!(actual.ir, &parse(input).ir);
+                assert!(actual.reusable_prefix.is_none());
+            });
+        }
+    }
+
+    #[test]
     fn batch_plan_falls_back_when_global_directives_cross_the_prefix_boundary() {
         let prefix = concat!(
             "flowchart LR\n",

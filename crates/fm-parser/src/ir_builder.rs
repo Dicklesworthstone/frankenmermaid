@@ -220,6 +220,16 @@ pub struct IrBuilder {
     /// Stack of open composite states for state diagrams.
     state_stack: Vec<StateCompositeContext>,
     parser_config: ParserConfig,
+    reusable_prefix_guard: Option<ReusablePrefixGuard>,
+}
+
+#[derive(Clone, Copy)]
+struct ReusablePrefixGuard {
+    node_count: usize,
+    edge_count: usize,
+    cluster_count: usize,
+    subgraph_count: usize,
+    unchanged: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -367,6 +377,59 @@ fn clone_ir_reusing(target: &mut MermaidDiagramIr, source: &MermaidDiagramIr) {
 }
 
 impl IrBuilder {
+    pub(crate) fn begin_reusable_suffix(&mut self, source: &Self) {
+        self.reusable_prefix_guard = Some(ReusablePrefixGuard {
+            node_count: source.ir.nodes.len(),
+            edge_count: source.ir.edges.len(),
+            cluster_count: source.ir.clusters.len(),
+            subgraph_count: source.ir.graph.subgraphs.len(),
+            unchanged: true,
+        });
+    }
+
+    #[inline]
+    fn mark_reusable_prefix_dirty(&mut self) {
+        if let Some(guard) = self.reusable_prefix_guard.as_mut() {
+            guard.unchanged = false;
+        }
+    }
+
+    #[inline]
+    fn mark_reusable_prefix_node_dirty(&mut self, node_id: IrNodeId) {
+        if let Some(guard) = self.reusable_prefix_guard.as_mut()
+            && node_id.0 < guard.node_count
+        {
+            guard.unchanged = false;
+        }
+    }
+
+    #[inline]
+    fn mark_reusable_prefix_edge_dirty(&mut self, edge_index: usize) {
+        if let Some(guard) = self.reusable_prefix_guard.as_mut()
+            && edge_index < guard.edge_count
+        {
+            guard.unchanged = false;
+        }
+    }
+
+    #[inline]
+    fn mark_reusable_prefix_cluster_dirty(&mut self, cluster_index: usize) {
+        if let Some(guard) = self.reusable_prefix_guard.as_mut()
+            && cluster_index < guard.cluster_count
+        {
+            guard.unchanged = false;
+        }
+    }
+
+    #[inline]
+    fn mark_reusable_prefix_subgraph_dirty(&mut self, subgraph_index: usize) {
+        if let Some(guard) = self.reusable_prefix_guard.as_mut()
+            && subgraph_index < guard.subgraph_count
+        {
+            guard.unchanged = false;
+        }
+    }
+
     /// Restore a builder whose last suffix left the compiled prefix byte-for-byte unchanged.
     ///
     /// [`Self::reusable_prefix_unchanged`] is the proof obligation for this path. Once it succeeds,
@@ -432,6 +495,7 @@ impl IrBuilder {
         self.current_class_node_id = source.current_class_node_id;
         self.state_stack.clone_from(&source.state_stack);
         self.parser_config = source.parser_config;
+        self.reusable_prefix_guard = None;
     }
 
     pub(crate) fn reset_from(&mut self, source: &Self) {
@@ -460,6 +524,7 @@ impl IrBuilder {
         self.current_class_node_id = source.current_class_node_id;
         self.state_stack.clone_from(&source.state_stack);
         self.parser_config = source.parser_config;
+        self.reusable_prefix_guard = None;
     }
 
     pub(crate) fn new(diagram_type: DiagramType) -> Self {
@@ -479,6 +544,7 @@ impl IrBuilder {
             current_class_node_id: None,
             state_stack: Vec::new(),
             parser_config: ParserConfig::default(),
+            reusable_prefix_guard: None,
         }
     }
 
@@ -524,10 +590,14 @@ impl IrBuilder {
             current_class_node_id: None,
             state_stack: Vec::new(),
             parser_config: ParserConfig::default(),
+            reusable_prefix_guard: None,
         }
     }
 
-    pub(crate) const fn set_direction(&mut self, direction: GraphDirection) {
+    pub(crate) fn set_direction(&mut self, direction: GraphDirection) {
+        if self.ir.direction != direction || self.ir.meta.direction != direction {
+            self.mark_reusable_prefix_dirty();
+        }
         self.ir.direction = direction;
         self.ir.meta.direction = direction;
     }
@@ -537,6 +607,15 @@ impl IrBuilder {
         subgraph_index: usize,
         direction: GraphDirection,
     ) {
+        let changes_prefix = self
+            .ir
+            .graph
+            .subgraphs
+            .get(subgraph_index)
+            .is_some_and(|subgraph| subgraph.direction != Some(direction));
+        if changes_prefix {
+            self.mark_reusable_prefix_subgraph_dirty(subgraph_index);
+        }
         if let Some(subgraph) = self.ir.graph.subgraphs.get_mut(subgraph_index) {
             subgraph.direction = Some(direction);
         }
@@ -1121,38 +1200,51 @@ impl IrBuilder {
         self.finalize();
     }
 
-    pub(crate) fn reusable_prefix_unchanged(&self, source: &Self) -> bool {
-        self.ir.direction == source.ir.direction
-            && self.ir.meta == source.ir.meta
-            && self.ir.style_refs == source.ir.style_refs
-            && self.ir.style_defs == source.ir.style_defs
-            && self.ir.nodes.starts_with(&source.ir.nodes)
-            && self.ir.edges.starts_with(&source.ir.edges)
-            && self.ir.clusters.starts_with(&source.ir.clusters)
-            && self.ir.labels.starts_with(&source.ir.labels)
-            && self.ir.graph.nodes.starts_with(&source.ir.graph.nodes)
-            && self.ir.graph.edges.starts_with(&source.ir.graph.edges)
-            && self
-                .ir
-                .graph
-                .clusters
-                .starts_with(&source.ir.graph.clusters)
-            && self
-                .ir
-                .graph
-                .subgraphs
-                .starts_with(&source.ir.graph.subgraphs)
-            && source
-                .ir
-                .label_markup
-                .iter()
-                .all(|(label, markup)| self.ir.label_markup.get(label) == Some(markup))
-            && self
-                .ir
-                .label_markup
-                .keys()
-                .filter(|label| label.0 < source.ir.labels.len())
-                .all(|label| source.ir.label_markup.contains_key(label))
+    pub(crate) fn reusable_prefix_unchanged(&self, _source: &Self) -> bool {
+        let unchanged = self
+            .reusable_prefix_guard
+            .is_some_and(|guard| guard.unchanged);
+
+        #[cfg(debug_assertions)]
+        {
+            let exact = self.ir.direction == _source.ir.direction
+                && self.ir.meta == _source.ir.meta
+                && self.ir.style_refs == _source.ir.style_refs
+                && self.ir.style_defs == _source.ir.style_defs
+                && self.ir.nodes.starts_with(&_source.ir.nodes)
+                && self.ir.edges.starts_with(&_source.ir.edges)
+                && self.ir.clusters.starts_with(&_source.ir.clusters)
+                && self.ir.labels.starts_with(&_source.ir.labels)
+                && self.ir.graph.nodes.starts_with(&_source.ir.graph.nodes)
+                && self.ir.graph.edges.starts_with(&_source.ir.graph.edges)
+                && self
+                    .ir
+                    .graph
+                    .clusters
+                    .starts_with(&_source.ir.graph.clusters)
+                && self
+                    .ir
+                    .graph
+                    .subgraphs
+                    .starts_with(&_source.ir.graph.subgraphs)
+                && _source
+                    .ir
+                    .label_markup
+                    .iter()
+                    .all(|(label, markup)| self.ir.label_markup.get(label) == Some(markup))
+                && self
+                    .ir
+                    .label_markup
+                    .keys()
+                    .filter(|label| label.0 < _source.ir.labels.len())
+                    .all(|label| _source.ir.label_markup.contains_key(label));
+            debug_assert_eq!(
+                unchanged, exact,
+                "reusable-prefix mutation tracking drifted"
+            );
+        }
+
+        unchanged
     }
 
     /// Finish building the IR, applying semantic recovery.
@@ -1297,12 +1389,15 @@ impl IrBuilder {
                 None
             };
 
+            let mut existing_node_changed = false;
             if let Some(existing_node) = self.ir.nodes.get_mut(existing_id.0) {
-                if existing_node.label.is_none() {
+                if existing_node.label.is_none() && resolved_label.is_some() {
                     existing_node.label = resolved_label;
+                    existing_node_changed = true;
                 }
                 if existing_node.shape == NodeShape::Rect && shape != NodeShape::Rect {
                     existing_node.shape = shape;
+                    existing_node_changed = true;
                 }
 
                 // `span_all` is write-only dead data (no workspace reader); do not accumulate
@@ -1313,7 +1408,11 @@ impl IrBuilder {
                 if !is_auto_created && existing_node.implicit {
                     existing_node.implicit = false;
                     self.auto_created_nodes.retain(|&id| id != existing_id);
+                    existing_node_changed = true;
                 }
+            }
+            if existing_node_changed {
+                self.mark_reusable_prefix_node_dirty(existing_id);
             }
             return Some(existing_id);
         }
@@ -1390,6 +1489,7 @@ impl IrBuilder {
                 if existing_title.is_none() || graph_title.is_none() {
                     let label = ParsedLabel::plain(title_text);
                     let label_id = self.intern_label(&label, span);
+                    self.mark_reusable_prefix_cluster_dirty(existing_index);
                     if let Some(cluster) = self.ir.clusters.get_mut(existing_index)
                         && cluster.title.is_none()
                     {
@@ -1455,6 +1555,8 @@ impl IrBuilder {
         if already {
             return;
         }
+        self.mark_reusable_prefix_cluster_dirty(cluster_index);
+        self.mark_reusable_prefix_node_dirty(node_id);
         if let Some(cluster) = self.ir.clusters.get_mut(cluster_index) {
             cluster.members.push(node_id);
         }
@@ -1499,6 +1601,7 @@ impl IrBuilder {
                 if existing_title.is_none() {
                     let label = ParsedLabel::plain(title_text);
                     let label_id = self.intern_label(&label, span);
+                    self.mark_reusable_prefix_subgraph_dirty(existing_index);
                     if let Some(subgraph) = self.ir.graph.subgraphs.get_mut(existing_index) {
                         subgraph.title = Some(label_id);
                     }
@@ -1526,15 +1629,17 @@ impl IrBuilder {
             span,
             direction: None,
         });
-        if let Some(parent_index) = parent
-            && let Some(parent_graph) = self.ir.graph.subgraphs.get_mut(parent_index)
-        {
-            parent_graph.children.push(IrSubgraphId(subgraph_index));
+        if let Some(parent_index) = parent {
+            self.mark_reusable_prefix_subgraph_dirty(parent_index);
+            if let Some(parent_graph) = self.ir.graph.subgraphs.get_mut(parent_index) {
+                parent_graph.children.push(IrSubgraphId(subgraph_index));
+            }
         }
-        if let Some(cluster_index) = cluster_index
-            && let Some(graph_cluster) = self.ir.graph.clusters.get_mut(cluster_index)
-        {
-            graph_cluster.subgraph = Some(IrSubgraphId(subgraph_index));
+        if let Some(cluster_index) = cluster_index {
+            self.mark_reusable_prefix_cluster_dirty(cluster_index);
+            if let Some(graph_cluster) = self.ir.graph.clusters.get_mut(cluster_index) {
+                graph_cluster.subgraph = Some(IrSubgraphId(subgraph_index));
+            }
         }
         self.subgraph_index_by_key
             .insert(normalized_lookup_key.to_string(), subgraph_index);
@@ -1556,6 +1661,8 @@ impl IrBuilder {
         if already {
             return;
         }
+        self.mark_reusable_prefix_subgraph_dirty(subgraph_index);
+        self.mark_reusable_prefix_node_dirty(node_id);
         if let Some(subgraph) = self.ir.graph.subgraphs.get_mut(subgraph_index) {
             subgraph.members.push(node_id);
         }
@@ -1566,6 +1673,20 @@ impl IrBuilder {
 
     pub(crate) fn set_cluster_grid_span(&mut self, cluster_index: usize, grid_span: usize) {
         let grid_span = grid_span.max(1);
+        let changes_prefix = self
+            .ir
+            .clusters
+            .get(cluster_index)
+            .is_some_and(|cluster| cluster.grid_span != grid_span)
+            || self
+                .ir
+                .graph
+                .clusters
+                .get(cluster_index)
+                .is_some_and(|cluster| cluster.grid_span != grid_span);
+        if changes_prefix {
+            self.mark_reusable_prefix_cluster_dirty(cluster_index);
+        }
         if let Some(cluster) = self.ir.clusters.get_mut(cluster_index) {
             cluster.grid_span = grid_span;
         }
@@ -1576,6 +1697,15 @@ impl IrBuilder {
 
     pub(crate) fn set_subgraph_grid_span(&mut self, subgraph_index: usize, grid_span: usize) {
         let grid_span = grid_span.max(1);
+        let changes_prefix = self
+            .ir
+            .graph
+            .subgraphs
+            .get(subgraph_index)
+            .is_some_and(|subgraph| subgraph.grid_span != grid_span);
+        if changes_prefix {
+            self.mark_reusable_prefix_subgraph_dirty(subgraph_index);
+        }
         if let Some(subgraph) = self.ir.graph.subgraphs.get_mut(subgraph_index) {
             subgraph.grid_span = grid_span;
         }
@@ -1669,17 +1799,24 @@ impl IrBuilder {
                 None
             };
 
+            let mut existing_node_changed = false;
             if let Some(existing_node) = self.ir.nodes.get_mut(existing_id.0) {
-                if existing_node.label.is_none() {
+                if existing_node.label.is_none() && resolved_label.is_some() {
                     existing_node.label = resolved_label;
+                    existing_node_changed = true;
                 }
                 if existing_node.shape == NodeShape::Rect && shape != NodeShape::Rect {
                     existing_node.shape = shape;
+                    existing_node_changed = true;
                 }
                 if existing_node.implicit {
                     existing_node.implicit = false;
                     self.auto_created_nodes.retain(|&id| id != existing_id);
+                    existing_node_changed = true;
                 }
+            }
+            if existing_node_changed {
+                self.mark_reusable_prefix_node_dirty(existing_id);
             }
             return Some(existing_id);
         }
@@ -1734,14 +1871,17 @@ impl IrBuilder {
             return;
         };
 
-        let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
+        let should_add = self.ir.nodes.get(node_id.0).is_some_and(|node| {
+            !node
+                .classes
+                .iter()
+                .any(|existing| existing == normalized_class)
+        });
+        if !should_add {
             return;
-        };
-        if !node
-            .classes
-            .iter()
-            .any(|existing| existing == normalized_class)
-        {
+        }
+        self.mark_reusable_prefix_node_dirty(node_id);
+        if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
             node.classes.push(normalized_class.to_string());
         }
     }
@@ -1752,14 +1892,17 @@ impl IrBuilder {
             return;
         }
 
-        let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
+        let should_add = self.ir.nodes.get(node_id.0).is_some_and(|node| {
+            !node
+                .classes
+                .iter()
+                .any(|existing| existing == normalized_class)
+        });
+        if !should_add {
             return;
-        };
-        if !node
-            .classes
-            .iter()
-            .any(|existing| existing == normalized_class)
-        {
+        }
+        self.mark_reusable_prefix_node_dirty(node_id);
+        if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
             node.classes.push(normalized_class.to_string());
         }
     }
@@ -1769,6 +1912,7 @@ impl IrBuilder {
         if icon.is_empty() {
             return;
         }
+        self.mark_reusable_prefix_node_dirty(node_id);
         if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
             node.interaction_mut().icon = Some(icon.to_string());
         }
@@ -1784,6 +1928,7 @@ impl IrBuilder {
             return;
         };
 
+        self.mark_reusable_prefix_node_dirty(node_id);
         if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
             node.interaction_mut().href = Some(target.to_string());
         }
@@ -1799,6 +1944,7 @@ impl IrBuilder {
             return;
         };
 
+        self.mark_reusable_prefix_node_dirty(node_id);
         if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
             node.interaction_mut().callback = Some(callback.to_string());
         }
@@ -1808,6 +1954,7 @@ impl IrBuilder {
         let Some(node_id) = self.intern_node(node_key, None, NodeShape::Rect, span) else {
             return;
         };
+        self.mark_reusable_prefix_node_dirty(node_id);
         if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
             node.interaction_mut().tooltip = Some(tooltip.to_string());
         }
@@ -1837,13 +1984,16 @@ impl IrBuilder {
             label: label.to_string(),
             url: url.to_string(),
         });
+        self.mark_reusable_prefix_node_dirty(node_id);
     }
 
     pub(crate) fn node_mut(&mut self, node_id: IrNodeId) -> Option<&mut fm_core::IrNode> {
+        self.mark_reusable_prefix_node_dirty(node_id);
         self.ir.nodes.get_mut(node_id.0)
     }
 
     pub(crate) fn set_c4_node_meta(&mut self, node_id: IrNodeId, meta: IrC4NodeMeta) {
+        self.mark_reusable_prefix_node_dirty(node_id);
         let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
             return;
         };
@@ -1859,6 +2009,7 @@ impl IrBuilder {
         key: IrAttributeKey,
         comment: Option<&str>,
     ) {
+        self.mark_reusable_prefix_node_dirty(node_id);
         let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
             return;
         };
@@ -1872,6 +2023,7 @@ impl IrBuilder {
     }
 
     pub(crate) fn push_style_ref(&mut self, target: IrStyleTarget, style: String, span: Span) {
+        self.mark_reusable_prefix_dirty();
         self.ir.style_refs.push(IrStyleRef {
             target,
             style,
@@ -1911,6 +2063,9 @@ impl IrBuilder {
 
     /// Set the ER cardinality notation on the last-pushed edge.
     pub(crate) fn set_last_edge_er_notation(&mut self, notation: &str) {
+        if let Some(edge_index) = self.ir.edges.len().checked_sub(1) {
+            self.mark_reusable_prefix_edge_dirty(edge_index);
+        }
         if let Some(edge) = self.ir.edges.last_mut() {
             edge.extras_mut().er_notation = Some(Box::from(notation));
         }
@@ -1918,6 +2073,9 @@ impl IrBuilder {
 
     /// Set cardinality labels on the most recently pushed edge.
     pub(crate) fn set_last_edge_cardinality(&mut self, source: Option<&str>, target: Option<&str>) {
+        if let Some(edge_index) = self.ir.edges.len().checked_sub(1) {
+            self.mark_reusable_prefix_edge_dirty(edge_index);
+        }
         if let Some(edge) = self.ir.edges.last_mut() {
             if let Some(s) = source {
                 edge.extras_mut().source_cardinality = Some(Box::from(s));

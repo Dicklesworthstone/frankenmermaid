@@ -1498,3 +1498,48 @@ instructions** and **6.35% fewer cycles** (`1.0671x` and `1.0678x` ratios).
 - **Retry predicate.** Re-run only if certified-prefix equality, prefix-group identity, builder
   index layout, shared-prefix corpus, worker ownership, executing ELF, or equivalence contract
   changes.
+
+## KEEP: write-time certification for shared-prefix batch parsing (2026-08-01)
+
+**Bead:** `bd-b4vy`. **Lane:** cod (`BlackThrush`).
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `daf58f9bdc59d420aa2f347f5b811cbba98a263738bce3a725519143c0e0ce3a`
+**A/A null control (same invocation):** all nine alternating prior/candidate processes ran their
+own nine-pair Rust null control. The medians across those process-level null medians were
+`1.002449` for the prior ELF and `1.000770` for the candidate; counted work, exact output identity,
+and semantic equivalence were the acceptance evidence rather than short-run timing noise.
+**Counted mechanism:** seven same-host `perf stat` repetitions over the exact 384-diagram,
+64-worker whole job measured 241,871,471,531 instructions and 180,111,253,488 cycles for the prior
+ELF, versus 228,500,216,746 instructions and 166,270,868,641 cycles for the candidate: **5.53% fewer
+instructions** and **7.68% fewer cycles** (`1.0585x` and `1.0832x` ratios).
+
+- **Mechanism.** The parser arms a compact guard when it begins a suffix parse and marks it at the
+  existing flowchart mutation sites whenever that suffix changes a cached node, edge, cluster,
+  subgraph, style, or diagram setting. An unchanged guard certifies the O(delta) builder restore
+  without rereading every cached IR vector. Debug builds still execute the former full equality
+  walk and assert that its answer matches the write-time certificate, preserving an exhaustive
+  development oracle while removing the production `memcmp` and `starts_with` passes.
+- **Whole-job result.** Nine alternating prior/candidate process pairs on `thinkstation1`, pinned
+  to CPUs 0-63 and self-reporting 64/64 workers, measured prior median **931,500 ns** and candidate
+  median **887,261 ns**: **1.049860x**. Both ELFs emitted aggregate SVG SHA-256
+  `6410d31e4b9b9e96053fe237b7f45bc13eb50a80badb35dff06fa7d09f24a6ab`.
+- **Live-incumbent corroboration.** The exact candidate ELF and pinned live mermaid-js 11.15.0 ran
+  together over all 384 diagrams: the scalar Rust observation was **10.518 ms**, mermaid-js was
+  **52,032.8 ms**, and structural verification passed **384/384** with zero divergent and zero
+  unverified. This equivalence invocation has no incumbent null arm, so it supports no competitive
+  ratio and this row remains maintenance-only. Artifact SHA-256
+  `3da3a849c5ab1543ab60bcd7120e94857091457dce81406b6f0fd7e90254f761`.
+- **Evidence.** Interleaved prior/candidate JSONL SHA-256
+  `88db39094a548107a1037ac23a48203fc68db86a682626f60ea3626e7d12199c` /
+  `29d059a8bc5e27f0103cc38058413d412e3cd6695310ac1a7e6dcca9b8eb7335`; counted prior/candidate
+  CSV SHA-256 `56d3882914ca7653d3d932c2cf38f4075c59435297a4a19671fc670ec50bb8be` /
+  `5367256f686a464d2e3f7b29da86ec75c99dc446941bb4890c561e99db19ea55`.
+- **Validation.** Strict-RCH workspace check and clippy passed; focused shared-prefix tests cover
+  direction, class, interaction, subgraph, and ordinary append paths while the full equality walk
+  remains a debug oracle. The full workspace suite reached only the known stale
+  `dense_flowchart_stress` FNV mismatch (`a8dd16e93853d93d` observed versus
+  `3c237445531e5ff4` checked in) after the changed parser and preceding suites passed. Formatting,
+  exact-output identity, counted work, and live structural equivalence passed.
+- **Retry predicate.** Re-run only if flowchart lowering gains a new prefix mutation site, the
+  reusable-prefix guard contract changes, shared-prefix corpus, worker ownership, executing ELF,
+  or equivalence contract changes.
