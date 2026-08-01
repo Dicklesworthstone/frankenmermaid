@@ -48,11 +48,12 @@ use fm_core::{
     mermaid_node_element_id_with_variant,
 };
 use fm_layout::{
-    CentralityTier, DiagramLayout, FillStyle, LayoutBand, LayoutBandKind, LayoutEdgePath,
-    LayoutNodeBox, LineCap as RenderLineCap, LineJoin as RenderLineJoin, MarkerKind, PathCmd,
-    RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene, RenderSource, RenderText,
-    RenderTransform, StrokeStyle, TextAlign as RenderTextAlign, TextBaseline as RenderTextBaseline,
-    build_render_scene,
+    CentralityTier, DiagramLayout, DirectedPathLayoutPrefix, FillStyle, LayoutBand, LayoutBandKind,
+    LayoutEdgePath, LayoutNodeBox, LineCap as RenderLineCap, LineJoin as RenderLineJoin,
+    MarkerKind, PathCmd, RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene,
+    RenderSource, RenderText, RenderTransform, StrokeStyle, TextAlign as RenderTextAlign,
+    TextBaseline as RenderTextBaseline, build_render_scene, certify_directed_path_layout_prefix,
+    try_relayout_directed_path_suffix,
 };
 
 /// Node fill gradient mode.
@@ -320,6 +321,7 @@ struct SvgBatchSnapshot {
     config: SvgRenderConfig,
     fragments: SvgBatchFragments,
     certified_prefix: Option<CertifiedSvgBatchPrefix>,
+    layout_prefix: Option<DirectedPathLayoutPrefix>,
 }
 
 /// Parser-certified immutable IR prefix for allocation-reusing batch rendering.
@@ -377,6 +379,7 @@ impl SvgBatchRenderer {
                 previous_certified_prefix: reusable_snapshot
                     .and_then(|snapshot| snapshot.certified_prefix.as_ref()),
                 current_certified_prefix: None,
+                certified_geometry_prefix: false,
                 next: &mut next_fragments,
             };
             render_svg_with_layout_impl_reusing(&ir, &layout, config, true, Some(&mut reuse))
@@ -392,6 +395,7 @@ impl SvgBatchRenderer {
             config: stored_config,
             fragments: next_fragments,
             certified_prefix: None,
+            layout_prefix: None,
         });
         svg
     }
@@ -423,6 +427,7 @@ impl SvgBatchRenderer {
                 previous_certified_prefix: reusable_snapshot
                     .and_then(|snapshot| snapshot.certified_prefix.as_ref()),
                 current_certified_prefix: certified_prefix.as_ref(),
+                certified_geometry_prefix: false,
                 next: &mut next_fragments,
             };
             render_svg_with_layout_impl_reusing(ir, &layout, config, true, Some(&mut reuse))
@@ -438,6 +443,96 @@ impl SvgBatchRenderer {
             config: stored_config,
             fragments: next_fragments,
             certified_prefix,
+            layout_prefix: None,
+        });
+        svg
+    }
+
+    /// Lay out and render a borrowed diagram while transplanting a certified LR path prefix.
+    ///
+    /// The first diagram uses the ordinary auto-layout pipeline and records an opaque geometry
+    /// proof. Later diagrams with the same parser certificate mutate the uniquely-owned prior
+    /// layout in place: prefix node boxes, edge paths, and their allocations stay untouched while
+    /// only the appended suffix is sized and routed. Every unsupported shape or ownership state
+    /// falls back to [`fm_layout::layout_diagram_traced`] before rendering.
+    #[must_use]
+    pub fn layout_and_render_borrowed(
+        &mut self,
+        ir: &MermaidDiagramIr,
+        config: &SvgRenderConfig,
+        certified_prefix: Option<CertifiedSvgBatchPrefix>,
+    ) -> String {
+        let mut previous = self.previous.take();
+        let mut certified_geometry_prefix = false;
+        let mut next_layout_prefix = None;
+
+        let reused_layout = previous.as_mut().and_then(|snapshot| {
+            let previous_prefix = snapshot.certified_prefix.as_ref()?;
+            let current_prefix = certified_prefix.as_ref()?;
+            let same_identity = Arc::ptr_eq(&previous_prefix.identity, &current_prefix.identity)
+                || previous_prefix.identity == current_prefix.identity;
+            if !same_identity
+                || previous_prefix.node_count != current_prefix.node_count
+                || previous_prefix.edge_count != current_prefix.edge_count
+                || Arc::strong_count(&snapshot.layout) != 1
+            {
+                return None;
+            }
+            let layout_prefix = snapshot.layout_prefix.as_ref()?;
+            if !try_relayout_directed_path_suffix(
+                ir,
+                Arc::make_mut(&mut snapshot.layout),
+                layout_prefix,
+            ) {
+                return None;
+            }
+            certified_geometry_prefix = true;
+            next_layout_prefix = Some(layout_prefix.clone());
+            Some(Arc::clone(&snapshot.layout))
+        });
+
+        let layout = reused_layout.unwrap_or_else(|| fm_layout::layout_diagram_traced(ir).layout);
+        if next_layout_prefix.is_none()
+            && let Some(prefix) = certified_prefix.as_ref()
+        {
+            next_layout_prefix = certify_directed_path_layout_prefix(
+                ir,
+                &layout,
+                prefix.node_count,
+                prefix.edge_count,
+            );
+        }
+
+        let same_config = previous
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.config == *config);
+        let mut next_fragments = SvgBatchFragments::default();
+        let reusable_snapshot = same_config.then_some(previous.as_ref()).flatten();
+        let svg = {
+            let mut reuse = SvgBatchFragmentReuse {
+                previous_ir: reusable_snapshot.and_then(|snapshot| snapshot.ir.as_deref()),
+                previous_layout: reusable_snapshot.map(|snapshot| snapshot.layout.as_ref()),
+                previous: reusable_snapshot.map(|snapshot| &snapshot.fragments),
+                previous_certified_prefix: reusable_snapshot
+                    .and_then(|snapshot| snapshot.certified_prefix.as_ref()),
+                current_certified_prefix: certified_prefix.as_ref(),
+                certified_geometry_prefix,
+                next: &mut next_fragments,
+            };
+            render_svg_with_layout_impl_reusing(ir, &layout, config, true, Some(&mut reuse))
+        };
+        let stored_config = if same_config {
+            previous.expect("same config requires snapshot").config
+        } else {
+            config.clone()
+        };
+        self.previous = Some(SvgBatchSnapshot {
+            ir: None,
+            layout,
+            config: stored_config,
+            fragments: next_fragments,
+            certified_prefix,
+            layout_prefix: next_layout_prefix,
         });
         svg
     }
@@ -449,6 +544,7 @@ struct SvgBatchFragmentReuse<'a> {
     previous: Option<&'a SvgBatchFragments>,
     previous_certified_prefix: Option<&'a CertifiedSvgBatchPrefix>,
     current_certified_prefix: Option<&'a CertifiedSvgBatchPrefix>,
+    certified_geometry_prefix: bool,
     next: &'a mut SvgBatchFragments,
 }
 
@@ -3067,6 +3163,9 @@ fn reusable_node_prefix_len(
     offset_y: f32,
 ) -> usize {
     if let Some(prefix) = certified_batch_prefix_match(reuse, layout, detail, offset_x, offset_y) {
+        if reuse.certified_geometry_prefix {
+            return prefix.node_count.min(layout.nodes.len());
+        }
         let previous_layout = reuse.previous_layout.expect("certified previous layout");
         return previous_layout
             .nodes
@@ -3109,6 +3208,9 @@ fn reusable_edge_prefix_len(
     offset_y: f32,
 ) -> usize {
     if let Some(prefix) = certified_batch_prefix_match(reuse, layout, detail, offset_x, offset_y) {
+        if reuse.certified_geometry_prefix {
+            return prefix.edge_count.min(layout.edges.len());
+        }
         let previous_layout = reuse.previous_layout.expect("certified previous layout");
         return previous_layout
             .edges
@@ -12082,6 +12184,85 @@ mod tests {
         assert!(snapshot.ir.is_none());
         assert!(snapshot.fragments.reused_nodes >= 3);
         assert!(snapshot.fragments.reused_edges >= 2);
+    }
+
+    #[test]
+    fn borrowed_batch_renderer_transplants_certified_path_geometry() {
+        let make_input = |tail_labels: &[&str]| {
+            let mut input =
+                String::from("flowchart LR\n  subgraph Shared[\"Shared ingestion platform\"]\n");
+            for index in 0..48 {
+                input.push_str(&format!("    S{index}[\"Shared platform node {index}\"]\n"));
+            }
+            for index in 0..47 {
+                input.push_str(&format!("    S{index}-->S{}\n", index + 1));
+            }
+            input.push_str("  end\n");
+            for (index, label) in tail_labels.iter().enumerate() {
+                input.push_str(&format!("  D{index}[\"{label}\"]\n"));
+            }
+            input.push_str("  S47-->D0\n");
+            for index in 0..tail_labels.len() - 1 {
+                input.push_str(&format!("  D{index}-->D{}\n", index + 1));
+            }
+            input
+        };
+        let owned_inputs = [
+            make_input(&[
+                "Scheduler",
+                "Cache",
+                "Client",
+                "Queue",
+                "API",
+                "Store",
+                "Worker",
+            ]),
+            make_input(&[
+                "Scheduler",
+                "Rollback on failure 545",
+                "Scheduler",
+                "Message Queue",
+                "Read Replica",
+                "Normalize payload",
+                "Client",
+                "Scheduler",
+                "Parse config 552",
+                "Normalize payload 553",
+                "Session Store",
+            ]),
+        ];
+        let inputs = owned_inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan = fm_parser::FlowchartBatchParsePlan::new(
+            &inputs,
+            fm_core::MermaidParseMode::Compat,
+            &fm_parser::ParserConfig::default(),
+        );
+        let config = SvgRenderConfig::default();
+        let mut scratch = fm_parser::FlowchartBatchParseScratch::default();
+        let mut renderer = SvgBatchRenderer::default();
+
+        for (index, input) in inputs.iter().enumerate() {
+            plan.with_parse_scratch(index, input, &mut scratch, |parsed| {
+                let prefix = parsed.reusable_prefix.expect("certified prefix");
+                let expected_layout = fm_layout::layout_diagram_traced(parsed.ir).layout;
+                let expected = render_svg_with_layout(parsed.ir, &expected_layout, &config);
+                let actual = renderer.layout_and_render_borrowed(
+                    parsed.ir,
+                    &config,
+                    Some(CertifiedSvgBatchPrefix::new(
+                        Arc::clone(&prefix.identity),
+                        prefix.node_count,
+                        prefix.edge_count,
+                    )),
+                );
+                assert_eq!(actual, expected);
+            });
+        }
+
+        let snapshot = renderer.previous.as_ref().expect("batch snapshot");
+        assert!(snapshot.layout_prefix.is_some());
+        assert!(snapshot.fragments.reused_nodes >= 48);
+        assert!(snapshot.fragments.reused_edges >= 47);
     }
 
     /// The full-node fast path must render byte-identical to the `Element` slow path it replaces.

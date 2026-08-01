@@ -2051,6 +2051,19 @@ pub struct TracedLayout {
     pub trace: LayoutTrace,
 }
 
+/// Opaque proof that a leading IR/layout slice is the stable prefix of an LR directed path.
+///
+/// Batch callers keep this beside the layout that produced it. A parser-certified unchanged IR
+/// prefix plus this geometry proof lets [`try_relayout_directed_path_suffix`] replace only the
+/// appended path tail, without rescanning or reallocating the shared prefix.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DirectedPathLayoutPrefix {
+    node_count: usize,
+    edge_count: usize,
+    max_node_height: f32,
+    depth_cursor: f32,
+}
+
 /// Target-agnostic render scene produced from diagram IR + layout geometry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderScene {
@@ -4957,6 +4970,230 @@ fn layout_directed_path_tree_traced(
         }),
         trace,
     }
+}
+
+/// Certify that a parser-provided leading slice has suffix-independent geometry in an LR path.
+///
+/// Certification is intentionally narrow. LR paths grow to the right, so an appended node cannot
+/// move an earlier rank; requiring the suffix node heights not to exceed the prefix maximum also
+/// proves that vertical normalization is unchanged. Other directions and non-sequential path IRs
+/// fall back to the ordinary layout pipeline.
+#[must_use]
+pub fn certify_directed_path_layout_prefix(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    node_count: usize,
+    edge_count: usize,
+) -> Option<DirectedPathLayoutPrefix> {
+    if ir.direction != GraphDirection::LR
+        || node_count == 0
+        || edge_count.checked_add(1) != Some(node_count)
+        || ir.edges.len().checked_add(1) != Some(ir.nodes.len())
+        || layout.nodes.len() != ir.nodes.len()
+        || layout.edges.len() != ir.edges.len()
+        || node_count > layout.nodes.len()
+        || edge_count > layout.edges.len()
+    {
+        return None;
+    }
+
+    let path_order = directed_path_order(ir)?;
+    if !path_order
+        .iter()
+        .enumerate()
+        .all(|(logical_depth, &node_index)| logical_depth == node_index)
+        || !ir.edges.iter().enumerate().all(|(edge_index, edge)| {
+            endpoint_node_index(ir, edge.from) == Some(edge_index)
+                && endpoint_node_index(ir, edge.to) == Some(edge_index + 1)
+        })
+        || !layout.nodes.iter().enumerate().all(|(node_index, node)| {
+            node.node_index == node_index && node.rank == node_index && node.order == 0
+        })
+        || !layout
+            .edges
+            .iter()
+            .enumerate()
+            .all(|(edge_index, edge)| edge.edge_index == edge_index)
+    {
+        return None;
+    }
+
+    let max_node_height = layout.nodes[..node_count]
+        .iter()
+        .map(|node| node.bounds.height)
+        .fold(0.0_f32, f32::max);
+    let rank_spacing = LayoutSpacing::default().rank_spacing;
+    let depth_cursor = layout.nodes[..node_count]
+        .iter()
+        .fold(0.0_f32, |cursor, node| {
+            cursor + (node.bounds.width.max(1.0) + rank_spacing)
+        });
+    if !max_node_height.is_finite()
+        || max_node_height <= 0.0
+        || !depth_cursor.is_finite()
+        || layout.nodes[node_count..]
+            .iter()
+            .any(|node| node.bounds.height > max_node_height)
+    {
+        return None;
+    }
+
+    // A sequential IR path can still have reached us through another layout algorithm. Prove
+    // that this is specifically the tree path specialization before preserving its arithmetic
+    // cursor: suffix transplantation must reproduce the exact floating-point operation order,
+    // not merely an algebraically equivalent geometry.
+    let center_y = (max_node_height / 2.0) + 20.0;
+    let mut cursor = 0.0_f32;
+    for node in &layout.nodes {
+        let width = node.bounds.width;
+        let height = node.bounds.height;
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        let center_x = (cursor + (width.max(1.0) / 2.0)) + 20.0;
+        let expected_x = center_x - (width / 2.0);
+        let expected_y = center_y - (height / 2.0);
+        if expected_x.to_bits() != node.bounds.x.to_bits()
+            || expected_y.to_bits() != node.bounds.y.to_bits()
+        {
+            return None;
+        }
+        cursor += width.max(1.0) + rank_spacing;
+    }
+
+    Some(DirectedPathLayoutPrefix {
+        node_count,
+        edge_count,
+        max_node_height,
+        depth_cursor,
+    })
+}
+
+/// Replace only the appended tail of a previously certified LR directed-path layout.
+///
+/// The caller must pair `prefix` with the exact unchanged IR prefix that produced `layout` (for
+/// example, a pointer-stable parser batch certificate). Every fallible check runs before mutation,
+/// so `false` leaves the supplied layout untouched and the caller can safely use a full fallback.
+pub fn try_relayout_directed_path_suffix(
+    ir: &MermaidDiagramIr,
+    layout: &mut DiagramLayout,
+    prefix: &DirectedPathLayoutPrefix,
+) -> bool {
+    let suffix_node_count = ir.nodes.len().saturating_sub(prefix.node_count);
+    if ir.direction != GraphDirection::LR
+        || prefix.node_count == 0
+        || prefix.edge_count.checked_add(1) != Some(prefix.node_count)
+        || prefix.node_count > ir.nodes.len()
+        || prefix.edge_count > ir.edges.len()
+        || prefix.node_count > layout.nodes.len()
+        || prefix.edge_count > layout.edges.len()
+        || ir.edges.len().checked_add(1) != Some(ir.nodes.len())
+        || ir.edges.len().saturating_sub(prefix.edge_count) != suffix_node_count
+    {
+        return false;
+    }
+
+    for (suffix_offset, edge) in ir.edges[prefix.edge_count..].iter().enumerate() {
+        let target = prefix.node_count + suffix_offset;
+        let source = target.saturating_sub(1);
+        if endpoint_node_index(ir, edge.from) != Some(source)
+            || endpoint_node_index(ir, edge.to) != Some(target)
+        {
+            return false;
+        }
+    }
+
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let suffix_sizes = ir.nodes[prefix.node_count..]
+        .iter()
+        .map(|node| compute_node_size(ir, node, &metrics))
+        .collect::<Vec<_>>();
+    if suffix_sizes
+        .iter()
+        .any(|&(_, height)| height > prefix.max_node_height)
+    {
+        return false;
+    }
+
+    let spacing = LayoutSpacing::default();
+    let center_y = (prefix.max_node_height / 2.0) + 20.0;
+    let mut depth_cursor = prefix.depth_cursor;
+
+    layout.nodes.truncate(prefix.node_count);
+    layout.nodes.reserve(suffix_node_count);
+    for (suffix_offset, (&(width, height), node)) in suffix_sizes
+        .iter()
+        .zip(&ir.nodes[prefix.node_count..])
+        .enumerate()
+    {
+        let node_index = prefix.node_count + suffix_offset;
+        // Preserve the full path layout's exact floating-point operation order. Reconstructing
+        // `x` from the preceding rendered box is algebraically equivalent but can differ by one
+        // hundredth after SVG formatting because it changes rounding associativity.
+        let center_x = depth_cursor + (width.max(1.0) / 2.0) + 20.0;
+        let x = center_x - (width / 2.0);
+        layout.nodes.push(LayoutNodeBox {
+            node_index,
+            node_id: node.id.clone(),
+            rank: node_index,
+            order: 0,
+            span: node.span_primary,
+            bounds: LayoutRect {
+                x,
+                y: center_y - (height / 2.0),
+                width,
+                height,
+            },
+        });
+        depth_cursor += width.max(1.0) + spacing.rank_spacing;
+    }
+
+    layout.edges.truncate(prefix.edge_count);
+    layout.edges.reserve(suffix_node_count);
+    for (edge_index, edge) in ir.edges.iter().enumerate().skip(prefix.edge_count) {
+        let source = edge_index;
+        let target = edge_index + 1;
+        let Some((source_box, target_box)) = layout.nodes.get(source).zip(layout.nodes.get(target))
+        else {
+            return false;
+        };
+        let (source_anchor, target_anchor) = edge_anchors(source_box, target_box, true);
+        let points =
+            route_edge_points_with_obstacle_index(source_anchor, target_anchor, true, &[], None);
+        layout.edges.push(LayoutEdgePath {
+            edge_index,
+            span: edge.span,
+            points,
+            reversed: false,
+            is_self_loop: false,
+            parallel_offset: 0.0,
+            bundle_count: 1,
+            bundled: false,
+        });
+    }
+
+    layout.clusters = build_cluster_boxes(ir, &layout.nodes, spacing);
+    layout.bounds = compute_bounds(&layout.nodes, &layout.clusters, &layout.edges, spacing);
+    let (total_edge_length, reversed_edge_total_length) =
+        compute_edge_length_metrics(&layout.edges);
+    let phase_iterations = layout.stats.phase_iterations;
+    layout.stats = LayoutStats {
+        node_count: ir.nodes.len(),
+        edge_count: ir.edges.len(),
+        crossing_count: 0,
+        crossing_count_before_refinement: 0,
+        reversed_edges: 0,
+        cycle_count: 0,
+        cycle_node_count: 0,
+        max_cycle_size: 0,
+        collapsed_clusters: 0,
+        reversed_edge_total_length,
+        total_edge_length,
+        phase_iterations,
+    };
+    layout.cycle_clusters.clear();
+    layout.dirty_regions.clear();
+    true
 }
 
 /// Lay out a diagram using a deterministic radial tree variant.
@@ -14899,14 +15136,15 @@ mod tests {
         CachedNodeSize, ConstraintSolverMode, CycleStrategy, DependencyGraph, DiagramLayout,
         DirtySet, EdgeRouting, GraphMetrics, IncrementalLayoutEngine, IncrementalLayoutSession,
         LayoutAlgorithm, LayoutConfig, LayoutDependencyGraph, LayoutEdit, LayoutGuardrails,
-        LayoutNodeBox, LayoutPoint, LayoutRect, LayoutSequenceLifecycleMarkerKind,
+        LayoutNodeBox, LayoutPoint, LayoutRect, LayoutSequenceLifecycleMarkerKind, LayoutSpacing,
         ObstacleSpatialIndex, RegionInput, RegionMemoryBudget, RenderClip, RenderItem,
         RenderSource, SubgraphRegion, SubgraphRegionId, SubgraphRegionKind, TracedLayout,
         build_directed_path_edge_paths, build_edge_paths, build_layout_decision_ledger,
-        build_layout_guard_report, build_render_scene, dispatch_layout_algorithm,
-        estimate_layout_cost, evaluate_layout_guardrails, find_obstacle_nudge_x,
-        find_obstacle_nudge_y, incremental_overlap_alignment, is_directed_path, layout,
-        layout_diagram, layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
+        build_layout_guard_report, build_render_scene, certify_directed_path_layout_prefix,
+        compute_node_size, dispatch_layout_algorithm, estimate_layout_cost,
+        evaluate_layout_guardrails, find_obstacle_nudge_x, find_obstacle_nudge_y,
+        incremental_overlap_alignment, is_directed_path, layout, layout_diagram,
+        layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
         layout_diagram_grid, layout_diagram_incremental_traced_with_config_and_guardrails,
         layout_diagram_radial, layout_diagram_sankey, layout_diagram_sequence,
         layout_diagram_sequence_traced, layout_diagram_timeline, layout_diagram_traced,
@@ -14914,6 +15152,7 @@ mod tests {
         layout_diagram_traced_with_config_and_guardrails, layout_diagram_tree,
         layout_diagram_with_config, layout_diagram_with_cycle_strategy, layout_diagram_xychart,
         layout_source_map, route_edge_points, route_edge_points_with_obstacles,
+        try_relayout_directed_path_suffix,
     };
     use fm_core::{
         ArrowType, DiagramType, GanttDate, GanttExclude, GraphDirection, IrCluster, IrClusterId,
@@ -20679,6 +20918,127 @@ mod tests {
         let cycle = graph_ir(DiagramType::Flowchart, 3, &[(0, 1), (1, 2), (2, 0)]);
         assert!(!is_directed_path(&branch));
         assert!(!is_directed_path(&cycle));
+    }
+
+    #[test]
+    fn certified_lr_path_prefix_relayout_matches_full_pipeline() {
+        const LABELS: [&str; 59] = [
+            "User",
+            "Object Store",
+            "Database 2",
+            "Café latency 3",
+            "Message Queue",
+            "Retry & backoff 5",
+            "Validate input",
+            "Überprüfung",
+            "Résumé job",
+            "API Gateway",
+            "Résumé job 10",
+            "Load Balancer",
+            "Message Queue",
+            "Validate input",
+            "API Gateway",
+            "API Gateway 15",
+            "Ingestion",
+            "Session Store 17",
+            "Read Replica",
+            "Database",
+            "Validate input 20",
+            "Diff & merge",
+            "Check permissions",
+            "Check permissions 23",
+            "Load Balancer 24",
+            "User's session",
+            "Persist record",
+            "Überprüfung",
+            "Cache",
+            "Scheduler",
+            "Database",
+            "Read Replica",
+            "Parse <config> 32",
+            "Aggregate results",
+            "Validate input",
+            "naïve retry 35",
+            "Message Queue 36",
+            "User",
+            "Read Replica",
+            "Parse <config>",
+            "CDN",
+            "Fan out",
+            "Fan out 42",
+            "Emit audit event 43",
+            "Cache",
+            "User",
+            "Aggregate results 46",
+            "Session Store",
+            "Scheduler",
+            "Rollback on failure 545",
+            "Scheduler",
+            "Message Queue",
+            "Read Replica",
+            "Normalize payload",
+            "Client",
+            "Scheduler",
+            "Parse <config> 552",
+            "Normalize payload 553",
+            "Session Store",
+        ];
+        let make_path = |node_count: usize| {
+            let edges = (0..node_count.saturating_sub(1))
+                .map(|index| (index, index + 1))
+                .collect::<Vec<_>>();
+            let mut ir = graph_ir(DiagramType::Flowchart, node_count, &edges);
+            ir.direction = GraphDirection::LR;
+            for (node_index, label) in LABELS.iter().take(node_count).enumerate() {
+                let label_index = ir.labels.len();
+                ir.labels.push(IrLabel {
+                    text: (*label).to_owned(),
+                    ..IrLabel::default()
+                });
+                ir.nodes[node_index].label = Some(IrLabelId(label_index));
+            }
+            ir
+        };
+
+        let base = make_path(55);
+        let mut cached = Arc::unwrap_or_clone(layout_diagram_traced(&base).layout);
+        let prefix = certify_directed_path_layout_prefix(&base, &cached, 48, 47)
+            .expect("sequential LR prefix should certify");
+
+        let next = make_path(59);
+        assert!(try_relayout_directed_path_suffix(
+            &next,
+            &mut cached,
+            &prefix
+        ));
+        let expected = layout_diagram_traced(&next).layout;
+        assert_eq!(cached, *expected);
+
+        // Algebraically rebuilding each suffix position from the previous rendered box changes
+        // floating-point associativity. This fixture is long and width-varied enough to prove the
+        // tempting shortcut diverges, so the cursor-preserving implementation cannot regress.
+        let spacing = LayoutSpacing::default();
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let mut right = expected.nodes[47].bounds.x + expected.nodes[47].bounds.width;
+        let mut rounded_differently = false;
+        for (node, expected_node) in next.nodes[48..].iter().zip(&expected.nodes[48..]) {
+            let (width, _) = compute_node_size(&next, node, &metrics);
+            let reconstructed_x = right + spacing.rank_spacing;
+            rounded_differently |= reconstructed_x.to_bits() != expected_node.bounds.x.to_bits();
+            right = reconstructed_x + width;
+        }
+        assert!(rounded_differently, "fixture must exercise cursor rounding");
+
+        let before_fallback = cached.clone();
+        let mut branch = next;
+        branch.edges[52].from = IrEndpoint::Node(IrNodeId(51));
+        branch.direction = GraphDirection::LR;
+        assert!(!try_relayout_directed_path_suffix(
+            &branch,
+            &mut cached,
+            &prefix
+        ));
+        assert_eq!(cached, before_fallback, "failed reuse must not mutate");
     }
 
     #[test]

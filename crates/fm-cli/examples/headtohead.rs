@@ -148,7 +148,6 @@ fn full_pipeline_borrowed_batch(
     cfg: &SvgRenderConfig,
     renderer: &mut SvgBatchRenderer,
 ) -> String {
-    let layout = fm_layout::layout_diagram_traced(parsed.ir).layout;
     let certified_prefix = parsed.reusable_prefix.map(|prefix| {
         CertifiedSvgBatchPrefix::new(
             Arc::clone(&prefix.identity),
@@ -156,7 +155,7 @@ fn full_pipeline_borrowed_batch(
             prefix.edge_count,
         )
     });
-    renderer.render_borrowed(parsed.ir, layout, cfg, certified_prefix)
+    renderer.layout_and_render_borrowed(parsed.ir, cfg, certified_prefix)
 }
 
 #[derive(Debug, PartialEq, Eq)]

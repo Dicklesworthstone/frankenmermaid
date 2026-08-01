@@ -1543,3 +1543,45 @@ instructions** and **7.68% fewer cycles** (`1.0585x` and `1.0832x` ratios).
 - **Retry predicate.** Re-run only if flowchart lowering gains a new prefix mutation site, the
   reusable-prefix guard contract changes, shared-prefix corpus, worker ownership, executing ELF,
   or equivalence contract changes.
+
+## KEEP: prefix-certified directed-path geometry transplant (2026-08-01)
+
+**Bead:** `bd-ctwu`. **Lane:** cod (`BlackThrush`).
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `012b25bdc3a92fc399275a818d4575d48c2a28ebcc76baac6f75e8d02e266863`
+**A/A null control (same invocation):** all nine alternating prior/candidate processes ran their
+own nine-pair Rust null control. The medians across those process-level null medians were
+`1.024142` for the prior ELF and `1.004395` for the candidate; counted work, exact output identity,
+and semantic equivalence were the acceptance evidence rather than short-run timing noise.
+**Counted mechanism:** seven same-host `perf stat` repetitions over the exact 384-diagram,
+64-worker whole job averaged 5,848,631,233 instructions and 4,981,331,389 cycles for the prior
+ELF, versus 4,436,096,369 instructions and 4,180,004,734 cycles for the candidate: **24.15% fewer
+instructions** and **16.09% fewer cycles** (`1.3184x` and `1.1917x` ratios).
+
+- **Mechanism.** When the parser proves that a suffix preserved a closed shared prefix, the
+  worker reuses the uniquely owned prior LR directed-path layout, truncates it to that prefix, and
+  lays out only the appended nodes and edges. The certificate retains the exact tree-layout depth
+  cursor so suffix coordinates preserve the incumbent floating-point operation order bit for bit;
+  diagrams outside the validated specialization take the ordinary full-layout path without
+  mutation.
+- **Whole-job result.** Nine alternating prior/candidate process pairs on `thinkstation1`, pinned
+  to CPUs 0-63 and self-reporting 64/64 workers, measured prior median **959,388 ns** and candidate
+  median **803,433 ns**: **1.194111x** by ratio of medians and **1.230035x** by paired median. Both
+  ELFs emitted aggregate SVG SHA-256
+  `6410d31e4b9b9e96053fe237b7f45bc13eb50a80badb35dff06fa7d09f24a6ab`.
+- **Live-incumbent corroboration.** The exact candidate ELF and live mermaid-js 11.15.0 ran in one
+  whole-job bracket over all 384 diagrams, with 64/64 Rust workers and **384/384** structural
+  equivalence. Its raw observations were 0.999934 ms Rust and 51,309.1 ms mermaid-js, but the
+  Rust-before A/A median was `1.053229` (5.323% from one), so the corrected gate rejected the
+  competitive ratio. This row remains maintenance-only and supports no competitive claim.
+- **Evidence.** Live equivalence artifact SHA-256
+  `9a80e416d1ec84c5cee507f3f530c96fca4f308a215d55a2229085a0415425ae`; same-invocation bracket
+  summary/event SHA-256 `eb11165f9f63496ff0fa49c12360fe5353a6b21d4b6375ac5e3b0807ffdd9fbe` /
+  `b0da47516b5ca3ee6ba7f6e366b25951804f73acae2b97c77dc5467687bd597a`.
+- **Validation.** Strict-RCH workspace check and clippy passed; focused exact-layout and renderer
+  tests cover a real floating-point associativity boundary, exact SVG reuse, and fallback without
+  partial mutation. Formatting, counted work, exact-output identity, and live structural
+  equivalence passed.
+- **Retry predicate.** Re-run only if the parser prefix certificate, directed-path tree arithmetic,
+  layout ownership, shared-prefix corpus, worker placement, executing ELF, or equivalence contract
+  changes.
