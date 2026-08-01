@@ -813,6 +813,66 @@ struct FnxWitness {
     results_hash: String,
 }
 
+/// Worker count for `render-batch` when `--jobs` is not given: **physical** cores, not logical.
+///
+/// `available_parallelism()` reports logical CPUs, so on an SMT machine the default asked for two
+/// workers per physical core. Batch workers are compute-bound and cache-resident -- each one is
+/// parsing, laying out and rendering a whole diagram -- so a pair of SMT siblings shares one core's
+/// L1/L2 and execution units without adding execution resources, and the extra thread costs
+/// scheduling, allocator arenas and cache pressure. Measured on a Threadripper PRO 5975WX
+/// (32 physical / 64 logical), interleaved rounds, whole-job wall clock:
+///
+/// | job | `--jobs 32` | `--jobs 64` | 64 vs 32 |
+/// |---|---:|---:|---|
+/// | `docs_site_200` (200 docs) | 5.20 ms | 6.86 ms | **+34%** (median of 11 rounds; all 11 slower) |
+/// | `ci_docs_2000` (2000 docs) | 26.9 ms | 28.9 ms | **+7%** (median of 7 rounds) |
+///
+/// The whole scaling curve peaks exactly at the physical core count: on `ci_docs_2000` the speedup
+/// over one worker is 6.9x at 8, 12.4x at 16, **17.5x at 32**, then falls back to 14.6x at 64.
+/// Output is byte-identical at every width (verified 1/8/16/32/64 over five corpus jobs), so this
+/// only changes how long the same bytes take to produce.
+///
+/// An explicit `--jobs` is still honoured exactly as given, including values above the physical
+/// core count -- this changes the default only.
+fn default_batch_workers() -> usize {
+    let logical = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    physical_core_count().map_or(logical, |physical| physical.clamp(1, logical))
+}
+
+/// Physical core count from Linux sysfs topology, or `None` when it cannot be determined.
+///
+/// Every logical CPU publishes the sibling set it shares a physical core with, so the number of
+/// distinct sibling sets is the number of physical cores. Read rather than computed from a crate:
+/// this is one directory walk at startup, once per batch. Any unreadable or unexpected topology
+/// yields `None` and the caller keeps the previous `available_parallelism()` behaviour, which is
+/// also what non-Linux targets get.
+fn physical_core_count() -> Option<usize> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let mut sibling_sets = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir("/sys/devices/system/cpu").ok()? {
+        let path = entry.ok()?.path();
+        let is_cpu_dir = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.starts_with("cpu") && name[3..].bytes().all(|b| b.is_ascii_digit())
+            });
+        if !is_cpu_dir {
+            continue;
+        }
+        // `thread_siblings_list` is identical for every sibling of one core, so it doubles as the
+        // core's identity without needing to parse the CPU numbers out of it.
+        let Ok(siblings) = std::fs::read_to_string(path.join("topology/thread_siblings_list"))
+        else {
+            continue;
+        };
+        sibling_sets.insert(siblings.trim().to_string());
+    }
+    (!sibling_sets.is_empty()).then_some(sibling_sets.len())
+}
+
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 fn fnx_results_hash(parts: &[&str]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -903,9 +963,7 @@ impl BatchRenderPlan {
             );
         }
 
-        let requested_workers = jobs.unwrap_or_else(|| {
-            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
-        });
+        let requested_workers = jobs.unwrap_or_else(default_batch_workers);
         if requested_workers == 0 {
             anyhow::bail!("--jobs must be at least 1");
         }
