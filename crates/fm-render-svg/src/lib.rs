@@ -349,14 +349,15 @@ impl SvgBatchRenderer {
         let mut next_fragments = SvgBatchFragments::default();
         let reusable_snapshot =
             same_config.then(|| previous.as_ref().expect("same config requires snapshot"));
-        let mut reuse = SvgBatchFragmentReuse {
-            previous_ir: reusable_snapshot.map(|snapshot| snapshot.ir.as_ref()),
-            previous_layout: reusable_snapshot.map(|snapshot| snapshot.layout.as_ref()),
-            previous: reusable_snapshot.map(|snapshot| &snapshot.fragments),
-            next: &mut next_fragments,
+        let svg = {
+            let mut reuse = SvgBatchFragmentReuse {
+                previous_ir: reusable_snapshot.map(|snapshot| snapshot.ir.as_ref()),
+                previous_layout: reusable_snapshot.map(|snapshot| snapshot.layout.as_ref()),
+                previous: reusable_snapshot.map(|snapshot| &snapshot.fragments),
+                next: &mut next_fragments,
+            };
+            render_svg_with_layout_impl_reusing(&ir, &layout, config, true, Some(&mut reuse))
         };
-        let svg = render_svg_with_layout_impl_reusing(&ir, &layout, config, true, Some(&mut reuse));
-        drop(reuse);
         let stored_config = if same_config {
             previous.expect("same config requires snapshot").config
         } else {
@@ -420,7 +421,7 @@ fn render_svg_with_layout_impl_reusing(
     layout: &DiagramLayout,
     config: &SvgRenderConfig,
     use_post_pass_cache: bool,
-    mut batch_reuse: Option<&mut SvgBatchFragmentReuse<'_>>,
+    batch_reuse: Option<&mut SvgBatchFragmentReuse<'_>>,
 ) -> String {
     let direct_minified_css = matches!(config.backend, SvgBackend::LegacyLayout)
         && config.embed_theme_css
@@ -436,7 +437,7 @@ fn render_svg_with_layout_impl_reusing(
                     live_marker_mask,
                     direct_minified_css,
                     use_post_pass_cache,
-                    batch_reuse.as_deref_mut(),
+                    batch_reuse,
                 ),
                 live_marker_mask,
             )
@@ -3846,7 +3847,7 @@ fn render_layout_to_svg(
     #[cfg(target_arch = "wasm32")]
     let stream_fast_path = no_between_or_after_children;
     if stream_fast_path {
-        if let Some(reuse) = batch_reuse.as_deref_mut()
+        if let Some(reuse) = batch_reuse.as_mut()
             && ir.diagram_type == DiagramType::Flowchart
         {
             reuse.next.detail = Some(detail);
@@ -3855,7 +3856,7 @@ fn render_layout_to_svg(
             reuse.next.active = true;
         }
         return doc.to_string_with_body(layout_svg_capacity_hint(ir, layout), |out| {
-            if let Some(reuse) = batch_reuse.as_deref_mut()
+            if let Some(reuse) = batch_reuse.as_mut()
                 && ir.diagram_type == DiagramType::Flowchart
             {
                 render_edges_with_batch_reuse(out, &layout.edges, &edge_context, layout, reuse);
@@ -3885,7 +3886,7 @@ fn render_layout_to_svg(
                 config,
                 &theme.colors,
             );
-            if let Some(reuse) = batch_reuse.as_deref_mut()
+            if let Some(reuse) = batch_reuse.as_mut()
                 && ir.diagram_type == DiagramType::Flowchart
             {
                 render_nodes_with_batch_reuse(

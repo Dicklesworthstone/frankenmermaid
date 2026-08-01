@@ -2127,8 +2127,10 @@ fn render_source_with_pressure(
     render_parsed_source_with_pressure(
         source,
         parsed,
-        parse_time,
-        total_start,
+        RenderTiming {
+            parse_time,
+            total_start,
+        },
         budget_broker,
         options,
         pressure,
@@ -2141,16 +2143,24 @@ fn render_source_with_pressure(
 /// `render-batch` uses this boundary after its cross-diagram prefix compiler has parsed suffixes in
 /// parallel. Single-diagram rendering still enters through [`render_source_with_pressure`], so its
 /// public behavior and timing metadata are unchanged.
+struct RenderTiming {
+    parse_time: std::time::Duration,
+    total_start: Instant,
+}
+
 fn render_parsed_source_with_pressure(
     source: &str,
     parsed: fm_parser::ParseResult,
-    parse_time: std::time::Duration,
-    total_start: Instant,
+    timing: RenderTiming,
     mut budget_broker: MermaidBudgetLedger,
     options: &RenderCommandOptions<'_>,
     pressure: &MermaidPressureReport,
-    mut batch_renderer: Option<&mut SvgBatchRenderer>,
+    batch_renderer: Option<&mut SvgBatchRenderer>,
 ) -> Result<RenderOutcome> {
+    let RenderTiming {
+        parse_time,
+        total_start,
+    } = timing;
     let fm_parser::ParseResult { ir, warnings, .. } = parsed;
     // The batch renderer retains the previous IR for exact prefix equality. Move only batch IRs
     // behind an Arc; the ordinary single-render path keeps its allocation-free owned value.
@@ -2243,8 +2253,7 @@ fn render_parsed_source_with_pressure(
     };
     let (rendered, actual_width, actual_height) = if options.format == OutputFormat::Svg
         && options.show_back_edges
-        && let (Some(renderer), Some(shared_ir)) =
-            (batch_renderer.as_deref_mut(), shared_ir.as_ref())
+        && let (Some(renderer), Some(shared_ir)) = (batch_renderer, shared_ir.as_ref())
     {
         let mut svg_config = build_svg_render_config(
             &options.svg_base_config,
@@ -2803,8 +2812,10 @@ fn cmd_render_batch(
         let outcome = render_parsed_source_with_pressure(
             source,
             parsed,
-            parse_time,
-            total_start,
+            RenderTiming {
+                parse_time,
+                total_start,
+            },
             budget_broker,
             &options,
             &pressure,

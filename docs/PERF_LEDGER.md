@@ -1341,3 +1341,34 @@ whole-job effect CI excludes 1 and clears twice the largest null radius; `cv_gat
 - **Retry predicate.** Re-run only if the shared-prefix corpus, parser replay semantics, persistent
   pool, equivalence contract, pinned incumbent, executing ELF/compiler profile, thread frontier,
   timer boundary, or corrected median-CI contract changes.
+
+## KEEP: caller-owned exact SVG prefix reuse in batch workers (2026-08-01)
+
+**Bead:** `bd-6t9z`. **Lane:** cod (`BlackThrush`).
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `bddb134cc226880b5cae41d64c6100be13a4656d08e2e15ae9f48bc9548918a7`
+**A/A null control (same invocation):** the short interleaved old/new process run's internal
+old and candidate null medians were approximately `1.0122` and `1.0562`; timing null noise was not
+used for acceptance.
+**Counted mechanism:** seven same-host `perf stat` repetitions over the exact 384-diagram,
+64-worker job measured 11,009,143,333 instructions and 7,731,741,579 cycles for the prior ELF,
+versus 8,022,146,371 instructions and 6,423,478,152 cycles for the candidate: **27.13% fewer
+instructions** and **16.92% fewer cycles** (`1.3723x` and `1.2037x` ratios).
+
+- **Mechanism.** One `SvgBatchRenderer` belongs to each fixed-shard/Rayon worker. It compares the
+  prior IR, layout, and render configuration exactly, copies byte-identical serialized edge/node
+  prefix fragments, and emits only the distinct suffix. There are no hashes, locks, or shared
+  mutable caches, and ordinary single-diagram rendering does not allocate an `Arc`.
+- **Whole-job result.** Nine interleaved old/new process pairs on `thinkstation1`, each pinned to
+  CPUs 0-63 and reporting all 64 workers, measured old median 1,488,221 ns and candidate median
+  1,219,832 ns: **1.2200x**. Both ELFs emitted aggregate SVG SHA-256
+  `6410d31e4b9b9e96053fe237b7f45bc13eb50a80badb35dff06fa7d09f24a6ab`.
+- **Equivalence.** Live mermaid-js 11.15.0 structural verification passed **384/384**, with zero
+  divergent and zero unverified diagrams. Artifact SHA-256
+  `d64c81148a5abc1b378ab7e4b3a7ec87dff60428de3deb327d23612a4a5586bb`.
+- **Live-incumbent corroboration.** A same-invocation scalar bracket measured 24.699 ms Rust versus
+  52,379.100 ms mermaid-js (`2,120.7x`), but the Rust bracket/null gate failed; this row therefore
+  remains maintenance-only and supports no competitive claim. Summary SHA-256
+  `0fa7da717f2d92253395deb5ed8bb330ddb6baa4c077aa7f44d8d11cd4624e7a`.
+- **Retry predicate.** Re-run only if fragment boundaries, exact-prefix equality, the shared-prefix
+  corpus, worker ownership, executing ELF, or equivalence contract changes.
