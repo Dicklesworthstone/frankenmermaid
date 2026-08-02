@@ -3210,3 +3210,65 @@ states, started zero workers, and wrote zero sources or SVGs.
 - **Retry predicate.** Re-measure if the packed framing or positional input-order contract, final
   payload validation/hash path, predecessor certificate admission, fixture, pinned incumbent,
   executing ELF, affinity, or median-CI gate changes.
+
+## CERTIFIED INCUMBENT WIN: terminal packed snapshot elides superseded ingress (2026-08-02)
+
+**Bead:** `bd-o42f`. **Lane:** cod.
+**Campaign result class:** incumbent-win
+**Executing ELF SHA-256 (self-reported by process):** `eca4014eda1dec00fdfa375f7e28737803c936dd2d102d1fe649ef6d8db4f3b1`
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de invocation_id=fm-terminal-packed-snapshot-exact-thinkstation1-1785684344817446157 measured_ratio=499.71612189179484x
+**A/A null control (same invocation):** candidate A/B medians were 19,415,023 / 19,263,752
+ns (ratio `1.007853`), with a 50,000-resample median-ratio 95% CI of
+`[0.994328, 1.030757]`, including one. Live mermaid-js ran 20 null rounds: median
+`1.000110`, bootstrap 95% CI `[0.987824, 1.019984]`, sufficient=true and
+`cv_gate=never`. The cross-engine median-ratio 95% CI was `[484.074370x, 508.208543x]`.
+**Counted mechanism:** across 36 rounds per arm, the length-prefixed packed control accepted 1,152
+complete snapshots carrying 163,093,608 encoded payload bytes and skipped 1,116 superseded
+semantic decodes. Each terminal candidate accepted 36 caller-coalesced snapshots carrying
+5,057,496 encoded payload bytes, with 1,116 upstream-elided snapshots and no outer record headers.
+Every arm executed and replayed 36 exact durable transactions, admitted 2,304 persistent diagram
+hits, reused 2,304 certified source states, started zero workers, wrote zero sources or SVGs, and
+emitted 36 acknowledgments.
+
+- **Profile-first attribution.** In the packed whole-job product profile, the largest coherent
+  unshared chain was kernel page clearing at 7.33%, pipe copy at 3.22%, scheduler wakeup at 3.09%,
+  `memmove` at 2.96%, and audit work at 2.80%. Those costs came from transporting 4.53 MiB of 32
+  revisions even though only the final 141 KiB snapshot was observable. The live incumbent arm
+  receives only the final source set and therefore does not pay this superseded-ingress chain.
+- **The one lever.** `--terminal-packed-snapshot` lets a caller that has already coalesced a
+  completed job send the final positional packed payload directly to EOF, without an outer record
+  length or any superseded frames. The existing bounded reader, UTF-8/length validation,
+  positional source hashing, durable certificate admission, and full miss fallback remain in
+  force. The same-ELF control used the existing 32-record packed stream.
+- **Whole-job self result.** Every sample included process startup, bounded terminal read, UTF-8
+  validation and SHA-256 of all 64 final sources, durable certificate checks, cache commit, and
+  one EOF acknowledgment. The 32-record packed control median was 20,789,003.5 ns versus terminal
+  candidate-A at 19,415,023 ns: **1.070769x**, with bootstrap 95% CI
+  `[1.042901x, 1.098510x]`.
+- **Live incumbent result.** In the same top-level invocation, pinned mermaid-js rendered the
+  identical canonical `ci_shared_subgraph_divergent_64` job in a median **9,702.0 ms** over nine
+  effect samples. The conservative Rust completed-job median was **19.415023 ms**: **499.716122x**
+  with bootstrap 95% CI `[484.074370x, 508.208543x]`. Runtime provenance reported one Chrome
+  150.0.7871.128 page-main execution thread.
+- **Output equivalence.** Candidate A, candidate B, and control produced identical 64-file,
+  3,469,549-byte SVG output trees with aggregate SHA-256
+  `a8502bdcf304ef8db6683a5075c896017bebd6daeabada58725436dccb3077b3`. The shared extractor
+  artifact for input SHA-256
+  `f487b4094bc4020436956d78067c529b80aa0ce8e595fbaa1a193c081fb13e68` proves 64/64 diagrams
+  structurally equivalent to the same pinned mermaid-js bundle with zero divergent or unverified.
+- **Host and validation.** Effect and incumbent phases ran on eight distinct physical cores 10,
+  11, 12, 13, 14, 17, 18, and 20 of x86-64 `thinkstation1` (AMD Ryzen Threadripper PRO 5975WX).
+  Consecutive effect admission samples peaked at 1.98% / 2.94% busy; incumbent admission peaked at
+  4.04% / 2.94%, and the report-only post-run sample was 13.86%. CLI binary tests passed in both
+  targets; clean-overlay remote workspace check and Clippy with warnings denied passed; targeted
+  rustfmt passed. All timed arms self-reported the external ELF hash.
+- **Evidence.** Exact artifact
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/fm-terminal-packed-snapshot-exact-thinkstation1-1785684344817446157.json`
+  (SHA-256 `3b8383b602505c6521ec73091825cf51e96bdf824f1f2534d90dee82fd0dce68`);
+  product profile
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/perf-packed-complete-snapshot-751a390f-product-hires.data`;
+  structural-equivalence artifact
+  `.benchmarks/headtohead/ci-shared-subgraph-divergent-64-equivalence/equivalence-4e990fe6-1785545013442.json`.
+- **Retry predicate.** Re-measure if caller-side coalescing, terminal framing, the packed positional
+  payload contract, bounded read/validation, predecessor certificate admission, fixture, pinned
+  incumbent, executing ELF, affinity, or median-CI gate changes.
