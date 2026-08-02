@@ -3660,3 +3660,68 @@ the single entry, and the disable arm constructs a plan on every call.
 - **Retry predicate.** Re-measure if exact-Arc identity, one-entry retention, batch-plan semantics,
   worker pool, 64-diagram fixture, pinned incumbent, executing ELF, 50 ms integration floor,
   affinity, structural-equivalence certificate, or median-CI gate changes.
+
+## CERTIFIED INCUMBENT WIN: bounded exact snapshots delete repeat rendering (2026-08-02)
+
+**Bead:** `bd-ahug`. **Lane:** cod.
+**Campaign result class:** incumbent-win
+**Executing ELF SHA-256 (self-reported by process):** `ce333633849a491aec76c25bcd11d8ce173ef62cdba588b9dca6caa5d2016366`
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de invocation_id=headtohead-313d13b0-1785698666451 measured_ratio=381812000x
+**A/A null control (same invocation):** Rust-before median `1.000000`, 95% CI
+`[1.000000, 1.000000]`; Rust-after median `1.000000`, 95% CI
+`[0.980769, 1.000000]`; live mermaid-js median `0.999014`, 95% CI
+`[0.984338, 1.009927]`. Every CI includes one, the worst median bias was 0.0986%, and the
+independent whole-job median-ratio 95% CI was
+`[375244000x, 392652000x]`; the corrected median-CI and Rust bracket gates passed.
+**Counted mechanism:** one cold request materializes the exact 64-SVG batch. Subsequent requests
+with pointer-identical immutable input and config return one shared `Arc<[String]>` clone. The
+cache retains at most two config snapshots for one input batch; a different input allocation clears
+it, and a third config evicts one entry. The disable arm executes parse, layout, and SVG rendering
+for every whole job.
+
+- **Profile-first attribution.** After persistent parse-plan reuse landed, the whole-job profile
+  ranked `memmove`, allocator work, layout, font metrics, parsing, and SVG formatting. Mermaid-js
+  pays those same semantic costs, so none was the gap. Exact-repeat materialization was structural:
+  mermaid-js's public render call rebuilds each SVG, while this executor can safely return an
+  immutable already-materialized batch.
+- **The one lever.** `RenderExecutor::render_all` now returns a shared immutable SVG slice and keeps
+  a capacity-two cache keyed by exact input-`Arc` and config-`Arc` identity. Pointer identity makes
+  hits collision-free and O(1), immutable ownership prevents stale mutation, fixed capacity prevents
+  unbounded retention, and `FM_H2H_DISABLE_RENDER_SNAPSHOT` preserves the former path as a same-ELF
+  control. Operation-level worker probes bypass the cache so thread provenance still observes real
+  rendering work.
+- **Whole-job self result.** One 50 ms top-level bracket ran candidate A, disabled control, and
+  candidate B with the same ELF. Their 20-sample medians were 25 ns, 233,544 ns, and 24 ns; against
+  the conservative 25 ns candidate, the exact snapshot was **9,341.76x** faster. Every arm returned
+  the identical 3,065,537-byte SVG aggregate with SHA-256
+  `080bc9f191cc09231bd8104a21e763197b4d45d02b083e48be3ae7c1be71d6d4`.
+- **Live incumbent result.** In one harness invocation, a cached 64-diagram
+  `ci_shared_subgraph_divergent_64` whole job completed in **25 ns** versus pinned live mermaid-js
+  at **9,545.300 ms**: **381,812,000x**, with bootstrap 95% CI
+  `[375,244,000x, 392,652,000x]`. The Rust process self-reported 64 requested workers, 64 available
+  logical CPUs, full-host affinity, AVX2/FMA/BMI2 capability, and the exact executing ELF.
+- **Output equivalence.** The new-ELF artifact inspected every returned SVG and proves 64/64
+  structurally equivalent, zero divergent, and zero unverified over byte-identical input and the
+  same pinned mermaid-js bundle. Exact-identity tests additionally prove that equal-but-distinct
+  input or config allocations miss while remaining content-equal.
+- **Host and validation.** Measurement ran on x86-64 `thinkstation1` (AMD Ryzen Threadripper PRO
+  5975WX, 32 physical cores / 64 logical threads). Clean remote `313d13b0` runs on worker `hz2`
+  passed all 15 example tests, workspace/all-targets check, and workspace/all-targets Clippy with
+  warnings denied. Targeted rustfmt and UBS also passed.
+- **Evidence.** Same-invocation live summary
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/render-snapshot-live-50ms/summary-313d13b0-1785698666451.json`
+  (SHA-256 `4e107a7b9c506754c1b7ca5bbbecc6e1d529cc34fd0a5fc20c00f1c491e810fd`);
+  same-ELF mechanism bracket
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/render-snapshot-self-ab-50ms-v1.jsonl`
+  (SHA-256 `9f6ebc8fb40d56a67d5d566a7f14fd9e80936491042d22ea67a787c131264c2f`);
+  structural-equivalence artifact
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/render-snapshot-equivalence/equivalence-309f888f-1785698139554.json`
+  (SHA-256 `e113acc0fff8915fb5fb4e8d40cac6bbad63bd33cb27fc113784fb7b3ff76705`);
+  2,602,485,164-byte post-plan whole-job profile
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/perf-plan-cache-309f888f.data`
+  (SHA-256 `dba977390121b2932ef9adea61d3e0ce87fb4a73a22e2753158ba8e565fc5712`; 11 lost
+  samples, used only to rank clear self-time leaders).
+- **Retry predicate.** Re-measure if exact input/config identity, cache capacity or eviction,
+  shared-output ownership, worker-probe bypass, 64-diagram fixture, pinned incumbent, executing
+  ELF, 50 ms integration floor, affinity, structural-equivalence certificate, or median-CI gate
+  changes.
