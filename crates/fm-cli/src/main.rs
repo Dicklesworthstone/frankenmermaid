@@ -317,6 +317,12 @@ enum Command {
         #[arg(long)]
         final_source_only: bool,
 
+        /// Emit one aggregate acknowledgment after the final-state stream reaches EOF instead of
+        /// flushing one acknowledgment per transaction. Callers that need only the completed job
+        /// can pipeline every revision without a synchronous process round trip per input line.
+        #[arg(long)]
+        final_ack_only: bool,
+
         /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
         #[arg(long, value_enum, default_value = "auto")]
         fnx_mode: FnxModeArg,
@@ -2433,6 +2439,7 @@ fn main() -> Result<()> {
             final_state_stream,
             final_output_only,
             final_source_only,
+            final_ack_only,
             fnx_mode,
             fnx_projection,
             fnx_fallback,
@@ -2476,6 +2483,12 @@ fn main() -> Result<()> {
             if final_source_only && !final_state_stream {
                 anyhow::bail!("--final-source-only requires --final-state-stream");
             }
+            if final_ack_only && !final_state_stream {
+                anyhow::bail!("--final-ack-only requires --final-state-stream");
+            }
+            if final_ack_only && json {
+                anyhow::bail!("--final-ack-only cannot be combined with --json");
+            }
             if final_state_stream {
                 cmd_render_batch_final_state_transaction_stream(
                     &inputs,
@@ -2486,6 +2499,7 @@ fn main() -> Result<()> {
                     FinalStateStreamMaterialization {
                         outputs_at_eof: final_output_only,
                         sources_at_eof: final_source_only,
+                        acknowledgments_at_eof: final_ack_only,
                     },
                     options,
                 )
@@ -4088,6 +4102,7 @@ fn batch_final_state_payload_limit(inputs: &[String], max_input_bytes: usize) ->
 struct FinalStateStreamMaterialization {
     outputs_at_eof: bool,
     sources_at_eof: bool,
+    acknowledgments_at_eof: bool,
 }
 
 fn cmd_render_batch_final_state_transaction_stream(
@@ -4104,6 +4119,7 @@ fn cmd_render_batch_final_state_transaction_stream(
     let FinalStateStreamMaterialization {
         outputs_at_eof: final_output_only,
         sources_at_eof: final_source_only,
+        acknowledgments_at_eof: final_ack_only,
     } = materialization;
 
     let max_payload_bytes = batch_final_state_payload_limit(inputs, options.max_input_bytes);
@@ -4122,6 +4138,8 @@ fn cmd_render_batch_final_state_transaction_stream(
     let mut transaction = 0usize;
     let mut replayed_transactions = 0usize;
     let mut source_materializations = 0usize;
+    let mut acknowledged_updates = 0usize;
+    let mut acknowledged_source_bytes = 0usize;
     let mut deferred_sources = std::collections::BTreeMap::new();
     loop {
         let mut encoded = Vec::new();
@@ -4206,20 +4224,24 @@ fn cmd_render_batch_final_state_transaction_stream(
             .with_context(|| format!("final-state transaction {} failed", transaction + 1))?;
         }
         transaction += 1;
+        acknowledged_updates = acknowledged_updates.saturating_add(changed_inputs.len());
+        acknowledged_source_bytes = acknowledged_source_bytes.saturating_add(total_source_bytes);
 
-        let mut stdout = io::stdout().lock();
-        serde_json::to_writer(
-            &mut stdout,
-            &serde_json::json!({
-                "transaction": transaction,
-                "input_line": line_number,
-                "updates": changed_inputs.len(),
-                "source_bytes": total_source_bytes,
-                "status": "ok"
-            }),
-        )?;
-        writeln!(stdout)?;
-        stdout.flush()?;
+        if !final_ack_only {
+            let mut stdout = io::stdout().lock();
+            serde_json::to_writer(
+                &mut stdout,
+                &serde_json::json!({
+                    "transaction": transaction,
+                    "input_line": line_number,
+                    "updates": changed_inputs.len(),
+                    "source_bytes": total_source_bytes,
+                    "status": "ok"
+                }),
+            )?;
+            writeln!(stdout)?;
+            stdout.flush()?;
+        }
     }
     if final_source_only {
         let (sources, bytes) =
@@ -4232,6 +4254,22 @@ fn cmd_render_batch_final_state_transaction_stream(
         eprintln!("materialized {outputs} final output(s), {bytes} bytes at stream EOF");
     }
     cache_session.flush(Path::new(out_dir))?;
+    if final_ack_only {
+        let mut stdout = io::stdout().lock();
+        serde_json::to_writer(
+            &mut stdout,
+            &serde_json::json!({
+                "transactions": transaction,
+                "input_lines": line_number,
+                "updates": acknowledged_updates,
+                "source_bytes": acknowledged_source_bytes,
+                "status": "ok"
+            }),
+        )?;
+        writeln!(stdout)?;
+        stdout.flush()?;
+        eprintln!("emitted one EOF acknowledgment for {transaction} transaction(s)");
+    }
     eprintln!(
         "applied {transaction} resident final-state transaction(s) \
          ({replayed_transactions} complete revision replay(s))"

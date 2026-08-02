@@ -2773,3 +2773,59 @@ rendered 1,152 first-seen revisions, reported 441,216 persistent hits, and wrote
   resident source ownership, EOF materialization or crash semantics, exact revision admission,
   changed-diagram or transaction count, source size, corpus, allocator, or filesystem changes.
   Promote no competitive claim without a same-invocation incumbent null arm.
+
+## KEEP: pipeline resident final-state acknowledgments at EOF (2026-08-02)
+
+**Bead:** `bd-s1kd`. **Lane:** cod.
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `697640122efe90b3520368d395a97d4041ab2829a408ee18c361cbbb6bc62712`
+**A/A null control (same invocation):** invocation
+`fm-resident-ack-coalescing-exact-thinkstation1-1785673773027790859` interleaved all six
+permutations of per-transaction-ACK control/candidate-A/candidate-B for 36 whole-job rounds per
+arm. Candidate A/B medians were 32,714,886.5 / 32,767,751.5 ns (ratio `0.998387`), with a
+50,000-resample median-ratio 95% CI of `[0.962463, 1.022800]`, including one.
+**Counted mechanism:** runtime counters recorded 1,152 stdout acknowledgment writes across 36
+control rounds versus 36 in each candidate arm: exactly 32 versus one per round, or 32x fewer.
+Every arm still processed 1,152 transactions, materialized 576 final sources and 576 final SVGs,
+performed 1,080 complete revision replays, rendered 1,152 first-seen revisions, and reported
+441,216 persistent hits.
+
+- **Structural gap.** A whole completed revision job still forced a synchronous caller/process
+  round trip after every one of its 32 transactions, even when the caller consumed only the final
+  committed source/output trees. The pinned incumbent's render-once boundary has no corresponding
+  intermediate acknowledgment protocol. Whole-job profiling showed that the Rust child spent only
+  about one quarter of elapsed time on CPU, making the repeated synchronization a plausible
+  off-CPU structural lever.
+- **The one lever.** Explicit `render-batch --trust-change-set --final-state-stream
+  --final-ack-only` accepts the same newline-delimited transactions but emits one aggregate JSON
+  acknowledgment only after EOF source/output materialization and the durable cache commit
+  succeed. This lets callers pipeline the entire job into the resident process. Existing callers
+  retain one flushed ACK per transaction by omitting the flag; JSON per-input reporting is rejected
+  with the EOF-only contract so stdout remains exactly one machine-readable record.
+- **Whole-job result.** Each round began from an untimed revision-A certificate, then sent 32
+  alternating transactions over 16 changed diagrams in the complete 384-diagram repository while
+  using both final-source-only and final-output-only semantics. Per-transaction-ACK control median
+  was 35,289,560.5 ns and candidate-A median was 32,714,886.5 ns: **1.078700x**, bootstrap 95% CI
+  `[1.050621, 1.114394]`. All arms produced identical 384-file / 20,685,288-byte SVG output,
+  aggregate SHA-256 `2f528b7b4e19d28b1546dc44513fc01979e2569b41f9d61af9ddd6be275810c2`.
+- **Host admission.** The effect phase ran on eight distinct physical cores 10, 11, 12, 13, 14,
+  17, 18, and 20 of x86-64 `thinkstation1`. Its admitted consecutive one-second samples peaked at
+  19.0% and 9.2% busy. The pre-incumbent admission required eight attempts; its accepted pair
+  peaked at 8.0% and 14.0%. The report-only post-incumbent sample was disturbed and is not used for
+  admission.
+- **Live-incumbent bracket.** The same invocation ran the exact candidate ELF around pinned
+  mermaid-js 11.15.0 over all 384 diagrams. Mermaid reported 52,511.6 ms render time (59.741 s live
+  wall), one Chrome 150.0.7871.128 page-main execution context, input SHA-256
+  `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`, and bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`. The incumbent was a
+  render-once arm without an incumbent null, so this row asserts no competitive ratio.
+- **Validation.** A 32-transaction protocol smoke produced exactly one correct aggregate EOF ACK.
+  Clean-overlay remote workspace-wide check and Clippy with warnings denied passed; targeted
+  rustfmt passed, all timed arms self-reported the external ELF hash, and the three output trees
+  were byte-identical. Exact
+  artifact SHA-256 `e7773aec9534896a02de2ab112e18a427040e262545950141fc1a82873895eb5` at
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/fm-resident-ack-coalescing-exact-thinkstation1-1785673773027790859.json`.
+- **Retry predicate.** Re-measure if callers require intermediate transaction ACKs, stdout flush or
+  buffering changes, EOF commit semantics, transaction count or payload size, source/output
+  materialization, exact revision replay, corpus, allocator, or filesystem changes. Promote no
+  competitive claim without a same-invocation incumbent null arm.
