@@ -311,6 +311,12 @@ enum Command {
         #[arg(long)]
         final_output_only: bool,
 
+        /// Hold each updated source body in memory and materialize only the final source files
+        /// when a final-state stream reaches EOF. Transaction acknowledgments then certify the
+        /// in-memory render state; callers that observe source files between ACKs must omit this.
+        #[arg(long)]
+        final_source_only: bool,
+
         /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
         #[arg(long, value_enum, default_value = "auto")]
         fnx_mode: FnxModeArg,
@@ -933,6 +939,7 @@ struct BatchCachePolicy<'a> {
     use_cache: bool,
     trust_change_set: bool,
     changed_inputs: &'a [String],
+    source_overrides: Option<&'a std::collections::BTreeMap<String, String>>,
     session: Option<&'a mut BatchRenderCacheSession>,
     plan: Option<&'a BatchRenderPlan>,
     report: Option<BatchReportCarry<'a>>,
@@ -1320,6 +1327,7 @@ impl BatchRenderCacheSession {
         &mut self,
         plan: &BatchRenderPlan,
         updates: &std::collections::BTreeMap<String, String>,
+        defer_source_writes: bool,
     ) -> Result<Option<usize>> {
         if !self.reuse_complete_revision_transactions || updates.is_empty() {
             return Ok(None);
@@ -1355,6 +1363,7 @@ impl BatchRenderCacheSession {
             let Some(previous_bytes) = usize::try_from(previous_entry.bytes).ok() else {
                 return Ok(None);
             };
+            let previous_source_modified_ns = previous_entry.source_modified_ns.clone();
             old_bytes = old_bytes
                 .checked_add(previous_bytes)
                 .ok_or_else(|| anyhow::anyhow!("resident transaction byte count overflow"))?;
@@ -1367,22 +1376,31 @@ impl BatchRenderCacheSession {
             new_bytes = new_bytes
                 .checked_add(rendered.len())
                 .ok_or_else(|| anyhow::anyhow!("resident transaction byte count overflow"))?;
-            let Ok(source_metadata) = Path::new(input).metadata() else {
-                return Ok(None);
-            };
-            let Some(source_modified_ns) = source_metadata
-                .modified()
-                .ok()
-                .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|duration| duration.as_nanos().to_string())
-            else {
-                return Ok(None);
+            let (source_bytes, source_modified_ns) = if defer_source_writes {
+                (
+                    u64::try_from(source.len())
+                        .map_err(|_| anyhow::anyhow!("source is too large to cache"))?,
+                    previous_source_modified_ns,
+                )
+            } else {
+                let Ok(source_metadata) = Path::new(input).metadata() else {
+                    return Ok(None);
+                };
+                let Some(source_modified_ns) = source_metadata
+                    .modified()
+                    .ok()
+                    .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_nanos().to_string())
+                else {
+                    return Ok(None);
+                };
+                (source_metadata.len(), source_modified_ns)
             };
             let entry = BatchRenderCacheEntry {
                 key,
                 source_digest,
                 options_key: options_key.clone(),
-                source_bytes: source_metadata.len(),
+                source_bytes,
                 source_modified_ns,
                 bytes: u64::try_from(rendered.len())
                     .map_err(|_| anyhow::anyhow!("rendered output is too large to cache"))?,
@@ -1417,6 +1435,55 @@ impl BatchRenderCacheSession {
             total_bytes,
         });
         Ok(Some(total_bytes))
+    }
+
+    fn materialize_deferred_sources(
+        &mut self,
+        plan: &BatchRenderPlan,
+        sources: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(usize, usize)> {
+        let mut total_bytes = 0usize;
+        for (input, source) in sources {
+            std::fs::write(input, source.as_bytes())
+                .with_context(|| format!("cannot materialize final-state input {input}"))?;
+            total_bytes = total_bytes
+                .checked_add(source.len())
+                .ok_or_else(|| anyhow::anyhow!("final source byte count overflow"))?;
+        }
+
+        let manifest = self.manifest.as_mut().ok_or_else(|| {
+            anyhow::anyhow!("final source materialization lost its cache manifest")
+        })?;
+        let mut manifest_changed = false;
+        for (input, source) in sources {
+            let index = plan.input_indices.get(input).copied().ok_or_else(|| {
+                anyhow::anyhow!("cannot materialize unknown batch input {input:?}")
+            })?;
+            let entry = manifest
+                .entries
+                .get_mut(&plan.destination_names[index])
+                .ok_or_else(|| anyhow::anyhow!("final source has no rendered cache entry"))?;
+            let expected_digest = sha256_hex(source.as_bytes());
+            if entry.source_digest != expected_digest {
+                anyhow::bail!("final source digest does not match its rendered cache entry");
+            }
+            let metadata = Path::new(input)
+                .metadata()
+                .with_context(|| format!("cannot inspect final-state input {input}"))?;
+            let source_modified_ns = metadata
+                .modified()
+                .context("final source has no modification timestamp")?
+                .duration_since(std::time::UNIX_EPOCH)
+                .context("final source modification timestamp predates the Unix epoch")?
+                .as_nanos()
+                .to_string();
+            manifest_changed |= entry.source_bytes != metadata.len()
+                || entry.source_modified_ns != source_modified_ns;
+            entry.source_bytes = metadata.len();
+            entry.source_modified_ns = source_modified_ns;
+        }
+        self.dirty |= manifest_changed;
+        Ok((sources.len(), total_bytes))
     }
 
     fn stage_output_if_deferred(&mut self, destination: &Path, bytes: Arc<Vec<u8>>) -> bool {
@@ -1936,6 +2003,7 @@ mod batch_render_cache_tests {
         let second_destination = directory.path().join("b.svg");
         std::fs::write(&first_input, "flowchart LR\nA-->B").unwrap();
         std::fs::write(&second_input, "flowchart LR\nB-->C").unwrap();
+        let first_input_path = first_input.clone();
 
         let first_input = first_input.display().to_string();
         let second_input = second_input.display().to_string();
@@ -1986,7 +2054,6 @@ mod batch_render_cache_tests {
             ..BatchRenderCacheSession::default()
         };
         let new_source = "flowchart LR\nA-->C";
-        std::fs::write(&first_input, new_source).unwrap();
         let digest = super::sha256_hex(new_source.as_bytes());
         let rendered = Arc::new(vec![7_u8; 10]);
         session.remember_revision_output(format!("{digest}:options"), Arc::clone(&rendered));
@@ -1994,9 +2061,13 @@ mod batch_render_cache_tests {
 
         assert_eq!(
             session
-                .replay_resident_transaction(&plan, &updates)
+                .replay_resident_transaction(&plan, &updates, true)
                 .unwrap(),
             Some(15)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&first_input_path).unwrap(),
+            "flowchart LR\nA-->B"
         );
         assert!(
             session
@@ -2017,6 +2088,16 @@ mod batch_render_cache_tests {
         );
         assert_eq!(session.trusted_batch.as_ref().unwrap().total_bytes, 15);
         assert!(session.dirty);
+        assert_eq!(
+            session
+                .materialize_deferred_sources(&plan, &updates)
+                .unwrap(),
+            (1, new_source.len())
+        );
+        assert_eq!(
+            std::fs::read_to_string(first_input_path).unwrap(),
+            new_source
+        );
     }
 
     #[test]
@@ -2351,6 +2432,7 @@ fn main() -> Result<()> {
             final_state_stdin,
             final_state_stream,
             final_output_only,
+            final_source_only,
             fnx_mode,
             fnx_projection,
             fnx_fallback,
@@ -2391,6 +2473,9 @@ fn main() -> Result<()> {
                     "--final-output-only requires --change-set-stdin or --final-state-stream"
                 );
             }
+            if final_source_only && !final_state_stream {
+                anyhow::bail!("--final-source-only requires --final-state-stream");
+            }
             if final_state_stream {
                 cmd_render_batch_final_state_transaction_stream(
                     &inputs,
@@ -2398,7 +2483,10 @@ fn main() -> Result<()> {
                     jobs,
                     keep_going,
                     json,
-                    final_output_only,
+                    FinalStateStreamMaterialization {
+                        outputs_at_eof: final_output_only,
+                        sources_at_eof: final_source_only,
+                    },
                     options,
                 )
             } else if final_state_stdin {
@@ -2426,6 +2514,7 @@ fn main() -> Result<()> {
                         use_cache: !no_cache,
                         trust_change_set,
                         changed_inputs: &changed_input,
+                        source_overrides: None,
                         session: None,
                         plan: None,
                         report: None,
@@ -3995,16 +4084,27 @@ fn batch_final_state_payload_limit(inputs: &[String], max_input_bytes: usize) ->
         .saturating_add(1024 * 1024)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FinalStateStreamMaterialization {
+    outputs_at_eof: bool,
+    sources_at_eof: bool,
+}
+
 fn cmd_render_batch_final_state_transaction_stream(
     inputs: &[String],
     out_dir: &str,
     jobs: Option<usize>,
     keep_going: bool,
     json: bool,
-    final_output_only: bool,
+    materialization: FinalStateStreamMaterialization,
     options: RenderCommandOptions<'_>,
 ) -> Result<()> {
     use std::io::{BufRead, Read, Write};
+
+    let FinalStateStreamMaterialization {
+        outputs_at_eof: final_output_only,
+        sources_at_eof: final_source_only,
+    } = materialization;
 
     let max_payload_bytes = batch_final_state_payload_limit(inputs, options.max_input_bytes);
     let read_limit = u64::try_from(max_payload_bytes)
@@ -4021,6 +4121,8 @@ fn cmd_render_batch_final_state_transaction_stream(
     let mut line_number = 0usize;
     let mut transaction = 0usize;
     let mut replayed_transactions = 0usize;
+    let mut source_materializations = 0usize;
+    let mut deferred_sources = std::collections::BTreeMap::new();
     loop {
         let mut encoded = Vec::new();
         let bytes_read = (&mut reader)
@@ -4057,13 +4159,20 @@ fn cmd_render_batch_final_state_transaction_stream(
             .values()
             .map(String::len)
             .fold(0usize, usize::saturating_add);
-        for (input, source) in &updates {
-            std::fs::write(input, source.as_bytes())
-                .with_context(|| format!("cannot apply final-state input {input}"))?;
+        if final_source_only {
+            for (input, source) in &updates {
+                deferred_sources.insert(input.clone(), source.clone());
+            }
+        } else {
+            for (input, source) in &updates {
+                std::fs::write(input, source.as_bytes())
+                    .with_context(|| format!("cannot apply final-state input {input}"))?;
+                source_materializations = source_materializations.saturating_add(1);
+            }
         }
         let replay_started = Instant::now();
         let replayed_total_bytes = (!json)
-            .then(|| cache_session.replay_resident_transaction(&plan, &updates))
+            .then(|| cache_session.replay_resident_transaction(&plan, &updates, final_source_only))
             .transpose()?
             .flatten();
         if let Some(total_bytes) = replayed_total_bytes {
@@ -4087,6 +4196,7 @@ fn cmd_render_batch_final_state_transaction_stream(
                     use_cache: true,
                     trust_change_set: true,
                     changed_inputs: &changed_inputs,
+                    source_overrides: final_source_only.then_some(&deferred_sources),
                     session: Some(&mut cache_session),
                     plan: Some(&plan),
                     report: None,
@@ -4111,6 +4221,12 @@ fn cmd_render_batch_final_state_transaction_stream(
         writeln!(stdout)?;
         stdout.flush()?;
     }
+    if final_source_only {
+        let (sources, bytes) =
+            cache_session.materialize_deferred_sources(&plan, &deferred_sources)?;
+        source_materializations = source_materializations.saturating_add(sources);
+        eprintln!("materialized {sources} final source(s), {bytes} bytes at stream EOF");
+    }
     let (outputs, bytes) = cache_session.materialize_deferred_outputs()?;
     if final_output_only {
         eprintln!("materialized {outputs} final output(s), {bytes} bytes at stream EOF");
@@ -4120,6 +4236,7 @@ fn cmd_render_batch_final_state_transaction_stream(
         "applied {transaction} resident final-state transaction(s) \
          ({replayed_transactions} complete revision replay(s))"
     );
+    eprintln!("materialized {source_materializations} source revision(s) during stream");
     Ok(())
 }
 
@@ -4168,6 +4285,7 @@ fn cmd_render_batch_final_state_stream(
             use_cache: true,
             trust_change_set: true,
             changed_inputs: &changed_inputs,
+            source_overrides: None,
             session: None,
             plan: Some(&plan),
             report: None,
@@ -4230,6 +4348,7 @@ fn cmd_render_batch_change_set_stream(
                 // epoch one; its on-disk copy was invalidated before this process could write.
                 trust_change_set: !retain_manifest || trust_first_epoch || epoch > 1,
                 changed_inputs: &changed_inputs,
+                source_overrides: None,
                 session: retain_manifest.then_some(&mut cache_session),
                 plan: batch_plan.as_ref(),
                 report: None,
@@ -4316,6 +4435,7 @@ fn cmd_render_batch(
         use_cache,
         trust_change_set,
         changed_inputs,
+        source_overrides,
         mut session,
         plan,
         report,
@@ -4394,6 +4514,7 @@ fn cmd_render_batch(
                 use_cache,
                 trust_change_set,
                 changed_inputs,
+                source_overrides,
                 session: session.as_deref_mut(),
                 plan: projected_plan.as_ref(),
                 report: Some(carry),
@@ -4542,6 +4663,9 @@ fn cmd_render_batch(
     let load_one = |(index, input): (usize, &String)| -> Result<(String, String)> {
         if sparse_cache_enabled && let Some(digest) = cached_source_digest(index) {
             return Ok((String::new(), digest));
+        }
+        if let Some(source) = source_overrides.and_then(|sources| sources.get(input)) {
+            return Ok((source.clone(), sha256_hex(source.as_bytes())));
         }
         let source = load_input(input, options.max_input_bytes)?;
         let digest = sha256_hex(source.as_bytes());
@@ -4963,18 +5087,33 @@ fn cmd_render_batch(
                 let Some(options_key) = option_cache_digest.as_ref() else {
                     continue;
                 };
-                let Ok(source_metadata) = Path::new(&inputs[index]).metadata() else {
-                    continue;
-                };
-                let Some(source_modified_ns) = modified_key(&source_metadata) else {
-                    continue;
-                };
                 let entry_name = &plan.destination_names[index];
+                let (source_bytes, source_modified_ns) = if let Some(source) =
+                    source_overrides.and_then(|sources| sources.get(&inputs[index]))
+                {
+                    let Ok(source_bytes) = u64::try_from(source.len()) else {
+                        continue;
+                    };
+                    let source_modified_ns = next_cache
+                        .entries
+                        .get(entry_name)
+                        .map(|entry| entry.source_modified_ns.clone())
+                        .unwrap_or_default();
+                    (source_bytes, source_modified_ns)
+                } else {
+                    let Ok(source_metadata) = Path::new(&inputs[index]).metadata() else {
+                        continue;
+                    };
+                    let Some(source_modified_ns) = modified_key(&source_metadata) else {
+                        continue;
+                    };
+                    (source_metadata.len(), source_modified_ns)
+                };
                 let entry = BatchRenderCacheEntry {
                     key,
                     source_digest: digest.clone(),
                     options_key: options_key.clone(),
-                    source_bytes: source_metadata.len(),
+                    source_bytes,
                     source_modified_ns,
                     bytes: u64::try_from(*bytes).unwrap_or(u64::MAX),
                 };

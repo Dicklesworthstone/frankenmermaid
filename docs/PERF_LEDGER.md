@@ -2720,3 +2720,56 @@ and accounted for the same 441,216 persistent diagram hits and 1,152 first-seen 
   transaction ACK or crash semantics, source/output durability, changed-diagram or transaction
   count, corpus, worker count, allocator, or filesystem changes. Promote no competitive claim
   without a same-invocation incumbent null arm.
+
+## KEEP: coalesce resident final-state source writes at EOF (2026-08-02)
+
+**Bead:** `bd-ej6d`. **Lane:** cod.
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `7981692790034c0e80160a2d7e69c829972f36a5fbe9ad83b0cdf313d35ea7d8`
+**A/A null control (same invocation):** invocation
+`fm-resident-source-coalescing-exact-thinkstation1-1785672029625618855` interleaved all six
+permutations of the ordinary-source control/candidate-A/candidate-B arms for 36 whole-job rounds
+per arm. Candidate A/B medians were 33,836,439.5 / 34,009,150.5 ns (ratio `0.994922`), with a
+50,000-resample median-ratio 95% CI of `[0.968481, 1.011425]`, including one.
+**Counted mechanism:** runtime counters recorded 18,432 source materializations across 36 control
+rounds versus 576 in each candidate arm: exactly 512 versus 16 per round, or 32x fewer. Every arm
+still processed and acknowledged 1,152 transactions, performed 1,080 complete revision replays,
+rendered 1,152 first-seen revisions, reported 441,216 persistent hits, and wrote 576 final SVGs.
+
+- **Structural gap.** Once complete revision replay deleted generic batch epochs, synchronous
+  source-file materialization was the largest avoidable survivor: every transient source revision
+  was copied to disk even when the caller consumed only the completed source and output trees.
+  Mermaid-js's page keeps input strings in memory and does not pay this filesystem boundary.
+- **The one lever.** Explicit `render-batch --trust-change-set --final-state-stream
+  --final-source-only` stores each updated source body by input path and feeds first-seen renders
+  directly from that resident map. It replaces superseded bodies, writes only the newest source set
+  at EOF, refreshes manifest length and modification metadata, then commits the durable clean
+  certificate. Existing callers retain per-ACK source-file observability by omitting the flag; an
+  ACK in this mode certifies the in-memory render state, as documented by the CLI.
+- **Whole-job result.** Each round began from an untimed revision-A certificate, then published 32
+  alternating transactions over 16 changed diagrams in the complete 384-diagram repository while
+  also using final-output-only semantics: 512 source updates and 12,288 observable in-memory
+  diagram states per arm. Ordinary-source control median was 57,247,822 ns and candidate-A median
+  was 33,836,439.5 ns: **1.691899x**, bootstrap 95% CI `[1.663078, 1.734648]`. All arms produced
+  identical 384-file / 20,685,288-byte SVG output, aggregate SHA-256
+  `2f528b7b4e19d28b1546dc44513fc01979e2569b41f9d61af9ddd6be275810c2`.
+- **Host admission.** The effect phase ran on eight distinct physical cores 10, 11, 12, 13, 14,
+  17, 18, and 20 of x86-64 `thinkstation1`. After one rejected busy sample, its admitted
+  consecutive one-second samples peaked at 14.1% and 19.8% busy. The pre-incumbent pair peaked at
+  10.0% and 17.2%, and the post-run sample at 17.8%, with no admitted selected core above 20%.
+- **Live-incumbent bracket.** The same invocation bracketed full uncached 384-diagram Rust renders
+  at 34.290 / 40.357 ms around pinned mermaid-js 11.15.0 at 52,439.8 ms render time (59.459 s live
+  wall). Runtime provenance reported one Chrome 150.0.7871.128 page-main execution context, input
+  SHA-256 `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`, and bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`. The incumbent was a
+  render-once arm without an incumbent null, so this row asserts no competitive ratio.
+- **Validation.** The focused deferred-source/revision-replay test passed in both CLI binary
+  targets on a clean-overlay remote worker. Workspace-wide remote check passed, final-source
+  workspace Clippy passed with warnings denied, and targeted rustfmt passed. External and
+  self-reported executable hashes agreed in every timed arm. Exact artifact SHA-256
+  `ab095c3cd41031a5230b53f6393c0e3e5e390ede2f8b5e0bd84ea912f45eaa0f` at
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/fm-resident-source-coalescing-exact-thinkstation1-1785672029625618855.json`.
+- **Retry predicate.** Re-measure if callers require source files between transaction ACKs,
+  resident source ownership, EOF materialization or crash semantics, exact revision admission,
+  changed-diagram or transaction count, source size, corpus, allocator, or filesystem changes.
+  Promote no competitive claim without a same-invocation incumbent null arm.
