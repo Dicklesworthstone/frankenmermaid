@@ -328,7 +328,8 @@ enum Command {
         /// Assert that every non-empty final-state stream record is a complete snapshot containing
         /// every batch input. With all three final-only flags, superseded records remain
         /// length/UTF-8 framed but only the newest snapshot is JSON-decoded and rendered. Resident
-        /// exact jobs instead acknowledge every certified packed record independently.
+        /// exact jobs acknowledge every certified packed record independently unless
+        /// `--final-ack-only` is also selected.
         #[arg(long)]
         complete_snapshot_stream: bool,
 
@@ -350,7 +351,7 @@ enum Command {
         #[arg(
             long,
             requires = "packed_complete_snapshot_stream",
-            conflicts_with_all = ["terminal_packed_snapshot", "final_ack_only"]
+            conflicts_with = "terminal_packed_snapshot"
         )]
         resident_exact_jobs: bool,
 
@@ -1782,9 +1783,11 @@ fn batch_cache_entry_matches_key(entry: &BatchRenderCacheEntry, options_key: &st
 mod batch_render_cache_tests {
     use super::{
         BatchRenderCacheEntry, BatchRenderCacheManifest, BatchRenderCacheSession, BatchRenderPlan,
-        TrustedBatchSummary, batch_cache_entry_matches_early, batch_cache_entry_matches_key,
-        parse_batch_change_set_line, parse_batch_final_state_payload, trusted_batch_from_manifest,
+        Cli, Command, TrustedBatchSummary, batch_cache_entry_matches_early,
+        batch_cache_entry_matches_key, parse_batch_change_set_line,
+        parse_batch_final_state_payload, trusted_batch_from_manifest,
     };
+    use clap::Parser as _;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
@@ -2047,6 +2050,37 @@ mod batch_render_cache_tests {
                 .to_string()
                 .contains("inside its payload-length header")
         );
+    }
+
+    #[test]
+    fn resident_exact_jobs_accepts_one_eof_acknowledgment() {
+        let cli = Cli::try_parse_from([
+            "fm-cli",
+            "render-batch",
+            "--out-dir",
+            "out",
+            "--trust-change-set",
+            "--final-state-stream",
+            "--final-output-only",
+            "--final-source-only",
+            "--final-ack-only",
+            "--complete-snapshot-stream",
+            "--packed-complete-snapshot-stream",
+            "--resident-exact-jobs",
+            "a.mmd",
+        ])
+        .expect("resident exact jobs should support a single EOF acknowledgment");
+
+        let (final_ack_only, resident_exact_jobs) = match cli.command {
+            Command::RenderBatch {
+                final_ack_only,
+                resident_exact_jobs,
+                ..
+            } => (final_ack_only, resident_exact_jobs),
+            _ => (false, false),
+        };
+        assert!(final_ack_only);
+        assert!(resident_exact_jobs);
     }
 
     #[test]
@@ -2943,6 +2977,7 @@ fn main() -> Result<()> {
                     json,
                     terminal_packed_snapshot,
                     resident_exact_jobs,
+                    final_ack_only,
                     options,
                 )
             } else if final_state_stream {
@@ -4895,6 +4930,7 @@ fn render_prepared_final_state_transaction(
     Ok(replayed_total_bytes.is_some())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_render_batch_resident_exact_jobs(
     reader: &mut impl Read,
     inputs: &[String],
@@ -4903,6 +4939,7 @@ fn cmd_render_batch_resident_exact_jobs(
     cache_session: &mut BatchRenderCacheSession,
     max_payload_bytes: usize,
     max_input_bytes: usize,
+    acknowledgments_at_eof: bool,
 ) -> Result<()> {
     let mut stdout = io::stdout().lock();
     let mut payload = Vec::new();
@@ -4963,23 +5000,41 @@ fn cmd_render_batch_resident_exact_jobs(
         jobs = jobs.saturating_add(1);
         logical_source_bytes = logical_source_bytes.saturating_add(source_bytes);
         logical_output_bytes = logical_output_bytes.saturating_add(output_bytes);
+        if !acknowledgments_at_eof {
+            serde_json::to_writer(
+                &mut stdout,
+                &serde_json::json!({
+                    "transactions": 1,
+                    "input_lines": 1,
+                    "updates": inputs.len(),
+                    "source_bytes": source_bytes,
+                    "source_bytes_scope": "completed_state",
+                    "encoded_payload_bytes": payload.len(),
+                    "status": "ok"
+                }),
+            )?;
+            writeln!(stdout)?;
+            stdout.flush()?;
+        }
+    }
+
+    cache_session.flush(Path::new(out_dir))?;
+    if acknowledgments_at_eof {
         serde_json::to_writer(
             &mut stdout,
             &serde_json::json!({
-                "transactions": 1,
-                "input_lines": 1,
-                "updates": inputs.len(),
-                "source_bytes": source_bytes,
-                "source_bytes_scope": "completed_state",
-                "encoded_payload_bytes": payload.len(),
+                "transactions": jobs,
+                "input_lines": jobs,
+                "updates": jobs.saturating_mul(inputs.len()),
+                "source_bytes": logical_source_bytes,
+                "source_bytes_scope": "completed_jobs",
+                "encoded_payload_bytes": encoded_payload_bytes,
                 "status": "ok"
             }),
         )?;
         writeln!(stdout)?;
         stdout.flush()?;
     }
-
-    cache_session.flush(Path::new(out_dir))?;
     eprintln!(
         "replayed {jobs} resident exact job(s), parsed {parsed_payloads} certified payload(s), \
          reused {exact_payload_reuses} exact payload(s), {encoded_payload_bytes} encoded bytes"
@@ -4990,7 +5045,11 @@ fn cmd_render_batch_resident_exact_jobs(
         jobs.saturating_mul(inputs.len())
     );
     eprintln!("materialized 0 source revision(s) and 0 output revision(s) during resident jobs");
-    eprintln!("emitted {jobs} resident job acknowledgment(s)");
+    if acknowledgments_at_eof {
+        eprintln!("emitted one EOF acknowledgment for {jobs} resident exact job(s)");
+    } else {
+        eprintln!("emitted {jobs} resident job acknowledgment(s)");
+    }
     Ok(())
 }
 
@@ -5003,6 +5062,7 @@ fn cmd_render_batch_packed_complete_snapshot_stream(
     json: bool,
     terminal_snapshot: bool,
     resident_exact_jobs: bool,
+    final_ack_only: bool,
     options: RenderCommandOptions<'_>,
 ) -> Result<()> {
     use std::io::{Read, Write};
@@ -5029,6 +5089,7 @@ fn cmd_render_batch_packed_complete_snapshot_stream(
             &mut cache_session,
             max_payload_bytes,
             options.max_input_bytes,
+            final_ack_only,
         );
     }
     let mut transaction = 0usize;
