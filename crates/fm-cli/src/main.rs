@@ -1199,6 +1199,8 @@ struct BatchRenderCacheSession {
     manifest_modified: Option<std::time::SystemTime>,
     dirty: bool,
     trusted_batch: Option<TrustedBatchSummary>,
+    certified_sources: std::collections::BTreeMap<String, BatchRenderCacheEntry>,
+    elide_certified_source_writes: bool,
     pressure: OnceLock<Arc<MermaidPressureReport>>,
     reuse_pressure: bool,
     revision_outputs: std::collections::HashMap<String, BatchRevisionOutput>,
@@ -1243,6 +1245,18 @@ impl BatchRenderCacheSession {
         self.trusted_batch = admit_clean_batch
             .then(|| plan.and_then(|plan| trusted_batch_from_manifest(&manifest, plan)))
             .flatten();
+        self.certified_sources.clear();
+        if self.trusted_batch.is_some()
+            && let Some(plan) = plan
+        {
+            for (input, &index) in &plan.input_indices {
+                let Some(entry) = manifest.entries.get(&plan.destination_names[index]) else {
+                    self.certified_sources.clear();
+                    break;
+                };
+                self.certified_sources.insert(input.clone(), entry.clone());
+            }
+        }
 
         // A clean certificate is a transaction commit record. Remove it before this process can
         // touch any output, while retaining the admitted summary in memory. If the process dies,
@@ -1460,11 +1474,55 @@ impl BatchRenderCacheSession {
         &mut self,
         plan: &BatchRenderPlan,
         sources: &std::collections::BTreeMap<String, String>,
-    ) -> Result<(usize, usize)> {
+    ) -> Result<(usize, usize, usize)> {
         let mut total_bytes = 0usize;
+        let mut materialized_sources = 0usize;
+        let mut certified_sources = 0usize;
+        let mut refreshed_entries = Vec::with_capacity(sources.len());
         for (input, source) in sources {
-            std::fs::write(input, source.as_bytes())
-                .with_context(|| format!("cannot materialize final-state input {input}"))?;
+            let index = plan.input_indices.get(input).copied().ok_or_else(|| {
+                anyhow::anyhow!("cannot materialize unknown batch input {input:?}")
+            })?;
+            let expected_digest = sha256_hex(source.as_bytes());
+            let certified_metadata = self
+                .elide_certified_source_writes
+                .then(|| {
+                    let certificate = self.certified_sources.get(input)?;
+                    if certificate.source_digest != expected_digest {
+                        return None;
+                    }
+                    let metadata = Path::new(input).metadata().ok()?;
+                    let source_modified_ns = metadata
+                        .modified()
+                        .ok()?
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()?
+                        .as_nanos()
+                        .to_string();
+                    (certificate.source_bytes == metadata.len()
+                        && certificate.source_modified_ns == source_modified_ns)
+                        .then_some(metadata)
+                })
+                .flatten();
+            let metadata = if let Some(metadata) = certified_metadata {
+                certified_sources = certified_sources.saturating_add(1);
+                metadata
+            } else {
+                std::fs::write(input, source.as_bytes())
+                    .with_context(|| format!("cannot materialize final-state input {input}"))?;
+                materialized_sources = materialized_sources.saturating_add(1);
+                Path::new(input)
+                    .metadata()
+                    .with_context(|| format!("cannot inspect final-state input {input}"))?
+            };
+            let source_modified_ns = metadata
+                .modified()
+                .context("final source has no modification timestamp")?
+                .duration_since(std::time::UNIX_EPOCH)
+                .context("final source modification timestamp predates the Unix epoch")?
+                .as_nanos()
+                .to_string();
+            refreshed_entries.push((index, expected_digest, metadata.len(), source_modified_ns));
             total_bytes = total_bytes
                 .checked_add(source.len())
                 .ok_or_else(|| anyhow::anyhow!("final source byte count overflow"))?;
@@ -1474,35 +1532,21 @@ impl BatchRenderCacheSession {
             anyhow::anyhow!("final source materialization lost its cache manifest")
         })?;
         let mut manifest_changed = false;
-        for (input, source) in sources {
-            let index = plan.input_indices.get(input).copied().ok_or_else(|| {
-                anyhow::anyhow!("cannot materialize unknown batch input {input:?}")
-            })?;
+        for (index, expected_digest, source_bytes, source_modified_ns) in refreshed_entries {
             let entry = manifest
                 .entries
                 .get_mut(&plan.destination_names[index])
                 .ok_or_else(|| anyhow::anyhow!("final source has no rendered cache entry"))?;
-            let expected_digest = sha256_hex(source.as_bytes());
             if entry.source_digest != expected_digest {
                 anyhow::bail!("final source digest does not match its rendered cache entry");
             }
-            let metadata = Path::new(input)
-                .metadata()
-                .with_context(|| format!("cannot inspect final-state input {input}"))?;
-            let source_modified_ns = metadata
-                .modified()
-                .context("final source has no modification timestamp")?
-                .duration_since(std::time::UNIX_EPOCH)
-                .context("final source modification timestamp predates the Unix epoch")?
-                .as_nanos()
-                .to_string();
-            manifest_changed |= entry.source_bytes != metadata.len()
+            manifest_changed |= entry.source_bytes != source_bytes
                 || entry.source_modified_ns != source_modified_ns;
-            entry.source_bytes = metadata.len();
+            entry.source_bytes = source_bytes;
             entry.source_modified_ns = source_modified_ns;
         }
         self.dirty |= manifest_changed;
-        Ok((sources.len(), total_bytes))
+        Ok((materialized_sources, certified_sources, total_bytes))
     }
 
     fn stage_output_if_deferred(&mut self, destination: &Path, bytes: Arc<Vec<u8>>) -> bool {
@@ -2213,12 +2257,88 @@ mod batch_render_cache_tests {
             session
                 .materialize_deferred_sources(&plan, &transaction.updates)
                 .unwrap(),
-            (1, new_source.len())
+            (1, 0, new_source.len())
         );
         assert_eq!(
             std::fs::read_to_string(first_input_path).unwrap(),
             new_source
         );
+    }
+
+    #[test]
+    fn certified_source_materialization_skips_only_exact_disk_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let input_path = directory.path().join("diagram.mmd");
+        std::fs::write(&input_path, "alpha").unwrap();
+        let input = input_path.display().to_string();
+        let metadata = input_path.metadata().unwrap();
+        let source_modified_ns = metadata
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let source_digest = super::sha256_hex(b"alpha");
+        let entry = BatchRenderCacheEntry {
+            key: format!("{source_digest}:options"),
+            source_digest,
+            options_key: "options".to_owned(),
+            source_bytes: metadata.len(),
+            source_modified_ns,
+            bytes: 1,
+        };
+        let plan = BatchRenderPlan {
+            input_set: [input.clone()].into_iter().collect(),
+            input_indices: [(input.clone(), 0)].into_iter().collect(),
+            destinations: vec![directory.path().join("diagram.svg")],
+            destination_names: vec!["diagram.svg".to_owned()],
+            destination_displays: vec![directory.path().join("diagram.svg").display().to_string()],
+            requested_workers: 1,
+            cache_path: directory.path().join("cache.json"),
+            option_cache_digest: Some("options".to_owned()),
+            cache_active: true,
+            key: "batch-plan".to_owned(),
+        };
+        let mut session = BatchRenderCacheSession {
+            manifest: Some(BatchRenderCacheManifest {
+                version: super::BATCH_RENDER_CACHE_VERSION,
+                clean_batch: None,
+                entries: [("diagram.svg".to_owned(), entry.clone())]
+                    .into_iter()
+                    .collect(),
+            }),
+            certified_sources: [(input.clone(), entry)].into_iter().collect(),
+            elide_certified_source_writes: true,
+            ..BatchRenderCacheSession::default()
+        };
+        let mut sources = [(input.clone(), "alpha".to_owned())].into_iter().collect();
+
+        assert_eq!(
+            session
+                .materialize_deferred_sources(&plan, &sources)
+                .unwrap(),
+            (0, 1, 5)
+        );
+
+        sources.insert(input.clone(), "omega".to_owned());
+        let changed_digest = super::sha256_hex(b"omega");
+        let changed_entry = session
+            .manifest
+            .as_mut()
+            .unwrap()
+            .entries
+            .get_mut("diagram.svg")
+            .unwrap();
+        changed_entry.key = format!("{changed_digest}:options");
+        changed_entry.source_digest = changed_digest;
+        assert_eq!(
+            session
+                .materialize_deferred_sources(&plan, &sources)
+                .unwrap(),
+            (1, 0, 5)
+        );
+        assert_eq!(std::fs::read_to_string(input_path).unwrap(), "omega");
     }
 
     #[test]
@@ -4478,6 +4598,8 @@ fn cmd_render_batch_final_state_transaction_stream(
     let admit_clean_batch = std::env::var_os("FM_DISABLE_DURABLE_BATCH_CERTIFICATE").is_none();
     cache_session.begin_stream(&plan.cache_path, Some(&plan), admit_clean_batch)?;
     cache_session.defer_output_writes = final_output_only;
+    cache_session.elide_certified_source_writes = retain_only_latest_complete_snapshot
+        && std::env::var_os("FM_DISABLE_CERTIFIED_SOURCE_NOOP").is_none();
 
     let stdin = io::stdin();
     let mut reader = stdin.lock();
@@ -4651,10 +4773,13 @@ fn cmd_render_batch_final_state_transaction_stream(
         deferred_sources = prepared.updates;
     }
     if final_source_only {
-        let (sources, bytes) =
+        let (sources, certified_sources, bytes) =
             cache_session.materialize_deferred_sources(&plan, &deferred_sources)?;
         source_materializations = source_materializations.saturating_add(sources);
-        eprintln!("materialized {sources} final source(s), {bytes} bytes at stream EOF");
+        eprintln!(
+            "materialized {sources} final source(s), reused {certified_sources} certified source(s), \
+             {bytes} logical bytes at stream EOF"
+        );
     }
     let (outputs, bytes) = cache_session.materialize_deferred_outputs()?;
     if final_output_only {

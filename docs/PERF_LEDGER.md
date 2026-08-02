@@ -3013,3 +3013,68 @@ transactions, executed 36 completed states, performed 2,304 persistent output lo
   diagnostics become observable, framing or input-size limits change, completed-state payload
   size or snapshot count changes, persistent-cache or source materialization state changes, or
   the fixture, pinned incumbent, executing ELF, affinity, or median-CI gate changes.
+
+## CERTIFIED INCUMBENT WIN: suppress certified canonical source rewrites (2026-08-02)
+
+**Bead:** `bd-m6my`. **Lane:** cod.
+**Campaign result class:** incumbent-win
+**Executing ELF SHA-256 (self-reported by process):** `37890e38123642026aee1cee6cb00a04b542f6a5a0b8e550d8cadd93efa04ee8`
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de invocation_id=fm-certified-source-noop-exact-thinkstation1-1785679363765615430 measured_ratio=392.89264885255807x
+**A/A null control (same invocation):** candidate A/B medians were 23,416,065.5 / 23,187,222
+ns (ratio `1.009869`), with a 50,000-resample median-ratio 95% CI of
+`[0.988693, 1.025065]`, including one. Live mermaid-js ran 20 null rounds: median
+`0.999926`, bootstrap 95% CI `[0.988784, 1.004190]`, sufficient=true and
+`cv_gate=never`. The cross-engine median-ratio 95% CI was `[385.354954x, 407.917547x]`.
+**Counted mechanism:** across 36 rounds, the same-ELF disabled control performed 2,304 final
+source writes. Each candidate performed zero and admitted 2,304 exact source states from the
+durable predecessor certificate: 64 writes removed per round. All arms still accepted 1,152
+complete snapshots, skipped 1,116 superseded JSON decodes, executed 36 completed states,
+performed 2,304 persistent output lookups, wrote 36 acknowledgments, and rendered or rewrote zero
+SVGs.
+
+- **Structural gap.** After completed-snapshot decode elision, every round still rewrote all 64
+  canonical repository source files even though the clean predecessor manifest already certified
+  their SHA-256, byte length, and modification timestamp and the completed snapshot returned to
+  those exact bytes. Mermaid-js's timed render receives source text in memory and pays no source
+  repository materialization, making this remaining filesystem work a Rust-only gap.
+- **The one lever.** At stream admission, the runner now retains the source identity entries only
+  when a matching durable clean-batch certificate is accepted. Complete-snapshot EOF
+  materialization suppresses a write only when the final SHA-256 equals that admitted identity and
+  current on-disk length and modification timestamp remain unchanged. A missing certificate,
+  changed digest, changed metadata, partial stream, or ordinary caller falls back to the existing
+  write path. `FM_DISABLE_CERTIFIED_SOURCE_NOOP=1` selects that path in the same ELF.
+- **Whole-job self result.** Every timed round began from an untimed completed-stream certificate,
+  then sent 31 distinct full snapshots followed by the canonical completed snapshot, retained only
+  the newest JSON object, executed it, checked all 64 source identities, committed the cache, and
+  emitted one ACK. The write-enabled control median was 25,560,203.5 ns versus candidate-A at
+  23,416,065.5 ns: **1.091567x**, with bootstrap 95% CI
+  `[1.071546x, 1.124088x]`.
+- **Live incumbent result.** In the same top-level invocation, pinned mermaid-js rendered the
+  identical canonical `ci_shared_subgraph_divergent_64` job in a median **9,200.0 ms** over nine
+  effect samples. The conservative Rust completed-job median was **23.416066 ms**, including
+  process startup, framing all 32 snapshots, final JSON validation, 64 certified source checks,
+  persistent output lookup, and durable manifest commit: **392.892649x** with bootstrap 95% CI
+  `[385.354954x, 407.917547x]`. Runtime provenance reported one Chrome 150.0.7871.128 page-main
+  execution thread.
+- **Output equivalence.** Candidate A, candidate B, and control produced identical 64-file,
+  3,469,549-byte SVG output trees with aggregate SHA-256
+  `a8502bdcf304ef8db6683a5075c896017bebd6daeabada58725436dccb3077b3`. The shared extractor
+  artifact for input SHA-256
+  `f487b4094bc4020436956d78067c529b80aa0ce8e595fbaa1a193c081fb13e68` proves 64/64 diagrams
+  structurally equivalent to the same pinned mermaid-js bundle with zero divergent or unverified.
+- **Host and validation.** The effect and incumbent phases ran on eight distinct physical cores
+  10, 11, 12, 13, 14, 17, 18, and 20 of x86-64 `thinkstation1` (AMD Ryzen Threadripper PRO
+  5975WX). Consecutive effect admission samples peaked at 3.92% / 1.98% busy; incumbent admission
+  peaked at 4.95% / 7.92%, and the report-only post-run sample at 17.82%. The focused test passed
+  in both CLI binary targets, proving an exact certificate skips the write while a same-length
+  digest change materializes it. Clean-overlay remote workspace check and Clippy with warnings
+  denied passed; targeted rustfmt passed. All timed arms self-reported the external ELF hash.
+- **Evidence.** Exact artifact
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/fm-certified-source-noop-exact-thinkstation1-1785679363765615430.json`
+  (SHA-256 `809fe4e1b46d93b0677964ba00b21363a446bcc0cdacb0575586dafe6f3727ed`);
+  structural-equivalence artifact
+  `.benchmarks/headtohead/ci-shared-subgraph-divergent-64-equivalence/equivalence-4e990fe6-1785545013442.json`.
+- **Retry predicate.** Re-measure if clean-certificate admission, source identity fields,
+  filesystem timestamp resolution, symlink or external-writer semantics, completed source state,
+  snapshot count, persistent output state, or the fixture, pinned incumbent, executing ELF,
+  affinity, or median-CI gate changes.
