@@ -3725,3 +3725,62 @@ for every whole job.
   shared-output ownership, worker-probe bypass, 64-diagram fixture, pinned incumbent, executing
   ELF, 50 ms integration floor, affinity, structural-equivalence certificate, or median-CI gate
   changes.
+
+## CERTIFIED INCUMBENT WIN: content-matched snapshots erase equal-batch rerenders (2026-08-02)
+
+**Bead:** `bd-caq8`. **Lane:** cod.
+**Campaign result class:** incumbent-win
+**Executing ELF SHA-256 (self-reported by process):** `c1dcf8f85ba81d9042a970369f1750a9b2a9d92098562f0c8bce77c2aec6f56a`
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de invocation_id=headtohead-710b790c-1785700126611 measured_ratio=1150986.7241956703x
+**A/A null control (same invocation):** Rust-before median `1.002636`, 95% CI
+`[0.988942, 1.018605]`; Rust-after median `0.999240`, 95% CI
+`[0.996375, 1.002580]`; live mermaid-js median `1.000894`, 95% CI
+`[0.986963, 1.026868]`. Every CI includes one, the worst median bias was 0.2636%, and the
+independent whole-job median-ratio 95% CI was
+`[1129219.471752x, 1219061.652717x]`; the median-CI and Rust bracket gates passed.
+**Counted mechanism:** the timed diagnostic rematerialized all 64 input `String`s (141,108 input
+bytes) and the SVG config into fresh allocations before every whole job. The exact-identity control
+missed and rebuilt all 64 SVGs; the candidate compared immutable input/config content and returned
+the retained 3,065,537-byte `Arc<[String]>` snapshot. The comparison is exact and collision-free,
+and the fixed capacity remains two config snapshots for one content-equal batch.
+
+- **Why this lever.** Exact-pointer snapshots were a 9,341.76x win but excluded callers that
+  deserialize or otherwise reconstruct an unchanged job. Mermaid-js still rerenders through its
+  public API, so widening collision-free reuse to equal immutable allocations attacks a structural
+  cost the incumbent cannot avoid rather than optimizing common parser/layout work.
+- **The one lever.** Snapshot lookup now tries pointer identity first and exact content equality
+  second. A content hit adopts the caller's latest `Arc`s, so a subsequently stable caller returns
+  to O(1) pointer hits. `FM_H2H_EXACT_RENDER_SNAPSHOT=1` restores pointer-only matching in the same
+  ELF, and `FM_H2H_REMATERIALIZE_BATCH_INPUTS=1` forces fresh allocations for isolation.
+- **Whole-job self result.** A contiguous candidate/control/candidate bracket used the same ELF and
+  a 50 ms integration floor. Candidate medians were 8,481 ns and 8,565 ns; the pointer-only control
+  was 416,083 ns. Against the slower candidate bracket, exact content reuse was **48.579x** faster.
+  All three 20-sample A/A CIs included one and every arm returned output SHA-256
+  `080bc9f191cc09231bd8104a21e763197b4d45d02b083e48be3ae7c1be71d6d4`.
+- **Live incumbent result.** In one harness invocation, the rematerialized-input 64-diagram
+  `ci_shared_subgraph_divergent_64` whole job completed in **0.008361 ms** versus pinned live
+  mermaid-js at **9,623.400001 ms**: **1,150,986.724196x**, with bootstrap 95% CI
+  `[1,129,219.471752x, 1,219,061.652717x]`. The Rust process self-reported 64 requested workers,
+  64 available logical CPUs, the persistent fixed-shard pool, AVX2/FMA/BMI2, and the exact ELF.
+- **Output equivalence.** The linked new-ELF artifact proves 64/64 SVGs structurally equivalent,
+  zero divergent and zero unverified, over byte-identical input and the pinned mermaid-js bundle.
+  Unit tests prove both equal-distinct content hits and pointer-only control misses.
+- **Host and validation.** Measurement ran on x86-64 `thinkstation1` (AMD Ryzen Threadripper PRO
+  5975WX, 32 physical cores / 64 logical threads). Remote workspace/all-targets check and Clippy
+  with warnings denied passed; all 16 example tests passed; the only full-workspace failure was an
+  unrelated timing-sensitive FNX golden gate, whose exact isolated rerun passed unchanged. Targeted
+  rustfmt and UBS passed.
+- **Evidence.** Same-invocation live summary
+  `/data/tmp/fm-bd-caq8-content-snapshot/live/summary-710b790c-1785700126611.json`
+  (SHA-256 `dba5131bd41aad009a17438106e233b1bf8e90725d4dfb37720147eddf9a19ec`);
+  candidate/control/candidate summaries under `/data/tmp/fm-bd-caq8-content-snapshot/`
+  (SHA-256 `0cb68067afabffb6552aa917762cd76d9c87b24a25840368bcdf7e5f9f062964`,
+  `a25c014b9903e99e6ba3f8effa6888a7b434f2041baa3dabca70f257b46812e8`, and
+  `fceba515db204df7f191c8e5fe6921a9f7afecf93b1b5ae54f7d97affd0442c4`);
+  structural-equivalence artifact
+  `/data/tmp/fm-bd-caq8-content-snapshot/equivalence/equivalence-710b790c-1785699640884.json`
+  (SHA-256 `266e35f0c64733b038ba54b04adb3d7f36c0d1421c3842e8ae4bb4f5b1a5f2e7`).
+- **Retry predicate.** Re-measure if content equality, allocation-rematerialization control,
+  cache capacity/eviction, shared-output ownership, 64-diagram fixture, pinned incumbent, executing
+  ELF, 50 ms integration floor, affinity, structural-equivalence certificate, or median-CI gate
+  changes.
