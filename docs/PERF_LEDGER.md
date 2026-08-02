@@ -2883,3 +2883,67 @@ rendered 1,152 first-seen revisions, and reported 441,216 persistent hits.
   entry/byte ceilings, source digest or validation semantics, EOF protocol, exact revision replay,
   corpus, allocator, or filesystem changes. Promote no competitive claim without a same-invocation
   incumbent null arm.
+
+## CERTIFIED INCUMBENT WIN: coalesce superseded EOF-only revisions (2026-08-02)
+
+**Bead:** `bd-rlf0`. **Lane:** cod.
+**Campaign result class:** incumbent-win
+**Executing ELF SHA-256 (self-reported by process):** `abce4109e48b0d4abfc48329173f2ac72e700d2891f411f9807aeae27b32870e`
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de invocation_id=fm-final-revision-coalescing-exact-thinkstation1-1785676351152936591 measured_ratio=261.3610386677114x
+**A/A null control (same invocation):** candidate A/B medians were 34,702,571 / 34,743,683.5
+ns (ratio `0.998817`), with a 50,000-resample median-ratio 95% CI of
+`[0.980572, 1.009457]`, including one. Live mermaid-js ran 20 null rounds: median
+`1.003716`, bootstrap 95% CI `[0.999354, 1.018642]`, sufficient=true and
+`cv_gate=never`. The cross-engine median-ratio 95% CI was `[254.120580x, 264.458920x]`.
+**Counted mechanism:** across 36 rounds, the disabled same-ELF control accepted and executed
+1,152 transactions and rendered 73,728 diagram revisions. Each candidate accepted the identical
+1,152 transactions but executed 36 completed states, rendered zero revisions, and converted all
+2,304 final diagram lookups into persistent hits. That is 32 accepted transactions to one
+execution per round and 2,048 superseded renders removed per round.
+
+- **Structural gap.** Combining final-source-only, final-output-only, and final-ack-only makes
+  intermediate revisions externally unobservable, yet the resident runner still decoded,
+  content-addressed, laid out, rendered, and staged every overwritten state. Mermaid-js's
+  completed-job arm receives only the final 64 documents and does not pay that history, so this
+  was the dominant Rust-only whole-job cost rather than a shared render primitive.
+- **The one lever.** When all three EOF contracts are present, the stream now envelope-validates
+  every JSON transaction, replaces each input's superseded body in a bounded-by-input final map,
+  then hashes and executes only that completed update set. Ordinary streams retain transaction
+  observability and execute every line. `FM_DISABLE_FINAL_STATE_COALESCING=1` selects the old path
+  in the same ELF for exact control measurements.
+- **Whole-job self result.** Each round seeded the canonical 64-diagram durable output, then sent
+  31 distinct full-batch revisions followed by the canonical completed revision: 32 payloads,
+  2,048 accepted source updates, one aggregate acknowledgment, and final source/output
+  materialization. The old path median was 172,958,439.5 ns versus candidate-A at 34,702,571 ns,
+  a **4.984024x** maintenance improvement with bootstrap 95% CI
+  `[4.904140x, 5.119784x]`.
+- **Live incumbent result.** In the same top-level invocation, pinned mermaid-js rendered the
+  identical canonical `ci_shared_subgraph_divergent_64` job in a median **9,069.900001 ms** over
+  nine effect samples. The conservative Rust completed-job median was **34.702571 ms**, including
+  process startup, all 32 envelope parses, final source writes, output-cache lookup, and durable
+  manifest commit: **261.361039x** with bootstrap 95% CI
+  `[254.120580x, 264.458920x]`. Runtime provenance reported one Chrome 150.0.7871.128 page-main
+  execution thread.
+- **Output equivalence.** Candidate A, candidate B, and control produced identical 64-file,
+  3,469,549-byte output trees with aggregate SHA-256
+  `a8502bdcf304ef8db6683a5075c896017bebd6daeabada58725436dccb3077b3`. The pre-existing shared
+  extractor artifact for the byte-identical input SHA-256
+  `f487b4094bc4020436956d78067c529b80aa0ce8e595fbaa1a193c081fb13e68` proves 64/64 diagrams
+  structurally equivalent to the same pinned mermaid-js bundle with zero divergent or unverified.
+- **Host and validation.** The effect and incumbent phases ran on eight distinct physical cores
+  10, 11, 12, 13, 14, 17, 18, and 20 of x86-64 `thinkstation1` (AMD Ryzen Threadripper PRO
+  5975WX). Consecutive effect admission samples peaked at 6.0% / 2.1% busy; incumbent admission
+  peaked at 10.9% / 9.1%, and the post-run sample at 15.0%. Focused merge/contract tests passed in
+  both CLI binary targets; clean-overlay remote workspace check and Clippy with warnings denied
+  passed; targeted rustfmt passed. UBS's cargo-backed fmt, Clippy, check, test-build, audit, and
+  deny phases passed; its remaining findings were pre-existing broad heuristics and false-positive
+  ordinary equality-as-secret reports.
+- **Evidence.** Exact artifact
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/fm-final-revision-coalescing-exact-thinkstation1-1785676351152936591.json`
+  (SHA-256 `2338daff0e11d62e11dfac9d888854270f47cfd376325b5c245155e1272466bf`);
+  structural-equivalence artifact
+  `.benchmarks/headtohead/ci-shared-subgraph-divergent-64-equivalence/equivalence-4e990fe6-1785545013442.json`.
+- **Retry predicate.** Re-measure if any intermediate source, output, or acknowledgment becomes
+  observable; transaction validation or failure semantics change; completed-state payload size,
+  revision count, persistent-cache state, fixture, pinned incumbent, executing ELF, affinity, or
+  median-CI gate changes.

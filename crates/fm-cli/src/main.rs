@@ -292,7 +292,9 @@ enum Command {
         final_state_stdin: bool,
 
         /// Read newline-delimited final-state JSON objects and render one complete observable
-        /// transaction per line without restarting this process.
+        /// transaction per line without restarting this process. When final source, output, and
+        /// acknowledgment materialization are all deferred to EOF, overwritten revisions are
+        /// validated and coalesced so only the completed state is rendered.
         #[arg(
             long,
             conflicts_with_all = [
@@ -1808,6 +1810,65 @@ mod batch_render_cache_tests {
                 .to_string()
                 .contains("exceeding the 4-byte input limit")
         );
+    }
+
+    #[test]
+    fn superseded_final_state_updates_keep_only_the_completed_revision() {
+        let mut completed = std::collections::BTreeMap::new();
+        super::merge_superseded_final_state_updates(
+            &mut completed,
+            [
+                ("a.mmd".to_owned(), "flowchart LR\nA-->B".to_owned()),
+                ("b.mmd".to_owned(), "flowchart LR\nB-->C".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        super::merge_superseded_final_state_updates(
+            &mut completed,
+            [
+                ("a.mmd".to_owned(), "flowchart LR\nA-->Z".to_owned()),
+                ("c.mmd".to_owned(), "flowchart LR\nC-->D".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        assert_eq!(completed.len(), 3);
+        assert_eq!(completed["a.mmd"], "flowchart LR\nA-->Z");
+        assert_eq!(completed["b.mmd"], "flowchart LR\nB-->C");
+        assert_eq!(completed["c.mmd"], "flowchart LR\nC-->D");
+
+        let prepared = super::prepare_batch_final_state_updates(completed);
+        assert_eq!(prepared.changed_inputs, ["a.mmd", "b.mmd", "c.mmd"]);
+        assert_eq!(prepared.source_digests.len(), 3);
+    }
+
+    #[test]
+    fn final_state_coalescing_requires_every_observation_at_eof() {
+        let completed_only = super::FinalStateStreamMaterialization {
+            outputs_at_eof: true,
+            sources_at_eof: true,
+            acknowledgments_at_eof: true,
+        };
+        assert!(completed_only.exposes_only_completed_state());
+
+        for materialization in [
+            super::FinalStateStreamMaterialization {
+                outputs_at_eof: false,
+                ..completed_only
+            },
+            super::FinalStateStreamMaterialization {
+                sources_at_eof: false,
+                ..completed_only
+            },
+            super::FinalStateStreamMaterialization {
+                acknowledgments_at_eof: false,
+                ..completed_only
+            },
+        ] {
+            assert!(!materialization.exposes_only_completed_state());
+        }
     }
 
     #[test]
@@ -4156,6 +4217,13 @@ fn prepare_batch_final_state_payload(
         .map(prepare_batch_final_state_updates)
 }
 
+fn merge_superseded_final_state_updates(
+    completed_state: &mut std::collections::BTreeMap<String, String>,
+    updates: std::collections::BTreeMap<String, String>,
+) {
+    completed_state.extend(updates);
+}
+
 const RESIDENT_PAYLOAD_CACHE_MAX_ENTRIES: usize = 8;
 const RESIDENT_PAYLOAD_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
@@ -4270,6 +4338,63 @@ struct FinalStateStreamMaterialization {
     acknowledgments_at_eof: bool,
 }
 
+impl FinalStateStreamMaterialization {
+    fn exposes_only_completed_state(self) -> bool {
+        self.outputs_at_eof && self.sources_at_eof && self.acknowledgments_at_eof
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_prepared_final_state_transaction(
+    inputs: &[String],
+    out_dir: &str,
+    jobs: Option<usize>,
+    keep_going: bool,
+    json: bool,
+    plan: &BatchRenderPlan,
+    cache_session: &mut BatchRenderCacheSession,
+    prepared: &PreparedBatchFinalState,
+    source_overrides: Option<&std::collections::BTreeMap<String, String>>,
+    options: &RenderCommandOptions<'_>,
+) -> Result<bool> {
+    let replay_started = Instant::now();
+    let replayed_total_bytes = (!json)
+        .then(|| {
+            cache_session.replay_resident_transaction(plan, prepared, source_overrides.is_some())
+        })
+        .transpose()?
+        .flatten();
+    if let Some(total_bytes) = replayed_total_bytes {
+        eprintln!(
+            "rendered {0}/{0} diagram(s) ({0} persistent hits, 0 identical renders reused, 0 \
+             shared prefix parses reused / 0 bytes), {total_bytes} bytes, {1} requested \
+             worker(s), 0 active worker(s), {2:.3} ms",
+            inputs.len(),
+            plan.requested_workers,
+            replay_started.elapsed().as_secs_f64() * 1000.0,
+        );
+    } else {
+        cmd_render_batch(
+            inputs,
+            out_dir,
+            jobs,
+            keep_going,
+            json,
+            BatchCachePolicy {
+                use_cache: true,
+                trust_change_set: true,
+                changed_inputs: &prepared.changed_inputs,
+                source_overrides,
+                session: Some(cache_session),
+                plan: Some(plan),
+                report: None,
+            },
+            options.clone(),
+        )?;
+    }
+    Ok(replayed_total_bytes.is_some())
+}
+
 fn cmd_render_batch_final_state_transaction_stream(
     inputs: &[String],
     out_dir: &str,
@@ -4281,6 +4406,8 @@ fn cmd_render_batch_final_state_transaction_stream(
 ) -> Result<()> {
     use std::io::{BufRead, Read, Write};
 
+    let coalesce_superseded_revisions = materialization.exposes_only_completed_state()
+        && std::env::var_os("FM_DISABLE_FINAL_STATE_COALESCING").is_none();
     let FinalStateStreamMaterialization {
         outputs_at_eof: final_output_only,
         sources_at_eof: final_source_only,
@@ -4301,6 +4428,7 @@ fn cmd_render_batch_final_state_transaction_stream(
     let mut reader = stdin.lock();
     let mut line_number = 0usize;
     let mut transaction = 0usize;
+    let mut executed_transactions = 0usize;
     let mut replayed_transactions = 0usize;
     let mut source_materializations = 0usize;
     let mut acknowledged_updates = 0usize;
@@ -4335,6 +4463,23 @@ fn cmd_render_batch_final_state_transaction_stream(
         if payload.trim().is_empty() {
             continue;
         }
+        if coalesce_superseded_revisions {
+            let updates = parse_batch_final_state_payload(payload, inputs, options.max_input_bytes)
+                .with_context(|| {
+                    format!("invalid final-state transaction on input line {line_number}")
+                })?;
+            let changed_inputs = updates.len();
+            let total_source_bytes = updates
+                .values()
+                .map(String::len)
+                .fold(0usize, usize::saturating_add);
+            merge_superseded_final_state_updates(&mut deferred_sources, updates);
+            transaction = transaction.saturating_add(1);
+            acknowledged_updates = acknowledged_updates.saturating_add(changed_inputs);
+            acknowledged_source_bytes =
+                acknowledged_source_bytes.saturating_add(total_source_bytes);
+            continue;
+        }
         let prepared = payload_cache
             .prepare(
                 payload,
@@ -4359,40 +4504,22 @@ fn cmd_render_batch_final_state_transaction_stream(
                 source_materializations = source_materializations.saturating_add(1);
             }
         }
-        let replay_started = Instant::now();
-        let replayed_total_bytes = (!json)
-            .then(|| cache_session.replay_resident_transaction(&plan, &prepared, final_source_only))
-            .transpose()?
-            .flatten();
-        if let Some(total_bytes) = replayed_total_bytes {
+        let replayed = render_prepared_final_state_transaction(
+            inputs,
+            out_dir,
+            jobs,
+            keep_going,
+            json,
+            &plan,
+            &mut cache_session,
+            &prepared,
+            final_source_only.then_some(&deferred_sources),
+            &options,
+        )
+        .with_context(|| format!("final-state transaction {} failed", transaction + 1))?;
+        executed_transactions = executed_transactions.saturating_add(1);
+        if replayed {
             replayed_transactions += 1;
-            eprintln!(
-                "rendered {0}/{0} diagram(s) ({0} persistent hits, 0 identical renders reused, 0 \
-                 shared prefix parses reused / 0 bytes), {total_bytes} bytes, {1} requested \
-                 worker(s), 0 active worker(s), {2:.3} ms",
-                inputs.len(),
-                plan.requested_workers,
-                replay_started.elapsed().as_secs_f64() * 1000.0,
-            );
-        } else {
-            cmd_render_batch(
-                inputs,
-                out_dir,
-                jobs,
-                keep_going,
-                json,
-                BatchCachePolicy {
-                    use_cache: true,
-                    trust_change_set: true,
-                    changed_inputs,
-                    source_overrides: final_source_only.then_some(&deferred_sources),
-                    session: Some(&mut cache_session),
-                    plan: Some(&plan),
-                    report: None,
-                },
-                options.clone(),
-            )
-            .with_context(|| format!("final-state transaction {} failed", transaction + 1))?;
         }
         transaction += 1;
         acknowledged_updates = acknowledged_updates.saturating_add(changed_inputs.len());
@@ -4414,6 +4541,25 @@ fn cmd_render_batch_final_state_transaction_stream(
             stdout.flush()?;
         }
     }
+    if coalesce_superseded_revisions && !deferred_sources.is_empty() {
+        let prepared = prepare_batch_final_state_updates(std::mem::take(&mut deferred_sources));
+        let replayed = render_prepared_final_state_transaction(
+            inputs,
+            out_dir,
+            jobs,
+            keep_going,
+            json,
+            &plan,
+            &mut cache_session,
+            &prepared,
+            Some(&prepared.updates),
+            &options,
+        )
+        .context("coalesced final-state transaction failed")?;
+        executed_transactions = 1;
+        replayed_transactions = if replayed { 1 } else { 0 };
+        deferred_sources = prepared.updates;
+    }
     if final_source_only {
         let (sources, bytes) =
             cache_session.materialize_deferred_sources(&plan, &deferred_sources)?;
@@ -4425,10 +4571,18 @@ fn cmd_render_batch_final_state_transaction_stream(
         eprintln!("materialized {outputs} final output(s), {bytes} bytes at stream EOF");
     }
     cache_session.flush(Path::new(out_dir))?;
-    eprintln!(
-        "decoded {} resident payload(s), reused {} exact payload(s)",
-        payload_cache.decoded, payload_cache.reused
-    );
+    if coalesce_superseded_revisions {
+        eprintln!(
+            "coalesced {transaction} resident payload(s) containing {acknowledged_updates} update(s) \
+             into {} final update(s)",
+            deferred_sources.len()
+        );
+    } else {
+        eprintln!(
+            "decoded {} resident payload(s), reused {} exact payload(s)",
+            payload_cache.decoded, payload_cache.reused
+        );
+    }
     if final_ack_only {
         let mut stdout = io::stdout().lock();
         serde_json::to_writer(
@@ -4447,7 +4601,7 @@ fn cmd_render_batch_final_state_transaction_stream(
     }
     eprintln!(
         "applied {transaction} resident final-state transaction(s) \
-         ({replayed_transactions} complete revision replay(s))"
+         ({executed_transactions} executed, {replayed_transactions} complete revision replay(s))"
     );
     eprintln!("materialized {source_materializations} source revision(s) during stream");
     Ok(())
