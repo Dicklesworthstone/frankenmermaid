@@ -2504,3 +2504,57 @@ for the control versus 288 source writes and 36 transactions in each candidate a
   payload or trust contract changes, input write durability changes, changed-diagram count, source
   size, edit count, cache certificate, worker count, corpus, or filesystem changes. Promote no
   competitive claim without a same-invocation incumbent null arm.
+
+## KEEP: retain the render engine across observable final-state transactions (2026-08-02)
+
+**Bead:** `bd-q959`. **Lane:** cod.
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `957f20ad34df7dc83c8dd257898eef0d4a077f1d6f23a8186b3725508ccda1ea`
+**A/A null control (same invocation):** invocation
+`fm-resident-final-state-exact-thinkstation1-1785663133358567894` interleaved all six
+permutations of the live one-shot control/candidate-A/candidate-B arms for 36 whole-job rounds per
+arm. Candidate A/B medians were 120,645,682 / 118,293,487.5 ns (ratio `1.019884`), with a
+50,000-resample median-ratio 95% CI of `[0.983127, 1.055792]`, including one.
+**Counted mechanism:** across 36 rounds the one-shot control started 1,152 processes and rendered
+18,432 changed revisions. Each resident candidate started 36 processes and rendered only 1,152
+first-seen revisions; the other 17,280 revisions were exact process-local output-cache hits. All
+arms still acknowledged 1,152 transactions, wrote the same 18,432 source files, and materialized
+every observable output state.
+
+- **Structural gap.** The coalesced one-shot API deleted transient edits, but a caller publishing
+  several observable commits still restarted the executable and rebuilt the immutable batch plan,
+  manifest lease, pressure snapshot, worker pool, and rendered-revision working set for every
+  commit. Mermaid-js keeps one browser page resident; Frankenmermaid can keep its substantially
+  cheaper native engine resident too, while additionally replaying exact A/B revisions.
+- **Mechanism.** Explicit `render-batch --trust-change-set --final-state-stream` accepts one bounded
+  newline-delimited final-state JSON object per transaction. It constructs and validates the
+  complete 384-input plan once, holds one cache session for the stream lifetime, applies each known
+  bounded source set, renders the surviving independent changes on the existing shared-nothing
+  pool, materializes that complete observable state, and flushes one durable certificate at EOF.
+  A JSON acknowledgment after each materialization gives the caller a transaction boundary.
+- **Whole-job result.** Each round began from an untimed revision-A certificate, then published 32
+  alternating transactions over 16 changed diagrams in the complete 384-diagram repository: 512
+  source writes and 12,288 observable diagram states per arm. The 32-process live one-shot median
+  was 741,942,946 ns and the one-process candidate-A median was 120,645,682 ns: **6.149768x**,
+  bootstrap 95% CI `[5.987533, 6.255576]`. All arms ended with identical 384-file / 20,685,288-byte
+  output, aggregate SHA-256
+  `2f528b7b4e19d28b1546dc44513fc01979e2569b41f9d61af9ddd6be275810c2`.
+- **Host admission.** The effect phase ran on eight distinct physical cores 10, 11, 12, 13, 14,
+  17, 18, and 20 of x86-64 `thinkstation1`. Its two consecutive one-second admission samples
+  peaked at 4.1% and 5.0% busy; the pre-incumbent pair peaked at 12.9% and 11.0%. Every first-seen
+  16-diagram revision used eight requested and eight active workers.
+- **Live-incumbent bracket.** The same invocation bracketed full uncached 384-diagram Rust renders
+  at 37.146 / 35.664 ms around pinned mermaid-js 11.15.0 at 52,072.8 ms render time (57.601 s live
+  wall). Runtime provenance reported one browser main thread, Chrome 150.0.7871.128, input SHA-256
+  `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`, and bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`. The incumbent was a
+  render-once arm without an incumbent null, so this row asserts no competitive ratio.
+- **Validation.** Strict clean-overlay remote cache/stream tests passed 15/15 in both CLI binary
+  targets and package Clippy passed with warnings denied before measurement. Workspace-wide remote
+  check and Clippy, targeted rustfmt, staged ledger lint, and UBS completed before landing. External
+  and self-reported executable hashes agreed throughout. Exact artifact:
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/fm-resident-final-state-exact-thinkstation1-1785663133358567894.json`.
+- **Retry predicate.** Re-measure if transaction observability, acknowledgment or crash semantics,
+  plan/session lifetime, exact revision key or capacity, output materialization, changed-diagram or
+  transaction count, corpus, worker count, or filesystem changes. Promote no competitive claim
+  without a same-invocation incumbent null arm.

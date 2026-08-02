@@ -281,10 +281,29 @@ enum Command {
         /// apply those source updates once, and render the coalesced final state as one job.
         #[arg(
             long,
-            conflicts_with_all = ["no_cache", "changed_input", "change_set_stdin"],
+            conflicts_with_all = [
+                "no_cache",
+                "changed_input",
+                "change_set_stdin",
+                "final_state_stream"
+            ],
             requires = "trust_change_set"
         )]
         final_state_stdin: bool,
+
+        /// Read newline-delimited final-state JSON objects and render one complete observable
+        /// transaction per line without restarting this process.
+        #[arg(
+            long,
+            conflicts_with_all = [
+                "no_cache",
+                "changed_input",
+                "change_set_stdin",
+                "final_state_stdin"
+            ],
+            requires = "trust_change_set"
+        )]
+        final_state_stream: bool,
 
         /// Hold each diagram's newest rendered bytes in memory and materialize only the final
         /// output tree when the change-set stream reaches EOF. This deletes transient writes for
@@ -2079,6 +2098,7 @@ fn main() -> Result<()> {
             changed_input,
             change_set_stdin,
             final_state_stdin,
+            final_state_stream,
             final_output_only,
             fnx_mode,
             fnx_projection,
@@ -2115,7 +2135,11 @@ fn main() -> Result<()> {
                 fnx_projection,
                 fnx_fallback,
             };
-            if final_state_stdin {
+            if final_state_stream {
+                cmd_render_batch_final_state_transaction_stream(
+                    &inputs, &out_dir, jobs, keep_going, json, options,
+                )
+            } else if final_state_stdin {
                 cmd_render_batch_final_state_stream(
                     &inputs, &out_dir, jobs, keep_going, json, options,
                 )
@@ -3700,6 +3724,116 @@ fn parse_batch_final_state_payload(
     Ok(updates)
 }
 
+fn batch_final_state_payload_limit(inputs: &[String], max_input_bytes: usize) -> usize {
+    // JSON escaping can expand one source byte to six ASCII bytes. The fixed allowance covers
+    // absolute path keys and object punctuation without making the decoder an unbounded buffer.
+    max_input_bytes
+        .saturating_mul(inputs.len().max(1))
+        .saturating_mul(6)
+        .saturating_add(1024 * 1024)
+}
+
+fn cmd_render_batch_final_state_transaction_stream(
+    inputs: &[String],
+    out_dir: &str,
+    jobs: Option<usize>,
+    keep_going: bool,
+    json: bool,
+    options: RenderCommandOptions<'_>,
+) -> Result<()> {
+    use std::io::{BufRead, Read, Write};
+
+    let max_payload_bytes = batch_final_state_payload_limit(inputs, options.max_input_bytes);
+    let read_limit = u64::try_from(max_payload_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(2);
+    let plan = BatchRenderPlan::new(inputs, out_dir, jobs, true, &options)?;
+    let mut cache_session = BatchRenderCacheSession::default();
+    let admit_clean_batch = std::env::var_os("FM_DISABLE_DURABLE_BATCH_CERTIFICATE").is_none();
+    cache_session.begin_stream(&plan.cache_path, Some(&plan), admit_clean_batch)?;
+
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    let mut line_number = 0usize;
+    let mut transaction = 0usize;
+    loop {
+        let mut encoded = Vec::new();
+        let bytes_read = (&mut reader)
+            .take(read_limit)
+            .read_until(b'\n', &mut encoded)
+            .context("cannot read final-state transaction stream")?;
+        if bytes_read == 0 {
+            break;
+        }
+        line_number += 1;
+        if encoded.last() == Some(&b'\n') {
+            encoded.pop();
+        }
+        if encoded.last() == Some(&b'\r') {
+            encoded.pop();
+        }
+        if encoded.len() > max_payload_bytes {
+            anyhow::bail!(
+                "final-state JSON on input line {line_number} exceeds the \
+                 {max_payload_bytes}-byte transaction limit"
+            );
+        }
+        let payload = std::str::from_utf8(&encoded)
+            .with_context(|| format!("final-state input line {line_number} is not UTF-8"))?;
+        if payload.trim().is_empty() {
+            continue;
+        }
+        let updates = parse_batch_final_state_payload(payload, inputs, options.max_input_bytes)
+            .with_context(|| {
+                format!("invalid final-state transaction on input line {line_number}")
+            })?;
+        let changed_inputs = updates.keys().cloned().collect::<Vec<_>>();
+        let total_source_bytes = updates
+            .values()
+            .map(String::len)
+            .fold(0usize, usize::saturating_add);
+        for (input, source) in &updates {
+            std::fs::write(input, source.as_bytes())
+                .with_context(|| format!("cannot apply final-state input {input}"))?;
+        }
+        cmd_render_batch(
+            inputs,
+            out_dir,
+            jobs,
+            keep_going,
+            json,
+            BatchCachePolicy {
+                use_cache: true,
+                trust_change_set: true,
+                changed_inputs: &changed_inputs,
+                session: Some(&mut cache_session),
+                plan: Some(&plan),
+                report: None,
+            },
+            options.clone(),
+        )
+        .with_context(|| format!("final-state transaction {} failed", transaction + 1))?;
+        transaction += 1;
+
+        let mut stdout = io::stdout().lock();
+        serde_json::to_writer(
+            &mut stdout,
+            &serde_json::json!({
+                "transaction": transaction,
+                "input_line": line_number,
+                "updates": changed_inputs.len(),
+                "source_bytes": total_source_bytes,
+                "status": "ok"
+            }),
+        )?;
+        writeln!(stdout)?;
+        stdout.flush()?;
+    }
+    cache_session.flush(Path::new(out_dir))?;
+    eprintln!("applied {transaction} resident final-state transaction(s)");
+    Ok(())
+}
+
 fn cmd_render_batch_final_state_stream(
     inputs: &[String],
     out_dir: &str,
@@ -3710,13 +3844,7 @@ fn cmd_render_batch_final_state_stream(
 ) -> Result<()> {
     use std::io::Read;
 
-    // JSON escaping can expand one source byte to six ASCII bytes. Bound the aggregate before
-    // deserializing, then enforce the ordinary per-input byte ceiling on decoded source bodies.
-    let max_payload_bytes = options
-        .max_input_bytes
-        .saturating_mul(inputs.len().max(1))
-        .saturating_mul(6)
-        .saturating_add(1024 * 1024);
+    let max_payload_bytes = batch_final_state_payload_limit(inputs, options.max_input_bytes);
     let read_limit = u64::try_from(max_payload_bytes)
         .unwrap_or(u64::MAX)
         .saturating_add(1);
