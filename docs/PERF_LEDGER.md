@@ -2353,3 +2353,50 @@ an exact digest+options+executable-key hit.
 - **Retry predicate.** Re-measure if the persistent-stream lifetime, source/options/executable key,
   output-write or manifest-commit semantics, cache capacity, corpus, or revision pattern changes.
   Promote no competitive claim without a same-invocation incumbent null arm.
+
+## KEEP: retain exact rendered revisions across multi-diagram churn (2026-08-02)
+
+**Bead:** `bd-b5f4`. **Lane:** cod.
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `4b0919e95556db4d9708b74e9e5f329f13cc4b83b8752019ae13270e2858bf5d`
+**A/A null control (same invocation):** invocation
+`fm-revision-lru-exact-thinkstation1-1785656752258587833` interleaved all six permutations of the
+two-entry control/candidate-A/candidate-B arms for 36 whole-job rounds per arm. Candidate A/B
+medians were 1,854,139,507.5 / 1,936,262,425.5 ns (ratio `0.957587`), with a 50,000-resample
+median-ratio 95% CI of `[0.804007, 1.151838]`, including one.
+**Counted mechanism:** each candidate arm replayed exact resident SVG bytes for 21,888/23,040
+epochs (608/640 in every round), versus 0/23,040 in the two-entry control. Each candidate parsed,
+laid out, and rendered only the first 32 distinct diagram/revision pairs; the control recomputed all
+640 epochs because its two global slots churned across the 16-diagram revision working set.
+
+- **Structural gap.** The proven two-revision cache collapsed one alternating diagram, but a user
+  switching among several diagrams evicted every revision before reuse. A resident Rust process can
+  retain immutable SVG revisions across that working set; mermaid-js still parses, lays out, and
+  renders every revision submitted to its page.
+- **Mechanism.** `BatchRenderCacheSession` now owns a content-addressed LRU capped at 256 entries
+  and 32 MiB. Exact hits promote recency; insertions replace duplicate keys and evict least-recently
+  used bytes until both ceilings hold; oversize SVGs bypass retention. The same executable's
+  `FM_SESSION_REVISION_CACHE_TWO_ENTRY_CONTROL=1` arm selects the former two-entry capacity.
+- **Whole-job result.** Each round started one process and executed 640 edits over 16 large
+  diagrams, alternating two revisions per diagram. The two-entry-control median was
+  2,163,305,127.5 ns and candidate-A median 1,854,139,507.5 ns: **1.166743x**, bootstrap 95% CI
+  `[1.048630, 1.389927]`. All arms emitted 384 files / 33,258,645 bytes with identical aggregate
+  SHA-256 `6f6a4332172924cdb095e669b810f6d8851152e7f5e85795f1ef9742639755a2`.
+- **Host admission.** The invocation used both SMT threads of physical cores 24-27 on x86-64
+  `thinkstation1` (`24-27,56-59`). Two consecutive pre-run one-second samples peaked at 7.0% and
+  3.0% busy; the post-run sample peaked at 5.0%. Sparse epochs requested eight workers and used
+  one or eight according to the admitted work.
+- **Live-incumbent bracket.** The same invocation bracketed full uncached 384-diagram Rust renders
+  at 27.040 / 27.583 ms around pinned mermaid-js 11.15.0 at 50,638.6 ms render time (55.723 s live
+  wall). Runtime provenance reported one browser main thread, Chrome 150.0.7871.128, input SHA-256
+  `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`, and bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`. The incumbent was a
+  render-once arm without an incumbent null, so this row asserts no competitive ratio.
+- **Validation.** A strict clean-overlay remote cache/stream suite passed 13/13 and strict remote
+  CLI Clippy passed with warnings denied before measurement. Workspace-wide clean-overlay check and
+  Clippy, targeted rustfmt, staged ledger lint, and UBS completed before landing. External and
+  self-reported executable hashes agreed.
+- **Retry predicate.** Re-measure if the persistent-stream lifetime, exact revision key, entry or
+  byte ceiling, SVG size distribution, working-set width, output materialization, corpus, or
+  revision pattern changes. Promote no competitive claim without a same-invocation incumbent null
+  arm.

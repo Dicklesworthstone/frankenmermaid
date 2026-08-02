@@ -1099,12 +1099,17 @@ struct TrustedBatchSummary {
     total_bytes: usize,
 }
 
-const REVISION_OUTPUT_CACHE_CAPACITY: usize = 2;
+// Persistent editors commonly revisit several diagrams while undoing or switching branches. Keep
+// exact rendered revisions across that working set, but enforce both cardinality and byte ceilings
+// so a pathological SVG cannot turn the process-local acceleration into unbounded retention.
+const REVISION_OUTPUT_CACHE_MAX_ENTRIES: usize = 256;
+const REVISION_OUTPUT_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+const REVISION_OUTPUT_CACHE_CONTROL_ENTRIES: usize = 2;
 
 #[derive(Debug)]
 struct BatchRevisionOutput {
-    key: String,
     bytes: Arc<Vec<u8>>,
+    last_used: u64,
 }
 
 #[derive(Debug, Default)]
@@ -1115,7 +1120,11 @@ struct BatchRenderCacheSession {
     trusted_batch: Option<TrustedBatchSummary>,
     pressure: OnceLock<Arc<MermaidPressureReport>>,
     reuse_pressure: bool,
-    revision_outputs: Vec<BatchRevisionOutput>,
+    revision_outputs: std::collections::HashMap<String, BatchRevisionOutput>,
+    revision_output_bytes: usize,
+    revision_output_clock: u64,
+    revision_output_max_entries: usize,
+    revision_output_max_bytes: usize,
     reuse_revision_outputs: bool,
 }
 
@@ -1129,6 +1138,18 @@ impl BatchRenderCacheSession {
         self.reuse_pressure = std::env::var_os("FM_DISABLE_SESSION_PRESSURE_SNAPSHOT").is_none();
         self.reuse_revision_outputs =
             std::env::var_os("FM_DISABLE_SESSION_REVISION_CACHE").is_none();
+        self.revision_output_max_entries =
+            if std::env::var_os("FM_SESSION_REVISION_CACHE_TWO_ENTRY_CONTROL").is_some() {
+                REVISION_OUTPUT_CACHE_CONTROL_ENTRIES
+            } else {
+                REVISION_OUTPUT_CACHE_MAX_ENTRIES
+            };
+        self.revision_output_max_bytes =
+            if self.revision_output_max_entries == REVISION_OUTPUT_CACHE_CONTROL_ENTRIES {
+                usize::MAX
+            } else {
+                REVISION_OUTPUT_CACHE_MAX_BYTES
+            };
         let (mut manifest, mut modified) = load_batch_render_cache(cache_path);
         self.trusted_batch = admit_clean_batch
             .then(|| plan.and_then(|plan| trusted_batch_from_manifest(&manifest, plan)))
@@ -1161,32 +1182,57 @@ impl BatchRenderCacheSession {
         )
     }
 
-    fn revision_output(&self, key: &str) -> Option<Arc<Vec<u8>>> {
+    fn revision_output(&mut self, key: &str) -> Option<Arc<Vec<u8>>> {
         if !self.reuse_revision_outputs {
             return None;
         }
-        self.revision_outputs
-            .iter()
-            .rev()
-            .find(|entry| entry.key == key)
-            .map(|entry| Arc::clone(&entry.bytes))
+        if !self.revision_outputs.contains_key(key) {
+            return None;
+        }
+        self.revision_output_clock = self.revision_output_clock.saturating_add(1);
+        let entry = self.revision_outputs.get_mut(key)?;
+        entry.last_used = self.revision_output_clock;
+        Some(Arc::clone(&entry.bytes))
     }
 
     fn remember_revision_output(&mut self, key: String, bytes: Arc<Vec<u8>>) {
-        if !self.reuse_revision_outputs {
+        if !self.reuse_revision_outputs
+            || self.revision_output_max_entries == 0
+            || bytes.len() > self.revision_output_max_bytes
+        {
             return;
         }
-        if let Some(index) = self
-            .revision_outputs
-            .iter()
-            .position(|entry| entry.key == key)
-        {
-            self.revision_outputs.remove(index);
-        } else if self.revision_outputs.len() == REVISION_OUTPUT_CACHE_CAPACITY {
-            self.revision_outputs.remove(0);
+        if let Some(previous) = self.revision_outputs.remove(&key) {
+            self.revision_output_bytes = self
+                .revision_output_bytes
+                .saturating_sub(previous.bytes.len());
         }
-        self.revision_outputs
-            .push(BatchRevisionOutput { key, bytes });
+        self.revision_output_clock = self.revision_output_clock.saturating_add(1);
+        self.revision_output_bytes = self.revision_output_bytes.saturating_add(bytes.len());
+        self.revision_outputs.insert(
+            key,
+            BatchRevisionOutput {
+                bytes,
+                last_used: self.revision_output_clock,
+            },
+        );
+        while self.revision_outputs.len() > self.revision_output_max_entries
+            || self.revision_output_bytes > self.revision_output_max_bytes
+        {
+            let Some(oldest_key) = self
+                .revision_outputs
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(oldest) = self.revision_outputs.remove(&oldest_key) {
+                self.revision_output_bytes = self
+                    .revision_output_bytes
+                    .saturating_sub(oldest.bytes.len());
+            }
+        }
     }
 
     fn lease<'a>(&'a mut self, cache_path: &Path) -> BatchRenderCacheLease<'a> {
@@ -1586,6 +1632,8 @@ mod batch_render_cache_tests {
     fn persistent_session_keeps_two_exact_rendered_revisions() {
         let mut session = BatchRenderCacheSession {
             reuse_revision_outputs: true,
+            revision_output_max_entries: 2,
+            revision_output_max_bytes: usize::MAX,
             ..BatchRenderCacheSession::default()
         };
         let first = Arc::new(vec![1_u8]);
@@ -1596,22 +1644,43 @@ mod batch_render_cache_tests {
         session.remember_revision_output("second".to_owned(), Arc::clone(&second));
         assert!(
             session
-                .revision_output("first")
-                .is_some_and(|bytes| Arc::ptr_eq(&bytes, &first))
-        );
-        assert!(
-            session
                 .revision_output("second")
                 .is_some_and(|bytes| Arc::ptr_eq(&bytes, &second))
         );
+        assert!(
+            session
+                .revision_output("first")
+                .is_some_and(|bytes| Arc::ptr_eq(&bytes, &first))
+        );
 
         session.remember_revision_output("third".to_owned(), Arc::clone(&third));
-        assert!(session.revision_output("first").is_none());
+        assert!(session.revision_output("second").is_none());
+        assert!(session.revision_output("first").is_some());
         assert!(
             session
                 .revision_output("third")
                 .is_some_and(|bytes| Arc::ptr_eq(&bytes, &third))
         );
+    }
+
+    #[test]
+    fn persistent_revision_cache_enforces_its_byte_budget() {
+        let mut session = BatchRenderCacheSession {
+            reuse_revision_outputs: true,
+            revision_output_max_entries: 8,
+            revision_output_max_bytes: 3,
+            ..BatchRenderCacheSession::default()
+        };
+
+        session.remember_revision_output("first".to_owned(), Arc::new(vec![1_u8; 2]));
+        session.remember_revision_output("second".to_owned(), Arc::new(vec![2_u8; 2]));
+        assert!(session.revision_output("first").is_none());
+        assert!(session.revision_output("second").is_some());
+        assert_eq!(session.revision_output_bytes, 2);
+
+        session.remember_revision_output("oversize".to_owned(), Arc::new(vec![3_u8; 4]));
+        assert!(session.revision_output("oversize").is_none());
+        assert_eq!(session.revision_output_bytes, 2);
     }
 }
 
@@ -3943,7 +4012,7 @@ fn cmd_render_batch(
                 continue;
             };
             let bytes = session_lease
-                .as_ref()
+                .as_mut()
                 .and_then(|lease| lease.session.revision_output(&key));
             let Some(bytes) = bytes else {
                 continue;
