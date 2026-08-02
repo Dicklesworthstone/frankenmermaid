@@ -2264,3 +2264,45 @@ from 2,345 to 2,265 over the 20-epoch job.
 - **Retry predicate.** Re-measure if plan fields, destination mapping, sparse-recursion admission,
   corpus, revision count, output equivalence, or default worker discovery changes. Promote no
   competitive claim without a same-invocation incumbent null arm.
+
+## KEEP: sample host pressure once per persistent edit stream (2026-08-02)
+
+**Bead:** `bd-369j`. **Lane:** cod (`BlackThrush`).
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `6402f257587890fb261f7b31200d6b8a1e0847df9fe89a752d04e060323c9b70`
+**A/A null control (same invocation):** invocation
+`fm-pressure-exact-trj-1785651422350986226` interleaved all six permutations of the disabled
+control/candidate-A/candidate-B arms for 36 whole-job rounds per arm on 128-CPU
+`threadripperje`. Candidate A/B medians were 25,437,457.5 / 25,065,029.5 ns (ratio `1.014858`),
+with a 50,000-resample median-ratio 95% CI of `[0.998427, 1.032389]`, including one.
+**Counted mechanism:** retaining one immutable pressure report for the process lifetime reduced
+exact-ELF `read` calls from 396 to 92, `openat` from 170 to 56, `statx` from 170 to 56, and total
+syscalls from 1,604 to 863 over the 20-epoch job.
+
+- **Profile-first attribution.** The live incumbent keeps one browser page resident and does not
+  walk Linux procfs/cgroup topology per edit. Frankenmermaid still reopened and reread
+  `/proc/self/status`, `/proc/<pid>/cgroup`, and three `cpu.max` ancestry paths on every epoch even
+  though those values only tune a process-local worker budget and cannot affect output bytes.
+- **Mechanism.** `BatchRenderCacheSession` now initializes one `MermaidPressureReport` lazily and
+  shares it across every render epoch in that persistent stream. One-shot batches retain their
+  existing single sample. `FM_DISABLE_SESSION_PRESSURE_SNAPSHOT=1` selects the former per-epoch
+  sampling path in the exact same executable.
+- **Whole-job result.** Every arm started one process and executed 20 alternating one-file source
+  revisions over the 384-diagram repository. The disabled-control median was 26,915,497 ns and
+  candidate median 25,437,457.5 ns: **1.058105x**, bootstrap 95% CI
+  `[1.040355, 1.066264]`. All three arms emitted identical 384-SVG aggregate SHA-256
+  `a8bbb4c00c012b846fab31463c2050ffbceb062374c5119b9810214ed40dc452`.
+- **Live-incumbent bracket.** The same invocation bracketed full uncached 384-diagram Rust renders
+  at 66.418 / 43.740 ms around pinned mermaid-js 11.15.0 at 48,675.5 ms render time (53.894 s live
+  wall). Runtime provenance reported one browser main thread, Chrome 151.0.7922.71, bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`, and live output SHA-256
+  `332955ff46de11d3292f578ecb5f6a0c022d0706d39af621d0afd7782ea6f6cf`. The incumbent used a
+  render-once arm without an incumbent null, so this row asserts no competitive ratio.
+- **Validation.** Strict clean-overlay remote focused tests passed 11/11; strict remote Clippy
+  passed with warnings denied; targeted rustfmt passed. Load stayed 21.95 -> 19.84 over 128 CPUs,
+  requested and active worker provenance reported 64, and the transferred executable's external
+  and self-reported hashes agreed.
+- **Retry predicate.** Re-measure if pressure signals begin affecting output semantics, persistent
+  streams commonly outlive meaningful host-pressure changes, pressure-source topology, corpus,
+  revision count, or stream protocol changes. Promote no competitive claim without a
+  same-invocation incumbent null arm.

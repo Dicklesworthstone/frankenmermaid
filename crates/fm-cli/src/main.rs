@@ -30,7 +30,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -1105,6 +1105,8 @@ struct BatchRenderCacheSession {
     manifest_modified: Option<std::time::SystemTime>,
     dirty: bool,
     trusted_batch: Option<TrustedBatchSummary>,
+    pressure: OnceLock<Arc<MermaidPressureReport>>,
+    reuse_pressure: bool,
 }
 
 impl BatchRenderCacheSession {
@@ -1114,6 +1116,7 @@ impl BatchRenderCacheSession {
         plan: Option<&BatchRenderPlan>,
         admit_clean_batch: bool,
     ) -> Result<()> {
+        self.reuse_pressure = std::env::var_os("FM_DISABLE_SESSION_PRESSURE_SNAPSHOT").is_none();
         let (mut manifest, mut modified) = load_batch_render_cache(cache_path);
         self.trusted_batch = admit_clean_batch
             .then(|| plan.and_then(|plan| trusted_batch_from_manifest(&manifest, plan)))
@@ -1134,6 +1137,16 @@ impl BatchRenderCacheSession {
         self.manifest = Some(manifest);
         self.manifest_modified = modified;
         Ok(())
+    }
+
+    fn pressure_report(&self) -> Arc<MermaidPressureReport> {
+        if !self.reuse_pressure {
+            return Arc::new(MermaidNativePressureSignals::sample().into_report());
+        }
+        Arc::clone(
+            self.pressure
+                .get_or_init(|| Arc::new(MermaidNativePressureSignals::sample().into_report())),
+        )
     }
 
     fn lease<'a>(&'a mut self, cache_path: &Path) -> BatchRenderCacheLease<'a> {
@@ -1284,6 +1297,7 @@ mod batch_render_cache_tests {
         parse_batch_change_set_line, trusted_batch_from_manifest,
     };
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
 
     fn entry() -> BatchRenderCacheEntry {
@@ -1513,6 +1527,19 @@ mod batch_render_cache_tests {
         assert_eq!(projected.option_cache_digest, plan.option_cache_digest);
         assert_eq!(projected.cache_active, plan.cache_active);
         assert_eq!(projected.key, plan.key);
+    }
+
+    #[test]
+    fn persistent_session_reuses_one_pressure_snapshot() {
+        let session = BatchRenderCacheSession {
+            reuse_pressure: true,
+            ..BatchRenderCacheSession::default()
+        };
+
+        let first = session.pressure_report();
+        let second = session.pressure_report();
+
+        assert!(Arc::ptr_eq(&first, &second));
     }
 }
 
@@ -3747,7 +3774,10 @@ fn cmd_render_batch(
     // Host pressure, sampled ONCE for batches that actually render. See
     // `render_source_with_pressure`: this is a host property, so per-diagram sampling is work the
     // output never depends on, and its `/proc/self/status` read serializes concurrent workers.
-    let pressure = MermaidNativePressureSignals::sample().into_report();
+    let pressure = match session_lease.as_ref() {
+        Some(lease) => lease.session.pressure_report(),
+        None => Arc::new(MermaidNativePressureSignals::sample().into_report()),
+    };
 
     // Phase 1: carry certified digests across metadata hits; read and content-address only misses.
     // The disabled arm below preserves the former read-all path for exact-binary mechanism tests.
