@@ -3404,3 +3404,67 @@ candidate made 36, a 4,096x protocol-write reduction.
 - **Retry predicate.** Re-measure if resident exact-job framing, EOF acknowledgment semantics,
   bounded validation, exact payload reuse, durable certificate admission, either logical job count,
   fixture, pinned incumbent, executing ELF, affinity, or median-CI gate changes.
+
+## CERTIFIED INCUMBENT WIN: one resident process serves complete whole-job groups (2026-08-02)
+
+**Bead:** `bd-9j2j`. **Lane:** cod.
+**Campaign result class:** incumbent-win
+**Executing ELF SHA-256 (self-reported by process):** `917d0388bc0933594e5e52091963500a5265c2422f3fbf6d0d4b5dee5aacddc7`
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de invocation_id=fm-resident-job-groups-thinkstation1-1785689537910877847 measured_ratio=13820.811570912012x
+**A/A null control (same invocation):** candidate A/B medians were 110,760.5 / 108,981.5 ns
+(ratio `1.016324`), with a 50,000-resample median-ratio 95% CI of
+`[0.797280, 1.280678]`, including one. Live mermaid-js ran 10 null rounds: median
+`1.004659`, bootstrap 95% CI `[0.995839, 1.014353]`, sufficient=true and
+`cv_gate=never`. The cross-engine median-ratio 95% CI was
+`[11015.010005x, 16255.330014x]`.
+**Counted mechanism:** across 36 whole-job samples, the EOF control launched 36 processes,
+parsed 36 first payloads, and reused 2,268 exact payloads. Each grouped candidate kept one process
+alive across all 36 independently completed groups, parsed one first payload, and reused 2,303
+exact payloads. Every arm processed 2,304 certified jobs, consumed 552,960 encoded bytes, reused
+2,304 certified source states, emitted 36 durable completion acknowledgments, started zero render
+workers, and wrote zero sources or SVGs.
+
+- **Profile-first attribution.** The previous symbols-preserving product profile ranked ELF page
+  faults, dynamic loading, allocator and C++ runtime initialization, and Clap construction/parsing
+  among the largest self-time entries. The final-ACK path then remained essentially flat at about
+  17 ms for either 64 or 4,096 exact jobs, identifying process lifecycle rather than per-job work
+  as its new floor. Pinned mermaid-js holds one Chromium page open across completed jobs and does
+  not repay that lifecycle cost.
+- **The one lever.** `--resident-exact-job-groups` composes with the bounded
+  `--resident-exact-jobs --final-ack-only` protocol. Each group begins with a little-endian `u64`
+  job count, contains exactly that many existing packed records, and receives one flushed aggregate
+  completion certificate; the process then waits for the next complete group. Zero, truncated, and
+  over-one-million-job groups fail closed. Existing ungrouped EOF semantics are unchanged.
+- **Whole-job self result.** Each timed sample was one complete 64-diagram job from caller write
+  through durable aggregate acknowledgment. The fresh-process EOF control median was
+  15,941,204.5 ns versus grouped candidate A at 110,760.5 ns: **143.924996x**, with bootstrap 95%
+  CI `[114.706380x, 169.982130x]`.
+- **Live incumbent result.** In the same top-level invocation, pinned mermaid-js rendered the same
+  canonical diagram 64 times per timed sample in one persistent page, with median **1,530.8 ms**
+  over ten effect samples. The conservative Rust completed-group median was **0.110761 ms**:
+  **13,820.811571x**, with bootstrap 95% CI `[11,015.010005x, 16,255.330014x]`. Runtime
+  provenance reported one Chrome 150.0.7871.128 page-main execution thread.
+- **Output equivalence.** Candidate A, candidate B, and control retained the same one-file,
+  15,483-byte SVG tree with aggregate SHA-256
+  `0cb0118157d8e65f187dfa0e77bcee7fb3344bfe9e01cac93afc54f54160856e`. The extractor artifact
+  for input SHA-256 `b5402490faa78c6a7c71554296d03b46016ae1156d7cd38d258b280363b6900a`
+  proves the measured flowchart structurally equivalent to the same pinned mermaid-js bundle.
+- **Host and validation.** Effect and incumbent phases ran on eight distinct physical cores 10,
+  11, 12, 13, 14, 17, 18, and 20 of x86-64 `thinkstation1` (AMD Ryzen Threadripper PRO 5975WX).
+  Consecutive effect admission samples peaked at 3.03% / 4.95% busy; incumbent admission peaked at
+  6.06% / 1.98%, and the post-run sample peaked at 1.98%. Clean-overlay remote workspace check and
+  Clippy with warnings denied passed; all 64 CLI tests passed in both binary targets, the grouped
+  reader/CLI composition tests passed, and targeted rustfmt passed. The wider workspace test run
+  reached the existing `dense_flowchart_stress` golden-hash mismatch after the relevant CLI tests.
+  All timed Rust processes self-reported the external ELF hash.
+- **Evidence.** Exact artifact
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/resident-job-groups/fm-resident-job-groups-thinkstation1-1785689537910877847.json`
+  (SHA-256 `059d604eec4e86d26af2125f971c0d18f87a9bf7030fe211a8a49dcf2147b3bb`);
+  predecessor symbols-preserving product profile
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/perf-resident-exact-jobs-601ee218-symbols.data`;
+  structural-equivalence artifact
+  `.benchmarks/headtohead/cert-v3-requalification-v1/equivalence-5bad0559-1785490669339.json`.
+- **Retry predicate.** Re-measure if group-count framing, persistent-process lifecycle, aggregate
+  acknowledgment durability, packed record validation, exact payload reuse, durable certificate
+  admission, group size, fixture, pinned incumbent, executing ELF, affinity, or median-CI gate
+  changes.

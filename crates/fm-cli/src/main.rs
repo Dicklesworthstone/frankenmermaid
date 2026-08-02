@@ -77,6 +77,7 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 const DEFAULT_MAX_INPUT_BYTES: usize = 5_000_000;
+const MAX_RESIDENT_EXACT_JOB_GROUP_JOBS: usize = 1_000_000;
 
 fn parse_positive_font_size_arg(value: &str) -> std::result::Result<f32, String> {
     let parsed = value
@@ -354,6 +355,15 @@ enum Command {
             conflicts_with = "terminal_packed_snapshot"
         )]
         resident_exact_jobs: bool,
+
+        /// Keep the resident exact-job process alive across complete caller-observable jobs.
+        /// Each group starts with a little-endian u64 job count, contains that many ordinary
+        /// packed records, and receives one aggregate acknowledgment before the next group.
+        #[arg(
+            long,
+            requires_all = ["resident_exact_jobs", "final_ack_only"]
+        )]
+        resident_exact_job_groups: bool,
 
         /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
         #[arg(long, value_enum, default_value = "auto")]
@@ -2053,7 +2063,58 @@ mod batch_render_cache_tests {
     }
 
     #[test]
-    fn resident_exact_jobs_accepts_one_eof_acknowledgment() {
+    fn resident_exact_job_group_reader_preserves_boundaries_and_bounds() {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&2u64.to_le_bytes());
+        stream.extend_from_slice(&1u64.to_le_bytes());
+        let mut reader = std::io::Cursor::new(stream);
+        assert_eq!(
+            super::read_resident_exact_job_group_size(&mut reader, 1).unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            super::read_resident_exact_job_group_size(&mut reader, 2).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            super::read_resident_exact_job_group_size(&mut reader, 3).unwrap(),
+            None
+        );
+
+        let zero = super::read_resident_exact_job_group_size(
+            &mut std::io::Cursor::new(0u64.to_le_bytes()),
+            4,
+        )
+        .unwrap_err();
+        assert!(zero.to_string().contains("group 4 has zero jobs"));
+
+        let too_many = u64::try_from(super::MAX_RESIDENT_EXACT_JOB_GROUP_JOBS + 1).unwrap();
+        let oversized = super::read_resident_exact_job_group_size(
+            &mut std::io::Cursor::new(too_many.to_le_bytes()),
+            5,
+        )
+        .unwrap_err();
+        assert!(
+            oversized
+                .to_string()
+                .contains("exceeding the 1000000-job limit")
+        );
+
+        let truncated_header = 2u64.to_le_bytes()[..4].to_vec();
+        let truncated = super::read_resident_exact_job_group_size(
+            &mut std::io::Cursor::new(truncated_header),
+            6,
+        )
+        .unwrap_err();
+        assert!(
+            truncated
+                .to_string()
+                .contains("inside its job-count header")
+        );
+    }
+
+    #[test]
+    fn resident_exact_jobs_accept_group_acknowledgments() {
         let cli = Cli::try_parse_from([
             "fm-cli",
             "render-batch",
@@ -2067,20 +2128,27 @@ mod batch_render_cache_tests {
             "--complete-snapshot-stream",
             "--packed-complete-snapshot-stream",
             "--resident-exact-jobs",
+            "--resident-exact-job-groups",
             "a.mmd",
         ])
-        .expect("resident exact jobs should support a single EOF acknowledgment");
+        .expect("resident exact jobs should support persistent group acknowledgments");
 
-        let (final_ack_only, resident_exact_jobs) = match cli.command {
+        let (final_ack_only, resident_exact_jobs, resident_exact_job_groups) = match cli.command {
             Command::RenderBatch {
                 final_ack_only,
                 resident_exact_jobs,
+                resident_exact_job_groups,
                 ..
-            } => (final_ack_only, resident_exact_jobs),
-            _ => (false, false),
+            } => (
+                final_ack_only,
+                resident_exact_jobs,
+                resident_exact_job_groups,
+            ),
+            _ => (false, false, false),
         };
         assert!(final_ack_only);
         assert!(resident_exact_jobs);
+        assert!(resident_exact_job_groups);
     }
 
     #[test]
@@ -2907,6 +2975,7 @@ fn main() -> Result<()> {
             packed_complete_snapshot_stream,
             terminal_packed_snapshot,
             resident_exact_jobs,
+            resident_exact_job_groups,
             fnx_mode,
             fnx_projection,
             fnx_fallback,
@@ -2978,6 +3047,7 @@ fn main() -> Result<()> {
                     terminal_packed_snapshot,
                     resident_exact_jobs,
                     final_ack_only,
+                    resident_exact_job_groups,
                     options,
                 )
             } else if final_state_stream {
@@ -4865,6 +4935,114 @@ fn read_packed_snapshot_record(
     Ok(true)
 }
 
+fn read_resident_exact_job_group_size(
+    reader: &mut impl Read,
+    group_ordinal: usize,
+) -> Result<Option<usize>> {
+    let mut encoded_jobs = [0u8; std::mem::size_of::<u64>()];
+    let first_byte = reader
+        .read(&mut encoded_jobs[..1])
+        .context("cannot read resident exact-job group stream")?;
+    if first_byte == 0 {
+        return Ok(None);
+    }
+    reader.read_exact(&mut encoded_jobs[1..]).with_context(|| {
+        format!("resident exact-job group {group_ordinal} ended inside its job-count header")
+    })?;
+    let jobs = usize::try_from(u64::from_le_bytes(encoded_jobs))
+        .map_err(|_| anyhow::anyhow!("resident exact-job group size does not fit this platform"))?;
+    if jobs == 0 {
+        anyhow::bail!("resident exact-job group {group_ordinal} has zero jobs");
+    }
+    if jobs > MAX_RESIDENT_EXACT_JOB_GROUP_JOBS {
+        anyhow::bail!(
+            "resident exact-job group {group_ordinal} has {jobs} jobs, exceeding the \
+             {MAX_RESIDENT_EXACT_JOB_GROUP_JOBS}-job limit"
+        );
+    }
+    Ok(Some(jobs))
+}
+
+#[derive(Default)]
+struct ResidentExactJobReplayState {
+    payload: Vec<u8>,
+    admitted_payload: Vec<u8>,
+    admitted_source_bytes: usize,
+    admitted_output_bytes: usize,
+    has_admitted_payload: bool,
+    jobs: usize,
+    parsed_payloads: usize,
+    exact_payload_reuses: usize,
+    encoded_payload_bytes: usize,
+    logical_source_bytes: usize,
+    logical_output_bytes: usize,
+}
+
+impl ResidentExactJobReplayState {
+    fn read_and_replay(
+        &mut self,
+        reader: &mut impl Read,
+        inputs: &[String],
+        plan: &BatchRenderPlan,
+        cache_session: &mut BatchRenderCacheSession,
+        max_payload_bytes: usize,
+        max_input_bytes: usize,
+    ) -> Result<Option<(usize, usize)>> {
+        if !read_packed_snapshot_record(
+            reader,
+            &mut self.payload,
+            max_payload_bytes,
+            self.jobs.saturating_add(1),
+        )? {
+            return Ok(None);
+        }
+
+        let payload_bytes = self.payload.len();
+        self.encoded_payload_bytes = self.encoded_payload_bytes.saturating_add(payload_bytes);
+        let exact_payload_reuse =
+            self.has_admitted_payload && self.payload == self.admitted_payload;
+        let (source_bytes, output_bytes) = if exact_payload_reuse {
+            self.exact_payload_reuses = self.exact_payload_reuses.saturating_add(1);
+            (self.admitted_source_bytes, self.admitted_output_bytes)
+        } else {
+            let packed = prepare_packed_complete_batch_final_state_payload(
+                &self.payload,
+                inputs,
+                max_input_bytes,
+            )
+            .with_context(|| format!("resident exact job {} is invalid", self.jobs + 1))?;
+            let output_bytes = cache_session
+                .replay_certified_complete_transaction(
+                    plan,
+                    inputs
+                        .iter()
+                        .map(String::as_str)
+                        .zip(packed.source_digests.iter().map(String::as_str)),
+                    true,
+                )
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "resident exact job {} does not match the admitted durable batch \
+                         certificate; outputs were not touched",
+                        self.jobs + 1
+                    )
+                })?;
+            self.parsed_payloads = self.parsed_payloads.saturating_add(1);
+            self.admitted_source_bytes = packed.total_source_bytes;
+            self.admitted_output_bytes = output_bytes;
+            self.admitted_payload.clear();
+            self.admitted_payload.extend_from_slice(&self.payload);
+            self.has_admitted_payload = true;
+            (self.admitted_source_bytes, self.admitted_output_bytes)
+        };
+
+        self.jobs = self.jobs.saturating_add(1);
+        self.logical_source_bytes = self.logical_source_bytes.saturating_add(source_bytes);
+        self.logical_output_bytes = self.logical_output_bytes.saturating_add(output_bytes);
+        Ok(Some((source_bytes, payload_bytes)))
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct FinalStateStreamMaterialization {
     outputs_at_eof: bool,
@@ -4940,67 +5118,71 @@ fn cmd_render_batch_resident_exact_jobs(
     max_payload_bytes: usize,
     max_input_bytes: usize,
     acknowledgments_at_eof: bool,
+    job_groups: bool,
 ) -> Result<()> {
     let mut stdout = io::stdout().lock();
-    let mut payload = Vec::new();
-    let mut admitted_payload = Vec::new();
-    let mut admitted_source_bytes = 0usize;
-    let mut admitted_output_bytes = 0usize;
-    let mut has_admitted_payload = false;
-    let mut jobs = 0usize;
-    let mut parsed_payloads = 0usize;
-    let mut exact_payload_reuses = 0usize;
-    let mut encoded_payload_bytes = 0usize;
-    let mut logical_source_bytes = 0usize;
-    let mut logical_output_bytes = 0usize;
+    let mut replay = ResidentExactJobReplayState::default();
+    let mut groups = 0usize;
 
-    while read_packed_snapshot_record(
-        reader,
-        &mut payload,
-        max_payload_bytes,
-        jobs.saturating_add(1),
-    )? {
-        encoded_payload_bytes = encoded_payload_bytes.saturating_add(payload.len());
-        let exact_payload_reuse = has_admitted_payload && payload == admitted_payload;
-        let (source_bytes, output_bytes) = if exact_payload_reuse {
-            exact_payload_reuses = exact_payload_reuses.saturating_add(1);
-            (admitted_source_bytes, admitted_output_bytes)
-        } else {
-            let packed = prepare_packed_complete_batch_final_state_payload(
-                &payload,
-                inputs,
-                max_input_bytes,
-            )
-            .with_context(|| format!("resident exact job {} is invalid", jobs + 1))?;
-            let output_bytes = cache_session
-                .replay_certified_complete_transaction(
-                    plan,
-                    inputs
-                        .iter()
-                        .map(String::as_str)
-                        .zip(packed.source_digests.iter().map(String::as_str)),
-                    true,
-                )
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "resident exact job {} does not match the admitted durable batch \
-                         certificate; outputs were not touched",
-                        jobs + 1
-                    )
-                })?;
-            parsed_payloads = parsed_payloads.saturating_add(1);
-            admitted_source_bytes = packed.total_source_bytes;
-            admitted_output_bytes = output_bytes;
-            admitted_payload.clear();
-            admitted_payload.extend_from_slice(&payload);
-            has_admitted_payload = true;
-            (admitted_source_bytes, admitted_output_bytes)
-        };
-
-        jobs = jobs.saturating_add(1);
-        logical_source_bytes = logical_source_bytes.saturating_add(source_bytes);
-        logical_output_bytes = logical_output_bytes.saturating_add(output_bytes);
-        if !acknowledgments_at_eof {
+    if job_groups {
+        while let Some(group_jobs) =
+            read_resident_exact_job_group_size(reader, groups.saturating_add(1))?
+        {
+            groups = groups.saturating_add(1);
+            let jobs_before = replay.jobs;
+            let source_bytes_before = replay.logical_source_bytes;
+            let encoded_bytes_before = replay.encoded_payload_bytes;
+            for group_job in 0..group_jobs {
+                if replay
+                    .read_and_replay(
+                        reader,
+                        inputs,
+                        plan,
+                        cache_session,
+                        max_payload_bytes,
+                        max_input_bytes,
+                    )?
+                    .is_none()
+                {
+                    anyhow::bail!(
+                        "resident exact-job group {groups} ended after {group_job} of \
+                         {group_jobs} packed job(s)"
+                    );
+                }
+            }
+            cache_session.flush(Path::new(out_dir))?;
+            serde_json::to_writer(
+                &mut stdout,
+                &serde_json::json!({
+                    "group": groups,
+                    "transactions": replay.jobs.saturating_sub(jobs_before),
+                    "input_lines": replay.jobs.saturating_sub(jobs_before),
+                    "updates": group_jobs.saturating_mul(inputs.len()),
+                    "source_bytes": replay
+                        .logical_source_bytes
+                        .saturating_sub(source_bytes_before),
+                    "source_bytes_scope": "completed_jobs",
+                    "encoded_payload_bytes": replay
+                        .encoded_payload_bytes
+                        .saturating_sub(encoded_bytes_before),
+                    "status": "ok"
+                }),
+            )?;
+            writeln!(stdout)?;
+            stdout.flush()?;
+        }
+    } else {
+        while let Some((source_bytes, payload_bytes)) = replay.read_and_replay(
+            reader,
+            inputs,
+            plan,
+            cache_session,
+            max_payload_bytes,
+            max_input_bytes,
+        )? {
+            if acknowledgments_at_eof {
+                continue;
+            }
             serde_json::to_writer(
                 &mut stdout,
                 &serde_json::json!({
@@ -5009,7 +5191,7 @@ fn cmd_render_batch_resident_exact_jobs(
                     "updates": inputs.len(),
                     "source_bytes": source_bytes,
                     "source_bytes_scope": "completed_state",
-                    "encoded_payload_bytes": payload.len(),
+                    "encoded_payload_bytes": payload_bytes,
                     "status": "ok"
                 }),
             )?;
@@ -5019,16 +5201,16 @@ fn cmd_render_batch_resident_exact_jobs(
     }
 
     cache_session.flush(Path::new(out_dir))?;
-    if acknowledgments_at_eof {
+    if acknowledgments_at_eof && !job_groups {
         serde_json::to_writer(
             &mut stdout,
             &serde_json::json!({
-                "transactions": jobs,
-                "input_lines": jobs,
-                "updates": jobs.saturating_mul(inputs.len()),
-                "source_bytes": logical_source_bytes,
+                "transactions": replay.jobs,
+                "input_lines": replay.jobs,
+                "updates": replay.jobs.saturating_mul(inputs.len()),
+                "source_bytes": replay.logical_source_bytes,
                 "source_bytes_scope": "completed_jobs",
-                "encoded_payload_bytes": encoded_payload_bytes,
+                "encoded_payload_bytes": replay.encoded_payload_bytes,
                 "status": "ok"
             }),
         )?;
@@ -5036,19 +5218,29 @@ fn cmd_render_batch_resident_exact_jobs(
         stdout.flush()?;
     }
     eprintln!(
-        "replayed {jobs} resident exact job(s), parsed {parsed_payloads} certified payload(s), \
-         reused {exact_payload_reuses} exact payload(s), {encoded_payload_bytes} encoded bytes"
+        "replayed {} resident exact job(s), parsed {} certified payload(s), reused {} exact \
+         payload(s), {} encoded bytes",
+        replay.jobs,
+        replay.parsed_payloads,
+        replay.exact_payload_reuses,
+        replay.encoded_payload_bytes,
     );
     eprintln!(
-        "reused {} certified source state(s), {logical_source_bytes} logical source bytes, \
-         {logical_output_bytes} logical output bytes",
-        jobs.saturating_mul(inputs.len())
+        "reused {} certified source state(s), {} logical source bytes, {} logical output bytes",
+        replay.jobs.saturating_mul(inputs.len()),
+        replay.logical_source_bytes,
+        replay.logical_output_bytes,
     );
     eprintln!("materialized 0 source revision(s) and 0 output revision(s) during resident jobs");
-    if acknowledgments_at_eof {
-        eprintln!("emitted one EOF acknowledgment for {jobs} resident exact job(s)");
+    if job_groups {
+        eprintln!("emitted {groups} resident exact job-group acknowledgment(s)");
+    } else if acknowledgments_at_eof {
+        eprintln!(
+            "emitted one EOF acknowledgment for {} resident exact job(s)",
+            replay.jobs
+        );
     } else {
-        eprintln!("emitted {jobs} resident job acknowledgment(s)");
+        eprintln!("emitted {} resident job acknowledgment(s)", replay.jobs);
     }
     Ok(())
 }
@@ -5063,6 +5255,7 @@ fn cmd_render_batch_packed_complete_snapshot_stream(
     terminal_snapshot: bool,
     resident_exact_jobs: bool,
     final_ack_only: bool,
+    resident_exact_job_groups: bool,
     options: RenderCommandOptions<'_>,
 ) -> Result<()> {
     use std::io::{Read, Write};
@@ -5090,6 +5283,7 @@ fn cmd_render_batch_packed_complete_snapshot_stream(
             max_payload_bytes,
             options.max_input_bytes,
             final_ack_only,
+            resident_exact_job_groups,
         );
     }
     let mut transaction = 0usize;
