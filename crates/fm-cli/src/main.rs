@@ -901,6 +901,16 @@ struct BatchCachePolicy<'a> {
     changed_inputs: &'a [String],
     session: Option<&'a mut BatchRenderCacheSession>,
     plan: Option<&'a BatchRenderPlan>,
+    report: Option<BatchReportCarry<'a>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BatchReportCarry<'a> {
+    plan_key: &'a str,
+    logical_input_count: usize,
+    inherited_diagrams: usize,
+    inherited_cache_hits: usize,
+    inherited_total_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -935,6 +945,7 @@ impl Default for BatchRenderCacheManifest {
 #[derive(Debug)]
 struct BatchRenderPlan {
     input_set: std::collections::BTreeSet<String>,
+    input_indices: std::collections::BTreeMap<String, usize>,
     destinations: Vec<PathBuf>,
     destination_names: Vec<String>,
     destination_displays: Vec<String>,
@@ -942,6 +953,7 @@ struct BatchRenderPlan {
     cache_path: PathBuf,
     option_cache_digest: Option<String>,
     cache_active: bool,
+    key: String,
 }
 
 impl BatchRenderPlan {
@@ -1018,9 +1030,20 @@ impl BatchRenderPlan {
         let option_cache_digest = executable_identity
             .as_ref()
             .map(|identity| sha256_hex(format!("{identity}\0{options:?}").as_bytes()));
+        let key = sha256_hex(&serde_json::to_vec(&(
+            inputs,
+            out_dir,
+            &option_cache_digest,
+        ))?);
 
         Ok(Self {
             input_set: inputs.iter().cloned().collect(),
+            input_indices: inputs
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, input)| (input, index))
+                .collect(),
             destinations,
             destination_names,
             destination_displays,
@@ -1028,8 +1051,16 @@ impl BatchRenderPlan {
             cache_path,
             option_cache_digest,
             cache_active,
+            key,
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrustedBatchSummary {
+    plan_key: String,
+    input_count: usize,
+    total_bytes: usize,
 }
 
 #[derive(Debug, Default)]
@@ -1037,6 +1068,7 @@ struct BatchRenderCacheSession {
     manifest: Option<BatchRenderCacheManifest>,
     manifest_modified: Option<std::time::SystemTime>,
     dirty: bool,
+    trusted_batch: Option<TrustedBatchSummary>,
 }
 
 impl BatchRenderCacheSession {
@@ -1071,6 +1103,35 @@ impl BatchRenderCacheSession {
             .ok();
         self.dirty = false;
         Ok(())
+    }
+
+    fn sparse_report_carry<'a>(
+        &self,
+        plan: &'a BatchRenderPlan,
+        changed_inputs: &[String],
+    ) -> Option<BatchReportCarry<'a>> {
+        let summary = self.trusted_batch.as_ref()?;
+        if summary.plan_key != plan.key || summary.input_count != plan.input_indices.len() {
+            return None;
+        }
+        let manifest = self.manifest.as_ref()?;
+        let options_key = plan.option_cache_digest.as_ref()?;
+        let mut changed_bytes = 0usize;
+        for input in changed_inputs {
+            let index = *plan.input_indices.get(input)?;
+            let entry = manifest.entries.get(&plan.destination_names[index])?;
+            if !batch_cache_entry_matches_key(entry, options_key) {
+                return None;
+            }
+            changed_bytes = changed_bytes.checked_add(usize::try_from(entry.bytes).ok()?)?;
+        }
+        Some(BatchReportCarry {
+            plan_key: &plan.key,
+            logical_input_count: summary.input_count,
+            inherited_diagrams: summary.input_count.checked_sub(changed_inputs.len())?,
+            inherited_cache_hits: summary.input_count.checked_sub(changed_inputs.len())?,
+            inherited_total_bytes: summary.total_bytes.checked_sub(changed_bytes)?,
+        })
     }
 }
 
@@ -1132,11 +1193,11 @@ fn batch_cache_entry_matches_key(entry: &BatchRenderCacheEntry, options_key: &st
 #[cfg(test)]
 mod batch_render_cache_tests {
     use super::{
-        BatchRenderCacheEntry, BatchRenderCacheManifest, BatchRenderCacheSession,
-        batch_cache_entry_matches_early, batch_cache_entry_matches_key,
+        BatchRenderCacheEntry, BatchRenderCacheManifest, BatchRenderCacheSession, BatchRenderPlan,
+        TrustedBatchSummary, batch_cache_entry_matches_early, batch_cache_entry_matches_key,
         parse_batch_change_set_line,
     };
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, UNIX_EPOCH};
 
     fn entry() -> BatchRenderCacheEntry {
@@ -1254,6 +1315,52 @@ mod batch_render_cache_tests {
                 .as_ref()
                 .is_some_and(|manifest| manifest.entries.contains_key("diagram.svg"))
         );
+    }
+
+    #[test]
+    fn sparse_epoch_carries_only_unlisted_diagrams() {
+        let mut first = entry();
+        first.bytes = 100;
+        let mut second = entry();
+        second.bytes = 250;
+        let session = BatchRenderCacheSession {
+            manifest: Some(BatchRenderCacheManifest {
+                version: super::BATCH_RENDER_CACHE_VERSION,
+                entries: [("a.svg".to_owned(), first), ("b.svg".to_owned(), second)]
+                    .into_iter()
+                    .collect(),
+            }),
+            trusted_batch: Some(TrustedBatchSummary {
+                plan_key: "batch-plan".to_owned(),
+                input_count: 2,
+                total_bytes: 350,
+            }),
+            ..BatchRenderCacheSession::default()
+        };
+        let plan = BatchRenderPlan {
+            input_set: ["a.mmd".to_owned(), "b.mmd".to_owned()]
+                .into_iter()
+                .collect(),
+            input_indices: [("a.mmd".to_owned(), 0), ("b.mmd".to_owned(), 1)]
+                .into_iter()
+                .collect(),
+            destinations: vec![PathBuf::from("out/a.svg"), PathBuf::from("out/b.svg")],
+            destination_names: vec!["a.svg".to_owned(), "b.svg".to_owned()],
+            destination_displays: vec!["out/a.svg".to_owned(), "out/b.svg".to_owned()],
+            requested_workers: 2,
+            cache_path: PathBuf::from("out/cache.json"),
+            option_cache_digest: Some("options".to_owned()),
+            cache_active: true,
+            key: "batch-plan".to_owned(),
+        };
+
+        let carry = session
+            .sparse_report_carry(&plan, &["b.mmd".to_owned()])
+            .expect("validated batch can execute a changed-only epoch");
+        assert_eq!(carry.logical_input_count, 2);
+        assert_eq!(carry.inherited_diagrams, 1);
+        assert_eq!(carry.inherited_cache_hits, 1);
+        assert_eq!(carry.inherited_total_bytes, 100);
     }
 }
 
@@ -1619,6 +1726,7 @@ fn main() -> Result<()> {
                         changed_inputs: &changed_input,
                         session: None,
                         plan: None,
+                        report: None,
                     },
                     options,
                 )
@@ -3190,6 +3298,7 @@ fn cmd_render_batch_change_set_stream(
                 changed_inputs: &changed_inputs,
                 session: retain_manifest.then_some(&mut cache_session),
                 plan: batch_plan.as_ref(),
+                report: None,
             },
             options.clone(),
         )
@@ -3269,14 +3378,16 @@ fn cmd_render_batch(
         use_cache,
         trust_change_set,
         changed_inputs,
-        session,
+        mut session,
         plan,
+        report,
     } = cache_policy;
 
     if trust_change_set && !use_cache {
         anyhow::bail!("--trust-change-set requires the persistent batch cache");
     }
 
+    let supplied_plan = plan.is_some();
     let owned_plan = plan
         .is_none()
         .then(|| BatchRenderPlan::new(inputs, out_dir, jobs, use_cache, &options))
@@ -3300,6 +3411,55 @@ fn cmd_render_batch(
 
     let requested = plan.requested_workers;
     let started = Instant::now();
+    let change_set_optimization_enabled = std::env::var_os("FM_DISABLE_BATCH_CHANGE_SET").is_none();
+    let trusted_change_set_active = trust_change_set && change_set_optimization_enabled;
+    let sparse_epoch_enabled = std::env::var_os("FM_DISABLE_SPARSE_CHANGE_SET_EPOCH").is_none();
+
+    // A resident stream has already proved every unlisted input and output during its first
+    // recovery epoch. Execute later epochs over the changed slice itself: this removes every
+    // batch-wide Vec, map pass and Rayon dispatch for the hundreds of diagrams the caller has
+    // certified unchanged. The process-owned manifest remains the source of truth, while the
+    // carry preserves whole-batch accounting without rescanning it.
+    if supplied_plan
+        && report.is_none()
+        && !json
+        && trusted_change_set_active
+        && sparse_epoch_enabled
+        && changed_inputs.len() < inputs.len()
+        && let Some(carry) = session
+            .as_deref()
+            .and_then(|session| session.sparse_report_carry(plan, changed_inputs))
+    {
+        if changed_inputs.is_empty() {
+            eprintln!(
+                "rendered {0}/{0} diagram(s) ({0} persistent hits, 0 identical renders reused, 0 \
+                 shared prefix parses reused / 0 bytes), {1} bytes, {2} requested worker(s), 0 \
+                 active worker(s), {3:.3} ms",
+                carry.logical_input_count,
+                carry.inherited_total_bytes,
+                requested,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+            return Ok(());
+        }
+        return cmd_render_batch(
+            changed_inputs,
+            out_dir,
+            Some(requested),
+            keep_going,
+            false,
+            BatchCachePolicy {
+                use_cache,
+                trust_change_set,
+                changed_inputs,
+                session: session.as_deref_mut(),
+                plan: None,
+                report: Some(carry),
+            },
+            options,
+        );
+    }
+
     let cache_path = &plan.cache_path;
     let cache_active = plan.cache_active;
     let option_cache_digest = &plan.option_cache_digest;
@@ -3318,8 +3478,6 @@ fn cmd_render_batch(
     } else {
         (&disk_cache, disk_cache_modified)
     };
-    let change_set_optimization_enabled = std::env::var_os("FM_DISABLE_BATCH_CHANGE_SET").is_none();
-    let trusted_change_set_active = trust_change_set && change_set_optimization_enabled;
     let cache_key_for = |digest: &str| -> Option<String> {
         option_cache_digest
             .as_ref()
@@ -3377,7 +3535,10 @@ fn cmd_render_batch(
     let sparse_cache_enabled = std::env::var_os("FM_DISABLE_SPARSE_BATCH_CACHE").is_none();
     if !inputs.is_empty() && early_cached_results.iter().all(Option::is_some) {
         let elapsed = started.elapsed();
-        let mut total_bytes = 0usize;
+        let inherited_diagrams = report.map_or(0, |carry| carry.inherited_diagrams);
+        let inherited_cache_hits = report.map_or(0, |carry| carry.inherited_cache_hits);
+        let logical_input_count = report.map_or(inputs.len(), |carry| carry.logical_input_count);
+        let mut total_bytes = report.map_or(0, |carry| carry.inherited_total_bytes);
         for (input, (path, bytes)) in inputs.iter().zip(early_cached_results.iter().flatten()) {
             total_bytes += *bytes;
             if json {
@@ -3394,11 +3555,18 @@ fn cmd_render_batch(
                 "rendered {}/{} diagram(s) ({} persistent hits, 0 identical renders reused, 0 \
                  shared prefix parses reused / 0 bytes), {total_bytes} bytes, {requested} \
                  requested worker(s), 0 active worker(s), {:.3} ms",
-                inputs.len(),
-                inputs.len(),
-                inputs.len(),
+                inherited_diagrams + inputs.len(),
+                logical_input_count,
+                inherited_cache_hits + inputs.len(),
                 elapsed.as_secs_f64() * 1000.0,
             );
+        }
+        if let Some(lease) = session_lease.as_mut() {
+            lease.session.trusted_batch = Some(TrustedBatchSummary {
+                plan_key: report.map_or_else(|| plan.key.clone(), |carry| carry.plan_key.into()),
+                input_count: logical_input_count,
+                total_bytes,
+            });
         }
         return Ok(());
     }
@@ -3485,7 +3653,8 @@ fn cmd_render_batch(
             Some((plan.destination_displays[index].clone(), bytes))
         })
         .collect::<Vec<_>>();
-    let cache_hit_count = cached_results.iter().flatten().count();
+    let cache_hit_count = report.map_or(0, |carry| carry.inherited_cache_hits)
+        + cached_results.iter().flatten().count();
 
     // Phase 2: how many inputs share each digest? A diagram whose source repeats in the batch --
     // the same architecture snippet embedded across a docs site, or an unchanged file in a CI
@@ -3777,8 +3946,9 @@ fn cmd_render_batch(
     }
     let elapsed = started.elapsed();
 
-    let mut rendered = 0usize;
-    let mut total_bytes = 0usize;
+    let logical_input_count = report.map_or(inputs.len(), |carry| carry.logical_input_count);
+    let mut rendered = report.map_or(0, |carry| carry.inherited_diagrams);
+    let mut total_bytes = report.map_or(0, |carry| carry.inherited_total_bytes);
     let mut failures: Vec<String> = Vec::new();
     for (input, result) in inputs.iter().zip(results) {
         match result {
@@ -3818,7 +3988,7 @@ fn cmd_render_batch(
              identical renders reused, {} shared \
              prefix parses reused / {} bytes), {total_bytes} bytes, {} requested worker(s), \
              {pool_threads} active worker(s), {:.3} ms",
-            inputs.len(),
+            logical_input_count,
             parse_plan_stats.reused_prefix_parses,
             parse_plan_stats.reused_prefix_bytes,
             requested,
@@ -3829,7 +3999,18 @@ fn cmd_render_batch(
         for failure in &failures {
             eprintln!("error: {failure}");
         }
-        anyhow::bail!("{} of {} diagram(s) failed", failures.len(), inputs.len());
+        anyhow::bail!(
+            "{} of {} diagram(s) failed",
+            failures.len(),
+            logical_input_count
+        );
+    }
+    if let Some(lease) = session_lease.as_mut() {
+        lease.session.trusted_batch = Some(TrustedBatchSummary {
+            plan_key: report.map_or_else(|| plan.key.clone(), |carry| carry.plan_key.into()),
+            input_count: logical_input_count,
+            total_bytes,
+        });
     }
     Ok(())
 }

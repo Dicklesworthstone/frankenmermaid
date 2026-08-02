@@ -2130,3 +2130,49 @@ name/path/display constructions. Exact-final-ELF `strace -f -c` also measured `s
   batch that blocks on I/O per document would want more threads than cores, not fewer, or (2) the
   peak moves off the physical core count on some machine class, which this rule assumes. The
   scaling curve above is the measurement to repeat; `--jobs` remains the escape hatch either way.
+
+## KEEP: execute persistent edit epochs over changed diagrams only (2026-08-02)
+
+**Bead:** `bd-3qp4`. **Lane:** cod (`BlackThrush`).
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `d90f1b2dc1c12d53563db0916de43230d45a7fffc31a0d48c29cd0085e506cd9`
+**A/A null control (same invocation):** invocation
+`fm-sparse-exact-trj-1785646437330341733` used one shared output/cache directory and all six
+permutations of control/candidate-A/candidate-B, repeated for 36 whole-job rounds per arm on
+128-CPU `threadripperje`. Candidate A/B medians were 22,157,837 / 22,086,884.5 ns (ratio
+`1.003212`), with a 20,000-resample median-ratio 95% CI of `[0.991109, 1.013402]`, including one.
+**Counted mechanism:** after the mandatory first recovery epoch, each of the remaining 19 epochs
+reduced its execution cardinality from 384 diagrams to the one caller-certified changed diagram.
+That deletes 7,277 unchanged entries from every batch-wide cache, digest, ownership, parse-plan,
+render-dispatch, manifest-update, and reporting pass. Exact-ELF `strace -f -c` showed this was not a
+hidden syscall win: the tiny subset plan increased `readlink` and `mkdir` from 1 to 20 and `statx`
+from 936 to 974, while the candidate still won.
+
+- **Profile-first attribution.** The retained topology had removed plan construction, but trusted
+  one-file edits still allocated and walked full 384-entry vectors and maps through the entire
+  batch pipeline. Live mermaid-js keeps one page resident and has no analogous batch-wide rescan;
+  actual parse/layout/render work for the changed diagram is shared work and was not targeted.
+- **Mechanism.** A successful full epoch records a process-local plan certificate plus aggregate
+  output bytes. Later complete change sets index their diagrams in the immutable plan, lease the
+  same full manifest, and execute `cmd_render_batch` over only that sparse slice. Whole-batch
+  rendered/hit/byte accounting is carried forward in O(changes). JSON mode retains its existing
+  one-record-per-input path; ordinary one-shot and crash-recovery behavior are unchanged.
+- **Whole-job result.** Every round ran one process through 20 alternating one-file revisions over
+  the complete 384-diagram repository. The exact-binary disabled control median was 23,721,542 ns;
+  the candidate median was 22,157,837 ns: **1.070571x**, bootstrap 95% CI
+  `[1.060293, 1.081687]`. Control and candidate emitted the identical 384-SVG aggregate SHA-256
+  `8c9897eb7fda549d70233a1f912782c53cb4d99b177afbea1e8a3ad9116af5c8`.
+- **Live-incumbent bracket.** The same invocation bracketed full uncached 384-diagram Rust renders
+  at 35.564 / 73.899 ms around pinned mermaid-js 11.15.0 at 51,103.6 ms render time. Runtime
+  provenance reported one browser main thread, Chrome 151.0.7922.71, input SHA-256
+  `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`, and bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`. The incumbent was a
+  render-once arm without an incumbent A/A null, so this row asserts no competitive ratio.
+- **Validation.** Strict clean-overlay remote check and Clippy passed with warnings denied; eight
+  focused cache/stream tests passed. The exact release ELF was rebuilt with one pinned nightly in
+  the dedicated per-repository trj target after removing 655.2 MiB of mixed-rustc artifacts. The
+  host stayed quiet at load 14.27 -> 14.80 over 128 CPUs. Exact output, balanced A/A,
+  executing-ELF self-report, counted work, and the live-incumbent bracket all passed.
+- **Retry predicate.** Re-measure if the complete-change-set contract, persistent session plan,
+  manifest ownership, per-input JSON contract, revision count, corpus, or output equivalence
+  changes. Promote no competitive claim without a same-invocation incumbent null arm.
