@@ -240,6 +240,73 @@ struct FixedShardJob {
     config: Arc<SvgRenderConfig>,
     parse_plan: Option<Arc<FlowchartBatchParsePlan>>,
     workers_seen: Option<Arc<[AtomicBool]>>,
+    shards: Arc<[Box<[u32]>]>,
+}
+
+/// Balanced static shard assignment: longest-processing-time-first on input byte length.
+///
+/// Contiguous shards assume similarly-sized diagrams. That holds for a repeated-template corpus and
+/// fails for real documentation corpora, whose page sizes are strongly right-skewed: contiguous
+/// intervals leave most workers idle while one worker drains the large tail. Input byte length
+/// correlates with whole-diagram cost at r >= 0.92 across this corpus, so ordering by bytes and
+/// placing each input on the currently-lightest worker recovers most of the imbalance.
+///
+/// This stays a *static* partition, so it keeps everything fixed shards bought: no work-stealing
+/// coordination, no locks on the hot path, and an assignment that is a pure function of the input
+/// sizes — identical on every run and every thread count, so output stays byte-identical.
+///
+/// Each worker's list is emitted in ascending input order. Balance decides *which* inputs a worker
+/// owns; input order decides the order it renders them, preserving the adjacency that the batch
+/// renderer's prefix reuse and the parser's scratch reuse both exploit.
+fn balanced_shards(texts: &[String], threads: usize) -> Vec<Box<[u32]>> {
+    let mut owned: Vec<Vec<u32>> = vec![Vec::new(); threads];
+    if threads == 0 {
+        return Vec::new();
+    }
+
+    let mut order: Vec<u32> = (0..u32::try_from(texts.len()).unwrap_or(u32::MAX)).collect();
+    // Descending cost; ties broken by ascending index so the assignment is deterministic.
+    order.sort_unstable_by(|&left, &right| {
+        texts[right as usize]
+            .len()
+            .cmp(&texts[left as usize].len())
+            .then(left.cmp(&right))
+    });
+
+    // Least-loaded worker in O(log threads): (load, worker) ordered so the smallest pops first.
+    let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<(u64, usize)>> =
+        (0..threads).map(|w| std::cmp::Reverse((0, w))).collect();
+    for index in order {
+        let std::cmp::Reverse((load, worker)) = heap.pop().expect("non-empty worker heap");
+        owned[worker].push(index);
+        let cost = texts[index as usize].len() as u64;
+        heap.push(std::cmp::Reverse((load.saturating_add(cost), worker)));
+    }
+
+    owned
+        .into_iter()
+        .map(|mut list| {
+            list.sort_unstable();
+            list.into_boxed_slice()
+        })
+        .collect()
+}
+
+/// The previous fixed contiguous assignment, retained as the exact-binary control arm.
+///
+/// `FM_H2H_CONTIGUOUS_SHARDS=1` selects it, so both schedules can be interleaved inside one
+/// process against one ELF instead of comparing two builds.
+fn contiguous_shards(len: usize, threads: usize) -> Vec<Box<[u32]>> {
+    (0..threads)
+        .map(|worker_index| {
+            let start = worker_index.saturating_mul(len) / threads;
+            let end = (worker_index + 1).saturating_mul(len) / threads;
+            (start..end)
+                .map(|index| u32::try_from(index).unwrap_or(u32::MAX))
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        })
+        .collect()
 }
 
 struct FixedShardState {
@@ -280,7 +347,7 @@ impl FixedShardPool {
             let worker_shared = Arc::clone(&shared);
             let spawn = std::thread::Builder::new()
                 .name(format!("fm-fixed-{worker_index}"))
-                .spawn(move || fixed_shard_worker(worker_index, threads, &worker_shared));
+                .spawn(move || fixed_shard_worker(worker_index, &worker_shared));
             match spawn {
                 Ok(handle) => handles.push(handle),
                 Err(error) => {
@@ -308,6 +375,7 @@ impl FixedShardPool {
 
     fn render(&self, job: Arc<FixedShardJob>, sink: &mut Vec<String>) {
         let output_len = job.texts.len();
+        let shards = Arc::clone(&job.shards);
         {
             let mut state = lock_unpoisoned(&self.shared.state);
             while state.remaining != 0 {
@@ -327,10 +395,23 @@ impl FixedShardPool {
             state.job = None;
         }
 
+        // Workers own non-contiguous index sets, so results are scattered back to input position.
+        // `String::new()` does not allocate, so sizing the sink is a pointer-width fill.
         sink.clear();
-        sink.reserve(output_len);
-        for shard in &self.shared.output_shards {
-            sink.append(&mut lock_unpoisoned(shard));
+        sink.resize(output_len, String::new());
+        for (worker_index, shard) in shards.iter().enumerate() {
+            let Some(slot) = self.shared.output_shards.get(worker_index) else {
+                continue;
+            };
+            let mut produced = lock_unpoisoned(slot);
+            for (position, &owned_index) in shard.iter().enumerate() {
+                if let (Some(value), Some(target)) =
+                    (produced.get_mut(position), sink.get_mut(owned_index as usize))
+                {
+                    *target = std::mem::take(value);
+                }
+            }
+            produced.clear();
         }
     }
 }
@@ -349,7 +430,7 @@ impl Drop for FixedShardPool {
     }
 }
 
-fn fixed_shard_worker(worker_index: usize, threads: usize, shared: &FixedShardShared) {
+fn fixed_shard_worker(worker_index: usize, shared: &FixedShardShared) {
     let mut observed_generation = 0;
     let mut renderer = SvgBatchRenderer::default();
     let mut parse_scratch = FlowchartBatchParseScratch::default();
@@ -369,21 +450,21 @@ fn fixed_shard_worker(worker_index: usize, threads: usize, shared: &FixedShardSh
             )
         };
 
-        let start = worker_index.saturating_mul(job.texts.len()) / threads;
-        let end = (worker_index + 1).saturating_mul(job.texts.len()) / threads;
+        let shard: &[u32] = job.shards.get(worker_index).map_or(&[], |list| &**list);
         let mut output = {
             let mut slot = lock_unpoisoned(&shared.output_shards[worker_index]);
             std::mem::take(&mut *slot)
         };
         output.clear();
-        output.reserve(end.saturating_sub(start));
-        if start != end
+        output.reserve(shard.len());
+        if !shard.is_empty()
             && let Some(workers_seen) = &job.workers_seen
             && let Some(seen) = workers_seen.get(worker_index)
         {
             seen.store(true, Ordering::Relaxed);
         }
-        for input_index in start..end {
+        for &owned_index in shard {
+            let input_index = owned_index as usize;
             let text = std::hint::black_box(job.texts[input_index].as_str());
             if let Some(plan) = &job.parse_plan {
                 output.push(plan.with_parse_scratch(
@@ -417,9 +498,10 @@ fn fixed_shard_worker(worker_index: usize, threads: usize, shared: &FixedShardSh
 /// The renderer's existing per-diagram scoped-thread cap is deliberately untouched: the negative
 /// evidence ledger shows that raising it above eight regresses because every render pays fresh
 /// thread startup. A CI batch is a different vein. Its diagrams are independent, so one pool can
-/// stay alive across every warmup, A/A arm, and measured sample. Fixed contiguous shards avoid
-/// work-stealing coordination for these similarly-sized independent diagrams; there are no
-/// ISA-specific assumptions in this harness.
+/// stay alive across every warmup, A/A arm, and measured sample. Shards stay a static partition to
+/// avoid work-stealing coordination, but they are balanced by input size rather than cut into
+/// contiguous intervals, because real corpora are right-skewed; there are no ISA-specific
+/// assumptions in this harness.
 struct RenderExecutor {
     threads: usize,
     available_parallelism: usize,
@@ -427,6 +509,7 @@ struct RenderExecutor {
     calibration_target_ns: u64,
     thread_probe_enabled: bool,
     shared_prefix_reuse: bool,
+    balanced_shards: bool,
     pool: Option<FixedShardPool>,
 }
 
@@ -454,6 +537,7 @@ impl RenderExecutor {
         let thread_probe_enabled =
             matches!(std::env::var("FM_H2H_THREAD_PROBE").as_deref(), Ok("1"));
         let shared_prefix_reuse = std::env::var_os("FM_H2H_DISABLE_SHARED_PREFIX").is_none();
+        let balanced_shards = std::env::var_os("FM_H2H_CONTIGUOUS_SHARDS").is_none();
         let pool = (threads != 1)
             .then(|| FixedShardPool::new(threads))
             .transpose()?;
@@ -464,6 +548,7 @@ impl RenderExecutor {
             calibration_target_ns,
             thread_probe_enabled,
             shared_prefix_reuse,
+            balanced_shards,
             pool,
         })
     }
@@ -509,12 +594,18 @@ impl RenderExecutor {
             ))
         });
         if let Some(pool) = &self.pool {
+            let shards: Arc<[Box<[u32]>]> = if self.balanced_shards {
+                balanced_shards(texts, pool.threads).into()
+            } else {
+                contiguous_shards(texts.len(), pool.threads).into()
+            };
             pool.render(
                 Arc::new(FixedShardJob {
                     texts: Arc::clone(texts),
                     config: Arc::clone(cfg),
                     parse_plan,
                     workers_seen,
+                    shards,
                 }),
                 sink,
             );
@@ -1256,6 +1347,7 @@ fn main() {
             "calibration_target_ns": executor.calibration_target_ns,
             "execution_model": executor.execution_model(),
             "shared_prefix_reuse": executor.shared_prefix_reuse,
+            "shard_schedule": if executor.balanced_shards { "balanced_lpt_bytes" } else { "fixed_contiguous" },
             "measurement_mode": workload_mode.as_str(),
             "measurement_boundary": workload_mode.boundary(),
         })
@@ -1502,6 +1594,7 @@ fn main() {
                 "calibration_target_ns": executor.calibration_target_ns,
                 "execution_model": executor.execution_model(),
                 "shared_prefix_reuse": executor.shared_prefix_reuse,
+                "shard_schedule": if executor.balanced_shards { "balanced_lpt_bytes" } else { "fixed_contiguous" },
                 "revisions": item.texts.len(),
                 "input_sha256": sha256_hex(joined_input.as_bytes()),
                 "input_bytes": joined_input.len(),
@@ -1558,10 +1651,84 @@ mod tests {
     use fm_render_svg::SvgRenderConfig;
 
     use super::{
-        CorpusItem, RenderExecutor, WorkloadMode, bootstrap_median_ci, calibrated_batch,
-        full_pipeline_parsed, measure_parse, median, parse_cpu_list, ratio_stats, rescaled_batch,
-        stats,
+        CorpusItem, RenderExecutor, WorkloadMode, balanced_shards, bootstrap_median_ci,
+        calibrated_batch, contiguous_shards, full_pipeline_parsed, measure_parse, median,
+        parse_cpu_list, ratio_stats, rescaled_batch, stats,
     };
+
+    /// Right-skewed sizes, the shape every realistic documentation corpus has.
+    fn skewed_inputs(count: usize) -> Vec<String> {
+        (0..count)
+            .map(|index| "x".repeat(8 + (index % 7) * (index % 7) * 40))
+            .collect()
+    }
+
+    fn assert_exact_partition(shards: &[Box<[u32]>], len: usize) {
+        let mut seen: Vec<u32> = shards.iter().flat_map(|s| s.iter().copied()).collect();
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            (0..u32::try_from(len).unwrap()).collect::<Vec<_>>(),
+            "every input must be owned exactly once"
+        );
+        for shard in shards {
+            assert!(
+                shard.windows(2).all(|w| w[0] < w[1]),
+                "each worker renders its inputs in ascending input order"
+            );
+        }
+    }
+
+    #[test]
+    fn balanced_shards_partition_every_input_exactly_once() {
+        let inputs = skewed_inputs(200);
+        for threads in [1, 2, 7, 32, 64, 256] {
+            let shards = balanced_shards(&inputs, threads);
+            assert_eq!(shards.len(), threads);
+            assert_exact_partition(&shards, inputs.len());
+            // The control schedule must agree on the partition contract.
+            let control = contiguous_shards(inputs.len(), threads);
+            assert_exact_partition(&control, inputs.len());
+        }
+    }
+
+    #[test]
+    fn balanced_shards_are_deterministic() {
+        let inputs = skewed_inputs(97);
+        let first = balanced_shards(&inputs, 16);
+        for _ in 0..8 {
+            assert_eq!(balanced_shards(&inputs, 16), first);
+        }
+    }
+
+    #[test]
+    fn balanced_shards_beat_contiguous_on_skewed_input() {
+        let inputs = skewed_inputs(200);
+        let threads = 32;
+        let heaviest = |shards: &[Box<[u32]>]| -> usize {
+            shards
+                .iter()
+                .map(|s| s.iter().map(|&i| inputs[i as usize].len()).sum::<usize>())
+                .max()
+                .unwrap_or(0)
+        };
+        let balanced = heaviest(&balanced_shards(&inputs, threads));
+        let contiguous = heaviest(&contiguous_shards(inputs.len(), threads));
+        assert!(
+            balanced < contiguous,
+            "balanced heaviest worker {balanced} should undercut contiguous {contiguous}"
+        );
+    }
+
+    #[test]
+    fn balanced_shards_handle_degenerate_shapes() {
+        assert!(balanced_shards(&[], 4).iter().all(|s| s.is_empty()));
+        assert!(balanced_shards(&skewed_inputs(3), 0).is_empty());
+        // More workers than inputs: the surplus workers idle rather than double-owning.
+        let shards = balanced_shards(&skewed_inputs(3), 8);
+        assert_eq!(shards.len(), 8);
+        assert_exact_partition(&shards, 3);
+    }
 
     #[test]
     fn median_averages_the_two_middle_values() {
