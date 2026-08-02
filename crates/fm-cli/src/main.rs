@@ -78,6 +78,7 @@ use tracing::{debug, info, warn};
 
 const DEFAULT_MAX_INPUT_BYTES: usize = 5_000_000;
 const MAX_RESIDENT_EXACT_JOB_GROUP_JOBS: usize = 1_000_000;
+const RESIDENT_EXACT_JOB_GROUP_REPEAT_MASK: u64 = 1 << 63;
 
 fn parse_positive_font_size_arg(value: &str) -> std::result::Result<f32, String> {
     let parsed = value
@@ -358,7 +359,9 @@ enum Command {
 
         /// Keep the resident exact-job process alive across complete caller-observable jobs.
         /// Each group starts with a little-endian u64 job count, contains that many ordinary
-        /// packed records, and receives one aggregate acknowledgment before the next group.
+        /// packed records, and receives one aggregate acknowledgment before the next group. If
+        /// the count's high bit is set, the remaining count repeats the already admitted exact
+        /// payload without retransmitting records.
         #[arg(
             long,
             requires_all = ["resident_exact_jobs", "final_ack_only"]
@@ -2066,30 +2069,28 @@ mod batch_render_cache_tests {
     fn resident_exact_job_group_reader_preserves_boundaries_and_bounds() {
         let mut stream = Vec::new();
         stream.extend_from_slice(&2u64.to_le_bytes());
-        stream.extend_from_slice(&1u64.to_le_bytes());
+        stream.extend_from_slice(&(super::RESIDENT_EXACT_JOB_GROUP_REPEAT_MASK | 1).to_le_bytes());
         let mut reader = std::io::Cursor::new(stream);
         assert_eq!(
-            super::read_resident_exact_job_group_size(&mut reader, 1).unwrap(),
-            Some(2)
+            super::read_resident_exact_job_group(&mut reader, 1).unwrap(),
+            Some(super::ResidentExactJobGroup::ExplicitRecords(2))
         );
         assert_eq!(
-            super::read_resident_exact_job_group_size(&mut reader, 2).unwrap(),
-            Some(1)
+            super::read_resident_exact_job_group(&mut reader, 2).unwrap(),
+            Some(super::ResidentExactJobGroup::RepeatAdmitted(1))
         );
         assert_eq!(
-            super::read_resident_exact_job_group_size(&mut reader, 3).unwrap(),
+            super::read_resident_exact_job_group(&mut reader, 3).unwrap(),
             None
         );
 
-        let zero = super::read_resident_exact_job_group_size(
-            &mut std::io::Cursor::new(0u64.to_le_bytes()),
-            4,
-        )
-        .unwrap_err();
+        let zero =
+            super::read_resident_exact_job_group(&mut std::io::Cursor::new(0u64.to_le_bytes()), 4)
+                .unwrap_err();
         assert!(zero.to_string().contains("group 4 has zero jobs"));
 
         let too_many = u64::try_from(super::MAX_RESIDENT_EXACT_JOB_GROUP_JOBS + 1).unwrap();
-        let oversized = super::read_resident_exact_job_group_size(
+        let oversized = super::read_resident_exact_job_group(
             &mut std::io::Cursor::new(too_many.to_le_bytes()),
             5,
         )
@@ -2101,16 +2102,31 @@ mod batch_render_cache_tests {
         );
 
         let truncated_header = 2u64.to_le_bytes()[..4].to_vec();
-        let truncated = super::read_resident_exact_job_group_size(
-            &mut std::io::Cursor::new(truncated_header),
-            6,
-        )
-        .unwrap_err();
+        let truncated =
+            super::read_resident_exact_job_group(&mut std::io::Cursor::new(truncated_header), 6)
+                .unwrap_err();
         assert!(
             truncated
                 .to_string()
                 .contains("inside its job-count header")
         );
+    }
+
+    #[test]
+    fn resident_exact_repeat_group_requires_and_reuses_admitted_payload() {
+        let mut replay = super::ResidentExactJobReplayState::default();
+        let error = replay.repeat_admitted(3).unwrap_err();
+        assert!(error.to_string().contains("no previously admitted payload"));
+
+        replay.has_admitted_payload = true;
+        replay.admitted_source_bytes = 11;
+        replay.admitted_output_bytes = 29;
+        assert_eq!(replay.repeat_admitted(3).unwrap(), (33, 0));
+        assert_eq!(replay.jobs, 3);
+        assert_eq!(replay.exact_payload_reuses, 3);
+        assert_eq!(replay.logical_source_bytes, 33);
+        assert_eq!(replay.logical_output_bytes, 87);
+        assert_eq!(replay.encoded_payload_bytes, 0);
     }
 
     #[test]
@@ -4935,10 +4951,24 @@ fn read_packed_snapshot_record(
     Ok(true)
 }
 
-fn read_resident_exact_job_group_size(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResidentExactJobGroup {
+    ExplicitRecords(usize),
+    RepeatAdmitted(usize),
+}
+
+impl ResidentExactJobGroup {
+    fn jobs(self) -> usize {
+        match self {
+            Self::ExplicitRecords(jobs) | Self::RepeatAdmitted(jobs) => jobs,
+        }
+    }
+}
+
+fn read_resident_exact_job_group(
     reader: &mut impl Read,
     group_ordinal: usize,
-) -> Result<Option<usize>> {
+) -> Result<Option<ResidentExactJobGroup>> {
     let mut encoded_jobs = [0u8; std::mem::size_of::<u64>()];
     let first_byte = reader
         .read(&mut encoded_jobs[..1])
@@ -4949,7 +4979,9 @@ fn read_resident_exact_job_group_size(
     reader.read_exact(&mut encoded_jobs[1..]).with_context(|| {
         format!("resident exact-job group {group_ordinal} ended inside its job-count header")
     })?;
-    let jobs = usize::try_from(u64::from_le_bytes(encoded_jobs))
+    let encoded_jobs = u64::from_le_bytes(encoded_jobs);
+    let repeat_admitted = encoded_jobs & RESIDENT_EXACT_JOB_GROUP_REPEAT_MASK != 0;
+    let jobs = usize::try_from(encoded_jobs & !RESIDENT_EXACT_JOB_GROUP_REPEAT_MASK)
         .map_err(|_| anyhow::anyhow!("resident exact-job group size does not fit this platform"))?;
     if jobs == 0 {
         anyhow::bail!("resident exact-job group {group_ordinal} has zero jobs");
@@ -4960,7 +4992,11 @@ fn read_resident_exact_job_group_size(
              {MAX_RESIDENT_EXACT_JOB_GROUP_JOBS}-job limit"
         );
     }
-    Ok(Some(jobs))
+    Ok(Some(if repeat_admitted {
+        ResidentExactJobGroup::RepeatAdmitted(jobs)
+    } else {
+        ResidentExactJobGroup::ExplicitRecords(jobs)
+    }))
 }
 
 #[derive(Default)]
@@ -5040,6 +5076,40 @@ impl ResidentExactJobReplayState {
         self.logical_source_bytes = self.logical_source_bytes.saturating_add(source_bytes);
         self.logical_output_bytes = self.logical_output_bytes.saturating_add(output_bytes);
         Ok(Some((source_bytes, payload_bytes)))
+    }
+
+    fn repeat_admitted(&mut self, jobs: usize) -> Result<(usize, usize)> {
+        if !self.has_admitted_payload {
+            anyhow::bail!(
+                "resident exact-job repeat group has no previously admitted payload; outputs \
+                 were not touched"
+            );
+        }
+        let source_bytes = self
+            .admitted_source_bytes
+            .checked_mul(jobs)
+            .ok_or_else(|| anyhow::anyhow!("resident repeat-group source byte count overflow"))?;
+        let output_bytes = self
+            .admitted_output_bytes
+            .checked_mul(jobs)
+            .ok_or_else(|| anyhow::anyhow!("resident repeat-group output byte count overflow"))?;
+        self.jobs = self
+            .jobs
+            .checked_add(jobs)
+            .ok_or_else(|| anyhow::anyhow!("resident repeat-group job count overflow"))?;
+        self.exact_payload_reuses = self
+            .exact_payload_reuses
+            .checked_add(jobs)
+            .ok_or_else(|| anyhow::anyhow!("resident repeat-group reuse count overflow"))?;
+        self.logical_source_bytes = self
+            .logical_source_bytes
+            .checked_add(source_bytes)
+            .ok_or_else(|| anyhow::anyhow!("resident repeat-group source total overflow"))?;
+        self.logical_output_bytes = self
+            .logical_output_bytes
+            .checked_add(output_bytes)
+            .ok_or_else(|| anyhow::anyhow!("resident repeat-group output total overflow"))?;
+        Ok((source_bytes, 0))
     }
 }
 
@@ -5123,31 +5193,45 @@ fn cmd_render_batch_resident_exact_jobs(
     let mut stdout = io::stdout().lock();
     let mut replay = ResidentExactJobReplayState::default();
     let mut groups = 0usize;
+    let mut repeat_groups = 0usize;
+    let mut repeat_group_jobs = 0usize;
 
     if job_groups {
-        while let Some(group_jobs) =
-            read_resident_exact_job_group_size(reader, groups.saturating_add(1))?
-        {
+        while let Some(group) = read_resident_exact_job_group(reader, groups.saturating_add(1))? {
             groups = groups.saturating_add(1);
+            let group_jobs = group.jobs();
             let jobs_before = replay.jobs;
             let source_bytes_before = replay.logical_source_bytes;
             let encoded_bytes_before = replay.encoded_payload_bytes;
-            for group_job in 0..group_jobs {
-                if replay
-                    .read_and_replay(
-                        reader,
-                        inputs,
-                        plan,
-                        cache_session,
-                        max_payload_bytes,
-                        max_input_bytes,
-                    )?
-                    .is_none()
-                {
-                    anyhow::bail!(
-                        "resident exact-job group {groups} ended after {group_job} of \
-                         {group_jobs} packed job(s)"
-                    );
+            match group {
+                ResidentExactJobGroup::ExplicitRecords(_) => {
+                    for group_job in 0..group_jobs {
+                        if replay
+                            .read_and_replay(
+                                reader,
+                                inputs,
+                                plan,
+                                cache_session,
+                                max_payload_bytes,
+                                max_input_bytes,
+                            )?
+                            .is_none()
+                        {
+                            anyhow::bail!(
+                                "resident exact-job group {groups} ended after {group_job} of \
+                                 {group_jobs} packed job(s)"
+                            );
+                        }
+                    }
+                }
+                ResidentExactJobGroup::RepeatAdmitted(_) => {
+                    replay.repeat_admitted(group_jobs).with_context(|| {
+                        format!(
+                            "resident exact-job group {groups} cannot repeat the admitted payload"
+                        )
+                    })?;
+                    repeat_groups = repeat_groups.saturating_add(1);
+                    repeat_group_jobs = repeat_group_jobs.saturating_add(group_jobs);
                 }
             }
             cache_session.flush(Path::new(out_dir))?;
@@ -5234,6 +5318,10 @@ fn cmd_render_batch_resident_exact_jobs(
     eprintln!("materialized 0 source revision(s) and 0 output revision(s) during resident jobs");
     if job_groups {
         eprintln!("emitted {groups} resident exact job-group acknowledgment(s)");
+        eprintln!(
+            "accepted {repeat_groups} admitted-payload repeat group(s) covering \
+             {repeat_group_jobs} resident exact job(s)"
+        );
     } else if acknowledgments_at_eof {
         eprintln!(
             "emitted one EOF acknowledgment for {} resident exact job(s)",

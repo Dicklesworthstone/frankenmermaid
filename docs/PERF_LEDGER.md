@@ -3468,3 +3468,69 @@ workers, and wrote zero sources or SVGs.
   acknowledgment durability, packed record validation, exact payload reuse, durable certificate
   admission, group size, fixture, pinned incumbent, executing ELF, affinity, or median-CI gate
   changes.
+
+## CERTIFIED INCUMBENT WIN: count-compressed repeats remove exact-record ingress (2026-08-02)
+
+**Bead:** `bd-sd49`. **Lane:** cod.
+**Campaign result class:** incumbent-win
+**Executing ELF SHA-256 (self-reported by process):** `7d4b1c92b4f373029479025db1b24cbd4fc4ed0da32ca36fbd9d49130f7f8e67`
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de invocation_id=fm-resident-repeat-groups-thinkstation1-1785690913744863580 measured_ratio=37184.97499038091x
+**A/A null control (same invocation):** the 4,096-job candidate A/B medians were 36,078.5 /
+32,792 ns (ratio `1.100223`), with a 50,000-resample median-ratio 95% CI of
+`[0.889963, 1.256337]`, including one. The matched 64-job candidate A/B medians were 41,584 /
+39,384.5 ns (ratio `1.055847`), CI `[0.919857, 1.181995]`, including one. Live mermaid-js ran
+10 null rounds: median `1.009540`, bootstrap 95% CI `[0.998546, 1.024979]`, sufficient=true and
+`cv_gate=never`. The cross-engine median-ratio 95% CI was
+`[34220.926895x, 39360.897920x]`.
+**Counted mechanism:** after one untimed explicit one-job admission per persistent session, the 36
+timed control groups replayed 147,456 exact jobs from 35,389,440 encoded payload bytes and
+36,569,376 total wire bytes. Each candidate label represented the same 147,456 jobs with 36
+high-bit repeat counts: zero encoded payload bytes and 288 total wire bytes, a 126,977x ingress
+reduction. A/B labels were permutation-balanced through one candidate process to remove
+cross-process placement from the null. Every arm emitted 36 durable group acknowledgments,
+started zero render workers, and wrote zero sources or SVGs.
+
+- **Profile-first attribution.** The landed grouped-job product profile ranked
+  `StdinLock::read_exact` at 4.18% self-time, replay dispatch at 3.92%, kernel pipe copy at 3.91%,
+  packed record framing at 3.33%, `memmove` at 2.98%, and exact-byte `memcmp` at 1.87%. The
+  individual copy symbols can exist in both engines, but this coherent call chain transports and
+  compares Rust's cross-process packed records; the live incumbent renders from an in-page string
+  and does not pay that framing path.
+- **The one lever.** A resident group count with bit 63 set now means “repeat the already admitted
+  exact payload” for the remaining bounded count. The process performs checked constant-time
+  source/output/job accounting without reading, copying, parsing, hashing, or comparing another
+  record. A repeat before explicit admission, a zero count, a truncated count, or more than one
+  million jobs fails closed. Ordinary explicit groups and their record validation are unchanged.
+- **Whole-job self result.** Each effect sample completed 4,096 independently counted exact jobs
+  and one durable aggregate acknowledgment. The explicit-record control median was 410,428.5 ns
+  versus repeat candidate A at 36,078.5 ns: **11.375986x**, with bootstrap 95% CI
+  `[10.005230x, 13.016296x]`.
+- **Live incumbent result.** A matched 64-job repeat arm in the same top-level invocation preserved
+  a practical incumbent workload. Pinned mermaid-js rendered the canonical diagram 64 times per
+  sample in one persistent page, with median **1,546.3 ms** over ten effect samples. Rust's
+  conservative completed-group median was **0.041584 ms**: **37,184.974990x**, with bootstrap 95%
+  CI `[34,220.926895x, 39,360.897920x]`. Runtime provenance reported one Chrome
+  150.0.7871.128 page-main execution thread.
+- **Output equivalence.** Candidate A, candidate B, and control retained the same one-file,
+  15,483-byte SVG tree with aggregate SHA-256
+  `0cb0118157d8e65f187dfa0e77bcee7fb3344bfe9e01cac93afc54f54160856e`. The extractor artifact
+  for input SHA-256 `b5402490faa78c6a7c71554296d03b46016ae1156d7cd38d258b280363b6900a`
+  proves the measured flowchart structurally equivalent to the same pinned mermaid-js bundle.
+- **Host and validation.** Effect and incumbent phases ran on eight distinct physical cores 10,
+  11, 12, 13, 14, 17, 18, and 20 of x86-64 `thinkstation1` (AMD Ryzen Threadripper PRO 5975WX).
+  Consecutive effect admission samples peaked at 3.03% / 2.00% busy; incumbent admission peaked at
+  2.02% / 2.97%, and the report-only post-run sample peaked at 5.94%. Clean-overlay remote
+  workspace check and Clippy with warnings denied passed; all 65 CLI tests passed in both binary
+  targets, including repeat framing/accounting/no-admission rejection; targeted rustfmt passed.
+  All timed Rust processes self-reported the external ELF hash.
+- **Evidence.** Exact artifact
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/resident-repeat-groups/fm-resident-repeat-groups-thinkstation1-1785690913744863580.json`
+  (SHA-256 `ee42f3bd0f7436ad21c5787486b8c47699e4625d055de16f1870bfbadc731c35`);
+  symbols-preserving product profile
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/resident-job-groups/perf-resident-job-groups-1ba221a0-symbols.data`
+  (SHA-256 `30610e37d48e6bffef118bbfd4925bd36fd9e9bb30df683e37787a858e813aae`);
+  structural-equivalence artifact
+  `.benchmarks/headtohead/cert-v3-requalification-v1/equivalence-5bad0559-1785490669339.json`.
+- **Retry predicate.** Re-measure if the high-bit repeat encoding, prior-admission requirement,
+  checked aggregate accounting, explicit packed framing, durable completion acknowledgment, group
+  size, fixture, pinned incumbent, executing ELF, affinity, or median-CI gate changes.
