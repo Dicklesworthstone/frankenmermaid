@@ -1146,6 +1146,32 @@ struct BatchRevisionOutput {
     last_used: u64,
 }
 
+struct BatchRenderWorkerPool {
+    threads: usize,
+    pool: rayon::ThreadPool,
+}
+
+impl std::fmt::Debug for BatchRenderWorkerPool {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BatchRenderWorkerPool")
+            .field("threads", &self.threads)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BatchRenderWorkerPool {
+    fn new(threads: usize) -> Result<Self> {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .map_err(|error| {
+                anyhow::anyhow!("cannot build {threads}-thread render pool: {error}")
+            })?;
+        Ok(Self { threads, pool })
+    }
+}
+
 #[derive(Debug, Default)]
 struct BatchRenderCacheSession {
     manifest: Option<BatchRenderCacheManifest>,
@@ -1160,6 +1186,8 @@ struct BatchRenderCacheSession {
     revision_output_max_entries: usize,
     revision_output_max_bytes: usize,
     reuse_revision_outputs: bool,
+    reuse_worker_pool: bool,
+    worker_pool: Option<Arc<BatchRenderWorkerPool>>,
     defer_output_writes: bool,
     deferred_outputs: std::collections::BTreeMap<PathBuf, Arc<Vec<u8>>>,
 }
@@ -1174,6 +1202,7 @@ impl BatchRenderCacheSession {
         self.reuse_pressure = std::env::var_os("FM_DISABLE_SESSION_PRESSURE_SNAPSHOT").is_none();
         self.reuse_revision_outputs =
             std::env::var_os("FM_DISABLE_SESSION_REVISION_CACHE").is_none();
+        self.reuse_worker_pool = std::env::var_os("FM_DISABLE_SESSION_WORKER_POOL").is_none();
         self.revision_output_max_entries =
             if std::env::var_os("FM_SESSION_REVISION_CACHE_TWO_ENTRY_CONTROL").is_some() {
                 REVISION_OUTPUT_CACHE_CONTROL_ENTRIES
@@ -1206,6 +1235,19 @@ impl BatchRenderCacheSession {
         self.manifest = Some(manifest);
         self.manifest_modified = modified;
         Ok(())
+    }
+
+    fn worker_pool(&mut self, threads: usize) -> Result<Arc<BatchRenderWorkerPool>> {
+        if let Some(pool) = self
+            .worker_pool
+            .as_ref()
+            .filter(|pool| pool.threads == threads)
+        {
+            return Ok(Arc::clone(pool));
+        }
+        let pool = Arc::new(BatchRenderWorkerPool::new(threads)?);
+        self.worker_pool = Some(Arc::clone(&pool));
+        Ok(pool)
     }
 
     fn pressure_report(&self) -> Arc<MermaidPressureReport> {
@@ -1711,6 +1753,17 @@ mod batch_render_cache_tests {
         let second = session.pressure_report();
 
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn persistent_session_reuses_one_fixed_width_worker_pool() {
+        let mut session = BatchRenderCacheSession::default();
+
+        let first = session.worker_pool(2).unwrap();
+        let second = session.worker_pool(2).unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.threads, 2);
     }
 
     #[test]
@@ -4286,27 +4339,28 @@ fn cmd_render_batch(
     };
     let pool = if pool_threads == 1 {
         None
+    } else if let Some(lease) = session_lease.as_mut()
+        && lease.session.reuse_worker_pool
+    {
+        Some(lease.session.worker_pool(pool_threads)?)
     } else {
-        Some(
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(pool_threads)
-                .build()
-                .map_err(|e| {
-                    anyhow::anyhow!("cannot build {pool_threads}-thread render pool: {e}")
-                })?,
-        )
+        Some(Arc::new(BatchRenderWorkerPool::new(pool_threads)?))
     };
     let run_all =
         |f: &(dyn Fn(usize) -> Result<(String, usize)> + Sync)| -> Vec<Result<(String, usize)>> {
             match &pool {
                 None => (0..inputs.len()).map(f).collect(),
-                Some(p) => p.install(|| (0..inputs.len()).into_par_iter().map(f).collect()),
+                Some(p) => p
+                    .pool
+                    .install(|| (0..inputs.len()).into_par_iter().map(f).collect()),
             }
         };
 
     let loaded: Vec<Result<(String, String)>> = match &pool {
         None => inputs.iter().enumerate().map(load_one).collect(),
-        Some(p) => p.install(|| inputs.par_iter().enumerate().map(load_one).collect()),
+        Some(p) => p
+            .pool
+            .install(|| inputs.par_iter().enumerate().map(load_one).collect()),
     };
 
     // A hit is admitted only when the source+configuration+executable key matches, the destination
@@ -4556,7 +4610,7 @@ fn cmd_render_batch(
                 .map(|index| render_or_seeded(&mut state, index))
                 .collect()
         }
-        Some(pool) => pool.install(|| {
+        Some(pool) => pool.pool.install(|| {
             (0..inputs.len())
                 .into_par_iter()
                 .map_init(initial_state, render_or_seeded)
