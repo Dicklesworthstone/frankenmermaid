@@ -2947,3 +2947,69 @@ execution per round and 2,048 superseded renders removed per round.
   observable; transaction validation or failure semantics change; completed-state payload size,
   revision count, persistent-cache state, fixture, pinned incumbent, executing ELF, affinity, or
   median-CI gate changes.
+
+## CERTIFIED INCUMBENT WIN: decode only the completed snapshot (2026-08-02)
+
+**Bead:** `bd-g11x`. **Lane:** cod.
+**Campaign result class:** incumbent-win
+**Executing ELF SHA-256 (self-reported by process):** `aa25ae612c42ad9bbfa445fd1d3f050f6b8abd9e13f667215afc74c9fe1de6f7`
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de invocation_id=fm-complete-snapshot-elision-exact-thinkstation1-1785678050583188381 measured_ratio=362.3659771683321x
+**A/A null control (same invocation):** candidate A/B medians were 25,504,050 / 25,386,732.5
+ns (ratio `1.004621`), with a 50,000-resample median-ratio 95% CI of
+`[0.980283, 1.017928]`, including one. Live mermaid-js ran 20 null rounds: median
+`1.000680`, bootstrap 95% CI `[0.993398, 1.005398]`, sufficient=true and
+`cv_gate=never`. The cross-engine median-ratio 95% CI was `[344.666483x, 370.825446x]`.
+**Counted mechanism:** across 36 rounds, the disabled same-ELF control decoded and merged all
+1,152 complete snapshot payloads before executing 36 completed states. Each candidate retained
+the identical 1,152 length- and UTF-8-framed payloads but JSON-decoded only the newest 36,
+skipping 1,116 superseded decodes: 31 removed decodes per round. All arms still accepted 1,152
+transactions, executed 36 completed states, performed 2,304 persistent output lookups, wrote
+2,304 final sources and 36 acknowledgments, and rendered or rewrote zero SVGs.
+
+- **Profile-first attribution.** `perf` on the completed-state whole job ranked serde_json string
+  escape scanning/decoding at 21.60% self-time, with serde iteration/string parsing at another
+  9.26%; vector appends, SHA-256, UTF-8 conversion, and memory copying brought the Rust-only
+  stream ingestion block to roughly 45%. The incumbent receives the final 64 documents once and
+  pays none of the 31 superseded JSON object decodes, so this was a structural gap rather than a
+  shared parse/layout/render primitive.
+- **The one lever.** Explicit `--complete-snapshot-stream`, combined with final-state,
+  final-source, final-output, and final-ack EOF contracts, asserts that every non-empty record is
+  a complete batch snapshot. The runner now keeps two reusable byte buffers, swaps each framed
+  record over the previous one without object decoding, then JSON-decodes and verifies only the
+  newest record contains every declared input before executing it. Ordinary and partial-update
+  streams retain their existing validation and execution semantics.
+  `FM_DISABLE_COMPLETE_SNAPSHOT_ELISION=1` selects the prior decode-and-merge path in the same ELF.
+- **Whole-job self result.** Each round seeded the canonical durable 64-diagram state, sent 31
+  distinct full snapshots followed by the canonical completed snapshot (188,070,120 encoded
+  bytes across each 36-round candidate arm), then materialized sources and committed the cache.
+  The control median was 33,500,347.5 ns versus candidate-A at 25,504,050 ns: **1.313530x**, with
+  bootstrap 95% CI `[1.292546x, 1.341553x]`.
+- **Live incumbent result.** In the same top-level invocation, pinned mermaid-js rendered the
+  identical canonical `ci_shared_subgraph_divergent_64` job in a median **9,241.8 ms** over nine
+  effect samples. The conservative Rust completed-job median was **25.504050 ms**, including
+  process startup, framing all 32 snapshots, final JSON validation, 64 final source writes,
+  persistent output lookup, and durable manifest commit: **362.365977x** with bootstrap 95% CI
+  `[344.666483x, 370.825446x]`. Runtime provenance reported one Chrome 150.0.7871.128 page-main
+  execution thread.
+- **Output equivalence.** Candidate A, candidate B, and control produced identical 64-file,
+  3,469,549-byte SVG output trees with aggregate SHA-256
+  `a8502bdcf304ef8db6683a5075c896017bebd6daeabada58725436dccb3077b3`. The shared extractor
+  artifact for input SHA-256
+  `f487b4094bc4020436956d78067c529b80aa0ce8e595fbaa1a193c081fb13e68` proves 64/64 diagrams
+  structurally equivalent to the same pinned mermaid-js bundle with zero divergent or unverified.
+- **Host and validation.** The effect and incumbent phases ran on eight distinct physical cores
+  10, 11, 12, 13, 14, 17, 18, and 20 of x86-64 `thinkstation1` (AMD Ryzen Threadripper PRO
+  5975WX). Consecutive effect admission samples peaked at 4.0% / 2.0% busy; incumbent admission
+  peaked at 9.9% / 8.0%, and the report-only post-run sample at 19.8%. The complete-snapshot
+  contract smoke and focused missing-input test passed; clean-overlay remote workspace check and
+  Clippy with warnings denied passed; targeted rustfmt passed. All timed arms self-reported the
+  external ELF hash.
+- **Evidence.** Exact artifact
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/fm-complete-snapshot-elision-exact-thinkstation1-1785678050583188381.json`
+  (SHA-256 `0fbe2ea0d62b45270a2a61624678dbd465f0663e655a907fb2f47f24863c27fa`);
+  structural-equivalence artifact
+  `.benchmarks/headtohead/ci-shared-subgraph-divergent-64-equivalence/equivalence-4e990fe6-1785545013442.json`.
+- **Retry predicate.** Re-measure if a record may omit a batch input, superseded-record JSON
+  diagnostics become observable, framing or input-size limits change, completed-state payload
+  size or snapshot count changes, persistent-cache or source materialization state changes, or
+  the fixture, pinned incumbent, executing ELF, affinity, or median-CI gate changes.

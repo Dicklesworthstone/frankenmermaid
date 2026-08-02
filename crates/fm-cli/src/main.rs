@@ -325,6 +325,12 @@ enum Command {
         #[arg(long)]
         final_ack_only: bool,
 
+        /// Assert that every non-empty final-state stream record is a complete snapshot containing
+        /// every batch input. With all three final-only flags, superseded records remain
+        /// length/UTF-8 framed but only the newest snapshot is JSON-decoded and rendered.
+        #[arg(long)]
+        complete_snapshot_stream: bool,
+
         /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
         #[arg(long, value_enum, default_value = "auto")]
         fnx_mode: FnxModeArg,
@@ -1813,6 +1819,23 @@ mod batch_render_cache_tests {
     }
 
     #[test]
+    fn complete_snapshot_requires_every_batch_input() {
+        let inputs = vec!["a.mmd".to_owned(), "b.mmd".to_owned()];
+        let prepared = super::prepare_complete_batch_final_state_payload(
+            r#"{"a.mmd":"A-->B","b.mmd":"B-->C"}"#,
+            &inputs,
+            64,
+        )
+        .unwrap();
+        assert_eq!(prepared.changed_inputs, inputs);
+
+        let error =
+            super::prepare_complete_batch_final_state_payload(r#"{"a.mmd":"A-->B"}"#, &inputs, 64)
+                .unwrap_err();
+        assert!(error.to_string().contains("contains 1 of 2 batch inputs"));
+    }
+
+    #[test]
     fn superseded_final_state_updates_keep_only_the_completed_revision() {
         let mut completed = std::collections::BTreeMap::new();
         super::merge_superseded_final_state_updates(
@@ -1850,6 +1873,7 @@ mod batch_render_cache_tests {
             outputs_at_eof: true,
             sources_at_eof: true,
             acknowledgments_at_eof: true,
+            complete_snapshots: false,
         };
         assert!(completed_only.exposes_only_completed_state());
 
@@ -2531,6 +2555,7 @@ fn main() -> Result<()> {
             final_output_only,
             final_source_only,
             final_ack_only,
+            complete_snapshot_stream,
             fnx_mode,
             fnx_projection,
             fnx_fallback,
@@ -2580,6 +2605,14 @@ fn main() -> Result<()> {
             if final_ack_only && json {
                 anyhow::bail!("--final-ack-only cannot be combined with --json");
             }
+            if complete_snapshot_stream
+                && !(final_state_stream && final_output_only && final_source_only && final_ack_only)
+            {
+                anyhow::bail!(
+                    "--complete-snapshot-stream requires --final-state-stream, \
+                     --final-output-only, --final-source-only, and --final-ack-only"
+                );
+            }
             if final_state_stream {
                 cmd_render_batch_final_state_transaction_stream(
                     &inputs,
@@ -2591,6 +2624,7 @@ fn main() -> Result<()> {
                         outputs_at_eof: final_output_only,
                         sources_at_eof: final_source_only,
                         acknowledgments_at_eof: final_ack_only,
+                        complete_snapshots: complete_snapshot_stream,
                     },
                     options,
                 )
@@ -4217,6 +4251,22 @@ fn prepare_batch_final_state_payload(
         .map(prepare_batch_final_state_updates)
 }
 
+fn prepare_complete_batch_final_state_payload(
+    payload: &str,
+    inputs: &[String],
+    max_input_bytes: usize,
+) -> Result<PreparedBatchFinalState> {
+    let prepared = prepare_batch_final_state_payload(payload, inputs, max_input_bytes)?;
+    if prepared.updates.len() != inputs.len() {
+        anyhow::bail!(
+            "--complete-snapshot-stream final payload contains {} of {} batch inputs",
+            prepared.updates.len(),
+            inputs.len()
+        );
+    }
+    Ok(prepared)
+}
+
 fn merge_superseded_final_state_updates(
     completed_state: &mut std::collections::BTreeMap<String, String>,
     updates: std::collections::BTreeMap<String, String>,
@@ -4336,6 +4386,7 @@ struct FinalStateStreamMaterialization {
     outputs_at_eof: bool,
     sources_at_eof: bool,
     acknowledgments_at_eof: bool,
+    complete_snapshots: bool,
 }
 
 impl FinalStateStreamMaterialization {
@@ -4408,10 +4459,14 @@ fn cmd_render_batch_final_state_transaction_stream(
 
     let coalesce_superseded_revisions = materialization.exposes_only_completed_state()
         && std::env::var_os("FM_DISABLE_FINAL_STATE_COALESCING").is_none();
+    let retain_only_latest_complete_snapshot = coalesce_superseded_revisions
+        && materialization.complete_snapshots
+        && std::env::var_os("FM_DISABLE_COMPLETE_SNAPSHOT_ELISION").is_none();
     let FinalStateStreamMaterialization {
         outputs_at_eof: final_output_only,
         sources_at_eof: final_source_only,
         acknowledgments_at_eof: final_ack_only,
+        complete_snapshots: _,
     } = materialization;
 
     let max_payload_bytes = batch_final_state_payload_limit(inputs, options.max_input_bytes);
@@ -4434,10 +4489,14 @@ fn cmd_render_batch_final_state_transaction_stream(
     let mut acknowledged_updates = 0usize;
     let mut acknowledged_source_bytes = 0usize;
     let mut deferred_sources = std::collections::BTreeMap::new();
+    let mut encoded_payload_bytes = 0usize;
+    let mut latest_complete_payload = Vec::new();
+    let mut has_latest_complete_payload = false;
     let payload_cache_enabled = std::env::var_os("FM_DISABLE_RESIDENT_PAYLOAD_CACHE").is_none();
     let mut payload_cache = ResidentPayloadCache::default();
+    let mut encoded = Vec::new();
     loop {
-        let mut encoded = Vec::new();
+        encoded.clear();
         let bytes_read = (&mut reader)
             .take(read_limit)
             .read_until(b'\n', &mut encoded)
@@ -4461,6 +4520,14 @@ fn cmd_render_batch_final_state_transaction_stream(
         let payload = std::str::from_utf8(&encoded)
             .with_context(|| format!("final-state input line {line_number} is not UTF-8"))?;
         if payload.trim().is_empty() {
+            continue;
+        }
+        if retain_only_latest_complete_snapshot {
+            transaction = transaction.saturating_add(1);
+            acknowledged_updates = acknowledged_updates.saturating_add(inputs.len());
+            encoded_payload_bytes = encoded_payload_bytes.saturating_add(encoded.len());
+            std::mem::swap(&mut latest_complete_payload, &mut encoded);
+            has_latest_complete_payload = true;
             continue;
         }
         if coalesce_superseded_revisions {
@@ -4541,7 +4608,30 @@ fn cmd_render_batch_final_state_transaction_stream(
             stdout.flush()?;
         }
     }
-    if coalesce_superseded_revisions && !deferred_sources.is_empty() {
+    if retain_only_latest_complete_snapshot && has_latest_complete_payload {
+        let payload = std::str::from_utf8(&latest_complete_payload)
+            .context("completed final-state snapshot is not UTF-8")?;
+        let prepared =
+            prepare_complete_batch_final_state_payload(payload, inputs, options.max_input_bytes)
+                .context("completed final-state snapshot is invalid")?;
+        acknowledged_source_bytes = prepared.total_source_bytes;
+        let replayed = render_prepared_final_state_transaction(
+            inputs,
+            out_dir,
+            jobs,
+            keep_going,
+            json,
+            &plan,
+            &mut cache_session,
+            &prepared,
+            Some(&prepared.updates),
+            &options,
+        )
+        .context("completed final-state snapshot failed")?;
+        executed_transactions = 1;
+        replayed_transactions = if replayed { 1 } else { 0 };
+        deferred_sources = prepared.updates;
+    } else if coalesce_superseded_revisions && !deferred_sources.is_empty() {
         let prepared = prepare_batch_final_state_updates(std::mem::take(&mut deferred_sources));
         let replayed = render_prepared_final_state_transaction(
             inputs,
@@ -4571,7 +4661,13 @@ fn cmd_render_batch_final_state_transaction_stream(
         eprintln!("materialized {outputs} final output(s), {bytes} bytes at stream EOF");
     }
     cache_session.flush(Path::new(out_dir))?;
-    if coalesce_superseded_revisions {
+    if retain_only_latest_complete_snapshot {
+        eprintln!(
+            "retained the newest of {transaction} complete snapshot payload(s), skipped {} \
+             superseded JSON decode(s), {encoded_payload_bytes} encoded bytes",
+            transaction.saturating_sub(if has_latest_complete_payload { 1 } else { 0 })
+        );
+    } else if coalesce_superseded_revisions {
         eprintln!(
             "coalesced {transaction} resident payload(s) containing {acknowledged_updates} update(s) \
              into {} final update(s)",
@@ -4585,16 +4681,26 @@ fn cmd_render_batch_final_state_transaction_stream(
     }
     if final_ack_only {
         let mut stdout = io::stdout().lock();
-        serde_json::to_writer(
-            &mut stdout,
-            &serde_json::json!({
+        let acknowledgment = if retain_only_latest_complete_snapshot {
+            serde_json::json!({
+                "transactions": transaction,
+                "input_lines": line_number,
+                "updates": acknowledged_updates,
+                "source_bytes": acknowledged_source_bytes,
+                "source_bytes_scope": "completed_state",
+                "encoded_payload_bytes": encoded_payload_bytes,
+                "status": "ok"
+            })
+        } else {
+            serde_json::json!({
                 "transactions": transaction,
                 "input_lines": line_number,
                 "updates": acknowledged_updates,
                 "source_bytes": acknowledged_source_bytes,
                 "status": "ok"
-            }),
-        )?;
+            })
+        };
+        serde_json::to_writer(&mut stdout, &acknowledgment)?;
         writeln!(stdout)?;
         stdout.flush()?;
         eprintln!("emitted one EOF acknowledgment for {transaction} transaction(s)");
