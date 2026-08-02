@@ -930,6 +930,8 @@ struct BatchRenderCacheEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BatchRenderCacheManifest {
     version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    clean_batch: Option<TrustedBatchSummary>,
     entries: std::collections::BTreeMap<String, BatchRenderCacheEntry>,
 }
 
@@ -937,6 +939,7 @@ impl Default for BatchRenderCacheManifest {
     fn default() -> Self {
         Self {
             version: BATCH_RENDER_CACHE_VERSION,
+            clean_batch: None,
             entries: std::collections::BTreeMap::new(),
         }
     }
@@ -1056,7 +1059,7 @@ impl BatchRenderPlan {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct TrustedBatchSummary {
     plan_key: String,
     input_count: usize,
@@ -1072,6 +1075,34 @@ struct BatchRenderCacheSession {
 }
 
 impl BatchRenderCacheSession {
+    fn begin_stream(
+        &mut self,
+        cache_path: &Path,
+        plan: Option<&BatchRenderPlan>,
+        admit_clean_batch: bool,
+    ) -> Result<()> {
+        let (mut manifest, mut modified) = load_batch_render_cache(cache_path);
+        self.trusted_batch = admit_clean_batch
+            .then(|| plan.and_then(|plan| trusted_batch_from_manifest(&manifest, plan)))
+            .flatten();
+
+        // A clean certificate is a transaction commit record. Remove it before this process can
+        // touch any output, while retaining the admitted summary in memory. If the process dies,
+        // the next process repairs in full; graceful EOF writes a fresh certificate in `flush`.
+        if manifest.clean_batch.take().is_some() {
+            let encoded = serde_json::to_vec(&manifest)?;
+            std::fs::write(cache_path, encoded)
+                .with_context(|| format!("cannot invalidate {}", cache_path.display()))?;
+            modified = cache_path
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok();
+        }
+        self.manifest = Some(manifest);
+        self.manifest_modified = modified;
+        Ok(())
+    }
+
     fn lease<'a>(&'a mut self, cache_path: &Path) -> BatchRenderCacheLease<'a> {
         if self.manifest.is_none() {
             let (manifest, modified) = load_batch_render_cache(cache_path);
@@ -1087,12 +1118,14 @@ impl BatchRenderCacheSession {
     }
 
     fn flush(&mut self, out_dir: &Path) -> Result<()> {
-        if !self.dirty {
-            return Ok(());
-        }
-        let Some(manifest) = self.manifest.as_ref() else {
+        let Some(manifest) = self.manifest.as_mut() else {
             anyhow::bail!("batch cache session still has an active manifest lease");
         };
+        let certificate_changed = manifest.clean_batch != self.trusted_batch;
+        if !self.dirty && !certificate_changed {
+            return Ok(());
+        }
+        manifest.clean_batch.clone_from(&self.trusted_batch);
         let cache_path = out_dir.join(BATCH_RENDER_CACHE_FILE);
         let encoded = serde_json::to_vec(manifest)?;
         std::fs::write(&cache_path, encoded)
@@ -1133,6 +1166,26 @@ impl BatchRenderCacheSession {
             inherited_total_bytes: summary.total_bytes.checked_sub(changed_bytes)?,
         })
     }
+}
+
+fn trusted_batch_from_manifest(
+    manifest: &BatchRenderCacheManifest,
+    plan: &BatchRenderPlan,
+) -> Option<TrustedBatchSummary> {
+    let summary = manifest.clean_batch.as_ref()?;
+    if summary.plan_key != plan.key || summary.input_count != plan.destination_names.len() {
+        return None;
+    }
+    let options_key = plan.option_cache_digest.as_ref()?;
+    let mut total_bytes = 0usize;
+    for destination_name in &plan.destination_names {
+        let entry = manifest.entries.get(destination_name)?;
+        if !batch_cache_entry_matches_key(entry, options_key) {
+            return None;
+        }
+        total_bytes = total_bytes.checked_add(usize::try_from(entry.bytes).ok()?)?;
+    }
+    (total_bytes == summary.total_bytes).then(|| summary.clone())
 }
 
 struct BatchRenderCacheLease<'a> {
@@ -1195,7 +1248,7 @@ mod batch_render_cache_tests {
     use super::{
         BatchRenderCacheEntry, BatchRenderCacheManifest, BatchRenderCacheSession, BatchRenderPlan,
         TrustedBatchSummary, batch_cache_entry_matches_early, batch_cache_entry_matches_key,
-        parse_batch_change_set_line,
+        parse_batch_change_set_line, trusted_batch_from_manifest,
     };
     use std::path::{Path, PathBuf};
     use std::time::{Duration, UNIX_EPOCH};
@@ -1208,6 +1261,25 @@ mod batch_render_cache_tests {
             source_bytes: 123,
             source_modified_ns: "456".to_owned(),
             bytes: 789,
+        }
+    }
+
+    fn plan() -> BatchRenderPlan {
+        BatchRenderPlan {
+            input_set: ["a.mmd".to_owned(), "b.mmd".to_owned()]
+                .into_iter()
+                .collect(),
+            input_indices: [("a.mmd".to_owned(), 0), ("b.mmd".to_owned(), 1)]
+                .into_iter()
+                .collect(),
+            destinations: vec![PathBuf::from("out/a.svg"), PathBuf::from("out/b.svg")],
+            destination_names: vec!["a.svg".to_owned(), "b.svg".to_owned()],
+            destination_displays: vec!["out/a.svg".to_owned(), "out/b.svg".to_owned()],
+            requested_workers: 2,
+            cache_path: PathBuf::from("out/cache.json"),
+            option_cache_digest: Some("options".to_owned()),
+            cache_active: true,
+            key: "batch-plan".to_owned(),
         }
     }
 
@@ -1326,6 +1398,7 @@ mod batch_render_cache_tests {
         let session = BatchRenderCacheSession {
             manifest: Some(BatchRenderCacheManifest {
                 version: super::BATCH_RENDER_CACHE_VERSION,
+                clean_batch: None,
                 entries: [("a.svg".to_owned(), first), ("b.svg".to_owned(), second)]
                     .into_iter()
                     .collect(),
@@ -1337,22 +1410,7 @@ mod batch_render_cache_tests {
             }),
             ..BatchRenderCacheSession::default()
         };
-        let plan = BatchRenderPlan {
-            input_set: ["a.mmd".to_owned(), "b.mmd".to_owned()]
-                .into_iter()
-                .collect(),
-            input_indices: [("a.mmd".to_owned(), 0), ("b.mmd".to_owned(), 1)]
-                .into_iter()
-                .collect(),
-            destinations: vec![PathBuf::from("out/a.svg"), PathBuf::from("out/b.svg")],
-            destination_names: vec!["a.svg".to_owned(), "b.svg".to_owned()],
-            destination_displays: vec!["out/a.svg".to_owned(), "out/b.svg".to_owned()],
-            requested_workers: 2,
-            cache_path: PathBuf::from("out/cache.json"),
-            option_cache_digest: Some("options".to_owned()),
-            cache_active: true,
-            key: "batch-plan".to_owned(),
-        };
+        let plan = plan();
 
         let carry = session
             .sparse_report_carry(&plan, &["b.mmd".to_owned()])
@@ -1361,6 +1419,44 @@ mod batch_render_cache_tests {
         assert_eq!(carry.inherited_diagrams, 1);
         assert_eq!(carry.inherited_cache_hits, 1);
         assert_eq!(carry.inherited_total_bytes, 100);
+    }
+
+    #[test]
+    fn clean_certificate_is_admitted_then_invalidated_before_output() {
+        let plan = plan();
+        let summary = TrustedBatchSummary {
+            plan_key: plan.key.clone(),
+            input_count: 2,
+            total_bytes: 350,
+        };
+        let mut first = entry();
+        first.bytes = 100;
+        let mut second = entry();
+        second.bytes = 250;
+        let manifest = BatchRenderCacheManifest {
+            version: super::BATCH_RENDER_CACHE_VERSION,
+            clean_batch: Some(summary.clone()),
+            entries: [("a.svg".to_owned(), first), ("b.svg".to_owned(), second)]
+                .into_iter()
+                .collect(),
+        };
+        assert_eq!(
+            trusted_batch_from_manifest(&manifest, &plan),
+            Some(summary.clone())
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let cache_path = directory.path().join(super::BATCH_RENDER_CACHE_FILE);
+        std::fs::write(&cache_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let mut session = BatchRenderCacheSession::default();
+        session
+            .begin_stream(&cache_path, Some(&plan), true)
+            .unwrap();
+
+        assert_eq!(session.trusted_batch, Some(summary));
+        let persisted: BatchRenderCacheManifest =
+            serde_json::from_slice(&std::fs::read(cache_path).unwrap()).unwrap();
+        assert_eq!(persisted.clean_batch, None);
     }
 }
 
@@ -3275,6 +3371,13 @@ fn cmd_render_batch_change_set_stream(
         .then(|| BatchRenderPlan::new(inputs, out_dir, jobs, true, &options))
         .transpose()?;
     let mut cache_session = BatchRenderCacheSession::default();
+    let mut trust_first_epoch = false;
+    if retain_manifest {
+        let cache_path = Path::new(out_dir).join(BATCH_RENDER_CACHE_FILE);
+        let admit_clean_batch = std::env::var_os("FM_DISABLE_DURABLE_BATCH_CERTIFICATE").is_none();
+        cache_session.begin_stream(&cache_path, batch_plan.as_ref(), admit_clean_batch)?;
+        trust_first_epoch = cache_session.trusted_batch.is_some();
+    }
     let mut epoch = 0usize;
     for (line_index, line) in stdin.lock().lines().enumerate() {
         let line_number = line_index + 1;
@@ -3293,8 +3396,9 @@ fn cmd_render_batch_change_set_stream(
             BatchCachePolicy {
                 use_cache: true,
                 // The first epoch validates the on-disk base in full. Later epochs can trust the
-                // process-owned manifest even if a preceding process died before flushing it.
-                trust_change_set: !retain_manifest || epoch > 1,
+                // process-owned manifest. A clean predecessor certificate proves that base before
+                // epoch one; its on-disk copy was invalidated before this process could write.
+                trust_change_set: !retain_manifest || trust_first_epoch || epoch > 1,
                 changed_inputs: &changed_inputs,
                 session: retain_manifest.then_some(&mut cache_session),
                 plan: batch_plan.as_ref(),
@@ -3468,11 +3572,20 @@ fn cmd_render_batch(
     } else {
         None
     };
-    let (mut disk_cache, disk_cache_modified) = if cache_active && session_lease.is_none() {
+    let (mut disk_cache, mut disk_cache_modified) = if cache_active && session_lease.is_none() {
         load_batch_render_cache(cache_path)
     } else {
         (BatchRenderCacheManifest::default(), None)
     };
+    if cache_active && session_lease.is_none() && disk_cache.clean_batch.take().is_some() {
+        let encoded = serde_json::to_vec(&disk_cache)?;
+        std::fs::write(cache_path, encoded)
+            .with_context(|| format!("cannot invalidate {}", cache_path.display()))?;
+        disk_cache_modified = cache_path
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok();
+    }
     let (prior_cache, prior_cache_modified) = if let Some(lease) = session_lease.as_ref() {
         (&lease.manifest, lease.manifest_modified)
     } else {

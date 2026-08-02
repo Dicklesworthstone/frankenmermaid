@@ -2176,3 +2176,49 @@ from 936 to 974, while the candidate still won.
 - **Retry predicate.** Re-measure if the complete-change-set contract, persistent session plan,
   manifest ownership, per-input JSON contract, revision count, corpus, or output equivalence
   changes. Promote no competitive claim without a same-invocation incumbent null arm.
+
+## KEEP: resume clean edit streams without a repository recovery scan (2026-08-02)
+
+**Bead:** `bd-riso`. **Lane:** cod (`BlackThrush`).
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `aa1c68f177a8c03e1e63ef745746c477628c08d68c498bbd56bcab2691142ee7`
+**A/A null control (same invocation):** invocation
+`fm-durable-exact-trj-1785647726112613212` interleaved all six permutations of the disabled
+control/candidate-A/candidate-B arms for 36 whole-job rounds per arm on 128-CPU
+`threadripperje`. Candidate A/B medians were 21,113,811 / 21,092,787 ns (ratio `1.000997`),
+with a 20,000-resample median-ratio 95% CI of `[0.988092, 1.014461]`, including one.
+**Counted mechanism:** a clean-shutdown certificate reduced exact-ELF first-epoch `statx` calls
+from 975 to 209 and total syscalls from 2,427 to 1,667. Before output can mutate, admission consumes
+the certificate and durably rewrites the manifest; a graceful EOF restores it, while a killed
+process leaves it absent and therefore forces the existing full recovery scan.
+
+- **Profile-first attribution.** After changed-only epochs landed, the first epoch of every new
+  persistent process still revalidated all 384 input/output pairs. The live mermaid-js arm keeps
+  its page resident and pays no repository recovery scan, making this a frankenmermaid-only cost.
+- **Mechanism.** The manifest may carry a versioned summary of a previously successful full batch.
+  Admission requires an exact plan key, option digest, aggregate output length, and complete
+  in-memory manifest topology match. The process atomically consumes that proof before rendering,
+  then restores it only after a successful stream flush. `FM_DISABLE_DURABLE_BATCH_CERTIFICATE=1`
+  selects the exact-binary control path.
+- **Whole-job result.** Every arm started a fresh process and executed 20 alternating one-file
+  revisions over the 384-diagram repository. The disabled-control median was 23,612,112.5 ns and
+  the candidate median was 21,113,811 ns: **1.118325x**, bootstrap 95% CI
+  `[1.104955, 1.129697]`. Both arms emitted the identical 384-SVG aggregate SHA-256
+  `8c9897eb7fda549d70233a1f912782c53cb4d99b177afbea1e8a3ad9116af5c8`.
+- **Crash behavior.** The exact invocation killed a candidate after certificate admission and
+  observed `crash_certificate_absent=true`; the next process performed recovery and restored the
+  certificate (`recovery_certificate_restored=true`). This is the safety invariant that permits
+  skipping the clean restart scan.
+- **Live-incumbent bracket.** The same invocation bracketed full uncached 384-diagram Rust renders
+  at 71.527 / 38.156 ms around pinned mermaid-js 11.15.0 at 51,238.1 ms render time (55.716 s live
+  wall). Runtime provenance reported one browser main thread, Chrome 151.0.7922.71, input SHA-256
+  `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`, and bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`. The incumbent was a
+  render-once arm without an incumbent A/A null, so this row asserts no competitive ratio.
+- **Validation.** Strict clean-overlay remote check and Clippy passed with warnings denied; nine
+  focused cache/stream tests passed, including certificate invalidation and crash recovery. Load
+  stayed 18.57 -> 17.29 over 128 CPUs. Exact output, balanced A/A, executing-ELF self-report,
+  counted syscalls, and the live-incumbent bracket all passed.
+- **Retry predicate.** Re-measure if manifest durability, clean-shutdown semantics, plan identity,
+  output ownership, stream failure handling, corpus, or revision count changes. Promote no
+  competitive claim without a same-invocation incumbent null arm.
