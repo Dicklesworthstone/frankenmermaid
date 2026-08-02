@@ -1099,6 +1099,14 @@ struct TrustedBatchSummary {
     total_bytes: usize,
 }
 
+const REVISION_OUTPUT_CACHE_CAPACITY: usize = 2;
+
+#[derive(Debug)]
+struct BatchRevisionOutput {
+    key: String,
+    bytes: Arc<Vec<u8>>,
+}
+
 #[derive(Debug, Default)]
 struct BatchRenderCacheSession {
     manifest: Option<BatchRenderCacheManifest>,
@@ -1107,6 +1115,8 @@ struct BatchRenderCacheSession {
     trusted_batch: Option<TrustedBatchSummary>,
     pressure: OnceLock<Arc<MermaidPressureReport>>,
     reuse_pressure: bool,
+    revision_outputs: Vec<BatchRevisionOutput>,
+    reuse_revision_outputs: bool,
 }
 
 impl BatchRenderCacheSession {
@@ -1117,6 +1127,8 @@ impl BatchRenderCacheSession {
         admit_clean_batch: bool,
     ) -> Result<()> {
         self.reuse_pressure = std::env::var_os("FM_DISABLE_SESSION_PRESSURE_SNAPSHOT").is_none();
+        self.reuse_revision_outputs =
+            std::env::var_os("FM_DISABLE_SESSION_REVISION_CACHE").is_none();
         let (mut manifest, mut modified) = load_batch_render_cache(cache_path);
         self.trusted_batch = admit_clean_batch
             .then(|| plan.and_then(|plan| trusted_batch_from_manifest(&manifest, plan)))
@@ -1147,6 +1159,34 @@ impl BatchRenderCacheSession {
             self.pressure
                 .get_or_init(|| Arc::new(MermaidNativePressureSignals::sample().into_report())),
         )
+    }
+
+    fn revision_output(&self, key: &str) -> Option<Arc<Vec<u8>>> {
+        if !self.reuse_revision_outputs {
+            return None;
+        }
+        self.revision_outputs
+            .iter()
+            .rev()
+            .find(|entry| entry.key == key)
+            .map(|entry| Arc::clone(&entry.bytes))
+    }
+
+    fn remember_revision_output(&mut self, key: String, bytes: Arc<Vec<u8>>) {
+        if !self.reuse_revision_outputs {
+            return;
+        }
+        if let Some(index) = self
+            .revision_outputs
+            .iter()
+            .position(|entry| entry.key == key)
+        {
+            self.revision_outputs.remove(index);
+        } else if self.revision_outputs.len() == REVISION_OUTPUT_CACHE_CAPACITY {
+            self.revision_outputs.remove(0);
+        }
+        self.revision_outputs
+            .push(BatchRevisionOutput { key, bytes });
     }
 
     fn lease<'a>(&'a mut self, cache_path: &Path) -> BatchRenderCacheLease<'a> {
@@ -1540,6 +1580,38 @@ mod batch_render_cache_tests {
         let second = session.pressure_report();
 
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn persistent_session_keeps_two_exact_rendered_revisions() {
+        let mut session = BatchRenderCacheSession {
+            reuse_revision_outputs: true,
+            ..BatchRenderCacheSession::default()
+        };
+        let first = Arc::new(vec![1_u8]);
+        let second = Arc::new(vec![2_u8]);
+        let third = Arc::new(vec![3_u8]);
+
+        session.remember_revision_output("first".to_owned(), Arc::clone(&first));
+        session.remember_revision_output("second".to_owned(), Arc::clone(&second));
+        assert!(
+            session
+                .revision_output("first")
+                .is_some_and(|bytes| Arc::ptr_eq(&bytes, &first))
+        );
+        assert!(
+            session
+                .revision_output("second")
+                .is_some_and(|bytes| Arc::ptr_eq(&bytes, &second))
+        );
+
+        session.remember_revision_output("third".to_owned(), Arc::clone(&third));
+        assert!(session.revision_output("first").is_none());
+        assert!(
+            session
+                .revision_output("third")
+                .is_some_and(|bytes| Arc::ptr_eq(&bytes, &third))
+        );
     }
 }
 
@@ -3833,7 +3905,7 @@ fn cmd_render_batch(
     // A hit is admitted only when the source+configuration+executable key matches, the destination
     // still has the recorded length, and it has not changed since the manifest was committed.
     // Hits never enter the parser plan or the render pool.
-    let cached_results = loaded
+    let mut cached_results = loaded
         .iter()
         .enumerate()
         .map(|(index, loaded)| {
@@ -3856,6 +3928,32 @@ fn cmd_render_batch(
             Some((plan.destination_displays[index].clone(), bytes))
         })
         .collect::<Vec<_>>();
+    let revision_cache_active = session_lease
+        .as_ref()
+        .is_some_and(|lease| lease.session.reuse_revision_outputs);
+    if revision_cache_active {
+        for (index, loaded) in loaded.iter().enumerate() {
+            if cached_results[index].is_some() {
+                continue;
+            }
+            let Ok((_, digest)) = loaded else {
+                continue;
+            };
+            let Some(key) = cache_key_for(digest) else {
+                continue;
+            };
+            let bytes = session_lease
+                .as_ref()
+                .and_then(|lease| lease.session.revision_output(&key));
+            let Some(bytes) = bytes else {
+                continue;
+            };
+            let destination = &plan.destinations[index];
+            std::fs::write(destination, bytes.as_slice())
+                .with_context(|| format!("cannot write {}", destination.display()))?;
+            cached_results[index] = Some((plan.destination_displays[index].clone(), bytes.len()));
+        }
+    }
     let cache_hit_count = report.map_or(0, |carry| carry.inherited_cache_hits)
         + cached_results.iter().flatten().count();
 
@@ -3972,7 +4070,9 @@ fn cmd_render_batch(
                 std::fs::write(destination, &outcome.rendered)
                     .with_context(|| format!("cannot write {}", destination.display()))?;
                 let length = outcome.rendered.len();
-                if digest_counts.get(digest.as_str()).copied().unwrap_or(0) > 1 {
+                if revision_cache_active
+                    || digest_counts.get(digest.as_str()).copied().unwrap_or(0) > 1
+                {
                     shared
                         .lock()
                         .map_err(|_| anyhow::anyhow!("render cache poisoned"))?
@@ -4043,6 +4143,24 @@ fn cmd_render_batch(
                 .collect()
         }),
     };
+    if revision_cache_active {
+        let rendered_revisions = {
+            let cache = shared
+                .lock()
+                .map_err(|_| anyhow::anyhow!("render cache poisoned"))?;
+            cache
+                .iter()
+                .filter_map(|(digest, bytes)| {
+                    cache_key_for(digest).map(|key| (key, Arc::clone(bytes)))
+                })
+                .collect::<Vec<_>>()
+        };
+        if let Some(lease) = session_lease.as_mut() {
+            for (key, bytes) in rendered_revisions {
+                lease.session.remember_revision_output(key, bytes);
+            }
+        }
+    }
 
     // Phase 4: every non-owner duplicate copies its owner's bytes. No parse, no layout, no render.
     //

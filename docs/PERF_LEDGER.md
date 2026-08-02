@@ -2306,3 +2306,50 @@ syscalls from 1,604 to 863 over the 20-epoch job.
   streams commonly outlive meaningful host-pressure changes, pressure-source topology, corpus,
   revision count, or stream protocol changes. Promote no competitive claim without a
   same-invocation incumbent null arm.
+
+## KEEP: replay the two most recent rendered revisions in persistent edit streams (2026-08-02)
+
+**Bead:** `bd-ucpx`. **Lane:** cod.
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `0ff8a1f2e8663388edab3c5be482dcc9764b1fff6f60fa58cf2aa30f209eccbc`
+**A/A null control (same invocation):** invocation
+`fm-revision-exact-thinkstation1-1785654560627396914` interleaved all six permutations of the
+disabled control/candidate-A/candidate-B arms for 36 whole-job rounds per arm. Candidate A/B
+medians were 20,600,710.5 / 20,602,584 ns (ratio `0.999909`), with a 50,000-resample median-ratio
+95% CI of `[0.990865, 1.006885]`, including one.
+**Counted mechanism:** each candidate arm replayed exact resident SVG bytes for 648/720 epochs
+(18 of every 20 alternating edits), versus 0/720 in the disabled control. Only the first encounter
+of each of the two revisions parsed, laid out, and rendered; every subsequent A/B oscillation was
+an exact digest+options+executable-key hit.
+
+- **Structural gap.** After batch-wide scans and per-edit configuration work were removed, the
+  remaining changed-diagram path still repeated parse, layout, and SVG materialization whenever an
+  editor returned to a recent revision. Mermaid-js also rerenders such a revision; a resident Rust
+  stream can retain the already-produced immutable bytes and delete all three stages.
+- **Mechanism.** `BatchRenderCacheSession` owns a two-entry process-local rendered-revision cache.
+  Admission requires the exact source digest plus render-options and executing-binary identity; a
+  hit rewrites the current destination and then enters the ordinary manifest commit path. The
+  bound caps retained output memory, one-shot and crash-recovery paths are unchanged, and
+  `FM_DISABLE_SESSION_REVISION_CACHE=1` selects the exact-binary control.
+- **Whole-job result.** Each round started one process and executed 20 alternating one-file edits
+  over the complete 384-diagram repository. The disabled-control median was 24,084,332.5 ns and
+  the candidate median was 20,600,710.5 ns: **1.169102x**, bootstrap 95% CI
+  `[1.162335, 1.176859]`. All arms emitted the identical final 384-SVG aggregate SHA-256
+  `bd2b9194e377ff60a471ee546bd5cd0a03aeda57e544f1afb35780cd3afcc56c`.
+- **Host admission.** The invocation used both SMT threads of isolated physical cores 24-31 on
+  x86-64 `thinkstation1` (`24-31,56-63`). Two consecutive pre-run one-second samples had no CPU
+  above 2% busy; the post-run sample had none above 5.1%. The exact process reported 16 requested
+  workers and one active worker on every sparse epoch.
+- **Live-incumbent bracket.** The same invocation bracketed full uncached 384-diagram Rust renders
+  at 26.451 / 26.273 ms around pinned mermaid-js 11.15.0 at 50,608.2 ms render time (55.675 s live
+  wall). Runtime provenance reported one browser main thread, Chrome 150.0.7871.128, input SHA-256
+  `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`, and bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`. The incumbent was a
+  render-once arm without an incumbent null, so this row asserts no competitive ratio.
+- **Validation.** A strict clean-overlay remote cache/stream suite passed 12/12. Workspace-wide
+  check and Clippy with warnings denied passed on strict remote clean overlays; targeted rustfmt,
+  staged ledger lint, and UBS completed before landing. The external and self-reported ELF hashes
+  agreed, and the exact disabled arm lived in that same executable.
+- **Retry predicate.** Re-measure if the persistent-stream lifetime, source/options/executable key,
+  output-write or manifest-commit semantics, cache capacity, corpus, or revision pattern changes.
+  Promote no competitive claim without a same-invocation incumbent null arm.
