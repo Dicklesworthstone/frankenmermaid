@@ -277,6 +277,15 @@ enum Command {
         )]
         change_set_stdin: bool,
 
+        /// Read one JSON object mapping batch input paths to their final UTF-8 source bodies,
+        /// apply those source updates once, and render the coalesced final state as one job.
+        #[arg(
+            long,
+            conflicts_with_all = ["no_cache", "changed_input", "change_set_stdin"],
+            requires = "trust_change_set"
+        )]
+        final_state_stdin: bool,
+
         /// Hold each diagram's newest rendered bytes in memory and materialize only the final
         /// output tree when the change-set stream reaches EOF. This deletes transient writes for
         /// build systems that consume only the completed revision transaction.
@@ -1408,7 +1417,7 @@ mod batch_render_cache_tests {
     use super::{
         BatchRenderCacheEntry, BatchRenderCacheManifest, BatchRenderCacheSession, BatchRenderPlan,
         TrustedBatchSummary, batch_cache_entry_matches_early, batch_cache_entry_matches_key,
-        parse_batch_change_set_line, trusted_batch_from_manifest,
+        parse_batch_change_set_line, parse_batch_final_state_payload, trusted_batch_from_manifest,
     };
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -1525,6 +1534,35 @@ mod batch_render_cache_tests {
         let error = parse_batch_change_set_line(r#"{"changed":["a.mmd"]}"#, 7)
             .expect_err("objects are not complete change-set arrays");
         assert!(error.to_string().contains("input line 7"));
+    }
+
+    #[test]
+    fn final_state_payload_accepts_only_known_bounded_inputs() {
+        let inputs = vec!["a.mmd".to_owned(), "b.mmd".to_owned()];
+        let updates = parse_batch_final_state_payload(
+            r#"{"b.mmd":"flowchart LR\nB-->C","a.mmd":"flowchart LR\nA-->B"}"#,
+            &inputs,
+            64,
+        )
+        .unwrap();
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates["a.mmd"], "flowchart LR\nA-->B");
+
+        let unknown =
+            parse_batch_final_state_payload(r#"{"c.mmd":"A-->B"}"#, &inputs, 64).unwrap_err();
+        assert!(
+            unknown
+                .to_string()
+                .contains("not one of this batch's inputs")
+        );
+
+        let oversize =
+            parse_batch_final_state_payload(r#"{"a.mmd":"12345"}"#, &inputs, 4).unwrap_err();
+        assert!(
+            oversize
+                .to_string()
+                .contains("exceeding the 4-byte input limit")
+        );
     }
 
     #[test]
@@ -2040,6 +2078,7 @@ fn main() -> Result<()> {
             trust_change_set,
             changed_input,
             change_set_stdin,
+            final_state_stdin,
             final_output_only,
             fnx_mode,
             fnx_projection,
@@ -2076,7 +2115,11 @@ fn main() -> Result<()> {
                 fnx_projection,
                 fnx_fallback,
             };
-            if change_set_stdin {
+            if final_state_stdin {
+                cmd_render_batch_final_state_stream(
+                    &inputs, &out_dir, jobs, keep_going, json, options,
+                )
+            } else if change_set_stdin {
                 cmd_render_batch_change_set_stream(
                     &inputs,
                     &out_dir,
@@ -3629,6 +3672,96 @@ fn parse_batch_change_set_line(line: &str, line_number: usize) -> Result<Option<
     serde_json::from_str(line)
         .with_context(|| format!("invalid change-set JSON array on input line {line_number}"))
         .map(Some)
+}
+
+fn parse_batch_final_state_payload(
+    payload: &str,
+    inputs: &[String],
+    max_input_bytes: usize,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let updates = serde_json::from_str::<std::collections::BTreeMap<String, String>>(payload)
+        .context("invalid final-state JSON object")?;
+    let input_set = inputs
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    for (input, source) in &updates {
+        if !input_set.contains(input.as_str()) {
+            anyhow::bail!("final-state input {input:?} is not one of this batch's inputs");
+        }
+        if source.len() > max_input_bytes {
+            anyhow::bail!(
+                "final-state input {input:?} is {} bytes, exceeding the {max_input_bytes}-byte \
+                 input limit",
+                source.len()
+            );
+        }
+    }
+    Ok(updates)
+}
+
+fn cmd_render_batch_final_state_stream(
+    inputs: &[String],
+    out_dir: &str,
+    jobs: Option<usize>,
+    keep_going: bool,
+    json: bool,
+    options: RenderCommandOptions<'_>,
+) -> Result<()> {
+    use std::io::Read;
+
+    // JSON escaping can expand one source byte to six ASCII bytes. Bound the aggregate before
+    // deserializing, then enforce the ordinary per-input byte ceiling on decoded source bodies.
+    let max_payload_bytes = options
+        .max_input_bytes
+        .saturating_mul(inputs.len().max(1))
+        .saturating_mul(6)
+        .saturating_add(1024 * 1024);
+    let read_limit = u64::try_from(max_payload_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut payload = String::new();
+    io::stdin()
+        .lock()
+        .take(read_limit)
+        .read_to_string(&mut payload)
+        .context("cannot read final-state JSON from stdin")?;
+    if payload.len() > max_payload_bytes {
+        anyhow::bail!("final-state JSON exceeds the {max_payload_bytes}-byte transaction limit");
+    }
+    let updates = parse_batch_final_state_payload(&payload, inputs, options.max_input_bytes)?;
+    let plan = BatchRenderPlan::new(inputs, out_dir, jobs, true, &options)?;
+    let changed_inputs = updates.keys().cloned().collect::<Vec<_>>();
+    let total_source_bytes = updates
+        .values()
+        .map(String::len)
+        .fold(0usize, usize::saturating_add);
+    for (input, source) in &updates {
+        std::fs::write(input, source.as_bytes())
+            .with_context(|| format!("cannot apply final-state input {input}"))?;
+    }
+
+    cmd_render_batch(
+        inputs,
+        out_dir,
+        jobs,
+        keep_going,
+        json,
+        BatchCachePolicy {
+            use_cache: true,
+            trust_change_set: true,
+            changed_inputs: &changed_inputs,
+            session: None,
+            plan: Some(&plan),
+            report: None,
+        },
+        options,
+    )?;
+    eprintln!(
+        "applied {} coalesced final source update(s), {total_source_bytes} bytes",
+        changed_inputs.len()
+    );
+    Ok(())
 }
 
 fn cmd_render_batch_change_set_stream(

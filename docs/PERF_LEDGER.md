@@ -2450,3 +2450,57 @@ writes / 547,055,712 bytes in each candidate arm.
   semantics change, the final-tree memory footprint, output size, edit count, changed-diagram count,
   revision replay admission, corpus, or filesystem changes. Promote no competitive claim without a
   same-invocation incumbent null arm.
+
+## KEEP: submit only the coalesced final source state (2026-08-02)
+
+**Bead:** `bd-pvdh`. **Lane:** cod.
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `e65133efc86488a911f2e024da2c9d89714e90304c69a91a9812ab661182a9a4`
+**A/A null control (same invocation):** invocation
+`fm-final-state-exact-thinkstation1-1785660401386884837` interleaved all six permutations of the
+final-output-only control/candidate-A/candidate-B arms for 36 whole-job rounds per arm. Candidate
+A/B medians were 53,506,012.5 / 55,082,735.5 ns (ratio `0.971375`), with a 50,000-resample
+median-ratio 95% CI of `[0.941986, 1.009333]`, including one.
+**Counted mechanism:** every control round performed 632 source-file writes / 71,568,856 bytes and
+632 JSON request/ack epochs before materializing eight final SVGs. Each candidate sent one bounded
+JSON transaction, wrote eight final sources / 906,160 decoded bytes, and rendered those eight
+surviving revisions concurrently. Across 36 rounds that is 22,752 source writes and acknowledgments
+for the control versus 288 source writes and 36 transactions in each candidate arm.
+
+- **Structural gap.** Once final-only materialization deleted transient SVG writes, the retained
+  stream still forced an in-memory editor to rewrite a source file and wait for an acknowledgment
+  for every unobservable intermediate edit. Mermaid-js accepts source strings directly and pays no
+  analogous source-file protocol. A final-state contract can delete all transient edit epochs and
+  expose the surviving independent diagrams to the existing shared-nothing worker pool at once.
+- **Mechanism.** Explicit `render-batch --trust-change-set --final-state-stdin` accepts one JSON
+  object from known batch input paths to final UTF-8 bodies. It bounds aggregate encoded input,
+  enforces the ordinary per-source limit, validates the complete batch plan before mutation, writes
+  each listed source once, and invokes one cached parallel batch with the complete changed set.
+  The option conflicts with ordinary change-set streaming, explicit changed paths, and no-cache so
+  callers cannot accidentally combine incompatible consistency contracts.
+- **Whole-job result.** Every timed round began from an untimed revision-A certificate over the
+  same 384-input output tree. The retained control then executed 79 alternating sweeps / 632
+  acknowledged edits and deferred output until EOF; the candidate encoded and submitted the same
+  eight final revision-B bodies once. Control median was 327,319,763 ns and candidate-A median was
+  53,506,012.5 ns: **6.117439x**, bootstrap 95% CI `[5.941557, 6.241070]`. All arms ended with
+  identical 384-file / 41,745,773-byte output, aggregate SHA-256
+  `3a51859f47cbe17f4652a5efdcd72dcba648694b8c624d4659f94c10d745c109`.
+- **Host admission.** The A/B phase used both SMT threads of physical cores 25, 27, 29, and 31 on
+  x86-64 `thinkstation1` (`25,27,29,31,57,59,61,63`). The harness waited through 27 busy
+  samples, then admitted two consecutive one-second samples peaking at 3.0% and 1.0%. The
+  pre-incumbent samples peaked at 4.0% / 4.0%, and the report-only post-invocation sample at 8.0%.
+- **Live-incumbent bracket.** The same invocation bracketed full uncached 384-diagram Rust renders
+  at 36.879 / 40.182 ms around pinned mermaid-js 11.15.0 at 50,398.7 ms render time (55.691 s live
+  wall). Runtime provenance reported one browser main thread, Chrome 150.0.7871.128, input SHA-256
+  `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`, and bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`. The incumbent was a
+  render-once arm without an incumbent null, so this row asserts no competitive ratio.
+- **Validation.** The exact source passed 15 focused cache/stream tests in both CLI binary targets.
+  Workspace-wide check and Clippy with warnings denied passed on separate clean-overlay remote
+  workers; targeted rustfmt, staged ledger lint, and UBS completed before landing. External and
+  self-reported executable hashes agreed in every timed arm. Exact artifact:
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/fm-final-state-exact-thinkstation1-1785660401386884837.json`.
+- **Retry predicate.** Re-measure if callers observe intermediate source states, the final-state
+  payload or trust contract changes, input write durability changes, changed-diagram count, source
+  size, edit count, cache certificate, worker count, corpus, or filesystem changes. Promote no
+  competitive claim without a same-invocation incumbent null arm.
