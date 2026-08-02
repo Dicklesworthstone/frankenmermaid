@@ -2665,3 +2665,58 @@ revision replays, and 12,288 observable diagram states per round.
 - **Retry predicate.** Re-measure if the stream, pool-width selection, changed-diagram or transaction
   count, revision replay, source/output durability, corpus, allocator, Rayon version, host topology,
   or filesystem changes. Promote no competitive claim without a same-invocation incumbent null arm.
+
+## KEEP: replay complete resident revisions before the generic batch engine (2026-08-02)
+
+**Bead:** `bd-d8vo`. **Lane:** cod.
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `378ee0a4a1ced267bd0f15c5332d54117df1db43531c79773941f9a27a0a9aa7`
+**A/A null control (same invocation):** invocation
+`fm-resident-transaction-replay-exact-thinkstation1-1785670293295219209` interleaved all six
+permutations of the disabled-path control/candidate-A/candidate-B arms for 36 whole-job rounds per
+arm. Candidate A/B medians were 56,557,646.5 / 55,894,518.5 ns (ratio `1.011864`), with a
+50,000-resample median-ratio 95% CI of `[0.985688, 1.032256]`, including one.
+**Counted mechanism:** across 36 rounds, the disabled-path control sent all 1,152 transactions
+through the generic batch engine. Each candidate admitted 1,080 complete exact-revision
+transactions before that engine and used it only for the first two revisions in each process. All
+arms still acknowledged 1,152 transactions, wrote 18,432 changed sources and 576 final outputs,
+and accounted for the same 441,216 persistent diagram hits and 1,152 first-seen renders.
+
+- **Profile-first attribution.** After retaining the Rayon pool, whole-job sampling still showed
+  Rayon scheduling, epoch pinning, and filesystem reopen work on exact A/B revision-cache hits.
+  Mermaid-js's resident page does not rebuild a generic batch epoch to publish bytes already held
+  in memory. This lever admits the whole transaction before that structural work begins.
+- **The one lever.** A trusted resident session now hashes each changed final-state source and
+  requires an exact process-local rendered-output hit for every change. On complete admission it
+  advances only those destination bytes and manifest entries, preserves the trusted whole-batch
+  byte total, emits the normal transaction ACK, and skips source reload, parse planning, pressure
+  sampling, Rayon dispatch, layout, and rendering. A miss falls through unchanged, JSON diagnostic
+  mode keeps the generic per-diagram reports, and `FM_DISABLE_RESIDENT_TRANSACTION_REPLAY=1`
+  supplies the same-ELF control.
+- **Whole-job result.** Each round began from an untimed revision-A certificate, then published 32
+  alternating transactions over 16 changed diagrams in the complete 384-diagram repository with
+  final-output-only semantics: 512 source writes and 12,288 observable diagram states per arm.
+  Generic-path control median was 62,342,917 ns and candidate-A median was 56,557,646.5 ns:
+  **1.102290x**, bootstrap 95% CI `[1.086652, 1.126391]`. All arms produced identical 384-file /
+  20,685,288-byte output, aggregate SHA-256
+  `2f528b7b4e19d28b1546dc44513fc01979e2569b41f9d61af9ddd6be275810c2`.
+- **Host admission.** The effect phase ran on eight distinct physical cores 10, 11, 12, 13, 14,
+  17, 18, and 20 of x86-64 `thinkstation1`. Its two consecutive one-second admission samples
+  peaked at 5.9% and 9.9% busy; the pre-incumbent pair peaked at 8.0% and 9.1%, and the post-run
+  sample peaked at 9.9%, with no selected core above 20%.
+- **Live-incumbent bracket.** The same invocation bracketed full uncached 384-diagram Rust renders
+  at 93.173 / 36.766 ms around pinned mermaid-js 11.15.0 at 52,930.5 ms render time (61.220 s live
+  wall). Runtime provenance reported one Chrome 150.0.7871.128 page-main execution context, input
+  SHA-256 `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`, and bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`. The incumbent was a
+  render-once arm without an incumbent null, so this row asserts no competitive ratio.
+- **Validation.** The focused exact-transaction replay test passed in both CLI binary targets on a
+  clean-overlay remote worker; workspace-wide check and Clippy with warnings denied passed on
+  remote workers. Targeted rustfmt passed; external and self-reported executable hashes agreed in
+  every timed arm. Exact artifact SHA-256
+  `6c68d1881b24d6333e784674aca6786fef6f201194dd28bb1e868500dbb32930` at
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/fm-resident-transaction-replay-exact-thinkstation1-1785670293295219209.json`.
+- **Retry predicate.** Re-measure if trusted-batch admission, exact revision keys or retention,
+  transaction ACK or crash semantics, source/output durability, changed-diagram or transaction
+  count, corpus, worker count, allocator, or filesystem changes. Promote no competitive claim
+  without a same-invocation incumbent null arm.

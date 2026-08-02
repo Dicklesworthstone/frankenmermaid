@@ -1186,6 +1186,7 @@ struct BatchRenderCacheSession {
     revision_output_max_entries: usize,
     revision_output_max_bytes: usize,
     reuse_revision_outputs: bool,
+    reuse_complete_revision_transactions: bool,
     reuse_worker_pool: bool,
     worker_pool: std::sync::Mutex<Option<Arc<BatchRenderWorkerPool>>>,
     defer_output_writes: bool,
@@ -1202,6 +1203,8 @@ impl BatchRenderCacheSession {
         self.reuse_pressure = std::env::var_os("FM_DISABLE_SESSION_PRESSURE_SNAPSHOT").is_none();
         self.reuse_revision_outputs =
             std::env::var_os("FM_DISABLE_SESSION_REVISION_CACHE").is_none();
+        self.reuse_complete_revision_transactions =
+            std::env::var_os("FM_DISABLE_RESIDENT_TRANSACTION_REPLAY").is_none();
         self.reuse_worker_pool = std::env::var_os("FM_DISABLE_SESSION_WORKER_POOL").is_none();
         self.revision_output_max_entries =
             if std::env::var_os("FM_SESSION_REVISION_CACHE_TWO_ENTRY_CONTROL").is_some() {
@@ -1311,6 +1314,109 @@ impl BatchRenderCacheSession {
                     .saturating_sub(oldest.bytes.len());
             }
         }
+    }
+
+    fn replay_resident_transaction(
+        &mut self,
+        plan: &BatchRenderPlan,
+        updates: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Option<usize>> {
+        if !self.reuse_complete_revision_transactions || updates.is_empty() {
+            return Ok(None);
+        }
+        let Some(summary) = self.trusted_batch.as_ref().filter(|summary| {
+            summary.plan_key == plan.key && summary.input_count == plan.input_indices.len()
+        }) else {
+            return Ok(None);
+        };
+        let previous_total_bytes = summary.total_bytes;
+        let Some(options_key) = plan.option_cache_digest.as_ref() else {
+            return Ok(None);
+        };
+        if self.manifest.is_none() {
+            return Ok(None);
+        }
+
+        let mut old_bytes = 0usize;
+        let mut new_bytes = 0usize;
+        let mut replacements = Vec::with_capacity(updates.len());
+        for (input, source) in updates {
+            let Some(index) = plan.input_indices.get(input).copied() else {
+                return Ok(None);
+            };
+            let Some(previous_entry) = self
+                .manifest
+                .as_ref()
+                .and_then(|manifest| manifest.entries.get(&plan.destination_names[index]))
+                .filter(|entry| batch_cache_entry_matches_key(entry, options_key))
+            else {
+                return Ok(None);
+            };
+            let Some(previous_bytes) = usize::try_from(previous_entry.bytes).ok() else {
+                return Ok(None);
+            };
+            old_bytes = old_bytes
+                .checked_add(previous_bytes)
+                .ok_or_else(|| anyhow::anyhow!("resident transaction byte count overflow"))?;
+
+            let source_digest = sha256_hex(source.as_bytes());
+            let key = format!("{source_digest}:{options_key}");
+            let Some(rendered) = self.revision_output(&key) else {
+                return Ok(None);
+            };
+            new_bytes = new_bytes
+                .checked_add(rendered.len())
+                .ok_or_else(|| anyhow::anyhow!("resident transaction byte count overflow"))?;
+            let Ok(source_metadata) = Path::new(input).metadata() else {
+                return Ok(None);
+            };
+            let Some(source_modified_ns) = source_metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos().to_string())
+            else {
+                return Ok(None);
+            };
+            let entry = BatchRenderCacheEntry {
+                key,
+                source_digest,
+                options_key: options_key.clone(),
+                source_bytes: source_metadata.len(),
+                source_modified_ns,
+                bytes: u64::try_from(rendered.len())
+                    .map_err(|_| anyhow::anyhow!("rendered output is too large to cache"))?,
+            };
+            replacements.push((index, rendered, entry));
+        }
+
+        let total_bytes = previous_total_bytes
+            .checked_sub(old_bytes)
+            .and_then(|unchanged| unchanged.checked_add(new_bytes))
+            .ok_or_else(|| anyhow::anyhow!("resident transaction byte accounting is invalid"))?;
+        for (index, rendered, _) in &replacements {
+            if !self.stage_output_if_deferred(&plan.destinations[*index], Arc::clone(rendered)) {
+                std::fs::write(&plan.destinations[*index], rendered.as_slice()).with_context(
+                    || format!("cannot write {}", plan.destinations[*index].display()),
+                )?;
+            }
+        }
+
+        let manifest = self
+            .manifest
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("resident transaction lost its cache manifest"))?;
+        for (index, _, entry) in replacements {
+            let destination_name = &plan.destination_names[index];
+            self.dirty |= manifest.entries.get(destination_name) != Some(&entry);
+            manifest.entries.insert(destination_name.clone(), entry);
+        }
+        self.trusted_batch = Some(TrustedBatchSummary {
+            plan_key: plan.key.clone(),
+            input_count: plan.input_indices.len(),
+            total_bytes,
+        });
+        Ok(Some(total_bytes))
     }
 
     fn stage_output_if_deferred(&mut self, destination: &Path, bytes: Arc<Vec<u8>>) -> bool {
@@ -1819,6 +1925,98 @@ mod batch_render_cache_tests {
         session.remember_revision_output("oversize".to_owned(), Arc::new(vec![3_u8; 4]));
         assert!(session.revision_output("oversize").is_none());
         assert_eq!(session.revision_output_bytes, 2);
+    }
+
+    #[test]
+    fn trusted_transaction_replays_exact_changed_revisions_without_rendering() {
+        let directory = tempfile::tempdir().unwrap();
+        let first_input = directory.path().join("a.mmd");
+        let second_input = directory.path().join("b.mmd");
+        let first_destination = directory.path().join("a.svg");
+        let second_destination = directory.path().join("b.svg");
+        std::fs::write(&first_input, "flowchart LR\nA-->B").unwrap();
+        std::fs::write(&second_input, "flowchart LR\nB-->C").unwrap();
+
+        let first_input = first_input.display().to_string();
+        let second_input = second_input.display().to_string();
+        let plan = BatchRenderPlan {
+            input_set: [first_input.clone(), second_input.clone()]
+                .into_iter()
+                .collect(),
+            input_indices: [(first_input.clone(), 0), (second_input.clone(), 1)]
+                .into_iter()
+                .collect(),
+            destinations: vec![first_destination.clone(), second_destination],
+            destination_names: vec!["a.svg".to_owned(), "b.svg".to_owned()],
+            destination_displays: vec![
+                first_destination.display().to_string(),
+                directory.path().join("b.svg").display().to_string(),
+            ],
+            requested_workers: 2,
+            cache_path: directory.path().join("cache.json"),
+            option_cache_digest: Some("options".to_owned()),
+            cache_active: true,
+            key: "batch-plan".to_owned(),
+        };
+        let mut first_entry = entry();
+        first_entry.bytes = 4;
+        let mut second_entry = entry();
+        second_entry.bytes = 5;
+        let mut session = BatchRenderCacheSession {
+            manifest: Some(BatchRenderCacheManifest {
+                version: super::BATCH_RENDER_CACHE_VERSION,
+                clean_batch: None,
+                entries: [
+                    ("a.svg".to_owned(), first_entry),
+                    ("b.svg".to_owned(), second_entry),
+                ]
+                .into_iter()
+                .collect(),
+            }),
+            trusted_batch: Some(TrustedBatchSummary {
+                plan_key: plan.key.clone(),
+                input_count: 2,
+                total_bytes: 9,
+            }),
+            reuse_revision_outputs: true,
+            reuse_complete_revision_transactions: true,
+            revision_output_max_entries: 8,
+            revision_output_max_bytes: usize::MAX,
+            defer_output_writes: true,
+            ..BatchRenderCacheSession::default()
+        };
+        let new_source = "flowchart LR\nA-->C";
+        std::fs::write(&first_input, new_source).unwrap();
+        let digest = super::sha256_hex(new_source.as_bytes());
+        let rendered = Arc::new(vec![7_u8; 10]);
+        session.remember_revision_output(format!("{digest}:options"), Arc::clone(&rendered));
+        let updates = [(first_input, new_source.to_owned())].into_iter().collect();
+
+        assert_eq!(
+            session
+                .replay_resident_transaction(&plan, &updates)
+                .unwrap(),
+            Some(15)
+        );
+        assert!(
+            session
+                .deferred_outputs
+                .get(&first_destination)
+                .is_some_and(|bytes| Arc::ptr_eq(bytes, &rendered))
+        );
+        assert_eq!(
+            session
+                .manifest
+                .as_ref()
+                .unwrap()
+                .entries
+                .get("a.svg")
+                .unwrap()
+                .source_digest,
+            digest
+        );
+        assert_eq!(session.trusted_batch.as_ref().unwrap().total_bytes, 15);
+        assert!(session.dirty);
     }
 
     #[test]
@@ -3822,6 +4020,7 @@ fn cmd_render_batch_final_state_transaction_stream(
     let mut reader = stdin.lock();
     let mut line_number = 0usize;
     let mut transaction = 0usize;
+    let mut replayed_transactions = 0usize;
     loop {
         let mut encoded = Vec::new();
         let bytes_read = (&mut reader)
@@ -3862,23 +4061,40 @@ fn cmd_render_batch_final_state_transaction_stream(
             std::fs::write(input, source.as_bytes())
                 .with_context(|| format!("cannot apply final-state input {input}"))?;
         }
-        cmd_render_batch(
-            inputs,
-            out_dir,
-            jobs,
-            keep_going,
-            json,
-            BatchCachePolicy {
-                use_cache: true,
-                trust_change_set: true,
-                changed_inputs: &changed_inputs,
-                session: Some(&mut cache_session),
-                plan: Some(&plan),
-                report: None,
-            },
-            options.clone(),
-        )
-        .with_context(|| format!("final-state transaction {} failed", transaction + 1))?;
+        let replay_started = Instant::now();
+        let replayed_total_bytes = (!json)
+            .then(|| cache_session.replay_resident_transaction(&plan, &updates))
+            .transpose()?
+            .flatten();
+        if let Some(total_bytes) = replayed_total_bytes {
+            replayed_transactions += 1;
+            eprintln!(
+                "rendered {0}/{0} diagram(s) ({0} persistent hits, 0 identical renders reused, 0 \
+                 shared prefix parses reused / 0 bytes), {total_bytes} bytes, {1} requested \
+                 worker(s), 0 active worker(s), {2:.3} ms",
+                inputs.len(),
+                plan.requested_workers,
+                replay_started.elapsed().as_secs_f64() * 1000.0,
+            );
+        } else {
+            cmd_render_batch(
+                inputs,
+                out_dir,
+                jobs,
+                keep_going,
+                json,
+                BatchCachePolicy {
+                    use_cache: true,
+                    trust_change_set: true,
+                    changed_inputs: &changed_inputs,
+                    session: Some(&mut cache_session),
+                    plan: Some(&plan),
+                    report: None,
+                },
+                options.clone(),
+            )
+            .with_context(|| format!("final-state transaction {} failed", transaction + 1))?;
+        }
         transaction += 1;
 
         let mut stdout = io::stdout().lock();
@@ -3900,7 +4116,10 @@ fn cmd_render_batch_final_state_transaction_stream(
         eprintln!("materialized {outputs} final output(s), {bytes} bytes at stream EOF");
     }
     cache_session.flush(Path::new(out_dir))?;
-    eprintln!("applied {transaction} resident final-state transaction(s)");
+    eprintln!(
+        "applied {transaction} resident final-state transaction(s) \
+         ({replayed_transactions} complete revision replay(s))"
+    );
     Ok(())
 }
 
