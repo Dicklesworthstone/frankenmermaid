@@ -2829,3 +2829,57 @@ performed 1,080 complete revision replays, rendered 1,152 first-seen revisions, 
   buffering changes, EOF commit semantics, transaction count or payload size, source/output
   materialization, exact revision replay, corpus, allocator, or filesystem changes. Promote no
   competitive claim without a same-invocation incumbent null arm.
+
+## KEEP: reuse prepared resident final-state payloads (2026-08-02)
+
+**Bead:** `bd-l057`. **Lane:** cod.
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `79c1150963b3003f2cd7751fee97a4a448a9940020323b8b131d26e0b006c184`
+**A/A null control (same invocation):** invocation
+`fm-resident-payload-cache-exact-thinkstation1-1785674851673222189` interleaved all six
+permutations of cache-disabled control/candidate-A/candidate-B for 36 whole-job rounds per arm.
+Candidate A/B medians were 30,081,295 / 29,906,814.5 ns (ratio `1.005834`), with a
+50,000-resample median-ratio 95% CI of `[0.981678, 1.035895]`, including one.
+**Counted mechanism:** the control decoded and content-addressed 1,152/1,152 transaction payloads.
+Each candidate decoded 72 and reused 1,080 already-validated exact payloads: exactly two decodes
+and 30 reuses per 32-transaction round. All arms still processed 1,152 transactions, performed
+1,080 complete revision replays, materialized 576 final sources and SVGs, wrote 36 aggregate ACKs,
+rendered 1,152 first-seen revisions, and reported 441,216 persistent hits.
+
+- **Profile-first attribution.** On the admitted EOF-only survivor, weighted `perf` self-time put
+  serde_json string/escape decoding at 15.5%; SHA-256 and hex preparation, UTF-8/string copies, and
+  path comparisons formed the next large Rust-specific block. The resident caller alternated only
+  two exact transaction payloads, while the process discarded their validated object maps and
+  source digests after every line.
+- **The one lever.** The final-state stream now retains up to eight exact encoded payloads and their
+  validated update map, ordered changed-input vector, total source bytes, and per-source SHA-256
+  digests under a combined 8 MiB ceiling. Hits use byte-exact payload equality before reusing that
+  immutable prepared transaction; misses keep full unknown-path and size validation, and LRU
+  eviction bounds residency. `FM_DISABLE_RESIDENT_PAYLOAD_CACHE=1` is the same-ELF control.
+- **Whole-job result.** Each round began from an untimed revision-A certificate, then sent 32
+  alternating transactions over 16 changed diagrams in the complete 384-diagram repository with
+  EOF-only acknowledgments, sources, and outputs. Cache-disabled control median was 32,777,408.5
+  ns and candidate-A median was 30,081,295 ns: **1.089628x**, bootstrap 95% CI
+  `[1.055067, 1.128990]`. All arms produced identical 384-file / 20,685,288-byte SVG output,
+  aggregate SHA-256 `2f528b7b4e19d28b1546dc44513fc01979e2569b41f9d61af9ddd6be275810c2`.
+- **Host admission.** The effect phase ran on eight distinct physical cores 10, 11, 12, 13, 14,
+  17, 18, and 20 of x86-64 `thinkstation1`. Its consecutive one-second admission samples peaked
+  at 4.0% and 11.1% busy. After one rejected sample, the accepted pre-incumbent pair peaked at 7.1%
+  and 13.1%; the post-run sample peaked at 14.0%, with no admitted core above 20%.
+- **Live-incumbent bracket.** The same invocation bracketed full uncached 384-diagram Rust renders
+  at 67.551 / 39.712 ms around pinned mermaid-js 11.15.0 at 52,612.2 ms render time (58.814 s live
+  wall). Runtime provenance reported one Chrome 150.0.7871.128 page-main execution context, input
+  SHA-256 `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`, and bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`. The incumbent was a
+  render-once arm without an incumbent null, so this row asserts no competitive ratio.
+- **Validation.** The focused cache test passed in both CLI binary targets on a clean-overlay
+  remote worker, including exact `Arc` reuse and the disabled path. Clean-overlay remote
+  workspace-wide check and Clippy with warnings denied passed; targeted rustfmt passed. The exact
+  smoke and all timed arms self-reported the external ELF hash, and the three output trees were
+  byte-identical. Exact
+  artifact SHA-256 `bde98682a4bc646f261b8ff32e4e518c1b3c0652885926a518f8c630caf48ddd` at
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/fm-resident-payload-cache-exact-thinkstation1-1785674851673222189.json`.
+- **Retry predicate.** Re-measure if payload identity or diversity, transaction count, retained
+  entry/byte ceilings, source digest or validation semantics, EOF protocol, exact revision replay,
+  corpus, allocator, or filesystem changes. Promote no competitive claim without a same-invocation
+  incumbent null arm.

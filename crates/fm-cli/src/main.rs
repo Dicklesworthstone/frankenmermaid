@@ -1332,9 +1332,13 @@ impl BatchRenderCacheSession {
     fn replay_resident_transaction(
         &mut self,
         plan: &BatchRenderPlan,
-        updates: &std::collections::BTreeMap<String, String>,
+        transaction: &PreparedBatchFinalState,
         defer_source_writes: bool,
     ) -> Result<Option<usize>> {
+        let updates = &transaction.updates;
+        if transaction.source_digests.len() != updates.len() {
+            anyhow::bail!("resident transaction digest count does not match its update count");
+        }
         if !self.reuse_complete_revision_transactions || updates.is_empty() {
             return Ok(None);
         }
@@ -1354,7 +1358,9 @@ impl BatchRenderCacheSession {
         let mut old_bytes = 0usize;
         let mut new_bytes = 0usize;
         let mut replacements = Vec::with_capacity(updates.len());
-        for (input, source) in updates {
+        for ((input, source), source_digest) in
+            updates.iter().zip(transaction.source_digests.iter())
+        {
             let Some(index) = plan.input_indices.get(input).copied() else {
                 return Ok(None);
             };
@@ -1374,7 +1380,6 @@ impl BatchRenderCacheSession {
                 .checked_add(previous_bytes)
                 .ok_or_else(|| anyhow::anyhow!("resident transaction byte count overflow"))?;
 
-            let source_digest = sha256_hex(source.as_bytes());
             let key = format!("{source_digest}:{options_key}");
             let Some(rendered) = self.revision_output(&key) else {
                 return Ok(None);
@@ -1404,7 +1409,7 @@ impl BatchRenderCacheSession {
             };
             let entry = BatchRenderCacheEntry {
                 key,
-                source_digest,
+                source_digest: source_digest.clone(),
                 options_key: options_key.clone(),
                 source_bytes,
                 source_modified_ns,
@@ -1806,6 +1811,29 @@ mod batch_render_cache_tests {
     }
 
     #[test]
+    fn resident_payload_cache_reuses_exact_prepared_transactions() {
+        let inputs = vec!["a.mmd".to_owned(), "b.mmd".to_owned()];
+        let payload = r#"{"b.mmd":"flowchart LR\nB-->C","a.mmd":"flowchart LR\nA-->B"}"#;
+        let mut cache = super::ResidentPayloadCache::default();
+
+        let first = cache.prepare(payload, &inputs, 64, true).unwrap();
+        let second = cache.prepare(payload, &inputs, 64, true).unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(cache.decoded, 1);
+        assert_eq!(cache.reused, 1);
+        assert_eq!(first.source_digests.len(), first.updates.len());
+        assert_eq!(first.changed_inputs, ["a.mmd", "b.mmd"]);
+
+        let mut disabled = super::ResidentPayloadCache::default();
+        let first = disabled.prepare(payload, &inputs, 64, false).unwrap();
+        let second = disabled.prepare(payload, &inputs, 64, false).unwrap();
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(disabled.decoded, 2);
+        assert_eq!(disabled.reused, 0);
+    }
+
+    #[test]
     fn process_cache_lease_restores_updated_manifest() {
         let mut session = BatchRenderCacheSession {
             manifest: Some(BatchRenderCacheManifest::default()),
@@ -2063,11 +2091,13 @@ mod batch_render_cache_tests {
         let digest = super::sha256_hex(new_source.as_bytes());
         let rendered = Arc::new(vec![7_u8; 10]);
         session.remember_revision_output(format!("{digest}:options"), Arc::clone(&rendered));
-        let updates = [(first_input, new_source.to_owned())].into_iter().collect();
+        let transaction = super::prepare_batch_final_state_updates(
+            [(first_input, new_source.to_owned())].into_iter().collect(),
+        );
 
         assert_eq!(
             session
-                .replay_resident_transaction(&plan, &updates, true)
+                .replay_resident_transaction(&plan, &transaction, true)
                 .unwrap(),
             Some(15)
         );
@@ -2096,7 +2126,7 @@ mod batch_render_cache_tests {
         assert!(session.dirty);
         assert_eq!(
             session
-                .materialize_deferred_sources(&plan, &updates)
+                .materialize_deferred_sources(&plan, &transaction.updates)
                 .unwrap(),
             (1, new_source.len())
         );
@@ -4089,6 +4119,141 @@ fn parse_batch_final_state_payload(
     Ok(updates)
 }
 
+#[derive(Debug)]
+struct PreparedBatchFinalState {
+    updates: std::collections::BTreeMap<String, String>,
+    source_digests: Vec<String>,
+    changed_inputs: Vec<String>,
+    total_source_bytes: usize,
+}
+
+fn prepare_batch_final_state_updates(
+    updates: std::collections::BTreeMap<String, String>,
+) -> PreparedBatchFinalState {
+    let source_digests = updates
+        .values()
+        .map(|source| sha256_hex(source.as_bytes()))
+        .collect();
+    let changed_inputs = updates.keys().cloned().collect();
+    let total_source_bytes = updates
+        .values()
+        .map(String::len)
+        .fold(0usize, usize::saturating_add);
+    PreparedBatchFinalState {
+        updates,
+        source_digests,
+        changed_inputs,
+        total_source_bytes,
+    }
+}
+
+fn prepare_batch_final_state_payload(
+    payload: &str,
+    inputs: &[String],
+    max_input_bytes: usize,
+) -> Result<PreparedBatchFinalState> {
+    parse_batch_final_state_payload(payload, inputs, max_input_bytes)
+        .map(prepare_batch_final_state_updates)
+}
+
+const RESIDENT_PAYLOAD_CACHE_MAX_ENTRIES: usize = 8;
+const RESIDENT_PAYLOAD_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Debug)]
+struct ResidentPayloadCacheEntry {
+    payload: String,
+    prepared: Arc<PreparedBatchFinalState>,
+    retained_bytes: usize,
+    last_used: u64,
+}
+
+#[derive(Debug, Default)]
+struct ResidentPayloadCache {
+    entries: Vec<ResidentPayloadCacheEntry>,
+    retained_bytes: usize,
+    clock: u64,
+    decoded: usize,
+    reused: usize,
+}
+
+impl ResidentPayloadCache {
+    fn prepare(
+        &mut self,
+        payload: &str,
+        inputs: &[String],
+        max_input_bytes: usize,
+        enabled: bool,
+    ) -> Result<Arc<PreparedBatchFinalState>> {
+        if enabled
+            && let Some(index) = self
+                .entries
+                .iter()
+                .position(|entry| entry.payload == payload)
+        {
+            self.clock = self.clock.saturating_add(1);
+            self.entries[index].last_used = self.clock;
+            self.reused = self.reused.saturating_add(1);
+            return Ok(Arc::clone(&self.entries[index].prepared));
+        }
+
+        let prepared = Arc::new(prepare_batch_final_state_payload(
+            payload,
+            inputs,
+            max_input_bytes,
+        )?);
+        self.decoded = self.decoded.saturating_add(1);
+        if !enabled {
+            return Ok(prepared);
+        }
+
+        let retained_bytes = payload
+            .len()
+            .saturating_add(prepared.total_source_bytes)
+            .saturating_add(
+                prepared
+                    .changed_inputs
+                    .iter()
+                    .map(String::len)
+                    .fold(0usize, usize::saturating_add),
+            )
+            .saturating_add(
+                prepared
+                    .source_digests
+                    .iter()
+                    .map(String::len)
+                    .fold(0usize, usize::saturating_add),
+            );
+        if retained_bytes > RESIDENT_PAYLOAD_CACHE_MAX_BYTES {
+            return Ok(prepared);
+        }
+
+        self.clock = self.clock.saturating_add(1);
+        self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
+        self.entries.push(ResidentPayloadCacheEntry {
+            payload: payload.to_owned(),
+            prepared: Arc::clone(&prepared),
+            retained_bytes,
+            last_used: self.clock,
+        });
+        while self.entries.len() > RESIDENT_PAYLOAD_CACHE_MAX_ENTRIES
+            || self.retained_bytes > RESIDENT_PAYLOAD_CACHE_MAX_BYTES
+        {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(index, _)| index)
+            else {
+                break;
+            };
+            let evicted = self.entries.remove(oldest);
+            self.retained_bytes = self.retained_bytes.saturating_sub(evicted.retained_bytes);
+        }
+        Ok(prepared)
+    }
+}
+
 fn batch_final_state_payload_limit(inputs: &[String], max_input_bytes: usize) -> usize {
     // JSON escaping can expand one source byte to six ASCII bytes. The fixed allowance covers
     // absolute path keys and object punctuation without making the decoder an unbounded buffer.
@@ -4141,6 +4306,8 @@ fn cmd_render_batch_final_state_transaction_stream(
     let mut acknowledged_updates = 0usize;
     let mut acknowledged_source_bytes = 0usize;
     let mut deferred_sources = std::collections::BTreeMap::new();
+    let payload_cache_enabled = std::env::var_os("FM_DISABLE_RESIDENT_PAYLOAD_CACHE").is_none();
+    let mut payload_cache = ResidentPayloadCache::default();
     loop {
         let mut encoded = Vec::new();
         let bytes_read = (&mut reader)
@@ -4168,21 +4335,25 @@ fn cmd_render_batch_final_state_transaction_stream(
         if payload.trim().is_empty() {
             continue;
         }
-        let updates = parse_batch_final_state_payload(payload, inputs, options.max_input_bytes)
+        let prepared = payload_cache
+            .prepare(
+                payload,
+                inputs,
+                options.max_input_bytes,
+                payload_cache_enabled,
+            )
             .with_context(|| {
                 format!("invalid final-state transaction on input line {line_number}")
             })?;
-        let changed_inputs = updates.keys().cloned().collect::<Vec<_>>();
-        let total_source_bytes = updates
-            .values()
-            .map(String::len)
-            .fold(0usize, usize::saturating_add);
+        let updates = &prepared.updates;
+        let changed_inputs = &prepared.changed_inputs;
+        let total_source_bytes = prepared.total_source_bytes;
         if final_source_only {
-            for (input, source) in &updates {
+            for (input, source) in updates {
                 deferred_sources.insert(input.clone(), source.clone());
             }
         } else {
-            for (input, source) in &updates {
+            for (input, source) in updates {
                 std::fs::write(input, source.as_bytes())
                     .with_context(|| format!("cannot apply final-state input {input}"))?;
                 source_materializations = source_materializations.saturating_add(1);
@@ -4190,7 +4361,7 @@ fn cmd_render_batch_final_state_transaction_stream(
         }
         let replay_started = Instant::now();
         let replayed_total_bytes = (!json)
-            .then(|| cache_session.replay_resident_transaction(&plan, &updates, final_source_only))
+            .then(|| cache_session.replay_resident_transaction(&plan, &prepared, final_source_only))
             .transpose()?
             .flatten();
         if let Some(total_bytes) = replayed_total_bytes {
@@ -4213,7 +4384,7 @@ fn cmd_render_batch_final_state_transaction_stream(
                 BatchCachePolicy {
                     use_cache: true,
                     trust_change_set: true,
-                    changed_inputs: &changed_inputs,
+                    changed_inputs,
                     source_overrides: final_source_only.then_some(&deferred_sources),
                     session: Some(&mut cache_session),
                     plan: Some(&plan),
@@ -4254,6 +4425,10 @@ fn cmd_render_batch_final_state_transaction_stream(
         eprintln!("materialized {outputs} final output(s), {bytes} bytes at stream EOF");
     }
     cache_session.flush(Path::new(out_dir))?;
+    eprintln!(
+        "decoded {} resident payload(s), reused {} exact payload(s)",
+        payload_cache.decoded, payload_cache.reused
+    );
     if final_ack_only {
         let mut stdout = io::stdout().lock();
         serde_json::to_writer(
