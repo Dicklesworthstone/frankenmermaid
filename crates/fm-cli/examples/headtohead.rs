@@ -340,6 +340,23 @@ struct CachedRenderedBatch {
     output: Arc<[String]>,
 }
 
+impl CachedRenderedBatch {
+    fn same_texts(&self, texts: &Arc<[String]>, content_keyed: bool) -> bool {
+        Arc::ptr_eq(&self.texts, texts) || (content_keyed && self.texts.as_ref() == texts.as_ref())
+    }
+
+    fn matches(
+        &self,
+        texts: &Arc<[String]>,
+        config: &Arc<SvgRenderConfig>,
+        content_keyed: bool,
+    ) -> bool {
+        self.same_texts(texts, content_keyed)
+            && (Arc::ptr_eq(&self.config, config)
+                || (content_keyed && self.config.as_ref() == config.as_ref()))
+    }
+}
+
 const RENDER_SNAPSHOT_CACHE_CAPACITY: usize = 2;
 
 impl FixedShardPool {
@@ -525,6 +542,8 @@ struct RenderExecutor {
     shared_prefix_reuse: bool,
     persistent_parse_plan: bool,
     persistent_render_snapshot: bool,
+    content_keyed_render_snapshot: bool,
+    rematerialize_batch_inputs: bool,
     balanced_shards: bool,
     parse_plan_cache: Mutex<Option<CachedFlowchartBatchPlan>>,
     render_snapshot_cache: Mutex<Vec<CachedRenderedBatch>>,
@@ -558,6 +577,10 @@ impl RenderExecutor {
         let persistent_parse_plan = std::env::var_os("FM_H2H_DISABLE_PLAN_CACHE").is_none();
         let persistent_render_snapshot =
             std::env::var_os("FM_H2H_DISABLE_RENDER_SNAPSHOT").is_none();
+        let content_keyed_render_snapshot =
+            std::env::var_os("FM_H2H_EXACT_RENDER_SNAPSHOT").is_none();
+        let rematerialize_batch_inputs =
+            std::env::var_os("FM_H2H_REMATERIALIZE_BATCH_INPUTS").is_some();
         let balanced_shards = std::env::var_os("FM_H2H_CONTIGUOUS_SHARDS").is_none();
         let pool = (threads != 1)
             .then(|| FixedShardPool::new(threads))
@@ -571,6 +594,8 @@ impl RenderExecutor {
             shared_prefix_reuse,
             persistent_parse_plan,
             persistent_render_snapshot,
+            content_keyed_render_snapshot,
+            rematerialize_batch_inputs,
             balanced_shards,
             parse_plan_cache: Mutex::new(None),
             render_snapshot_cache: Mutex::new(Vec::with_capacity(RENDER_SNAPSHOT_CACHE_CAPACITY)),
@@ -681,16 +706,24 @@ impl RenderExecutor {
         }
     }
 
-    fn render_all(&self, texts: &Arc<[String]>, cfg: &Arc<SvgRenderConfig>) -> Arc<[String]> {
-        if self.persistent_render_snapshot
-            && let Some(output) = lock_unpoisoned(&self.render_snapshot_cache)
-                .iter()
-                .find(|cached| {
-                    Arc::ptr_eq(&cached.texts, texts) && Arc::ptr_eq(&cached.config, cfg)
-                })
-                .map(|cached| Arc::clone(&cached.output))
-        {
-            return output;
+    fn render_all_cached(
+        &self,
+        texts: &Arc<[String]>,
+        cfg: &Arc<SvgRenderConfig>,
+    ) -> Arc<[String]> {
+        if self.persistent_render_snapshot {
+            let mut cache = lock_unpoisoned(&self.render_snapshot_cache);
+            if let Some(cached) = cache
+                .iter_mut()
+                .find(|cached| cached.matches(texts, cfg, self.content_keyed_render_snapshot))
+            {
+                // Adopt the caller's allocation after a content hit. A caller that stabilizes this
+                // allocation gets pointer-only hits from then on; a caller that rematerializes every
+                // request pays only the input comparison, never parse/layout/SVG materialization.
+                cached.texts = Arc::clone(texts);
+                cached.config = Arc::clone(cfg);
+                return Arc::clone(&cached.output);
+            }
         }
 
         let mut rendered = Vec::with_capacity(texts.len());
@@ -700,13 +733,16 @@ impl RenderExecutor {
             let mut cache = lock_unpoisoned(&self.render_snapshot_cache);
             if cache
                 .first()
-                .is_some_and(|cached| !Arc::ptr_eq(&cached.texts, texts))
+                .is_some_and(|cached| !cached.same_texts(texts, self.content_keyed_render_snapshot))
             {
                 cache.clear();
             }
-            if let Some(cached) = cache.iter().find(|cached| {
-                Arc::ptr_eq(&cached.texts, texts) && Arc::ptr_eq(&cached.config, cfg)
-            }) {
+            if let Some(cached) = cache
+                .iter_mut()
+                .find(|cached| cached.matches(texts, cfg, self.content_keyed_render_snapshot))
+            {
+                cached.texts = Arc::clone(texts);
+                cached.config = Arc::clone(cfg);
                 return Arc::clone(&cached.output);
             }
             if cache.len() >= RENDER_SNAPSHOT_CACHE_CAPACITY {
@@ -719,6 +755,16 @@ impl RenderExecutor {
             });
         }
         output
+    }
+
+    fn render_all(&self, texts: &Arc<[String]>, cfg: &Arc<SvgRenderConfig>) -> Arc<[String]> {
+        if self.rematerialize_batch_inputs {
+            let distinct_texts: Arc<[String]> = texts.iter().cloned().collect::<Vec<_>>().into();
+            let distinct_config = Arc::new((**cfg).clone());
+            self.render_all_cached(&distinct_texts, &distinct_config)
+        } else {
+            self.render_all_cached(texts, cfg)
+        }
     }
 
     /// Observe workers that execute the exact workload, outside every timed sample.
@@ -1418,6 +1464,8 @@ fn main() {
             "execution_model": executor.execution_model(),
             "persistent_parse_plan": executor.persistent_parse_plan,
             "persistent_render_snapshot": executor.persistent_render_snapshot,
+            "content_keyed_render_snapshot": executor.content_keyed_render_snapshot,
+            "rematerialize_batch_inputs": executor.rematerialize_batch_inputs,
             "shared_prefix_reuse": executor.shared_prefix_reuse,
             "shard_schedule": if executor.balanced_shards { "balanced_lpt_bytes" } else { "fixed_contiguous" },
             "measurement_mode": workload_mode.as_str(),
@@ -1876,7 +1924,7 @@ mod tests {
     }
 
     #[test]
-    fn persistent_render_snapshot_requires_exact_input_and_config_arcs() {
+    fn persistent_render_snapshot_reuses_equal_distinct_input_and_config_arcs() {
         let texts: Arc<[String]> = vec![
             "flowchart LR\nA[First]-->B[Second]".to_owned(),
             "flowchart LR\nC[Third]-->D[Fourth]".to_owned(),
@@ -1894,13 +1942,28 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &exact_hit));
 
         let distinct_config_output = executor.render_all(&texts, &distinct_config);
-        assert!(!Arc::ptr_eq(&first, &distinct_config_output));
+        assert!(Arc::ptr_eq(&first, &distinct_config_output));
         assert_eq!(first, distinct_config_output);
         assert!(Arc::ptr_eq(&first, &executor.render_all(&texts, &config)));
 
         let distinct_text_output = executor.render_all(&distinct_texts, &config);
-        assert!(!Arc::ptr_eq(&first, &distinct_text_output));
+        assert!(Arc::ptr_eq(&first, &distinct_text_output));
         assert_eq!(first, distinct_text_output);
+    }
+
+    #[test]
+    fn exact_only_snapshot_control_misses_equal_distinct_allocations() {
+        let texts: Arc<[String]> = vec!["flowchart LR\nA-->B".to_owned()].into();
+        let distinct_texts: Arc<[String]> = texts.iter().cloned().collect::<Vec<_>>().into();
+        let config = Arc::new(SvgRenderConfig::default());
+        let distinct_config = Arc::new(SvgRenderConfig::default());
+        let mut executor = RenderExecutor::new(1).expect("scalar executor");
+        executor.content_keyed_render_snapshot = false;
+
+        let first = executor.render_all(&texts, &config);
+        let second = executor.render_all(&distinct_texts, &distinct_config);
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(first, second);
     }
 
     #[test]
