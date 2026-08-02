@@ -331,6 +331,12 @@ enum Command {
         #[arg(long)]
         complete_snapshot_stream: bool,
 
+        /// Read complete snapshots as bounded positional binary records instead of JSON. Each
+        /// record is a little-endian u64 payload length followed by one little-endian u64 source
+        /// length and UTF-8 source body per batch input, in command-line order.
+        #[arg(long, requires = "complete_snapshot_stream")]
+        packed_complete_snapshot_stream: bool,
+
         /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
         #[arg(long, value_enum, default_value = "auto")]
         fnx_mode: FnxModeArg,
@@ -1352,6 +1358,41 @@ impl BatchRenderCacheSession {
         }
     }
 
+    fn replay_certified_complete_transaction<'a>(
+        &self,
+        plan: &BatchRenderPlan,
+        mut source_digests: impl ExactSizeIterator<Item = (&'a str, &'a str)>,
+        defer_source_writes: bool,
+    ) -> Option<usize> {
+        if !self.reuse_complete_revision_transactions
+            || !self.reuse_certified_complete_transaction
+            || !defer_source_writes
+            || source_digests.len() != plan.input_indices.len()
+            || self.certified_sources.len() != plan.input_indices.len()
+            || !self.deferred_outputs.is_empty()
+        {
+            return None;
+        }
+        let summary = self.trusted_batch.as_ref().filter(|summary| {
+            summary.plan_key == plan.key && summary.input_count == plan.input_indices.len()
+        })?;
+        let options_key = plan.option_cache_digest.as_ref()?;
+        let manifest = self.manifest.as_ref()?;
+        source_digests
+            .all(|(input, source_digest)| {
+                let Some(index) = plan.input_indices.get(input).copied() else {
+                    return false;
+                };
+                let Some(certificate) = self.certified_sources.get(input) else {
+                    return false;
+                };
+                certificate.source_digest == source_digest
+                    && batch_cache_entry_matches_key(certificate, options_key)
+                    && manifest.entries.get(&plan.destination_names[index]) == Some(certificate)
+            })
+            .then_some(summary.total_bytes)
+    }
+
     fn replay_resident_transaction(
         &mut self,
         plan: &BatchRenderPlan,
@@ -1361,6 +1402,16 @@ impl BatchRenderCacheSession {
         let updates = &transaction.updates;
         if transaction.source_digests.len() != updates.len() {
             anyhow::bail!("resident transaction digest count does not match its update count");
+        }
+        if let Some(total_bytes) = self.replay_certified_complete_transaction(
+            plan,
+            updates
+                .iter()
+                .zip(transaction.source_digests.iter())
+                .map(|((input, _), source_digest)| (input.as_str(), source_digest.as_str())),
+            defer_source_writes,
+        ) {
+            return Ok(Some(total_bytes));
         }
         if !self.reuse_complete_revision_transactions || updates.is_empty() {
             return Ok(None);
@@ -1376,29 +1427,6 @@ impl BatchRenderCacheSession {
         };
         if self.manifest.is_none() {
             return Ok(None);
-        }
-
-        let certified_complete_state = self.reuse_certified_complete_transaction
-            && defer_source_writes
-            && updates.len() == plan.input_indices.len()
-            && self.certified_sources.len() == plan.input_indices.len()
-            && self.deferred_outputs.is_empty()
-            && updates.iter().zip(transaction.source_digests.iter()).all(
-                |((input, _), source_digest)| {
-                    let Some(index) = plan.input_indices.get(input).copied() else {
-                        return false;
-                    };
-                    let Some(certificate) = self.certified_sources.get(input) else {
-                        return false;
-                    };
-                    certificate.source_digest == source_digest.as_str()
-                        && self.manifest.as_ref().and_then(|manifest| {
-                            manifest.entries.get(&plan.destination_names[index])
-                        }) == Some(certificate)
-                },
-            );
-        if certified_complete_state {
-            return Ok(Some(summary.total_bytes));
         }
 
         let mut old_bytes = 0usize;
@@ -1901,6 +1929,65 @@ mod batch_render_cache_tests {
             super::prepare_complete_batch_final_state_payload(r#"{"a.mmd":"A-->B"}"#, &inputs, 64)
                 .unwrap_err();
         assert!(error.to_string().contains("contains 1 of 2 batch inputs"));
+    }
+
+    #[test]
+    fn packed_complete_snapshot_uses_cli_input_order_without_path_keys() {
+        let inputs = vec!["b.mmd".to_owned(), "a.mmd".to_owned()];
+        let sources = ["flowchart LR\nB-->C", "flowchart LR\nA-->B"];
+        let mut payload = Vec::new();
+        for source in sources {
+            payload.extend_from_slice(&u64::try_from(source.len()).unwrap().to_le_bytes());
+            payload.extend_from_slice(source.as_bytes());
+        }
+
+        let prepared =
+            super::prepare_packed_complete_batch_final_state_payload(&payload, &inputs, 64)
+                .unwrap();
+        assert_eq!(prepared.sources, sources);
+        assert_eq!(prepared.source_digests.len(), inputs.len());
+        assert_eq!(
+            prepared.total_source_bytes,
+            sources.map(str::len).into_iter().sum::<usize>()
+        );
+
+        let keyed = prepared.into_keyed(&inputs);
+        assert_eq!(keyed.updates["a.mmd"], sources[1]);
+        assert_eq!(keyed.updates["b.mmd"], sources[0]);
+    }
+
+    #[test]
+    fn packed_complete_snapshot_rejects_bad_bounds_and_trailing_bytes() {
+        let inputs = vec!["a.mmd".to_owned()];
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&5u64.to_le_bytes());
+        payload.extend_from_slice(b"12345");
+        let oversize =
+            super::prepare_packed_complete_batch_final_state_payload(&payload, &inputs, 4)
+                .unwrap_err();
+        assert!(
+            oversize
+                .to_string()
+                .contains("exceeding the 4-byte input limit")
+        );
+
+        payload.push(0);
+        let trailing =
+            super::prepare_packed_complete_batch_final_state_payload(&payload, &inputs, 5)
+                .unwrap_err();
+        assert!(trailing.to_string().contains("1 trailing byte"));
+
+        let truncated = super::prepare_packed_complete_batch_final_state_payload(
+            &5u64.to_le_bytes(),
+            &inputs,
+            5,
+        )
+        .unwrap_err();
+        assert!(
+            truncated
+                .to_string()
+                .contains("ended inside the 5-byte body")
+        );
     }
 
     #[test]
@@ -2724,6 +2811,7 @@ fn main() -> Result<()> {
             final_source_only,
             final_ack_only,
             complete_snapshot_stream,
+            packed_complete_snapshot_stream,
             fnx_mode,
             fnx_projection,
             fnx_fallback,
@@ -2781,7 +2869,11 @@ fn main() -> Result<()> {
                      --final-output-only, --final-source-only, and --final-ack-only"
                 );
             }
-            if final_state_stream {
+            if packed_complete_snapshot_stream {
+                cmd_render_batch_packed_complete_snapshot_stream(
+                    &inputs, &out_dir, jobs, keep_going, json, options,
+                )
+            } else if final_state_stream {
                 cmd_render_batch_final_state_transaction_stream(
                     &inputs,
                     &out_dir,
@@ -4390,6 +4482,24 @@ struct PreparedBatchFinalState {
     total_source_bytes: usize,
 }
 
+#[derive(Debug)]
+struct PreparedPackedCompleteBatchFinalState<'a> {
+    sources: Vec<&'a str>,
+    source_digests: Vec<String>,
+    total_source_bytes: usize,
+}
+
+impl PreparedPackedCompleteBatchFinalState<'_> {
+    fn into_keyed(self, inputs: &[String]) -> PreparedBatchFinalState {
+        let updates = inputs
+            .iter()
+            .cloned()
+            .zip(self.sources.into_iter().map(str::to_owned))
+            .collect();
+        prepare_batch_final_state_updates(updates)
+    }
+}
+
 fn prepare_batch_final_state_updates(
     updates: std::collections::BTreeMap<String, String>,
 ) -> PreparedBatchFinalState {
@@ -4408,6 +4518,64 @@ fn prepare_batch_final_state_updates(
         changed_inputs,
         total_source_bytes,
     }
+}
+
+fn prepare_packed_complete_batch_final_state_payload<'a>(
+    payload: &'a [u8],
+    inputs: &[String],
+    max_input_bytes: usize,
+) -> Result<PreparedPackedCompleteBatchFinalState<'a>> {
+    let mut cursor = 0usize;
+    let mut sources = Vec::with_capacity(inputs.len());
+    let mut source_digests = Vec::with_capacity(inputs.len());
+    let mut total_source_bytes = 0usize;
+    for input in inputs {
+        let length_end = cursor
+            .checked_add(std::mem::size_of::<u64>())
+            .ok_or_else(|| anyhow::anyhow!("packed source length offset overflow"))?;
+        let length_bytes = payload.get(cursor..length_end).ok_or_else(|| {
+            anyhow::anyhow!("packed snapshot ended before the length for input {input:?}")
+        })?;
+        let source_bytes =
+            usize::try_from(u64::from_le_bytes(length_bytes.try_into().map_err(
+                |_| anyhow::anyhow!("packed source length is not eight bytes"),
+            )?))
+            .map_err(|_| anyhow::anyhow!("packed source length does not fit this platform"))?;
+        if source_bytes > max_input_bytes {
+            anyhow::bail!(
+                "packed final-state input {input:?} is {source_bytes} bytes, exceeding the \
+                 {max_input_bytes}-byte input limit"
+            );
+        }
+        let source_end = length_end
+            .checked_add(source_bytes)
+            .ok_or_else(|| anyhow::anyhow!("packed source body offset overflow"))?;
+        let encoded_source = payload.get(length_end..source_end).ok_or_else(|| {
+            anyhow::anyhow!(
+                "packed snapshot ended inside the {source_bytes}-byte body for input {input:?}"
+            )
+        })?;
+        let source = std::str::from_utf8(encoded_source)
+            .with_context(|| format!("packed final-state input {input:?} is not UTF-8"))?;
+        total_source_bytes = total_source_bytes
+            .checked_add(source_bytes)
+            .ok_or_else(|| anyhow::anyhow!("packed snapshot source byte count overflow"))?;
+        sources.push(source);
+        source_digests.push(sha256_hex(encoded_source));
+        cursor = source_end;
+    }
+    if cursor != payload.len() {
+        anyhow::bail!(
+            "packed snapshot has {} trailing byte(s) after {} input(s)",
+            payload.len() - cursor,
+            inputs.len()
+        );
+    }
+    Ok(PreparedPackedCompleteBatchFinalState {
+        sources,
+        source_digests,
+        total_source_bytes,
+    })
 }
 
 fn prepare_batch_final_state_payload(
@@ -4549,6 +4717,12 @@ fn batch_final_state_payload_limit(inputs: &[String], max_input_bytes: usize) ->
         .saturating_add(1024 * 1024)
 }
 
+fn packed_complete_snapshot_payload_limit(inputs: &[String], max_input_bytes: usize) -> usize {
+    max_input_bytes
+        .saturating_add(std::mem::size_of::<u64>())
+        .saturating_mul(inputs.len())
+}
+
 #[derive(Debug, Clone, Copy)]
 struct FinalStateStreamMaterialization {
     outputs_at_eof: bool,
@@ -4612,6 +4786,179 @@ fn render_prepared_final_state_transaction(
         )?;
     }
     Ok(replayed_total_bytes.is_some())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_render_batch_packed_complete_snapshot_stream(
+    inputs: &[String],
+    out_dir: &str,
+    jobs: Option<usize>,
+    keep_going: bool,
+    json: bool,
+    options: RenderCommandOptions<'_>,
+) -> Result<()> {
+    use std::io::{Read, Write};
+
+    let max_payload_bytes = packed_complete_snapshot_payload_limit(inputs, options.max_input_bytes);
+    let plan = BatchRenderPlan::new(inputs, out_dir, jobs, true, &options)?;
+    let mut cache_session = BatchRenderCacheSession::default();
+    let admit_clean_batch = std::env::var_os("FM_DISABLE_DURABLE_BATCH_CERTIFICATE").is_none();
+    cache_session.begin_stream(&plan.cache_path, Some(&plan), admit_clean_batch)?;
+    cache_session.defer_output_writes = true;
+    cache_session.elide_certified_source_writes =
+        std::env::var_os("FM_DISABLE_CERTIFIED_SOURCE_NOOP").is_none();
+    cache_session.reuse_certified_complete_transaction =
+        std::env::var_os("FM_DISABLE_CERTIFIED_TRANSACTION_REPLAY").is_none();
+
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    let mut transaction = 0usize;
+    let mut acknowledged_updates = 0usize;
+    let mut acknowledged_source_bytes = 0usize;
+    let mut encoded_payload_bytes = 0usize;
+    let mut latest_payload = Vec::new();
+    loop {
+        let mut payload_length = [0u8; std::mem::size_of::<u64>()];
+        let first_length_byte = reader
+            .read(&mut payload_length[..1])
+            .context("cannot read packed snapshot stream")?;
+        if first_length_byte == 0 {
+            break;
+        }
+        reader
+            .read_exact(&mut payload_length[1..])
+            .with_context(|| {
+                format!(
+                    "packed snapshot {} ended inside its payload-length header",
+                    transaction + 1
+                )
+            })?;
+        let payload_bytes = usize::try_from(u64::from_le_bytes(payload_length)).map_err(|_| {
+            anyhow::anyhow!("packed snapshot payload length does not fit this platform")
+        })?;
+        if payload_bytes > max_payload_bytes {
+            anyhow::bail!(
+                "packed snapshot {} is {payload_bytes} bytes, exceeding the \
+                 {max_payload_bytes}-byte transaction limit",
+                transaction + 1
+            );
+        }
+        latest_payload.resize(payload_bytes, 0);
+        reader.read_exact(&mut latest_payload).with_context(|| {
+            format!(
+                "packed snapshot {} ended inside its {payload_bytes}-byte payload",
+                transaction + 1
+            )
+        })?;
+        transaction = transaction.saturating_add(1);
+        acknowledged_updates = acknowledged_updates.saturating_add(inputs.len());
+        encoded_payload_bytes = encoded_payload_bytes.saturating_add(payload_bytes);
+    }
+
+    let mut executed_transactions = 0usize;
+    let mut replayed_transactions = 0usize;
+    let mut source_materializations = 0usize;
+    let mut certified_source_reuses = 0usize;
+    let mut deferred_sources = std::collections::BTreeMap::new();
+    if transaction > 0 {
+        let packed = prepare_packed_complete_batch_final_state_payload(
+            &latest_payload,
+            inputs,
+            options.max_input_bytes,
+        )
+        .context("completed packed final-state snapshot is invalid")?;
+        acknowledged_source_bytes = packed.total_source_bytes;
+        let replay_started = Instant::now();
+        let replayed_total_bytes = cache_session
+            .elide_certified_source_writes
+            .then(|| {
+                cache_session.replay_certified_complete_transaction(
+                    &plan,
+                    inputs
+                        .iter()
+                        .map(String::as_str)
+                        .zip(packed.source_digests.iter().map(String::as_str)),
+                    true,
+                )
+            })
+            .flatten();
+        if let Some(total_bytes) = replayed_total_bytes {
+            eprintln!(
+                "rendered {0}/{0} diagram(s) ({0} persistent hits, 0 identical renders reused, 0 \
+                 shared prefix parses reused / 0 bytes), {total_bytes} bytes, {1} requested \
+                 worker(s), 0 active worker(s), {2:.3} ms",
+                inputs.len(),
+                plan.requested_workers,
+                replay_started.elapsed().as_secs_f64() * 1000.0,
+            );
+            replayed_transactions = 1;
+            certified_source_reuses = inputs.len();
+        } else {
+            let prepared = packed.into_keyed(inputs);
+            let replayed = render_prepared_final_state_transaction(
+                inputs,
+                out_dir,
+                jobs,
+                keep_going,
+                json,
+                &plan,
+                &mut cache_session,
+                &prepared,
+                Some(&prepared.updates),
+                &options,
+            )
+            .context("completed packed final-state snapshot failed")?;
+            replayed_transactions = usize::from(replayed);
+            deferred_sources = prepared.updates;
+        }
+        executed_transactions = 1;
+    }
+
+    if certified_source_reuses > 0 {
+        eprintln!(
+            "materialized 0 final source(s), reused {certified_source_reuses} certified source(s), \
+             {acknowledged_source_bytes} logical bytes at stream EOF"
+        );
+    } else {
+        let (sources, certified_sources, bytes) =
+            cache_session.materialize_deferred_sources(&plan, &deferred_sources)?;
+        source_materializations = source_materializations.saturating_add(sources);
+        eprintln!(
+            "materialized {sources} final source(s), reused {certified_sources} certified source(s), \
+             {bytes} logical bytes at stream EOF"
+        );
+    }
+    let (outputs, bytes) = cache_session.materialize_deferred_outputs()?;
+    eprintln!("materialized {outputs} final output(s), {bytes} bytes at stream EOF");
+    cache_session.flush(Path::new(out_dir))?;
+    eprintln!(
+        "retained the newest of {transaction} packed complete snapshot payload(s), skipped {} \
+         superseded decode(s), {encoded_payload_bytes} encoded bytes",
+        transaction.saturating_sub(usize::from(transaction > 0))
+    );
+
+    let mut stdout = io::stdout().lock();
+    serde_json::to_writer(
+        &mut stdout,
+        &serde_json::json!({
+            "transactions": transaction,
+            "input_lines": transaction,
+            "updates": acknowledged_updates,
+            "source_bytes": acknowledged_source_bytes,
+            "source_bytes_scope": "completed_state",
+            "encoded_payload_bytes": encoded_payload_bytes,
+            "status": "ok"
+        }),
+    )?;
+    writeln!(stdout)?;
+    stdout.flush()?;
+    eprintln!("emitted one EOF acknowledgment for {transaction} transaction(s)");
+    eprintln!(
+        "applied {transaction} resident final-state transaction(s) \
+         ({executed_transactions} executed, {replayed_transactions} complete revision replay(s))"
+    );
+    eprintln!("materialized {source_materializations} source revision(s) during stream");
+    Ok(())
 }
 
 fn cmd_render_batch_final_state_transaction_stream(
