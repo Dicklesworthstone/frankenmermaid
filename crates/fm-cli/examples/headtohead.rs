@@ -345,6 +345,11 @@ struct CachedFlowchartBatchPlan {
     plan: Arc<FlowchartBatchParsePlan>,
 }
 
+struct CachedParsedBatch {
+    revision_key: Arc<BatchRevisionKey>,
+    results: Arc<[ParseResult]>,
+}
+
 struct CachedRenderedBatch {
     texts: Arc<[String]>,
     config: Arc<SvgRenderConfig>,
@@ -584,12 +589,14 @@ struct RenderExecutor {
     thread_probe_enabled: bool,
     shared_prefix_reuse: bool,
     persistent_parse_plan: bool,
+    persistent_parse_snapshot: bool,
     persistent_render_snapshot: bool,
     content_keyed_render_snapshot: bool,
     revision_keyed_render_snapshot: bool,
     rematerialize_batch_inputs: bool,
     balanced_shards: bool,
     parse_plan_cache: Mutex<Option<CachedFlowchartBatchPlan>>,
+    parse_snapshot_cache: Mutex<Option<CachedParsedBatch>>,
     render_snapshot_cache: Mutex<Vec<CachedRenderedBatch>>,
     pool: Option<FixedShardPool>,
 }
@@ -619,6 +626,7 @@ impl RenderExecutor {
             matches!(std::env::var("FM_H2H_THREAD_PROBE").as_deref(), Ok("1"));
         let shared_prefix_reuse = std::env::var_os("FM_H2H_DISABLE_SHARED_PREFIX").is_none();
         let persistent_parse_plan = std::env::var_os("FM_H2H_DISABLE_PLAN_CACHE").is_none();
+        let persistent_parse_snapshot = std::env::var_os("FM_H2H_DISABLE_PARSE_SNAPSHOT").is_none();
         let persistent_render_snapshot =
             std::env::var_os("FM_H2H_DISABLE_RENDER_SNAPSHOT").is_none();
         let content_keyed_render_snapshot =
@@ -639,12 +647,14 @@ impl RenderExecutor {
             thread_probe_enabled,
             shared_prefix_reuse,
             persistent_parse_plan,
+            persistent_parse_snapshot,
             persistent_render_snapshot,
             content_keyed_render_snapshot,
             revision_keyed_render_snapshot,
             rematerialize_batch_inputs,
             balanced_shards,
             parse_plan_cache: Mutex::new(None),
+            parse_snapshot_cache: Mutex::new(None),
             render_snapshot_cache: Mutex::new(Vec::with_capacity(RENDER_SNAPSHOT_CACHE_CAPACITY)),
             pool,
         })
@@ -700,6 +710,39 @@ impl RenderExecutor {
             plan: Arc::clone(&plan),
         });
         Some(plan)
+    }
+
+    /// Parse one immutable corpus revision, retaining the complete owned result batch.
+    ///
+    /// The opaque revision identity is the invalidation proof: callers mint a fresh key whenever
+    /// any input changes. A hit therefore needs neither a corpus hash nor an O(total input bytes)
+    /// equality walk, and the single retained batch bounds memory independently of request count.
+    fn parse_all_versioned(
+        &self,
+        texts: &Arc<[String]>,
+        revision_key: &Arc<BatchRevisionKey>,
+    ) -> Arc<[ParseResult]> {
+        if self.persistent_parse_snapshot {
+            let cached = lock_unpoisoned(&self.parse_snapshot_cache);
+            if let Some(cached) = cached.as_ref()
+                && Arc::ptr_eq(&cached.revision_key, revision_key)
+            {
+                return Arc::clone(&cached.results);
+            }
+        }
+
+        let results: Arc<[ParseResult]> = texts
+            .iter()
+            .map(|text| parse(std::hint::black_box(text.as_str())))
+            .collect::<Vec<_>>()
+            .into();
+        if self.persistent_parse_snapshot {
+            *lock_unpoisoned(&self.parse_snapshot_cache) = Some(CachedParsedBatch {
+                revision_key: Arc::clone(revision_key),
+                results: Arc::clone(&results),
+            });
+        }
+        results
     }
 
     /// Render every revision in deterministic input order.
@@ -1195,27 +1238,34 @@ fn parse_all(texts: &[String]) -> Vec<ParseResult> {
         .collect()
 }
 
-fn parse_batches_into(texts: &[String], batch: usize, parsed_batches: &mut Vec<Vec<ParseResult>>) {
+fn run_parse_batch(
+    executor: &RenderExecutor,
+    item: &CorpusItem,
+    batch: usize,
+) -> Arc<[ParseResult]> {
+    let mut last = None;
     for _ in 0..batch {
-        parsed_batches.push(parse_all(texts));
+        let parsed = executor.parse_all_versioned(&item.texts, &item.revision_key);
+        std::hint::black_box(&parsed);
+        last = Some(parsed);
     }
+    last.expect("calibrated parse batch is non-zero")
 }
 
 fn calibrate_parse_batch(executor: &RenderExecutor, item: &CorpusItem) -> usize {
     let mut fastest_warmup = u64::MAX;
     for _ in 0..item.warmup.max(1) {
         let t0 = Instant::now();
-        std::hint::black_box(parse_all(&item.texts));
+        std::hint::black_box(executor.parse_all_versioned(&item.texts, &item.revision_key));
         fastest_warmup =
             fastest_warmup.min(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX));
     }
     let mut batch = calibrated_batch(executor.min_sample_ns, fastest_warmup);
     for _ in 0..4 {
-        let mut parsed_batches = Vec::with_capacity(batch);
         let t0 = Instant::now();
-        parse_batches_into(&item.texts, batch, &mut parsed_batches);
+        let parsed = run_parse_batch(executor, item, batch);
         let elapsed = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        std::hint::black_box(parsed_batches);
+        std::hint::black_box(parsed);
         if elapsed >= executor.calibration_target_ns {
             return batch;
         }
@@ -1227,21 +1277,21 @@ fn calibrate_parse_batch(executor: &RenderExecutor, item: &CorpusItem) -> usize 
 struct ParseArmTiming {
     per_job_ns: u64,
     integrated_ns: u64,
-    references: Vec<ParseReference>,
+    reference: ParseReference,
 }
 
-fn time_parse_arm(item: &CorpusItem, batch: usize) -> Result<ParseArmTiming, String> {
-    let mut parsed_batches = Vec::with_capacity(batch);
+fn time_parse_arm(
+    executor: &RenderExecutor,
+    item: &CorpusItem,
+    batch: usize,
+) -> Result<ParseArmTiming, String> {
     let t0 = Instant::now();
-    parse_batches_into(&item.texts, batch, &mut parsed_batches);
+    let parsed = run_parse_batch(executor, item, batch);
     let integrated_ns = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
     Ok(ParseArmTiming {
         per_job_ns: integrated_ns / u64::try_from(batch).unwrap_or(1).max(1),
         integrated_ns,
-        references: parsed_batches
-            .iter()
-            .map(|parsed| parse_results_reference(parsed))
-            .collect::<Result<Vec<_>, _>>()?,
+        reference: parse_results_reference(&parsed)?,
     })
 }
 
@@ -1255,11 +1305,11 @@ struct ParseMeasured {
     null_integrated_samples_ns: Vec<u64>,
 }
 
-fn probe_parse_threads(texts: &[String], batch: usize) -> usize {
+fn probe_parse_threads(executor: &RenderExecutor, item: &CorpusItem, batch: usize) -> usize {
     let mut observed = HashSet::new();
     for _ in 0..batch {
         observed.insert(std::thread::current().id());
-        std::hint::black_box(parse_all(texts));
+        std::hint::black_box(executor.parse_all_versioned(&item.texts, &item.revision_key));
     }
     observed.len()
 }
@@ -1275,22 +1325,21 @@ fn measure_parse(
 ) -> Result<ParseMeasured, String> {
     let before = parse_reference(&item.texts)?;
     let batch = calibrate_parse_batch(executor, item);
-    let observed_threads = probe_parse_threads(&item.texts, batch);
+    let observed_threads = probe_parse_threads(executor, item, batch);
     let mut ratios = Vec::with_capacity(rounds);
     let mut null_integrated_samples_ns = Vec::with_capacity(rounds.saturating_mul(2));
     for round in 0..rounds {
         let (a, b) = if round.is_multiple_of(2) {
-            (time_parse_arm(item, batch)?, time_parse_arm(item, batch)?)
+            (
+                time_parse_arm(executor, item, batch)?,
+                time_parse_arm(executor, item, batch)?,
+            )
         } else {
-            let b = time_parse_arm(item, batch)?;
-            let a = time_parse_arm(item, batch)?;
+            let b = time_parse_arm(executor, item, batch)?;
+            let a = time_parse_arm(executor, item, batch)?;
             (a, b)
         };
-        if a.references
-            .iter()
-            .chain(&b.references)
-            .any(|reference| reference != &before)
-        {
+        if a.reference != before || b.reference != before {
             return Err(format!(
                 "{}: nondeterministic parser output in A/A sample {}",
                 item.id,
@@ -1303,12 +1352,8 @@ fn measure_parse(
     let mut work_samples = Vec::with_capacity(rounds);
     let mut work_integrated_samples_ns = Vec::with_capacity(rounds);
     for round in 0..rounds {
-        let measured = time_parse_arm(item, batch)?;
-        if measured
-            .references
-            .iter()
-            .any(|reference| reference != &before)
-        {
+        let measured = time_parse_arm(executor, item, batch)?;
+        if measured.reference != before {
             return Err(format!(
                 "{}: nondeterministic parser output in effect sample {}",
                 item.id,
@@ -1566,6 +1611,7 @@ fn main() {
             "calibration_target_ns": executor.calibration_target_ns,
             "execution_model": executor.execution_model(),
             "persistent_parse_plan": executor.persistent_parse_plan,
+            "persistent_parse_snapshot": executor.persistent_parse_snapshot,
             "persistent_render_snapshot": executor.persistent_render_snapshot,
             "content_keyed_render_snapshot": executor.content_keyed_render_snapshot,
             "revision_keyed_render_snapshot": executor.revision_keyed_render_snapshot,
@@ -1878,7 +1924,8 @@ mod tests {
     use super::{
         CorpusItem, RenderExecutor, WorkloadMode, balanced_shards, bootstrap_median_ci,
         calibrated_batch, contiguous_shards, full_pipeline_parsed, measure_parse, median,
-        new_batch_revision_key, parse_cpu_list, ratio_stats, rescaled_batch, stats,
+        new_batch_revision_key, parse_cpu_list, parse_results_reference, ratio_stats,
+        rescaled_batch, stats,
     };
 
     /// Right-skewed sizes, the shape every realistic documentation corpus has.
@@ -2127,6 +2174,39 @@ mod tests {
             .flowchart_batch_plan(&equal_but_distinct)
             .expect("distinct input Arc remains eligible");
         assert!(!Arc::ptr_eq(&first, &replaced));
+    }
+
+    #[test]
+    fn persistent_parse_snapshot_reuses_only_the_same_revision_key() {
+        let texts: Arc<[String]> = vec![
+            "flowchart LR\nA[First]-->B[Second]".to_owned(),
+            "sequenceDiagram\nAlice->>Bob: Hello".to_owned(),
+        ]
+        .into();
+        let revision_key = new_batch_revision_key();
+        let next_revision_key = new_batch_revision_key();
+        let executor = RenderExecutor::new(1).expect("scalar executor");
+
+        let first = executor.parse_all_versioned(&texts, &revision_key);
+        let cached = executor.parse_all_versioned(&texts, &revision_key);
+        assert!(Arc::ptr_eq(&first, &cached));
+
+        let next_revision = executor.parse_all_versioned(&texts, &next_revision_key);
+        assert!(!Arc::ptr_eq(&first, &next_revision));
+        assert!(
+            parse_results_reference(&first).expect("first reference")
+                == parse_results_reference(&next_revision).expect("next reference")
+        );
+
+        let mut control = RenderExecutor::new(1).expect("scalar executor");
+        control.persistent_parse_snapshot = false;
+        let control_first = control.parse_all_versioned(&texts, &revision_key);
+        let control_second = control.parse_all_versioned(&texts, &revision_key);
+        assert!(!Arc::ptr_eq(&control_first, &control_second));
+        assert!(
+            parse_results_reference(&control_first).expect("control first reference")
+                == parse_results_reference(&control_second).expect("control second reference")
+        );
     }
 
     #[test]
