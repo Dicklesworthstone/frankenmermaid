@@ -2611,3 +2611,57 @@ candidate arm, exactly 32x fewer.
   semantics change, changed-diagram or transaction count changes, revision replay admission,
   output size, corpus, worker count, or filesystem changes. Promote no competitive claim without a
   same-invocation incumbent null arm.
+
+## KEEP: retain one Rayon worker pool across resident transactions (2026-08-02)
+
+**Bead:** `bd-kef8`. **Lane:** cod.
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `fb81536198fa6559a88beb749b511823ee85f783d7ca80aba2df8271c7147248`
+**A/A null control (same invocation):** invocation
+`fm-resident-worker-pool-exact-thinkstation1-1785667736339070952` interleaved all six
+permutations of the fresh-pool control/candidate-A/candidate-B arms for 36 whole-job rounds per
+arm. Candidate A/B medians were 64,907,481.5 / 64,750,784.5 ns (ratio `1.002420`), with a
+50,000-resample median-ratio 95% CI of `[0.974098, 1.017511]`, including one.
+**Counted mechanism:** low-overhead `strace -f -c` over the same 32-transaction job counted 262
+`clone3`, 1,109 `rt_sigprocmask`, and 773 `sigaltstack` calls with per-transaction pools versus 14,
+99, and 27 with the retained pool. The candidate therefore removed all 248 redundant Rayon worker
+creations after the first eight-worker pool. Timed arms otherwise did identical work: 32 ACKed
+transactions, 512 source writes, 16 final output writes, 32 first-seen renders, 12,256 exact
+revision replays, and 12,288 observable diagram states per round.
+
+- **Profile-first attribution.** After EOF output coalescing moved the bottleneck, a whole-job
+  syscall profile ranked thread lifecycle above JSON and filesystem calls: the 32-transaction
+  process created eight Rayon workers again on every epoch. The long-lived mermaid-js browser does
+  not pay this per-transaction thread lifecycle, and the work is not part of parsing, layout,
+  rendering, replay, or durability. A high-overhead DWARF capture was discarded before inference;
+  the counted profile above and untraced whole-job result decide the lever.
+- **The one lever.** A resident `BatchRenderCacheSession` now owns an `Arc` to the fixed-width Rayon
+  pool and returns that pool on later epochs of the same width. Ordinary one-shot batches retain
+  their former one-shot pool, a width change replaces the cached pool, and
+  `FM_DISABLE_SESSION_WORKER_POOL=1` supplies the exact same-ELF control. The session-local mutex is
+  acquired only by the coordinator while selecting the pool; workers never coordinate through it.
+- **Whole-job result.** Each round began from an untimed revision-A certificate, then published 32
+  alternating transactions over 16 changed diagrams in the complete 384-diagram repository with
+  final-output-only semantics. Fresh-pool control median was 84,794,266 ns and retained-pool
+  candidate-A median was 64,907,481.5 ns: **1.306387x**, bootstrap 95% CI
+  `[1.266042, 1.347285]`. All arms produced identical 384-file / 20,685,288-byte output, aggregate
+  SHA-256 `2f528b7b4e19d28b1546dc44513fc01979e2569b41f9d61af9ddd6be275810c2`.
+- **Host admission.** The effect phase ran on eight distinct physical cores 10, 11, 12, 13, 14,
+  17, 18, and 20 of x86-64 `thinkstation1`. Its consecutive one-second admission samples peaked at
+  15.2% and 14.1% busy; the pre-incumbent pair peaked at 13.1% and 7.0%, with no selected core above
+  20%. Every first-seen revision requested and used eight workers.
+- **Live-incumbent bracket.** The same invocation ran the candidate ELF and pinned live mermaid-js
+  11.15.0 over all 384 diagrams. Mermaid reported 51,812.3 ms render time (57.353 s live wall), one
+  Chrome 150.0.7871.128 page-main execution context, input SHA-256
+  `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`, and bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`. Uncached Rust brackets were
+  42.599 / 37.172 ms. The incumbent arm had no null, so this row asserts no competitive ratio.
+- **Validation.** The focused persistent-pool unit test passed on a clean-overlay remote worker;
+  workspace-wide remote check passed. Targeted rustfmt, workspace-wide Clippy with warnings denied,
+  staged ledger lint, and UBS completed before landing. External and self-reported executable hashes
+  agreed in every timed arm. Exact artifact SHA-256
+  `83db3f091cf05a0e77af0964bf624b9242baa71d74577d3c66f52aafcd0b022c` at
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/fm-resident-worker-pool-exact-thinkstation1-1785667736339070952.json`.
+- **Retry predicate.** Re-measure if the stream, pool-width selection, changed-diagram or transaction
+  count, revision replay, source/output durability, corpus, allocator, Rayon version, host topology,
+  or filesystem changes. Promote no competitive claim without a same-invocation incumbent null arm.
