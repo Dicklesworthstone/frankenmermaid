@@ -329,6 +329,11 @@ struct FixedShardPool {
     handles: Vec<std::thread::JoinHandle<()>>,
 }
 
+struct CachedFlowchartBatchPlan {
+    texts: Arc<[String]>,
+    plan: Arc<FlowchartBatchParsePlan>,
+}
+
 impl FixedShardPool {
     fn new(threads: usize) -> Result<Self, String> {
         let shared = Arc::new(FixedShardShared {
@@ -405,9 +410,10 @@ impl FixedShardPool {
             };
             let mut produced = lock_unpoisoned(slot);
             for (position, &owned_index) in shard.iter().enumerate() {
-                if let (Some(value), Some(target)) =
-                    (produced.get_mut(position), sink.get_mut(owned_index as usize))
-                {
+                if let (Some(value), Some(target)) = (
+                    produced.get_mut(position),
+                    sink.get_mut(owned_index as usize),
+                ) {
                     *target = std::mem::take(value);
                 }
             }
@@ -509,7 +515,9 @@ struct RenderExecutor {
     calibration_target_ns: u64,
     thread_probe_enabled: bool,
     shared_prefix_reuse: bool,
+    persistent_parse_plan: bool,
     balanced_shards: bool,
+    parse_plan_cache: Mutex<Option<CachedFlowchartBatchPlan>>,
     pool: Option<FixedShardPool>,
 }
 
@@ -537,6 +545,7 @@ impl RenderExecutor {
         let thread_probe_enabled =
             matches!(std::env::var("FM_H2H_THREAD_PROBE").as_deref(), Ok("1"));
         let shared_prefix_reuse = std::env::var_os("FM_H2H_DISABLE_SHARED_PREFIX").is_none();
+        let persistent_parse_plan = std::env::var_os("FM_H2H_DISABLE_PLAN_CACHE").is_none();
         let balanced_shards = std::env::var_os("FM_H2H_CONTIGUOUS_SHARDS").is_none();
         let pool = (threads != 1)
             .then(|| FixedShardPool::new(threads))
@@ -548,7 +557,9 @@ impl RenderExecutor {
             calibration_target_ns,
             thread_probe_enabled,
             shared_prefix_reuse,
+            persistent_parse_plan,
             balanced_shards,
+            parse_plan_cache: Mutex::new(None),
             pool,
         })
     }
@@ -573,6 +584,38 @@ impl RenderExecutor {
         self.threads > self.available_parallelism
     }
 
+    fn flowchart_batch_plan(&self, texts: &Arc<[String]>) -> Option<Arc<FlowchartBatchParsePlan>> {
+        if !self.shared_prefix_reuse {
+            return None;
+        }
+        if !self.persistent_parse_plan {
+            let input_refs = texts.iter().map(String::as_str).collect::<Vec<_>>();
+            return Some(Arc::new(FlowchartBatchParsePlan::new(
+                &input_refs,
+                MermaidParseMode::Compat,
+                &ParserConfig::default(),
+            )));
+        }
+
+        let mut cached = lock_unpoisoned(&self.parse_plan_cache);
+        if let Some(cached) = cached.as_ref()
+            && Arc::ptr_eq(&cached.texts, texts)
+        {
+            return Some(Arc::clone(&cached.plan));
+        }
+        let input_refs = texts.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan = Arc::new(FlowchartBatchParsePlan::new(
+            &input_refs,
+            MermaidParseMode::Compat,
+            &ParserConfig::default(),
+        ));
+        *cached = Some(CachedFlowchartBatchPlan {
+            texts: Arc::clone(texts),
+            plan: Arc::clone(&plan),
+        });
+        Some(plan)
+    }
+
     /// Render every revision in deterministic input order.
     ///
     /// Each worker owns one contiguous input interval, and shards are concatenated in worker order,
@@ -585,14 +628,7 @@ impl RenderExecutor {
         workers_seen: Option<Arc<[AtomicBool]>>,
     ) {
         sink.clear();
-        let input_refs = texts.iter().map(String::as_str).collect::<Vec<_>>();
-        let parse_plan = self.shared_prefix_reuse.then(|| {
-            Arc::new(FlowchartBatchParsePlan::new(
-                &input_refs,
-                MermaidParseMode::Compat,
-                &ParserConfig::default(),
-            ))
-        });
+        let parse_plan = self.flowchart_batch_plan(texts);
         if let Some(pool) = &self.pool {
             let shards: Arc<[Box<[u32]>]> = if self.balanced_shards {
                 balanced_shards(texts, pool.threads).into()
@@ -1346,6 +1382,7 @@ fn main() {
             "min_sample_ns": executor.min_sample_ns,
             "calibration_target_ns": executor.calibration_target_ns,
             "execution_model": executor.execution_model(),
+            "persistent_parse_plan": executor.persistent_parse_plan,
             "shared_prefix_reuse": executor.shared_prefix_reuse,
             "shard_schedule": if executor.balanced_shards { "balanced_lpt_bytes" } else { "fixed_contiguous" },
             "measurement_mode": workload_mode.as_str(),
@@ -1593,6 +1630,7 @@ fn main() {
                 "min_sample_ns": executor.min_sample_ns,
                 "calibration_target_ns": executor.calibration_target_ns,
                 "execution_model": executor.execution_model(),
+                "persistent_parse_plan": executor.persistent_parse_plan,
                 "shared_prefix_reuse": executor.shared_prefix_reuse,
                 "shard_schedule": if executor.balanced_shards { "balanced_lpt_bytes" } else { "fixed_contiguous" },
                 "revisions": item.texts.len(),
@@ -1804,6 +1842,31 @@ mod tests {
         executor.render_all(&texts, &config, &mut actual);
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn persistent_parse_plan_reuses_only_the_exact_input_arc() {
+        let texts: Arc<[String]> = vec![
+            "flowchart LR\nA[First]-->B[Second]".to_owned(),
+            "flowchart LR\nC[Third]-->D[Fourth]".to_owned(),
+        ]
+        .into();
+        let same_storage = Arc::clone(&texts);
+        let equal_but_distinct: Arc<[String]> = texts.iter().cloned().collect::<Vec<_>>().into();
+        let executor = RenderExecutor::new(2).expect("parallel executor");
+
+        let first = executor
+            .flowchart_batch_plan(&texts)
+            .expect("shared-prefix planning enabled");
+        let cached = executor
+            .flowchart_batch_plan(&same_storage)
+            .expect("same input Arc remains eligible");
+        assert!(Arc::ptr_eq(&first, &cached));
+
+        let replaced = executor
+            .flowchart_batch_plan(&equal_but_distinct)
+            .expect("distinct input Arc remains eligible");
+        assert!(!Arc::ptr_eq(&first, &replaced));
     }
 
     #[test]

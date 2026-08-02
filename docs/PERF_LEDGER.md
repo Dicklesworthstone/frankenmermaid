@@ -3600,3 +3600,63 @@ count is 4,000,008 bytes, a 20.47x output-byte reduction.
   `.benchmarks/headtohead/cert-v3-requalification-v1/equivalence-5bad0559-1785490669339.json`.
 - **Retry predicate.** Re-measure if acknowledgment width/meaning, flush durability, repeat-group
   framing, fixture, pinned incumbent, executing ELF, affinity, or median-CI gate changes.
+
+## CERTIFIED INCUMBENT WIN: exact-Arc plans delete repeated batch compilation (2026-08-02)
+
+**Bead:** `bd-et83`. **Lane:** cod.
+**Campaign result class:** incumbent-win
+**Executing ELF SHA-256 (self-reported by process):** `dca522cab76743cc12801381aa4eae68d2a46551b31d35fe896d0b3021a00e28`
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de invocation_id=headtohead-2a9751d0-1785695991937 measured_ratio=34460.1868549231x
+**A/A null control (same invocation):** Rust-before median `0.990200`, 95% CI
+`[0.962237, 1.085722]`; Rust-after median `0.985095`, 95% CI
+`[0.950204, 1.040621]`; live mermaid-js median `1.000549`, 95% CI
+`[0.995167, 1.011542]`. All CIs include one and all medians are within 2% of one; worst bias
+was 1.4905%. The independent whole-job median-ratio 95% CI was
+`[32552.031373x, 36090.597311x]`, so the corrected median-CI gate passed.
+**Counted mechanism:** the bounded cache owns one immutable input `Arc<[String]>` and one compiled
+`FlowchartBatchParsePlan`. The first exact-identity call constructs the plan; every subsequent
+whole-job call returns the same plan through one `Arc::ptr_eq` check. A distinct allocation replaces
+the single entry, and the disable arm constructs a plan on every call.
+
+- **Profile-first attribution.** The symbols-preserving whole-job profile showed serialized
+  `RenderExecutor::render_all_observing` plan construction ahead of the 64-worker dispatch. Live
+  mermaid-js retains its parsed/runtime state inside one browser page and does not repay this Rust
+  coordinator compilation for every repeated whole job; common `memmove` cost was therefore not
+  selected as the lever.
+- **The one lever.** `RenderExecutor` now retains the exact batch plan across calibration, warmup,
+  A/A, and effect jobs when the caller supplies the same immutable `Arc`. Pointer identity makes the
+  hit O(1), rules out stale content without hashing, and bounds retention to one corpus. The
+  `FM_H2H_DISABLE_PLAN_CACHE` arm preserves the former behavior for same-ELF isolation.
+- **Whole-job self result.** One top-level bracket ran cached candidate A, the disabled control, and
+  cached candidate B with the same ELF and a 50 ms integration floor. Their 20-sample medians were
+  239,401 ns, 416,477 ns, and 269,883 ns. Against the slower candidate bracket, persistent exact-plan
+  reuse was **1.543176x** faster. Every arm emitted the identical 3,065,537-byte SVG aggregate with
+  SHA-256 `080bc9f191cc09231bd8104a21e763197b4d45d02b083e48be3ae7c1be71d6d4`.
+- **Live incumbent result.** In one harness invocation, the 64-diagram
+  `ci_shared_subgraph_divergent_64` whole job completed in **0.265666 ms** versus pinned live
+  mermaid-js at **9,154.900001 ms**: **34,460.186855x**. The Rust process self-reported 64 requested
+  workers, 64 available logical CPUs, full-host affinity, AVX2/FMA/BMI2 ISA capability, and the
+  fixed-shard persistent-pool execution model. The Rust before/after drift gate also passed.
+- **Output equivalence.** The linked artifact proves 64/64 SVGs structurally equivalent, with zero
+  divergent and zero unverified diagrams, over byte-identical input and the same Rust ELF and
+  mermaid-js bundle.
+- **Host and validation.** Measurement ran on x86-64 `thinkstation1` (AMD Ryzen Threadripper PRO
+  5975WX, 32 physical cores / 64 logical threads). A clean-overlay remote run on worker `hz2` passed
+  all 14 example tests, workspace/all-targets check, and workspace/all-targets Clippy with warnings
+  denied. The exact cache-identity test proves reuse for the same allocation and replacement for an
+  equal-but-distinct allocation.
+- **Evidence.** Same-invocation live summary
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/plan-cache-live-50ms/summary-2a9751d0-1785695991937.json`
+  (SHA-256 `53a73de482d40127a03b14b4d1b03237d9426482e64359ec04e558a143540d6b`);
+  same-ELF mechanism bracket
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/plan-cache-self-ab-50ms-v1.jsonl`
+  (SHA-256 `66bc94986227483c40d3efd6772888c542daf7fc82ea2566cab4c527b5467dcd`);
+  structural-equivalence artifact
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/plan-cache-equivalence/equivalence-2a9751d0-1785695005542.json`
+  (SHA-256 `65bc1a6cb6a82e9028494da7f4bad90b9ed2938c84ecc04ded5243e0c5081092`);
+  predecessor profile
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/perf-divergent64-edb1eea2-self.data`
+  (SHA-256 `3966f3af88f581852fc5b25b1a721ed01418832d5dff101af678350181bd1766`).
+- **Retry predicate.** Re-measure if exact-Arc identity, one-entry retention, batch-plan semantics,
+  worker pool, 64-diagram fixture, pinned incumbent, executing ELF, 50 ms integration floor,
+  affinity, structural-equivalence certificate, or median-CI gate changes.
