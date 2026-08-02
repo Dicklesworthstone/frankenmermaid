@@ -2400,3 +2400,53 @@ laid out, and rendered only the first 32 distinct diagram/revision pairs; the co
   byte ceiling, SVG size distribution, working-set width, output materialization, corpus, or
   revision pattern changes. Promote no competitive claim without a same-invocation incumbent null
   arm.
+
+## KEEP: materialize only the final revision of a change-set stream (2026-08-02)
+
+**Bead:** `bd-go2d`. **Lane:** cod.
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `f927f269ea2bd4e80cafcfef71d03ddfc99c49add2417e6e321450c8d7ee9bd0`
+**A/A null control (same invocation):** invocation
+`fm-final-output-exact-thinkstation1-1785658549007374011` interleaved all six permutations of the
+ordinary-output control/candidate-A/candidate-B arms for 36 whole-job rounds per arm. Candidate
+A/B medians were 415,215,955.5 / 418,270,456.5 ns (ratio `0.992697`), with a 50,000-resample
+median-ratio 95% CI of `[0.946943, 1.025234]`, including one.
+**Counted mechanism:** every control round materialized 640 transient SVG revisions / 1,215,964,480
+bytes. Each `--final-output-only` candidate instead replaced resident bytes by destination and
+materialized eight final SVGs / 15,195,992 bytes at EOF: 80x fewer bytes and 632 fewer output-file
+writes per job. Across 36 rounds, that is 23,040 control writes / 43,774,721,280 bytes versus 288
+writes / 547,055,712 bytes in each candidate arm.
+
+- **Structural gap.** After exact revision replay removed repeated parse/layout/render work, the
+  stream still copied every transient SVG to the filesystem even when a build system consumed only
+  the completed output tree. Mermaid-js returns strings to its resident page and has no analogous
+  mandatory per-revision filesystem materialization. The final-state contract permits deleting
+  those writes rather than making them incrementally faster.
+- **Mechanism.** Explicit `render-batch --change-set-stdin --final-output-only` mode holds one newest
+  immutable `Arc<Vec<u8>>` per changed destination. Every epoch is still processed and acknowledged;
+  EOF writes the deterministic final destination set before the durable clean certificate is
+  committed. A write failure leaves that certificate invalid, while the default stream continues
+  to materialize every acknowledged epoch for callers that consume intermediate output.
+- **Whole-job result.** Each round started one process and executed 640 acknowledged edits over
+  eight 900-node diagrams alternating two exact revisions. The ordinary-output-control median was
+  5,115,566,767.5 ns and candidate-A median 415,215,955.5 ns: **12.320256x**, bootstrap 95% CI
+  `[11.836834, 12.843769]`. Every arm ended with identical 384-file / 41,738,645-byte output,
+  aggregate SHA-256 `bbfdcca3e38e367b01d63c0016b806c11040ca7b1f8041e076d65054ac27b806`.
+- **Host admission.** The A/B phase used both SMT threads of physical cores 25, 27, 29, and 31 on
+  x86-64 `thinkstation1` (`25,27,29,31,57,59,61,63`). Its two consecutive pre-phase one-second
+  samples peaked at 9.4% and 19.6% busy with no CPU above the fixed 20% ceiling. The pre-incumbent
+  samples peaked at 6.0% and 5.1%. A report-only post-invocation sample peaked at 22% on CPU 61.
+- **Live-incumbent bracket.** The same invocation bracketed full uncached 384-diagram Rust renders
+  at 27.542 / 31.340 ms around pinned mermaid-js 11.15.0 at 50,275.1 ms render time (55.387 s live
+  wall). Runtime provenance reported one browser main thread, Chrome 150.0.7871.128, input SHA-256
+  `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`, and bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`. The incumbent was a
+  render-once arm without an incumbent null, so this row asserts no competitive ratio.
+- **Validation.** Strict clean-overlay remote cache/stream tests passed 14/14 in both CLI binary
+  targets and package Clippy passed with warnings denied before measurement. Workspace-wide
+  clean-overlay check and Clippy, targeted rustfmt, staged ledger lint, and UBS completed before
+  landing. External and self-reported executable hashes agreed in every arm.
+- **Retry predicate.** Re-measure if callers require intermediate output, EOF transaction or crash
+  semantics change, the final-tree memory footprint, output size, edit count, changed-diagram count,
+  revision replay admission, corpus, or filesystem changes. Promote no competitive claim without a
+  same-invocation incumbent null arm.

@@ -277,6 +277,12 @@ enum Command {
         )]
         change_set_stdin: bool,
 
+        /// Hold each diagram's newest rendered bytes in memory and materialize only the final
+        /// output tree when the change-set stream reaches EOF. This deletes transient writes for
+        /// build systems that consume only the completed revision transaction.
+        #[arg(long, requires = "change_set_stdin")]
+        final_output_only: bool,
+
         /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
         #[arg(long, value_enum, default_value = "auto")]
         fnx_mode: FnxModeArg,
@@ -1126,6 +1132,8 @@ struct BatchRenderCacheSession {
     revision_output_max_entries: usize,
     revision_output_max_bytes: usize,
     reuse_revision_outputs: bool,
+    defer_output_writes: bool,
+    deferred_outputs: std::collections::BTreeMap<PathBuf, Arc<Vec<u8>>>,
 }
 
 impl BatchRenderCacheSession {
@@ -1233,6 +1241,26 @@ impl BatchRenderCacheSession {
                     .saturating_sub(oldest.bytes.len());
             }
         }
+    }
+
+    fn stage_output_if_deferred(&mut self, destination: &Path, bytes: Arc<Vec<u8>>) -> bool {
+        if !self.defer_output_writes {
+            return false;
+        }
+        self.deferred_outputs.insert(destination.to_owned(), bytes);
+        true
+    }
+
+    fn materialize_deferred_outputs(&mut self) -> Result<(usize, usize)> {
+        let mut total_bytes = 0usize;
+        for (destination, bytes) in &self.deferred_outputs {
+            std::fs::write(destination, bytes.as_slice())
+                .with_context(|| format!("cannot write {}", destination.display()))?;
+            total_bytes = total_bytes.saturating_add(bytes.len());
+        }
+        let output_count = self.deferred_outputs.len();
+        self.deferred_outputs.clear();
+        Ok((output_count, total_bytes))
     }
 
     fn lease<'a>(&'a mut self, cache_path: &Path) -> BatchRenderCacheLease<'a> {
@@ -1682,6 +1710,24 @@ mod batch_render_cache_tests {
         assert!(session.revision_output("oversize").is_none());
         assert_eq!(session.revision_output_bytes, 2);
     }
+
+    #[test]
+    fn final_output_transaction_materializes_only_the_newest_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("diagram.svg");
+        let mut session = BatchRenderCacheSession {
+            defer_output_writes: true,
+            ..BatchRenderCacheSession::default()
+        };
+
+        assert!(session.stage_output_if_deferred(&destination, Arc::new(vec![1_u8; 8])));
+        assert!(session.stage_output_if_deferred(&destination, Arc::new(vec![2_u8; 3])));
+        assert!(!destination.exists());
+
+        assert_eq!(session.materialize_deferred_outputs().unwrap(), (1, 3));
+        assert_eq!(std::fs::read(destination).unwrap(), vec![2_u8; 3]);
+        assert!(session.deferred_outputs.is_empty());
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1994,6 +2040,7 @@ fn main() -> Result<()> {
             trust_change_set,
             changed_input,
             change_set_stdin,
+            final_output_only,
             fnx_mode,
             fnx_projection,
             fnx_fallback,
@@ -2031,7 +2078,13 @@ fn main() -> Result<()> {
             };
             if change_set_stdin {
                 cmd_render_batch_change_set_stream(
-                    &inputs, &out_dir, jobs, keep_going, json, options,
+                    &inputs,
+                    &out_dir,
+                    jobs,
+                    keep_going,
+                    json,
+                    final_output_only,
+                    options,
                 )
             } else {
                 cmd_render_batch(
@@ -3584,12 +3637,14 @@ fn cmd_render_batch_change_set_stream(
     jobs: Option<usize>,
     keep_going: bool,
     json: bool,
+    final_output_only: bool,
     options: RenderCommandOptions<'_>,
 ) -> Result<()> {
     use std::io::BufRead;
 
     let stdin = io::stdin();
-    let retain_manifest = std::env::var_os("FM_DISABLE_IN_MEMORY_BATCH_MANIFEST").is_none();
+    let retain_manifest =
+        final_output_only || std::env::var_os("FM_DISABLE_IN_MEMORY_BATCH_MANIFEST").is_none();
     let retain_plan = std::env::var_os("FM_DISABLE_IN_MEMORY_BATCH_PLAN").is_none();
     let batch_plan = retain_plan
         .then(|| BatchRenderPlan::new(inputs, out_dir, jobs, true, &options))
@@ -3603,6 +3658,7 @@ fn cmd_render_batch_change_set_stream(
         trust_first_epoch = cache_session.trusted_batch.is_some();
     }
     let mut epoch = 0usize;
+    cache_session.defer_output_writes = final_output_only;
     for (line_index, line) in stdin.lock().lines().enumerate() {
         let line_number = line_index + 1;
         let line =
@@ -3645,6 +3701,10 @@ fn cmd_render_batch_change_set_stream(
         stdout.flush()?;
     }
     if retain_manifest {
+        let (outputs, bytes) = cache_session.materialize_deferred_outputs()?;
+        if final_output_only {
+            eprintln!("materialized {outputs} final output(s), {bytes} bytes at stream EOF");
+        }
         cache_session.flush(Path::new(out_dir))?;
     }
     Ok(())
@@ -4000,6 +4060,9 @@ fn cmd_render_batch(
     let revision_cache_active = session_lease
         .as_ref()
         .is_some_and(|lease| lease.session.reuse_revision_outputs);
+    let defer_output_writes = session_lease
+        .as_ref()
+        .is_some_and(|lease| lease.session.defer_output_writes);
     if revision_cache_active {
         for (index, loaded) in loaded.iter().enumerate() {
             if cached_results[index].is_some() {
@@ -4018,8 +4081,15 @@ fn cmd_render_batch(
                 continue;
             };
             let destination = &plan.destinations[index];
-            std::fs::write(destination, bytes.as_slice())
-                .with_context(|| format!("cannot write {}", destination.display()))?;
+            let output_deferred = session_lease.as_mut().is_some_and(|lease| {
+                lease
+                    .session
+                    .stage_output_if_deferred(destination, Arc::clone(&bytes))
+            });
+            if !output_deferred {
+                std::fs::write(destination, bytes.as_slice())
+                    .with_context(|| format!("cannot write {}", destination.display()))?;
+            }
             cached_results[index] = Some((plan.destination_displays[index].clone(), bytes.len()));
         }
     }
@@ -4135,11 +4205,14 @@ fn cmd_render_batch(
                     &pressure,
                     renderer,
                 )?;
-                let destination = &plan.destinations[index];
-                std::fs::write(destination, &outcome.rendered)
-                    .with_context(|| format!("cannot write {}", destination.display()))?;
+                if !defer_output_writes {
+                    let destination = &plan.destinations[index];
+                    std::fs::write(destination, &outcome.rendered)
+                        .with_context(|| format!("cannot write {}", destination.display()))?;
+                }
                 let length = outcome.rendered.len();
-                if revision_cache_active
+                if defer_output_writes
+                    || revision_cache_active
                     || digest_counts.get(digest.as_str()).copied().unwrap_or(0) > 1
                 {
                     shared
@@ -4268,13 +4341,47 @@ fn cmd_render_batch(
                     "duplicate of an input that failed to render"
                 ));
             };
-            let destination = &plan.destinations[index];
-            std::fs::write(destination, bytes.as_slice())
-                .with_context(|| format!("cannot write {}", destination.display()))?;
+            if !defer_output_writes {
+                let destination = &plan.destinations[index];
+                std::fs::write(destination, bytes.as_slice())
+                    .with_context(|| format!("cannot write {}", destination.display()))?;
+            }
             Ok((plan.destination_displays[index].clone(), bytes.len()))
         };
         run_all(&write_duplicate)
     };
+    if defer_output_writes {
+        let deferred = {
+            let cache = shared
+                .lock()
+                .map_err(|_| anyhow::anyhow!("render cache poisoned"))?;
+            let mut deferred = Vec::new();
+            for (index, result) in results.iter().enumerate() {
+                if result.is_err() || cached_results[index].is_some() {
+                    continue;
+                }
+                let (_, digest) = loaded[index]
+                    .as_ref()
+                    .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+                let bytes = cache.get(digest.as_str()).cloned().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "rendered output for {} was not retained for final materialization",
+                        inputs[index]
+                    )
+                })?;
+                deferred.push((plan.destinations[index].clone(), bytes));
+            }
+            deferred
+        };
+        let lease = session_lease.as_mut().ok_or_else(|| {
+            anyhow::anyhow!("final-output-only stream lost its resident cache session")
+        })?;
+        for (destination, bytes) in deferred {
+            if !lease.session.stage_output_if_deferred(&destination, bytes) {
+                anyhow::bail!("final-output-only stream stopped deferring output writes");
+            }
+        }
+    }
     if cache_active {
         let mut commit_manifest = false;
         {
