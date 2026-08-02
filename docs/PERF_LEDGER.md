@@ -3534,3 +3534,69 @@ started zero render workers, and wrote zero sources or SVGs.
 - **Retry predicate.** Re-measure if the high-bit repeat encoding, prior-admission requirement,
   checked aggregate accounting, explicit packed framing, durable completion acknowledgment, group
   size, fixture, pinned incumbent, executing ELF, affinity, or median-CI gate changes.
+
+## CERTIFIED INCUMBENT WIN: fixed-width ACK deletes JSON completion tax (2026-08-02)
+
+**Bead:** `bd-f7u4`. **Lane:** cod.
+**Campaign result class:** incumbent-win
+**Executing ELF SHA-256 (self-reported by process):** `c6455bc3467e22e886cd4a728fd948a481620206c84186ef4f6b30fad589a89e`
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de invocation_id=fm-resident-ack64-thinkstation1-1785692029099419051 measured_ratio=36896.57279002993x
+**A/A null control (same invocation):** the 4,096-job ACK64 candidate A/B medians were
+55,785.5 / 56,843 ns (ratio `0.981396`), with a 50,000-resample median-ratio 95% CI of
+`[0.800688, 1.141564]`, including one. The matched 64-job candidate A/B medians were 40,922.5 /
+39,976 ns (ratio `1.023677`), CI `[0.760702, 1.233196]`, including one. Live mermaid-js ran ten
+null rounds: median `1.008636`, bootstrap 95% CI `[0.992872, 1.017649]`, sufficient=true and
+`cv_gate=never`. The cross-engine median-ratio 95% CI was
+`[30302.603810x, 38525.928925x]`.
+**Counted mechanism:** the effect control and each candidate label completed the same 36 groups,
+147,456 logical diagram jobs, 288 input framing bytes, zero encoded payload bytes, zero render
+workers, and zero source/SVG writes after one untimed admission. Control constructed and serialized
+eight keyed JSON values plus a newline for every group; ACK64 wrote exactly one eight-byte
+little-endian completed-group ordinal. The predecessor 500,001-group whole-job profile counted
+81,889,056 JSON acknowledgment bytes; the fixed-width representation for the same acknowledgment
+count is 4,000,008 bytes, a 20.47x output-byte reduction.
+
+- **Profile-first attribution.** The symbols-preserving `b318ea35` product profile ran 500,000
+  admitted-payload repeat groups covering 32,000,000 logical jobs. Top self-time was newline reverse
+  scanning (`memrchr`, 7.23%), `StdoutLock::write_all` (5.97%), JSON string serialization (5.58%),
+  `memmove` (3.58%), kernel Unix-stream send (3.42%), JSON `BTreeMap` insertion (3.12%), and JSON
+  `Value` serialization (1.87%). Mermaid-js renders inside its browser page and does not construct
+  or transport frankenmermaid's resident completion protocol, so this coherent chain is an
+  unshared structural tax rather than a common render cost.
+- **The one lever.** `--resident-exact-ack64` is an opt-in protocol for callers that already know
+  submitted group metadata. After durable completion it writes the monotonically increasing group
+  ordinal as one little-endian u64 and flushes it; errors still fail closed through process status
+  and stderr. The existing JSON-line protocol is byte-for-byte unchanged when the flag is absent,
+  and Clap rejects ACK64 unless resident exact-job groups are enabled.
+- **Whole-job self result.** Each effect sample completed 4,096 independently counted exact jobs
+  and one durable group acknowledgment. The JSON-line control median was 72,938.5 ns versus ACK64
+  candidate A at 55,785.5 ns: **1.307481x**, with bootstrap 95% CI
+  `[1.020237x, 1.562302x]`.
+- **Live incumbent result.** The same top-level invocation used a matched 64-job candidate and the
+  pinned live incumbent. Mermaid-js rendered the canonical diagram 64 times per sample in one
+  persistent page, with median **1,509.9 ms** over ten samples. ACK64's conservative completed-job
+  median was **0.0409225 ms**: **36,896.572790x**, with bootstrap 95% CI
+  `[30,302.603810x, 38,525.928925x]`. Runtime provenance reported one Chrome
+  150.0.7871.128 page-main execution thread.
+- **Output equivalence.** Candidate A, candidate B, and control retained the same one-file,
+  15,483-byte SVG tree with aggregate SHA-256
+  `0cb0118157d8e65f187dfa0e77bcee7fb3344bfe9e01cac93afc54f54160856e`. The extractor artifact
+  for input SHA-256 `b5402490faa78c6a7c71554296d03b46016ae1156d7cd38d258b280363b6900a`
+  proves the measured flowchart structurally equivalent to the same pinned mermaid-js bundle.
+- **Host and validation.** Effect and incumbent phases ran on eight distinct physical cores 10,
+  11, 12, 13, 14, 17, 18, and 20 of x86-64 `thinkstation1` (AMD Ryzen Threadripper PRO 5975WX).
+  Consecutive effect admission samples peaked at 5.00% / 3.00% busy; incumbent admission peaked at
+  2.94% / 3.00%, and the report-only post-run sample peaked at 3.96%. Clean-overlay remote
+  workspace check and Clippy with warnings denied passed; all 66 CLI tests passed in both binary
+  targets plus six evidence tests, including exact binary bytes and CLI requirement coverage;
+  targeted rustfmt passed. All timed Rust processes self-reported the external ELF hash.
+- **Evidence.** Exact artifact
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/resident-repeat-groups/fm-resident-ack64-thinkstation1-1785692029099419051.json`
+  (SHA-256 `050cd9b4688d4dbd3290525e7c7d380a541c0d12eb62d1a61aabf70997293683`);
+  symbols-preserving predecessor product profile
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/resident-repeat-groups/perf-resident-repeat-groups-b318ea35-symbols.data`
+  (SHA-256 `fa7faeb9694b73b4788b212acc6a86ac8b6b42cb35ea95e3316485e383d05ef0`);
+  structural-equivalence artifact
+  `.benchmarks/headtohead/cert-v3-requalification-v1/equivalence-5bad0559-1785490669339.json`.
+- **Retry predicate.** Re-measure if acknowledgment width/meaning, flush durability, repeat-group
+  framing, fixture, pinned incumbent, executing ELF, affinity, or median-CI gate changes.

@@ -368,6 +368,12 @@ enum Command {
         )]
         resident_exact_job_groups: bool,
 
+        /// Acknowledge each resident exact-job group with only its completed little-endian u64
+        /// group ordinal. This removes JSON construction, serialization, and newline framing from
+        /// latency-sensitive callers that already know the submitted group metadata.
+        #[arg(long, requires = "resident_exact_job_groups")]
+        resident_exact_ack64: bool,
+
         /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
         #[arg(long, value_enum, default_value = "auto")]
         fnx_mode: FnxModeArg,
@@ -2145,26 +2151,53 @@ mod batch_render_cache_tests {
             "--packed-complete-snapshot-stream",
             "--resident-exact-jobs",
             "--resident-exact-job-groups",
+            "--resident-exact-ack64",
             "a.mmd",
         ])
         .expect("resident exact jobs should support persistent group acknowledgments");
 
-        let (final_ack_only, resident_exact_jobs, resident_exact_job_groups) = match cli.command {
-            Command::RenderBatch {
-                final_ack_only,
-                resident_exact_jobs,
-                resident_exact_job_groups,
-                ..
-            } => (
-                final_ack_only,
-                resident_exact_jobs,
-                resident_exact_job_groups,
-            ),
-            _ => (false, false, false),
-        };
+        let (final_ack_only, resident_exact_jobs, resident_exact_job_groups, resident_exact_ack64) =
+            match cli.command {
+                Command::RenderBatch {
+                    final_ack_only,
+                    resident_exact_jobs,
+                    resident_exact_job_groups,
+                    resident_exact_ack64,
+                    ..
+                } => (
+                    final_ack_only,
+                    resident_exact_jobs,
+                    resident_exact_job_groups,
+                    resident_exact_ack64,
+                ),
+                _ => (false, false, false, false),
+            };
         assert!(final_ack_only);
         assert!(resident_exact_jobs);
         assert!(resident_exact_job_groups);
+        assert!(resident_exact_ack64);
+    }
+
+    #[test]
+    fn resident_exact_ack64_is_one_completed_group_ordinal() {
+        let acknowledgment = super::ResidentExactJobGroupAcknowledgment {
+            group: 7,
+            transactions: 64,
+            updates: 640,
+            source_bytes: 1_024,
+            encoded_payload_bytes: 0,
+        };
+        let mut binary = Vec::new();
+        super::write_resident_exact_job_group_ack(&mut binary, true, acknowledgment).unwrap();
+        assert_eq!(binary, 7u64.to_le_bytes());
+
+        let mut json = Vec::new();
+        super::write_resident_exact_job_group_ack(&mut json, false, acknowledgment).unwrap();
+        let decoded: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(decoded["group"], 7);
+        assert_eq!(decoded["transactions"], 64);
+        assert_eq!(decoded["source_bytes_scope"], "completed_jobs");
+        assert_eq!(json.last(), Some(&b'\n'));
     }
 
     #[test]
@@ -2992,6 +3025,7 @@ fn main() -> Result<()> {
             terminal_packed_snapshot,
             resident_exact_jobs,
             resident_exact_job_groups,
+            resident_exact_ack64,
             fnx_mode,
             fnx_projection,
             fnx_fallback,
@@ -3064,6 +3098,7 @@ fn main() -> Result<()> {
                     resident_exact_jobs,
                     final_ack_only,
                     resident_exact_job_groups,
+                    resident_exact_ack64,
                     options,
                 )
             } else if final_state_stream {
@@ -5014,6 +5049,44 @@ struct ResidentExactJobReplayState {
     logical_output_bytes: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ResidentExactJobGroupAcknowledgment {
+    group: usize,
+    transactions: usize,
+    updates: usize,
+    source_bytes: usize,
+    encoded_payload_bytes: usize,
+}
+
+fn write_resident_exact_job_group_ack(
+    writer: &mut impl Write,
+    ack64: bool,
+    acknowledgment: ResidentExactJobGroupAcknowledgment,
+) -> Result<()> {
+    if ack64 {
+        let group = u64::try_from(acknowledgment.group)
+            .context("resident exact-job group ordinal does not fit u64")?;
+        writer.write_all(&group.to_le_bytes())?;
+    } else {
+        serde_json::to_writer(
+            &mut *writer,
+            &serde_json::json!({
+                "group": acknowledgment.group,
+                "transactions": acknowledgment.transactions,
+                "input_lines": acknowledgment.transactions,
+                "updates": acknowledgment.updates,
+                "source_bytes": acknowledgment.source_bytes,
+                "source_bytes_scope": "completed_jobs",
+                "encoded_payload_bytes": acknowledgment.encoded_payload_bytes,
+                "status": "ok"
+            }),
+        )?;
+        writeln!(writer)?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
 impl ResidentExactJobReplayState {
     fn read_and_replay(
         &mut self,
@@ -5189,6 +5262,7 @@ fn cmd_render_batch_resident_exact_jobs(
     max_input_bytes: usize,
     acknowledgments_at_eof: bool,
     job_groups: bool,
+    ack64: bool,
 ) -> Result<()> {
     let mut stdout = io::stdout().lock();
     let mut replay = ResidentExactJobReplayState::default();
@@ -5235,25 +5309,21 @@ fn cmd_render_batch_resident_exact_jobs(
                 }
             }
             cache_session.flush(Path::new(out_dir))?;
-            serde_json::to_writer(
+            write_resident_exact_job_group_ack(
                 &mut stdout,
-                &serde_json::json!({
-                    "group": groups,
-                    "transactions": replay.jobs.saturating_sub(jobs_before),
-                    "input_lines": replay.jobs.saturating_sub(jobs_before),
-                    "updates": group_jobs.saturating_mul(inputs.len()),
-                    "source_bytes": replay
+                ack64,
+                ResidentExactJobGroupAcknowledgment {
+                    group: groups,
+                    transactions: replay.jobs.saturating_sub(jobs_before),
+                    updates: group_jobs.saturating_mul(inputs.len()),
+                    source_bytes: replay
                         .logical_source_bytes
                         .saturating_sub(source_bytes_before),
-                    "source_bytes_scope": "completed_jobs",
-                    "encoded_payload_bytes": replay
+                    encoded_payload_bytes: replay
                         .encoded_payload_bytes
                         .saturating_sub(encoded_bytes_before),
-                    "status": "ok"
-                }),
+                },
             )?;
-            writeln!(stdout)?;
-            stdout.flush()?;
         }
     } else {
         while let Some((source_bytes, payload_bytes)) = replay.read_and_replay(
@@ -5344,6 +5414,7 @@ fn cmd_render_batch_packed_complete_snapshot_stream(
     resident_exact_jobs: bool,
     final_ack_only: bool,
     resident_exact_job_groups: bool,
+    resident_exact_ack64: bool,
     options: RenderCommandOptions<'_>,
 ) -> Result<()> {
     use std::io::{Read, Write};
@@ -5372,6 +5443,7 @@ fn cmd_render_batch_packed_complete_snapshot_stream(
             options.max_input_bytes,
             final_ack_only,
             resident_exact_job_groups,
+            resident_exact_ack64,
         );
     }
     let mut transaction = 0usize;
