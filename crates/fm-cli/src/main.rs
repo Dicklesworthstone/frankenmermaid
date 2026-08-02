@@ -1187,7 +1187,7 @@ struct BatchRenderCacheSession {
     revision_output_max_bytes: usize,
     reuse_revision_outputs: bool,
     reuse_worker_pool: bool,
-    worker_pool: Option<Arc<BatchRenderWorkerPool>>,
+    worker_pool: std::sync::Mutex<Option<Arc<BatchRenderWorkerPool>>>,
     defer_output_writes: bool,
     deferred_outputs: std::collections::BTreeMap<PathBuf, Arc<Vec<u8>>>,
 }
@@ -1237,16 +1237,16 @@ impl BatchRenderCacheSession {
         Ok(())
     }
 
-    fn worker_pool(&mut self, threads: usize) -> Result<Arc<BatchRenderWorkerPool>> {
-        if let Some(pool) = self
+    fn worker_pool(&self, threads: usize) -> Result<Arc<BatchRenderWorkerPool>> {
+        let mut worker_pool = self
             .worker_pool
-            .as_ref()
-            .filter(|pool| pool.threads == threads)
-        {
+            .lock()
+            .map_err(|_| anyhow::anyhow!("resident render worker pool is poisoned"))?;
+        if let Some(pool) = worker_pool.as_ref().filter(|pool| pool.threads == threads) {
             return Ok(Arc::clone(pool));
         }
         let pool = Arc::new(BatchRenderWorkerPool::new(threads)?);
-        self.worker_pool = Some(Arc::clone(&pool));
+        *worker_pool = Some(Arc::clone(&pool));
         Ok(pool)
     }
 
@@ -1757,7 +1757,7 @@ mod batch_render_cache_tests {
 
     #[test]
     fn persistent_session_reuses_one_fixed_width_worker_pool() {
-        let mut session = BatchRenderCacheSession::default();
+        let session = BatchRenderCacheSession::default();
 
         let first = session.worker_pool(2).unwrap();
         let second = session.worker_pool(2).unwrap();
@@ -4339,7 +4339,7 @@ fn cmd_render_batch(
     };
     let pool = if pool_threads == 1 {
         None
-    } else if let Some(lease) = session_lease.as_mut()
+    } else if let Some(lease) = session_lease.as_ref()
         && lease.session.reuse_worker_pool
     {
         Some(lease.session.worker_pool(pool_threads)?)
