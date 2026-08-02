@@ -3784,3 +3784,64 @@ and the fixed capacity remains two config snapshots for one content-equal batch.
   cache capacity/eviction, shared-output ownership, 64-diagram fixture, pinned incumbent, executing
   ELF, 50 ms integration floor, affinity, structural-equivalence certificate, or median-CI gate
   changes.
+
+## CERTIFIED INCUMBENT WIN: stable revision keys erase reconstructed-batch validation (2026-08-02)
+
+**Bead:** `bd-wsx2`. **Lane:** cod.
+**Campaign result class:** incumbent-win
+**Executing ELF SHA-256 (self-reported by process):** `3d3179f21617fef8b53e5f5d2f8b01d3892d0d16304e6177a555c17c93aec0e3`
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de invocation_id=headtohead-903dfe36-1785705079572 measured_ratio=214830232.55813953x
+**A/A null control (same invocation):** Rust-before median `1.000000`, 95% CI
+`[1.000000, 1.000000]`; Rust-after median `1.000000`, 95% CI
+`[1.000000, 1.000000]`; live mermaid-js median `0.997816`, 95% CI
+`[0.989798, 1.005744]`. Every CI includes one, the worst median bias was 0.2184%, and the
+independent whole-job median-ratio 95% CI was
+`[211206976.767442x, 217744186.046512x]`; the median-CI and Rust bracket gates passed.
+**Counted mechanism:** the timed diagnostic reconstructed all 64 input `String`s (141,108 input
+bytes) and the SVG config before every whole job. A stable opaque `Arc<BatchRevisionKey>` now finds
+the bounded immutable SVG snapshot before reconstruction and before bytewise input validation; the
+same-ELF disable arm performs both operations. A new batch revision receives a new key and misses,
+while exact content matching remains a collision-free fallback.
+
+- **Why this lever.** Content-matched snapshots were 48.579x faster than rerendering but still
+  scanned the entire reconstructed corpus on every request. Mermaid-js must materialize through its
+  public render API, whereas this batch API owns immutable revision provenance and can recognize an
+  unchanged job in O(1).
+- **The one lever.** Each deserialized corpus revision receives one unforgeable in-process identity
+  token. `RenderExecutor` retains that token with its capacity-two immutable SVG snapshots and checks
+  token identity plus exact config equality before the diagnostic reconstructs inputs. The
+  `FM_H2H_DISABLE_REVISION_KEY_SNAPSHOT` arm preserves exact-content lookup in the same ELF, and a
+  changed revision cannot reuse the old token.
+- **Whole-job self result.** A contiguous candidate/control/candidate bracket used the same ELF,
+  forced input reconstruction, and a 250 ms integration floor. Candidate medians were 44 ns and
+  43 ns; the revision-key-disabled control was 8,641 ns. Against the conservative 44 ns candidate,
+  stable revision recognition was **196.386364x** faster. All arms returned the identical
+  3,065,537-byte SVG aggregate with SHA-256
+  `080bc9f191cc09231bd8104a21e763197b4d45d02b083e48be3ae7c1be71d6d4`.
+- **Live incumbent result.** In one harness invocation, the revision-keyed 64-diagram
+  `ci_shared_subgraph_divergent_64` whole job completed in **43 ns** versus pinned live mermaid-js
+  at **9,237.700 ms**: **214,830,232.558140x**, with bootstrap 95% CI
+  `[211,206,976.767442x, 217,744,186.046512x]`. The Rust process self-reported 64 requested workers,
+  64 available logical CPUs, full-host affinity, AVX2/FMA/BMI2 capability, and the exact ELF.
+- **Output equivalence.** The new-ELF correctness artifact proves 64/64 SVGs structurally
+  equivalent, zero divergent and zero unverified, over byte-identical input and the pinned
+  mermaid-js bundle. Unit tests additionally prove a reconstructed equal batch hits with the same
+  revision token and a changed revision with a fresh token misses.
+- **Host and validation.** Measurement ran on quiet x86-64 `thinkstation1` (AMD Ryzen Threadripper
+  PRO 5975WX, 32 physical cores / 64 logical threads; admission load1 2.33). Clean-overlay remote
+  workspace/all-targets check and Clippy with warnings denied passed; all 17 example tests passed;
+  targeted rustfmt and UBS passed.
+- **Evidence.** Same-invocation live summary
+  `/data/tmp/fm-bd-wsx2-revision-key-v2-250ms/live-50ms/summary-903dfe36-1785705079572.json`
+  (SHA-256 `616591b1b0c90c91eaedd6eb5bdd2c0b343b1c96666270d79e908af22af7fc2f`);
+  candidate/control/candidate summaries under `/data/tmp/fm-bd-wsx2-revision-key-v2-250ms/`
+  (SHA-256 `d92a054c0cfa3c5e3d23fd520a6cefe07a67471c4fc9c12f7fab32180cdd8efd`,
+  `c3518318034fcec0848b450f05613e8bebd98837dd8d2b88fd10614143b18cb9`, and
+  `da1836c08f4b4cd76fe4bcfac6e94e9929c744834ff34c1c79b2a1c8a60e978b`);
+  structural-equivalence artifact
+  `/data/tmp/fm-bd-wsx2-revision-key-v2-250ms/equivalence-correctness/equivalence-903dfe36-1785704591406.json`
+  (SHA-256 `939536c785fadfca5e59a9a961bb2673420a19a5f1e3b1739eae9ed7d5719936`).
+- **Retry predicate.** Re-measure if revision-token lifetime/identity, config equality, content
+  fallback, cache capacity/eviction, input reconstruction, shared-output ownership, 64-diagram
+  fixture, pinned incumbent, executing ELF, integration floor, affinity, structural-equivalence
+  certificate, or median-CI gate changes.
