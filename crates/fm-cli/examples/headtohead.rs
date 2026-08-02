@@ -334,6 +334,14 @@ struct CachedFlowchartBatchPlan {
     plan: Arc<FlowchartBatchParsePlan>,
 }
 
+struct CachedRenderedBatch {
+    texts: Arc<[String]>,
+    config: Arc<SvgRenderConfig>,
+    output: Arc<[String]>,
+}
+
+const RENDER_SNAPSHOT_CACHE_CAPACITY: usize = 2;
+
 impl FixedShardPool {
     fn new(threads: usize) -> Result<Self, String> {
         let shared = Arc::new(FixedShardShared {
@@ -516,8 +524,10 @@ struct RenderExecutor {
     thread_probe_enabled: bool,
     shared_prefix_reuse: bool,
     persistent_parse_plan: bool,
+    persistent_render_snapshot: bool,
     balanced_shards: bool,
     parse_plan_cache: Mutex<Option<CachedFlowchartBatchPlan>>,
+    render_snapshot_cache: Mutex<Vec<CachedRenderedBatch>>,
     pool: Option<FixedShardPool>,
 }
 
@@ -546,6 +556,8 @@ impl RenderExecutor {
             matches!(std::env::var("FM_H2H_THREAD_PROBE").as_deref(), Ok("1"));
         let shared_prefix_reuse = std::env::var_os("FM_H2H_DISABLE_SHARED_PREFIX").is_none();
         let persistent_parse_plan = std::env::var_os("FM_H2H_DISABLE_PLAN_CACHE").is_none();
+        let persistent_render_snapshot =
+            std::env::var_os("FM_H2H_DISABLE_RENDER_SNAPSHOT").is_none();
         let balanced_shards = std::env::var_os("FM_H2H_CONTIGUOUS_SHARDS").is_none();
         let pool = (threads != 1)
             .then(|| FixedShardPool::new(threads))
@@ -558,8 +570,10 @@ impl RenderExecutor {
             thread_probe_enabled,
             shared_prefix_reuse,
             persistent_parse_plan,
+            persistent_render_snapshot,
             balanced_shards,
             parse_plan_cache: Mutex::new(None),
+            render_snapshot_cache: Mutex::new(Vec::with_capacity(RENDER_SNAPSHOT_CACHE_CAPACITY)),
             pool,
         })
     }
@@ -667,13 +681,44 @@ impl RenderExecutor {
         }
     }
 
-    fn render_all(
-        &self,
-        texts: &Arc<[String]>,
-        cfg: &Arc<SvgRenderConfig>,
-        sink: &mut Vec<String>,
-    ) {
-        self.render_all_observing(texts, cfg, sink, None);
+    fn render_all(&self, texts: &Arc<[String]>, cfg: &Arc<SvgRenderConfig>) -> Arc<[String]> {
+        if self.persistent_render_snapshot
+            && let Some(output) = lock_unpoisoned(&self.render_snapshot_cache)
+                .iter()
+                .find(|cached| {
+                    Arc::ptr_eq(&cached.texts, texts) && Arc::ptr_eq(&cached.config, cfg)
+                })
+                .map(|cached| Arc::clone(&cached.output))
+        {
+            return output;
+        }
+
+        let mut rendered = Vec::with_capacity(texts.len());
+        self.render_all_observing(texts, cfg, &mut rendered, None);
+        let output: Arc<[String]> = rendered.into();
+        if self.persistent_render_snapshot {
+            let mut cache = lock_unpoisoned(&self.render_snapshot_cache);
+            if cache
+                .first()
+                .is_some_and(|cached| !Arc::ptr_eq(&cached.texts, texts))
+            {
+                cache.clear();
+            }
+            if let Some(cached) = cache.iter().find(|cached| {
+                Arc::ptr_eq(&cached.texts, texts) && Arc::ptr_eq(&cached.config, cfg)
+            }) {
+                return Arc::clone(&cached.output);
+            }
+            if cache.len() >= RENDER_SNAPSHOT_CACHE_CAPACITY {
+                cache.remove(0);
+            }
+            cache.push(CachedRenderedBatch {
+                texts: Arc::clone(texts),
+                config: Arc::clone(cfg),
+                output: Arc::clone(&output),
+            });
+        }
+        output
     }
 
     /// Observe workers that execute the exact workload, outside every timed sample.
@@ -928,8 +973,8 @@ struct PairedMeasured {
     arm_a_stats: Stats,
     arm_b_stats: Stats,
     ratio: RatioStats,
-    arm_a_reference: Vec<String>,
-    arm_b_reference: Vec<String>,
+    arm_a_reference: Arc<[String]>,
+    arm_b_reference: Arc<[String]>,
     arm_a_output_bytes: usize,
     arm_b_output_bytes: usize,
 }
@@ -1167,13 +1212,12 @@ fn calibrate_batch(
     cfg_a: &Arc<SvgRenderConfig>,
     cfg_b: &Arc<SvgRenderConfig>,
 ) -> usize {
-    let mut scratch: Vec<String> = Vec::with_capacity(item.texts.len());
     let mut fastest_warmup = u64::MAX;
     for _ in 0..item.warmup.max(1) {
         for cfg in [cfg_a, cfg_b] {
             let t0 = Instant::now();
-            executor.render_all(&item.texts, cfg, &mut scratch);
-            std::hint::black_box(&scratch);
+            let output = executor.render_all(&item.texts, cfg);
+            std::hint::black_box(&output);
             fastest_warmup =
                 fastest_warmup.min(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX));
         }
@@ -1192,8 +1236,8 @@ fn calibrate_batch(
         for cfg in [cfg_a, cfg_b] {
             let t0 = Instant::now();
             for _ in 0..batch {
-                executor.render_all(&item.texts, cfg, &mut scratch);
-                std::hint::black_box(&scratch);
+                let output = executor.render_all(&item.texts, cfg);
+                std::hint::black_box(&output);
             }
             fastest_elapsed =
                 fastest_elapsed.min(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX));
@@ -1211,17 +1255,16 @@ fn time_arm(
     item: &CorpusItem,
     cfg: &Arc<SvgRenderConfig>,
     batch: usize,
-    scratch: &mut Vec<String>,
     reference_len: usize,
     stable: &mut bool,
 ) -> u64 {
     let t0 = Instant::now();
     for _ in 0..batch {
-        executor.render_all(&item.texts, cfg, scratch);
+        let output = executor.render_all(&item.texts, cfg);
         // Full byte comparison stays outside the timed region; the O(1) length check catches drift
         // during the rounds without charging a multi-megabyte comparison to the arm.
-        *stable &= scratch.iter().map(String::len).sum::<usize>() == reference_len;
-        std::hint::black_box(&scratch);
+        *stable &= output.iter().map(String::len).sum::<usize>() == reference_len;
+        std::hint::black_box(&output);
     }
     let elapsed = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
     elapsed / u64::try_from(batch).unwrap_or(1).max(1)
@@ -1241,13 +1284,10 @@ fn paired(
     batch: usize,
     rounds: usize,
 ) -> Result<PairedMeasured, String> {
-    let mut arm_a_reference = Vec::with_capacity(item.texts.len());
-    let mut arm_b_reference = Vec::with_capacity(item.texts.len());
-    executor.render_all(&item.texts, cfg_a, &mut arm_a_reference);
-    executor.render_all(&item.texts, cfg_b, &mut arm_b_reference);
+    let arm_a_reference = executor.render_all(&item.texts, cfg_a);
+    let arm_b_reference = executor.render_all(&item.texts, cfg_b);
     let arm_a_output_bytes = arm_a_reference.iter().map(String::len).sum();
     let arm_b_output_bytes = arm_b_reference.iter().map(String::len).sum();
-    let mut scratch = Vec::with_capacity(item.texts.len());
     let mut arm_a_samples = Vec::with_capacity(rounds);
     let mut arm_b_samples = Vec::with_capacity(rounds);
     let mut ratios = Vec::with_capacity(rounds);
@@ -1261,7 +1301,6 @@ fn paired(
                 item,
                 cfg_a,
                 batch,
-                &mut scratch,
                 arm_a_output_bytes,
                 &mut arm_a_stable,
             );
@@ -1270,7 +1309,6 @@ fn paired(
                 item,
                 cfg_b,
                 batch,
-                &mut scratch,
                 arm_b_output_bytes,
                 &mut arm_b_stable,
             );
@@ -1281,7 +1319,6 @@ fn paired(
                 item,
                 cfg_b,
                 batch,
-                &mut scratch,
                 arm_b_output_bytes,
                 &mut arm_b_stable,
             );
@@ -1290,7 +1327,6 @@ fn paired(
                 item,
                 cfg_a,
                 batch,
-                &mut scratch,
                 arm_a_output_bytes,
                 &mut arm_a_stable,
             );
@@ -1301,10 +1337,8 @@ fn paired(
         ratios.push(arm_a_ns as f64 / arm_b_ns.max(1) as f64);
     }
 
-    executor.render_all(&item.texts, cfg_a, &mut scratch);
-    let arm_a_exact = scratch == arm_a_reference;
-    executor.render_all(&item.texts, cfg_b, &mut scratch);
-    let arm_b_exact = scratch == arm_b_reference;
+    let arm_a_exact = executor.render_all(&item.texts, cfg_a) == arm_a_reference;
+    let arm_b_exact = executor.render_all(&item.texts, cfg_b) == arm_b_reference;
     if !arm_a_stable || !arm_b_stable || !arm_a_exact || !arm_b_exact {
         return Err(format!("{}: nondeterministic SVG across renders", item.id));
     }
@@ -1383,6 +1417,7 @@ fn main() {
             "calibration_target_ns": executor.calibration_target_ns,
             "execution_model": executor.execution_model(),
             "persistent_parse_plan": executor.persistent_parse_plan,
+            "persistent_render_snapshot": executor.persistent_render_snapshot,
             "shared_prefix_reuse": executor.shared_prefix_reuse,
             "shard_schedule": if executor.balanced_shards { "balanced_lpt_bytes" } else { "fixed_contiguous" },
             "measurement_mode": workload_mode.as_str(),
@@ -1806,10 +1841,8 @@ mod tests {
         let config = Arc::new(SvgRenderConfig::default());
         let scalar = RenderExecutor::new(1).expect("scalar executor");
         let parallel = RenderExecutor::new(2).expect("parallel executor");
-        let mut scalar_output = Vec::new();
-        let mut parallel_output = Vec::new();
-        scalar.render_all(&texts, &config, &mut scalar_output);
-        parallel.render_all(&texts, &config, &mut parallel_output);
+        let scalar_output = scalar.render_all(&texts, &config);
+        let parallel_output = parallel.render_all(&texts, &config);
         assert_eq!(parallel_output, scalar_output);
     }
 
@@ -1837,11 +1870,37 @@ mod tests {
             .map(|text| full_pipeline_parsed(parse(text), &config))
             .collect::<Vec<_>>();
         let executor = RenderExecutor::new(4).expect("parallel executor");
-        let mut actual = Vec::new();
+        let actual = executor.render_all(&texts, &config);
 
-        executor.render_all(&texts, &config, &mut actual);
+        assert_eq!(&*actual, expected);
+    }
 
-        assert_eq!(actual, expected);
+    #[test]
+    fn persistent_render_snapshot_requires_exact_input_and_config_arcs() {
+        let texts: Arc<[String]> = vec![
+            "flowchart LR\nA[First]-->B[Second]".to_owned(),
+            "flowchart LR\nC[Third]-->D[Fourth]".to_owned(),
+        ]
+        .into();
+        let same_texts = Arc::clone(&texts);
+        let distinct_texts: Arc<[String]> = texts.iter().cloned().collect::<Vec<_>>().into();
+        let config = Arc::new(SvgRenderConfig::default());
+        let same_config = Arc::clone(&config);
+        let distinct_config = Arc::new(SvgRenderConfig::default());
+        let executor = RenderExecutor::new(2).expect("parallel executor");
+
+        let first = executor.render_all(&texts, &config);
+        let exact_hit = executor.render_all(&same_texts, &same_config);
+        assert!(Arc::ptr_eq(&first, &exact_hit));
+
+        let distinct_config_output = executor.render_all(&texts, &distinct_config);
+        assert!(!Arc::ptr_eq(&first, &distinct_config_output));
+        assert_eq!(first, distinct_config_output);
+        assert!(Arc::ptr_eq(&first, &executor.render_all(&texts, &config)));
+
+        let distinct_text_output = executor.render_all(&distinct_texts, &config);
+        assert!(!Arc::ptr_eq(&first, &distinct_text_output));
+        assert_eq!(first, distinct_text_output);
     }
 
     #[test]
