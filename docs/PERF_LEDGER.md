@@ -2222,3 +2222,45 @@ process leaves it absent and therefore forces the existing full recovery scan.
 - **Retry predicate.** Re-measure if manifest durability, clean-shutdown semantics, plan identity,
   output ownership, stream failure handling, corpus, or revision count changes. Promote no
   competitive claim without a same-invocation incumbent null arm.
+
+## KEEP: project the resident plan into sparse edit epochs (2026-08-02)
+
+**Bead:** `bd-byke`. **Lane:** cod (`BlackThrush`).
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `7ebd5796463b03a41f6d18dbaee290810ca089cac70d6de4a3f6437ab1bbb0a9`
+**A/A null control (same invocation):** invocation
+`fm-projection-exact-trj-1785649010456680300` interleaved all six permutations of the disabled
+control/candidate-A/candidate-B arms for 36 whole-job rounds per arm on 128-CPU
+`threadripperje`. Candidate A/B medians were 27,714,123.5 / 27,775,123 ns (ratio `0.997804`),
+with a 20,000-resample median-ratio 95% CI of `[0.983507, 1.015058]`, including one.
+**Counted mechanism:** projecting changed inputs from the immutable parent plan reduced exact-ELF
+`readlink` calls from 22 to 2, `mkdir` from 21 to 1, `statx` from 343 to 303, and total syscalls
+from 2,345 to 2,265 over the 20-epoch job.
+
+- **Profile-first attribution.** Changed-only execution still recursively called
+  `BatchRenderPlan::new` once per edit. That repeated output-directory creation, executable
+  metadata, worker-topology discovery, path derivation, option hashing, and plan-key hashing even
+  though the persistent process already owned their immutable results. The incumbent's resident
+  page has no analogous per-edit plan reconstruction.
+- **Mechanism.** `BatchRenderPlan::project` maps the changed paths through the resident input index
+  and clones only their destination triples while retaining the parent worker count, cache path,
+  option digest, and identity. `FM_DISABLE_EPOCH_PLAN_PROJECTION=1` selects the former constructor
+  path in the same executable.
+- **Whole-job result.** Every arm started one process and executed 20 alternating one-file edits
+  over the 384-diagram repository. The disabled-control median was 28,381,855 ns and candidate
+  median 27,714,123.5 ns: **1.024094x**, bootstrap 95% CI `[1.006503, 1.055370]`. All three arms
+  emitted identical 384-SVG aggregate SHA-256
+  `a8bbb4c00c012b846fab31463c2050ffbceb062374c5119b9810214ed40dc452`.
+- **Live-incumbent bracket.** The same invocation bracketed full uncached 384-diagram Rust renders
+  at 61.466 / 69.735 ms around pinned mermaid-js 11.15.0 at 52,553.6 ms render time (57.775 s live
+  wall). Runtime provenance reported one browser main thread, Chrome 151.0.7922.71, input SHA-256
+  `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`, and bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`. The incumbent used the
+  render-once arm with no incumbent null, so this row asserts no competitive ratio.
+- **Validation.** Strict remote focused tests passed 10/10; strict remote Clippy passed with
+  warnings denied; targeted rustfmt passed. Load stayed 15.53 -> 16.11 over 128 CPUs. The release
+  build used the repository-local target contract (`env -u CARGO_TARGET_DIR`) and the transferred
+  executable's external and self-reported hashes agreed.
+- **Retry predicate.** Re-measure if plan fields, destination mapping, sparse-recursion admission,
+  corpus, revision count, output equivalence, or default worker discovery changes. Promote no
+  competitive claim without a same-invocation incumbent null arm.

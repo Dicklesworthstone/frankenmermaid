@@ -1057,6 +1057,39 @@ impl BatchRenderPlan {
             key,
         })
     }
+
+    fn project(&self, inputs: &[String]) -> Result<Self> {
+        let mut destinations = Vec::with_capacity(inputs.len());
+        let mut destination_names = Vec::with_capacity(inputs.len());
+        let mut destination_displays = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let index =
+                self.input_indices.get(input).copied().ok_or_else(|| {
+                    anyhow::anyhow!("cannot project unknown batch input {input:?}")
+                })?;
+            destinations.push(self.destinations[index].clone());
+            destination_names.push(self.destination_names[index].clone());
+            destination_displays.push(self.destination_displays[index].clone());
+        }
+
+        Ok(Self {
+            input_set: inputs.iter().cloned().collect(),
+            input_indices: inputs
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, input)| (input, index))
+                .collect(),
+            destinations,
+            destination_names,
+            destination_displays,
+            requested_workers: self.requested_workers,
+            cache_path: self.cache_path.clone(),
+            option_cache_digest: self.option_cache_digest.clone(),
+            cache_active: self.cache_active,
+            key: self.key.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1457,6 +1490,29 @@ mod batch_render_cache_tests {
         let persisted: BatchRenderCacheManifest =
             serde_json::from_slice(&std::fs::read(cache_path).unwrap()).unwrap();
         assert_eq!(persisted.clean_batch, None);
+    }
+
+    #[test]
+    fn projected_plan_preserves_parent_destinations_and_identity() {
+        let plan = plan();
+        let projected = plan.project(&["b.mmd".to_owned()]).unwrap();
+
+        assert_eq!(
+            projected.input_set,
+            ["b.mmd".to_owned()].into_iter().collect()
+        );
+        assert_eq!(
+            projected.input_indices,
+            [("b.mmd".to_owned(), 0)].into_iter().collect()
+        );
+        assert_eq!(projected.destinations, [PathBuf::from("out/b.svg")]);
+        assert_eq!(projected.destination_names, ["b.svg"]);
+        assert_eq!(projected.destination_displays, ["out/b.svg"]);
+        assert_eq!(projected.requested_workers, plan.requested_workers);
+        assert_eq!(projected.cache_path, plan.cache_path);
+        assert_eq!(projected.option_cache_digest, plan.option_cache_digest);
+        assert_eq!(projected.cache_active, plan.cache_active);
+        assert_eq!(projected.key, plan.key);
     }
 }
 
@@ -3546,6 +3602,10 @@ fn cmd_render_batch(
             );
             return Ok(());
         }
+        let projected_plan = std::env::var_os("FM_DISABLE_EPOCH_PLAN_PROJECTION")
+            .is_none()
+            .then(|| plan.project(changed_inputs))
+            .transpose()?;
         return cmd_render_batch(
             changed_inputs,
             out_dir,
@@ -3557,7 +3617,7 @@ fn cmd_render_batch(
                 trust_change_set,
                 changed_inputs,
                 session: session.as_deref_mut(),
-                plan: None,
+                plan: projected_plan.as_ref(),
                 report: Some(carry),
             },
             options,
