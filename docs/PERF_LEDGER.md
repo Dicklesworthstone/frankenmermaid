@@ -3272,3 +3272,69 @@ emitted 36 acknowledgments.
 - **Retry predicate.** Re-measure if caller-side coalescing, terminal framing, the packed positional
   payload contract, bounded read/validation, predecessor certificate admission, fixture, pinned
   incumbent, executing ELF, affinity, or median-CI gate changes.
+
+## CERTIFIED INCUMBENT WIN: resident exact jobs amortize process startup (2026-08-02)
+
+**Bead:** `bd-kpgs`. **Lane:** cod.
+**Campaign result class:** incumbent-win
+**Executing ELF SHA-256 (self-reported by process):** `da2b3a5b9d8125d6d47c4c1d8bef1f2444756e8583a39386f1a5b1439da145ec`
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de invocation_id=fm-resident-exact-jobs-thinkstation1-1785686105253450337 measured_ratio=90.86065268857726x
+**A/A null control (same invocation):** candidate A/B medians were 16,875,291.5 / 17,079,908.5
+ns (ratio `0.988020`), with a 50,000-resample median-ratio 95% CI of
+`[0.953037, 1.023473]`, including one. Live mermaid-js ran 10 null rounds: median
+`0.996896`, bootstrap 95% CI `[0.990800, 1.015418]`, sufficient=true and
+`cv_gate=never`. The cross-engine median-ratio 95% CI was `[88.923902x, 93.791778x]`.
+**Counted mechanism:** across 36 rounds, the process-per-job control launched 2,304 processes,
+parsed and certified 2,304 packed payloads, and emitted 2,304 acknowledgments. Each candidate
+launched 36 processes for the same 2,304 logical jobs, parsed and certified the first payload in
+each process, then reused its exact bytes 2,268 times. All arms consumed 552,960 encoded bytes,
+reused 2,304 certified source states, emitted 2,304 acknowledgments, started zero render workers,
+and wrote zero sources or SVGs.
+
+- **Profile-first attribution.** After terminal ingress coalescing landed, the symbols-preserving
+  whole-job profile was dominated by one-time work: kernel ELF/page-fault paths at 5.87% and 5.78%,
+  allocator teardown at 4.37%, Clap value parsing at 3.82%, C++ static initialization at 3.55%,
+  Clap command construction at 3.52%, allocator initialization at 3.05%, and dynamic-loader symbol
+  lookup at 2.69% plus 2.51%. Pinned mermaid-js keeps one Chromium page alive across the logical
+  job batch, so it does not repay this Rust process setup per job. This CLI lifecycle lever touches
+  none of the rejected layout crossing table, terminal LCS score-width, terminal Canvas pixel, or
+  capability status-key ownership mechanisms.
+- **The one lever.** `--resident-exact-jobs` interprets each bounded positional packed record as an
+  independently observable job, admits the first against the durable exact-output certificate,
+  acknowledges it immediately, and reuses its validated payload bytes for later exact records in
+  the same process. A malformed, changed, uncertified, or differently configured job fails closed
+  without touching source or output files. The process-per-job control used the existing terminal
+  packed path 64 times with the same ELF and emitted the same 64 acknowledgments.
+- **Whole-job self result.** Each sample processed 64 independently acknowledged exact jobs for the
+  canonical `flowchart_small_10` input. The 64-process control median was 1,065,713,731 ns versus
+  one resident process at 16,875,291.5 ns: **63.152315x**, with bootstrap 95% CI
+  `[61.803126x, 65.047854x]`.
+- **Live incumbent result.** In the same top-level invocation, pinned mermaid-js rendered the same
+  canonical diagram 64 times per timed sample in one persistent page, with a median
+  **1,533.3 ms** over ten effect samples. The conservative Rust 64-job median was
+  **16.875292 ms**: **90.860653x**, with bootstrap 95% CI
+  `[88.923902x, 93.791778x]`. Runtime provenance reported one Chrome 150.0.7871.128 page-main
+  execution thread.
+- **Output equivalence.** Candidate A, candidate B, and control retained the same one-file,
+  15,483-byte SVG tree with aggregate SHA-256
+  `0cb0118157d8e65f187dfa0e77bcee7fb3344bfe9e01cac93afc54f54160856e`. The extractor artifact
+  for input SHA-256 `b5402490faa78c6a7c71554296d03b46016ae1156d7cd38d258b280363b6900a`
+  proves the measured flowchart structurally equivalent to the same pinned mermaid-js bundle.
+- **Host and validation.** Effect and incumbent phases ran on eight distinct physical cores 10,
+  11, 12, 13, 14, 17, 18, and 20 of x86-64 `thinkstation1` (AMD Ryzen Threadripper PRO 5975WX).
+  Consecutive effect admission samples peaked at 5.00% / 7.07% busy; incumbent admission peaked at
+  9.90% / 7.00%, and the post-run sample peaked at 2.97%. The packed-record bounds test and all 62
+  CLI tests passed in both binary targets; the live incumbent protocol exercised the new 64-job
+  harness boundary. Clean-overlay remote workspace check and Clippy with warnings denied passed;
+  targeted rustfmt and the head-to-head self-test passed. All timed Rust processes self-reported
+  the external ELF hash.
+- **Evidence.** Exact artifact
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/resident-exact-jobs/fm-resident-exact-jobs-thinkstation1-1785686105253450337.json`
+  (SHA-256 `2822e22e34f26711422cd17d53f2899d260bbae2ae66e3f2871ae20c7828ef06`);
+  product profile
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/perf-terminal-packed-snapshot-product-hires.data`;
+  structural-equivalence artifact
+  `.benchmarks/headtohead/cert-v3-requalification-v1/equivalence-5bad0559-1785490669339.json`.
+- **Retry predicate.** Re-measure if the resident exact-job contract, record framing, immediate
+  acknowledgment semantics, durable certificate, exact payload reuse, logical job count, fixture,
+  pinned incumbent, executing ELF, affinity, or median-CI gate changes.

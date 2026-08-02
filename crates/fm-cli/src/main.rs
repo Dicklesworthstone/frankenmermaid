@@ -327,7 +327,8 @@ enum Command {
 
         /// Assert that every non-empty final-state stream record is a complete snapshot containing
         /// every batch input. With all three final-only flags, superseded records remain
-        /// length/UTF-8 framed but only the newest snapshot is JSON-decoded and rendered.
+        /// length/UTF-8 framed but only the newest snapshot is JSON-decoded and rendered. Resident
+        /// exact jobs instead acknowledge every certified packed record independently.
         #[arg(long)]
         complete_snapshot_stream: bool,
 
@@ -342,6 +343,16 @@ enum Command {
         /// must already have been discarded because only the completed job is observable.
         #[arg(long, requires = "packed_complete_snapshot_stream")]
         terminal_packed_snapshot: bool,
+
+        /// Replay a sequence of independently observable exact jobs in one resident process.
+        /// Each bounded packed record must match the admitted durable batch certificate and is
+        /// acknowledged immediately; a changed record fails closed without touching outputs.
+        #[arg(
+            long,
+            requires = "packed_complete_snapshot_stream",
+            conflicts_with_all = ["terminal_packed_snapshot", "final_ack_only"]
+        )]
+        resident_exact_jobs: bool,
 
         /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
         #[arg(long, value_enum, default_value = "auto")]
@@ -1997,6 +2008,48 @@ mod batch_render_cache_tests {
     }
 
     #[test]
+    fn packed_snapshot_record_reader_preserves_job_boundaries_and_bounds() {
+        let mut stream = Vec::new();
+        for payload in [b"first".as_slice(), b"second".as_slice()] {
+            stream.extend_from_slice(&u64::try_from(payload.len()).unwrap().to_le_bytes());
+            stream.extend_from_slice(payload);
+        }
+        let mut reader = std::io::Cursor::new(stream);
+        let mut payload = Vec::new();
+        assert!(super::read_packed_snapshot_record(&mut reader, &mut payload, 6, 1).unwrap());
+        assert_eq!(payload, b"first");
+        assert!(super::read_packed_snapshot_record(&mut reader, &mut payload, 6, 2).unwrap());
+        assert_eq!(payload, b"second");
+        assert!(!super::read_packed_snapshot_record(&mut reader, &mut payload, 6, 3).unwrap());
+        assert!(payload.is_empty());
+
+        let mut oversized = Vec::from(7u64.to_le_bytes());
+        oversized.extend_from_slice(b"1234567");
+        let error = super::read_packed_snapshot_record(
+            &mut std::io::Cursor::new(oversized),
+            &mut payload,
+            6,
+            4,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("packed snapshot 4 is 7 bytes"));
+
+        let truncated_header = 5u64.to_le_bytes()[..4].to_vec();
+        let error = super::read_packed_snapshot_record(
+            &mut std::io::Cursor::new(truncated_header),
+            &mut payload,
+            6,
+            5,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("inside its payload-length header")
+        );
+    }
+
+    #[test]
     fn superseded_final_state_updates_keep_only_the_completed_revision() {
         let mut completed = std::collections::BTreeMap::new();
         super::merge_superseded_final_state_updates(
@@ -2819,6 +2872,7 @@ fn main() -> Result<()> {
             complete_snapshot_stream,
             packed_complete_snapshot_stream,
             terminal_packed_snapshot,
+            resident_exact_jobs,
             fnx_mode,
             fnx_projection,
             fnx_fallback,
@@ -2869,11 +2923,15 @@ fn main() -> Result<()> {
                 anyhow::bail!("--final-ack-only cannot be combined with --json");
             }
             if complete_snapshot_stream
-                && !(final_state_stream && final_output_only && final_source_only && final_ack_only)
+                && !(final_state_stream
+                    && final_output_only
+                    && final_source_only
+                    && (final_ack_only || resident_exact_jobs))
             {
                 anyhow::bail!(
                     "--complete-snapshot-stream requires --final-state-stream, \
-                     --final-output-only, --final-source-only, and --final-ack-only"
+                     --final-output-only, --final-source-only, and either --final-ack-only or \
+                     --resident-exact-jobs"
                 );
             }
             if packed_complete_snapshot_stream {
@@ -2884,6 +2942,7 @@ fn main() -> Result<()> {
                     keep_going,
                     json,
                     terminal_packed_snapshot,
+                    resident_exact_jobs,
                     options,
                 )
             } else if final_state_stream {
@@ -4736,6 +4795,41 @@ fn packed_complete_snapshot_payload_limit(inputs: &[String], max_input_bytes: us
         .saturating_mul(inputs.len())
 }
 
+fn read_packed_snapshot_record(
+    reader: &mut impl Read,
+    payload: &mut Vec<u8>,
+    max_payload_bytes: usize,
+    record_ordinal: usize,
+) -> Result<bool> {
+    let mut payload_length = [0u8; std::mem::size_of::<u64>()];
+    let first_length_byte = reader
+        .read(&mut payload_length[..1])
+        .context("cannot read packed snapshot stream")?;
+    if first_length_byte == 0 {
+        payload.clear();
+        return Ok(false);
+    }
+    reader
+        .read_exact(&mut payload_length[1..])
+        .with_context(|| {
+            format!("packed snapshot {record_ordinal} ended inside its payload-length header")
+        })?;
+    let payload_bytes = usize::try_from(u64::from_le_bytes(payload_length)).map_err(|_| {
+        anyhow::anyhow!("packed snapshot payload length does not fit this platform")
+    })?;
+    if payload_bytes > max_payload_bytes {
+        anyhow::bail!(
+            "packed snapshot {record_ordinal} is {payload_bytes} bytes, exceeding the \
+             {max_payload_bytes}-byte transaction limit"
+        );
+    }
+    payload.resize(payload_bytes, 0);
+    reader.read_exact(payload).with_context(|| {
+        format!("packed snapshot {record_ordinal} ended inside its {payload_bytes}-byte payload")
+    })?;
+    Ok(true)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct FinalStateStreamMaterialization {
     outputs_at_eof: bool,
@@ -4801,6 +4895,105 @@ fn render_prepared_final_state_transaction(
     Ok(replayed_total_bytes.is_some())
 }
 
+fn cmd_render_batch_resident_exact_jobs(
+    reader: &mut impl Read,
+    inputs: &[String],
+    out_dir: &str,
+    plan: &BatchRenderPlan,
+    cache_session: &mut BatchRenderCacheSession,
+    max_payload_bytes: usize,
+    max_input_bytes: usize,
+) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    let mut payload = Vec::new();
+    let mut admitted_payload = Vec::new();
+    let mut admitted_source_bytes = 0usize;
+    let mut admitted_output_bytes = 0usize;
+    let mut has_admitted_payload = false;
+    let mut jobs = 0usize;
+    let mut parsed_payloads = 0usize;
+    let mut exact_payload_reuses = 0usize;
+    let mut encoded_payload_bytes = 0usize;
+    let mut logical_source_bytes = 0usize;
+    let mut logical_output_bytes = 0usize;
+
+    while read_packed_snapshot_record(
+        reader,
+        &mut payload,
+        max_payload_bytes,
+        jobs.saturating_add(1),
+    )? {
+        encoded_payload_bytes = encoded_payload_bytes.saturating_add(payload.len());
+        let exact_payload_reuse = has_admitted_payload && payload == admitted_payload;
+        let (source_bytes, output_bytes) = if exact_payload_reuse {
+            exact_payload_reuses = exact_payload_reuses.saturating_add(1);
+            (admitted_source_bytes, admitted_output_bytes)
+        } else {
+            let packed = prepare_packed_complete_batch_final_state_payload(
+                &payload,
+                inputs,
+                max_input_bytes,
+            )
+            .with_context(|| format!("resident exact job {} is invalid", jobs + 1))?;
+            let output_bytes = cache_session
+                .replay_certified_complete_transaction(
+                    plan,
+                    inputs
+                        .iter()
+                        .map(String::as_str)
+                        .zip(packed.source_digests.iter().map(String::as_str)),
+                    true,
+                )
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "resident exact job {} does not match the admitted durable batch \
+                         certificate; outputs were not touched",
+                        jobs + 1
+                    )
+                })?;
+            parsed_payloads = parsed_payloads.saturating_add(1);
+            admitted_source_bytes = packed.total_source_bytes;
+            admitted_output_bytes = output_bytes;
+            admitted_payload.clear();
+            admitted_payload.extend_from_slice(&payload);
+            has_admitted_payload = true;
+            (admitted_source_bytes, admitted_output_bytes)
+        };
+
+        jobs = jobs.saturating_add(1);
+        logical_source_bytes = logical_source_bytes.saturating_add(source_bytes);
+        logical_output_bytes = logical_output_bytes.saturating_add(output_bytes);
+        serde_json::to_writer(
+            &mut stdout,
+            &serde_json::json!({
+                "transactions": 1,
+                "input_lines": 1,
+                "updates": inputs.len(),
+                "source_bytes": source_bytes,
+                "source_bytes_scope": "completed_state",
+                "encoded_payload_bytes": payload.len(),
+                "status": "ok"
+            }),
+        )?;
+        writeln!(stdout)?;
+        stdout.flush()?;
+    }
+
+    cache_session.flush(Path::new(out_dir))?;
+    eprintln!(
+        "replayed {jobs} resident exact job(s), parsed {parsed_payloads} certified payload(s), \
+         reused {exact_payload_reuses} exact payload(s), {encoded_payload_bytes} encoded bytes"
+    );
+    eprintln!(
+        "reused {} certified source state(s), {logical_source_bytes} logical source bytes, \
+         {logical_output_bytes} logical output bytes",
+        jobs.saturating_mul(inputs.len())
+    );
+    eprintln!("materialized 0 source revision(s) and 0 output revision(s) during resident jobs");
+    eprintln!("emitted {jobs} resident job acknowledgment(s)");
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_render_batch_packed_complete_snapshot_stream(
     inputs: &[String],
@@ -4809,6 +5002,7 @@ fn cmd_render_batch_packed_complete_snapshot_stream(
     keep_going: bool,
     json: bool,
     terminal_snapshot: bool,
+    resident_exact_jobs: bool,
     options: RenderCommandOptions<'_>,
 ) -> Result<()> {
     use std::io::{Read, Write};
@@ -4826,6 +5020,17 @@ fn cmd_render_batch_packed_complete_snapshot_stream(
 
     let stdin = io::stdin();
     let mut reader = stdin.lock();
+    if resident_exact_jobs {
+        return cmd_render_batch_resident_exact_jobs(
+            &mut reader,
+            inputs,
+            out_dir,
+            &plan,
+            &mut cache_session,
+            max_payload_bytes,
+            options.max_input_bytes,
+        );
+    }
     let mut transaction = 0usize;
     let mut acknowledged_updates = 0usize;
     let mut acknowledged_source_bytes = 0usize;
@@ -4852,43 +5057,15 @@ fn cmd_render_batch_packed_complete_snapshot_stream(
             encoded_payload_bytes = latest_payload.len();
         }
     } else {
-        loop {
-            let mut payload_length = [0u8; std::mem::size_of::<u64>()];
-            let first_length_byte = reader
-                .read(&mut payload_length[..1])
-                .context("cannot read packed snapshot stream")?;
-            if first_length_byte == 0 {
-                break;
-            }
-            reader
-                .read_exact(&mut payload_length[1..])
-                .with_context(|| {
-                    format!(
-                        "packed snapshot {} ended inside its payload-length header",
-                        transaction + 1
-                    )
-                })?;
-            let payload_bytes =
-                usize::try_from(u64::from_le_bytes(payload_length)).map_err(|_| {
-                    anyhow::anyhow!("packed snapshot payload length does not fit this platform")
-                })?;
-            if payload_bytes > max_payload_bytes {
-                anyhow::bail!(
-                    "packed snapshot {} is {payload_bytes} bytes, exceeding the \
-                     {max_payload_bytes}-byte transaction limit",
-                    transaction + 1
-                );
-            }
-            latest_payload.resize(payload_bytes, 0);
-            reader.read_exact(&mut latest_payload).with_context(|| {
-                format!(
-                    "packed snapshot {} ended inside its {payload_bytes}-byte payload",
-                    transaction + 1
-                )
-            })?;
+        while read_packed_snapshot_record(
+            &mut reader,
+            &mut latest_payload,
+            max_payload_bytes,
+            transaction + 1,
+        )? {
             transaction = transaction.saturating_add(1);
             acknowledged_updates = acknowledged_updates.saturating_add(inputs.len());
-            encoded_payload_bytes = encoded_payload_bytes.saturating_add(payload_bytes);
+            encoded_payload_bytes = encoded_payload_bytes.saturating_add(latest_payload.len());
         }
     }
 

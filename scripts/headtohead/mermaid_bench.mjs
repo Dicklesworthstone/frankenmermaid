@@ -376,7 +376,7 @@ function largestInput(texts) {
 // Runs inside chromium. One timed sample renders every revision of the item in order (a single-shot
 // item has exactly one revision), which is what a live preview does as the user edits. Returns the
 // timings plus every SVG so the driver can validate each one and sum the bytes.
-const PAGE_BENCH = `async ({ texts, reps, warmup, nullReps, tag }) => {
+const PAGE_BENCH = `async ({ texts, reps, warmup, nullReps, tag, jobBatch }) => {
   const m = window.mermaid;
   const out = {
     times: [],
@@ -393,10 +393,17 @@ const PAGE_BENCH = `async ({ texts, reps, warmup, nullReps, tag }) => {
     !svg.includes('aria-roledescription="error"') &&
     !/Syntax error in text/i.test(svg);
   const renderAll = async (suffix) => {
-    const svgs = [];
-    for (let k = 0; k < texts.length; k++) {
-      const r = await m.render(tag + suffix + '_' + k, texts[k]);
-      svgs.push(r.svg);
+    let svgs = [];
+    for (let job = 0; job < jobBatch; job++) {
+      const completed = [];
+      for (let k = 0; k < texts.length; k++) {
+        const r = await m.render(tag + suffix + '_j' + job + '_' + k, texts[k]);
+        if (!plausibleSvg(r.svg)) {
+          throw new Error('invalid SVG in logical job ' + job + ', revision ' + k);
+        }
+        completed.push(r.svg);
+      }
+      svgs = completed;
     }
     return svgs;
   };
@@ -771,6 +778,11 @@ if (!['render', 'parse'].includes(mode)) {
 }
 const parseOnly = mode === 'parse';
 const repsScale = Number(arg('reps-scale', '1'));
+const jobBatch = Number(arg('job-batch', '1'));
+if (!Number.isSafeInteger(jobBatch) || jobBatch < 1) {
+  log(`--job-batch must be a positive safe integer, got ${JSON.stringify(jobBatch)}`);
+  process.exit(2);
+}
 const forceSampleIsolation = has('isolate-samples');
 // Scales every item's `js_budget_ms`. A smoke run wants short budgets; a claim run wants the
 // declared ones. Recorded on every DNF row, because "did not finish" is only meaningful with the
@@ -1185,6 +1197,7 @@ try {
       execution_model: 'single_page_main_thread',
       measurement_mode: mode,
       measurement_boundary: parseOnly ? 'public_parse_validate' : 'parse_layout_render_svg',
+      job_batch: parseOnly ? 1 : jobBatch,
       render_once: renderOnce,
       id: item.id,
       revisions: texts.length,
@@ -1259,7 +1272,7 @@ try {
       // Reserve two renders per A/A round before sizing the real arm. If the declared budget cannot
       // afford a valid null, still attempt one real sample: it can honestly establish a DNF, but a
       // completed timing remains inconclusive and the top-level median-CI gate will reject it.
-      const perSample = Math.max(1, probeMs * texts.length);
+      const perSample = Math.max(1, probeMs * texts.length * jobBatch);
       const left = budgetMs - (Date.now() - t0);
       const affordable = Math.floor(left / perSample);
       if (affordable < 2 * nullReps + 1 + warmup) warmup = 0;
@@ -1278,6 +1291,7 @@ try {
       warmup,
       nullReps,
       tag,
+      jobBatch,
       minSampleMs: PARSE_MIN_SAMPLE_MS,
       calibrationTargetMs: PARSE_CALIBRATION_TARGET_MS,
     };
