@@ -2558,3 +2558,56 @@ every observable output state.
   plan/session lifetime, exact revision key or capacity, output materialization, changed-diagram or
   transaction count, corpus, worker count, or filesystem changes. Promote no competitive claim
   without a same-invocation incumbent null arm.
+
+## KEEP: coalesce resident final-state outputs at EOF (2026-08-02)
+
+**Bead:** `bd-mzzl`. **Lane:** cod.
+**Campaign result class:** maintenance-self-speedup
+**Executing ELF SHA-256 (self-reported by process):** `af91786bc58fd4c5adae43ee45f651f1fc61a48a82c55fe2e60a29124b5286b9`
+**A/A null control (same invocation):** invocation
+`fm-resident-final-state-exact-thinkstation1-1785666213885571322` interleaved all six
+permutations of the resident ordinary-output control/candidate-A/candidate-B arms for 36 whole-job
+rounds per arm. Candidate A/B medians were 84,121,404 / 85,208,775.5 ns (ratio `0.987239`),
+with a 50,000-resample median-ratio 95% CI of `[0.963145, 1.025681]`, including one.
+**Counted mechanism:** every arm processed and acknowledged 32 transactions, rendered the same 32
+first-seen revisions, replayed the same 12,256 exact cached revisions, and performed 512 source
+writes per round. The ordinary resident control also materialized 512 output revisions per round;
+each `--final-output-only` candidate replaced those bytes by destination and materialized only 16
+final outputs at EOF. Across 36 rounds that is 18,432 control output writes versus 576 per
+candidate arm, exactly 32x fewer.
+
+- **Structural gap.** The resident transaction stream preserved every observable render and ACK,
+  but still copied each superseded SVG revision to the filesystem even when its caller explicitly
+  requested only the completed output tree. The existing change-set mode had already proved that a
+  destination-keyed final sink can delete this work; the final-state stream had not exposed it.
+- **Mechanism.** `render-batch --trust-change-set --final-state-stream --final-output-only` now
+  keeps each changed destination's newest immutable output bytes in the process-owned session.
+  Every transaction still parses, applies, renders or replays, and emits its JSON ACK; EOF writes
+  the deterministic final destination set before committing the durable clean certificate. The
+  default resident stream remains unchanged for callers that consume intermediate files.
+- **Whole-job result.** Each round began from an untimed revision-A certificate, then published 32
+  alternating transactions over 16 changed diagrams in the complete 384-diagram repository: 512
+  source updates and 12,288 observable diagram states per arm. Ordinary resident output median was
+  154,483,913.5 ns and candidate-A median was 84,121,404 ns: **1.836440x**, bootstrap 95% CI
+  `[1.563767, 1.923657]`. All arms ended with identical 384-file / 20,685,288-byte output,
+  aggregate SHA-256 `2f528b7b4e19d28b1546dc44513fc01979e2569b41f9d61af9ddd6be275810c2`.
+- **Host admission.** The effect phase ran on eight distinct physical cores 10, 11, 12, 13, 14,
+  17, 18, and 20 of x86-64 `thinkstation1`. Its two consecutive one-second admission samples
+  peaked at 6.1% and 6.9% busy; the pre-incumbent pair peaked at 13.3% and 10.9%. Every first-seen
+  16-diagram revision requested and used eight workers.
+- **Live-incumbent bracket.** The same invocation ran the exact candidate ELF and pinned live
+  mermaid-js 11.15.0 over all 384 diagrams. Mermaid reported 69,522.5 ms render time, one Chrome
+  150.0.7871.128 page-main execution context, input SHA-256
+  `4d9914725224c310b44bd1bb4c03cc18575b6c02ef2350a70b6496470e53b464`, and bundle SHA-256
+  `70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de`. The incumbent arm had no
+  null and the post-incumbent Rust bracket was disturbed, so this row asserts no competitive ratio.
+- **Validation.** Strict clean-overlay remote cache/stream tests passed 15/15 in both CLI binary
+  targets. Workspace-wide remote check and Clippy with warnings denied, targeted rustfmt, staged
+  ledger lint, and UBS completed before landing. External and self-reported executable hashes
+  agreed in every timed arm. Exact artifact SHA-256
+  `9686191180948e0ab39e58b8d36b2b48ddee63728c2f5342834599ceb1d6aaca` at
+  `/data/tmp/fm-bd-nsgu-exact-9Bugn0Py/fm-resident-final-state-exact-thinkstation1-1785666213885571322.json`.
+- **Retry predicate.** Re-measure if callers require intermediate files, render/ACK or EOF crash
+  semantics change, changed-diagram or transaction count changes, revision replay admission,
+  output size, corpus, worker count, or filesystem changes. Promote no competitive claim without a
+  same-invocation incumbent null arm.

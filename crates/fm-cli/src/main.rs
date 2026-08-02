@@ -306,9 +306,9 @@ enum Command {
         final_state_stream: bool,
 
         /// Hold each diagram's newest rendered bytes in memory and materialize only the final
-        /// output tree when the change-set stream reaches EOF. This deletes transient writes for
-        /// build systems that consume only the completed revision transaction.
-        #[arg(long, requires = "change_set_stdin")]
+        /// output tree when the change-set or final-state stream reaches EOF. This deletes
+        /// transient writes for build systems that consume only the completed revision.
+        #[arg(long)]
         final_output_only: bool,
 
         /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
@@ -2135,9 +2135,20 @@ fn main() -> Result<()> {
                 fnx_projection,
                 fnx_fallback,
             };
+            if final_output_only && !change_set_stdin && !final_state_stream {
+                anyhow::bail!(
+                    "--final-output-only requires --change-set-stdin or --final-state-stream"
+                );
+            }
             if final_state_stream {
                 cmd_render_batch_final_state_transaction_stream(
-                    &inputs, &out_dir, jobs, keep_going, json, options,
+                    &inputs,
+                    &out_dir,
+                    jobs,
+                    keep_going,
+                    json,
+                    final_output_only,
+                    options,
                 )
             } else if final_state_stdin {
                 cmd_render_batch_final_state_stream(
@@ -3739,6 +3750,7 @@ fn cmd_render_batch_final_state_transaction_stream(
     jobs: Option<usize>,
     keep_going: bool,
     json: bool,
+    final_output_only: bool,
     options: RenderCommandOptions<'_>,
 ) -> Result<()> {
     use std::io::{BufRead, Read, Write};
@@ -3751,6 +3763,7 @@ fn cmd_render_batch_final_state_transaction_stream(
     let mut cache_session = BatchRenderCacheSession::default();
     let admit_clean_batch = std::env::var_os("FM_DISABLE_DURABLE_BATCH_CERTIFICATE").is_none();
     cache_session.begin_stream(&plan.cache_path, Some(&plan), admit_clean_batch)?;
+    cache_session.defer_output_writes = final_output_only;
 
     let stdin = io::stdin();
     let mut reader = stdin.lock();
@@ -3828,6 +3841,10 @@ fn cmd_render_batch_final_state_transaction_stream(
         )?;
         writeln!(stdout)?;
         stdout.flush()?;
+    }
+    let (outputs, bytes) = cache_session.materialize_deferred_outputs()?;
+    if final_output_only {
+        eprintln!("materialized {outputs} final output(s), {bytes} bytes at stream EOF");
     }
     cache_session.flush(Path::new(out_dir))?;
     eprintln!("applied {transaction} resident final-state transaction(s)");
