@@ -13,8 +13,8 @@
 //! Run via `scripts/headtohead/run.mjs`, not directly.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Instant;
 
 use fm_core::MermaidParseMode;
@@ -309,12 +309,16 @@ fn contiguous_shards(len: usize, threads: usize) -> Vec<Box<[u32]>> {
         .collect()
 }
 
+struct FixedShardState {
+    generation: u64,
+    remaining: usize,
+    shutdown: bool,
+    job: Option<Arc<FixedShardJob>>,
+}
+
 struct FixedShardShared {
-    generation: AtomicU64,
-    remaining: AtomicUsize,
-    shutdown: AtomicBool,
-    job: RwLock<Option<Arc<FixedShardJob>>>,
-    done_lock: Mutex<()>,
+    state: Mutex<FixedShardState>,
+    start: Condvar,
     done: Condvar,
     output_shards: Vec<Mutex<Vec<String>>>,
 }
@@ -322,18 +326,19 @@ struct FixedShardShared {
 struct FixedShardPool {
     threads: usize,
     shared: Arc<FixedShardShared>,
-    dispatch: Mutex<()>,
     handles: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl FixedShardPool {
     fn new(threads: usize) -> Result<Self, String> {
         let shared = Arc::new(FixedShardShared {
-            generation: AtomicU64::new(0),
-            remaining: AtomicUsize::new(0),
-            shutdown: AtomicBool::new(false),
-            job: RwLock::new(None),
-            done_lock: Mutex::new(()),
+            state: Mutex::new(FixedShardState {
+                generation: 0,
+                remaining: 0,
+                shutdown: false,
+                job: None,
+            }),
+            start: Condvar::new(),
             done: Condvar::new(),
             output_shards: (0..threads).map(|_| Mutex::new(Vec::new())).collect(),
         });
@@ -346,11 +351,12 @@ impl FixedShardPool {
             match spawn {
                 Ok(handle) => handles.push(handle),
                 Err(error) => {
-                    shared.shutdown.store(true, Ordering::Release);
-                    shared.generation.fetch_add(1, Ordering::Release);
-                    for handle in &handles {
-                        handle.thread().unpark();
+                    {
+                        let mut state = lock_unpoisoned(&shared.state);
+                        state.shutdown = true;
+                        state.generation = state.generation.wrapping_add(1);
                     }
+                    shared.start.notify_all();
                     for handle in handles {
                         let _ = handle.join();
                     }
@@ -363,42 +369,30 @@ impl FixedShardPool {
         Ok(Self {
             threads,
             shared,
-            dispatch: Mutex::new(()),
             handles,
         })
     }
 
     fn render(&self, job: Arc<FixedShardJob>, sink: &mut Vec<String>) {
-        let _dispatch = lock_unpoisoned(&self.dispatch);
         let output_len = job.texts.len();
         let shards = Arc::clone(&job.shards);
         {
-            let mut active_job = self
-                .shared
-                .job
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *active_job = Some(Arc::clone(&job));
+            let mut state = lock_unpoisoned(&self.shared.state);
+            while state.remaining != 0 {
+                state = wait_unpoisoned(&self.shared.done, state);
+            }
+            state.job = Some(job);
+            state.remaining = self.threads;
+            state.generation = state.generation.wrapping_add(1);
         }
-        self.shared.remaining.store(self.threads, Ordering::Release);
-        self.shared.generation.fetch_add(1, Ordering::Release);
-        for handle in &self.handles {
-            handle.thread().unpark();
-        }
+        self.shared.start.notify_all();
 
         {
-            let mut done = lock_unpoisoned(&self.shared.done_lock);
-            while self.shared.remaining.load(Ordering::Acquire) != 0 {
-                done = wait_unpoisoned(&self.shared.done, done);
+            let mut state = lock_unpoisoned(&self.shared.state);
+            while state.remaining != 0 {
+                state = wait_unpoisoned(&self.shared.done, state);
             }
-        }
-        {
-            let mut active_job = self
-                .shared
-                .job
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *active_job = None;
+            state.job = None;
         }
 
         // Workers own non-contiguous index sets, so results are scattered back to input position.
@@ -411,10 +405,9 @@ impl FixedShardPool {
             };
             let mut produced = lock_unpoisoned(slot);
             for (position, &owned_index) in shard.iter().enumerate() {
-                if let (Some(value), Some(target)) = (
-                    produced.get_mut(position),
-                    sink.get_mut(owned_index as usize),
-                ) {
+                if let (Some(value), Some(target)) =
+                    (produced.get_mut(position), sink.get_mut(owned_index as usize))
+                {
                     *target = std::mem::take(value);
                 }
             }
@@ -425,11 +418,12 @@ impl FixedShardPool {
 
 impl Drop for FixedShardPool {
     fn drop(&mut self) {
-        self.shared.shutdown.store(true, Ordering::Release);
-        self.shared.generation.fetch_add(1, Ordering::Release);
-        for handle in &self.handles {
-            handle.thread().unpark();
+        {
+            let mut state = lock_unpoisoned(&self.shared.state);
+            state.shutdown = true;
+            state.generation = state.generation.wrapping_add(1);
         }
+        self.shared.start.notify_all();
         for handle in self.handles.drain(..) {
             let _ = handle.join();
         }
@@ -441,28 +435,19 @@ fn fixed_shard_worker(worker_index: usize, shared: &FixedShardShared) {
     let mut renderer = SvgBatchRenderer::default();
     let mut parse_scratch = FlowchartBatchParseScratch::default();
     loop {
-        while !shared.shutdown.load(Ordering::Acquire)
-            && shared.generation.load(Ordering::Acquire) == observed_generation
-        {
-            std::thread::park();
-        }
-        if shared.shutdown.load(Ordering::Acquire) {
-            return;
-        }
-        let generation = shared.generation.load(Ordering::Acquire);
-        if generation == observed_generation {
-            continue;
-        }
-        observed_generation = generation;
-        let job = {
-            let active_job = shared
-                .job
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let Some(job) = active_job.as_ref() else {
-                continue;
-            };
-            Arc::clone(job)
+        let (generation, job) = {
+            let mut state = lock_unpoisoned(&shared.state);
+            while !state.shutdown && state.generation == observed_generation {
+                state = wait_unpoisoned(&shared.start, state);
+            }
+            if state.shutdown {
+                return;
+            }
+            observed_generation = state.generation;
+            (
+                state.generation,
+                Arc::clone(state.job.as_ref().expect("active fixed-shard job")),
+            )
         };
 
         let shard: &[u32] = job.shards.get(worker_index).map_or(&[], |list| &**list);
@@ -498,9 +483,12 @@ fn fixed_shard_worker(worker_index: usize, shared: &FixedShardShared) {
         }
         *lock_unpoisoned(&shared.output_shards[worker_index]) = output;
 
-        if shared.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
-            let _done = lock_unpoisoned(&shared.done_lock);
-            shared.done.notify_one();
+        let mut state = lock_unpoisoned(&shared.state);
+        if state.generation == generation {
+            state.remaining = state.remaining.saturating_sub(1);
+            if state.remaining == 0 {
+                shared.done.notify_one();
+            }
         }
     }
 }
