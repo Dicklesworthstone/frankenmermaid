@@ -1201,6 +1201,7 @@ struct BatchRenderCacheSession {
     trusted_batch: Option<TrustedBatchSummary>,
     certified_sources: std::collections::BTreeMap<String, BatchRenderCacheEntry>,
     elide_certified_source_writes: bool,
+    reuse_certified_complete_transaction: bool,
     pressure: OnceLock<Arc<MermaidPressureReport>>,
     reuse_pressure: bool,
     revision_outputs: std::collections::HashMap<String, BatchRevisionOutput>,
@@ -1375,6 +1376,29 @@ impl BatchRenderCacheSession {
         };
         if self.manifest.is_none() {
             return Ok(None);
+        }
+
+        let certified_complete_state = self.reuse_certified_complete_transaction
+            && defer_source_writes
+            && updates.len() == plan.input_indices.len()
+            && self.certified_sources.len() == plan.input_indices.len()
+            && self.deferred_outputs.is_empty()
+            && updates.iter().zip(transaction.source_digests.iter()).all(
+                |((input, _), source_digest)| {
+                    let Some(index) = plan.input_indices.get(input).copied() else {
+                        return false;
+                    };
+                    let Some(certificate) = self.certified_sources.get(input) else {
+                        return false;
+                    };
+                    certificate.source_digest == source_digest.as_str()
+                        && self.manifest.as_ref().and_then(|manifest| {
+                            manifest.entries.get(&plan.destination_names[index])
+                        }) == Some(certificate)
+                },
+            );
+        if certified_complete_state {
+            return Ok(Some(summary.total_bytes));
         }
 
         let mut old_bytes = 0usize;
@@ -2310,9 +2334,26 @@ mod batch_render_cache_tests {
             }),
             certified_sources: [(input.clone(), entry)].into_iter().collect(),
             elide_certified_source_writes: true,
+            trusted_batch: Some(TrustedBatchSummary {
+                plan_key: plan.key.clone(),
+                input_count: 1,
+                total_bytes: 1,
+            }),
+            reuse_complete_revision_transactions: true,
+            reuse_certified_complete_transaction: true,
             ..BatchRenderCacheSession::default()
         };
-        let mut sources = [(input.clone(), "alpha".to_owned())].into_iter().collect();
+        let mut sources = [(input.clone(), "alpha".to_owned())]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let certified_transaction = super::prepare_batch_final_state_updates(sources.clone());
+
+        assert_eq!(
+            session
+                .replay_resident_transaction(&plan, &certified_transaction, true)
+                .unwrap(),
+            Some(1)
+        );
 
         assert_eq!(
             session
@@ -2332,6 +2373,13 @@ mod batch_render_cache_tests {
             .unwrap();
         changed_entry.key = format!("{changed_digest}:options");
         changed_entry.source_digest = changed_digest;
+        let changed_transaction = super::prepare_batch_final_state_updates(sources.clone());
+        assert_eq!(
+            session
+                .replay_resident_transaction(&plan, &changed_transaction, true)
+                .unwrap(),
+            None
+        );
         assert_eq!(
             session
                 .materialize_deferred_sources(&plan, &sources)
@@ -4600,6 +4648,8 @@ fn cmd_render_batch_final_state_transaction_stream(
     cache_session.defer_output_writes = final_output_only;
     cache_session.elide_certified_source_writes = retain_only_latest_complete_snapshot
         && std::env::var_os("FM_DISABLE_CERTIFIED_SOURCE_NOOP").is_none();
+    cache_session.reuse_certified_complete_transaction = retain_only_latest_complete_snapshot
+        && std::env::var_os("FM_DISABLE_CERTIFIED_TRANSACTION_REPLAY").is_none();
 
     let stdin = io::stdin();
     let mut reader = stdin.lock();
