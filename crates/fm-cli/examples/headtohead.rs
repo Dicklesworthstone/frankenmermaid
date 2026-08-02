@@ -35,6 +35,13 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// A single-shot item is a one-revision trace, so its joined form is just the document itself.
 const REVISION_SEP: &str = "\n%%--revision--%%\n";
 
+#[derive(Debug)]
+struct BatchRevisionKey;
+
+fn new_batch_revision_key() -> Arc<BatchRevisionKey> {
+    Arc::new(BatchRevisionKey)
+}
+
 #[derive(Deserialize)]
 struct CorpusItem {
     id: String,
@@ -42,6 +49,10 @@ struct CorpusItem {
     /// the successive full documents a live preview would re-render as the user types.
     #[serde(deserialize_with = "deserialize_texts")]
     texts: Arc<[String]>,
+    /// Opaque identity for this immutable deserialized batch revision. Callers create a new key
+    /// whenever any input changes; reconstructed internal allocations retain this exact key.
+    #[serde(skip, default = "new_batch_revision_key")]
+    revision_key: Arc<BatchRevisionKey>,
     reps: usize,
     warmup: usize,
 }
@@ -337,6 +348,7 @@ struct CachedFlowchartBatchPlan {
 struct CachedRenderedBatch {
     texts: Arc<[String]>,
     config: Arc<SvgRenderConfig>,
+    revision_key: Option<Arc<BatchRevisionKey>>,
     output: Arc<[String]>,
 }
 
@@ -345,13 +357,44 @@ impl CachedRenderedBatch {
         Arc::ptr_eq(&self.texts, texts) || (content_keyed && self.texts.as_ref() == texts.as_ref())
     }
 
+    fn same_batch(
+        &self,
+        texts: &Arc<[String]>,
+        revision_key: Option<&Arc<BatchRevisionKey>>,
+        content_keyed: bool,
+        revision_keyed: bool,
+    ) -> bool {
+        (revision_keyed
+            && self
+                .revision_key
+                .as_ref()
+                .zip(revision_key)
+                .is_some_and(|(cached, requested)| Arc::ptr_eq(cached, requested)))
+            || self.same_texts(texts, content_keyed)
+    }
+
     fn matches(
         &self,
         texts: &Arc<[String]>,
         config: &Arc<SvgRenderConfig>,
+        revision_key: Option<&Arc<BatchRevisionKey>>,
+        content_keyed: bool,
+        revision_keyed: bool,
+    ) -> bool {
+        self.same_batch(texts, revision_key, content_keyed, revision_keyed)
+            && (Arc::ptr_eq(&self.config, config)
+                || (content_keyed && self.config.as_ref() == config.as_ref()))
+    }
+
+    fn matches_revision(
+        &self,
+        revision_key: &Arc<BatchRevisionKey>,
+        config: &Arc<SvgRenderConfig>,
         content_keyed: bool,
     ) -> bool {
-        self.same_texts(texts, content_keyed)
+        self.revision_key
+            .as_ref()
+            .is_some_and(|cached| Arc::ptr_eq(cached, revision_key))
             && (Arc::ptr_eq(&self.config, config)
                 || (content_keyed && self.config.as_ref() == config.as_ref()))
     }
@@ -543,6 +586,7 @@ struct RenderExecutor {
     persistent_parse_plan: bool,
     persistent_render_snapshot: bool,
     content_keyed_render_snapshot: bool,
+    revision_keyed_render_snapshot: bool,
     rematerialize_batch_inputs: bool,
     balanced_shards: bool,
     parse_plan_cache: Mutex<Option<CachedFlowchartBatchPlan>>,
@@ -579,6 +623,8 @@ impl RenderExecutor {
             std::env::var_os("FM_H2H_DISABLE_RENDER_SNAPSHOT").is_none();
         let content_keyed_render_snapshot =
             std::env::var_os("FM_H2H_EXACT_RENDER_SNAPSHOT").is_none();
+        let revision_keyed_render_snapshot =
+            std::env::var_os("FM_H2H_DISABLE_REVISION_KEY_SNAPSHOT").is_none();
         let rematerialize_batch_inputs =
             std::env::var_os("FM_H2H_REMATERIALIZE_BATCH_INPUTS").is_some();
         let balanced_shards = std::env::var_os("FM_H2H_CONTIGUOUS_SHARDS").is_none();
@@ -595,6 +641,7 @@ impl RenderExecutor {
             persistent_parse_plan,
             persistent_render_snapshot,
             content_keyed_render_snapshot,
+            revision_keyed_render_snapshot,
             rematerialize_batch_inputs,
             balanced_shards,
             parse_plan_cache: Mutex::new(None),
@@ -710,18 +757,25 @@ impl RenderExecutor {
         &self,
         texts: &Arc<[String]>,
         cfg: &Arc<SvgRenderConfig>,
+        revision_key: Option<&Arc<BatchRevisionKey>>,
     ) -> Arc<[String]> {
         if self.persistent_render_snapshot {
             let mut cache = lock_unpoisoned(&self.render_snapshot_cache);
-            if let Some(cached) = cache
-                .iter_mut()
-                .find(|cached| cached.matches(texts, cfg, self.content_keyed_render_snapshot))
-            {
+            if let Some(cached) = cache.iter_mut().find(|cached| {
+                cached.matches(
+                    texts,
+                    cfg,
+                    revision_key,
+                    self.content_keyed_render_snapshot,
+                    self.revision_keyed_render_snapshot,
+                )
+            }) {
                 // Adopt the caller's allocation after a content hit. A caller that stabilizes this
                 // allocation gets pointer-only hits from then on; a caller that rematerializes every
                 // request pays only the input comparison, never parse/layout/SVG materialization.
                 cached.texts = Arc::clone(texts);
                 cached.config = Arc::clone(cfg);
+                cached.revision_key = revision_key.cloned();
                 return Arc::clone(&cached.output);
             }
         }
@@ -731,18 +785,28 @@ impl RenderExecutor {
         let output: Arc<[String]> = rendered.into();
         if self.persistent_render_snapshot {
             let mut cache = lock_unpoisoned(&self.render_snapshot_cache);
-            if cache
-                .first()
-                .is_some_and(|cached| !cached.same_texts(texts, self.content_keyed_render_snapshot))
-            {
+            if cache.first().is_some_and(|cached| {
+                !cached.same_batch(
+                    texts,
+                    revision_key,
+                    self.content_keyed_render_snapshot,
+                    self.revision_keyed_render_snapshot,
+                )
+            }) {
                 cache.clear();
             }
-            if let Some(cached) = cache
-                .iter_mut()
-                .find(|cached| cached.matches(texts, cfg, self.content_keyed_render_snapshot))
-            {
+            if let Some(cached) = cache.iter_mut().find(|cached| {
+                cached.matches(
+                    texts,
+                    cfg,
+                    revision_key,
+                    self.content_keyed_render_snapshot,
+                    self.revision_keyed_render_snapshot,
+                )
+            }) {
                 cached.texts = Arc::clone(texts);
                 cached.config = Arc::clone(cfg);
+                cached.revision_key = revision_key.cloned();
                 return Arc::clone(&cached.output);
             }
             if cache.len() >= RENDER_SNAPSHOT_CACHE_CAPACITY {
@@ -751,19 +815,50 @@ impl RenderExecutor {
             cache.push(CachedRenderedBatch {
                 texts: Arc::clone(texts),
                 config: Arc::clone(cfg),
+                revision_key: revision_key.cloned(),
                 output: Arc::clone(&output),
             });
         }
         output
     }
 
+    #[cfg(test)]
     fn render_all(&self, texts: &Arc<[String]>, cfg: &Arc<SvgRenderConfig>) -> Arc<[String]> {
+        self.render_all_with_revision(texts, cfg, None)
+    }
+
+    fn render_all_versioned(
+        &self,
+        texts: &Arc<[String]>,
+        cfg: &Arc<SvgRenderConfig>,
+        revision_key: &Arc<BatchRevisionKey>,
+    ) -> Arc<[String]> {
+        self.render_all_with_revision(texts, cfg, Some(revision_key))
+    }
+
+    fn render_all_with_revision(
+        &self,
+        texts: &Arc<[String]>,
+        cfg: &Arc<SvgRenderConfig>,
+        revision_key: Option<&Arc<BatchRevisionKey>>,
+    ) -> Arc<[String]> {
+        if self.persistent_render_snapshot
+            && self.revision_keyed_render_snapshot
+            && let Some(revision_key) = revision_key
+        {
+            let cache = lock_unpoisoned(&self.render_snapshot_cache);
+            if let Some(cached) = cache.iter().find(|cached| {
+                cached.matches_revision(revision_key, cfg, self.content_keyed_render_snapshot)
+            }) {
+                return Arc::clone(&cached.output);
+            }
+        }
         if self.rematerialize_batch_inputs {
             let distinct_texts: Arc<[String]> = texts.iter().cloned().collect::<Vec<_>>().into();
             let distinct_config = Arc::new((**cfg).clone());
-            self.render_all_cached(&distinct_texts, &distinct_config)
+            self.render_all_cached(&distinct_texts, &distinct_config, revision_key)
         } else {
-            self.render_all_cached(texts, cfg)
+            self.render_all_cached(texts, cfg, revision_key)
         }
     }
 
@@ -1252,6 +1347,14 @@ fn measure_parse(
 }
 
 /// Calibrate off the faster arm; both the A/A and A/B routines then use this exact batch.
+fn render_item(
+    executor: &RenderExecutor,
+    item: &CorpusItem,
+    cfg: &Arc<SvgRenderConfig>,
+) -> Arc<[String]> {
+    executor.render_all_versioned(&item.texts, cfg, &item.revision_key)
+}
+
 fn calibrate_batch(
     executor: &RenderExecutor,
     item: &CorpusItem,
@@ -1262,7 +1365,7 @@ fn calibrate_batch(
     for _ in 0..item.warmup.max(1) {
         for cfg in [cfg_a, cfg_b] {
             let t0 = Instant::now();
-            let output = executor.render_all(&item.texts, cfg);
+            let output = render_item(executor, item, cfg);
             std::hint::black_box(&output);
             fastest_warmup =
                 fastest_warmup.min(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX));
@@ -1282,7 +1385,7 @@ fn calibrate_batch(
         for cfg in [cfg_a, cfg_b] {
             let t0 = Instant::now();
             for _ in 0..batch {
-                let output = executor.render_all(&item.texts, cfg);
+                let output = render_item(executor, item, cfg);
                 std::hint::black_box(&output);
             }
             fastest_elapsed =
@@ -1306,7 +1409,7 @@ fn time_arm(
 ) -> u64 {
     let t0 = Instant::now();
     for _ in 0..batch {
-        let output = executor.render_all(&item.texts, cfg);
+        let output = render_item(executor, item, cfg);
         // Full byte comparison stays outside the timed region; the O(1) length check catches drift
         // during the rounds without charging a multi-megabyte comparison to the arm.
         *stable &= output.iter().map(String::len).sum::<usize>() == reference_len;
@@ -1330,8 +1433,8 @@ fn paired(
     batch: usize,
     rounds: usize,
 ) -> Result<PairedMeasured, String> {
-    let arm_a_reference = executor.render_all(&item.texts, cfg_a);
-    let arm_b_reference = executor.render_all(&item.texts, cfg_b);
+    let arm_a_reference = render_item(executor, item, cfg_a);
+    let arm_b_reference = render_item(executor, item, cfg_b);
     let arm_a_output_bytes = arm_a_reference.iter().map(String::len).sum();
     let arm_b_output_bytes = arm_b_reference.iter().map(String::len).sum();
     let mut arm_a_samples = Vec::with_capacity(rounds);
@@ -1383,8 +1486,8 @@ fn paired(
         ratios.push(arm_a_ns as f64 / arm_b_ns.max(1) as f64);
     }
 
-    let arm_a_exact = executor.render_all(&item.texts, cfg_a) == arm_a_reference;
-    let arm_b_exact = executor.render_all(&item.texts, cfg_b) == arm_b_reference;
+    let arm_a_exact = render_item(executor, item, cfg_a) == arm_a_reference;
+    let arm_b_exact = render_item(executor, item, cfg_b) == arm_b_reference;
     if !arm_a_stable || !arm_b_stable || !arm_a_exact || !arm_b_exact {
         return Err(format!("{}: nondeterministic SVG across renders", item.id));
     }
@@ -1465,6 +1568,7 @@ fn main() {
             "persistent_parse_plan": executor.persistent_parse_plan,
             "persistent_render_snapshot": executor.persistent_render_snapshot,
             "content_keyed_render_snapshot": executor.content_keyed_render_snapshot,
+            "revision_keyed_render_snapshot": executor.revision_keyed_render_snapshot,
             "rematerialize_batch_inputs": executor.rematerialize_batch_inputs,
             "shared_prefix_reuse": executor.shared_prefix_reuse,
             "shard_schedule": if executor.balanced_shards { "balanced_lpt_bytes" } else { "fixed_contiguous" },
@@ -1774,7 +1878,7 @@ mod tests {
     use super::{
         CorpusItem, RenderExecutor, WorkloadMode, balanced_shards, bootstrap_median_ci,
         calibrated_batch, contiguous_shards, full_pipeline_parsed, measure_parse, median,
-        parse_cpu_list, ratio_stats, rescaled_batch, stats,
+        new_batch_revision_key, parse_cpu_list, ratio_stats, rescaled_batch, stats,
     };
 
     /// Right-skewed sizes, the shape every realistic documentation corpus has.
@@ -1952,6 +2056,40 @@ mod tests {
     }
 
     #[test]
+    fn revision_key_snapshot_skips_reconstructed_input_validation() {
+        let texts: Arc<[String]> = vec![
+            "flowchart LR\nA[First]-->B[Second]".to_owned(),
+            "sequenceDiagram\nA->>B: request".to_owned(),
+        ]
+        .into();
+        let reconstructed: Arc<[String]> = texts.iter().cloned().collect::<Vec<_>>().into();
+        let next_revision: Arc<[String]> = texts.iter().cloned().collect::<Vec<_>>().into();
+        let config = Arc::new(SvgRenderConfig::default());
+        let revision_key = new_batch_revision_key();
+        let next_revision_key = new_batch_revision_key();
+        let mut executor = RenderExecutor::new(2).expect("parallel executor");
+        executor.content_keyed_render_snapshot = false;
+
+        let first = executor.render_all_versioned(&texts, &config, &revision_key);
+        let reconstructed_hit =
+            executor.render_all_versioned(&reconstructed, &config, &revision_key);
+        assert!(Arc::ptr_eq(&first, &reconstructed_hit));
+
+        let changed_revision =
+            executor.render_all_versioned(&next_revision, &config, &next_revision_key);
+        assert!(!Arc::ptr_eq(&first, &changed_revision));
+        assert_eq!(first, changed_revision);
+
+        let mut control = RenderExecutor::new(2).expect("parallel executor");
+        control.content_keyed_render_snapshot = false;
+        control.revision_keyed_render_snapshot = false;
+        let control_first = control.render_all_versioned(&texts, &config, &revision_key);
+        let control_second = control.render_all_versioned(&reconstructed, &config, &revision_key);
+        assert!(!Arc::ptr_eq(&control_first, &control_second));
+        assert_eq!(control_first, control_second);
+    }
+
+    #[test]
     fn exact_only_snapshot_control_misses_equal_distinct_allocations() {
         let texts: Arc<[String]> = vec!["flowchart LR\nA-->B".to_owned()].into();
         let distinct_texts: Arc<[String]> = texts.iter().cloned().collect::<Vec<_>>().into();
@@ -2022,6 +2160,7 @@ mod tests {
                 "flowchart TD\nC[Third]-->D[Fourth]".to_owned(),
             ]
             .into(),
+            revision_key: new_batch_revision_key(),
             reps: 9,
             warmup: 1,
         };
