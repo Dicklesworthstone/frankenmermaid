@@ -337,6 +337,12 @@ enum Command {
         #[arg(long, requires = "complete_snapshot_stream")]
         packed_complete_snapshot_stream: bool,
 
+        /// Read one caller-coalesced terminal packed snapshot directly to EOF, without an outer
+        /// record-length header. Requires `--packed-complete-snapshot-stream`; superseded states
+        /// must already have been discarded because only the completed job is observable.
+        #[arg(long, requires = "packed_complete_snapshot_stream")]
+        terminal_packed_snapshot: bool,
+
         /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
         #[arg(long, value_enum, default_value = "auto")]
         fnx_mode: FnxModeArg,
@@ -2812,6 +2818,7 @@ fn main() -> Result<()> {
             final_ack_only,
             complete_snapshot_stream,
             packed_complete_snapshot_stream,
+            terminal_packed_snapshot,
             fnx_mode,
             fnx_projection,
             fnx_fallback,
@@ -2871,7 +2878,13 @@ fn main() -> Result<()> {
             }
             if packed_complete_snapshot_stream {
                 cmd_render_batch_packed_complete_snapshot_stream(
-                    &inputs, &out_dir, jobs, keep_going, json, options,
+                    &inputs,
+                    &out_dir,
+                    jobs,
+                    keep_going,
+                    json,
+                    terminal_packed_snapshot,
+                    options,
                 )
             } else if final_state_stream {
                 cmd_render_batch_final_state_transaction_stream(
@@ -4795,6 +4808,7 @@ fn cmd_render_batch_packed_complete_snapshot_stream(
     jobs: Option<usize>,
     keep_going: bool,
     json: bool,
+    terminal_snapshot: bool,
     options: RenderCommandOptions<'_>,
 ) -> Result<()> {
     use std::io::{Read, Write};
@@ -4817,42 +4831,65 @@ fn cmd_render_batch_packed_complete_snapshot_stream(
     let mut acknowledged_source_bytes = 0usize;
     let mut encoded_payload_bytes = 0usize;
     let mut latest_payload = Vec::new();
-    loop {
-        let mut payload_length = [0u8; std::mem::size_of::<u64>()];
-        let first_length_byte = reader
-            .read(&mut payload_length[..1])
-            .context("cannot read packed snapshot stream")?;
-        if first_length_byte == 0 {
-            break;
+    if terminal_snapshot {
+        let read_limit = u64::try_from(max_payload_bytes)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        (&mut reader)
+            .take(read_limit)
+            .read_to_end(&mut latest_payload)
+            .context("cannot read terminal packed snapshot")?;
+        if latest_payload.len() > max_payload_bytes {
+            anyhow::bail!(
+                "terminal packed snapshot is {} bytes, exceeding the \
+                 {max_payload_bytes}-byte transaction limit",
+                latest_payload.len()
+            );
         }
-        reader
-            .read_exact(&mut payload_length[1..])
-            .with_context(|| {
+        if !latest_payload.is_empty() {
+            transaction = 1;
+            acknowledged_updates = inputs.len();
+            encoded_payload_bytes = latest_payload.len();
+        }
+    } else {
+        loop {
+            let mut payload_length = [0u8; std::mem::size_of::<u64>()];
+            let first_length_byte = reader
+                .read(&mut payload_length[..1])
+                .context("cannot read packed snapshot stream")?;
+            if first_length_byte == 0 {
+                break;
+            }
+            reader
+                .read_exact(&mut payload_length[1..])
+                .with_context(|| {
+                    format!(
+                        "packed snapshot {} ended inside its payload-length header",
+                        transaction + 1
+                    )
+                })?;
+            let payload_bytes =
+                usize::try_from(u64::from_le_bytes(payload_length)).map_err(|_| {
+                    anyhow::anyhow!("packed snapshot payload length does not fit this platform")
+                })?;
+            if payload_bytes > max_payload_bytes {
+                anyhow::bail!(
+                    "packed snapshot {} is {payload_bytes} bytes, exceeding the \
+                     {max_payload_bytes}-byte transaction limit",
+                    transaction + 1
+                );
+            }
+            latest_payload.resize(payload_bytes, 0);
+            reader.read_exact(&mut latest_payload).with_context(|| {
                 format!(
-                    "packed snapshot {} ended inside its payload-length header",
+                    "packed snapshot {} ended inside its {payload_bytes}-byte payload",
                     transaction + 1
                 )
             })?;
-        let payload_bytes = usize::try_from(u64::from_le_bytes(payload_length)).map_err(|_| {
-            anyhow::anyhow!("packed snapshot payload length does not fit this platform")
-        })?;
-        if payload_bytes > max_payload_bytes {
-            anyhow::bail!(
-                "packed snapshot {} is {payload_bytes} bytes, exceeding the \
-                 {max_payload_bytes}-byte transaction limit",
-                transaction + 1
-            );
+            transaction = transaction.saturating_add(1);
+            acknowledged_updates = acknowledged_updates.saturating_add(inputs.len());
+            encoded_payload_bytes = encoded_payload_bytes.saturating_add(payload_bytes);
         }
-        latest_payload.resize(payload_bytes, 0);
-        reader.read_exact(&mut latest_payload).with_context(|| {
-            format!(
-                "packed snapshot {} ended inside its {payload_bytes}-byte payload",
-                transaction + 1
-            )
-        })?;
-        transaction = transaction.saturating_add(1);
-        acknowledged_updates = acknowledged_updates.saturating_add(inputs.len());
-        encoded_payload_bytes = encoded_payload_bytes.saturating_add(payload_bytes);
     }
 
     let mut executed_transactions = 0usize;
@@ -4931,11 +4968,18 @@ fn cmd_render_batch_packed_complete_snapshot_stream(
     let (outputs, bytes) = cache_session.materialize_deferred_outputs()?;
     eprintln!("materialized {outputs} final output(s), {bytes} bytes at stream EOF");
     cache_session.flush(Path::new(out_dir))?;
-    eprintln!(
-        "retained the newest of {transaction} packed complete snapshot payload(s), skipped {} \
-         superseded decode(s), {encoded_payload_bytes} encoded bytes",
-        transaction.saturating_sub(usize::from(transaction > 0))
-    );
+    if terminal_snapshot {
+        eprintln!(
+            "accepted {transaction} terminal packed snapshot payload(s), caller elided \
+             superseded states, {encoded_payload_bytes} encoded bytes"
+        );
+    } else {
+        eprintln!(
+            "retained the newest of {transaction} packed complete snapshot payload(s), skipped {} \
+             superseded decode(s), {encoded_payload_bytes} encoded bytes",
+            transaction.saturating_sub(usize::from(transaction > 0))
+        );
+    }
 
     let mut stdout = io::stdout().lock();
     serde_json::to_writer(
