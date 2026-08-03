@@ -914,16 +914,17 @@ impl RenderExecutor {
         &self,
         texts: &Arc<[String]>,
         cfg: &Arc<SvgRenderConfig>,
-        batch: usize,
     ) -> usize {
         let workers_seen: Arc<[AtomicBool]> = (0..self.threads)
             .map(|_| AtomicBool::new(false))
             .collect::<Vec<_>>()
             .into();
         let mut sink = Vec::with_capacity(texts.len());
-        for _ in 0..batch {
-            self.render_all_observing(texts, cfg, &mut sink, Some(Arc::clone(&workers_seen)));
-        }
+        // One complete batch already assigns every non-empty static shard. Replaying the timing
+        // calibration count cannot reveal another worker, and an O(1) snapshot hit can make that
+        // count hundreds of thousands -- turning an out-of-band provenance check into hours of
+        // deliberately uncached rendering.
+        self.render_all_observing(texts, cfg, &mut sink, Some(Arc::clone(&workers_seen)));
         workers_seen
             .iter()
             .filter(|seen| seen.load(Ordering::Relaxed))
@@ -1756,7 +1757,7 @@ fn main() {
         let batch = calibrate_batch(&executor, item, &default_cfg, &lean_cfg);
         let thread_count_actually_used = executor
             .thread_probe_enabled
-            .then(|| executor.probe_operation_threads(&item.texts, &default_cfg, batch));
+            .then(|| executor.probe_operation_threads(&item.texts, &default_cfg));
         let rounds = item.reps.max(MIN_NULL_ROUNDS);
         let null_run = match paired(&executor, item, &default_cfg, &default_cfg, batch, rounds) {
             Ok(v) => v,
@@ -1849,8 +1850,8 @@ fn main() {
                 "thread_count_requested": executor.threads,
                 "thread_count_actually_used": thread_count_actually_used,
                 "thread_probe": thread_count_actually_used.map(|observed| serde_json::json!({
-                    "method": "instrumented_caller_worker_union_over_exact_workload",
-                    "probe_batch": batch,
+                    "method": "instrumented_caller_worker_union_over_one_exact_workload",
+                    "probe_batch": 1,
                     "caller_workers_observed": observed,
                     "portable_across_isa": true,
                     "inside_timed_region": false,
@@ -2218,8 +2219,8 @@ mod tests {
         let config = Arc::new(SvgRenderConfig::default());
         let scalar = RenderExecutor::new(1).expect("scalar executor");
         let parallel = RenderExecutor::new(2).expect("parallel executor");
-        assert_eq!(scalar.probe_operation_threads(&texts, &config, 2), 1);
-        assert_eq!(parallel.probe_operation_threads(&texts, &config, 2), 2);
+        assert_eq!(scalar.probe_operation_threads(&texts, &config), 1);
+        assert_eq!(parallel.probe_operation_threads(&texts, &config), 2);
     }
 
     #[test]

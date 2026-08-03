@@ -735,9 +735,10 @@ function validRustThreadProvenance(record, requestedThreads) {
     Number.isSafeInteger(observed) &&
     observed >= 1 &&
     observed <= requestedThreads &&
-    record.thread_probe?.method === 'instrumented_caller_worker_union_over_exact_workload' &&
+    record.thread_probe?.method ===
+      'instrumented_caller_worker_union_over_one_exact_workload' &&
     record.thread_probe?.caller_workers_observed === observed &&
-    record.thread_probe?.probe_batch === record.batch &&
+    record.thread_probe?.probe_batch === 1 &&
     record.thread_probe?.inside_timed_region === false &&
     record.oversubscribed === (requestedThreads > record.available_parallelism) &&
     Array.isArray(record.affinity_cpus) &&
@@ -1350,9 +1351,9 @@ if (has('self-test')) {
     affinity_cpus: [0, 1, 2, 3],
     affinity_source: 'linux_proc_status',
     thread_probe: {
-      method: 'instrumented_caller_worker_union_over_exact_workload',
+      method: 'instrumented_caller_worker_union_over_one_exact_workload',
       caller_workers_observed: 3,
-      probe_batch: 7,
+      probe_batch: 1,
       inside_timed_region: false,
     },
   };

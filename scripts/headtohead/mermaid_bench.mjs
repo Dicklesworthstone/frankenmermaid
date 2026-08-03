@@ -968,11 +968,11 @@ async function replaceBrowser() {
  * Browser launch and bundle injection are outside the timed interval but inside the item wall
  * budget. The returned timing still covers every revision, in order, exactly once.
  */
-async function isolatedSample(texts, tag, startedAt, budgetMs) {
+async function isolatedSample(texts, tag, startedAt, budgetMs, jobBatch) {
   await replaceBrowser();
   const res = await evaluateRenderInPage(
     PAGE_BENCH,
-    { texts, reps: 1, warmup: 0, nullReps: 0, tag },
+    { texts, reps: 1, warmup: 0, nullReps: 0, tag, jobBatch },
     remainingBudgetMs(startedAt, budgetMs),
   );
   if (res.exceptionDetails) throw new Error(res.exceptionDetails.text);
@@ -995,18 +995,27 @@ async function isolatedSample(texts, tag, startedAt, budgetMs) {
  * state, but all are children of this one `mermaid_bench.mjs` invocation. Ten null rounds balance
  * the alternating A-first/B-first order exactly.
  */
-async function isolatedBenchmark(texts, reps, nullReps, tag, startedAt, budgetMs, itemId) {
+async function isolatedBenchmark(
+  texts,
+  reps,
+  nullReps,
+  tag,
+  startedAt,
+  budgetMs,
+  itemId,
+  jobBatch,
+) {
   const nullRatios = [];
   let nullChecksumBytes = 0;
   for (let i = 0; i < nullReps; i++) {
     let a;
     let b;
     if (i % 2 === 0) {
-      a = await isolatedSample(texts, `${tag}_null_${i}_a`, startedAt, budgetMs);
-      b = await isolatedSample(texts, `${tag}_null_${i}_b`, startedAt, budgetMs);
+      a = await isolatedSample(texts, `${tag}_null_${i}_a`, startedAt, budgetMs, jobBatch);
+      b = await isolatedSample(texts, `${tag}_null_${i}_b`, startedAt, budgetMs, jobBatch);
     } else {
-      b = await isolatedSample(texts, `${tag}_null_${i}_b`, startedAt, budgetMs);
-      a = await isolatedSample(texts, `${tag}_null_${i}_a`, startedAt, budgetMs);
+      b = await isolatedSample(texts, `${tag}_null_${i}_b`, startedAt, budgetMs, jobBatch);
+      a = await isolatedSample(texts, `${tag}_null_${i}_a`, startedAt, budgetMs, jobBatch);
     }
     nullRatios.push(a.ms / Math.max(Number.EPSILON, b.ms));
     nullChecksumBytes += a.bytes + b.bytes;
@@ -1016,7 +1025,13 @@ async function isolatedBenchmark(texts, reps, nullReps, tag, startedAt, budgetMs
   const times = [];
   let svgs = [];
   for (let i = 0; i < reps; i++) {
-    const measured = await isolatedSample(texts, `${tag}_real_${i}`, startedAt, budgetMs);
+    const measured = await isolatedSample(
+      texts,
+      `${tag}_real_${i}`,
+      startedAt,
+      budgetMs,
+      jobBatch,
+    );
     times.push(measured.ms);
     svgs = measured.svgs;
     log(`real ${itemId}: ${i + 1}/${reps}`);
@@ -1301,7 +1316,16 @@ try {
       if (isolateSamples) {
         out = parseOnly
           ? await isolatedParseBenchmark(texts, reps, nullReps, t0, budgetMs, item.id)
-          : await isolatedBenchmark(texts, reps, nullReps, tag, t0, budgetMs, item.id);
+          : await isolatedBenchmark(
+            texts,
+            reps,
+            nullReps,
+            tag,
+            t0,
+            budgetMs,
+            item.id,
+            jobBatch,
+          );
       } else {
         res = await evaluateInPage(
           parseOnly ? PAGE_PARSE_BENCH : PAGE_BENCH,
