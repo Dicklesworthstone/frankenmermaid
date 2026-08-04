@@ -13,6 +13,26 @@ fn to_cga_point(p: LayoutPoint) -> CgaPoint {
     CgaPoint::new(f64::from(p.x), f64::from(p.y))
 }
 
+#[inline]
+fn routing_inputs_are_valid(start: LayoutPoint, end: LayoutPoint, margin: f32) -> bool {
+    start.x.is_finite()
+        && start.y.is_finite()
+        && end.x.is_finite()
+        && end.y.is_finite()
+        && margin.is_finite()
+        && margin >= 0.0
+}
+
+#[inline]
+fn obstacle_is_valid(obstacle: &LayoutRect) -> bool {
+    obstacle.x.is_finite()
+        && obstacle.y.is_finite()
+        && obstacle.width.is_finite()
+        && obstacle.height.is_finite()
+        && obstacle.width >= 0.0
+        && obstacle.height >= 0.0
+}
+
 /// Check if a line segment intersects any obstacle rectangle.
 ///
 /// Returns true if the segment crosses the obstacle boundary OR is inside it.
@@ -24,11 +44,18 @@ pub fn segment_intersects_obstacles(
     obstacles: &[LayoutRect],
     margin: f32,
 ) -> bool {
+    if !routing_inputs_are_valid(start, end, margin) {
+        return false;
+    }
+
     let seg = CgaLineSegment::new(to_cga_point(start), to_cga_point(end));
     let start_cga = to_cga_point(start);
     let margin_f64 = f64::from(margin);
 
     for obs in obstacles {
+        if !obstacle_is_valid(obs) {
+            continue;
+        }
         // Expand obstacle by margin
         let expanded = CgaRect::new(
             f64::from(obs.x) - margin_f64,
@@ -56,10 +83,17 @@ pub fn find_first_obstacle_intersection(
     obstacles: &[LayoutRect],
     margin: f32,
 ) -> Option<(usize, Vec<LayoutPoint>)> {
+    if !routing_inputs_are_valid(start, end, margin) {
+        return None;
+    }
+
     let seg = CgaLineSegment::new(to_cga_point(start), to_cga_point(end));
     let margin_f64 = f64::from(margin);
 
     for (i, obs) in obstacles.iter().enumerate() {
+        if !obstacle_is_valid(obs) {
+            continue;
+        }
         let expanded = CgaRect::new(
             f64::from(obs.x) - margin_f64,
             f64::from(obs.y) - margin_f64,
@@ -105,6 +139,10 @@ pub fn find_vertical_segment_nudge_by_indices(
     candidate_indices: &[usize],
     margin: f32,
 ) -> Option<f32> {
+    if !routing_inputs_are_valid(segment_start, segment_end, margin) {
+        return None;
+    }
+
     let seg = CgaLineSegment::new(to_cga_point(segment_start), to_cga_point(segment_end));
     let start_cga = to_cga_point(segment_start);
     let margin_f64 = f64::from(margin);
@@ -144,6 +182,10 @@ fn find_vertical_segment_nudge_iter<'a>(
     obstacles: impl IntoIterator<Item = &'a LayoutRect>,
     margin: f32,
 ) -> Option<f32> {
+    if !routing_inputs_are_valid(segment_start, segment_end, margin) {
+        return None;
+    }
+
     let seg = CgaLineSegment::new(to_cga_point(segment_start), to_cga_point(segment_end));
     let start_cga = to_cga_point(segment_start);
     let margin_f64 = f64::from(margin);
@@ -183,6 +225,10 @@ fn vertical_nudge_for_obstacle(
     seg_min_y: f64,
     seg_max_y: f64,
 ) -> Option<f32> {
+    if !obstacle_is_valid(obs) {
+        return None;
+    }
+
     // Cheap AABB rejection before the (expensive) CGA test. The segment lies within its
     // bounding box and `start` within that box, so if the box does not overlap the
     // margin-expanded obstacle the CGA test is guaranteed to report no intersection.
@@ -246,6 +292,10 @@ pub fn find_horizontal_segment_nudge_by_indices(
     candidate_indices: &[usize],
     margin: f32,
 ) -> Option<f32> {
+    if !routing_inputs_are_valid(segment_start, segment_end, margin) {
+        return None;
+    }
+
     let seg = CgaLineSegment::new(to_cga_point(segment_start), to_cga_point(segment_end));
     let start_cga = to_cga_point(segment_start);
     let margin_f64 = f64::from(margin);
@@ -282,6 +332,10 @@ fn find_horizontal_segment_nudge_iter<'a>(
     obstacles: impl IntoIterator<Item = &'a LayoutRect>,
     margin: f32,
 ) -> Option<f32> {
+    if !routing_inputs_are_valid(segment_start, segment_end, margin) {
+        return None;
+    }
+
     let seg = CgaLineSegment::new(to_cga_point(segment_start), to_cga_point(segment_end));
     let start_cga = to_cga_point(segment_start);
     let margin_f64 = f64::from(margin);
@@ -320,6 +374,10 @@ fn horizontal_nudge_for_obstacle(
     seg_min_y: f64,
     seg_max_y: f64,
 ) -> Option<f32> {
+    if !obstacle_is_valid(obs) {
+        return None;
+    }
+
     // Cheap AABB rejection before the (expensive) CGA test.
     let exp_min_x = f64::from(obs.x) - margin_f64;
     let exp_max_x = f64::from(obs.x) + f64::from(obs.width) + margin_f64;
@@ -609,5 +667,55 @@ mod tests {
         // y=25 is 15 from top edge (10) and 15 from bottom edge (40)
         // Equal distance, so should nudge to top edge
         assert!((nudge.unwrap() - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn routing_queries_reject_non_finite_inputs_and_skip_invalid_obstacles() {
+        let valid = LayoutRect {
+            x: 10.0,
+            y: 10.0,
+            width: 20.0,
+            height: 20.0,
+        };
+        let invalid = LayoutRect {
+            x: f32::NAN,
+            ..valid
+        };
+        let start = LayoutPoint { x: 0.0, y: 15.0 };
+        let end = LayoutPoint { x: 50.0, y: 15.0 };
+
+        assert!(!segment_intersects_obstacles(
+            LayoutPoint {
+                x: f32::NAN,
+                ..start
+            },
+            end,
+            &[valid],
+            0.0,
+        ));
+        assert_eq!(
+            find_first_obstacle_intersection(start, end, &[valid], f32::INFINITY),
+            None
+        );
+        assert_eq!(
+            find_vertical_segment_nudge(start, end, &[valid], -1.0),
+            None
+        );
+        assert_eq!(
+            find_horizontal_segment_nudge_by_indices(start, end, &[valid], &[0], f32::NAN),
+            None
+        );
+
+        assert!(segment_intersects_obstacles(
+            start,
+            end,
+            &[invalid, valid],
+            0.0
+        ));
+        assert_eq!(
+            find_first_obstacle_intersection(start, end, &[invalid, valid], 0.0)
+                .map(|(index, _)| index),
+            Some(1)
+        );
     }
 }
