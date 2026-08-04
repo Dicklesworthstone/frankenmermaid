@@ -3247,7 +3247,16 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
     }
 
     let mut statements = Vec::new();
+    let mut handled_non_node_statement = false;
     for statement in split_statements(line) {
+        // Accessibility and styling are extracted from the original input after this parser runs.
+        // They must be handled here too: otherwise the generic node fallback below interns the
+        // directive text as a class node before its actual meaning is extracted.
+        if is_class_non_node_statement(statement) {
+            handled_non_node_statement = true;
+            continue;
+        }
+
         if let Some(ast) = parse_class_assignment_ast(statement) {
             statements.push(ClassStatement::Ast(ast));
             continue;
@@ -3316,7 +3325,39 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
         }
     }
 
-    (!statements.is_empty()).then_some(statements)
+    (!statements.is_empty() || handled_non_node_statement).then_some(statements)
+}
+
+/// Statements that carry class-diagram metadata or interactivity rather than declaring a class.
+///
+/// Their data is either extracted globally (`accTitle`, `accDescr`, `style`, `classDef`) or not
+/// represented by the current IR yet (link/callback/note). Treating any of them as a node is worse
+/// than the graceful unsupported-construct behavior: it changes the diagram's visible topology.
+fn is_class_non_node_statement(statement: &str) -> bool {
+    let statement = trim_fast(statement);
+    let begins_with_whitespace =
+        |value: &str| value.chars().next().is_some_and(char::is_whitespace);
+    let keyword = |name: &str| {
+        statement
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.is_empty() || begins_with_whitespace(rest))
+    };
+    let accessibility = |name: &str| {
+        statement
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with(':') || begins_with_whitespace(rest))
+    };
+
+    accessibility("accTitle")
+        || accessibility("accDescr")
+        || keyword("title")
+        || keyword("style")
+        || keyword("classDef")
+        || keyword("cssClass")
+        || keyword("click")
+        || keyword("link")
+        || keyword("callback")
+        || statement.starts_with("note for ")
 }
 
 fn lower_class_statement(
@@ -9157,19 +9198,17 @@ fn parse_xychart_numeric_values(
 
 fn parse_xychart_axis(raw: &str) -> IrXyAxis {
     let trimmed = raw.trim();
-    if let Some(categories) = bracket_contents(trimmed) {
-        return IrXyAxis {
-            categories: parse_chart_value_list(categories),
-            ..Default::default()
-        };
-    }
-
     let mut axis = IrXyAxis::default();
     let mut remaining = trimmed;
 
     if let Some((label, rest)) = extract_quoted_value(remaining) {
         axis.label = Some(label);
         remaining = rest.trim();
+    }
+
+    if let Some(categories) = bracket_contents(remaining) {
+        axis.categories = parse_chart_value_list(categories);
+        return axis;
     }
 
     if let Some((range_start, range_end)) = parse_axis_range(remaining) {
@@ -13863,6 +13902,28 @@ Rel_Back(db, app, "Responds")"#,
     }
 
     #[test]
+    fn class_directives_do_not_create_phantom_nodes() {
+        let parsed = parse_mermaid(
+            "classDiagram\n\
+             accTitle: Domain model\n\
+             accDescr: Metadata belongs in the diagram, not a class\n\
+             title Domain model\n\
+             style Animal fill:#f9f\n\
+             classDef selected fill:#bbf\n\
+             cssClass Animal selected\n\
+             click Animal href \"https://example.test\"\n\
+             link Animal https://example.test\n\
+             callback Animal inspect\n\
+             note for Animal \"A class note\"\n\
+             class Animal",
+        );
+
+        assert_eq!(parsed.ir.meta.acc_title.as_deref(), Some("Domain model"));
+        assert_eq!(parsed.ir.nodes.len(), 1);
+        assert_eq!(parsed.ir.nodes[0].id, "Animal");
+    }
+
+    #[test]
     fn class_inline_generics_declaration_does_not_open_a_member_block() {
         // `class List~T~` emits BlockStart..End on one line to carry its generics. That
         // trailing End has to close the block, or the following relation is swallowed as a
@@ -14630,6 +14691,16 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(xy_meta.x_axis.categories, vec!["A", "B", "C"]);
         assert_eq!(xy_meta.series[0].kind, IrXySeriesKind::Line);
         assert_eq!(xy_meta.series[0].values, vec![5.0, 15.0, 25.0]);
+    }
+
+    #[test]
+    fn xychart_x_axis_keeps_quoted_label_with_categories() {
+        let input = "xychart-beta\n  x-axis \"Quarter\" [Q1, Q2, Q3]\n  bar [10, 20, 30]";
+        let parsed = parse_mermaid(input);
+        let xy_meta = parsed.ir.xy_chart_meta.as_ref().expect("xy chart meta");
+
+        assert_eq!(xy_meta.x_axis.label.as_deref(), Some("Quarter"));
+        assert_eq!(xy_meta.x_axis.categories, vec!["Q1", "Q2", "Q3"]);
     }
 
     // --- Architecture tests ---
