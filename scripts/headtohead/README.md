@@ -136,6 +136,12 @@ command. During the freeze, validation uses only
 When a benchmark executable is needed locally, Route 1 copies that single file from the assigned
 worker's `.rch-target-<worker>-pool-*` directory instead of retrieving a target tree.
 
+Outside that freeze, an unspecialized local Cargo command uses `target/local` by repository
+configuration. This is intentionally separate from RCH's retrieval tree (`target/`), so local Cargo
+cannot link an RCH-retrieved intermediate artifact. Do not set `CARGO_TARGET_DIR=target` for a local
+build; an explicit `CARGO_TARGET_DIR` or `--target-dir` deliberately overrides that isolation and is
+not valid evidence unless its provenance is independently verified.
+
 There is **no `release-perf` profile** in this workspace. The harness builds and measures
 `--profile release` (workspace `opt-level="z"` with `opt-level=3` overrides on fm-core, fm-parser,
 fm-layout and fm-render-svg), which is what every number here claims. Nothing is mislabeled.

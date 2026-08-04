@@ -1,3 +1,11 @@
+# Local Cargo builds use a dedicated target tree. RCH injects a worker-scoped
+# CARGO_TARGET_DIR for remote builds, but a plain `cargo build` otherwise defaults to
+# `target/`, where RCH may have retrieved worker artifacts. Keeping local intermediates
+# in `target/local` prevents a direct build from reusing those retrieved `.rlib`s.
+# An explicit CARGO_TARGET_DIR or --target-dir remains an intentional override.
+[build]
+target-dir = "target/local"
+
 # Native x86-64 builds target the x86-64-v2 microarchitecture level (SSE4.1/SSSE3/POPCNT/
 # CMPXCHG16B — Intel Nehalem / AMD Bulldozer, ~2009, and the baseline required by modern
 # distros such as RHEL 9). This lets the number-formatting hot path lower round_ties_even()
