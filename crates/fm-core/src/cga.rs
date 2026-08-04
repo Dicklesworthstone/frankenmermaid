@@ -1003,7 +1003,11 @@ impl CgaLineSegment {
 
     /// Find intersection with another line segment.
     ///
-    /// Returns the intersection point if segments cross, None otherwise.
+    /// Returns a deterministic intersection point when the segments meet.
+    ///
+    /// For collinear overlaps, this returns the first overlapping point while
+    /// traversing `self`; this gives routing and hit testing a stable contact
+    /// point even though the geometric intersection is not unique.
     /// Uses parametric line-line intersection.
     #[must_use]
     pub fn intersect(&self, other: &CgaLineSegment) -> Option<CgaPoint> {
@@ -1024,8 +1028,40 @@ impl CgaLineSegment {
 
         let cross = d1x * d2y - d1y * d2x;
         if cross.abs() < f64::EPSILON {
-            // Lines are parallel
-            return None;
+            let offset_cross =
+                (other.start.x - self.start.x) * d1y - (other.start.y - self.start.y) * d1x;
+            if offset_cross.abs() >= f64::EPSILON {
+                return None;
+            }
+
+            let self_length_squared = d1x * d1x + d1y * d1y;
+            let other_length_squared = d2x * d2x + d2y * d2y;
+            if self_length_squared < f64::EPSILON {
+                if other_length_squared < f64::EPSILON {
+                    return (self.start == other.start).then_some(self.start);
+                }
+
+                let other_t = ((self.start.x - other.start.x) * d2x
+                    + (self.start.y - other.start.y) * d2y)
+                    / other_length_squared;
+                return (0.0..=1.0).contains(&other_t).then_some(self.start);
+            }
+
+            let first_other_t = ((other.start.x - self.start.x) * d1x
+                + (other.start.y - self.start.y) * d1y)
+                / self_length_squared;
+            let second_other_t = ((other.end.x - self.start.x) * d1x
+                + (other.end.y - self.start.y) * d1y)
+                / self_length_squared;
+            let overlap_start = first_other_t.min(second_other_t).max(0.0);
+            let overlap_end = first_other_t.max(second_other_t).min(1.0);
+
+            return (overlap_start <= overlap_end).then(|| {
+                CgaPoint::new(
+                    self.start.x + overlap_start * d1x,
+                    self.start.y + overlap_start * d1y,
+                )
+            });
         }
 
         let ox = other.start.x - self.start.x;
@@ -1704,6 +1740,22 @@ mod geometry_tests {
     }
 
     #[test]
+    fn line_segment_intersection_returns_first_collinear_overlap() {
+        let segment = CgaLineSegment::new(CgaPoint::new(0.0, 0.0), CgaPoint::new(4.0, 0.0));
+        let overlapping = CgaLineSegment::new(CgaPoint::new(3.0, 0.0), CgaPoint::new(1.0, 0.0));
+        let touching_point = CgaLineSegment::new(CgaPoint::new(4.0, 0.0), CgaPoint::new(4.0, 0.0));
+
+        assert_eq!(
+            segment.intersect(&overlapping),
+            Some(CgaPoint::new(1.0, 0.0))
+        );
+        assert_eq!(
+            segment.intersect(&touching_point),
+            Some(CgaPoint::new(4.0, 0.0))
+        );
+    }
+
+    #[test]
     fn line_segment_no_intersection_not_crossing() {
         // Lines would cross if extended, but segments don't
         let seg1 = CgaLineSegment::new(CgaPoint::new(0.0, 0.0), CgaPoint::new(1.0, 1.0));
@@ -1792,7 +1844,10 @@ mod geometry_tests {
         let boundary = CgaLineSegment::new(CgaPoint::new(2.0, 0.0), CgaPoint::new(2.0, 0.0));
 
         assert!(circle.intersect_segment(&interior).is_empty());
-        assert_eq!(circle.intersect_segment(&boundary), [CgaPoint::new(2.0, 0.0)]);
+        assert_eq!(
+            circle.intersect_segment(&boundary),
+            [CgaPoint::new(2.0, 0.0)]
+        );
     }
 
     #[test]
