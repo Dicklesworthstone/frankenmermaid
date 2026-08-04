@@ -2897,6 +2897,22 @@ fn e2e_pipeline_xychart_renders_axes_and_mixed_series() {
 }
 
 #[test]
+fn e2e_pipeline_xychart_renders_labeled_category_axis() {
+    let input = "xychart-beta\n  x-axis \"Quarter\" [Q1, Q2, Q3]\n  bar [30, 50, 70]";
+    let parse_result = parse(input);
+    assert!(
+        parse_result.warnings.is_empty(),
+        "xychart should parse cleanly: {:?}",
+        parse_result.warnings
+    );
+
+    let svg = render_svg(&parse_result.ir);
+    assert!(svg.contains("fm-xychart-x-label"));
+    assert!(svg.contains(">Quarter<"));
+    assert!(svg.contains(">Q1<"));
+}
+
+#[test]
 fn e2e_pipeline_block_beta() {
     assert_pipeline_roundtrip(
         "block-beta\n  columns 3\n  a[\"Block A\"]:2\n  b[\"Block B\"]\n  c[\"Block C\"]:3",

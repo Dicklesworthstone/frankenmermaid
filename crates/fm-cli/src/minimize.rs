@@ -101,7 +101,7 @@ pub fn minimize(input: &str, signature: &FailureSignature) -> MinimizeResult {
     }
 
     // Pass 1: Line-level reduction.
-    let mut lines: Vec<&str> = input.lines().collect();
+    let mut lines: Vec<String> = input.lines().map(str::to_owned).collect();
     let mut changed = true;
     while changed {
         changed = false;
@@ -154,6 +154,64 @@ pub fn minimize(input: &str, signature: &FailureSignature) -> MinimizeResult {
         }
     }
 
+    // Pass 3: Apply ddmin to each retained line.  Byte slicing would corrupt
+    // non-ASCII labels, so candidates are built from `char_indices` boundaries.
+    let mut line_index = 0;
+    while line_index < lines.len() && iterations <= 10_000 {
+        let mut granularity = 2;
+        loop {
+            let boundaries: Vec<usize> = lines[line_index]
+                .char_indices()
+                .map(|(index, _)| index)
+                .chain(std::iter::once(lines[line_index].len()))
+                .collect();
+            let char_count = boundaries.len().saturating_sub(1);
+            if char_count == 0 {
+                break;
+            }
+
+            let chunk_size = char_count.div_ceil(granularity);
+            let mut removed_chunk = false;
+            let mut start = 0;
+            while start < char_count {
+                let end = (start + chunk_size).min(char_count);
+                let line = &lines[line_index];
+                let mut candidate_line = String::with_capacity(line.len());
+                candidate_line.push_str(&line[..boundaries[start]]);
+                candidate_line.push_str(&line[boundaries[end]..]);
+
+                let mut candidate = lines.clone();
+                candidate[line_index] = candidate_line;
+                let candidate_input = candidate.join("\n");
+                iterations += 1;
+
+                if test_failure(&candidate_input, signature) {
+                    lines = candidate;
+                    granularity = 2;
+                    removed_chunk = true;
+                    break;
+                }
+
+                if iterations > 10_000 {
+                    break;
+                }
+                start = end;
+            }
+
+            if iterations > 10_000 || removed_chunk {
+                if iterations > 10_000 {
+                    break;
+                }
+                continue;
+            }
+            if granularity >= char_count {
+                break;
+            }
+            granularity = (granularity * 2).min(char_count);
+        }
+        line_index += 1;
+    }
+
     let minimized_input = lines.join("\n");
     let minimized_lines = lines.len();
 
@@ -184,7 +242,10 @@ mod tests {
     fn minimize_preserves_output_contains() {
         let input = "flowchart LR\n  A --> B\n  B --> C\n  C --> D\n  D --> E";
         // The minimized version should still contain node "A".
-        let result = minimize(input, &FailureSignature::OutputContains("\"A\"".to_string()));
+        let result = minimize(
+            input,
+            &FailureSignature::OutputContains("\"A\"".to_string()),
+        );
         assert!(result.minimized_input.contains('A'));
         assert!(result.minimized_lines <= result.original_lines);
     }
@@ -192,9 +253,24 @@ mod tests {
     #[test]
     fn minimize_result_tracks_iterations() {
         let input = "flowchart LR\n  A --> B";
-        let result = minimize(input, &FailureSignature::OutputContains("\"A\"".to_string()));
+        let result = minimize(
+            input,
+            &FailureSignature::OutputContains("\"A\"".to_string()),
+        );
         // Should have done some iterations.
         assert!(result.iterations > 0 || result.minimized_lines == result.original_lines);
+    }
+
+    #[test]
+    fn minimizes_characters_without_splitting_utf8_labels() {
+        let input = "flowchart LR\n  A[éclair] --> B";
+        let signature = FailureSignature::OutputContains("\"A\"".to_string());
+
+        let result = minimize(input, &signature);
+
+        assert!(result.minimized_input.len() < input.len());
+        assert!(result.minimized_input.contains('A'));
+        assert!(test_failure(&result.minimized_input, &signature));
     }
 
     #[test]
