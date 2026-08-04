@@ -1,8 +1,9 @@
 //! Golden snapshot harness for SVG rendering determinism and stability.
 
+use fm_core::{DiagramType, GanttDate};
 use fm_layout::layout_diagram;
 use fm_parser::parse;
-use fm_render_svg::{SvgRenderConfig, render_svg_with_config};
+use fm_render_svg::{render_svg_with_config, SvgRenderConfig};
 use serde::Deserialize;
 use serde_json::json;
 use std::fs;
@@ -286,6 +287,55 @@ fn svg_golden_snapshots_are_stable() {
     for case_id in selected_case_ids() {
         run_case(case_id, bless);
     }
+}
+
+#[test]
+fn gantt_basic_fixture_preserves_task_and_dependency_semantics() {
+    let input_path = golden_dir().join("gantt_basic.mmd");
+    let input = fs::read_to_string(&input_path)
+        .map_err(|err| format!("failed reading {}: {err}", input_path.display()))
+        .expect("read gantt fixture");
+    let parsed = parse(&input);
+    let gantt = parsed
+        .ir
+        .gantt_meta
+        .as_ref()
+        .expect("gantt fixture metadata");
+
+    assert_eq!(parsed.ir.diagram_type, DiagramType::Gantt);
+    assert_eq!(parsed.ir.nodes.len(), 2);
+    assert_eq!(parsed.ir.edges.len(), 1);
+    assert_eq!(gantt.title.as_deref(), Some("Roadmap"));
+    assert_eq!(gantt.sections.len(), 1);
+    assert_eq!(gantt.sections[0].name, "Core");
+    assert_eq!(gantt.tasks.len(), 2);
+    assert_eq!(gantt.tasks[0].task_id.as_deref(), Some("a1"));
+    assert_eq!(
+        gantt.tasks[0].start.as_ref(),
+        Some(&GanttDate::Absolute("2026-01-01".to_string()))
+    );
+    assert_eq!(
+        gantt.tasks[0].end.as_ref(),
+        Some(&GanttDate::DurationDays(3))
+    );
+    assert_eq!(gantt.tasks[1].task_id.as_deref(), Some("a2"));
+    assert_eq!(gantt.tasks[1].depends_on, ["a1"]);
+    assert_eq!(
+        gantt.tasks[1].end.as_ref(),
+        Some(&GanttDate::DurationDays(4))
+    );
+
+    let rendered = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+    assert_eq!(
+        rendered
+            .matches("fm-gantt-task fm-gantt-task-normal")
+            .count(),
+        2,
+        "both Gantt tasks must render as task bars"
+    );
+    assert!(rendered.contains(">Design</text>"));
+    assert!(rendered.contains(">Build</text>"));
+    assert!(rendered.contains("fm-gantt-dependency"));
 }
 
 #[test]
