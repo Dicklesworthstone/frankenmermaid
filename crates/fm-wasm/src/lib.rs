@@ -837,7 +837,10 @@ fn hit_test_layout_edge(
             let distance = segment.distance_to_point(&point);
             let is_closer = match closest {
                 None => true,
-                Some((_, best_distance)) => distance < best_distance,
+                Some((best_edge_index, best_distance)) => {
+                    distance < best_distance
+                        || (distance == best_distance && edge.edge_index < best_edge_index)
+                }
             };
             if distance.is_finite() && distance <= max_distance && is_closer {
                 closest = Some((edge.edge_index, distance));
@@ -1803,6 +1806,39 @@ mod tests {
             None
         );
         assert_eq!(hit_test_layout_edge(&traced.layout, 0.0, 0.0, -1.0), None);
+    }
+
+    #[test]
+    fn cga_edge_hit_testing_breaks_equal_distance_ties_by_edge_index() -> Result<(), &'static str> {
+        let parsed = parse("flowchart LR\nA-->B");
+        let traced = layout_diagram_traced(&parsed.ir);
+        let mut layout = traced.layout;
+        let first_edge = layout
+            .edges
+            .first()
+            .cloned()
+            .ok_or("single-edge flowchart must produce a rendered path")?;
+        let (start, end) = first_edge
+            .points
+            .first()
+            .zip(first_edge.points.get(1))
+            .ok_or("rendered path must contain a segment")?;
+        let expected_edge_index = first_edge.edge_index;
+
+        let mut duplicate = first_edge;
+        duplicate.edge_index = expected_edge_index + 1;
+        layout.edges.push(duplicate);
+        layout.edges.reverse();
+
+        let midpoint = (
+            (f64::from(start.x) + f64::from(end.x)) / 2.0,
+            (f64::from(start.y) + f64::from(end.y)) / 2.0,
+        );
+        assert_eq!(
+            hit_test_layout_edge(&layout, midpoint.0, midpoint.1, 0.01),
+            Some(expected_edge_index)
+        );
+        Ok(())
     }
 
     #[test]
