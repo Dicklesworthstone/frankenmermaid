@@ -1135,12 +1135,13 @@ impl CgaCircle {
         let c = fx * fx + fy * fy - self.radius * self.radius;
 
         let discriminant = b * b - 4.0 * a * c;
-        if discriminant < 0.0 {
+        let discriminant_tolerance = f64::EPSILON * (b * b + (4.0 * a * c).abs()).max(1.0) * 8.0;
+        if discriminant < -discriminant_tolerance {
             return Vec::new();
         }
 
         let mut points = Vec::new();
-        let sqrt_disc = discriminant.sqrt();
+        let sqrt_disc = discriminant.max(0.0).sqrt();
         let t1 = (-b - sqrt_disc) / (2.0 * a);
         let t2 = (-b + sqrt_disc) / (2.0 * a);
 
@@ -1751,6 +1752,17 @@ mod geometry_tests {
         let points = circle.intersect_segment(&seg);
         assert_eq!(points.len(), 1);
         assert!((points[0].y - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn circle_intersect_segment_tangent_with_fractional_coordinates() {
+        let circle = CgaCircle::new(CgaPoint::new(0.2, -0.3), 0.7);
+        let seg = CgaLineSegment::new(CgaPoint::new(-1.4, 0.4), CgaPoint::new(1.8, 0.4));
+        let points = circle.intersect_segment(&seg);
+
+        assert_eq!(points.len(), 1);
+        assert!((points[0].x - 0.2).abs() < 1e-10);
+        assert!((points[0].y - 0.4).abs() < 1e-10);
     }
 
     #[test]
