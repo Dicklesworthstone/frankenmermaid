@@ -988,6 +988,9 @@ impl CgaLineSegment {
     /// Direction vector (normalized).
     #[must_use]
     pub fn direction(&self) -> (f64, f64) {
+        if !self.start.is_finite() || !self.end.is_finite() {
+            return (0.0, 0.0);
+        }
         let dx = self.end.x - self.start.x;
         let dy = self.end.y - self.start.y;
         let len = (dx * dx + dy * dy).sqrt();
@@ -1672,6 +1675,15 @@ mod geometry_tests {
     fn line_segment_length() {
         let seg = CgaLineSegment::new(CgaPoint::new(0.0, 0.0), CgaPoint::new(3.0, 4.0));
         assert!((seg.length() - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn line_segment_direction_rejects_non_finite_endpoints() {
+        let segment = CgaLineSegment::new(
+            CgaPoint::new(f64::NAN, 0.0),
+            CgaPoint::new(f64::INFINITY, 1.0),
+        );
+        assert_eq!(segment.direction(), (0.0, 0.0));
     }
 
     #[test]
