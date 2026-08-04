@@ -9840,11 +9840,18 @@ fn serve_playground_html() -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
                 if (res.ok) {
                     output.innerHTML = data;
                 } else {
-                    output.innerHTML = '<div class="error">' + data + '</div>';
+                    showError(data);
                 }
             } catch (e) {
-                output.innerHTML = '<div class="error">Connection error</div>';
+                showError('Connection error');
             }
+        }
+
+        function showError(message) {
+            const error = document.createElement('div');
+            error.className = 'error';
+            error.textContent = message;
+            output.replaceChildren(error);
         }
 
         input.addEventListener('input', () => {
@@ -9932,7 +9939,7 @@ fn open_browser(url: &str) -> Result<()> {
 
 #[cfg(all(test, feature = "serve"))]
 mod serve_tests {
-    use super::{ServeRoute, serve_route};
+    use super::{ServeRoute, serve_playground_html, serve_route};
     use tiny_http::Method;
 
     #[test]
@@ -9944,6 +9951,19 @@ mod serve_tests {
             ServeRoute::MethodNotAllowed
         );
         assert_eq!(serve_route("/missing", &Method::Get), ServeRoute::NotFound);
+    }
+
+    #[test]
+    fn preview_playground_inserts_render_errors_as_text() -> Result<(), &'static str> {
+        let response = serve_playground_html();
+        let html =
+            String::from_utf8(response.into_data()).map_err(|_| "playground HTML is UTF-8")?;
+
+        assert!(html.contains("function showError(message)"));
+        assert!(html.contains("error.textContent = message;"));
+        assert!(html.contains("output.replaceChildren(error);"));
+        assert!(!html.contains("output.innerHTML = '<div class=\"error\">' + data + '</div>';"));
+        Ok(())
     }
 }
 
