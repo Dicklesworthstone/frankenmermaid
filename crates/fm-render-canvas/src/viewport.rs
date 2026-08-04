@@ -3,6 +3,8 @@
 //! Handles fitting diagrams to canvas dimensions with proper
 //! padding, zoom, and pan support.
 
+use fm_core::cga::TransformStack;
+
 /// A viewport defines the visible area of the diagram.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Viewport {
@@ -97,13 +99,17 @@ impl Viewport {
     /// Get the transform matrix for this viewport.
     #[must_use]
     pub fn transform(&self) -> ViewportTransform {
+        let mut transforms = TransformStack::new();
+        transforms.push_scale(self.zoom);
+        transforms.push_translation(self.offset_x, self.offset_y);
+        let affine = transforms.to_affine_matrix();
         ViewportTransform {
-            a: self.zoom,
-            b: 0.0,
-            c: 0.0,
-            d: self.zoom,
-            e: self.offset_x,
-            f: self.offset_y,
+            a: affine.a,
+            b: affine.c,
+            c: affine.b,
+            d: affine.d,
+            e: affine.tx,
+            f: affine.ty,
         }
     }
 }
@@ -257,6 +263,22 @@ mod tests {
         let (cx, cy) = vp.diagram_to_canvas(100.0, 50.0);
         assert!((cx - 300.0).abs() < 0.001);
         assert!((cy - 150.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn cga_viewport_transform_matches_coordinate_conversion() {
+        let vp = Viewport {
+            offset_x: 100.0,
+            offset_y: 50.0,
+            zoom: 2.0,
+            canvas_width: 800.0,
+            canvas_height: 600.0,
+            device_pixel_ratio: 1.0,
+        };
+
+        let via_viewport = vp.diagram_to_canvas(25.0, 40.0);
+        let via_transform = vp.transform().apply(25.0, 40.0);
+        assert_eq!(via_transform, via_viewport);
     }
 
     #[test]
