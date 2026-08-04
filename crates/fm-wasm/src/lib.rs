@@ -214,6 +214,91 @@ struct PressureConfigOverrides {
     worker_saturation_permille: Option<u16>,
 }
 
+/// A structured-clone-safe request for the browser worker render path.
+///
+/// Configuration stays JSON text so callers can forward the same payload to a
+/// worker without depending on a browser-only `JsValue` representation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerRenderRequest {
+    pub request_id: u64,
+    pub input: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_json: Option<String>,
+}
+
+/// Messages accepted by the dedicated diagram render worker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum WorkerRenderMessage {
+    Render(WorkerRenderRequest),
+    Cancel { request_id: u64 },
+}
+
+/// The action a worker host must perform after receiving a protocol message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkerRenderAction {
+    Start(WorkerRenderRequest),
+    Supersede {
+        cancelled_request_id: u64,
+        next: WorkerRenderRequest,
+    },
+    Cancelled {
+        request_id: u64,
+    },
+    Ignored {
+        request_id: u64,
+    },
+}
+
+/// Tracks the one live worker render so typing updates never publish stale output.
+#[derive(Debug, Default)]
+pub struct WorkerRenderCoordinator {
+    active_request_id: Option<u64>,
+}
+
+impl WorkerRenderCoordinator {
+    /// Applies a message in arrival order and returns the host action.
+    #[must_use]
+    pub fn handle(&mut self, message: WorkerRenderMessage) -> WorkerRenderAction {
+        match message {
+            WorkerRenderMessage::Render(next) => {
+                if let Some(cancelled_request_id) = self.active_request_id.replace(next.request_id)
+                {
+                    WorkerRenderAction::Supersede {
+                        cancelled_request_id,
+                        next,
+                    }
+                } else {
+                    WorkerRenderAction::Start(next)
+                }
+            }
+            WorkerRenderMessage::Cancel { request_id }
+                if self.active_request_id == Some(request_id) =>
+            {
+                self.active_request_id = None;
+                WorkerRenderAction::Cancelled { request_id }
+            }
+            WorkerRenderMessage::Cancel { request_id } => {
+                WorkerRenderAction::Ignored { request_id }
+            }
+        }
+    }
+
+    /// Reports completion only when it belongs to the current request.
+    ///
+    /// A host must discard a `false` result because a newer typing update has
+    /// already replaced that request.
+    pub fn complete(&mut self, request_id: u64) -> bool {
+        if self.active_request_id == Some(request_id) {
+            self.active_request_id = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1409,7 +1494,8 @@ impl Diagram {
 mod tests {
     use super::{
         CanvasConfigOverrides, LayoutRuntimeSummary, PressureConfigOverrides, RuntimeConfig,
-        RuntimeInitConfig, SvgConfigOverrides, ThemePreset, WebRendererKind,
+        RuntimeInitConfig, SvgConfigOverrides, ThemePreset, WebRendererKind, WorkerRenderAction,
+        WorkerRenderCoordinator, WorkerRenderMessage, WorkerRenderRequest,
         align_canvas_typography_with_svg, apply_budget_svg_simplifications,
         apply_canvas_theme_preset, canvas_font_size_px, collect_source_spans, merge_canvas_config,
         merge_pressure_config, merge_renderer_kind, merge_svg_config, read_runtime_config, render,
@@ -1725,6 +1811,56 @@ mod tests {
             merge_renderer_kind(WebRendererKind::WebGpu, None),
             WebRendererKind::WebGpu
         );
+    }
+
+    #[test]
+    fn worker_protocol_supersedes_stale_typing_render_and_rejects_its_completion() {
+        let mut coordinator = WorkerRenderCoordinator::default();
+        let first = WorkerRenderRequest {
+            request_id: 41,
+            input: "flowchart LR\nA-->B".to_string(),
+            config_json: None,
+        };
+        let second = WorkerRenderRequest {
+            request_id: 42,
+            input: "flowchart LR\nA-->C".to_string(),
+            config_json: Some("{\"theme\":\"dark\"}".to_string()),
+        };
+
+        assert_eq!(
+            coordinator.handle(WorkerRenderMessage::Render(first.clone())),
+            WorkerRenderAction::Start(first),
+        );
+        assert_eq!(
+            coordinator.handle(WorkerRenderMessage::Render(second.clone())),
+            WorkerRenderAction::Supersede {
+                cancelled_request_id: 41,
+                next: second,
+            },
+        );
+        assert!(!coordinator.complete(41));
+        assert!(coordinator.complete(42));
+    }
+
+    #[test]
+    fn worker_protocol_cancels_only_the_active_request() {
+        let mut coordinator = WorkerRenderCoordinator::default();
+        let request = WorkerRenderRequest {
+            request_id: 7,
+            input: "flowchart LR\nA-->B".to_string(),
+            config_json: None,
+        };
+        let _ = coordinator.handle(WorkerRenderMessage::Render(request));
+
+        assert_eq!(
+            coordinator.handle(WorkerRenderMessage::Cancel { request_id: 6 }),
+            WorkerRenderAction::Ignored { request_id: 6 },
+        );
+        assert_eq!(
+            coordinator.handle(WorkerRenderMessage::Cancel { request_id: 7 }),
+            WorkerRenderAction::Cancelled { request_id: 7 },
+        );
+        assert!(!coordinator.complete(7));
     }
 
     #[test]
