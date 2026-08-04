@@ -915,14 +915,42 @@ impl CgaPoint {
         self.x.is_finite() && self.y.is_finite()
     }
 
+    /// Embed this Euclidean point as a null vector in the conformal model.
+    ///
+    /// With `e∞ = e+ + e-` and `eo = (e- - e+)/2`, the embedding is
+    /// `x e1 + y e2 + (x² + y²) e∞ / 2 + eo`.
+    #[must_use]
+    pub fn to_multivector(self) -> Multivector {
+        let radius_squared = self.x.mul_add(self.x, self.y * self.y);
+        let mut components = [0.0; 16];
+        components[blade::E1] = self.x;
+        components[blade::E2] = self.y;
+        components[blade::EP] = (radius_squared - 1.0) / 2.0;
+        components[blade::EM] = (radius_squared + 1.0) / 2.0;
+        Multivector { components }
+    }
+
+    /// Conformal inner product with another embedded point.
+    ///
+    /// For finite Euclidean points this is `-distance_squared / 2`.
+    #[must_use]
+    pub fn inner_product(&self, other: &Self) -> f64 {
+        self.to_multivector()
+            .geometric_product(other.to_multivector())
+            .scalar_part()
+    }
+
     /// Squared distance to another point.
     ///
     /// Uses the conformal inner product: d²(P, Q) = -2 * P·Q
     #[must_use]
     pub fn distance_squared(&self, other: &CgaPoint) -> f64 {
-        let dx = self.x - other.x;
-        let dy = self.y - other.y;
-        dx * dx + dy * dy
+        let squared_distance = -2.0 * self.inner_product(other);
+        if squared_distance.is_finite() {
+            squared_distance.max(0.0)
+        } else {
+            squared_distance
+        }
     }
 
     /// Distance to another point.
@@ -1564,6 +1592,16 @@ mod geometry_tests {
         let p1 = CgaPoint::new(0.0, 0.0);
         let p2 = CgaPoint::new(3.0, 4.0);
         assert!((p1.distance(&p2) - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn conformal_point_embedding_is_null_and_encodes_distance() {
+        let origin = CgaPoint::origin();
+        let point = CgaPoint::new(3.0, 4.0);
+
+        assert!(point.to_multivector().norm_squared().abs() < 1e-12);
+        assert!((origin.inner_product(&point) + 12.5).abs() < 1e-12);
+        assert!((origin.distance_squared(&point) - 25.0).abs() < 1e-12);
     }
 
     #[test]
