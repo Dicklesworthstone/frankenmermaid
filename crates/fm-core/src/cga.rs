@@ -1084,6 +1084,10 @@ impl CgaLineSegment {
     /// Find closest point on the segment to a given point.
     #[must_use]
     pub fn closest_point(&self, point: &CgaPoint) -> CgaPoint {
+        if !self.start.is_finite() || !self.end.is_finite() || !point.is_finite() {
+            return CgaPoint::origin();
+        }
+
         let dx = self.end.x - self.start.x;
         let dy = self.end.y - self.start.y;
         let len_sq = dx * dx + dy * dy;
@@ -1101,6 +1105,10 @@ impl CgaLineSegment {
     /// Distance from a point to this line segment.
     #[must_use]
     pub fn distance_to_point(&self, point: &CgaPoint) -> f64 {
+        if !self.start.is_finite() || !self.end.is_finite() || !point.is_finite() {
+            return f64::INFINITY;
+        }
+
         let closest = self.closest_point(point);
         point.distance(&closest)
     }
@@ -1338,6 +1346,10 @@ impl CgaRect {
     /// Closest point on rectangle boundary to a given point.
     #[must_use]
     pub fn closest_boundary_point(&self, point: &CgaPoint) -> CgaPoint {
+        if !self.is_valid() || !point.is_finite() {
+            return CgaPoint::origin();
+        }
+
         let mut closest = self.edges()[0].closest_point(point);
         let mut min_dist_squared = point.distance_squared(&closest);
         let mut min_dist = min_dist_squared.sqrt();
@@ -1797,6 +1809,20 @@ mod geometry_tests {
     }
 
     #[test]
+    fn line_segment_closest_point_and_distance_reject_non_finite_inputs() {
+        let valid = CgaLineSegment::new(CgaPoint::origin(), CgaPoint::new(4.0, 0.0));
+        let invalid = CgaLineSegment::new(
+            CgaPoint::new(f64::NAN, 0.0),
+            CgaPoint::new(4.0, 0.0),
+        );
+
+        assert_eq!(valid.closest_point(&CgaPoint::new(f64::INFINITY, 0.0)), CgaPoint::origin());
+        assert!(valid.distance_to_point(&CgaPoint::new(f64::NAN, 0.0)).is_infinite());
+        assert_eq!(invalid.closest_point(&CgaPoint::origin()), CgaPoint::origin());
+        assert!(invalid.distance_to_point(&CgaPoint::origin()).is_infinite());
+    }
+
+    #[test]
     fn circle_contains_point() {
         let circle = CgaCircle::new(CgaPoint::new(5.0, 5.0), 3.0);
         assert!(circle.contains(&CgaPoint::new(5.0, 5.0))); // center
@@ -1917,6 +1943,14 @@ mod geometry_tests {
         let valid_rect = CgaRect::new(0.0, 0.0, 1.0, 1.0);
         assert!(!valid_rect.contains(&CgaPoint::new(f64::NAN, 0.5)));
         assert!(!valid_rect.contains(&CgaPoint::new(0.5, f64::INFINITY)));
+        assert_eq!(
+            valid_rect.closest_boundary_point(&CgaPoint::new(f64::NAN, 0.5)),
+            CgaPoint::origin()
+        );
+        assert_eq!(
+            invalid_rectangles[0].closest_boundary_point(&CgaPoint::origin()),
+            CgaPoint::origin()
+        );
     }
 
     #[test]
