@@ -684,20 +684,24 @@ impl Drop for ActiveIncrementalStateGuard {
 
 struct ActiveIncrementalSessionGuard {
     session: SharedIncrementalLayoutSession,
+    previous_session: Option<SharedIncrementalLayoutSession>,
+    previous_state: Option<IncrementalCacheState>,
     finished: bool,
 }
 
 impl ActiveIncrementalSessionGuard {
     fn install(session: SharedIncrementalLayoutSession) -> Self {
         let state = session.borrow().state.clone();
-        ACTIVE_INCREMENTAL_SESSION.with(|slot| {
-            *slot.borrow_mut() = Some(Rc::clone(&session));
-        });
-        ACTIVE_INCREMENTAL_STATE.with(|slot| {
-            *slot.borrow_mut() = Some(state);
-        });
+        // An incremental layout can invoke another layout on the same thread through an
+        // extension callback. Preserve that caller's context rather than clearing it when the
+        // nested guard finishes.
+        let previous_session =
+            ACTIVE_INCREMENTAL_SESSION.with(|slot| slot.borrow_mut().replace(Rc::clone(&session)));
+        let previous_state = ACTIVE_INCREMENTAL_STATE.with(|slot| slot.borrow_mut().replace(state));
         Self {
             session,
+            previous_session,
+            previous_state,
             finished: false,
         }
     }
@@ -707,7 +711,10 @@ impl ActiveIncrementalSessionGuard {
             ACTIVE_INCREMENTAL_STATE.with(|slot| slot.borrow_mut().take().unwrap_or_default());
         self.session.borrow_mut().state = state.clone();
         ACTIVE_INCREMENTAL_SESSION.with(|slot| {
-            *slot.borrow_mut() = None;
+            *slot.borrow_mut() = self.previous_session.take();
+        });
+        ACTIVE_INCREMENTAL_STATE.with(|slot| {
+            *slot.borrow_mut() = self.previous_state.take();
         });
         self.finished = true;
         state
@@ -720,10 +727,10 @@ impl Drop for ActiveIncrementalSessionGuard {
             return;
         }
         ACTIVE_INCREMENTAL_SESSION.with(|slot| {
-            *slot.borrow_mut() = None;
+            *slot.borrow_mut() = self.previous_session.take();
         });
         ACTIVE_INCREMENTAL_STATE.with(|slot| {
-            *slot.borrow_mut() = None;
+            *slot.borrow_mut() = self.previous_state.take();
         });
     }
 }
@@ -11937,9 +11944,9 @@ fn egraph_optimized_order_for_rank(
             .cloned()
             .map(crate::egraph_ordering::LayerOrdering::new)
     });
-    let upper_edges =
-        rank.checked_sub(1)
-            .and_then(|upper_rank| layer_edges.get(&(upper_rank, rank)));
+    let upper_edges = rank
+        .checked_sub(1)
+        .and_then(|upper_rank| layer_edges.get(&(upper_rank, rank)));
 
     let lower_ordering = rank.checked_add(1).and_then(|lower_rank| {
         ordering_by_rank
@@ -12796,12 +12803,7 @@ impl RankNeighbourCrossings {
         };
         let lower = match self.lower.as_mut() {
             Some(counter) => counter.count(moving),
-            None => pair_crossings(
-                rank,
-                rank.saturating_add(1),
-                ordering_by_rank,
-                pair_edges,
-            ),
+            None => pair_crossings(rank, rank.saturating_add(1), ordering_by_rank, pair_edges),
         };
         upper.saturating_add(lower)
     }
@@ -15761,6 +15763,30 @@ mod tests {
         assert!(!dependency_query.cache_hit);
         assert_eq!(dependency_query.recomputed_nodes, 0);
         assert_eq!(dependency_query.total_nodes, ir.nodes.len());
+    }
+
+    #[test]
+    fn nested_incremental_session_guard_restores_parent_context() {
+        let parent = Rc::new(RefCell::new(IncrementalLayoutSession::new()));
+        let nested = Rc::new(RefCell::new(IncrementalLayoutSession::new()));
+        let parent_guard = super::ActiveIncrementalSessionGuard::install(Rc::clone(&parent));
+
+        let nested_guard = super::ActiveIncrementalSessionGuard::install(Rc::clone(&nested));
+        let _ = nested_guard.finish();
+
+        super::ACTIVE_INCREMENTAL_SESSION.with(|slot| {
+            let active = slot.borrow();
+            let active = active.as_ref().expect("parent session must be restored");
+            assert!(Rc::ptr_eq(active, &parent));
+        });
+
+        let _ = parent_guard.finish();
+        super::ACTIVE_INCREMENTAL_SESSION.with(|slot| {
+            assert!(
+                slot.borrow().is_none(),
+                "outer guard must clear its context"
+            );
+        });
     }
 
     #[test]

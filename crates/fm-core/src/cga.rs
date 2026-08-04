@@ -1229,10 +1229,23 @@ impl CgaRect {
         }
     }
 
+    fn is_valid(self) -> bool {
+        self.x.is_finite()
+            && self.y.is_finite()
+            && self.width.is_finite()
+            && self.height.is_finite()
+            && self.width >= 0.0
+            && self.height >= 0.0
+            && (self.x + self.width).is_finite()
+            && (self.y + self.height).is_finite()
+    }
+
     /// Check if a point is inside the rectangle.
     #[must_use]
     pub fn contains(&self, point: &CgaPoint) -> bool {
-        point.x >= self.x
+        self.is_valid()
+            && point.is_finite()
+            && point.x >= self.x
             && point.x <= self.x + self.width
             && point.y >= self.y
             && point.y <= self.y + self.height
@@ -1256,6 +1269,10 @@ impl CgaRect {
     /// Find intersection points with a line segment.
     #[must_use]
     pub fn intersect_segment(&self, segment: &CgaLineSegment) -> Vec<CgaPoint> {
+        if !self.is_valid() || !segment.start.is_finite() || !segment.end.is_finite() {
+            return Vec::new();
+        }
+
         let mut points = Vec::new();
         for edge in self.edges() {
             if let Some(p) = segment.intersect(&edge) {
@@ -1760,6 +1777,27 @@ mod geometry_tests {
         assert!(rect.contains(&CgaPoint::new(0.0, 0.0)));
         assert!(rect.contains(&CgaPoint::new(10.0, 10.0)));
         assert!(!rect.contains(&CgaPoint::new(-1.0, 5.0)));
+    }
+
+    #[test]
+    fn rect_queries_reject_invalid_geometry_and_points() {
+        let segment = CgaLineSegment::new(CgaPoint::new(-1.0, 0.5), CgaPoint::new(2.0, 0.5));
+        let invalid_rectangles = [
+            CgaRect::new(f64::NAN, 0.0, 1.0, 1.0),
+            CgaRect::new(0.0, f64::INFINITY, 1.0, 1.0),
+            CgaRect::new(0.0, 0.0, -1.0, 1.0),
+            CgaRect::new(0.0, 0.0, 1.0, -1.0),
+            CgaRect::new(f64::MAX, 0.0, f64::MAX, 1.0),
+        ];
+
+        for rect in invalid_rectangles {
+            assert!(!rect.contains(&CgaPoint::new(0.5, 0.5)));
+            assert!(rect.intersect_segment(&segment).is_empty());
+        }
+
+        let valid_rect = CgaRect::new(0.0, 0.0, 1.0, 1.0);
+        assert!(!valid_rect.contains(&CgaPoint::new(f64::NAN, 0.5)));
+        assert!(!valid_rect.contains(&CgaPoint::new(0.5, f64::INFINITY)));
     }
 
     #[test]

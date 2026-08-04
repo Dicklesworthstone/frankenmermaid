@@ -9166,11 +9166,40 @@ fn bracket_contents(line: &str) -> Option<&str> {
 }
 
 fn parse_chart_value_list(raw: &str) -> Vec<String> {
-    raw.split(',')
-        .map(trim_fast)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.trim_matches('"').trim_matches('\'').to_string())
-        .collect()
+    let mut values = Vec::new();
+    let mut value_start = 0;
+    let mut quote = None;
+    let mut escaped = false;
+
+    for (index, character) in raw.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        match quote {
+            Some(delimiter) if character == delimiter => quote = None,
+            Some(_) => {}
+            None if matches!(character, '\'' | '"') => quote = Some(character),
+            None if character == ',' => {
+                let value = trim_fast(&raw[value_start..index]);
+                if !value.is_empty() {
+                    values.push(value.trim_matches('"').trim_matches('\'').to_string());
+                }
+                value_start = index + character.len_utf8();
+            }
+            None => {}
+        }
+    }
+
+    let value = trim_fast(&raw[value_start..]);
+    if !value.is_empty() {
+        values.push(value.trim_matches('"').trim_matches('\'').to_string());
+    }
+    values
 }
 
 fn parse_xychart_numeric_values(
@@ -14701,6 +14730,15 @@ Rel_Back(db, app, "Responds")"#,
 
         assert_eq!(xy_meta.x_axis.label.as_deref(), Some("Quarter"));
         assert_eq!(xy_meta.x_axis.categories, vec!["Q1", "Q2", "Q3"]);
+    }
+
+    #[test]
+    fn xychart_x_axis_keeps_commas_inside_quoted_categories() {
+        let input = "xychart-beta\n  x-axis [\"North, East\", South]\n  bar [10, 20]";
+        let parsed = parse_mermaid(input);
+        let xy_meta = parsed.ir.xy_chart_meta.as_ref().expect("xy chart meta");
+
+        assert_eq!(xy_meta.x_axis.categories, vec!["North, East", "South"]);
     }
 
     // --- Architecture tests ---
