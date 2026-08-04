@@ -2161,8 +2161,9 @@ fn register_clip_path(
 
 fn scene_transform_value(transform: RenderTransform) -> String {
     // Use direct matrix formatting for bit-identical output.
-    // CGA rotor stack available via cga_transform::render_transform_to_cga()
-    // when rotation extraction or other CGA features are needed.
+    // A fallible CGA rotor conversion is available via
+    // cga_transform::try_render_transform_to_cga() when rotation extraction or other
+    // similarity-transform-only features are needed.
     cga_transform::render_transform_to_svg_matrix(transform)
 }
 

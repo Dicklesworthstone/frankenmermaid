@@ -150,26 +150,55 @@ fn fmt_svg_num(n: f32) -> String {
     }
 }
 
-/// Convert a RenderTransform to a CGA transform stack operation.
+/// Convert a similarity `RenderTransform` to a CGA transform stack operation.
 ///
-/// Use this when you need CGA-specific features (rotation extraction, etc.).
-pub fn render_transform_to_cga(transform: fm_layout::RenderTransform) -> CgaTransformStack {
+/// CGA rotors represent translation, rotation, and uniform positive scale. SVG matrices may also
+/// encode reflection, shear, or non-uniform scale; those have no exact rotor representation, so
+/// they return `None` rather than silently changing the rendered transform.
+#[must_use]
+pub fn try_render_transform_to_cga(
+    transform: fm_layout::RenderTransform,
+) -> Option<CgaTransformStack> {
     let mut stack = CgaTransformStack::new();
     match transform {
         fm_layout::RenderTransform::Matrix { a, b, c, d, e, f } => {
-            // Push the matrix as a single transform
+            if !is_cga_similarity_transform(a, b, c, d, e, f) {
+                return None;
+            }
+            // SVG uses x' = a*x + c*y + e, y' = b*x + d*y + f; AffineMatrix2D stores
+            // x' = a*x + b*y + tx, y' = c*x + d*y + ty.
             let matrix = AffineMatrix2D {
                 a: f64::from(a),
-                b: f64::from(b),
+                b: f64::from(c),
                 tx: f64::from(e),
-                c: f64::from(c),
+                c: f64::from(b),
                 d: f64::from(d),
                 ty: f64::from(f),
             };
             stack.inner.push_matrix(matrix);
         }
     }
-    stack
+    Some(stack)
+}
+
+fn is_cga_similarity_transform(a: f32, b: f32, c: f32, d: f32, e: f32, f: f32) -> bool {
+    const RELATIVE_TOLERANCE: f32 = 0.0001;
+    if ![a, b, c, d, e, f].into_iter().all(f32::is_finite) {
+        return false;
+    }
+
+    let x_axis_squared = a.mul_add(a, b * b);
+    let y_axis_squared = c.mul_add(c, d * d);
+    let scale_squared = x_axis_squared.max(y_axis_squared);
+    if scale_squared <= 0.0 {
+        return false;
+    }
+
+    let tolerance = scale_squared * RELATIVE_TOLERANCE;
+    let orthogonal = a.mul_add(c, b * d).abs() <= tolerance;
+    let equal_scale = (x_axis_squared - y_axis_squared).abs() <= tolerance;
+    let orientation_preserving = a.mul_add(d, -(b * c)) > 0.0;
+    orthogonal && equal_scale && orientation_preserving
 }
 
 #[cfg(test)]
@@ -226,19 +255,60 @@ mod tests {
     }
 
     #[test]
-    fn render_transform_conversion() {
+    fn render_transform_conversion_preserves_svg_axis_order() {
         use fm_layout::RenderTransform;
         let transform = RenderTransform::Matrix {
-            a: 1.0,
-            b: 0.0,
-            c: 0.0,
-            d: 1.0,
+            a: 0.0,
+            b: 1.0,
+            c: -1.0,
+            d: 0.0,
             e: 5.0,
             f: 10.0,
         };
-        let stack = render_transform_to_cga(transform);
-        let (x, y) = stack.apply(0.0, 0.0);
-        assert!((x - 5.0).abs() < 0.001);
-        assert!((y - 10.0).abs() < 0.001);
+        let transformed = try_render_transform_to_cga(transform).map(|stack| stack.apply(1.0, 0.0));
+        assert!(
+            matches!(transformed, Some((x, y)) if (x - 5.0).abs() < 0.001 && (y - 11.0).abs() < 0.001)
+        );
+    }
+
+    #[test]
+    fn render_transform_conversion_rejects_non_rotor_matrices() {
+        use fm_layout::RenderTransform;
+        for transform in [
+            RenderTransform::Matrix {
+                a: 1.0,
+                b: 0.0,
+                c: 0.5,
+                d: 1.0,
+                e: 0.0,
+                f: 0.0,
+            },
+            RenderTransform::Matrix {
+                a: 2.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e: 0.0,
+                f: 0.0,
+            },
+            RenderTransform::Matrix {
+                a: -1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e: 0.0,
+                f: 0.0,
+            },
+            RenderTransform::Matrix {
+                a: f32::NAN,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e: 0.0,
+                f: 0.0,
+            },
+        ] {
+            assert!(try_render_transform_to_cga(transform).is_none());
+        }
     }
 }
