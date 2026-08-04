@@ -160,10 +160,13 @@ pub fn minimize(input: &str, signature: &FailureSignature) -> MinimizeResult {
     while line_index < lines.len() && iterations <= 10_000 {
         let mut granularity = 2;
         loop {
-            let boundaries: Vec<usize> = lines[line_index]
+            let Some(line) = lines.get(line_index) else {
+                break;
+            };
+            let boundaries: Vec<usize> = line
                 .char_indices()
                 .map(|(index, _)| index)
-                .chain(std::iter::once(lines[line_index].len()))
+                .chain(std::iter::once(line.len()))
                 .collect();
             let char_count = boundaries.len().saturating_sub(1);
             if char_count == 0 {
@@ -175,13 +178,25 @@ pub fn minimize(input: &str, signature: &FailureSignature) -> MinimizeResult {
             let mut start = 0;
             while start < char_count {
                 let end = (start + chunk_size).min(char_count);
-                let line = &lines[line_index];
+                let (Some(prefix_end), Some(suffix_start)) =
+                    (boundaries.get(start), boundaries.get(end))
+                else {
+                    break;
+                };
+                let (Some(prefix), Some(suffix)) =
+                    (line.get(..*prefix_end), line.get(*suffix_start..))
+                else {
+                    break;
+                };
                 let mut candidate_line = String::with_capacity(line.len());
-                candidate_line.push_str(&line[..boundaries[start]]);
-                candidate_line.push_str(&line[boundaries[end]..]);
+                candidate_line.push_str(prefix);
+                candidate_line.push_str(suffix);
 
                 let mut candidate = lines.clone();
-                candidate[line_index] = candidate_line;
+                let Some(candidate_slot) = candidate.get_mut(line_index) else {
+                    break;
+                };
+                *candidate_slot = candidate_line;
                 let candidate_input = candidate.join("\n");
                 iterations += 1;
 
@@ -258,7 +273,7 @@ mod tests {
             &FailureSignature::OutputContains("\"A\"".to_string()),
         );
         // Should have done some iterations.
-        assert!(result.iterations > 0 || result.minimized_lines == result.original_lines);
+        assert!(result.iterations > 0);
     }
 
     #[test]
