@@ -46,6 +46,14 @@ mod blade {
     pub const E12PM: usize = 15;
 }
 
+/// Component-to-basis masks in the public grade-major component ordering.
+///
+/// Bit 0 is `e1`, bit 1 is `e2`, bit 2 is `e+`, and bit 3 is `e-`.
+const BLADE_MASKS: [u8; 16] = [0, 1, 2, 4, 8, 3, 5, 9, 6, 10, 12, 7, 11, 13, 14, 15];
+
+/// Basis-mask-to-component lookup for [`BLADE_MASKS`].
+const BLADE_INDEX_BY_MASK: [usize; 16] = [0, 1, 2, 5, 3, 6, 8, 11, 4, 7, 9, 12, 10, 13, 14, 15];
+
 /// A general multivector in R_{3,1} with 16 components.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Multivector {
@@ -123,52 +131,41 @@ impl Multivector {
     /// For rotors (even-grade), this composes transforms.
     #[must_use]
     pub fn geometric_product(self, other: Self) -> Self {
-        // Full 16x16 geometric product via Cayley table for R_{3,1}.
-        // For efficiency, we only compute the terms that contribute.
-        // e+^2 = +1, e-^2 = -1, e1^2 = e2^2 = +1.
-        let a = &self.components;
-        let b = &other.components;
         let mut r = [0.0_f64; 16];
 
-        // This is a simplified computation focusing on the most commonly
-        // used components. Full Cayley table expansion would be 256 terms.
-        // For rotors (even-grade), only even-grade outputs matter.
+        for (lhs_index, &lhs) in self.components.iter().enumerate() {
+            if lhs == 0.0 {
+                continue;
+            }
+            let lhs_mask = BLADE_MASKS[lhs_index];
+            for (rhs_index, &rhs) in other.components.iter().enumerate() {
+                if rhs == 0.0 {
+                    continue;
+                }
+                let rhs_mask = BLADE_MASKS[rhs_index];
+                let mut sign = 1.0;
+                let mut result_mask = lhs_mask;
 
-        // Scalar output: a0*b0 + a1*b1 + a2*b2 + a3*b3 - a4*b4
-        //                - a5*b5 - a6*b6 + a7*b7 - a8*b8 + a9*b9
-        //                + a10*b10 + ...
-        // (This is the full contraction, complex to enumerate)
+                for basis in 0..4 {
+                    let basis_bit = 1_u8 << basis;
+                    if rhs_mask & basis_bit == 0 {
+                        continue;
+                    }
 
-        // For practical use, implement the even-subalgebra product
-        // which is sufficient for rotors.
-        r[blade::SCALAR] = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
-            - a[4] * b[4]
-            - a[5] * b[5]
-            - a[6] * b[6]
-            + a[7] * b[7]
-            - a[8] * b[8]
-            + a[9] * b[9]
-            + a[10] * b[10]
-            - a[11] * b[11]
-            + a[12] * b[12]
-            + a[13] * b[13]
-            + a[14] * b[14]
-            - a[15] * b[15];
+                    let lower_or_equal = (basis_bit << 1) - 1;
+                    if (result_mask & !lower_or_equal).count_ones() % 2 == 1 {
+                        sign = -sign;
+                    }
+                    if basis == 3 && result_mask & basis_bit != 0 {
+                        sign = -sign;
+                    }
+                    result_mask ^= basis_bit;
+                }
 
-        // For a full implementation we'd compute all 16 output components.
-        // For now, focus on the scalar and grade-2 components needed for rotors.
-        // Grade 1 output (needed for sandwich product on vectors):
-        r[blade::E1] = a[0] * b[1] + a[1] * b[0] + a[5] * b[2] - a[2] * b[5] + a[6] * b[3]
-            - a[3] * b[6]
-            - a[7] * b[4]
-            + a[4] * b[7];
-        r[blade::E2] = a[0] * b[2] + a[2] * b[0] - a[5] * b[1] + a[1] * b[5] + a[8] * b[3]
-            - a[3] * b[8]
-            - a[9] * b[4]
-            + a[4] * b[9];
-
-        // Grade 2 output (rotor components):
-        r[blade::E12] = a[0] * b[5] + a[5] * b[0] + a[1] * b[2] - a[2] * b[1];
+                let result_index = BLADE_INDEX_BY_MASK[usize::from(result_mask)];
+                r[result_index] += sign * lhs * rhs;
+            }
+        }
 
         Self { components: r }
     }
