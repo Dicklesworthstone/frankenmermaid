@@ -284,6 +284,23 @@ impl AffineMatrix2D {
     }
 }
 
+/// Recover a positive uniform scale from the `e+∧e-` rotor component.
+///
+/// A dilation rotor stores `sinh(ln(scale) / 2)`, so extracting the scale
+/// requires the inverse hyperbolic sine before exponentiating. Keeping this
+/// conversion in one place prevents transform inspection from disagreeing
+/// with affine conversion.
+#[must_use]
+fn dilation_scale(epm: f64) -> f64 {
+    let half_log_scale = epm.asinh();
+    let scale = (2.0 * half_log_scale).exp();
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    }
+}
+
 /// A CGA rotor representing a rigid transform in 2D.
 ///
 /// Rotors compose via geometric product and apply transforms via
@@ -453,17 +470,7 @@ impl Rotor {
         // Scale factor from e+- component
         // epm = sinh(ln(scale)/2), so we need to recover scale = exp(2 * arsinh(epm))
         // arsinh(x) = ln(x + sqrt(x^2 + 1))
-        let scale_factor = if epm.abs() < 1e-12 {
-            1.0
-        } else {
-            let arsinh_epm = (epm + (epm * epm + 1.0).sqrt()).ln();
-            let scale = (2.0 * arsinh_epm).exp();
-            if scale.is_finite() && scale > 0.0 {
-                scale
-            } else {
-                1.0
-            }
-        };
+        let scale_factor = dilation_scale(epm);
 
         // For combined rotation+scale rotor:
         // s = cos(θ/2) * cosh(ln(scale)/2)
@@ -773,8 +780,7 @@ impl TransformStack {
     /// Get the scale factor of the composed transform.
     #[must_use]
     pub fn scale_factor(&self) -> f64 {
-        let epm = self.composed.components[6];
-        (epm * 2.0).exp()
+        dilation_scale(self.composed.components[6])
     }
 
     /// Apply the composed transform to a 2D point.
@@ -1190,6 +1196,31 @@ mod transform_stack_tests {
         assert!(
             (extracted - angle).abs() < 1e-10,
             "extracted {extracted}, expected {angle}"
+        );
+    }
+
+    #[test]
+    fn transform_stack_scale_factor_recovers_dilation() {
+        let mut stack = TransformStack::new();
+        stack.push_scale(2.0);
+
+        assert!(
+            (stack.scale_factor() - 2.0).abs() < 1e-10,
+            "scale factor should recover the dilation, got {}",
+            stack.scale_factor()
+        );
+    }
+
+    #[test]
+    fn transform_stack_scale_factor_composes_dilations() {
+        let mut stack = TransformStack::new();
+        stack.push_scale(2.0);
+        stack.push_scale(0.5);
+
+        assert!(
+            (stack.scale_factor() - 1.0).abs() < 1e-10,
+            "inverse dilations should compose to identity, got {}",
+            stack.scale_factor()
         );
     }
 
