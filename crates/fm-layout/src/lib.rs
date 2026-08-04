@@ -8313,18 +8313,36 @@ fn radial_leaf_count(
         return cached;
     }
 
-    let node_children = children.of(node_index);
-    let count = if node_children.is_empty() {
-        1
-    } else {
-        node_children
-            .iter()
-            .map(|child| radial_leaf_count(*child, children, memo))
-            .sum::<usize>()
-            .max(1)
-    };
-    memo[node_index] = Some(count);
-    count
+    // A mindmap can have a single branch thousands of levels deep.  Compute the
+    // post-order leaf totals explicitly so untrusted indentation cannot consume
+    // the calling thread's stack.
+    let mut work = vec![(node_index, false)];
+    while let Some((node, children_visited)) = work.pop() {
+        if memo[node].is_some() {
+            continue;
+        }
+
+        let node_children = children.of(node);
+        if node_children.is_empty() {
+            memo[node] = Some(1);
+        } else if children_visited {
+            let count = node_children
+                .iter()
+                .map(|child| memo[*child].unwrap_or(1))
+                .sum::<usize>()
+                .max(1);
+            memo[node] = Some(count);
+        } else {
+            work.push((node, true));
+            for child in node_children.iter().rev() {
+                if memo[*child].is_none() {
+                    work.push((*child, false));
+                }
+            }
+        }
+    }
+
+    memo[node_index].unwrap_or(1)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8340,95 +8358,105 @@ fn assign_radial_angles(
     spacing: LayoutSpacing,
     angles: &mut [f32],
 ) {
-    let children = tree.children.of(node_index);
-    if children.is_empty() {
-        angles[node_index] = f32::midpoint(start_angle, end_angle);
-        return;
+    enum AngleWork {
+        Assign { node: usize, start: f32, end: f32 },
+        Finish { node: usize, start: f32, end: f32 },
     }
 
-    let available = (end_angle - start_angle).max(0.0);
-    if available <= f32::EPSILON {
-        angles[node_index] = start_angle;
-        for child in children {
-            assign_radial_angles(
-                *child,
-                start_angle,
-                start_angle,
-                tree,
-                leaf_counts,
-                node_sizes,
-                radii,
-                depth_offset,
-                spacing,
-                angles,
-            );
+    // Keep the recursive algorithm's pre/post-order semantics, but make the
+    // call stack explicit.  This keeps radial layout safe for 10k-depth
+    // mindmaps while retaining exactly the same child-span calculations.
+    let mut work = vec![AngleWork::Assign {
+        node: node_index,
+        start: start_angle,
+        end: end_angle,
+    }];
+    while let Some(task) = work.pop() {
+        match task {
+            AngleWork::Finish { node, start, end } => {
+                let children = tree.children.of(node);
+                let total_child_angle: f32 = children.iter().map(|child| angles[*child]).sum();
+                angles[node] = total_child_angle / children.len().max(1) as f32;
+                if !angles[node].is_finite() {
+                    angles[node] = f32::midpoint(start, end);
+                }
+            }
+            AngleWork::Assign { node, start, end } => {
+                let children = tree.children.of(node);
+                if children.is_empty() {
+                    angles[node] = f32::midpoint(start, end);
+                    continue;
+                }
+
+                let available = (end - start).max(0.0);
+                if available <= f32::EPSILON {
+                    angles[node] = start;
+                    for child in children.iter().rev() {
+                        work.push(AngleWork::Assign {
+                            node: *child,
+                            start,
+                            end: start,
+                        });
+                    }
+                    continue;
+                }
+
+                let total_child_leaves: usize =
+                    children.iter().map(|child| leaf_counts[*child]).sum();
+                let total_child_leaves = total_child_leaves.max(1);
+                let child_level = tree.depth[node] + depth_offset + 1;
+                let child_radius = radii.get(child_level).copied().unwrap_or(1.0).max(1.0);
+                let required_spans: Vec<f32> = children
+                    .iter()
+                    .map(|child| {
+                        let (width, height) = node_sizes[*child];
+                        (spacing.node_spacing.mul_add(0.35, width.max(height)) / child_radius)
+                            .min(PI)
+                    })
+                    .collect();
+                let required_sum: f32 = required_spans.iter().sum();
+                let mut spans = vec![0.0_f32; children.len()];
+                if required_sum >= available {
+                    for (index, child) in children.iter().enumerate() {
+                        let weight = leaf_counts[*child] as f32 / total_child_leaves as f32;
+                        spans[index] = available * weight;
+                    }
+                } else {
+                    let extra = available - required_sum;
+                    for (index, child) in children.iter().enumerate() {
+                        let weight = leaf_counts[*child] as f32 / total_child_leaves as f32;
+                        spans[index] = required_spans[index] + (extra * weight);
+                    }
+                }
+
+                // Fix floating-point drift so child spans cover the requested range exactly.
+                let assigned: f32 = spans.iter().sum();
+                if let Some(last_span) = spans.last_mut() {
+                    *last_span += available - assigned;
+                }
+
+                let mut child_ranges = Vec::with_capacity(children.len());
+                let mut cursor = start;
+                for (index, child) in children.iter().enumerate() {
+                    let child_end = if index + 1 == children.len() {
+                        end
+                    } else {
+                        cursor + spans[index]
+                    };
+                    child_ranges.push((*child, cursor, child_end));
+                    cursor = child_end;
+                }
+
+                work.push(AngleWork::Finish { node, start, end });
+                for (child, child_start, child_end) in child_ranges.into_iter().rev() {
+                    work.push(AngleWork::Assign {
+                        node: child,
+                        start: child_start,
+                        end: child_end,
+                    });
+                }
+            }
         }
-        return;
-    }
-
-    let total_child_leaves: usize = children.iter().map(|child| leaf_counts[*child]).sum();
-    let total_child_leaves = total_child_leaves.max(1);
-    let child_level = tree.depth[node_index] + depth_offset + 1;
-    let child_radius = radii.get(child_level).copied().unwrap_or(1.0).max(1.0);
-
-    let required_spans: Vec<f32> = children
-        .iter()
-        .map(|child| {
-            let (width, height) = node_sizes[*child];
-            (spacing.node_spacing.mul_add(0.35, width.max(height)) / child_radius).min(PI)
-        })
-        .collect();
-
-    let required_sum: f32 = required_spans.iter().sum();
-    let mut spans = vec![0.0_f32; children.len()];
-    if required_sum >= available {
-        for (index, child) in children.iter().enumerate() {
-            let weight = leaf_counts[*child] as f32 / total_child_leaves as f32;
-            spans[index] = available * weight;
-        }
-    } else {
-        let extra = available - required_sum;
-        for (index, child) in children.iter().enumerate() {
-            let weight = leaf_counts[*child] as f32 / total_child_leaves as f32;
-            spans[index] = required_spans[index] + (extra * weight);
-        }
-    }
-
-    // Fix floating-point drift so child spans cover the requested range exactly.
-    let assigned: f32 = spans.iter().sum();
-    if let Some(last_span) = spans.last_mut() {
-        *last_span += available - assigned;
-    }
-
-    let mut cursor = start_angle;
-    for (index, child) in children.iter().enumerate() {
-        let child_start = cursor;
-        let child_end = if index + 1 == children.len() {
-            end_angle
-        } else {
-            cursor + spans[index]
-        };
-        assign_radial_angles(
-            *child,
-            child_start,
-            child_end,
-            tree,
-            leaf_counts,
-            node_sizes,
-            radii,
-            depth_offset,
-            spacing,
-            angles,
-        );
-        cursor = child_end;
-    }
-
-    let total_child_angle: f32 = children.iter().map(|child| angles[*child]).sum();
-    angles[node_index] = total_child_angle / children.len().max(1) as f32;
-
-    // Guard against NaN from any unexpected numerical instability.
-    if !angles[node_index].is_finite() {
-        angles[node_index] = f32::midpoint(start_angle, end_angle);
     }
 }
 
@@ -18770,6 +18798,38 @@ mod tests {
             let distance = (center.x - root.x).hypot(center.y - root.y);
             assert!(distance > 1.0, "{} should be away from root", node.node_id);
         }
+    }
+
+    #[test]
+    fn radial_layout_handles_ten_thousand_node_chain_on_worker_stack() {
+        let node_count = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let depth = 10_000;
+                let mut ir = MermaidDiagramIr::empty(DiagramType::Mindmap);
+                ir.direction = GraphDirection::TB;
+                for node in 0..depth {
+                    ir.nodes.push(IrNode {
+                        id: format!("node-{node}"),
+                        ..IrNode::default()
+                    });
+                }
+                for node in 0..depth - 1 {
+                    ir.edges.push(IrEdge {
+                        from: IrEndpoint::Node(IrNodeId(node)),
+                        to: IrEndpoint::Node(IrNodeId(node + 1)),
+                        arrow: ArrowType::Arrow,
+                        ..IrEdge::default()
+                    });
+                }
+
+                layout_diagram_radial(&ir).nodes.len()
+            })
+            .expect("spawn radial layout worker")
+            .join()
+            .expect("radial layout should not overflow worker stack");
+
+        assert_eq!(node_count, 10_000);
     }
 
     #[test]
