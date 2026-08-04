@@ -5910,7 +5910,7 @@ fn render_xychart_svg(
     config: &SvgRenderConfig,
     theme: &Theme,
 ) -> SvgDocument {
-    let plot_bounds = xychart_plot_bounds(layout);
+    let plot_bounds = xychart_plot_bounds(layout, xy_chart_meta);
     let plot_x = plot_bounds.x + offset_x;
     let plot_y = plot_bounds.y + offset_y;
     let plot_bottom = plot_y + plot_bounds.height;
@@ -6403,16 +6403,29 @@ fn render_xychart_svg(
     doc
 }
 
-fn xychart_plot_bounds(layout: &DiagramLayout) -> fm_layout::LayoutRect {
+fn xychart_plot_bounds(
+    layout: &DiagramLayout,
+    xy_chart_meta: &IrXyChartMeta,
+) -> fm_layout::LayoutRect {
     const LEFT_MARGIN: f32 = 88.0;
     const TOP_MARGIN: f32 = 84.0;
     const RIGHT_MARGIN: f32 = 36.0;
+    const LEGEND_RIGHT_MARGIN: f32 = 136.0;
     const BOTTOM_MARGIN: f32 = 76.0;
+    let right_margin = if xy_chart_meta
+        .series
+        .iter()
+        .any(|series| series.name.is_some())
+    {
+        LEGEND_RIGHT_MARGIN
+    } else {
+        RIGHT_MARGIN
+    };
 
     fm_layout::LayoutRect {
         x: layout.bounds.x + LEFT_MARGIN,
         y: layout.bounds.y + TOP_MARGIN,
-        width: (layout.bounds.width - LEFT_MARGIN - RIGHT_MARGIN).max(1.0),
+        width: (layout.bounds.width - LEFT_MARGIN - right_margin).max(1.0),
         height: (layout.bounds.height - TOP_MARGIN - BOTTOM_MARGIN).max(1.0),
     }
 }
@@ -15137,6 +15150,23 @@ mod tests {
         assert!(svg.contains("Sales Revenue"));
         assert!(svg.contains(">Jan<"));
         assert!(svg.contains(">Revenue<"));
+    }
+
+    #[test]
+    fn named_xychart_legend_fits_inside_layout_viewport() {
+        let ir = create_xychart_ir();
+        let layout = layout_diagram(&ir);
+        let xy_chart_meta = ir.xy_chart_meta.as_ref().expect("xy chart metadata");
+        let plot_bounds = xychart_plot_bounds(&layout, xy_chart_meta);
+
+        const LEGEND_GAP: f32 = 16.0;
+        const LEGEND_WIDTH: f32 = 120.0;
+        let legend_right = plot_bounds.x + plot_bounds.width + LEGEND_GAP + LEGEND_WIDTH;
+        let viewport_right = layout.bounds.x + layout.bounds.width;
+        assert!(
+            legend_right <= viewport_right,
+            "legend right edge {legend_right} exceeds viewport {viewport_right}"
+        );
     }
 
     #[test]

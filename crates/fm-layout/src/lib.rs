@@ -6591,6 +6591,7 @@ fn layout_diagram_xychart_from_meta(
     const LEFT_MARGIN: f32 = 88.0;
     const TOP_MARGIN: f32 = 84.0;
     const RIGHT_MARGIN: f32 = 36.0;
+    const LEGEND_RIGHT_MARGIN: f32 = 136.0;
     const BOTTOM_MARGIN: f32 = 76.0;
     const PLOT_HEIGHT: f32 = 320.0;
     const MIN_PLOT_WIDTH: f32 = 240.0;
@@ -6599,6 +6600,15 @@ fn layout_diagram_xychart_from_meta(
 
     let category_count = xy_chart_category_count(xy_chart_meta).max(1);
     let plot_width = (category_count as f32 * CATEGORY_STEP).max(MIN_PLOT_WIDTH);
+    let right_margin = if xy_chart_meta
+        .series
+        .iter()
+        .any(|series| series.name.is_some())
+    {
+        LEGEND_RIGHT_MARGIN
+    } else {
+        RIGHT_MARGIN
+    };
     let plot_bounds = LayoutRect {
         x: LEFT_MARGIN,
         y: TOP_MARGIN,
@@ -6608,7 +6618,7 @@ fn layout_diagram_xychart_from_meta(
     let bounds = LayoutRect {
         x: 0.0,
         y: 0.0,
-        width: LEFT_MARGIN + plot_width + RIGHT_MARGIN,
+        width: LEFT_MARGIN + plot_width + right_margin,
         height: TOP_MARGIN + PLOT_HEIGHT + BOTTOM_MARGIN,
     };
 
