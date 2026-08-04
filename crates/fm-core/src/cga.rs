@@ -715,6 +715,8 @@ pub struct TransformStack {
     composed: Rotor,
     /// Stack of individual rotors for pop support.
     stack: Vec<Rotor>,
+    /// Composed state immediately before each pushed rotor.
+    previous_composed: Vec<Rotor>,
 }
 
 impl Default for TransformStack {
@@ -730,6 +732,7 @@ impl TransformStack {
         Self {
             composed: Rotor::identity(),
             stack: Vec::new(),
+            previous_composed: Vec::new(),
         }
     }
 
@@ -753,6 +756,7 @@ impl TransformStack {
 
     /// Push a raw rotor onto the stack.
     pub fn push_rotor(&mut self, rotor: Rotor) {
+        self.previous_composed.push(self.composed);
         self.composed = self.composed.compose(rotor);
         self.stack.push(rotor);
     }
@@ -767,11 +771,8 @@ impl TransformStack {
     ///
     /// Returns `true` if a transform was popped, `false` if the stack was empty.
     pub fn pop(&mut self) -> bool {
-        if let Some(rotor) = self.stack.pop() {
-            // Multiply by the inverse to undo the transform
-            // For normalized rotors, inverse = reverse
-            // For scale rotors, inverse = reverse / norm_squared
-            self.composed = self.composed.compose(rotor.inverse());
+        if self.stack.pop().is_some() {
+            self.composed = self.previous_composed.pop().unwrap_or_else(Rotor::identity);
             true
         } else {
             false
@@ -846,6 +847,7 @@ impl TransformStack {
     pub fn reset(&mut self) {
         self.composed = Rotor::identity();
         self.stack.clear();
+        self.previous_composed.clear();
     }
 
     /// Convert to SVG transform attribute string.
@@ -1473,6 +1475,20 @@ mod transform_stack_tests {
         let (x, y) = stack.apply(5.0, 7.0);
         assert!((x - 5.0).abs() < 1e-9, "After pop x: {x}");
         assert!((y - 7.0).abs() < 1e-9, "After pop y: {y}");
+    }
+
+    #[test]
+    fn transform_stack_pop_restores_exact_state_for_raw_rotors() {
+        let raw_rotor = Rotor {
+            components: [1.0, 0.0, 2.0, 0.0, 0.0, 3.0, 0.0, 0.0],
+        };
+        let mut stack = TransformStack::new();
+        let before_push = stack.rotor();
+
+        stack.push_rotor(raw_rotor);
+        assert!(stack.pop());
+        assert_eq!(stack.rotor().components, before_push.components);
+        assert!(stack.is_empty());
     }
 
     #[test]
