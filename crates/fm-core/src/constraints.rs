@@ -22,7 +22,199 @@
 //! to satisfy them, falling back to soft constraints (penalties) when hard constraints
 //! conflict.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
+
+/// A node position supplied as an example for constraint synthesis.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ConstraintExamplePosition {
+    /// Horizontal coordinate in layout units.
+    pub x: f32,
+    /// Vertical coordinate in layout units.
+    pub y: f32,
+}
+
+/// A user-provided layout example used by the CEGIS constraint synthesizer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConstraintExample {
+    /// Positions keyed by the stable Mermaid node identifier.
+    pub positions: BTreeMap<String, ConstraintExamplePosition>,
+}
+
+/// A candidate relation that a later layout example disproved.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConstraintCounterexample {
+    /// Index of the example that refuted the candidate.
+    pub example_index: usize,
+    /// Candidate relation's subject node.
+    pub subject: String,
+    /// Candidate relation that did not hold in the example.
+    pub relation: OrderRelation,
+    /// Candidate relation's reference node.
+    pub reference: String,
+}
+
+/// Result of synthesizing layout constraints from example positions.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConstraintSynthesisResult {
+    /// Relations that held across every complete, finite example.
+    pub constraints: Vec<LayoutConstraint>,
+    /// Relations proposed by the seed example but rejected by a counterexample.
+    pub counterexamples: Vec<ConstraintCounterexample>,
+}
+
+#[derive(Debug, Clone)]
+struct OrderCandidate {
+    subject: String,
+    relation: OrderRelation,
+    reference: String,
+    min_gap: f32,
+}
+
+/// Synthesizes strict pairwise order constraints with a counterexample-guided loop.
+///
+/// The first example proposes an order for every pair of nodes it contains. Each
+/// subsequent example is a counterexample search: a candidate is retained only
+/// when its direction remains strict and finite, while its minimum observed gap
+/// is tightened. Nodes absent from any example are excluded; tied or non-finite
+/// coordinates reject a candidate rather than creating a constraint that a later
+/// layout cannot satisfy.
+#[must_use]
+pub fn synthesize_order_constraints(examples: &[ConstraintExample]) -> ConstraintSynthesisResult {
+    let Some(seed) = examples.first() else {
+        return ConstraintSynthesisResult::default();
+    };
+
+    let node_ids = seed
+        .positions
+        .keys()
+        .filter(|node_id| {
+            examples
+                .iter()
+                .all(|example| example.positions.contains_key(*node_id))
+        })
+        .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+
+    for (index, subject) in node_ids.iter().enumerate() {
+        for reference in node_ids.iter().skip(index + 1) {
+            let subject_position = seed.positions.get(*subject);
+            let reference_position = seed.positions.get(*reference);
+            if let (Some(subject_position), Some(reference_position)) =
+                (subject_position, reference_position)
+            {
+                for relation in [
+                    horizontal_relation(*subject_position, *reference_position),
+                    vertical_relation(*subject_position, *reference_position),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if let Some(min_gap) =
+                        order_gap(*subject_position, *reference_position, relation)
+                    {
+                        candidates.push(OrderCandidate {
+                            subject: (*subject).clone(),
+                            relation,
+                            reference: (*reference).clone(),
+                            min_gap,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let mut counterexamples = Vec::new();
+    for (example_index, example) in examples.iter().enumerate().skip(1) {
+        candidates.retain_mut(|candidate| {
+            let observed_gap = example
+                .positions
+                .get(&candidate.subject)
+                .zip(example.positions.get(&candidate.reference))
+                .and_then(|(subject, reference)| {
+                    order_gap(*subject, *reference, candidate.relation)
+                });
+            if let Some(observed_gap) = observed_gap {
+                candidate.min_gap = candidate.min_gap.min(observed_gap);
+                true
+            } else {
+                counterexamples.push(ConstraintCounterexample {
+                    example_index,
+                    subject: candidate.subject.clone(),
+                    relation: candidate.relation,
+                    reference: candidate.reference.clone(),
+                });
+                false
+            }
+        });
+    }
+
+    ConstraintSynthesisResult {
+        constraints: candidates
+            .into_iter()
+            .map(|candidate| {
+                LayoutConstraint::Order(OrderConstraint {
+                    subject: candidate.subject,
+                    relation: candidate.relation,
+                    reference: candidate.reference,
+                    min_gap: candidate.min_gap,
+                    strength: ConstraintStrength::Hard,
+                })
+            })
+            .collect(),
+        counterexamples,
+    }
+}
+
+fn horizontal_relation(
+    subject: ConstraintExamplePosition,
+    reference: ConstraintExamplePosition,
+) -> Option<OrderRelation> {
+    if !subject.x.is_finite() || !reference.x.is_finite() || subject.x == reference.x {
+        None
+    } else if subject.x < reference.x {
+        Some(OrderRelation::LeftOf)
+    } else {
+        Some(OrderRelation::RightOf)
+    }
+}
+
+fn vertical_relation(
+    subject: ConstraintExamplePosition,
+    reference: ConstraintExamplePosition,
+) -> Option<OrderRelation> {
+    if !subject.y.is_finite() || !reference.y.is_finite() || subject.y == reference.y {
+        None
+    } else if subject.y < reference.y {
+        Some(OrderRelation::Above)
+    } else {
+        Some(OrderRelation::Below)
+    }
+}
+
+fn order_gap(
+    subject: ConstraintExamplePosition,
+    reference: ConstraintExamplePosition,
+    relation: OrderRelation,
+) -> Option<f32> {
+    if !subject.x.is_finite()
+        || !subject.y.is_finite()
+        || !reference.x.is_finite()
+        || !reference.y.is_finite()
+    {
+        return None;
+    }
+
+    let gap = match relation {
+        OrderRelation::LeftOf => reference.x - subject.x,
+        OrderRelation::RightOf => subject.x - reference.x,
+        OrderRelation::Above => reference.y - subject.y,
+        OrderRelation::Below => subject.y - reference.y,
+    };
+    (gap > 0.0).then_some(gap)
+}
 
 /// A layout constraint specification.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -325,8 +517,86 @@ fn contradictory_relations(a: OrderRelation, b: OrderRelation) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::hint::black_box;
     use std::time::Instant;
+
+    fn constraint_example(nodes: &[(&str, f32, f32)]) -> ConstraintExample {
+        ConstraintExample {
+            positions: nodes
+                .iter()
+                .map(|(id, x, y)| {
+                    (
+                        (*id).to_string(),
+                        ConstraintExamplePosition { x: *x, y: *y },
+                    )
+                })
+                .collect::<BTreeMap<_, _>>(),
+        }
+    }
+
+    fn has_order(
+        result: &ConstraintSynthesisResult,
+        subject: &str,
+        relation: OrderRelation,
+        reference: &str,
+        min_gap: f32,
+    ) -> bool {
+        result.constraints.iter().any(|constraint| {
+            matches!(
+                constraint,
+                LayoutConstraint::Order(OrderConstraint {
+                    subject: actual_subject,
+                    relation: actual_relation,
+                    reference: actual_reference,
+                    min_gap: actual_gap,
+                    strength: ConstraintStrength::Hard,
+                }) if actual_subject == subject
+                    && *actual_relation == relation
+                    && actual_reference == reference
+                    && (*actual_gap - min_gap).abs() < f32::EPSILON
+            )
+        })
+    }
+
+    #[test]
+    fn cegis_synthesis_keeps_only_orders_shared_by_all_examples() {
+        let result = synthesize_order_constraints(&[
+            constraint_example(&[("A", 0.0, 10.0), ("B", 100.0, 70.0)]),
+            constraint_example(&[("A", 20.0, 15.0), ("B", 160.0, 95.0)]),
+        ]);
+
+        assert!(result.counterexamples.is_empty());
+        assert!(has_order(&result, "A", OrderRelation::LeftOf, "B", 100.0));
+        assert!(has_order(&result, "A", OrderRelation::Above, "B", 60.0));
+    }
+
+    #[test]
+    fn cegis_synthesis_records_counterexamples_instead_of_reversing_constraints() {
+        let result = synthesize_order_constraints(&[
+            constraint_example(&[("A", 0.0, 0.0), ("B", 100.0, 0.0)]),
+            constraint_example(&[("A", 140.0, 0.0), ("B", 100.0, 0.0)]),
+        ]);
+
+        assert!(result.constraints.is_empty());
+        assert_eq!(result.counterexamples.len(), 1);
+        assert_eq!(result.counterexamples[0].example_index, 1);
+        assert_eq!(result.counterexamples[0].subject, "A");
+        assert_eq!(result.counterexamples[0].relation, OrderRelation::LeftOf);
+        assert_eq!(result.counterexamples[0].reference, "B");
+    }
+
+    #[test]
+    fn cegis_synthesis_rejects_non_finite_counterexamples() {
+        let result = synthesize_order_constraints(&[
+            constraint_example(&[("A", 0.0, 0.0), ("B", 100.0, 0.0)]),
+            constraint_example(&[("A", f32::NAN, 0.0), ("B", 100.0, 0.0)]),
+        ]);
+
+        assert!(result.constraints.is_empty());
+        assert_eq!(result.counterexamples.len(), 1);
+        assert_eq!(result.counterexamples[0].relation, OrderRelation::LeftOf);
+    }
 
     fn non_conflicting_constraint_fixture(len: usize) -> Vec<LayoutConstraint> {
         (0..len)
