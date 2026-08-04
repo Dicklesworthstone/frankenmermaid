@@ -467,6 +467,12 @@ impl ParseLensSnapshot {
         &self.source
     }
 
+    /// Consumes the snapshot and returns its exact source without cloning it.
+    #[must_use]
+    pub fn into_original_source(self) -> String {
+        self.source
+    }
+
     /// Applies an edit against the source map captured by this snapshot.
     ///
     /// Keeping the source and map together prevents applying byte ranges from one
@@ -1951,6 +1957,13 @@ mod tests {
             result.updated_source,
             "%% comment\r\nflowchart LR\r\nA[Alpha] -.-> B[Beta]\r\n"
         );
+    }
+
+    #[test]
+    fn parse_lens_snapshot_returns_owned_original_source_without_normalizing_it() {
+        let input = "%% comment\r\nflowchart LR\r\nA[\"Alpha\"] --> B[Beta]\r\n";
+
+        assert_eq!(build_parse_lens(input).into_original_source(), input);
     }
 
     #[test]
