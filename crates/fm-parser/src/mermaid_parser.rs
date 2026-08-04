@@ -2984,8 +2984,14 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
         };
 
         for statement in statements {
-            if let ClassStatement::BlockStart(ref name, _) = statement {
-                in_block = Some(name.clone());
+            match statement {
+                // A `{`-less producer (the `class List~T~` generics form, the `Animal : +name`
+                // shorthand) emits BlockStart..End within one line. Without clearing here, that
+                // trailing End left `in_block` set and every following line — edges included —
+                // was swallowed as a member of it.
+                ClassStatement::BlockStart(ref name, _) => in_block = Some(name.clone()),
+                ClassStatement::End => in_block = None,
+                _ => {}
             }
 
             // If inside a namespace, track node key to add to subgraph after lowering.
@@ -3028,6 +3034,39 @@ fn extract_class_generics(raw_name: &str) -> (&str, Vec<String>) {
         .filter(|s| !s.is_empty())
         .collect();
     (class_name, generics)
+}
+
+/// Parse mermaid's non-block class member shorthand: `Animal : +name`, `Dog : +bark()`.
+///
+/// Splits on the FIRST colon — everything after it is a member declaration, which may carry
+/// its own `:` return-type separator (`greet() : String`), so a later colon must not win.
+///
+/// The left side has to be a single class-name token. That is what separates this form from
+/// the class-diagram statements that also contain a colon but are not members —
+/// `style A fill:#f00`, `classDef x fill:#f00`, `link A "http://x"`,
+/// `note for A "text: here"` — every one of which has whitespace to the left of its colon.
+/// The accessibility and layout directives are single tokens, so they are excluded by name.
+fn parse_class_shorthand_member(
+    statement: &str,
+) -> Option<(String, Vec<String>, fm_core::IrClassMember)> {
+    let colon = memchr::memchr(b':', statement.as_bytes())?;
+    let raw_name = trim_fast(&statement[..colon]);
+    let member_source = trim_fast(&statement[colon + 1..]);
+    if raw_name.is_empty()
+        || member_source.is_empty()
+        || raw_name.bytes().any(|byte| byte.is_ascii_whitespace())
+        || matches!(raw_name, "accTitle" | "accDescr" | "title" | "direction")
+    {
+        return None;
+    }
+
+    let (class_name, generics) = extract_class_generics(raw_name);
+    if class_name.is_empty() {
+        return None;
+    }
+
+    let member = parse_class_member(member_source)?;
+    Some((class_name.to_string(), generics, member))
 }
 
 /// Parse a class member declaration like `+String name`, `-int age`, `#doSomething() void`.
@@ -3260,6 +3299,18 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
             }
             continue;
         }
+
+        // `Animal : +name` — the member shorthand. Runs after the edge attempt so a labeled
+        // relation (`A <|-- B : label`) still parses as an edge. Reuses the block lowering:
+        // BlockStart opens the class, Member attaches to it, End closes it again, so a class
+        // declared only by shorthand lines accumulates members exactly as a block would.
+        if let Some((class_name, generics, member)) = parse_class_shorthand_member(statement) {
+            statements.push(ClassStatement::BlockStart(class_name, generics));
+            statements.push(ClassStatement::Member(member));
+            statements.push(ClassStatement::End);
+            continue;
+        }
+
         if let Some(node) = parse_node_token_with_config(statement, config) {
             statements.push(ClassStatement::Node(node));
         }
@@ -13662,6 +13713,165 @@ Rel_Back(db, app, "Responds")"#,
             fm_core::ClassVisibility::Private
         );
         assert_eq!(meta.methods[0].return_type, Some("void".to_string()));
+    }
+
+    #[test]
+    fn class_colon_shorthand_populates_members_not_a_literal_label() {
+        // The exact shape of crates/fm-cli/tests/golden/class_basic.mmd.
+        let parsed =
+            parse_mermaid("classDiagram\n  Animal <|-- Dog\n  Animal : +name\n  Dog : +bark()");
+
+        let animal = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "Animal")
+            .expect("Animal node");
+        // Negative case: before the shorthand was recognized the whole line became one
+        // node carrying the literal label "Animal : +name". A class node declares no
+        // explicit label (the block form behaves the same), so what must hold is that no
+        // member text leaked into one.
+        assert!(
+            animal
+                .label
+                .is_none_or(|label| !parsed.ir.labels[label.0].text.contains(':')),
+            "member text leaked into the node label"
+        );
+        let animal_meta = animal.class_meta.as_ref().expect("Animal class_meta");
+        assert_eq!(animal_meta.attributes.len(), 1);
+        assert_eq!(animal_meta.attributes[0].name, "name");
+        assert_eq!(
+            animal_meta.attributes[0].visibility,
+            fm_core::ClassVisibility::Public
+        );
+        assert!(animal_meta.methods.is_empty());
+
+        let dog = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "Dog")
+            .expect("Dog node");
+        assert!(
+            dog.label
+                .is_none_or(|label| !parsed.ir.labels[label.0].text.contains(':')),
+            "member text leaked into the node label"
+        );
+        let dog_meta = dog.class_meta.as_ref().expect("Dog class_meta");
+        assert_eq!(dog_meta.methods.len(), 1);
+        assert_eq!(dog_meta.methods[0].name, "bark()");
+
+        // The shorthand must not invent extra class nodes.
+        assert_eq!(parsed.ir.nodes.len(), 2);
+        assert_eq!(parsed.ir.edges.len(), 1);
+    }
+
+    #[test]
+    fn class_colon_shorthand_accumulates_multiple_members_per_class() {
+        let parsed = parse_mermaid(
+            "classDiagram\n  Animal : +name\n  Animal : -age\n  Animal : +eat() void",
+        );
+        let meta = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "Animal")
+            .expect("Animal node")
+            .class_meta
+            .as_ref()
+            .expect("class_meta");
+        assert_eq!(meta.attributes.len(), 2);
+        assert_eq!(
+            meta.attributes[1].visibility,
+            fm_core::ClassVisibility::Private
+        );
+        assert_eq!(meta.methods.len(), 1);
+        // `eat() void` keeps its own colon-free return type; a shorthand split on the LAST
+        // colon instead of the first would mangle members that carry `: ReturnType`.
+        assert_eq!(meta.methods[0].return_type, Some("void".to_string()));
+    }
+
+    #[test]
+    fn class_colon_shorthand_keeps_return_type_after_the_member_colon() {
+        let parsed = parse_mermaid("classDiagram\n  Animal : +greet() : String");
+        let meta = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "Animal")
+            .expect("Animal node")
+            .class_meta
+            .as_ref()
+            .expect("class_meta");
+        assert_eq!(meta.methods.len(), 1);
+        assert_eq!(meta.methods[0].name, "greet()");
+        assert_eq!(meta.methods[0].return_type, Some("String".to_string()));
+    }
+
+    #[test]
+    fn class_colon_shorthand_ignores_directive_and_style_statements() {
+        let parsed = parse_mermaid(
+            "classDiagram\n  accTitle: My Title\n  Animal : +name\n  style Animal fill:#f9f",
+        );
+
+        // Negative case: a rule that fired on any colon would turn `accTitle: My Title`
+        // into a class named `accTitle` carrying a member `My Title`, and
+        // `style Animal fill:#f9f` into one named `style Animal fill`.
+        assert_eq!(parsed.ir.meta.acc_title.as_deref(), Some("My Title"));
+        assert!(
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .filter(|node| node.id != "Animal")
+                .all(|node| node
+                    .class_meta
+                    .as_ref()
+                    .is_none_or(|meta| meta.attributes.is_empty() && meta.methods.is_empty())),
+            "only Animal may gain members; directive/style lines must not parse as shorthand"
+        );
+        // Separately tracked (bd-ij5b): `parse_class`'s fallthrough already turns any
+        // unrecognized statement — `accTitle:`, `style …` — into a junk node. That predates
+        // this shorthand and is unaffected by it (both are rejected by the guard above and
+        // reach the same fallthrough), so this test only pins the shorthand's own scope.
+
+        let animal = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "Animal")
+            .expect("Animal node");
+        assert_eq!(
+            animal
+                .class_meta
+                .as_ref()
+                .expect("class_meta")
+                .attributes
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn class_inline_generics_declaration_does_not_open_a_member_block() {
+        // `class List~T~` emits BlockStart..End on one line to carry its generics. That
+        // trailing End has to close the block, or the following relation is swallowed as a
+        // member of `List` and no edge is produced.
+        let parsed = parse_mermaid("classDiagram\n  class List~T~\n  Animal <|-- Dog");
+
+        assert_eq!(parsed.ir.edges.len(), 1);
+        let list = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "List")
+            .expect("List node");
+        assert!(
+            list.class_meta
+                .as_ref()
+                .is_none_or(|meta| meta.attributes.is_empty() && meta.methods.is_empty()),
+            "List must not absorb the following relation as a member"
+        );
     }
 
     #[test]
