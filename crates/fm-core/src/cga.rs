@@ -1049,18 +1049,25 @@ impl CgaPoint {
 
     /// Squared distance to another point.
     ///
-    /// Uses the conformal inner product: d²(P, Q) = -2 * P·Q.
+    /// The conformal identity d²(P, Q) = -2 P·Q holds exactly in real arithmetic, and
+    /// [`Self::inner_product`] still evaluates it, but it is NOT how this is computed. The
+    /// embedding squares each coordinate before subtracting, which is catastrophic
+    /// cancellation whenever the separation is small relative to the coordinates: for points
+    /// around 90 apart from the origin, a true distance of 1e-9 came back as exactly 0.0, and
+    /// a point known to lie on a segment measured 6.1e-5 off it. Squaring also overflows near
+    /// 1.3e154, far below the range of the distance itself, and the `inf - inf` that follows is
+    /// NaN rather than an overflow.
     ///
-    /// The conformal embedding squares each coordinate, so it leaves the representable range
-    /// long before the distance itself does, and the resulting `inf - inf` in the geometric
-    /// product is NaN rather than an overflow. When that happens the Euclidean squared distance
-    /// is recomputed in an exactly-scaled frame. The result may be `+inf` when d² genuinely
-    /// exceeds `f64`, but it is never NaN for finite input.
+    /// So the separation is taken directly, which is both better conditioned and cheaper. If
+    /// that still overflows, it is recomputed in an exactly-scaled frame; the result may be
+    /// `+inf` when d² genuinely exceeds `f64`, but it is never NaN for finite input.
     #[must_use]
     pub fn distance_squared(&self, other: &CgaPoint) -> f64 {
-        let squared_distance = -2.0 * self.inner_product(other);
+        let dx = other.x - self.x;
+        let dy = other.y - self.y;
+        let squared_distance = dx * dx + dy * dy;
         if squared_distance.is_finite() {
-            return squared_distance.max(0.0);
+            return squared_distance;
         }
 
         let (separation, scale) = self.scaled_separation(*other);
@@ -1074,9 +1081,11 @@ impl CgaPoint {
     /// root of [`Self::distance_squared`].
     #[must_use]
     pub fn distance(&self, other: &CgaPoint) -> f64 {
-        let squared_distance = -2.0 * self.inner_product(other);
+        let dx = other.x - self.x;
+        let dy = other.y - self.y;
+        let squared_distance = dx * dx + dy * dy;
         if squared_distance.is_finite() {
-            return squared_distance.max(0.0).sqrt();
+            return squared_distance.sqrt();
         }
 
         let (separation, scale) = self.scaled_separation(*other);
@@ -2411,6 +2420,110 @@ mod geometry_tests {
         }
     }
 
+    /// Correctness of the intersection queries on realistic geometry (bd-2q3f.3 criterion 1:
+    /// line-line, line-circle, circle-circle "verified against analytic solutions").
+    ///
+    /// The checks are deliberately NOT a second quadratic solver — re-deriving the same algebra
+    /// and comparing would mostly prove the two copies agree. Instead each result is verified
+    /// against the DEFINITION of an intersection (the point lies on both objects) plus a
+    /// topological count that a plausible wrong implementation fails: a segment with one
+    /// endpoint strictly inside a circle and the other strictly outside crosses the boundary
+    /// exactly once, whatever the algebra says.
+    #[test]
+    fn intersection_queries_agree_with_their_geometric_definition() {
+        let mut state = 0x853c_49e6_748f_ea9b_u64;
+        let mut next_unit = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            f64::from_bits(0x3ff0_0000_0000_0000 | (state >> 12)) - 1.0
+        };
+        // Realistic magnitudes: extreme-range behaviour is the robustness sweep's job, and
+        // mixing the two would make a precision failure look like a correctness failure.
+        let mut next_coordinate = move || next_unit() * 200.0 - 100.0;
+        let mut next_radius = move || next_unit().mul_add(40.0, 1.0);
+
+        let mut crossing_cases = 0_u32;
+        for _ in 0..20_000 {
+            let circle = CgaCircle::new(
+                CgaPoint::new(next_coordinate(), next_coordinate()),
+                next_radius(),
+            );
+            let segment = CgaLineSegment::new(
+                CgaPoint::new(next_coordinate(), next_coordinate()),
+                CgaPoint::new(next_coordinate(), next_coordinate()),
+            );
+
+            // Line-circle: every reported point lies on the circle AND on the segment.
+            let hits = circle.intersect_segment(&segment);
+            assert!(hits.len() <= 2, "a segment meets a circle at most twice");
+            for hit in &hits {
+                let radial_error = (hit.distance(&circle.center) - circle.radius).abs();
+                assert!(
+                    radial_error < 1e-6 * circle.radius.max(1.0),
+                    "{hit:?} is not on {circle:?} (radial error {radial_error})"
+                );
+                let off_segment = segment.distance_to_point(hit);
+                assert!(
+                    off_segment < 1e-6 * segment.start.distance(&segment.end).max(1.0),
+                    "{hit:?} is not on {segment:?} (off by {off_segment})"
+                );
+            }
+
+            // Topological control, independent of the algebra: strictly-inside to
+            // strictly-outside must cross the boundary exactly once. Endpoints near the
+            // boundary are skipped so the test never depends on tie-breaking at a tangency.
+            let start_depth = segment.start.distance(&circle.center) - circle.radius;
+            let end_depth = segment.end.distance(&circle.center) - circle.radius;
+            let margin = 1e-3 * circle.radius.max(1.0);
+            if start_depth < -margin && end_depth > margin {
+                crossing_cases += 1;
+                assert_eq!(
+                    hits.len(),
+                    1,
+                    "inside {start_depth} -> outside {end_depth} must cross once, got {hits:?}"
+                );
+            }
+
+            // Circle-circle: every reported point lies on both circles.
+            let other_circle = CgaCircle::new(
+                CgaPoint::new(next_coordinate(), next_coordinate()),
+                next_radius(),
+            );
+            for hit in circle.intersect_circle(&other_circle) {
+                for owner in [&circle, &other_circle] {
+                    let radial_error = (hit.distance(&owner.center) - owner.radius).abs();
+                    assert!(
+                        radial_error < 1e-6 * owner.radius.max(1.0),
+                        "{hit:?} is not on {owner:?} (radial error {radial_error})"
+                    );
+                }
+            }
+
+            // Line-line: a reported crossing lies on both segments.
+            let other_segment = CgaLineSegment::new(
+                CgaPoint::new(next_coordinate(), next_coordinate()),
+                CgaPoint::new(next_coordinate(), next_coordinate()),
+            );
+            if let Some(crossing) = segment.intersect(&other_segment) {
+                for owner in [&segment, &other_segment] {
+                    let off = owner.distance_to_point(&crossing);
+                    assert!(
+                        off < 1e-6 * owner.start.distance(&owner.end).max(1.0),
+                        "{crossing:?} is not on {owner:?} (off by {off})"
+                    );
+                }
+            }
+        }
+
+        // The topological control must actually have been exercised; otherwise the assertion
+        // above is dead and this test silently proves less than it claims.
+        assert!(
+            crossing_cases > 100,
+            "expected many inside->outside segments, saw {crossing_cases}"
+        );
+    }
+
     /// `CgaPoint::distance` measures separation through the conformal inner product, which
     /// squares each coordinate. That embedding overflows at around 1.3e154 — far below the
     /// point where the distance itself stops being representable — and the resulting
@@ -2440,11 +2553,44 @@ mod geometry_tests {
         let squared = near.distance_squared(&far);
         assert!(!squared.is_nan() && squared > 0.0);
 
-        // Ordinary geometry must be untouched by the overflow retry: this is the value the
-        // conformal path already produced, asserted exactly.
+        // Ordinary geometry is exact.
         let a = CgaPoint::new(3.0, 4.0);
         assert_eq!(a.distance(&CgaPoint::origin()), 5.0);
         assert_eq!(a.distance_squared(&CgaPoint::origin()), 25.0);
+    }
+
+    /// Small separations between points far from the origin must survive.
+    ///
+    /// Evaluating d² as -2 P·Q through the conformal embedding squares each coordinate before
+    /// subtracting, so a tiny gap between two distant points is annihilated. This pins the
+    /// conditioning, not just the value: the identity is exact in real arithmetic, so a future
+    /// change routing distance back through `inner_product` would still look mathematically
+    /// correct while silently reintroducing the loss.
+    #[test]
+    fn small_separations_between_distant_points_survive() {
+        let base = CgaPoint::new(70.020_074_126_673_5, -44.414_915_631_233_34);
+        let nudged = CgaPoint::new(base.x + 1e-9, base.y);
+
+        // Compare against the separation actually STORED, not the nominal 1e-9: at this
+        // magnitude `base.x + 1e-9` lands on a neighbouring representable value, so the real
+        // gap is 1.0000036e-9. Asserting the nominal figure would be asserting that f64 can
+        // hold a number it cannot.
+        let stored_separation = nudged.x - base.x;
+        let distance = base.distance(&nudged);
+        assert!(
+            (distance - stored_separation).abs() < 1e-24,
+            "expected the stored {stored_separation} separation to survive, got {distance}"
+        );
+
+        // The conformal identity is exact in real arithmetic but destroys this in f64 --
+        // it reports exactly zero. Asserting the gap keeps the two evaluations from being
+        // quietly swapped back.
+        let conformal = (-2.0 * base.inner_product(&nudged)).max(0.0).sqrt();
+        assert_eq!(
+            conformal, 0.0,
+            "conformal evaluation is expected to annihilate this separation"
+        );
+        assert!(distance > conformal);
     }
 
     /// Randomised robustness sweep over every CGA query, at magnitudes that reach the edge of
