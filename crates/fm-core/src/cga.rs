@@ -1049,22 +1049,67 @@ impl CgaPoint {
 
     /// Squared distance to another point.
     ///
-    /// Uses the conformal inner product: d²(P, Q) = -2 * P·Q
+    /// Uses the conformal inner product: d²(P, Q) = -2 * P·Q.
+    ///
+    /// The conformal embedding squares each coordinate, so it leaves the representable range
+    /// long before the distance itself does, and the resulting `inf - inf` in the geometric
+    /// product is NaN rather than an overflow. When that happens the Euclidean squared distance
+    /// is recomputed in an exactly-scaled frame. The result may be `+inf` when d² genuinely
+    /// exceeds `f64`, but it is never NaN for finite input.
     #[must_use]
     pub fn distance_squared(&self, other: &CgaPoint) -> f64 {
         let squared_distance = -2.0 * self.inner_product(other);
         if squared_distance.is_finite() {
-            squared_distance.max(0.0)
-        } else {
-            squared_distance
+            return squared_distance.max(0.0);
         }
+
+        let (separation, scale) = self.scaled_separation(*other);
+        separation * scale * scale
     }
 
     /// Distance to another point.
+    ///
+    /// Finite for every pair of finite points whose separation is representable — including
+    /// pairs whose SQUARED separation is not, which is why this does not simply take the square
+    /// root of [`Self::distance_squared`].
     #[must_use]
     pub fn distance(&self, other: &CgaPoint) -> f64 {
-        self.distance_squared(other).sqrt()
+        let squared_distance = -2.0 * self.inner_product(other);
+        if squared_distance.is_finite() {
+            return squared_distance.max(0.0).sqrt();
+        }
+
+        let (separation, scale) = self.scaled_separation(*other);
+        separation.sqrt() * scale
     }
+
+    /// Squared separation measured in a power-of-two scaled frame, with the scale factor.
+    ///
+    /// Dividing by a power of two only shifts exponents, so the scaled frame introduces no
+    /// rounding of its own.
+    fn scaled_separation(self, other: Self) -> (f64, f64) {
+        let scale = power_of_two_scale(
+            [self.x, self.y, other.x, other.y]
+                .into_iter()
+                .fold(0.0_f64, |acc, value| acc.max(value.abs())),
+        );
+        let dx = other.x / scale - self.x / scale;
+        let dy = other.y / scale - self.y / scale;
+        (dx * dx + dy * dy, scale)
+    }
+}
+
+/// Largest power of two not exceeding `magnitude`, or `1.0` when there is nothing to scale.
+///
+/// Used to bring an overflowing configuration back into range. Multiplying or dividing by a
+/// power of two only shifts exponents, so a scaled retry adds no rounding of its own.
+fn power_of_two_scale(magnitude: f64) -> f64 {
+    let biased_exponent = (magnitude.to_bits() >> 52) & 0x7ff;
+    if biased_exponent == 0 {
+        // Zero or subnormal: already as small as it gets, and nothing here can overflow.
+        return 1.0;
+    }
+    f64::from_bits(biased_exponent << 52)
 }
 
 /// A line segment defined by two endpoints.
@@ -1210,21 +1255,13 @@ impl CgaLineSegment {
     }
 
     /// Largest power of two not exceeding the biggest coordinate magnitude involved.
-    ///
-    /// Dividing by a power of two only shifts exponents, so the scaled retry introduces no
-    /// rounding of its own.
     fn retry_scale(points: [CgaPoint; 3]) -> f64 {
-        let max_magnitude = points
-            .iter()
-            .flat_map(|p| [p.x.abs(), p.y.abs()])
-            .fold(0.0_f64, f64::max);
-
-        let biased_exponent = (max_magnitude.to_bits() >> 52) & 0x7ff;
-        if biased_exponent == 0 {
-            // Zero or subnormal: already as small as it gets, and there is nothing to scale.
-            return 1.0;
-        }
-        f64::from_bits(biased_exponent << 52)
+        power_of_two_scale(
+            points
+                .iter()
+                .flat_map(|p| [p.x.abs(), p.y.abs()])
+                .fold(0.0_f64, f64::max),
+        )
     }
 
     /// Find closest point on the segment to a given point.
@@ -2371,6 +2408,149 @@ mod geometry_tests {
                 rect.closest_boundary_point(&point),
                 closest_boundary_reference(&rect, &point),
             );
+        }
+    }
+
+    /// `CgaPoint::distance` measures separation through the conformal inner product, which
+    /// squares each coordinate. That embedding overflows at around 1.3e154 — far below the
+    /// point where the distance itself stops being representable — and the resulting
+    /// `inf - inf` inside the geometric product is NaN, not an overflow. So two perfectly
+    /// finite points, whose separation is comfortably representable, reported a NaN distance.
+    ///
+    /// Found by the randomised sweep below; pinned here so the defect keeps a named test even
+    /// if that generator is ever retuned.
+    #[test]
+    fn distance_between_far_apart_finite_points_is_finite() {
+        // The exact pair the sweep surfaced.
+        let near = CgaPoint::new(59.213_211_327_964_64, -1.272_648_833_201_636e-308);
+        let far = CgaPoint::new(-5.880_064_458_331_531e299, -1.305_365_161_648_630_6e-308);
+
+        let distance = near.distance(&far);
+        assert!(
+            distance.is_finite(),
+            "distance between two finite points must be finite, got {distance}"
+        );
+        // The separation is dominated by the x gap, which is representable.
+        assert!(
+            (distance - 5.880_064_458_331_531e299).abs() < 1e285,
+            "expected the true separation, got {distance}"
+        );
+
+        // d² genuinely exceeds f64 here, so infinity is the honest answer -- but never NaN.
+        let squared = near.distance_squared(&far);
+        assert!(!squared.is_nan() && squared > 0.0);
+
+        // Ordinary geometry must be untouched by the overflow retry: this is the value the
+        // conformal path already produced, asserted exactly.
+        let a = CgaPoint::new(3.0, 4.0);
+        assert_eq!(a.distance(&CgaPoint::origin()), 5.0);
+        assert_eq!(a.distance_squared(&CgaPoint::origin()), 25.0);
+    }
+
+    /// Randomised robustness sweep over every CGA query, at magnitudes that reach the edge of
+    /// the representable range (bd-2q3f.3: "degenerate cases handled without NaN/panic").
+    ///
+    /// The shared contract asserted here is narrow on purpose, because it is the one every
+    /// caller relies on and none of them can defend against: given finite input, no query may
+    /// panic, and no query may hand back a non-finite coordinate or a NaN distance. Accuracy is
+    /// NOT asserted — at these magnitudes the exact answer is often unrepresentable, and that is
+    /// checked against a reference elsewhere in this module on realistic geometry.
+    #[test]
+    fn cga_queries_never_produce_non_finite_output_for_finite_input() {
+        // Deterministic xorshift; the interesting inputs are the extremes, so the generator
+        // deliberately spends most of its draws on magnitudes near the limits rather than on
+        // comfortable mid-range values that could never overflow anything.
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next_bits = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut next_coordinate = move || {
+            let bits = next_bits();
+            let unit = (f64::from_bits(0x3ff0_0000_0000_0000 | (bits >> 12)) - 1.0) * 2.0 - 1.0;
+            match bits % 8 {
+                0 => f64::MAX * unit,
+                1 => f64::MIN_POSITIVE * unit,
+                2 => 0.0,
+                3 => -0.0,
+                4 => unit * 1e300,
+                5 => unit * 1e-300,
+                6 => unit * 1e150,
+                _ => unit * 1_000.0,
+            }
+        };
+        let mut next_point = move || CgaPoint::new(next_coordinate(), next_coordinate());
+
+        for _ in 0..20_000 {
+            let segment = CgaLineSegment::new(next_point(), next_point());
+            let other = CgaLineSegment::new(next_point(), next_point());
+            let query = next_point();
+            let circle = CgaCircle::new(next_point(), next_coordinate().abs());
+            let rect = CgaRect::new(
+                next_coordinate(),
+                next_coordinate(),
+                next_coordinate().abs(),
+                next_coordinate().abs(),
+            );
+
+            // Every generated input is finite by construction, so every guard below is being
+            // asked about well-formed geometry rather than about rejected garbage.
+            assert!(segment.start.is_finite() && segment.end.is_finite());
+            assert!(other.start.is_finite() && other.end.is_finite());
+            assert!(query.is_finite() && circle.center.is_finite() && circle.radius.is_finite());
+
+            let projected = segment.closest_point(&query);
+            assert!(
+                projected.is_finite(),
+                "closest_point({segment:?}, {query:?}) -> {projected:?}"
+            );
+
+            let distance = segment.distance_to_point(&query);
+            assert!(
+                !distance.is_nan() && distance >= 0.0,
+                "distance_to_point({segment:?}, {query:?}) -> {distance}"
+            );
+
+            if let Some(crossing) = segment.intersect(&other) {
+                assert!(
+                    crossing.is_finite(),
+                    "intersect({segment:?}, {other:?}) -> {crossing:?}"
+                );
+            }
+
+            for hit in circle.intersect_segment(&segment) {
+                assert!(
+                    hit.is_finite(),
+                    "circle intersect_segment({circle:?}, {segment:?}) -> {hit:?}"
+                );
+            }
+
+            for hit in rect.intersect_segment(&segment) {
+                assert!(
+                    hit.is_finite(),
+                    "rect intersect_segment({rect:?}, {segment:?}) -> {hit:?}"
+                );
+            }
+
+            let boundary = rect.closest_boundary_point(&query);
+            assert!(
+                boundary.is_finite(),
+                "closest_boundary_point({rect:?}, {query:?}) -> {boundary:?}"
+            );
+
+            let point_distance = query.distance(&circle.center);
+            assert!(
+                !point_distance.is_nan() && point_distance >= 0.0,
+                "distance({query:?}, {:?}) -> {point_distance}",
+                circle.center
+            );
+
+            // Predicates must stay total: they may answer either way, but must not panic.
+            let _ = circle.contains(&query);
+            let _ = circle.contains_strict(&query);
+            let _ = rect.contains(&query);
         }
     }
 
