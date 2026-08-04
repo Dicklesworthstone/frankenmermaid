@@ -11,9 +11,20 @@
 //   * it renders each example via the real WASM `renderSvg` and fails on any that throws or that
 //     silently produces empty output.
 //
-// Usage (after `./build-wasm.sh` so pkg/ is current):
-//   node scripts/verify_demo_samples.mjs
+// GH#5 extended this guard to the OTHER render path: the showcase only routes the
+// `frankenReadyCategories` families through the WASM engine — every other family (and any WASM
+// failure) falls through to the mermaid.js baseline. The "Rendering Requirements Trace" tile
+// broke on THAT path (mermaid's requirement grammar rejects unquoted values containing `-`)
+// while this script stayed green, because it only exercised the WASM path. Step 4 below now
+// parses every sample through real mermaid.js (same major as the CDN pin in the HTML) under
+// jsdom, so a sample that either engine rejects fails the guard.
+//
+// Usage (after `./build-wasm.sh` so pkg/ is current, and `bun install` in scripts/ for the
+// mermaid baseline dependencies):
+//   node scripts/verify_demo_samples.mjs [--wasm-only]
 // Exit code 0 = all good; non-zero prints the offending families.
+// `--wasm-only` skips the mermaid.js baseline pass (step 4) for environments without the
+// scripts/node_modules install; CI and pre-release runs should NOT pass it.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -86,7 +97,43 @@ for (const entry of DIAGRAM_SAMPLES) {
   }
 }
 
-const all = [...problems, ...renderProblems];
+// 4. Parse each example through real mermaid.js — the showcase's baseline path for every family
+//    the WASM allowlist does not cover, and its fallback when a WASM render throws. `parse` (not
+//    `render`) is the right level here: jsdom has no layout engine, and the failure class this
+//    guards against (GH#5) is a parse rejection.
+const baselineProblems = [];
+if (process.argv.includes("--wasm-only")) {
+  console.log("NOTE: --wasm-only passed; skipping the mermaid.js baseline parse pass.");
+} else {
+  let mermaid;
+  try {
+    const { JSDOM } = await import("jsdom");
+    const dom = new JSDOM("<!DOCTYPE html><html><body></body></html>", { pretendToBeVisual: true });
+    globalThis.window = dom.window;
+    globalThis.document = dom.window.document;
+    if (!globalThis.navigator) globalThis.navigator = dom.window.navigator;
+    mermaid = (await import("mermaid")).default;
+    mermaid.initialize({ startOnLoad: false, securityLevel: "loose" });
+  } catch (error) {
+    console.error(
+      "failed to load the mermaid.js baseline (run `bun install` in scripts/, or pass --wasm-only to skip):",
+      String(error).split("\n")[0],
+    );
+    process.exit(2);
+  }
+  for (const entry of DIAGRAM_SAMPLES) {
+    try {
+      await mermaid.parse(entry.code);
+    } catch (error) {
+      const detail = String(error?.message ?? error).split("\n").slice(0, 3).join(" | ");
+      baselineProblems.push(
+        `${entry.category} (${entry.label}) REJECTED by mermaid.js baseline: ${detail.slice(0, 200)}`,
+      );
+    }
+  }
+}
+
+const all = [...problems, ...renderProblems, ...baselineProblems];
 if (all.length > 0) {
   console.error("demo sample verification FAILED:");
   for (const line of all) console.error("  - " + line);
@@ -94,5 +141,6 @@ if (all.length > 0) {
 }
 console.log(
   `demo sample verification OK: ${DIAGRAM_SAMPLES.length} examples, ` +
-    `${EXPECTED_FAMILIES.length} supported families, each rendered once through the WASM build.`
+    `${EXPECTED_FAMILIES.length} supported families, each rendered once through the WASM build` +
+    (process.argv.includes("--wasm-only") ? "." : " and parsed by the mermaid.js baseline.")
 );

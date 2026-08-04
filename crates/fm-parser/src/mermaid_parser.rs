@@ -3821,7 +3821,17 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
                 let meta = node
                     .requirement_meta
                     .get_or_insert_with(|| Box::new(fm_core::IrRequirementNodeMeta::default()));
-                let value = trim_fast(rest).to_string();
+                // Mermaid's requirement grammar accepts both unquoted values and quoted
+                // strings (`qString`: `["][^"]*["]`); quoting is the only way to carry
+                // characters its unquoted lexer rejects (`-`, `<`, `>`, `=`, ...). Strip a
+                // surrounding double-quote pair so quoted sources render without literal
+                // quotes, matching mermaid.js.
+                let raw = trim_fast(rest);
+                let value = if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
+                    raw[1..raw.len() - 1].to_string()
+                } else {
+                    raw.to_string()
+                };
                 match field {
                     "id" => meta.req_id = Some(value),
                     "text" => meta.text = Some(value),
@@ -14439,6 +14449,38 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid(input);
         assert_eq!(parsed.ir.diagram_type, DiagramType::Requirement);
         assert!(!parsed.ir.nodes.is_empty());
+    }
+
+    #[test]
+    fn requirement_strips_quoted_field_values() {
+        // GH#5: mermaid.js only accepts `-`, `<`, `>`, `=` inside requirement field values
+        // when the value is a quoted string, and it strips the quotes on parse. The demo
+        // showcase's "Rendering Requirements Trace" sample quotes its `text:` values for
+        // baseline compatibility, so the engine must strip the quote pair too instead of
+        // rendering literal quotes.
+        let input = "requirementDiagram\n    requirement deterministic_layout {\n      id: 1\n      text: \"Layout output must be byte-identical across runs\"\n      risk: high\n      verifymethod: test\n    }\n    functionalRequirement svg_export {\n      id: 2\n      text: \"The engine must export standalone SVG\"\n      risk: medium\n      verifymethod: demonstration\n    }\n    deterministic_layout - derives -> svg_export";
+        let parsed = parse_mermaid(input);
+        assert_eq!(parsed.ir.diagram_type, DiagramType::Requirement);
+        let texts: Vec<&str> = parsed
+            .ir
+            .nodes
+            .iter()
+            .filter_map(|node| node.requirement_meta.as_ref())
+            .filter_map(|meta| meta.text.as_deref())
+            .collect();
+        assert!(
+            texts.contains(&"Layout output must be byte-identical across runs"),
+            "quoted text should be stored without surrounding quotes, got {texts:?}"
+        );
+        assert!(
+            texts.contains(&"The engine must export standalone SVG"),
+            "quoted text should be stored without surrounding quotes, got {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.starts_with('"')),
+            "no stored text should keep literal quotes, got {texts:?}"
+        );
+        assert!(!parsed.ir.edges.is_empty(), "Should keep the derives edge");
     }
 
     #[test]
