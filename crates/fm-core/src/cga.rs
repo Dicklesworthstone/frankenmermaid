@@ -483,36 +483,62 @@ impl Rotor {
         let e2p = self.components[4];
         let e2m = self.components[5];
         let epm = self.components[6];
+        let e12pm = self.components[7];
 
-        // Scale factor from e+- component
-        // epm = sinh(ln(scale)/2), so we need to recover scale = exp(2 * arsinh(epm))
-        // arsinh(x) = ln(x + sqrt(x^2 + 1))
-        let scale_factor = dilation_scale(epm);
-
-        // For combined rotation+scale rotor:
-        // s = cos(θ/2) * cosh(ln(scale)/2)
-        // e12 = sin(θ/2) * cosh(ln(scale)/2)
+        // Decompose the composite rotor M = T·S·R. Writing L = ln(scale)/2 and h = θ/2, the
+        // geometric product distributes the dilation across BOTH the scalar/e12 pair and the
+        // e+-/e12+- pair:
         //
-        // We need to extract the rotation component. The cosh factor is sqrt(1 + epm^2).
-        let cosh_factor = (1.0 + epm * epm).sqrt();
-        let cos_half = if cosh_factor.abs() > 1e-12 {
-            s / cosh_factor
+        //     s     = cos(h)·cosh(L)      e12   = sin(h)·cosh(L)
+        //     epm   = cos(h)·sinh(L)      e12pm = sin(h)·sinh(L)
+        //
+        // The previous code read `epm` as sinh(L) directly and normalized the half-angle by
+        // sqrt(1 + epm²). Both are only true when the other factor is absent, i.e. for a rotor
+        // carrying a dilation OR a rotation but never both — which is precisely the case the unit
+        // tests covered. Recover each factor from its own invariant instead.
+        let cosh_l = s.hypot(e12);
+        let (cos_half, sin_half) = if cosh_l > 1e-12 {
+            (s / cosh_l, e12 / cosh_l)
         } else {
-            s
+            (s, e12)
         };
-        let sin_half = if cosh_factor.abs() > 1e-12 {
-            e12 / cosh_factor
+        // Projecting (epm, e12pm) onto the half-angle direction yields sinh(L) with its sign,
+        // since cos(h)² + sin(h)² = 1.
+        let sinh_l = epm.mul_add(cos_half, e12pm * sin_half);
+        // e^L = cosh(L) + sinh(L), and scale = e^(2L) = (cosh(L) + sinh(L))².
+        let half_dilation = cosh_l + sinh_l;
+        let scale_factor = if half_dilation.is_finite() && half_dilation > 1e-12 {
+            half_dilation * half_dilation
         } else {
-            e12
+            dilation_scale(sinh_l)
         };
 
         // Recover full rotation angle using double angle formulas
         let cos_theta = cos_half * cos_half - sin_half * sin_half;
         let sin_theta = 2.0 * cos_half * sin_half;
 
-        // Translation from e1+/e1- and e2+/e2- components
-        let tx = e1p + e1m;
-        let ty = e2p + e2m;
+        // Translation from e1+/e1- and e2+/e2- components.
+        //
+        // These are NOT the translation directly once a rotation or dilation is also present.
+        // `Rotor::translation` stores t/2 on each of e1e±/e2e±, but composing it with a rotation
+        // (`compose` = geometric product) mixes those components: (e1e±)·e12 yields an e2e± term
+        // and vice versa. For the canonical composite M = T·S·R the raw sums come out as
+        //
+        //     raw = sqrt(scale) · Rot(θ/2) · t
+        //
+        // — the stored translation rotated by HALF the rotation angle and dilated by the half-
+        // dilation. Reading `e1p + e1m` back as `tx` was therefore only correct for a pure
+        // translation, which is the only case the unit tests covered. Undo both to recover t.
+        let raw_tx = e1p + e1m;
+        let raw_ty = e2p + e2m;
+        let (raw_tx, raw_ty) = if half_dilation.is_finite() && half_dilation > 1e-12 {
+            (raw_tx / half_dilation, raw_ty / half_dilation)
+        } else {
+            (raw_tx, raw_ty)
+        };
+        // Inverse of a Rot(θ/2), i.e. Rot(-θ/2), using the already-normalized half-angle terms.
+        let tx = raw_tx.mul_add(cos_half, raw_ty * sin_half);
+        let ty = raw_ty.mul_add(cos_half, -(raw_tx * sin_half));
 
         AffineMatrix2D {
             a: cos_theta * scale_factor,
@@ -547,6 +573,75 @@ mod tests {
         assert!((m.d - 1.0).abs() < 1e-10);
         assert!((m.tx - 3.0).abs() < 1e-10);
         assert!((m.ty - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn translation_survives_composition_with_rotation_and_scale() {
+        // Regression for the composite case: `translation_rotor_produces_correct_matrix`,
+        // `rotation_rotor_90_degrees` and `scale_rotor_produces_correct_matrix` each exercise one
+        // primitive in isolation, so all three passed while T·R and T·S·R silently rotated and
+        // dilated the translation. Composing is exactly where the extraction used to break.
+        for &(dx, dy) in &[(5.0_f64, 10.0_f64), (-3.0, 7.5), (0.0, -4.0)] {
+            for &angle in &[
+                0.0_f64,
+                std::f64::consts::FRAC_PI_2,
+                -std::f64::consts::FRAC_PI_3,
+                2.5,
+            ] {
+                for &scale in &[1.0_f64, 2.0, 0.25] {
+                    let composed = Rotor::translation(dx, dy)
+                        .compose(Rotor::scale(scale).compose(Rotor::rotation(angle)));
+                    let m = composed.to_affine_matrix();
+
+                    assert!(
+                        (m.tx - dx).abs() < 1e-9 && (m.ty - dy).abs() < 1e-9,
+                        "translation ({dx}, {dy}) must survive rotation {angle} and scale {scale}, got ({}, {})",
+                        m.tx,
+                        m.ty
+                    );
+                    // The rotation/scale block must stay correct too, so the fix cannot be a
+                    // translation-only patch that corrupts the linear part.
+                    assert!(
+                        (m.a - angle.cos() * scale).abs() < 1e-9
+                            && (m.b + angle.sin() * scale).abs() < 1e-9
+                            && (m.c - angle.sin() * scale).abs() < 1e-9
+                            && (m.d - angle.cos() * scale).abs() < 1e-9,
+                        "linear block wrong for angle {angle} scale {scale}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn affine_matrix_rotor_round_trip_preserves_similarity_transforms() {
+        // `AffineMatrix2D -> to_rotor -> to_affine_matrix` must be the identity on similarity
+        // transforms, and must agree with the matrix's own `apply` on a probe point.
+        for &angle in &[0.0_f64, std::f64::consts::FRAC_PI_2, 2.0, -1.25] {
+            for &scale in &[1.0_f64, 3.0, 0.5] {
+                for &(tx, ty) in &[(0.0_f64, 0.0_f64), (5.0, 10.0), (-2.5, 4.0)] {
+                    let original = AffineMatrix2D {
+                        a: angle.cos() * scale,
+                        b: -angle.sin() * scale,
+                        tx,
+                        c: angle.sin() * scale,
+                        d: angle.cos() * scale,
+                        ty,
+                    };
+                    let round_tripped = original.to_rotor().to_affine_matrix();
+
+                    for &(px, py) in &[(1.0_f64, 0.0_f64), (0.0, 1.0), (-3.0, 2.0)] {
+                        let (ex, ey) = original.apply(px, py);
+                        let (gx, gy) = round_tripped.apply(px, py);
+                        assert!(
+                            (gx - ex).abs() < 1e-9 && (gy - ey).abs() < 1e-9,
+                            "round trip changed ({px}, {py}): expected ({ex}, {ey}), got ({gx}, {gy}) \
+                             for angle {angle} scale {scale} translation ({tx}, {ty})"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -807,19 +902,26 @@ impl TransformStack {
     }
 
     /// Get the translation component of the composed transform.
+    ///
+    /// Derived from `to_affine_matrix` rather than read straight off the e1e±/e2e± components:
+    /// once the stack also carries a rotation or dilation those raw sums are the translation
+    /// rotated by half the angle and dilated by the half-dilation, not the translation itself.
+    /// Going through the decomposition also guarantees this can never disagree with `apply`.
     #[must_use]
     pub fn translation(&self) -> (f64, f64) {
-        let e1p = self.composed.components[2];
-        let e1m = self.composed.components[3];
-        let e2p = self.composed.components[4];
-        let e2m = self.composed.components[5];
-        (e1p + e1m, e2p + e2m)
+        let matrix = self.composed.to_affine_matrix();
+        (matrix.tx, matrix.ty)
     }
 
     /// Get the scale factor of the composed transform.
+    ///
+    /// The e+- component alone is `cos(θ/2)·sinh(ln(scale)/2)`, so reading it as `sinh` understates
+    /// the dilation of any stack that also rotates. Recover it from the linear block instead:
+    /// `a = cos(θ)·scale` and `c = sin(θ)·scale`, so `hypot(a, c) = scale`.
     #[must_use]
     pub fn scale_factor(&self) -> f64 {
-        dilation_scale(self.composed.components[6])
+        let matrix = self.composed.to_affine_matrix();
+        matrix.a.hypot(matrix.c)
     }
 
     /// Apply the composed transform to a 2D point.
@@ -1450,6 +1552,40 @@ mod transform_stack_tests {
             (stack.scale_factor() - 1.0).abs() < 1e-10,
             "inverse dilations should compose to identity, got {}",
             stack.scale_factor()
+        );
+    }
+
+    #[test]
+    fn transform_stack_accessors_survive_mixed_rotation_scale_translation() {
+        // `transform_stack_translation`, `transform_stack_rotation_angle_extraction` and
+        // `transform_stack_scale_factor_recovers_dilation` each push ONE kind of transform, so the
+        // accessors reading raw rotor components passed all three while a mixed stack reported a
+        // rotated/dilated translation and an understated scale.
+        let mut stack = TransformStack::new();
+        stack.push_translation(5.0, 10.0);
+        stack.push_scale(2.0);
+        stack.push_rotation(std::f64::consts::FRAC_PI_2);
+
+        let (tx, ty) = stack.translation();
+        assert!(
+            (tx - 5.0).abs() < 1e-9 && (ty - 10.0).abs() < 1e-9,
+            "translation must stay (5, 10) under rotation and scale, got ({tx}, {ty})"
+        );
+        assert!(
+            (stack.scale_factor() - 2.0).abs() < 1e-9,
+            "scale must stay 2.0 under rotation, got {}",
+            stack.scale_factor()
+        );
+        assert!(
+            (stack.rotation_angle() - std::f64::consts::FRAC_PI_2).abs() < 1e-9,
+            "rotation must stay 90deg under scale, got {}",
+            stack.rotation_angle()
+        );
+        // The accessors must agree with what the transform actually does to a point.
+        let (px, py) = stack.apply(1.0, 0.0);
+        assert!(
+            (px - 5.0).abs() < 1e-9 && (py - 12.0).abs() < 1e-9,
+            "scale 2 then rotate 90 then translate (5,10) sends (1,0) to (5,12), got ({px}, {py})"
         );
     }
 
