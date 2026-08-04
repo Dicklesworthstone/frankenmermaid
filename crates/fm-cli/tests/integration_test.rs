@@ -3060,6 +3060,11 @@ fn determinism_manifest_cli_is_stable_and_finite() {
 
     let cases = first["cases"].as_array().expect("cases array");
     assert!(!cases.is_empty(), "manifest should include golden cases");
+    assert_eq!(
+        first["version"].as_u64(),
+        Some(2),
+        "manifest version must identify the exact-bit digest format"
+    );
     for case in cases {
         assert_eq!(
             case["non_finite_value_count"].as_u64().unwrap_or_default(),
@@ -3071,6 +3076,12 @@ fn determinism_manifest_cli_is_stable_and_finite() {
                 .as_str()
                 .is_some_and(|value| value.len() == 64),
             "layout SHA-256 digest missing or malformed: {case:?}"
+        );
+        assert!(
+            case["layout_f32_bits_sha256"]
+                .as_str()
+                .is_some_and(|value| value.len() == 64),
+            "exact f32-bit layout SHA-256 digest missing or malformed: {case:?}"
         );
     }
 }

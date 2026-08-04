@@ -2879,6 +2879,11 @@ struct DeterminismManifestCase {
     layout_height: f64,
     non_finite_value_count: usize,
     subnormal_value_count: usize,
+    /// SHA-256 of the canonical layout encoded as raw IEEE-754 `f32` bit patterns.
+    ///
+    /// Unlike `layout_sha256`, this deliberately does not round coordinates, so a cross-target
+    /// comparison catches a one-ULP FMA, subnormal, or rounding-mode difference.
+    layout_f32_bits_sha256: String,
     layout_sha256: String,
 }
 
@@ -3956,11 +3961,16 @@ fn build_determinism_manifest() -> DeterminismManifest {
         .collect();
     let joined = cases
         .iter()
-        .map(|case| format!("{}:{}", case.case_id, case.layout_sha256))
+        .map(|case| {
+            format!(
+                "{}:{}:{}",
+                case.case_id, case.layout_f32_bits_sha256, case.layout_sha256
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     DeterminismManifest {
-        version: 1,
+        version: 2,
         target_arch: std::env::consts::ARCH,
         target_os: std::env::consts::OS,
         target_env: option_env!("CARGO_CFG_TARGET_ENV").unwrap_or("unknown"),
@@ -3972,8 +3982,9 @@ fn build_determinism_manifest() -> DeterminismManifest {
 
 fn determinism_manifest_case(case_id: &'static str, input: &str) -> DeterminismManifestCase {
     let parsed = parse_with_mode(input, MermaidParseMode::Compat);
-    let canonical = canonical_layout(&parsed.ir);
     let layout = fm_layout::layout_diagram(&parsed.ir);
+    let canonical = canonical_layout(&layout);
+    let exact_bits = canonical_layout_f32_bits(&layout);
     let (non_finite_value_count, subnormal_value_count) = layout_float_anomalies(&layout);
     DeterminismManifestCase {
         case_id,
@@ -3984,6 +3995,7 @@ fn determinism_manifest_case(case_id: &'static str, input: &str) -> DeterminismM
         layout_height: round6(layout.bounds.height),
         non_finite_value_count,
         subnormal_value_count,
+        layout_f32_bits_sha256: sha256_hex(exact_bits.as_bytes()),
         layout_sha256: sha256_hex(canonical.as_bytes()),
     }
 }
@@ -3998,8 +4010,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     encode_hex(&hasher.finalize())
 }
 
-fn canonical_layout(ir: &MermaidDiagramIr) -> String {
-    let layout = fm_layout::layout_diagram(ir);
+fn canonical_layout(layout: &fm_layout::DiagramLayout) -> String {
     let mut lines: Vec<String> = Vec::new();
 
     let mut nodes: Vec<_> = layout.nodes.iter().collect();
@@ -4036,6 +4047,52 @@ fn canonical_layout(ir: &MermaidDiagramIr) -> String {
         round6(layout.bounds.y),
         round6(layout.bounds.width),
         round6(layout.bounds.height),
+    ));
+
+    lines.join("\n")
+}
+
+/// A target-comparison encoding of every layout coordinate that preserves each `f32` bit exactly.
+/// Sorting is identical to [`canonical_layout`], while hexadecimal avoids architecture-dependent
+/// float formatting. This is intentionally separate from the rounded digest retained for readable
+/// operator diagnostics.
+fn canonical_layout_f32_bits(layout: &fm_layout::DiagramLayout) -> String {
+    let mut lines: Vec<String> = Vec::new();
+
+    let mut nodes: Vec<_> = layout.nodes.iter().collect();
+    nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+    for node in &nodes {
+        lines.push(format!(
+            "node:{} x={:08x} y={:08x} w={:08x} h={:08x}",
+            node.node_id,
+            node.bounds.x.to_bits(),
+            node.bounds.y.to_bits(),
+            node.bounds.width.to_bits(),
+            node.bounds.height.to_bits(),
+        ));
+    }
+
+    let mut edges: Vec<_> = layout.edges.iter().collect();
+    edges.sort_by_key(|edge| edge.edge_index);
+    for edge in &edges {
+        let points = edge
+            .points
+            .iter()
+            .map(|point| format!("{:08x},{:08x}", point.x.to_bits(), point.y.to_bits()))
+            .collect::<Vec<_>>()
+            .join(";");
+        lines.push(format!(
+            "edge:{} reversed={} pts={}",
+            edge.edge_index, edge.reversed, points
+        ));
+    }
+
+    lines.push(format!(
+        "bounds: x={:08x} y={:08x} w={:08x} h={:08x}",
+        layout.bounds.x.to_bits(),
+        layout.bounds.y.to_bits(),
+        layout.bounds.width.to_bits(),
+        layout.bounds.height.to_bits(),
     ));
 
     lines.join("\n")
