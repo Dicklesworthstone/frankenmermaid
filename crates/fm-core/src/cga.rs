@@ -377,25 +377,42 @@ impl Rotor {
         }
     }
 
+    fn to_multivector(self) -> Multivector {
+        let mut components = [0.0; 16];
+        components[blade::SCALAR] = self.components[0];
+        components[blade::E12] = self.components[1];
+        components[blade::E1P] = self.components[2];
+        components[blade::E1M] = self.components[3];
+        components[blade::E2P] = self.components[4];
+        components[blade::E2M] = self.components[5];
+        components[blade::EPM] = self.components[6];
+        components[blade::E12PM] = self.components[7];
+        Multivector { components }
+    }
+
+    fn from_multivector(multivector: Multivector) -> Self {
+        let components = multivector.components;
+        Self {
+            components: [
+                components[blade::SCALAR],
+                components[blade::E12],
+                components[blade::E1P],
+                components[blade::E1M],
+                components[blade::E2P],
+                components[blade::E2M],
+                components[blade::EPM],
+                components[blade::E12PM],
+            ],
+        }
+    }
+
     /// Compose two rotors: self * other (geometric product of even subalgebra).
     #[must_use]
     pub fn compose(self, other: Self) -> Self {
-        let a = &self.components;
-        let b = &other.components;
-        // Even-subalgebra product for R_{3,1}
-        // Simplified: only the most important terms for translation+rotation.
-        Self {
-            components: [
-                a[0] * b[0] - a[1] * b[1] - a[6] * b[6],
-                a[0] * b[1] + a[1] * b[0],
-                a[0] * b[2] + a[2] * b[0] + a[1] * b[4] - a[4] * b[1],
-                a[0] * b[3] + a[3] * b[0] + a[1] * b[5] - a[5] * b[1],
-                a[0] * b[4] + a[4] * b[0] - a[1] * b[2] + a[2] * b[1],
-                a[0] * b[5] + a[5] * b[0] - a[1] * b[3] + a[3] * b[1],
-                a[0] * b[6] + a[6] * b[0],
-                a[0] * b[7] + a[7] * b[0] + a[1] * b[6] - a[6] * b[1],
-            ],
-        }
+        Self::from_multivector(
+            self.to_multivector()
+                .geometric_product(other.to_multivector()),
+        )
     }
 
     /// Reverse of the rotor: R̃.
@@ -628,6 +645,27 @@ mod tests {
         assert!((m.a - 1.0).abs() < 1e-10);
         assert!((m.d - 1.0).abs() < 1e-10);
         assert!(m.tx.abs() < 1e-10);
+    }
+
+    #[test]
+    fn rotor_compose_preserves_full_even_subalgebra_terms() {
+        let left = Rotor {
+            components: [0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        let right = Rotor {
+            components: [0.0, 0.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0],
+        };
+
+        let composed = left.compose(right);
+        assert_eq!(
+            composed.components[7], -6.0,
+            "e1+ * e2- should produce -6 e12+-"
+        );
+        assert_eq!(
+            composed.to_multivector(),
+            left.to_multivector()
+                .geometric_product(right.to_multivector())
+        );
     }
 
     #[test]
