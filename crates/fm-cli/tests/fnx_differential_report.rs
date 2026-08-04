@@ -128,8 +128,9 @@ struct DifferentialReport {
     structure_classification: DeltaClassification,
     overall_classification: DeltaClassification,
 
-    // Gate pass/fail
-    passes_gate: bool,
+    // Correctness gate pass/fail. Runtime samples remain report-only because a
+    // shared worker cannot make a stable correctness decision from them.
+    passes_correctness_gate: bool,
     failure_reasons: Vec<String>,
 }
 
@@ -357,15 +358,14 @@ fn generate_differential_report(input: &str, scenario_id: &str) -> DifferentialR
         DeltaClassification::Neutral
     };
 
-    // Overall classification
-    let overall_classification = if timing_classification == DeltaClassification::Regression
-        || quality_classification == DeltaClassification::Regression
+    // Overall classification is a correctness result. Timing is reported for
+    // dedicated benchmark admission, not used to reject a deterministic
+    // parse/layout/render conformance run on a shared CI worker.
+    let overall_classification = if quality_classification == DeltaClassification::Regression
         || structure_classification == DeltaClassification::Regression
     {
         DeltaClassification::Regression
-    } else if timing_classification == DeltaClassification::ExpectedImprovement
-        || quality_classification == DeltaClassification::ExpectedImprovement
-    {
+    } else if quality_classification == DeltaClassification::ExpectedImprovement {
         DeltaClassification::ExpectedImprovement
     } else {
         DeltaClassification::Neutral
@@ -374,22 +374,6 @@ fn generate_differential_report(input: &str, scenario_id: &str) -> DifferentialR
     // Collect failure reasons
     let mut failure_reasons = Vec::new();
 
-    if layout_timing_regression {
-        failure_reasons.push(format!(
-            "layout_time_regression: {:.1}% > {:.1}% threshold and > {}us absolute delta",
-            layout_time_delta_pct,
-            thresholds::MAX_LAYOUT_TIME_REGRESSION_PCT,
-            thresholds::MIN_LAYOUT_TIME_REGRESSION_ABS_US
-        ));
-    }
-    if render_timing_regression {
-        failure_reasons.push(format!(
-            "render_time_regression: {:.1}% > {:.1}% threshold and > {}us absolute delta",
-            render_time_delta_pct,
-            thresholds::MAX_RENDER_TIME_REGRESSION_PCT,
-            thresholds::MIN_RENDER_TIME_REGRESSION_ABS_US
-        ));
-    }
     if crossing_delta > thresholds::MAX_CROSSING_REGRESSION {
         failure_reasons.push(format!(
             "crossing_regression: +{} > {} threshold",
@@ -424,7 +408,7 @@ fn generate_differential_report(input: &str, scenario_id: &str) -> DifferentialR
         ));
     }
 
-    let passes_gate = failure_reasons.is_empty();
+    let passes_correctness_gate = failure_reasons.is_empty();
 
     DifferentialReport {
         scenario_id: scenario_id.to_string(),
@@ -440,7 +424,7 @@ fn generate_differential_report(input: &str, scenario_id: &str) -> DifferentialR
         quality_classification,
         structure_classification,
         overall_classification,
-        passes_gate,
+        passes_correctness_gate,
         failure_reasons,
     }
 }
@@ -489,7 +473,7 @@ fn differential_all_golden_cases_pass_gate() {
     for (case_id, input) in &cases {
         let report = generate_differential_report(input, case_id);
 
-        if !report.passes_gate {
+        if !report.passes_correctness_gate {
             failures.push(format!(
                 "{case_id}: {}\n  reasons: {:?}",
                 report.overall_classification, report.failure_reasons
@@ -545,26 +529,19 @@ fn differential_layout_bounds_stable() {
 }
 
 #[test]
-fn differential_no_severe_timing_regression() {
-    let cases = load_golden_cases();
-
-    for (case_id, input) in &cases {
-        let report = generate_differential_report(input, case_id);
-
-        assert!(
-            !timing_regression_exceeds_gate(
-                report.fnx_off.layout_us,
-                report.fnx_on.layout_us,
-                report.layout_time_delta_pct,
-                thresholds::MAX_LAYOUT_TIME_REGRESSION_PCT,
-                thresholds::MIN_LAYOUT_TIME_REGRESSION_ABS_US,
-            ),
-            "{case_id}: layout time regression {:.1}% exceeds {:.1}% and {}us absolute thresholds",
-            report.layout_time_delta_pct,
-            thresholds::MAX_LAYOUT_TIME_REGRESSION_PCT,
-            thresholds::MIN_LAYOUT_TIME_REGRESSION_ABS_US
-        );
-    }
+fn timing_regression_requires_both_percentage_and_absolute_breaches() {
+    assert!(!timing_regression_exceeds_gate(
+        1_000, 1_999, 99.9, 50.0, 1_000
+    ));
+    assert!(!timing_regression_exceeds_gate(
+        1_000, 2_000, 50.0, 50.0, 1_000
+    ));
+    assert!(!timing_regression_exceeds_gate(
+        1_000, 2_000, 100.0, 50.0, 1_000
+    ));
+    assert!(timing_regression_exceeds_gate(
+        1_000, 2_001, 100.1, 50.0, 1_000
+    ));
 }
 
 #[test]
@@ -627,7 +604,7 @@ fn differential_evidence_log_emitted() {
                 "structure": format!("{}", report.structure_classification),
                 "overall": format!("{}", report.overall_classification),
             },
-            "passes_gate": report.passes_gate,
+            "passes_correctness_gate": report.passes_correctness_gate,
             "failure_reasons": report.failure_reasons,
             "threshold_policy_version": DIFFERENTIAL_REPORT_VERSION,
             "surface": "fnx-differential-report",
@@ -658,7 +635,7 @@ fn differential_summary_statistics() {
             DeltaClassification::Regression => regressions += 1,
         }
 
-        if report.passes_gate {
+        if report.passes_correctness_gate {
             gate_passes += 1;
         }
     }
@@ -717,7 +694,7 @@ fn save_differential_baselines(reports: &BTreeMap<String, DifferentialReport>) {
                 k.clone(),
                 serde_json::json!({
                     "overall_classification": format!("{}", r.overall_classification),
-                    "passes_gate": r.passes_gate,
+                    "passes_correctness_gate": r.passes_correctness_gate,
                     "crossing_delta": r.crossing_delta,
                     "fnx_off_output_hash": r.fnx_off.output_hash,
                     "fnx_on_output_hash": r.fnx_on.output_hash,
@@ -772,14 +749,14 @@ fn differential_baselines_stable_or_bless() {
             Some(expected_entry) => {
                 // Check gate status consistency
                 let expected_passes = expected_entry
-                    .get("passes_gate")
+                    .get("passes_correctness_gate")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
 
-                if report.passes_gate != expected_passes {
+                if report.passes_correctness_gate != expected_passes {
                     mismatches.push(format!(
                         "{case_id}: gate status changed from {} to {}",
-                        expected_passes, report.passes_gate
+                        expected_passes, report.passes_correctness_gate
                     ));
                 }
 
@@ -879,10 +856,14 @@ flowchart TD
         "Hub-spoke FNX-on should have 0 crossings"
     );
 
-    assert!(report.passes_gate, "Hub-spoke should pass gate");
+    assert!(
+        report.passes_correctness_gate,
+        "Hub-spoke should pass the correctness gate"
+    );
 }
 
 #[test]
+#[ignore = "timing admission requires an isolated benchmark harness"]
 fn differential_chain_performance() {
     // Long chain should not have significant timing regression
     let mut input = "flowchart LR\n".to_string();
