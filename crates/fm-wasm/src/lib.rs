@@ -1044,16 +1044,18 @@ pub fn capability_matrix_js() -> Result<JsValue, JsValue> {
 #[cfg(target_arch = "wasm32")]
 #[derive(Debug, Clone)]
 struct WebCanvas2dContext {
-    canvas: web_sys::HtmlCanvasElement,
+    width: u32,
+    height: u32,
     context: web_sys::CanvasRenderingContext2d,
     current_font: String,
 }
 
 #[cfg(target_arch = "wasm32")]
 impl WebCanvas2dContext {
-    fn new(canvas: web_sys::HtmlCanvasElement, context: web_sys::CanvasRenderingContext2d) -> Self {
+    fn new(width: u32, height: u32, context: web_sys::CanvasRenderingContext2d) -> Self {
         Self {
-            canvas,
+            width,
+            height,
             context,
             current_font: "14px sans-serif".to_string(),
         }
@@ -1063,11 +1065,11 @@ impl WebCanvas2dContext {
 #[cfg(target_arch = "wasm32")]
 impl Canvas2dContext for WebCanvas2dContext {
     fn width(&self) -> f64 {
-        f64::from(self.canvas.width())
+        f64::from(self.width)
     }
 
     fn height(&self) -> f64 {
-        f64::from(self.canvas.height())
+        f64::from(self.height)
     }
 
     fn save(&mut self) {
@@ -1255,7 +1257,9 @@ fn browser_supports_webgpu() -> bool {
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub struct Diagram {
-    canvas: web_sys::HtmlCanvasElement,
+    canvas: Option<web_sys::HtmlCanvasElement>,
+    canvas_width: u32,
+    canvas_height: u32,
     context: web_sys::CanvasRenderingContext2d,
     renderer: WebRendererKind,
     svg_config: SvgRenderConfig,
@@ -1272,6 +1276,42 @@ impl Diagram {
             return Err(js_error("diagram has been destroyed"));
         }
         Ok(())
+    }
+
+    fn from_canvas_context(
+        canvas: Option<web_sys::HtmlCanvasElement>,
+        canvas_width: u32,
+        canvas_height: u32,
+        context: web_sys::CanvasRenderingContext2d,
+        config: Option<JsValue>,
+    ) -> Result<Self, JsValue> {
+        let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
+        let runtime = read_runtime_config();
+        let requested_theme = requested_theme_preset(&overrides)?;
+        let svg_config =
+            merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref())?;
+        let canvas_base = requested_theme
+            .map(|preset| apply_canvas_theme_preset(runtime.canvas.clone(), preset))
+            .unwrap_or_else(|| runtime.canvas.clone());
+        let canvas_config = align_canvas_typography_with_svg(
+            merge_canvas_config(&canvas_base, &overrides.canvas),
+            &svg_config,
+        );
+        let pressure_config = merge_pressure_config(&runtime.pressure, &overrides.pressure);
+        let renderer = merge_renderer_kind(runtime.renderer, overrides.renderer);
+
+        Ok(Self {
+            canvas,
+            canvas_width,
+            canvas_height,
+            context,
+            renderer,
+            svg_config,
+            canvas_config,
+            pressure_config,
+            layout_engine: fm_layout::IncrementalLayoutEngine::default(),
+            destroyed: false,
+        })
     }
 }
 
@@ -1290,32 +1330,32 @@ impl Diagram {
             .ok_or_else(|| js_error("canvas 2d context is unavailable"))?
             .dyn_into::<web_sys::CanvasRenderingContext2d>()
             .map_err(|_| js_error("failed to cast context to CanvasRenderingContext2d"))?;
+        let canvas_width = canvas.width();
+        let canvas_height = canvas.height();
+        Self::from_canvas_context(Some(canvas), canvas_width, canvas_height, context, config)
+    }
 
-        let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
-        let runtime = read_runtime_config();
-        let requested_theme = requested_theme_preset(&overrides)?;
-        let svg_config =
-            merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref())?;
-        let canvas_base = requested_theme
-            .map(|preset| apply_canvas_theme_preset(runtime.canvas.clone(), preset))
-            .unwrap_or_else(|| runtime.canvas.clone());
-        let canvas_config = align_canvas_typography_with_svg(
-            merge_canvas_config(&canvas_base, &overrides.canvas),
-            &svg_config,
-        );
-        let pressure_config = merge_pressure_config(&runtime.pressure, &overrides.pressure);
-        let renderer = merge_renderer_kind(runtime.renderer, overrides.renderer);
-
-        Ok(Self {
-            canvas,
-            context,
-            renderer,
-            svg_config,
-            canvas_config,
-            pressure_config,
-            layout_engine: fm_layout::IncrementalLayoutEngine::default(),
-            destroyed: false,
-        })
+    /// Creates a renderer for an `OffscreenCanvas` transferred to a worker.
+    ///
+    /// The offscreen 2D context implements the same CanvasRenderingContext2D
+    /// method surface used by `Canvas2dContext`; it is stored structurally so
+    /// the renderer can share the normal Canvas2D path without main-thread DOM
+    /// access. Event registration remains unavailable because an offscreen
+    /// canvas is not an `EventTarget`.
+    #[wasm_bindgen(js_name = fromOffscreenCanvas)]
+    pub fn from_offscreen_canvas(
+        canvas: web_sys::OffscreenCanvas,
+        config: Option<JsValue>,
+    ) -> Result<Self, JsValue> {
+        let canvas_width = canvas.width();
+        let canvas_height = canvas.height();
+        let context_value = canvas
+            .get_context("2d")
+            .map_err(|err| js_error_with_value("failed to get offscreen 2d context", err))?;
+        let context = context_value
+            .ok_or_else(|| js_error("offscreen canvas 2d context is unavailable"))?
+            .unchecked_into::<web_sys::CanvasRenderingContext2d>();
+        Self::from_canvas_context(None, canvas_width, canvas_height, context, config)
     }
 
     pub fn render(&mut self, input: &str, config: Option<JsValue>) -> Result<JsValue, JsValue> {
@@ -1388,8 +1428,11 @@ impl Diagram {
         let render_start = Instant::now();
         let canvas_result = match renderer.actual {
             WebRendererKind::Canvas2d => {
-                let mut web_canvas =
-                    WebCanvas2dContext::new(self.canvas.clone(), self.context.clone());
+                let mut web_canvas = WebCanvas2dContext::new(
+                    self.canvas_width,
+                    self.canvas_height,
+                    self.context.clone(),
+                );
                 render_to_canvas_with_layout(
                     &parsed.ir,
                     &traced_layout.layout,
@@ -1447,6 +1490,8 @@ impl Diagram {
     pub fn on(&self, event: &str, callback: &js_sys::Function) -> Result<(), JsValue> {
         self.ensure_alive()?;
         self.canvas
+            .as_ref()
+            .ok_or_else(|| js_error("offscreen canvas does not support DOM event listeners"))?
             .add_event_listener_with_callback(event, callback)
             .map_err(|err| js_error_with_value("failed to register canvas event listener", err))
     }
@@ -1458,8 +1503,8 @@ impl Diagram {
         self.context.clear_rect(
             0.0,
             0.0,
-            f64::from(self.canvas.width()),
-            f64::from(self.canvas.height()),
+            f64::from(self.canvas_width),
+            f64::from(self.canvas_height),
         );
         self.destroyed = true;
     }
