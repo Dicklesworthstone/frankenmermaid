@@ -6179,6 +6179,12 @@ fn render_xychart_svg(
         let legend_entry_h = 22.0_f32;
         let legend_height = named_series.len() as f32 * legend_entry_h + 12.0;
         let legend_width = 120.0_f32;
+        // The layout reserves exactly this 120px legend column. Keep the label beside its swatch
+        // within that reservation rather than allowing a long series name to extend past the SVG
+        // viewport. `textLength` only engages once the ordinary label would overflow, so normal
+        // legend typography stays unchanged.
+        let legend_text_width = legend_width - 32.0;
+        let legend_font_size = clamp_font_size(config.font_size * 0.72, config.min_font_size);
 
         let mut legend = Element::group().class("fm-xychart-legend");
         legend = legend.child(
@@ -6196,6 +6202,23 @@ fn render_xychart_svg(
         for (entry_idx, &(series_idx, name)) in named_series.iter().enumerate() {
             let row_y = legend_y + 6.0 + entry_idx as f32 * legend_entry_h + legend_entry_h / 2.0;
             let color = &palette[series_idx % palette.len()];
+            let legend_text = TextBuilder::new(name)
+                .x(legend_x + 24.0)
+                .y(row_y)
+                .baseline(crate::text::DominantBaseline::Middle)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                .font_size(legend_font_size)
+                .fill(&theme.colors.text)
+                .class("fm-xychart-legend-entry")
+                .build();
+            let estimated_text_width = name.chars().count() as f32 * legend_font_size * 0.56;
+            let legend_text = if estimated_text_width > legend_text_width {
+                legend_text
+                    .attr("textLength", legend_text_width)
+                    .attr("lengthAdjust", "spacingAndGlyphs")
+            } else {
+                legend_text
+            };
             legend = legend.child(
                 Element::rect()
                     .x(legend_x + 8.0)
@@ -6206,20 +6229,7 @@ fn render_xychart_svg(
                     .fill(color)
                     .class("fm-xychart-legend-swatch"),
             );
-            legend = legend.child(
-                TextBuilder::new(name)
-                    .x(legend_x + 24.0)
-                    .y(row_y)
-                    .baseline(crate::text::DominantBaseline::Middle)
-                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
-                    .font_size(clamp_font_size(
-                        config.font_size * 0.72,
-                        config.min_font_size,
-                    ))
-                    .fill(&theme.colors.text)
-                    .class("fm-xychart-legend-entry")
-                    .build(),
-            );
+            legend = legend.child(legend_text);
         }
         doc = doc.child(legend);
     }
@@ -15166,6 +15176,21 @@ mod tests {
         assert!(
             legend_right <= viewport_right,
             "legend right edge {legend_right} exceeds viewport {viewport_right}"
+        );
+    }
+
+    #[test]
+    fn named_xychart_legend_constrains_overlong_series_labels() {
+        let mut ir = create_xychart_ir();
+        let meta = ir.xy_chart_meta.as_mut().expect("xy chart metadata");
+        meta.series[0].name = Some("Revenue from enterprise subscriptions".to_string());
+
+        let svg = render_svg_with_config(&ir, &SvgRenderConfig::default());
+
+        assert!(svg.contains("class=\"fm-xychart-legend-entry\""));
+        assert!(
+            svg.contains("textLength=\"88\"") && svg.contains("lengthAdjust=\"spacingAndGlyphs\""),
+            "overlong legend labels must remain inside the reserved 120px legend column"
         );
     }
 
