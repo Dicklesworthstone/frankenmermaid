@@ -2164,8 +2164,18 @@ mod geometry_tests {
         ]
     }
 
+    /// Independent sqrt-based reference for `CgaRect::closest_boundary_point`.
+    ///
+    /// It must model the SAME contract, including the fail-closed precondition: a malformed rect
+    /// (non-finite, negative extent, or overflowing far edge) or a non-finite query point yields
+    /// the origin. Without this guard the reference silently computed a boundary point for
+    /// geometry the real function rejects, so the two disagreed on every negative-extent rect.
     #[inline(never)]
     fn closest_boundary_reference(rect: &CgaRect, point: &CgaPoint) -> CgaPoint {
+        if !rect.is_valid() || !point.is_finite() {
+            return CgaPoint::origin();
+        }
+
         let mut closest = rect.edges()[0].closest_point(point);
         let mut min_dist = point.distance(&closest);
 
@@ -2194,7 +2204,10 @@ mod geometry_tests {
             );
         }
 
-        let special_cases = [
+        // Fail-closed contract, asserted DIRECTLY against the origin rather than against the
+        // reference. Comparing two guarded implementations to each other would pass even if the
+        // guard condition itself were wrong, so these pin the actual specified result.
+        let rejected_cases = [
             (
                 CgaRect::new(0.0, 0.0, 10.0, 5.0),
                 CgaPoint::new(f64::NAN, 1.0),
@@ -2203,18 +2216,53 @@ mod geometry_tests {
                 CgaRect::new(0.0, 0.0, 10.0, 5.0),
                 CgaPoint::new(f64::INFINITY, f64::NEG_INFINITY),
             ),
+            // Far edge overflows to +inf even though every field is finite.
             (
                 CgaRect::new(f64::MAX, -f64::MAX, f64::MAX, f64::MAX),
                 CgaPoint::new(0.0, -0.0),
             ),
-            (CgaRect::new(-0.0, 0.0, -0.0, 0.0), CgaPoint::new(-0.0, 0.0)),
+            // Negative extent — this is the shape the random loop below used to emit, which is
+            // how the reference and the real function came to disagree.
+            (CgaRect::new(0.0, 0.0, -5.0, 5.0), CgaPoint::new(1.0, 1.0)),
+            (CgaRect::new(0.0, 0.0, 5.0, -5.0), CgaPoint::new(1.0, 1.0)),
         ];
-        for (rect, point) in special_cases {
-            assert_point_bits_eq(
-                rect.closest_boundary_point(&point),
-                closest_boundary_reference(&rect, &point),
-            );
+        for (rect, point) in rejected_cases {
+            assert!(!rect.is_valid() || !point.is_finite());
+            assert_point_bits_eq(rect.closest_boundary_point(&point), CgaPoint::origin());
         }
+
+        // Negative control for the guard: a VALID rect far out in the representable range must
+        // still produce a real boundary point. Without this, tightening `is_valid` further could
+        // swallow the whole extreme-value domain and every assertion above would still pass.
+        // 1e150 is chosen because its squared edge length (1e300) is still representable.
+        let extreme = CgaRect::new(0.0, 0.0, 1e150, 1e150);
+        assert!(extreme.is_valid());
+        let extreme_hit = extreme.closest_boundary_point(&CgaPoint::new(1.0, 2.0));
+        assert!(
+            extreme_hit.is_finite() && extreme_hit != CgaPoint::origin(),
+            "a valid extreme rect must still return a real boundary point, got {extreme_hit:?}"
+        );
+
+        // Documented boundary of that guarantee, pinned rather than left silent: once an edge is
+        // long enough that its SQUARED length overflows, `CgaLineSegment::closest_point` fails
+        // closed, so the rect degrades to the origin even though `is_valid` still accepts it.
+        // `is_valid` checks `x + width` for overflow but not `width * width`, so the two
+        // disagree on this band. Tracked separately; asserted here so a change is not silent.
+        let overflowing_extent = CgaRect::new(0.0, 0.0, f64::MAX, f64::MAX);
+        assert!(overflowing_extent.is_valid());
+        assert_point_bits_eq(
+            overflowing_extent.closest_boundary_point(&CgaPoint::new(1.0, 2.0)),
+            CgaPoint::origin(),
+        );
+
+        // Degenerate but VALID: -0.0 extents satisfy `>= 0.0`, so this takes the real path.
+        let degenerate = CgaRect::new(-0.0, 0.0, -0.0, 0.0);
+        let degenerate_point = CgaPoint::new(-0.0, 0.0);
+        assert!(degenerate.is_valid());
+        assert_point_bits_eq(
+            degenerate.closest_boundary_point(&degenerate_point),
+            closest_boundary_reference(&degenerate, &degenerate_point),
+        );
 
         let mut state = 0x9e37_79b9_7f4a_7c15_u64;
         let mut next_finite = || {
@@ -2224,8 +2272,20 @@ mod geometry_tests {
             (f64::from_bits(0x3ff0_0000_0000_0000 | (state >> 12)) - 1.0) * 2_000.0 - 1_000.0
         };
         for _ in 0..20_000 {
-            let rect = CgaRect::new(next_finite(), next_finite(), next_finite(), next_finite());
+            // Extents are magnitudes so every generated rect is VALID. Emitting negative extents
+            // here would make both sides short-circuit to the origin, degenerating 20k iterations
+            // of differential testing into `origin == origin` — proving nothing about the search.
+            let rect = CgaRect::new(
+                next_finite(),
+                next_finite(),
+                next_finite().abs(),
+                next_finite().abs(),
+            );
             let point = CgaPoint::new(next_finite(), next_finite());
+            assert!(
+                rect.is_valid() && point.is_finite(),
+                "random case must exercise the real boundary search, not the guard"
+            );
             assert_point_bits_eq(
                 rect.closest_boundary_point(&point),
                 closest_boundary_reference(&rect, &point),
