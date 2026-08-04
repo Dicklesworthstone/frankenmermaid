@@ -2191,8 +2191,9 @@ fn apply_fill_style(mut elem: Element, fill: &FillStyle) -> Element {
     match fill {
         FillStyle::Solid { color, opacity } => {
             elem = elem.fill(color);
-            if *opacity < 0.999 {
-                elem = elem.fill_opacity(clamp_unit_interval(*opacity));
+            let opacity = clamp_unit_interval(*opacity);
+            if opacity < 0.999 {
+                elem = elem.fill_opacity(opacity);
             }
         }
     }
@@ -2200,20 +2201,27 @@ fn apply_fill_style(mut elem: Element, fill: &FillStyle) -> Element {
 }
 
 fn apply_stroke_style(mut elem: Element, stroke: &StrokeStyle) -> Element {
-    elem = elem.stroke(&stroke.color).stroke_width(stroke.width);
+    elem = elem
+        .stroke(&stroke.color)
+        .stroke_width(sanitize_stroke_width(stroke.width));
 
-    if stroke.opacity < 0.999 {
-        elem = elem.stroke_opacity(clamp_unit_interval(stroke.opacity));
+    let opacity = clamp_unit_interval(stroke.opacity);
+    if opacity < 0.999 {
+        elem = elem.stroke_opacity(opacity);
     }
 
     if !stroke.dash_array.is_empty() {
         let dasharray = stroke
             .dash_array
             .iter()
-            .map(|value| fmt_svg_number(*value))
+            .copied()
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .map(fmt_svg_number)
             .collect::<Vec<_>>()
             .join(",");
-        elem = elem.stroke_dasharray(&dasharray);
+        if !dasharray.is_empty() {
+            elem = elem.stroke_dasharray(&dasharray);
+        }
     }
 
     elem = elem.stroke_linecap(map_line_cap(stroke.line_cap));
@@ -2221,6 +2229,9 @@ fn apply_stroke_style(mut elem: Element, stroke: &StrokeStyle) -> Element {
 }
 
 fn fmt_svg_number(value: f32) -> String {
+    if !value.is_finite() {
+        return "0".to_string();
+    }
     if value.fract() == 0.0 {
         format!("{}", value as i32)
     } else {
@@ -2268,7 +2279,19 @@ fn clamp_font_size(candidate: f32, min_font_size: f32) -> f32 {
 }
 
 fn clamp_unit_interval(value: f32) -> f32 {
-    value.clamp(0.0, 1.0)
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
+}
+
+fn sanitize_stroke_width(value: f32) -> f32 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// The substring-keyword flags a single node class can raise (highlight/inactive/dashed/double
@@ -14548,6 +14571,29 @@ mod tests {
         assert!(svg.contains("stroke-dasharray=\"6,4\""));
         assert!(svg.contains("stroke-linecap=\"round\""));
         assert!(svg.contains("stroke-linejoin=\"bevel\""));
+    }
+
+    #[test]
+    fn render_scene_sanitizes_non_finite_stroke_style_values() {
+        let mut scene = create_scene_with_path_and_text();
+        assert!(matches!(
+            scene.root.children.first(),
+            Some(RenderItem::Path(_))
+        ));
+        let Some(RenderItem::Path(path)) = scene.root.children.first_mut() else {
+            return;
+        };
+        let stroke = path.stroke.as_mut().expect("fixture path has a stroke");
+        stroke.width = f32::NAN;
+        stroke.opacity = f32::NAN;
+        stroke.dash_array = vec![f32::NAN, f32::INFINITY, -2.0, 3.0];
+
+        let svg = render_scene_to_svg(&scene, &SvgRenderConfig::default());
+
+        assert!(!svg.contains("NaN") && !svg.contains("Infinity"));
+        assert!(svg.contains("stroke-width=\"0\""));
+        assert!(!svg.contains("stroke-opacity="));
+        assert!(svg.contains("stroke-dasharray=\"3\""));
     }
 
     #[test]
