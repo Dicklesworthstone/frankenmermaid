@@ -440,19 +440,22 @@ impl Rotor {
 
     /// Multiplicative inverse: R⁻¹ = R̃ / |R|².
     ///
-    /// For normalized rotors (|R|² = 1), this equals the reverse.
-    /// For non-normalized rotors (like scale), this properly inverts.
+    /// Returns `None` for singular or non-finite rotors. For normalized rotors
+    /// (|R|² = 1), the inverse equals the reverse.
     #[must_use]
-    pub fn inverse(self) -> Self {
+    pub fn inverse(self) -> Option<Self> {
         let norm_sq = self.norm_squared();
+        if !norm_sq.is_finite() || norm_sq.abs() < f64::EPSILON {
+            return None;
+        }
         if (norm_sq - 1.0).abs() < 1e-12 {
             // Already normalized, reverse is the inverse
-            self.reverse()
+            Some(self.reverse())
         } else {
             // Scale each component of the reverse by 1/norm_squared
             let rev = self.reverse();
             let inv_norm = 1.0 / norm_sq;
-            Self {
+            Some(Self {
                 components: [
                     rev.components[0] * inv_norm,
                     rev.components[1] * inv_norm,
@@ -463,7 +466,7 @@ impl Rotor {
                     rev.components[6] * inv_norm,
                     rev.components[7] * inv_norm,
                 ],
-            }
+            })
         }
     }
 
@@ -1593,6 +1596,21 @@ mod transform_stack_tests {
     #[should_panic(expected = "scale factor must be positive")]
     fn rotor_scale_negative_panics() {
         let _ = Rotor::scale(-1.0);
+    }
+
+    #[test]
+    fn rotor_inverse_rejects_singular_and_non_finite_rotors() {
+        assert!(Rotor {
+            components: [0.0; 8]
+        }
+        .inverse()
+        .is_none());
+        assert!(Rotor {
+            components: [f64::NAN, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        }
+        .inverse()
+        .is_none());
+        assert_eq!(Rotor::identity().inverse(), Some(Rotor::identity()));
     }
 
     #[test]
