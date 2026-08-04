@@ -910,11 +910,7 @@ impl RenderExecutor {
     /// `ThreadPoolBuilder::num_threads` is only a request. Recording the distinct Rayon worker
     /// indices that actually run diagram jobs proves operation-level participation on Linux and
     /// Apple Silicon without relying on ISA- or OS-specific thread APIs.
-    fn probe_operation_threads(
-        &self,
-        texts: &Arc<[String]>,
-        cfg: &Arc<SvgRenderConfig>,
-    ) -> usize {
+    fn probe_operation_threads(&self, texts: &Arc<[String]>, cfg: &Arc<SvgRenderConfig>) -> usize {
         let workers_seen: Arc<[AtomicBool]> = (0..self.threads)
             .map(|_| AtomicBool::new(false))
             .collect::<Vec<_>>()

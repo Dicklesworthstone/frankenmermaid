@@ -1644,16 +1644,20 @@ mod transform_stack_tests {
 
     #[test]
     fn rotor_inverse_rejects_singular_and_non_finite_rotors() {
-        assert!(Rotor {
-            components: [0.0; 8]
-        }
-        .inverse()
-        .is_none());
-        assert!(Rotor {
-            components: [f64::NAN, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        }
-        .inverse()
-        .is_none());
+        assert!(
+            Rotor {
+                components: [0.0; 8]
+            }
+            .inverse()
+            .is_none()
+        );
+        assert!(
+            Rotor {
+                components: [f64::NAN, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            }
+            .inverse()
+            .is_none()
+        );
         assert_eq!(Rotor::identity().inverse(), Some(Rotor::identity()));
     }
 
@@ -1872,12 +1876,16 @@ mod geometry_tests {
     fn circle_intersect_circle_rejects_non_unique_and_invalid_inputs() {
         let unit_at_origin = CgaCircle::new(CgaPoint::origin(), 1.0);
         assert!(unit_at_origin.intersect_circle(&unit_at_origin).is_empty());
-        assert!(unit_at_origin
-            .intersect_circle(&CgaCircle::new(CgaPoint::new(3.0, 0.0), 1.0))
-            .is_empty());
-        assert!(unit_at_origin
-            .intersect_circle(&CgaCircle::new(CgaPoint::new(0.0, 0.0), -1.0))
-            .is_empty());
+        assert!(
+            unit_at_origin
+                .intersect_circle(&CgaCircle::new(CgaPoint::new(3.0, 0.0), 1.0))
+                .is_empty()
+        );
+        assert!(
+            unit_at_origin
+                .intersect_circle(&CgaCircle::new(CgaPoint::new(0.0, 0.0), -1.0))
+                .is_empty()
+        );
         assert!(!CgaCircle::new(CgaPoint::origin(), -1.0).contains(&CgaPoint::origin()));
     }
 

@@ -3,7 +3,7 @@
 use fm_core::{DiagramType, GanttDate};
 use fm_layout::layout_diagram;
 use fm_parser::parse;
-use fm_render_svg::{render_svg_with_config, SvgRenderConfig};
+use fm_render_svg::{SvgRenderConfig, render_svg_with_config};
 use serde::Deserialize;
 use serde_json::json;
 use std::fs;
