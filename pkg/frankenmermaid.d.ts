@@ -13,6 +13,8 @@ export class Diagram {
 
 export function applyLensEdit(input: string, element_id: string, replacement: string): any;
 
+export function applyParseLensEdit(input: string, element_id: string, replacement: string): any;
+
 export function describeDiagram(input: string): string;
 
 export function detectType(input: string): any;
@@ -23,6 +25,8 @@ export function init(config?: any | null): void;
 
 export function parse(input: string): any;
 
+export function parseLens(input: string): any;
+
 export function renderSvg(input: string, config?: any | null): string;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -31,6 +35,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_diagram_free: (a: number, b: number) => void;
     readonly applyLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+    readonly applyParseLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly describeDiagram: (a: number, b: number, c: number) => void;
     readonly detectType: (a: number, b: number, c: number) => void;
     readonly diagramLens: (a: number, b: number, c: number) => void;
@@ -41,6 +46,7 @@ export interface InitOutput {
     readonly diagram_setTheme: (a: number, b: number, c: number, d: number) => void;
     readonly init: (a: number, b: number) => void;
     readonly parse: (a: number, b: number, c: number) => void;
+    readonly parseLens: (a: number, b: number, c: number) => void;
     readonly renderSvg: (a: number, b: number, c: number, d: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;

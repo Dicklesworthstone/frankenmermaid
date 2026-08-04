@@ -36,9 +36,18 @@ mod thresholds {
     /// FNX-on can be at most 50% slower than FNX-off.
     pub const MAX_LAYOUT_TIME_REGRESSION_PCT: f64 = 50.0;
 
+    /// Ignore layout timing deltas below this absolute threshold.
+    /// The golden corpus includes sub-millisecond cases where scheduler noise
+    /// can look like a severe percentage regression.
+    pub const MIN_LAYOUT_TIME_REGRESSION_ABS_US: u64 = 1_000;
+
     /// Maximum acceptable render time regression (percentage).
     /// Set high because render times are typically small (microseconds) and have high variance.
     pub const MAX_RENDER_TIME_REGRESSION_PCT: f64 = 100.0;
+
+    /// Ignore render timing deltas below this absolute threshold for the same
+    /// reason as layout timing.
+    pub const MIN_RENDER_TIME_REGRESSION_ABS_US: u64 = 1_000;
 
     /// Layout bounds must not differ by more than this percentage.
     pub const MAX_BOUNDS_DELTA_PCT: f64 = 1.0;
@@ -280,6 +289,16 @@ fn compute_pct_delta(baseline: f64, current: f64) -> f64 {
     }
 }
 
+fn timing_regression_exceeds_gate(
+    baseline_us: u64,
+    current_us: u64,
+    delta_pct: f64,
+    max_delta_pct: f64,
+    min_abs_delta_us: u64,
+) -> bool {
+    delta_pct > max_delta_pct && current_us.saturating_sub(baseline_us) > min_abs_delta_us
+}
+
 fn generate_differential_report(input: &str, scenario_id: &str) -> DifferentialReport {
     let fnx_off = run_scenario_median(input, scenario_id, false);
     let fnx_on = run_scenario_median(input, scenario_id, true);
@@ -295,10 +314,22 @@ fn generate_differential_report(input: &str, scenario_id: &str) -> DifferentialR
     let crossing_delta = fnx_on.edge_crossings as i32 - fnx_off.edge_crossings as i32;
 
     // Classify timing
-    let timing_classification = if layout_time_delta_pct
-        > thresholds::MAX_LAYOUT_TIME_REGRESSION_PCT
-        || render_time_delta_pct > thresholds::MAX_RENDER_TIME_REGRESSION_PCT
-    {
+    let layout_timing_regression = timing_regression_exceeds_gate(
+        fnx_off.layout_us,
+        fnx_on.layout_us,
+        layout_time_delta_pct,
+        thresholds::MAX_LAYOUT_TIME_REGRESSION_PCT,
+        thresholds::MIN_LAYOUT_TIME_REGRESSION_ABS_US,
+    );
+    let render_timing_regression = timing_regression_exceeds_gate(
+        fnx_off.render_us,
+        fnx_on.render_us,
+        render_time_delta_pct,
+        thresholds::MAX_RENDER_TIME_REGRESSION_PCT,
+        thresholds::MIN_RENDER_TIME_REGRESSION_ABS_US,
+    );
+
+    let timing_classification = if layout_timing_regression || render_timing_regression {
         DeltaClassification::Regression
     } else if layout_time_delta_pct < -10.0 {
         DeltaClassification::ExpectedImprovement
@@ -343,18 +374,20 @@ fn generate_differential_report(input: &str, scenario_id: &str) -> DifferentialR
     // Collect failure reasons
     let mut failure_reasons = Vec::new();
 
-    if layout_time_delta_pct > thresholds::MAX_LAYOUT_TIME_REGRESSION_PCT {
+    if layout_timing_regression {
         failure_reasons.push(format!(
-            "layout_time_regression: {:.1}% > {:.1}% threshold",
+            "layout_time_regression: {:.1}% > {:.1}% threshold and > {}us absolute delta",
             layout_time_delta_pct,
-            thresholds::MAX_LAYOUT_TIME_REGRESSION_PCT
+            thresholds::MAX_LAYOUT_TIME_REGRESSION_PCT,
+            thresholds::MIN_LAYOUT_TIME_REGRESSION_ABS_US
         ));
     }
-    if render_time_delta_pct > thresholds::MAX_RENDER_TIME_REGRESSION_PCT {
+    if render_timing_regression {
         failure_reasons.push(format!(
-            "render_time_regression: {:.1}% > {:.1}% threshold",
+            "render_time_regression: {:.1}% > {:.1}% threshold and > {}us absolute delta",
             render_time_delta_pct,
-            thresholds::MAX_RENDER_TIME_REGRESSION_PCT
+            thresholds::MAX_RENDER_TIME_REGRESSION_PCT,
+            thresholds::MIN_RENDER_TIME_REGRESSION_ABS_US
         ));
     }
     if crossing_delta > thresholds::MAX_CROSSING_REGRESSION {
@@ -519,10 +552,17 @@ fn differential_no_severe_timing_regression() {
         let report = generate_differential_report(input, case_id);
 
         assert!(
-            report.layout_time_delta_pct <= thresholds::MAX_LAYOUT_TIME_REGRESSION_PCT,
-            "{case_id}: layout time regression {:.1}% exceeds threshold {:.1}%",
+            !timing_regression_exceeds_gate(
+                report.fnx_off.layout_us,
+                report.fnx_on.layout_us,
+                report.layout_time_delta_pct,
+                thresholds::MAX_LAYOUT_TIME_REGRESSION_PCT,
+                thresholds::MIN_LAYOUT_TIME_REGRESSION_ABS_US,
+            ),
+            "{case_id}: layout time regression {:.1}% exceeds {:.1}% and {}us absolute thresholds",
             report.layout_time_delta_pct,
-            thresholds::MAX_LAYOUT_TIME_REGRESSION_PCT
+            thresholds::MAX_LAYOUT_TIME_REGRESSION_PCT,
+            thresholds::MIN_LAYOUT_TIME_REGRESSION_ABS_US
         );
     }
 }

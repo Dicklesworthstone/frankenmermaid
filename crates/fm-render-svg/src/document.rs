@@ -6,7 +6,7 @@
 use std::fmt::{self, Write};
 use std::io;
 
-use crate::attributes::{Attributes, escape_xml_text};
+use crate::attributes::{Attributes, write_escaped_attr, write_escaped_text};
 use crate::defs::DefsBuilder;
 use crate::element::Element;
 
@@ -45,6 +45,15 @@ impl SvgDocument {
     #[must_use]
     pub fn viewbox(mut self, x: f32, y: f32, width: f32, height: f32) -> Self {
         self.viewbox = Some((x, y, width, height));
+        self
+    }
+
+    /// Set `font-family` on the root `<svg>`. `font-family` is inherited, so every descendant
+    /// `<text>` picks it up — letting the per-label inline `font-family` (a long ~90-byte string)
+    /// be dropped when the theme CSS is embedded.
+    #[must_use]
+    pub fn font_family(mut self, family: &str) -> Self {
+        self.attrs = self.attrs.set("font-family", family);
         self
     }
 
@@ -110,7 +119,7 @@ impl SvgDocument {
     /// Set a custom attribute.
     #[must_use]
     pub fn attr<V: Into<String>>(mut self, name: &str, value: V) -> Self {
-        self.attrs = self.attrs.set(name, value.into());
+        self.attrs = self.attrs.set(name.to_string(), value.into());
         self
     }
 
@@ -144,6 +153,16 @@ impl SvgDocument {
 
     /// Write the SVG document to a string.
     pub fn write_to_string(&self, output: &mut String) {
+        self.write_prelude(output);
+        output.push_str("</svg>");
+    }
+
+    /// Serialize everything up to (but not including) the closing `</svg>`: the open tag with all
+    /// root attributes, `<title>`/`<desc>`/`<style>`/`<defs>`, and every child in order. Split out
+    /// of [`write_to_string`] so a caller can stream extra body content (the node/edge fragments)
+    /// straight into the final buffer at the child position instead of materializing them as
+    /// intermediate `String`s and copying them a second time. See [`to_string_with_body`].
+    fn write_prelude(&self, output: &mut String) {
         output.push_str("<svg xmlns=\"http://www.w3.org/2000/svg\"");
 
         // Add viewBox (guard against NaN/Infinity producing invalid SVG)
@@ -158,10 +177,14 @@ impl SvgDocument {
 
         // Add width/height
         if let Some(ref w) = self.width {
-            let _ = write!(output, " width=\"{}\"", escape_xml_attr_value(w));
+            output.push_str(" width=\"");
+            let _ = write_escaped_attr(output, w);
+            output.push('"');
         }
         if let Some(ref h) = self.height {
-            let _ = write!(output, " height=\"{}\"", escape_xml_attr_value(h));
+            output.push_str(" height=\"");
+            let _ = write_escaped_attr(output, h);
+            output.push('"');
         }
 
         // Add other attributes
@@ -171,17 +194,23 @@ impl SvgDocument {
 
         // Add title for accessibility
         if let Some(ref title) = self.title {
-            let _ = write!(output, "<title>{}</title>", escape_xml_text(title));
+            output.push_str("<title>");
+            let _ = write_escaped_text(output, title);
+            output.push_str("</title>");
         }
 
         // Add description for accessibility
         if let Some(ref desc) = self.desc {
-            let _ = write!(output, "<desc>{}</desc>", escape_xml_text(desc));
+            output.push_str("<desc>");
+            let _ = write_escaped_text(output, desc);
+            output.push_str("</desc>");
         }
 
         // Add inline style
         if let Some(ref css) = self.style {
-            let _ = write!(output, "<style>{}</style>", escape_xml_text(css));
+            output.push_str("<style>");
+            let _ = write_escaped_text(output, css);
+            output.push_str("</style>");
         }
 
         // Add defs section
@@ -193,8 +222,33 @@ impl SvgDocument {
         for child in &self.children {
             child.write_to_string(output);
         }
+    }
 
+    /// Render the SVG document into a string with caller-provided capacity.
+    ///
+    /// Large diagrams are dominated by the final contiguous SVG buffer. Letting
+    /// layout/render callers provide a size hint avoids repeated growth copies
+    /// while preserving the exact same serialization path.
+    #[must_use]
+    pub fn to_string_with_capacity(&self, capacity: usize) -> String {
+        let mut output = String::with_capacity(capacity.max(4096));
+        self.write_to_string(&mut output);
+        output
+    }
+
+    /// Serialize the prelude (open tag + meta + defs + this document's children), then invoke
+    /// `body` to stream additional content directly into the final buffer at the child position,
+    /// then close with `</svg>`. Byte-identical to appending `body`'s content as the trailing
+    /// children — but without materializing that content as an intermediate `String` and copying
+    /// it in a second time. The render fast path uses this to write the node/edge fragments
+    /// straight into the output.
+    #[must_use]
+    pub fn to_string_with_body(&self, capacity: usize, body: impl FnOnce(&mut String)) -> String {
+        let mut output = String::with_capacity(capacity.max(4096));
+        self.write_prelude(&mut output);
+        body(&mut output);
         output.push_str("</svg>");
+        output
     }
 
     /// Write the SVG document to an io::Write implementor.
@@ -212,25 +266,8 @@ impl Default for SvgDocument {
 
 impl fmt::Display for SvgDocument {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut output = String::with_capacity(4096);
-        self.write_to_string(&mut output);
-        f.write_str(&output)
+        f.write_str(&self.to_string_with_capacity(4096))
     }
-}
-
-fn escape_xml_attr_value(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&#39;"),
-            _ => escaped.push(ch),
-        }
-    }
-    escaped
 }
 
 #[cfg(test)]
@@ -245,6 +282,17 @@ mod tests {
         assert!(svg.ends_with("</svg>"));
         assert!(svg.contains("xmlns=\"http://www.w3.org/2000/svg\""));
         assert!(svg.contains("viewBox=\"0 0 100 100\""));
+    }
+
+    #[test]
+    fn capacity_hint_preserves_serialization() {
+        let doc = SvgDocument::new()
+            .viewbox(0.0, 0.0, 100.0, 100.0)
+            .responsive()
+            .accessible("Title", "Description")
+            .child(Element::rect().x(1.0).y(2.0).width(3.0).height(4.0));
+
+        assert_eq!(doc.to_string(), doc.to_string_with_capacity(64 * 1024));
     }
 
     #[test]

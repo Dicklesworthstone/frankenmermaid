@@ -526,6 +526,20 @@
     .category-dot-timeline { background: #60a5fa; }
     .category-dot-pie { background: #f472b6; }
     .category-dot-gitGraph { background: #c084fc; }
+    .category-dot-mindmap { background: #f97316; }
+    .category-dot-requirement { background: #facc15; }
+    .category-dot-quadrantChart { background: #22d3ee; }
+    .category-dot-sankey { background: #2dd4bf; }
+    .category-dot-xyChart { background: #818cf8; }
+    .category-dot-blockBeta { background: #94a3b8; }
+    .category-dot-packetBeta { background: #fb7185; }
+    .category-dot-architectureBeta { background: #38bdf8; }
+    .category-dot-c4Context { background: #a3e635; }
+    .category-dot-c4Container { background: #84cc16; }
+    .category-dot-c4Component { background: #65a30d; }
+    .category-dot-c4Dynamic { background: #4ade80; }
+    .category-dot-c4Deployment { background: #16a34a; }
+    .category-dot-kanban { background: #e879f9; }
 
     /* --- Mobile min-height reductions --- */
     @media (max-width: 767px) {
@@ -2062,9 +2076,24 @@
       return candidates;
     })();
 
-    // Only use frankenmermaid WASM for diagram types that are fully implemented.
-    // For partial types, mermaid.js produces far better output.
-    const frankenReadyCategories = new Set(["flowchart"]);
+    // Families the live WASM runtime draws in the gallery and spotlight; everything else uses the
+    // mermaid.js baseline. This set is EVIDENCE-BASED, not aspirational: every entry was rendered
+    // through the shipped pkg/frankenmermaid_bg.wasm build and reviewed against the baseline.
+    // Families whose engine output is still visibly weaker stay on the baseline and say why in
+    // `spotlightReasons` (class/state fold `: label` transition labels into the target node;
+    // gantt has no time axis yet; sankey, kanban, block-beta and C4 label placement is coarse).
+    const frankenReadyCategories = new Set([
+      "flowchart",
+      "sequence",
+      "er",
+      "journey",
+      "timeline",
+      "pie",
+      "mindmap",
+      "quadrantChart",
+      "xyChart",
+      "packetBeta"
+    ]);
 
     function shouldUseFranken(category) {
       return frankenReadyCategories.has(category);
@@ -2077,345 +2106,496 @@
         .replace(/^-+|-+$/g, "");
     }
 
-    function sample(category, index, title, description, code, featured = false, narrative = null) {
-      return {
-        id: `${category}-${index + 1}-${slug(title)}`,
-        category,
-        label: title,
-        description,
-        code,
-        featured,
-        narrative
-      };
-    }
-
-    function buildFlowchartScenario(s) {
-      return `flowchart TD
+    // >>> demo-samples:start
+    // One example per diagram family the engine actually dispatches. The family list and the
+    // `support` values are the engine's own taxonomy (fm-core `DiagramType` / `support_level()`,
+    // mirrored by evidence/capability_matrix.json): 24 families, 23 Supported and sequence
+    // Partial. Exactly one entry per family — extra examples only ever belong here when they
+    // demonstrate a *different* feature, not another coat of paint on the same one.
+    //
+    // `scripts/verify_demo_samples.mjs` extracts this literal verbatim and renders every entry
+    // through the shipped pkg/ WASM build, so keep it self-contained: literal strings only, no
+    // interpolation, no references to anything outside the array.
+    const DIAGRAM_SAMPLES = [
+      {
+        category: "flowchart",
+        label: "Incident Response Escalation",
+        support: "Implemented",
+        code: `flowchart TD
     subgraph Intake
-      A[${s.entry}] --> B[Normalize signal]
-      B --> C{${s.check}}
+      A[PagerDuty sev-1] --> B[Normalize signal]
+      B --> C{Correlate alerts?}
     end
     subgraph Analysis
-      C -->|valid| D[${s.assess}]
+      C -->|valid| D[Assemble incident room]
       C -->|noise| E[Close alert]
-      D --> F{${s.decision}}
+      D --> F{Mitigation path}
     end
     subgraph Response
-      F -->|automate| G[${s.automate}]
-      F -->|coordinate| H[${s.coordinate}]
-      G --> I[${s.verify}]
+      F -->|automate| G[Run edge traffic shift]
+      F -->|coordinate| H[Page platform + product leads]
+      G --> I[Validate latency and error budgets]
       H --> I
     end
     subgraph Learning
-      I --> J[${s.document}]
-      J --> K[${s.retrospective}]
-    end`;
-    }
-
-    function buildSequenceScenario(s) {
-      return `sequenceDiagram
-    participant User as ${s.user}
-    participant Portal as ${s.portal}
-    participant Api as ${s.api}
-    participant Queue as ${s.queue}
-    participant Worker as ${s.worker}
-    participant Store as ${s.store}
-    User->>Portal: ${s.open}
-    Portal->>Api: ${s.submit}
-    Api->>Queue: ${s.enqueue}
-    Queue->>Worker: ${s.execute}
-    Worker->>Store: ${s.persist}
-    Store-->>Api: ${s.ack}
-    Api-->>Portal: ${s.respond}
-    Portal-->>User: ${s.complete}`;
-    }
-
-    function buildClassScenario(s) {
-      return `classDiagram
-    class ${s.root} {
+      I --> J[Capture incident timeline]
+      J --> K[Publish corrective actions]
+    end`,
+        narrative: {
+          headline: "Best recovery-and-operations proof in the current repo.",
+          lookFor: "Dense but still readable routing, explicit decision diamonds, and a believable escalation flow that makes the flowchart renderer look production-oriented instead of toy-like.",
+          proves: ["J1 messy-input-to-useful-output anchor", "J2 shared-engine story anchor", "strongest currently implemented family"]
+        }
+      },
+      {
+        category: "sequence",
+        label: "Checkout Risk Review",
+        support: "Partial",
+        code: `sequenceDiagram
+    participant User as Fraud Analyst
+    participant Portal as Risk Console
+    participant Api as Risk API
+    participant Queue as Decision Queue
+    participant Worker as Scoring Worker
+    participant Store as Ledger Store
+    User->>Portal: Open charge review
+    Portal->>Api: Fetch order + customer context
+    Api->>Queue: Queue secondary scoring
+    Queue->>Worker: Recompute risk profile
+    Worker->>Store: Persist case evidence
+    Store-->>Api: Store versioned result
+    Api-->>Portal: Return approve/hold recommendation
+    Portal-->>User: Display reviewer action panel`,
+        narrative: {
+          headline: "Best message-flow narrative for cross-surface comparison.",
+          lookFor: "Clear participant orchestration, request/queue/worker boundaries, and a scenario that feels like a real fraud-review system rather than a tutorial.",
+          proves: ["J2 multi-surface breadth", "the one family the engine still reports as Partial", "browser baseline comparison value"]
+        }
+      },
+      {
+        category: "class",
+        label: "Change Management Domain",
+        support: "Implemented",
+        code: `classDiagram
+    class ChangeRequest {
       +id: UUID
       +status: String
       +createdAt: DateTime
     }
-    class ${s.policy} {
+    class ApprovalPolicy {
       +evaluate()
       +explain()
     }
-    class ${s.service} {
+    class ExecutionService {
       +plan()
       +dispatch()
     }
-    class ${s.step} {
+    class ExecutionStep {
       +name: String
       +owner: String
       +deadline: DateTime
     }
-    class ${s.event} {
+    class AuditEvent {
       +kind: String
       +payload: Json
     }
-    class ${s.repo} {
-      +load()
-      +save()
-    }
-    ${s.root} --> ${s.policy} : checks
-    ${s.root} --> ${s.service} : executes
-    ${s.service} --> ${s.step} : emits
-    ${s.step} --> ${s.event} : records
-    ${s.service} --> ${s.repo} : persists`;
-    }
-
-    function buildStateScenario(s) {
-      return `stateDiagram-v2
-    [*] --> ${s.start}
-    ${s.start} --> ${s.review} : submit
-    ${s.review} --> ${s.blocked} : missing evidence
-    ${s.blocked} --> ${s.review} : evidence added
-    ${s.review} --> ${s.approved} : approve
-    ${s.review} --> ${s.rejected} : reject
-    ${s.approved} --> ${s.executing} : schedule
-    ${s.executing} --> ${s.verifying} : complete work
-    ${s.verifying} --> ${s.closed} : pass checks
-    ${s.verifying} --> ${s.rollback} : fail checks
-    ${s.rollback} --> ${s.closed} : restore baseline
-    ${s.rejected} --> [*]
-    ${s.closed} --> [*]`;
-    }
-
-    function buildErScenario(s) {
-      return `erDiagram
-    ${s.owner} {
+    ChangeRequest --> ApprovalPolicy : checks
+    ChangeRequest --> ExecutionService : executes
+    ExecutionService --> ExecutionStep : emits
+    ExecutionStep --> AuditEvent : records`
+      },
+      {
+        category: "state",
+        label: "Security Exception Lifecycle",
+        support: "Implemented",
+        code: `stateDiagram-v2
+    [*] --> Draft
+    Draft --> Review : submit
+    Review --> WaitingForEvidence : missing evidence
+    WaitingForEvidence --> Review : evidence added
+    Review --> Approved : approve
+    Review --> Rejected : reject
+    Approved --> InEffect : schedule
+    InEffect --> Validating : complete work
+    Validating --> Closed : pass checks
+    Validating --> Revoking : fail checks
+    Revoking --> Closed : restore baseline
+    Rejected --> [*]
+    Closed --> [*]`,
+        narrative: {
+          headline: "Best lifecycle and rollback story in the gallery.",
+          lookFor: "Approval, blocked, verification, rollback, and closure states that show the renderer can carry operational lifecycle semantics without collapsing into noise.",
+          proves: ["J4 terminal/operator storytelling candidate", "cycle/rollback readability", "transition-label gap is visible, not hidden"]
+        }
+      },
+      {
+        category: "er",
+        label: "Incident Ownership Model",
+        support: "Implemented",
+        code: `erDiagram
+    TEAM {
       string id
       string name
       string region
     }
-    ${s.primary} {
+    INCIDENT {
       string id
       string status
       datetime opened_at
     }
-    ${s.secondary} {
+    ACTION_ITEM {
       string id
       string type
       string priority
     }
-    ${s.audit} {
+    AUDIT_LOG {
       string id
       string actor
       datetime recorded_at
     }
-    ${s.owner} ||--o{ ${s.primary} : owns
-    ${s.primary} ||--o{ ${s.secondary} : includes
-    ${s.primary} ||--o{ ${s.audit} : emits
-    ${s.secondary} }o--|| ${s.owner} : assigned_to`;
-    }
-
-    function buildGanttScenario(s) {
-      return `gantt
-    title ${s.title}
+    TEAM ||--o{ INCIDENT : owns
+    INCIDENT ||--o{ ACTION_ITEM : includes
+    INCIDENT ||--o{ AUDIT_LOG : emits
+    ACTION_ITEM }o--|| TEAM : assigned_to`
+      },
+      {
+        category: "gantt",
+        label: "Q2 Reliability Hardening",
+        support: "Implemented",
+        code: `gantt
+    title Q2 Reliability Hardening
     dateFormat  YYYY-MM-DD
     section Discovery
-    ${s.discovery1} :done, ${s.id}a, ${s.start}, 3d
-    ${s.discovery2} :done, ${s.id}b, after ${s.id}a, 2d
+    Stabilize alert topology :done, gm1a, 2026-04-01, 3d
+    Review runbook gaps :done, gm1b, after gm1a, 2d
     section Build
-    ${s.build1} :active, ${s.id}c, after ${s.id}b, 4d
-    ${s.build2} :${s.flag}, ${s.id}d, after ${s.id}c, 3d
+    Automate remediation hooks :active, gm1c, after gm1b, 4d
+    Refactor canary policies :crit, gm1d, after gm1c, 3d
     section Launch
-    ${s.launch1} :${s.launchFlag}, ${s.id}e, after ${s.id}d, 2d
-    ${s.launch2} :${s.closeFlag}, ${s.id}f, after ${s.id}e, 2d`;
-    }
-
-    function buildJourneyScenario(s) {
-      return `journey
-    title ${s.title}
-    section ${s.section1}
-      ${s.step1}: ${s.score1}: ${s.actor}
-      ${s.step2}: ${s.score2}: ${s.actor}
-    section ${s.section2}
-      ${s.step3}: ${s.score3}: ${s.actor}
-      ${s.step4}: ${s.score4}: ${s.actor}
-    section ${s.section3}
-      ${s.step5}: ${s.score5}: ${s.actor}
-      ${s.step6}: ${s.score6}: ${s.actor}`;
-    }
-
-    function buildTimelineScenario(s) {
-      return `timeline
-    title ${s.title}
-    ${s.year1} : ${s.event1}
-    ${s.year2} : ${s.event2}
-    ${s.year3} : ${s.event3}
-    ${s.year4} : ${s.event4}
-    ${s.year5} : ${s.event5}`;
-    }
-
-    function buildPieScenario(s) {
-      return `pie
-    title ${s.title}
-    "${s.slice1}" : ${s.value1}
-    "${s.slice2}" : ${s.value2}
-    "${s.slice3}" : ${s.value3}
-    "${s.slice4}" : ${s.value4}`;
-    }
-
-    function buildGitGraphScenario(s) {
-      return `gitGraph
-    commit id: "${s.c1}"
-    branch ${s.branch}
-    checkout ${s.branch}
-    commit id: "${s.c2}"
-    commit id: "${s.c3}"
+    Gradual enablement :active, gm1e, after gm1d, 2d
+    Ops handoff :milestone, gm1f, after gm1e, 2d`,
+        narrative: {
+          headline: "Best schedule-oriented proof for deterministic review and release narratives.",
+          lookFor: "A plausible program plan with discovery, build, and launch sections that can anchor CI/review trust even before the engine grows a real time axis.",
+          proves: ["J3 deterministic/reviewable evidence story", "J5 browser-runtime proof support", "time-based planning coverage"]
+        }
+      },
+      {
+        category: "journey",
+        label: "New Customer Launch Journey",
+        support: "Implemented",
+        code: `journey
+    title New Customer Launch Journey
+    section Discovery
+      Understand offer: 4: Customer
+      Evaluate security posture: 3: Customer
+    section Implementation
+      Configure workspace: 5: Customer
+      Connect identity provider: 3: Customer
+    section Adoption
+      Train operators: 4: Customer
+      Review first month results: 5: Customer`,
+        narrative: {
+          headline: "Best user-facing narrative example in the gallery.",
+          lookFor: "A customer journey that broadens the product story beyond engineering workflows while still staying concrete and reviewable.",
+          proves: ["J5 metadata/embed story support", "accessibility/inspectability relevance", "non-ops narrative breadth"]
+        }
+      },
+      {
+        category: "timeline",
+        label: "Platform Reliability Roadmap",
+        support: "Implemented",
+        code: `timeline
+    title Platform Reliability Roadmap
+    2022 : Consolidated alerting layers
+    2023 : Introduced runbook automation
+    2024 : Added deterministic deployment gates
+    2025 : Unified incident evidence model
+    2026 : Rolled out live browser diagnostics`
+      },
+      {
+        category: "pie",
+        label: "Cloud Cost Composition",
+        support: "Implemented",
+        code: `pie
+    title Cloud Cost Composition
+    "Compute" : 38
+    "Storage" : 22
+    "Data Transfer" : 18
+    "Observability" : 22`
+      },
+      {
+        category: "gitGraph",
+        label: "Release Train Alpha",
+        support: "Implemented",
+        code: `gitGraph
+    commit id: "baseline"
+    branch payments-redesign
+    checkout payments-redesign
+    commit id: "pricing-api"
+    commit id: "checkout-ui"
     checkout main
-    merge ${s.branch}
-    commit id: "${s.c4}"
-    branch ${s.hotfix}
-    checkout ${s.hotfix}
-    commit id: "${s.c5}"
+    merge payments-redesign
+    commit id: "alpha-cut"
+    branch hotfix-tax
+    checkout hotfix-tax
+    commit id: "tax-fix"
     checkout main
-    merge ${s.hotfix}
-    commit id: "${s.c6}"`;
+    merge hotfix-tax
+    commit id: "alpha.1"`,
+        narrative: {
+          headline: "Best release-engineering story for branch/merge readability.",
+          lookFor: "A branch-and-hotfix path that makes release storytelling legible at a glance and supports operational review conversations.",
+          proves: ["J3 reviewability support", "release-train storytelling", "gallery breadth with credible workflow context"]
+        }
+      },
+      {
+        category: "mindmap",
+        label: "Incident Program Map",
+        support: "Implemented",
+        code: `mindmap
+  root((Incident Program))
+    Detection
+      Alert routing
+      Signal correlation
+    Response
+      Runbooks
+      Comms tree
+    Learning
+      Postmortems
+      Action tracking`
+      },
+      {
+        category: "requirement",
+        label: "Rendering Requirements Trace",
+        support: "Implemented",
+        code: `requirementDiagram
+    requirement deterministic_layout {
+      id: 1
+      text: Layout output must be byte-identical across runs
+      risk: high
+      verifymethod: test
     }
-
-    const gallerySamples = [
-      ...[
-        { title: "Incident Response Escalation", entry: "PagerDuty sev-1", check: "Correlate alerts?", assess: "Assemble incident room", decision: "Mitigation path", automate: "Run edge traffic shift", coordinate: "Page platform + product leads", verify: "Validate latency and error budgets", document: "Capture incident timeline", retrospective: "Publish corrective actions" },
-        { title: "Customer Onboarding Workflow", entry: "Signed contract", check: "Compliance package complete?", assess: "Create workspace + SSO profile", decision: "Provisioning strategy", automate: "Create default environment", coordinate: "Route legal gaps to onboarding team", verify: "Run acceptance checklist", document: "Store launch packet", retrospective: "Measure time-to-value" },
-        { title: "Change Approval Pipeline", entry: "RFC submitted", check: "Owner + risk score present?", assess: "Generate deployment plan", decision: "Execution mode", automate: "Schedule controlled rollout", coordinate: "Open CAB review lane", verify: "Confirm health checks", document: "Snapshot decision log", retrospective: "Review rollback readiness" },
-        { title: "ML Feature Store Refresh", entry: "Daily retrain trigger", check: "Fresh source data landed?", assess: "Materialize candidate features", decision: "Publish threshold met", automate: "Promote feature set", coordinate: "Open analyst review", verify: "Compare offline metrics", document: "Write lineage note", retrospective: "Tune freshness policy" },
-        { title: "Billing Failure Recovery", entry: "Invoice payment failed", check: "Card updater succeeded?", assess: "Classify account risk", decision: "Recovery branch", automate: "Trigger smart retry", coordinate: "Notify finance + CSM", verify: "Confirm payment settled", document: "Append account journal", retrospective: "Update dunning copy" },
-        { title: "Security Exception Intake", entry: "Exception request opened", check: "Threat model attached?", assess: "Score exposure window", decision: "Approval path", automate: "Create temporary policy waiver", coordinate: "Escalate to security council", verify: "Confirm compensating controls", document: "Store waiver evidence", retrospective: "Retire exception on schedule" },
-        { title: "Warehouse Restock Planner", entry: "Inventory falls below target", check: "Demand forecast stable?", assess: "Generate purchase options", decision: "Supplier route", automate: "Place replenishment order", coordinate: "Escalate to sourcing lead", verify: "Confirm ASN received", document: "Update planning workbook", retrospective: "Tune reorder levels" },
-        { title: "Partner API Migration", entry: "Deprecation notice arrives", check: "Client inventory complete?", assess: "Map compatibility gaps", decision: "Migration strategy", automate: "Generate SDK upgrade PRs", coordinate: "Coordinate vendor office hours", verify: "Replay contract tests", document: "Publish migration bulletin", retrospective: "Archive sunset metrics" }
-      ].map((s, index) => sample("flowchart", index, s.title, "Implemented", buildFlowchartScenario(s), index === 0, index === 0 ? {
-        headline: "Best recovery-and-operations proof in the current repo.",
-        lookFor: "Dense but still readable routing, explicit decision diamonds, and a believable escalation flow that makes the flowchart renderer look production-oriented instead of toy-like.",
-        proves: ["J1 messy-input-to-useful-output anchor", "J2 shared-engine story anchor", "strongest currently implemented family"]
-      } : null)),
-      ...[
-        { title: "Checkout Risk Review", user: "Fraud Analyst", portal: "Risk Console", api: "Risk API", queue: "Decision Queue", worker: "Scoring Worker", store: "Ledger Store", open: "Open charge review", submit: "Fetch order + customer context", enqueue: "Queue secondary scoring", execute: "Recompute risk profile", persist: "Persist case evidence", ack: "Store versioned result", respond: "Return approve/hold recommendation", complete: "Display reviewer action panel" },
-        { title: "Claims Triage Pipeline", user: "Claims Lead", portal: "Claims Workspace", api: "Claims API", queue: "Routing Queue", worker: "Triage Worker", store: "Case Vault", open: "Inspect newly filed claim", submit: "Submit policy + incident payload", enqueue: "Route to adjudication lane", execute: "Evaluate claimant history", persist: "Write evidence bundle", ack: "Acknowledge saved record", respond: "Return triage priority", complete: "Show next handling steps" },
-        { title: "Observability Burn Review", user: "SRE", portal: "Ops Dashboard", api: "Incident API", queue: "Runbook Queue", worker: "Automation Bot", store: "Evidence Store", open: "Open noisy service incident", submit: "Request correlated traces", enqueue: "Schedule remediation job", execute: "Apply safe recovery runbook", persist: "Write audit event", ack: "Confirm event durability", respond: "Return service health state", complete: "Surface follow-up tasks" },
-        { title: "Regulatory Filing Assembly", user: "Compliance Manager", portal: "Filing Portal", api: "Filing API", queue: "Document Queue", worker: "Assembler", store: "Record Archive", open: "Start quarterly filing", submit: "Collect source entities", enqueue: "Request document assembly", execute: "Build regulator packet", persist: "Archive signed filing", ack: "Confirm immutable record", respond: "Return filing reference", complete: "Download submission receipt" },
-        { title: "Data Export Access Review", user: "Privacy Officer", portal: "Privacy Console", api: "Export API", queue: "Approval Queue", worker: "Policy Worker", store: "Access Ledger", open: "Open export request", submit: "Load requester + scope", enqueue: "Queue policy validation", execute: "Evaluate data handling rules", persist: "Record approval artifact", ack: "Return evidence key", respond: "Emit release decision", complete: "Unlock export package" },
-        { title: "Marketplace Listing Publish", user: "Merchandiser", portal: "Catalog Studio", api: "Catalog API", queue: "Publish Queue", worker: "Indexer", store: "Catalog Store", open: "Review draft listing", submit: "Send listing payload", enqueue: "Queue enrichment pass", execute: "Compute taxonomy + search facets", persist: "Save enriched listing", ack: "Confirm write revision", respond: "Return publish eligibility", complete: "Show channel status board" },
-        { title: "Loan Underwriting Sync", user: "Underwriter", portal: "Credit Workbench", api: "Underwriting API", queue: "Decision Queue", worker: "Rules Engine", store: "Credit Vault", open: "Open loan application", submit: "Request bureau + banking data", enqueue: "Queue policy pass", execute: "Score affordability and fraud", persist: "Store decision package", ack: "Return package id", respond: "Emit approve/decline range", complete: "Present recommendation summary" },
-        { title: "Media Render Dispatch", user: "Producer", portal: "Render Studio", api: "Render API", queue: "Render Queue", worker: "Transcode Worker", store: "Asset Archive", open: "Submit campaign cut", submit: "Register source asset", enqueue: "Queue renditions", execute: "Render channel variants", persist: "Store final assets", ack: "Confirm output manifest", respond: "Return delivery map", complete: "Open publish checklist" }
-      ].map((s, index) => sample("sequence", index, s.title, "Partial", buildSequenceScenario(s), index === 0, index === 0 ? {
-        headline: "Best message-flow narrative for cross-surface comparison.",
-        lookFor: "Clear participant orchestration, request/queue/worker boundaries, and a scenario that feels like a real fraud-review system rather than a tutorial.",
-        proves: ["J2 multi-surface breadth", "partial-family honesty with still-useful output", "browser baseline comparison value"]
-      } : null)),
-      ...[
-        { title: "Change Management Domain", root: "ChangeRequest", policy: "ApprovalPolicy", service: "ExecutionService", step: "ExecutionStep", event: "AuditEvent", repo: "ChangeRepository" },
-        { title: "Subscription Lifecycle Domain", root: "Subscription", policy: "EntitlementPolicy", service: "BillingService", step: "InvoiceRun", event: "LedgerEvent", repo: "SubscriptionRepository" },
-        { title: "Experiment Delivery Domain", root: "Experiment", policy: "TargetingPolicy", service: "VariantService", step: "ExposureWindow", event: "ExposureEvent", repo: "ExperimentRepository" },
-        { title: "Fulfillment Planning Domain", root: "ShipmentPlan", policy: "AllocationPolicy", service: "RoutingService", step: "PickWave", event: "WarehouseEvent", repo: "FulfillmentRepository" },
-        { title: "Identity Governance Domain", root: "AccessRequest", policy: "ReviewPolicy", service: "ProvisioningService", step: "ApprovalStep", event: "AccessEvent", repo: "IdentityRepository" },
-        { title: "Support Escalation Domain", root: "SupportCase", policy: "EscalationPolicy", service: "AssignmentService", step: "HandlingStep", event: "CaseEvent", repo: "SupportRepository" },
-        { title: "Portfolio Rebalance Domain", root: "RebalancePlan", policy: "RiskPolicy", service: "ExecutionDesk", step: "TradeBatch", event: "TradeEvent", repo: "PortfolioRepository" },
-        { title: "Manufacturing Release Domain", root: "ReleaseOrder", policy: "QualityPolicy", service: "SchedulingService", step: "WorkCenterStep", event: "ProductionEvent", repo: "ReleaseRepository" }
-      ].map((s, index) => sample("class", index, s.title, "Partial", buildClassScenario(s), index === 0)),
-      ...[
-        { title: "Security Exception Lifecycle", start: "Draft", review: "Review", blocked: "WaitingForEvidence", approved: "Approved", rejected: "Rejected", executing: "InEffect", verifying: "Validating", rollback: "Revoking", closed: "Closed" },
-        { title: "Invoice Dispute Lifecycle", start: "Opened", review: "Triage", blocked: "AwaitingDocuments", approved: "Accepted", rejected: "Declined", executing: "AdjustingLedger", verifying: "RecheckingBalances", rollback: "Reversal", closed: "Resolved" },
-        { title: "Feature Flag Release Lifecycle", start: "Draft", review: "Reviewing", blocked: "BlockedByRisk", approved: "Approved", rejected: "Rejected", executing: "RollingOut", verifying: "Monitoring", rollback: "RollingBack", closed: "Archived" },
-        { title: "Supplier Onboarding Lifecycle", start: "Invited", review: "Screening", blocked: "MissingTaxForms", approved: "Approved", rejected: "Rejected", executing: "Provisioning", verifying: "VerifyingConnections", rollback: "Deprovisioning", closed: "Live" },
-        { title: "Loan Review Lifecycle", start: "ApplicationReceived", review: "UnderReview", blocked: "NeedMoreInfo", approved: "Approved", rejected: "Declined", executing: "Funding", verifying: "QualityControl", rollback: "Cancelling", closed: "Booked" },
-        { title: "Dataset Publication Lifecycle", start: "Draft", review: "GovernanceReview", blocked: "BlockedByPII", approved: "Approved", rejected: "Rejected", executing: "Publishing", verifying: "VerifyingContracts", rollback: "Unpublishing", closed: "Available" },
-        { title: "Warehouse Recall Lifecycle", start: "Detected", review: "Investigating", blocked: "WaitingForVendor", approved: "Approved", rejected: "Cancelled", executing: "Recalling", verifying: "InspectingReturns", rollback: "ResumeShipping", closed: "Contained" },
-        { title: "Partner Integration Lifecycle", start: "Proposed", review: "Evaluating", blocked: "WaitingOnSandbox", approved: "Approved", rejected: "Declined", executing: "Implementing", verifying: "Certifying", rollback: "Suspending", closed: "Operational" }
-      ].map((s, index) => sample("state", index, s.title, "Partial", buildStateScenario(s), index === 0, index === 0 ? {
-        headline: "Best lifecycle and rollback story among partial families.",
-        lookFor: "Approval, blocked, verification, rollback, and closure states that show the renderer can carry operational lifecycle semantics without collapsing into noise.",
-        proves: ["J4 terminal/operator storytelling candidate", "cycle/rollback readability", "partial-family seriousness"]
-      } : null)),
-      ...[
-        { title: "Incident Ownership Model", owner: "TEAM", primary: "INCIDENT", secondary: "ACTION_ITEM", audit: "AUDIT_LOG" },
-        { title: "Subscription Billing Model", owner: "ACCOUNT", primary: "SUBSCRIPTION", secondary: "INVOICE", audit: "LEDGER_EVENT" },
-        { title: "Catalog Curation Model", owner: "MERCHANT", primary: "LISTING", secondary: "VARIANT", audit: "REVIEW_EVENT" },
-        { title: "Fraud Investigation Model", owner: "ANALYST", primary: "CASE", secondary: "SIGNAL", audit: "CASE_NOTE" },
-        { title: "Manufacturing Release Model", owner: "PLANT", primary: "RELEASE_ORDER", secondary: "WORK_STEP", audit: "QUALITY_EVENT" },
-        { title: "Clinical Scheduling Model", owner: "CLINIC", primary: "APPOINTMENT", secondary: "PROCEDURE", audit: "ACCESS_LOG" },
-        { title: "Loan Servicing Model", owner: "SERVICER", primary: "LOAN", secondary: "PAYMENT_PLAN", audit: "SERVICING_EVENT" },
-        { title: "Education Program Model", owner: "INSTITUTION", primary: "COHORT", secondary: "LESSON_PLAN", audit: "ENGAGEMENT_EVENT" }
-      ].map((s, index) => sample("er", index, s.title, "Partial", buildErScenario(s), index === 0)),
-      ...[
-        { id: "gm1", title: "Q2 Reliability Hardening", start: "2026-04-01", discovery1: "Stabilize alert topology", discovery2: "Review runbook gaps", build1: "Automate remediation hooks", build2: "Refactor canary policies", launch1: "Gradual enablement", launch2: "Ops handoff", flag: "crit", launchFlag: "active", closeFlag: "milestone" },
-        { id: "gm2", title: "Enterprise Onboarding Program", start: "2026-05-03", discovery1: "Map tenant requirements", discovery2: "Approve compliance checklist", build1: "Implement SSO templates", build2: "Provision default spaces", launch1: "Pilot first account", launch2: "Rollout playbook", flag: "active", launchFlag: "crit", closeFlag: "milestone" },
-        { id: "gm3", title: "Partner API Migration", start: "2026-06-10", discovery1: "Inventory client calls", discovery2: "Draft compatibility matrix", build1: "Ship SDK adapters", build2: "Replay contract suite", launch1: "Cut traffic over", launch2: "Remove legacy paths", flag: "crit", launchFlag: "active", closeFlag: "milestone" },
-        { id: "gm4", title: "Warehouse Slotting Refresh", start: "2026-07-08", discovery1: "Analyze pick density", discovery2: "Lock wave strategy", build1: "Rebuild slotting plans", build2: "Rebalance labor cells", launch1: "Test new lanes", launch2: "Measure throughput", flag: "active", launchFlag: "active", closeFlag: "milestone" },
-        { id: "gm5", title: "Clinical Scheduling Revamp", start: "2026-08-04", discovery1: "Audit booking patterns", discovery2: "Review staff constraints", build1: "Implement routing rules", build2: "Deploy reminder flows", launch1: "Open new booking paths", launch2: "Retune utilization", flag: "crit", launchFlag: "active", closeFlag: "milestone" },
-        { id: "gm6", title: "Credit Decisioning Upgrade", start: "2026-09-01", discovery1: "Validate data contracts", discovery2: "Approve model guardrails", build1: "Integrate new scorecards", build2: "Backfill decision traces", launch1: "Canary underwriting", launch2: "Roll operator training", flag: "crit", launchFlag: "active", closeFlag: "milestone" },
-        { id: "gm7", title: "Media Delivery Platform", start: "2026-10-06", discovery1: "Map channel requirements", discovery2: "Define asset taxonomy", build1: "Scale rendition pipeline", build2: "Automate approval routing", launch1: "Launch creator beta", launch2: "Open self-service ingest", flag: "active", launchFlag: "active", closeFlag: "milestone" },
-        { id: "gm8", title: "Data Governance Rollout", start: "2026-11-02", discovery1: "Classify datasets", discovery2: "Review retention policy", build1: "Enforce access tiers", build2: "Backfill lineage views", launch1: "Enable steward dashboards", launch2: "Publish governance scorecard", flag: "crit", launchFlag: "active", closeFlag: "milestone" }
-      ].map((s, index) => sample("gantt", index, s.title, "Partial/basic", buildGanttScenario(s), index === 0, index === 0 ? {
-        headline: "Best schedule-oriented proof for deterministic review and release narratives.",
-        lookFor: "A plausible program plan with discovery, build, and launch sections that can anchor CI/review trust even before full parity is reached.",
-        proves: ["J3 deterministic/reviewable evidence story", "J5 browser-runtime proof support", "time-based planning coverage"]
-      } : null)),
-      ...[
-        { title: "New Customer Launch Journey", actor: "Customer", section1: "Discovery", step1: "Understand offer", score1: 4, step2: "Evaluate security posture", score2: 3, section2: "Implementation", step3: "Configure workspace", score3: 5, step4: "Connect identity provider", score4: 3, section3: "Adoption", step5: "Train operators", score5: 4, step6: "Review first month results", score6: 5 },
-        { title: "Incident Commander Journey", actor: "Commander", section1: "Triage", step1: "Assess alert burst", score1: 2, step2: "Open command channel", score2: 4, section2: "Containment", step3: "Delegate mitigation lanes", score3: 4, step4: "Track customer impact", score4: 3, section3: "Closure", step5: "Verify recovery", score5: 5, step6: "Publish postmortem", score6: 4 },
-        { title: "Analyst Review Journey", actor: "Analyst", section1: "Intake", step1: "Open evidence packet", score1: 3, step2: "Check policy matches", score2: 4, section2: "Decision", step3: "Compare historical context", score3: 5, step4: "Escalate edge cases", score4: 2, section3: "Follow-up", step5: "Record rationale", score5: 4, step6: "Send handoff summary", score6: 5 },
-        { title: "Fulfillment Manager Journey", actor: "Manager", section1: "Planning", step1: "Review demand spikes", score1: 4, step2: "Adjust labor plan", score2: 3, section2: "Execution", step3: "Release wave schedule", score3: 5, step4: "Handle exceptions", score4: 2, section3: "Optimization", step5: "Compare throughput", score5: 4, step6: "Tune slotting rules", score6: 4 },
-        { title: "Privacy Request Journey", actor: "Requester", section1: "Request", step1: "Find request portal", score1: 3, step2: "Submit identity proof", score2: 2, section2: "Processing", step3: "Track status", score3: 4, step4: "Clarify data scope", score4: 3, section3: "Completion", step5: "Download export", score5: 5, step6: "Close request", score6: 5 },
-        { title: "Partner Enablement Journey", actor: "Partner", section1: "Qualification", step1: "Review sandbox docs", score1: 4, step2: "Map feature gaps", score2: 3, section2: "Build", step3: "Implement integration", score3: 5, step4: "Certify contract tests", score4: 4, section3: "Go-live", step5: "Cut traffic", score5: 3, step6: "Monitor first week", score6: 4 },
-        { title: "Research Program Journey", actor: "Researcher", section1: "Planning", step1: "Draft study plan", score1: 4, step2: "Secure approvals", score2: 2, section2: "Execution", step3: "Recruit participants", score3: 3, step4: "Capture findings", score4: 5, section3: "Synthesis", step5: "Publish readout", score5: 4, step6: "Prioritize next bets", score6: 5 },
-        { title: "RevOps Forecast Journey", actor: "Operator", section1: "Preparation", step1: "Load pipeline snapshot", score1: 4, step2: "Normalize territories", score2: 3, section2: "Forecasting", step3: "Adjust commit bands", score3: 5, step4: "Review downside cases", score4: 3, section3: "Communication", step5: "Present scenario deck", score5: 4, step6: "Update plan of record", score6: 5 }
-      ].map((s, index) => sample("journey", index, s.title, "Partial/basic", buildJourneyScenario(s), index === 0, index === 0 ? {
-        headline: "Best user-facing narrative example in the current featured set.",
-        lookFor: "A customer journey that broadens the product story beyond engineering workflows while still staying concrete and reviewable.",
-        proves: ["J5 metadata/embed story support", "accessibility/inspectability relevance", "non-ops narrative breadth"]
-      } : null)),
-      ...[
-        { title: "Platform Reliability Roadmap", year1: "2022", event1: "Consolidated alerting layers", year2: "2023", event2: "Introduced runbook automation", year3: "2024", event3: "Added deterministic deployment gates", year4: "2025", event4: "Unified incident evidence model", year5: "2026", event5: "Rolled out live browser diagnostics" },
-        { title: "Identity Program Timeline", year1: "2021", event1: "Migrated to central SSO", year2: "2022", event2: "Added step-up auth", year3: "2023", event3: "Shipped just-in-time provisioning", year4: "2024", event4: "Enforced admin review rules", year5: "2025", event5: "Published access lineage dashboard" },
-        { title: "Fulfillment Modernization", year1: "2020", event1: "Rebuilt pick routing", year2: "2021", event2: "Introduced wave planning", year3: "2022", event3: "Opened robotics lane", year4: "2024", event4: "Connected carrier exception feeds", year5: "2026", event5: "Added throughput planning simulator" },
-        { title: "Clinical Scheduling Evolution", year1: "2019", event1: "Unified intake forms", year2: "2020", event2: "Launched waitlist engine", year3: "2022", event3: "Automated reminders", year4: "2024", event4: "Added no-show prediction", year5: "2026", event5: "Optimized provider utilization" },
-        { title: "Data Governance Milestones", year1: "2021", event1: "Defined classification tiers", year2: "2022", event2: "Mapped source ownership", year3: "2023", event3: "Activated retention rules", year4: "2025", event4: "Deployed lineage explorer", year5: "2026", event5: "Introduced policy simulation" },
-        { title: "Revenue Architecture Timeline", year1: "2020", event1: "Retired spreadsheet quotas", year2: "2021", event2: "Standardized territory rules", year3: "2023", event3: "Built forecast review boards", year4: "2024", event4: "Connected finance actuals", year5: "2026", event5: "Shipped scenario planning modeler" },
-        { title: "Partner Ecosystem Timeline", year1: "2018", event1: "Opened developer sandbox", year2: "2020", event2: "Added certification program", year3: "2022", event3: "Introduced versioned contracts", year4: "2025", event4: "Enabled self-service keys", year5: "2026", event5: "Published migration command center" },
-        { title: "Fraud Ops Timeline", year1: "2021", event1: "Centralized case handling", year2: "2022", event2: "Added customer graph lookups", year3: "2023", event3: "Automated queue prioritization", year4: "2024", event4: "Linked external consortium data", year5: "2026", event5: "Released analyst copilot views" }
-      ].map((s, index) => sample("timeline", index, s.title, "Partial/basic", buildTimelineScenario(s), index === 0)),
-      ...[
-        { title: "Cloud Cost Composition", slice1: "Compute", value1: 38, slice2: "Storage", value2: 22, slice3: "Data Transfer", value3: 18, slice4: "Observability", value4: 22 },
-        { title: "Support Ticket Mix", slice1: "Integrations", value1: 27, slice2: "Billing", value2: 18, slice3: "Provisioning", value3: 31, slice4: "Reporting", value4: 24 },
-        { title: "Product Adoption Drivers", slice1: "Automation", value1: 34, slice2: "Visibility", value2: 26, slice3: "Collaboration", value3: 19, slice4: "Compliance", value4: 21 },
-        { title: "Warehouse Delay Causes", slice1: "Carrier Capacity", value1: 29, slice2: "Labor Shortage", value2: 21, slice3: "Inventory Drift", value3: 24, slice4: "Weather", value4: 26 },
-        { title: "Forecast Variance Split", slice1: "Pipeline Timing", value1: 33, slice2: "Pricing", value2: 17, slice3: "Expansion", value3: 28, slice4: "Churn", value4: 22 },
-        { title: "Clinical Intake Mix", slice1: "New Visits", value1: 41, slice2: "Follow-up", value2: 27, slice3: "Diagnostics", value3: 16, slice4: "Urgent Care", value4: 16 },
-        { title: "Portfolio Risk Allocation", slice1: "Credit", value1: 36, slice2: "Liquidity", value2: 18, slice3: "Market", value3: 26, slice4: "Operational", value4: 20 },
-        { title: "Security Findings Breakdown", slice1: "Identity", value1: 24, slice2: "Network", value2: 19, slice3: "Application", value3: 37, slice4: "Secrets", value4: 20 }
-      ].map((s, index) => sample("pie", index, s.title, "Partial/basic", buildPieScenario(s), index === 0)),
-      ...[
-        { title: "Release Train Alpha", branch: "payments-redesign", hotfix: "hotfix-tax", c1: "baseline", c2: "pricing-api", c3: "checkout-ui", c4: "alpha-cut", c5: "tax-fix", c6: "alpha.1" },
-        { title: "Release Train Bravo", branch: "identity-refresh", hotfix: "hotfix-session", c1: "mainline", c2: "sso-rules", c3: "audit-hooks", c4: "beta-cut", c5: "session-patch", c6: "beta.1" },
-        { title: "Release Train Charlie", branch: "warehouse-routing", hotfix: "hotfix-picker", c1: "init", c2: "lane-engine", c3: "wave-tuner", c4: "pilot-cut", c5: "picker-fix", c6: "pilot.1" },
-        { title: "Release Train Delta", branch: "forecast-model", hotfix: "hotfix-commit", c1: "seed", c2: "scenario-board", c3: "quota-sync", c4: "preview-cut", c5: "commit-fix", c6: "preview.1" },
-        { title: "Release Train Echo", branch: "partner-migration", hotfix: "hotfix-headers", c1: "origin", c2: "contract-v2", c3: "sdk-registry", c4: "wave-1", c5: "header-fix", c6: "wave-1.1" },
-        { title: "Release Train Foxtrot", branch: "governance-ui", hotfix: "hotfix-lineage", c1: "start", c2: "policy-panels", c3: "retention-jobs", c4: "governance-cut", c5: "lineage-fix", c6: "governance.1" },
-        { title: "Release Train Golf", branch: "claims-ops", hotfix: "hotfix-docs", c1: "root", c2: "triage-queue", c3: "evidence-pack", c4: "claims-cut", c5: "docs-fix", c6: "claims.1" },
-        { title: "Release Train Hotel", branch: "media-dispatch", hotfix: "hotfix-codec", c1: "boot", c2: "render-farm", c3: "delivery-rules", c4: "creator-cut", c5: "codec-fix", c6: "creator.1" }
-      ].map((s, index) => sample("gitGraph", index, s.title, "Partial/basic", buildGitGraphScenario(s), index === 0, index === 0 ? {
-        headline: "Best release-engineering story for branch/merge readability.",
-        lookFor: "A branch-and-hotfix path that makes release storytelling legible at a glance and supports operational review conversations.",
-        proves: ["J3 reviewability support", "release-train storytelling", "gallery breadth with credible workflow context"]
-      } : null))
+    functionalRequirement svg_export {
+      id: 2
+      text: The engine must export standalone SVG
+      risk: medium
+      verifymethod: demonstration
+    }
+    performanceRequirement browser_budget {
+      id: 3
+      text: Browser bundle stays under the gzip budget
+      risk: low
+      verifymethod: analysis
+    }
+    deterministic_layout - derives -> svg_export
+    browser_budget - refines -> deterministic_layout`
+      },
+      {
+        category: "quadrantChart",
+        label: "Roadmap Bets",
+        support: "Implemented",
+        code: `quadrantChart
+    title Roadmap Bets
+    x-axis Low Effort --> High Effort
+    y-axis Low Impact --> High Impact
+    quadrant-1 Do now
+    quadrant-2 Plan
+    quadrant-3 Drop
+    quadrant-4 Delegate
+    Incremental layout: [0.35, 0.85]
+    WebGPU renderer: [0.85, 0.75]
+    Theme presets: [0.25, 0.4]
+    Legacy shim: [0.7, 0.2]`
+      },
+      {
+        category: "sankey",
+        label: "Render Budget Flow",
+        support: "Implemented",
+        code: `sankey-beta
+    Compute, Rendering, 38
+    Compute, Layout, 22
+    Storage, Layout, 12
+    Rendering, Browser, 30
+    Layout, Browser, 26`
+      },
+      {
+        category: "xyChart",
+        label: "Quarterly Render Throughput",
+        support: "Implemented",
+        code: `xychart-beta
+    title "Quarterly Render Throughput"
+    x-axis [Q1, Q2, Q3, Q4]
+    y-axis "Diagrams per second" 0 --> 100
+    bar [42, 55, 71, 88]
+    line [40, 50, 65, 80]`
+      },
+      {
+        category: "blockBeta",
+        label: "Pipeline Block Diagram",
+        support: "Implemented",
+        code: `block-beta
+    columns 3
+    ingest["Ingest"] parse["Parse"] ir["Shared IR"]
+    layout["Layout"] render["Render"] out["SVG / Canvas / Term"]
+    ingest --> parse
+    parse --> ir
+    ir --> layout
+    layout --> render
+    render --> out`
+      },
+      {
+        category: "packetBeta",
+        label: "TCP Header Layout",
+        support: "Implemented",
+        code: `packet-beta
+    0-15: "Source Port"
+    16-31: "Destination Port"
+    32-63: "Sequence Number"
+    64-95: "Acknowledgment Number"
+    96-111: "Flags"
+    112-127: "Window Size"`
+      },
+      {
+        category: "architectureBeta",
+        label: "Rendering Platform Architecture",
+        support: "Implemented",
+        code: `architecture-beta
+    group platform(cloud)[Platform]
+    service browser(internet)[Browser] in platform
+    service wasm(server)[WASM Runtime] in platform
+    service cli(server)[CLI] in platform
+    service store(database)[Golden Snapshots] in platform
+    browser:R --> L:wasm
+    cli:R --> L:store
+    wasm:B --> T:store`
+      },
+      {
+        category: "c4Context",
+        label: "Diagram Rendering Context",
+        support: "Implemented",
+        code: `C4Context
+    title Diagram Rendering Context
+    Person(author, "Diagram Author")
+    System_Boundary(fm, "frankenmermaid") {
+      System(engine, "Rendering Engine")
+    }
+    System_Ext(ci, "CI Pipeline")
+    Rel(author, engine, "Writes diagrams", "CLI / browser")
+    Rel(ci, engine, "Renders snapshots", "CLI")`
+      },
+      {
+        category: "c4Container",
+        label: "frankenmermaid Containers",
+        support: "Implemented",
+        code: `C4Container
+    title frankenmermaid Containers
+    Person(author, "Diagram Author")
+    Container(cli, "CLI", "Rust", "Parses and renders locally")
+    Container(wasm, "WASM Runtime", "Rust/wasm32", "Renders in the browser")
+    ContainerDb(golden, "Golden Snapshots", "Files", "Deterministic baselines")
+    Rel(author, cli, "Runs")
+    Rel(cli, golden, "Compares against")
+    Rel(wasm, golden, "Shares IR with")`
+      },
+      {
+        category: "c4Component",
+        label: "Rendering Engine Components",
+        support: "Implemented",
+        code: `C4Component
+    title Rendering Engine Components
+    Component(parser, "Parser", "Rust", "Mermaid source to shared IR")
+    Component(layout, "Layout", "Rust", "Deterministic node placement")
+    Component(svg, "SVG Renderer", "Rust", "Vector output")
+    Component(term, "Terminal Renderer", "Rust", "ASCII output")
+    Rel(parser, layout, "IR")
+    Rel(layout, svg, "Layout")
+    Rel(layout, term, "Layout")`
+      },
+      {
+        category: "c4Dynamic",
+        label: "Browser Render Call",
+        support: "Implemented",
+        code: `C4Dynamic
+    title Browser Render Call
+    Person(author, "Diagram Author")
+    Container(page, "Showcase Page", "JS")
+    Container(wasm, "WASM Runtime", "Rust")
+    Rel(author, page, "1. Edits source")
+    Rel(page, wasm, "2. renderSvg(source)")
+    Rel(wasm, page, "3. Returns SVG")`
+      },
+      {
+        category: "c4Deployment",
+        label: "Static Hosting Deployment",
+        support: "Implemented",
+        code: `C4Deployment
+    title Static Hosting Deployment
+    Deployment_Node(edge, "CDN Edge", "Cloudflare Pages") {
+      Container(page, "Showcase Page", "HTML")
+      Container(wasm, "frankenmermaid_bg.wasm", "WebAssembly")
+    }
+    Deployment_Node(dev, "Developer Machine", "Linux") {
+      Container(cli, "frankenmermaid CLI", "Rust binary")
+    }
+    Rel(cli, wasm, "Shares the same IR pipeline")`
+      },
+      {
+        category: "kanban",
+        label: "Engine Delivery Board",
+        support: "Implemented",
+        code: `kanban
+    Todo
+      layout1[Incremental layout cache]
+      docs1[Document runtime config]
+    In Progress
+      wasm1[Browser runtime hardening]
+    Done
+      svg1[Deterministic SVG output]
+      term1[Terminal renderer]`
+      }
     ];
+    // >>> demo-samples:end
+
+    // Gallery entries are derived 1:1 from DIAGRAM_SAMPLES: every supported family appears
+    // exactly once, and every entry is also a playground sample (`featured`).
+    const gallerySamples = DIAGRAM_SAMPLES.map((entry) => ({
+      id: `${entry.category}-1-${slug(entry.label)}`,
+      category: entry.category,
+      label: entry.label,
+      description: entry.support,
+      code: entry.code,
+      featured: true,
+      narrative: entry.narrative || null
+    }));
 
     const editorSamples = gallerySamples.filter((entry) => entry.featured);
     const galleryCategories = ["all", ...new Set(gallerySamples.map((entry) => entry.category))];
     const spotlightReasons = {
       flowchart: "Shows the strongest currently implemented family with multi-stage operational flows and readable subgraphs.",
-      sequence: "Exercises participant orchestration and message flow for real application and service interactions.",
-      class: "Surfaces structural modeling for realistic domain objects instead of toy inheritance examples.",
-      state: "Makes lifecycle and rollback behavior visible in the kinds of approval systems real teams run.",
-      er: "Shows data relationships people use for platform, billing, audit, and operations models.",
-      gantt: "Demonstrates time-based planning views with realistic delivery programs and multi-phase execution.",
+      sequence: "Exercises participant orchestration and message flow for real application and service interactions. This is the one family the engine still reports as Partial.",
+      class: "Surfaces structural modeling for realistic domain objects instead of toy inheritance examples. Rendered through the mermaid baseline: the engine still folds `: label` relationship labels into the target class name.",
+      state: "Makes lifecycle and rollback behavior visible in the kinds of approval systems real teams run. Rendered through the mermaid baseline: the engine still folds `: label` transition labels into the target state name.",
+      er: "Shows data relationships people use for platform, billing, audit, and operations models, including crow's-foot cardinality.",
+      gantt: "Demonstrates schedule storytelling with a realistic delivery program. Rendered through the mermaid baseline: the engine lays out task dependencies but has no calendar axis yet.",
       journey: "Covers user and operator experience mapping rather than only engineering process diagrams.",
       timeline: "Shows narrative milestone views that product and operations teams actually present.",
       pie: "Covers summary visualization families people still expect from Mermaid-compatible tooling.",
-      gitGraph: "Tests branch and merge storytelling that release engineering teams genuinely use."
+      gitGraph: "Tests branch and merge storytelling that release engineering teams genuinely use.",
+      mindmap: "Exercises the radial layout family on a hierarchy that fans out from a single root.",
+      requirement: "Covers traceable requirement/verification modeling, including relationship kinds like derives and refines.",
+      quadrantChart: "Proves the fixed-axis chart family: four labelled quadrants with normalized point placement.",
+      sankey: "Exercises weighted flow between stages. Rendered through the mermaid baseline while the engine's ribbon geometry is still coarse.",
+      xyChart: "Covers the bar plus line chart family with an explicit value axis.",
+      blockBeta: "Exercises the fixed-column grid family. Rendered through the mermaid baseline while the engine's block packing is still coarse.",
+      packetBeta: "Covers bit-range packet layouts, the most structurally different family in the set.",
+      architectureBeta: "Shows grouped services with edge-anchored connections. Rendered through the mermaid baseline while the engine's icon and port rendering catches up.",
+      c4Context: "Covers the C4 level-1 system context view with boundaries and external systems.",
+      c4Container: "Covers the C4 level-2 container view including datastore containers.",
+      c4Component: "Covers the C4 level-3 component decomposition of a single container.",
+      c4Dynamic: "Covers the C4 dynamic view where numbered interactions carry the story.",
+      c4Deployment: "Covers the C4 deployment view with nested deployment nodes.",
+      kanban: "Exercises the column/card board family that the engine dispatches to its dedicated kanban layout."
     };
 
     const presenterTours = {

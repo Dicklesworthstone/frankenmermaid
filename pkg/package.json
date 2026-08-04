@@ -2,7 +2,7 @@
   "name": "@frankenmermaid/core",
   "type": "module",
   "description": "Rust-first Mermaid-compatible diagram engine for WebAssembly and browser rendering.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "repository": {
     "type": "git",

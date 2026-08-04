@@ -1,4 +1,7 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::sync::Arc;
 
 use chumsky::prelude::*;
 use fm_core::{
@@ -9,9 +12,10 @@ use fm_core::{
     parse_mermaid_js_config_value, to_init_parse,
 };
 use serde_json::Value;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
-    DetectedType, ParseResult, ParserConfig,
+    DetectedType, FlowchartBatchParseRef, FlowchartBatchPrefix, ParseResult, ParserConfig,
     ir_builder::{IrBuilder, ParsedLabel},
     is_sankey_header, matches_keyword_header, normalize_identifier,
 };
@@ -62,11 +66,21 @@ const SEQUENCE_OPERATORS: [(&str, ArrowType); 26] = [
     ("-x", ArrowType::Cross),
 ];
 
-const CLASS_OPERATORS: [(&str, ArrowType); 6] = [
-    ("<|--", ArrowType::Arrow),
-    ("--|>", ArrowType::Arrow),
+// ORDER IS LOAD-BEARING. `find_operator_core` scans left to right by byte position and, at the first
+// position that can start an operator, returns the FIRST entry in this table that `starts_with`.
+// Position ordering makes `o--`/`*--` win on their own leading byte, but `--o`/`--*` share the `--`
+// prefix, so they must precede the bare `--` or it matches first and swallows the trailing marker
+// byte into the endpoint — which is exactly the bd-92b6 defect: `C3 o-- C4` matched `--` at the `-`,
+// leaving `C3 o` as the source and normalizing it into the phantom node `C3-o`.
+const CLASS_OPERATORS: [(&str, ArrowType); 10] = [
+    ("<|--", ArrowType::Inheritance),
+    ("--|>", ArrowType::InheritanceReverse),
     ("..>", ArrowType::DottedArrow),
     ("<..", ArrowType::DottedArrow),
+    ("o--", ArrowType::Aggregation),
+    ("*--", ArrowType::Composition),
+    ("--o", ArrowType::AggregationReverse),
+    ("--*", ArrowType::CompositionReverse),
     ("-->", ArrowType::Arrow),
     ("--", ArrowType::Line),
 ];
@@ -95,7 +109,43 @@ const ER_OPERATORS: [(&str, ArrowType); 14] = [
     ("..", ArrowType::DottedArrow),
 ];
 
+/// Compile-time first-byte gate for an operator list: bit `b` set ⇔ some operator starts with ASCII
+/// byte `b`. Lets `'static` operator lists precompute the gate as a `const` and pass it to
+/// [`find_operator_core`], skipping the per-call rebuild (`find_operator`'s hot cost on sequences).
+const fn op_first_byte_gate(operators: &[(&str, ArrowType)]) -> u128 {
+    let mut gate: u128 = 0;
+    let mut i = 0;
+    while i < operators.len() {
+        let bytes = operators[i].0.as_bytes();
+        if !bytes.is_empty() && bytes[0] < 128 {
+            gate |= 1u128 << bytes[0];
+        }
+        i += 1;
+    }
+    gate
+}
+
+/// Precomputed first-byte gate for [`SEQUENCE_OPERATORS`] (26 entries) — used on the hot per-message
+/// sequence path so `find_operator` doesn't rebuild the gate for every message line.
+const SEQUENCE_OP_GATE: u128 = op_first_byte_gate(&SEQUENCE_OPERATORS);
+const ER_OP_GATE: u128 = op_first_byte_gate(&ER_OPERATORS);
+const FLOW_OP_GATE: u128 = op_first_byte_gate(&FLOW_OPERATORS);
+const CLASS_OP_GATE: u128 = op_first_byte_gate(&CLASS_OPERATORS);
+const PACKET_OP_GATE: u128 = op_first_byte_gate(&PACKET_OPERATORS);
+
 const DANGLING_PLACEHOLDER_PREFIX: &str = "__fm_dangling_line_";
+const JOURNEY_SCORE_CLASSES: [&str; 10] = [
+    "journey-score-0",
+    "journey-score-1",
+    "journey-score-2",
+    "journey-score-3",
+    "journey-score-4",
+    "journey-score-5",
+    "journey-score-6",
+    "journey-score-7",
+    "journey-score-8",
+    "journey-score-9",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NodeToken {
@@ -126,7 +176,10 @@ struct SequenceParticipantDeclaration {
 enum SequenceStatement {
     Participant(String),
     Actor(String),
-    Message(String),
+    /// A fully-parsed message. The classifier parses the message ONCE (arrow, endpoints, labels,
+    /// activation) into [`SequenceMessageData`]; lowering then only interns + pushes the edge, instead
+    /// of re-parsing the raw line a second time (and cloning it). Boxed to keep the enum small.
+    Message(Box<SequenceMessageData>),
     Autonumber {
         start: Option<u32>,
         increment: Option<u32>,
@@ -212,7 +265,13 @@ pub fn parse_mermaid_with_detection_and_config(
 ) -> ParseResult {
     let (content, front_matter_payload) = split_front_matter_block(input);
     let diagram_type = detection.diagram_type;
-    let input_lines = content.lines().count();
+    // Capacity hint only (feeds `with_capacity_hint`'s node/edge estimates — no semantic
+    // effect), so an approximate line count is fine. Count `\n` with memchr's SIMD scan: the
+    // scalar `filter(..).count()` (and the equivalent `map(bool).sum()`) does NOT auto-vectorize
+    // at opt=3/x86-64-v2 and profiled ~4.8% self; memchr's `\n` count measured ~14× faster on
+    // realistic input, byte-identical (exact `\n` count). memchr is already in the build graph via
+    // chumsky, so no bundle cost. `+ 1` matches `str::lines()` for input without a trailing newline.
+    let input_lines = memchr::memchr_iter(b'\n', content.as_bytes()).count() + 1;
     let mut builder = IrBuilder::with_capacity_hint(diagram_type, input_lines);
     builder.set_parse_mode(parse_mode);
     builder.set_parser_config(*config);
@@ -402,7 +461,7 @@ fn apply_support_contract(
 
 /// Intermediate AST node produced by the chumsky flowchart parser.
 /// Lowered to IR via [`lower_flowchart`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)] // Subgraph variant used in future expansion
 enum FlowAst {
     Direction(GraphDirection),
@@ -427,7 +486,7 @@ enum FlowAst {
     ClassDef,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FlowAstNode {
     id: String,
     label: Option<ParsedLabel>,
@@ -447,24 +506,38 @@ impl From<NodeToken> for FlowAstNode {
 }
 
 #[derive(Debug, Clone)]
-enum FlowDocumentItem {
+enum FlowDocumentItem<'a> {
+    FastEdge {
+        from: &'a str,
+        arrow: ArrowType,
+        to: &'a str,
+        line_number: usize,
+        source_line: &'a str,
+    },
+    FastNode {
+        id: &'a str,
+        label: Option<ParsedLabel>,
+        icon: Option<String>,
+        line_number: usize,
+        source_line: &'a str,
+    },
     Statements {
         asts: Vec<FlowAst>,
         line_number: usize,
-        source_line: String,
+        source_line: &'a str,
     },
     Subgraph {
         id: String,
         title: Option<String>,
         line_number: usize,
-        source_line: String,
+        source_line: &'a str,
         body: Vec<Self>,
     },
 }
 
 #[derive(Debug, Default)]
-struct FlowDocumentParseResult {
-    items: Vec<FlowDocumentItem>,
+struct FlowDocumentParseResult<'a> {
+    items: Vec<FlowDocumentItem<'a>>,
     warnings: Vec<String>,
     header_direction: Option<GraphDirection>,
 }
@@ -505,7 +578,13 @@ struct BlockBetaDocumentParseResult {
 // Document structure (lines, comments, header) is handled by the outer loop.
 
 /// Build a chumsky parser for a single flowchart statement.
-fn flow_statement_parser<'a>() -> impl Parser<'a, &'a str, FlowAst, extra::Err<Rich<'a, char>>> {
+// Error type is `EmptyErr` (not `Rich`): the caller only checks `errors.is_empty()` (success/failure)
+// and discards the error content, so tracking the expected-token alternatives that `Rich` records at
+// every choice point — `InputRef::add_alt` + `Vec<Located<Rich>>::truncate`, ~30% of shaped-node parse
+// (hexagon/diamond/…) on SUCCESSFUL parses — is pure waste. Output-identical: the combinators and their
+// success/failure are unchanged; only the discarded error detail is cheaper, and no `recover_with` uses it.
+fn flow_statement_parser<'a>()
+-> impl Parser<'a, &'a str, FlowAst, extra::Err<chumsky::error::EmptyErr>> {
     // -- Whitespace helpers --------------------------------------------------
     let ws_char = any().filter(|c: &char| *c == ' ' || *c == '\t');
     let inline_ws = ws_char.repeated().to(());
@@ -780,7 +859,7 @@ fn lower_flow_ast(
             }
         }
         FlowAst::ClassAssign { nodes, class } => {
-            for class_name in class.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            for class_name in class.split(',').map(trim_fast).filter(|s| !s.is_empty()) {
                 for node_key in nodes {
                     builder.add_class_to_node(node_key, class_name, span);
                 }
@@ -844,21 +923,80 @@ fn lower_flow_ast(
 }
 
 fn lower_flow_document_item(
-    item: &FlowDocumentItem,
+    item: FlowDocumentItem<'_>,
     builder: &mut IrBuilder,
     active_clusters: &[usize],
     active_subgraphs: &[usize],
 ) {
+    // `add_node_to_active_groups` only does work when a cluster or subgraph is open; on a flat
+    // flowchart both are empty (this fn is entered with `&[], &[]` and only recurses non-empty inside
+    // a subgraph body), so it is a no-op called ~2400×/parse (both endpoints per edge + each node).
+    // Gate the calls on this once-computed flag — byte-identical (skips a provable no-op).
+    let in_groups = !active_clusters.is_empty() || !active_subgraphs.is_empty();
     match item {
+        FlowDocumentItem::FastEdge {
+            from,
+            arrow,
+            to,
+            line_number,
+            source_line,
+        } => {
+            let span = span_for(line_number, source_line);
+            // `from`/`to` come from `parse_fast_simple_flowchart_edge_parts`, already `trim_ascii`'d and
+            // `is_fast_flow_identifier`-validated — intern through the pre-trimmed endpoint path.
+            let from_id = if is_dangling_placeholder_node_id(from) {
+                builder.intern_placeholder_node(from, span)
+            } else {
+                builder.intern_edge_endpoint_pretrimmed(from, span)
+            };
+            let to_id = if is_dangling_placeholder_node_id(to) {
+                builder.intern_placeholder_node(to, span)
+            } else {
+                builder.intern_edge_endpoint_pretrimmed(to, span)
+            };
+            if let (Some(f), Some(t)) = (from_id, to_id) {
+                if in_groups {
+                    add_node_to_active_groups(builder, active_clusters, active_subgraphs, f);
+                    add_node_to_active_groups(builder, active_clusters, active_subgraphs, t);
+                }
+                builder.push_edge(f, t, arrow, None, span);
+            }
+        }
+        FlowDocumentItem::FastNode {
+            id,
+            label,
+            icon,
+            line_number,
+            source_line,
+        } => {
+            // Exact mirror of the `FlowAst::Node` arm of `lower_flow_ast` / `intern_flow_ast_node`
+            // for a Rect node — interns straight from the borrowed id slice. `item` is consumed by
+            // value so the owned `label` is MOVED into the interner (no `String` clone; see
+            // `intern_node_label_owned`) instead of being cloned from a borrow.
+            let span = span_for(line_number, source_line);
+            let node_id = if is_dangling_placeholder_node_id(id) {
+                builder.intern_placeholder_node(id, span)
+            } else {
+                builder.intern_node_label_owned(id, label, NodeShape::Rect, span)
+            };
+            if let Some(node_id) = node_id {
+                if let Some(icon) = icon.as_deref() {
+                    builder.set_node_icon(node_id, icon);
+                }
+                if in_groups {
+                    add_node_to_active_groups(builder, active_clusters, active_subgraphs, node_id);
+                }
+            }
+        }
         FlowDocumentItem::Statements {
             asts,
             line_number,
             source_line,
         } => {
-            for ast in asts {
+            for ast in &asts {
                 lower_flow_ast(
                     ast,
-                    *line_number,
+                    line_number,
                     source_line,
                     builder,
                     active_clusters,
@@ -873,8 +1011,8 @@ fn lower_flow_document_item(
             source_line,
             body,
         } => {
-            let span = span_for(*line_number, source_line);
-            let lookup_key = flow_subgraph_lookup_key(id, title.as_deref());
+            let span = span_for(line_number, source_line);
+            let lookup_key = flow_subgraph_lookup_key(&id, title.as_deref());
             let Some(cluster_index) = builder.ensure_cluster(&lookup_key, title.as_deref(), span)
             else {
                 return;
@@ -882,7 +1020,7 @@ fn lower_flow_document_item(
             let parent_subgraph = active_subgraphs.last().copied();
             let Some(subgraph_index) = builder.ensure_subgraph(
                 &lookup_key,
-                id,
+                &id,
                 title.as_deref(),
                 span,
                 parent_subgraph,
@@ -910,19 +1048,296 @@ fn flow_subgraph_lookup_key(id: &str, title: Option<&str>) -> String {
     }
 }
 
+/// Parsed syntax for a complete, closed flowchart-prefix subgraph.
+///
+/// Every related diagram seeds a worker-local reusable builder from the immutable, already-lowered
+/// snapshot, then parses its unique suffix. This removes repeated tokenization, lowering,
+/// interning, allocation, and membership rebuilds without coordinating workers.
+#[derive(Default)]
+pub(crate) struct CompiledFlowchartScratch {
+    builder: Option<IrBuilder>,
+    prefix_identity: Option<Arc<str>>,
+    prefix_unchanged: bool,
+}
+
+pub(crate) struct CompiledFlowchartPrefix {
+    prefix: Arc<str>,
+    builder: IrBuilder,
+    detection: DetectedType,
+    line_offset: usize,
+    reusable_prefix: FlowchartBatchPrefix,
+}
+
+impl CompiledFlowchartPrefix {
+    pub(crate) fn new(
+        prefix: &str,
+        parse_mode: MermaidParseMode,
+        config: &ParserConfig,
+    ) -> Option<Self> {
+        let detection = crate::detect_type_with_confidence_and_config(prefix, config);
+        if detection.diagram_type != DiagramType::Flowchart
+            || detection.method != crate::DetectionMethod::ExactKeyword
+        {
+            return None;
+        }
+
+        let document = parse_flowchart_document(prefix, 0, config);
+        let input_lines = memchr::memchr_iter(b'\n', prefix.as_bytes()).count() + 1;
+        let mut builder = IrBuilder::with_capacity_hint(DiagramType::Flowchart, input_lines);
+        builder.set_parse_mode(parse_mode);
+        builder.set_parser_config(*config);
+        for warning in &detection.warnings {
+            builder.add_warning(warning.clone());
+        }
+        if let Some(direction) = document.header_direction {
+            builder.set_direction(direction);
+        }
+        for warning in document.warnings {
+            builder.add_warning(warning);
+        }
+        for item in document.items {
+            lower_flow_document_item(item, &mut builder, &[], &[]);
+        }
+
+        let line_offset = memchr::memchr_iter(b'\n', prefix.as_bytes()).count();
+        let prefix: Arc<str> = Arc::from(prefix);
+        Some(Self {
+            reusable_prefix: FlowchartBatchPrefix {
+                identity: Arc::clone(&prefix),
+                node_count: builder.node_count(),
+                edge_count: builder.edge_count(),
+            },
+            prefix,
+            builder,
+            detection,
+            line_offset,
+        })
+    }
+
+    pub(crate) fn parse(&self, input: &str) -> Option<ParseResult> {
+        let suffix = input.strip_prefix(self.prefix.as_ref())?;
+        let mut builder = self.builder.clone();
+        parse_flowchart_with_line_offset(suffix, self.line_offset, &mut builder);
+        if builder.node_count() == 0 && builder.edge_count() == 0 {
+            builder.add_warning("No parseable nodes or edges were found");
+        }
+        Some(builder.finish(self.detection.confidence, self.detection.method))
+    }
+
+    pub(crate) fn parse_with_scratch<'a>(
+        &'a self,
+        input: &str,
+        scratch: &'a mut CompiledFlowchartScratch,
+    ) -> Option<FlowchartBatchParseRef<'a>> {
+        let suffix = input.strip_prefix(self.prefix.as_ref())?;
+        let same_prefix = scratch
+            .prefix_identity
+            .as_ref()
+            .is_some_and(|identity| Arc::ptr_eq(identity, &self.prefix));
+        if let Some(builder) = scratch.builder.as_mut() {
+            if same_prefix && scratch.prefix_unchanged {
+                builder.reset_reusable_suffix_from(&self.builder);
+            } else {
+                builder.reset_from(&self.builder);
+            }
+        } else {
+            scratch.builder = Some(self.builder.clone());
+        }
+        if !same_prefix {
+            scratch.prefix_identity = Some(Arc::clone(&self.prefix));
+        }
+        let builder = scratch.builder.as_mut()?;
+        builder.begin_reusable_suffix(&self.builder);
+        parse_flowchart_with_line_offset(suffix, self.line_offset, builder);
+        if builder.node_count() == 0 && builder.edge_count() == 0 {
+            builder.add_warning("No parseable nodes or edges were found");
+        }
+        builder.finish_reusable();
+        scratch.prefix_unchanged = builder.reusable_prefix_unchanged(&self.builder);
+        let reusable_prefix = scratch.prefix_unchanged.then_some(&self.reusable_prefix);
+        Some(FlowchartBatchParseRef {
+            ir: builder.ir(),
+            warnings: builder.warnings(),
+            confidence: self.detection.confidence,
+            detection_method: self.detection.method,
+            reusable_prefix,
+        })
+    }
+}
+
+/// Return the largest exact prefix containing the header followed by one or more complete,
+/// top-level subgraph blocks.
+///
+/// Global directives are deliberately excluded: their extraction happens after whole-document
+/// lowering and can refer forward into a suffix. Such inputs stay on the ordinary parser. The
+/// accepted subset is therefore an isomorphism, not a best-effort cache: prefix lowering order,
+/// interning order, source lines, warnings, and suffix semantics match a full parse exactly.
+pub(crate) fn reusable_flowchart_prefix(input: &str) -> Option<&str> {
+    let mut offset = 0usize;
+    let mut saw_header = false;
+    let mut saw_subgraph = false;
+    let mut depth = 0usize;
+    let mut last_complete_end = None;
+
+    for raw_line in input.split_inclusive('\n') {
+        let source_line = raw_line
+            .strip_suffix("\r\n")
+            .or_else(|| raw_line.strip_suffix('\n'))
+            .unwrap_or(raw_line);
+        let trimmed = trim_fast(source_line);
+        let line_end = offset + raw_line.len();
+
+        if shared_prefix_global_directive(trimmed) {
+            return None;
+        }
+
+        if !saw_header {
+            if trimmed.is_empty() || is_comment(trimmed) {
+                offset = line_end;
+                continue;
+            }
+            if !is_flowchart_header(trimmed) {
+                return None;
+            }
+            saw_header = true;
+            offset = line_end;
+            continue;
+        }
+
+        if depth == 0 {
+            if trimmed.is_empty() || is_comment(trimmed) {
+                offset = line_end;
+                continue;
+            }
+            if is_subgraph_block_start(trimmed) {
+                depth = 1;
+                saw_subgraph = true;
+                offset = line_end;
+                continue;
+            }
+            break;
+        }
+
+        if is_subgraph_block_start(trimmed) {
+            depth += 1;
+        } else if trimmed == "end" {
+            depth -= 1;
+            if depth == 0 {
+                last_complete_end = Some(line_end);
+            }
+        }
+        offset = line_end;
+    }
+
+    let end = last_complete_end?;
+    if !saw_header || !saw_subgraph || depth != 0 || end >= input.len() || end < 128 {
+        return None;
+    }
+
+    // Directives in the suffix can target prefix nodes, so the whole input must be free of the
+    // post-lowering global directive families before prefix compilation is legal.
+    if byte_lines(&input[end..])
+        .map(trim_fast)
+        .any(shared_prefix_global_directive)
+    {
+        return None;
+    }
+    Some(&input[..end])
+}
+
+/// Return the largest reusable complete-subgraph prefix ending at or before `byte_limit`.
+///
+/// The caller has already found a common byte prefix across a batch. Reusing only a complete
+/// top-level subgraph boundary keeps the compiled fragment isomorphic to an ordinary full parse;
+/// partial lines and partial nested subgraphs are never admitted.
+pub(crate) fn reusable_flowchart_prefix_at_or_before(
+    input: &str,
+    byte_limit: usize,
+) -> Option<&str> {
+    let largest_prefix = reusable_flowchart_prefix(input)?;
+    let byte_limit = byte_limit.min(largest_prefix.len());
+    let mut offset = 0usize;
+    let mut saw_header = false;
+    let mut depth = 0usize;
+    let mut candidate_end = None;
+
+    for raw_line in largest_prefix.split_inclusive('\n') {
+        let source_line = raw_line
+            .strip_suffix("\r\n")
+            .or_else(|| raw_line.strip_suffix('\n'))
+            .unwrap_or(raw_line);
+        let trimmed = trim_fast(source_line);
+        let line_end = offset + raw_line.len();
+
+        if !saw_header {
+            if !trimmed.is_empty() && !is_comment(trimmed) {
+                saw_header = true;
+            }
+        } else if is_subgraph_block_start(trimmed) {
+            depth += 1;
+        } else if trimmed == "end" {
+            depth = depth.saturating_sub(1);
+            if depth == 0 && line_end >= 128 && line_end <= byte_limit {
+                candidate_end = Some(line_end);
+            }
+        }
+        offset = line_end;
+    }
+
+    candidate_end.map(|end| &input[..end])
+}
+
+/// Check another batch input against an already-validated reusable prefix.
+///
+/// The expensive structural walk belongs to the first member of an exact-prefix group. Subsequent
+/// members only need a vectorized byte-prefix comparison plus a scan of their unique suffix for
+/// directives whose scope could cross the boundary.
+pub(crate) fn can_reuse_flowchart_prefix(input: &str, prefix: &str) -> bool {
+    let Some(suffix) = input.strip_prefix(prefix) else {
+        return false;
+    };
+    !suffix.is_empty()
+        && !byte_lines(suffix)
+            .map(trim_fast)
+            .any(shared_prefix_global_directive)
+}
+
+fn is_subgraph_block_start(line: &str) -> bool {
+    line.strip_prefix("subgraph")
+        .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
+}
+
+fn shared_prefix_global_directive(line: &str) -> bool {
+    line.starts_with("%%{")
+        || is_non_graph_statement(line)
+        || line.starts_with("accTitle")
+        || line.starts_with("accDescr")
+}
+
 // ---------------------------------------------------------------------------
 // Top-level parse_flowchart — line-by-line with chumsky statement parser
 // ---------------------------------------------------------------------------
 
 fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
-    let document = parse_flowchart_document(input, builder.parser_config());
+    parse_flowchart_with_line_offset(input, 0, builder);
+}
+
+/// Parse a flowchart fragment whose first line follows `line_offset` lines already compiled into
+/// `builder`.
+///
+/// A render batch can contain many diagrams that begin with the same complete subgraph block. The
+/// shared-prefix compiler lowers that block once, clones the interned builder state, and sends only
+/// each unique suffix through this function. Offsetting line numbers preserves the exact spans and
+/// diagnostics that a full-source parse would produce.
+fn parse_flowchart_with_line_offset(input: &str, line_offset: usize, builder: &mut IrBuilder) {
+    let document = parse_flowchart_document(input, line_offset, builder.parser_config());
     if let Some(direction) = document.header_direction {
         builder.set_direction(direction);
     }
     for warning in &document.warnings {
         builder.add_warning(warning.clone());
     }
-    for item in &document.items {
+    for item in document.items {
         lower_flow_document_item(item, builder, &[], &[]);
     }
 
@@ -931,11 +1346,67 @@ fn parse_flowchart(input: &str, builder: &mut IrBuilder) {
     extract_style_directives(input, builder);
 }
 
-fn parse_flowchart_document(input: &str, config: &ParserConfig) -> FlowDocumentParseResult {
-    let lines: Vec<(usize, &str)> = input
-        .lines()
+/// Iterator over `input`'s lines, byte-identical to [`str::lines`] but implemented with a
+/// `[u8]::position(== b'\n')` byte scan instead of `lines()`'s single-`char` `'\n'` `CharSearcher`.
+/// `str::lines()`'s CharSearcher `next_match` measured as a top parse self-time symbol (~6% of
+/// flowchart parse), and every diagram parser scans the input line-by-line. Semantics match
+/// `lines()` exactly: split on `\n`, strip one trailing `\r` per line, and do not yield a trailing
+/// empty line after a final `\n`. Pinned against `str::lines()` by `byte_lines_matches_std_lines`.
+struct ByteLines<'a> {
+    input: &'a str,
+    start: usize,
+}
+
+impl<'a> Iterator for ByteLines<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<&'a str> {
+        let bytes = self.input.as_bytes();
+        if self.start > bytes.len() {
+            return None;
+        }
+        match memchr::memchr(b'\n', &bytes[self.start..]) {
+            Some(rel) => {
+                let nl = self.start + rel;
+                let end = if nl > self.start && bytes[nl - 1] == b'\r' {
+                    nl - 1
+                } else {
+                    nl
+                };
+                let line = &self.input[self.start..end];
+                self.start = nl + 1;
+                Some(line)
+            }
+            None => {
+                // Final segment (no more `\n`). `lines()` yields it only when non-empty and never
+                // yields a trailing empty line after a final `\n`; mark exhausted either way. A
+                // trailing `\r` here is a LONE carriage return (not a `\r\n` terminator), which
+                // `str::lines()` does NOT strip — so the final segment is emitted verbatim.
+                let out = if self.start < bytes.len() {
+                    Some(&self.input[self.start..])
+                } else {
+                    None
+                };
+                self.start = bytes.len() + 1;
+                out
+            }
+        }
+    }
+}
+
+/// Byte-based [`str::lines`] replacement — see [`ByteLines`].
+fn byte_lines(input: &str) -> ByteLines<'_> {
+    ByteLines { input, start: 0 }
+}
+
+fn parse_flowchart_document<'a>(
+    input: &'a str,
+    line_offset: usize,
+    config: &ParserConfig,
+) -> FlowDocumentParseResult<'a> {
+    let lines: Vec<(usize, &str)> = byte_lines(input)
         .enumerate()
-        .map(|(i, line)| (i + 1, line))
+        .map(|(i, line)| (line_offset + i + 1, line))
         .collect();
     let mut next_index = 0;
     let mut warnings = Vec::new();
@@ -960,35 +1431,132 @@ fn parse_flowchart_document(input: &str, config: &ParserConfig) -> FlowDocumentP
     }
 }
 
-fn parse_flowchart_document_items(
-    lines: &[(usize, &str)],
+/// ASCII-fast equivalent of [`str::trim`], byte-identical on the common all-ASCII-boundary case.
+///
+/// The flowchart document loop trims every source line and every `;`-split statement; `str::trim`
+/// uses the Unicode `char::is_whitespace` char scan, which a symbolized parse profile showed as
+/// ~4.5% of parse self-time. This trims ASCII whitespace by byte, then falls back to `str::trim`
+/// only when a non-ASCII byte sits at a trimmed boundary — where a multi-byte Unicode-whitespace
+/// char could remain — so the returned slice is exactly what `str::trim` would return in every case.
+pub(crate) fn trim_fast(s: &str) -> &str {
+    let b = s.as_bytes();
+    let mut start = 0;
+    let mut end = b.len();
+    while start < end && b[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && b[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    // A non-ASCII byte at either trimmed boundary may be part of a Unicode-whitespace char that
+    // `str::trim` would strip but the ASCII scan above left in place — defer to `str::trim` to stay
+    // byte-identical. Otherwise both boundaries sit on ASCII bytes (always char boundaries), so the
+    // slice is valid and identical to the Unicode trim.
+    if start < end && (b[start] >= 0x80 || b[end - 1] >= 0x80) {
+        return s.trim();
+    }
+    &s[start..end]
+}
+
+/// `str::trim_start` equivalent that skips ASCII leading whitespace by byte (auto-vectorizable),
+/// falling back to the Unicode `char::is_whitespace` scan only when a non-ASCII byte sits at the
+/// trimmed start boundary — where a multi-byte Unicode-whitespace char could remain. Byte-identical
+/// to `str::trim_start` in every case; used on the per-statement flowchart path where a symbolized
+/// profile showed `trim_start_matches::<char::is_whitespace>` as a self-symbol.
+fn trim_start_fast(s: &str) -> &str {
+    let b = s.as_bytes();
+    let mut start = 0;
+    while start < b.len() && b[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    // A non-ASCII byte at the trimmed start may begin a Unicode-whitespace char the ASCII scan left;
+    // defer to `str::trim_start` to stay byte-identical. Otherwise `start` sits on an ASCII byte (a
+    // char boundary), so the slice is valid and identical to the Unicode trim.
+    if start < b.len() && b[start] >= 0x80 {
+        return s.trim_start();
+    }
+    &s[start..]
+}
+
+/// `str::trim_end` equivalent that skips ASCII trailing whitespace by byte, falling back to the
+/// Unicode `char::is_whitespace` scan only when a non-ASCII byte sits at the trimmed end boundary —
+/// where a multi-byte Unicode-whitespace char could remain. Byte-identical to `str::trim_end` in
+/// every case; used on the class-relation parse path where a symbolized profile showed
+/// `trim_end_matches::<char::is_whitespace>` / `CharSearcher::next_match_back` as self-symbols.
+fn trim_end_fast(s: &str) -> &str {
+    let b = s.as_bytes();
+    let mut end = b.len();
+    while end > 0 && b[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    // A non-ASCII byte at the trimmed end may be part of a Unicode-whitespace char the ASCII scan
+    // left; defer to `str::trim_end` to stay byte-identical. Otherwise `end` sits just past an ASCII
+    // byte (a char boundary), so the slice is valid and identical to the Unicode trim.
+    if end > 0 && b[end - 1] >= 0x80 {
+        return s.trim_end();
+    }
+    &s[..end]
+}
+
+fn parse_flowchart_document_items<'a>(
+    lines: &[(usize, &'a str)],
     next_index: &mut usize,
     is_root: bool,
     warnings: &mut Vec<String>,
     header_direction: &mut Option<GraphDirection>,
     config: &ParserConfig,
-) -> (Vec<FlowDocumentItem>, usize) {
-    let mut items = Vec::new();
+) -> (Vec<FlowDocumentItem<'a>>, usize) {
+    // Pre-size to the number of remaining lines: each source line yields at most a small
+    // constant number of document items (usually exactly one node/edge), so this is a tight
+    // upper bound that removes the ~log2(N) reallocs the empty `Vec::new()` incurred while
+    // growing to hundreds/thousands of items on wide flowcharts. Recursive subgraph-body
+    // calls over-estimate (the body ends before end-of-input), but the unused tail capacity
+    // is never written, so its pages never fault — it costs address space, not RSS or time.
+    let mut items = Vec::with_capacity(lines.len().saturating_sub(*next_index));
     let mut unclosed_subgraphs = 0;
 
     while let Some((line_number, line)) = lines.get(*next_index).copied() {
         *next_index += 1;
 
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
 
-        let uncommented_line = strip_flowchart_inline_comment(trimmed);
+        // Single byte scan for the only two bytes that drive the comment-strip (`%`) and statement-split
+        // (`;`) passes; a line with neither — the overwhelmingly common case — is one clean statement
+        // equal to `trimmed`, so skip both passes (their per-line calls AND their internal `%`/`;` scans)
+        // entirely. Byte-identical: `strip_flowchart_inline_comment` returns `trimmed` unchanged when there
+        // is no `%`, and `split_statements` yields exactly `[trimmed]` when there is no `;`.
+        let has_special = memchr::memchr2(b'%', b';', trimmed.as_bytes()).is_some();
+        let uncommented_line = if has_special {
+            strip_flowchart_inline_comment(trimmed)
+        } else {
+            trimmed
+        };
         if uncommented_line.is_empty() {
             continue;
         }
 
-        let mut line_items = Vec::new();
+        // Push document items straight into `items` rather than staging them in a per-line `Vec` that is
+        // immediately `extend`ed in — that staging Vec allocated once per content line (~1 alloc/statement
+        // on wide flowcharts) for no benefit: every branch below flushes it unconditionally (the bottom
+        // `extend` on normal completion, or the `end` early-return), and items keep insertion order either
+        // way. Removing it is behavior-identical.
         let mut parsed_line = false;
 
-        for statement in split_statements(uncommented_line) {
-            let normalized_statement = statement.trim();
+        let statements = if has_special {
+            split_statements(uncommented_line)
+        } else {
+            SplitStatements::Single(std::iter::once(uncommented_line))
+        };
+        for statement in statements {
+            // `split_statements` already yields trimmed segments: its `;`-split path `trim`s each
+            // segment, and its no-`;` fast path yields `uncommented_line` verbatim — which is itself
+            // the `trim_fast`'d `trimmed` (optionally `trim_end`'d by comment stripping). So this
+            // statement is already trimmed; the previous `trim_fast(statement)` here re-scanned it for
+            // nothing. Downstream `parse_fast_simple_*` still trim their input defensively.
+            let normalized_statement = statement;
             if normalized_statement.is_empty() {
                 parsed_line = true;
                 continue;
@@ -1018,11 +1586,11 @@ fn parse_flowchart_document_items(
                     config,
                 );
                 unclosed_subgraphs += child_unclosed;
-                line_items.push(FlowDocumentItem::Subgraph {
+                items.push(FlowDocumentItem::Subgraph {
                     id: cluster_key,
                     title: cluster_title,
                     line_number,
-                    source_line: line.to_string(),
+                    source_line: line,
                     body,
                 });
                 parsed_line = true;
@@ -1031,12 +1599,43 @@ fn parse_flowchart_document_items(
 
             if normalized_statement == "end" {
                 if !is_root {
-                    items.extend(line_items);
                     return (items, unclosed_subgraphs);
                 }
                 warnings.push(format!(
                     "Line {line_number}: encountered 'end' without matching 'subgraph'"
                 ));
+                parsed_line = true;
+                continue;
+            }
+
+            if let Some((from, arrow, to)) =
+                parse_fast_simple_flowchart_edge_parts(normalized_statement)
+            {
+                items.push(FlowDocumentItem::FastEdge {
+                    from,
+                    arrow,
+                    to,
+                    line_number,
+                    source_line: line,
+                });
+                parsed_line = true;
+                continue;
+            }
+
+            // Simple `id` / `id[label]` node statement: intern straight from the borrowed slice,
+            // skipping the `FlowAst::Node` String + single-element `vec![ast]` the general path makes.
+            // Same matcher (and the same edge-before-node priority) as the fast path inside
+            // `parse_flowchart_statement_asts`, so this is behavior-identical — only allocation-cheaper.
+            if let Some((id, label, icon)) =
+                parse_fast_simple_flowchart_node_borrowed(normalized_statement)
+            {
+                items.push(FlowDocumentItem::FastNode {
+                    id,
+                    label,
+                    icon,
+                    line_number,
+                    source_line: line,
+                });
                 parsed_line = true;
                 continue;
             }
@@ -1048,10 +1647,10 @@ fn parse_flowchart_document_items(
                 warnings,
                 config,
             ) {
-                line_items.push(FlowDocumentItem::Statements {
+                items.push(FlowDocumentItem::Statements {
                     asts,
                     line_number,
-                    source_line: line.to_string(),
+                    source_line: line,
                 });
                 parsed_line = true;
             }
@@ -1062,8 +1661,6 @@ fn parse_flowchart_document_items(
                 "Line {line_number}: unsupported flowchart syntax: {trimmed}"
             ));
         }
-
-        items.extend(line_items);
     }
 
     if !is_root {
@@ -1073,6 +1670,24 @@ fn parse_flowchart_document_items(
     (items, unclosed_subgraphs)
 }
 
+/// Byte index of the first `:::` (the inline-class suffix) in `s`, or `None`. Locates it via `memchr`
+/// on `:` plus a cheap prefix verify, avoiding the `TwoWaySearcher` (maximal-suffix factorization) that
+/// `str::contains(":::")` / `str::split(":::")` build per call — a per-statement + per-`:::`-node cost on
+/// flowchart parse. Byte-identical to those std searches (memchr keeps the SIMD first-byte skip, so a
+/// `:`-free statement — the common plain flowchart line — returns `None` in one vectorized scan).
+fn find_triple_colon(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = memchr::memchr(b':', &bytes[from..]) {
+        let idx = from + rel;
+        if bytes[idx..].starts_with(b":::") {
+            return Some(idx);
+        }
+        from = idx + 1;
+    }
+    None
+}
+
 fn parse_flowchart_statement_asts(
     statement: &str,
     line_number: usize,
@@ -1080,13 +1695,53 @@ fn parse_flowchart_statement_asts(
     warnings: &mut Vec<String>,
     config: &ParserConfig,
 ) -> Option<Vec<FlowAst>> {
-    let (ast, errors) = flow_statement_parser()
-        .parse(statement)
-        .into_output_errors();
-    if errors.is_empty()
-        && let Some(ast_node) = ast
-    {
-        return Some(vec![ast_node]);
+    if let Some(ast) = parse_fast_simple_flowchart_statement_ast(statement) {
+        return Some(vec![ast]);
+    }
+
+    // A trailing `:::className` inline-class suffix has no rule in `flow_statement_parser`: the node
+    // grammar requires `end()` immediately after the shape, so any node statement carrying a `:::`
+    // suffix fails the full chumsky parse and falls through to the cheaper manual matchers below (which
+    // strip the suffix via `parse_node_token_with_config`). Skipping the doomed combinator attempt for
+    // exactly those statements saves ~1.1 µs/node on styled flowcharts (measured). The guard fires only
+    // when chumsky provably fails: `style `/`linkStyle `/`classDef ` still parse via `skip_directive`,
+    // and any statement with a flow operator (e.g. `A -->|x:::y| B`, `A:::x --> B`) keeps its normal
+    // edge handling — both stay on the chumsky path. Behavior-identical: for the skipped statements
+    // chumsky returned a parse error and contributed nothing.
+    // Capture the operator position for `:::`-class statements ONCE: the chumsky-skip guard AND the
+    // edge-vs-node decision at the tail both need it, and on a long `:::`-suffixed node line (styled
+    // flowcharts) `find_operator` was re-scanning the whole statement up to 3× (guard + the tail's
+    // `parse_edge_statement_asts` + its `is_some()` re-check). Non-`:::` statements keep the lazy path,
+    // so plain flowcharts (no `:::`) do not pay an extra scan.
+    let class_suffix_op = find_triple_colon(statement).is_some().then(|| {
+        // Every flow operator starts with one of `- < = .` (the first bytes of `FLOW_OPERATORS` /
+        // `FLOW_OP_GATE`). A `:::` node declaration (`A[Label]:::class…`) contains none of them, so this
+        // auto-vectorizing byte-set scan skips the depth-tracking `find_operator` SCALAR scan of the
+        // (often long) node line. Byte-identical: no such byte ⇒ no operator ⇒ `find_operator` is `None`.
+        statement
+            .as_bytes()
+            .iter()
+            .any(|&b| matches!(b, b'-' | b'<' | b'=' | b'.'))
+            .then(|| find_operator(statement, &FLOW_OPERATORS, FLOW_OP_GATE))
+            .flatten()
+    });
+    let chumsky_would_fail = matches!(
+        &class_suffix_op,
+        Some(op)
+            if op.is_none()
+                && !statement.starts_with("style ")
+                && !statement.starts_with("linkStyle ")
+                && !statement.starts_with("classDef ")
+    );
+    if !chumsky_would_fail {
+        let (ast, errors) = flow_statement_parser()
+            .parse(statement)
+            .into_output_errors();
+        if errors.is_empty()
+            && let Some(ast_node) = ast
+        {
+            return Some(vec![ast_node]);
+        }
     }
 
     if let Some(ast) = parse_class_assignment_ast(statement) {
@@ -1101,13 +1756,42 @@ fn parse_flowchart_statement_asts(
         // but the side effect populates ir.style_refs via the builder.
         return Some(vec![FlowAst::StyleOrLinkStyle]);
     }
-    if let Some(asts) =
-        parse_edge_statement_asts(statement, &FLOW_OPERATORS, true, config, line_number)
-    {
-        return Some(asts);
-    }
-    if find_operator(statement, &FLOW_OPERATORS).is_some() {
-        return None;
+    // Reuse the `:::`-class operator position found above to avoid re-scanning: a `:::` node line has
+    // no operator, so it goes straight to `parse_node_token_with_config` — skipping the edge-parse scan
+    // and its `is_some()` re-scan (styled flowcharts are node-declaration-heavy). Non-`:::` statements
+    // take the original lazy path. Byte-identical: `parse_edge_statement_asts` returns `None` for a
+    // no-operator statement anyway, and the `is_some()` branch only mattered when an operator existed.
+    match &class_suffix_op {
+        Some(op) => {
+            if op.is_some() {
+                if let Some(asts) = parse_edge_statement_asts(
+                    statement,
+                    &FLOW_OPERATORS,
+                    FLOW_OP_GATE,
+                    true,
+                    config,
+                    line_number,
+                ) {
+                    return Some(asts);
+                }
+                return None;
+            }
+        }
+        None => {
+            if let Some(asts) = parse_edge_statement_asts(
+                statement,
+                &FLOW_OPERATORS,
+                FLOW_OP_GATE,
+                true,
+                config,
+                line_number,
+            ) {
+                return Some(asts);
+            }
+            if find_operator(statement, &FLOW_OPERATORS, FLOW_OP_GATE).is_some() {
+                return None;
+            }
+        }
     }
     if let Some(node) = parse_node_token_with_config(statement, config) {
         return Some(vec![FlowAst::Node(FlowAstNode {
@@ -1120,6 +1804,225 @@ fn parse_flowchart_statement_asts(
 
     let _ = source_line;
     None
+}
+
+fn parse_fast_simple_flowchart_statement_ast(statement: &str) -> Option<FlowAst> {
+    parse_fast_simple_flowchart_edge_ast(statement)
+        .or_else(|| parse_fast_simple_flowchart_node_ast(statement).map(FlowAst::Node))
+}
+
+fn parse_fast_simple_flowchart_edge_ast(statement: &str) -> Option<FlowAst> {
+    let (left, arrow, right) = parse_fast_simple_flowchart_edge_parts(statement)?;
+    Some(FlowAst::Edge {
+        from: FlowAstNode {
+            id: left.to_string(),
+            label: None,
+            icon: None,
+            shape: NodeShape::Rect,
+        },
+        arrow,
+        label: None,
+        to: FlowAstNode {
+            id: right.to_string(),
+            label: None,
+            icon: None,
+            shape: NodeShape::Rect,
+        },
+    })
+}
+
+/// Byte-classification table: `true` for the bytes whose presence forces a flowchart statement off
+/// the fast edge path (bracket/paren/brace shapes, quotes, `|` edge labels, `&` node lists, `:`/`,`).
+/// A single indexed load per byte replaces the 12-way `matches!` compare chain on this hot scan.
+static FAST_EDGE_REJECT: [bool; 256] = {
+    let mut t = [false; 256];
+    let rejects = b"[](){}\"'`|&:,";
+    let mut i = 0;
+    while i < rejects.len() {
+        t[rejects[i] as usize] = true;
+        i += 1;
+    }
+    t
+};
+
+fn parse_fast_simple_flowchart_edge_parts(statement: &str) -> Option<(&str, ArrowType, &str)> {
+    // Every caller (the flowchart doc loop, directly or via the `_ast` chain) passes an already
+    // `trim_fast`'d statement — no leading/trailing whitespace (ASCII or Unicode) remains — so the old
+    // top `trim_ascii` was a no-op. Use `statement` directly. (`left`/`right` around the operator are
+    // still trimmed below, where whitespace like `N0 --> N1` IS possible.)
+    let trimmed = statement;
+    if trimmed.is_empty() || trimmed.bytes().any(|byte| FAST_EDGE_REJECT[byte as usize]) {
+        return None;
+    }
+
+    const FAST_OPERATORS: [(&str, ArrowType); 9] = [
+        ("-.->", ArrowType::DottedArrow),
+        ("<-.->", ArrowType::DoubleDottedArrow),
+        ("==>", ArrowType::ThickArrow),
+        ("<==>", ArrowType::DoubleThickArrow),
+        ("-->", ArrowType::Arrow),
+        ("<-->", ArrowType::DoubleArrow),
+        ("---", ArrowType::Line),
+        ("--o", ArrowType::Circle),
+        ("--x", ArrowType::Cross),
+    ];
+
+    // Single byte scan for the leftmost operator-start byte, instead of several full `str::find`
+    // substring searches. Byte-identical: fast operators start with `-`, `=`, or `<`, and no two
+    // are prefixes of one another, so at most one matches at any position — the leftmost operator
+    // necessarily starts at the leftmost matching byte (same result as the old leftmost-index /
+    // longest tie-break).
+    let bytes = trimmed.as_bytes();
+    let mut matched: Option<(usize, &str, ArrowType)> = None;
+    for i in 0..bytes.len() {
+        if matches!(bytes[i], b'-' | b'=' | b'<') {
+            for (operator, arrow) in FAST_OPERATORS {
+                if bytes[i..].starts_with(operator.as_bytes()) {
+                    matched = Some((i, operator, arrow));
+                    break;
+                }
+            }
+            if matched.is_some() {
+                break;
+            }
+        }
+    }
+
+    let (operator_index, operator, arrow) = matched?;
+    let left = trimmed.get(..operator_index)?.trim_ascii();
+    let right = trimmed.get(operator_index + operator.len()..)?.trim_ascii();
+    if !is_fast_flow_identifier(left) || !is_fast_flow_identifier(right) {
+        return None;
+    }
+    // Reject a chained right side (e.g. `a-->b-->c`, where `right` holds a second operator).
+    // Guard the substring searches behind a single byte scan: every fast operator starts with
+    // `-`, `=`, or `<`, so if `right` has none of those bytes none can match. Byte-identical;
+    // saves substring-search calls per edge for the common single-operator edge.
+    if right.bytes().any(|byte| matches!(byte, b'-' | b'=' | b'<'))
+        && FAST_OPERATORS
+            .iter()
+            .any(|(next_operator, _)| right.contains(next_operator))
+    {
+        return None;
+    }
+
+    Some((left, arrow, right))
+}
+
+fn parse_fast_simple_flowchart_node_ast(statement: &str) -> Option<FlowAstNode> {
+    let (id, label, icon) = parse_fast_simple_flowchart_node_borrowed(statement)?;
+    Some(FlowAstNode {
+        id: id.to_string(),
+        label,
+        icon,
+        shape: NodeShape::Rect,
+    })
+}
+
+/// Borrowed core of [`parse_fast_simple_flowchart_node_ast`]: returns the node id as a `&str` slice
+/// into `statement` (instead of an owned `String`) plus the owned label/icon. Lets the document parser
+/// stash a simple node as `FlowDocumentItem::FastNode` and intern it straight from the slice — skipping
+/// both the `id.to_string()` and the single-element `vec![FlowAst::Node(..)]` the general path allocates.
+/// Shape is always `Rect` on this fast path. Byte-identical matching to the original (same trims/guards).
+fn parse_fast_simple_flowchart_node_borrowed(
+    statement: &str,
+) -> Option<(&str, Option<ParsedLabel>, Option<String>)> {
+    // Every caller passes an already `trim_fast`'d statement (see
+    // `parse_fast_simple_flowchart_edge_parts`), so the top `trim_ascii` was a no-op — use `statement`
+    // directly. The `id` before `[` is still trimmed below (`N0 [x]` has interior whitespace).
+    let trimmed = statement;
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Single scan for the first `[` OR forbidden byte (paren/brace/quote/pipe/amp/comma). Fusing them
+    // keeps the early reject for `{`/`(`-shaped nodes — diamond/hexagon fail at the first byte, as the
+    // old whole-line forbidden scan did — AND lets a bracketed node skip the rest of the scan when it
+    // isn't `]`-terminated (a `:::`-class suffix `N0[label]:::x`, the hot styled-flowchart
+    // node-declaration line). `[` is ASCII, so its byte index is a char boundary and the slices
+    // reproduce `split_once('[')` exactly.
+    let first_special = trimmed.as_bytes().iter().position(|&b| {
+        matches!(
+            b,
+            b'[' | b'(' | b')' | b'{' | b'}' | b'"' | b'\'' | b'`' | b'|' | b'&' | b','
+        )
+    });
+    match first_special {
+        Some(bracket) if trimmed.as_bytes()[bracket] == b'[' => {
+            // `[` came before any forbidden byte, so the id (before `[`) is already clean.
+            if !trimmed.ends_with(']') {
+                return None;
+            }
+            let id = trimmed[..bracket].trim_ascii();
+            // `trim_fast` is byte-identical to `str::trim` but skips the `char::is_whitespace`
+            // CharSearcher — this label trim fires once per bracketed node.
+            let label_raw = trim_fast(trimmed[bracket + 1..].strip_suffix(']')?);
+            // Mermaid's quoted rectangular labels deliberately carry punctuation that is syntax
+            // outside the quotes (`&`, commas, braces, parentheses, apostrophes). Chumsky treats
+            // all of it as label content, then `parse_label` removes the surrounding quotes. Keep
+            // the conservative forbidden-byte gate for unquoted labels, but let the existing fast
+            // path handle a complete double-quoted label directly. This is the dominant node form
+            // in documentation batches and avoids constructing the Chumsky choice graph per node.
+            let double_quoted =
+                label_raw.len() >= 2 && label_raw.starts_with('"') && label_raw.ends_with('"');
+            if !double_quoted
+                && label_raw.as_bytes().iter().any(|&b| {
+                    matches!(
+                        b,
+                        b'(' | b')' | b'{' | b'}' | b'"' | b'\'' | b'`' | b'|' | b'&' | b','
+                    )
+                })
+            {
+                return None;
+            }
+            // Byte scan for a nested `[`/`]` rather than `contains(['[', ']'])`; both are ASCII.
+            if !is_fast_flow_identifier(id)
+                || label_raw.as_bytes().iter().any(|&b| b == b'[' || b == b']')
+            {
+                return None;
+            }
+            // `label_raw` is `trim_fast`'d above; `parse_label_pretrimmed` skips the redundant re-trim.
+            let mut label = parse_label_pretrimmed(label_raw);
+            let icon = extract_icon_prefix_pretrimmed(label.as_mut());
+            clear_empty_label(&mut label);
+            Some((id, label, icon))
+        }
+        // A forbidden byte before any `[` (paren/brace/… shaped node — diamond/hexagon/…).
+        Some(_) => None,
+        // No `[` and no forbidden byte: a plain identifier node.
+        None => is_fast_flow_identifier(trimmed).then_some((trimmed, None, None)),
+    }
+}
+
+/// `[byte] -> is a valid fast-flow-identifier byte`. Replaces the per-byte
+/// `is_ascii_alphanumeric() || matches!(_ - . /)` chain (≈7 comparisons) with one table load on the
+/// hot fast-edge path. Byte-identical: the same accept set (`0-9 A-Z a-z _ - . /`).
+static FAST_ID_CHAR: [bool; 256] = {
+    let mut t = [false; 256];
+    let mut i = b'0';
+    while i <= b'9' {
+        t[i as usize] = true;
+        i += 1;
+    }
+    let mut i = b'A';
+    while i <= b'Z' {
+        t[i as usize] = true;
+        i += 1;
+    }
+    let mut i = b'a';
+    while i <= b'z' {
+        t[i as usize] = true;
+        i += 1;
+    }
+    t[b'_' as usize] = true;
+    t[b'-' as usize] = true;
+    t[b'.' as usize] = true;
+    t[b'/' as usize] = true;
+    t
+};
+
+fn is_fast_flow_identifier(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| FAST_ID_CHAR[byte as usize])
 }
 
 fn add_node_to_active_clusters(
@@ -1172,7 +2075,9 @@ fn parse_subgraph_statement(
     statement: &str,
     config: &ParserConfig,
 ) -> Option<(String, Option<String>)> {
-    let statement = statement.trim_start();
+    // `trim_start_fast` is byte-identical to `str::trim_start` but skips the CharSearcher; this runs
+    // once per flowchart statement (before the node/edge classifiers) on an already-trimmed line.
+    let statement = trim_start_fast(statement);
     let rest = statement.strip_prefix("subgraph")?;
     let first = rest.chars().next()?;
     if !first.is_whitespace() {
@@ -1238,15 +2143,15 @@ fn looks_like_explicit_subgraph_id(raw: &str) -> bool {
         .trim_matches('\'')
         .trim_matches('`');
     !trimmed.is_empty()
-        && trimmed.chars().all(|ch| {
-            ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '-' | '.' | '/')
+        && trimmed.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-' | b'.' | b'/')
         })
 }
 
 fn parse_sequence(input: &str, builder: &mut IrBuilder) {
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -1267,6 +2172,21 @@ fn parse_sequence(input: &str, builder: &mut IrBuilder) {
 }
 
 fn parse_sequence_statement(line: &str) -> Option<SequenceStatement> {
+    // Fast reject: every keyword statement below begins with a lowercase ASCII letter, `Note` (`N`), or
+    // the case-insensitive `hide footbox` (`h`/`H`) — all its checks are prefix (`strip_prefix`/`==`)
+    // matches. A line whose first byte is anything else (an uppercase participant name like `Alice`/`P0`,
+    // a digit, `[`, `"`, …) cannot match any keyword, so skip the whole ~18-check keyword chain straight
+    // to the message parse (those keyword `strip_prefix`/`==` calls each invoke `memcmp` even on a
+    // first-byte mismatch — ~8.9% of sequence parse). Byte-identical: each skipped check compares from
+    // byte 0 and would return `None` on such a first byte, and the message parse is the existing
+    // fall-through. Conservative — a lowercase/`N`/`H` first byte still runs the full chain.
+    if let Some(&first) = line.as_bytes().first()
+        && !(first.is_ascii_lowercase() || first == b'N' || first == b'H')
+    {
+        return parse_sequence_message_ast(line)
+            .map(|data| SequenceStatement::Message(Box::new(data)));
+    }
+
     if let Some(autonumber) = parse_sequence_autonumber(line) {
         return Some(autonumber);
     }
@@ -1382,7 +2302,7 @@ fn parse_sequence_statement(line: &str) -> Option<SequenceStatement> {
         }
     }
 
-    parse_sequence_message_ast(line).map(SequenceStatement::Message)
+    parse_sequence_message_ast(line).map(|data| SequenceStatement::Message(Box::new(data)))
 }
 
 fn parse_sequence_autonumber(line: &str) -> Option<SequenceStatement> {
@@ -1485,12 +2405,27 @@ fn decode_mermaid_entities(text: &str) -> String {
     decoded
 }
 
+/// Replace the three `<br>` spellings with `\n`, gated on a cheap `'<'` byte scan.
+///
+/// Each `str::replace(&str, _)` builds a `TwoWaySearcher` and allocates a fresh `String` even when
+/// the needle is absent — measured as ~17% of sequence-message parsing (searcher construction +
+/// `str::replace` + malloc), because a message label almost never contains `'<'`. `str::contains('<')`
+/// is a char pattern (memchr), not a `TwoWaySearcher`. With no `'<'` present, none of the `"<br...>"`
+/// needles can match, so returning the input borrowed is byte-identical to running the replace chain.
+fn replace_br_with_newlines(text: &str) -> Cow<'_, str> {
+    if text.contains('<') {
+        Cow::Owned(
+            text.replace("<br/>", "\n")
+                .replace("<br>", "\n")
+                .replace("<br />", "\n"),
+        )
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
 fn normalize_sequence_display_text(text: &str) -> String {
-    let with_line_breaks = text
-        .trim()
-        .replace("<br/>", "\n")
-        .replace("<br>", "\n")
-        .replace("<br />", "\n");
+    let with_line_breaks = replace_br_with_newlines(text.trim());
     decode_mermaid_entities(&with_line_breaks)
 }
 
@@ -1507,7 +2442,7 @@ fn decode_mermaid_entity_token(token: &str) -> Option<char> {
             return char::from_u32(value);
         }
 
-        if numeric.chars().all(|ch| ch.is_ascii_digit()) {
+        if numeric.bytes().all(|b| b.is_ascii_digit()) {
             let value = numeric.parse::<u32>().ok()?;
             return char::from_u32(value);
         }
@@ -1845,8 +2780,8 @@ fn lower_sequence_statement(
                 ));
             }
         }
-        SequenceStatement::Message(statement) => {
-            let _ = lower_sequence_message(&statement, line_number, source_line, builder);
+        SequenceStatement::Message(data) => {
+            let _ = lower_sequence_message(&data, line_number, source_line, builder);
         }
         SequenceStatement::Autonumber { start, increment } => {
             builder.enable_autonumber_with(start.unwrap_or(1), increment.unwrap_or(1));
@@ -1947,9 +2882,9 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
     // Stack of (namespace_name, subgraph_index) for nested namespace blocks.
     let mut namespace_stack: Vec<(String, usize)> = Vec::new();
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -1994,12 +2929,13 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // Inside a class block: parse member declarations
-        if let Some(ref class_name) = in_block {
+        // Inside a class block: parse member declarations. The open class name lives in the builder's
+        // `current_class` context (set on `BlockStart`, read by `add_class_member`), so this branch
+        // only needs to know a block is open — the previous per-member `class_name.clone()` was written
+        // into `cn` and immediately dropped unused, one wasted heap alloc+copy+free per member line.
+        if in_block.is_some() {
             if let Some(member) = parse_class_member(trimmed) {
-                let cn = class_name.clone();
                 lower_class_statement(ClassStatement::Member(member), line_number, line, builder);
-                let _ = cn; // class_name is used via the builder's current_class context
             }
             continue;
         }
@@ -2027,7 +2963,7 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
             lower_class_statement(statement, line_number, line, builder);
 
             if let (Some(key), Some(sg_idx)) = (ns_node_key, ns_sg_idx)
-                && let Some(node_id) = builder.node_id_by_key(&key).copied()
+                && let Some(node_id) = builder.node_id_by_key(&key)
             {
                 builder.add_node_to_subgraph(sg_idx, node_id);
             }
@@ -2059,8 +2995,10 @@ fn extract_class_generics(raw_name: &str) -> (&str, Vec<String>) {
 }
 
 /// Parse a class member declaration like `+String name`, `-int age`, `#doSomething() void`.
-fn parse_class_member(line: &str) -> Option<fm_core::IrClassMember> {
-    let trimmed = line.trim();
+fn parse_class_member(trimmed: &str) -> Option<fm_core::IrClassMember> {
+    // The sole caller (the `parse_class_statements` line loop) already `trim_fast`s the line and
+    // `continue`s on an empty/comment line, so `trimmed` is a non-empty, whitespace-trimmed slice.
+    // Re-trimming here re-scanned every member line for whitespace that is provably absent.
     if trimmed.is_empty() {
         return None;
     }
@@ -2074,7 +3012,7 @@ fn parse_class_member(line: &str) -> Option<fm_core::IrClassMember> {
         _ => (fm_core::ClassVisibility::Public, trimmed),
     };
 
-    let rest = rest.trim();
+    let rest = trim_fast(rest);
     if rest.is_empty() {
         return None;
     }
@@ -2085,17 +3023,22 @@ fn parse_class_member(line: &str) -> Option<fm_core::IrClassMember> {
     // Check for static ($) and abstract (*) markers at end
     let is_static = rest.ends_with('$');
     let is_abstract = rest.ends_with('*');
-    let rest = rest.trim_end_matches('$').trim_end_matches('*').trim();
+    let rest = trim_fast(rest.trim_end_matches('$').trim_end_matches('*'));
 
-    // Parse type annotation
-    let (name_part, return_type) = if let Some((name, typ)) = rest.rsplit_once(':') {
+    // Parse type annotation. `rsplit_once(':')` / `rfind(')')` on a single ASCII char go through
+    // the scalar `CharSearcher` reverse searcher (a profiled self-symbol on class parse); the SIMD
+    // `memchr::memrchr` finds the same last-byte index (`:` / `)` are ASCII ⇒ char boundaries).
+    let (name_part, return_type) = if let Some(colon) = memchr::memrchr(b':', rest.as_bytes()) {
         // Colon-separated: `name : Type` or `method() : ReturnType`
-        (name.trim(), Some(typ.trim().to_string()))
+        (
+            trim_fast(&rest[..colon]),
+            Some(trim_fast(&rest[colon + 1..]).to_string()),
+        )
     } else if is_method {
         // For methods without colon, check for return type after closing paren
         // e.g., `eat() void` → name="eat()", return_type=Some("void")
-        if let Some(paren_end) = rest.rfind(')') {
-            let after_paren = rest[paren_end + 1..].trim();
+        if let Some(paren_end) = memchr::memrchr(b')', rest.as_bytes()) {
+            let after_paren = trim_fast(&rest[paren_end + 1..]);
             if after_paren.is_empty() {
                 (rest, None)
             } else {
@@ -2134,15 +3077,22 @@ fn parse_class_member(line: &str) -> Option<fm_core::IrClassMember> {
 /// The source cardinality is a quoted string after the left-hand class name
 /// and before the operator.  The target cardinality is a quoted string after
 /// the operator and before the right-hand class name.
-fn strip_class_cardinality(statement: &str) -> (String, Option<String>, Option<String>) {
+fn strip_class_cardinality(statement: &str) -> Option<(String, Option<String>, Option<String>)> {
+    // Cardinality labels are ALWAYS quoted (`"1"`, `"*"`). A statement with no `"` therefore carries
+    // no cardinality to strip — the common class relationship line (`A --> B : label`). Gate the whole
+    // routine (a `find_operator` scan the edge parser repeats anyway, plus the left/right rebuild
+    // allocations) behind a single vectorized `memchr(b'"')`. `None` tells the caller to use the
+    // borrowed `statement` verbatim. Byte-identical: the old code returned `(statement.to_string(),
+    // None, None)` for any quote-free statement, which the caller treats exactly like the original.
+    if !statement.as_bytes().contains(&b'"') {
+        return None;
+    }
+
     let mut source_card = None;
     let mut target_card = None;
 
     // Find operator position.
-    let op_pos = find_operator(statement, &CLASS_OPERATORS);
-    let Some((op_idx, op_str, _)) = op_pos else {
-        return (statement.to_string(), None, None);
-    };
+    let (op_idx, op_str, _) = find_operator(statement, &CLASS_OPERATORS, CLASS_OP_GATE)?;
 
     let left = &statement[..op_idx];
     let right = &statement[op_idx + op_str.len()..];
@@ -2153,7 +3103,7 @@ fn strip_class_cardinality(statement: &str) -> (String, Option<String>, Option<S
         let before_last_quote = &left[..q_start];
         if let Some(q_open) = before_last_quote.rfind('"') {
             source_card = Some(left[q_open + 1..q_start].to_string());
-            cleaned_left = format!("{}{}", left[..q_open].trim_end(), " ");
+            cleaned_left = format!("{}{}", trim_end_fast(&left[..q_open]), " ");
         } else {
             cleaned_left = left.to_string();
         }
@@ -2163,7 +3113,7 @@ fn strip_class_cardinality(statement: &str) -> (String, Option<String>, Option<S
 
     // Extract target cardinality from right side: `"*" ClassB : label` → `ClassB : label`, `"*"`
     let cleaned_right;
-    let trimmed_right = right.trim_start();
+    let trimmed_right = trim_start_fast(right);
     if let Some(after_quote) = trimmed_right.strip_prefix('"') {
         if let Some(close_quote) = after_quote.find('"') {
             target_card = Some(after_quote[..close_quote].to_string());
@@ -2176,20 +3126,21 @@ fn strip_class_cardinality(statement: &str) -> (String, Option<String>, Option<S
     }
 
     if source_card.is_none() && target_card.is_none() {
-        return (statement.to_string(), None, None);
+        return None;
     }
 
-    let result = format!("{}{}{}", cleaned_left.trim_end(), op_str, cleaned_right);
-    (result, source_card, target_card)
+    let result = format!(
+        "{}{}{}",
+        trim_end_fast(&cleaned_left),
+        op_str,
+        cleaned_right
+    );
+    Some((result, source_card, target_card))
 }
 
 fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<ClassStatement>> {
     if line.starts_with("class ") && line.ends_with('{') {
-        let raw_name = line
-            .trim_start_matches("class")
-            .trim()
-            .trim_end_matches('{')
-            .trim();
+        let raw_name = trim_fast(trim_fast(line.trim_start_matches("class")).trim_end_matches('{'));
         let (class_name, generics) = extract_class_generics(raw_name);
         return Some(vec![ClassStatement::BlockStart(
             class_name.to_string(),
@@ -2245,20 +3196,26 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
             }
         }
 
-        // Try edge parsing — first strip cardinality labels if present.
-        let (cleaned_statement, source_card, target_card) = strip_class_cardinality(statement);
-        let edge_input = if source_card.is_some() || target_card.is_some() {
-            cleaned_statement.as_str()
-        } else {
-            statement
+        // Try edge parsing — first strip cardinality labels if present. `None` ⇒ no quoted
+        // cardinality, so the edge parser sees the original borrowed `statement` (no rebuild alloc).
+        let stripped = strip_class_cardinality(statement);
+        let edge_input = match &stripped {
+            Some((cleaned, ..)) => cleaned.as_str(),
+            None => statement,
         };
-        if let Some(asts) =
-            parse_edge_statement_asts(edge_input, &CLASS_OPERATORS, false, config, 0)
-        {
+        if let Some(asts) = parse_edge_statement_asts(
+            edge_input,
+            &CLASS_OPERATORS,
+            CLASS_OP_GATE,
+            false,
+            config,
+            0,
+        ) {
             for ast in asts {
                 statements.push(ClassStatement::Ast(ast));
-                // Attach cardinality to this edge in lower_class_statement.
-                if source_card.is_some() || target_card.is_some() {
+                // Attach cardinality to this edge in lower_class_statement. `stripped` is `Some`
+                // only when at least one cardinality was extracted, so no is_some() re-check.
+                if let Some((_, source_card, target_card)) = &stripped {
                     statements.push(ClassStatement::Cardinality(
                         source_card.clone(),
                         target_card.clone(),
@@ -2318,9 +3275,9 @@ fn parse_state(input: &str, builder: &mut IrBuilder) {
     // Multi-line note accumulator: (target, position, lines, start_line_number)
     let mut note_block: Option<(String, String, Vec<String>, usize)> = None;
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
 
         // Inside a multi-line note block: collect until `end note`.
         if let Some((target, position, mut lines, start)) = note_block.take() {
@@ -2425,8 +3382,37 @@ fn parse_state_statements(line: &str, config: &ParserConfig) -> Option<Vec<State
     // `[*]` standalone is handled as a node in the edge parsing
     let mut statements = Vec::new();
     for statement in split_statements(line) {
-        if let Some(asts) = parse_edge_statement_asts(statement, &FLOW_OPERATORS, false, config, 0)
+        // A state transition spells its label `S0 --> S1: text`, but the edge parser below is the
+        // generic FLOWCHART one, which knows only `-->|text|` and `-- text -->`. Left intact, the
+        // suffix reaches it as node-token syntax: `&` reads as a parallel-endpoint separator, `(`/`<`
+        // as node-shape delimiters, and in the benign case the whole `S1: text` becomes the TARGET
+        // NODE's label while the edge gets none (bd-yq3k). Split the label off first.
+        let (edge_source, transition_label) = split_state_transition_label(statement);
+        if let Some(asts) =
+            parse_edge_statement_asts(edge_source, &FLOW_OPERATORS, FLOW_OP_GATE, false, config, 0)
         {
+            let asts = match transition_label {
+                // `label.or(..)` not `Some(..)`: an explicit `-->|text|` already parsed a label and
+                // must win over the colon suffix rather than be overwritten by it.
+                Some(text) => asts
+                    .into_iter()
+                    .map(|ast| match ast {
+                        FlowAst::Edge {
+                            from,
+                            arrow,
+                            label,
+                            to,
+                        } => FlowAst::Edge {
+                            from,
+                            arrow,
+                            label: label.or_else(|| Some(text.to_string())),
+                            to,
+                        },
+                        other => other,
+                    })
+                    .collect(),
+                None => asts,
+            };
             statements.push(StateStatement::Edge(asts));
             continue;
         }
@@ -2436,6 +3422,63 @@ fn parse_state_statements(line: &str, config: &ParserConfig) -> Option<Vec<State
     }
 
     (!statements.is_empty()).then_some(statements)
+}
+
+/// Split a state transition's `: label` suffix off its edge text.
+///
+/// Returns `(edge_text, label)`. The colon is only meaningful AFTER an edge operator — a bare
+/// `S1: description` is mermaid's state-description syntax, which sets the state's own label and must
+/// keep flowing to the node parser untouched — so a statement with no operator is returned unchanged.
+///
+/// The scan tracks quotes and bracket depth exactly as [`find_operator_core`] does, so a colon inside
+/// `"..."` or inside `[*]`/`(...)`/`{...}` is not mistaken for the separator. The FIRST top-level
+/// colon wins, matching mermaid: `S0 --> S1: Rate limit: 429` labels the edge `Rate limit: 429`.
+fn split_state_transition_label(statement: &str) -> (&str, Option<&str>) {
+    let Some((operator_idx, operator, _)) = find_operator(statement, &FLOW_OPERATORS, FLOW_OP_GATE)
+    else {
+        return (statement, None);
+    };
+
+    let scan_from = operator_idx + operator.len();
+    let mut in_quote: Option<u8> = None;
+    let mut escaped = false;
+    let mut square_depth = 0_usize;
+    let mut paren_depth = 0_usize;
+    let mut brace_depth = 0_usize;
+
+    for (idx, &byte) in statement.as_bytes().iter().enumerate() {
+        if idx < scan_from {
+            continue;
+        }
+        if let Some(quote) = in_quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' && quote != b'`' {
+                escaped = true;
+            } else if byte == quote {
+                in_quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'"' | b'\'' | b'`' => in_quote = Some(byte),
+            b'[' => square_depth = square_depth.saturating_add(1),
+            b']' => square_depth = square_depth.saturating_sub(1),
+            b'(' => paren_depth = paren_depth.saturating_add(1),
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            b'{' => brace_depth = brace_depth.saturating_add(1),
+            b'}' => brace_depth = brace_depth.saturating_sub(1),
+            b':' if square_depth == 0 && paren_depth == 0 && brace_depth == 0 => {
+                let label = trim_fast(&statement[idx + 1..]);
+                // An empty suffix (`S0 --> S1:`) carries no label; leave the edge unlabelled rather
+                // than attaching an empty string.
+                return (&statement[..idx], (!label.is_empty()).then_some(label));
+            }
+            _ => {}
+        }
+    }
+
+    (statement, None)
 }
 
 fn parse_state_note(line: &str) -> Option<StateStatement> {
@@ -2562,8 +3605,9 @@ fn lower_state_flow_ast(
                 if (guard.is_some() || action.is_some())
                     && let Some(edge) = builder.ir_mut().edges.last_mut()
                 {
-                    edge.guard = guard;
-                    edge.action = action;
+                    let ex = edge.extras_mut();
+                    ex.guard = guard.map(String::into_boxed_str);
+                    ex.action = action.map(String::into_boxed_str);
                 }
             }
         }
@@ -2583,7 +3627,11 @@ fn extract_state_guard_action(
     let Some(label) = label else {
         return (None, None, None);
     };
-    let label = label.trim();
+    // Whitespace trims routed through the byte-exact `trim_fast`/`trim_end_fast`/`trim_start_fast`
+    // siblings (identical slice to `str::trim*`, no `char::is_whitespace` CharSearcher). The entry trim
+    // fires once per labelled state transition; the guard/action trims fire on the `[cond]` / `/action`
+    // branches.
+    let label = trim_fast(label);
     if label.is_empty() {
         return (None, None, None);
     }
@@ -2596,28 +3644,46 @@ fn extract_state_guard_action(
     if let Some(bracket_start) = clean.find('[')
         && let Some(bracket_end) = clean[bracket_start..].find(']')
     {
-        guard = Some(
-            clean[bracket_start + 1..bracket_start + bracket_end]
-                .trim()
-                .to_string(),
-        );
+        guard = Some(trim_fast(&clean[bracket_start + 1..bracket_start + bracket_end]).to_string());
         clean = format!(
             "{}{}",
-            clean[..bracket_start].trim_end(),
-            clean[bracket_start + bracket_end + 1..].trim_start()
+            trim_end_fast(&clean[..bracket_start]),
+            trim_start_fast(&clean[bracket_start + bracket_end + 1..])
         );
     }
 
-    // Extract action: / action()
-    if let Some(slash_pos) = clean.find(" / ") {
-        action = Some(clean[slash_pos + 3..].trim().to_string());
-        clean = clean[..slash_pos].trim().to_string();
-    } else if let Some(slash_pos) = clean.find('/') {
+    // Extract action: / action(). Preserve the existing priority: the first spaced delimiter wins
+    // even when an earlier bare slash exists. One byte pass records both candidates so the common
+    // slash-free label does not run two independent searches.
+    let mut first_slash = None;
+    let mut first_spaced_slash = None;
+    let clean_bytes = clean.as_bytes();
+    for (index, &byte) in clean_bytes.iter().enumerate() {
+        if byte != b'/' {
+            continue;
+        }
+        if first_slash.is_none() {
+            first_slash = Some(index);
+        }
+        if index > 0
+            && index + 1 < clean_bytes.len()
+            && clean_bytes[index - 1] == b' '
+            && clean_bytes[index + 1] == b' '
+        {
+            first_spaced_slash = Some(index - 1);
+            break;
+        }
+    }
+
+    if let Some(slash_pos) = first_spaced_slash {
+        action = Some(trim_fast(&clean[slash_pos + 3..]).to_string());
+        clean = trim_fast(&clean[..slash_pos]).to_string();
+    } else if let Some(slash_pos) = first_slash {
         // Also handle without spaces: "/action"
-        let after = clean[slash_pos + 1..].trim();
+        let after = trim_fast(&clean[slash_pos + 1..]);
         if !after.is_empty() {
             action = Some(after.to_string());
-            clean = clean[..slash_pos].trim().to_string();
+            clean = trim_fast(&clean[..slash_pos]).to_string();
         }
     }
 
@@ -2659,6 +3725,25 @@ fn state_edge_endpoint<'a>(
     }
 }
 
+fn finalize_requirement_block(
+    builder: &mut IrBuilder,
+    current_req_node: &mut Option<fm_core::IrNodeId>,
+    current_req_type: &mut Option<String>,
+) {
+    if let Some(node_id) = *current_req_node
+        && let Some(node) = builder.node_mut(node_id)
+    {
+        let meta = node
+            .requirement_meta
+            .get_or_insert_with(|| Box::new(fm_core::IrRequirementNodeMeta::default()));
+        if meta.requirement_type.is_none() {
+            meta.requirement_type = current_req_type.take();
+        }
+    }
+    *current_req_node = None;
+    *current_req_type = None;
+}
+
 fn parse_requirement(input: &str, builder: &mut IrBuilder) {
     let mut inside_requirement_block = false;
     let mut current_req_node: Option<fm_core::IrNodeId> = None;
@@ -2674,15 +3759,42 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
         "element ",
     ];
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
 
         if trimmed == "requirementDiagram" {
             continue;
+        }
+
+        if inside_requirement_block {
+            if trimmed.starts_with('}') {
+                finalize_requirement_block(builder, &mut current_req_node, &mut current_req_type);
+                inside_requirement_block = false;
+                continue;
+            }
+
+            if let Some((field @ ("id" | "text" | "risk" | "verifymethod"), rest)) =
+                trimmed.split_once(':')
+                && let Some(node_id) = current_req_node
+                && let Some(node) = builder.node_mut(node_id)
+            {
+                let meta = node
+                    .requirement_meta
+                    .get_or_insert_with(|| Box::new(fm_core::IrRequirementNodeMeta::default()));
+                let value = trim_fast(rest).to_string();
+                match field {
+                    "id" => meta.req_id = Some(value),
+                    "text" => meta.text = Some(value),
+                    "risk" => meta.risk = Some(value),
+                    "verifymethod" => meta.verify_method = Some(value),
+                    _ => unreachable!(),
+                }
+                continue;
+            }
         }
 
         // Check for any requirement block start.
@@ -2716,65 +3828,9 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
             continue;
         }
         if trimmed.starts_with('}') {
-            // Finalize the requirement block: store accumulated metadata.
-            if let Some(node_id) = current_req_node
-                && let Some(node) = builder.node_mut(node_id)
-            {
-                let meta = node
-                    .requirement_meta
-                    .get_or_insert_with(fm_core::IrRequirementNodeMeta::default);
-                if meta.requirement_type.is_none() {
-                    meta.requirement_type = current_req_type.take();
-                }
-            }
+            finalize_requirement_block(builder, &mut current_req_node, &mut current_req_type);
             inside_requirement_block = false;
-            current_req_node = None;
-            current_req_type = None;
             continue;
-        }
-
-        // Extract metadata fields inside a requirement block.
-        if inside_requirement_block {
-            if let Some(rest) = trimmed.strip_prefix("id:")
-                && let Some(node_id) = current_req_node
-                && let Some(node) = builder.node_mut(node_id)
-            {
-                let meta = node
-                    .requirement_meta
-                    .get_or_insert_with(fm_core::IrRequirementNodeMeta::default);
-                meta.req_id = Some(rest.trim().to_string());
-                continue;
-            }
-            if let Some(rest) = trimmed.strip_prefix("text:")
-                && let Some(node_id) = current_req_node
-                && let Some(node) = builder.node_mut(node_id)
-            {
-                let meta = node
-                    .requirement_meta
-                    .get_or_insert_with(fm_core::IrRequirementNodeMeta::default);
-                meta.text = Some(rest.trim().to_string());
-                continue;
-            }
-            if let Some(rest) = trimmed.strip_prefix("risk:")
-                && let Some(node_id) = current_req_node
-                && let Some(node) = builder.node_mut(node_id)
-            {
-                let meta = node
-                    .requirement_meta
-                    .get_or_insert_with(fm_core::IrRequirementNodeMeta::default);
-                meta.risk = Some(rest.trim().to_string());
-                continue;
-            }
-            if let Some(rest) = trimmed.strip_prefix("verifymethod:")
-                && let Some(node_id) = current_req_node
-                && let Some(node) = builder.node_mut(node_id)
-            {
-                let meta = node
-                    .requirement_meta
-                    .get_or_insert_with(fm_core::IrRequirementNodeMeta::default);
-                meta.verify_method = Some(rest.trim().to_string());
-                continue;
-            }
         }
 
         if parse_requirement_relation(trimmed, line_number, line, builder) {
@@ -2787,6 +3843,17 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
     }
 }
 
+const MINDMAP_BRANCH_CLASSES: [&str; 8] = [
+    "mindmap-branch-0",
+    "mindmap-branch-1",
+    "mindmap-branch-2",
+    "mindmap-branch-3",
+    "mindmap-branch-4",
+    "mindmap-branch-5",
+    "mindmap-branch-6",
+    "mindmap-branch-7",
+];
+
 fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
     let mut ancestry: Vec<(usize, fm_core::IrNodeId)> = Vec::new();
     let mut last_node_id: Option<fm_core::IrNodeId> = None;
@@ -2796,9 +3863,9 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
     // Map from first-level children: depth of root, branch counter.
     let mut root_depth: Option<usize> = None;
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -2822,12 +3889,8 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
         if let Some(class_suffix) = trimmed.strip_prefix(":::") {
             let classes = class_suffix.trim();
             if let Some(node_id) = last_node_id {
-                let span = span_for(line_number, line);
                 for class in classes.split_whitespace() {
-                    if let Some(node) = builder.get_node_by_id(node_id) {
-                        let key = node.id.clone();
-                        builder.add_class_to_node(&key, class, span);
-                    }
+                    builder.add_class_to_node_id(node_id, class);
                 }
             }
             continue;
@@ -2867,7 +3930,7 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
         if !root_seen {
             root_seen = true;
             root_depth = Some(depth);
-            builder.add_class_to_node(&node.id, "mindmap-root", span);
+            builder.add_class_to_node_id(node_id, "mindmap-root");
         } else if let Some(rd) = root_depth {
             // First-level children: one indent deeper than root.
             if ancestry.len() <= 2 && depth > rd {
@@ -2875,8 +3938,7 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
             }
         }
         // Apply branch color class to all nodes.
-        let branch_class = format!("mindmap-branch-{}", branch_index % 8);
-        builder.add_class_to_node(&node.id, &branch_class, span);
+        builder.add_class_to_node_id(node_id, MINDMAP_BRANCH_CLASSES[branch_index & 7]);
     }
 }
 
@@ -2888,46 +3950,61 @@ fn parse_mindmap_node_token(raw: &str, config: &ParserConfig) -> Option<NodeToke
         return None;
     }
 
-    // Strip class suffix (:::class1 class2) from the node definition
-    let core = trimmed.split(":::").next().unwrap_or(trimmed).trim();
+    // Strip class suffix (:::class1 class2) from the node definition. The `:::` split builds a
+    // substring searcher; guard it behind a cheap `memchr(':')` — the common mindmap node has no colon.
+    let core = if trimmed.as_bytes().contains(&b':') {
+        trim_fast(find_triple_colon(trimmed).map_or(trimmed, |pos| &trimmed[..pos]))
+    } else {
+        trimmed
+    };
     if core.is_empty() {
         return None;
     }
 
-    // Bang shape: id))text((
-    if let Some(parsed) = parse_mindmap_bang(core) {
-        return Some(parsed);
-    }
+    // Every mindmap shape — `))…((`, `)…(`, `{{…}}`, `((…))`, `(…)`, `[…]` — contains a bracket/paren/
+    // brace delimiter. A plain node (the common case) has none, so skip the shape probes (each a
+    // `find`/`contains` substring searcher) below. Byte-identical: the probes all miss without a delimiter.
+    if core
+        .as_bytes()
+        .iter()
+        .any(|&b| matches!(b, b'(' | b')' | b'[' | b']' | b'{' | b'}'))
+    {
+        // Bang shape: id))text((
+        if let Some(parsed) = parse_mindmap_bang(core) {
+            return Some(parsed);
+        }
 
-    // Cloud shape: id)text(
-    if let Some(parsed) = parse_mindmap_cloud(core) {
-        return Some(parsed);
-    }
+        // Cloud shape: id)text(
+        if let Some(parsed) = parse_mindmap_cloud(core) {
+            return Some(parsed);
+        }
 
-    // Hexagon shape: id{{text}}
-    if let Some(parsed) = parse_mindmap_hexagon(core) {
-        return Some(parsed);
-    }
+        // Hexagon shape: id{{text}}
+        if let Some(parsed) = parse_mindmap_hexagon(core) {
+            return Some(parsed);
+        }
 
-    // Circle shape: id((text)) - reuse existing double-circle parser
-    if let Some(parsed) = parse_double_circle_with_config(core, config) {
-        // For mindmap, (( )) is just a circle, not double-circle
-        return Some(NodeToken {
-            id: parsed.id,
-            label: parsed.label,
-            icon: parsed.icon,
-            shape: NodeShape::Circle,
-        });
-    }
+        // Circle shape: id((text)) - reuse existing double-circle parser
+        if let Some(parsed) = parse_double_circle_with_config(core, config) {
+            // For mindmap, (( )) is just a circle, not double-circle
+            return Some(NodeToken {
+                id: parsed.id,
+                label: parsed.label,
+                icon: parsed.icon,
+                shape: NodeShape::Circle,
+            });
+        }
 
-    // Rounded shape: id(text)
-    if let Some(parsed) = parse_wrapped_with_config(core, '(', ')', NodeShape::Rounded, config) {
-        return Some(parsed);
-    }
+        // Rounded shape: id(text)
+        if let Some(parsed) = parse_wrapped_with_config(core, '(', ')', NodeShape::Rounded, config)
+        {
+            return Some(parsed);
+        }
 
-    // Square shape: id[text]
-    if let Some(parsed) = parse_wrapped_with_config(core, '[', ']', NodeShape::Rect, config) {
-        return Some(parsed);
+        // Square shape: id[text]
+        if let Some(parsed) = parse_wrapped_with_config(core, '[', ']', NodeShape::Rect, config) {
+            return Some(parsed);
+        }
     }
 
     // Default shape: plain text (no delimiters)
@@ -3043,9 +4120,9 @@ fn parse_mindmap_hexagon(raw: &str) -> Option<NodeToken> {
 fn parse_er(input: &str, builder: &mut IrBuilder) {
     let mut current_entity: Option<IrNodeId> = None;
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -3057,8 +4134,12 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
         // Start of entity block: ENTITY_NAME {
         if trimmed.ends_with('{') {
             let entity_name = trimmed.trim_end_matches('{').trim();
+            let span = span_for(line_number, line);
+            if is_plain_normalized_er_id(entity_name) {
+                current_entity = builder.intern_node(entity_name, None, NodeShape::Rect, span);
+                continue;
+            }
             if let Some(node) = parse_node_token_with_config(entity_name, builder.parser_config()) {
-                let span = span_for(line_number, line);
                 current_entity = intern_node_token(builder, &node, span);
                 continue;
             }
@@ -3070,8 +4151,17 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        if let Some(entity_id) = current_entity
+            && let Some((data_type, name, key)) = parse_simple_er_attribute(trimmed)
+        {
+            builder.add_entity_attribute(entity_id, data_type, name, key, None);
+            continue;
+        }
+
         // Relationship line (outside entity block or mixed)
-        if parse_er_relationship(trimmed, line_number, line, builder) {
+        if parse_plain_er_relationship(trimmed, line_number, line, builder)
+            || parse_er_relationship(trimmed, line_number, line, builder)
+        {
             continue;
         }
 
@@ -3102,6 +4192,134 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
     }
 }
 
+fn parse_plain_er_relationship(
+    statement: &str,
+    line_number: usize,
+    source_line: &str,
+    builder: &mut IrBuilder,
+) -> bool {
+    let (relation, label) = if let Some((left, right)) = statement.split_once(':') {
+        let trimmed_label = right.trim();
+        if trimmed_label.is_empty() {
+            (left.trim(), None)
+        } else if is_simple_er_label(trimmed_label) {
+            (left.trim(), Some(trimmed_label))
+        } else {
+            return false;
+        }
+    } else {
+        (statement.trim(), None)
+    };
+
+    let Some((operator_idx, operator, arrow)) = find_plain_er_operator(relation) else {
+        return false;
+    };
+
+    let left_raw = relation[..operator_idx].trim();
+    let right_raw = relation[operator_idx + operator.len()..].trim();
+    if !is_plain_normalized_er_id(left_raw) || !is_plain_normalized_er_id(right_raw) {
+        return false;
+    }
+
+    let span = span_for(line_number, source_line);
+    let Some(from_node) = builder.intern_node(left_raw, None, NodeShape::Rect, span) else {
+        return false;
+    };
+    let Some(to_node) = builder.intern_node(right_raw, None, NodeShape::Rect, span) else {
+        return false;
+    };
+
+    builder.push_edge(from_node, to_node, arrow, label, span);
+    builder.set_last_edge_er_notation(operator);
+    true
+}
+
+fn find_plain_er_operator(relation: &str) -> Option<(usize, &'static str, ArrowType)> {
+    for (idx, &byte) in relation.as_bytes().iter().enumerate() {
+        let cp = u32::from(byte);
+        if cp >= 128 || (ER_OP_GATE >> cp) & 1 == 0 {
+            continue;
+        }
+
+        let tail = &relation[idx..];
+        let mut best_match: Option<(&str, ArrowType)> = None;
+        for (operator, arrow) in &ER_OPERATORS {
+            if tail.starts_with(operator) {
+                match best_match {
+                    Some((best_operator, _)) if operator.len() <= best_operator.len() => {}
+                    _ => best_match = Some((operator, *arrow)),
+                }
+            }
+        }
+
+        if let Some((operator, arrow)) = best_match {
+            return Some((idx, operator, arrow));
+        }
+    }
+
+    None
+}
+
+fn parse_simple_er_attribute(line: &str) -> Option<(&str, &str, IrAttributeKey)> {
+    if line
+        .as_bytes()
+        .iter()
+        .any(|&byte| matches!(byte, b':' | b'"' | b'\'' | b'`'))
+    {
+        return None;
+    }
+
+    let mut parts = line.split_ascii_whitespace();
+    let data_type = parts.next()?;
+    let name = parts.next()?;
+    let key = match parts.next() {
+        Some(raw_key) => parse_er_attribute_key(raw_key)?,
+        None => IrAttributeKey::None,
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+
+    if is_simple_er_data_type(data_type) && is_plain_normalized_er_id(name) {
+        Some((data_type, name, key))
+    } else {
+        None
+    }
+}
+
+fn parse_er_attribute_key(raw: &str) -> Option<IrAttributeKey> {
+    if raw.eq_ignore_ascii_case("PK") {
+        Some(IrAttributeKey::Pk)
+    } else if raw.eq_ignore_ascii_case("FK") {
+        Some(IrAttributeKey::Fk)
+    } else if raw.eq_ignore_ascii_case("UK") {
+        Some(IrAttributeKey::Uk)
+    } else {
+        None
+    }
+}
+
+fn is_plain_normalized_er_id(value: &str) -> bool {
+    // Same accept set as `is_fast_flow_identifier` — reuse its `[bool;256]` table (1 load/byte).
+    !value.is_empty()
+        && !value.ends_with('_')
+        && value.bytes().all(|byte| FAST_ID_CHAR[byte as usize])
+}
+
+fn is_simple_er_data_type(value: &str) -> bool {
+    // `FAST_ID_CHAR` set plus `(` `)`; table load then two cheap byte compares, vs the former
+    // ~7-comparison predicate per byte. Byte-identical.
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| FAST_ID_CHAR[byte as usize] || byte == b'(' || byte == b')')
+}
+
+fn is_simple_er_label(value: &str) -> bool {
+    // Same accept set as `is_fast_flow_identifier` — reuse its table.
+    !value.is_empty() && value.bytes().all(|byte| FAST_ID_CHAR[byte as usize])
+}
+
 /// Parsed ER attribute.
 struct ErAttribute {
     data_type: String,
@@ -3119,7 +4337,7 @@ struct ErAttribute {
 /// - `varchar(255) email UK`
 /// - `date created_at`
 fn parse_er_attribute(line: &str) -> Option<ErAttribute> {
-    let trimmed = line.trim();
+    let trimmed = trim_fast(line);
     if trimmed.is_empty() {
         return None;
     }
@@ -3191,22 +4409,29 @@ fn parse_requirement_relation(
     //   `A - satisfies -> B`  or  `A -> B`
     // The relationship type label appears between `- ` and ` ->`.
 
-    let Some((left_raw, right_raw)) = statement.split_once("->") else {
+    // Find the first `->` by byte scan rather than `split_once("->")`, which builds a `TwoWaySearcher`
+    // (maximal-suffix factorization) per relation line — pure setup overhead on the short relation-line
+    // haystack. Byte-identical: `windows(2).position` returns the first `->` index `split_once` would,
+    // and `->` is ASCII so both boundaries are char boundaries.
+    let Some(arrow_idx) = statement.as_bytes().windows(2).position(|w| w == b"->") else {
         return false;
     };
+    let (left_raw, right_raw) = (&statement[..arrow_idx], &statement[arrow_idx + 2..]);
 
-    // Extract relationship type from `A - type ` prefix.
-    let (left_part, relation_label) = if let Some(dash_pos) = left_raw.rfind(" - ") {
-        let rel_type = left_raw[dash_pos + 3..].trim();
-        let left = left_raw[..dash_pos].trim();
-        if rel_type.is_empty() {
-            (left_raw.trim(), None)
+    // Extract relationship type from `A - type ` prefix. Byte-scan the last ` - ` (was `rfind(" - ")`,
+    // another per-line `TwoWaySearcher`). Byte-identical: `rposition` returns the last ` - ` start index.
+    let (left_part, relation_label) =
+        if let Some(dash_pos) = left_raw.as_bytes().windows(3).rposition(|w| w == b" - ") {
+            let rel_type = left_raw[dash_pos + 3..].trim();
+            let left = left_raw[..dash_pos].trim();
+            if rel_type.is_empty() {
+                (left_raw.trim(), None)
+            } else {
+                (left, Some(rel_type))
+            }
         } else {
-            (left, Some(rel_type))
-        }
-    } else {
-        (left_raw.trim(), None)
-    };
+            (left_raw.trim(), None)
+        };
 
     let left_id = left_part
         .split_whitespace()
@@ -3379,9 +4604,9 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
     let mut current_section: Option<usize> = None;
     let mut current_section_subgraph: Option<usize> = None;
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -3459,18 +4684,12 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
         let current_step =
             builder.intern_node(&step_id, Some(&step.name), NodeShape::Rounded, span);
         if let Some(step_node) = current_step {
-            builder.add_class_to_node(&step_id, "journey-step", span);
+            builder.add_class_to_node_id(step_node, "journey-step");
             if let Some(score) = step.score {
-                builder.add_class_to_node(&step_id, &format!("journey-score-{score}"), span);
+                let score_class = journey_score_class(score);
+                builder.add_class_to_node_id(step_node, score_class.as_ref());
             }
-            for actor in &step.actors {
-                builder.add_class_to_node(&step_id, "journey-actor", span);
-                builder.add_class_to_node(
-                    &step_id,
-                    &format!("journey-actor-{}", normalize_compound_identifier(actor)),
-                    span,
-                );
-            }
+            add_journey_actor_classes(builder, step_node, step.actors_raw);
             if let Some(section_idx) = current_section {
                 builder.add_node_to_cluster(section_idx, step_node);
             }
@@ -3487,31 +4706,57 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
     }
 }
 
-struct JourneyStep {
+struct JourneyStep<'a> {
     name: String,
     score: Option<u8>,
-    actors: Vec<String>,
+    actors_raw: Option<&'a str>,
 }
 
-fn parse_journey_step(line: &str) -> Option<JourneyStep> {
-    let mut segments = line.split(':').map(str::trim);
+fn parse_journey_step(line: &str) -> Option<JourneyStep<'_>> {
+    // `trim_fast` (byte ASCII trim) instead of the Unicode `str::trim` on each `:`-split segment —
+    // these are raw `Task: score: actors` parts with real surrounding whitespace, so the trim does
+    // work (unlike pre-trimmed inputs); it was ~10% of journey parse. Byte-identical.
+    let mut segments = line.split(':').map(trim_fast);
     let name = clean_label(segments.next())?;
 
     let score = segments.next().and_then(|raw| raw.parse::<u8>().ok());
-    let actors = segments
-        .next()
-        .map(|raw| {
-            raw.split(',')
-                .filter_map(|actor| clean_label(Some(actor)))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let actors_raw = segments.next();
 
     Some(JourneyStep {
         name,
         score,
-        actors,
+        actors_raw,
     })
+}
+
+fn journey_score_class(score: u8) -> Cow<'static, str> {
+    JOURNEY_SCORE_CLASSES.get(usize::from(score)).map_or_else(
+        || Cow::Owned(format!("journey-score-{score}")),
+        |class| Cow::Borrowed(*class),
+    )
+}
+
+fn add_journey_actor_classes(
+    builder: &mut IrBuilder,
+    step_node: IrNodeId,
+    actors_raw: Option<&str>,
+) {
+    let Some(actors_raw) = actors_raw else {
+        return;
+    };
+
+    let mut has_actor_class = false;
+    for actor in actors_raw
+        .split(',')
+        .filter_map(|actor| clean_label(Some(actor)))
+    {
+        if !has_actor_class {
+            builder.add_class_to_node_id(step_node, "journey-actor");
+            has_actor_class = true;
+        }
+        let actor_class = format!("journey-actor-{}", normalize_compound_identifier(&actor));
+        builder.add_class_to_node_id(step_node, &actor_class);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3524,9 +4769,9 @@ fn parse_kanban(input: &str, builder: &mut IrBuilder) {
     let mut current_column_indent: Option<usize> = None;
     let mut card_count = 0_usize;
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -3727,15 +4972,26 @@ fn parse_kanban_item(text: &str) -> (String, String) {
     (id, label)
 }
 
+const TIMELINE_SECTION_CLASSES: [&str; 8] = [
+    "timeline-section-0",
+    "timeline-section-1",
+    "timeline-section-2",
+    "timeline-section-3",
+    "timeline-section-4",
+    "timeline-section-5",
+    "timeline-section-6",
+    "timeline-section-7",
+];
+
 fn parse_timeline(input: &str, builder: &mut IrBuilder) {
     let mut previous_period: Option<IrNodeId> = None;
     let mut current_period: Option<IrNodeId> = None;
     let mut current_section: Option<usize> = None;
     let mut current_section_subgraph: Option<usize> = None;
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -3817,13 +5073,12 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
                 builder.intern_node(&period_id, Some(period_text), NodeShape::Rect, span);
 
             if let Some(period_node_id) = period_node {
-                builder.add_class_to_node(&period_id, "timeline-period", span);
+                builder.add_class_to_node_id(period_node_id, "timeline-period");
                 // Section color class for background band differentiation.
-                if current_section.is_some() {
-                    builder.add_class_to_node(
-                        &period_id,
-                        &format!("timeline-section-{}", current_section.unwrap_or(0) % 8),
-                        span,
+                if let Some(section_idx) = current_section {
+                    builder.add_class_to_node_id(
+                        period_node_id,
+                        TIMELINE_SECTION_CLASSES[section_idx % TIMELINE_SECTION_CLASSES.len()],
                     );
                 }
 
@@ -3917,13 +5172,12 @@ fn parse_timeline_events(
         if let Some(event_node_id) =
             builder.intern_node(&event_id, Some(event_text), NodeShape::Rounded, span)
         {
-            builder.add_class_to_node(&event_id, "timeline-event", span);
+            builder.add_class_to_node_id(event_node_id, "timeline-event");
             if let Some(section_idx) = current_section {
                 builder.add_node_to_cluster(section_idx, event_node_id);
-                builder.add_class_to_node(
-                    &event_id,
-                    &format!("timeline-section-{}", section_idx % 8),
-                    span,
+                builder.add_class_to_node_id(
+                    event_node_id,
+                    TIMELINE_SECTION_CLASSES[section_idx % TIMELINE_SECTION_CLASSES.len()],
                 );
             }
             if let Some(subgraph_idx) = current_section_subgraph {
@@ -3939,9 +5193,9 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
     let mut field_index = 0_usize;
     let mut previous_field: Option<IrNodeId> = None;
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -3971,7 +5225,7 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
                 if let Some(node_id) =
                     builder.intern_node(&field_id, Some(&display_label), NodeShape::Rect, span)
                 {
-                    builder.add_class_to_node(&field_id, "packet-field", span);
+                    builder.add_class_to_node_id(node_id, "packet-field");
 
                     // Parse bit range for width hint.
                     if let Some((start_str, end_str)) = range.split_once('-')
@@ -3981,13 +5235,9 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
                         )
                     {
                         let bit_width = end.saturating_sub(start) + 1;
-                        builder.add_class_to_node(
-                            &field_id,
-                            &format!("packet-bits-{bit_width}"),
-                            span,
-                        );
+                        builder.add_class_to_node_id(node_id, &format!("packet-bits-{bit_width}"));
                         if bit_width > 8 {
-                            builder.add_class_to_node(&field_id, "packet-field-wide", span);
+                            builder.add_class_to_node_id(node_id, "packet-field-wide");
                         }
                     }
 
@@ -4005,7 +5255,14 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
         // Fallback: try generic node/edge parsing.
         let mut parsed_line = false;
         for statement in split_statements(trimmed) {
-            if parse_edge_statement(statement, line_number, line, &PACKET_OPERATORS, builder) {
+            if parse_edge_statement(
+                statement,
+                line_number,
+                line,
+                &PACKET_OPERATORS,
+                PACKET_OP_GATE,
+                builder,
+            ) {
                 parsed_line = true;
                 continue;
             }
@@ -4035,7 +5292,8 @@ fn parse_er_relationship(
         (statement.trim(), None)
     };
 
-    let Some((operator_idx, operator, arrow)) = find_operator(relation, &ER_OPERATORS) else {
+    let Some((operator_idx, operator, arrow)) = find_operator(relation, &ER_OPERATORS, ER_OP_GATE)
+    else {
         return false;
     };
 
@@ -4076,15 +5334,32 @@ fn parse_er_relationship(
     }
 }
 
+enum PendingGanttDependency {
+    Resolved {
+        node: IrNodeId,
+        from: IrNodeId,
+        span: Span,
+    },
+    Unresolved {
+        node: IrNodeId,
+        dependency: String,
+        span: Span,
+    },
+}
+
 fn parse_gantt(input: &str, builder: &mut IrBuilder) {
     let mut gantt_meta = IrGanttMeta::default();
     let mut current_section_idx = 0_usize;
-    let mut task_ids_to_nodes: BTreeMap<String, IrNodeId> = BTreeMap::new();
-    let mut pending_dependencies: Vec<(IrNodeId, String, Span)> = Vec::new();
+    // Lookup-only (dependency resolution `get`s below); iteration order is never used — the resolved
+    // edges come from `pending_dependencies` in insertion order — so an FxHashMap replaces the BTreeMap's
+    // O(log N) String-comparison inserts/lookups with O(1) hashing. Byte-identical output.
+    let mut task_ids_to_nodes: rustc_hash::FxHashMap<String, IrNodeId> =
+        rustc_hash::FxHashMap::default();
+    let mut pending_dependencies: Vec<PendingGanttDependency> = Vec::new();
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -4184,7 +5459,14 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
             ));
             continue;
         }
-        let task_id = format!("{task_id_raw}_{line_number}");
+        // `format!("{task_id_raw}_{line_number}")` ran once per gantt task and was ~30% of gantt parse
+        // (format_inner + fmt::write + write_str): it allocated a NEW String and re-copied `task_id_raw`
+        // through the `Formatter`. `task_id_raw` is owned and unused after this, so MOVE it and append the
+        // `_line` suffix in place — reusing its allocation and writing the line number via the table-driven
+        // `push_usize_decimal` (byte-identical to `usize`'s `Display`, no Formatter). Byte-identical.
+        let mut task_id = task_id_raw;
+        task_id.push('_');
+        fm_core::push_usize_decimal(&mut task_id, line_number);
 
         let span = span_for(line_number, line);
         let Some(node) = builder.intern_node(&task_id, Some(&task_name), NodeShape::Rect, span)
@@ -4197,7 +5479,15 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
             task_ids_to_nodes.entry(task_id_ref.clone()).or_insert(node);
         }
         if let Some(after_task_id) = parsed_meta.depends_on.first() {
-            pending_dependencies.push((node, after_task_id.clone(), span));
+            if let Some(from) = task_ids_to_nodes.get(after_task_id).copied() {
+                pending_dependencies.push(PendingGanttDependency::Resolved { node, from, span });
+            } else {
+                pending_dependencies.push(PendingGanttDependency::Unresolved {
+                    node,
+                    dependency: after_task_id.clone(),
+                    span,
+                });
+            }
         }
 
         let mut classes = Vec::new();
@@ -4215,7 +5505,7 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         gantt_meta.tasks.push(IrGanttTask {
             node,
             section_idx: current_section_idx,
-            meta: raw_meta.trim().to_string(),
+            meta: trim_fast(raw_meta).to_string(),
             task_id: parsed_meta.task_id,
             start: parsed_meta.start,
             end: parsed_meta.end,
@@ -4225,11 +5515,23 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         });
     }
 
-    for (node, dependency, span) in pending_dependencies {
-        if let Some(from) = task_ids_to_nodes.get(&dependency).copied() {
-            builder.push_edge(from, node, ArrowType::Arrow, None, span);
-        } else {
-            builder.add_warning(format!("Unresolved gantt dependency 'after {dependency}'"));
+    for dependency in pending_dependencies {
+        match dependency {
+            PendingGanttDependency::Resolved { node, from, span } => {
+                builder.push_edge(from, node, ArrowType::Arrow, None, span);
+            }
+            PendingGanttDependency::Unresolved {
+                node,
+                dependency,
+                span,
+            } => {
+                if let Some(from) = task_ids_to_nodes.get(&dependency).copied() {
+                    builder.push_edge(from, node, ArrowType::Arrow, None, span);
+                } else {
+                    builder
+                        .add_warning(format!("Unresolved gantt dependency 'after {dependency}'"));
+                }
+            }
         }
     }
 
@@ -4260,32 +5562,34 @@ fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> Parse
 
     for token in raw_meta
         .split(',')
-        .map(str::trim)
+        .map(trim_fast)
         .filter(|token| !token.is_empty())
     {
-        let lower = token.to_ascii_lowercase();
-        match lower.as_str() {
-            "milestone" => {
-                parsed.task_type = GanttTaskType::Milestone;
-                continue;
-            }
-            "active" => {
-                parsed.task_type = GanttTaskType::Active;
-                continue;
-            }
-            "done" => {
-                parsed.task_type = GanttTaskType::Done;
-                continue;
-            }
-            "crit" | "critical" => {
-                parsed.task_type = GanttTaskType::Critical;
-                continue;
-            }
-            _ => {}
+        // Case-insensitive keyword match without allocating a lowercased copy of every token — the
+        // vast majority (ids, dates, `Nd` durations) match nothing. `eq_ignore_ascii_case` is identical
+        // to the old `token.to_ascii_lowercase()` then `match as_str()` (both exact case-insensitive).
+        if token.eq_ignore_ascii_case("milestone") {
+            parsed.task_type = GanttTaskType::Milestone;
+            continue;
+        }
+        if token.eq_ignore_ascii_case("active") {
+            parsed.task_type = GanttTaskType::Active;
+            continue;
+        }
+        if token.eq_ignore_ascii_case("done") {
+            parsed.task_type = GanttTaskType::Done;
+            continue;
+        }
+        if token.eq_ignore_ascii_case("crit") || token.eq_ignore_ascii_case("critical") {
+            parsed.task_type = GanttTaskType::Critical;
+            continue;
         }
 
-        if let Some(after) = lower.strip_prefix("after ") {
-            let dependency = normalize_compound_identifier(after);
+        // `after <task>` dependency: match the prefix case-insensitively, then lowercase ONLY the
+        // reference (as the old whole-token `to_ascii_lowercase` did before `strip_prefix("after ")`).
+        if token.len() >= 6 && token.as_bytes()[..6].eq_ignore_ascii_case(b"after ") {
+            let after = token[6..].to_ascii_lowercase();
+            let dependency = normalize_compound_identifier(&after);
             if !dependency.is_empty() {
                 if parsed.start.is_none() {
                     parsed.start = Some(GanttDate::AfterTask(dependency.clone()));
@@ -4340,28 +5644,54 @@ fn parse_gantt_absolute_date(token: &str, date_format: Option<&str>) -> Option<S
 }
 
 fn normalize_gantt_date_with_format(token: &str, date_format: &str) -> Option<String> {
-    let format_parts = split_gantt_date_parts(date_format, |ch| ch.is_ascii_alphabetic())?;
     let token_parts = split_gantt_date_parts(token, |ch| ch.is_ascii_digit())?;
-    if format_parts.len() != 3 || token_parts.len() != 3 || format_parts.len() != token_parts.len()
-    {
-        return None;
-    }
 
-    let mut year = None;
-    let mut month = None;
-    let mut day = None;
-    for (format_part, token_part) in format_parts.iter().zip(token_parts.iter()) {
-        match *format_part {
-            "YYYY" => year = token_part.parse::<u32>().ok(),
-            "MM" => month = token_part.parse::<u32>().ok(),
-            "DD" => day = token_part.parse::<u32>().ok(),
-            _ => return None,
+    // Fast path for the default/most-common format: `"YYYY-MM-DD"` always splits to
+    // `["YYYY","MM","DD"]`, so skip re-splitting the (constant) format string on EVERY date —
+    // `split_gantt_date_parts(date_format, …)` ran once per task otherwise. Byte-identical to the
+    // general zip+match below for this format (year = part 0, month = part 1, day = part 2).
+    let (year, month, day) = if date_format == "YYYY-MM-DD" {
+        (
+            token_parts[0].parse::<u32>().ok()?,
+            token_parts[1].parse::<u32>().ok()?,
+            token_parts[2].parse::<u32>().ok()?,
+        )
+    } else {
+        let format_parts = split_gantt_date_parts(date_format, |ch| ch.is_ascii_alphabetic())?;
+        let mut year = None;
+        let mut month = None;
+        let mut day = None;
+        for (format_part, token_part) in format_parts.iter().zip(token_parts.iter()) {
+            match *format_part {
+                "YYYY" => year = token_part.parse::<u32>().ok(),
+                "MM" => month = token_part.parse::<u32>().ok(),
+                "DD" => day = token_part.parse::<u32>().ok(),
+                _ => return None,
+            }
         }
-    }
+        (year?, month?, day?)
+    };
 
-    let (year, month, day) = (year?, month?, day?);
     if !is_valid_gantt_calendar_date(year, month, day) {
         return None;
+    }
+
+    // Fast path: write the fixed 10-byte `YYYY-MM-DD` directly instead of going through
+    // `format!`'s `Formatter`/zero-pad machinery, which ran once per parsed gantt date. Gated on
+    // `year < 10000` so the four year digits are exactly `{year:04}`; `month`/`day` are already
+    // validated to 1..=12 / 1..=31 (two digits). Byte-identical to the `format!` below for this
+    // range; wider years (rare) keep `format!`, which allows a >4-digit year.
+    if year < 10000 {
+        let mut b = [b'-'; 10];
+        b[0] = b'0' + (year / 1000) as u8;
+        b[1] = b'0' + (year / 100 % 10) as u8;
+        b[2] = b'0' + (year / 10 % 10) as u8;
+        b[3] = b'0' + (year % 10) as u8;
+        b[5] = b'0' + (month / 10) as u8;
+        b[6] = b'0' + (month % 10) as u8;
+        b[8] = b'0' + (day / 10) as u8;
+        b[9] = b'0' + (day % 10) as u8;
+        return Some(String::from_utf8(b.to_vec()).expect("ascii date digits"));
     }
 
     Some(format!("{year:04}-{month:02}-{day:02}"))
@@ -4394,16 +5724,27 @@ const fn is_gantt_leap_year(year: u32) -> bool {
     (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
-fn split_gantt_date_parts<F>(value: &str, predicate: F) -> Option<Vec<&str>>
+/// Split a date/format string into its three non-empty component runs (e.g. `YYYY`/`MM`/`DD` or
+/// `2024`/`01`/`01`). Returns `Some([a, b, c])` only for EXACTLY three parts — the sole caller
+/// (`normalize_gantt_date_with_format`) required `len() == 3` — so this avoids the per-date `Vec`
+/// allocation the old `collect::<Vec<_>>()` incurred (2 allocs per parsed date). Byte-identical:
+/// fewer than three parts fails the `next()?`, more than three fails the trailing check — both map
+/// to the previous `len() != 3 -> None`.
+fn split_gantt_date_parts<F>(value: &str, predicate: F) -> Option<[&str; 3]>
 where
     F: Fn(char) -> bool,
 {
-    let parts = value
+    let mut parts = value
         .trim()
-        .split(|ch: char| !predicate(ch))
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if parts.is_empty() { None } else { Some(parts) }
+        .split(move |ch: char| !predicate(ch))
+        .filter(|part| !part.is_empty());
+    let a = parts.next()?;
+    let b = parts.next()?;
+    let c = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some([a, b, c])
 }
 
 fn parse_gantt_duration_days(raw: &str) -> Option<u32> {
@@ -4412,11 +5753,12 @@ fn parse_gantt_duration_days(raw: &str) -> Option<u32> {
         return None;
     }
 
-    let lower = trimmed.to_ascii_lowercase();
-    if let Some(days) = lower.strip_suffix('d') {
+    // Strip the unit suffix from the ORIGINAL (case-insensitively) rather than allocating a lowercased
+    // copy — the leading digits are ASCII and parse identically regardless of the suffix's case.
+    if let Some(days) = trimmed.strip_suffix(['d', 'D']) {
         return days.trim().parse::<u32>().ok();
     }
-    if let Some(weeks) = lower.strip_suffix('w') {
+    if let Some(weeks) = trimmed.strip_suffix(['w', 'W']) {
         return weeks.trim().parse::<u32>().ok().map(|weeks| weeks * 7);
     }
     None
@@ -4445,7 +5787,7 @@ fn parse_gantt_excludes(raw: &str, date_format: Option<&str>) -> Vec<GanttExclud
 
     for token in raw
         .split(',')
-        .map(str::trim)
+        .map(trim_fast)
         .filter(|token| !token.is_empty())
     {
         if token.eq_ignore_ascii_case("weekends") {
@@ -4480,9 +5822,9 @@ fn parse_gantt_weekday(token: &str) -> Option<u8> {
 fn parse_pie(input: &str, builder: &mut IrBuilder) {
     let mut pie_meta = fm_core::IrPieMeta::default();
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -4534,7 +5876,7 @@ fn parse_pie(input: &str, builder: &mut IrBuilder) {
         }
 
         // Extract numeric value after the colon.
-        let value = match trimmed.split_once(':').map(|(_, v)| v.trim()) {
+        let value = match trimmed.split_once(':').map(|(_, v)| trim_fast(v)) {
             Some(v) if !v.is_empty() => {
                 if let Ok(n) = v.parse::<f32>() {
                     n
@@ -4565,9 +5907,9 @@ fn parse_pie(input: &str, builder: &mut IrBuilder) {
 fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
     let mut meta = fm_core::IrQuadrantMeta::default();
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -4669,10 +6011,11 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
 
 fn parse_xychart(input: &str, builder: &mut IrBuilder) {
     let mut xy_chart_meta = IrXyChartMeta::default();
+    let mut seen_base_ids = rustc_hash::FxHashSet::default();
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -4722,23 +6065,32 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
             .filter(|name| !name.is_empty())
             .unwrap_or(series_kind);
         let base_id = normalize_compound_identifier(base_name);
+        let use_fresh_nodes = seen_base_ids.insert(base_id.clone());
         let mut previous_node = None;
         let mut series_nodes = Vec::with_capacity(values.len());
 
         for (point_index, value) in values.iter().enumerate() {
-            let x_label = xy_chart_meta
-                .x_axis
-                .categories
-                .get(point_index)
-                .cloned()
-                .unwrap_or_else(|| (point_index + 1).to_string());
-            let node_label = format!("{base_name} {x_label}: {value}");
-            let node_id = format!("{base_id}_{}", point_index + 1);
+            let point_number = point_index + 1;
+            let fallback_x_label;
+            let x_label = match xy_chart_meta.x_axis.categories.get(point_index) {
+                Some(category) => category.as_str(),
+                None => {
+                    fallback_x_label = point_number.to_string();
+                    fallback_x_label.as_str()
+                }
+            };
+            let node_label = xychart_point_label(base_name, x_label, *value);
+            let node_id = xychart_point_id(&base_id, point_number);
             let shape = match series_kind {
                 "bar" => NodeShape::Rect,
                 _ => NodeShape::Circle,
             };
-            let Some(node) = builder.intern_node(&node_id, Some(&node_label), shape, span) else {
+            let node = if use_fresh_nodes {
+                builder.intern_fresh_node_owned_label(node_id, node_label, shape, span)
+            } else {
+                builder.intern_node(&node_id, Some(&node_label), shape, span)
+            };
+            let Some(node) = node else {
                 continue;
             };
             series_nodes.push(node);
@@ -4776,16 +6128,55 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
     }
 }
 
+fn xychart_point_id(base_id: &str, point_number: usize) -> String {
+    let mut node_id = String::with_capacity(base_id.len() + 21);
+    node_id.push_str(base_id);
+    node_id.push('_');
+    let _ = write!(&mut node_id, "{point_number}");
+    node_id
+}
+
+fn xychart_point_label(base_name: &str, x_label: &str, value: f32) -> String {
+    let mut label = String::with_capacity(base_name.len() + x_label.len() + 16);
+    label.push_str(base_name);
+    label.push(' ');
+    label.push_str(x_label);
+    label.push_str(": ");
+    // Fast path: a whole-number value below 2^24 formats identically to its `i64` (`{}` on such an
+    // f32 prints the exact integer, no trailing `.0`), so skip the grisu shortest-decimal float path
+    // — ~30% of xychart parse, and chart values are overwhelmingly small integers. Guards: the
+    // `as i64 as f32 == value` round-trip rejects non-integers/NaN/inf; `< 2^24` is REQUIRED because
+    // at larger magnitudes f32 has integer gaps and grisu's shortest decimal differs from `value as
+    // i64` (e.g. `2147483600f32` prints `2147483600` but casts to `2147483648`); `-0.0` prints `-0`,
+    // not `0`, so exclude it. Verified byte-identical to `write!("{value}")` over a 40M-value sweep.
+    let as_int = value as i64;
+    if as_int as f32 == value
+        && value.abs() < 16_777_216.0
+        && !(value == 0.0 && value.is_sign_negative())
+    {
+        let _ = write!(&mut label, "{as_int}");
+    } else {
+        let _ = write!(&mut label, "{value}");
+    }
+    label
+}
+
 fn parse_sankey(input: &str, builder: &mut IrBuilder) {
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
 
-        let lower = trimmed.to_ascii_lowercase();
-        if is_sankey_header(&lower) || lower.starts_with("title ") {
+        // Header/title skip without the per-line `to_ascii_lowercase()` heap alloc (most lines are
+        // data records). `is_sankey_header` now lowercases-compare in place; the title check folds
+        // ASCII case over the first 6 bytes — byte-identical to the old `lower.starts_with`.
+        if is_sankey_header(trimmed)
+            || trimmed
+                .get(..6)
+                .is_some_and(|p| p.eq_ignore_ascii_case("title "))
+        {
             continue;
         }
 
@@ -4833,8 +6224,8 @@ fn parse_sankey(input: &str, builder: &mut IrBuilder) {
             continue;
         };
 
-        builder.add_class_to_node(&source_label, "sankey-node", span);
-        builder.add_class_to_node(&target_label, "sankey-node", span);
+        builder.add_class_to_node_id(source_node, "sankey-node");
+        builder.add_class_to_node_id(target_node, "sankey-node");
 
         builder.push_edge(
             source_node,
@@ -4845,19 +6236,16 @@ fn parse_sankey(input: &str, builder: &mut IrBuilder) {
         );
 
         // Add flow data attribute for gradient rendering.
-        if let Some(edge) = builder.ir_mut().edges.last_mut() {
-            edge.source_cardinality = None; // Not used for sankey
-            edge.target_cardinality = None;
-        }
+        // (sankey edges carry no cardinality; `extras` defaults to `None`)
     }
 }
 
 fn parse_c4(input: &str, builder: &mut IrBuilder) {
     let mut boundary_stack: Vec<(usize, usize)> = Vec::new();
 
-    for (index, raw_line) in input.lines().enumerate() {
+    for (index, raw_line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = strip_flowchart_inline_comment(raw_line).trim();
+        let trimmed = trim_fast(strip_flowchart_inline_comment(raw_line));
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -4895,6 +6283,11 @@ fn parse_c4(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        let span = span_for(line_number, raw_line);
+        if parse_c4_fast_context_call(trimmed, span, &boundary_stack, builder) {
+            continue;
+        }
+
         let Some((function_name, arguments, opens_block)) = parse_function_call(trimmed) else {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported C4 syntax: {trimmed}"
@@ -4902,7 +6295,6 @@ fn parse_c4(input: &str, builder: &mut IrBuilder) {
             continue;
         };
 
-        let span = span_for(line_number, raw_line);
         match function_name.as_str() {
             "Person" | "Person_Ext" | "System" | "System_Ext" | "SystemDb" | "SystemDb_Ext"
             | "SystemQueue" | "SystemQueue_Ext" | "Container" | "Container_Ext" | "ContainerDb"
@@ -4964,9 +6356,9 @@ fn parse_c4(input: &str, builder: &mut IrBuilder) {
 fn parse_architecture(input: &str, builder: &mut IrBuilder) {
     let mut groups: BTreeMap<String, (usize, usize)> = BTreeMap::new();
 
-    for (index, raw_line) in input.lines().enumerate() {
+    for (index, raw_line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = strip_flowchart_inline_comment(raw_line).trim();
+        let trimmed = trim_fast(strip_flowchart_inline_comment(raw_line));
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
@@ -5109,8 +6501,9 @@ fn parse_architecture(input: &str, builder: &mut IrBuilder) {
 
 /// Git graph state tracker for parsing.
 struct GitGraphState {
-    /// Map of branch names to their current head commit node ID
-    branches: BTreeMap<String, IrNodeId>,
+    /// Map of branch names to their current head commit node ID. Lookup-only (`get`/`insert`, never
+    /// iterated), so FxHashMap's O(1) hashing replaces the BTreeMap's O(log N) String comparisons.
+    branches: rustc_hash::FxHashMap<String, IrNodeId>,
     /// Current branch name
     current_branch: String,
     /// Auto-generated commit counter for unnamed commits
@@ -5122,7 +6515,7 @@ struct GitGraphState {
 impl GitGraphState {
     fn new() -> Self {
         Self {
-            branches: BTreeMap::new(),
+            branches: rustc_hash::FxHashMap::default(),
             current_branch: "main".to_string(),
             commit_counter: 0,
             branch_order: vec!["main".to_string()],
@@ -5220,17 +6613,18 @@ fn parse_block_beta_document_items(
     while let Some((line_number, line)) = lines.get(*next_index).copied() {
         *next_index += 1;
 
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
 
-        let lower = trimmed.to_ascii_lowercase();
-        if lower.starts_with("block-beta") {
+        // Header/`end` skip without the per-line `to_ascii_lowercase()` heap alloc (fires on every
+        // block line, then `parse_block_beta_columns`/`_blocks` below each lowercased again).
+        if starts_with_ci(trimmed, "block-beta") {
             continue;
         }
 
-        if lower == "end" {
+        if trimmed.eq_ignore_ascii_case("end") {
             if stop_on_end {
                 return (items, unclosed_groups);
             }
@@ -5263,9 +6657,14 @@ fn parse_block_beta_document_items(
             continue;
         }
 
-        if let Some(asts) =
-            parse_edge_statement_asts(trimmed, &FLOW_OPERATORS, false, config, line_number)
-        {
+        if let Some(asts) = parse_edge_statement_asts(
+            trimmed,
+            &FLOW_OPERATORS,
+            FLOW_OP_GATE,
+            false,
+            config,
+            line_number,
+        ) {
             items.push(BlockBetaDocumentItem::Statement {
                 statement: BlockBetaStatement::Edges(asts),
                 line_number,
@@ -5353,15 +6752,14 @@ fn lower_block_beta_document_item(
                             continue;
                         };
 
-                        builder.add_class_to_node(&block.id, "block-beta", span);
+                        builder.add_class_to_node_id(node_id, "block-beta");
                         if block.is_space {
-                            builder.add_class_to_node(&block.id, "block-beta-space", span);
+                            builder.add_class_to_node_id(node_id, "block-beta-space");
                         }
                         if span_cols > 1 {
-                            builder.add_class_to_node(
-                                &block.id,
+                            builder.add_class_to_node_id(
+                                node_id,
                                 &format!("block-beta-span-{span_cols}"),
-                                span,
                             );
                         }
 
@@ -5428,9 +6826,21 @@ fn lower_block_beta_document_item(
     }
 }
 
+/// ASCII-case-insensitive `str::starts_with` without allocating a lowercased copy.
+fn starts_with_ci(s: &str, prefix: &str) -> bool {
+    s.len() >= prefix.len() && s.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+}
+
+/// ASCII-case-insensitive `str::strip_prefix` returning the RAW (not lowercased) remainder.
+/// `prefix.len()` is a char boundary once `starts_with_ci` holds (the matched bytes are ASCII).
+fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    starts_with_ci(s, prefix).then(|| &s[prefix.len()..])
+}
+
 fn parse_block_beta_columns(line: &str) -> Option<usize> {
-    let lower = line.to_ascii_lowercase();
-    let rest = lower.strip_prefix("columns")?.trim();
+    // The remainder after `columns` is trimmed then parsed as a `usize` (digits/whitespace are
+    // case-invariant), so match the prefix case-insensitively without the per-line lowercase alloc.
+    let rest = strip_prefix_ci(line, "columns")?.trim();
     rest.parse::<usize>().ok()
 }
 
@@ -5442,7 +6852,7 @@ fn parse_block_beta_group_start(line: &str) -> Option<(String, Option<usize>)> {
 
     let (raw_key, span_cols) = match rest.rsplit_once(':') {
         Some((candidate_key, candidate_span))
-            if candidate_span.trim().chars().all(|ch| ch.is_ascii_digit()) =>
+            if candidate_span.trim().bytes().all(|b| b.is_ascii_digit()) =>
         {
             (
                 candidate_key.trim(),
@@ -5457,11 +6867,11 @@ fn parse_block_beta_group_start(line: &str) -> Option<(String, Option<usize>)> {
 }
 
 fn parse_block_beta_blocks(line: &str, line_number: usize, config: &ParserConfig) -> Vec<BlockDef> {
-    let lower = line.to_ascii_lowercase();
-    if lower == "space" || lower.starts_with("space:") {
-        let span_cols = lower
-            .strip_prefix("space:")
-            .and_then(|value| value.trim().parse::<usize>().ok())
+    // Case-insensitive `space`/`space:N` check without the per-line lowercase alloc; the `N` after
+    // `space:` is numeric (case-invariant). Byte-identical to the old lowercased-copy comparisons.
+    if line.eq_ignore_ascii_case("space") || starts_with_ci(line, "space:") {
+        let span_cols = strip_prefix_ci(line, "space:")
+            .and_then(|value| trim_fast(value).parse::<usize>().ok())
             .unwrap_or(1);
         return vec![BlockDef {
             id: format!("__space_{line_number}"),
@@ -5472,9 +6882,12 @@ fn parse_block_beta_blocks(line: &str, line_number: usize, config: &ParserConfig
         }];
     }
 
+    // `split_block_beta_defs` already `trim_fast`'d every token before pushing it (below), and
+    // `try_parse_block_beta_def` trims its input too, so the old per-token `token.trim()` here was a
+    // redundant third whitespace `CharSearcher` pass — pass the borrowed token straight through.
     split_block_beta_defs(line)
         .into_iter()
-        .filter_map(|token| try_parse_block_beta_def(token.trim(), config))
+        .filter_map(|token| try_parse_block_beta_def(&token, config))
         .collect()
 }
 
@@ -5516,7 +6929,7 @@ fn split_block_beta_defs(line: &str) -> Vec<String> {
                 current.push(ch);
             }
             _ if ch.is_whitespace() && square_depth == 0 => {
-                let segment = current.trim();
+                let segment = trim_fast(&current);
                 if !segment.is_empty() {
                     tokens.push(segment.to_string());
                 }
@@ -5526,7 +6939,7 @@ fn split_block_beta_defs(line: &str) -> Vec<String> {
         }
     }
 
-    let segment = current.trim();
+    let segment = trim_fast(&current);
     if !segment.is_empty() {
         tokens.push(segment.to_string());
     }
@@ -5535,25 +6948,31 @@ fn split_block_beta_defs(line: &str) -> Vec<String> {
 }
 
 fn try_parse_block_beta_def(token: &str, config: &ParserConfig) -> Option<BlockDef> {
-    let trimmed = token.trim();
+    let trimmed = trim_fast(token);
     if trimmed.is_empty() {
         return None;
     }
 
-    if find_operator(trimmed, &FLOW_OPERATORS).is_some() {
+    if find_operator(trimmed, &FLOW_OPERATORS, FLOW_OP_GATE).is_some() {
         return None;
     }
 
+    // `candidate_span` was trimmed twice (guard + body) via the whitespace `CharSearcher`; trim it once
+    // with `trim_fast` and reuse. `bytes().all(is_ascii_digit)` matches the old `chars().all(..)` byte
+    // for byte (digits are ASCII; the empty-span vacuous-true is preserved, so `id:` still spans 1).
     let (core, span_cols) = match trimmed.rsplit_once(':') {
-        Some((candidate_core, candidate_span))
-            if candidate_span.trim().chars().all(|ch| ch.is_ascii_digit()) =>
-        {
-            (
-                candidate_core.trim(),
-                candidate_span.trim().parse::<usize>().ok().unwrap_or(1),
-            )
+        Some((candidate_core, candidate_span)) => {
+            let span = trim_fast(candidate_span);
+            if span.bytes().all(|b| b.is_ascii_digit()) {
+                (
+                    trim_fast(candidate_core),
+                    span.parse::<usize>().ok().unwrap_or(1),
+                )
+            } else {
+                (trimmed, 1)
+            }
         }
-        _ => (trimmed, 1),
+        None => (trimmed, 1),
     };
 
     let node = parse_node_token_with_config(core, config)?;
@@ -5569,16 +6988,15 @@ fn try_parse_block_beta_def(token: &str, config: &ParserConfig) -> Option<BlockD
 fn parse_gitgraph(input: &str, builder: &mut IrBuilder) {
     let mut state = GitGraphState::new();
 
-    for (index, line) in input.lines().enumerate() {
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
             continue;
         }
 
-        // Skip header line (case-insensitive)
-        let lower = trimmed.to_ascii_lowercase();
-        if lower.starts_with("gitgraph") {
+        // Skip header line (case-insensitive) — byte prefix check, no per-line lowercased alloc.
+        if trimmed.len() >= 8 && trimmed.as_bytes()[..8].eq_ignore_ascii_case(b"gitgraph") {
             // Check for options like LR, TB after gitGraph
             if let Some(direction) = parse_gitgraph_direction(trimmed) {
                 builder.set_direction(direction);
@@ -5666,8 +7084,12 @@ fn lower_gitgraph_command(
 
 /// Strip a git command prefix, requiring a word boundary (space or end of string).
 fn strip_git_command<'a>(line: &'a str, command: &str) -> Option<&'a str> {
-    let lower = line.to_ascii_lowercase();
-    if !lower.starts_with(command) {
+    // Case-insensitive prefix match WITHOUT allocating a lowercased copy of `line`. This ran up to 6x
+    // per gitgraph command line (once per command keyword), dominating gitgraph parse at ~15% in
+    // `to_ascii_lowercase`. `command` is a lowercase ASCII literal, so a byte-wise
+    // `eq_ignore_ascii_case` on the prefix is identical to `line.to_ascii_lowercase().starts_with(command)`.
+    let cmd = command.as_bytes();
+    if line.len() < cmd.len() || !line.as_bytes()[..cmd.len()].eq_ignore_ascii_case(cmd) {
         return None;
     }
     let rest = &line[command.len()..];
@@ -5749,13 +7171,21 @@ fn parse_git_commit(
         );
     }
 
-    // Apply branch color class.
-    let branch_index = state.branch_index(&state.current_branch.clone());
-    builder.add_class_to_node(
-        &commit_id,
-        &format!("git-branch-{}", branch_index % 8),
-        span,
-    );
+    // Apply branch color class. `branch_index` borrows `&self`, so no per-commit clone of the branch
+    // name is needed; and the class is one of 8 fixed strings, so index a static table instead of a
+    // per-commit `format!` heap allocation. Byte-identical.
+    const GIT_BRANCH_CLASSES: [&str; 8] = [
+        "git-branch-0",
+        "git-branch-1",
+        "git-branch-2",
+        "git-branch-3",
+        "git-branch-4",
+        "git-branch-5",
+        "git-branch-6",
+        "git-branch-7",
+    ];
+    let branch_index = state.branch_index(&state.current_branch);
+    builder.add_class_to_node(&commit_id, GIT_BRANCH_CLASSES[branch_index % 8], span);
 
     // Link from current branch head if it exists
     if let Some(parent_id) = state.current_head() {
@@ -6213,7 +7643,9 @@ fn parse_sequence_participant_declaration(
     declaration: &str,
     actor_keyword: bool,
 ) -> Option<SequenceParticipantDeclaration> {
-    let trimmed = declaration.trim();
+    // `trim_fast` is byte-identical to `str::trim` but skips the `char::is_whitespace` CharSearcher
+    // (a profiled self-symbol on sequence parse); this fires once per participant declaration.
+    let trimmed = trim_fast(declaration);
     if trimmed.is_empty() {
         return None;
     }
@@ -6245,7 +7677,7 @@ fn parse_sequence_participant_declaration(
             (before_alias, None)
         };
 
-    let raw_id = without_config.trim();
+    let raw_id = trim_fast(without_config);
 
     let participant_id = normalize_identifier(raw_id);
     if participant_id.is_empty() {
@@ -6304,7 +7736,7 @@ fn sequence_participant_visuals(
     actor_keyword: bool,
 ) -> (NodeShape, Vec<&'static str>) {
     match participant_type
-        .map(str::trim)
+        .map(trim_fast)
         .filter(|value| !value.is_empty())
         .map(str::to_ascii_lowercase)
         .as_deref()
@@ -6324,49 +7756,33 @@ fn sequence_participant_visuals(
     }
 }
 
-fn parse_sequence_message_ast(statement: &str) -> Option<String> {
-    let (operator_idx, operator, _) = find_operator(statement, &SEQUENCE_OPERATORS)?;
-    let left = statement[..operator_idx].trim();
-    let right = statement[operator_idx + operator.len()..].trim();
-    if left.is_empty() || right.is_empty() {
-        return None;
-    }
-
-    let target_raw = right
-        .split_once(':')
-        .map_or(right, |(target, _)| target)
-        .trim();
-    let left = strip_sequence_central_suffix(left);
-    let target_raw = strip_sequence_central_prefix(target_raw);
-    let from_id = normalize_identifier(left);
-    let to_id = normalize_identifier(target_raw);
-    if from_id.is_empty() || to_id.is_empty() {
-        return None;
-    }
-
-    Some(statement.to_string())
+/// Fully-parsed sequence message — every pure computation the old two-pass path did TWICE (once to
+/// validate in the classifier, once to lower). Lowering consumes this and only touches the builder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SequenceMessageData {
+    from_id: String,
+    to_id: String,
+    arrow: ArrowType,
+    left_label: Option<ParsedLabel>,
+    right_label: Option<ParsedLabel>,
+    message_label: Option<String>,
+    activate: bool,
+    deactivate: bool,
 }
 
-fn lower_sequence_message(
-    statement: &str,
-    line_number: usize,
-    source_line: &str,
-    builder: &mut IrBuilder,
-) -> bool {
-    let Some((operator_idx, operator, arrow)) = find_operator(statement, &SEQUENCE_OPERATORS)
-    else {
-        return false;
-    };
-
-    let left = statement[..operator_idx].trim();
-    let right = statement[operator_idx + operator.len()..].trim();
+fn parse_sequence_message_ast(statement: &str) -> Option<SequenceMessageData> {
+    // Pass the precomputed const gate (skip the per-call gate rebuild — the hot cost here).
+    let (operator_idx, operator, arrow) =
+        find_operator_core(statement, 0, &SEQUENCE_OPERATORS, SEQUENCE_OP_GATE)?;
+    let left = trim_fast(&statement[..operator_idx]);
+    let right = trim_fast(&statement[operator_idx + operator.len()..]);
     if left.is_empty() || right.is_empty() {
-        return false;
+        return None;
     }
 
     let (target_raw, message_label) = if let Some((target, label)) = right.split_once(':') {
         (
-            target.trim(),
+            trim_fast(target),
             clean_label(Some(label)).map(|label| normalize_sequence_display_text(&label)),
         )
     } else {
@@ -6376,38 +7792,85 @@ fn lower_sequence_message(
     let left = strip_sequence_central_suffix(left);
     let target_raw = strip_sequence_central_prefix(target_raw);
 
-    // Check for +/- activation modifiers on target
-    let (target_clean, activate_target, deactivate_target) =
-        if let Some(stripped) = target_raw.strip_prefix('+') {
-            (stripped, true, false)
-        } else if let Some(stripped) = target_raw.strip_prefix('-') {
-            (stripped, false, true)
-        } else {
-            (target_raw, false, false)
-        };
+    // +/- activation modifiers on the target.
+    let (target_clean, activate, deactivate) = if let Some(stripped) = target_raw.strip_prefix('+')
+    {
+        (stripped, true, false)
+    } else if let Some(stripped) = target_raw.strip_prefix('-') {
+        (stripped, false, true)
+    } else {
+        (target_raw, false, false)
+    };
 
     let from_id = normalize_identifier(left);
     let to_id = normalize_identifier(target_clean);
     if from_id.is_empty() || to_id.is_empty() {
-        return false;
+        return None;
     }
 
+    // For a plain participant token (`P0->>P1`), `parse_label` returns `plain(token.trim())` whose text
+    // equals the normalized id, so the `.filter(text != id)` drops it — but the `ParsedLabel` heap alloc
+    // was already paid, twice per message. Skip `parse_label` when the trimmed token already equals the
+    // id (the only case that yields `None`): a token needing quote/entity/`_`-trim normalization has
+    // `id != token.trim()` and still takes the full path. Byte-identical.
+    let left_label = (from_id.as_str() != trim_fast(left))
+        .then(|| parse_label(Some(left)))
+        .flatten()
+        .filter(|label| label.text != from_id);
+    let right_label = (to_id.as_str() != trim_fast(target_clean))
+        .then(|| parse_label(Some(target_clean)))
+        .flatten()
+        .filter(|label| label.text != to_id);
+
+    Some(SequenceMessageData {
+        from_id,
+        to_id,
+        arrow,
+        left_label,
+        right_label,
+        message_label,
+        activate,
+        deactivate,
+    })
+}
+
+fn lower_sequence_message(
+    data: &SequenceMessageData,
+    line_number: usize,
+    source_line: &str,
+    builder: &mut IrBuilder,
+) -> bool {
+    // All parsing already happened in `parse_sequence_message_ast`; only the builder-touching steps
+    // (interning + edge push, in the SAME order as before) run here — no re-parse, no re-normalize.
     let span = span_for(line_number, source_line);
 
-    let left_label = parse_label(Some(left)).filter(|label| label.text != from_id);
-    let from = builder.intern_node_label(&from_id, left_label.as_ref(), NodeShape::Rect, span);
-
-    let right_label = parse_label(Some(target_clean)).filter(|label| label.text != to_id);
-    let to = builder.intern_node_label(&to_id, right_label.as_ref(), NodeShape::Rect, span);
+    let from = builder.intern_node_label(
+        &data.from_id,
+        data.left_label.as_ref(),
+        NodeShape::Rect,
+        span,
+    );
+    let to = builder.intern_node_label(
+        &data.to_id,
+        data.right_label.as_ref(),
+        NodeShape::Rect,
+        span,
+    );
 
     match (from, to) {
         (Some(from_node), Some(to_node)) => {
-            builder.push_edge(from_node, to_node, arrow, message_label.as_deref(), span);
-            if activate_target {
-                builder.activate_participant(&to_id);
+            builder.push_edge(
+                from_node,
+                to_node,
+                data.arrow,
+                data.message_label.as_deref(),
+                span,
+            );
+            if data.activate {
+                builder.activate_participant(&data.to_id);
             }
-            if deactivate_target {
-                builder.deactivate_participant(&to_id);
+            if data.deactivate {
+                builder.deactivate_participant(&data.to_id);
             }
             true
         }
@@ -6416,15 +7879,15 @@ fn lower_sequence_message(
 }
 
 fn strip_sequence_central_prefix(raw: &str) -> &str {
-    raw.trim()
-        .strip_prefix("()")
-        .map_or(raw.trim(), str::trim_start)
+    // `trim_fast` once (byte ASCII trim, was `str::trim` twice — the Unicode char scan showed up in
+    // the sequence-parse profile) and reuse it for both the strip and the no-`()` fallback.
+    let trimmed = trim_fast(raw);
+    trimmed.strip_prefix("()").map_or(trimmed, str::trim_start)
 }
 
 fn strip_sequence_central_suffix(raw: &str) -> &str {
-    raw.trim()
-        .strip_suffix("()")
-        .map_or(raw.trim(), str::trim_end)
+    let trimmed = trim_fast(raw);
+    trimmed.strip_suffix("()").map_or(trimmed, str::trim_end)
 }
 
 fn parse_edge_statement(
@@ -6432,21 +7895,31 @@ fn parse_edge_statement(
     line_number: usize,
     source_line: &str,
     operators: &[(&str, ArrowType)],
+    gate: u128,
     builder: &mut IrBuilder,
 ) -> bool {
-    parse_edge_statement_with_nodes(statement, line_number, source_line, operators, builder)
-        .is_some()
+    parse_edge_statement_with_nodes(
+        statement,
+        line_number,
+        source_line,
+        operators,
+        gate,
+        builder,
+    )
+    .is_some()
 }
 
 fn parse_edge_statement_asts(
     statement: &str,
     operators: &[(&str, ArrowType)],
+    gate: u128,
     allow_parallel_node_lists: bool,
     config: &ParserConfig,
     line_number: usize,
 ) -> Option<Vec<FlowAst>> {
-    let (first_operator_idx, first_operator, first_arrow) = find_operator(statement, operators)?;
-    let left_raw = statement[..first_operator_idx].trim();
+    let (first_operator_idx, first_operator, first_arrow) =
+        find_operator(statement, operators, gate)?;
+    let left_raw = trim_fast(&statement[..first_operator_idx]);
     if left_raw.is_empty() {
         return None;
     }
@@ -6460,7 +7933,7 @@ fn parse_edge_statement_asts(
 
     loop {
         let rhs_start = operator_idx + operator.len();
-        let mut next_operator = find_operator_from_index(statement, rhs_start, operators);
+        let mut next_operator = find_operator_from_index(statement, rhs_start, operators, gate);
 
         let edge_label;
         let right_without_label;
@@ -6470,24 +7943,22 @@ fn parse_edge_statement_asts(
         if is_arrow_prefix(operator)
             && let Some((n_idx, n_op, n_arrow)) = next_operator
         {
-            let label_part = statement[rhs_start..n_idx].trim();
+            let label_part = trim_fast(&statement[rhs_start..n_idx]);
             edge_label = clean_label(Some(label_part));
             current_arrow = n_arrow;
 
             // Now we need to find the node AFTER the second operator
             let after_next_start = n_idx + n_op.len();
-            next_operator = find_operator_from_index(statement, after_next_start, operators);
-            right_without_label = match next_operator {
+            next_operator = find_operator_from_index(statement, after_next_start, operators, gate);
+            right_without_label = trim_fast(match next_operator {
                 Some((next_idx, _, _)) => &statement[after_next_start..next_idx],
                 None => &statement[after_next_start..],
-            }
-            .trim();
+            });
         } else {
-            let right_segment = match next_operator {
+            let right_segment = trim_fast(match next_operator {
                 Some((next_idx, _, _)) => &statement[rhs_start..next_idx],
                 None => &statement[rhs_start..],
-            }
-            .trim();
+            });
 
             if right_segment.is_empty() {
                 if !config.create_placeholder_nodes {
@@ -6555,6 +8026,19 @@ fn parse_node_list_with_config(
     allow_parallel_node_lists: bool,
     config: &ParserConfig,
 ) -> Option<Vec<NodeToken>> {
+    // Common case — an edge endpoint with no `&` fork (every `A --> B` node): the whole string is a
+    // single node, so skip the `split_top_level_ampersands` `vec![raw]` intermediate allocation and wrap
+    // the one parsed node directly. Byte-identical: with no `&` the split returns exactly `vec![raw]` and
+    // the loop below trims/parses that one part, and `contains_top_level_ampersand` is false so the
+    // parallel-list reject never fires.
+    if !raw.as_bytes().contains(&b'&') {
+        let trimmed = trim_fast(raw);
+        if trimmed.is_empty() {
+            return None;
+        }
+        return Some(vec![parse_node_token_with_config(trimmed, config)?]);
+    }
+
     if !allow_parallel_node_lists && contains_top_level_ampersand(raw) {
         return None;
     }
@@ -6566,7 +8050,7 @@ fn parse_node_list_with_config(
 
     let mut nodes = Vec::with_capacity(parts.len());
     for part in parts {
-        let trimmed = part.trim();
+        let trimmed = trim_fast(part);
         if trimmed.is_empty() {
             return None;
         }
@@ -6576,10 +8060,18 @@ fn parse_node_list_with_config(
 }
 
 fn contains_top_level_ampersand(raw: &str) -> bool {
-    split_top_level_ampersands(raw).len() > 1
+    // A top-level `&` requires an `&` at all; the cheap byte reject avoids building the split `Vec`
+    // (and its whole char scan) on the common node list with no fork.
+    raw.as_bytes().contains(&b'&') && split_top_level_ampersands(raw).len() > 1
 }
 
 fn split_top_level_ampersands(raw: &str) -> Vec<&str> {
+    // No `&` anywhere → the whole string is the only part; skip the quote/bracket state-machine scan.
+    // Byte-identical: with no `&`, the scan below never splits and returns exactly `vec![raw]`.
+    if !raw.as_bytes().contains(&b'&') {
+        return vec![raw];
+    }
+
     let mut in_quote: Option<char> = None;
     let mut escaped = false;
     let mut square_depth = 0_usize;
@@ -6655,10 +8147,12 @@ fn parse_edge_statement_with_nodes(
     line_number: usize,
     source_line: &str,
     operators: &[(&str, ArrowType)],
+    gate: u128,
     builder: &mut IrBuilder,
 ) -> Option<Vec<IrNodeId>> {
-    let (first_operator_idx, first_operator, first_arrow) = find_operator(statement, operators)?;
-    let left_raw = statement[..first_operator_idx].trim();
+    let (first_operator_idx, first_operator, first_arrow) =
+        find_operator(statement, operators, gate)?;
+    let left_raw = trim_fast(&statement[..first_operator_idx]);
     if left_raw.is_empty() {
         return None;
     }
@@ -6680,12 +8174,11 @@ fn parse_edge_statement_with_nodes(
 
     loop {
         let rhs_start = operator_idx + operator.len();
-        let next_operator = find_operator_from_index(statement, rhs_start, operators);
-        let right_segment = match next_operator {
+        let next_operator = find_operator_from_index(statement, rhs_start, operators, gate);
+        let right_segment = trim_fast(match next_operator {
             Some((next_idx, _, _)) => &statement[rhs_start..next_idx],
             None => &statement[rhs_start..],
-        }
-        .trim();
+        });
 
         if right_segment.is_empty() {
             let to_node = if builder.parser_config().create_placeholder_nodes {
@@ -6753,22 +8246,51 @@ fn parse_edge_statement_with_nodes(
 fn find_operator<'a>(
     statement: &str,
     operators: &'a [(&'a str, ArrowType)],
+    gate: u128,
 ) -> Option<(usize, &'a str, ArrowType)> {
-    find_operator_from_index(statement, 0, operators)
+    find_operator_from_index(statement, 0, operators, gate)
 }
 
 fn find_operator_from_index<'a>(
     statement: &str,
     start_index: usize,
     operators: &'a [(&'a str, ArrowType)],
+    gate: u128,
 ) -> Option<(usize, &'a str, ArrowType)> {
-    let mut in_quote: Option<char> = None;
+    // `gate` is the caller's precomputed first-byte gate for `operators` (a `const` such as
+    // `FLOW_OP_GATE` / `CLASS_OP_GATE` / `SEQUENCE_OP_GATE`). Threading it in — rather than rebuilding
+    // `op_first_byte_gate(operators)` on every call — was the dominant cost of the operator scan on the
+    // hot per-message / per-relation paths (e.g. 14 flow / 26 sequence operators re-hashed every line).
+    find_operator_core(statement, start_index, operators, gate)
+}
+
+/// Core operator scan with a caller-supplied first-byte gate: bit `b` is set iff some operator in
+/// `operators` starts with ASCII byte `b`. Every operator starts with one specific ASCII byte (`-`,
+/// `<`, etc.), so at a position whose byte can't start ANY operator the `starts_with` loop is
+/// guaranteed to miss — skipping it turns the O(chars × operators) sweep into O(operator-start
+/// positions × operators). Operator tables must put a token before every shorter prefix of that
+/// token, so the first match is also the longest match. Byte-identical: the gate only skips positions
+/// the loop would reject, and table-order ties retain their existing priority.
+fn find_operator_core<'a>(
+    statement: &str,
+    start_index: usize,
+    operators: &'a [(&'a str, ArrowType)],
+    op_first_byte: u128,
+) -> Option<(usize, &'a str, ArrowType)> {
+    // Byte-level scan (was `char_indices`): every structural byte tracked here — the quotes `"` `'` `` ` ``,
+    // the brackets `[] () {}`, the escape `\` — and every operator first byte is ASCII (< 128). A UTF-8
+    // lead or continuation byte (>= 128) can never equal an ASCII structural/operator byte, so the depth
+    // and in-quote state transitions are identical to the char scan while a multi-byte char stays inert;
+    // `starts_with` only runs at an ASCII position (a char boundary). Iterating bytes drops the per-char
+    // UTF-8 decode (find_operator was ~14% of `:::`-class flowchart parse). Byte-identical: pinned by the
+    // parser corpus + golden snapshots.
+    let mut in_quote: Option<u8> = None;
     let mut escaped = false;
     let mut square_depth = 0_usize;
     let mut paren_depth = 0_usize;
     let mut brace_depth = 0_usize;
 
-    for (idx, ch) in statement.char_indices() {
+    for (idx, &byte) in statement.as_bytes().iter().enumerate() {
         if idx < start_index {
             continue;
         }
@@ -6778,42 +8300,42 @@ fn find_operator_from_index<'a>(
                 escaped = false;
                 continue;
             }
-            if ch == '\\' && quote != '`' {
+            if byte == b'\\' && quote != b'`' {
                 escaped = true;
                 continue;
             }
-            if ch == quote {
+            if byte == quote {
                 in_quote = None;
             }
             continue;
         }
 
-        match ch {
-            '"' | '\'' | '`' => {
-                in_quote = Some(ch);
+        match byte {
+            b'"' | b'\'' | b'`' => {
+                in_quote = Some(byte);
                 continue;
             }
-            '[' => {
+            b'[' => {
                 square_depth = square_depth.saturating_add(1);
                 continue;
             }
-            ']' => {
+            b']' => {
                 square_depth = square_depth.saturating_sub(1);
                 continue;
             }
-            '(' => {
+            b'(' => {
                 paren_depth = paren_depth.saturating_add(1);
                 continue;
             }
-            ')' => {
+            b')' => {
                 paren_depth = paren_depth.saturating_sub(1);
                 continue;
             }
-            '{' => {
+            b'{' => {
                 brace_depth = brace_depth.saturating_add(1);
                 continue;
             }
-            '}' => {
+            b'}' => {
                 brace_depth = brace_depth.saturating_sub(1);
                 continue;
             }
@@ -6824,19 +8346,18 @@ fn find_operator_from_index<'a>(
             continue;
         }
 
-        let tail = &statement[idx..];
-        let mut best_match: Option<(&str, ArrowType)> = None;
-        for (operator, arrow) in operators {
-            if tail.starts_with(operator) {
-                match best_match {
-                    Some((best_operator, _)) if operator.len() <= best_operator.len() => {}
-                    _ => best_match = Some((operator, *arrow)),
-                }
-            }
+        // Skip positions whose byte can't begin any operator (see `op_first_byte`). Bytes >= 128
+        // (UTF-8 lead/continuation) can never match an ASCII-prefixed operator either.
+        let cp = u32::from(byte);
+        if cp >= 128 || (op_first_byte >> cp) & 1 == 0 {
+            continue;
         }
 
-        if let Some((operator, arrow)) = best_match {
-            return Some((idx, operator, arrow));
+        let tail = &statement[idx..];
+        for (operator, arrow) in operators {
+            if tail.starts_with(operator) {
+                return Some((idx, operator, *arrow));
+            }
         }
     }
 
@@ -6844,7 +8365,11 @@ fn find_operator_from_index<'a>(
 }
 
 fn extract_pipe_label(right_hand_side: &str) -> (Option<String>, &str) {
-    let trimmed = right_hand_side.trim();
+    // Both callers (`parse_edge_statement_asts` / `parse_edge_statement`) pass an already-`trim_fast`'d
+    // `right_segment`, so `trim_fast` here is byte-identical to `str::trim` (and a no-op on the pre-trimmed
+    // input) but skips the `char::is_whitespace` CharSearcher — this fires once per edge on every
+    // edge-based diagram (state/class/er/packet, and complex flowchart edges).
+    let trimmed = trim_fast(right_hand_side);
     let Some(after_open) = trimmed.strip_prefix('|') else {
         return (None, trimmed);
     };
@@ -6853,12 +8378,12 @@ fn extract_pipe_label(right_hand_side: &str) -> (Option<String>, &str) {
     };
 
     let label = clean_label(Some(&after_open[..close_idx]));
-    let remainder = after_open[close_idx + 1..].trim();
+    let remainder = trim_fast(&after_open[close_idx + 1..]);
     (label, remainder)
 }
 
 fn parse_node_token_with_config(raw: &str, config: &ParserConfig) -> Option<NodeToken> {
-    let trimmed = raw.trim();
+    let trimmed = trim_fast(raw);
     if trimmed.is_empty() {
         return None;
     }
@@ -6872,61 +8397,80 @@ fn parse_node_token_with_config(raw: &str, config: &ParserConfig) -> Option<Node
         });
     }
 
-    let core = trimmed.split(":::").next().unwrap_or(trimmed).trim();
+    // The `:::className` CSS-class shorthand needs a `:`; guard the multi-char `split(":::")` (which
+    // builds a substring searcher) behind a cheap `memchr(':')` — the common node token has no colon.
+    let core = if trimmed.as_bytes().contains(&b':') {
+        trim_fast(find_triple_colon(trimmed).map_or(trimmed, |pos| &trimmed[..pos]))
+    } else {
+        trimmed
+    };
     if core.is_empty() {
         return None;
     }
 
-    if let Some(parsed) = parse_double_circle_with_config(core, config) {
-        return Some(parsed);
-    }
-    if let Some(parsed) =
-        parse_wrapped_str_with_config(core, "[(", ")]", NodeShape::Cylinder, config)
+    // Fast path: every shaped token — `((…))`, `[(…)]`, `[[…]]`, `[…]`, `(…)`, `{…}`, `>…]`,
+    // `[/…\]`, … — contains an opening delimiter `(` `[` `{` or `>`. A plain identifier (the common
+    // node id) has none, so skip the ~11 `str::find`/`ends_with` shape probes AND
+    // `looks_like_unclosed_node_delimiter`'s `contains` sweep below — each builds a substring searcher
+    // and all of them would miss. Byte-identical: the gate only skips work that returns None here.
+    if core
+        .as_bytes()
+        .iter()
+        .any(|&b| matches!(b, b'(' | b'[' | b'{' | b'>'))
     {
-        return Some(parsed);
-    }
-    if let Some(parsed) =
-        parse_wrapped_str_with_config(core, "[[", "]]", NodeShape::Subroutine, config)
-    {
-        return Some(parsed);
-    }
-    if let Some(parsed) = parse_wrapped_with_config(core, '[', ']', NodeShape::Rect, config) {
-        return Some(parsed);
-    }
-    if let Some(parsed) = parse_wrapped_with_config(core, '(', ')', NodeShape::Rounded, config) {
-        return Some(parsed);
-    }
-    if let Some(parsed) = parse_wrapped_with_config(core, '{', '}', NodeShape::Diamond, config) {
-        return Some(parsed);
-    }
-    if let Some(parsed) =
-        parse_wrapped_str_with_config(core, ">", "]", NodeShape::Asymmetric, config)
-    {
-        return Some(parsed);
-    }
-    if let Some(parsed) =
-        parse_wrapped_str_with_config(core, "[/", "/]", NodeShape::Parallelogram, config)
-    {
-        return Some(parsed);
-    }
-    if let Some(parsed) =
-        parse_wrapped_str_with_config(core, "[\\", "\\]", NodeShape::InvParallelogram, config)
-    {
-        return Some(parsed);
-    }
-    if let Some(parsed) =
-        parse_wrapped_str_with_config(core, "[/", "\\]", NodeShape::Trapezoid, config)
-    {
-        return Some(parsed);
-    }
-    if let Some(parsed) =
-        parse_wrapped_str_with_config(core, "[\\", "/]", NodeShape::InvTrapezoid, config)
-    {
-        return Some(parsed);
-    }
+        if let Some(parsed) = parse_double_circle_with_config(core, config) {
+            return Some(parsed);
+        }
+        if let Some(parsed) =
+            parse_wrapped_str_with_config(core, "[(", ")]", NodeShape::Cylinder, config)
+        {
+            return Some(parsed);
+        }
+        if let Some(parsed) =
+            parse_wrapped_str_with_config(core, "[[", "]]", NodeShape::Subroutine, config)
+        {
+            return Some(parsed);
+        }
+        if let Some(parsed) = parse_wrapped_with_config(core, '[', ']', NodeShape::Rect, config) {
+            return Some(parsed);
+        }
+        if let Some(parsed) = parse_wrapped_with_config(core, '(', ')', NodeShape::Rounded, config)
+        {
+            return Some(parsed);
+        }
+        if let Some(parsed) = parse_wrapped_with_config(core, '{', '}', NodeShape::Diamond, config)
+        {
+            return Some(parsed);
+        }
+        if let Some(parsed) =
+            parse_wrapped_str_with_config(core, ">", "]", NodeShape::Asymmetric, config)
+        {
+            return Some(parsed);
+        }
+        if let Some(parsed) =
+            parse_wrapped_str_with_config(core, "[/", "/]", NodeShape::Parallelogram, config)
+        {
+            return Some(parsed);
+        }
+        if let Some(parsed) =
+            parse_wrapped_str_with_config(core, "[\\", "\\]", NodeShape::InvParallelogram, config)
+        {
+            return Some(parsed);
+        }
+        if let Some(parsed) =
+            parse_wrapped_str_with_config(core, "[/", "\\]", NodeShape::Trapezoid, config)
+        {
+            return Some(parsed);
+        }
+        if let Some(parsed) =
+            parse_wrapped_str_with_config(core, "[\\", "/]", NodeShape::InvTrapezoid, config)
+        {
+            return Some(parsed);
+        }
 
-    if !config.auto_close_delimiters && looks_like_unclosed_node_delimiter(core) {
-        return None;
+        if !config.auto_close_delimiters && looks_like_unclosed_node_delimiter(core) {
+            return None;
+        }
     }
 
     let id = normalize_identifier(core);
@@ -7027,7 +8571,25 @@ fn parse_wrapped_str_with_config(
     shape: NodeShape,
     config: &ParserConfig,
 ) -> Option<NodeToken> {
-    let start = raw.find(open)?;
+    // Locate the (multi-char) open delimiter via memchr on its first byte + a cheap prefix verify,
+    // rather than `raw.find(open)` which builds a `TwoWaySearcher` (maximal-suffix factorization) per
+    // call — pure setup, and node/block shape probing calls this with several delimiters (`((`, `[[`,
+    // `{{`, `[/`, …) that mostly miss. memchr keeps the SIMD first-byte search; only the factorization
+    // setup is dropped. Byte-identical: returns the first full-match index `find(open)` would.
+    let open_bytes = open.as_bytes();
+    let hay = raw.as_bytes();
+    let first = *open_bytes.first()?;
+    let start = {
+        let mut from = 0;
+        loop {
+            let rel = memchr::memchr(first, &hay[from..])?;
+            let cand = from + rel;
+            if hay[cand..].starts_with(open_bytes) {
+                break cand;
+            }
+            from = cand + 1;
+        }
+    };
     if !raw.ends_with(close) && !config.auto_close_delimiters {
         return None;
     }
@@ -7095,13 +8657,25 @@ fn is_dangling_placeholder_node_id(id: &str) -> bool {
     id.starts_with(DANGLING_PLACEHOLDER_PREFIX)
 }
 
+/// `str::trim_matches(c)` for an ASCII byte `c`, without the `char` `CharSearcher` (a byte scan from
+/// both ends). Byte-identical for ASCII `c`: `c`'s every byte index is a char boundary, so the trimmed
+/// slice equals what `trim_matches::<char>` returns (all leading and all trailing `c` stripped; an
+/// all-`c` string yields `""`).
+fn trim_matches_ascii(s: &str, c: u8) -> &str {
+    let b = s.as_bytes();
+    let start = b.iter().position(|&x| x != c).unwrap_or(b.len());
+    let end = b.iter().rposition(|&x| x != c).map_or(start, |p| p + 1);
+    &s[start..end]
+}
+
 fn normalize_compound_identifier(raw: &str) -> String {
-    let cleaned = raw
-        .trim()
-        .trim_matches('"')
-        .trim_matches('\'')
-        .trim_matches('`')
-        .trim();
+    // Whitespace trims via `trim_fast`; the quote strips via `trim_matches_ascii` (byte scan, no `char`
+    // CharSearcher — measured ~8% of journey parse across the three quote passes). Called per gantt task /
+    // journey step / kanban card / mindmap node / xychart series across ~10 sites.
+    let cleaned = trim_fast(trim_matches_ascii(
+        trim_matches_ascii(trim_matches_ascii(trim_fast(raw), b'"'), b'\''),
+        b'`',
+    ));
     if cleaned.is_empty() {
         return String::new();
     }
@@ -7118,7 +8692,31 @@ fn normalize_compound_identifier(raw: &str) -> String {
         }
     }
 
-    normalized.trim_matches('_').to_string()
+    // Strip leading/trailing `_`. The overwhelmingly common id has none (a mid-string separator, not an
+    // edge one), so return the OWNED `normalized` verbatim instead of the old `trim_matches('_').to_string()`
+    // — which always allocated a second String and re-copied even when the trim was a no-op. When an edge
+    // `_` IS present, trim it in place (truncate the tail, drain the head). Byte-identical to `trim_matches('_')`.
+    let start = normalized.bytes().position(|x| x != b'_');
+    match start {
+        None => {
+            // all underscores (or empty) → trims to ""
+            normalized.clear();
+            normalized
+        }
+        Some(head) => {
+            let tail = normalized
+                .bytes()
+                .rposition(|x| x != b'_')
+                .map_or(head, |p| p + 1);
+            if tail < normalized.len() {
+                normalized.truncate(tail);
+            }
+            if head > 0 {
+                normalized.drain(..head);
+            }
+            normalized
+        }
+    }
 }
 
 fn clean_label(raw: Option<&str>) -> Option<String> {
@@ -7132,8 +8730,27 @@ fn clear_empty_label(label: &mut Option<ParsedLabel>) {
 }
 
 fn extract_icon_prefix(label: Option<&mut ParsedLabel>) -> Option<String> {
+    extract_icon_prefix_inner(label, false)
+}
+
+/// [`extract_icon_prefix`] where the caller guarantees `label.text` is already `trim_fast`'d, so the
+/// initial re-trim is skipped. Used by `parse_fast_simple_flowchart_node_borrowed`, whose label comes
+/// from `parse_label_pretrimmed` (text already trimmed) — ~once per labelled node.
+fn extract_icon_prefix_pretrimmed(label: Option<&mut ParsedLabel>) -> Option<String> {
+    extract_icon_prefix_inner(label, true)
+}
+
+fn extract_icon_prefix_inner(label: Option<&mut ParsedLabel>, pretrimmed: bool) -> Option<String> {
     let label = label?;
-    let trimmed = label.text.trim();
+    // `trim_fast` == `str::trim` byte-for-byte, without the `char::is_whitespace` CharSearcher; this
+    // runs once per node label (extract_icon_prefix is called for every labelled flowchart node).
+    // When the caller already trimmed `label.text` (`pretrimmed`, a const per wrapper → the branch
+    // folds away), `trim_fast(&label.text) == label.text`, so use it directly.
+    let trimmed = if pretrimmed {
+        label.text.as_str()
+    } else {
+        trim_fast(&label.text)
+    };
     if trimmed.is_empty() {
         return None;
     }
@@ -7154,8 +8771,11 @@ fn extract_icon_prefix(label: Option<&mut ParsedLabel>) -> Option<String> {
 }
 
 fn split_fontawesome_icon_prefix(text: &str) -> Option<(&str, Option<&str>)> {
-    let trimmed = text.trim();
-    let remainder = trimmed.strip_prefix("fa:")?;
+    // The sole caller (`extract_icon_prefix`) always passes an already-`trim_fast`'d slice, and
+    // `trim_fast` is idempotent, so re-trimming `text` here is a proven no-op — use it directly
+    // (drops one `trim_fast` per labelled node). The remainder trim below strips post-icon whitespace
+    // and IS load-bearing.
+    let remainder = text.strip_prefix("fa:")?;
     let icon_end = remainder
         .find(|ch: char| ch.is_whitespace())
         .unwrap_or(remainder.len());
@@ -7163,27 +8783,82 @@ fn split_fontawesome_icon_prefix(text: &str) -> Option<(&str, Option<&str>)> {
         return None;
     }
 
-    let icon = &trimmed[..3 + icon_end];
-    let remainder = remainder[icon_end..].trim();
+    let icon = &text[..3 + icon_end];
+    let remainder = trim_fast(&remainder[icon_end..]);
     Some((icon, (!remainder.is_empty()).then_some(remainder)))
 }
 
 fn split_emoji_icon_prefix(text: &str) -> Option<(&str, Option<&str>)> {
-    let trimmed = text.trim();
-    let mut chars = trimmed.char_indices();
-    let (_, first) = chars.next()?;
-    if first.is_ascii() {
+    // Same as `split_fontawesome_icon_prefix`: `extract_icon_prefix` already `trim_fast`'d `text`, so
+    // skip the idempotent re-trim (drops one `trim_fast` per labelled node — fontawesome returns
+    // `None` first on plain labels, so this path runs for every one).
+    let first = text.chars().next()?;
+    if !is_emoji_base(first) {
         return None;
     }
 
-    let next_boundary = chars.next().map_or(trimmed.len(), |(idx, _)| idx);
-    let icon = &trimmed[..next_boundary];
-    let remainder = trimmed[next_boundary..].trim();
+    // Keep variation selectors, skin-tone modifiers, flags, and ZWJ sequences with the icon.
+    let next_boundary = text
+        .grapheme_indices(true)
+        .nth(1)
+        .map_or(text.len(), |(idx, _)| idx);
+    let icon = &text[..next_boundary];
+    let remainder = trim_fast(&text[next_boundary..]);
     Some((icon, (!remainder.is_empty()).then_some(remainder)))
 }
 
+fn is_emoji_base(ch: char) -> bool {
+    matches!(ch as u32,
+        0x231A..=0x231B
+        | 0x23E9..=0x23F3
+        | 0x23F8..=0x23FA
+        | 0x25AA..=0x25AB
+        | 0x25B6
+        | 0x25C0
+        | 0x25FB..=0x25FE
+        | 0x2600..=0x27BF
+        | 0x2934..=0x2935
+        | 0x2B05..=0x2B07
+        | 0x2B1B..=0x2B1C
+        | 0x2B50
+        | 0x2B55
+        | 0x3030
+        | 0x303D
+        | 0x3297
+        | 0x3299
+        | 0x1F000..=0x1FAFF
+    )
+}
+
 fn parse_label(raw: Option<&str>) -> Option<ParsedLabel> {
-    let raw = raw?;
+    parse_label_inner(raw?, false)
+}
+
+/// [`parse_label`] where the caller guarantees `raw` is already `trim_fast`'d, so the plain-label fast
+/// path skips the redundant re-trim. Used by `parse_fast_simple_flowchart_node_borrowed`, whose
+/// `label_raw` is `trim_fast`'d immediately before this call (~800 labelled nodes per flowchart/800 parse).
+fn parse_label_pretrimmed(raw: &str) -> Option<ParsedLabel> {
+    parse_label_inner(raw, true)
+}
+
+fn parse_label_inner(raw: &str, pretrimmed: bool) -> Option<ParsedLabel> {
+    // Fast path: a label with no surrounding quotes (`"` `'`), markdown backtick, or HTML entity
+    // (`&` `#`) reduces to a plain trimmed copy -- the quote-stripping, markdown, and entity-decode
+    // passes below all leave it unchanged. Byte-identical: for such a label the full path also ends
+    // at `Some(ParsedLabel::plain(raw.trim()))` (or `None` when empty). Skips ~3 redundant
+    // `trim`/`trim_matches` scans + the two-`find` entity decode per label (parse_label runs once
+    // per node label; doc-parse is ~49% of flowchart parse).
+    if !raw
+        .bytes()
+        .any(|byte| matches!(byte, b'"' | b'\'' | b'`' | b'&' | b'#'))
+    {
+        // `trim_fast` == `str::trim` byte-for-byte but skips the `char::is_whitespace` CharSearcher.
+        // When the caller already trimmed (`pretrimmed`), `trim_fast(raw) == raw`, so skip it entirely
+        // (`pretrimmed` is a const per wrapper, so this branch folds away). Runs once per node label.
+        let trimmed = if pretrimmed { raw } else { trim_fast(raw) };
+        return (!trimmed.is_empty()).then(|| ParsedLabel::plain(trimmed));
+    }
+
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -7198,11 +8873,7 @@ fn parse_label(raw: Option<&str>) -> Option<ParsedLabel> {
         .strip_prefix('`')
         .and_then(|value| value.strip_suffix('`'))
     {
-        let normalized = markdown_body
-            .trim()
-            .replace("<br/>", "\n")
-            .replace("<br>", "\n")
-            .replace("<br />", "\n");
+        let normalized = replace_br_with_newlines(markdown_body.trim());
         let decoded = decode_mermaid_entities(&normalized);
         let segments = parse_markdown_label_segments(&decoded);
         let text = flatten_label_segments(&segments);
@@ -7317,7 +8988,9 @@ fn normalize_subgraph_title(raw: &str) -> Option<String> {
 
 fn parse_name_before_colon(line: &str) -> Option<&str> {
     let (left, _) = line.split_once(':')?;
-    let candidate = left.trim().trim_matches('"').trim_matches('\'').trim();
+    // trim_fast for the two whitespace trims (the char `trim_matches` quote strips stay — they are
+    // memchr, not the `is_whitespace` CharSearcher). Called per pie slice / xychart point.
+    let candidate = trim_fast(trim_fast(left).trim_matches('"').trim_matches('\''));
     (!candidate.is_empty()).then_some(candidate)
 }
 
@@ -7329,7 +9002,7 @@ fn bracket_contents(line: &str) -> Option<&str> {
 
 fn parse_chart_value_list(raw: &str) -> Vec<String> {
     raw.split(',')
-        .map(str::trim)
+        .map(trim_fast)
         .filter(|value| !value.is_empty())
         .map(|value| value.trim_matches('"').trim_matches('\'').to_string())
         .collect()
@@ -7341,8 +9014,13 @@ fn parse_xychart_numeric_values(
     line: &str,
     builder: &mut IrBuilder,
 ) -> Vec<f32> {
-    let mut values = Vec::new();
-    for raw_value in parse_chart_value_list(raw) {
+    let mut values = Vec::with_capacity(memchr::memchr_iter(b',', raw.as_bytes()).count() + 1);
+    for raw_value in raw
+        .split(',')
+        .map(trim_fast)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.trim_matches('"').trim_matches('\''))
+    {
         match raw_value.parse::<f32>() {
             Ok(value) if value.is_finite() => values.push(value),
             _ => builder.add_warning(format!(
@@ -7409,9 +9087,15 @@ fn parse_xychart_series(line: &str) -> Option<(&str, Option<String>, &str)> {
 }
 
 fn parse_init_directives(input: &str, builder: &mut IrBuilder) {
-    for (index, line) in input.lines().enumerate() {
+    // Init directives are `%%{ ... }%%` blocks; if that marker never appears there is
+    // nothing to parse, so skip the per-line scan (run on every parse). Output-identical:
+    // `extract_init_payload` only matches lines containing `%%{`.
+    if !input.contains("%%{") {
+        return;
+    }
+    for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
         let Some(payload) = extract_init_payload(trimmed) else {
             continue;
         };
@@ -7555,17 +9239,50 @@ fn parse_init_payload_value(payload: &str) -> Result<Value, String> {
 
 fn leading_indent_width(line: &str) -> usize {
     let mut width = 0_usize;
-    for ch in line.chars() {
-        match ch {
-            ' ' => width += 1,
-            '\t' => width += 2,
+    for byte in line.as_bytes() {
+        match byte {
+            b' ' => width += 1,
+            b'\t' => width += 2,
             _ => break,
         }
     }
     width
 }
 
-fn split_statements(line: &str) -> impl Iterator<Item = &str> {
+/// Iterator over the `;`-separated statements of a line. The overwhelmingly common no-`;` line yields
+/// the whole line via [`std::iter::Once`] with NO allocation; only a genuinely multi-statement line
+/// builds the `Vec`. (Previously this always returned `Vec::into_iter()`, so every single-statement line
+/// paid a one-element `Vec<&str>` allocation — ~1 alloc/line on wide flowcharts.)
+enum SplitStatements<'a> {
+    Single(std::iter::Once<&'a str>),
+    Multiple(std::vec::IntoIter<&'a str>),
+}
+
+impl<'a> Iterator for SplitStatements<'a> {
+    type Item = &'a str;
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Single(it) => it.next(),
+            Self::Multiple(it) => it.next(),
+        }
+    }
+}
+
+// `manual_contains` would rewrite the `.iter().any(== b';')` below back to `<[u8]>::contains`, whose
+// u8 specialization is `memchr` — measurably SLOWER than a scalar scan on these short per-line
+// haystacks (see the scalar-scan win / ByteLines reject in NEGATIVE_EVIDENCE). Keep the scalar form.
+#[allow(clippy::manual_contains)]
+fn split_statements(line: &str) -> SplitStatements<'_> {
+    // Statements are separated by `;` (outside quotes/brackets). When the line contains no `;` at all it
+    // is a single statement, so skip the quote/bracket-aware scan AND the `Vec` allocation — yield the
+    // whole line via `Once`. Output-identical: the full scan yields exactly `[line]` in that case.
+    // Scalar `.iter().any()` rather than `<[u8]>::contains` (which is memchr-specialized): this scans a
+    // short source line (~tens of bytes) per statement, and a compiler-vectorized scalar scan beats
+    // memchr's per-call SIMD setup on short haystacks (see the ByteLines `\n` reject in NEGATIVE_EVIDENCE).
+    if !line.as_bytes().iter().any(|&byte| byte == b';') {
+        return SplitStatements::Single(std::iter::once(line));
+    }
     let mut statements = Vec::new();
     let mut current_start = 0;
     let mut in_quote: Option<char> = None;
@@ -7615,7 +9332,7 @@ fn split_statements(line: &str) -> impl Iterator<Item = &str> {
         statements.push(remainder);
     }
 
-    statements.into_iter()
+    SplitStatements::Multiple(statements.into_iter())
 }
 
 fn parse_sankey_record(line: &str) -> Option<(String, String, String)> {
@@ -7672,14 +9389,14 @@ fn split_csv_fields(line: &str) -> Option<Vec<String>> {
 
 fn parse_function_call(line: &str) -> Option<(String, Vec<String>, bool)> {
     let open_paren = line.find('(')?;
-    let function_name = line[..open_paren].trim();
+    let function_name = trim_fast(&line[..open_paren]);
     if function_name.is_empty() {
         return None;
     }
 
     let close_paren = find_matching_paren(line, open_paren)?;
     let arguments = split_top_level_arguments(&line[open_paren + 1..close_paren]);
-    let remainder = line[close_paren + 1..].trim();
+    let remainder = trim_fast(&line[close_paren + 1..]);
     let opens_block = remainder == "{";
 
     Some((function_name.to_string(), arguments, opens_block))
@@ -7723,54 +9440,48 @@ fn find_matching_paren(line: &str, open_paren: usize) -> Option<usize> {
 }
 
 fn split_top_level_arguments(raw: &str) -> Vec<String> {
+    // Each argument is a VERBATIM substring of `raw` between top-level commas (the old version pushed
+    // every char — including backslashes and quotes — into a per-arg `String`, doing no unescaping).
+    // So track the byte index of each argument boundary and SLICE instead of building char-by-char
+    // (`String::push` + `encode_utf8` were ~6% of C4 parse). Byte-identical: `raw[start..comma]` is
+    // exactly what the accumulator held; `trim_fast` equals `str::trim`.
     let mut arguments = Vec::new();
-    let mut current = String::new();
     let mut in_quote: Option<char> = None;
     let mut escaped = false;
     let mut nested_parens = 0_usize;
+    let mut start = 0_usize;
 
-    for ch in raw.chars() {
+    for (idx, ch) in raw.char_indices() {
         if let Some(quote) = in_quote {
             if escaped {
-                current.push(ch);
                 escaped = false;
                 continue;
             }
             if ch == '\\' && quote != '`' {
-                current.push(ch);
                 escaped = true;
                 continue;
             }
             if ch == quote {
                 in_quote = None;
             }
-            current.push(ch);
             continue;
         }
 
         match ch {
-            '"' | '\'' | '`' => {
-                in_quote = Some(ch);
-                current.push(ch);
-            }
-            '(' => {
-                nested_parens = nested_parens.saturating_add(1);
-                current.push(ch);
-            }
-            ')' => {
-                nested_parens = nested_parens.saturating_sub(1);
-                current.push(ch);
-            }
+            '"' | '\'' | '`' => in_quote = Some(ch),
+            '(' => nested_parens = nested_parens.saturating_add(1),
+            ')' => nested_parens = nested_parens.saturating_sub(1),
             ',' if nested_parens == 0 => {
-                arguments.push(current.trim().to_string());
-                current.clear();
+                arguments.push(trim_fast(&raw[start..idx]).to_string());
+                start = idx + ch.len_utf8();
             }
-            _ => current.push(ch),
+            _ => {}
         }
     }
 
-    if !current.trim().is_empty() {
-        arguments.push(current.trim().to_string());
+    let last = trim_fast(&raw[start..]);
+    if !last.is_empty() {
+        arguments.push(last.to_string());
     }
 
     arguments
@@ -7781,6 +9492,167 @@ fn is_c4_header(line: &str) -> bool {
         line,
         "C4Context" | "C4Container" | "C4Component" | "C4Dynamic" | "C4Deployment"
     )
+}
+
+fn parse_c4_fast_context_call(
+    line: &str,
+    span: Span,
+    boundary_stack: &[(usize, usize)],
+    builder: &mut IrBuilder,
+) -> bool {
+    if let Some(arguments) = c4_fast_arguments(line, "Person") {
+        return parse_c4_fast_node(
+            arguments,
+            "Person",
+            NodeShape::Rounded,
+            &["c4", "c4-person"],
+            span,
+            boundary_stack,
+            builder,
+        );
+    }
+
+    if let Some(arguments) = c4_fast_arguments(line, "System") {
+        return parse_c4_fast_node(
+            arguments,
+            "System",
+            NodeShape::Rect,
+            &["c4", "c4-system"],
+            span,
+            boundary_stack,
+            builder,
+        );
+    }
+
+    if let Some(arguments) = c4_fast_arguments(line, "Rel") {
+        return parse_c4_fast_rel(arguments, span, builder);
+    }
+
+    false
+}
+
+fn c4_fast_arguments<'a>(line: &'a str, function_name: &str) -> Option<[&'a str; 4]> {
+    let remainder = line.strip_prefix(function_name)?.strip_prefix('(')?;
+    let raw_arguments = remainder.strip_suffix(')')?;
+    let mut arguments = [""; 4];
+    let count = split_c4_fast_arguments(raw_arguments, &mut arguments)?;
+    match (function_name, count) {
+        ("Person" | "System", 2 | 3) | ("Rel", 3 | 4) => Some(arguments),
+        _ => None,
+    }
+}
+
+fn split_c4_fast_arguments<'a>(raw: &'a str, arguments: &mut [&'a str; 4]) -> Option<usize> {
+    let mut start = 0_usize;
+    let mut count = 0_usize;
+    let mut in_quote = false;
+
+    for (index, ch) in raw.char_indices() {
+        match ch {
+            '"' => in_quote = !in_quote,
+            '\\' | '\'' | '`' | '(' | ')' => return None,
+            ',' if !in_quote => {
+                if count == arguments.len() {
+                    return None;
+                }
+                let argument = trim_fast(&raw[start..index]);
+                if argument.is_empty() {
+                    return None;
+                }
+                arguments[count] = argument;
+                count += 1;
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    if in_quote || count == arguments.len() {
+        return None;
+    }
+
+    let argument = trim_fast(&raw[start..]);
+    if argument.is_empty() {
+        return None;
+    }
+    arguments[count] = argument;
+    Some(count + 1)
+}
+
+fn parse_c4_fast_node(
+    arguments: [&str; 4],
+    element_type: &str,
+    shape: NodeShape,
+    classes: &[&str],
+    span: Span,
+    boundary_stack: &[(usize, usize)],
+    builder: &mut IrBuilder,
+) -> bool {
+    let Some(node_id) = clean_label(Some(arguments[0])) else {
+        return false;
+    };
+    let Some(label) = clean_label(Some(arguments[1])) else {
+        return false;
+    };
+    let description = if arguments[2].is_empty() {
+        None
+    } else {
+        clean_label(Some(arguments[2]))
+    };
+
+    let Some(node_id_value) = builder.intern_node(&node_id, Some(&label), shape, span) else {
+        return false;
+    };
+    builder.set_c4_node_meta(
+        node_id_value,
+        IrC4NodeMeta {
+            element_type: element_type.to_string(),
+            technology: None,
+            description,
+        },
+    );
+    for class_name in classes {
+        builder.add_class_to_node_id(node_id_value, class_name);
+    }
+    add_node_to_active_c4_boundaries(boundary_stack, node_id_value, builder);
+    true
+}
+
+fn parse_c4_fast_rel(arguments: [&str; 4], span: Span, builder: &mut IrBuilder) -> bool {
+    let Some(from_id) = clean_label(Some(arguments[0])) else {
+        return false;
+    };
+    let Some(to_id) = clean_label(Some(arguments[1])) else {
+        return false;
+    };
+    let label = clean_label(Some(arguments[2]));
+    let technology = if arguments[3].is_empty() {
+        None
+    } else {
+        clean_label(Some(arguments[3]))
+    };
+    let combined_label = match (label, technology) {
+        (Some(label), Some(technology)) => Some(format!("{label} [{technology}]")),
+        (Some(label), None) => Some(label),
+        (None, Some(technology)) => Some(format!("[{technology}]")),
+        (None, None) => None,
+    };
+
+    let Some(from_node) = builder.intern_node(&from_id, Some(&from_id), NodeShape::Rect, span)
+    else {
+        return false;
+    };
+    let Some(to_node) = builder.intern_node(&to_id, Some(&to_id), NodeShape::Rect, span) else {
+        return false;
+    };
+    builder.push_edge(
+        from_node,
+        to_node,
+        ArrowType::Arrow,
+        combined_label.as_deref(),
+        span,
+    );
+    true
 }
 
 fn parse_c4_node(
@@ -8077,7 +9949,19 @@ fn is_architecture_side_token(token: &str) -> bool {
     matches!(token, "L" | "R" | "T" | "B")
 }
 
+// See `split_statements`: keep the scalar `.iter().any(== b'%')`; `manual_contains` would swap in the
+// memchr-backed `<[u8]>::contains`, which is slower on this short per-line haystack.
+#[allow(clippy::manual_contains)]
 fn strip_flowchart_inline_comment(line: &str) -> &str {
+    // Inline comments begin with `%%`; if there is no `%` at all there is nothing to
+    // strip, so skip the quote/bracket-aware scan entirely. Output-identical: the full
+    // scan returns `line` unchanged when it finds no `%%`. Scalar `.iter().any()` rather than
+    // memchr-specialized `<[u8]>::contains` — this per-line scan is over a short haystack where a
+    // vectorized scalar loop beats memchr's setup (see the ByteLines `\n` reject in NEGATIVE_EVIDENCE).
+    if !line.as_bytes().iter().any(|&byte| byte == b'%') {
+        return line;
+    }
+
     let mut in_quote: Option<char> = None;
     let mut escaped = false;
     let mut square_depth = 0_usize;
@@ -8155,17 +10039,34 @@ fn parse_graph_direction(header: &str) -> Option<GraphDirection> {
 }
 
 fn span_for(line_number: usize, line: &str) -> Span {
-    Span::at_line(line_number, line.chars().count())
+    // The span length is the line's char count. For an all-ASCII line (the overwhelming majority of
+    // Mermaid source — identifiers, keywords, operators) that equals `line.len()`, an O(1) field read,
+    // so skip `chars().count()`'s `char_count_general_case` byte scan (~3% of class parse; `span_for`
+    // runs per statement in every parser). Byte-identical: `is_ascii()` gates so the non-ASCII path still
+    // counts chars exactly.
+    let cols = if line.is_ascii() {
+        line.len()
+    } else {
+        line.chars().count()
+    };
+    Span::at_line(line_number, cols)
 }
 
 pub fn first_significant_line(input: &str) -> Option<&str> {
     let (content, _) = split_front_matter_block(input);
-    content.lines().map(str::trim).find(|line| {
+    content.lines().map(trim_fast).find(|line| {
         !line.is_empty() && !is_comment(line) && !line.starts_with("%%{") && !line.ends_with("}%%")
     })
 }
 
 fn is_flowchart_header(line: &str) -> bool {
+    // A flowchart header is `flowchart`/`graph` (case-insensitive) at the start of the
+    // already-trimmed statement, so its first byte must be one of those keywords'
+    // initials. Bail before allocating a lowercased copy — this runs for every statement,
+    // and node/edge statements (the overwhelming majority) never start with f/g.
+    if !matches!(line.as_bytes().first(), Some(b'f' | b'F' | b'g' | b'G')) {
+        return false;
+    }
     let lower = line.to_ascii_lowercase();
     matches_keyword_header(&lower, "flowchart") || matches_keyword_header(&lower, "graph")
 }
@@ -8193,11 +10094,26 @@ fn is_non_graph_statement(line: &str) -> bool {
 /// to rendering output. A compatibility warning is emitted for each directive
 /// to inform users that their styles will not be applied.
 fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
+    // Every style-directive line starts with `classDef`/`style`/`linkStyle`/`class`; if
+    // none of those substrings occur anywhere, there is nothing to extract and the whole
+    // per-line scan (which computes a span_for/char-count for every line) is pure waste —
+    // the common flowchart has no style directives. Output-identical: with no directive
+    // the loop leaves `saw_style_directive` false and the trailing block is skipped.
+    // `memmem::find` (SIMD prefilter) replaces `str::contains`'s TwoWaySearcher on these
+    // multi-byte needles — same ASCII-substring presence test, scanned on every non-flowchart parse.
+    let bytes = input.as_bytes();
+    if memchr::memmem::find(bytes, b"class").is_none()
+        && memchr::memmem::find(bytes, b"style").is_none()
+        && memchr::memmem::find(bytes, b"linkStyle").is_none()
+    {
+        return;
+    }
+
     let mut saw_style_directive = false;
     let mut first_style_span = None;
 
-    for (line_number, raw_line) in input.lines().enumerate() {
-        let line = raw_line.trim();
+    for (line_number, raw_line) in byte_lines(input).enumerate() {
+        let line = trim_fast(raw_line);
         let span = span_for(line_number + 1, raw_line);
 
         if let Some(rest) = line.strip_prefix("classDef ") {
@@ -8246,7 +10162,7 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                     for target in targets.split(',') {
                         let target = target.trim();
                         if !target.is_empty()
-                            && let Some(&node_id) = builder.node_id_by_key(target)
+                            && let Some(node_id) = builder.node_id_by_key(target)
                         {
                             builder.push_style_ref(
                                 fm_core::IrStyleTarget::Node(node_id),
@@ -8320,11 +10236,23 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
 /// - `accDescr: Single-line description`
 /// - `accDescr { multi-line description }`
 fn extract_accessibility_directives(input: &str, builder: &mut IrBuilder) {
+    // The only accessibility directives are `accTitle`/`accDescr`; if neither keyword
+    // appears, bail before the per-line scan (run on every parse of every diagram type).
+    // Output-identical: with neither substring no directive line matches and no accDescr
+    // block is ever opened, so there is nothing to flush at end of input.
+    // SIMD `memmem::find` replaces `str::contains`'s TwoWaySearcher (same ASCII-substring test).
+    let bytes = input.as_bytes();
+    if memchr::memmem::find(bytes, b"accTitle").is_none()
+        && memchr::memmem::find(bytes, b"accDescr").is_none()
+    {
+        return;
+    }
+
     let mut in_acc_descr_block = false;
     let mut descr_lines: Vec<&str> = Vec::new();
 
     for line in input.lines() {
-        let trimmed = line.trim();
+        let trimmed = trim_fast(line);
 
         if in_acc_descr_block {
             if trimmed == "}" {
@@ -8374,6 +10302,48 @@ fn is_comment(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ci_prefix_helpers_are_byte_identical() {
+        // Pin the alloc-free helpers to the old `to_ascii_lowercase()` forms they replaced.
+        let cases = [
+            "space",
+            "Space",
+            "SPACE:3",
+            "space: 2",
+            "spacex",
+            "space",
+            "block-beta",
+            "Block-Beta x",
+            "columns 4",
+            "COLUMNS 5",
+            "col",
+            "",
+            "spÄce",
+            "space:",
+            " space",
+        ];
+        for prefix in ["space", "space:", "block-beta", "columns"] {
+            for s in cases {
+                let lower = s.to_ascii_lowercase();
+                assert_eq!(
+                    super::starts_with_ci(s, prefix),
+                    lower.starts_with(prefix),
+                    "{s:?} {prefix:?}"
+                );
+                // strip_prefix_ci returns the RAW remainder; membership matches lowercase strip.
+                assert_eq!(
+                    super::strip_prefix_ci(s, prefix).is_some(),
+                    lower.strip_prefix(prefix).is_some(),
+                    "{s:?} {prefix:?}"
+                );
+                if let Some(raw_rest) = super::strip_prefix_ci(s, prefix) {
+                    assert_eq!(raw_rest, &s[prefix.len()..]);
+                }
+            }
+        }
+    }
+
+    use chumsky::Parser;
     use fm_core::{
         ArrowType, DiagnosticCategory, DiagnosticSeverity, DiagramType, GanttDate, GanttExclude,
         GanttTaskType, GanttTickInterval, GraphDirection, IrEndpoint, IrLabelSegment,
@@ -8381,9 +10351,62 @@ mod tests {
     };
 
     use super::{
-        STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE, is_dangling_placeholder_node_id, parse_mermaid,
+        CLASS_OPERATORS, ER_OPERATORS, FLOW_OP_GATE, FLOW_OPERATORS, PACKET_OPERATORS,
+        SEQUENCE_OPERATORS, STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE, byte_lines, flow_statement_parser,
+        is_dangling_placeholder_node_id, parse_edge_statement_asts,
+        parse_fast_simple_flowchart_statement_ast, parse_mermaid,
     };
     use crate::{ParserConfig, detect_type, parse_with_mode_and_config};
+
+    #[test]
+    fn byte_lines_matches_std_lines() {
+        // `byte_lines` must be byte-identical to `str::lines()` across every edge case: empty
+        // input, `\n`/`\r\n`/lone-`\r` terminators, blank lines, and presence/absence of a final
+        // newline. Any divergence would corrupt line numbers or content in every diagram parser.
+        let cases = [
+            "",
+            "\n",
+            "\r\n",
+            "\n\n",
+            "a",
+            "a\n",
+            "a\nb",
+            "a\nb\n",
+            "a\r\nb\r\n",
+            "a\r\nb",
+            "  x  \n\ty\t\n",
+            "flowchart TD\n  A-->B\n\n  B-->C",
+            "a\n\n\nb\n",
+            "unicode: café\nnext líne\n",
+            "trailing carriage\r",
+            "mixed\r\nunix\nend",
+        ];
+        for case in cases {
+            let expected: Vec<&str> = case.lines().collect();
+            let got: Vec<&str> = byte_lines(case).collect();
+            assert_eq!(got, expected, "byte_lines mismatch for {case:?}");
+        }
+    }
+
+    #[test]
+    fn operator_tables_are_longest_prefix_first() {
+        for (table_name, operators) in [
+            ("flow", FLOW_OPERATORS.as_slice()),
+            ("sequence", SEQUENCE_OPERATORS.as_slice()),
+            ("class", CLASS_OPERATORS.as_slice()),
+            ("packet", PACKET_OPERATORS.as_slice()),
+            ("er", ER_OPERATORS.as_slice()),
+        ] {
+            for (index, (earlier, _)) in operators.iter().enumerate() {
+                for (later, _) in &operators[index + 1..] {
+                    assert!(
+                        !later.starts_with(earlier),
+                        "{table_name} operator {later:?} must precede its prefix {earlier:?}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn detects_supported_headers() {
@@ -8430,6 +10453,92 @@ mod tests {
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "A"));
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "B"));
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "C"));
+        // A plain flowchart with no classDef/class directives attaches no classes to its nodes.
+        assert!(parsed.ir.nodes.iter().all(|node| node.classes.is_empty()));
+    }
+
+    #[test]
+    fn flowchart_fast_path_matches_fallback_for_simple_edges() {
+        for statement in [
+            "A-->B",
+            "A --> B",
+            "left_1 -.-> right.2",
+            "left_1 <-.-> right.2",
+            "svc/api ==> db-node",
+            "svc/api <==> db-node",
+            "A---B",
+            "A<-->B",
+            "A--oB",
+            "A--xB",
+        ] {
+            let fast = parse_fast_simple_flowchart_statement_ast(statement);
+            assert!(fast.is_some(), "fast path rejected {statement:?}");
+            let Some(fast) = fast else {
+                return;
+            };
+            let fallback = parse_edge_statement_asts(
+                statement,
+                &FLOW_OPERATORS,
+                FLOW_OP_GATE,
+                true,
+                &ParserConfig::default(),
+                0,
+            );
+            assert_eq!(
+                Some(vec![fast]),
+                fallback,
+                "fast path diverged from fallback edge parser for {statement:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn flowchart_fast_path_matches_chumsky_for_simple_nodes() {
+        for statement in [
+            "A",
+            "node_1[Node 1]",
+            "svc/api[Service API]",
+            "db-node[fa:database Storage]",
+            "stage.one[Stage One]",
+            "N0[\"Rate limit (429)\"]",
+            "N1[\"Retry & backoff\"]",
+            "N2[\"User's session\"]",
+            "N3[\"Parse <config>\"]",
+            "N4[\"Café latency\"]",
+            "N5[\"comma, braces {stay content}\"]",
+        ] {
+            let fast = parse_fast_simple_flowchart_statement_ast(statement);
+            assert!(fast.is_some(), "fast path rejected {statement:?}");
+            let Some(fast) = fast else {
+                return;
+            };
+            let (chumsky, errors) = flow_statement_parser()
+                .parse(statement)
+                .into_output_errors();
+            assert!(
+                errors.is_empty(),
+                "chumsky rejected {statement:?}: {errors:?}"
+            );
+            assert_eq!(Some(fast), chumsky, "fast path diverged for {statement:?}");
+        }
+    }
+
+    #[test]
+    fn flowchart_fast_path_rejects_complex_statements() {
+        for statement in [
+            "A-->B-->C",
+            "A & B --> C",
+            "A[Start] -->|go| B(End)",
+            "class A hot",
+            "click A callback \"tip\"",
+            "A:::hot",
+            "A[[Subroutine]]",
+        ] {
+            assert!(
+                parse_fast_simple_flowchart_statement_ast(statement).is_none(),
+                "fast path should reject complex statement {statement:?}"
+            );
+        }
     }
 
     #[test]
@@ -9058,7 +11167,7 @@ mod tests {
         );
         let node_a = parsed.ir.nodes.iter().find(|node| node.id == "A");
         if let Some(node_a) = node_a {
-            assert!(node_a.href.is_none());
+            assert!(node_a.href().is_none());
         }
     }
 
@@ -9071,7 +11180,7 @@ mod tests {
 
         assert!(node_a.is_some());
         let node_a = node_a.expect("node A should exist");
-        assert_eq!(node_a.href.as_deref(), Some("//example.com"));
+        assert_eq!(node_a.href(), Some("//example.com"));
         assert!(
             !parsed
                 .warnings
@@ -9089,7 +11198,7 @@ mod tests {
 
         assert!(node_a.is_some());
         let node_a = node_a.expect("node A should exist");
-        assert_eq!(node_a.href.as_deref(), Some("javascript:alert(1)"));
+        assert_eq!(node_a.href(), Some("javascript:alert(1)"));
         assert!(
             !parsed
                 .warnings
@@ -9116,15 +11225,15 @@ mod tests {
 
         assert!(node_b.is_some());
         let node_b = node_b.expect("node B should exist");
-        assert_eq!(node_b.callback.as_deref(), Some("focusNode"));
-        assert_eq!(node_b.tooltip.as_deref(), Some("Focus node"));
+        assert_eq!(node_b.callback(), Some("focusNode"));
+        assert_eq!(node_b.tooltip(), Some("Focus node"));
         assert!(
             node_b
                 .classes
                 .iter()
                 .any(|class_name| class_name == "has-callback")
         );
-        assert!(node_b.href.is_none());
+        assert!(node_b.href().is_none());
     }
 
     #[test]
@@ -9571,9 +11680,18 @@ mod tests {
         let parsed = parse_mermaid("block-beta\nsvc[Service] db[(Database)] cache:2");
         assert_eq!(parsed.ir.diagram_type, DiagramType::BlockBeta);
         assert_eq!(parsed.ir.nodes.len(), 3);
-        assert!(parsed.ir.nodes.iter().any(|node| node.id == "svc"));
+        let svc = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|node| node.id == "svc")
+            .unwrap();
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "db"));
         assert!(parsed.ir.nodes.iter().any(|node| node.id == "cache"));
+        assert_eq!(
+            svc.classes.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["block-beta"]
+        );
 
         let db = parsed.ir.nodes.iter().find(|node| node.id == "db").unwrap();
         assert_eq!(db.shape, NodeShape::Cylinder);
@@ -9583,11 +11701,9 @@ mod tests {
             .iter()
             .find(|node| node.id == "cache")
             .unwrap();
-        assert!(
-            cache
-                .classes
-                .iter()
-                .any(|class_name| class_name == "block-beta-span-2")
+        assert_eq!(
+            cache.classes.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["block-beta", "block-beta-span-2"]
         );
     }
 
@@ -9641,11 +11757,9 @@ mod tests {
         assert_eq!(parsed.ir.nodes.len(), 1);
         let space = &parsed.ir.nodes[0];
         assert!(space.id.starts_with("__space_"));
-        assert!(
-            space
-                .classes
-                .iter()
-                .any(|class_name| class_name == "block-beta-space")
+        assert_eq!(
+            space.classes.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["block-beta", "block-beta-space", "block-beta-span-2"]
         );
         assert_eq!(parsed.ir.meta.block_beta_columns, None);
         assert!(
@@ -9847,7 +11961,7 @@ mod tests {
             .iter()
             .find(|node| node.id == "Child")
             .unwrap();
-        assert_eq!(child.icon.as_deref(), Some("fa fa-book"));
+        assert_eq!(child.icon(), Some("fa fa-book"));
     }
 
     #[test]
@@ -9858,7 +11972,7 @@ mod tests {
             .label
             .and_then(|label_id| parsed.ir.labels.get(label_id.0))
             .map(|label| label.text.as_str());
-        assert_eq!(node.icon.as_deref(), Some("fa:server"));
+        assert_eq!(node.icon(), Some("fa:server"));
         assert_eq!(label, Some("API"));
     }
 
@@ -9870,8 +11984,20 @@ mod tests {
             .label
             .and_then(|label_id| parsed.ir.labels.get(label_id.0))
             .map(|label| label.text.as_str());
-        assert_eq!(node.icon.as_deref(), Some("🚀"));
+        assert_eq!(node.icon(), Some("🚀"));
         assert_eq!(label, Some("Deploy"));
+    }
+
+    #[test]
+    fn flowchart_preserves_non_ascii_letter_prefix_in_label() {
+        let parsed = parse_mermaid("flowchart LR\nA[Überprüfung]");
+        let node = parsed.ir.nodes.iter().find(|node| node.id == "A").unwrap();
+        let label = node
+            .label
+            .and_then(|label_id| parsed.ir.labels.get(label_id.0))
+            .map(|label| label.text.as_str());
+        assert_eq!(node.icon(), None);
+        assert_eq!(label, Some("Überprüfung"));
     }
 
     #[test]
@@ -10519,7 +12645,7 @@ fan_in:B --> T:db",
                 .iter()
                 .any(|class_name| class_name == "architecture-icon-server")
         );
-        assert_eq!(api.icon.as_deref(), Some("server"));
+        assert_eq!(api.icon(), Some("server"));
 
         let junction = parsed
             .ir
@@ -12366,8 +14492,8 @@ Rel_Back(db, app, "Responds")"#,
             "flowchart LR\n  A[Node]\n  click A \"https://example.com\" \"My Tooltip\"",
         );
         let node = parsed.ir.nodes.iter().find(|n| n.id == "A").unwrap();
-        assert_eq!(node.href.as_deref(), Some("https://example.com"));
-        assert_eq!(node.tooltip.as_deref(), Some("My Tooltip"));
+        assert_eq!(node.href(), Some("https://example.com"));
+        assert_eq!(node.tooltip(), Some("My Tooltip"));
     }
 
     // ── linkStyle default tests ────────────────────────────────────────
@@ -12412,7 +14538,7 @@ Rel_Back(db, app, "Responds")"#,
         assert!(!parsed.ir.edges.is_empty(), "should have edges");
         let edge = &parsed.ir.edges[0];
         assert!(
-            edge.er_notation.is_some(),
+            edge.er_notation().is_some(),
             "er_notation should be set on ER edges"
         );
     }
@@ -12690,8 +14816,8 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid("classDiagram\n  Dog \"1\" --> \"*\" Cat : chases");
         assert!(!parsed.ir.edges.is_empty(), "should have edges");
         let edge = &parsed.ir.edges[0];
-        assert_eq!(edge.source_cardinality.as_deref(), Some("1"));
-        assert_eq!(edge.target_cardinality.as_deref(), Some("*"));
+        assert_eq!(edge.source_cardinality(), Some("1"));
+        assert_eq!(edge.target_cardinality(), Some("*"));
     }
 
     #[test]
@@ -12699,8 +14825,8 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid("classDiagram\n  Vehicle \"1\" *-- \"0..*\" Wheel");
         assert!(!parsed.ir.edges.is_empty(), "should have edges");
         let edge = &parsed.ir.edges[0];
-        assert_eq!(edge.source_cardinality.as_deref(), Some("1"));
-        assert_eq!(edge.target_cardinality.as_deref(), Some("0..*"));
+        assert_eq!(edge.source_cardinality(), Some("1"));
+        assert_eq!(edge.target_cardinality(), Some("0..*"));
     }
 
     #[test]
@@ -12708,8 +14834,8 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid("classDiagram\n  Dog --> Cat");
         assert!(!parsed.ir.edges.is_empty());
         let edge = &parsed.ir.edges[0];
-        assert!(edge.source_cardinality.is_none());
-        assert!(edge.target_cardinality.is_none());
+        assert!(edge.source_cardinality().is_none());
+        assert!(edge.target_cardinality().is_none());
     }
 
     #[test]
@@ -12717,8 +14843,8 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid("classDiagram\n  Student \"1\" --> \"*\" Course : enrolls");
         assert!(!parsed.ir.edges.is_empty(), "should have an edge");
         let edge = &parsed.ir.edges[0];
-        assert_eq!(edge.source_cardinality.as_deref(), Some("1"));
-        assert_eq!(edge.target_cardinality.as_deref(), Some("*"));
+        assert_eq!(edge.source_cardinality(), Some("1"));
+        assert_eq!(edge.target_cardinality(), Some("*"));
     }
 
     #[test]
@@ -12776,8 +14902,8 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid("stateDiagram-v2\n  Active --> Done : complete");
         assert!(!parsed.ir.edges.is_empty());
         let edge = &parsed.ir.edges[0];
-        assert!(edge.guard.is_none());
-        assert!(edge.action.is_none());
+        assert!(edge.guard().is_none());
+        assert!(edge.action().is_none());
     }
 
     #[test]
@@ -12804,6 +14930,22 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(label.as_deref(), Some("complete"));
         assert!(guard.is_none());
         assert_eq!(action.as_deref(), Some("cleanup()"));
+    }
+
+    #[test]
+    fn extract_action_prefers_later_spaced_delimiter() {
+        let (label, guard, action) = super::extract_state_guard_action(Some("go/a / b"));
+        assert_eq!(label.as_deref(), Some("go/a"));
+        assert!(guard.is_none());
+        assert_eq!(action.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn extract_empty_bare_action_preserves_label() {
+        let (label, guard, action) = super::extract_state_guard_action(Some("complete/"));
+        assert_eq!(label.as_deref(), Some("complete/"));
+        assert!(guard.is_none());
+        assert!(action.is_none());
     }
 
     #[test]
@@ -13157,6 +15299,22 @@ Rel_Back(db, app, "Responds")"#,
             node.classes.iter().any(|c| c == "packet-bits-32"),
             "should have packet-bits-32 class"
         );
+    }
+
+    #[test]
+    fn packet_beta_preserves_field_class_order() {
+        let parsed =
+            parse_mermaid("packet-beta\n  0-7: \"Byte\"\n  8-23: \"Wide\"\n  24: \"Single Bit\"");
+
+        assert_eq!(
+            parsed.ir.nodes[0].classes,
+            ["packet-field", "packet-bits-8"]
+        );
+        assert_eq!(
+            parsed.ir.nodes[1].classes,
+            ["packet-field", "packet-bits-16", "packet-field-wide"]
+        );
+        assert_eq!(parsed.ir.nodes[2].classes, ["packet-field"]);
     }
 
     #[test]

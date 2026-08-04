@@ -1,0 +1,51 @@
+{
+  "schema": "frankenmermaid.headtohead.v1",
+  "env": {
+    "captured_at": "2026-07-22T21:11:15.503Z",
+    "git_rev": "988f8f32fe83695614e0954032516b7f579062a0",
+    "git_dirty": true,
+    "rustc": "rustc 1.99.0-nightly (0e29c21d9 2026-07-21)",
+    "cargo_profile": "release (opt-level=3 for fm-core/parser/layout/render-svg, lto=fat, codegen-units=1)",
+    "rustflags": "-C target-cpu=x86-64-v2 (.cargo/config.toml)",
+    "node": "v24.14.0",
+    "chromium": "Chromium 150.0.7871.114 snap",
+    "kernel": "6.17.0-35-generic",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "cpu_count": 64,
+    "total_mem_gb": 215.8,
+    "loadavg_1m": 8.74,
+    "load_warning": null,
+    "pinned_cpu": {
+      "cpu": 45,
+      "busy_pct": null
+    }
+  },
+  "pins": {
+    "mermaid": "11.15.0",
+    "bundle_url": "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js",
+    "security_level": "strict"
+  },
+  "corpus_items": 1,
+  "ok_items": 0,
+  "mad_gate_pct": 5,
+  "mad_gate_failures": [],
+  "speedup": null,
+  "speedup_min_estimator": null,
+  "rows": [
+    {
+      "id": "flowchart_large_500",
+      "nodes": 500,
+      "edges": 499,
+      "revisions": 1,
+      "fm_p50_ns": 336282,
+      "fm_min_ns": 332529,
+      "fm_cv_pct": 8.55,
+      "fm_mad_pct": 0.89,
+      "fm_bytes": 343946,
+      "fm_bytes_lean": 232778,
+      "fm_lean_p50_ns": 312405,
+      "lean_slowdown": 0.9289970917265866,
+      "status": "fm_only"
+    }
+  ]
+}

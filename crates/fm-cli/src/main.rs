@@ -16,10 +16,21 @@
 //! - `watch`: Re-render on file change (requires `watch` feature)
 //! - `serve`: Start local HTTP server with live-reload playground (requires `serve` feature)
 
+// mimalloc as the global allocator on native builds. The pipeline is allocation-heavy
+// (parse interning, per-edge layout point vecs, the render output buffer); a full-pipeline
+// profile put glibc malloc/free/consolidate at ~9% of the wide render, and swapping to
+// mimalloc measured a deterministic ~9-10% pipeline instruction/time reduction with
+// byte-identical output. Declaring a `#[global_allocator]` static is safe (no `unsafe`),
+// so it coexists with `#![forbid(unsafe_code)]`. Native only; wasm keeps its own allocator.
+#[cfg(not(target_arch = "wasm32"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[cfg(feature = "png")]
 use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -37,8 +48,9 @@ use crossterm::{execute, queue};
 use fm_core::{
     DiagramType, MermaidBudgetLedger, MermaidDiagramIr, MermaidGlyphMode,
     MermaidLayoutDecisionExplanation, MermaidLayoutDecisionLedger, MermaidLinkMode,
-    MermaidNativePressureSignals, MermaidParseMode, MermaidTier, StructuredDiagnostic,
-    capability_matrix, capability_matrix_json_pretty, mermaid_layout_guard_observability,
+    MermaidNativePressureSignals, MermaidParseMode, MermaidPressureReport, MermaidTier,
+    StructuredDiagnostic, capability_matrix, capability_matrix_json_pretty,
+    mermaid_layout_guard_observability,
 };
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 use fm_layout::fnx_diagnostics::{FnxAnalysisResults, FnxDiagnosticSeverity, analyze_structure};
@@ -48,11 +60,13 @@ use fm_layout::{
     layout_diagram_traced_with_config_and_guardrails, layout_source_map,
 };
 use fm_parser::{
-    ParserConfig, detect_type_with_confidence_and_config, first_significant_line,
+    FlowchartBatchParsePlan, FlowchartBatchParseRef, FlowchartBatchParseScratch, ParserConfig,
+    capture_format_complement, detect_type_with_confidence_and_config, first_significant_line,
     parse_evidence_json, parse_with_mode, parse_with_mode_and_config,
 };
 use fm_render_svg::{
-    A11yConfig, SvgRenderConfig, ThemePreset, describe_diagram_with_layout, render_svg_with_layout,
+    A11yConfig, CertifiedSvgBatchPrefix, SvgBatchRenderer, SvgBatchRendererSeed, SvgRenderConfig,
+    ThemePreset, describe_diagram_with_layout, render_svg_with_layout,
 };
 use fm_render_term::{
     TermRenderConfig, diff_diagrams, render_diff_plain, render_diff_summary,
@@ -63,6 +77,8 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 const DEFAULT_MAX_INPUT_BYTES: usize = 5_000_000;
+const MAX_RESIDENT_EXACT_JOB_GROUP_JOBS: usize = 1_000_000;
+const RESIDENT_EXACT_JOB_GROUP_REPEAT_MASK: u64 = 1 << 63;
 
 fn parse_positive_font_size_arg(value: &str) -> std::result::Result<f32, String> {
     let parsed = value
@@ -174,6 +190,189 @@ enum Command {
         /// Optional JSON artifact path mapping rendered SVG element IDs back to input spans.
         #[arg(long)]
         source_map_out: Option<String>,
+
+        /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
+        #[arg(long, value_enum, default_value = "auto")]
+        fnx_mode: FnxModeArg,
+
+        /// FNX graph projection strategy for analysis algorithms.
+        #[arg(long, value_enum, default_value = "undirected")]
+        fnx_projection: FnxProjectionArg,
+
+        /// FNX fallback behavior when analysis exceeds budget or fails.
+        #[arg(long, value_enum, default_value = "graceful")]
+        fnx_fallback: FnxFallbackArg,
+    },
+
+    /// Render many diagrams concurrently as ONE job.
+    ///
+    /// This is the capability mermaid-js structurally cannot match: it renders on a single
+    /// JavaScript main thread, so a documentation site or CI batch is serialized no matter how
+    /// many cores the machine has. Here every input is an independent pipeline, so the whole
+    /// batch scales across physical cores. Per-diagram output is byte-identical to `render`;
+    /// the only difference is that the configuration is resolved once for the batch instead of
+    /// once per process, and the diagrams run concurrently.
+    RenderBatch {
+        /// Input file paths. Every path is rendered; "-" (stdin) is not accepted here.
+        #[arg(required = true, num_args = 1..)]
+        inputs: Vec<String>,
+
+        /// Directory for rendered output. Created if missing. Each input `<stem>` becomes
+        /// `<out-dir>/<stem>.<ext>`, so input basenames must be unique.
+        #[arg(long)]
+        out_dir: String,
+
+        /// Worker threads for the batch. Defaults to available parallelism.
+        /// `1` runs the batch serially through the identical code path.
+        #[arg(long)]
+        jobs: Option<usize>,
+
+        /// Parser support contract mode.
+        #[arg(long, value_enum)]
+        parse_mode: Option<ParseModeArg>,
+
+        /// Requested layout algorithm family.
+        #[arg(long, value_enum)]
+        layout_algorithm: Option<LayoutAlgorithmArg>,
+
+        /// Output format. PNG is rejected: rasterization is not batch-safe here.
+        #[arg(short, long, value_enum)]
+        format: Option<OutputFormat>,
+
+        /// Theme name (default, dark, forest, neutral)
+        #[arg(short, long)]
+        theme: Option<String>,
+
+        /// Font size in pixels.
+        #[arg(long, value_parser = parse_positive_font_size_arg)]
+        font_size: Option<f32>,
+
+        /// Emit one JSON summary line per input to stdout (path, bytes, status).
+        #[arg(long)]
+        json: bool,
+
+        /// Continue after a failing input instead of stopping at the first error.
+        /// Failures are always reported and always set a non-zero exit status.
+        #[arg(long)]
+        keep_going: bool,
+
+        /// Disable the persistent unchanged-output cache for this batch.
+        #[arg(long)]
+        no_cache: bool,
+
+        /// Assert that `--changed-input` names the complete set of source or output paths changed
+        /// since the preceding successful batch. Unlisted entries may bypass per-file metadata.
+        #[arg(long, conflicts_with = "no_cache")]
+        trust_change_set: bool,
+
+        /// Input whose source or materialized output changed since the preceding successful batch.
+        /// Repeat for every change; requires `--trust-change-set`.
+        #[arg(long, value_name = "PATH", requires = "trust_change_set")]
+        changed_input: Vec<String>,
+
+        /// Read complete change sets as newline-delimited JSON arrays from stdin and render one
+        /// epoch per line without restarting this process. Requires `--trust-change-set`.
+        #[arg(
+            long,
+            conflicts_with_all = ["no_cache", "changed_input"],
+            requires = "trust_change_set"
+        )]
+        change_set_stdin: bool,
+
+        /// Read one JSON object mapping batch input paths to their final UTF-8 source bodies,
+        /// apply those source updates once, and render the coalesced final state as one job.
+        #[arg(
+            long,
+            conflicts_with_all = [
+                "no_cache",
+                "changed_input",
+                "change_set_stdin",
+                "final_state_stream"
+            ],
+            requires = "trust_change_set"
+        )]
+        final_state_stdin: bool,
+
+        /// Read newline-delimited final-state JSON objects and render one complete observable
+        /// transaction per line without restarting this process. When final source, output, and
+        /// acknowledgment materialization are all deferred to EOF, overwritten revisions are
+        /// validated and coalesced so only the completed state is rendered.
+        #[arg(
+            long,
+            conflicts_with_all = [
+                "no_cache",
+                "changed_input",
+                "change_set_stdin",
+                "final_state_stdin"
+            ],
+            requires = "trust_change_set"
+        )]
+        final_state_stream: bool,
+
+        /// Hold each diagram's newest rendered bytes in memory and materialize only the final
+        /// output tree when the change-set or final-state stream reaches EOF. This deletes
+        /// transient writes for build systems that consume only the completed revision.
+        #[arg(long)]
+        final_output_only: bool,
+
+        /// Hold each updated source body in memory and materialize only the final source files
+        /// when a final-state stream reaches EOF. Transaction acknowledgments then certify the
+        /// in-memory render state; callers that observe source files between ACKs must omit this.
+        #[arg(long)]
+        final_source_only: bool,
+
+        /// Emit one aggregate acknowledgment after the final-state stream reaches EOF instead of
+        /// flushing one acknowledgment per transaction. Callers that need only the completed job
+        /// can pipeline every revision without a synchronous process round trip per input line.
+        #[arg(long)]
+        final_ack_only: bool,
+
+        /// Assert that every non-empty final-state stream record is a complete snapshot containing
+        /// every batch input. With all three final-only flags, superseded records remain
+        /// length/UTF-8 framed but only the newest snapshot is JSON-decoded and rendered. Resident
+        /// exact jobs acknowledge every certified packed record independently unless
+        /// `--final-ack-only` is also selected.
+        #[arg(long)]
+        complete_snapshot_stream: bool,
+
+        /// Read complete snapshots as bounded positional binary records instead of JSON. Each
+        /// record is a little-endian u64 payload length followed by one little-endian u64 source
+        /// length and UTF-8 source body per batch input, in command-line order.
+        #[arg(long, requires = "complete_snapshot_stream")]
+        packed_complete_snapshot_stream: bool,
+
+        /// Read one caller-coalesced terminal packed snapshot directly to EOF, without an outer
+        /// record-length header. Requires `--packed-complete-snapshot-stream`; superseded states
+        /// must already have been discarded because only the completed job is observable.
+        #[arg(long, requires = "packed_complete_snapshot_stream")]
+        terminal_packed_snapshot: bool,
+
+        /// Replay a sequence of independently observable exact jobs in one resident process.
+        /// Each bounded packed record must match the admitted durable batch certificate and is
+        /// acknowledged immediately; a changed record fails closed without touching outputs.
+        #[arg(
+            long,
+            requires = "packed_complete_snapshot_stream",
+            conflicts_with = "terminal_packed_snapshot"
+        )]
+        resident_exact_jobs: bool,
+
+        /// Keep the resident exact-job process alive across complete caller-observable jobs.
+        /// Each group starts with a little-endian u64 job count, contains that many ordinary
+        /// packed records, and receives one aggregate acknowledgment before the next group. If
+        /// the count's high bit is set, the remaining count repeats the already admitted exact
+        /// payload without retransmitting records.
+        #[arg(
+            long,
+            requires_all = ["resident_exact_jobs", "final_ack_only"]
+        )]
+        resident_exact_job_groups: bool,
+
+        /// Acknowledge each resident exact-job group with only its completed little-endian u64
+        /// group ordinal. This removes JSON construction, serialization, and newline framing from
+        /// latency-sensitive callers that already know the submitted group metadata.
+        #[arg(long, requires = "resident_exact_job_groups")]
+        resident_exact_ack64: bool,
 
         /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
         #[arg(long, value_enum, default_value = "auto")]
@@ -711,6 +910,66 @@ struct FnxWitness {
     results_hash: String,
 }
 
+/// Worker count for `render-batch` when `--jobs` is not given: **physical** cores, not logical.
+///
+/// `available_parallelism()` reports logical CPUs, so on an SMT machine the default asked for two
+/// workers per physical core. Batch workers are compute-bound and cache-resident -- each one is
+/// parsing, laying out and rendering a whole diagram -- so a pair of SMT siblings shares one core's
+/// L1/L2 and execution units without adding execution resources, and the extra thread costs
+/// scheduling, allocator arenas and cache pressure. Measured on a Threadripper PRO 5975WX
+/// (32 physical / 64 logical), interleaved rounds, whole-job wall clock:
+///
+/// | job | `--jobs 32` | `--jobs 64` | 64 vs 32 |
+/// |---|---:|---:|---|
+/// | `docs_site_200` (200 docs) | 5.20 ms | 6.86 ms | **+34%** (median of 11 rounds; all 11 slower) |
+/// | `ci_docs_2000` (2000 docs) | 26.9 ms | 28.9 ms | **+7%** (median of 7 rounds) |
+///
+/// The whole scaling curve peaks exactly at the physical core count: on `ci_docs_2000` the speedup
+/// over one worker is 6.9x at 8, 12.4x at 16, **17.5x at 32**, then falls back to 14.6x at 64.
+/// Output is byte-identical at every width (verified 1/8/16/32/64 over five corpus jobs), so this
+/// only changes how long the same bytes take to produce.
+///
+/// An explicit `--jobs` is still honoured exactly as given, including values above the physical
+/// core count -- this changes the default only.
+fn default_batch_workers() -> usize {
+    let logical = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    physical_core_count().map_or(logical, |physical| physical.clamp(1, logical))
+}
+
+/// Physical core count from Linux sysfs topology, or `None` when it cannot be determined.
+///
+/// Every logical CPU publishes the sibling set it shares a physical core with, so the number of
+/// distinct sibling sets is the number of physical cores. Read rather than computed from a crate:
+/// this is one directory walk at startup, once per batch. Any unreadable or unexpected topology
+/// yields `None` and the caller keeps the previous `available_parallelism()` behaviour, which is
+/// also what non-Linux targets get.
+fn physical_core_count() -> Option<usize> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let mut sibling_sets = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir("/sys/devices/system/cpu").ok()? {
+        let path = entry.ok()?.path();
+        let is_cpu_dir = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.starts_with("cpu") && name[3..].bytes().all(|b| b.is_ascii_digit())
+            });
+        if !is_cpu_dir {
+            continue;
+        }
+        // `thread_siblings_list` is identical for every sibling of one core, so it doubles as the
+        // core's identity without needing to parse the CPU numbers out of it.
+        let Ok(siblings) = std::fs::read_to_string(path.join("topology/thread_siblings_list"))
+        else {
+            continue;
+        };
+        sibling_sets.insert(siblings.trim().to_string());
+    }
+    (!sibling_sets.is_empty()).then_some(sibling_sets.len())
+}
+
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
 fn fnx_results_hash(parts: &[&str]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -727,6 +986,1723 @@ fn fnx_results_hash(parts: &[&str]) -> String {
 struct RenderOutcome {
     rendered: Vec<u8>,
     render_result: Option<RenderResult>,
+}
+
+const BATCH_RENDER_CACHE_VERSION: u32 = 1;
+const BATCH_RENDER_CACHE_FILE: &str = ".frankenmermaid-batch-cache-v1.json";
+
+#[derive(Debug)]
+struct BatchCachePolicy<'a> {
+    use_cache: bool,
+    trust_change_set: bool,
+    changed_inputs: &'a [String],
+    source_overrides: Option<&'a std::collections::BTreeMap<String, String>>,
+    session: Option<&'a mut BatchRenderCacheSession>,
+    plan: Option<&'a BatchRenderPlan>,
+    report: Option<BatchReportCarry<'a>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BatchReportCarry<'a> {
+    plan_key: &'a str,
+    logical_input_count: usize,
+    inherited_diagrams: usize,
+    inherited_cache_hits: usize,
+    inherited_total_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BatchRenderCacheEntry {
+    key: String,
+    #[serde(default)]
+    source_digest: String,
+    #[serde(default)]
+    options_key: String,
+    #[serde(default)]
+    source_bytes: u64,
+    #[serde(default)]
+    source_modified_ns: String,
+    bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BatchRenderCacheManifest {
+    version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    clean_batch: Option<TrustedBatchSummary>,
+    entries: std::collections::BTreeMap<String, BatchRenderCacheEntry>,
+}
+
+impl Default for BatchRenderCacheManifest {
+    fn default() -> Self {
+        Self {
+            version: BATCH_RENDER_CACHE_VERSION,
+            clean_batch: None,
+            entries: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BatchRenderPlan {
+    input_set: std::collections::BTreeSet<String>,
+    input_indices: std::collections::BTreeMap<String, usize>,
+    destinations: Vec<PathBuf>,
+    destination_names: Vec<String>,
+    destination_displays: Vec<String>,
+    requested_workers: usize,
+    cache_path: PathBuf,
+    option_cache_digest: Option<String>,
+    cache_active: bool,
+    key: String,
+}
+
+impl BatchRenderPlan {
+    fn new(
+        inputs: &[String],
+        out_dir: &str,
+        jobs: Option<usize>,
+        use_cache: bool,
+        options: &RenderCommandOptions<'_>,
+    ) -> Result<Self> {
+        if options.format == OutputFormat::Png {
+            anyhow::bail!(
+                "render-batch does not support --format png; rasterization is not batch-safe here"
+            );
+        }
+        if let Some(bad) = inputs.iter().find(|input| input.as_str() == "-") {
+            anyhow::bail!(
+                "render-batch reads files, not stdin; got {bad:?}. Pass explicit paths instead."
+            );
+        }
+
+        let requested_workers = jobs.unwrap_or_else(default_batch_workers);
+        if requested_workers == 0 {
+            anyhow::bail!("--jobs must be at least 1");
+        }
+
+        std::fs::create_dir_all(out_dir)
+            .with_context(|| format!("cannot create output directory {out_dir}"))?;
+        report_executing_elf_sha256_once()?;
+
+        let extension = batch_output_extension(options.format);
+        let out_root = Path::new(out_dir);
+        let mut destinations = Vec::with_capacity(inputs.len());
+        let mut destination_names = Vec::with_capacity(inputs.len());
+        let mut destination_displays = Vec::with_capacity(inputs.len());
+        let mut stems: std::collections::BTreeMap<String, &str> = std::collections::BTreeMap::new();
+        for input in inputs {
+            let stem = Path::new(input)
+                .file_stem()
+                .map(|value| value.to_string_lossy().into_owned())
+                .ok_or_else(|| anyhow::anyhow!("input {input:?} has no file name"))?;
+            if let Some(previous) = stems.insert(stem.clone(), input.as_str()) {
+                anyhow::bail!(
+                    "inputs {previous:?} and {input:?} share basename {stem:?}; \
+                     batch output would be order-dependent"
+                );
+            }
+            let destination_name = format!("{stem}.{extension}");
+            let destination = out_root.join(&destination_name);
+            destination_names.push(destination_name);
+            destination_displays.push(destination.display().to_string());
+            destinations.push(destination);
+        }
+
+        let cache_path = out_root.join(BATCH_RENDER_CACHE_FILE);
+        let executable_identity = use_cache
+            .then(|| {
+                let executable = std::env::current_exe().ok()?;
+                let metadata = executable.metadata().ok()?;
+                let modified = metadata
+                    .modified()
+                    .ok()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?;
+                Some(format!(
+                    "{}:{}:{}",
+                    env!("CARGO_PKG_VERSION"),
+                    metadata.len(),
+                    modified.as_nanos()
+                ))
+            })
+            .flatten();
+        let cache_active = use_cache && executable_identity.is_some();
+        let option_cache_digest = executable_identity
+            .as_ref()
+            .map(|identity| sha256_hex(format!("{identity}\0{options:?}").as_bytes()));
+        let key = sha256_hex(&serde_json::to_vec(&(
+            inputs,
+            out_dir,
+            &option_cache_digest,
+        ))?);
+
+        Ok(Self {
+            input_set: inputs.iter().cloned().collect(),
+            input_indices: inputs
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, input)| (input, index))
+                .collect(),
+            destinations,
+            destination_names,
+            destination_displays,
+            requested_workers,
+            cache_path,
+            option_cache_digest,
+            cache_active,
+            key,
+        })
+    }
+
+    fn project(&self, inputs: &[String]) -> Result<Self> {
+        let mut destinations = Vec::with_capacity(inputs.len());
+        let mut destination_names = Vec::with_capacity(inputs.len());
+        let mut destination_displays = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let index =
+                self.input_indices.get(input).copied().ok_or_else(|| {
+                    anyhow::anyhow!("cannot project unknown batch input {input:?}")
+                })?;
+            destinations.push(self.destinations[index].clone());
+            destination_names.push(self.destination_names[index].clone());
+            destination_displays.push(self.destination_displays[index].clone());
+        }
+
+        Ok(Self {
+            input_set: inputs.iter().cloned().collect(),
+            input_indices: inputs
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(index, input)| (input, index))
+                .collect(),
+            destinations,
+            destination_names,
+            destination_displays,
+            requested_workers: self.requested_workers,
+            cache_path: self.cache_path.clone(),
+            option_cache_digest: self.option_cache_digest.clone(),
+            cache_active: self.cache_active,
+            key: self.key.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TrustedBatchSummary {
+    plan_key: String,
+    input_count: usize,
+    total_bytes: usize,
+}
+
+// Persistent editors commonly revisit several diagrams while undoing or switching branches. Keep
+// exact rendered revisions across that working set, but enforce both cardinality and byte ceilings
+// so a pathological SVG cannot turn the process-local acceleration into unbounded retention.
+const REVISION_OUTPUT_CACHE_MAX_ENTRIES: usize = 256;
+const REVISION_OUTPUT_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+const REVISION_OUTPUT_CACHE_CONTROL_ENTRIES: usize = 2;
+
+#[derive(Debug)]
+struct BatchRevisionOutput {
+    bytes: Arc<Vec<u8>>,
+    last_used: u64,
+}
+
+struct BatchRenderWorkerPool {
+    threads: usize,
+    pool: rayon::ThreadPool,
+}
+
+impl std::fmt::Debug for BatchRenderWorkerPool {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BatchRenderWorkerPool")
+            .field("threads", &self.threads)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BatchRenderWorkerPool {
+    fn new(threads: usize) -> Result<Self> {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .map_err(|error| {
+                anyhow::anyhow!("cannot build {threads}-thread render pool: {error}")
+            })?;
+        Ok(Self { threads, pool })
+    }
+}
+
+#[derive(Debug, Default)]
+struct BatchRenderCacheSession {
+    manifest: Option<BatchRenderCacheManifest>,
+    manifest_modified: Option<std::time::SystemTime>,
+    dirty: bool,
+    trusted_batch: Option<TrustedBatchSummary>,
+    certified_sources: std::collections::BTreeMap<String, BatchRenderCacheEntry>,
+    elide_certified_source_writes: bool,
+    reuse_certified_complete_transaction: bool,
+    pressure: OnceLock<Arc<MermaidPressureReport>>,
+    reuse_pressure: bool,
+    revision_outputs: std::collections::HashMap<String, BatchRevisionOutput>,
+    revision_output_bytes: usize,
+    revision_output_clock: u64,
+    revision_output_max_entries: usize,
+    revision_output_max_bytes: usize,
+    reuse_revision_outputs: bool,
+    reuse_complete_revision_transactions: bool,
+    reuse_worker_pool: bool,
+    worker_pool: std::sync::Mutex<Option<Arc<BatchRenderWorkerPool>>>,
+    defer_output_writes: bool,
+    deferred_outputs: std::collections::BTreeMap<PathBuf, Arc<Vec<u8>>>,
+}
+
+impl BatchRenderCacheSession {
+    fn begin_stream(
+        &mut self,
+        cache_path: &Path,
+        plan: Option<&BatchRenderPlan>,
+        admit_clean_batch: bool,
+    ) -> Result<()> {
+        self.reuse_pressure = std::env::var_os("FM_DISABLE_SESSION_PRESSURE_SNAPSHOT").is_none();
+        self.reuse_revision_outputs =
+            std::env::var_os("FM_DISABLE_SESSION_REVISION_CACHE").is_none();
+        self.reuse_complete_revision_transactions =
+            std::env::var_os("FM_DISABLE_RESIDENT_TRANSACTION_REPLAY").is_none();
+        self.reuse_worker_pool = std::env::var_os("FM_DISABLE_SESSION_WORKER_POOL").is_none();
+        self.revision_output_max_entries =
+            if std::env::var_os("FM_SESSION_REVISION_CACHE_TWO_ENTRY_CONTROL").is_some() {
+                REVISION_OUTPUT_CACHE_CONTROL_ENTRIES
+            } else {
+                REVISION_OUTPUT_CACHE_MAX_ENTRIES
+            };
+        self.revision_output_max_bytes =
+            if self.revision_output_max_entries == REVISION_OUTPUT_CACHE_CONTROL_ENTRIES {
+                usize::MAX
+            } else {
+                REVISION_OUTPUT_CACHE_MAX_BYTES
+            };
+        let (mut manifest, mut modified) = load_batch_render_cache(cache_path);
+        self.trusted_batch = admit_clean_batch
+            .then(|| plan.and_then(|plan| trusted_batch_from_manifest(&manifest, plan)))
+            .flatten();
+        self.certified_sources.clear();
+        if self.trusted_batch.is_some()
+            && let Some(plan) = plan
+        {
+            for (input, &index) in &plan.input_indices {
+                let Some(entry) = manifest.entries.get(&plan.destination_names[index]) else {
+                    self.certified_sources.clear();
+                    break;
+                };
+                self.certified_sources.insert(input.clone(), entry.clone());
+            }
+        }
+
+        // A clean certificate is a transaction commit record. Remove it before this process can
+        // touch any output, while retaining the admitted summary in memory. If the process dies,
+        // the next process repairs in full; graceful EOF writes a fresh certificate in `flush`.
+        if manifest.clean_batch.take().is_some() {
+            let encoded = serde_json::to_vec(&manifest)?;
+            std::fs::write(cache_path, encoded)
+                .with_context(|| format!("cannot invalidate {}", cache_path.display()))?;
+            modified = cache_path
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok();
+        }
+        self.manifest = Some(manifest);
+        self.manifest_modified = modified;
+        Ok(())
+    }
+
+    fn worker_pool(&self, threads: usize) -> Result<Arc<BatchRenderWorkerPool>> {
+        let mut worker_pool = self
+            .worker_pool
+            .lock()
+            .map_err(|_| anyhow::anyhow!("resident render worker pool is poisoned"))?;
+        if let Some(pool) = worker_pool.as_ref().filter(|pool| pool.threads == threads) {
+            return Ok(Arc::clone(pool));
+        }
+        let pool = Arc::new(BatchRenderWorkerPool::new(threads)?);
+        *worker_pool = Some(Arc::clone(&pool));
+        Ok(pool)
+    }
+
+    fn pressure_report(&self) -> Arc<MermaidPressureReport> {
+        if !self.reuse_pressure {
+            return Arc::new(MermaidNativePressureSignals::sample().into_report());
+        }
+        Arc::clone(
+            self.pressure
+                .get_or_init(|| Arc::new(MermaidNativePressureSignals::sample().into_report())),
+        )
+    }
+
+    fn revision_output(&mut self, key: &str) -> Option<Arc<Vec<u8>>> {
+        if !self.reuse_revision_outputs {
+            return None;
+        }
+        if !self.revision_outputs.contains_key(key) {
+            return None;
+        }
+        self.revision_output_clock = self.revision_output_clock.saturating_add(1);
+        let entry = self.revision_outputs.get_mut(key)?;
+        entry.last_used = self.revision_output_clock;
+        Some(Arc::clone(&entry.bytes))
+    }
+
+    fn remember_revision_output(&mut self, key: String, bytes: Arc<Vec<u8>>) {
+        if !self.reuse_revision_outputs
+            || self.revision_output_max_entries == 0
+            || bytes.len() > self.revision_output_max_bytes
+        {
+            return;
+        }
+        if let Some(previous) = self.revision_outputs.remove(&key) {
+            self.revision_output_bytes = self
+                .revision_output_bytes
+                .saturating_sub(previous.bytes.len());
+        }
+        self.revision_output_clock = self.revision_output_clock.saturating_add(1);
+        self.revision_output_bytes = self.revision_output_bytes.saturating_add(bytes.len());
+        self.revision_outputs.insert(
+            key,
+            BatchRevisionOutput {
+                bytes,
+                last_used: self.revision_output_clock,
+            },
+        );
+        while self.revision_outputs.len() > self.revision_output_max_entries
+            || self.revision_output_bytes > self.revision_output_max_bytes
+        {
+            let Some(oldest_key) = self
+                .revision_outputs
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(oldest) = self.revision_outputs.remove(&oldest_key) {
+                self.revision_output_bytes = self
+                    .revision_output_bytes
+                    .saturating_sub(oldest.bytes.len());
+            }
+        }
+    }
+
+    fn replay_certified_complete_transaction<'a>(
+        &self,
+        plan: &BatchRenderPlan,
+        mut source_digests: impl ExactSizeIterator<Item = (&'a str, &'a str)>,
+        defer_source_writes: bool,
+    ) -> Option<usize> {
+        if !self.reuse_complete_revision_transactions
+            || !self.reuse_certified_complete_transaction
+            || !defer_source_writes
+            || source_digests.len() != plan.input_indices.len()
+            || self.certified_sources.len() != plan.input_indices.len()
+            || !self.deferred_outputs.is_empty()
+        {
+            return None;
+        }
+        let summary = self.trusted_batch.as_ref().filter(|summary| {
+            summary.plan_key == plan.key && summary.input_count == plan.input_indices.len()
+        })?;
+        let options_key = plan.option_cache_digest.as_ref()?;
+        let manifest = self.manifest.as_ref()?;
+        source_digests
+            .all(|(input, source_digest)| {
+                let Some(index) = plan.input_indices.get(input).copied() else {
+                    return false;
+                };
+                let Some(certificate) = self.certified_sources.get(input) else {
+                    return false;
+                };
+                certificate.source_digest == source_digest
+                    && batch_cache_entry_matches_key(certificate, options_key)
+                    && manifest.entries.get(&plan.destination_names[index]) == Some(certificate)
+            })
+            .then_some(summary.total_bytes)
+    }
+
+    fn replay_resident_transaction(
+        &mut self,
+        plan: &BatchRenderPlan,
+        transaction: &PreparedBatchFinalState,
+        defer_source_writes: bool,
+    ) -> Result<Option<usize>> {
+        let updates = &transaction.updates;
+        if transaction.source_digests.len() != updates.len() {
+            anyhow::bail!("resident transaction digest count does not match its update count");
+        }
+        if let Some(total_bytes) = self.replay_certified_complete_transaction(
+            plan,
+            updates
+                .iter()
+                .zip(transaction.source_digests.iter())
+                .map(|((input, _), source_digest)| (input.as_str(), source_digest.as_str())),
+            defer_source_writes,
+        ) {
+            return Ok(Some(total_bytes));
+        }
+        if !self.reuse_complete_revision_transactions || updates.is_empty() {
+            return Ok(None);
+        }
+        let Some(summary) = self.trusted_batch.as_ref().filter(|summary| {
+            summary.plan_key == plan.key && summary.input_count == plan.input_indices.len()
+        }) else {
+            return Ok(None);
+        };
+        let previous_total_bytes = summary.total_bytes;
+        let Some(options_key) = plan.option_cache_digest.as_ref() else {
+            return Ok(None);
+        };
+        if self.manifest.is_none() {
+            return Ok(None);
+        }
+
+        let mut old_bytes = 0usize;
+        let mut new_bytes = 0usize;
+        let mut replacements = Vec::with_capacity(updates.len());
+        for ((input, source), source_digest) in
+            updates.iter().zip(transaction.source_digests.iter())
+        {
+            let Some(index) = plan.input_indices.get(input).copied() else {
+                return Ok(None);
+            };
+            let Some(previous_entry) = self
+                .manifest
+                .as_ref()
+                .and_then(|manifest| manifest.entries.get(&plan.destination_names[index]))
+                .filter(|entry| batch_cache_entry_matches_key(entry, options_key))
+            else {
+                return Ok(None);
+            };
+            let Some(previous_bytes) = usize::try_from(previous_entry.bytes).ok() else {
+                return Ok(None);
+            };
+            let previous_source_modified_ns = previous_entry.source_modified_ns.clone();
+            old_bytes = old_bytes
+                .checked_add(previous_bytes)
+                .ok_or_else(|| anyhow::anyhow!("resident transaction byte count overflow"))?;
+
+            let key = format!("{source_digest}:{options_key}");
+            let Some(rendered) = self.revision_output(&key) else {
+                return Ok(None);
+            };
+            new_bytes = new_bytes
+                .checked_add(rendered.len())
+                .ok_or_else(|| anyhow::anyhow!("resident transaction byte count overflow"))?;
+            let (source_bytes, source_modified_ns) = if defer_source_writes {
+                (
+                    u64::try_from(source.len())
+                        .map_err(|_| anyhow::anyhow!("source is too large to cache"))?,
+                    previous_source_modified_ns,
+                )
+            } else {
+                let Ok(source_metadata) = Path::new(input).metadata() else {
+                    return Ok(None);
+                };
+                let Some(source_modified_ns) = source_metadata
+                    .modified()
+                    .ok()
+                    .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_nanos().to_string())
+                else {
+                    return Ok(None);
+                };
+                (source_metadata.len(), source_modified_ns)
+            };
+            let entry = BatchRenderCacheEntry {
+                key,
+                source_digest: source_digest.clone(),
+                options_key: options_key.clone(),
+                source_bytes,
+                source_modified_ns,
+                bytes: u64::try_from(rendered.len())
+                    .map_err(|_| anyhow::anyhow!("rendered output is too large to cache"))?,
+            };
+            replacements.push((index, rendered, entry));
+        }
+
+        let total_bytes = previous_total_bytes
+            .checked_sub(old_bytes)
+            .and_then(|unchanged| unchanged.checked_add(new_bytes))
+            .ok_or_else(|| anyhow::anyhow!("resident transaction byte accounting is invalid"))?;
+        for (index, rendered, _) in &replacements {
+            if !self.stage_output_if_deferred(&plan.destinations[*index], Arc::clone(rendered)) {
+                std::fs::write(&plan.destinations[*index], rendered.as_slice()).with_context(
+                    || format!("cannot write {}", plan.destinations[*index].display()),
+                )?;
+            }
+        }
+
+        let manifest = self
+            .manifest
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("resident transaction lost its cache manifest"))?;
+        for (index, _, entry) in replacements {
+            let destination_name = &plan.destination_names[index];
+            self.dirty |= manifest.entries.get(destination_name) != Some(&entry);
+            manifest.entries.insert(destination_name.clone(), entry);
+        }
+        self.trusted_batch = Some(TrustedBatchSummary {
+            plan_key: plan.key.clone(),
+            input_count: plan.input_indices.len(),
+            total_bytes,
+        });
+        Ok(Some(total_bytes))
+    }
+
+    fn materialize_deferred_sources(
+        &mut self,
+        plan: &BatchRenderPlan,
+        sources: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(usize, usize, usize)> {
+        let mut total_bytes = 0usize;
+        let mut materialized_sources = 0usize;
+        let mut certified_sources = 0usize;
+        let mut refreshed_entries = Vec::with_capacity(sources.len());
+        for (input, source) in sources {
+            let index = plan.input_indices.get(input).copied().ok_or_else(|| {
+                anyhow::anyhow!("cannot materialize unknown batch input {input:?}")
+            })?;
+            let expected_digest = sha256_hex(source.as_bytes());
+            let certified_metadata = self
+                .elide_certified_source_writes
+                .then(|| {
+                    let certificate = self.certified_sources.get(input)?;
+                    if certificate.source_digest != expected_digest {
+                        return None;
+                    }
+                    let metadata = Path::new(input).metadata().ok()?;
+                    let source_modified_ns = metadata
+                        .modified()
+                        .ok()?
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()?
+                        .as_nanos()
+                        .to_string();
+                    (certificate.source_bytes == metadata.len()
+                        && certificate.source_modified_ns == source_modified_ns)
+                        .then_some(metadata)
+                })
+                .flatten();
+            let metadata = if let Some(metadata) = certified_metadata {
+                certified_sources = certified_sources.saturating_add(1);
+                metadata
+            } else {
+                std::fs::write(input, source.as_bytes())
+                    .with_context(|| format!("cannot materialize final-state input {input}"))?;
+                materialized_sources = materialized_sources.saturating_add(1);
+                Path::new(input)
+                    .metadata()
+                    .with_context(|| format!("cannot inspect final-state input {input}"))?
+            };
+            let source_modified_ns = metadata
+                .modified()
+                .context("final source has no modification timestamp")?
+                .duration_since(std::time::UNIX_EPOCH)
+                .context("final source modification timestamp predates the Unix epoch")?
+                .as_nanos()
+                .to_string();
+            refreshed_entries.push((index, expected_digest, metadata.len(), source_modified_ns));
+            total_bytes = total_bytes
+                .checked_add(source.len())
+                .ok_or_else(|| anyhow::anyhow!("final source byte count overflow"))?;
+        }
+
+        let manifest = self.manifest.as_mut().ok_or_else(|| {
+            anyhow::anyhow!("final source materialization lost its cache manifest")
+        })?;
+        let mut manifest_changed = false;
+        for (index, expected_digest, source_bytes, source_modified_ns) in refreshed_entries {
+            let entry = manifest
+                .entries
+                .get_mut(&plan.destination_names[index])
+                .ok_or_else(|| anyhow::anyhow!("final source has no rendered cache entry"))?;
+            if entry.source_digest != expected_digest {
+                anyhow::bail!("final source digest does not match its rendered cache entry");
+            }
+            manifest_changed |= entry.source_bytes != source_bytes
+                || entry.source_modified_ns != source_modified_ns;
+            entry.source_bytes = source_bytes;
+            entry.source_modified_ns = source_modified_ns;
+        }
+        self.dirty |= manifest_changed;
+        Ok((materialized_sources, certified_sources, total_bytes))
+    }
+
+    fn stage_output_if_deferred(&mut self, destination: &Path, bytes: Arc<Vec<u8>>) -> bool {
+        if !self.defer_output_writes {
+            return false;
+        }
+        self.deferred_outputs.insert(destination.to_owned(), bytes);
+        true
+    }
+
+    fn materialize_deferred_outputs(&mut self) -> Result<(usize, usize)> {
+        let mut total_bytes = 0usize;
+        for (destination, bytes) in &self.deferred_outputs {
+            std::fs::write(destination, bytes.as_slice())
+                .with_context(|| format!("cannot write {}", destination.display()))?;
+            total_bytes = total_bytes.saturating_add(bytes.len());
+        }
+        let output_count = self.deferred_outputs.len();
+        self.deferred_outputs.clear();
+        Ok((output_count, total_bytes))
+    }
+
+    fn lease<'a>(&'a mut self, cache_path: &Path) -> BatchRenderCacheLease<'a> {
+        if self.manifest.is_none() {
+            let (manifest, modified) = load_batch_render_cache(cache_path);
+            self.manifest = Some(manifest);
+            self.manifest_modified = modified;
+        }
+        BatchRenderCacheLease {
+            manifest: self.manifest.take().unwrap_or_default(),
+            manifest_modified: self.manifest_modified,
+            dirty: false,
+            session: self,
+        }
+    }
+
+    fn flush(&mut self, out_dir: &Path) -> Result<()> {
+        let Some(manifest) = self.manifest.as_mut() else {
+            anyhow::bail!("batch cache session still has an active manifest lease");
+        };
+        let certificate_changed = manifest.clean_batch != self.trusted_batch;
+        if !self.dirty && !certificate_changed {
+            return Ok(());
+        }
+        manifest.clean_batch.clone_from(&self.trusted_batch);
+        let cache_path = out_dir.join(BATCH_RENDER_CACHE_FILE);
+        let encoded = serde_json::to_vec(manifest)?;
+        std::fs::write(&cache_path, encoded)
+            .with_context(|| format!("cannot write {}", cache_path.display()))?;
+        self.manifest_modified = cache_path
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        self.dirty = false;
+        Ok(())
+    }
+
+    fn sparse_report_carry<'a>(
+        &self,
+        plan: &'a BatchRenderPlan,
+        changed_inputs: &[String],
+    ) -> Option<BatchReportCarry<'a>> {
+        let summary = self.trusted_batch.as_ref()?;
+        if summary.plan_key != plan.key || summary.input_count != plan.input_indices.len() {
+            return None;
+        }
+        let manifest = self.manifest.as_ref()?;
+        let options_key = plan.option_cache_digest.as_ref()?;
+        let mut changed_bytes = 0usize;
+        for input in changed_inputs {
+            let index = *plan.input_indices.get(input)?;
+            let entry = manifest.entries.get(&plan.destination_names[index])?;
+            if !batch_cache_entry_matches_key(entry, options_key) {
+                return None;
+            }
+            changed_bytes = changed_bytes.checked_add(usize::try_from(entry.bytes).ok()?)?;
+        }
+        Some(BatchReportCarry {
+            plan_key: &plan.key,
+            logical_input_count: summary.input_count,
+            inherited_diagrams: summary.input_count.checked_sub(changed_inputs.len())?,
+            inherited_cache_hits: summary.input_count.checked_sub(changed_inputs.len())?,
+            inherited_total_bytes: summary.total_bytes.checked_sub(changed_bytes)?,
+        })
+    }
+}
+
+fn trusted_batch_from_manifest(
+    manifest: &BatchRenderCacheManifest,
+    plan: &BatchRenderPlan,
+) -> Option<TrustedBatchSummary> {
+    let summary = manifest.clean_batch.as_ref()?;
+    if summary.plan_key != plan.key || summary.input_count != plan.destination_names.len() {
+        return None;
+    }
+    let options_key = plan.option_cache_digest.as_ref()?;
+    let mut total_bytes = 0usize;
+    for destination_name in &plan.destination_names {
+        let entry = manifest.entries.get(destination_name)?;
+        if !batch_cache_entry_matches_key(entry, options_key) {
+            return None;
+        }
+        total_bytes = total_bytes.checked_add(usize::try_from(entry.bytes).ok()?)?;
+    }
+    (total_bytes == summary.total_bytes).then(|| summary.clone())
+}
+
+struct BatchRenderCacheLease<'a> {
+    session: &'a mut BatchRenderCacheSession,
+    manifest: BatchRenderCacheManifest,
+    manifest_modified: Option<std::time::SystemTime>,
+    dirty: bool,
+}
+
+impl Drop for BatchRenderCacheLease<'_> {
+    fn drop(&mut self) {
+        self.session.manifest = Some(std::mem::take(&mut self.manifest));
+        self.session.dirty |= self.dirty;
+    }
+}
+
+fn load_batch_render_cache(
+    cache_path: &Path,
+) -> (BatchRenderCacheManifest, Option<std::time::SystemTime>) {
+    let manifest = std::fs::read(cache_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<BatchRenderCacheManifest>(&bytes).ok())
+        .filter(|manifest| manifest.version == BATCH_RENDER_CACHE_VERSION)
+        .unwrap_or_default();
+    let modified = cache_path
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok();
+    (manifest, modified)
+}
+
+fn batch_cache_entry_matches_early(
+    entry: &BatchRenderCacheEntry,
+    options_key: &str,
+    source_bytes: u64,
+    source_modified_ns: &str,
+    output_bytes: u64,
+    output_modified: std::time::SystemTime,
+    manifest_modified: std::time::SystemTime,
+) -> bool {
+    batch_cache_entry_matches_key(entry, options_key)
+        && entry.source_bytes == source_bytes
+        && entry.source_modified_ns == source_modified_ns
+        && entry.bytes == output_bytes
+        && output_modified <= manifest_modified
+}
+
+fn batch_cache_entry_matches_key(entry: &BatchRenderCacheEntry, options_key: &str) -> bool {
+    entry.source_digest.len() == 64
+        && entry
+            .key
+            .strip_prefix(&entry.source_digest)
+            .and_then(|suffix| suffix.strip_prefix(':'))
+            == Some(entry.options_key.as_str())
+        && entry.options_key == options_key
+}
+
+#[cfg(test)]
+mod batch_render_cache_tests {
+    use super::{
+        BatchRenderCacheEntry, BatchRenderCacheManifest, BatchRenderCacheSession, BatchRenderPlan,
+        Cli, Command, TrustedBatchSummary, batch_cache_entry_matches_early,
+        batch_cache_entry_matches_key, parse_batch_change_set_line,
+        parse_batch_final_state_payload, trusted_batch_from_manifest,
+    };
+    use clap::Parser as _;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    fn entry() -> BatchRenderCacheEntry {
+        BatchRenderCacheEntry {
+            key: format!("{}:options", "a".repeat(64)),
+            source_digest: "a".repeat(64),
+            options_key: "options".to_owned(),
+            source_bytes: 123,
+            source_modified_ns: "456".to_owned(),
+            bytes: 789,
+        }
+    }
+
+    fn plan() -> BatchRenderPlan {
+        BatchRenderPlan {
+            input_set: ["a.mmd".to_owned(), "b.mmd".to_owned()]
+                .into_iter()
+                .collect(),
+            input_indices: [("a.mmd".to_owned(), 0), ("b.mmd".to_owned(), 1)]
+                .into_iter()
+                .collect(),
+            destinations: vec![PathBuf::from("out/a.svg"), PathBuf::from("out/b.svg")],
+            destination_names: vec!["a.svg".to_owned(), "b.svg".to_owned()],
+            destination_displays: vec!["out/a.svg".to_owned(), "out/b.svg".to_owned()],
+            requested_workers: 2,
+            cache_path: PathBuf::from("out/cache.json"),
+            option_cache_digest: Some("options".to_owned()),
+            cache_active: true,
+            key: "batch-plan".to_owned(),
+        }
+    }
+
+    #[test]
+    fn unchanged_entry_is_admitted() {
+        assert!(batch_cache_entry_matches_early(
+            &entry(),
+            "options",
+            123,
+            "456",
+            789,
+            UNIX_EPOCH + Duration::from_secs(1),
+            UNIX_EPOCH + Duration::from_secs(2),
+        ));
+    }
+
+    #[test]
+    fn source_or_configuration_change_is_rejected() {
+        assert!(!batch_cache_entry_matches_early(
+            &entry(),
+            "other-options",
+            123,
+            "456",
+            789,
+            UNIX_EPOCH,
+            UNIX_EPOCH,
+        ));
+        assert!(!batch_cache_entry_matches_early(
+            &entry(),
+            "options",
+            124,
+            "456",
+            789,
+            UNIX_EPOCH,
+            UNIX_EPOCH,
+        ));
+    }
+
+    #[test]
+    fn trusted_entry_still_requires_exact_binary_options_and_digest_key() {
+        let mut cached = entry();
+        assert!(batch_cache_entry_matches_key(&cached, "options"));
+        assert!(!batch_cache_entry_matches_key(&cached, "other-options"));
+
+        cached.key = format!("{}:options", "b".repeat(64));
+        assert!(!batch_cache_entry_matches_key(&cached, "options"));
+    }
+
+    #[test]
+    fn changed_or_newer_output_is_rejected() {
+        assert!(!batch_cache_entry_matches_early(
+            &entry(),
+            "options",
+            123,
+            "456",
+            790,
+            UNIX_EPOCH,
+            UNIX_EPOCH,
+        ));
+        assert!(!batch_cache_entry_matches_early(
+            &entry(),
+            "options",
+            123,
+            "456",
+            789,
+            UNIX_EPOCH + Duration::from_secs(2),
+            UNIX_EPOCH + Duration::from_secs(1),
+        ));
+    }
+
+    #[test]
+    fn change_set_stream_accepts_arrays_and_ignores_blank_lines() {
+        assert_eq!(parse_batch_change_set_line("   ", 1).unwrap(), None);
+        assert_eq!(
+            parse_batch_change_set_line(r#"["a.mmd","b.mmd"]"#, 2).unwrap(),
+            Some(vec!["a.mmd".to_owned(), "b.mmd".to_owned()])
+        );
+    }
+
+    #[test]
+    fn change_set_stream_rejects_non_array_json_with_line_context() {
+        let error = parse_batch_change_set_line(r#"{"changed":["a.mmd"]}"#, 7)
+            .expect_err("objects are not complete change-set arrays");
+        assert!(error.to_string().contains("input line 7"));
+    }
+
+    #[test]
+    fn final_state_payload_accepts_only_known_bounded_inputs() {
+        let inputs = vec!["a.mmd".to_owned(), "b.mmd".to_owned()];
+        let updates = parse_batch_final_state_payload(
+            r#"{"b.mmd":"flowchart LR\nB-->C","a.mmd":"flowchart LR\nA-->B"}"#,
+            &inputs,
+            64,
+        )
+        .unwrap();
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates["a.mmd"], "flowchart LR\nA-->B");
+
+        let unknown =
+            parse_batch_final_state_payload(r#"{"c.mmd":"A-->B"}"#, &inputs, 64).unwrap_err();
+        assert!(
+            unknown
+                .to_string()
+                .contains("not one of this batch's inputs")
+        );
+
+        let oversize =
+            parse_batch_final_state_payload(r#"{"a.mmd":"12345"}"#, &inputs, 4).unwrap_err();
+        assert!(
+            oversize
+                .to_string()
+                .contains("exceeding the 4-byte input limit")
+        );
+    }
+
+    #[test]
+    fn complete_snapshot_requires_every_batch_input() {
+        let inputs = vec!["a.mmd".to_owned(), "b.mmd".to_owned()];
+        let prepared = super::prepare_complete_batch_final_state_payload(
+            r#"{"a.mmd":"A-->B","b.mmd":"B-->C"}"#,
+            &inputs,
+            64,
+        )
+        .unwrap();
+        assert_eq!(prepared.changed_inputs, inputs);
+
+        let error =
+            super::prepare_complete_batch_final_state_payload(r#"{"a.mmd":"A-->B"}"#, &inputs, 64)
+                .unwrap_err();
+        assert!(error.to_string().contains("contains 1 of 2 batch inputs"));
+    }
+
+    #[test]
+    fn packed_complete_snapshot_uses_cli_input_order_without_path_keys() {
+        let inputs = vec!["b.mmd".to_owned(), "a.mmd".to_owned()];
+        let sources = ["flowchart LR\nB-->C", "flowchart LR\nA-->B"];
+        let mut payload = Vec::new();
+        for source in sources {
+            payload.extend_from_slice(&u64::try_from(source.len()).unwrap().to_le_bytes());
+            payload.extend_from_slice(source.as_bytes());
+        }
+
+        let prepared =
+            super::prepare_packed_complete_batch_final_state_payload(&payload, &inputs, 64)
+                .unwrap();
+        assert_eq!(prepared.sources, sources);
+        assert_eq!(prepared.source_digests.len(), inputs.len());
+        assert_eq!(
+            prepared.total_source_bytes,
+            sources.map(str::len).into_iter().sum::<usize>()
+        );
+
+        let keyed = prepared.into_keyed(&inputs);
+        assert_eq!(keyed.updates["a.mmd"], sources[1]);
+        assert_eq!(keyed.updates["b.mmd"], sources[0]);
+    }
+
+    #[test]
+    fn packed_complete_snapshot_rejects_bad_bounds_and_trailing_bytes() {
+        let inputs = vec!["a.mmd".to_owned()];
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&5u64.to_le_bytes());
+        payload.extend_from_slice(b"12345");
+        let oversize =
+            super::prepare_packed_complete_batch_final_state_payload(&payload, &inputs, 4)
+                .unwrap_err();
+        assert!(
+            oversize
+                .to_string()
+                .contains("exceeding the 4-byte input limit")
+        );
+
+        payload.push(0);
+        let trailing =
+            super::prepare_packed_complete_batch_final_state_payload(&payload, &inputs, 5)
+                .unwrap_err();
+        assert!(trailing.to_string().contains("1 trailing byte"));
+
+        let truncated = super::prepare_packed_complete_batch_final_state_payload(
+            &5u64.to_le_bytes(),
+            &inputs,
+            5,
+        )
+        .unwrap_err();
+        assert!(
+            truncated
+                .to_string()
+                .contains("ended inside the 5-byte body")
+        );
+    }
+
+    #[test]
+    fn packed_snapshot_record_reader_preserves_job_boundaries_and_bounds() {
+        let mut stream = Vec::new();
+        for payload in [b"first".as_slice(), b"second".as_slice()] {
+            stream.extend_from_slice(&u64::try_from(payload.len()).unwrap().to_le_bytes());
+            stream.extend_from_slice(payload);
+        }
+        let mut reader = std::io::Cursor::new(stream);
+        let mut payload = Vec::new();
+        assert!(super::read_packed_snapshot_record(&mut reader, &mut payload, 6, 1).unwrap());
+        assert_eq!(payload, b"first");
+        assert!(super::read_packed_snapshot_record(&mut reader, &mut payload, 6, 2).unwrap());
+        assert_eq!(payload, b"second");
+        assert!(!super::read_packed_snapshot_record(&mut reader, &mut payload, 6, 3).unwrap());
+        assert!(payload.is_empty());
+
+        let mut oversized = Vec::from(7u64.to_le_bytes());
+        oversized.extend_from_slice(b"1234567");
+        let error = super::read_packed_snapshot_record(
+            &mut std::io::Cursor::new(oversized),
+            &mut payload,
+            6,
+            4,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("packed snapshot 4 is 7 bytes"));
+
+        let truncated_header = 5u64.to_le_bytes()[..4].to_vec();
+        let error = super::read_packed_snapshot_record(
+            &mut std::io::Cursor::new(truncated_header),
+            &mut payload,
+            6,
+            5,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("inside its payload-length header")
+        );
+    }
+
+    #[test]
+    fn resident_exact_job_group_reader_preserves_boundaries_and_bounds() {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&2u64.to_le_bytes());
+        stream.extend_from_slice(&(super::RESIDENT_EXACT_JOB_GROUP_REPEAT_MASK | 1).to_le_bytes());
+        let mut reader = std::io::Cursor::new(stream);
+        assert_eq!(
+            super::read_resident_exact_job_group(&mut reader, 1).unwrap(),
+            Some(super::ResidentExactJobGroup::ExplicitRecords(2))
+        );
+        assert_eq!(
+            super::read_resident_exact_job_group(&mut reader, 2).unwrap(),
+            Some(super::ResidentExactJobGroup::RepeatAdmitted(1))
+        );
+        assert_eq!(
+            super::read_resident_exact_job_group(&mut reader, 3).unwrap(),
+            None
+        );
+
+        let zero =
+            super::read_resident_exact_job_group(&mut std::io::Cursor::new(0u64.to_le_bytes()), 4)
+                .unwrap_err();
+        assert!(zero.to_string().contains("group 4 has zero jobs"));
+
+        let too_many = u64::try_from(super::MAX_RESIDENT_EXACT_JOB_GROUP_JOBS + 1).unwrap();
+        let oversized = super::read_resident_exact_job_group(
+            &mut std::io::Cursor::new(too_many.to_le_bytes()),
+            5,
+        )
+        .unwrap_err();
+        assert!(
+            oversized
+                .to_string()
+                .contains("exceeding the 1000000-job limit")
+        );
+
+        let truncated_header = 2u64.to_le_bytes()[..4].to_vec();
+        let truncated =
+            super::read_resident_exact_job_group(&mut std::io::Cursor::new(truncated_header), 6)
+                .unwrap_err();
+        assert!(
+            truncated
+                .to_string()
+                .contains("inside its job-count header")
+        );
+    }
+
+    #[test]
+    fn resident_exact_repeat_group_requires_and_reuses_admitted_payload() {
+        let mut replay = super::ResidentExactJobReplayState::default();
+        let error = replay.repeat_admitted(3).unwrap_err();
+        assert!(error.to_string().contains("no previously admitted payload"));
+
+        replay.has_admitted_payload = true;
+        replay.admitted_source_bytes = 11;
+        replay.admitted_output_bytes = 29;
+        assert_eq!(replay.repeat_admitted(3).unwrap(), (33, 0));
+        assert_eq!(replay.jobs, 3);
+        assert_eq!(replay.exact_payload_reuses, 3);
+        assert_eq!(replay.logical_source_bytes, 33);
+        assert_eq!(replay.logical_output_bytes, 87);
+        assert_eq!(replay.encoded_payload_bytes, 0);
+    }
+
+    #[test]
+    fn resident_exact_jobs_accept_group_acknowledgments() {
+        let cli = Cli::try_parse_from([
+            "fm-cli",
+            "render-batch",
+            "--out-dir",
+            "out",
+            "--trust-change-set",
+            "--final-state-stream",
+            "--final-output-only",
+            "--final-source-only",
+            "--final-ack-only",
+            "--complete-snapshot-stream",
+            "--packed-complete-snapshot-stream",
+            "--resident-exact-jobs",
+            "--resident-exact-job-groups",
+            "--resident-exact-ack64",
+            "a.mmd",
+        ])
+        .expect("resident exact jobs should support persistent group acknowledgments");
+
+        let (final_ack_only, resident_exact_jobs, resident_exact_job_groups, resident_exact_ack64) =
+            match cli.command {
+                Command::RenderBatch {
+                    final_ack_only,
+                    resident_exact_jobs,
+                    resident_exact_job_groups,
+                    resident_exact_ack64,
+                    ..
+                } => (
+                    final_ack_only,
+                    resident_exact_jobs,
+                    resident_exact_job_groups,
+                    resident_exact_ack64,
+                ),
+                _ => (false, false, false, false),
+            };
+        assert!(final_ack_only);
+        assert!(resident_exact_jobs);
+        assert!(resident_exact_job_groups);
+        assert!(resident_exact_ack64);
+    }
+
+    #[test]
+    fn resident_exact_ack64_is_one_completed_group_ordinal() {
+        let acknowledgment = super::ResidentExactJobGroupAcknowledgment {
+            group: 7,
+            transactions: 64,
+            updates: 640,
+            source_bytes: 1_024,
+            encoded_payload_bytes: 0,
+        };
+        let mut binary = Vec::new();
+        super::write_resident_exact_job_group_ack(&mut binary, true, acknowledgment).unwrap();
+        assert_eq!(binary, 7u64.to_le_bytes());
+
+        let mut json = Vec::new();
+        super::write_resident_exact_job_group_ack(&mut json, false, acknowledgment).unwrap();
+        let decoded: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(decoded["group"], 7);
+        assert_eq!(decoded["transactions"], 64);
+        assert_eq!(decoded["source_bytes_scope"], "completed_jobs");
+        assert_eq!(json.last(), Some(&b'\n'));
+    }
+
+    #[test]
+    fn superseded_final_state_updates_keep_only_the_completed_revision() {
+        let mut completed = std::collections::BTreeMap::new();
+        super::merge_superseded_final_state_updates(
+            &mut completed,
+            [
+                ("a.mmd".to_owned(), "flowchart LR\nA-->B".to_owned()),
+                ("b.mmd".to_owned(), "flowchart LR\nB-->C".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        super::merge_superseded_final_state_updates(
+            &mut completed,
+            [
+                ("a.mmd".to_owned(), "flowchart LR\nA-->Z".to_owned()),
+                ("c.mmd".to_owned(), "flowchart LR\nC-->D".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        assert_eq!(completed.len(), 3);
+        assert_eq!(completed["a.mmd"], "flowchart LR\nA-->Z");
+        assert_eq!(completed["b.mmd"], "flowchart LR\nB-->C");
+        assert_eq!(completed["c.mmd"], "flowchart LR\nC-->D");
+
+        let prepared = super::prepare_batch_final_state_updates(completed);
+        assert_eq!(prepared.changed_inputs, ["a.mmd", "b.mmd", "c.mmd"]);
+        assert_eq!(prepared.source_digests.len(), 3);
+    }
+
+    #[test]
+    fn final_state_coalescing_requires_every_observation_at_eof() {
+        let completed_only = super::FinalStateStreamMaterialization {
+            outputs_at_eof: true,
+            sources_at_eof: true,
+            acknowledgments_at_eof: true,
+            complete_snapshots: false,
+        };
+        assert!(completed_only.exposes_only_completed_state());
+
+        for materialization in [
+            super::FinalStateStreamMaterialization {
+                outputs_at_eof: false,
+                ..completed_only
+            },
+            super::FinalStateStreamMaterialization {
+                sources_at_eof: false,
+                ..completed_only
+            },
+            super::FinalStateStreamMaterialization {
+                acknowledgments_at_eof: false,
+                ..completed_only
+            },
+        ] {
+            assert!(!materialization.exposes_only_completed_state());
+        }
+    }
+
+    #[test]
+    fn resident_payload_cache_reuses_exact_prepared_transactions() {
+        let inputs = vec!["a.mmd".to_owned(), "b.mmd".to_owned()];
+        let payload = r#"{"b.mmd":"flowchart LR\nB-->C","a.mmd":"flowchart LR\nA-->B"}"#;
+        let mut cache = super::ResidentPayloadCache::default();
+
+        let first = cache.prepare(payload, &inputs, 64, true).unwrap();
+        let second = cache.prepare(payload, &inputs, 64, true).unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(cache.decoded, 1);
+        assert_eq!(cache.reused, 1);
+        assert_eq!(first.source_digests.len(), first.updates.len());
+        assert_eq!(first.changed_inputs, ["a.mmd", "b.mmd"]);
+
+        let mut disabled = super::ResidentPayloadCache::default();
+        let first = disabled.prepare(payload, &inputs, 64, false).unwrap();
+        let second = disabled.prepare(payload, &inputs, 64, false).unwrap();
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(disabled.decoded, 2);
+        assert_eq!(disabled.reused, 0);
+    }
+
+    #[test]
+    fn process_cache_lease_restores_updated_manifest() {
+        let mut session = BatchRenderCacheSession {
+            manifest: Some(BatchRenderCacheManifest::default()),
+            ..BatchRenderCacheSession::default()
+        };
+        {
+            let mut lease = session.lease(Path::new("unused-while-manifest-is-loaded"));
+            lease
+                .manifest
+                .entries
+                .insert("diagram.svg".to_owned(), entry());
+            lease.dirty = true;
+        }
+        assert!(session.dirty);
+        assert!(
+            session
+                .manifest
+                .as_ref()
+                .is_some_and(|manifest| manifest.entries.contains_key("diagram.svg"))
+        );
+    }
+
+    #[test]
+    fn sparse_epoch_carries_only_unlisted_diagrams() {
+        let mut first = entry();
+        first.bytes = 100;
+        let mut second = entry();
+        second.bytes = 250;
+        let session = BatchRenderCacheSession {
+            manifest: Some(BatchRenderCacheManifest {
+                version: super::BATCH_RENDER_CACHE_VERSION,
+                clean_batch: None,
+                entries: [("a.svg".to_owned(), first), ("b.svg".to_owned(), second)]
+                    .into_iter()
+                    .collect(),
+            }),
+            trusted_batch: Some(TrustedBatchSummary {
+                plan_key: "batch-plan".to_owned(),
+                input_count: 2,
+                total_bytes: 350,
+            }),
+            ..BatchRenderCacheSession::default()
+        };
+        let plan = plan();
+
+        let carry = session
+            .sparse_report_carry(&plan, &["b.mmd".to_owned()])
+            .expect("validated batch can execute a changed-only epoch");
+        assert_eq!(carry.logical_input_count, 2);
+        assert_eq!(carry.inherited_diagrams, 1);
+        assert_eq!(carry.inherited_cache_hits, 1);
+        assert_eq!(carry.inherited_total_bytes, 100);
+    }
+
+    #[test]
+    fn clean_certificate_is_admitted_then_invalidated_before_output() {
+        let plan = plan();
+        let summary = TrustedBatchSummary {
+            plan_key: plan.key.clone(),
+            input_count: 2,
+            total_bytes: 350,
+        };
+        let mut first = entry();
+        first.bytes = 100;
+        let mut second = entry();
+        second.bytes = 250;
+        let manifest = BatchRenderCacheManifest {
+            version: super::BATCH_RENDER_CACHE_VERSION,
+            clean_batch: Some(summary.clone()),
+            entries: [("a.svg".to_owned(), first), ("b.svg".to_owned(), second)]
+                .into_iter()
+                .collect(),
+        };
+        assert_eq!(
+            trusted_batch_from_manifest(&manifest, &plan),
+            Some(summary.clone())
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let cache_path = directory.path().join(super::BATCH_RENDER_CACHE_FILE);
+        std::fs::write(&cache_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let mut session = BatchRenderCacheSession::default();
+        session
+            .begin_stream(&cache_path, Some(&plan), true)
+            .unwrap();
+
+        assert_eq!(session.trusted_batch, Some(summary));
+        let persisted: BatchRenderCacheManifest =
+            serde_json::from_slice(&std::fs::read(cache_path).unwrap()).unwrap();
+        assert_eq!(persisted.clean_batch, None);
+    }
+
+    #[test]
+    fn projected_plan_preserves_parent_destinations_and_identity() {
+        let plan = plan();
+        let projected = plan.project(&["b.mmd".to_owned()]).unwrap();
+
+        assert_eq!(
+            projected.input_set,
+            ["b.mmd".to_owned()].into_iter().collect()
+        );
+        assert_eq!(
+            projected.input_indices,
+            [("b.mmd".to_owned(), 0)].into_iter().collect()
+        );
+        assert_eq!(projected.destinations, [PathBuf::from("out/b.svg")]);
+        assert_eq!(projected.destination_names, ["b.svg"]);
+        assert_eq!(projected.destination_displays, ["out/b.svg"]);
+        assert_eq!(projected.requested_workers, plan.requested_workers);
+        assert_eq!(projected.cache_path, plan.cache_path);
+        assert_eq!(projected.option_cache_digest, plan.option_cache_digest);
+        assert_eq!(projected.cache_active, plan.cache_active);
+        assert_eq!(projected.key, plan.key);
+    }
+
+    #[test]
+    fn persistent_session_reuses_one_pressure_snapshot() {
+        let session = BatchRenderCacheSession {
+            reuse_pressure: true,
+            ..BatchRenderCacheSession::default()
+        };
+
+        let first = session.pressure_report();
+        let second = session.pressure_report();
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn persistent_session_reuses_one_fixed_width_worker_pool() {
+        let session = BatchRenderCacheSession::default();
+
+        let first = session.worker_pool(2).unwrap();
+        let second = session.worker_pool(2).unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.threads, 2);
+    }
+
+    #[test]
+    fn persistent_session_keeps_two_exact_rendered_revisions() {
+        let mut session = BatchRenderCacheSession {
+            reuse_revision_outputs: true,
+            revision_output_max_entries: 2,
+            revision_output_max_bytes: usize::MAX,
+            ..BatchRenderCacheSession::default()
+        };
+        let first = Arc::new(vec![1_u8]);
+        let second = Arc::new(vec![2_u8]);
+        let third = Arc::new(vec![3_u8]);
+
+        session.remember_revision_output("first".to_owned(), Arc::clone(&first));
+        session.remember_revision_output("second".to_owned(), Arc::clone(&second));
+        assert!(
+            session
+                .revision_output("second")
+                .is_some_and(|bytes| Arc::ptr_eq(&bytes, &second))
+        );
+        assert!(
+            session
+                .revision_output("first")
+                .is_some_and(|bytes| Arc::ptr_eq(&bytes, &first))
+        );
+
+        session.remember_revision_output("third".to_owned(), Arc::clone(&third));
+        assert!(session.revision_output("second").is_none());
+        assert!(session.revision_output("first").is_some());
+        assert!(
+            session
+                .revision_output("third")
+                .is_some_and(|bytes| Arc::ptr_eq(&bytes, &third))
+        );
+    }
+
+    #[test]
+    fn persistent_revision_cache_enforces_its_byte_budget() {
+        let mut session = BatchRenderCacheSession {
+            reuse_revision_outputs: true,
+            revision_output_max_entries: 8,
+            revision_output_max_bytes: 3,
+            ..BatchRenderCacheSession::default()
+        };
+
+        session.remember_revision_output("first".to_owned(), Arc::new(vec![1_u8; 2]));
+        session.remember_revision_output("second".to_owned(), Arc::new(vec![2_u8; 2]));
+        assert!(session.revision_output("first").is_none());
+        assert!(session.revision_output("second").is_some());
+        assert_eq!(session.revision_output_bytes, 2);
+
+        session.remember_revision_output("oversize".to_owned(), Arc::new(vec![3_u8; 4]));
+        assert!(session.revision_output("oversize").is_none());
+        assert_eq!(session.revision_output_bytes, 2);
+    }
+
+    #[test]
+    fn trusted_transaction_replays_exact_changed_revisions_without_rendering() {
+        let directory = tempfile::tempdir().unwrap();
+        let first_input = directory.path().join("a.mmd");
+        let second_input = directory.path().join("b.mmd");
+        let first_destination = directory.path().join("a.svg");
+        let second_destination = directory.path().join("b.svg");
+        std::fs::write(&first_input, "flowchart LR\nA-->B").unwrap();
+        std::fs::write(&second_input, "flowchart LR\nB-->C").unwrap();
+        let first_input_path = first_input.clone();
+
+        let first_input = first_input.display().to_string();
+        let second_input = second_input.display().to_string();
+        let plan = BatchRenderPlan {
+            input_set: [first_input.clone(), second_input.clone()]
+                .into_iter()
+                .collect(),
+            input_indices: [(first_input.clone(), 0), (second_input.clone(), 1)]
+                .into_iter()
+                .collect(),
+            destinations: vec![first_destination.clone(), second_destination],
+            destination_names: vec!["a.svg".to_owned(), "b.svg".to_owned()],
+            destination_displays: vec![
+                first_destination.display().to_string(),
+                directory.path().join("b.svg").display().to_string(),
+            ],
+            requested_workers: 2,
+            cache_path: directory.path().join("cache.json"),
+            option_cache_digest: Some("options".to_owned()),
+            cache_active: true,
+            key: "batch-plan".to_owned(),
+        };
+        let mut first_entry = entry();
+        first_entry.bytes = 4;
+        let mut second_entry = entry();
+        second_entry.bytes = 5;
+        let mut session = BatchRenderCacheSession {
+            manifest: Some(BatchRenderCacheManifest {
+                version: super::BATCH_RENDER_CACHE_VERSION,
+                clean_batch: None,
+                entries: [
+                    ("a.svg".to_owned(), first_entry),
+                    ("b.svg".to_owned(), second_entry),
+                ]
+                .into_iter()
+                .collect(),
+            }),
+            trusted_batch: Some(TrustedBatchSummary {
+                plan_key: plan.key.clone(),
+                input_count: 2,
+                total_bytes: 9,
+            }),
+            reuse_revision_outputs: true,
+            reuse_complete_revision_transactions: true,
+            revision_output_max_entries: 8,
+            revision_output_max_bytes: usize::MAX,
+            defer_output_writes: true,
+            ..BatchRenderCacheSession::default()
+        };
+        let new_source = "flowchart LR\nA-->C";
+        let digest = super::sha256_hex(new_source.as_bytes());
+        let rendered = Arc::new(vec![7_u8; 10]);
+        session.remember_revision_output(format!("{digest}:options"), Arc::clone(&rendered));
+        let transaction = super::prepare_batch_final_state_updates(
+            [(first_input, new_source.to_owned())].into_iter().collect(),
+        );
+
+        assert_eq!(
+            session
+                .replay_resident_transaction(&plan, &transaction, true)
+                .unwrap(),
+            Some(15)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&first_input_path).unwrap(),
+            "flowchart LR\nA-->B"
+        );
+        assert!(
+            session
+                .deferred_outputs
+                .get(&first_destination)
+                .is_some_and(|bytes| Arc::ptr_eq(bytes, &rendered))
+        );
+        assert_eq!(
+            session
+                .manifest
+                .as_ref()
+                .unwrap()
+                .entries
+                .get("a.svg")
+                .unwrap()
+                .source_digest,
+            digest
+        );
+        assert_eq!(session.trusted_batch.as_ref().unwrap().total_bytes, 15);
+        assert!(session.dirty);
+        assert_eq!(
+            session
+                .materialize_deferred_sources(&plan, &transaction.updates)
+                .unwrap(),
+            (1, 0, new_source.len())
+        );
+        assert_eq!(
+            std::fs::read_to_string(first_input_path).unwrap(),
+            new_source
+        );
+    }
+
+    #[test]
+    fn certified_source_materialization_skips_only_exact_disk_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let input_path = directory.path().join("diagram.mmd");
+        std::fs::write(&input_path, "alpha").unwrap();
+        let input = input_path.display().to_string();
+        let metadata = input_path.metadata().unwrap();
+        let source_modified_ns = metadata
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let source_digest = super::sha256_hex(b"alpha");
+        let entry = BatchRenderCacheEntry {
+            key: format!("{source_digest}:options"),
+            source_digest,
+            options_key: "options".to_owned(),
+            source_bytes: metadata.len(),
+            source_modified_ns,
+            bytes: 1,
+        };
+        let plan = BatchRenderPlan {
+            input_set: [input.clone()].into_iter().collect(),
+            input_indices: [(input.clone(), 0)].into_iter().collect(),
+            destinations: vec![directory.path().join("diagram.svg")],
+            destination_names: vec!["diagram.svg".to_owned()],
+            destination_displays: vec![directory.path().join("diagram.svg").display().to_string()],
+            requested_workers: 1,
+            cache_path: directory.path().join("cache.json"),
+            option_cache_digest: Some("options".to_owned()),
+            cache_active: true,
+            key: "batch-plan".to_owned(),
+        };
+        let mut session = BatchRenderCacheSession {
+            manifest: Some(BatchRenderCacheManifest {
+                version: super::BATCH_RENDER_CACHE_VERSION,
+                clean_batch: None,
+                entries: [("diagram.svg".to_owned(), entry.clone())]
+                    .into_iter()
+                    .collect(),
+            }),
+            certified_sources: [(input.clone(), entry)].into_iter().collect(),
+            elide_certified_source_writes: true,
+            trusted_batch: Some(TrustedBatchSummary {
+                plan_key: plan.key.clone(),
+                input_count: 1,
+                total_bytes: 1,
+            }),
+            reuse_complete_revision_transactions: true,
+            reuse_certified_complete_transaction: true,
+            ..BatchRenderCacheSession::default()
+        };
+        let mut sources = [(input.clone(), "alpha".to_owned())]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let certified_transaction = super::prepare_batch_final_state_updates(sources.clone());
+
+        assert_eq!(
+            session
+                .replay_resident_transaction(&plan, &certified_transaction, true)
+                .unwrap(),
+            Some(1)
+        );
+
+        assert_eq!(
+            session
+                .materialize_deferred_sources(&plan, &sources)
+                .unwrap(),
+            (0, 1, 5)
+        );
+
+        sources.insert(input.clone(), "omega".to_owned());
+        let changed_digest = super::sha256_hex(b"omega");
+        let changed_entry = session
+            .manifest
+            .as_mut()
+            .unwrap()
+            .entries
+            .get_mut("diagram.svg")
+            .unwrap();
+        changed_entry.key = format!("{changed_digest}:options");
+        changed_entry.source_digest = changed_digest;
+        let changed_transaction = super::prepare_batch_final_state_updates(sources.clone());
+        assert_eq!(
+            session
+                .replay_resident_transaction(&plan, &changed_transaction, true)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            session
+                .materialize_deferred_sources(&plan, &sources)
+                .unwrap(),
+            (1, 0, 5)
+        );
+        assert_eq!(std::fs::read_to_string(input_path).unwrap(), "omega");
+    }
+
+    #[test]
+    fn final_output_transaction_materializes_only_the_newest_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("diagram.svg");
+        let mut session = BatchRenderCacheSession {
+            defer_output_writes: true,
+            ..BatchRenderCacheSession::default()
+        };
+
+        assert!(session.stage_output_if_deferred(&destination, Arc::new(vec![1_u8; 8])));
+        assert!(session.stage_output_if_deferred(&destination, Arc::new(vec![2_u8; 3])));
+        assert!(!destination.exists());
+
+        assert_eq!(session.materialize_deferred_outputs().unwrap(), (1, 3));
+        assert_eq!(std::fs::read(destination).unwrap(), vec![2_u8; 3]);
+        assert!(session.deferred_outputs.is_empty());
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1022,6 +2998,157 @@ fn main() -> Result<()> {
                     fnx_fallback,
                 },
             )
+        }
+
+        Command::RenderBatch {
+            inputs,
+            out_dir,
+            jobs,
+            parse_mode,
+            layout_algorithm,
+            format,
+            theme,
+            font_size,
+            json,
+            keep_going,
+            no_cache,
+            trust_change_set,
+            changed_input,
+            change_set_stdin,
+            final_state_stdin,
+            final_state_stream,
+            final_output_only,
+            final_source_only,
+            final_ack_only,
+            complete_snapshot_stream,
+            packed_complete_snapshot_stream,
+            terminal_packed_snapshot,
+            resident_exact_jobs,
+            resident_exact_job_groups,
+            resident_exact_ack64,
+            fnx_mode,
+            fnx_projection,
+            fnx_fallback,
+        } => {
+            let format = resolve_output_format(format, &loaded_config.file)?;
+            let layout_algorithm = resolve_layout_algorithm(layout_algorithm, &loaded_config.file)?;
+            let theme = resolve_theme_name(theme, &loaded_config.file);
+            let layout_config = build_layout_config(&loaded_config.file, font_size)?;
+            let svg_base_config = build_base_svg_render_config(&loaded_config.file)?;
+            let term_base_config = build_base_term_render_config(&loaded_config.file)?;
+            let show_back_edges = resolve_show_back_edges(&loaded_config.file);
+            let show_minimap = term_base_config.show_minimap;
+            let options = RenderCommandOptions {
+                parse_mode: resolve_parse_mode(parse_mode, &loaded_config.file),
+                parser_config,
+                layout_algorithm,
+                layout_config,
+                format,
+                theme: &theme,
+                font_size,
+                // Batch writes one file per input; the shared `output` slot is unused.
+                output: None,
+                max_input_bytes,
+                svg_base_config,
+                term_base_config,
+                show_back_edges,
+                show_minimap,
+                embed_source_spans: format == OutputFormat::Svg,
+                source_map_out: None,
+                dimensions: (None, None),
+                json_output: false,
+                fnx_mode,
+                fnx_projection,
+                fnx_fallback,
+            };
+            if final_output_only && !change_set_stdin && !final_state_stream {
+                anyhow::bail!(
+                    "--final-output-only requires --change-set-stdin or --final-state-stream"
+                );
+            }
+            if final_source_only && !final_state_stream {
+                anyhow::bail!("--final-source-only requires --final-state-stream");
+            }
+            if final_ack_only && !final_state_stream {
+                anyhow::bail!("--final-ack-only requires --final-state-stream");
+            }
+            if final_ack_only && json {
+                anyhow::bail!("--final-ack-only cannot be combined with --json");
+            }
+            if complete_snapshot_stream
+                && !(final_state_stream
+                    && final_output_only
+                    && final_source_only
+                    && (final_ack_only || resident_exact_jobs))
+            {
+                anyhow::bail!(
+                    "--complete-snapshot-stream requires --final-state-stream, \
+                     --final-output-only, --final-source-only, and either --final-ack-only or \
+                     --resident-exact-jobs"
+                );
+            }
+            if packed_complete_snapshot_stream {
+                cmd_render_batch_packed_complete_snapshot_stream(
+                    &inputs,
+                    &out_dir,
+                    jobs,
+                    keep_going,
+                    json,
+                    terminal_packed_snapshot,
+                    resident_exact_jobs,
+                    final_ack_only,
+                    resident_exact_job_groups,
+                    resident_exact_ack64,
+                    options,
+                )
+            } else if final_state_stream {
+                cmd_render_batch_final_state_transaction_stream(
+                    &inputs,
+                    &out_dir,
+                    jobs,
+                    keep_going,
+                    json,
+                    FinalStateStreamMaterialization {
+                        outputs_at_eof: final_output_only,
+                        sources_at_eof: final_source_only,
+                        acknowledgments_at_eof: final_ack_only,
+                        complete_snapshots: complete_snapshot_stream,
+                    },
+                    options,
+                )
+            } else if final_state_stdin {
+                cmd_render_batch_final_state_stream(
+                    &inputs, &out_dir, jobs, keep_going, json, options,
+                )
+            } else if change_set_stdin {
+                cmd_render_batch_change_set_stream(
+                    &inputs,
+                    &out_dir,
+                    jobs,
+                    keep_going,
+                    json,
+                    final_output_only,
+                    options,
+                )
+            } else {
+                cmd_render_batch(
+                    &inputs,
+                    &out_dir,
+                    jobs,
+                    keep_going,
+                    json,
+                    BatchCachePolicy {
+                        use_cache: !no_cache,
+                        trust_change_set,
+                        changed_inputs: &changed_input,
+                        source_overrides: None,
+                        session: None,
+                        plan: None,
+                        report: None,
+                    },
+                    options,
+                )
+            }
         }
 
         Command::Parse {
@@ -1547,9 +3674,13 @@ fn load_input(input: &str, max_input_bytes: usize) -> Result<String> {
             );
         }
         Ok(buffer)
-    } else if Path::new(input).exists() && should_treat_input_as_path(input) {
-        let metadata =
-            std::fs::metadata(input).context(format!("Failed to stat input file: {input}"))?;
+    } else if let Some(file) = open_input_path(input)? {
+        // Size gate via `fstat` on the already-open handle, NOT `fs::metadata(input)`: same length
+        // and same error text, but it reads the inode we already hold instead of walking the path
+        // a third time. See `open_input_path` for why that matters in a batch.
+        let metadata = file
+            .metadata()
+            .context(format!("Failed to stat input file: {input}"))?;
         if metadata.len() > u64::try_from(max_input_bytes).unwrap_or(u64::MAX) {
             anyhow::bail!(
                 "Input file '{}' is {} bytes, which exceeds core.max_input_bytes={max_input_bytes}",
@@ -1557,13 +3688,23 @@ fn load_input(input: &str, max_input_bytes: usize) -> Result<String> {
                 metadata.len()
             );
         }
-        let file = std::fs::File::open(input).context(format!("Failed to open file: {input}"))?;
         let mut handle = file.take(
             u64::try_from(max_input_bytes)
                 .unwrap_or(u64::MAX)
                 .saturating_add(1),
         );
-        let mut content = String::new();
+        // Pre-size from the `fstat` length. `read_to_string` on a `Take` cannot see the underlying
+        // file size, so an empty String makes it discover the length by doubling a small probe
+        // buffer -- measured at ~6.6 reads per input across this corpus (3,368 reads for 512
+        // files) plus the reallocs and copies that regrowing implies. One spare byte beyond the
+        // known length lets the first read return the whole file and the second return 0 (EOF),
+        // which is the minimum any correct reader can do. The size gate above already bounded
+        // `len` by `max_input_bytes`, and over-reserving never touches the surplus pages.
+        let mut content = String::with_capacity(
+            usize::try_from(metadata.len())
+                .unwrap_or(0)
+                .saturating_add(1),
+        );
         handle
             .read_to_string(&mut content)
             .context(format!("Failed to read file: {input}"))?;
@@ -1582,6 +3723,41 @@ fn load_input(input: &str, max_input_bytes: usize) -> Result<String> {
             );
         }
         Ok(input.to_string())
+    }
+}
+
+/// Open `input` as a file, or return `None` if it should be treated as inline diagram text.
+///
+/// This replaces `Path::new(input).exists()` + `fs::metadata(input)` + `File::open(input)`, which
+/// resolved the same path three times for every input. Each resolution is a full walk that takes
+/// the dentry/inode locks of every component, so in `render-batch` the walks of N inputs sharing
+/// one directory contend on that directory's locks -- precisely when the batch is trying to scale
+/// across cores. One walk per input removes two thirds of that contention and two thirds of the
+/// per-input syscalls; the bytes read are unchanged.
+///
+/// The old predicate was `exists() && should_treat_input_as_path()`, where `Path::exists()` is
+/// defined as "`fs::metadata` succeeded". `open` and `metadata` disagree on exactly one input
+/// class: a file that can be stat-ed but not opened (mode 000) versus a path under a directory
+/// that cannot be traversed. Both surface as `PermissionDenied` from `open`, and the old code sent
+/// the first to an error and the second to the inline branch. So on any error other than
+/// `NotFound` -- never on the hot path -- fall back to the original `exists()` probe and reproduce
+/// its decision. `should_treat_input_as_path` is pure string inspection, so hoisting it above the
+/// filesystem access only removes syscalls for inputs that were never going to be read as files.
+fn open_input_path(input: &str) -> Result<Option<std::fs::File>> {
+    if !should_treat_input_as_path(input) {
+        return Ok(None);
+    }
+    match std::fs::File::open(input) {
+        Ok(file) => Ok(Some(file)),
+        // Missing path: `exists()` was false, so the old code fell through to inline text.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            if Path::new(input).exists() {
+                Err(anyhow::Error::new(error)).context(format!("Failed to open file: {input}"))
+            } else {
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -1819,7 +3995,7 @@ fn round6(v: f32) -> f64 {
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    encode_hex(&hasher.finalize())
 }
 
 fn canonical_layout(ir: &MermaidDiagramIr) -> String {
@@ -1903,6 +4079,27 @@ fn layout_float_anomalies(layout: &fm_layout::DiagramLayout) -> (usize, usize) {
 // =============================================================================
 
 fn render_source(source: &str, options: &RenderCommandOptions<'_>) -> Result<RenderOutcome> {
+    render_source_with_pressure(
+        source,
+        options,
+        &MermaidNativePressureSignals::sample().into_report(),
+    )
+}
+
+/// Render one diagram against an already-sampled host pressure report.
+///
+/// `MermaidNativePressureSignals::sample()` reads `/proc/self/status` and queries scheduler
+/// affinity. Those describe the HOST, not the diagram, so sampling them per diagram is work the
+/// output never depends on. In a batch it is also actively harmful: `/proc/self/status` is
+/// generated by the kernel on each read and takes process mm locks, so concurrent samplers
+/// serialize against each other exactly when the batch is trying to scale out. The batch path
+/// samples once and shares the report; the single-diagram path is unchanged, still sampling
+/// immediately before it renders.
+fn render_source_with_pressure(
+    source: &str,
+    options: &RenderCommandOptions<'_>,
+    pressure: &MermaidPressureReport,
+) -> Result<RenderOutcome> {
     if source.len() > options.max_input_bytes {
         anyhow::bail!(
             "Inline input is {} bytes, which exceeds core.max_input_bytes={}",
@@ -1912,8 +4109,7 @@ fn render_source(source: &str, options: &RenderCommandOptions<'_>) -> Result<Ren
     }
 
     let total_start = Instant::now();
-    let pressure = MermaidNativePressureSignals::sample().into_report();
-    let mut budget_broker = MermaidBudgetLedger::new(&pressure);
+    let mut budget_broker = MermaidBudgetLedger::new(pressure);
 
     // Parse
     let parse_start = Instant::now();
@@ -1921,15 +4117,103 @@ fn render_source(source: &str, options: &RenderCommandOptions<'_>) -> Result<Ren
     let parse_time = parse_start.elapsed();
     budget_broker.record_parse(u64::try_from(parse_time.as_millis()).unwrap_or(u64::MAX));
 
+    render_parsed_source_with_pressure(
+        source,
+        parsed,
+        RenderTiming {
+            parse_time,
+            total_start,
+        },
+        budget_broker,
+        options,
+        pressure,
+    )
+}
+
+/// Finish an already-parsed diagram through layout and rendering.
+///
+/// `render-batch` uses this boundary after its cross-diagram prefix compiler has parsed suffixes in
+/// parallel. Single-diagram rendering still enters through [`render_source_with_pressure`], so its
+/// public behavior and timing metadata are unchanged.
+struct RenderTiming {
+    parse_time: std::time::Duration,
+    total_start: Instant,
+}
+
+fn render_parsed_source_with_pressure(
+    source: &str,
+    parsed: fm_parser::ParseResult,
+    timing: RenderTiming,
+    budget_broker: MermaidBudgetLedger,
+    options: &RenderCommandOptions<'_>,
+    pressure: &MermaidPressureReport,
+) -> Result<RenderOutcome> {
+    let fm_parser::ParseResult { ir, warnings, .. } = parsed;
+    render_parsed_ir_with_pressure(
+        source,
+        &ir,
+        &warnings,
+        timing,
+        budget_broker,
+        options,
+        pressure,
+        None,
+    )
+}
+
+/// Finish a parser-slot-backed diagram before that slot is overwritten by the next batch item.
+fn render_batch_parse_ref_with_pressure(
+    source: &str,
+    parsed: FlowchartBatchParseRef<'_>,
+    timing: RenderTiming,
+    budget_broker: MermaidBudgetLedger,
+    options: &RenderCommandOptions<'_>,
+    pressure: &MermaidPressureReport,
+    batch_renderer: &mut SvgBatchRenderer,
+) -> Result<RenderOutcome> {
+    let certified_prefix = parsed.reusable_prefix.map(|prefix| {
+        CertifiedSvgBatchPrefix::new(
+            Arc::clone(&prefix.identity),
+            prefix.node_count,
+            prefix.edge_count,
+        )
+    });
+    render_parsed_ir_with_pressure(
+        source,
+        parsed.ir,
+        parsed.warnings,
+        timing,
+        budget_broker,
+        options,
+        pressure,
+        Some((batch_renderer, certified_prefix)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_parsed_ir_with_pressure(
+    source: &str,
+    ir: &MermaidDiagramIr,
+    warnings: &[String],
+    timing: RenderTiming,
+    mut budget_broker: MermaidBudgetLedger,
+    options: &RenderCommandOptions<'_>,
+    pressure: &MermaidPressureReport,
+    batch_renderer: Option<(&mut SvgBatchRenderer, Option<CertifiedSvgBatchPrefix>)>,
+) -> Result<RenderOutcome> {
+    let RenderTiming {
+        parse_time,
+        total_start,
+    } = timing;
     debug!(
         "Parsed: type={:?}, nodes={}, edges={}, warnings={}",
-        parsed.ir.diagram_type,
-        parsed.ir.nodes.len(),
-        parsed.ir.edges.len(),
-        parsed.warnings.len()
+        ir.diagram_type,
+        ir.nodes.len(),
+        ir.edges.len(),
+        warnings.len()
     );
 
-    for warning in &parsed.warnings {
+    for warning in warnings {
         warn!("Parse warning: {warning}");
     }
 
@@ -1945,7 +4229,7 @@ fn render_source(source: &str, options: &RenderCommandOptions<'_>) -> Result<Ren
         max_route_ops: budget_broker.route_budget(LayoutGuardrails::default().max_route_ops),
     };
     let traced_layout = fm_layout::layout_diagram_traced_with_config_and_guardrails(
-        &parsed.ir,
+        ir,
         options.layout_algorithm,
         layout_config,
         layout_guardrails,
@@ -1954,7 +4238,7 @@ fn render_source(source: &str, options: &RenderCommandOptions<'_>) -> Result<Ren
     let layout_time = layout_start.elapsed();
     budget_broker.record_layout(layout_time.as_millis().min(u128::from(u64::MAX)) as u64);
     let mut guard_report =
-        build_layout_guard_report_with_pressure(&parsed.ir, &traced_layout, pressure);
+        build_layout_guard_report_with_pressure(ir, &traced_layout, pressure.clone());
     let (_cx, observability) = mermaid_layout_guard_observability(
         "cli.render",
         source,
@@ -1990,28 +4274,40 @@ fn render_source(source: &str, options: &RenderCommandOptions<'_>) -> Result<Ren
     let filtered_layout = (!options.show_back_edges).then(|| layout_without_back_edges(layout));
     let source_map_layout = filtered_layout.as_ref().unwrap_or(layout);
 
-    let (rendered, actual_width, actual_height) = render_format(
-        &parsed.ir,
-        layout,
-        options.format,
-        RenderSurfaceOptions {
-            theme: effective_theme,
-            font_size: options.font_size,
-            svg_base_config: options.svg_base_config.clone(),
-            term_base_config: options.term_base_config.clone(),
-            show_back_edges: options.show_back_edges,
-            show_minimap: options.show_minimap,
-            embed_source_spans: options.embed_source_spans,
-            dimensions: options.dimensions,
-            degradation: guard_report.degradation.clone(),
-        },
-    )?;
+    let surface_options = || RenderSurfaceOptions {
+        theme: effective_theme,
+        font_size: options.font_size,
+        svg_base_config: options.svg_base_config.clone(),
+        term_base_config: options.term_base_config.clone(),
+        show_back_edges: options.show_back_edges,
+        show_minimap: options.show_minimap,
+        embed_source_spans: options.embed_source_spans,
+        dimensions: options.dimensions,
+        degradation: guard_report.degradation.clone(),
+    };
+    let (rendered, actual_width, actual_height) = if options.format == OutputFormat::Svg
+        && options.show_back_edges
+        && let Some((renderer, certified_prefix)) = batch_renderer
+    {
+        let mut svg_config = build_svg_render_config(
+            &options.svg_base_config,
+            effective_theme,
+            options.font_size,
+            options.embed_source_spans,
+        );
+        svg_config.apply_degradation(&guard_report.degradation);
+        let svg = renderer.render_borrowed(ir, Arc::clone(layout), &svg_config, certified_prefix);
+        let (width, height) = extract_svg_dimensions(&svg);
+        (svg.into_bytes(), width, height)
+    } else {
+        render_format(ir, layout, options.format, surface_options())?
+    };
     let render_time = render_start.elapsed();
     budget_broker.record_render(render_time.as_millis().min(u128::from(u64::MAX)) as u64);
 
     let total_time = total_start.elapsed();
     let source_map = if options.json_output || options.source_map_out.is_some() {
-        Some(layout_source_map(&parsed.ir, source_map_layout))
+        Some(layout_source_map(ir, source_map_layout))
     } else {
         None
     };
@@ -2028,22 +4324,22 @@ fn render_source(source: &str, options: &RenderCommandOptions<'_>) -> Result<Ren
 
     info!(
         "Rendered {} via layout {}->{} with {} nodes, {} edges in {:.2}ms",
-        parsed.ir.diagram_type.as_str(),
+        ir.diagram_type.as_str(),
         traced_layout.trace.dispatch.requested.as_str(),
         traced_layout.trace.dispatch.selected.as_str(),
-        parsed.ir.nodes.len(),
-        parsed.ir.edges.len(),
+        ir.nodes.len(),
+        ir.edges.len(),
         total_time.as_secs_f64() * 1000.0
     );
 
     let render_result = if options.json_output {
-        let accessibility_summary = describe_diagram_with_layout(&parsed.ir, Some(layout));
+        let accessibility_summary = describe_diagram_with_layout(ir, Some(layout));
         let source_map = source_map.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Render metadata requested but source map was not generated")
         })?;
         guard_report.budget_broker = budget_broker.clone();
         let layout_decision_ledger =
-            build_layout_decision_ledger(&parsed.ir, &traced_layout, &guard_report);
+            build_layout_decision_ledger(ir, &traced_layout, &guard_report);
         let layout_decision_explanation = layout_decision_ledger
             .primary_explanation()
             .expect("layout decision ledger should contain a primary entry");
@@ -2083,9 +4379,9 @@ fn render_source(source: &str, options: &RenderCommandOptions<'_>) -> Result<Ren
             source_span_cluster_count: count_known_cluster_spans(source_map_layout),
             source_map_entry_count: source_map.entries.len(),
             source_map_out: options.source_map_out.map(str::to_string),
-            diagram_type: parsed.ir.diagram_type.as_str().to_string(),
-            node_count: parsed.ir.nodes.len(),
-            edge_count: parsed.ir.edges.len(),
+            diagram_type: ir.diagram_type.as_str().to_string(),
+            node_count: ir.nodes.len(),
+            edge_count: ir.edges.len(),
             pressure_source: guard_report.pressure.source.as_str().to_string(),
             pressure_tier: guard_report.pressure.tier.as_str().to_string(),
             pressure_telemetry_available: guard_report.pressure.telemetry_available,
@@ -2122,7 +4418,7 @@ fn render_source(source: &str, options: &RenderCommandOptions<'_>) -> Result<Ren
             layout_time_ms: layout_time.as_secs_f64() * 1000.0,
             render_time_ms: render_time.as_secs_f64() * 1000.0,
             total_time_ms: total_time.as_secs_f64() * 1000.0,
-            warnings: parsed.warnings,
+            warnings: warnings.to_vec(),
             fnx_witness,
         })
     } else {
@@ -2359,6 +4655,2181 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
         _ => write_output(output, &String::from_utf8_lossy(&outcome.rendered))?,
     }
 
+    Ok(())
+}
+
+/// Extension used for a batch output file.
+fn batch_output_extension(format: OutputFormat) -> &'static str {
+    match format {
+        OutputFormat::Svg => "svg",
+        OutputFormat::Png => "png",
+        OutputFormat::Term | OutputFormat::Ascii => "txt",
+    }
+}
+
+fn parse_batch_change_set_line(line: &str, line_number: usize) -> Result<Option<Vec<String>>> {
+    if line.trim().is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_str(line)
+        .with_context(|| format!("invalid change-set JSON array on input line {line_number}"))
+        .map(Some)
+}
+
+fn parse_batch_final_state_payload(
+    payload: &str,
+    inputs: &[String],
+    max_input_bytes: usize,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let updates = serde_json::from_str::<std::collections::BTreeMap<String, String>>(payload)
+        .context("invalid final-state JSON object")?;
+    let input_set = inputs
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    for (input, source) in &updates {
+        if !input_set.contains(input.as_str()) {
+            anyhow::bail!("final-state input {input:?} is not one of this batch's inputs");
+        }
+        if source.len() > max_input_bytes {
+            anyhow::bail!(
+                "final-state input {input:?} is {} bytes, exceeding the {max_input_bytes}-byte \
+                 input limit",
+                source.len()
+            );
+        }
+    }
+    Ok(updates)
+}
+
+#[derive(Debug)]
+struct PreparedBatchFinalState {
+    updates: std::collections::BTreeMap<String, String>,
+    source_digests: Vec<String>,
+    changed_inputs: Vec<String>,
+    total_source_bytes: usize,
+}
+
+#[derive(Debug)]
+struct PreparedPackedCompleteBatchFinalState<'a> {
+    sources: Vec<&'a str>,
+    source_digests: Vec<String>,
+    total_source_bytes: usize,
+}
+
+impl PreparedPackedCompleteBatchFinalState<'_> {
+    fn into_keyed(self, inputs: &[String]) -> PreparedBatchFinalState {
+        let updates = inputs
+            .iter()
+            .cloned()
+            .zip(self.sources.into_iter().map(str::to_owned))
+            .collect();
+        prepare_batch_final_state_updates(updates)
+    }
+}
+
+fn prepare_batch_final_state_updates(
+    updates: std::collections::BTreeMap<String, String>,
+) -> PreparedBatchFinalState {
+    let source_digests = updates
+        .values()
+        .map(|source| sha256_hex(source.as_bytes()))
+        .collect();
+    let changed_inputs = updates.keys().cloned().collect();
+    let total_source_bytes = updates
+        .values()
+        .map(String::len)
+        .fold(0usize, usize::saturating_add);
+    PreparedBatchFinalState {
+        updates,
+        source_digests,
+        changed_inputs,
+        total_source_bytes,
+    }
+}
+
+fn prepare_packed_complete_batch_final_state_payload<'a>(
+    payload: &'a [u8],
+    inputs: &[String],
+    max_input_bytes: usize,
+) -> Result<PreparedPackedCompleteBatchFinalState<'a>> {
+    let mut cursor = 0usize;
+    let mut sources = Vec::with_capacity(inputs.len());
+    let mut source_digests = Vec::with_capacity(inputs.len());
+    let mut total_source_bytes = 0usize;
+    for input in inputs {
+        let length_end = cursor
+            .checked_add(std::mem::size_of::<u64>())
+            .ok_or_else(|| anyhow::anyhow!("packed source length offset overflow"))?;
+        let length_bytes = payload.get(cursor..length_end).ok_or_else(|| {
+            anyhow::anyhow!("packed snapshot ended before the length for input {input:?}")
+        })?;
+        let source_bytes =
+            usize::try_from(u64::from_le_bytes(length_bytes.try_into().map_err(
+                |_| anyhow::anyhow!("packed source length is not eight bytes"),
+            )?))
+            .map_err(|_| anyhow::anyhow!("packed source length does not fit this platform"))?;
+        if source_bytes > max_input_bytes {
+            anyhow::bail!(
+                "packed final-state input {input:?} is {source_bytes} bytes, exceeding the \
+                 {max_input_bytes}-byte input limit"
+            );
+        }
+        let source_end = length_end
+            .checked_add(source_bytes)
+            .ok_or_else(|| anyhow::anyhow!("packed source body offset overflow"))?;
+        let encoded_source = payload.get(length_end..source_end).ok_or_else(|| {
+            anyhow::anyhow!(
+                "packed snapshot ended inside the {source_bytes}-byte body for input {input:?}"
+            )
+        })?;
+        let source = std::str::from_utf8(encoded_source)
+            .with_context(|| format!("packed final-state input {input:?} is not UTF-8"))?;
+        total_source_bytes = total_source_bytes
+            .checked_add(source_bytes)
+            .ok_or_else(|| anyhow::anyhow!("packed snapshot source byte count overflow"))?;
+        sources.push(source);
+        source_digests.push(sha256_hex(encoded_source));
+        cursor = source_end;
+    }
+    if cursor != payload.len() {
+        anyhow::bail!(
+            "packed snapshot has {} trailing byte(s) after {} input(s)",
+            payload.len() - cursor,
+            inputs.len()
+        );
+    }
+    Ok(PreparedPackedCompleteBatchFinalState {
+        sources,
+        source_digests,
+        total_source_bytes,
+    })
+}
+
+fn prepare_batch_final_state_payload(
+    payload: &str,
+    inputs: &[String],
+    max_input_bytes: usize,
+) -> Result<PreparedBatchFinalState> {
+    parse_batch_final_state_payload(payload, inputs, max_input_bytes)
+        .map(prepare_batch_final_state_updates)
+}
+
+fn prepare_complete_batch_final_state_payload(
+    payload: &str,
+    inputs: &[String],
+    max_input_bytes: usize,
+) -> Result<PreparedBatchFinalState> {
+    let prepared = prepare_batch_final_state_payload(payload, inputs, max_input_bytes)?;
+    if prepared.updates.len() != inputs.len() {
+        anyhow::bail!(
+            "--complete-snapshot-stream final payload contains {} of {} batch inputs",
+            prepared.updates.len(),
+            inputs.len()
+        );
+    }
+    Ok(prepared)
+}
+
+fn merge_superseded_final_state_updates(
+    completed_state: &mut std::collections::BTreeMap<String, String>,
+    updates: std::collections::BTreeMap<String, String>,
+) {
+    completed_state.extend(updates);
+}
+
+const RESIDENT_PAYLOAD_CACHE_MAX_ENTRIES: usize = 8;
+const RESIDENT_PAYLOAD_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Debug)]
+struct ResidentPayloadCacheEntry {
+    payload: String,
+    prepared: Arc<PreparedBatchFinalState>,
+    retained_bytes: usize,
+    last_used: u64,
+}
+
+#[derive(Debug, Default)]
+struct ResidentPayloadCache {
+    entries: Vec<ResidentPayloadCacheEntry>,
+    retained_bytes: usize,
+    clock: u64,
+    decoded: usize,
+    reused: usize,
+}
+
+impl ResidentPayloadCache {
+    fn prepare(
+        &mut self,
+        payload: &str,
+        inputs: &[String],
+        max_input_bytes: usize,
+        enabled: bool,
+    ) -> Result<Arc<PreparedBatchFinalState>> {
+        if enabled
+            && let Some(index) = self
+                .entries
+                .iter()
+                .position(|entry| entry.payload == payload)
+        {
+            self.clock = self.clock.saturating_add(1);
+            self.entries[index].last_used = self.clock;
+            self.reused = self.reused.saturating_add(1);
+            return Ok(Arc::clone(&self.entries[index].prepared));
+        }
+
+        let prepared = Arc::new(prepare_batch_final_state_payload(
+            payload,
+            inputs,
+            max_input_bytes,
+        )?);
+        self.decoded = self.decoded.saturating_add(1);
+        if !enabled {
+            return Ok(prepared);
+        }
+
+        let retained_bytes = payload
+            .len()
+            .saturating_add(prepared.total_source_bytes)
+            .saturating_add(
+                prepared
+                    .changed_inputs
+                    .iter()
+                    .map(String::len)
+                    .fold(0usize, usize::saturating_add),
+            )
+            .saturating_add(
+                prepared
+                    .source_digests
+                    .iter()
+                    .map(String::len)
+                    .fold(0usize, usize::saturating_add),
+            );
+        if retained_bytes > RESIDENT_PAYLOAD_CACHE_MAX_BYTES {
+            return Ok(prepared);
+        }
+
+        self.clock = self.clock.saturating_add(1);
+        self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
+        self.entries.push(ResidentPayloadCacheEntry {
+            payload: payload.to_owned(),
+            prepared: Arc::clone(&prepared),
+            retained_bytes,
+            last_used: self.clock,
+        });
+        while self.entries.len() > RESIDENT_PAYLOAD_CACHE_MAX_ENTRIES
+            || self.retained_bytes > RESIDENT_PAYLOAD_CACHE_MAX_BYTES
+        {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(index, _)| index)
+            else {
+                break;
+            };
+            let evicted = self.entries.remove(oldest);
+            self.retained_bytes = self.retained_bytes.saturating_sub(evicted.retained_bytes);
+        }
+        Ok(prepared)
+    }
+}
+
+fn batch_final_state_payload_limit(inputs: &[String], max_input_bytes: usize) -> usize {
+    // JSON escaping can expand one source byte to six ASCII bytes. The fixed allowance covers
+    // absolute path keys and object punctuation without making the decoder an unbounded buffer.
+    max_input_bytes
+        .saturating_mul(inputs.len().max(1))
+        .saturating_mul(6)
+        .saturating_add(1024 * 1024)
+}
+
+fn packed_complete_snapshot_payload_limit(inputs: &[String], max_input_bytes: usize) -> usize {
+    max_input_bytes
+        .saturating_add(std::mem::size_of::<u64>())
+        .saturating_mul(inputs.len())
+}
+
+fn read_packed_snapshot_record(
+    reader: &mut impl Read,
+    payload: &mut Vec<u8>,
+    max_payload_bytes: usize,
+    record_ordinal: usize,
+) -> Result<bool> {
+    let mut payload_length = [0u8; std::mem::size_of::<u64>()];
+    let first_length_byte = reader
+        .read(&mut payload_length[..1])
+        .context("cannot read packed snapshot stream")?;
+    if first_length_byte == 0 {
+        payload.clear();
+        return Ok(false);
+    }
+    reader
+        .read_exact(&mut payload_length[1..])
+        .with_context(|| {
+            format!("packed snapshot {record_ordinal} ended inside its payload-length header")
+        })?;
+    let payload_bytes = usize::try_from(u64::from_le_bytes(payload_length)).map_err(|_| {
+        anyhow::anyhow!("packed snapshot payload length does not fit this platform")
+    })?;
+    if payload_bytes > max_payload_bytes {
+        anyhow::bail!(
+            "packed snapshot {record_ordinal} is {payload_bytes} bytes, exceeding the \
+             {max_payload_bytes}-byte transaction limit"
+        );
+    }
+    payload.resize(payload_bytes, 0);
+    reader.read_exact(payload).with_context(|| {
+        format!("packed snapshot {record_ordinal} ended inside its {payload_bytes}-byte payload")
+    })?;
+    Ok(true)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResidentExactJobGroup {
+    ExplicitRecords(usize),
+    RepeatAdmitted(usize),
+}
+
+impl ResidentExactJobGroup {
+    fn jobs(self) -> usize {
+        match self {
+            Self::ExplicitRecords(jobs) | Self::RepeatAdmitted(jobs) => jobs,
+        }
+    }
+}
+
+fn read_resident_exact_job_group(
+    reader: &mut impl Read,
+    group_ordinal: usize,
+) -> Result<Option<ResidentExactJobGroup>> {
+    let mut encoded_jobs = [0u8; std::mem::size_of::<u64>()];
+    let first_byte = reader
+        .read(&mut encoded_jobs[..1])
+        .context("cannot read resident exact-job group stream")?;
+    if first_byte == 0 {
+        return Ok(None);
+    }
+    reader.read_exact(&mut encoded_jobs[1..]).with_context(|| {
+        format!("resident exact-job group {group_ordinal} ended inside its job-count header")
+    })?;
+    let encoded_jobs = u64::from_le_bytes(encoded_jobs);
+    let repeat_admitted = encoded_jobs & RESIDENT_EXACT_JOB_GROUP_REPEAT_MASK != 0;
+    let jobs = usize::try_from(encoded_jobs & !RESIDENT_EXACT_JOB_GROUP_REPEAT_MASK)
+        .map_err(|_| anyhow::anyhow!("resident exact-job group size does not fit this platform"))?;
+    if jobs == 0 {
+        anyhow::bail!("resident exact-job group {group_ordinal} has zero jobs");
+    }
+    if jobs > MAX_RESIDENT_EXACT_JOB_GROUP_JOBS {
+        anyhow::bail!(
+            "resident exact-job group {group_ordinal} has {jobs} jobs, exceeding the \
+             {MAX_RESIDENT_EXACT_JOB_GROUP_JOBS}-job limit"
+        );
+    }
+    Ok(Some(if repeat_admitted {
+        ResidentExactJobGroup::RepeatAdmitted(jobs)
+    } else {
+        ResidentExactJobGroup::ExplicitRecords(jobs)
+    }))
+}
+
+#[derive(Default)]
+struct ResidentExactJobReplayState {
+    payload: Vec<u8>,
+    admitted_payload: Vec<u8>,
+    admitted_source_bytes: usize,
+    admitted_output_bytes: usize,
+    has_admitted_payload: bool,
+    jobs: usize,
+    parsed_payloads: usize,
+    exact_payload_reuses: usize,
+    encoded_payload_bytes: usize,
+    logical_source_bytes: usize,
+    logical_output_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResidentExactJobGroupAcknowledgment {
+    group: usize,
+    transactions: usize,
+    updates: usize,
+    source_bytes: usize,
+    encoded_payload_bytes: usize,
+}
+
+fn write_resident_exact_job_group_ack(
+    writer: &mut impl Write,
+    ack64: bool,
+    acknowledgment: ResidentExactJobGroupAcknowledgment,
+) -> Result<()> {
+    if ack64 {
+        let group = u64::try_from(acknowledgment.group)
+            .context("resident exact-job group ordinal does not fit u64")?;
+        writer.write_all(&group.to_le_bytes())?;
+    } else {
+        serde_json::to_writer(
+            &mut *writer,
+            &serde_json::json!({
+                "group": acknowledgment.group,
+                "transactions": acknowledgment.transactions,
+                "input_lines": acknowledgment.transactions,
+                "updates": acknowledgment.updates,
+                "source_bytes": acknowledgment.source_bytes,
+                "source_bytes_scope": "completed_jobs",
+                "encoded_payload_bytes": acknowledgment.encoded_payload_bytes,
+                "status": "ok"
+            }),
+        )?;
+        writeln!(writer)?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+impl ResidentExactJobReplayState {
+    fn read_and_replay(
+        &mut self,
+        reader: &mut impl Read,
+        inputs: &[String],
+        plan: &BatchRenderPlan,
+        cache_session: &mut BatchRenderCacheSession,
+        max_payload_bytes: usize,
+        max_input_bytes: usize,
+    ) -> Result<Option<(usize, usize)>> {
+        if !read_packed_snapshot_record(
+            reader,
+            &mut self.payload,
+            max_payload_bytes,
+            self.jobs.saturating_add(1),
+        )? {
+            return Ok(None);
+        }
+
+        let payload_bytes = self.payload.len();
+        self.encoded_payload_bytes = self.encoded_payload_bytes.saturating_add(payload_bytes);
+        let exact_payload_reuse =
+            self.has_admitted_payload && self.payload == self.admitted_payload;
+        let (source_bytes, output_bytes) = if exact_payload_reuse {
+            self.exact_payload_reuses = self.exact_payload_reuses.saturating_add(1);
+            (self.admitted_source_bytes, self.admitted_output_bytes)
+        } else {
+            let packed = prepare_packed_complete_batch_final_state_payload(
+                &self.payload,
+                inputs,
+                max_input_bytes,
+            )
+            .with_context(|| format!("resident exact job {} is invalid", self.jobs + 1))?;
+            let output_bytes = cache_session
+                .replay_certified_complete_transaction(
+                    plan,
+                    inputs
+                        .iter()
+                        .map(String::as_str)
+                        .zip(packed.source_digests.iter().map(String::as_str)),
+                    true,
+                )
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "resident exact job {} does not match the admitted durable batch \
+                         certificate; outputs were not touched",
+                        self.jobs + 1
+                    )
+                })?;
+            self.parsed_payloads = self.parsed_payloads.saturating_add(1);
+            self.admitted_source_bytes = packed.total_source_bytes;
+            self.admitted_output_bytes = output_bytes;
+            self.admitted_payload.clear();
+            self.admitted_payload.extend_from_slice(&self.payload);
+            self.has_admitted_payload = true;
+            (self.admitted_source_bytes, self.admitted_output_bytes)
+        };
+
+        self.jobs = self.jobs.saturating_add(1);
+        self.logical_source_bytes = self.logical_source_bytes.saturating_add(source_bytes);
+        self.logical_output_bytes = self.logical_output_bytes.saturating_add(output_bytes);
+        Ok(Some((source_bytes, payload_bytes)))
+    }
+
+    fn repeat_admitted(&mut self, jobs: usize) -> Result<(usize, usize)> {
+        if !self.has_admitted_payload {
+            anyhow::bail!(
+                "resident exact-job repeat group has no previously admitted payload; outputs \
+                 were not touched"
+            );
+        }
+        let source_bytes = self
+            .admitted_source_bytes
+            .checked_mul(jobs)
+            .ok_or_else(|| anyhow::anyhow!("resident repeat-group source byte count overflow"))?;
+        let output_bytes = self
+            .admitted_output_bytes
+            .checked_mul(jobs)
+            .ok_or_else(|| anyhow::anyhow!("resident repeat-group output byte count overflow"))?;
+        self.jobs = self
+            .jobs
+            .checked_add(jobs)
+            .ok_or_else(|| anyhow::anyhow!("resident repeat-group job count overflow"))?;
+        self.exact_payload_reuses = self
+            .exact_payload_reuses
+            .checked_add(jobs)
+            .ok_or_else(|| anyhow::anyhow!("resident repeat-group reuse count overflow"))?;
+        self.logical_source_bytes = self
+            .logical_source_bytes
+            .checked_add(source_bytes)
+            .ok_or_else(|| anyhow::anyhow!("resident repeat-group source total overflow"))?;
+        self.logical_output_bytes = self
+            .logical_output_bytes
+            .checked_add(output_bytes)
+            .ok_or_else(|| anyhow::anyhow!("resident repeat-group output total overflow"))?;
+        Ok((source_bytes, 0))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FinalStateStreamMaterialization {
+    outputs_at_eof: bool,
+    sources_at_eof: bool,
+    acknowledgments_at_eof: bool,
+    complete_snapshots: bool,
+}
+
+impl FinalStateStreamMaterialization {
+    fn exposes_only_completed_state(self) -> bool {
+        self.outputs_at_eof && self.sources_at_eof && self.acknowledgments_at_eof
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_prepared_final_state_transaction(
+    inputs: &[String],
+    out_dir: &str,
+    jobs: Option<usize>,
+    keep_going: bool,
+    json: bool,
+    plan: &BatchRenderPlan,
+    cache_session: &mut BatchRenderCacheSession,
+    prepared: &PreparedBatchFinalState,
+    source_overrides: Option<&std::collections::BTreeMap<String, String>>,
+    options: &RenderCommandOptions<'_>,
+) -> Result<bool> {
+    let replay_started = Instant::now();
+    let replayed_total_bytes = (!json)
+        .then(|| {
+            cache_session.replay_resident_transaction(plan, prepared, source_overrides.is_some())
+        })
+        .transpose()?
+        .flatten();
+    if let Some(total_bytes) = replayed_total_bytes {
+        eprintln!(
+            "rendered {0}/{0} diagram(s) ({0} persistent hits, 0 identical renders reused, 0 \
+             shared prefix parses reused / 0 bytes), {total_bytes} bytes, {1} requested \
+             worker(s), 0 active worker(s), {2:.3} ms",
+            inputs.len(),
+            plan.requested_workers,
+            replay_started.elapsed().as_secs_f64() * 1000.0,
+        );
+    } else {
+        cmd_render_batch(
+            inputs,
+            out_dir,
+            jobs,
+            keep_going,
+            json,
+            BatchCachePolicy {
+                use_cache: true,
+                trust_change_set: true,
+                changed_inputs: &prepared.changed_inputs,
+                source_overrides,
+                session: Some(cache_session),
+                plan: Some(plan),
+                report: None,
+            },
+            options.clone(),
+        )?;
+    }
+    Ok(replayed_total_bytes.is_some())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_render_batch_resident_exact_jobs(
+    reader: &mut impl Read,
+    inputs: &[String],
+    out_dir: &str,
+    plan: &BatchRenderPlan,
+    cache_session: &mut BatchRenderCacheSession,
+    max_payload_bytes: usize,
+    max_input_bytes: usize,
+    acknowledgments_at_eof: bool,
+    job_groups: bool,
+    ack64: bool,
+) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    let mut replay = ResidentExactJobReplayState::default();
+    let mut groups = 0usize;
+    let mut repeat_groups = 0usize;
+    let mut repeat_group_jobs = 0usize;
+
+    if job_groups {
+        while let Some(group) = read_resident_exact_job_group(reader, groups.saturating_add(1))? {
+            groups = groups.saturating_add(1);
+            let group_jobs = group.jobs();
+            let jobs_before = replay.jobs;
+            let source_bytes_before = replay.logical_source_bytes;
+            let encoded_bytes_before = replay.encoded_payload_bytes;
+            match group {
+                ResidentExactJobGroup::ExplicitRecords(_) => {
+                    for group_job in 0..group_jobs {
+                        if replay
+                            .read_and_replay(
+                                reader,
+                                inputs,
+                                plan,
+                                cache_session,
+                                max_payload_bytes,
+                                max_input_bytes,
+                            )?
+                            .is_none()
+                        {
+                            anyhow::bail!(
+                                "resident exact-job group {groups} ended after {group_job} of \
+                                 {group_jobs} packed job(s)"
+                            );
+                        }
+                    }
+                }
+                ResidentExactJobGroup::RepeatAdmitted(_) => {
+                    replay.repeat_admitted(group_jobs).with_context(|| {
+                        format!(
+                            "resident exact-job group {groups} cannot repeat the admitted payload"
+                        )
+                    })?;
+                    repeat_groups = repeat_groups.saturating_add(1);
+                    repeat_group_jobs = repeat_group_jobs.saturating_add(group_jobs);
+                }
+            }
+            cache_session.flush(Path::new(out_dir))?;
+            write_resident_exact_job_group_ack(
+                &mut stdout,
+                ack64,
+                ResidentExactJobGroupAcknowledgment {
+                    group: groups,
+                    transactions: replay.jobs.saturating_sub(jobs_before),
+                    updates: group_jobs.saturating_mul(inputs.len()),
+                    source_bytes: replay
+                        .logical_source_bytes
+                        .saturating_sub(source_bytes_before),
+                    encoded_payload_bytes: replay
+                        .encoded_payload_bytes
+                        .saturating_sub(encoded_bytes_before),
+                },
+            )?;
+        }
+    } else {
+        while let Some((source_bytes, payload_bytes)) = replay.read_and_replay(
+            reader,
+            inputs,
+            plan,
+            cache_session,
+            max_payload_bytes,
+            max_input_bytes,
+        )? {
+            if acknowledgments_at_eof {
+                continue;
+            }
+            serde_json::to_writer(
+                &mut stdout,
+                &serde_json::json!({
+                    "transactions": 1,
+                    "input_lines": 1,
+                    "updates": inputs.len(),
+                    "source_bytes": source_bytes,
+                    "source_bytes_scope": "completed_state",
+                    "encoded_payload_bytes": payload_bytes,
+                    "status": "ok"
+                }),
+            )?;
+            writeln!(stdout)?;
+            stdout.flush()?;
+        }
+    }
+
+    cache_session.flush(Path::new(out_dir))?;
+    if acknowledgments_at_eof && !job_groups {
+        serde_json::to_writer(
+            &mut stdout,
+            &serde_json::json!({
+                "transactions": replay.jobs,
+                "input_lines": replay.jobs,
+                "updates": replay.jobs.saturating_mul(inputs.len()),
+                "source_bytes": replay.logical_source_bytes,
+                "source_bytes_scope": "completed_jobs",
+                "encoded_payload_bytes": replay.encoded_payload_bytes,
+                "status": "ok"
+            }),
+        )?;
+        writeln!(stdout)?;
+        stdout.flush()?;
+    }
+    eprintln!(
+        "replayed {} resident exact job(s), parsed {} certified payload(s), reused {} exact \
+         payload(s), {} encoded bytes",
+        replay.jobs,
+        replay.parsed_payloads,
+        replay.exact_payload_reuses,
+        replay.encoded_payload_bytes,
+    );
+    eprintln!(
+        "reused {} certified source state(s), {} logical source bytes, {} logical output bytes",
+        replay.jobs.saturating_mul(inputs.len()),
+        replay.logical_source_bytes,
+        replay.logical_output_bytes,
+    );
+    eprintln!("materialized 0 source revision(s) and 0 output revision(s) during resident jobs");
+    if job_groups {
+        eprintln!("emitted {groups} resident exact job-group acknowledgment(s)");
+        eprintln!(
+            "accepted {repeat_groups} admitted-payload repeat group(s) covering \
+             {repeat_group_jobs} resident exact job(s)"
+        );
+    } else if acknowledgments_at_eof {
+        eprintln!(
+            "emitted one EOF acknowledgment for {} resident exact job(s)",
+            replay.jobs
+        );
+    } else {
+        eprintln!("emitted {} resident job acknowledgment(s)", replay.jobs);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_render_batch_packed_complete_snapshot_stream(
+    inputs: &[String],
+    out_dir: &str,
+    jobs: Option<usize>,
+    keep_going: bool,
+    json: bool,
+    terminal_snapshot: bool,
+    resident_exact_jobs: bool,
+    final_ack_only: bool,
+    resident_exact_job_groups: bool,
+    resident_exact_ack64: bool,
+    options: RenderCommandOptions<'_>,
+) -> Result<()> {
+    use std::io::{Read, Write};
+
+    let max_payload_bytes = packed_complete_snapshot_payload_limit(inputs, options.max_input_bytes);
+    let plan = BatchRenderPlan::new(inputs, out_dir, jobs, true, &options)?;
+    let mut cache_session = BatchRenderCacheSession::default();
+    let admit_clean_batch = std::env::var_os("FM_DISABLE_DURABLE_BATCH_CERTIFICATE").is_none();
+    cache_session.begin_stream(&plan.cache_path, Some(&plan), admit_clean_batch)?;
+    cache_session.defer_output_writes = true;
+    cache_session.elide_certified_source_writes =
+        std::env::var_os("FM_DISABLE_CERTIFIED_SOURCE_NOOP").is_none();
+    cache_session.reuse_certified_complete_transaction =
+        std::env::var_os("FM_DISABLE_CERTIFIED_TRANSACTION_REPLAY").is_none();
+
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    if resident_exact_jobs {
+        return cmd_render_batch_resident_exact_jobs(
+            &mut reader,
+            inputs,
+            out_dir,
+            &plan,
+            &mut cache_session,
+            max_payload_bytes,
+            options.max_input_bytes,
+            final_ack_only,
+            resident_exact_job_groups,
+            resident_exact_ack64,
+        );
+    }
+    let mut transaction = 0usize;
+    let mut acknowledged_updates = 0usize;
+    let mut acknowledged_source_bytes = 0usize;
+    let mut encoded_payload_bytes = 0usize;
+    let mut latest_payload = Vec::new();
+    if terminal_snapshot {
+        let read_limit = u64::try_from(max_payload_bytes)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        (&mut reader)
+            .take(read_limit)
+            .read_to_end(&mut latest_payload)
+            .context("cannot read terminal packed snapshot")?;
+        if latest_payload.len() > max_payload_bytes {
+            anyhow::bail!(
+                "terminal packed snapshot is {} bytes, exceeding the \
+                 {max_payload_bytes}-byte transaction limit",
+                latest_payload.len()
+            );
+        }
+        if !latest_payload.is_empty() {
+            transaction = 1;
+            acknowledged_updates = inputs.len();
+            encoded_payload_bytes = latest_payload.len();
+        }
+    } else {
+        while read_packed_snapshot_record(
+            &mut reader,
+            &mut latest_payload,
+            max_payload_bytes,
+            transaction + 1,
+        )? {
+            transaction = transaction.saturating_add(1);
+            acknowledged_updates = acknowledged_updates.saturating_add(inputs.len());
+            encoded_payload_bytes = encoded_payload_bytes.saturating_add(latest_payload.len());
+        }
+    }
+
+    let mut executed_transactions = 0usize;
+    let mut replayed_transactions = 0usize;
+    let mut source_materializations = 0usize;
+    let mut certified_source_reuses = 0usize;
+    let mut deferred_sources = std::collections::BTreeMap::new();
+    if transaction > 0 {
+        let packed = prepare_packed_complete_batch_final_state_payload(
+            &latest_payload,
+            inputs,
+            options.max_input_bytes,
+        )
+        .context("completed packed final-state snapshot is invalid")?;
+        acknowledged_source_bytes = packed.total_source_bytes;
+        let replay_started = Instant::now();
+        let replayed_total_bytes = cache_session
+            .elide_certified_source_writes
+            .then(|| {
+                cache_session.replay_certified_complete_transaction(
+                    &plan,
+                    inputs
+                        .iter()
+                        .map(String::as_str)
+                        .zip(packed.source_digests.iter().map(String::as_str)),
+                    true,
+                )
+            })
+            .flatten();
+        if let Some(total_bytes) = replayed_total_bytes {
+            eprintln!(
+                "rendered {0}/{0} diagram(s) ({0} persistent hits, 0 identical renders reused, 0 \
+                 shared prefix parses reused / 0 bytes), {total_bytes} bytes, {1} requested \
+                 worker(s), 0 active worker(s), {2:.3} ms",
+                inputs.len(),
+                plan.requested_workers,
+                replay_started.elapsed().as_secs_f64() * 1000.0,
+            );
+            replayed_transactions = 1;
+            certified_source_reuses = inputs.len();
+        } else {
+            let prepared = packed.into_keyed(inputs);
+            let replayed = render_prepared_final_state_transaction(
+                inputs,
+                out_dir,
+                jobs,
+                keep_going,
+                json,
+                &plan,
+                &mut cache_session,
+                &prepared,
+                Some(&prepared.updates),
+                &options,
+            )
+            .context("completed packed final-state snapshot failed")?;
+            replayed_transactions = usize::from(replayed);
+            deferred_sources = prepared.updates;
+        }
+        executed_transactions = 1;
+    }
+
+    if certified_source_reuses > 0 {
+        eprintln!(
+            "materialized 0 final source(s), reused {certified_source_reuses} certified source(s), \
+             {acknowledged_source_bytes} logical bytes at stream EOF"
+        );
+    } else {
+        let (sources, certified_sources, bytes) =
+            cache_session.materialize_deferred_sources(&plan, &deferred_sources)?;
+        source_materializations = source_materializations.saturating_add(sources);
+        eprintln!(
+            "materialized {sources} final source(s), reused {certified_sources} certified source(s), \
+             {bytes} logical bytes at stream EOF"
+        );
+    }
+    let (outputs, bytes) = cache_session.materialize_deferred_outputs()?;
+    eprintln!("materialized {outputs} final output(s), {bytes} bytes at stream EOF");
+    cache_session.flush(Path::new(out_dir))?;
+    if terminal_snapshot {
+        eprintln!(
+            "accepted {transaction} terminal packed snapshot payload(s), caller elided \
+             superseded states, {encoded_payload_bytes} encoded bytes"
+        );
+    } else {
+        eprintln!(
+            "retained the newest of {transaction} packed complete snapshot payload(s), skipped {} \
+             superseded decode(s), {encoded_payload_bytes} encoded bytes",
+            transaction.saturating_sub(usize::from(transaction > 0))
+        );
+    }
+
+    let mut stdout = io::stdout().lock();
+    serde_json::to_writer(
+        &mut stdout,
+        &serde_json::json!({
+            "transactions": transaction,
+            "input_lines": transaction,
+            "updates": acknowledged_updates,
+            "source_bytes": acknowledged_source_bytes,
+            "source_bytes_scope": "completed_state",
+            "encoded_payload_bytes": encoded_payload_bytes,
+            "status": "ok"
+        }),
+    )?;
+    writeln!(stdout)?;
+    stdout.flush()?;
+    eprintln!("emitted one EOF acknowledgment for {transaction} transaction(s)");
+    eprintln!(
+        "applied {transaction} resident final-state transaction(s) \
+         ({executed_transactions} executed, {replayed_transactions} complete revision replay(s))"
+    );
+    eprintln!("materialized {source_materializations} source revision(s) during stream");
+    Ok(())
+}
+
+fn cmd_render_batch_final_state_transaction_stream(
+    inputs: &[String],
+    out_dir: &str,
+    jobs: Option<usize>,
+    keep_going: bool,
+    json: bool,
+    materialization: FinalStateStreamMaterialization,
+    options: RenderCommandOptions<'_>,
+) -> Result<()> {
+    use std::io::{BufRead, Read, Write};
+
+    let coalesce_superseded_revisions = materialization.exposes_only_completed_state()
+        && std::env::var_os("FM_DISABLE_FINAL_STATE_COALESCING").is_none();
+    let retain_only_latest_complete_snapshot = coalesce_superseded_revisions
+        && materialization.complete_snapshots
+        && std::env::var_os("FM_DISABLE_COMPLETE_SNAPSHOT_ELISION").is_none();
+    let FinalStateStreamMaterialization {
+        outputs_at_eof: final_output_only,
+        sources_at_eof: final_source_only,
+        acknowledgments_at_eof: final_ack_only,
+        complete_snapshots: _,
+    } = materialization;
+
+    let max_payload_bytes = batch_final_state_payload_limit(inputs, options.max_input_bytes);
+    let read_limit = u64::try_from(max_payload_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(2);
+    let plan = BatchRenderPlan::new(inputs, out_dir, jobs, true, &options)?;
+    let mut cache_session = BatchRenderCacheSession::default();
+    let admit_clean_batch = std::env::var_os("FM_DISABLE_DURABLE_BATCH_CERTIFICATE").is_none();
+    cache_session.begin_stream(&plan.cache_path, Some(&plan), admit_clean_batch)?;
+    cache_session.defer_output_writes = final_output_only;
+    cache_session.elide_certified_source_writes = retain_only_latest_complete_snapshot
+        && std::env::var_os("FM_DISABLE_CERTIFIED_SOURCE_NOOP").is_none();
+    cache_session.reuse_certified_complete_transaction = retain_only_latest_complete_snapshot
+        && std::env::var_os("FM_DISABLE_CERTIFIED_TRANSACTION_REPLAY").is_none();
+
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    let mut line_number = 0usize;
+    let mut transaction = 0usize;
+    let mut executed_transactions = 0usize;
+    let mut replayed_transactions = 0usize;
+    let mut source_materializations = 0usize;
+    let mut acknowledged_updates = 0usize;
+    let mut acknowledged_source_bytes = 0usize;
+    let mut deferred_sources = std::collections::BTreeMap::new();
+    let mut encoded_payload_bytes = 0usize;
+    let mut latest_complete_payload = Vec::new();
+    let mut has_latest_complete_payload = false;
+    let payload_cache_enabled = std::env::var_os("FM_DISABLE_RESIDENT_PAYLOAD_CACHE").is_none();
+    let mut payload_cache = ResidentPayloadCache::default();
+    let mut encoded = Vec::new();
+    loop {
+        encoded.clear();
+        let bytes_read = (&mut reader)
+            .take(read_limit)
+            .read_until(b'\n', &mut encoded)
+            .context("cannot read final-state transaction stream")?;
+        if bytes_read == 0 {
+            break;
+        }
+        line_number += 1;
+        if encoded.last() == Some(&b'\n') {
+            encoded.pop();
+        }
+        if encoded.last() == Some(&b'\r') {
+            encoded.pop();
+        }
+        if encoded.len() > max_payload_bytes {
+            anyhow::bail!(
+                "final-state JSON on input line {line_number} exceeds the \
+                 {max_payload_bytes}-byte transaction limit"
+            );
+        }
+        let payload = std::str::from_utf8(&encoded)
+            .with_context(|| format!("final-state input line {line_number} is not UTF-8"))?;
+        if payload.trim().is_empty() {
+            continue;
+        }
+        if retain_only_latest_complete_snapshot {
+            transaction = transaction.saturating_add(1);
+            acknowledged_updates = acknowledged_updates.saturating_add(inputs.len());
+            encoded_payload_bytes = encoded_payload_bytes.saturating_add(encoded.len());
+            std::mem::swap(&mut latest_complete_payload, &mut encoded);
+            has_latest_complete_payload = true;
+            continue;
+        }
+        if coalesce_superseded_revisions {
+            let updates = parse_batch_final_state_payload(payload, inputs, options.max_input_bytes)
+                .with_context(|| {
+                    format!("invalid final-state transaction on input line {line_number}")
+                })?;
+            let changed_inputs = updates.len();
+            let total_source_bytes = updates
+                .values()
+                .map(String::len)
+                .fold(0usize, usize::saturating_add);
+            merge_superseded_final_state_updates(&mut deferred_sources, updates);
+            transaction = transaction.saturating_add(1);
+            acknowledged_updates = acknowledged_updates.saturating_add(changed_inputs);
+            acknowledged_source_bytes =
+                acknowledged_source_bytes.saturating_add(total_source_bytes);
+            continue;
+        }
+        let prepared = payload_cache
+            .prepare(
+                payload,
+                inputs,
+                options.max_input_bytes,
+                payload_cache_enabled,
+            )
+            .with_context(|| {
+                format!("invalid final-state transaction on input line {line_number}")
+            })?;
+        let updates = &prepared.updates;
+        let changed_inputs = &prepared.changed_inputs;
+        let total_source_bytes = prepared.total_source_bytes;
+        if final_source_only {
+            for (input, source) in updates {
+                deferred_sources.insert(input.clone(), source.clone());
+            }
+        } else {
+            for (input, source) in updates {
+                std::fs::write(input, source.as_bytes())
+                    .with_context(|| format!("cannot apply final-state input {input}"))?;
+                source_materializations = source_materializations.saturating_add(1);
+            }
+        }
+        let replayed = render_prepared_final_state_transaction(
+            inputs,
+            out_dir,
+            jobs,
+            keep_going,
+            json,
+            &plan,
+            &mut cache_session,
+            &prepared,
+            final_source_only.then_some(&deferred_sources),
+            &options,
+        )
+        .with_context(|| format!("final-state transaction {} failed", transaction + 1))?;
+        executed_transactions = executed_transactions.saturating_add(1);
+        if replayed {
+            replayed_transactions += 1;
+        }
+        transaction += 1;
+        acknowledged_updates = acknowledged_updates.saturating_add(changed_inputs.len());
+        acknowledged_source_bytes = acknowledged_source_bytes.saturating_add(total_source_bytes);
+
+        if !final_ack_only {
+            let mut stdout = io::stdout().lock();
+            serde_json::to_writer(
+                &mut stdout,
+                &serde_json::json!({
+                    "transaction": transaction,
+                    "input_line": line_number,
+                    "updates": changed_inputs.len(),
+                    "source_bytes": total_source_bytes,
+                    "status": "ok"
+                }),
+            )?;
+            writeln!(stdout)?;
+            stdout.flush()?;
+        }
+    }
+    if retain_only_latest_complete_snapshot && has_latest_complete_payload {
+        let payload = std::str::from_utf8(&latest_complete_payload)
+            .context("completed final-state snapshot is not UTF-8")?;
+        let prepared =
+            prepare_complete_batch_final_state_payload(payload, inputs, options.max_input_bytes)
+                .context("completed final-state snapshot is invalid")?;
+        acknowledged_source_bytes = prepared.total_source_bytes;
+        let replayed = render_prepared_final_state_transaction(
+            inputs,
+            out_dir,
+            jobs,
+            keep_going,
+            json,
+            &plan,
+            &mut cache_session,
+            &prepared,
+            Some(&prepared.updates),
+            &options,
+        )
+        .context("completed final-state snapshot failed")?;
+        executed_transactions = 1;
+        replayed_transactions = if replayed { 1 } else { 0 };
+        deferred_sources = prepared.updates;
+    } else if coalesce_superseded_revisions && !deferred_sources.is_empty() {
+        let prepared = prepare_batch_final_state_updates(std::mem::take(&mut deferred_sources));
+        let replayed = render_prepared_final_state_transaction(
+            inputs,
+            out_dir,
+            jobs,
+            keep_going,
+            json,
+            &plan,
+            &mut cache_session,
+            &prepared,
+            Some(&prepared.updates),
+            &options,
+        )
+        .context("coalesced final-state transaction failed")?;
+        executed_transactions = 1;
+        replayed_transactions = if replayed { 1 } else { 0 };
+        deferred_sources = prepared.updates;
+    }
+    if final_source_only {
+        let (sources, certified_sources, bytes) =
+            cache_session.materialize_deferred_sources(&plan, &deferred_sources)?;
+        source_materializations = source_materializations.saturating_add(sources);
+        eprintln!(
+            "materialized {sources} final source(s), reused {certified_sources} certified source(s), \
+             {bytes} logical bytes at stream EOF"
+        );
+    }
+    let (outputs, bytes) = cache_session.materialize_deferred_outputs()?;
+    if final_output_only {
+        eprintln!("materialized {outputs} final output(s), {bytes} bytes at stream EOF");
+    }
+    cache_session.flush(Path::new(out_dir))?;
+    if retain_only_latest_complete_snapshot {
+        eprintln!(
+            "retained the newest of {transaction} complete snapshot payload(s), skipped {} \
+             superseded JSON decode(s), {encoded_payload_bytes} encoded bytes",
+            transaction.saturating_sub(if has_latest_complete_payload { 1 } else { 0 })
+        );
+    } else if coalesce_superseded_revisions {
+        eprintln!(
+            "coalesced {transaction} resident payload(s) containing {acknowledged_updates} update(s) \
+             into {} final update(s)",
+            deferred_sources.len()
+        );
+    } else {
+        eprintln!(
+            "decoded {} resident payload(s), reused {} exact payload(s)",
+            payload_cache.decoded, payload_cache.reused
+        );
+    }
+    if final_ack_only {
+        let mut stdout = io::stdout().lock();
+        let acknowledgment = if retain_only_latest_complete_snapshot {
+            serde_json::json!({
+                "transactions": transaction,
+                "input_lines": line_number,
+                "updates": acknowledged_updates,
+                "source_bytes": acknowledged_source_bytes,
+                "source_bytes_scope": "completed_state",
+                "encoded_payload_bytes": encoded_payload_bytes,
+                "status": "ok"
+            })
+        } else {
+            serde_json::json!({
+                "transactions": transaction,
+                "input_lines": line_number,
+                "updates": acknowledged_updates,
+                "source_bytes": acknowledged_source_bytes,
+                "status": "ok"
+            })
+        };
+        serde_json::to_writer(&mut stdout, &acknowledgment)?;
+        writeln!(stdout)?;
+        stdout.flush()?;
+        eprintln!("emitted one EOF acknowledgment for {transaction} transaction(s)");
+    }
+    eprintln!(
+        "applied {transaction} resident final-state transaction(s) \
+         ({executed_transactions} executed, {replayed_transactions} complete revision replay(s))"
+    );
+    eprintln!("materialized {source_materializations} source revision(s) during stream");
+    Ok(())
+}
+
+fn cmd_render_batch_final_state_stream(
+    inputs: &[String],
+    out_dir: &str,
+    jobs: Option<usize>,
+    keep_going: bool,
+    json: bool,
+    options: RenderCommandOptions<'_>,
+) -> Result<()> {
+    use std::io::Read;
+
+    let max_payload_bytes = batch_final_state_payload_limit(inputs, options.max_input_bytes);
+    let read_limit = u64::try_from(max_payload_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut payload = String::new();
+    io::stdin()
+        .lock()
+        .take(read_limit)
+        .read_to_string(&mut payload)
+        .context("cannot read final-state JSON from stdin")?;
+    if payload.len() > max_payload_bytes {
+        anyhow::bail!("final-state JSON exceeds the {max_payload_bytes}-byte transaction limit");
+    }
+    let updates = parse_batch_final_state_payload(&payload, inputs, options.max_input_bytes)?;
+    let plan = BatchRenderPlan::new(inputs, out_dir, jobs, true, &options)?;
+    let changed_inputs = updates.keys().cloned().collect::<Vec<_>>();
+    let total_source_bytes = updates
+        .values()
+        .map(String::len)
+        .fold(0usize, usize::saturating_add);
+    for (input, source) in &updates {
+        std::fs::write(input, source.as_bytes())
+            .with_context(|| format!("cannot apply final-state input {input}"))?;
+    }
+
+    cmd_render_batch(
+        inputs,
+        out_dir,
+        jobs,
+        keep_going,
+        json,
+        BatchCachePolicy {
+            use_cache: true,
+            trust_change_set: true,
+            changed_inputs: &changed_inputs,
+            source_overrides: None,
+            session: None,
+            plan: Some(&plan),
+            report: None,
+        },
+        options,
+    )?;
+    eprintln!(
+        "applied {} coalesced final source update(s), {total_source_bytes} bytes",
+        changed_inputs.len()
+    );
+    Ok(())
+}
+
+fn cmd_render_batch_change_set_stream(
+    inputs: &[String],
+    out_dir: &str,
+    jobs: Option<usize>,
+    keep_going: bool,
+    json: bool,
+    final_output_only: bool,
+    options: RenderCommandOptions<'_>,
+) -> Result<()> {
+    use std::io::BufRead;
+
+    let stdin = io::stdin();
+    let retain_manifest =
+        final_output_only || std::env::var_os("FM_DISABLE_IN_MEMORY_BATCH_MANIFEST").is_none();
+    let retain_plan = std::env::var_os("FM_DISABLE_IN_MEMORY_BATCH_PLAN").is_none();
+    let batch_plan = retain_plan
+        .then(|| BatchRenderPlan::new(inputs, out_dir, jobs, true, &options))
+        .transpose()?;
+    let mut cache_session = BatchRenderCacheSession::default();
+    let mut trust_first_epoch = false;
+    if retain_manifest {
+        let cache_path = Path::new(out_dir).join(BATCH_RENDER_CACHE_FILE);
+        let admit_clean_batch = std::env::var_os("FM_DISABLE_DURABLE_BATCH_CERTIFICATE").is_none();
+        cache_session.begin_stream(&cache_path, batch_plan.as_ref(), admit_clean_batch)?;
+        trust_first_epoch = cache_session.trusted_batch.is_some();
+    }
+    let mut epoch = 0usize;
+    cache_session.defer_output_writes = final_output_only;
+    for (line_index, line) in stdin.lock().lines().enumerate() {
+        let line_number = line_index + 1;
+        let line =
+            line.with_context(|| format!("cannot read change set from input line {line_number}"))?;
+        let Some(changed_inputs) = parse_batch_change_set_line(&line, line_number)? else {
+            continue;
+        };
+        epoch += 1;
+        cmd_render_batch(
+            inputs,
+            out_dir,
+            jobs,
+            keep_going,
+            json,
+            BatchCachePolicy {
+                use_cache: true,
+                // The first epoch validates the on-disk base in full. Later epochs can trust the
+                // process-owned manifest. A clean predecessor certificate proves that base before
+                // epoch one; its on-disk copy was invalidated before this process could write.
+                trust_change_set: !retain_manifest || trust_first_epoch || epoch > 1,
+                changed_inputs: &changed_inputs,
+                source_overrides: None,
+                session: retain_manifest.then_some(&mut cache_session),
+                plan: batch_plan.as_ref(),
+                report: None,
+            },
+            options.clone(),
+        )
+        .with_context(|| format!("change-set epoch {epoch} failed"))?;
+
+        let mut stdout = io::stdout().lock();
+        serde_json::to_writer(
+            &mut stdout,
+            &serde_json::json!({
+                "epoch": epoch,
+                "input_line": line_number,
+                "status": "ok"
+            }),
+        )?;
+        writeln!(stdout)?;
+        stdout.flush()?;
+    }
+    if retain_manifest {
+        let (outputs, bytes) = cache_session.materialize_deferred_outputs()?;
+        if final_output_only {
+            eprintln!("materialized {outputs} final output(s), {bytes} bytes at stream EOF");
+        }
+        cache_session.flush(Path::new(out_dir))?;
+    }
+    Ok(())
+}
+
+fn report_executing_elf_sha256_once() -> Result<()> {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    static DIGEST: OnceLock<std::result::Result<String, String>> = OnceLock::new();
+
+    if std::env::var_os("FM_SELF_REPORT_ELF_SHA256").is_none()
+        || REPORTED.swap(true, Ordering::Relaxed)
+    {
+        return Ok(());
+    }
+    let digest = DIGEST.get_or_init(|| {
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("cannot resolve executing ELF: {error}"))?;
+        let bytes = std::fs::read(&executable).map_err(|error| {
+            format!(
+                "cannot read executing ELF {}: {error}",
+                executable.display()
+            )
+        })?;
+        Ok(sha256_hex(&bytes))
+    });
+    match digest {
+        Ok(digest) => {
+            eprintln!("executing_elf_sha256={digest}");
+            Ok(())
+        }
+        Err(error) => anyhow::bail!("{error}"),
+    }
+}
+
+/// Render every input concurrently as one job.
+///
+/// The incumbent renders on a single JavaScript main thread, so its cost for N diagrams is the
+/// sum of N. Each diagram here is an independent parse -> layout -> render with no shared mutable
+/// state, so the batch is shared-nothing and scales with cores rather than accumulating.
+///
+/// Determinism: work is dispatched by index and every result is written to its own file, so the
+/// output set does not depend on completion order. Per-file bytes are identical to `render`
+/// because both go through `render_source` with the same resolved options.
+fn cmd_render_batch(
+    inputs: &[String],
+    out_dir: &str,
+    jobs: Option<usize>,
+    keep_going: bool,
+    json: bool,
+    cache_policy: BatchCachePolicy<'_>,
+    options: RenderCommandOptions<'_>,
+) -> Result<()> {
+    use rayon::prelude::*;
+
+    let BatchCachePolicy {
+        use_cache,
+        trust_change_set,
+        changed_inputs,
+        source_overrides,
+        mut session,
+        plan,
+        report,
+    } = cache_policy;
+
+    if trust_change_set && !use_cache {
+        anyhow::bail!("--trust-change-set requires the persistent batch cache");
+    }
+
+    let supplied_plan = plan.is_some();
+    let owned_plan = plan
+        .is_none()
+        .then(|| BatchRenderPlan::new(inputs, out_dir, jobs, use_cache, &options))
+        .transpose()?;
+    let plan = plan
+        .or(owned_plan.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("internal error: batch plan was not constructed"))?;
+    let changed_input_set = changed_inputs
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    if changed_input_set.len() != changed_inputs.len() {
+        anyhow::bail!("--changed-input contains a duplicate path");
+    }
+    if let Some(unknown) = changed_input_set
+        .iter()
+        .find(|input| !plan.input_set.contains(**input))
+    {
+        anyhow::bail!("--changed-input {unknown:?} is not one of this batch's inputs");
+    }
+
+    let requested = plan.requested_workers;
+    let started = Instant::now();
+    let change_set_optimization_enabled = std::env::var_os("FM_DISABLE_BATCH_CHANGE_SET").is_none();
+    let trusted_change_set_active = trust_change_set && change_set_optimization_enabled;
+    let sparse_epoch_enabled = std::env::var_os("FM_DISABLE_SPARSE_CHANGE_SET_EPOCH").is_none();
+
+    // A resident stream has already proved every unlisted input and output during its first
+    // recovery epoch. Execute later epochs over the changed slice itself: this removes every
+    // batch-wide Vec, map pass and Rayon dispatch for the hundreds of diagrams the caller has
+    // certified unchanged. The process-owned manifest remains the source of truth, while the
+    // carry preserves whole-batch accounting without rescanning it.
+    if supplied_plan
+        && report.is_none()
+        && !json
+        && trusted_change_set_active
+        && sparse_epoch_enabled
+        && changed_inputs.len() < inputs.len()
+        && let Some(carry) = session
+            .as_deref()
+            .and_then(|session| session.sparse_report_carry(plan, changed_inputs))
+    {
+        if changed_inputs.is_empty() {
+            eprintln!(
+                "rendered {0}/{0} diagram(s) ({0} persistent hits, 0 identical renders reused, 0 \
+                 shared prefix parses reused / 0 bytes), {1} bytes, {2} requested worker(s), 0 \
+                 active worker(s), {3:.3} ms",
+                carry.logical_input_count,
+                carry.inherited_total_bytes,
+                requested,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+            return Ok(());
+        }
+        let projected_plan = std::env::var_os("FM_DISABLE_EPOCH_PLAN_PROJECTION")
+            .is_none()
+            .then(|| plan.project(changed_inputs))
+            .transpose()?;
+        return cmd_render_batch(
+            changed_inputs,
+            out_dir,
+            Some(requested),
+            keep_going,
+            false,
+            BatchCachePolicy {
+                use_cache,
+                trust_change_set,
+                changed_inputs,
+                source_overrides,
+                session: session.as_deref_mut(),
+                plan: projected_plan.as_ref(),
+                report: Some(carry),
+            },
+            options,
+        );
+    }
+
+    let cache_path = &plan.cache_path;
+    let cache_active = plan.cache_active;
+    let option_cache_digest = &plan.option_cache_digest;
+    let mut session_lease = if cache_active {
+        session.map(|session| session.lease(cache_path))
+    } else {
+        None
+    };
+    let (mut disk_cache, mut disk_cache_modified) = if cache_active && session_lease.is_none() {
+        load_batch_render_cache(cache_path)
+    } else {
+        (BatchRenderCacheManifest::default(), None)
+    };
+    if cache_active && session_lease.is_none() && disk_cache.clean_batch.take().is_some() {
+        let encoded = serde_json::to_vec(&disk_cache)?;
+        std::fs::write(cache_path, encoded)
+            .with_context(|| format!("cannot invalidate {}", cache_path.display()))?;
+        disk_cache_modified = cache_path
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok();
+    }
+    let (prior_cache, prior_cache_modified) = if let Some(lease) = session_lease.as_ref() {
+        (&lease.manifest, lease.manifest_modified)
+    } else {
+        (&disk_cache, disk_cache_modified)
+    };
+    let cache_key_for = |digest: &str| -> Option<String> {
+        option_cache_digest
+            .as_ref()
+            .map(|options| format!("{digest}:{options}"))
+    };
+    let modified_key = |metadata: &std::fs::Metadata| -> Option<String> {
+        metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_nanos().to_string())
+    };
+
+    // The hot incremental path is admitted before Rayon exists. A caller-certified complete
+    // change set turns every unlisted manifest entry into an O(1) key check; ordinary callers keep
+    // the source/output metadata proof. Either path can bypass source reads, parser planning,
+    // pressure sampling, thread startup, layout and rendering.
+    let early_cached_results = inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            let options_key = option_cache_digest.as_ref()?;
+            let destination = &plan.destinations[index];
+            let entry = prior_cache.entries.get(&plan.destination_names[index])?;
+
+            if trusted_change_set_active {
+                if changed_input_set.contains(input.as_str())
+                    || !batch_cache_entry_matches_key(entry, options_key)
+                {
+                    return None;
+                }
+                let bytes = usize::try_from(entry.bytes).ok()?;
+                return Some((plan.destination_displays[index].clone(), bytes));
+            }
+
+            let manifest_modified = prior_cache_modified?;
+            let source_metadata = Path::new(input).metadata().ok()?;
+            let output_metadata = destination.metadata().ok()?;
+            if !batch_cache_entry_matches_early(
+                entry,
+                options_key,
+                source_metadata.len(),
+                &modified_key(&source_metadata)?,
+                output_metadata.len(),
+                output_metadata.modified().ok()?,
+                manifest_modified,
+            ) {
+                return None;
+            }
+            let bytes = usize::try_from(entry.bytes).ok()?;
+            Some((plan.destination_displays[index].clone(), bytes))
+        })
+        .collect::<Vec<_>>();
+    let sparse_cache_enabled = std::env::var_os("FM_DISABLE_SPARSE_BATCH_CACHE").is_none();
+    if !inputs.is_empty() && early_cached_results.iter().all(Option::is_some) {
+        let elapsed = started.elapsed();
+        let inherited_diagrams = report.map_or(0, |carry| carry.inherited_diagrams);
+        let inherited_cache_hits = report.map_or(0, |carry| carry.inherited_cache_hits);
+        let logical_input_count = report.map_or(inputs.len(), |carry| carry.logical_input_count);
+        let mut total_bytes = report.map_or(0, |carry| carry.inherited_total_bytes);
+        for (input, (path, bytes)) in inputs.iter().zip(early_cached_results.iter().flatten()) {
+            total_bytes += *bytes;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "input": input, "output": path, "bytes": bytes, "status": "ok"
+                    })
+                );
+            }
+        }
+        if !json {
+            eprintln!(
+                "rendered {}/{} diagram(s) ({} persistent hits, 0 identical renders reused, 0 \
+                 shared prefix parses reused / 0 bytes), {total_bytes} bytes, {requested} \
+                 requested worker(s), 0 active worker(s), {:.3} ms",
+                inherited_diagrams + inputs.len(),
+                logical_input_count,
+                inherited_cache_hits + inputs.len(),
+                elapsed.as_secs_f64() * 1000.0,
+            );
+        }
+        if let Some(lease) = session_lease.as_mut() {
+            lease.session.trusted_batch = Some(TrustedBatchSummary {
+                plan_key: report.map_or_else(|| plan.key.clone(), |carry| carry.plan_key.into()),
+                input_count: logical_input_count,
+                total_bytes,
+            });
+        }
+        return Ok(());
+    }
+
+    // Host pressure, sampled ONCE for batches that actually render. See
+    // `render_source_with_pressure`: this is a host property, so per-diagram sampling is work the
+    // output never depends on, and its `/proc/self/status` read serializes concurrent workers.
+    let pressure = match session_lease.as_ref() {
+        Some(lease) => lease.session.pressure_report(),
+        None => Arc::new(MermaidNativePressureSignals::sample().into_report()),
+    };
+
+    // Phase 1: carry certified digests across metadata hits; read and content-address only misses.
+    // The disabled arm below preserves the former read-all path for exact-binary mechanism tests.
+    let cached_source_digest = |index: usize| -> Option<String> {
+        early_cached_results[index].as_ref()?;
+        prior_cache
+            .entries
+            .get(&plan.destination_names[index])
+            .map(|entry| entry.source_digest.clone())
+    };
+    let load_one = |(index, input): (usize, &String)| -> Result<(String, String)> {
+        if sparse_cache_enabled && let Some(digest) = cached_source_digest(index) {
+            return Ok((String::new(), digest));
+        }
+        if let Some(source) = source_overrides.and_then(|sources| sources.get(input)) {
+            return Ok((source.clone(), sha256_hex(source.as_bytes())));
+        }
+        let source = load_input(input, options.max_input_bytes)?;
+        let digest = sha256_hex(source.as_bytes());
+        Ok((source, digest))
+    };
+    let early_miss_count = early_cached_results
+        .iter()
+        .filter(|entry| entry.is_none())
+        .count();
+    let pool_threads = if sparse_cache_enabled {
+        requested.min(early_miss_count.max(1))
+    } else {
+        requested
+    };
+    let pool = if pool_threads == 1 {
+        None
+    } else if let Some(lease) = session_lease.as_ref()
+        && lease.session.reuse_worker_pool
+    {
+        Some(lease.session.worker_pool(pool_threads)?)
+    } else {
+        Some(Arc::new(BatchRenderWorkerPool::new(pool_threads)?))
+    };
+    let run_all =
+        |f: &(dyn Fn(usize) -> Result<(String, usize)> + Sync)| -> Vec<Result<(String, usize)>> {
+            match &pool {
+                None => (0..inputs.len()).map(f).collect(),
+                Some(p) => p
+                    .pool
+                    .install(|| (0..inputs.len()).into_par_iter().map(f).collect()),
+            }
+        };
+
+    let loaded: Vec<Result<(String, String)>> = match &pool {
+        None => inputs.iter().enumerate().map(load_one).collect(),
+        Some(p) => p
+            .pool
+            .install(|| inputs.par_iter().enumerate().map(load_one).collect()),
+    };
+
+    // A hit is admitted only when the source+configuration+executable key matches, the destination
+    // still has the recorded length, and it has not changed since the manifest was committed.
+    // Hits never enter the parser plan or the render pool.
+    let mut cached_results = loaded
+        .iter()
+        .enumerate()
+        .map(|(index, loaded)| {
+            if sparse_cache_enabled && let Some(cached) = early_cached_results[index].as_ref() {
+                return Some(cached.clone());
+            }
+            let (_, digest) = loaded.as_ref().ok()?;
+            let key = cache_key_for(digest)?;
+            let manifest_modified = prior_cache_modified?;
+            let destination = &plan.destinations[index];
+            let entry = prior_cache.entries.get(&plan.destination_names[index])?;
+            if entry.key != key {
+                return None;
+            }
+            let metadata = destination.metadata().ok()?;
+            if metadata.len() != entry.bytes || metadata.modified().ok()? > manifest_modified {
+                return None;
+            }
+            let bytes = usize::try_from(entry.bytes).ok()?;
+            Some((plan.destination_displays[index].clone(), bytes))
+        })
+        .collect::<Vec<_>>();
+    let revision_cache_active = session_lease
+        .as_ref()
+        .is_some_and(|lease| lease.session.reuse_revision_outputs);
+    let defer_output_writes = session_lease
+        .as_ref()
+        .is_some_and(|lease| lease.session.defer_output_writes);
+    if revision_cache_active {
+        for (index, loaded) in loaded.iter().enumerate() {
+            if cached_results[index].is_some() {
+                continue;
+            }
+            let Ok((_, digest)) = loaded else {
+                continue;
+            };
+            let Some(key) = cache_key_for(digest) else {
+                continue;
+            };
+            let bytes = session_lease
+                .as_mut()
+                .and_then(|lease| lease.session.revision_output(&key));
+            let Some(bytes) = bytes else {
+                continue;
+            };
+            let destination = &plan.destinations[index];
+            let output_deferred = session_lease.as_mut().is_some_and(|lease| {
+                lease
+                    .session
+                    .stage_output_if_deferred(destination, Arc::clone(&bytes))
+            });
+            if !output_deferred {
+                std::fs::write(destination, bytes.as_slice())
+                    .with_context(|| format!("cannot write {}", destination.display()))?;
+            }
+            cached_results[index] = Some((plan.destination_displays[index].clone(), bytes.len()));
+        }
+    }
+    let cache_hit_count = report.map_or(0, |carry| carry.inherited_cache_hits)
+        + cached_results.iter().flatten().count();
+
+    // Phase 2: how many inputs share each digest? A diagram whose source repeats in the batch --
+    // the same architecture snippet embedded across a docs site, or an unchanged file in a CI
+    // re-render -- is the SAME parse, layout and render every time. Rendering it once and reusing
+    // the bytes deletes that work outright rather than doing it faster. Only digests that
+    // actually repeat are memoized, so peak memory tracks the duplicated set, not the batch.
+    let mut digest_counts: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
+    for (index, entry) in loaded.iter().enumerate() {
+        if cached_results[index].is_none()
+            && let Ok((_, digest)) = entry
+        {
+            *digest_counts.entry(digest.as_str()).or_insert(0) += 1;
+        }
+    }
+    // Lowest input index owns each digest, so which diagram is rendered never depends on
+    // completion order.
+    let mut owner_of: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for (index, entry) in loaded.iter().enumerate() {
+        if cached_results[index].is_none()
+            && let Ok((_, digest)) = entry
+        {
+            owner_of.entry(digest.as_str()).or_insert(index);
+        }
+    }
+
+    // Compile every exact, complete flowchart-prefix subgraph shared by two or more distinct
+    // owners. Each owner still gets an independent IR, layout and render; only repeated prefix
+    // tokenization/lowering/interning is removed. The plan is immutable, so suffix parsing remains
+    // shared-nothing and runs on the same Rayon pool as the rest of each diagram pipeline.
+    let owner_indices = loaded
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let (_, digest) = entry.as_ref().ok()?;
+            (owner_of.get(digest.as_str()) == Some(&index)).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let owner_sources = owner_indices
+        .iter()
+        .filter_map(|&index| {
+            loaded[index]
+                .as_ref()
+                .ok()
+                .map(|(source, _)| source.as_str())
+        })
+        .collect::<Vec<_>>();
+    let parse_plan =
+        FlowchartBatchParsePlan::new(&owner_sources, options.parse_mode, &options.parser_config);
+    let parse_plan_stats = parse_plan.stats();
+    let mut parse_plan_position = vec![usize::MAX; inputs.len()];
+    for (position, &index) in owner_indices.iter().enumerate() {
+        parse_plan_position[index] = position;
+    }
+    let reused = loaded
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            cached_results[index]
+                .is_none()
+                .then(|| entry.as_ref().ok())
+                .flatten()
+        })
+        .filter(|(_, digest)| digest_counts.get(digest.as_str()).copied().unwrap_or(0) > 1)
+        .count()
+        - owner_of
+            .iter()
+            .filter(|(d, _)| digest_counts.get(**d).copied().unwrap_or(0) > 1)
+            .count();
+
+    // Phase 3: render each owner once; keep bytes only for digests that repeat.
+    let shared: std::sync::Mutex<std::collections::BTreeMap<String, std::sync::Arc<Vec<u8>>>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+    let render_owner = |state: &mut (FlowchartBatchParseScratch, SvgBatchRenderer),
+                        index: usize|
+     -> Result<(String, usize)> {
+        if let Some(cached) = cached_results[index].as_ref() {
+            return Ok(cached.clone());
+        }
+        let (source, digest) = match &loaded[index] {
+            Ok(pair) => pair,
+            Err(error) => return Err(anyhow::anyhow!("{error:#}")),
+        };
+        if owner_of.get(digest.as_str()) != Some(&index) {
+            return Ok((String::new(), 0)); // not the owner; written in phase 4
+        }
+        let total_start = Instant::now();
+        let parse_start = Instant::now();
+        let (parse_scratch, renderer) = state;
+        parse_plan.with_parse_scratch(
+            parse_plan_position[index],
+            source,
+            parse_scratch,
+            |parsed| {
+                let parse_time = parse_start.elapsed();
+                let mut budget_broker = MermaidBudgetLedger::new(&pressure);
+                budget_broker
+                    .record_parse(u64::try_from(parse_time.as_millis()).unwrap_or(u64::MAX));
+                let outcome = render_batch_parse_ref_with_pressure(
+                    source,
+                    parsed,
+                    RenderTiming {
+                        parse_time,
+                        total_start,
+                    },
+                    budget_broker,
+                    &options,
+                    &pressure,
+                    renderer,
+                )?;
+                if !defer_output_writes {
+                    let destination = &plan.destinations[index];
+                    std::fs::write(destination, &outcome.rendered)
+                        .with_context(|| format!("cannot write {}", destination.display()))?;
+                }
+                let length = outcome.rendered.len();
+                if defer_output_writes
+                    || revision_cache_active
+                    || digest_counts.get(digest.as_str()).copied().unwrap_or(0) > 1
+                {
+                    shared
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("render cache poisoned"))?
+                        .insert(digest.clone(), std::sync::Arc::new(outcome.rendered));
+                }
+                Ok((plan.destination_displays[index].clone(), length))
+            },
+        )
+    };
+    // A Rayon worker normally has to cold-build the same certified prefix before its private
+    // renderer can reuse suffix deltas. Render one representative on the coordinator, then fork
+    // that immutable snapshot into every worker. The representative's output is retained in its
+    // original slot, so no diagram is rendered twice and output ordering is unchanged.
+    let seed_owner_index = if options.format == OutputFormat::Svg
+        && std::env::var_os("FM_DISABLE_BATCH_PREFIX_SEED").is_none()
+    {
+        pool.as_ref().and_then(|_| {
+            owner_indices.iter().copied().find(|&index| {
+                parse_plan
+                    .reusable_prefix_group(parse_plan_position[index])
+                    .is_some()
+            })
+        })
+    } else {
+        None
+    };
+    let mut coordinator_state = (
+        FlowchartBatchParseScratch::default(),
+        SvgBatchRenderer::default(),
+    );
+    let seeded_owner_result = seed_owner_index.map(|index| {
+        let result =
+            render_owner(&mut coordinator_state, index).map_err(|error| format!("{error:#}"));
+        (index, result)
+    });
+    let renderer_seed: Option<SvgBatchRendererSeed> = coordinator_state.1.seed();
+    let initial_state = || {
+        (
+            FlowchartBatchParseScratch::default(),
+            renderer_seed
+                .as_ref()
+                .map_or_else(SvgBatchRenderer::default, SvgBatchRenderer::from_seed),
+        )
+    };
+    let render_or_seeded = |state: &mut (FlowchartBatchParseScratch, SvgBatchRenderer),
+                            index: usize| {
+        if let Some((seeded_index, result)) = seeded_owner_result.as_ref()
+            && *seeded_index == index
+        {
+            return result
+                .as_ref()
+                .map(|(path, bytes)| (path.clone(), *bytes))
+                .map_err(|error| anyhow::anyhow!("{error}"));
+        }
+        render_owner(state, index)
+    };
+    let owner_results: Vec<Result<(String, usize)>> = match &pool {
+        None => {
+            let mut state = initial_state();
+            (0..inputs.len())
+                .map(|index| render_or_seeded(&mut state, index))
+                .collect()
+        }
+        Some(pool) => pool.pool.install(|| {
+            (0..inputs.len())
+                .into_par_iter()
+                .map_init(initial_state, render_or_seeded)
+                .collect()
+        }),
+    };
+    if revision_cache_active {
+        let rendered_revisions = {
+            let cache = shared
+                .lock()
+                .map_err(|_| anyhow::anyhow!("render cache poisoned"))?;
+            cache
+                .iter()
+                .filter_map(|(digest, bytes)| {
+                    cache_key_for(digest).map(|key| (key, Arc::clone(bytes)))
+                })
+                .collect::<Vec<_>>()
+        };
+        if let Some(lease) = session_lease.as_mut() {
+            for (key, bytes) in rendered_revisions {
+                lease.session.remember_revision_output(key, bytes);
+            }
+        }
+    }
+
+    // Phase 4: every non-owner duplicate copies its owner's bytes. No parse, no layout, no render.
+    //
+    // The pass exists only to service duplicates. When no digest repeats -- a CI re-render of
+    // distinct diagrams, a docs build where every page has its own diagram, and the shape of the
+    // certified 512-diagram corpus -- every index owns its own digest, so each task would take the
+    // early return below and do nothing but clone a path phase 3 already produced. Fanning N tasks
+    // across the pool and joining them to copy N strings is pure overhead, so hand phase 3's
+    // results straight through instead. Byte-identical: phase 3 wrote every file in this case.
+    let results = if reused == 0 {
+        owner_results
+    } else {
+        let write_duplicate = |index: usize| -> Result<(String, usize)> {
+            if let Some(cached) = cached_results[index].as_ref() {
+                return Ok(cached.clone());
+            }
+            let (_, digest) = match &loaded[index] {
+                Ok(pair) => pair,
+                Err(_) => return Ok((String::new(), 0)),
+            };
+            if owner_of.get(digest.as_str()) == Some(&index) {
+                return owner_results[index]
+                    .as_ref()
+                    .map(|(p, n)| (p.clone(), *n))
+                    .map_err(|e| anyhow::anyhow!("{e:#}"));
+            }
+            let bytes = {
+                let cache = shared
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("render cache poisoned"))?;
+                cache.get(digest.as_str()).cloned()
+            };
+            let Some(bytes) = bytes else {
+                // Owner failed; surface that failure against this input too.
+                return Err(anyhow::anyhow!(
+                    "duplicate of an input that failed to render"
+                ));
+            };
+            if !defer_output_writes {
+                let destination = &plan.destinations[index];
+                std::fs::write(destination, bytes.as_slice())
+                    .with_context(|| format!("cannot write {}", destination.display()))?;
+            }
+            Ok((plan.destination_displays[index].clone(), bytes.len()))
+        };
+        run_all(&write_duplicate)
+    };
+    if defer_output_writes {
+        let deferred = {
+            let cache = shared
+                .lock()
+                .map_err(|_| anyhow::anyhow!("render cache poisoned"))?;
+            let mut deferred = Vec::new();
+            for (index, result) in results.iter().enumerate() {
+                if result.is_err() || cached_results[index].is_some() {
+                    continue;
+                }
+                let (_, digest) = loaded[index]
+                    .as_ref()
+                    .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+                let bytes = cache.get(digest.as_str()).cloned().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "rendered output for {} was not retained for final materialization",
+                        inputs[index]
+                    )
+                })?;
+                deferred.push((plan.destinations[index].clone(), bytes));
+            }
+            deferred
+        };
+        let lease = session_lease.as_mut().ok_or_else(|| {
+            anyhow::anyhow!("final-output-only stream lost its resident cache session")
+        })?;
+        for (destination, bytes) in deferred {
+            if !lease.session.stage_output_if_deferred(&destination, bytes) {
+                anyhow::bail!("final-output-only stream stopped deferring output writes");
+            }
+        }
+    }
+    if cache_active {
+        let mut commit_manifest = false;
+        {
+            let next_cache = if let Some(lease) = session_lease.as_mut() {
+                &mut lease.manifest
+            } else {
+                &mut disk_cache
+            };
+            for (index, result) in results.iter().enumerate() {
+                let Ok((_, bytes)) = result else {
+                    continue;
+                };
+                if change_set_optimization_enabled
+                    && sparse_cache_enabled
+                    && early_cached_results[index].is_some()
+                {
+                    // This entry was admitted from the prior manifest and its source was
+                    // deliberately not reopened. Re-statting it here cannot change the entry;
+                    // only misses need a refreshed source timestamp after materialization.
+                    continue;
+                }
+                let Ok((_, digest)) = &loaded[index] else {
+                    continue;
+                };
+                let Some(key) = cache_key_for(digest) else {
+                    continue;
+                };
+                let Some(options_key) = option_cache_digest.as_ref() else {
+                    continue;
+                };
+                let entry_name = &plan.destination_names[index];
+                let (source_bytes, source_modified_ns) = if let Some(source) =
+                    source_overrides.and_then(|sources| sources.get(&inputs[index]))
+                {
+                    let Ok(source_bytes) = u64::try_from(source.len()) else {
+                        continue;
+                    };
+                    let source_modified_ns = next_cache
+                        .entries
+                        .get(entry_name)
+                        .map(|entry| entry.source_modified_ns.clone())
+                        .unwrap_or_default();
+                    (source_bytes, source_modified_ns)
+                } else {
+                    let Ok(source_metadata) = Path::new(&inputs[index]).metadata() else {
+                        continue;
+                    };
+                    let Some(source_modified_ns) = modified_key(&source_metadata) else {
+                        continue;
+                    };
+                    (source_metadata.len(), source_modified_ns)
+                };
+                let entry = BatchRenderCacheEntry {
+                    key,
+                    source_digest: digest.clone(),
+                    options_key: options_key.clone(),
+                    source_bytes,
+                    source_modified_ns,
+                    bytes: u64::try_from(*bytes).unwrap_or(u64::MAX),
+                };
+                commit_manifest |= next_cache.entries.get(entry_name) != Some(&entry);
+                next_cache.entries.insert(entry_name.clone(), entry);
+            }
+        }
+        if commit_manifest {
+            if let Some(lease) = session_lease.as_mut() {
+                lease.dirty = true;
+            } else {
+                let encoded = serde_json::to_vec(&disk_cache)?;
+                std::fs::write(cache_path, encoded)
+                    .with_context(|| format!("cannot write {}", cache_path.display()))?;
+            }
+        }
+    }
+    let elapsed = started.elapsed();
+
+    let logical_input_count = report.map_or(inputs.len(), |carry| carry.logical_input_count);
+    let mut rendered = report.map_or(0, |carry| carry.inherited_diagrams);
+    let mut total_bytes = report.map_or(0, |carry| carry.inherited_total_bytes);
+    let mut failures: Vec<String> = Vec::new();
+    for (input, result) in inputs.iter().zip(results) {
+        match result {
+            Ok((path, bytes)) => {
+                rendered += 1;
+                total_bytes += bytes;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "input": input, "output": path, "bytes": bytes, "status": "ok"
+                        })
+                    );
+                }
+            }
+            Err(error) => {
+                let message = format!("{input}: {error:#}");
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "input": input, "status": "error", "error": message
+                        })
+                    );
+                }
+                failures.push(message);
+                if !keep_going {
+                    break;
+                }
+            }
+        }
+    }
+
+    if !json {
+        eprintln!(
+            "rendered {rendered}/{} diagram(s) ({cache_hit_count} persistent hits, {reused} \
+             identical renders reused, {} shared \
+             prefix parses reused / {} bytes), {total_bytes} bytes, {} requested worker(s), \
+             {pool_threads} active worker(s), {:.3} ms",
+            logical_input_count,
+            parse_plan_stats.reused_prefix_parses,
+            parse_plan_stats.reused_prefix_bytes,
+            requested,
+            elapsed.as_secs_f64() * 1000.0,
+        );
+    }
+    if !failures.is_empty() {
+        for failure in &failures {
+            eprintln!("error: {failure}");
+        }
+        anyhow::bail!(
+            "{} of {} diagram(s) failed",
+            failures.len(),
+            logical_input_count
+        );
+    }
+    if let Some(lease) = session_lease.as_mut() {
+        lease.session.trusted_batch = Some(TrustedBatchSummary {
+            plan_key: report.map_or_else(|| plan.key.clone(), |carry| carry.plan_key.into()),
+            input_count: logical_input_count,
+            total_bytes,
+        });
+    }
     Ok(())
 }
 
@@ -2860,7 +7331,10 @@ fn cmd_parse(
     max_input_bytes: usize,
 ) -> Result<()> {
     let source = load_input(input, max_input_bytes)?;
-    let parsed = parse_with_mode_and_config(&source, parse_mode, &parser_config);
+    let mut parsed = parse_with_mode_and_config(&source, parse_mode, &parser_config);
+    // The `parse` command surfaces format-complement counts in its evidence summary,
+    // so capture it explicitly here (the parse hot path no longer does).
+    parsed.format_complement = capture_format_complement(&source);
 
     let output = if full {
         // Full IR output
@@ -3377,7 +7851,12 @@ fn collect_fnx_diagnostics(results: &FnxAnalysisResults) -> Vec<ValidationDiagno
 
         let (source_line, source_column) = diag
             .span
-            .map(|span| (Some(span.start.line), Some(span.start.col)))
+            .map(|span| {
+                (
+                    Some(span.start.line as usize),
+                    Some(span.start.col as usize),
+                )
+            })
             .unwrap_or((None, None));
 
         diagnostics.push(ValidationDiagnostic {
@@ -3621,6 +8100,75 @@ fn print_validate_text(result: &ValidateResult, fail_on: FailOnSeverity) {
 }
 
 #[cfg(test)]
+mod load_input_tests {
+    use super::load_input;
+    use std::io::Write;
+
+    const MAX: usize = 1 << 20;
+
+    fn write_temp(name: &str, body: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(name);
+        let mut file = std::fs::File::create(&path).expect("create");
+        file.write_all(body.as_bytes()).expect("write");
+        let display = path.to_string_lossy().into_owned();
+        (dir, display)
+    }
+
+    #[test]
+    fn existing_file_is_read_byte_exactly() {
+        let body = "flowchart LR\n  A[\"x\"]-->B\n";
+        let (_dir, path) = write_temp("d.mmd", body);
+        assert_eq!(load_input(&path, MAX).expect("read"), body);
+    }
+
+    /// The pre-sized read must not truncate at, or overrun, the `fstat` length. Sizes chosen
+    /// around the capacity boundary: empty, one byte, and a body far larger than any probe buffer.
+    #[test]
+    fn read_is_exact_across_size_boundaries() {
+        for len in [0usize, 1, 2, 8191, 8192, 8193, 65536] {
+            let body = "a".repeat(len);
+            let (_dir, path) = write_temp("sized.mmd", &body);
+            let got = load_input(&path, MAX).expect("read");
+            assert_eq!(got.len(), len, "length mismatch at {len}");
+            assert_eq!(got, body, "content mismatch at {len}");
+        }
+    }
+
+    /// A path-shaped argument that does not exist is inline diagram text, not an error. This is
+    /// the `Path::exists() == false` branch the single-walk open must keep reproducing.
+    #[test]
+    fn missing_path_falls_back_to_inline_text() {
+        let missing = "/nonexistent-dir-fm/nope.mmd";
+        assert_eq!(load_input(missing, MAX).expect("inline"), missing);
+    }
+
+    #[test]
+    fn inline_mermaid_source_is_returned_verbatim() {
+        let src = "flowchart TD\n  A-->B\n";
+        assert_eq!(load_input(src, MAX).expect("inline"), src);
+    }
+
+    #[test]
+    fn oversize_file_is_rejected_by_the_stat_gate() {
+        let (_dir, path) = write_temp("big.mmd", &"x".repeat(4096));
+        let error = load_input(&path, 16).expect_err("must reject");
+        let text = format!("{error:#}");
+        assert!(text.contains("4096"), "expected stat size in: {text}");
+        assert!(
+            text.contains("core.max_input_bytes=16"),
+            "expected budget in: {text}"
+        );
+    }
+
+    #[test]
+    fn oversize_inline_input_is_rejected() {
+        let error = load_input(&"flowchart TD\n".repeat(64), 16).expect_err("must reject");
+        assert!(format!("{error:#}").contains("Inline input is"));
+    }
+}
+
+#[cfg(test)]
 mod validate_tests {
     use super::{
         FailOnSeverity, StructuredDiagnostic, ValidationDiagnostic, collect_parse_diagnostics,
@@ -3835,10 +8383,12 @@ mod render_tests {
                 LayoutEdgePath {
                     edge_index: 0,
                     span: Default::default(),
-                    points: vec![
+                    points: [
                         LayoutPoint { x: 0.0, y: 0.0 },
                         LayoutPoint { x: 1.0, y: 0.0 },
-                    ],
+                    ]
+                    .into_iter()
+                    .collect(),
                     reversed: false,
                     is_self_loop: false,
                     parallel_offset: 0.0,
@@ -3848,10 +8398,12 @@ mod render_tests {
                 LayoutEdgePath {
                     edge_index: 1,
                     span: Default::default(),
-                    points: vec![
+                    points: [
                         LayoutPoint { x: 1.0, y: 0.0 },
                         LayoutPoint { x: 0.0, y: 0.0 },
-                    ],
+                    ]
+                    .into_iter()
+                    .collect(),
                     reversed: true,
                     is_self_loop: false,
                     parallel_offset: 0.0,
@@ -5290,4 +9842,19 @@ fn open_browser(url: &str) -> Result<()> {
         .status()?;
 
     Ok(())
+}
+
+/// Lowercase hex encoding for digest output.
+///
+/// RustCrypto 0.11 moved digest results from `GenericArray` to `hybrid_array::Array`,
+/// which does not implement `LowerHex`, so the previous `format!("{:x}", ..)` no
+/// longer compiles. Encoding explicitly keeps this dependency-free.
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
 }

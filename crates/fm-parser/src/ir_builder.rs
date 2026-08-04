@@ -1,4 +1,7 @@
 use std::collections::BTreeMap;
+use std::collections::hash_map::Entry;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use fm_core::{
     ArrowType, ClassMemberKind, ClassStereotype, Diagnostic, DiagnosticCategory, DiagramType,
@@ -12,6 +15,7 @@ use fm_core::{
     NotePosition, Span,
 };
 
+use crate::mermaid_parser::trim_fast;
 use crate::{ParseResult, ParserConfig, normalize_identifier};
 
 /// Open fragment entry: (kind, label, `start_edge`, alternatives, `child_fragment_indices`).
@@ -33,13 +37,173 @@ struct StateCompositeContext {
     pending_region_members: Vec<IrNodeId>,
 }
 
+/// Node-id → `IrNodeId` lookup that keys by the FxHash of the id rather than storing an owned `String`
+/// key. The id is already owned once in `ir.nodes[id].id`; the previous `FxHashMap<String, _>` cloned it
+/// a SECOND time per node purely for the map key (the keys accumulate through lowering, so they are not
+/// allocator-recycled — a real per-node allocation on every diagram). Keying by `u64` removes that clone;
+/// lookups verify the candidate against `ir.nodes[..].id` so a hash collision can never resolve to the
+/// wrong node (collisions land in `Many`). The map is never iterated (IR order comes from `ir.nodes`), so
+/// keying by hash is determinism-safe.
+#[derive(Clone, Default)]
+struct NodeIdIndex {
+    buckets: FxHashMap<u64, NodeIdBucket>,
+}
+
+#[derive(Clone)]
+enum NodeIdBucket {
+    One(IrNodeId),
+    Many(Vec<IrNodeId>),
+}
+
+impl NodeIdIndex {
+    /// Pre-size the bucket map so a large diagram's node interning doesn't rehash ~log2(N) times
+    /// (measured as `RawTable::reserve_rehash` on the hot parse path). Capacity-only, behavior-identical.
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            buckets: FxHashMap::with_capacity_and_hasher(capacity, rustc_hash::FxBuildHasher),
+        }
+    }
+
+    fn hash_key(id: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = rustc_hash::FxHasher::default();
+        id.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn get(&self, id: &str, nodes: &[IrNode]) -> Option<IrNodeId> {
+        self.get_with_hash(Self::hash_key(id), id, nodes)
+    }
+
+    /// Like [`Self::get`] but with a caller-precomputed `hash` (from [`Self::hash_key`]). Lets the
+    /// intern hot path (`intern_node_auto`) hash the id ONCE for its get+insert pair instead of
+    /// twice (a full `FxHasher` run per new node was redundant). Behaviour-identical to `get`.
+    fn get_with_hash(&self, hash: u64, id: &str, nodes: &[IrNode]) -> Option<IrNodeId> {
+        let matches = |nid: &IrNodeId| nodes.get(nid.0).is_some_and(|node| node.id == id);
+        match self.buckets.get(&hash)? {
+            NodeIdBucket::One(nid) => matches(nid).then_some(*nid),
+            NodeIdBucket::Many(candidates) => candidates.iter().copied().find(|nid| matches(nid)),
+        }
+    }
+
+    /// Record `node_id` under a caller-precomputed `hash` (from [`Self::hash_key`]). Callers
+    /// guarantee the id is not already present (`intern_node_auto` checks `get_with_hash` first),
+    /// so an occupied slot here is always a hash COLLISION between distinct ids.
+    fn insert_with_hash(&mut self, hash: u64, node_id: IrNodeId) {
+        // `entry` locates the slot in ONE probe; the old `get_mut(&hash)` + `insert(hash, ..)` pair
+        // probed the bucket map twice on the common vacant path (every distinct node id). The bucket
+        // transitions are identical, so this is behaviour-identical.
+        match self.buckets.entry(hash) {
+            Entry::Vacant(slot) => {
+                slot.insert(NodeIdBucket::One(node_id));
+            }
+            Entry::Occupied(mut slot) => {
+                let bucket = slot.get_mut();
+                match bucket {
+                    NodeIdBucket::One(existing) => {
+                        *bucket = NodeIdBucket::Many(vec![*existing, node_id]);
+                    }
+                    NodeIdBucket::Many(candidates) => candidates.push(node_id),
+                }
+            }
+        }
+    }
+}
+
+/// Label-dedup index that keys by the FxHash of `(text, segments)` instead of storing an owned
+/// `(String, Vec<IrLabelSegment>)` key. The label text is already owned in `ir.labels[id].text` and the
+/// segments in `ir.label_markup[id]`; the previous `FxHashMap<(String, Vec<_>), _>` cloned BOTH a second
+/// time per distinct label purely for the dedup key. Keying by hash removes those clones; lookups verify
+/// the candidate against `ir.labels`/`ir.label_markup` so a hash collision can never dedup two distinct
+/// labels together (collisions land in `Many`). Never iterated, so hash-keying is determinism-safe.
+#[derive(Clone, Default)]
+struct LabelIndex {
+    buckets: FxHashMap<u64, LabelBucket>,
+}
+
+#[derive(Clone)]
+enum LabelBucket {
+    One(IrLabelId),
+    Many(Vec<IrLabelId>),
+}
+
+impl LabelIndex {
+    /// Pre-size the bucket map — see [`NodeIdIndex::with_capacity`]. Capacity-only, behavior-identical.
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            buckets: FxHashMap::with_capacity_and_hasher(capacity, rustc_hash::FxBuildHasher),
+        }
+    }
+
+    fn hash_key(text: &str, segments: &[IrLabelSegment]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = rustc_hash::FxHasher::default();
+        text.hash(&mut hasher);
+        segments.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Look up `(text, segments)` under a caller-precomputed `hash` (from [`Self::hash_key`]). Lets
+    /// `intern_label` hash the pair ONCE for its get+insert pair instead of twice per new label.
+    fn get_with_hash(
+        &self,
+        hash: u64,
+        text: &str,
+        segments: &[IrLabelSegment],
+        labels: &[IrLabel],
+        markup: &BTreeMap<IrLabelId, Vec<IrLabelSegment>>,
+    ) -> Option<IrLabelId> {
+        let matches = |lid: &IrLabelId| {
+            labels.get(lid.0).is_some_and(|label| label.text == text)
+                && markup.get(lid).map_or(&[][..], Vec::as_slice) == segments
+        };
+        match self.buckets.get(&hash)? {
+            LabelBucket::One(lid) => matches(lid).then_some(*lid),
+            LabelBucket::Many(candidates) => candidates.iter().copied().find(|lid| matches(lid)),
+        }
+    }
+
+    /// Record `label_id` under a caller-precomputed `hash` (from [`Self::hash_key`]). Callers
+    /// guarantee the pair is not already present (`intern_label` checks `get_with_hash` first),
+    /// so an occupied slot is always a hash COLLISION.
+    fn insert_with_hash(&mut self, hash: u64, label_id: IrLabelId) {
+        // One-probe `entry` in place of `get_mut` + `insert` (two probes on the vacant path, hit for
+        // every distinct label). Bucket transitions identical — behaviour-identical. See
+        // `NodeIdIndex::insert_with_hash`.
+        match self.buckets.entry(hash) {
+            Entry::Vacant(slot) => {
+                slot.insert(LabelBucket::One(label_id));
+            }
+            Entry::Occupied(mut slot) => {
+                let bucket = slot.get_mut();
+                match bucket {
+                    LabelBucket::One(existing) => {
+                        *bucket = LabelBucket::Many(vec![*existing, label_id]);
+                    }
+                    LabelBucket::Many(candidates) => candidates.push(label_id),
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct IrBuilder {
     ir: MermaidDiagramIr,
-    // Lookups for uniqueness
-    node_index_by_id: BTreeMap<String, IrNodeId>,
-    cluster_index_by_key: BTreeMap<String, usize>,
-    subgraph_index_by_key: BTreeMap<String, usize>,
-    label_index_by_text: BTreeMap<(String, Vec<IrLabelSegment>), IrLabelId>,
+    // Lookups for uniqueness. These are read by key only (never iterated), so a hash
+    // map is both faster and determinism-safe — IR output order comes from the `ir`
+    // vectors, not from map iteration.
+    node_id_index: NodeIdIndex,
+    cluster_index_by_key: FxHashMap<String, usize>,
+    subgraph_index_by_key: FxHashMap<String, usize>,
+    /// O(1) membership dedup for `(cluster_index, node_id)` / `(subgraph_index, node_id)` — the
+    /// `cluster.members`/`subgraph.members` Vecs are append-only and grow to the subgraph size, so
+    /// the old `members.contains(&id)` linear dedup-on-insert was O(subgraph²) (measured ~58% of a
+    /// big-subgraph parse). These sets mirror those Vecs exactly (both start empty, both are only
+    /// appended here), so gating the push on the set is byte-identical.
+    cluster_member_set: FxHashSet<(usize, IrNodeId)>,
+    subgraph_member_set: FxHashSet<(usize, IrNodeId)>,
+    label_index: LabelIndex,
 
     warnings: Vec<String>,
     /// Track nodes that were auto-created (for dangling edge recovery)
@@ -50,17 +214,37 @@ pub struct IrBuilder {
     current_participant_group: Option<(String, Option<String>, Vec<String>)>,
     /// Stack of open fragments
     fragment_stack: Vec<OpenFragment>,
-    /// Currently open class block (for member accumulation)
-    current_class: Option<String>,
+    /// Node id of the currently open class block, resolved once when the block opens so each member add
+    /// skips a `NodeIdIndex` hash+lookup+id-compare (the class name is invariant across a block's members).
+    current_class_node_id: Option<IrNodeId>,
     /// Stack of open composite states for state diagrams.
     state_stack: Vec<StateCompositeContext>,
     parser_config: ParserConfig,
+    reusable_prefix_guard: Option<ReusablePrefixGuard>,
+}
+
+#[derive(Clone, Copy)]
+struct ReusablePrefixGuard {
+    node_count: usize,
+    edge_count: usize,
+    cluster_count: usize,
+    subgraph_count: usize,
+    unchanged: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedLabel {
     pub(crate) text: String,
     pub(crate) segments: Vec<IrLabelSegment>,
+}
+
+#[derive(Clone)]
+enum NodeLabelInput<'a> {
+    Parsed(&'a ParsedLabel),
+    Plain(&'a str),
+    /// Owned label the caller hands over by value (moved, not cloned, into the IR on the create
+    /// path). Used by the flowchart lowering pass to consume its `FastNode` label.
+    ParsedOwned(ParsedLabel),
 }
 
 impl ParsedLabel {
@@ -76,22 +260,291 @@ impl ParsedLabel {
     }
 }
 
+fn clone_vec_reusing<T: Clone>(
+    target: &mut Vec<T>,
+    source: &[T],
+    mut clone_one: impl FnMut(&mut T, &T),
+) {
+    let shared_len = target.len().min(source.len());
+    for index in 0..shared_len {
+        clone_one(&mut target[index], &source[index]);
+    }
+    if target.len() > source.len() {
+        target.truncate(source.len());
+    } else {
+        target.extend(source[shared_len..].iter().cloned());
+    }
+}
+
+fn clone_node_reusing(target: &mut IrNode, source: &IrNode) {
+    target.id.clone_from(&source.id);
+    target.label = source.label;
+    target.shape = source.shape;
+    target.classes.clone_from(&source.classes);
+    target.interaction.clone_from(&source.interaction);
+    target.menu_links.clone_from(&source.menu_links);
+    target.span_primary = source.span_primary;
+    target.implicit = source.implicit;
+    target.members.clone_from(&source.members);
+    target.class_meta.clone_from(&source.class_meta);
+    target.requirement_meta.clone_from(&source.requirement_meta);
+    target.c4_meta.clone_from(&source.c4_meta);
+    target.inline_style.clone_from(&source.inline_style);
+}
+
+fn clone_label_reusing(target: &mut IrLabel, source: &IrLabel) {
+    target.text.clone_from(&source.text);
+    target.span = source.span;
+}
+
+fn clone_cluster_reusing(target: &mut IrCluster, source: &IrCluster) {
+    target.id = source.id;
+    target.title = source.title;
+    target.members.clone_from(&source.members);
+    target.grid_span = source.grid_span;
+    target.span = source.span;
+}
+
+fn clone_graph_node_reusing(target: &mut IrGraphNode, source: &IrGraphNode) {
+    target.node_id = source.node_id;
+    target.kind = source.kind;
+    target.clusters.clone_from(&source.clusters);
+    target.subgraphs.clone_from(&source.subgraphs);
+}
+
+fn clone_graph_cluster_reusing(target: &mut IrGraphCluster, source: &IrGraphCluster) {
+    target.cluster_id = source.cluster_id;
+    target.title = source.title;
+    target.members.clone_from(&source.members);
+    target.subgraph = source.subgraph;
+    target.grid_span = source.grid_span;
+    target.span = source.span;
+}
+
+fn clone_subgraph_reusing(target: &mut IrSubgraph, source: &IrSubgraph) {
+    target.id = source.id;
+    target.key.clone_from(&source.key);
+    target.title = source.title;
+    target.parent = source.parent;
+    target.children.clone_from(&source.children);
+    target.members.clone_from(&source.members);
+    target.cluster = source.cluster;
+    target.grid_span = source.grid_span;
+    target.span = source.span;
+    target.direction = source.direction;
+}
+
+fn clone_ir_reusing(target: &mut MermaidDiagramIr, source: &MermaidDiagramIr) {
+    target.diagram_type = source.diagram_type;
+    target.direction = source.direction;
+    clone_vec_reusing(&mut target.nodes, &source.nodes, clone_node_reusing);
+    target.edges.clone_from(&source.edges);
+    target.ports.clone_from(&source.ports);
+    clone_vec_reusing(
+        &mut target.clusters,
+        &source.clusters,
+        clone_cluster_reusing,
+    );
+    clone_vec_reusing(
+        &mut target.graph.nodes,
+        &source.graph.nodes,
+        clone_graph_node_reusing,
+    );
+    target.graph.edges.clone_from(&source.graph.edges);
+    clone_vec_reusing(
+        &mut target.graph.clusters,
+        &source.graph.clusters,
+        clone_graph_cluster_reusing,
+    );
+    clone_vec_reusing(
+        &mut target.graph.subgraphs,
+        &source.graph.subgraphs,
+        clone_subgraph_reusing,
+    );
+    clone_vec_reusing(&mut target.labels, &source.labels, clone_label_reusing);
+    target.label_markup.clone_from(&source.label_markup);
+    target.constraints.clone_from(&source.constraints);
+    target.style_refs.clone_from(&source.style_refs);
+    target.style_defs.clone_from(&source.style_defs);
+    target.meta.clone_from(&source.meta);
+    target.sequence_meta.clone_from(&source.sequence_meta);
+    target.gantt_meta.clone_from(&source.gantt_meta);
+    target.xy_chart_meta.clone_from(&source.xy_chart_meta);
+    target.pie_meta.clone_from(&source.pie_meta);
+    target.quadrant_meta.clone_from(&source.quadrant_meta);
+    target.state_notes.clone_from(&source.state_notes);
+    target.diagnostics.clone_from(&source.diagnostics);
+}
+
 impl IrBuilder {
+    pub(crate) fn begin_reusable_suffix(&mut self, source: &Self) {
+        self.reusable_prefix_guard = Some(ReusablePrefixGuard {
+            node_count: source.ir.nodes.len(),
+            edge_count: source.ir.edges.len(),
+            cluster_count: source.ir.clusters.len(),
+            subgraph_count: source.ir.graph.subgraphs.len(),
+            unchanged: true,
+        });
+    }
+
+    #[inline]
+    fn mark_reusable_prefix_dirty(&mut self) {
+        if let Some(guard) = self.reusable_prefix_guard.as_mut() {
+            guard.unchanged = false;
+        }
+    }
+
+    #[inline]
+    fn mark_reusable_prefix_node_dirty(&mut self, node_id: IrNodeId) {
+        if let Some(guard) = self.reusable_prefix_guard.as_mut()
+            && node_id.0 < guard.node_count
+        {
+            guard.unchanged = false;
+        }
+    }
+
+    #[inline]
+    fn mark_reusable_prefix_edge_dirty(&mut self, edge_index: usize) {
+        if let Some(guard) = self.reusable_prefix_guard.as_mut()
+            && edge_index < guard.edge_count
+        {
+            guard.unchanged = false;
+        }
+    }
+
+    #[inline]
+    fn mark_reusable_prefix_cluster_dirty(&mut self, cluster_index: usize) {
+        if let Some(guard) = self.reusable_prefix_guard.as_mut()
+            && cluster_index < guard.cluster_count
+        {
+            guard.unchanged = false;
+        }
+    }
+
+    #[inline]
+    fn mark_reusable_prefix_subgraph_dirty(&mut self, subgraph_index: usize) {
+        if let Some(guard) = self.reusable_prefix_guard.as_mut()
+            && subgraph_index < guard.subgraph_count
+        {
+            guard.unchanged = false;
+        }
+    }
+
+    /// Restore a builder whose last suffix left the compiled prefix byte-for-byte unchanged.
+    ///
+    /// [`Self::reusable_prefix_unchanged`] is the proof obligation for this path. Once it succeeds,
+    /// every large IR sequence starts with the immutable compiled snapshot, so restoring the slot
+    /// only needs to discard the appended suffix. The lookup indexes are still refreshed from the
+    /// snapshot because hash collisions can mix prefix and suffix IDs in one bucket; those maps are
+    /// small compared with cloning every prefix node, edge, label, and nested membership vector.
+    pub(crate) fn reset_reusable_suffix_from(&mut self, source: &Self) {
+        debug_assert!(self.reusable_prefix_unchanged(source));
+
+        self.ir.nodes.truncate(source.ir.nodes.len());
+        self.ir.edges.truncate(source.ir.edges.len());
+        self.ir.clusters.truncate(source.ir.clusters.len());
+        self.ir.graph.nodes.truncate(source.ir.graph.nodes.len());
+        self.ir.graph.edges.truncate(source.ir.graph.edges.len());
+        self.ir
+            .graph
+            .clusters
+            .truncate(source.ir.graph.clusters.len());
+        self.ir
+            .graph
+            .subgraphs
+            .truncate(source.ir.graph.subgraphs.len());
+        self.ir.labels.truncate(source.ir.labels.len());
+        self.ir
+            .label_markup
+            .retain(|label, _| label.0 < source.ir.labels.len());
+
+        // These fields are outside the certified flowchart-prefix equality surface. The admitted
+        // flowchart subset leaves them empty, but copying the snapshot here keeps the reset exact if
+        // that subset grows later without putting the large graph vectors back on the copy path.
+        self.ir.ports.clone_from(&source.ir.ports);
+        self.ir.constraints.clone_from(&source.ir.constraints);
+        self.ir.sequence_meta.clone_from(&source.ir.sequence_meta);
+        self.ir.gantt_meta.clone_from(&source.ir.gantt_meta);
+        self.ir.xy_chart_meta.clone_from(&source.ir.xy_chart_meta);
+        self.ir.pie_meta.clone_from(&source.ir.pie_meta);
+        self.ir.quadrant_meta.clone_from(&source.ir.quadrant_meta);
+        self.ir.state_notes.clone_from(&source.ir.state_notes);
+        self.ir.diagnostics.clone_from(&source.ir.diagnostics);
+
+        self.node_id_index
+            .buckets
+            .clone_from(&source.node_id_index.buckets);
+        self.cluster_index_by_key
+            .clone_from(&source.cluster_index_by_key);
+        self.subgraph_index_by_key
+            .clone_from(&source.subgraph_index_by_key);
+        self.cluster_member_set
+            .clone_from(&source.cluster_member_set);
+        self.subgraph_member_set
+            .clone_from(&source.subgraph_member_set);
+        self.label_index
+            .buckets
+            .clone_from(&source.label_index.buckets);
+        self.warnings.clone_from(&source.warnings);
+        self.auto_created_nodes
+            .clone_from(&source.auto_created_nodes);
+        self.activation_stacks.clone_from(&source.activation_stacks);
+        self.current_participant_group
+            .clone_from(&source.current_participant_group);
+        self.fragment_stack.clone_from(&source.fragment_stack);
+        self.current_class_node_id = source.current_class_node_id;
+        self.state_stack.clone_from(&source.state_stack);
+        self.parser_config = source.parser_config;
+        self.reusable_prefix_guard = None;
+    }
+
+    pub(crate) fn reset_from(&mut self, source: &Self) {
+        clone_ir_reusing(&mut self.ir, &source.ir);
+        self.node_id_index
+            .buckets
+            .clone_from(&source.node_id_index.buckets);
+        self.cluster_index_by_key
+            .clone_from(&source.cluster_index_by_key);
+        self.subgraph_index_by_key
+            .clone_from(&source.subgraph_index_by_key);
+        self.cluster_member_set
+            .clone_from(&source.cluster_member_set);
+        self.subgraph_member_set
+            .clone_from(&source.subgraph_member_set);
+        self.label_index
+            .buckets
+            .clone_from(&source.label_index.buckets);
+        self.warnings.clone_from(&source.warnings);
+        self.auto_created_nodes
+            .clone_from(&source.auto_created_nodes);
+        self.activation_stacks.clone_from(&source.activation_stacks);
+        self.current_participant_group
+            .clone_from(&source.current_participant_group);
+        self.fragment_stack.clone_from(&source.fragment_stack);
+        self.current_class_node_id = source.current_class_node_id;
+        self.state_stack.clone_from(&source.state_stack);
+        self.parser_config = source.parser_config;
+        self.reusable_prefix_guard = None;
+    }
+
     pub(crate) fn new(diagram_type: DiagramType) -> Self {
         Self {
             ir: MermaidDiagramIr::empty(diagram_type),
-            node_index_by_id: BTreeMap::new(),
-            cluster_index_by_key: BTreeMap::new(),
-            subgraph_index_by_key: BTreeMap::new(),
-            label_index_by_text: BTreeMap::new(),
+            node_id_index: NodeIdIndex::default(),
+            cluster_index_by_key: FxHashMap::default(),
+            subgraph_index_by_key: FxHashMap::default(),
+            cluster_member_set: FxHashSet::default(),
+            subgraph_member_set: FxHashSet::default(),
+            label_index: LabelIndex::default(),
             warnings: Vec::new(),
             auto_created_nodes: Vec::new(),
             activation_stacks: BTreeMap::new(),
             current_participant_group: None,
             fragment_stack: Vec::new(),
-            current_class: None,
+            current_class_node_id: None,
             state_stack: Vec::new(),
             parser_config: ParserConfig::default(),
+            reusable_prefix_guard: None,
         }
     }
 
@@ -99,29 +552,52 @@ impl IrBuilder {
     ///
     /// Heuristic: each non-empty input line produces ~0.5 nodes and ~0.3 edges.
     pub(crate) fn with_capacity_hint(diagram_type: DiagramType, input_lines: usize) -> Self {
-        let estimated_nodes = (input_lines / 2).max(4);
+        // Timeline creates a period AND event node per data line, so it needs ~`2 * input_lines` nodes/labels.
+        // Other NODE-PER-LINE diagrams (journey/gantt/mindmap/kanban/pie/xychart) need ~`input_lines`, while
+        // EDGE-HEAVY diagrams (flowchart/er/state/class) need ~`input_lines/2`. Sizing the
+        // node & label indexes per-type shrinks the `NodeIdIndex`/`LabelIndex`/member-set `reserve_rehash`
+        // (the `/2` estimate was ~2-4× short — timeline builds a year + event node per line) WITHOUT
+        // over-reserving the edge-heavy common case (the `_` arm is byte-for-byte unchanged: flowchart/er
+        // NEUTRAL). `with_capacity_hint` runs once per parse (cold) ⇒ no hot-path codegen change.
+        // Capacity-only ⇒ behavior-identical.
+        let estimated_nodes = match diagram_type {
+            DiagramType::Timeline => input_lines.saturating_mul(2).max(4),
+            DiagramType::Journey
+            | DiagramType::Gantt
+            | DiagramType::Mindmap
+            | DiagramType::Kanban
+            | DiagramType::Pie
+            | DiagramType::XyChart => input_lines.max(4),
+            _ => (input_lines / 2).max(4),
+        };
         let estimated_edges = (input_lines / 3).max(2);
         let estimated_labels = estimated_nodes;
         let mut ir = MermaidDiagramIr::empty(diagram_type);
         ir.reserve_capacity(estimated_nodes, estimated_edges, estimated_labels);
         Self {
             ir,
-            node_index_by_id: BTreeMap::new(),
-            cluster_index_by_key: BTreeMap::new(),
-            subgraph_index_by_key: BTreeMap::new(),
-            label_index_by_text: BTreeMap::new(),
+            node_id_index: NodeIdIndex::with_capacity(estimated_nodes),
+            cluster_index_by_key: FxHashMap::default(),
+            subgraph_index_by_key: FxHashMap::default(),
+            cluster_member_set: FxHashSet::default(),
+            subgraph_member_set: FxHashSet::default(),
+            label_index: LabelIndex::with_capacity(estimated_labels),
             warnings: Vec::new(),
             auto_created_nodes: Vec::new(),
             activation_stacks: BTreeMap::new(),
             current_participant_group: None,
             fragment_stack: Vec::new(),
-            current_class: None,
+            current_class_node_id: None,
             state_stack: Vec::new(),
             parser_config: ParserConfig::default(),
+            reusable_prefix_guard: None,
         }
     }
 
-    pub(crate) const fn set_direction(&mut self, direction: GraphDirection) {
+    pub(crate) fn set_direction(&mut self, direction: GraphDirection) {
+        if self.ir.direction != direction || self.ir.meta.direction != direction {
+            self.mark_reusable_prefix_dirty();
+        }
         self.ir.direction = direction;
         self.ir.meta.direction = direction;
     }
@@ -131,6 +607,15 @@ impl IrBuilder {
         subgraph_index: usize,
         direction: GraphDirection,
     ) {
+        let changes_prefix = self
+            .ir
+            .graph
+            .subgraphs
+            .get(subgraph_index)
+            .is_some_and(|subgraph| subgraph.direction != Some(direction));
+        if changes_prefix {
+            self.mark_reusable_prefix_subgraph_dirty(subgraph_index);
+        }
         if let Some(subgraph) = self.ir.graph.subgraphs.get_mut(subgraph_index) {
             subgraph.direction = Some(direction);
         }
@@ -262,7 +747,7 @@ impl IrBuilder {
             .iter()
             .filter_map(|name| {
                 let normalized = normalize_identifier(name);
-                self.node_index_by_id.get(&normalized).copied()
+                self.node_id_index.get(&normalized, &self.ir.nodes)
             })
             .collect();
 
@@ -280,7 +765,7 @@ impl IrBuilder {
 
     pub(crate) fn activate_participant(&mut self, name: &str) {
         let normalized = normalize_identifier(name);
-        let Some(&node_id) = self.node_index_by_id.get(&normalized) else {
+        let Some(node_id) = self.node_id_index.get(&normalized, &self.ir.nodes) else {
             return;
         };
         let edge_index = self.ir.edges.len().saturating_sub(1);
@@ -323,7 +808,7 @@ impl IrBuilder {
         if let Some((label, color, names)) = self.current_participant_group.take() {
             let participants: Vec<IrNodeId> = names
                 .iter()
-                .filter_map(|name| self.node_index_by_id.get(name).copied())
+                .filter_map(|name| self.node_id_index.get(name, &self.ir.nodes))
                 .collect();
 
             if !participants.is_empty() {
@@ -352,7 +837,7 @@ impl IrBuilder {
 
     pub(crate) fn add_lifecycle_create(&mut self, name: &str) {
         let normalized = normalize_identifier(name);
-        let Some(&node_id) = self.node_index_by_id.get(&normalized) else {
+        let Some(node_id) = self.node_id_index.get(&normalized, &self.ir.nodes) else {
             return;
         };
         let at_edge = self.ir.edges.len();
@@ -369,7 +854,7 @@ impl IrBuilder {
 
     pub(crate) fn add_lifecycle_destroy(&mut self, name: &str) {
         let normalized = normalize_identifier(name);
-        let Some(&node_id) = self.node_index_by_id.get(&normalized) else {
+        let Some(node_id) = self.node_id_index.get(&normalized, &self.ir.nodes) else {
             return;
         };
         let at_edge = self.ir.edges.len().saturating_sub(1);
@@ -385,24 +870,28 @@ impl IrBuilder {
     }
 
     pub(crate) fn set_current_class(&mut self, name: &str) {
-        self.current_class = Some(name.to_string());
+        // Callers intern the class node immediately before this (see `lower_class_statement`'s
+        // `BlockStart` arm), and node ids are stable append indices, so resolving here is identical to
+        // resolving per member — and lets `add_class_member` skip the lookup entirely.
+        self.current_class_node_id = self.node_id_index.get(name, &self.ir.nodes);
     }
 
     pub(crate) fn clear_current_class(&mut self) {
-        self.current_class = None;
+        self.current_class_node_id = None;
     }
 
     pub(crate) fn add_class_member(&mut self, member: IrClassMember) {
-        let Some(class_name) = self.current_class.as_ref() else {
-            return;
-        };
-        let Some(&node_id) = self.node_index_by_id.get(class_name) else {
+        // `current_class_node_id` was resolved once in `set_current_class` — same node the per-member
+        // `node_id_index.get(class_name)` would return, without re-hashing the class name each member.
+        let Some(node_id) = self.current_class_node_id else {
             return;
         };
         let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
             return;
         };
-        let meta = node.class_meta.get_or_insert_with(IrClassNodeMeta::default);
+        let meta = node
+            .class_meta
+            .get_or_insert_with(|| Box::new(IrClassNodeMeta::default()));
         match member.kind {
             ClassMemberKind::Attribute => meta.attributes.push(member),
             ClassMemberKind::Method => meta.methods.push(member),
@@ -410,26 +899,26 @@ impl IrBuilder {
     }
 
     pub(crate) fn set_class_stereotype(&mut self, class_name: &str, stereotype: ClassStereotype) {
-        let Some(&node_id) = self.node_index_by_id.get(class_name) else {
+        let Some(node_id) = self.node_id_index.get(class_name, &self.ir.nodes) else {
             return;
         };
         let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
             return;
         };
         node.class_meta
-            .get_or_insert_with(IrClassNodeMeta::default)
+            .get_or_insert_with(|| Box::new(IrClassNodeMeta::default()))
             .stereotype = Some(stereotype);
     }
 
     pub(crate) fn set_class_generics(&mut self, class_name: &str, generics: Vec<String>) {
-        let Some(&node_id) = self.node_index_by_id.get(class_name) else {
+        let Some(node_id) = self.node_id_index.get(class_name, &self.ir.nodes) else {
             return;
         };
         let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
             return;
         };
         node.class_meta
-            .get_or_insert_with(IrClassNodeMeta::default)
+            .get_or_insert_with(|| Box::new(IrClassNodeMeta::default()))
             .generics = generics;
     }
 
@@ -673,6 +1162,14 @@ impl IrBuilder {
         &mut self.ir
     }
 
+    pub(crate) const fn ir(&self) -> &MermaidDiagramIr {
+        &self.ir
+    }
+
+    pub(crate) fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
     pub(crate) const fn node_count(&self) -> usize {
         self.ir.nodes.len()
     }
@@ -682,21 +1179,11 @@ impl IrBuilder {
     }
 
     /// Look up a node ID by its string key (as used in the diagram source).
-    pub(crate) fn node_id_by_key(&self, key: &str) -> Option<&IrNodeId> {
-        self.node_index_by_id.get(key)
+    pub(crate) fn node_id_by_key(&self, key: &str) -> Option<IrNodeId> {
+        self.node_id_index.get(key, &self.ir.nodes)
     }
 
-    /// Get a node by its `IrNodeId`.
-    pub(crate) fn get_node_by_id(&self, id: IrNodeId) -> Option<&IrNode> {
-        self.ir.nodes.get(id.0)
-    }
-
-    /// Finish building the IR, applying semantic recovery.
-    pub(crate) fn finish(
-        mut self,
-        confidence: f32,
-        detection_method: crate::DetectionMethod,
-    ) -> ParseResult {
+    fn finalize(&mut self) {
         // Close any remaining open fragments, activations, and participant groups
         while self.end_fragment() {}
         self.flush_open_activations();
@@ -707,6 +1194,66 @@ impl IrBuilder {
 
         // Populate structured style types from raw style_refs.
         self.ir.populate_structured_styles();
+    }
+
+    pub(crate) fn finish_reusable(&mut self) {
+        self.finalize();
+    }
+
+    pub(crate) fn reusable_prefix_unchanged(&self, _source: &Self) -> bool {
+        let unchanged = self
+            .reusable_prefix_guard
+            .is_some_and(|guard| guard.unchanged);
+
+        #[cfg(debug_assertions)]
+        {
+            let exact = self.ir.direction == _source.ir.direction
+                && self.ir.meta == _source.ir.meta
+                && self.ir.style_refs == _source.ir.style_refs
+                && self.ir.style_defs == _source.ir.style_defs
+                && self.ir.nodes.starts_with(&_source.ir.nodes)
+                && self.ir.edges.starts_with(&_source.ir.edges)
+                && self.ir.clusters.starts_with(&_source.ir.clusters)
+                && self.ir.labels.starts_with(&_source.ir.labels)
+                && self.ir.graph.nodes.starts_with(&_source.ir.graph.nodes)
+                && self.ir.graph.edges.starts_with(&_source.ir.graph.edges)
+                && self
+                    .ir
+                    .graph
+                    .clusters
+                    .starts_with(&_source.ir.graph.clusters)
+                && self
+                    .ir
+                    .graph
+                    .subgraphs
+                    .starts_with(&_source.ir.graph.subgraphs)
+                && _source
+                    .ir
+                    .label_markup
+                    .iter()
+                    .all(|(label, markup)| self.ir.label_markup.get(label) == Some(markup))
+                && self
+                    .ir
+                    .label_markup
+                    .keys()
+                    .filter(|label| label.0 < _source.ir.labels.len())
+                    .all(|label| _source.ir.label_markup.contains_key(label));
+            debug_assert_eq!(
+                unchanged, exact,
+                "reusable-prefix mutation tracking drifted"
+            );
+        }
+
+        unchanged
+    }
+
+    /// Finish building the IR, applying semantic recovery.
+    pub(crate) fn finish(
+        mut self,
+        confidence: f32,
+        detection_method: crate::DetectionMethod,
+    ) -> ParseResult {
+        self.finalize();
 
         ParseResult {
             ir: self.ir,
@@ -789,22 +1336,47 @@ impl IrBuilder {
     }
 
     /// Intern a node, optionally marking it as auto-created (for recovery).
-    pub(crate) fn intern_node_auto(
+    fn intern_node_auto(
         &mut self,
         id: &str,
-        label: Option<&ParsedLabel>,
+        label: Option<NodeLabelInput<'_>>,
         shape: NodeShape,
         span: Span,
         is_auto_created: bool,
     ) -> Option<IrNodeId> {
-        let normalized_id = id.trim();
+        // `trim_fast` == `str::trim` byte-for-byte (ASCII byte scan, Unicode fallback only when a
+        // non-ASCII byte sits at a trimmed boundary) but skips the `char::is_whitespace` CharSearcher.
+        // Normalize a possibly-untrimmed id, then delegate to the normalized core.
+        self.intern_node_auto_normalized(trim_fast(id), label, shape, span, is_auto_created)
+    }
+
+    /// Core of [`Self::intern_node_auto`] taking an ALREADY-trimmed `normalized_id`. The flowchart
+    /// fast paths (`parse_fast_simple_flowchart_node_borrowed` / `_edge_parts`) hand in ids that are
+    /// already `trim_ascii`'d AND validated as pure-ASCII `is_fast_flow_identifier`s (no whitespace),
+    /// so `trim_fast(id) == id` there — they intern through this directly to skip the redundant
+    /// per-intern trim (~2400 interns per flowchart/800 parse).
+    fn intern_node_auto_normalized(
+        &mut self,
+        normalized_id: &str,
+        label: Option<NodeLabelInput<'_>>,
+        shape: NodeShape,
+        span: Span,
+        is_auto_created: bool,
+    ) -> Option<IrNodeId> {
         if normalized_id.is_empty() {
             self.add_warning("Encountered empty node identifier; skipped node");
             return None;
         }
 
+        // Hash the id ONCE for the get+insert pair below (a new node was hashed twice: once here
+        // and again in the insert on the create path). Byte-identical; monotonically fewer hashes.
+        let id_hash = NodeIdIndex::hash_key(normalized_id);
+
         // Check if already exists
-        if let Some(existing_id) = self.node_index_by_id.get(normalized_id).copied() {
+        if let Some(existing_id) =
+            self.node_id_index
+                .get_with_hash(id_hash, normalized_id, &self.ir.nodes)
+        {
             let resolved_label = if self
                 .ir
                 .nodes
@@ -812,45 +1384,49 @@ impl IrBuilder {
                 .and_then(|node| node.label)
                 .is_none()
             {
-                label.map(|value| self.intern_label(value, span))
+                label.map(|value| self.intern_node_label_input(value, span))
             } else {
                 None
             };
 
+            let mut existing_node_changed = false;
             if let Some(existing_node) = self.ir.nodes.get_mut(existing_id.0) {
-                if existing_node.label.is_none() {
+                if existing_node.label.is_none() && resolved_label.is_some() {
                     existing_node.label = resolved_label;
+                    existing_node_changed = true;
                 }
                 if existing_node.shape == NodeShape::Rect && shape != NodeShape::Rect {
                     existing_node.shape = shape;
+                    existing_node_changed = true;
                 }
 
-                existing_node.span_all.push(span);
+                // `span_all` is write-only dead data (no workspace reader); do not accumulate
+                // a `Span` per node reference. See the node-construction site.
 
                 // If this call is NOT auto-created but the existing node IS,
                 // "upgrade" it to an explicit node and remove from tracking.
                 if !is_auto_created && existing_node.implicit {
                     existing_node.implicit = false;
                     self.auto_created_nodes.retain(|&id| id != existing_id);
+                    existing_node_changed = true;
                 }
+            }
+            if existing_node_changed {
+                self.mark_reusable_prefix_node_dirty(existing_id);
             }
             return Some(existing_id);
         }
 
         // Create new node
-        let label_id = label.map(|value| self.intern_label(value, span));
+        let label_id = label.map(|value| self.intern_node_label_input(value, span));
         let node_id = IrNodeId(self.ir.nodes.len());
         let node = IrNode {
             id: normalized_id.to_string(),
             label: label_id,
             shape,
-            icon: None,
             classes: Vec::new(),
-            href: None,
-            callback: None,
-            tooltip: None,
+            interaction: None,
             span_primary: span,
-            span_all: vec![span],
             implicit: is_auto_created,
             members: Vec::new(),
             menu_links: Vec::new(),
@@ -867,8 +1443,7 @@ impl IrBuilder {
             clusters: Vec::new(),
             subgraphs: Vec::new(),
         });
-        self.node_index_by_id
-            .insert(normalized_id.to_string(), node_id);
+        self.node_id_index.insert_with_hash(id_hash, node_id);
 
         if is_auto_created {
             self.auto_created_nodes.push(node_id);
@@ -888,6 +1463,17 @@ impl IrBuilder {
             return None;
         }
 
+        // Reserve the `add_node_to_cluster` dedup set once, when the FIRST cluster is created — it fills
+        // to ~node-count as members accumulate, so this skips the geometric `reserve_rehash` (~5.8% of
+        // section-heavy parse: timeline −0.98%, journey −1.19%). Done here (per-section, cold) rather than
+        // in the per-node `add_node_to_cluster` so the flowchart node hot path is byte-for-byte unchanged
+        // (moving it into the hot path regressed flowchart +0.11% via inlining), and a subgraph-free diagram
+        // never reaches here so pays no unused-map allocation. Capacity-only ⇒ behavior-identical.
+        if self.cluster_member_set.capacity() == 0 {
+            self.cluster_member_set
+                .reserve(self.ir.nodes.capacity().max(4));
+        }
+
         if let Some(&existing_index) = self.cluster_index_by_key.get(normalized_key) {
             // If the re-opened cluster has a title but the existing one doesn't,
             // update it.
@@ -903,6 +1489,7 @@ impl IrBuilder {
                 if existing_title.is_none() || graph_title.is_none() {
                     let label = ParsedLabel::plain(title_text);
                     let label_id = self.intern_label(&label, span);
+                    self.mark_reusable_prefix_cluster_dirty(existing_index);
                     if let Some(cluster) = self.ir.clusters.get_mut(existing_index)
                         && cluster.title.is_none()
                     {
@@ -944,22 +1531,40 @@ impl IrBuilder {
     }
 
     pub(crate) fn add_node_to_cluster(&mut self, cluster_index: usize, node_id: IrNodeId) {
-        let Some(cluster) = self.ir.clusters.get_mut(cluster_index) else {
+        if self.ir.clusters.get(cluster_index).is_none() {
             return;
+        }
+        let cluster_id = IrClusterId(cluster_index);
+        // The membership index is already here: `ir.graph.nodes[i].clusters` is appended ONLY below,
+        // starts empty, and grows on exactly the calls that append to `clusters[i].members`. So the
+        // per-node list answers "is this node already in this cluster" without a second structure —
+        // and it answers it from ~1 element (a node is in its own group plus its ancestors) instead
+        // of a hash probe into a set sized to the whole diagram. See `add_node_to_subgraph` for the
+        // mirrored site; both were paying this, and on a subgraph-heavy diagram the shared
+        // `FxHashSet<(usize, IrNodeId)>::insert` was the single largest self-time frame (8.73% on
+        // `arch_100x50`, 5,000 nodes in 100 subgraphs).
+        let already = match self.ir.graph.nodes.get(node_id.0) {
+            Some(graph_node) => graph_node.clusters.contains(&cluster_id),
+            // No mirror to consult. Unreachable via the interner -- `ir.nodes` and `ir.graph.nodes`
+            // are pushed in lockstep, so an id is never handed out before its graph node exists --
+            // but keep the original set-based dedup rather than assume it. The two paths partition
+            // node ids (a given id either has a graph node on every call or on none), so a node can
+            // never dedup against the wrong one.
+            None => !self.cluster_member_set.insert((cluster_index, node_id)),
         };
-        if !cluster.members.contains(&node_id) {
+        if already {
+            return;
+        }
+        self.mark_reusable_prefix_cluster_dirty(cluster_index);
+        self.mark_reusable_prefix_node_dirty(node_id);
+        if let Some(cluster) = self.ir.clusters.get_mut(cluster_index) {
             cluster.members.push(node_id);
         }
-        if let Some(graph_cluster) = self.ir.graph.clusters.get_mut(cluster_index)
-            && !graph_cluster.members.contains(&node_id)
-        {
+        if let Some(graph_cluster) = self.ir.graph.clusters.get_mut(cluster_index) {
             graph_cluster.members.push(node_id);
         }
         if let Some(graph_node) = self.ir.graph.nodes.get_mut(node_id.0) {
-            let cluster_id = IrClusterId(cluster_index);
-            if !graph_node.clusters.contains(&cluster_id) {
-                graph_node.clusters.push(cluster_id);
-            }
+            graph_node.clusters.push(cluster_id);
         }
     }
 
@@ -978,6 +1583,12 @@ impl IrBuilder {
             return None;
         }
 
+        // See `ensure_cluster`: one-time member-set reserve on first subgraph, off the per-node hot path.
+        if self.subgraph_member_set.capacity() == 0 {
+            self.subgraph_member_set
+                .reserve(self.ir.nodes.capacity().max(4));
+        }
+
         if let Some(&existing_index) = self.subgraph_index_by_key.get(normalized_lookup_key) {
             // Update title if needed
             if let Some(title_text) = clean_label(title) {
@@ -990,6 +1601,7 @@ impl IrBuilder {
                 if existing_title.is_none() {
                     let label = ParsedLabel::plain(title_text);
                     let label_id = self.intern_label(&label, span);
+                    self.mark_reusable_prefix_subgraph_dirty(existing_index);
                     if let Some(subgraph) = self.ir.graph.subgraphs.get_mut(existing_index) {
                         subgraph.title = Some(label_id);
                     }
@@ -1017,15 +1629,17 @@ impl IrBuilder {
             span,
             direction: None,
         });
-        if let Some(parent_index) = parent
-            && let Some(parent_graph) = self.ir.graph.subgraphs.get_mut(parent_index)
-        {
-            parent_graph.children.push(IrSubgraphId(subgraph_index));
+        if let Some(parent_index) = parent {
+            self.mark_reusable_prefix_subgraph_dirty(parent_index);
+            if let Some(parent_graph) = self.ir.graph.subgraphs.get_mut(parent_index) {
+                parent_graph.children.push(IrSubgraphId(subgraph_index));
+            }
         }
-        if let Some(cluster_index) = cluster_index
-            && let Some(graph_cluster) = self.ir.graph.clusters.get_mut(cluster_index)
-        {
-            graph_cluster.subgraph = Some(IrSubgraphId(subgraph_index));
+        if let Some(cluster_index) = cluster_index {
+            self.mark_reusable_prefix_cluster_dirty(cluster_index);
+            if let Some(graph_cluster) = self.ir.graph.clusters.get_mut(cluster_index) {
+                graph_cluster.subgraph = Some(IrSubgraphId(subgraph_index));
+            }
         }
         self.subgraph_index_by_key
             .insert(normalized_lookup_key.to_string(), subgraph_index);
@@ -1033,22 +1647,46 @@ impl IrBuilder {
     }
 
     pub(crate) fn add_node_to_subgraph(&mut self, subgraph_index: usize, node_id: IrNodeId) {
-        let Some(subgraph) = self.ir.graph.subgraphs.get_mut(subgraph_index) else {
+        if self.ir.graph.subgraphs.get(subgraph_index).is_none() {
             return;
+        }
+        let subgraph_id = IrSubgraphId(subgraph_index);
+        // Mirrors `add_node_to_cluster`: `ir.graph.nodes[i].subgraphs` is appended only below, starts
+        // empty, and grows on exactly the calls that append to `subgraphs[i].members`, so it already
+        // is the membership index and the parallel hash set is redundant on this path.
+        let already = match self.ir.graph.nodes.get(node_id.0) {
+            Some(graph_node) => graph_node.subgraphs.contains(&subgraph_id),
+            None => !self.subgraph_member_set.insert((subgraph_index, node_id)),
         };
-        if !subgraph.members.contains(&node_id) {
+        if already {
+            return;
+        }
+        self.mark_reusable_prefix_subgraph_dirty(subgraph_index);
+        self.mark_reusable_prefix_node_dirty(node_id);
+        if let Some(subgraph) = self.ir.graph.subgraphs.get_mut(subgraph_index) {
             subgraph.members.push(node_id);
         }
         if let Some(graph_node) = self.ir.graph.nodes.get_mut(node_id.0) {
-            let subgraph_id = IrSubgraphId(subgraph_index);
-            if !graph_node.subgraphs.contains(&subgraph_id) {
-                graph_node.subgraphs.push(subgraph_id);
-            }
+            graph_node.subgraphs.push(subgraph_id);
         }
     }
 
     pub(crate) fn set_cluster_grid_span(&mut self, cluster_index: usize, grid_span: usize) {
         let grid_span = grid_span.max(1);
+        let changes_prefix = self
+            .ir
+            .clusters
+            .get(cluster_index)
+            .is_some_and(|cluster| cluster.grid_span != grid_span)
+            || self
+                .ir
+                .graph
+                .clusters
+                .get(cluster_index)
+                .is_some_and(|cluster| cluster.grid_span != grid_span);
+        if changes_prefix {
+            self.mark_reusable_prefix_cluster_dirty(cluster_index);
+        }
         if let Some(cluster) = self.ir.clusters.get_mut(cluster_index) {
             cluster.grid_span = grid_span;
         }
@@ -1059,6 +1697,15 @@ impl IrBuilder {
 
     pub(crate) fn set_subgraph_grid_span(&mut self, subgraph_index: usize, grid_span: usize) {
         let grid_span = grid_span.max(1);
+        let changes_prefix = self
+            .ir
+            .graph
+            .subgraphs
+            .get(subgraph_index)
+            .is_some_and(|subgraph| subgraph.grid_span != grid_span);
+        if changes_prefix {
+            self.mark_reusable_prefix_subgraph_dirty(subgraph_index);
+        }
         if let Some(subgraph) = self.ir.graph.subgraphs.get_mut(subgraph_index) {
             subgraph.grid_span = grid_span;
         }
@@ -1071,7 +1718,38 @@ impl IrBuilder {
         shape: NodeShape,
         span: Span,
     ) -> Option<IrNodeId> {
-        self.intern_node_auto(id, label, shape, span, false)
+        self.intern_node_auto(id, label.map(NodeLabelInput::Parsed), shape, span, false)
+    }
+
+    /// Intern a flowchart fast-path edge endpoint (label-less Rect node) whose id is already
+    /// `trim_ascii`'d and `is_fast_flow_identifier`-validated (pure ASCII, no whitespace) — so
+    /// `trim_fast(id) == id`. Interns through the normalized core to skip that redundant trim.
+    pub(crate) fn intern_edge_endpoint_pretrimmed(
+        &mut self,
+        id: &str,
+        span: Span,
+    ) -> Option<IrNodeId> {
+        self.intern_node_auto_normalized(id, None, NodeShape::Rect, span, false)
+    }
+
+    /// Like [`Self::intern_node_label`] but consumes an owned label, moving it into the IR instead of
+    /// cloning (see [`Self::intern_label_owned`]). For the flowchart lowering pass's `FastNode`, whose
+    /// id is already `trim_ascii`'d + `is_fast_flow_identifier`-validated — so intern through the
+    /// normalized core to skip the redundant `trim_fast`.
+    pub(crate) fn intern_node_label_owned(
+        &mut self,
+        id: &str,
+        label: Option<ParsedLabel>,
+        shape: NodeShape,
+        span: Span,
+    ) -> Option<IrNodeId> {
+        self.intern_node_auto_normalized(
+            id,
+            label.map(NodeLabelInput::ParsedOwned),
+            shape,
+            span,
+            false,
+        )
     }
 
     pub(crate) fn intern_node(
@@ -1081,19 +1759,110 @@ impl IrBuilder {
         shape: NodeShape,
         span: Span,
     ) -> Option<IrNodeId> {
-        let parsed_label = label.map(ParsedLabel::plain);
-        self.intern_node_auto(id, parsed_label.as_ref(), shape, span, false)
+        self.intern_node_auto(id, label.map(NodeLabelInput::Plain), shape, span, false)
+    }
+
+    /// Intern a generated node whose id is known fresh by the caller, consuming the
+    /// owned id and plain label instead of cloning them through the generic path.
+    pub(crate) fn intern_fresh_node_owned_label(
+        &mut self,
+        id: String,
+        label: String,
+        shape: NodeShape,
+        span: Span,
+    ) -> Option<IrNodeId> {
+        // Byte-exact `trim_fast` for the same reason as `intern_node_auto` — normalizes the owned
+        // generated id without the Unicode `char::is_whitespace` CharSearcher. Byte-identical.
+        let normalized_id = trim_fast(&id);
+        if normalized_id.is_empty() {
+            self.add_warning("Encountered empty node identifier; skipped node");
+            return None;
+        }
+        if normalized_id.len() != id.len() {
+            return self.intern_node(normalized_id, Some(&label), shape, span);
+        }
+
+        let id_hash = NodeIdIndex::hash_key(&id);
+        if let Some(existing_id) = self
+            .node_id_index
+            .get_with_hash(id_hash, &id, &self.ir.nodes)
+        {
+            let resolved_label = if self
+                .ir
+                .nodes
+                .get(existing_id.0)
+                .and_then(|node| node.label)
+                .is_none()
+            {
+                Some(self.intern_plain_label_owned(label, span))
+            } else {
+                None
+            };
+
+            let mut existing_node_changed = false;
+            if let Some(existing_node) = self.ir.nodes.get_mut(existing_id.0) {
+                if existing_node.label.is_none() && resolved_label.is_some() {
+                    existing_node.label = resolved_label;
+                    existing_node_changed = true;
+                }
+                if existing_node.shape == NodeShape::Rect && shape != NodeShape::Rect {
+                    existing_node.shape = shape;
+                    existing_node_changed = true;
+                }
+                if existing_node.implicit {
+                    existing_node.implicit = false;
+                    self.auto_created_nodes.retain(|&id| id != existing_id);
+                    existing_node_changed = true;
+                }
+            }
+            if existing_node_changed {
+                self.mark_reusable_prefix_node_dirty(existing_id);
+            }
+            return Some(existing_id);
+        }
+
+        let label_id = self.intern_plain_label_owned(label, span);
+        let node_id = IrNodeId(self.ir.nodes.len());
+        self.ir.nodes.push(IrNode {
+            id,
+            label: Some(label_id),
+            shape,
+            classes: Vec::new(),
+            interaction: None,
+            span_primary: span,
+            implicit: false,
+            members: Vec::new(),
+            menu_links: Vec::new(),
+            class_meta: None,
+            requirement_meta: None,
+            c4_meta: None,
+            inline_style: None,
+        });
+        self.ir.graph.nodes.push(IrGraphNode {
+            node_id,
+            kind: self.node_kind(),
+            clusters: Vec::new(),
+            subgraphs: Vec::new(),
+        });
+        self.node_id_index.insert_with_hash(id_hash, node_id);
+        Some(node_id)
     }
 
     /// Intern a node as a placeholder (auto-created for dangling edge recovery).
     #[allow(dead_code)] // Will be used by recovery features
     pub(crate) fn intern_placeholder_node(&mut self, id: &str, span: Span) -> Option<IrNodeId> {
         let label = ParsedLabel::plain(id);
-        self.intern_node_auto(id, Some(&label), NodeShape::Rect, span, true)
+        self.intern_node_auto(
+            id,
+            Some(NodeLabelInput::Parsed(&label)),
+            NodeShape::Rect,
+            span,
+            true,
+        )
     }
 
     pub(crate) fn add_class_to_node(&mut self, node_key: &str, class_name: &str, span: Span) {
-        let normalized_class = class_name.trim();
+        let normalized_class = trim_fast(class_name);
         if normalized_class.is_empty() {
             return;
         }
@@ -1102,14 +1871,38 @@ impl IrBuilder {
             return;
         };
 
-        let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
+        let should_add = self.ir.nodes.get(node_id.0).is_some_and(|node| {
+            !node
+                .classes
+                .iter()
+                .any(|existing| existing == normalized_class)
+        });
+        if !should_add {
             return;
-        };
-        if !node
-            .classes
-            .iter()
-            .any(|existing| existing == normalized_class)
-        {
+        }
+        self.mark_reusable_prefix_node_dirty(node_id);
+        if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
+            node.classes.push(normalized_class.to_string());
+        }
+    }
+
+    pub(crate) fn add_class_to_node_id(&mut self, node_id: IrNodeId, class_name: &str) {
+        let normalized_class = trim_fast(class_name);
+        if normalized_class.is_empty() {
+            return;
+        }
+
+        let should_add = self.ir.nodes.get(node_id.0).is_some_and(|node| {
+            !node
+                .classes
+                .iter()
+                .any(|existing| existing == normalized_class)
+        });
+        if !should_add {
+            return;
+        }
+        self.mark_reusable_prefix_node_dirty(node_id);
+        if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
             node.classes.push(normalized_class.to_string());
         }
     }
@@ -1119,8 +1912,9 @@ impl IrBuilder {
         if icon.is_empty() {
             return;
         }
+        self.mark_reusable_prefix_node_dirty(node_id);
         if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
-            node.icon = Some(icon.to_string());
+            node.interaction_mut().icon = Some(icon.to_string());
         }
     }
 
@@ -1134,8 +1928,9 @@ impl IrBuilder {
             return;
         };
 
+        self.mark_reusable_prefix_node_dirty(node_id);
         if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
-            node.href = Some(target.to_string());
+            node.interaction_mut().href = Some(target.to_string());
         }
     }
 
@@ -1149,8 +1944,9 @@ impl IrBuilder {
             return;
         };
 
+        self.mark_reusable_prefix_node_dirty(node_id);
         if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
-            node.callback = Some(callback.to_string());
+            node.interaction_mut().callback = Some(callback.to_string());
         }
     }
 
@@ -1158,8 +1954,9 @@ impl IrBuilder {
         let Some(node_id) = self.intern_node(node_key, None, NodeShape::Rect, span) else {
             return;
         };
+        self.mark_reusable_prefix_node_dirty(node_id);
         if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
-            node.tooltip = Some(tooltip.to_string());
+            node.interaction_mut().tooltip = Some(tooltip.to_string());
         }
     }
 
@@ -1187,17 +1984,20 @@ impl IrBuilder {
             label: label.to_string(),
             url: url.to_string(),
         });
+        self.mark_reusable_prefix_node_dirty(node_id);
     }
 
     pub(crate) fn node_mut(&mut self, node_id: IrNodeId) -> Option<&mut fm_core::IrNode> {
+        self.mark_reusable_prefix_node_dirty(node_id);
         self.ir.nodes.get_mut(node_id.0)
     }
 
     pub(crate) fn set_c4_node_meta(&mut self, node_id: IrNodeId, meta: IrC4NodeMeta) {
+        self.mark_reusable_prefix_node_dirty(node_id);
         let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
             return;
         };
-        node.c4_meta = Some(meta);
+        node.c4_meta = Some(Box::new(meta));
     }
 
     /// Add an entity attribute to a node (for ER diagrams).
@@ -1209,6 +2009,7 @@ impl IrBuilder {
         key: IrAttributeKey,
         comment: Option<&str>,
     ) {
+        self.mark_reusable_prefix_node_dirty(node_id);
         let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
             return;
         };
@@ -1222,6 +2023,7 @@ impl IrBuilder {
     }
 
     pub(crate) fn push_style_ref(&mut self, target: IrStyleTarget, style: String, span: Span) {
+        self.mark_reusable_prefix_dirty();
         self.ir.style_refs.push(IrStyleRef {
             target,
             style,
@@ -1247,11 +2049,7 @@ impl IrBuilder {
             arrow,
             label: label_id,
             span,
-            er_notation: None,
-            source_cardinality: None,
-            target_cardinality: None,
-            guard: None,
-            action: None,
+            extras: None,
             inline_style: None,
         });
         self.ir.graph.edges.push(IrGraphEdge {
@@ -1265,26 +2063,40 @@ impl IrBuilder {
 
     /// Set the ER cardinality notation on the last-pushed edge.
     pub(crate) fn set_last_edge_er_notation(&mut self, notation: &str) {
+        if let Some(edge_index) = self.ir.edges.len().checked_sub(1) {
+            self.mark_reusable_prefix_edge_dirty(edge_index);
+        }
         if let Some(edge) = self.ir.edges.last_mut() {
-            edge.er_notation = Some(notation.to_string());
+            edge.extras_mut().er_notation = Some(Box::from(notation));
         }
     }
 
     /// Set cardinality labels on the most recently pushed edge.
     pub(crate) fn set_last_edge_cardinality(&mut self, source: Option<&str>, target: Option<&str>) {
+        if let Some(edge_index) = self.ir.edges.len().checked_sub(1) {
+            self.mark_reusable_prefix_edge_dirty(edge_index);
+        }
         if let Some(edge) = self.ir.edges.last_mut() {
             if let Some(s) = source {
-                edge.source_cardinality = Some(s.to_string());
+                edge.extras_mut().source_cardinality = Some(Box::from(s));
             }
             if let Some(t) = target {
-                edge.target_cardinality = Some(t.to_string());
+                edge.extras_mut().target_cardinality = Some(Box::from(t));
             }
         }
     }
 
     fn intern_label(&mut self, label: &ParsedLabel, span: Span) -> IrLabelId {
-        let key = (label.text.clone(), label.segments.clone());
-        if let Some(&existing_id) = self.label_index_by_text.get(&key) {
+        // Hash the (text, segments) pair ONCE for the get+insert pair below (a new label was
+        // hashed twice). Byte-identical; monotonically fewer hashes.
+        let label_hash = LabelIndex::hash_key(&label.text, &label.segments);
+        if let Some(existing_id) = self.label_index.get_with_hash(
+            label_hash,
+            &label.text,
+            &label.segments,
+            &self.ir.labels,
+            &self.ir.label_markup,
+        ) {
             return existing_id;
         }
 
@@ -1298,7 +2110,83 @@ impl IrBuilder {
                 .label_markup
                 .insert(label_id, label.segments.clone());
         }
-        self.label_index_by_text.insert(key, label_id);
+        self.label_index.insert_with_hash(label_hash, label_id);
+        label_id
+    }
+
+    fn intern_node_label_input(&mut self, label: NodeLabelInput<'_>, span: Span) -> IrLabelId {
+        match label {
+            NodeLabelInput::Parsed(label) => self.intern_label(label, span),
+            NodeLabelInput::Plain(text) => self.intern_plain_label(text, span),
+            NodeLabelInput::ParsedOwned(label) => self.intern_label_owned(label, span),
+        }
+    }
+
+    /// Owned-label variant of [`Self::intern_label`]: consumes the `ParsedLabel` and MOVES its text
+    /// and segments into the IR on the create path instead of cloning them. Byte-identical to
+    /// `intern_label` (same hash, same dedup, same insertion order); on a dedup hit the owned label is
+    /// dropped — exactly what happens to the borrowed form's owner. Lets the flowchart lowering pass
+    /// hand its owned `FlowDocumentItem::FastNode` label straight in, avoiding a `String` clone (and
+    /// that clone's later free when the document `Vec` drops) per distinct node label.
+    fn intern_label_owned(&mut self, label: ParsedLabel, span: Span) -> IrLabelId {
+        let label_hash = LabelIndex::hash_key(&label.text, &label.segments);
+        if let Some(existing_id) = self.label_index.get_with_hash(
+            label_hash,
+            &label.text,
+            &label.segments,
+            &self.ir.labels,
+            &self.ir.label_markup,
+        ) {
+            return existing_id;
+        }
+
+        let label_id = IrLabelId(self.ir.labels.len());
+        let ParsedLabel { text, segments } = label;
+        let has_segments = !segments.is_empty();
+        self.ir.labels.push(IrLabel { text, span });
+        if has_segments {
+            self.ir.label_markup.insert(label_id, segments);
+        }
+        self.label_index.insert_with_hash(label_hash, label_id);
+        label_id
+    }
+
+    fn intern_plain_label(&mut self, text: &str, span: Span) -> IrLabelId {
+        let label_hash = LabelIndex::hash_key(text, &[]);
+        if let Some(existing_id) = self.label_index.get_with_hash(
+            label_hash,
+            text,
+            &[],
+            &self.ir.labels,
+            &self.ir.label_markup,
+        ) {
+            return existing_id;
+        }
+
+        let label_id = IrLabelId(self.ir.labels.len());
+        self.ir.labels.push(IrLabel {
+            text: text.to_owned(),
+            span,
+        });
+        self.label_index.insert_with_hash(label_hash, label_id);
+        label_id
+    }
+
+    fn intern_plain_label_owned(&mut self, text: String, span: Span) -> IrLabelId {
+        let label_hash = LabelIndex::hash_key(&text, &[]);
+        if let Some(existing_id) = self.label_index.get_with_hash(
+            label_hash,
+            &text,
+            &[],
+            &self.ir.labels,
+            &self.ir.label_markup,
+        ) {
+            return existing_id;
+        }
+
+        let label_id = IrLabelId(self.ir.labels.len());
+        self.ir.labels.push(IrLabel { text, span });
+        self.label_index.insert_with_hash(label_hash, label_id);
         label_id
     }
 }
@@ -1365,7 +2253,7 @@ mod tests {
 
         assert_eq!(first, second);
 
-        let node = builder.get_node_by_id(first).expect("node should exist");
+        let node = builder.ir.nodes.get(first.0).expect("node should exist");
         assert_eq!(node.shape, NodeShape::Diamond);
         assert!(
             node.label.is_some(),

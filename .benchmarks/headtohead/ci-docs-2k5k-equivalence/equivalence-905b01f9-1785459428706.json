@@ -1,0 +1,2440 @@
+{
+  "schema": "frankenmermaid.headtohead.equivalence.v1",
+  "env": {
+    "captured_at": "2026-07-31T00:50:55.992Z",
+    "host_identity": "thinkstation1",
+    "git_rev": "905b01f98bc4fd26f82844d188d62443dc43a910",
+    "git_dirty": false,
+    "kernel": "6.17.0-35-generic",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "logical_threads": 64,
+    "total_mem_gb": 215.8,
+    "loadavg_1m": 13.23,
+    "node": "v24.14.0",
+    "load_affects_verdict": false
+  },
+  "method": {
+    "kind": "svg_structural",
+    "rasterized_perceptual_diff": false,
+    "why_not_raster": "the engines use different fonts, paddings and stroke widths, so a pixel diff would report a large distance for two correct renders -- it measures styling, not content",
+    "why_not_byte_equality": "the engines emit deliberately different SVG (HTML foreignObject labels vs <text>, different class vocabularies, different layout engines)",
+    "tier1": "rendered-text token multiset, containment-gated: every token mermaid-js renders must be present in ours. Applies to every syntax family. Rendering MORE than mermaid is reported, not failed.",
+    "tier2": "rendered-path edge topology compared cross-engine AND against input-derived ground truth. Frankenmermaid endpoints are reconstructed geometrically; mermaid-js uses the same geometry when unambiguous and uniquely resolved per-path data-id endpoints otherwise. Claimed for: flowchart, state.",
+    "extractor": "single shared implementation applied to both engines (svg_equivalence.mjs); a per-engine extractor pair could agree by construction",
+    "self_test": "svg_equivalence.mjs --self-test: 5 mutation controls (dropped label, either engine dropping an edge, rewired edge, displaced node) and 2 negative controls (extra content, differing text segmentation)",
+    "undecidable_is_not_a_pass": true
+  },
+  "pins": {
+    "mermaid": "11.15.0",
+    "bundle_sha256": "70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de"
+  },
+  "provenance": {
+    "fm_elf_sha256": "c410a84698acd943dc6d5eb134c119e3239414f9446cfcb702a970620f048d7d",
+    "fm_elf_bytes": 7814880,
+    "fm_execution_model": "scalar",
+    "chromium_binary": "/usr/bin/chromium-browser",
+    "chromium_version": "Chrome/150.0.7871.128",
+    "mermaid_bundle_url": "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js"
+  },
+  "rows": [
+    {
+      "id": "ci_docs_2000",
+      "status": "compared",
+      "revisions": 2000,
+      "input_sha256": "ae5b6ff4da07288524f948b38d6fc1df065f4797de3f0ab115ac2621cf23598b",
+      "fm_input_sha256": "ae5b6ff4da07288524f948b38d6fc1df065f4797de3f0ab115ac2621cf23598b",
+      "js_input_sha256": "ae5b6ff4da07288524f948b38d6fc1df065f4797de3f0ab115ac2621cf23598b",
+      "inputs_identical": true,
+      "linkage": {
+        "fm_revisions_dumped": 2000,
+        "js_revisions_dumped": 2000,
+        "revisions_expected": 2000,
+        "fm_dump_sha256": "8e48ff1f5a813ec6b09a58252e736586ea843ae06a7fb9582b25c37a87389af9",
+        "fm_reported_sha256": "8e48ff1f5a813ec6b09a58252e736586ea843ae06a7fb9582b25c37a87389af9",
+        "js_dump_sha256": "cb9e63232d825fad981cf18bc1edd2fd4640eb0692739dcaecc746104471a877",
+        "js_reported_sha256": "cb9e63232d825fad981cf18bc1edd2fd4640eb0692739dcaecc746104471a877",
+        "fm_matches_measured": true,
+        "js_matches_measured": true,
+        "counts_match": true
+      },
+      "equivalence": {
+        "method": "svg_structural",
+        "rasterized_perceptual_diff": false,
+        "claim": "engine-neutral structural equivalence: rendered-text multiset (all families) plus rendered-path edge topology cross-engine and against input-derived ground truth. Frankenmermaid endpoints are reconstructed geometrically; mermaid-js uses geometric endpoints when unambiguous and uniquely resolved per-path data-id endpoints otherwise. Not byte equality; not a pixel diff.",
+        "diagrams": 2000,
+        "equivalent": 1705,
+        "divergent": 295,
+        "unverified": 0,
+        "verdict": "fail",
+        "tier2_diagrams": 1371,
+        "by_invariant": {
+          "rendered_text_no_loss": {
+            "gating": true,
+            "decided": 2000,
+            "passed": 1750,
+            "failed": 250,
+            "undecided": 0
+          },
+          "rendered_text_exact_runs": {
+            "gating": false,
+            "decided": 0,
+            "passed": 0,
+            "failed": 0,
+            "undecided": 2000
+          },
+          "node_id_set": {
+            "gating": true,
+            "decided": 1673,
+            "passed": 1531,
+            "failed": 142,
+            "undecided": 327
+          },
+          "edge_topology_cross_engine": {
+            "gating": true,
+            "decided": 1371,
+            "passed": 1296,
+            "failed": 75,
+            "undecided": 629
+          },
+          "incumbent_geometry_matches_declared_ids": {
+            "gating": true,
+            "decided": 765,
+            "passed": 765,
+            "failed": 0,
+            "undecided": 1235
+          },
+          "edge_topology_vs_input__frankenmermaid": {
+            "gating": true,
+            "decided": 1149,
+            "passed": 1149,
+            "failed": 0,
+            "undecided": 851
+          },
+          "edge_topology_vs_input__mermaid-js": {
+            "gating": true,
+            "decided": 1149,
+            "passed": 1149,
+            "failed": 0,
+            "undecided": 851
+          }
+        },
+        "by_family": {
+          "flowchart": {
+            "diagrams": 1149,
+            "divergent": 0,
+            "unverified": 0,
+            "tier2": 1149
+          },
+          "sequence": {
+            "diagrams": 327,
+            "divergent": 0,
+            "unverified": 0,
+            "tier2": 0
+          },
+          "er": {
+            "diagrams": 165,
+            "divergent": 0,
+            "unverified": 0,
+            "tier2": 52
+          },
+          "state": {
+            "diagrams": 169,
+            "divergent": 105,
+            "unverified": 0,
+            "tier2": 169
+          },
+          "class": {
+            "diagrams": 190,
+            "divergent": 190,
+            "unverified": 0,
+            "tier2": 1
+          }
+        },
+        "divergent_samples": [
+          {
+            "index": 7,
+            "family": "state",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1,
+              2
+            ],
+            "checks_decided": 3,
+            "checks_failed": 1,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "total_missing": 0,
+                  "distinct_missing": 0,
+                  "missing": [],
+                  "truncated": false,
+                  "js_token_count": 54,
+                  "fm_token_count": 55
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 49,
+                  "differences": [
+                    {
+                      "value": "Auth Service",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "Cache",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Database",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Load Balancer",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Normalize payload",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "Object Store",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "Persist record",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Read Replica",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Render response",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "Retry & backoff",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Rollback on failure",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Résumé job",
+                      "left": 0,
+                      "right": 1
+                    }
+                  ],
+                  "truncated": true
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 21,
+                  "js_node_count": 21,
+                  "fm_synthetic": 2,
+                  "js_synthetic": 2
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "geometric",
+                  "js_geometric_status": "geometric",
+                  "fm_edge_elements": 19,
+                  "js_edge_elements": 20,
+                  "equal": false,
+                  "difference_count": 1,
+                  "differences": [
+                    {
+                      "value": "s2>s3",
+                      "left": 0,
+                      "right": 1
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 20,
+                  "declared_status": "malformed_path_declaration",
+                  "geometric_status": "geometric"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 23281,
+              "node_count": 21,
+              "edge_element_count": 19,
+              "topology_status": "geometric"
+            },
+            "js": {
+              "bytes": 55121,
+              "node_count": 21,
+              "edge_element_count": 20,
+              "topology_status": "geometric",
+              "geometric_topology_status": "geometric"
+            }
+          },
+          {
+            "index": 12,
+            "family": "class",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1
+            ],
+            "checks_decided": 2,
+            "checks_failed": 1,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "total_missing": 14,
+                  "distinct_missing": 9,
+                  "missing": [
+                    {
+                      "value": "+float",
+                      "required": 2,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method0()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method1()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method2()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+string",
+                      "required": 2,
+                      "present": 0
+                    },
+                    {
+                      "value": "bool",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "field1",
+                      "required": 3,
+                      "present": 0
+                    },
+                    {
+                      "value": "field2",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "void",
+                      "required": 2,
+                      "present": 0
+                    }
+                  ],
+                  "truncated": false,
+                  "js_token_count": 23,
+                  "fm_token_count": 10
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 8,
+                  "differences": [
+                    {
+                      "value": "+float field1",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "+method0() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method1() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method2() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+string field1",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+string field2",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "C1",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "C1 *",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 3,
+                  "js_node_count": 3,
+                  "fm_synthetic": 0,
+                  "js_synthetic": 0
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "malformed_path_declaration",
+                  "js_geometric_status": "ambiguous(unresolved=1,unparsed=0)",
+                  "fm_edge_elements": 2,
+                  "js_edge_elements": 2
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 2,
+                  "declared_status": "malformed_path_declaration",
+                  "geometric_status": "ambiguous(unresolved=1,unparsed=0)"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 8502,
+              "node_count": 3,
+              "edge_element_count": 2,
+              "topology_status": "geometric"
+            },
+            "js": {
+              "bytes": 25375,
+              "node_count": 3,
+              "edge_element_count": 2,
+              "topology_status": "malformed_path_declaration",
+              "geometric_topology_status": "ambiguous(unresolved=1,unparsed=0)"
+            }
+          },
+          {
+            "index": 20,
+            "family": "class",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1
+            ],
+            "checks_decided": 2,
+            "checks_failed": 1,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "total_missing": 52,
+                  "distinct_missing": 18,
+                  "missing": [
+                    {
+                      "value": "+bool",
+                      "required": 4,
+                      "present": 0
+                    },
+                    {
+                      "value": "+float",
+                      "required": 3,
+                      "present": 0
+                    },
+                    {
+                      "value": "+int",
+                      "required": 2,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method0()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method1()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method2()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method3()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method4()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method5()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method6()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+string",
+                      "required": 10,
+                      "present": 0
+                    },
+                    {
+                      "value": "bool",
+                      "required": 1,
+                      "present": 0
+                    }
+                  ],
+                  "truncated": true,
+                  "js_token_count": 59,
+                  "fm_token_count": 10
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 23,
+                  "differences": [
+                    {
+                      "value": "+bool field0",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "+bool field1",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+bool field2",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+float field1",
+                      "left": 0,
+                      "right": 3
+                    },
+                    {
+                      "value": "+int field1",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+int field2",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method0() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method1() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method2() : string",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method3() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method4() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method5() : void",
+                      "left": 0,
+                      "right": 1
+                    }
+                  ],
+                  "truncated": true
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 7,
+                  "js_node_count": 7,
+                  "fm_synthetic": 0,
+                  "js_synthetic": 0
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "malformed_path_declaration",
+                  "js_geometric_status": "ambiguous(unresolved=5,unparsed=0)",
+                  "fm_edge_elements": 6,
+                  "js_edge_elements": 6
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 6,
+                  "declared_status": "malformed_path_declaration",
+                  "geometric_status": "ambiguous(unresolved=5,unparsed=0)"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 12266,
+              "node_count": 7,
+              "edge_element_count": 6,
+              "topology_status": "geometric"
+            },
+            "js": {
+              "bytes": 44544,
+              "node_count": 7,
+              "edge_element_count": 6,
+              "topology_status": "malformed_path_declaration",
+              "geometric_topology_status": "ambiguous(unresolved=5,unparsed=0)"
+            }
+          },
+          {
+            "index": 29,
+            "family": "class",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1
+            ],
+            "checks_decided": 2,
+            "checks_failed": 1,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "total_missing": 46,
+                  "distinct_missing": 17,
+                  "missing": [
+                    {
+                      "value": "+bool",
+                      "required": 5,
+                      "present": 0
+                    },
+                    {
+                      "value": "+float",
+                      "required": 4,
+                      "present": 0
+                    },
+                    {
+                      "value": "+int",
+                      "required": 4,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method0()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method1()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method2()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method3()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method4()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method5()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+string",
+                      "required": 4,
+                      "present": 0
+                    },
+                    {
+                      "value": "bool",
+                      "required": 2,
+                      "present": 0
+                    },
+                    {
+                      "value": "field0",
+                      "required": 6,
+                      "present": 0
+                    }
+                  ],
+                  "truncated": true,
+                  "js_token_count": 52,
+                  "fm_token_count": 7
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 19,
+                  "differences": [
+                    {
+                      "value": "+bool field0",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "+bool field1",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "+bool field2",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+float field0",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+float field1",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+float field2",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "+int field0",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+int field1",
+                      "left": 0,
+                      "right": 3
+                    },
+                    {
+                      "value": "+method0() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method1() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method2() : string",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method3() : string",
+                      "left": 0,
+                      "right": 1
+                    }
+                  ],
+                  "truncated": true
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 6,
+                  "js_node_count": 6,
+                  "fm_synthetic": 0,
+                  "js_synthetic": 0
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "malformed_path_declaration",
+                  "js_geometric_status": "ambiguous(unresolved=4,unparsed=0)",
+                  "fm_edge_elements": 5,
+                  "js_edge_elements": 5
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 5,
+                  "declared_status": "malformed_path_declaration",
+                  "geometric_status": "ambiguous(unresolved=4,unparsed=0)"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 11062,
+              "node_count": 6,
+              "edge_element_count": 5,
+              "topology_status": "geometric"
+            },
+            "js": {
+              "bytes": 40070,
+              "node_count": 6,
+              "edge_element_count": 5,
+              "topology_status": "malformed_path_declaration",
+              "geometric_topology_status": "ambiguous(unresolved=4,unparsed=0)"
+            }
+          },
+          {
+            "index": 32,
+            "family": "class",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1
+            ],
+            "checks_decided": 2,
+            "checks_failed": 2,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "total_missing": 46,
+                  "distinct_missing": 16,
+                  "missing": [
+                    {
+                      "value": "+bool",
+                      "required": 4,
+                      "present": 0
+                    },
+                    {
+                      "value": "+float",
+                      "required": 3,
+                      "present": 0
+                    },
+                    {
+                      "value": "+int",
+                      "required": 5,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method0()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method1()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method2()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method3()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method4()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method5()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+string",
+                      "required": 5,
+                      "present": 0
+                    },
+                    {
+                      "value": "field0",
+                      "required": 6,
+                      "present": 0
+                    },
+                    {
+                      "value": "field1",
+                      "required": 6,
+                      "present": 0
+                    }
+                  ],
+                  "truncated": true,
+                  "js_token_count": 52,
+                  "fm_token_count": 8
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 19,
+                  "differences": [
+                    {
+                      "value": "+bool field0",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "+bool field1",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+bool field2",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+float field0",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+float field1",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+float field2",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+int field0",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "+int field1",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "+int field3",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method0() : string",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method1() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method2() : void",
+                      "left": 0,
+                      "right": 1
+                    }
+                  ],
+                  "truncated": true
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 1,
+                  "differences": [
+                    {
+                      "value": "c3-o",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false,
+                  "fm_node_count": 7,
+                  "js_node_count": 6,
+                  "fm_synthetic": 0,
+                  "js_synthetic": 0
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "malformed_path_declaration",
+                  "js_geometric_status": "ambiguous(unresolved=4,unparsed=0)",
+                  "fm_edge_elements": 5,
+                  "js_edge_elements": 5
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 5,
+                  "declared_status": "malformed_path_declaration",
+                  "geometric_status": "ambiguous(unresolved=4,unparsed=0)"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 11415,
+              "node_count": 7,
+              "edge_element_count": 5,
+              "topology_status": "geometric"
+            },
+            "js": {
+              "bytes": 40090,
+              "node_count": 6,
+              "edge_element_count": 5,
+              "topology_status": "malformed_path_declaration",
+              "geometric_topology_status": "ambiguous(unresolved=4,unparsed=0)"
+            }
+          }
+        ],
+        "unverified_samples": []
+      }
+    },
+    {
+      "id": "ci_docs_5000",
+      "status": "compared",
+      "revisions": 5000,
+      "input_sha256": "26e5710af60c5548521f75aaf047672a4316d657885a8ab1d119338ba1804f41",
+      "fm_input_sha256": "26e5710af60c5548521f75aaf047672a4316d657885a8ab1d119338ba1804f41",
+      "js_input_sha256": "26e5710af60c5548521f75aaf047672a4316d657885a8ab1d119338ba1804f41",
+      "inputs_identical": true,
+      "linkage": {
+        "fm_revisions_dumped": 5000,
+        "js_revisions_dumped": 5000,
+        "revisions_expected": 5000,
+        "fm_dump_sha256": "ab2c9ec4d3433fe917026d004fd83edcb43efac1466aa00bc855aebfeba98dee",
+        "fm_reported_sha256": "ab2c9ec4d3433fe917026d004fd83edcb43efac1466aa00bc855aebfeba98dee",
+        "js_dump_sha256": "9b19fc6cf26ff483d7df361c16393fc86d52c6ffc637df2a95ee6cedb0a5ba38",
+        "js_reported_sha256": "9b19fc6cf26ff483d7df361c16393fc86d52c6ffc637df2a95ee6cedb0a5ba38",
+        "fm_matches_measured": true,
+        "js_matches_measured": true,
+        "counts_match": true
+      },
+      "equivalence": {
+        "method": "svg_structural",
+        "rasterized_perceptual_diff": false,
+        "claim": "engine-neutral structural equivalence: rendered-text multiset (all families) plus rendered-path edge topology cross-engine and against input-derived ground truth. Frankenmermaid endpoints are reconstructed geometrically; mermaid-js uses geometric endpoints when unambiguous and uniquely resolved per-path data-id endpoints otherwise. Not byte equality; not a pixel diff.",
+        "diagrams": 5000,
+        "equivalent": 4291,
+        "divergent": 709,
+        "unverified": 0,
+        "verdict": "fail",
+        "tier2_diagrams": 3428,
+        "by_invariant": {
+          "rendered_text_no_loss": {
+            "gating": true,
+            "decided": 5000,
+            "passed": 4389,
+            "failed": 611,
+            "undecided": 0
+          },
+          "rendered_text_exact_runs": {
+            "gating": false,
+            "decided": 0,
+            "passed": 0,
+            "failed": 0,
+            "undecided": 5000
+          },
+          "node_id_set": {
+            "gating": true,
+            "decided": 4196,
+            "passed": 3838,
+            "failed": 358,
+            "undecided": 804
+          },
+          "edge_topology_cross_engine": {
+            "gating": true,
+            "decided": 3428,
+            "passed": 3261,
+            "failed": 167,
+            "undecided": 1572
+          },
+          "incumbent_geometry_matches_declared_ids": {
+            "gating": true,
+            "decided": 1897,
+            "passed": 1897,
+            "failed": 0,
+            "undecided": 3103
+          },
+          "edge_topology_vs_input__frankenmermaid": {
+            "gating": true,
+            "decided": 2882,
+            "passed": 2882,
+            "failed": 0,
+            "undecided": 2118
+          },
+          "edge_topology_vs_input__mermaid-js": {
+            "gating": true,
+            "decided": 2882,
+            "passed": 2882,
+            "failed": 0,
+            "undecided": 2118
+          }
+        },
+        "by_family": {
+          "flowchart": {
+            "diagrams": 2882,
+            "divergent": 0,
+            "unverified": 0,
+            "tier2": 2882
+          },
+          "sequence": {
+            "diagrams": 804,
+            "divergent": 0,
+            "unverified": 0,
+            "tier2": 0
+          },
+          "er": {
+            "diagrams": 442,
+            "divergent": 0,
+            "unverified": 0,
+            "tier2": 155
+          },
+          "state": {
+            "diagrams": 390,
+            "divergent": 227,
+            "unverified": 0,
+            "tier2": 390
+          },
+          "class": {
+            "diagrams": 482,
+            "divergent": 482,
+            "unverified": 0,
+            "tier2": 1
+          }
+        },
+        "divergent_samples": [
+          {
+            "index": 7,
+            "family": "state",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1,
+              2
+            ],
+            "checks_decided": 3,
+            "checks_failed": 1,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "total_missing": 0,
+                  "distinct_missing": 0,
+                  "missing": [],
+                  "truncated": false,
+                  "js_token_count": 54,
+                  "fm_token_count": 55
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 49,
+                  "differences": [
+                    {
+                      "value": "Auth Service",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "Cache",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Database",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Load Balancer",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Normalize payload",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "Object Store",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "Persist record",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Read Replica",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Render response",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "Retry & backoff",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Rollback on failure",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Résumé job",
+                      "left": 0,
+                      "right": 1
+                    }
+                  ],
+                  "truncated": true
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 21,
+                  "js_node_count": 21,
+                  "fm_synthetic": 2,
+                  "js_synthetic": 2
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "geometric",
+                  "js_geometric_status": "geometric",
+                  "fm_edge_elements": 19,
+                  "js_edge_elements": 20,
+                  "equal": false,
+                  "difference_count": 1,
+                  "differences": [
+                    {
+                      "value": "s2>s3",
+                      "left": 0,
+                      "right": 1
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 20,
+                  "declared_status": "malformed_path_declaration",
+                  "geometric_status": "geometric"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 23281,
+              "node_count": 21,
+              "edge_element_count": 19,
+              "topology_status": "geometric"
+            },
+            "js": {
+              "bytes": 55121,
+              "node_count": 21,
+              "edge_element_count": 20,
+              "topology_status": "geometric",
+              "geometric_topology_status": "geometric"
+            }
+          },
+          {
+            "index": 12,
+            "family": "class",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1
+            ],
+            "checks_decided": 2,
+            "checks_failed": 1,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "total_missing": 14,
+                  "distinct_missing": 9,
+                  "missing": [
+                    {
+                      "value": "+float",
+                      "required": 2,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method0()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method1()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method2()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+string",
+                      "required": 2,
+                      "present": 0
+                    },
+                    {
+                      "value": "bool",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "field1",
+                      "required": 3,
+                      "present": 0
+                    },
+                    {
+                      "value": "field2",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "void",
+                      "required": 2,
+                      "present": 0
+                    }
+                  ],
+                  "truncated": false,
+                  "js_token_count": 23,
+                  "fm_token_count": 10
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 8,
+                  "differences": [
+                    {
+                      "value": "+float field1",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "+method0() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method1() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method2() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+string field1",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+string field2",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "C1",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "C1 *",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 3,
+                  "js_node_count": 3,
+                  "fm_synthetic": 0,
+                  "js_synthetic": 0
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "malformed_path_declaration",
+                  "js_geometric_status": "ambiguous(unresolved=1,unparsed=0)",
+                  "fm_edge_elements": 2,
+                  "js_edge_elements": 2
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 2,
+                  "declared_status": "malformed_path_declaration",
+                  "geometric_status": "ambiguous(unresolved=1,unparsed=0)"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 8502,
+              "node_count": 3,
+              "edge_element_count": 2,
+              "topology_status": "geometric"
+            },
+            "js": {
+              "bytes": 25369,
+              "node_count": 3,
+              "edge_element_count": 2,
+              "topology_status": "malformed_path_declaration",
+              "geometric_topology_status": "ambiguous(unresolved=1,unparsed=0)"
+            }
+          },
+          {
+            "index": 20,
+            "family": "class",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1
+            ],
+            "checks_decided": 2,
+            "checks_failed": 1,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "total_missing": 52,
+                  "distinct_missing": 18,
+                  "missing": [
+                    {
+                      "value": "+bool",
+                      "required": 4,
+                      "present": 0
+                    },
+                    {
+                      "value": "+float",
+                      "required": 3,
+                      "present": 0
+                    },
+                    {
+                      "value": "+int",
+                      "required": 2,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method0()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method1()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method2()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method3()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method4()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method5()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method6()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+string",
+                      "required": 10,
+                      "present": 0
+                    },
+                    {
+                      "value": "bool",
+                      "required": 1,
+                      "present": 0
+                    }
+                  ],
+                  "truncated": true,
+                  "js_token_count": 59,
+                  "fm_token_count": 10
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 23,
+                  "differences": [
+                    {
+                      "value": "+bool field0",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "+bool field1",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+bool field2",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+float field1",
+                      "left": 0,
+                      "right": 3
+                    },
+                    {
+                      "value": "+int field1",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+int field2",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method0() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method1() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method2() : string",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method3() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method4() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method5() : void",
+                      "left": 0,
+                      "right": 1
+                    }
+                  ],
+                  "truncated": true
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 7,
+                  "js_node_count": 7,
+                  "fm_synthetic": 0,
+                  "js_synthetic": 0
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "malformed_path_declaration",
+                  "js_geometric_status": "ambiguous(unresolved=5,unparsed=0)",
+                  "fm_edge_elements": 6,
+                  "js_edge_elements": 6
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 6,
+                  "declared_status": "malformed_path_declaration",
+                  "geometric_status": "ambiguous(unresolved=5,unparsed=0)"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 12266,
+              "node_count": 7,
+              "edge_element_count": 6,
+              "topology_status": "geometric"
+            },
+            "js": {
+              "bytes": 44551,
+              "node_count": 7,
+              "edge_element_count": 6,
+              "topology_status": "malformed_path_declaration",
+              "geometric_topology_status": "ambiguous(unresolved=5,unparsed=0)"
+            }
+          },
+          {
+            "index": 29,
+            "family": "class",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1
+            ],
+            "checks_decided": 2,
+            "checks_failed": 1,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "total_missing": 46,
+                  "distinct_missing": 17,
+                  "missing": [
+                    {
+                      "value": "+bool",
+                      "required": 5,
+                      "present": 0
+                    },
+                    {
+                      "value": "+float",
+                      "required": 4,
+                      "present": 0
+                    },
+                    {
+                      "value": "+int",
+                      "required": 4,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method0()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method1()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method2()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method3()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method4()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method5()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+string",
+                      "required": 4,
+                      "present": 0
+                    },
+                    {
+                      "value": "bool",
+                      "required": 2,
+                      "present": 0
+                    },
+                    {
+                      "value": "field0",
+                      "required": 6,
+                      "present": 0
+                    }
+                  ],
+                  "truncated": true,
+                  "js_token_count": 52,
+                  "fm_token_count": 7
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 19,
+                  "differences": [
+                    {
+                      "value": "+bool field0",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "+bool field1",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "+bool field2",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+float field0",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+float field1",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+float field2",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "+int field0",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+int field1",
+                      "left": 0,
+                      "right": 3
+                    },
+                    {
+                      "value": "+method0() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method1() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method2() : string",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method3() : string",
+                      "left": 0,
+                      "right": 1
+                    }
+                  ],
+                  "truncated": true
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 6,
+                  "js_node_count": 6,
+                  "fm_synthetic": 0,
+                  "js_synthetic": 0
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "malformed_path_declaration",
+                  "js_geometric_status": "ambiguous(unresolved=4,unparsed=0)",
+                  "fm_edge_elements": 5,
+                  "js_edge_elements": 5
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 5,
+                  "declared_status": "malformed_path_declaration",
+                  "geometric_status": "ambiguous(unresolved=4,unparsed=0)"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 11062,
+              "node_count": 6,
+              "edge_element_count": 5,
+              "topology_status": "geometric"
+            },
+            "js": {
+              "bytes": 40059,
+              "node_count": 6,
+              "edge_element_count": 5,
+              "topology_status": "malformed_path_declaration",
+              "geometric_topology_status": "ambiguous(unresolved=4,unparsed=0)"
+            }
+          },
+          {
+            "index": 32,
+            "family": "class",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1
+            ],
+            "checks_decided": 2,
+            "checks_failed": 2,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "total_missing": 46,
+                  "distinct_missing": 16,
+                  "missing": [
+                    {
+                      "value": "+bool",
+                      "required": 4,
+                      "present": 0
+                    },
+                    {
+                      "value": "+float",
+                      "required": 3,
+                      "present": 0
+                    },
+                    {
+                      "value": "+int",
+                      "required": 5,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method0()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method1()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method2()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method3()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method4()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+method5()",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "+string",
+                      "required": 5,
+                      "present": 0
+                    },
+                    {
+                      "value": "field0",
+                      "required": 6,
+                      "present": 0
+                    },
+                    {
+                      "value": "field1",
+                      "required": 6,
+                      "present": 0
+                    }
+                  ],
+                  "truncated": true,
+                  "js_token_count": 52,
+                  "fm_token_count": 8
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 19,
+                  "differences": [
+                    {
+                      "value": "+bool field0",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "+bool field1",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+bool field2",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+float field0",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+float field1",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+float field2",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+int field0",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "+int field1",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "+int field3",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method0() : string",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method1() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method2() : void",
+                      "left": 0,
+                      "right": 1
+                    }
+                  ],
+                  "truncated": true
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 1,
+                  "differences": [
+                    {
+                      "value": "c3-o",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false,
+                  "fm_node_count": 7,
+                  "js_node_count": 6,
+                  "fm_synthetic": 0,
+                  "js_synthetic": 0
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "malformed_path_declaration",
+                  "js_geometric_status": "ambiguous(unresolved=4,unparsed=0)",
+                  "fm_edge_elements": 5,
+                  "js_edge_elements": 5
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 5,
+                  "declared_status": "malformed_path_declaration",
+                  "geometric_status": "ambiguous(unresolved=4,unparsed=0)"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 11415,
+              "node_count": 7,
+              "edge_element_count": 5,
+              "topology_status": "geometric"
+            },
+            "js": {
+              "bytes": 40084,
+              "node_count": 6,
+              "edge_element_count": 5,
+              "topology_status": "malformed_path_declaration",
+              "geometric_topology_status": "ambiguous(unresolved=4,unparsed=0)"
+            }
+          }
+        ],
+        "unverified_samples": []
+      }
+    }
+  ],
+  "verdict": "fail"
+}

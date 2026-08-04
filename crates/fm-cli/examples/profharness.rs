@@ -1,0 +1,545 @@
+//! Scratch profiling harness (not committed).
+use fm_parser::parse;
+use fm_render_canvas::{
+    Canvas2dContext, CanvasRenderConfig, LineCap, LineJoin, TextAlign, TextBaseline, TextMetrics,
+    render_to_canvas_with_layout,
+};
+use fm_render_svg::{SvgRenderConfig, render_svg_with_layout};
+use fm_render_term::{TermRenderConfig, render_term_with_layout_and_config};
+
+// A do-nothing Canvas2D context: unlike MockCanvas2dContext (which records every op into a Vec + clones
+// color/text Strings, dominating the profile), this drops every call so the profile reflects the RENDERER.
+// `measure_text` returns a plausible width so text-fit logic doesn't degenerate.
+struct NopCanvas {
+    font_px: f64,
+}
+#[rustfmt::skip]
+impl Canvas2dContext for NopCanvas {
+    fn width(&self) -> f64 { 2000.0 }
+    fn height(&self) -> f64 { 2000.0 }
+    fn save(&mut self) {}
+    fn restore(&mut self) {}
+    fn set_fill_style(&mut self, _c: &str) {}
+    fn set_stroke_style(&mut self, _c: &str) {}
+    fn set_line_width(&mut self, _w: f64) {}
+    fn set_line_cap(&mut self, _c: LineCap) {}
+    fn set_line_join(&mut self, _j: LineJoin) {}
+    fn set_line_dash(&mut self, _p: &[f64]) {}
+    fn set_global_alpha(&mut self, _a: f64) {}
+    fn set_font(&mut self, font: &str) {
+        // Track px so measure_text tracks the renderer's font like MockCanvas2dContext does.
+        if let Some(px) = font.split_whitespace().find_map(|t| t.strip_suffix("px")).and_then(|n| n.parse::<f64>().ok()) {
+            self.font_px = px;
+        }
+    }
+    fn set_text_align(&mut self, _a: TextAlign) {}
+    fn set_text_baseline(&mut self, _b: TextBaseline) {}
+    fn begin_path(&mut self) {}
+    fn close_path(&mut self) {}
+    fn move_to(&mut self, _x: f64, _y: f64) {}
+    fn line_to(&mut self, _x: f64, _y: f64) {}
+    fn quadratic_curve_to(&mut self, _a: f64, _b: f64, _c: f64, _d: f64) {}
+    fn bezier_curve_to(&mut self, _a: f64, _b: f64, _c: f64, _d: f64, _e: f64, _f: f64) {}
+    fn arc(&mut self, _x: f64, _y: f64, _r: f64, _s: f64, _e: f64) {}
+    fn arc_to(&mut self, _a: f64, _b: f64, _c: f64, _d: f64, _e: f64) {}
+    fn rect(&mut self, _x: f64, _y: f64, _w: f64, _h: f64) {}
+    fn fill(&mut self) {}
+    fn stroke(&mut self) {}
+    fn fill_rect(&mut self, _x: f64, _y: f64, _w: f64, _h: f64) {}
+    fn stroke_rect(&mut self, _x: f64, _y: f64, _w: f64, _h: f64) {}
+    fn clear_rect(&mut self, _x: f64, _y: f64, _w: f64, _h: f64) {}
+    fn fill_text(&mut self, _t: &str, _x: f64, _y: f64) {}
+    fn stroke_text(&mut self, _t: &str, _x: f64, _y: f64) {}
+    fn measure_text(&self, text: &str) -> TextMetrics {
+        TextMetrics { width: text.len() as f64 * self.font_px * 0.57, height: self.font_px }
+    }
+    fn set_transform(&mut self, _a: f64, _b: f64, _c: f64, _d: f64, _e: f64, _f: f64) {}
+    fn reset_transform(&mut self) {}
+    fn translate(&mut self, _x: f64, _y: f64) {}
+    fn scale(&mut self, _x: f64, _y: f64) {}
+    fn rotate(&mut self, _a: f64) {}
+    fn clip(&mut self) {}
+    fn set_shadow_blur(&mut self, _b: f64) {}
+    fn set_shadow_color(&mut self, _c: &str) {}
+    fn set_shadow_offset(&mut self, _x: f64, _y: f64) {}
+}
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+fn gen_input(shape: &str, n: usize) -> String {
+    let mut l = Vec::new();
+    match shape {
+        "class" => {
+            l.push("classDiagram".into());
+            for i in 0..n {
+                l.push(format!("  class C{i} {{"));
+                l.push(format!("    +int field{i}"));
+                l.push(format!("    +method{i}() bool"));
+                l.push("  }".into());
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  C{i} <|-- C{}", i + 1));
+            }
+        }
+        "classbad" => {
+            l.push("classDiagram".into());
+            for i in 0..n {
+                l.push(format!("  class C{i} {{ +int field{i} +method{i}() }}"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  C{i} <|-- C{}", i + 1));
+            }
+        }
+        "classcard" => {
+            l.push("classDiagram".into());
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  C{i} \"1\" --> \"*\" C{} : rel{i}", i + 1));
+            }
+        }
+        "requirement" => {
+            l.push("requirementDiagram".into());
+            for i in 0..n {
+                l.push(format!("requirement req{i} {{"));
+                l.push(format!("  id: {i}"));
+                l.push(format!("  text: the requirement text number {i}"));
+                l.push("  risk: high".into());
+                l.push("  verifymethod: test".into());
+                l.push("}".into());
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("req{i} - satisfies -> req{}", i + 1));
+            }
+        }
+        "er" => {
+            l.push("erDiagram".into());
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  E{i} ||--o{{ E{} : has", i + 1));
+            }
+        }
+        "erattr" => {
+            // ER entities WITH attribute lists (exercises the Element-per-attribute render path).
+            l.push("erDiagram".into());
+            for i in 0..n {
+                l.push(format!("  E{i} {{"));
+                l.push("    int id PK".into());
+                l.push("    string name".into());
+                l.push(format!("    int e{i}_ref FK"));
+                l.push("    string description".into());
+                l.push("  }".into());
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  E{i} ||--o{{ E{} : has", i + 1));
+            }
+        }
+        "gantt" => {
+            l.push("gantt".into());
+            l.push("  title Project".into());
+            l.push("  dateFormat YYYY-MM-DD".into());
+            let secs = ((n as f64).sqrt() as usize).max(2);
+            for s in 0..secs {
+                l.push(format!("  section Section {s}"));
+                let per = n / secs;
+                for t in 0..per {
+                    let idx = s * per + t;
+                    if t == 0 {
+                        l.push(format!(
+                            "  Task {idx} :t{idx}, 2024-01-01, {}d",
+                            3 + (idx % 20)
+                        ));
+                    } else {
+                        l.push(format!(
+                            "  Task {idx} :t{idx}, after t{}, {}d",
+                            idx - 1,
+                            2 + (idx % 15)
+                        ));
+                    }
+                }
+            }
+        }
+        "state" => {
+            l.push("stateDiagram-v2".into());
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  S{i} --> S{}", i + 1));
+            }
+        }
+        "sankey" => {
+            l.push("sankey-beta".into());
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("N{i},N{},{}", i + 1, 5 + (i % 20)));
+            }
+        }
+        "pie" => {
+            l.push("pie".into());
+            for i in 0..n {
+                l.push(format!("  \"Slice {i}\" : {}", 1 + (i % 50)));
+            }
+        }
+        "journey" => {
+            l.push("journey".into());
+            l.push("  title My Journey".into());
+            let secs = ((n as f64).sqrt() as usize).max(2);
+            for s in 0..secs {
+                l.push(format!("  section Section {s}"));
+                let per = n / secs;
+                for t in 0..per {
+                    let idx = s * per + t;
+                    l.push(format!(
+                        "    Task {idx}: {}: Actor{}",
+                        1 + (idx % 5),
+                        idx % 3
+                    ));
+                }
+            }
+        }
+        "xychart" => {
+            l.push("xychart-beta".into());
+            l.push("  title Chart".into());
+            let cats: Vec<String> = (0..n).map(|i| format!("c{i}")).collect();
+            l.push(format!("  x-axis [{}]", cats.join(", ")));
+            l.push("  y-axis \"Value\" 0 --> 1000".into());
+            let vals: Vec<String> = (0..n).map(|i| format!("{}", 10 + (i * 7) % 900)).collect();
+            l.push(format!("  line [{}]", vals.join(", ")));
+            l.push(format!("  bar [{}]", vals.join(", ")));
+        }
+        "quadrant" => {
+            l.push("quadrantChart".into());
+            l.push("  title Q".into());
+            l.push("  x-axis Low --> High".into());
+            l.push("  y-axis Low --> High".into());
+            for i in 0..n {
+                l.push(format!(
+                    "  Point {i}: [{:.2}, {:.2}]",
+                    (i % 100) as f32 / 100.0,
+                    ((i * 7) % 100) as f32 / 100.0
+                ));
+            }
+        }
+        "timeline" => {
+            l.push("timeline".into());
+            l.push("  title Timeline".into());
+            let secs = ((n as f64).sqrt() as usize).max(2);
+            for s in 0..secs {
+                l.push(format!("  section Period {s}"));
+                let per = n / secs;
+                for t in 0..per {
+                    let idx = s * per + t;
+                    l.push(format!("    {} : Event {idx}", 2000 + idx));
+                }
+            }
+        }
+        "kanban" => {
+            l.push("kanban".into());
+            let cols = ((n as f64).sqrt() as usize).max(2);
+            for c in 0..cols {
+                l.push(format!("  col{c}[Column {c}]"));
+                let per = n / cols;
+                for t in 0..per {
+                    let idx = c * per + t;
+                    l.push(format!("    task{idx}[Task {idx}]"));
+                }
+            }
+        }
+        "block" => {
+            l.push("block-beta".into());
+            l.push("columns 3".into());
+            for i in 0..n {
+                if i % 10 == 0 {
+                    l.push("  space".into());
+                } else {
+                    l.push(format!("  B{i}[\"Block {i}\"]"));
+                }
+            }
+        }
+        "mindmap" => {
+            l.push("mindmap".into());
+            l.push("  root".into());
+            for i in 0..n {
+                l.push(format!("    child{i}"));
+            }
+        }
+        "git" => {
+            // gitGraph: sqrt(N) branches, N commits distributed (stresses per-node cluster find)
+            let b = ((n as f64).sqrt() as usize).max(2);
+            l.push("gitGraph".into());
+            l.push("  commit".into());
+            for i in 0..b {
+                l.push(format!("  branch b{i}"));
+                l.push(format!("  checkout b{i}"));
+                let per = n / b;
+                for _ in 0..per {
+                    l.push("  commit".into());
+                }
+            }
+        }
+        "subg" => {
+            // one big subgraph with N nodes (stresses O(subgraph^2) membership dedup)
+            l.push("flowchart TB".into());
+            l.push("  subgraph Big".into());
+            for i in 0..n {
+                l.push(format!("    N{i}"));
+            }
+            l.push("  end".into());
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
+        "seq" => {
+            // sequence: sqrt(n) participants, n messages between them
+            let p = ((n as f64).sqrt() as usize).max(3);
+            l.push("sequenceDiagram".into());
+            for i in 0..p {
+                l.push(format!("  participant P{i}"));
+            }
+            for i in 0..n {
+                let a = i % p;
+                let b = (i + 1) % p;
+                l.push(format!("  P{a}->>P{b}: message {i}"));
+            }
+        }
+        "styled" => {
+            l.push("flowchart LR".into());
+            for i in 0..n {
+                l.push(format!("  N{i}[Node {i}]:::myCustomNodeClass"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
+        "flowo" => {
+            l.push("flowchart LR".into());
+            for i in 0..n {
+                l.push(format!("  N{i}[Node {i}]"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}--oN{}", i + 1));
+            }
+        }
+        "flowround" => {
+            l.push("flowchart LR".into());
+            for i in 0..n {
+                l.push(format!("  N{i}(Node {i})"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
+        "diamond" => {
+            // decision/diamond nodes — NOT in the common fast-path shape set → slow Element path
+            l.push("flowchart TB".into());
+            for i in 0..n {
+                l.push(format!("  N{i}{{Decision {i}}}"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
+        "hexagon" => {
+            l.push("flowchart TB".into());
+            for i in 0..n {
+                l.push(format!("  N{i}{{{{Hex {i}}}}}"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
+        "densedag" => {
+            // Mirrors bench gen_dense_dag: N nodes, edges N{i}-->N{i+step} for step in {1,2,3,5}.
+            l.push("flowchart TD".into());
+            for i in 0..n {
+                l.push(format!("  N{i}[Node {i}]"));
+            }
+            for i in 0..n {
+                for step in [1_usize, 2, 3, 5] {
+                    if i + step < n {
+                        l.push(format!("  N{i}-->N{}", i + step));
+                    }
+                }
+            }
+        }
+        "parallel" => {
+            l.push("flowchart TB".into());
+            for i in 0..n {
+                l.push(format!("  N{i}[/Para {i}/]"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
+        "invparallel" => {
+            l.push("flowchart TB".into());
+            for i in 0..n {
+                l.push(format!("  N{i}[\\InvPara {i}\\]"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
+        "trapez" => {
+            l.push("flowchart TB".into());
+            for i in 0..n {
+                l.push(format!("  N{i}[/Trap {i}\\]"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
+        "invtrap" => {
+            l.push("flowchart TB".into());
+            for i in 0..n {
+                l.push(format!("  N{i}[\\Inv {i}/]"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
+        "asym" => {
+            l.push("flowchart TB".into());
+            for i in 0..n {
+                l.push(format!("  N{i}>Flag {i}]"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
+        "flowstad" => {
+            l.push("flowchart LR".into());
+            for i in 0..n {
+                l.push(format!("  N{i}([Node {i}])"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
+        "flowx" => {
+            l.push("flowchart LR".into());
+            for i in 0..n {
+                l.push(format!("  N{i}[Node {i}]"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}--xN{}", i + 1));
+            }
+        }
+        "styled3" => {
+            l.push("flowchart LR".into());
+            for i in 0..n {
+                l.push(format!("  N{i}[Node {i}]:::serviceNodeStyle:::regionUsEastPrimary:::observabilityDashboard"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
+        "wide" => {
+            // grid: W nodes per rank across R ranks, cross-edges to next rank (max crossings)
+            let w = ((n as f64).sqrt() as usize).max(4);
+            let ranks = n / w;
+            l.push("flowchart TB".into());
+            for i in 0..n {
+                l.push(format!("  N{i}[N{i}]"));
+            }
+            for r in 0..ranks.saturating_sub(1) {
+                for c in 0..w {
+                    let src = r * w + c;
+                    let dst = (r + 1) * w + ((c + 3) % w);
+                    if src < n && dst < n {
+                        l.push(format!("  N{src}-->N{dst}"));
+                    }
+                }
+            }
+        }
+        _ => {
+            l.push("flowchart LR".into());
+            for i in 0..n {
+                l.push(format!("  N{i}[Node {i}]"));
+            }
+            for i in 0..n.saturating_sub(1) {
+                l.push(format!("  N{i}-->N{}", i + 1));
+            }
+        }
+    }
+    l.join("\n")
+}
+
+fn main() {
+    let a: Vec<String> = std::env::args().collect();
+    let shape = a.get(1).map(String::as_str).unwrap_or("class");
+    let size: usize = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(300);
+    let iters: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(2000);
+    let phase = a.get(4).map(String::as_str).unwrap_or("render");
+    let input = gen_input(shape, size);
+    let pf = parse(&input);
+    eprintln!(
+        "shape={shape} size={size} iters={iters} phase={phase} bytes={}",
+        input.len()
+    );
+    let mut cfg = SvgRenderConfig::default();
+    // Lean profile (a11y off) when FM_LEAN=1 — exercises the lean streaming fast paths (bd-u63b etc).
+    if std::env::var("FM_LEAN").is_ok() {
+        cfg.a11y = fm_render_svg::A11yConfig::none();
+        cfg.accessible = false;
+    }
+    let mut acc: usize = 0;
+    let layout = fm_layout::layout_diagram(&pf.ir);
+    if phase == "dump" {
+        let v = render_svg_with_layout(&pf.ir, &layout, &cfg);
+        print!("{v}");
+        return;
+    }
+    if phase == "dumpterm" {
+        let tcfg = TermRenderConfig::default();
+        let r = render_term_with_layout_and_config(&pf.ir, &layout, &tcfg, 200, 80);
+        print!("{}", r.output);
+        return;
+    }
+    let mut s: Vec<u64> = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        let t0 = std::time::Instant::now();
+        match phase {
+            "render" => {
+                let v = render_svg_with_layout(&pf.ir, &layout, &cfg);
+                acc = acc.wrapping_add(v.len());
+                std::hint::black_box(&v);
+            }
+            "termrender" => {
+                let tcfg = TermRenderConfig::default();
+                let r = render_term_with_layout_and_config(&pf.ir, &layout, &tcfg, 200, 80);
+                acc = acc.wrapping_add(r.output.len());
+                std::hint::black_box(&r);
+            }
+            "canvasrender" => {
+                let ccfg = CanvasRenderConfig::default();
+                let mut ctx = NopCanvas { font_px: 14.0 };
+                let r = render_to_canvas_with_layout(&pf.ir, &layout, &mut ctx, &ccfg);
+                acc = acc.wrapping_add(r.draw_calls);
+                std::hint::black_box(&r);
+            }
+            "layout" => {
+                let x = fm_layout::layout_diagram(&pf.ir);
+                acc = acc.wrapping_add(x.nodes.len());
+                std::hint::black_box(&x);
+            }
+            "parse" => {
+                let p = parse(&input);
+                acc = acc.wrapping_add(p.ir.nodes.len());
+                std::hint::black_box(&p);
+            }
+            "sugiyama" => {
+                let x = fm_layout::layout_diagram_traced_with_algorithm(
+                    &pf.ir,
+                    fm_layout::LayoutAlgorithm::Sugiyama,
+                );
+                acc = acc.wrapping_add(x.layout.nodes.len());
+                std::hint::black_box(&x);
+            }
+            _ => {
+                let p = parse(&input);
+                let x = fm_layout::layout_diagram(&p.ir);
+                let v = render_svg_with_layout(&p.ir, &x, &cfg);
+                acc = acc.wrapping_add(v.len());
+                std::hint::black_box(&v);
+            }
+        }
+        s.push(t0.elapsed().as_nanos() as u64);
+    }
+    s.sort_unstable();
+    eprintln!("min={}ns median={}ns acc={acc}", s[0], s[s.len() / 2]);
+}

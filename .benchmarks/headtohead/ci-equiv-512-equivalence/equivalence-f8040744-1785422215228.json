@@ -1,0 +1,1094 @@
+{
+  "schema": "frankenmermaid.headtohead.equivalence.v1",
+  "env": {
+    "captured_at": "2026-07-30T14:36:22.831Z",
+    "host_identity": "thinkstation1",
+    "git_rev": "f8040744ae850d7a01157b20d21c291f0529718e",
+    "git_dirty": true,
+    "kernel": "6.17.0-35-generic",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "logical_threads": 64,
+    "total_mem_gb": 215.8,
+    "loadavg_1m": 15,
+    "node": "v24.14.0",
+    "load_affects_verdict": false
+  },
+  "method": {
+    "kind": "svg_structural",
+    "rasterized_perceptual_diff": false,
+    "why_not_raster": "the engines use different fonts, paddings and stroke widths, so a pixel diff would report a large distance for two correct renders -- it measures styling, not content",
+    "why_not_byte_equality": "the engines emit deliberately different SVG (HTML foreignObject labels vs <text>, different class vocabularies, different layout engines)",
+    "tier1": "rendered-text token multiset, containment-gated: every token mermaid-js renders must be present in ours. Applies to every syntax family. Rendering MORE than mermaid is reported, not failed.",
+    "tier2": "edge topology reconstructed geometrically from path endpoints resolved to node anchors, by one shared extractor, compared cross-engine AND against input-derived ground truth. Claimed for: flowchart, state.",
+    "extractor": "single shared implementation applied to both engines (svg_equivalence.mjs); a per-engine extractor pair could agree by construction",
+    "self_test": "svg_equivalence.mjs --self-test: 4 mutation controls (dropped label, dropped edge, rewired edge, displaced node) and 2 negative controls (extra content, differing text segmentation)",
+    "undecidable_is_not_a_pass": true
+  },
+  "pins": {
+    "mermaid": "11.15.0",
+    "bundle_sha256": "70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de"
+  },
+  "provenance": {
+    "fm_elf_sha256": "c410a84698acd943dc6d5eb134c119e3239414f9446cfcb702a970620f048d7d",
+    "fm_elf_bytes": 7814880,
+    "fm_execution_model": "scalar",
+    "chromium_binary": "/usr/bin/chromium-browser",
+    "chromium_version": "Chrome/150.0.7871.128",
+    "mermaid_bundle_url": "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js"
+  },
+  "rows": [
+    {
+      "id": "ci_equiv_512",
+      "status": "compared",
+      "revisions": 512,
+      "input_sha256": "c9e451e325601c4c8cc7574183bda27f1ea65f4683fdd15ab88114a57fc4fba7",
+      "fm_input_sha256": "c9e451e325601c4c8cc7574183bda27f1ea65f4683fdd15ab88114a57fc4fba7",
+      "js_input_sha256": "c9e451e325601c4c8cc7574183bda27f1ea65f4683fdd15ab88114a57fc4fba7",
+      "inputs_identical": true,
+      "linkage": {
+        "fm_revisions_dumped": 512,
+        "js_revisions_dumped": 512,
+        "revisions_expected": 512,
+        "fm_dump_sha256": "3402f5880c069d224c9144082f196a5cbe1faba1cc210ada27ec1223834de329",
+        "fm_reported_sha256": "3402f5880c069d224c9144082f196a5cbe1faba1cc210ada27ec1223834de329",
+        "js_dump_sha256": "2af9d6a3b6ffdc852463c76a7678419de4da9cd7b66836a18838bdc34f19e6c8",
+        "js_reported_sha256": "2af9d6a3b6ffdc852463c76a7678419de4da9cd7b66836a18838bdc34f19e6c8",
+        "fm_matches_measured": true,
+        "js_matches_measured": true,
+        "counts_match": true
+      },
+      "equivalence": {
+        "method": "svg_structural",
+        "rasterized_perceptual_diff": false,
+        "claim": "engine-neutral structural equivalence: rendered-text multiset (all families) plus geometrically reconstructed edge topology cross-engine and against input-derived ground truth (node/edge families only). Not byte equality; not a pixel diff.",
+        "diagrams": 512,
+        "equivalent": 332,
+        "divergent": 34,
+        "unverified": 146,
+        "verdict": "fail",
+        "tier2_diagrams": 512,
+        "by_invariant": {
+          "rendered_text_no_loss": {
+            "gating": true,
+            "decided": 512,
+            "passed": 493,
+            "failed": 19,
+            "undecided": 0
+          },
+          "rendered_text_exact_runs": {
+            "gating": false,
+            "decided": 0,
+            "passed": 0,
+            "failed": 0,
+            "undecided": 512
+          },
+          "node_id_set": {
+            "gating": true,
+            "decided": 512,
+            "passed": 512,
+            "failed": 0,
+            "undecided": 0
+          },
+          "edge_topology_cross_engine": {
+            "gating": true,
+            "decided": 366,
+            "passed": 342,
+            "failed": 24,
+            "undecided": 146
+          },
+          "incumbent_geometry_matches_declared_ids": {
+            "gating": true,
+            "decided": 301,
+            "passed": 301,
+            "failed": 0,
+            "undecided": 211
+          },
+          "edge_topology_vs_input__frankenmermaid": {
+            "gating": true,
+            "decided": 447,
+            "passed": 447,
+            "failed": 0,
+            "undecided": 65
+          },
+          "edge_topology_vs_input__mermaid-js": {
+            "gating": true,
+            "decided": 301,
+            "passed": 301,
+            "failed": 0,
+            "undecided": 211
+          }
+        },
+        "by_family": {
+          "flowchart": {
+            "diagrams": 447,
+            "divergent": 0,
+            "unverified": 146,
+            "tier2": 447
+          },
+          "state": {
+            "diagrams": 65,
+            "divergent": 34,
+            "unverified": 0,
+            "tier2": 65
+          }
+        },
+        "divergent_samples": [
+          {
+            "index": 17,
+            "family": "state",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1,
+              2
+            ],
+            "checks_decided": 3,
+            "checks_failed": 1,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "total_missing": 4,
+                  "distinct_missing": 4,
+                  "missing": [
+                    {
+                      "value": "(429)",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "Rate",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "S3",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "limit",
+                      "required": 1,
+                      "present": 0
+                    }
+                  ],
+                  "truncated": false,
+                  "js_token_count": 49,
+                  "fm_token_count": 46
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 52,
+                  "differences": [
+                    {
+                      "value": "429",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "Auth Service",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "CDN",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Client",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Database",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Ingestion",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "Load Balancer",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "Object Store",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Rate limit (429)",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "S1",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "S10",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "S10: Load Balancer",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": true
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 22,
+                  "js_node_count": 22,
+                  "fm_synthetic": 2,
+                  "js_synthetic": 2
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "geometric",
+                  "fm_edge_elements": 21,
+                  "js_edge_elements": 21,
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 21
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 21733,
+              "node_count": 22,
+              "edge_element_count": 21,
+              "topology_status": "geometric"
+            },
+            "js": {
+              "bytes": 56802,
+              "node_count": 22,
+              "edge_element_count": 21,
+              "topology_status": "geometric"
+            }
+          },
+          {
+            "index": 46,
+            "family": "state",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1,
+              2
+            ],
+            "checks_decided": 3,
+            "checks_failed": 2,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "total_missing": 5,
+                  "distinct_missing": 5,
+                  "missing": [
+                    {
+                      "value": "(429)",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "Parse",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "Rate",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "S15",
+                      "required": 1,
+                      "present": 0
+                    },
+                    {
+                      "value": "limit",
+                      "required": 1,
+                      "present": 0
+                    }
+                  ],
+                  "truncated": false,
+                  "js_token_count": 55,
+                  "fm_token_count": 53
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 49,
+                  "differences": [
+                    {
+                      "value": "429",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "API Gateway",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Aggregate results",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Cache",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Check permissions",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Emit audit event",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Fan out",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Load Balancer",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Message Queue",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Parse",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Persist record",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Rate limit (429)",
+                      "left": 0,
+                      "right": 1
+                    }
+                  ],
+                  "truncated": true
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 21,
+                  "js_node_count": 21,
+                  "fm_synthetic": 2,
+                  "js_synthetic": 2
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "geometric",
+                  "fm_edge_elements": 17,
+                  "js_edge_elements": 20,
+                  "equal": false,
+                  "difference_count": 3,
+                  "differences": [
+                    {
+                      "value": "s15>s16",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "s2>s3",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "s3>s4",
+                      "left": 0,
+                      "right": 1
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 20
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 22808,
+              "node_count": 21,
+              "edge_element_count": 17,
+              "topology_status": "geometric"
+            },
+            "js": {
+              "bytes": 55172,
+              "node_count": 21,
+              "edge_element_count": 20,
+              "topology_status": "geometric"
+            }
+          },
+          {
+            "index": 47,
+            "family": "state",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1,
+              2
+            ],
+            "checks_decided": 3,
+            "checks_failed": 1,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "total_missing": 0,
+                  "distinct_missing": 0,
+                  "missing": [],
+                  "truncated": false,
+                  "js_token_count": 41,
+                  "fm_token_count": 43
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 39,
+                  "differences": [
+                    {
+                      "value": "Auth Service",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Cache",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "Café latency",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Check permissions",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Client",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Diff & merge",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Fan out",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Load Balancer",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Rollback on failure",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "S1",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "S10",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "S10: Cache",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": true
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 17,
+                  "js_node_count": 17,
+                  "fm_synthetic": 2,
+                  "js_synthetic": 2
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "geometric",
+                  "fm_edge_elements": 14,
+                  "js_edge_elements": 16,
+                  "equal": false,
+                  "difference_count": 2,
+                  "differences": [
+                    {
+                      "value": "s3>s4",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "s8>s9",
+                      "left": 0,
+                      "right": 1
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 16
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 20019,
+              "node_count": 17,
+              "edge_element_count": 14,
+              "topology_status": "geometric"
+            },
+            "js": {
+              "bytes": 48867,
+              "node_count": 17,
+              "edge_element_count": 16,
+              "topology_status": "geometric"
+            }
+          },
+          {
+            "index": 50,
+            "family": "state",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1,
+              2
+            ],
+            "checks_decided": 3,
+            "checks_failed": 1,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "total_missing": 0,
+                  "distinct_missing": 0,
+                  "missing": [],
+                  "truncated": false,
+                  "js_token_count": 10,
+                  "fm_token_count": 11
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 8,
+                  "differences": [
+                    {
+                      "value": "Database",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Retry & backoff",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "S1",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "S1: User's session",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "S2",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "S2: Database",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "S3: Retry & backoff",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "User's session",
+                      "left": 0,
+                      "right": 1
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 6,
+                  "js_node_count": 6,
+                  "fm_synthetic": 2,
+                  "js_synthetic": 2
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "geometric",
+                  "fm_edge_elements": 4,
+                  "js_edge_elements": 5,
+                  "equal": false,
+                  "difference_count": 1,
+                  "differences": [
+                    {
+                      "value": "s2>s3",
+                      "left": 0,
+                      "right": 1
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 5
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 10553,
+              "node_count": 6,
+              "edge_element_count": 4,
+              "topology_status": "geometric"
+            },
+            "js": {
+              "bytes": 31728,
+              "node_count": 6,
+              "edge_element_count": 5,
+              "topology_status": "geometric"
+            }
+          },
+          {
+            "index": 55,
+            "family": "state",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1,
+              2
+            ],
+            "checks_decided": 3,
+            "checks_failed": 1,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "total_missing": 0,
+                  "distinct_missing": 0,
+                  "missing": [],
+                  "truncated": false,
+                  "js_token_count": 32,
+                  "fm_token_count": 33
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 31,
+                  "differences": [
+                    {
+                      "value": "API Gateway",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Auth Service",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Diff & merge",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Fan out",
+                      "left": 0,
+                      "right": 2
+                    },
+                    {
+                      "value": "Persist record",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "Résumé job",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "S1",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "S10",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "S10: Fan out",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "S11: Diff & merge",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "S1: Auth Service",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "S2",
+                      "left": 0,
+                      "right": 1
+                    }
+                  ],
+                  "truncated": true
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 14,
+                  "js_node_count": 14,
+                  "fm_synthetic": 2,
+                  "js_synthetic": 2
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "geometric",
+                  "fm_edge_elements": 12,
+                  "js_edge_elements": 13,
+                  "equal": false,
+                  "difference_count": 1,
+                  "differences": [
+                    {
+                      "value": "s10>s11",
+                      "left": 0,
+                      "right": 1
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 13
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "reason": "input_not_decodable"
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 17416,
+              "node_count": 14,
+              "edge_element_count": 12,
+              "topology_status": "geometric"
+            },
+            "js": {
+              "bytes": 44246,
+              "node_count": 14,
+              "edge_element_count": 13,
+              "topology_status": "geometric"
+            }
+          }
+        ],
+        "unverified_samples": [
+          {
+            "index": 1,
+            "family": "flowchart",
+            "reason": "tier2 claimed for flowchart but topology undecidable (fm=geometric, js=ambiguous(unresolved=1,unparsed=0))"
+          },
+          {
+            "index": 9,
+            "family": "flowchart",
+            "reason": "tier2 claimed for flowchart but topology undecidable (fm=geometric, js=ambiguous(unresolved=3,unparsed=0))"
+          },
+          {
+            "index": 10,
+            "family": "flowchart",
+            "reason": "tier2 claimed for flowchart but topology undecidable (fm=geometric, js=ambiguous(unresolved=1,unparsed=0))"
+          },
+          {
+            "index": 12,
+            "family": "flowchart",
+            "reason": "tier2 claimed for flowchart but topology undecidable (fm=geometric, js=ambiguous(unresolved=2,unparsed=0))"
+          },
+          {
+            "index": 15,
+            "family": "flowchart",
+            "reason": "tier2 claimed for flowchart but topology undecidable (fm=geometric, js=ambiguous(unresolved=6,unparsed=0))"
+          }
+        ]
+      }
+    }
+  ],
+  "verdict": "fail"
+}

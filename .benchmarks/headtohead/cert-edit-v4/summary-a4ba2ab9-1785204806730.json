@@ -1,0 +1,154 @@
+{
+  "schema": "frankenmermaid.headtohead.v2",
+  "env": {
+    "captured_at": "2026-07-28T02:08:14.911Z",
+    "git_rev": "a4ba2ab9f68e4fa17e0134e75ced72dca631a139",
+    "git_dirty": true,
+    "rustc": "rustc 1.99.0-nightly (dc3f85158 2026-07-26)",
+    "cargo_profile": "release (opt-level=3 for fm-core/parser/layout/render-svg, lto=fat, codegen-units=1)",
+    "rustflags": "-C target-cpu=x86-64-v2 (.cargo/config.toml)",
+    "node": "v24.14.0",
+    "chromium": "Chromium 150.0.7871.128 snap",
+    "kernel": "6.17.0-35-generic",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "cpu_count": 64,
+    "total_mem_gb": 215.8,
+    "loadavg_1m": 13.11,
+    "load_warning": null,
+    "pinned_cpu": {
+      "cpu": 5,
+      "busy_pct": 0
+    },
+    "fm_elf_sha256": "a23cf867fd18608c0c3d6a75671dc57573847fb4db6724bc87942944a74cbd6a",
+    "fm_elf_bytes": 7778704
+  },
+  "pins": {
+    "mermaid": "11.15.0",
+    "bundle_url": "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js",
+    "security_level": "strict"
+  },
+  "corpus_items": 1,
+  "ok_items": 1,
+  "dnf_items": 0,
+  "dnf": [],
+  "median_ci_gate_rule": "claim magnitude >= max(1.01, 1 + 2 * max(per-engine A/A CI radius))",
+  "arm_asymmetry": {
+    "phases": [
+      {
+        "phase": "frankenmermaid",
+        "seconds": 2.412,
+        "busy_fraction": 0.1551
+      },
+      {
+        "phase": "mermaid-js",
+        "seconds": 308.694,
+        "busy_fraction": 0.3423
+      }
+    ],
+    "busy_ratio": 2.2069632495164413,
+    "heavier_phase": "mermaid-js",
+    "verdict": "fail",
+    "rule": "phase CPU-busy ratio <= 1.25"
+  },
+  "cv_gate": "never",
+  "median_ci_gate_failures": [
+    "edit_trace_200x200"
+  ],
+  "speedup": {
+    "min": 6374.082146128213,
+    "median": 6374.082146128213,
+    "max": 6374.082146128213
+  },
+  "speedup_min_estimator": {
+    "min": 6614.841261141621,
+    "median": 6614.841261141621,
+    "max": 6614.841261141621
+  },
+  "rows": [
+    {
+      "id": "edit_trace_200x200",
+      "class": "edit_trace",
+      "nodes": 267,
+      "edges": 332,
+      "nodes_max": 267,
+      "edges_max": 332,
+      "nodes_total": 46967,
+      "edges_total": 53399,
+      "revisions": 201,
+      "fm_p50_ns": 47014973,
+      "fm_min_ns": 45303778,
+      "fm_cv_pct": 12.61,
+      "fm_mad_pct": 2.55,
+      "fm_null_control": {
+        "arm_a_sha256": "b206614a5b779e8aa1bde3c64d0617d7acbac3343ffaaee06bf1ccfc85ebd88c",
+        "arm_b_sha256": "b206614a5b779e8aa1bde3c64d0617d7acbac3343ffaaee06bf1ccfc85ebd88c",
+        "ci95_hi": 1.2904888896342954,
+        "ci95_lo": 0.9250258821351545,
+        "cv_gate": "never",
+        "cv_pct": 15.96,
+        "half_width": 0.2904888896342954,
+        "kind": "aa_null",
+        "mad_pct": 5.27,
+        "median": 0.9765227374886836,
+        "min_decidable_2x": 1.5809777792685908,
+        "n": 9,
+        "sufficient": true
+      },
+      "fm_profile_ab": {
+        "arm_a_sha256": "b206614a5b779e8aa1bde3c64d0617d7acbac3343ffaaee06bf1ccfc85ebd88c",
+        "arm_b_sha256": "e500acb3c91b0db6344e606a6153657d8c018c139a887e8e22dd88a74135398d",
+        "ci95_hi": 1.1065449596024566,
+        "ci95_lo": 1.0243788885942609,
+        "cv_gate": "never",
+        "cv_pct": 13.69,
+        "half_width": null,
+        "kind": "default_vs_lean",
+        "mad_pct": 3.02,
+        "median": 1.0684277510044564,
+        "min_decidable_2x": null,
+        "n": 9,
+        "sufficient": true
+      },
+      "fm_bytes": 36989757,
+      "fm_bytes_lean": 25568775,
+      "fm_lean_p50_ns": 42972075,
+      "lean_slowdown": 0.91400828838081,
+      "mjs_p50_ns": 299677300000,
+      "mjs_min_ns": 299677300000,
+      "mjs_cv_pct": 0,
+      "mjs_mad_pct": 0,
+      "mjs_null_control": {
+        "n": 0,
+        "sufficient": false,
+        "median": null,
+        "ci95_lo": null,
+        "ci95_hi": null,
+        "half_width": null,
+        "min_decidable_2x": null,
+        "cv_pct": null,
+        "mad_pct": null,
+        "cv_gate": "never",
+        "checksum_bytes": 0
+      },
+      "mjs_bytes": 140068489,
+      "speedup": 6374.082146128213,
+      "speedup_min": 6614.841261141621,
+      "speedup_lean": 6973.768429846592,
+      "bytes_ratio": 3.7866831350095107,
+      "bytes_ratio_lean": 5.478107144358695,
+      "fm_ns_per_revision": 233905.33830845772,
+      "mjs_ns_per_revision": 1490931840.7960198,
+      "median_ci_gate": {
+        "verdict": "fail",
+        "rule": "null_ci95_2x_margin",
+        "cv_gate": "never",
+        "reason": "missing or insufficient same-invocation A/A null control",
+        "claim_ratio": 6374.082146128213,
+        "claim_magnitude": null,
+        "null_radius": null,
+        "min_decidable_2x": null
+      },
+      "status": "ok"
+    }
+  ]
+}

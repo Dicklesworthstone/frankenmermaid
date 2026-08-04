@@ -171,7 +171,12 @@ fn explicit_config_enables_svg_effects_and_accessibility() {
         stderr_text(&output)
     );
     let svg = stdout_text(&output);
-    assert!(svg.contains("id=\"drop-shadow\""));
+    // With the default embedded theme CSS, shadows render via the CSS `filter: drop-shadow(…)`
+    // rule and the `<filter id="drop-shadow">` def is correctly skipped as dead (its only referrer,
+    // the inline `filter="url(#drop-shadow)"`, is gated off under embedded CSS). Assert the actual
+    // shadow artifact (the CSS drop-shadow call) rather than the optimized-away filter-def id; the
+    // disabled-effects test above still pins that `shadows = false` emits no `drop-shadow` at all.
+    assert!(svg.contains("drop-shadow("));
     assert!(svg.contains("<linearGradient") || svg.contains("<radialGradient"));
     assert!(svg.contains("aria-label="));
     assert!(svg.contains("role=\"img\""));

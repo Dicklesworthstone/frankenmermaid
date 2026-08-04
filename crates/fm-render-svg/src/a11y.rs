@@ -2,7 +2,10 @@
 //!
 //! Provides ARIA attributes, text alternatives, and accessibility CSS utilities.
 
-use fm_core::{IrNode, MermaidDiagramIr};
+use std::borrow::Cow;
+use std::fmt::Write as _;
+
+use fm_core::{ArrowType, IrNode, MermaidDiagramIr};
 use fm_layout::DiagramLayout;
 
 /// Generate an accessible description for a diagram.
@@ -17,7 +20,14 @@ pub fn describe_diagram_with_layout(
     ir: &MermaidDiagramIr,
     layout: Option<&DiagramLayout>,
 ) -> String {
-    let mut parts = Vec::new();
+    // Build the description straight into one `String` instead of collecting a `Vec<String>` of
+    // `format!`-allocated parts and `join(". ")`-ing them. `join(". ")` inserts ". " BETWEEN parts,
+    // so the first part is written bare and every subsequent (conditionally present) part is prefixed
+    // with ". " — byte-identical to the old collect+join. Drops the parts `Vec`, each part's
+    // intermediate `format!` `String`, and the final join allocation per render. Capacity covers the
+    // bounded worst case (counts + direction + up to 3 key nodes + 3 relationship sentences + the
+    // layout line) so the common desc never reallocs — the old `join` allocated the result exactly.
+    let mut desc = String::with_capacity(512);
 
     let type_desc = match ir.diagram_type.as_str() {
         "flowchart" => "flowchart diagram",
@@ -35,15 +45,16 @@ pub fn describe_diagram_with_layout(
     };
 
     let diagnostics = ir.diagnostic_counts();
-    parts.push(format!(
+    let _ = write!(
+        desc,
         "{} with {} nodes and {} edges",
         leading_type_phrase(type_desc),
         ir.nodes.len(),
         ir.edges.len()
-    ));
+    );
 
     if !ir.clusters.is_empty() {
-        parts.push(format!("organized in {} groups", ir.clusters.len()));
+        let _ = write!(desc, ". organized in {} groups", ir.clusters.len());
     }
 
     let direction_desc = match ir.direction {
@@ -52,16 +63,27 @@ pub fn describe_diagram_with_layout(
         fm_core::GraphDirection::TB | fm_core::GraphDirection::TD => "flowing top to bottom",
         fm_core::GraphDirection::BT => "flowing bottom to top",
     };
-    parts.push(direction_desc.to_string());
+    let _ = write!(desc, ". {direction_desc}");
 
+    // Write the joined lists element-by-element rather than `join(sep)`-ing into a temporary String:
+    // `join(sep)` == first element, then each subsequent prefixed with `sep`. Byte-identical, drops the
+    // intermediate join allocation.
     let key_nodes = summarize_key_nodes(ir);
-    if !key_nodes.is_empty() {
-        parts.push(format!("Key nodes: {}.", key_nodes.join(", ")));
+    if let Some((first, rest)) = key_nodes.split_first() {
+        let _ = write!(desc, ". Key nodes: {first}");
+        for node in rest {
+            let _ = write!(desc, ", {node}");
+        }
+        desc.push('.');
     }
 
     let relationships = summarize_key_relationships(ir);
-    if !relationships.is_empty() {
-        parts.push(format!("Key relationships: {}.", relationships.join("; ")));
+    if let Some((first, rest)) = relationships.split_first() {
+        let _ = write!(desc, ". Key relationships: {first}");
+        for rel in rest {
+            let _ = write!(desc, "; {rel}");
+        }
+        desc.push('.');
     }
 
     if diagnostics.warnings > 0 || diagnostics.errors > 0 {
@@ -80,27 +102,29 @@ pub fn describe_diagram_with_layout(
                 plural_suffix(diagnostics.errors)
             ));
         }
-        parts.push(format!("Diagnostics: {}.", diag_parts.join(", ")));
+        let _ = write!(desc, ". Diagnostics: {}.", diag_parts.join(", "));
     }
 
     if let Some(layout) = layout {
-        parts.push(format!(
-            "Layout spans {:.0} by {:.0} units with {} rendered node boxes and {} routed edge paths.",
+        let _ = write!(
+            desc,
+            ". Layout spans {:.0} by {:.0} units with {} rendered node boxes and {} routed edge paths.",
             layout.bounds.width,
             layout.bounds.height,
             layout.nodes.len(),
             layout.edges.len()
-        ));
+        );
         if layout.stats.crossing_count > 0 {
-            parts.push(format!(
-                "The layout currently contains {} edge crossing{}.",
+            let _ = write!(
+                desc,
+                ". The layout currently contains {} edge crossing{}.",
                 layout.stats.crossing_count,
                 plural_suffix(layout.stats.crossing_count)
-            ));
+            );
         }
     }
 
-    parts.join(". ")
+    desc
 }
 
 fn leading_type_phrase(type_desc: &str) -> String {
@@ -115,7 +139,7 @@ fn plural_suffix(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
 
-fn summarize_key_nodes(ir: &MermaidDiagramIr) -> Vec<String> {
+fn summarize_key_nodes(ir: &MermaidDiagramIr) -> Vec<Cow<'_, str>> {
     ir.nodes
         .iter()
         .filter_map(|node| node_label(node, ir))
@@ -148,12 +172,16 @@ fn summarize_key_relationships(ir: &MermaidDiagramIr) -> Vec<String> {
         .collect()
 }
 
-fn node_label(node: &IrNode, ir: &MermaidDiagramIr) -> Option<String> {
+fn node_label<'a>(node: &'a IrNode, ir: &'a MermaidDiagramIr) -> Option<Cow<'a, str>> {
+    // Borrow the name (trimmed label text, or the id fallback) instead of `to_string()`/`clone()` —
+    // `summarize_key_nodes` only `join`s these into the `<desc>`, which reads them by reference.
+    // Byte-identical: `str::trim` returns a slice of the same bytes.
     node.label
         .and_then(|lid| ir.labels.get(lid.0))
-        .map(|label| label.text.trim().to_string())
+        .map(|label| label.text.trim())
         .filter(|label| !label.is_empty())
-        .or_else(|| (!node.id.is_empty()).then(|| node.id.clone()))
+        .map(Cow::Borrowed)
+        .or_else(|| (!node.id.is_empty()).then_some(Cow::Borrowed(node.id.as_str())))
 }
 
 /// Generate a text alternative for a node.
@@ -221,19 +249,46 @@ pub fn describe_edge(
         .or_else(|| to_node.map(|n| n.id.as_str()))
         .unwrap_or("unknown");
 
+    describe_edge_labels(Some(from_label), Some(to_label), arrow_type, label)
+}
+
+pub(crate) fn accessible_node_label<'a>(node: &'a IrNode, ir: &'a MermaidDiagramIr) -> &'a str {
+    node.label
+        .and_then(|lid| ir.labels.get(lid.0))
+        .map(|label| label.text.as_str())
+        .unwrap_or(&node.id)
+}
+
+pub(crate) fn describe_edge_labels(
+    from_label: Option<&str>,
+    to_label: Option<&str>,
+    arrow_type: ArrowType,
+    label: Option<&str>,
+) -> String {
+    let from_label = from_label.unwrap_or("unknown");
+    let to_label = to_label.unwrap_or("unknown");
     let arrow_desc = match arrow_type {
-        fm_core::ArrowType::Arrow => "points to",
-        fm_core::ArrowType::ThickArrow => "strongly points to",
-        fm_core::ArrowType::DottedArrow => "optionally points to",
-        fm_core::ArrowType::Circle => "relates to",
-        fm_core::ArrowType::Cross => "blocks",
-        fm_core::ArrowType::ThickLine => "strongly connects to",
-        fm_core::ArrowType::DottedLine => "optionally connects to",
-        fm_core::ArrowType::DoubleArrow => "points both ways to",
-        fm_core::ArrowType::DoubleThickArrow => "strongly points both ways to",
-        fm_core::ArrowType::DoubleDottedArrow => "optionally points both ways to",
-        fm_core::ArrowType::OpenArrow => "sends to",
-        fm_core::ArrowType::DottedOpenArrow => "optionally sends to",
+        ArrowType::Arrow => "points to",
+        ArrowType::ThickArrow => "strongly points to",
+        ArrowType::DottedArrow => "optionally points to",
+        ArrowType::Circle => "relates to",
+        ArrowType::Cross => "blocks",
+        ArrowType::ThickLine => "strongly connects to",
+        ArrowType::DottedLine => "optionally connects to",
+        ArrowType::DoubleArrow => "points both ways to",
+        ArrowType::DoubleThickArrow => "strongly points both ways to",
+        ArrowType::DoubleDottedArrow => "optionally points both ways to",
+        ArrowType::OpenArrow => "sends to",
+        ArrowType::DottedOpenArrow => "optionally sends to",
+        // UML relationships read owner-first, matching the phrases the SVG fragment writer puts in
+        // each edge's `<title>`. Without these the catch-all below said "connects to" here while the
+        // title said "is inherited by", so the two accessibility surfaces disagreed.
+        ArrowType::Inheritance => "is inherited by",
+        ArrowType::InheritanceReverse => "inherits",
+        ArrowType::Aggregation => "aggregates",
+        ArrowType::AggregationReverse => "is aggregated by",
+        ArrowType::Composition => "is composed of",
+        ArrowType::CompositionReverse => "composes",
         _ => "connects to",
     };
 
@@ -444,6 +499,29 @@ mod tests {
         );
         assert!(desc.contains("connects to"));
         assert!(!desc.contains("with label"));
+    }
+
+    #[test]
+    fn cached_edge_labels_match_node_lookup_description() -> Result<(), &'static str> {
+        let ir = create_test_ir();
+        let from_node = ir.nodes.first().ok_or("missing from node")?;
+        let to_node = ir.nodes.get(1).ok_or("missing to node")?;
+        let direct = describe_edge(
+            Some(from_node),
+            Some(to_node),
+            fm_core::ArrowType::Arrow,
+            Some("Submit"),
+            &ir,
+        );
+        let cached = describe_edge_labels(
+            Some(accessible_node_label(from_node, &ir)),
+            Some(accessible_node_label(to_node, &ir)),
+            fm_core::ArrowType::Arrow,
+            Some("Submit"),
+        );
+
+        assert_eq!(direct, cached);
+        Ok(())
     }
 
     #[test]

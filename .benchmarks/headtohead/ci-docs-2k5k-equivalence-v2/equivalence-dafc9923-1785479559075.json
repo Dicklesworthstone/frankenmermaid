@@ -1,0 +1,3639 @@
+{
+  "schema": "frankenmermaid.headtohead.equivalence.v1",
+  "env": {
+    "captured_at": "2026-07-31T06:26:30.291Z",
+    "host_identity": "thinkstation1",
+    "git_rev": "dafc992347f3e3d7e9fed9ddace11655ff9b2f44",
+    "git_dirty": true,
+    "kernel": "6.17.0-35-generic",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "logical_threads": 64,
+    "total_mem_gb": 215.8,
+    "loadavg_1m": 9.15,
+    "node": "v24.14.0",
+    "cpu_power_policy": {
+      "kind": "linux_cpufreq",
+      "platform": "linux",
+      "complete": true,
+      "drivers": [
+        "amd-pstate-epp"
+      ],
+      "governors": [
+        "powersave"
+      ],
+      "energy_performance_preferences": [
+        "performance"
+      ],
+      "boost": {
+        "source": "/sys/devices/system/cpu/cpufreq/boost",
+        "enabled": true,
+        "raw": "1"
+      },
+      "policies": [
+        {
+          "policy": "policy0",
+          "affected_cpus": "0",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy1",
+          "affected_cpus": "1",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy2",
+          "affected_cpus": "2",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy3",
+          "affected_cpus": "3",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy4",
+          "affected_cpus": "4",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy5",
+          "affected_cpus": "5",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy6",
+          "affected_cpus": "6",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy7",
+          "affected_cpus": "7",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy8",
+          "affected_cpus": "8",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy9",
+          "affected_cpus": "9",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy10",
+          "affected_cpus": "10",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy11",
+          "affected_cpus": "11",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy12",
+          "affected_cpus": "12",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy13",
+          "affected_cpus": "13",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy14",
+          "affected_cpus": "14",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy15",
+          "affected_cpus": "15",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy16",
+          "affected_cpus": "16",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy17",
+          "affected_cpus": "17",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy18",
+          "affected_cpus": "18",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy19",
+          "affected_cpus": "19",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy20",
+          "affected_cpus": "20",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy21",
+          "affected_cpus": "21",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy22",
+          "affected_cpus": "22",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy23",
+          "affected_cpus": "23",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy24",
+          "affected_cpus": "24",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy25",
+          "affected_cpus": "25",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy26",
+          "affected_cpus": "26",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy27",
+          "affected_cpus": "27",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy28",
+          "affected_cpus": "28",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy29",
+          "affected_cpus": "29",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy30",
+          "affected_cpus": "30",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy31",
+          "affected_cpus": "31",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy32",
+          "affected_cpus": "32",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy33",
+          "affected_cpus": "33",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy34",
+          "affected_cpus": "34",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy35",
+          "affected_cpus": "35",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy36",
+          "affected_cpus": "36",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy37",
+          "affected_cpus": "37",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy38",
+          "affected_cpus": "38",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy39",
+          "affected_cpus": "39",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy40",
+          "affected_cpus": "40",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy41",
+          "affected_cpus": "41",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy42",
+          "affected_cpus": "42",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy43",
+          "affected_cpus": "43",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy44",
+          "affected_cpus": "44",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy45",
+          "affected_cpus": "45",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy46",
+          "affected_cpus": "46",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy47",
+          "affected_cpus": "47",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy48",
+          "affected_cpus": "48",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy49",
+          "affected_cpus": "49",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy50",
+          "affected_cpus": "50",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy51",
+          "affected_cpus": "51",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy52",
+          "affected_cpus": "52",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy53",
+          "affected_cpus": "53",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy54",
+          "affected_cpus": "54",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy55",
+          "affected_cpus": "55",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy56",
+          "affected_cpus": "56",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy57",
+          "affected_cpus": "57",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy58",
+          "affected_cpus": "58",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy59",
+          "affected_cpus": "59",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy60",
+          "affected_cpus": "60",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy61",
+          "affected_cpus": "61",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy62",
+          "affected_cpus": "62",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        },
+        {
+          "policy": "policy63",
+          "affected_cpus": "63",
+          "driver": "amd-pstate-epp",
+          "governor": "powersave",
+          "energy_performance_preference": "performance",
+          "scaling_min_khz": "1429008",
+          "scaling_max_khz": "4561833"
+        }
+      ]
+    },
+    "isa": {
+      "architecture": "x64",
+      "machine": "x86_64",
+      "source": "/proc/cpuinfo",
+      "complete": true,
+      "flags": [
+        "3dnowprefetch",
+        "abm",
+        "adx",
+        "aes",
+        "amd_ppin",
+        "aperfmperf",
+        "apic",
+        "arat",
+        "avx",
+        "avx2",
+        "bmi1",
+        "bmi2",
+        "bpext",
+        "brs",
+        "cat_l3",
+        "cdp_l3",
+        "clflush",
+        "clflushopt",
+        "clwb",
+        "clzero",
+        "cmov",
+        "cmp_legacy",
+        "constant_tsc",
+        "cpb",
+        "cpuid",
+        "cqm",
+        "cqm_llc",
+        "cqm_mbm_local",
+        "cqm_mbm_total",
+        "cqm_occup_llc",
+        "cr8_legacy",
+        "cx16",
+        "cx8",
+        "de",
+        "debug_swap",
+        "decodeassists",
+        "erms",
+        "extapic",
+        "extd_apicid",
+        "f16c",
+        "flushbyasid",
+        "fma",
+        "fpu",
+        "fsgsbase",
+        "fsrm",
+        "fxsr",
+        "fxsr_opt",
+        "ht",
+        "hw_pstate",
+        "ibpb",
+        "ibrs",
+        "ibs",
+        "invpcid",
+        "irperf",
+        "lahf_lm",
+        "lbrv",
+        "lm",
+        "mba",
+        "mca",
+        "mce",
+        "misalignsse",
+        "mmx",
+        "mmxext",
+        "monitor",
+        "movbe",
+        "msr",
+        "mtrr",
+        "mwaitx",
+        "nonstop_tsc",
+        "nopl",
+        "npt",
+        "nrip_save",
+        "nx",
+        "ospke",
+        "osvw",
+        "overflow_recov",
+        "pae",
+        "pat",
+        "pausefilter",
+        "pcid",
+        "pclmulqdq",
+        "pdpe1gb",
+        "perfctr_core",
+        "perfctr_llc",
+        "perfctr_nb",
+        "pfthreshold",
+        "pge",
+        "pku",
+        "pni",
+        "popcnt",
+        "pse",
+        "pse36",
+        "rapl",
+        "rdpid",
+        "rdpru",
+        "rdrand",
+        "rdseed",
+        "rdt_a",
+        "rdtscp",
+        "rep_good",
+        "sep",
+        "sha_ni",
+        "skinit",
+        "smap",
+        "smca",
+        "smep",
+        "ssbd",
+        "sse",
+        "sse2",
+        "sse4_1",
+        "sse4_2",
+        "sse4a",
+        "ssse3",
+        "stibp",
+        "succor",
+        "svm",
+        "svm_lock",
+        "syscall",
+        "tce",
+        "topoext",
+        "tsc",
+        "tsc_scale",
+        "umip",
+        "user_shstk",
+        "v_spec_ctrl",
+        "v_vmsave_vmload",
+        "vaes",
+        "vgif",
+        "vmcb_clean",
+        "vme",
+        "vmmcall",
+        "vpclmulqdq",
+        "wbnoinvd",
+        "wdt",
+        "x2apic",
+        "xgetbv1",
+        "xsave",
+        "xsavec",
+        "xsaveerptr",
+        "xsaveopt",
+        "xsaves",
+        "xtopology"
+      ],
+      "capabilities": {
+        "avx2": true,
+        "fma": true,
+        "bmi2": true,
+        "vaes": true,
+        "any_avx512": false,
+        "neon_or_asimd": false
+      }
+    },
+    "load_affects_verdict": false
+  },
+  "method": {
+    "kind": "svg_structural",
+    "rasterized_perceptual_diff": false,
+    "why_not_raster": "the engines use different fonts, paddings and stroke widths, so a pixel diff would report a large distance for two correct renders -- it measures styling, not content",
+    "why_not_byte_equality": "the engines emit deliberately different SVG (HTML foreignObject labels vs <text>, different class vocabularies, different layout engines)",
+    "tier1": "rendered-text token multiset, containment-gated: every token mermaid-js renders must be present in ours. Applies to every syntax family. Rendering MORE than mermaid is reported, not failed.",
+    "tier2": "rendered-path edge topology compared cross-engine AND against input-derived ground truth for flowchart/state, plus class relationship kind and marker-owning endpoint compared cross-engine AND against input-derived ground truth. Frankenmermaid endpoints are reconstructed geometrically; mermaid-js uses the same geometry when unambiguous and uniquely resolved per-path data-id endpoints otherwise. Claimed for: flowchart, state, class.",
+    "extractor": "single shared implementation applied to both engines (svg_equivalence.mjs); a per-engine extractor pair could agree by construction",
+    "self_test": "svg_equivalence.mjs --self-test: 11 mutation controls (including dropped or rewired edges, displaced nodes, swapped class relationship kinds, wrong owning endpoint, unknown markers, and cardinality/label drift) and 4 negative controls (including benign path ordering and extra content)",
+    "undecidable_is_not_a_pass": true
+  },
+  "pins": {
+    "mermaid": "11.15.0",
+    "bundle_sha256": "70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de"
+  },
+  "provenance": {
+    "fm_elf_sha256": "f80ff6881f434e2c3d8b96fdd22c2e8a434847ed8dff75ca360837fe5168da4d",
+    "fm_elf_bytes": 7901264,
+    "fm_execution_model": "scalar",
+    "chromium_binary": "/usr/bin/chromium-browser",
+    "chromium_version": "Chrome/150.0.7871.128",
+    "mermaid_bundle_url": "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js"
+  },
+  "rows": [
+    {
+      "id": "ci_docs_2000",
+      "status": "compared",
+      "revisions": 2000,
+      "input_sha256": "ae5b6ff4da07288524f948b38d6fc1df065f4797de3f0ab115ac2621cf23598b",
+      "fm_input_sha256": "ae5b6ff4da07288524f948b38d6fc1df065f4797de3f0ab115ac2621cf23598b",
+      "js_input_sha256": "ae5b6ff4da07288524f948b38d6fc1df065f4797de3f0ab115ac2621cf23598b",
+      "inputs_identical": true,
+      "execution": {
+        "frankenmermaid": {
+          "requested_worker_threads": 1,
+          "actual_observed_worker_threads": 1,
+          "execution_model": "scalar"
+        },
+        "mermaid_js": {
+          "requested_worker_threads": 1,
+          "actual_observed_worker_threads": 1,
+          "execution_model": "single_page_main_thread"
+        }
+      },
+      "linkage": {
+        "fm_revisions_dumped": 2000,
+        "js_revisions_dumped": 2000,
+        "revisions_expected": 2000,
+        "fm_dump_sha256": "0b3b0890abaf641ff58ec4f31d8af877632419bd32fc5dd44d9b42abc4d374f9",
+        "fm_reported_sha256": "0b3b0890abaf641ff58ec4f31d8af877632419bd32fc5dd44d9b42abc4d374f9",
+        "js_dump_sha256": "88adf3866c6290cbf8cc915c1e09a569003d372876bf3b56b0dd479b5a228967",
+        "js_reported_sha256": "88adf3866c6290cbf8cc915c1e09a569003d372876bf3b56b0dd479b5a228967",
+        "fm_matches_measured": true,
+        "js_matches_measured": true,
+        "counts_match": true
+      },
+      "equivalence": {
+        "method": "svg_structural",
+        "rasterized_perceptual_diff": false,
+        "claim": "engine-neutral structural equivalence: rendered-text multiset (all families), rendered-path edge topology cross-engine and against input-derived ground truth, and class relationship marker kind plus owning end. Frankenmermaid endpoints are reconstructed geometrically; mermaid-js uses geometric endpoints when unambiguous and uniquely resolved per-path data-id endpoints otherwise. Not byte equality; not a pixel diff.",
+        "diagrams": 2000,
+        "equivalent": 1856,
+        "divergent": 144,
+        "unverified": 0,
+        "verdict": "fail",
+        "tier2_diagrams": 1560,
+        "by_invariant": {
+          "rendered_text_no_loss": {
+            "gating": true,
+            "decided": 2000,
+            "passed": 2000,
+            "failed": 0,
+            "undecided": 0
+          },
+          "rendered_text_exact_runs": {
+            "gating": false,
+            "decided": 0,
+            "passed": 0,
+            "failed": 0,
+            "undecided": 2000
+          },
+          "node_id_set": {
+            "gating": true,
+            "decided": 1673,
+            "passed": 1673,
+            "failed": 0,
+            "undecided": 327
+          },
+          "edge_topology_cross_engine": {
+            "gating": true,
+            "decided": 1560,
+            "passed": 1560,
+            "failed": 0,
+            "undecided": 440
+          },
+          "incumbent_geometry_matches_declared_ids": {
+            "gating": true,
+            "decided": 766,
+            "passed": 766,
+            "failed": 0,
+            "undecided": 1234
+          },
+          "edge_topology_vs_input__frankenmermaid": {
+            "gating": true,
+            "decided": 1339,
+            "passed": 1339,
+            "failed": 0,
+            "undecided": 661
+          },
+          "edge_topology_vs_input__mermaid-js": {
+            "gating": true,
+            "decided": 1339,
+            "passed": 1339,
+            "failed": 0,
+            "undecided": 661
+          },
+          "class_relationship_semantics_cross_engine": {
+            "gating": true,
+            "decided": 190,
+            "passed": 46,
+            "failed": 144,
+            "undecided": 0
+          },
+          "class_relationship_semantics_vs_input__frankenmermaid": {
+            "gating": true,
+            "decided": 190,
+            "passed": 46,
+            "failed": 144,
+            "undecided": 0
+          },
+          "class_relationship_semantics_vs_input__mermaid-js": {
+            "gating": true,
+            "decided": 190,
+            "passed": 190,
+            "failed": 0,
+            "undecided": 0
+          }
+        },
+        "by_family": {
+          "flowchart": {
+            "diagrams": 1149,
+            "divergent": 0,
+            "unverified": 0,
+            "tier2": 1149
+          },
+          "sequence": {
+            "diagrams": 327,
+            "divergent": 0,
+            "unverified": 0,
+            "tier2": 0
+          },
+          "er": {
+            "diagrams": 165,
+            "divergent": 0,
+            "unverified": 0,
+            "tier2": 52
+          },
+          "state": {
+            "diagrams": 169,
+            "divergent": 0,
+            "unverified": 0,
+            "tier2": 169
+          },
+          "class": {
+            "diagrams": 190,
+            "divergent": 144,
+            "unverified": 0,
+            "tier2": 190
+          }
+        },
+        "divergent_samples": [
+          {
+            "index": 20,
+            "family": "class",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1,
+              2
+            ],
+            "checks_decided": 8,
+            "checks_failed": 2,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "total_missing": 0,
+                  "distinct_missing": 0,
+                  "missing": [],
+                  "truncated": false,
+                  "js_token_count": 59,
+                  "fm_token_count": 59
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 14,
+                  "differences": [
+                    {
+                      "value": "+method0() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method0(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method1() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method1(): bool",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method2() : string",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method2(): string",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method3() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method3(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method4() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method4(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method5() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method5(): void",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": true
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 7,
+                  "js_node_count": 7,
+                  "fm_synthetic": 0,
+                  "js_synthetic": 0
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "declared_path_endpoints",
+                  "js_geometric_status": "ambiguous(unresolved=5,unparsed=0)",
+                  "fm_edge_elements": 6,
+                  "js_edge_elements": 6,
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 6,
+                  "declared_status": "declared_path_endpoints",
+                  "geometric_status": "ambiguous(unresolved=5,unparsed=0)"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 4,
+                  "differences": [
+                    {
+                      "value": "c1>c2|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c1>c2|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "c2>c3|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c2>c3|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 4,
+                  "differences": [
+                    {
+                      "value": "c1>c2|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c1>c2|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "c2>c3|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c2>c3|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 15327,
+              "node_count": 7,
+              "edge_element_count": 6,
+              "topology_status": "geometric",
+              "class_relationships_status": "rendered_relationship_markers"
+            },
+            "js": {
+              "bytes": 44554,
+              "node_count": 7,
+              "edge_element_count": 6,
+              "topology_status": "declared_path_endpoints",
+              "geometric_topology_status": "ambiguous(unresolved=5,unparsed=0)",
+              "class_relationships_status": "rendered_relationship_markers"
+            }
+          },
+          {
+            "index": 32,
+            "family": "class",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1,
+              2
+            ],
+            "checks_decided": 8,
+            "checks_failed": 2,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "total_missing": 0,
+                  "distinct_missing": 0,
+                  "missing": [],
+                  "truncated": false,
+                  "js_token_count": 52,
+                  "fm_token_count": 52
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 12,
+                  "differences": [
+                    {
+                      "value": "+method0() : string",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method0(): string",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method1() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method1(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method2() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method2(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method3() : string",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method3(): string",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method4() : string",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method4(): string",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method5() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method5(): void",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 6,
+                  "js_node_count": 6,
+                  "fm_synthetic": 0,
+                  "js_synthetic": 0
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "declared_path_endpoints",
+                  "js_geometric_status": "ambiguous(unresolved=4,unparsed=0)",
+                  "fm_edge_elements": 5,
+                  "js_edge_elements": 5,
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 5,
+                  "declared_status": "declared_path_endpoints",
+                  "geometric_status": "ambiguous(unresolved=4,unparsed=0)"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 6,
+                  "differences": [
+                    {
+                      "value": "c1>c2|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c1>c2|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "c2>c3|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c2>c3|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "c4>c5|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c4>c5|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 6,
+                  "differences": [
+                    {
+                      "value": "c1>c2|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c1>c2|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "c2>c3|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c2>c3|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "c4>c5|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c4>c5|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 13947,
+              "node_count": 6,
+              "edge_element_count": 5,
+              "topology_status": "geometric",
+              "class_relationships_status": "rendered_relationship_markers"
+            },
+            "js": {
+              "bytes": 40103,
+              "node_count": 6,
+              "edge_element_count": 5,
+              "topology_status": "declared_path_endpoints",
+              "geometric_topology_status": "ambiguous(unresolved=4,unparsed=0)",
+              "class_relationships_status": "rendered_relationship_markers"
+            }
+          },
+          {
+            "index": 37,
+            "family": "class",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1,
+              2
+            ],
+            "checks_decided": 8,
+            "checks_failed": 2,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "total_missing": 0,
+                  "distinct_missing": 0,
+                  "missing": [],
+                  "truncated": false,
+                  "js_token_count": 53,
+                  "fm_token_count": 53
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 14,
+                  "differences": [
+                    {
+                      "value": "+method0() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method0(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method1() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method1(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method2() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method2(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method3() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method3(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method4() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method4(): bool",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method5() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method5(): bool",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": true
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 7,
+                  "js_node_count": 7,
+                  "fm_synthetic": 0,
+                  "js_synthetic": 0
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "declared_path_endpoints",
+                  "js_geometric_status": "ambiguous(unresolved=5,unparsed=0)",
+                  "fm_edge_elements": 6,
+                  "js_edge_elements": 6,
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 6,
+                  "declared_status": "declared_path_endpoints",
+                  "geometric_status": "ambiguous(unresolved=5,unparsed=0)"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 2,
+                  "differences": [
+                    {
+                      "value": "c3>c4|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c3>c4|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 2,
+                  "differences": [
+                    {
+                      "value": "c3>c4|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c3>c4|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 14999,
+              "node_count": 7,
+              "edge_element_count": 6,
+              "topology_status": "geometric",
+              "class_relationships_status": "rendered_relationship_markers"
+            },
+            "js": {
+              "bytes": 43483,
+              "node_count": 7,
+              "edge_element_count": 6,
+              "topology_status": "declared_path_endpoints",
+              "geometric_topology_status": "ambiguous(unresolved=5,unparsed=0)",
+              "class_relationships_status": "rendered_relationship_markers"
+            }
+          },
+          {
+            "index": 54,
+            "family": "class",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1,
+              2
+            ],
+            "checks_decided": 8,
+            "checks_failed": 2,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "total_missing": 0,
+                  "distinct_missing": 0,
+                  "missing": [],
+                  "truncated": false,
+                  "js_token_count": 92,
+                  "fm_token_count": 92
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 24,
+                  "differences": [
+                    {
+                      "value": "+method0() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method0(): bool",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method1() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method1(): bool",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method10() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method10(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method11() : string",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method11(): string",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method2() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method2(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method3() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method3(): bool",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": true
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 12,
+                  "js_node_count": 12,
+                  "fm_synthetic": 0,
+                  "js_synthetic": 0
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "declared_path_endpoints",
+                  "js_geometric_status": "ambiguous(unresolved=10,unparsed=0)",
+                  "fm_edge_elements": 11,
+                  "js_edge_elements": 11,
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 11,
+                  "declared_status": "declared_path_endpoints",
+                  "geometric_status": "ambiguous(unresolved=10,unparsed=0)"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 2,
+                  "differences": [
+                    {
+                      "value": "c9>c10|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c9>c10|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 2,
+                  "differences": [
+                    {
+                      "value": "c9>c10|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c9>c10|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 21108,
+              "node_count": 12,
+              "edge_element_count": 11,
+              "topology_status": "geometric",
+              "class_relationships_status": "rendered_relationship_markers"
+            },
+            "js": {
+              "bytes": 66445,
+              "node_count": 12,
+              "edge_element_count": 11,
+              "topology_status": "declared_path_endpoints",
+              "geometric_topology_status": "ambiguous(unresolved=10,unparsed=0)",
+              "class_relationships_status": "rendered_relationship_markers"
+            }
+          },
+          {
+            "index": 60,
+            "family": "class",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1,
+              2
+            ],
+            "checks_decided": 8,
+            "checks_failed": 2,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "total_missing": 0,
+                  "distinct_missing": 0,
+                  "missing": [],
+                  "truncated": false,
+                  "js_token_count": 30,
+                  "fm_token_count": 30
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 8,
+                  "differences": [
+                    {
+                      "value": "+method0() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method0(): bool",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method1() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method1(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method2() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method2(): bool",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method3() : string",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method3(): string",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 4,
+                  "js_node_count": 4,
+                  "fm_synthetic": 0,
+                  "js_synthetic": 0
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "declared_path_endpoints",
+                  "js_geometric_status": "ambiguous(unresolved=3,unparsed=0)",
+                  "fm_edge_elements": 3,
+                  "js_edge_elements": 3,
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 3,
+                  "declared_status": "declared_path_endpoints",
+                  "geometric_status": "ambiguous(unresolved=3,unparsed=0)"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 4,
+                  "differences": [
+                    {
+                      "value": "c0>c1|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c0>c1|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "c2>c3|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c2>c3|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 4,
+                  "differences": [
+                    {
+                      "value": "c0>c1|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c0>c1|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "c2>c3|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c2>c3|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 10482,
+              "node_count": 4,
+              "edge_element_count": 3,
+              "topology_status": "geometric",
+              "class_relationships_status": "rendered_relationship_markers"
+            },
+            "js": {
+              "bytes": 29830,
+              "node_count": 4,
+              "edge_element_count": 3,
+              "topology_status": "declared_path_endpoints",
+              "geometric_topology_status": "ambiguous(unresolved=3,unparsed=0)",
+              "class_relationships_status": "rendered_relationship_markers"
+            }
+          }
+        ],
+        "unverified_samples": []
+      }
+    },
+    {
+      "id": "ci_docs_5000",
+      "status": "compared",
+      "revisions": 5000,
+      "input_sha256": "26e5710af60c5548521f75aaf047672a4316d657885a8ab1d119338ba1804f41",
+      "fm_input_sha256": "26e5710af60c5548521f75aaf047672a4316d657885a8ab1d119338ba1804f41",
+      "js_input_sha256": "26e5710af60c5548521f75aaf047672a4316d657885a8ab1d119338ba1804f41",
+      "inputs_identical": true,
+      "execution": {
+        "frankenmermaid": {
+          "requested_worker_threads": 1,
+          "actual_observed_worker_threads": 1,
+          "execution_model": "scalar"
+        },
+        "mermaid_js": {
+          "requested_worker_threads": 1,
+          "actual_observed_worker_threads": 1,
+          "execution_model": "single_page_main_thread"
+        }
+      },
+      "linkage": {
+        "fm_revisions_dumped": 5000,
+        "js_revisions_dumped": 5000,
+        "revisions_expected": 5000,
+        "fm_dump_sha256": "82ed097ced135fb141cdeaf524243cf778e60d2c7cb00c428120b7e0c70d288f",
+        "fm_reported_sha256": "82ed097ced135fb141cdeaf524243cf778e60d2c7cb00c428120b7e0c70d288f",
+        "js_dump_sha256": "f7146c0730d23621926e7b67fb3cdbb8be20897db4cbae57f2c6baa9ff813949",
+        "js_reported_sha256": "f7146c0730d23621926e7b67fb3cdbb8be20897db4cbae57f2c6baa9ff813949",
+        "fm_matches_measured": true,
+        "js_matches_measured": true,
+        "counts_match": true
+      },
+      "equivalence": {
+        "method": "svg_structural",
+        "rasterized_perceptual_diff": false,
+        "claim": "engine-neutral structural equivalence: rendered-text multiset (all families), rendered-path edge topology cross-engine and against input-derived ground truth, and class relationship marker kind plus owning end. Frankenmermaid endpoints are reconstructed geometrically; mermaid-js uses geometric endpoints when unambiguous and uniquely resolved per-path data-id endpoints otherwise. Not byte equality; not a pixel diff.",
+        "diagrams": 5000,
+        "equivalent": 4647,
+        "divergent": 353,
+        "unverified": 0,
+        "verdict": "fail",
+        "tier2_diagrams": 3909,
+        "by_invariant": {
+          "rendered_text_no_loss": {
+            "gating": true,
+            "decided": 5000,
+            "passed": 5000,
+            "failed": 0,
+            "undecided": 0
+          },
+          "rendered_text_exact_runs": {
+            "gating": false,
+            "decided": 0,
+            "passed": 0,
+            "failed": 0,
+            "undecided": 5000
+          },
+          "node_id_set": {
+            "gating": true,
+            "decided": 4196,
+            "passed": 4196,
+            "failed": 0,
+            "undecided": 804
+          },
+          "edge_topology_cross_engine": {
+            "gating": true,
+            "decided": 3909,
+            "passed": 3909,
+            "failed": 0,
+            "undecided": 1091
+          },
+          "incumbent_geometry_matches_declared_ids": {
+            "gating": true,
+            "decided": 1898,
+            "passed": 1898,
+            "failed": 0,
+            "undecided": 3102
+          },
+          "edge_topology_vs_input__frankenmermaid": {
+            "gating": true,
+            "decided": 3364,
+            "passed": 3364,
+            "failed": 0,
+            "undecided": 1636
+          },
+          "edge_topology_vs_input__mermaid-js": {
+            "gating": true,
+            "decided": 3364,
+            "passed": 3364,
+            "failed": 0,
+            "undecided": 1636
+          },
+          "class_relationship_semantics_cross_engine": {
+            "gating": true,
+            "decided": 482,
+            "passed": 129,
+            "failed": 353,
+            "undecided": 0
+          },
+          "class_relationship_semantics_vs_input__frankenmermaid": {
+            "gating": true,
+            "decided": 482,
+            "passed": 129,
+            "failed": 353,
+            "undecided": 0
+          },
+          "class_relationship_semantics_vs_input__mermaid-js": {
+            "gating": true,
+            "decided": 482,
+            "passed": 482,
+            "failed": 0,
+            "undecided": 0
+          }
+        },
+        "by_family": {
+          "flowchart": {
+            "diagrams": 2882,
+            "divergent": 0,
+            "unverified": 0,
+            "tier2": 2882
+          },
+          "sequence": {
+            "diagrams": 804,
+            "divergent": 0,
+            "unverified": 0,
+            "tier2": 0
+          },
+          "er": {
+            "diagrams": 442,
+            "divergent": 0,
+            "unverified": 0,
+            "tier2": 155
+          },
+          "state": {
+            "diagrams": 390,
+            "divergent": 0,
+            "unverified": 0,
+            "tier2": 390
+          },
+          "class": {
+            "diagrams": 482,
+            "divergent": 353,
+            "unverified": 0,
+            "tier2": 482
+          }
+        },
+        "divergent_samples": [
+          {
+            "index": 20,
+            "family": "class",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1,
+              2
+            ],
+            "checks_decided": 8,
+            "checks_failed": 2,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "total_missing": 0,
+                  "distinct_missing": 0,
+                  "missing": [],
+                  "truncated": false,
+                  "js_token_count": 59,
+                  "fm_token_count": 59
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 14,
+                  "differences": [
+                    {
+                      "value": "+method0() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method0(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method1() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method1(): bool",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method2() : string",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method2(): string",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method3() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method3(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method4() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method4(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method5() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method5(): void",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": true
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 7,
+                  "js_node_count": 7,
+                  "fm_synthetic": 0,
+                  "js_synthetic": 0
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "declared_path_endpoints",
+                  "js_geometric_status": "ambiguous(unresolved=5,unparsed=0)",
+                  "fm_edge_elements": 6,
+                  "js_edge_elements": 6,
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 6,
+                  "declared_status": "declared_path_endpoints",
+                  "geometric_status": "ambiguous(unresolved=5,unparsed=0)"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 4,
+                  "differences": [
+                    {
+                      "value": "c1>c2|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c1>c2|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "c2>c3|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c2>c3|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 4,
+                  "differences": [
+                    {
+                      "value": "c1>c2|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c1>c2|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "c2>c3|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c2>c3|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 15327,
+              "node_count": 7,
+              "edge_element_count": 6,
+              "topology_status": "geometric",
+              "class_relationships_status": "rendered_relationship_markers"
+            },
+            "js": {
+              "bytes": 44531,
+              "node_count": 7,
+              "edge_element_count": 6,
+              "topology_status": "declared_path_endpoints",
+              "geometric_topology_status": "ambiguous(unresolved=5,unparsed=0)",
+              "class_relationships_status": "rendered_relationship_markers"
+            }
+          },
+          {
+            "index": 32,
+            "family": "class",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1,
+              2
+            ],
+            "checks_decided": 8,
+            "checks_failed": 2,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "total_missing": 0,
+                  "distinct_missing": 0,
+                  "missing": [],
+                  "truncated": false,
+                  "js_token_count": 52,
+                  "fm_token_count": 52
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 12,
+                  "differences": [
+                    {
+                      "value": "+method0() : string",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method0(): string",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method1() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method1(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method2() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method2(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method3() : string",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method3(): string",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method4() : string",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method4(): string",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method5() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method5(): void",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 6,
+                  "js_node_count": 6,
+                  "fm_synthetic": 0,
+                  "js_synthetic": 0
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "declared_path_endpoints",
+                  "js_geometric_status": "ambiguous(unresolved=4,unparsed=0)",
+                  "fm_edge_elements": 5,
+                  "js_edge_elements": 5,
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 5,
+                  "declared_status": "declared_path_endpoints",
+                  "geometric_status": "ambiguous(unresolved=4,unparsed=0)"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 6,
+                  "differences": [
+                    {
+                      "value": "c1>c2|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c1>c2|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "c2>c3|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c2>c3|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "c4>c5|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c4>c5|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 6,
+                  "differences": [
+                    {
+                      "value": "c1>c2|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c1>c2|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "c2>c3|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c2>c3|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "c4>c5|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c4>c5|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 13947,
+              "node_count": 6,
+              "edge_element_count": 5,
+              "topology_status": "geometric",
+              "class_relationships_status": "rendered_relationship_markers"
+            },
+            "js": {
+              "bytes": 40104,
+              "node_count": 6,
+              "edge_element_count": 5,
+              "topology_status": "declared_path_endpoints",
+              "geometric_topology_status": "ambiguous(unresolved=4,unparsed=0)",
+              "class_relationships_status": "rendered_relationship_markers"
+            }
+          },
+          {
+            "index": 37,
+            "family": "class",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1,
+              2
+            ],
+            "checks_decided": 8,
+            "checks_failed": 2,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "total_missing": 0,
+                  "distinct_missing": 0,
+                  "missing": [],
+                  "truncated": false,
+                  "js_token_count": 53,
+                  "fm_token_count": 53
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 14,
+                  "differences": [
+                    {
+                      "value": "+method0() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method0(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method1() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method1(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method2() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method2(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method3() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method3(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method4() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method4(): bool",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method5() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method5(): bool",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": true
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 7,
+                  "js_node_count": 7,
+                  "fm_synthetic": 0,
+                  "js_synthetic": 0
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "declared_path_endpoints",
+                  "js_geometric_status": "ambiguous(unresolved=5,unparsed=0)",
+                  "fm_edge_elements": 6,
+                  "js_edge_elements": 6,
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 6,
+                  "declared_status": "declared_path_endpoints",
+                  "geometric_status": "ambiguous(unresolved=5,unparsed=0)"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 2,
+                  "differences": [
+                    {
+                      "value": "c3>c4|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c3>c4|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 2,
+                  "differences": [
+                    {
+                      "value": "c3>c4|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c3>c4|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 14999,
+              "node_count": 7,
+              "edge_element_count": 6,
+              "topology_status": "geometric",
+              "class_relationships_status": "rendered_relationship_markers"
+            },
+            "js": {
+              "bytes": 43462,
+              "node_count": 7,
+              "edge_element_count": 6,
+              "topology_status": "declared_path_endpoints",
+              "geometric_topology_status": "ambiguous(unresolved=5,unparsed=0)",
+              "class_relationships_status": "rendered_relationship_markers"
+            }
+          },
+          {
+            "index": 54,
+            "family": "class",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1,
+              2
+            ],
+            "checks_decided": 8,
+            "checks_failed": 2,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "total_missing": 0,
+                  "distinct_missing": 0,
+                  "missing": [],
+                  "truncated": false,
+                  "js_token_count": 92,
+                  "fm_token_count": 92
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 24,
+                  "differences": [
+                    {
+                      "value": "+method0() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method0(): bool",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method1() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method1(): bool",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method10() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method10(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method11() : string",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method11(): string",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method2() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method2(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method3() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method3(): bool",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": true
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 12,
+                  "js_node_count": 12,
+                  "fm_synthetic": 0,
+                  "js_synthetic": 0
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "declared_path_endpoints",
+                  "js_geometric_status": "ambiguous(unresolved=10,unparsed=0)",
+                  "fm_edge_elements": 11,
+                  "js_edge_elements": 11,
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 11,
+                  "declared_status": "declared_path_endpoints",
+                  "geometric_status": "ambiguous(unresolved=10,unparsed=0)"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 2,
+                  "differences": [
+                    {
+                      "value": "c9>c10|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c9>c10|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 2,
+                  "differences": [
+                    {
+                      "value": "c9>c10|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c9>c10|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 21108,
+              "node_count": 12,
+              "edge_element_count": 11,
+              "topology_status": "geometric",
+              "class_relationships_status": "rendered_relationship_markers"
+            },
+            "js": {
+              "bytes": 66463,
+              "node_count": 12,
+              "edge_element_count": 11,
+              "topology_status": "declared_path_endpoints",
+              "geometric_topology_status": "ambiguous(unresolved=10,unparsed=0)",
+              "class_relationships_status": "rendered_relationship_markers"
+            }
+          },
+          {
+            "index": 60,
+            "family": "class",
+            "verdict": "divergent",
+            "tiers_decided": [
+              1,
+              2
+            ],
+            "checks_decided": 8,
+            "checks_failed": 2,
+            "checks": [
+              {
+                "invariant": "rendered_text_no_loss",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "total_missing": 0,
+                  "distinct_missing": 0,
+                  "missing": [],
+                  "truncated": false,
+                  "js_token_count": 30,
+                  "fm_token_count": 30
+                }
+              },
+              {
+                "invariant": "rendered_text_exact_runs",
+                "tier": 1,
+                "decided": false,
+                "gating": false,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 8,
+                  "differences": [
+                    {
+                      "value": "+method0() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method0(): bool",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method1() : void",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method1(): void",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method2() : bool",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method2(): bool",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "+method3() : string",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "+method3(): string",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "node_id_set",
+                "tier": 1,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false,
+                  "fm_node_count": 4,
+                  "js_node_count": 4,
+                  "fm_synthetic": 0,
+                  "js_synthetic": 0
+                }
+              },
+              {
+                "invariant": "edge_topology_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "fm_status": "geometric",
+                  "js_status": "declared_path_endpoints",
+                  "js_geometric_status": "ambiguous(unresolved=3,unparsed=0)",
+                  "fm_edge_elements": 3,
+                  "js_edge_elements": 3,
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "incumbent_geometry_matches_declared_ids",
+                "tier": 2,
+                "decided": false,
+                "pass": null,
+                "detail": {
+                  "declared_ids": 3,
+                  "declared_status": "declared_path_endpoints",
+                  "geometric_status": "ambiguous(unresolved=3,unparsed=0)"
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "edge_topology_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_cross_engine",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 4,
+                  "differences": [
+                    {
+                      "value": "c0>c1|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c0>c1|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "c2>c3|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c2>c3|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__frankenmermaid",
+                "tier": 2,
+                "decided": true,
+                "pass": false,
+                "detail": {
+                  "equal": false,
+                  "difference_count": 4,
+                  "differences": [
+                    {
+                      "value": "c0>c1|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c0>c1|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    },
+                    {
+                      "value": "c2>c3|start=inheritance|end=none",
+                      "left": 0,
+                      "right": 1
+                    },
+                    {
+                      "value": "c2>c3|start=none|end=association",
+                      "left": 1,
+                      "right": 0
+                    }
+                  ],
+                  "truncated": false
+                }
+              },
+              {
+                "invariant": "class_relationship_semantics_vs_input__mermaid-js",
+                "tier": 2,
+                "decided": true,
+                "pass": true,
+                "detail": {
+                  "equal": true,
+                  "difference_count": 0,
+                  "differences": [],
+                  "truncated": false
+                }
+              }
+            ],
+            "fm": {
+              "bytes": 10482,
+              "node_count": 4,
+              "edge_element_count": 3,
+              "topology_status": "geometric",
+              "class_relationships_status": "rendered_relationship_markers"
+            },
+            "js": {
+              "bytes": 29820,
+              "node_count": 4,
+              "edge_element_count": 3,
+              "topology_status": "declared_path_endpoints",
+              "geometric_topology_status": "ambiguous(unresolved=3,unparsed=0)",
+              "class_relationships_status": "rendered_relationship_markers"
+            }
+          }
+        ],
+        "unverified_samples": []
+      }
+    }
+  ],
+  "verdict": "fail"
+}

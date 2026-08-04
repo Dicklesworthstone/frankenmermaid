@@ -1,0 +1,254 @@
+{
+  "schema": "frankenmermaid.headtohead.equivalence.v1",
+  "env": {
+    "captured_at": "2026-07-31T05:44:59.737Z",
+    "host_identity": "thinkstation1",
+    "git_rev": "98043420d6f60e9690b97353981d54dc99a46c65",
+    "git_dirty": true,
+    "kernel": "6.17.0-35-generic",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "logical_threads": 64,
+    "total_mem_gb": 215.8,
+    "loadavg_1m": 3.16,
+    "node": "v24.14.0",
+    "load_affects_verdict": false
+  },
+  "method": {
+    "kind": "svg_structural",
+    "rasterized_perceptual_diff": false,
+    "why_not_raster": "the engines use different fonts, paddings and stroke widths, so a pixel diff would report a large distance for two correct renders -- it measures styling, not content",
+    "why_not_byte_equality": "the engines emit deliberately different SVG (HTML foreignObject labels vs <text>, different class vocabularies, different layout engines)",
+    "tier1": "rendered-text token multiset, containment-gated: every token mermaid-js renders must be present in ours. Applies to every syntax family. Rendering MORE than mermaid is reported, not failed.",
+    "tier2": "rendered-path edge topology compared cross-engine AND against input-derived ground truth. Frankenmermaid endpoints are reconstructed geometrically; mermaid-js uses the same geometry when unambiguous and uniquely resolved per-path data-id endpoints otherwise. Claimed for: flowchart, state.",
+    "extractor": "single shared implementation applied to both engines (svg_equivalence.mjs); a per-engine extractor pair could agree by construction",
+    "self_test": "svg_equivalence.mjs --self-test: 5 mutation controls (dropped label, either engine dropping an edge, rewired edge, displaced node) and 2 negative controls (extra content, differing text segmentation)",
+    "undecidable_is_not_a_pass": true
+  },
+  "pins": {
+    "mermaid": "11.15.0",
+    "bundle_sha256": "70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de"
+  },
+  "provenance": {
+    "fm_elf_sha256": "317f66e9b1828d333a3ce68a2dfaf3e3e70018f2bcfebd9e96f6848c758cd38a",
+    "fm_elf_bytes": 7889440,
+    "fm_execution_model": "scalar",
+    "chromium_binary": "/usr/bin/chromium-browser",
+    "chromium_version": "Chrome/150.0.7871.128",
+    "mermaid_bundle_url": "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js"
+  },
+  "rows": [
+    {
+      "id": "ci_equiv_512",
+      "status": "compared",
+      "revisions": 512,
+      "input_sha256": "228414f81bb6e73135bcc5244cb93503237f670bfa327b5da9310e6d777904aa",
+      "fm_input_sha256": "228414f81bb6e73135bcc5244cb93503237f670bfa327b5da9310e6d777904aa",
+      "js_input_sha256": "228414f81bb6e73135bcc5244cb93503237f670bfa327b5da9310e6d777904aa",
+      "inputs_identical": true,
+      "linkage": {
+        "fm_revisions_dumped": 512,
+        "js_revisions_dumped": 512,
+        "revisions_expected": 512,
+        "fm_dump_sha256": "787024772b946413b6d76c7b0293a0e339a6fb3cc565aa07f8fb657153be27a4",
+        "fm_reported_sha256": "787024772b946413b6d76c7b0293a0e339a6fb3cc565aa07f8fb657153be27a4",
+        "js_dump_sha256": "b4d3ab5b9025d40245c6bfb259af9e61b4446a3790e0e838873968f362337bd4",
+        "js_reported_sha256": "b4d3ab5b9025d40245c6bfb259af9e61b4446a3790e0e838873968f362337bd4",
+        "fm_matches_measured": true,
+        "js_matches_measured": true,
+        "counts_match": true
+      },
+      "equivalence": {
+        "method": "svg_structural",
+        "rasterized_perceptual_diff": false,
+        "claim": "engine-neutral structural equivalence: rendered-text multiset (all families) plus rendered-path edge topology cross-engine and against input-derived ground truth. Frankenmermaid endpoints are reconstructed geometrically; mermaid-js uses geometric endpoints when unambiguous and uniquely resolved per-path data-id endpoints otherwise. Not byte equality; not a pixel diff.",
+        "diagrams": 512,
+        "equivalent": 512,
+        "divergent": 0,
+        "unverified": 0,
+        "verdict": "pass",
+        "tier2_diagrams": 512,
+        "by_invariant": {
+          "rendered_text_no_loss": {
+            "gating": true,
+            "decided": 512,
+            "passed": 512,
+            "failed": 0,
+            "undecided": 0
+          },
+          "rendered_text_exact_runs": {
+            "gating": false,
+            "decided": 0,
+            "passed": 0,
+            "failed": 0,
+            "undecided": 512
+          },
+          "node_id_set": {
+            "gating": true,
+            "decided": 512,
+            "passed": 512,
+            "failed": 0,
+            "undecided": 0
+          },
+          "edge_topology_cross_engine": {
+            "gating": true,
+            "decided": 512,
+            "passed": 512,
+            "failed": 0,
+            "undecided": 0
+          },
+          "incumbent_geometry_matches_declared_ids": {
+            "gating": true,
+            "decided": 47,
+            "passed": 47,
+            "failed": 0,
+            "undecided": 465
+          },
+          "edge_topology_vs_input__frankenmermaid": {
+            "gating": true,
+            "decided": 512,
+            "passed": 512,
+            "failed": 0,
+            "undecided": 0
+          },
+          "edge_topology_vs_input__mermaid-js": {
+            "gating": true,
+            "decided": 512,
+            "passed": 512,
+            "failed": 0,
+            "undecided": 0
+          }
+        },
+        "by_family": {
+          "flowchart": {
+            "diagrams": 512,
+            "divergent": 0,
+            "unverified": 0,
+            "tier2": 512
+          }
+        },
+        "divergent_samples": [],
+        "unverified_samples": []
+      }
+    },
+    {
+      "id": "typing_trace_60",
+      "status": "compared",
+      "revisions": 60,
+      "input_sha256": "1b387d42772f0e4a2e479059cbd60c002aff4451ee7b4a97bf3bd6d82c334a33",
+      "fm_input_sha256": "1b387d42772f0e4a2e479059cbd60c002aff4451ee7b4a97bf3bd6d82c334a33",
+      "js_input_sha256": "1b387d42772f0e4a2e479059cbd60c002aff4451ee7b4a97bf3bd6d82c334a33",
+      "inputs_identical": true,
+      "linkage": {
+        "fm_revisions_dumped": 60,
+        "js_revisions_dumped": 60,
+        "revisions_expected": 60,
+        "fm_dump_sha256": "826e563060f688301cb2d188cfe3c052f5c93c902ab5733a8432265c557aba97",
+        "fm_reported_sha256": "826e563060f688301cb2d188cfe3c052f5c93c902ab5733a8432265c557aba97",
+        "js_dump_sha256": "6d290e8b4c68a6e951ddc3a0b072f9168df8a74f20e320ccd5100d50790320d9",
+        "js_reported_sha256": "6d290e8b4c68a6e951ddc3a0b072f9168df8a74f20e320ccd5100d50790320d9",
+        "fm_matches_measured": true,
+        "js_matches_measured": true,
+        "counts_match": true
+      },
+      "equivalence": {
+        "method": "svg_structural",
+        "rasterized_perceptual_diff": false,
+        "claim": "engine-neutral structural equivalence: rendered-text multiset (all families) plus rendered-path edge topology cross-engine and against input-derived ground truth. Frankenmermaid endpoints are reconstructed geometrically; mermaid-js uses geometric endpoints when unambiguous and uniquely resolved per-path data-id endpoints otherwise. Not byte equality; not a pixel diff.",
+        "diagrams": 60,
+        "equivalent": 28,
+        "divergent": 0,
+        "unverified": 32,
+        "verdict": "fail",
+        "tier2_diagrams": 60,
+        "by_invariant": {
+          "rendered_text_no_loss": {
+            "gating": true,
+            "decided": 60,
+            "passed": 60,
+            "failed": 0,
+            "undecided": 0
+          },
+          "rendered_text_exact_runs": {
+            "gating": false,
+            "decided": 0,
+            "passed": 0,
+            "failed": 0,
+            "undecided": 60
+          },
+          "node_id_set": {
+            "gating": true,
+            "decided": 60,
+            "passed": 60,
+            "failed": 0,
+            "undecided": 0
+          },
+          "edge_topology_cross_engine": {
+            "gating": true,
+            "decided": 28,
+            "passed": 28,
+            "failed": 0,
+            "undecided": 32
+          },
+          "incumbent_geometry_matches_declared_ids": {
+            "gating": true,
+            "decided": 0,
+            "passed": 0,
+            "failed": 0,
+            "undecided": 60
+          },
+          "edge_topology_vs_input__frankenmermaid": {
+            "gating": true,
+            "decided": 28,
+            "passed": 28,
+            "failed": 0,
+            "undecided": 32
+          },
+          "edge_topology_vs_input__mermaid-js": {
+            "gating": true,
+            "decided": 60,
+            "passed": 60,
+            "failed": 0,
+            "undecided": 0
+          }
+        },
+        "by_family": {
+          "flowchart": {
+            "diagrams": 60,
+            "divergent": 0,
+            "unverified": 32,
+            "tier2": 60
+          }
+        },
+        "divergent_samples": [],
+        "unverified_samples": [
+          {
+            "index": 28,
+            "family": "flowchart",
+            "reason": "tier2 claimed for flowchart but topology undecidable (fm=ambiguous(unresolved=1,unparsed=0), js=declared_path_endpoints, js_geometry=ambiguous(unresolved=21,unparsed=0))"
+          },
+          {
+            "index": 29,
+            "family": "flowchart",
+            "reason": "tier2 claimed for flowchart but topology undecidable (fm=ambiguous(unresolved=1,unparsed=0), js=declared_path_endpoints, js_geometry=ambiguous(unresolved=21,unparsed=0))"
+          },
+          {
+            "index": 30,
+            "family": "flowchart",
+            "reason": "tier2 claimed for flowchart but topology undecidable (fm=ambiguous(unresolved=1,unparsed=0), js=declared_path_endpoints, js_geometry=ambiguous(unresolved=21,unparsed=0))"
+          },
+          {
+            "index": 31,
+            "family": "flowchart",
+            "reason": "tier2 claimed for flowchart but topology undecidable (fm=ambiguous(unresolved=1,unparsed=0), js=declared_path_endpoints, js_geometry=ambiguous(unresolved=21,unparsed=0))"
+          },
+          {
+            "index": 32,
+            "family": "flowchart",
+            "reason": "tier2 claimed for flowchart but topology undecidable (fm=ambiguous(unresolved=1,unparsed=0), js=declared_path_endpoints, js_geometry=ambiguous(unresolved=21,unparsed=0))"
+          }
+        ]
+      }
+    }
+  ],
+  "verdict": "fail"
+}

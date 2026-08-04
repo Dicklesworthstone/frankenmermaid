@@ -17,7 +17,7 @@ mod tests {
     };
 
     /// Helper to create a span from line/col ranges.
-    fn span(line: usize, start_col: usize, end_col: usize) -> Span {
+    fn span(line: u32, start_col: u32, end_col: u32) -> Span {
         Span::new(
             Position {
                 line,

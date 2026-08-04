@@ -113,3 +113,12 @@ windsurf.mcp.json
 
 # Local read-only legacy reference clone (standalone git checkout, not a submodule)
 legacy_mermaid_code/
+
+# Out-of-tree build dirs that rch sometimes materializes inside the repo, and perf captures.
+.rch-targets/
+perf.data
+perf.data.old
+
+# Generated input for the head-to-head harness (the corpus is regenerated + hash-checked per run;
+# see scripts/headtohead/pins.json). The run-*.jsonl / summary-*.json evidence IS committed.
+.benchmarks/headtohead/corpus.json

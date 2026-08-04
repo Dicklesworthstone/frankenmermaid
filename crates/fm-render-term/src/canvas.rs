@@ -10,8 +10,13 @@ use fm_core::MermaidRenderMode;
 /// A pixel-level canvas that maps to terminal cells.
 #[derive(Debug, Clone)]
 pub struct Canvas {
-    /// Pixel buffer: true = set, false = unset.
-    pixels: Vec<bool>,
+    /// Fused pixel + generation buffer: `cell_gen[i] == generation` iff the pixel is set THIS
+    /// generation (0 = unset / never touched). This unifies the old `pixels: Vec<bool>` +
+    /// `pixel_gen: Vec<u32>` — a set/get touched BOTH (two separate allocations / cache lines) even
+    /// though `pixels[i]` was only meaningful when `pixel_gen[i] == generation`. Now one read/write per
+    /// pixel op. Byte-identical: set writes `generation`, unset writes 0, get is `== generation`
+    /// (`generation` is never 0 — starts at 1, `clear` wraps to 1 — so 0 always reads as unset).
+    cell_gen: Vec<u32>,
     /// Width in pixels.
     pixel_width: usize,
     /// Height in pixels.
@@ -24,8 +29,6 @@ pub struct Canvas {
     mode: MermaidRenderMode,
     /// Generation counter for O(1) clear.
     generation: u32,
-    /// Per-pixel generation for O(1) clear.
-    pixel_gen: Vec<u32>,
 }
 
 impl Canvas {
@@ -38,14 +41,13 @@ impl Canvas {
         let size = pixel_width.saturating_mul(pixel_height);
 
         Self {
-            pixels: vec![false; size],
+            cell_gen: vec![0; size],
             pixel_width,
             pixel_height,
             cell_width,
             cell_height,
             mode,
             generation: 1,
-            pixel_gen: vec![0; size],
         }
     }
 
@@ -55,7 +57,7 @@ impl Canvas {
         if self.generation == 0 {
             // Wrapped around, need to reset everything.
             self.generation = 1;
-            self.pixel_gen.fill(0);
+            self.cell_gen.fill(0);
         }
     }
 
@@ -74,16 +76,16 @@ impl Canvas {
     /// Set a pixel at (x, y).
     pub fn set_pixel(&mut self, x: usize, y: usize) {
         if let Some(index) = self.pixel_index(x, y) {
-            self.pixels[index] = true;
-            self.pixel_gen[index] = self.generation;
+            self.cell_gen[index] = self.generation;
         }
     }
 
     /// Unset a pixel at (x, y).
     pub fn unset_pixel(&mut self, x: usize, y: usize) {
         if let Some(index) = self.pixel_index(x, y) {
-            self.pixels[index] = false;
-            self.pixel_gen[index] = self.generation;
+            // 0 reads as unset for any `generation >= 1`; matches the old `pixels[i]=false` result
+            // (the old `pixel_gen[i]=generation` write was unobservable — `get` returned false anyway).
+            self.cell_gen[index] = 0;
         }
     }
 
@@ -91,12 +93,60 @@ impl Canvas {
     #[must_use]
     pub fn get_pixel(&self, x: usize, y: usize) -> bool {
         self.pixel_index(x, y)
-            .map(|index| self.pixel_gen[index] == self.generation && self.pixels[index])
+            .map(|index| self.pixel_set_at(index))
             .unwrap_or(false)
+    }
+
+    /// Whether the pixel at a KNOWN-valid buffer `index` is set this generation. The caller must have
+    /// established `index < cell_gen.len()` (e.g. from a cell wholly inside the pixel grid); this is the
+    /// body of [`get_pixel`] without the per-call `pixel_index` bounds-check + multiply + `Option`, so a
+    /// cell renderer that reads several fixed-offset sub-pixels off one precomputed base index skips that
+    /// recompute per sub-pixel. Byte-identical to `get_pixel(x, y)` for the in-bounds `(x, y)` that maps
+    /// to `index`.
+    #[inline]
+    fn pixel_set_at(&self, index: usize) -> bool {
+        self.cell_gen[index] == self.generation
     }
 
     /// Draw a line from (x0, y0) to (x1, y1) using Bresenham's algorithm.
     pub fn draw_line(&mut self, x0: isize, y0: isize, x1: isize, y1: isize) {
+        // Axis-aligned fast paths. Rect outlines (`draw_rect`) and orthogonal connector segments are
+        // horizontal or vertical, and Bresenham's per-pixel `set_pixel` recomputes `pixel_index`
+        // (bounds check + multiply + `Option`) and stamps two buffers on every step. A horizontal run has
+        // CONTIGUOUS indices, so one `fill(true)`/`fill(generation)` replaces the whole loop; a vertical
+        // run has a fixed `pixel_width` stride, so the index increments with no per-pixel multiply.
+        // Byte-identical to the Bresenham path: it sets exactly the same in-bounds pixel set (0≤x<width,
+        // 0≤y<height, endpoints inclusive — pixel order is irrelevant to the final buffer) with the same
+        // `true` + `generation` stamp.
+        if y0 == y1 {
+            if y0 >= 0 && (y0 as usize) < self.pixel_height {
+                let x_lo = x0.min(x1).max(0);
+                let x_hi = x0.max(x1).min(self.pixel_width as isize - 1);
+                if x_lo <= x_hi {
+                    let base = (y0 as usize) * self.pixel_width;
+                    let lo = base + x_lo as usize;
+                    let hi = base + x_hi as usize;
+                    self.cell_gen[lo..=hi].fill(self.generation);
+                }
+            }
+            return;
+        }
+        if x0 == x1 {
+            if x0 >= 0 && (x0 as usize) < self.pixel_width {
+                let y_lo = y0.min(y1).max(0);
+                let y_hi = y0.max(y1).min(self.pixel_height as isize - 1);
+                if y_lo <= y_hi {
+                    let x = x0 as usize;
+                    let mut index = (y_lo as usize) * self.pixel_width + x;
+                    for _ in y_lo..=y_hi {
+                        self.cell_gen[index] = self.generation;
+                        index += self.pixel_width;
+                    }
+                }
+            }
+            return;
+        }
+
         let dx = (x1 - x0).abs();
         let dy = -(y1 - y0).abs();
         let sx = if x0 < x1 { 1 } else { -1 };
@@ -241,6 +291,26 @@ impl Canvas {
         output
     }
 
+    /// Render each cell's character into a `cell_height × cell_width` grid of `char`s. This is what the
+    /// label overlay needs (it indexes `grid[row][col]` to stamp label chars), so producing the grid
+    /// directly lets the caller skip the [`render`] → `String` → `str::lines().chars().collect()` round
+    /// trip — one fewer full encode (per-cell `String::push` + `encode_utf8`) and decode of the whole
+    /// output. Byte-identical to `render().lines().map(|l| l.chars().collect()).collect()`: every row
+    /// holds exactly this canvas's `cell_width` cells in `render`'s column order (no inter-row `\n`, which
+    /// `lines()` strips anyway).
+    #[must_use]
+    pub fn render_char_grid(&self) -> Vec<Vec<char>> {
+        let mut grid = Vec::with_capacity(self.cell_height);
+        for cell_y in 0..self.cell_height {
+            let mut row = Vec::with_capacity(self.cell_width);
+            for cell_x in 0..self.cell_width {
+                row.push(self.render_cell(cell_x, cell_y));
+            }
+            grid.push(row);
+        }
+        grid
+    }
+
     /// Render a single cell to its character.
     #[must_use]
     fn render_cell(&self, cell_x: usize, cell_y: usize) -> char {
@@ -270,31 +340,73 @@ impl Canvas {
 
         let mut code_point = 0x2800_u32; // Unicode Braille base
 
-        // Dot positions mapped to bit offsets
-        if self.get_pixel(px, py) {
-            code_point |= 0x01;
-        } // Dot 1
-        if self.get_pixel(px, py + 1) {
-            code_point |= 0x02;
-        } // Dot 2
-        if self.get_pixel(px, py + 2) {
-            code_point |= 0x04;
-        } // Dot 3
-        if self.get_pixel(px + 1, py) {
-            code_point |= 0x08;
-        } // Dot 4
-        if self.get_pixel(px + 1, py + 1) {
-            code_point |= 0x10;
-        } // Dot 5
-        if self.get_pixel(px + 1, py + 2) {
-            code_point |= 0x20;
-        } // Dot 6
-        if self.get_pixel(px, py + 3) {
-            code_point |= 0x40;
-        } // Dot 7
-        if self.get_pixel(px + 1, py + 3) {
-            code_point |= 0x80;
-        } // Dot 8
+        // Fast path: the whole 2x4 sub-pixel block is inside the grid, so compute the base index ONCE
+        // and read the 8 dots by fixed offset (`base + row*width + col`) instead of 8 `get_pixel` calls,
+        // each of which recomputes `pixel_index` (bounds check + `y*width+x` multiply + `Option`). This
+        // is the default (Braille) render mode, called once per output cell. Byte-identical: every
+        // `pixel_set_at(base + r*w + c)` equals `get_pixel(px+c, py+r)` because the gate guarantees each
+        // `(px+c, py+r)` is in bounds and maps to exactly that index.
+        if px + 1 < self.pixel_width && py + 3 < self.pixel_height {
+            let w = self.pixel_width;
+            let base = py * w + px;
+            let cur_gen = self.generation;
+            // Slice `cell_gen` ONCE over the cell's `[base, base + 3w + 1]` span (the maximum dot index),
+            // then read the 8 dots by relative offset. Each offset is `<= 3w + 1 == cell.len() - 1`, so the
+            // compiler proves every `cell[offset]` in-bounds from the single slice length and drops the
+            // per-dot bounds check that the 8 `pixel_set_at` calls each paid (it was not inlined — a
+            // separate ~13% frame). Byte-identical: `cell[o] == gen` == `pixel_set_at(base + o)`.
+            let cell = &self.cell_gen[base..=base + 3 * w + 1];
+            if cell[0] == cur_gen {
+                code_point |= 0x01;
+            } // Dot 1 (px, py)
+            if cell[w] == cur_gen {
+                code_point |= 0x02;
+            } // Dot 2 (px, py+1)
+            if cell[2 * w] == cur_gen {
+                code_point |= 0x04;
+            } // Dot 3 (px, py+2)
+            if cell[1] == cur_gen {
+                code_point |= 0x08;
+            } // Dot 4 (px+1, py)
+            if cell[w + 1] == cur_gen {
+                code_point |= 0x10;
+            } // Dot 5 (px+1, py+1)
+            if cell[2 * w + 1] == cur_gen {
+                code_point |= 0x20;
+            } // Dot 6 (px+1, py+2)
+            if cell[3 * w] == cur_gen {
+                code_point |= 0x40;
+            } // Dot 7 (px, py+3)
+            if cell[3 * w + 1] == cur_gen {
+                code_point |= 0x80;
+            } // Dot 8 (px+1, py+3)
+        } else {
+            // Edge cell: bounds-safe per-pixel reads (unchanged).
+            if self.get_pixel(px, py) {
+                code_point |= 0x01;
+            }
+            if self.get_pixel(px, py + 1) {
+                code_point |= 0x02;
+            }
+            if self.get_pixel(px, py + 2) {
+                code_point |= 0x04;
+            }
+            if self.get_pixel(px + 1, py) {
+                code_point |= 0x08;
+            }
+            if self.get_pixel(px + 1, py + 1) {
+                code_point |= 0x10;
+            }
+            if self.get_pixel(px + 1, py + 2) {
+                code_point |= 0x20;
+            }
+            if self.get_pixel(px, py + 3) {
+                code_point |= 0x40;
+            }
+            if self.get_pixel(px + 1, py + 3) {
+                code_point |= 0x80;
+            }
+        }
 
         char::from_u32(code_point).unwrap_or(' ')
     }

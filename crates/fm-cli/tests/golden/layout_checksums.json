@@ -188,9 +188,9 @@
     "state_basic": {
       "edge_count": 3,
       "layout_algorithm": "auto",
-      "layout_checksum": "056eb9aa8f479467",
+      "layout_checksum": "5f4ce6514d68462f",
       "layout_height": 497.0,
-      "layout_width": 271.699982,
+      "layout_width": 228.800003,
       "node_count": 3
     },
     "stress_120_nodes": {

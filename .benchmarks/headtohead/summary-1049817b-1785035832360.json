@@ -1,0 +1,80 @@
+{
+  "schema": "frankenmermaid.headtohead.v1",
+  "env": {
+    "captured_at": "2026-07-26T03:17:09.931Z",
+    "git_rev": "1049817b527673c1209e7ba0a73dcf1c7b3b82b8",
+    "git_dirty": true,
+    "rustc": "rustc 1.99.0-nightly (da86f4d07 2026-07-24)",
+    "cargo_profile": "release (opt-level=3 for fm-core/parser/layout/render-svg, lto=fat, codegen-units=1)",
+    "rustflags": "-C target-cpu=x86-64-v2 (.cargo/config.toml)",
+    "node": "v24.14.0",
+    "chromium": "Chromium 150.0.7871.114 snap",
+    "kernel": "6.17.0-35-generic",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "cpu_count": 64,
+    "total_mem_gb": 215.8,
+    "loadavg_1m": 12.53,
+    "load_warning": null,
+    "pinned_cpu": {
+      "cpu": 28,
+      "busy_pct": 0
+    },
+    "fm_elf_sha256": "0c0b7469d44364050f100cd04bcaed404e8264af9ea56fbbb6756cc57cc2bfa8",
+    "fm_elf_bytes": 7762128
+  },
+  "pins": {
+    "mermaid": "11.15.0",
+    "bundle_url": "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js",
+    "security_level": "strict"
+  },
+  "corpus_items": 2,
+  "ok_items": 0,
+  "dnf_items": 0,
+  "dnf": [],
+  "mad_gate_pct": 5,
+  "mad_gate_failures": [],
+  "speedup": null,
+  "speedup_min_estimator": null,
+  "rows": [
+    {
+      "id": "arch_200x50",
+      "class": "single",
+      "nodes": 10000,
+      "edges": 9999,
+      "nodes_max": 10000,
+      "edges_max": 9999,
+      "nodes_total": 10000,
+      "edges_total": 9999,
+      "revisions": 1,
+      "fm_p50_ns": 10304120,
+      "fm_min_ns": 10014378,
+      "fm_cv_pct": 5.23,
+      "fm_mad_pct": 1.1,
+      "fm_bytes": 6983411,
+      "fm_bytes_lean": 4713266,
+      "fm_lean_p50_ns": 9412232,
+      "lean_slowdown": 0.9134435546169881,
+      "status": "fm_only"
+    },
+    {
+      "id": "er_schema_2500x8",
+      "class": "single",
+      "nodes": 2500,
+      "edges": 2499,
+      "nodes_max": 2500,
+      "edges_max": 2499,
+      "nodes_total": 2500,
+      "edges_total": 2499,
+      "revisions": 1,
+      "fm_p50_ns": 7139224,
+      "fm_min_ns": 6594396,
+      "fm_cv_pct": 30.12,
+      "fm_mad_pct": 1.92,
+      "fm_bytes": 6817764,
+      "fm_bytes_lean": 6370931,
+      "fm_lean_p50_ns": 6946987,
+      "lean_slowdown": 0.9730731239137475,
+      "status": "fm_only"
+    }
+  ]
+}

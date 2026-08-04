@@ -2576,6 +2576,153 @@ fn e2e_pipeline_class() {
     );
 }
 
+/// bd-yq3k: state transition labels were handed to the generic flowchart edge parser, which knows
+/// only `-->|text|`. The colon suffix therefore reached it as node-token syntax — `&` read as a
+/// parallel-endpoint separator, `(` and `<` as node-shape delimiters — and in the benign case the
+/// whole `S1: text` became the TARGET NODE's label while the edge got none.
+///
+/// Asserts the label lands on the EDGE and the node keeps a clean id, because node and edge COUNTS
+/// are correct in the plain case and in two of the three corrupting forms: a count-only check passes
+/// while the label sits in the wrong place entirely.
+#[test]
+fn state_transition_labels_attach_to_the_edge_not_the_node() {
+    let labels = [
+        "plain label",
+        "Retry & backoff",  // top-level `&` read as a parallel endpoint list
+        "Parse <config>",   // `<` `>` read as asymmetric node delimiters
+        "Rate limit (429)", // `(` `)` read as a rounded node delimiter
+        "Diff & merge",
+        "Sign & upload",
+    ];
+
+    for label in labels {
+        let source = format!("stateDiagram-v2\n  [*] --> S0\n  S0 --> S1: {label}\n  S1 --> [*]\n");
+        let result = parse(&source);
+        assert_eq!(result.ir.diagram_type, DiagramType::State);
+
+        let ids: Vec<&str> = result
+            .ir
+            .nodes
+            .iter()
+            .map(|n| n.id.as_str())
+            .filter(|id| !id.starts_with("__state_"))
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["S0", "S1"],
+            "label {label:?} produced node ids {ids:?}; anything else means the suffix leaked into \
+             an endpoint (bd-yq3k)"
+        );
+
+        let labelled: Vec<&str> = result
+            .ir
+            .edges
+            .iter()
+            .filter_map(|e| e.label)
+            .filter_map(|id| result.ir.labels.get(id.0))
+            .map(|l| l.text.as_str())
+            .collect();
+        assert!(
+            labelled.contains(&label),
+            "label {label:?} never reached an edge; edge labels were {labelled:?} (bd-yq3k)"
+        );
+
+        for node in &result.ir.nodes {
+            let node_label = node.label.and_then(|id| result.ir.labels.get(id.0));
+            if let Some(text) = node_label {
+                assert!(
+                    !text.text.contains(':'),
+                    "node {:?} absorbed the transition label as {:?} (bd-yq3k)",
+                    node.id,
+                    text.text
+                );
+            }
+        }
+    }
+}
+
+/// bd-92b6: `o--` and `*--` were absent from `CLASS_OPERATORS`, so the operator scan matched the
+/// trailing `--` instead and swallowed the marker byte into the endpoint — `C0 o-- C1` parsed with
+/// `C0 o` as the source, which normalized into the phantom node `C0-o`. The reversed `--o` / `--*`
+/// forms had the identical defect from the other side. This corrupted the node SET, which is why the
+/// cross-engine gate found 142/190 and 358/482 class diagrams divergent.
+#[test]
+fn class_relationship_operators_do_not_create_phantom_nodes() {
+    // (source, operator, expected arrow type)
+    let cases = [
+        ("o--", fm_core::ArrowType::Aggregation),
+        ("*--", fm_core::ArrowType::Composition),
+        ("--o", fm_core::ArrowType::AggregationReverse),
+        ("--*", fm_core::ArrowType::CompositionReverse),
+        ("<|--", fm_core::ArrowType::Inheritance),
+        ("--|>", fm_core::ArrowType::InheritanceReverse),
+        ("-->", fm_core::ArrowType::Arrow),
+    ];
+
+    for (operator, expected_arrow) in cases {
+        let source = format!("classDiagram\n  C0 {operator} C1\n");
+        let result = parse(&source);
+        assert_eq!(result.ir.diagram_type, DiagramType::Class);
+
+        let mut ids: Vec<&str> = result.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            vec!["C0", "C1"],
+            "operator {operator:?} produced node set {ids:?}; a third id means the operator was \
+             mis-split and part of it leaked into an endpoint (bd-92b6)"
+        );
+        assert_eq!(
+            result.ir.edges.len(),
+            1,
+            "operator {operator:?} should yield exactly one relationship"
+        );
+        assert_eq!(
+            result.ir.edges[0].arrow, expected_arrow,
+            "operator {operator:?} lost its UML relationship kind"
+        );
+    }
+}
+
+/// bd-4isi: class members were silently dropped from the rendered SVG. The renderer walks each member
+/// row against the node's height and `break`s on the first row that falls outside it, while node sizing
+/// measured only the class name — so every method vanished, and fields vanished too once a larger
+/// diagram shrank the boxes. The head-to-head equivalence gate caught it as 100/500 divergent diagrams.
+///
+/// Sizes are swept because the original defect was size-dependent: a 2-class diagram rendered its
+/// fields while a 50-class one did not, so a single small case would have passed against the bug.
+#[test]
+fn class_members_survive_rendering_at_every_diagram_size() {
+    for class_count in [2_usize, 10, 50] {
+        let mut source = String::from("classDiagram\n");
+        for i in 0..class_count {
+            source.push_str(&format!(
+                "  class C{i} {{\n    +int field{i}\n    +method{i}() bool\n  }}\n"
+            ));
+        }
+        for i in 0..class_count.saturating_sub(1) {
+            source.push_str(&format!("  C{i} <|-- C{}\n", i + 1));
+        }
+
+        let result = parse(&source);
+        assert_eq!(result.ir.diagram_type, DiagramType::Class);
+        let svg = render_svg(&result.ir);
+
+        for i in 0..class_count {
+            assert!(
+                svg.contains(&format!("field{i}")),
+                "class_count={class_count}: field{i} missing from rendered SVG \
+                 (node box too short for its compartment stack — see bd-4isi)"
+            );
+            assert!(
+                svg.contains(&format!("method{i}")),
+                "class_count={class_count}: method{i} missing from rendered SVG \
+                 (node box too short for its compartment stack — see bd-4isi)"
+            );
+        }
+    }
+}
+
 #[test]
 fn e2e_pipeline_state() {
     assert_pipeline_roundtrip(

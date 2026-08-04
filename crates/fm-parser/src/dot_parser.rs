@@ -1,25 +1,61 @@
+use std::{borrow::Cow, iter::Peekable, str::CharIndices};
+
 use fm_core::{ArrowType, DiagramType, NodeShape, Span};
+use memchr::memchr2;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{DetectionMethod, ParseResult, ir_builder::IrBuilder};
 
 #[must_use]
 pub fn looks_like_dot(input: &str) -> bool {
-    let cleaned = strip_all_comments(input);
-    if dot_header_kind(&cleaned).is_none() {
+    // DOT graphs are brace-delimited, so an input with no braces cannot be DOT. Bail
+    // before `strip_all_comments`, which collects the whole input into a `Vec<char>` and
+    // rescans it — wasteful on every parse of the common Mermaid flowchart (no braces).
+    // Output-identical: comment stripping only removes characters, so a brace in the
+    // cleaned text implies a brace in the raw input.
+    let bytes = input.as_bytes();
+    if !bytes.contains(&b'{') || !bytes.contains(&b'}') {
+        return false;
+    }
+    // Every DOT header is `graph` / `digraph` / `strict [di]graph` — all contain "graph", and DOT
+    // keywords are case-insensitive (`dot_header_kind` lowercases the first line). So a real DOT file
+    // ALWAYS contains "graph" somewhere in its raw text. Class/state diagrams have `{ }` braces but no
+    // `graph` keyword, so this cheap substring pre-guard short-circuits the expensive
+    // `strip_all_comments` (whole-input `Vec<char>` collect + rescan) that dominated their detection.
+    // Output-identical: comment stripping never introduces a `graph` substring that wasn't there.
+    if !contains_ignore_ascii_case(bytes, b"graph") {
+        return false;
+    }
+    let cleaned = strip_all_comments_cow(input);
+    if dot_header_kind(cleaned.as_ref()).is_none() {
         return false;
     }
     cleaned.contains('{') && cleaned.contains('}')
 }
 
+/// Case-insensitive ASCII substring test (`needle` is a short ASCII literal). Scans byte windows,
+/// short-circuiting on the first match; each window compare rejects on the first differing byte.
+fn contains_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
 #[must_use]
 pub fn parse_dot(input: &str) -> ParseResult {
     let mut builder = IrBuilder::new(DiagramType::Flowchart);
-    let directed = is_directed_graph(input);
-    let cleaned = strip_all_comments(input);
-    let body = extract_body(&cleaned);
-    let expanded_groups = expand_edge_groups(body);
-    let normalized_body = normalize_dot_body(&expanded_groups);
+    let cleaned = strip_all_comments_cow(input);
+    let cleaned = cleaned.as_ref();
+    let directed = is_directed_graph_cleaned(cleaned);
+    let body = extract_body(cleaned);
+    let normalized_body_storage;
+    let normalized_body = if dot_body_needs_normalization(body) {
+        let expanded_groups = expand_edge_groups(body);
+        normalized_body_storage = normalize_dot_body(&expanded_groups);
+        normalized_body_storage.as_str()
+    } else {
+        body
+    };
     let mut active_clusters: Vec<usize> = Vec::new();
     let mut active_subgraphs: Vec<usize> = Vec::new();
 
@@ -126,7 +162,14 @@ pub fn parse_dot(input: &str) -> ParseResult {
     builder.finish(0.95, DetectionMethod::DotFormat)
 }
 
-fn strip_all_comments(input: &str) -> String {
+fn strip_all_comments_cow(input: &str) -> Cow<'_, str> {
+    if memchr2(b'/', b'#', input.as_bytes()).is_none() {
+        return Cow::Borrowed(input);
+    }
+    Cow::Owned(strip_all_comments_slow(input))
+}
+
+fn strip_all_comments_slow(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut in_quote: Option<char> = None;
     let mut escaped = false;
@@ -331,19 +374,19 @@ fn parse_dot_edge_statement(
 }
 
 fn find_edge_operator(statement: &str) -> Option<&'static str> {
-    let mut in_quote: Option<char> = None;
+    let mut in_quote: Option<u8> = None;
     let mut escaped = false;
     let mut html_depth = 0_usize;
 
-    let chars: Vec<char> = statement.chars().collect();
+    let bytes = statement.as_bytes();
     let mut i = 0;
-    while i + 1 < chars.len() {
-        let c = chars[i];
+    while i + 1 < bytes.len() {
+        let c = bytes[i];
 
         if let Some(q) = in_quote {
             if escaped {
                 escaped = false;
-            } else if c == '\\' {
+            } else if c == b'\\' {
                 escaped = true;
             } else if c == q {
                 in_quote = None;
@@ -352,27 +395,27 @@ fn find_edge_operator(statement: &str) -> Option<&'static str> {
             continue;
         }
 
-        if c == '"' || c == '\'' {
+        if c == b'"' || c == b'\'' {
             in_quote = Some(c);
             i += 1;
             continue;
         }
 
-        if c == '<' {
+        if c == b'<' {
             html_depth = html_depth.saturating_add(1);
             i += 1;
             continue;
         }
-        if c == '>' {
+        if c == b'>' {
             html_depth = html_depth.saturating_sub(1);
             i += 1;
             continue;
         }
 
-        if html_depth == 0 && c == '-' {
-            match chars[i + 1] {
-                '>' => return Some("->"),
-                '-' => return Some("--"),
+        if html_depth == 0 && c == b'-' {
+            match bytes[i + 1] {
+                b'>' => return Some("->"),
+                b'-' => return Some("--"),
                 _ => {}
             }
         }
@@ -438,101 +481,155 @@ fn parse_dot_node_fragment(raw: &str) -> Option<DotNode> {
         return None;
     }
 
-    let label = attrs.and_then(parse_dot_label);
-    let shape = attrs.and_then(parse_dot_shape).unwrap_or(NodeShape::Rect);
+    let (label, shape) = attrs.map_or((None, NodeShape::Rect), parse_dot_node_attributes);
 
     Some(DotNode { id, label, shape })
 }
 
-fn extract_dot_attribute_raw(attributes: &str, key: &str) -> Option<String> {
-    let lower_key = key.to_ascii_lowercase();
-    let mut chars = attributes.chars().peekable();
+struct DotAttributeIter<'a> {
+    attributes: &'a str,
+    chars: Peekable<CharIndices<'a>>,
+}
 
-    while let Some(ch) = chars.next() {
-        if ch.is_whitespace() || ch == '[' || ch == ']' || ch == ',' {
-            continue;
+impl<'a> DotAttributeIter<'a> {
+    fn new(attributes: &'a str) -> Self {
+        Self {
+            attributes,
+            chars: attributes.char_indices().peekable(),
         }
+    }
+}
 
-        let mut current_key = String::new();
-        current_key.push(ch);
-        while let Some(&c) = chars.peek() {
-            if c == '=' || c.is_whitespace() || c == '[' || c == ']' || c == ',' {
-                break;
+impl<'a> Iterator for DotAttributeIter<'a> {
+    type Item = (&'a str, Cow<'a, str>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let attributes = self.attributes;
+
+        loop {
+            let (key_start, ch) = self.chars.next()?;
+            if ch.is_whitespace() || ch == '[' || ch == ']' || ch == ',' {
+                continue;
             }
-            current_key.push(c);
-            chars.next();
-        }
 
-        while let Some(&c) = chars.peek() {
-            if c.is_whitespace() {
-                chars.next();
-            } else {
-                break;
+            let mut key_end = attributes.len();
+            while let Some(&(idx, c)) = self.chars.peek() {
+                if c == '=' || c.is_whitespace() || c == '[' || c == ']' || c == ',' {
+                    key_end = idx;
+                    break;
+                }
+                self.chars.next();
             }
-        }
+            let current_key = &attributes[key_start..key_end];
 
-        let mut has_eq = false;
-        if chars.peek() == Some(&'=') {
-            has_eq = true;
-            chars.next();
-            while let Some(&c) = chars.peek() {
+            while let Some(&(_, c)) = self.chars.peek() {
                 if c.is_whitespace() {
-                    chars.next();
+                    self.chars.next();
                 } else {
                     break;
                 }
             }
-        }
 
-        let mut current_val = String::new();
-        if has_eq && let Some(&c) = chars.peek() {
-            if c == '"' {
-                chars.next();
-                let mut escaped = false;
-                for vc in chars.by_ref() {
-                    if escaped {
-                        current_val.push(vc);
-                        escaped = false;
-                    } else if vc == '\\' {
-                        escaped = true;
-                        current_val.push(vc);
-                    } else if vc == '"' {
-                        break;
+            let mut has_eq = false;
+            if let Some(&(_, '=')) = self.chars.peek() {
+                has_eq = true;
+                self.chars.next();
+                while let Some(&(_, c)) = self.chars.peek() {
+                    if c.is_whitespace() {
+                        self.chars.next();
                     } else {
-                        current_val.push(vc);
-                    }
-                }
-                current_val = format!("\"{current_val}\"");
-            } else {
-                let mut html_depth = 0;
-                while let Some(&vc) = chars.peek() {
-                    if vc == '<' {
-                        html_depth += 1;
-                    } else if vc == '>' && html_depth > 0 {
-                        html_depth -= 1;
-                    }
-
-                    if html_depth == 0 && (vc.is_whitespace() || vc == ',' || vc == ']') {
                         break;
                     }
-                    current_val.push(vc);
-                    chars.next();
                 }
             }
-        }
 
-        if current_key.eq_ignore_ascii_case(&lower_key) {
-            return Some(current_val);
+            let mut current_val: Cow<'_, str> = Cow::Borrowed("");
+            if has_eq && let Some(&(val_start, c)) = self.chars.peek() {
+                if c == '"' {
+                    self.chars.next();
+                    let mut escaped = false;
+                    let mut close_idx = None;
+                    while let Some(&(idx, vc)) = self.chars.peek() {
+                        if escaped {
+                            escaped = false;
+                            self.chars.next();
+                        } else if vc == '\\' {
+                            escaped = true;
+                            self.chars.next();
+                        } else if vc == '"' {
+                            close_idx = Some(idx);
+                            self.chars.next();
+                            break;
+                        } else {
+                            self.chars.next();
+                        }
+                    }
+                    current_val = match close_idx {
+                        Some(ci) => Cow::Borrowed(&attributes[val_start..ci + 1]),
+                        None => Cow::Owned(format!("{}\"", &attributes[val_start..])),
+                    };
+                } else {
+                    let mut html_depth = 0;
+                    let mut val_end = attributes.len();
+                    while let Some(&(idx, vc)) = self.chars.peek() {
+                        if vc == '<' {
+                            html_depth += 1;
+                        } else if vc == '>' && html_depth > 0 {
+                            html_depth -= 1;
+                        }
+
+                        if html_depth == 0 && (vc.is_whitespace() || vc == ',' || vc == ']') {
+                            val_end = idx;
+                            break;
+                        }
+                        self.chars.next();
+                    }
+                    current_val = Cow::Borrowed(&attributes[val_start..val_end]);
+                }
+            }
+
+            return Some((current_key, current_val));
         }
     }
-    None
 }
 
-/// Extract `shape=...` from DOT attribute list and map to `NodeShape`.
-fn parse_dot_shape(attributes: &str) -> Option<NodeShape> {
-    let value = extract_dot_attribute_raw(attributes, "shape")?;
+fn parse_dot_node_attributes(attributes: &str) -> (Option<String>, NodeShape) {
+    let mut label_value = None;
+    let mut shape_value = None;
+
+    for (key, value) in DotAttributeIter::new(attributes) {
+        if label_value.is_none() && key.eq_ignore_ascii_case("label") {
+            label_value = Some(value);
+        } else if shape_value.is_none() && key.eq_ignore_ascii_case("shape") {
+            shape_value = Some(value);
+        }
+        if label_value.is_some() && shape_value.is_some() {
+            break;
+        }
+    }
+
+    let label = label_value.as_deref().and_then(parse_dot_label_value);
+    let shape = shape_value
+        .as_deref()
+        .and_then(parse_dot_shape_value)
+        .unwrap_or(NodeShape::Rect);
+    (label, shape)
+}
+
+fn parse_dot_shape_value(value: &str) -> Option<NodeShape> {
     let shape_name = value.trim().trim_matches('"').to_ascii_lowercase();
     dot_shape_to_node_shape(&shape_name)
+}
+
+fn extract_dot_attribute_raw<'a>(attributes: &'a str, key: &str) -> Option<Cow<'a, str>> {
+    DotAttributeIter::new(attributes)
+        .find_map(|(current_key, value)| current_key.eq_ignore_ascii_case(key).then_some(value))
+}
+
+#[cfg(test)]
+fn parse_dot_shape(attributes: &str) -> Option<NodeShape> {
+    let value = extract_dot_attribute_raw(attributes, "shape")?;
+    parse_dot_shape_value(value.as_ref())
 }
 
 /// Map DOT shape names to frankenmermaid `NodeShape`.
@@ -618,8 +715,7 @@ fn split_endpoint_and_attrs(fragment: &str) -> (&str, Option<&str>) {
     (endpoint, Some(attrs))
 }
 
-fn parse_dot_label(attributes: &str) -> Option<String> {
-    let value = extract_dot_attribute_raw(attributes, "label")?;
+fn parse_dot_label_value(value: &str) -> Option<String> {
     let value = value.trim();
 
     if let Some(quoted) = value.strip_prefix('"') {
@@ -637,6 +733,23 @@ fn parse_dot_label(attributes: &str) -> Option<String> {
     let raw_label = value.trim_matches('"');
     let decoded_label = decode_escapes(raw_label);
     (!decoded_label.is_empty()).then_some(decoded_label)
+}
+
+fn parse_dot_label(attributes: &str) -> Option<String> {
+    let value = extract_dot_attribute_raw(attributes, "label")?;
+    parse_dot_label_value(value.as_ref())
+}
+
+#[cfg(test)]
+fn parse_dot_node_attributes_sequential(attributes: &str) -> (Option<String>, NodeShape) {
+    let label = parse_dot_label(attributes);
+    let shape = if contains_ignore_ascii_case(attributes.as_bytes(), b"shape") {
+        parse_dot_shape(attributes)
+    } else {
+        None
+    }
+    .unwrap_or(NodeShape::Rect);
+    (label, shape)
 }
 
 fn find_unescaped_quote_end(input: &str) -> Option<usize> {
@@ -680,6 +793,21 @@ fn normalize_identifier(raw: &str) -> String {
         return String::new();
     }
 
+    // Fast path (parity with the canonical `lib.rs::normalize_identifier`): an identifier already made
+    // up entirely of the bytes the loop below keeps verbatim (ASCII alphanumerics + `_ - . /`) with no
+    // trailing `_` (so `trim_end_matches('_')` is a no-op) normalizes to ITSELF — the overwhelmingly
+    // common case for generated/most DOT node ids. Return one owned copy and skip the char-by-char
+    // rebuild. Byte-identical: the loop pushes each such char unchanged and the trim/fallback leave it
+    // as-is; a non-ASCII byte fails `is_ascii_alphanumeric`, correctly deferring to the slow path.
+    let cleaned_bytes = cleaned.as_bytes();
+    if cleaned_bytes[cleaned_bytes.len() - 1] != b'_'
+        && cleaned_bytes
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/'))
+    {
+        return cleaned.to_owned();
+    }
+
     let mut out = String::with_capacity(cleaned.len());
     for ch in cleaned.chars() {
         if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/') {
@@ -699,7 +827,13 @@ fn normalize_identifier(raw: &str) -> String {
         }
     }
 
-    let mut result = out.trim_end_matches('_').to_string();
+    // Drop trailing `_` in place instead of `out.trim_end_matches('_').to_string()`, which
+    // allocates a second String and copies the whole id. `_` is single-byte ASCII, so the trimmed
+    // byte length is a valid truncation boundary — byte-identical, and a no-op when there is no
+    // trailing `_` (the common case for well-formed DOT ids), reusing `out`'s allocation.
+    let trimmed_len = out.trim_end_matches('_').len();
+    out.truncate(trimmed_len);
+    let mut result = out;
     if result.is_empty() {
         let mut fallback = String::with_capacity(cleaned.len());
         for grapheme in cleaned.graphemes(true) {
@@ -729,13 +863,12 @@ fn fnv1a_hash(bytes: &[u8]) -> u64 {
     hash
 }
 
-fn is_directed_graph(input: &str) -> bool {
-    let cleaned = strip_all_comments(input);
-    if let Some(is_directed) = dot_header_kind(&cleaned) {
+fn is_directed_graph_cleaned(cleaned_input: &str) -> bool {
+    if let Some(is_directed) = dot_header_kind(cleaned_input) {
         return is_directed;
     }
 
-    let body = extract_body(&cleaned);
+    let body = extract_body(cleaned_input);
     contains_directed_edge_operator(body)
 }
 
@@ -865,6 +998,10 @@ fn parse_subgraph_start(
     }
     let title = clean_optional(body);
     Some((key, title, opens_scope))
+}
+
+fn dot_body_needs_normalization(body: &str) -> bool {
+    memchr2(b'{', b'}', body.as_bytes()).is_some()
 }
 
 fn normalize_dot_body(body: &str) -> String {
@@ -1032,6 +1169,15 @@ fn clean_optional(raw: &str) -> Option<String> {
 }
 
 fn decode_escapes(raw: &str) -> String {
+    // Fast path: no backslash means no escape sequence, so the loop below pushes every char unchanged and
+    // returns `raw` verbatim — replace the char-by-char rebuild with one memcpy. Byte-identical: without a
+    // `\`, `escaped` never flips, so every char takes the `else { output.push(ch) }` branch and the trailing
+    // `if escaped` is false. `\` is single-byte ASCII (never a UTF-8 continuation byte), so the byte scan is
+    // correct. Called on every DOT node/edge label; the overwhelming majority carry no escapes.
+    if !raw.as_bytes().contains(&b'\\') {
+        return raw.to_owned();
+    }
+
     let mut output = String::with_capacity(raw.len());
     let mut escaped = false;
 
@@ -1083,49 +1229,65 @@ fn strip_html_tags(raw: &str) -> String {
 fn split_dot_by<'a>(line: &'a str, separator: &str) -> Vec<&'a str> {
     let mut parts = Vec::new();
     let mut current_start = 0;
-    let mut in_quote: Option<char> = None;
+    let mut in_quote: Option<u8> = None;
     let mut escaped = false;
     let mut html_depth = 0_usize;
 
-    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let bytes = line.as_bytes();
+    let separator_bytes = separator.as_bytes();
+    let separator_len = separator_bytes.len();
     let mut i = 0;
 
-    while i < chars.len() {
-        let (byte_idx, c) = chars[i];
+    while i < bytes.len() {
+        let c = bytes[i];
 
         if let Some(quote_char) = in_quote {
             if escaped {
                 escaped = false;
-            } else if c == '\\' {
+            } else if c == b'\\' {
                 escaped = true;
             } else if c == quote_char {
                 in_quote = None;
             }
         } else {
-            if c == '"' || c == '\'' {
+            if c == b'"' || c == b'\'' {
                 in_quote = Some(c);
-            } else if c == '<' {
+            } else if c == b'<' {
                 html_depth = html_depth.saturating_add(1);
-            } else if c == '>' {
+            } else if c == b'>' {
                 html_depth = html_depth.saturating_sub(1);
-            } else if html_depth == 0 && line[byte_idx..].starts_with(separator) {
-                parts.push(line[current_start..byte_idx].trim());
-                current_start = byte_idx + separator.len();
-                let sep_chars = separator.chars().count();
-                i += sep_chars.saturating_sub(1);
+            } else if html_depth == 0 && bytes[i..].starts_with(separator_bytes) {
+                // Skip empty (post-trim) parts at push time rather than materializing them and
+                // then dropping them with `into_iter().filter().collect()`, which allocated a
+                // whole second `Vec`. Byte-identical: same non-empty parts in the same order.
+                let part = line[current_start..i].trim();
+                if !part.is_empty() {
+                    parts.push(part);
+                }
+                current_start = i + separator_len;
+                i = current_start;
+                continue;
             }
         }
         i += 1;
     }
 
     if current_start < line.len() {
-        parts.push(line[current_start..].trim());
+        let part = line[current_start..].trim();
+        if !part.is_empty() {
+            parts.push(part);
+        }
     }
-    parts.into_iter().filter(|s| !s.is_empty()).collect()
+    parts
 }
 
 fn span_for(line_number: usize, line: &str) -> Span {
-    Span::at_line(line_number, line.chars().count())
+    let width = if line.is_ascii() {
+        line.len()
+    } else {
+        line.chars().count()
+    };
+    Span::at_line(line_number, width)
 }
 
 #[cfg(test)]
@@ -1426,14 +1588,35 @@ fn dot_compass_points_stripped() {
 fn extract_attribute_with_spaces() {
     let attr = "shape = box";
     assert_eq!(
-        extract_dot_attribute_raw(attr, "shape"),
-        Some("box".to_string())
+        extract_dot_attribute_raw(attr, "shape").as_deref(),
+        Some("box")
     );
     let attr2 = "shape= box";
     assert_eq!(
-        extract_dot_attribute_raw(attr2, "shape"),
-        Some("box".to_string())
+        extract_dot_attribute_raw(attr2, "shape").as_deref(),
+        Some("box")
     );
+}
+
+#[test]
+fn dot_node_attribute_single_pass_matches_sequential_reference() {
+    for attributes in [
+        r#"label="Node", shape=diamond"#,
+        r#"SHAPE = "circle", color=red, LABEL = <b>Alpha</b>"#,
+        r#"color=red, label="Line\nBreak", style=filled, shape=roundedbox"#,
+        r#"label="", xlabel="shape", myshape=star"#,
+        r#"shape=unknown, shape=diamond, label="first", label="second""#,
+        r#"color=red, label="unterminated"#,
+        r#"tooltip="shape=diamond", label="Tooltip only""#,
+        r#"shape=hexagon"#,
+        "",
+    ] {
+        assert_eq!(
+            parse_dot_node_attributes(attributes),
+            parse_dot_node_attributes_sequential(attributes),
+            "attribute list: {attributes:?}"
+        );
+    }
 }
 
 #[test]

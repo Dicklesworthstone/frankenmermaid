@@ -3,7 +3,10 @@
 //! Draws diagrams to Canvas2D contexts using computed layouts.
 
 use crate::context::{Canvas2dContext, LineCap, LineJoin, TextAlign, TextBaseline};
-use crate::shapes::{draw_arrowhead, draw_circle_marker, draw_cross_marker, draw_shape};
+use crate::shapes::{
+    draw_arrowhead, draw_circle_marker, draw_cross_marker, draw_diamond_marker,
+    draw_open_triangle_marker, draw_shape,
+};
 use crate::viewport::{Viewport, fit_to_viewport};
 use fm_core::{ArrowType, DiagramType, MermaidDiagramIr, NodeShape};
 use fm_layout::{
@@ -104,11 +107,43 @@ pub struct Canvas2dRenderer {
     draw_calls: usize,
 }
 
+const DENSE_SOURCE_INDEX_LIMIT: usize = 65_536;
+const LEGACY_DOTTED_EDGE_DASH: [f64; 2] = [5.0, 5.0];
+
+#[derive(Debug, Default)]
+struct SourceIndexSet {
+    words: Vec<u64>,
+    sparse: BTreeSet<usize>,
+    len: usize,
+}
+
+impl SourceIndexSet {
+    fn insert(&mut self, index: usize) {
+        if index < DENSE_SOURCE_INDEX_LIMIT {
+            let word_index = index / u64::BITS as usize;
+            if word_index >= self.words.len() {
+                self.words.resize(word_index + 1, 0);
+            }
+            let mask = 1_u64 << (index % u64::BITS as usize);
+            if self.words[word_index] & mask == 0 {
+                self.words[word_index] |= mask;
+                self.len += 1;
+            }
+        } else if self.sparse.insert(index) {
+            self.len += 1;
+        }
+    }
+
+    const fn len(&self) -> usize {
+        self.len
+    }
+}
+
 #[derive(Debug, Default)]
 struct SceneRenderStats {
-    node_sources: BTreeSet<usize>,
-    edge_sources: BTreeSet<usize>,
-    cluster_sources: BTreeSet<usize>,
+    node_sources: SourceIndexSet,
+    edge_sources: SourceIndexSet,
+    cluster_sources: SourceIndexSet,
     labels_drawn: usize,
 }
 
@@ -442,10 +477,19 @@ impl Canvas2dRenderer {
         offset_x: f64,
         offset_y: f64,
     ) {
-        let stroke_color: String = path.stroke.as_ref().map_or_else(
-            || self.config.edge_stroke.clone(),
-            |stroke| stroke.color.clone(),
-        );
+        // Most scene paths have no markers. Avoid cloning a color before discovering
+        // there is nothing to draw, and borrow the path-owned color when markers exist.
+        if path.marker_start == MarkerKind::None && path.marker_end == MarkerKind::None {
+            return;
+        }
+
+        let fallback_color;
+        let stroke_color = if let Some(stroke) = &path.stroke {
+            stroke.color.as_str()
+        } else {
+            fallback_color = self.config.edge_stroke.clone();
+            fallback_color.as_str()
+        };
 
         if path.marker_start != MarkerKind::None
             && let Some((x, y, angle)) = path_marker_start_geometry(&path.commands)
@@ -456,7 +500,7 @@ impl Canvas2dRenderer {
                 x + offset_x,
                 y + offset_y,
                 angle,
-                &stroke_color,
+                stroke_color,
             );
         }
 
@@ -469,7 +513,7 @@ impl Canvas2dRenderer {
                 x + offset_x,
                 y + offset_y,
                 angle,
-                &stroke_color,
+                stroke_color,
             );
         }
     }
@@ -483,29 +527,15 @@ impl Canvas2dRenderer {
         angle: f64,
         stroke_color: &str,
     ) {
-        match marker {
-            MarkerKind::None => {}
-            MarkerKind::Circle => {
-                draw_circle_marker(ctx, x, y, 4.0, &self.config.node_fill, stroke_color);
-                self.draw_calls += 1;
-            }
-            MarkerKind::Cross => {
-                draw_cross_marker(ctx, x, y, 8.0, stroke_color);
-                self.draw_calls += 2;
-            }
-            MarkerKind::Arrow
-            | MarkerKind::ThickArrow
-            | MarkerKind::DottedArrow
-            | MarkerKind::Diamond
-            | MarkerKind::Open
-            | MarkerKind::HalfArrowTop
-            | MarkerKind::HalfArrowBottom
-            | MarkerKind::StickArrowTop
-            | MarkerKind::StickArrowBottom => {
-                draw_arrowhead(ctx, x, y, angle, 10.0, stroke_color);
-                self.draw_calls += 1;
-            }
-        }
+        self.draw_calls += draw_marker_primitive(
+            ctx,
+            marker,
+            x,
+            y,
+            angle,
+            &self.config.node_fill,
+            stroke_color,
+        );
     }
 
     fn render_text_item<C: Canvas2dContext>(
@@ -572,12 +602,7 @@ impl Canvas2dRenderer {
         if stroke.dash_array.is_empty() {
             ctx.set_line_dash(&[]);
         } else {
-            let dash: Vec<f64> = stroke
-                .dash_array
-                .iter()
-                .map(|value| f64::from(*value))
-                .collect();
-            ctx.set_line_dash(&dash);
+            with_canvas_dash_f64(&stroke.dash_array, |dash| ctx.set_line_dash(dash));
         }
         ctx.set_line_cap(match stroke.line_cap {
             IrLineCap::Butt => LineCap::Butt,
@@ -649,6 +674,12 @@ impl Canvas2dRenderer {
     ) -> usize {
         let mut count = 0;
 
+        // The cluster label font is a pure function of `config` (invariant across clusters), so format it
+        // once and reuse it — the prior canvas font-hoist campaign missed this site. Lazy (like the
+        // `standard_label_font` site) so a cluster-free diagram never formats it. Byte-identical to the
+        // per-cluster `format!("{}px {}", font_size*0.9, font_family)`.
+        let mut cluster_label_font: Option<String> = None;
+
         for cluster_box in &layout.clusters {
             let x = f64::from(cluster_box.bounds.x) + offset_x;
             let y = f64::from(cluster_box.bounds.y) + offset_y;
@@ -688,11 +719,13 @@ impl Canvas2dRenderer {
 
             if let Some(title_text) = title_text {
                 ctx.set_fill_style(&self.config.label_color);
-                ctx.set_font(&format!(
-                    "{}px {}",
-                    self.config.font_size * 0.9,
-                    self.config.font_family
-                ));
+                ctx.set_font(cluster_label_font.get_or_insert_with(|| {
+                    format!(
+                        "{}px {}",
+                        self.config.font_size * 0.9,
+                        self.config.font_family
+                    )
+                }));
                 ctx.set_text_align(TextAlign::Left);
                 ctx.set_text_baseline(TextBaseline::Top);
                 ctx.fill_text(title_text, x + 8.0, y + 4.0);
@@ -714,6 +747,10 @@ impl Canvas2dRenderer {
         offset_y: f64,
     ) {
         use fm_layout::LayoutBandKind;
+        // Invariant section-label font, formatted once and reused across bands (lazy so a band-free
+        // diagram never formats it). Byte-identical to the per-band
+        // `format!("bold {}px {}", font_size*0.85, font_family)`.
+        let mut section_label_font: Option<String> = None;
         for band in &layout.extensions.bands {
             let x = f64::from(band.bounds.x) + offset_x;
             let y = f64::from(band.bounds.y) + offset_y;
@@ -740,11 +777,13 @@ impl Canvas2dRenderer {
                     ctx.fill_rect(x, y, w, h);
                     if !band.label.is_empty() {
                         ctx.set_fill_style(&self.config.label_color);
-                        ctx.set_font(&format!(
-                            "bold {}px {}",
-                            self.config.font_size * 0.85,
-                            self.config.font_family
-                        ));
+                        ctx.set_font(section_label_font.get_or_insert_with(|| {
+                            format!(
+                                "bold {}px {}",
+                                self.config.font_size * 0.85,
+                                self.config.font_family
+                            )
+                        }));
                         ctx.set_text_align(TextAlign::Left);
                         ctx.set_text_baseline(TextBaseline::Top);
                         ctx.fill_text(&band.label, x + 4.0, y + 2.0);
@@ -799,6 +838,8 @@ impl Canvas2dRenderer {
         offset_x: f64,
         offset_y: f64,
     ) {
+        let mut fragment_font = None;
+
         for fragment in &layout.extensions.sequence_fragments {
             let x = f64::from(fragment.bounds.x) + offset_x;
             let y = f64::from(fragment.bounds.y) + offset_y;
@@ -820,11 +861,9 @@ impl Canvas2dRenderer {
             if fragment.label.is_empty() {
                 let label = fragment_kind_label(fragment.kind);
                 ctx.set_fill_style(&self.config.label_color);
-                ctx.set_font(&format!(
-                    "bold {}px {}",
-                    self.config.font_size * 0.8,
-                    self.config.font_family
-                ));
+                let fragment_font =
+                    fragment_font.get_or_insert_with(|| sequence_fragment_font_css(&self.config));
+                ctx.set_font(fragment_font.as_str());
                 ctx.set_text_align(TextAlign::Left);
                 ctx.set_text_baseline(TextBaseline::Top);
                 ctx.fill_text(label, x + 6.0, y + 4.0);
@@ -835,11 +874,9 @@ impl Canvas2dRenderer {
                     fragment.label
                 );
                 ctx.set_fill_style(&self.config.label_color);
-                ctx.set_font(&format!(
-                    "bold {}px {}",
-                    self.config.font_size * 0.8,
-                    self.config.font_family
-                ));
+                let fragment_font =
+                    fragment_font.get_or_insert_with(|| sequence_fragment_font_css(&self.config));
+                ctx.set_font(fragment_font.as_str());
                 ctx.set_text_align(TextAlign::Left);
                 ctx.set_text_baseline(TextBaseline::Top);
                 ctx.fill_text(&label, x + 6.0, y + 4.0);
@@ -857,6 +894,8 @@ impl Canvas2dRenderer {
         offset_y: f64,
         labels_drawn: &mut usize,
     ) {
+        let mut note_font = None;
+
         for note in &layout.extensions.sequence_notes {
             let x = f64::from(note.bounds.x) + offset_x;
             let y = f64::from(note.bounds.y) + offset_y;
@@ -873,11 +912,9 @@ impl Canvas2dRenderer {
             // Note text.
             if !note.text.is_empty() {
                 ctx.set_fill_style(&self.config.label_color);
-                ctx.set_font(&format!(
-                    "{}px {}",
-                    self.config.font_size * 0.85,
-                    self.config.font_family
-                ));
+                let note_font =
+                    note_font.get_or_insert_with(|| secondary_label_font_css(&self.config));
+                ctx.set_font(note_font.as_str());
                 ctx.set_text_align(TextAlign::Center);
                 ctx.set_text_baseline(TextBaseline::Middle);
                 ctx.fill_text(&note.text, x + w / 2.0, y + h / 2.0);
@@ -898,45 +935,84 @@ impl Canvas2dRenderer {
         labels_drawn: &mut usize,
     ) -> usize {
         let mut count = 0;
+        let mut edge_label_font = None;
 
         for edge_path in &layout.edges {
             let ir_edge = ir.edges.get(edge_path.edge_index);
             let arrow = ir_edge.map_or(ArrowType::Arrow, |e| e.arrow);
 
-            if edge_path.points.len() < 2 {
+            // Deref the point `SmallVec` to a slice ONCE — the edge draw below indexes it ~12× (path
+            // loop, arrowhead direction, label anchor), and each `edge_path.points[i]` / `.len()` was a
+            // fresh `SmallVec` deref (inline-vs-spilled branch). Byte-identical: same points, same order.
+            let points = edge_path.points.as_slice();
+            if points.len() < 2 {
                 continue;
             }
 
             // Set edge style
-            let (stroke_width, dash_pattern) = match arrow {
-                ArrowType::ThickArrow => (2.5, None),
-                ArrowType::DottedArrow => (1.5, Some(vec![5.0, 5.0])),
-                _ => (self.config.edge_stroke_width, None),
-            };
+            let (stroke_width, dash_pattern) =
+                legacy_edge_stroke(arrow, self.config.edge_stroke_width);
 
             ctx.set_stroke_style(&self.config.edge_stroke);
             ctx.set_line_width(stroke_width);
-            if let Some(pattern) = dash_pattern {
-                ctx.set_line_dash(&pattern);
-            } else {
-                ctx.set_line_dash(&[]);
-            }
+            ctx.set_line_dash(dash_pattern);
 
             // Draw edge path
             ctx.begin_path();
-            let first = &edge_path.points[0];
+            let first = &points[0];
             ctx.move_to(f64::from(first.x) + offset_x, f64::from(first.y) + offset_y);
 
-            for point in edge_path.points.iter().skip(1) {
+            for point in points.iter().skip(1) {
                 ctx.line_to(f64::from(point.x) + offset_x, f64::from(point.y) + offset_y);
             }
             ctx.stroke();
             self.draw_calls += 1;
 
-            // Draw arrowhead at end
-            if edge_path.points.len() >= 2 {
-                let end = &edge_path.points[edge_path.points.len() - 1];
-                let prev = &edge_path.points[edge_path.points.len() - 2];
+            let uml_markers = if edge_path.reversed {
+                None
+            } else {
+                legacy_uml_markers(arrow)
+            };
+            if let Some((marker_start, marker_end)) = uml_markers {
+                let start = &points[0];
+                let next = &points[1];
+                let end = &points[points.len() - 1];
+                let prev = &points[points.len() - 2];
+
+                if marker_start != MarkerKind::None {
+                    let sx = f64::from(start.x) + offset_x;
+                    let sy = f64::from(start.y) + offset_y;
+                    let angle = f64::from(next.y - start.y).atan2(f64::from(next.x - start.x));
+                    let marker_calls = draw_marker_primitive(
+                        ctx,
+                        marker_start,
+                        sx,
+                        sy,
+                        angle,
+                        &self.config.node_fill,
+                        &self.config.edge_stroke,
+                    );
+                    self.draw_calls += marker_calls;
+                }
+
+                if marker_end != MarkerKind::None {
+                    let ex = f64::from(end.x) + offset_x;
+                    let ey = f64::from(end.y) + offset_y;
+                    let angle = f64::from(end.y - prev.y).atan2(f64::from(end.x - prev.x));
+                    let marker_calls = draw_marker_primitive(
+                        ctx,
+                        marker_end,
+                        ex,
+                        ey,
+                        angle,
+                        &self.config.node_fill,
+                        &self.config.edge_stroke,
+                    );
+                    self.draw_calls += marker_calls;
+                }
+            } else {
+                let end = &points[points.len() - 1];
+                let prev = &points[points.len() - 2];
                 let angle = f64::from(end.y - prev.y).atan2(f64::from(end.x - prev.x));
 
                 let ex = f64::from(end.x) + offset_x;
@@ -973,8 +1049,8 @@ impl Canvas2dRenderer {
                         | ArrowType::DoubleThickArrow
                         | ArrowType::DoubleDottedArrow
                 ) {
-                    let start = &edge_path.points[0];
-                    let next = &edge_path.points[1];
+                    let start = &points[0];
+                    let next = &points[1];
                     let start_angle =
                         f64::from(start.y - next.y).atan2(f64::from(start.x - next.x));
                     let sx = f64::from(start.x) + offset_x;
@@ -988,72 +1064,97 @@ impl Canvas2dRenderer {
             // Draw edge label if present
             if let Some(label_id) = ir_edge.and_then(|e| e.label)
                 && let Some(label) = ir.labels.get(label_id.0)
-                && edge_path.points.len() >= 2
+                && points.len() >= 2
             {
                 let label_offset = self.config.font_size * 0.8;
-                let (lx, ly) = if edge_path.points.len() == 4 {
-                    let p1 = &edge_path.points[1];
-                    let p2 = &edge_path.points[2];
+                let (lx, ly) = if points.len() == 4 {
+                    let p1 = &points[1];
+                    let p2 = &points[2];
                     (
                         f64::from(f32::midpoint(p1.x, p2.x)) + offset_x,
                         f64::from(f32::midpoint(p1.y, p2.y)) + offset_y - label_offset,
                     )
-                } else if edge_path.points.len() == 2 {
-                    let p1 = &edge_path.points[0];
-                    let p2 = &edge_path.points[1];
+                } else if points.len() == 2 {
+                    let p1 = &points[0];
+                    let p2 = &points[1];
                     (
                         f64::from(f32::midpoint(p1.x, p2.x)) + offset_x,
                         f64::from(f32::midpoint(p1.y, p2.y)) + offset_y - label_offset,
                     )
                 } else {
-                    let mid_idx = edge_path.points.len() / 2;
-                    let mid = &edge_path.points[mid_idx];
+                    let mid_idx = points.len() / 2;
+                    let mid = &points[mid_idx];
                     (
                         f64::from(mid.x) + offset_x,
                         f64::from(mid.y) + offset_y - label_offset,
                     )
                 };
 
-                let edge_label_font = format!(
-                    "{}px {}",
-                    self.config.font_size * 0.85,
-                    self.config.font_family
-                );
-                ctx.set_font(&edge_label_font);
+                let edge_label_font =
+                    edge_label_font.get_or_insert_with(|| secondary_label_font_css(&self.config));
+                ctx.set_font(edge_label_font.as_str());
 
-                // Background for label
-                let lines: Vec<&str> = label.text.lines().collect();
-                let mut max_text_width = 0.0_f64;
-                for line in &lines {
-                    let text_metrics = ctx.measure_text(line);
-                    max_text_width = max_text_width.max(text_metrics.width);
-                }
-
-                let label_width = max_text_width + 8.0;
                 let line_height = self.config.font_size * 1.2;
-                let total_height = lines.len() as f64 * line_height;
-                let label_height = total_height + 4.0;
 
-                ctx.set_fill_style(&self.config.node_fill);
-                ctx.fill_rect(
-                    lx - label_width / 2.0,
-                    ly - label_height / 2.0,
-                    label_width,
-                    label_height,
-                );
-                self.draw_calls += 1;
+                // The common single-line edge label (`:has`, `-->|x|`, …) draws exactly `label.text` at
+                // `ly`, so measure it directly and skip the `Vec<&str>` collect. Only a genuinely
+                // multi-line label (`\n`) needs the split (it's re-read for max-width + count + per-line
+                // draw). Byte-identical: for a `\n`-free label the sole `lines()` item IS `label.text`,
+                // `total_height == line_height`, and `start_y == ly`.
+                if !label.text.contains('\n') {
+                    let label_width = ctx.measure_text(&label.text).width + 8.0;
+                    let label_height = line_height + 4.0;
 
-                // Label text
-                ctx.set_fill_style(&self.config.label_color);
-                ctx.set_font(&edge_label_font);
-                ctx.set_text_align(TextAlign::Center);
-                ctx.set_text_baseline(TextBaseline::Middle);
+                    ctx.set_fill_style(&self.config.node_fill);
+                    ctx.fill_rect(
+                        lx - label_width / 2.0,
+                        ly - label_height / 2.0,
+                        label_width,
+                        label_height,
+                    );
+                    self.draw_calls += 1;
 
-                let start_y = ly - (total_height / 2.0) + (line_height / 2.0);
-                for (i, line) in lines.iter().enumerate() {
-                    ctx.fill_text(line, lx, start_y + (i as f64) * line_height);
+                    ctx.set_fill_style(&self.config.label_color);
+                    ctx.set_font(edge_label_font.as_str());
+                    ctx.set_text_align(TextAlign::Center);
+                    ctx.set_text_baseline(TextBaseline::Middle);
+                    ctx.fill_text(&label.text, lx, ly);
                     self.draw_calls += 1;
                     *labels_drawn += 1;
+                } else {
+                    // Background for label
+                    let lines: Vec<&str> = label.text.lines().collect();
+                    let mut max_text_width = 0.0_f64;
+                    for line in &lines {
+                        let text_metrics = ctx.measure_text(line);
+                        max_text_width = max_text_width.max(text_metrics.width);
+                    }
+
+                    let label_width = max_text_width + 8.0;
+                    let total_height = lines.len() as f64 * line_height;
+                    let label_height = total_height + 4.0;
+
+                    ctx.set_fill_style(&self.config.node_fill);
+                    ctx.fill_rect(
+                        lx - label_width / 2.0,
+                        ly - label_height / 2.0,
+                        label_width,
+                        label_height,
+                    );
+                    self.draw_calls += 1;
+
+                    // Label text
+                    ctx.set_fill_style(&self.config.label_color);
+                    ctx.set_font(edge_label_font.as_str());
+                    ctx.set_text_align(TextAlign::Center);
+                    ctx.set_text_baseline(TextBaseline::Middle);
+
+                    let start_y = ly - (total_height / 2.0) + (line_height / 2.0);
+                    for (i, line) in lines.iter().enumerate() {
+                        ctx.fill_text(line, lx, start_y + (i as f64) * line_height);
+                        self.draw_calls += 1;
+                        *labels_drawn += 1;
+                    }
                 }
             }
 
@@ -1076,6 +1177,8 @@ impl Canvas2dRenderer {
         labels_drawn: &mut usize,
     ) -> usize {
         let mut count = 0;
+        let mut class_compartment_fonts = None;
+        let mut standard_label_font = None;
 
         for node_box in &layout.nodes {
             let ir_node = ir.nodes.get(node_box.node_index);
@@ -1124,10 +1227,9 @@ impl Canvas2dRenderer {
                     format!("{class_name}<{}>", meta.generics.join(", "))
                 };
 
-                ctx.set_font(&format!(
-                    "bold {}px {}",
-                    self.config.font_size, self.config.font_family
-                ));
+                let class_fonts = class_compartment_fonts
+                    .get_or_insert_with(|| class_compartment_font_css(&self.config));
+                ctx.set_font(class_fonts.0.as_str());
                 ctx.set_text_align(TextAlign::Center);
                 let mut cursor_y = y + line_h;
                 ctx.fill_text(&display_name, x + w / 2.0, cursor_y);
@@ -1144,7 +1246,7 @@ impl Canvas2dRenderer {
                 cursor_y += member_font * 0.5;
 
                 // Attributes.
-                ctx.set_font(&format!("{}px {}", member_font, self.config.font_family));
+                ctx.set_font(class_fonts.1.as_str());
                 ctx.set_text_align(TextAlign::Left);
                 for attr in &meta.attributes {
                     if cursor_y > y + h - line_h * 0.5 {
@@ -1194,19 +1296,22 @@ impl Canvas2dRenderer {
                     let cy = y + h / 2.0;
 
                     ctx.set_fill_style(&self.config.label_color);
-                    ctx.set_font(&format!(
-                        "{}px {}",
-                        self.config.font_size, self.config.font_family
-                    ));
+                    ctx.set_font(
+                        standard_label_font.get_or_insert_with(|| standard_node_font(&self.config)),
+                    );
                     ctx.set_text_align(TextAlign::Center);
                     ctx.set_text_baseline(TextBaseline::Middle);
 
-                    let lines: Vec<&str> = label_text.lines().collect();
-                    if lines.len() <= 1 {
+                    // The overwhelmingly common single-line label draws `label_text` directly and never
+                    // touches the split lines, so only COUNT them (no `Vec<&str>` alloc) to pick the
+                    // branch; materialise the `Vec` only on the rare multi-line path. Byte-identical:
+                    // `lines().count()` equals the old `collect().len()`.
+                    if label_text.lines().count() <= 1 {
                         ctx.fill_text(label_text, cx, cy);
                         self.draw_calls += 1;
                         *labels_drawn += 1;
                     } else {
+                        let lines: Vec<&str> = label_text.lines().collect();
                         let line_height = self.config.font_size * 1.2;
                         let total_height = lines.len() as f64 * line_height;
                         let start_y = cy - (total_height / 2.0) + (line_height / 2.0);
@@ -1263,6 +1368,14 @@ impl Canvas2dRenderer {
 
         let mut angle = -std::f64::consts::FRAC_PI_2;
 
+        // Invariant slice-label font, hoisted out of the per-slice loop (byte-identical to the per-slice
+        // `format!("{}px {}", font_size*0.8, font_family)`).
+        let slice_label_font = format!(
+            "{}px {}",
+            self.config.font_size * 0.8,
+            self.config.font_family
+        );
+
         for (i, slice) in pie_meta.slices.iter().enumerate() {
             let value = f64::from(slice.value.max(0.0));
             let sweep = (value / total) * 2.0 * std::f64::consts::PI;
@@ -1288,11 +1401,7 @@ impl Canvas2dRenderer {
             let label = format!("{}: {pct:.1}%", slice.label);
 
             ctx.set_fill_style(&self.config.label_color);
-            ctx.set_font(&format!(
-                "{}px {}",
-                self.config.font_size * 0.8,
-                self.config.font_family
-            ));
+            ctx.set_font(&slice_label_font);
             ctx.set_text_align(TextAlign::Center);
             ctx.set_text_baseline(TextBaseline::Middle);
             ctx.fill_text(&label, lx, ly);
@@ -1300,6 +1409,56 @@ impl Canvas2dRenderer {
             *labels_drawn += 1;
 
             angle += sweep;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_marker_primitive<C: Canvas2dContext>(
+    ctx: &mut C,
+    marker: MarkerKind,
+    x: f64,
+    y: f64,
+    angle: f64,
+    node_fill: &str,
+    stroke_color: &str,
+) -> usize {
+    match marker {
+        MarkerKind::None => 0,
+        MarkerKind::Circle => {
+            draw_circle_marker(ctx, x, y, 4.0, node_fill, stroke_color);
+            1
+        }
+        MarkerKind::Cross => {
+            draw_cross_marker(ctx, x, y, 8.0, stroke_color);
+            2
+        }
+        MarkerKind::Diamond => {
+            draw_diamond_marker(ctx, x, y, angle, 10.0, Some(stroke_color), stroke_color);
+            1
+        }
+        MarkerKind::DiamondOpen => {
+            draw_diamond_marker(ctx, x, y, angle, 10.0, None, stroke_color);
+            1
+        }
+        MarkerKind::TriangleOpen => {
+            draw_open_triangle_marker(ctx, x, y, angle, 10.0, stroke_color);
+            1
+        }
+        MarkerKind::TriangleOpenStart => {
+            draw_open_triangle_marker(ctx, x, y, angle + std::f64::consts::PI, 10.0, stroke_color);
+            1
+        }
+        MarkerKind::Arrow
+        | MarkerKind::ThickArrow
+        | MarkerKind::DottedArrow
+        | MarkerKind::Open
+        | MarkerKind::HalfArrowTop
+        | MarkerKind::HalfArrowBottom
+        | MarkerKind::StickArrowTop
+        | MarkerKind::StickArrowBottom => {
+            draw_arrowhead(ctx, x, y, angle, 10.0, stroke_color);
+            1
         }
     }
 }
@@ -1357,6 +1516,43 @@ fn path_marker_start_geometry(commands: &[PathCmd]) -> Option<(f64, f64, f64)> {
 }
 
 fn path_marker_end_geometry(commands: &[PathCmd]) -> Option<(f64, f64, f64)> {
+    if matches!(commands.first(), Some(PathCmd::MoveTo { .. }))
+        && let Some((last_command, preceding_commands)) = commands.split_last()
+    {
+        match *last_command {
+            PathCmd::LineTo { x, y } => {
+                let start = match preceding_commands.last().copied() {
+                    Some(
+                        PathCmd::MoveTo { x, y }
+                        | PathCmd::LineTo { x, y }
+                        | PathCmd::QuadTo { x, y, .. }
+                        | PathCmd::CubicTo { x, y, .. },
+                    ) => Some((f64::from(x), f64::from(y))),
+                    Some(PathCmd::Close) | None => None,
+                };
+                if let Some(start) = start {
+                    let end = (f64::from(x), f64::from(y));
+                    return Some((end.0, end.1, angle_between(start, end)));
+                }
+            }
+            PathCmd::QuadTo { cx, cy, x, y } => {
+                let control = (f64::from(cx), f64::from(cy));
+                let end = (f64::from(x), f64::from(y));
+                if points_are_distinct(control, end) {
+                    return Some((end.0, end.1, angle_between(control, end)));
+                }
+            }
+            PathCmd::CubicTo { c2x, c2y, x, y, .. } => {
+                let control = (f64::from(c2x), f64::from(c2y));
+                let end = (f64::from(x), f64::from(y));
+                if points_are_distinct(control, end) {
+                    return Some((end.0, end.1, angle_between(control, end)));
+                }
+            }
+            PathCmd::MoveTo { .. } | PathCmd::Close => {}
+        }
+    }
+
     let mut current = None;
     let mut subpath_start = None;
     let mut last = None;
@@ -1443,6 +1639,37 @@ fn fragment_kind_label(kind: fm_core::FragmentKind) -> &'static str {
     }
 }
 
+#[inline]
+fn legacy_edge_stroke(arrow: ArrowType, default_width: f64) -> (f64, &'static [f64]) {
+    match arrow {
+        ArrowType::ThickArrow => (2.5, &[]),
+        ArrowType::DottedArrow => (1.5, &LEGACY_DOTTED_EDGE_DASH),
+        _ => (default_width, &[]),
+    }
+}
+
+const fn legacy_uml_markers(arrow: ArrowType) -> Option<(MarkerKind, MarkerKind)> {
+    match arrow {
+        ArrowType::Aggregation => Some((MarkerKind::DiamondOpen, MarkerKind::None)),
+        ArrowType::AggregationReverse => Some((MarkerKind::None, MarkerKind::DiamondOpen)),
+        ArrowType::Composition => Some((MarkerKind::Diamond, MarkerKind::None)),
+        ArrowType::CompositionReverse => Some((MarkerKind::None, MarkerKind::Diamond)),
+        ArrowType::Inheritance => Some((MarkerKind::TriangleOpenStart, MarkerKind::None)),
+        ArrowType::InheritanceReverse => Some((MarkerKind::None, MarkerKind::TriangleOpen)),
+        _ => None,
+    }
+}
+
+#[inline]
+fn with_canvas_dash_f64<T>(dash: &[f32], use_dash: impl FnOnce(&[f64]) -> T) -> T {
+    if let [first, second] = dash {
+        use_dash(&[f64::from(*first), f64::from(*second)])
+    } else {
+        let converted: Vec<f64> = dash.iter().copied().map(f64::from).collect();
+        use_dash(&converted)
+    }
+}
+
 fn class_vis_char(vis: fm_core::ClassVisibility) -> char {
     match vis {
         fm_core::ClassVisibility::Public => '+',
@@ -1450,6 +1677,25 @@ fn class_vis_char(vis: fm_core::ClassVisibility) -> char {
         fm_core::ClassVisibility::Protected => '#',
         fm_core::ClassVisibility::Package => '~',
     }
+}
+
+fn standard_node_font(config: &CanvasRenderConfig) -> String {
+    format!("{}px {}", config.font_size, config.font_family)
+}
+
+fn secondary_label_font_css(config: &CanvasRenderConfig) -> String {
+    format!("{}px {}", config.font_size * 0.85, config.font_family)
+}
+
+fn sequence_fragment_font_css(config: &CanvasRenderConfig) -> String {
+    format!("bold {}px {}", config.font_size * 0.8, config.font_family)
+}
+
+fn class_compartment_font_css(config: &CanvasRenderConfig) -> (String, String) {
+    (
+        format!("bold {}px {}", config.font_size, config.font_family),
+        format!("{}px {}", config.font_size * 0.9, config.font_family),
+    )
 }
 
 fn generic_canvas_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
@@ -1462,11 +1708,314 @@ fn generic_canvas_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::context::{DrawOperation, MockCanvas2dContext};
-    use fm_core::DiagramType;
+    use fm_core::{DiagramType, IrEdge, IrEndpoint, IrNode, IrNodeId};
     use fm_layout::{
-        LayoutActivationBar, LayoutExtensions, LayoutRect, LayoutStats, build_render_scene,
-        layout_diagram,
+        LayoutActivationBar, LayoutEdgePath, LayoutExtensions, LayoutRect, LayoutStats,
+        build_render_scene, layout_diagram,
     };
+
+    fn owned_legacy_edge_stroke_reference(
+        arrow: ArrowType,
+        default_width: f64,
+    ) -> (f64, Option<Vec<f64>>) {
+        match arrow {
+            ArrowType::ThickArrow => (2.5, None),
+            ArrowType::DottedArrow => (1.5, Some(vec![5.0, 5.0])),
+            _ => (default_width, None),
+        }
+    }
+
+    fn geometry_bits(geometry: (f64, f64, f64)) -> (u64, u64, u64) {
+        (
+            geometry.0.to_bits(),
+            geometry.1.to_bits(),
+            geometry.2.to_bits(),
+        )
+    }
+
+    fn marker_operations(marker: MarkerKind) -> Vec<DrawOperation> {
+        let mut ctx = MockCanvas2dContext::new(120.0, 40.0);
+        assert_eq!(
+            draw_marker_primitive(&mut ctx, marker, 50.0, 20.0, 0.0, "#ffffff", "#112233",),
+            1
+        );
+        ctx.operations().to_vec()
+    }
+
+    fn legacy_uml_edge_operations(arrow: ArrowType) -> Vec<DrawOperation> {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Class);
+        ir.nodes.push(IrNode {
+            id: "Owner".to_string(),
+            ..Default::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "Part".to_string(),
+            ..Default::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow,
+            ..Default::default()
+        });
+
+        let layout = DiagramLayout {
+            nodes: Vec::new(),
+            clusters: Vec::new(),
+            cycle_clusters: Vec::new(),
+            edges: vec![LayoutEdgePath {
+                edge_index: 0,
+                span: Default::default(),
+                points: [
+                    fm_layout::LayoutPoint { x: 10.0, y: 20.0 },
+                    fm_layout::LayoutPoint { x: 110.0, y: 20.0 },
+                ]
+                .into_iter()
+                .collect(),
+                reversed: false,
+                is_self_loop: false,
+                parallel_offset: 0.0,
+                bundle_count: 1,
+                bundled: false,
+            }],
+            bounds: LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 120.0,
+                height: 40.0,
+            },
+            stats: LayoutStats::default(),
+            extensions: LayoutExtensions::default(),
+            dirty_regions: Vec::new(),
+        };
+
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            ..Default::default()
+        };
+        let mut ctx = MockCanvas2dContext::new(120.0, 40.0);
+        let mut renderer = Canvas2dRenderer::new(config);
+        let mut labels_drawn = 0;
+        assert_eq!(
+            renderer.draw_edges(&layout, &ir, &mut ctx, 0.0, 0.0, &mut labels_drawn),
+            1
+        );
+        ctx.operations().to_vec()
+    }
+
+    #[test]
+    fn canvas_uml_marker_primitives_preserve_geometry_fill_and_orientation() {
+        let composition = marker_operations(MarkerKind::Diamond);
+        assert!(
+            composition
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Fill))
+        );
+        assert!(
+            !composition
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Stroke))
+        );
+        assert_eq!(
+            composition
+                .iter()
+                .filter(|operation| matches!(operation, DrawOperation::LineTo(_, _)))
+                .count(),
+            3
+        );
+        assert!(
+            composition
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::LineTo(x, y)
+                if (*x + 10.0).abs() < 0.001 && y.abs() < 0.001))
+        );
+
+        let aggregation = marker_operations(MarkerKind::DiamondOpen);
+        assert!(
+            !aggregation
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Fill))
+        );
+        assert!(
+            aggregation
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Stroke))
+        );
+        assert_eq!(
+            aggregation
+                .iter()
+                .filter(|operation| matches!(operation, DrawOperation::LineTo(_, _)))
+                .count(),
+            3
+        );
+
+        let inheritance_end = marker_operations(MarkerKind::TriangleOpen);
+        assert!(
+            !inheritance_end
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Fill))
+        );
+        assert!(
+            inheritance_end
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Stroke))
+        );
+        assert_eq!(
+            inheritance_end
+                .iter()
+                .filter(|operation| matches!(operation, DrawOperation::LineTo(_, _)))
+                .count(),
+            2
+        );
+        assert!(
+            inheritance_end
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Rotate(angle)
+                if angle.abs() < f64::EPSILON))
+        );
+
+        let inheritance_start = marker_operations(MarkerKind::TriangleOpenStart);
+        assert!(
+            inheritance_start
+                .iter()
+                .any(|operation| matches!(operation, DrawOperation::Rotate(angle)
+                if (*angle - std::f64::consts::PI).abs() < 0.001))
+        );
+    }
+
+    #[test]
+    fn legacy_canvas_places_uml_markers_on_the_owning_endpoint() {
+        for arrow in [
+            ArrowType::Aggregation,
+            ArrowType::Composition,
+            ArrowType::Inheritance,
+        ] {
+            let operations = legacy_uml_edge_operations(arrow);
+            assert!(operations.iter().any(
+                |operation| matches!(operation, DrawOperation::Translate(x, y)
+                    if (*x - 10.0).abs() < 0.001 && (*y - 20.0).abs() < 0.001)
+            ));
+            assert!(!operations.iter().any(
+                |operation| matches!(operation, DrawOperation::Translate(x, y)
+                    if (*x - 110.0).abs() < 0.001 && (*y - 20.0).abs() < 0.001)
+            ));
+        }
+
+        for arrow in [
+            ArrowType::AggregationReverse,
+            ArrowType::CompositionReverse,
+            ArrowType::InheritanceReverse,
+        ] {
+            let operations = legacy_uml_edge_operations(arrow);
+            assert!(!operations.iter().any(
+                |operation| matches!(operation, DrawOperation::Translate(x, y)
+                    if (*x - 10.0).abs() < 0.001 && (*y - 20.0).abs() < 0.001)
+            ));
+            assert!(operations.iter().any(
+                |operation| matches!(operation, DrawOperation::Translate(x, y)
+                    if (*x - 110.0).abs() < 0.001 && (*y - 20.0).abs() < 0.001)
+            ));
+        }
+    }
+
+    #[test]
+    fn marker_end_geometry_preserves_tail_and_fallback_contracts() {
+        let cubic = [
+            PathCmd::MoveTo { x: 1.0, y: 2.0 },
+            PathCmd::CubicTo {
+                c1x: 2.0,
+                c1y: 3.0,
+                c2x: 4.0,
+                c2y: 5.0,
+                x: 6.0,
+                y: 8.0,
+            },
+            PathCmd::CubicTo {
+                c1x: 7.0,
+                c1y: 9.0,
+                c2x: 10.0,
+                c2y: 11.0,
+                x: 13.0,
+                y: 15.0,
+            },
+        ];
+        assert_eq!(
+            geometry_bits(path_marker_end_geometry(&cubic).expect("cubic geometry")),
+            geometry_bits((13.0, 15.0, angle_between((10.0, 11.0), (13.0, 15.0))))
+        );
+
+        let quad = [
+            PathCmd::MoveTo { x: 1.0, y: 2.0 },
+            PathCmd::QuadTo {
+                cx: 4.0,
+                cy: 5.0,
+                x: 7.0,
+                y: 9.0,
+            },
+        ];
+        assert_eq!(
+            geometry_bits(path_marker_end_geometry(&quad).expect("quadratic geometry")),
+            geometry_bits((7.0, 9.0, angle_between((4.0, 5.0), (7.0, 9.0))))
+        );
+
+        let line = [
+            PathCmd::MoveTo { x: 1.0, y: 2.0 },
+            PathCmd::LineTo { x: 7.0, y: 9.0 },
+        ];
+        assert_eq!(
+            geometry_bits(path_marker_end_geometry(&line).expect("line geometry")),
+            geometry_bits((7.0, 9.0, angle_between((1.0, 2.0), (7.0, 9.0))))
+        );
+
+        let degenerate_cubic = [
+            PathCmd::MoveTo { x: 1.0, y: 2.0 },
+            PathCmd::LineTo { x: 3.0, y: 4.0 },
+            PathCmd::CubicTo {
+                c1x: 5.0,
+                c1y: 6.0,
+                c2x: 8.0,
+                c2y: 9.0,
+                x: 8.0,
+                y: 9.0,
+            },
+        ];
+        assert_eq!(
+            geometry_bits(
+                path_marker_end_geometry(&degenerate_cubic).expect("degenerate cubic geometry")
+            ),
+            geometry_bits((8.0, 9.0, angle_between((3.0, 4.0), (8.0, 9.0))))
+        );
+
+        let closed = [
+            PathCmd::MoveTo { x: 1.0, y: 2.0 },
+            PathCmd::LineTo { x: 3.0, y: 4.0 },
+            PathCmd::Close,
+        ];
+        assert_eq!(
+            geometry_bits(path_marker_end_geometry(&closed).expect("closed geometry")),
+            geometry_bits((1.0, 2.0, angle_between((3.0, 4.0), (1.0, 2.0))))
+        );
+
+        let trailing_move = [
+            PathCmd::MoveTo { x: 1.0, y: 2.0 },
+            PathCmd::LineTo { x: 3.0, y: 4.0 },
+            PathCmd::MoveTo { x: 8.0, y: 9.0 },
+        ];
+        assert_eq!(
+            geometry_bits(
+                path_marker_end_geometry(&trailing_move).expect("trailing move geometry")
+            ),
+            geometry_bits((3.0, 4.0, angle_between((1.0, 2.0), (3.0, 4.0))))
+        );
+
+        let malformed = [
+            PathCmd::LineTo { x: 1.0, y: 2.0 },
+            PathCmd::MoveTo { x: 3.0, y: 4.0 },
+            PathCmd::LineTo { x: 5.0, y: 6.0 },
+        ];
+        assert!(path_marker_end_geometry(&malformed).is_none());
+    }
 
     #[test]
     fn renderer_handles_empty_diagram() {
@@ -1500,6 +2049,379 @@ mod tests {
         assert!(!config.font_family.is_empty());
         assert!(config.font_size > 0.0);
         assert!(config.padding > 0.0);
+    }
+
+    #[test]
+    fn standard_node_font_preserves_canvas_css_format() {
+        for (font_size, font_family, expected) in [
+            (0.0, "sans-serif", "0px sans-serif"),
+            (12.5, "Test Sans, serif", "12.5px Test Sans, serif"),
+            (14.0, "'Inter', Arial", "14px 'Inter', Arial"),
+        ] {
+            let config = CanvasRenderConfig {
+                font_size,
+                font_family: font_family.to_owned(),
+                ..CanvasRenderConfig::default()
+            };
+            assert_eq!(standard_node_font(&config), expected);
+        }
+    }
+
+    #[test]
+    fn secondary_label_font_preserves_canvas_css_format() {
+        for (font_size, font_family, expected) in [
+            (0.0, "sans-serif", "0px sans-serif"),
+            (10.0, "Test Sans", "8.5px Test Sans"),
+            (20.0, "'Inter', Arial", "17px 'Inter', Arial"),
+        ] {
+            let config = CanvasRenderConfig {
+                font_size,
+                font_family: font_family.to_owned(),
+                ..CanvasRenderConfig::default()
+            };
+            assert_eq!(secondary_label_font_css(&config), expected);
+        }
+    }
+
+    #[test]
+    fn sequence_fragment_font_preserves_canvas_css_format() {
+        for (font_size, font_family, expected) in [
+            (0.0, "sans-serif", "bold 0px sans-serif"),
+            (10.0, "Test Sans", "bold 8px Test Sans"),
+            (20.0, "'Inter', Arial", "bold 16px 'Inter', Arial"),
+        ] {
+            let config = CanvasRenderConfig {
+                font_size,
+                font_family: font_family.to_owned(),
+                ..CanvasRenderConfig::default()
+            };
+            assert_eq!(sequence_fragment_font_css(&config), expected);
+        }
+    }
+
+    #[test]
+    fn class_compartment_fonts_preserve_canvas_css_format() {
+        for (font_size, font_family, expected) in [
+            (0.0, "sans-serif", ("bold 0px sans-serif", "0px sans-serif")),
+            (
+                12.5,
+                "Test Sans, serif",
+                ("bold 12.5px Test Sans, serif", "11.25px Test Sans, serif"),
+            ),
+            (
+                20.0,
+                "'Inter', Arial",
+                ("bold 20px 'Inter', Arial", "18px 'Inter', Arial"),
+            ),
+        ] {
+            let config = CanvasRenderConfig {
+                font_size,
+                font_family: font_family.to_owned(),
+                ..CanvasRenderConfig::default()
+            };
+            assert_eq!(
+                class_compartment_font_css(&config),
+                (expected.0.to_owned(), expected.1.to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn canvas_dash_conversion_preserves_order_and_float_bits() {
+        let corpus: &[&[f32]] = &[&[], &[6.0, 4.0], &[3.25], &[1.0, 2.0, 3.0, 4.0, 5.0]];
+        for &values in corpus {
+            let expected: Vec<u64> = values
+                .iter()
+                .copied()
+                .map(f64::from)
+                .map(f64::to_bits)
+                .collect();
+            let actual = with_canvas_dash_f64(values, |converted| {
+                converted
+                    .iter()
+                    .copied()
+                    .map(f64::to_bits)
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn legacy_edge_stroke_borrow_preserves_branch_mappings() {
+        let default_width = 1.25;
+        for arrow in [
+            ArrowType::ThickArrow,
+            ArrowType::DottedArrow,
+            ArrowType::Arrow,
+            ArrowType::DottedLine,
+            ArrowType::DoubleDottedArrow,
+        ] {
+            let (expected_width, expected_dash) =
+                owned_legacy_edge_stroke_reference(arrow, default_width);
+            let (actual_width, actual_dash) = legacy_edge_stroke(arrow, default_width);
+            assert_eq!(
+                actual_width.to_bits(),
+                expected_width.to_bits(),
+                "{arrow:?}"
+            );
+            assert_eq!(
+                actual_dash
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                expected_dash
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "{arrow:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground release-only performance probe"]
+    fn legacy_dotted_edge_dash_borrow_perf_ab() {
+        use sha2::{Digest, Sha256};
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ROUNDS: usize = 41;
+        const MIN_OF: u32 = 3;
+        const MIN_SAMPLE_NS: u64 = 2_000_000;
+
+        #[derive(Clone, Copy)]
+        enum Arm {
+            Owned,
+            Borrowed,
+        }
+
+        struct Stats {
+            a_p50_ns: f64,
+            b_p50_ns: f64,
+            ratio_p50: f64,
+            ratio_ci: (f64, f64),
+            cv_pct: f64,
+            mad_pct: f64,
+            checksum: u64,
+        }
+
+        fn self_identity() -> String {
+            use std::fmt::Write as _;
+
+            let Ok(path) = std::env::current_exe() else {
+                return "unavailable".to_owned();
+            };
+            let Ok(bytes) = std::fs::read(&path) else {
+                return "unavailable".to_owned();
+            };
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let digest = hasher.finalize();
+            let mut sha256 = String::with_capacity(digest.len() * 2);
+            for byte in digest {
+                write!(sha256, "{byte:02x}").expect("writing to String cannot fail");
+            }
+            format!("{} ({} bytes) {}", sha256, bytes.len(), path.display())
+        }
+
+        fn median(values: &mut [f64]) -> f64 {
+            values.sort_by(f64::total_cmp);
+            let middle = values.len() / 2;
+            if values.len().is_multiple_of(2) {
+                f64::midpoint(values[middle - 1], values[middle])
+            } else {
+                values[middle]
+            }
+        }
+
+        fn bootstrap_median_ci(ratios: &[f64]) -> (f64, f64) {
+            const RESAMPLES: usize = 2_000;
+            let mut state = 0x2545_F491_4F6C_DD1D_u64;
+            let mut medians = Vec::with_capacity(RESAMPLES);
+            let mut sample = vec![0.0_f64; ratios.len()];
+            for _ in 0..RESAMPLES {
+                for slot in &mut sample {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    let index = usize::try_from(state >> 33).unwrap_or(0) % ratios.len();
+                    *slot = ratios[index];
+                }
+                medians.push(median(&mut sample));
+            }
+            medians.sort_by(f64::total_cmp);
+            (
+                medians[RESAMPLES / 40],
+                medians[RESAMPLES - 1 - RESAMPLES / 40],
+            )
+        }
+
+        fn digest(width: f64, dash: &[f64]) -> u64 {
+            dash.iter().fold(width.to_bits(), |state, value| {
+                state.rotate_left(9) ^ value.to_bits()
+            })
+        }
+
+        fn time_arm(arm: Arm, iterations: u32) -> (u64, u64) {
+            let mut checksum = 0_u64;
+            let start = Instant::now();
+            for _ in 0..iterations.max(1) {
+                match arm {
+                    Arm::Owned => {
+                        let (width, dash) = owned_legacy_edge_stroke_reference(
+                            black_box(ArrowType::DottedArrow),
+                            black_box(1.25),
+                        );
+                        let dash = black_box(dash);
+                        checksum = checksum
+                            .wrapping_add(digest(width, dash.as_deref().unwrap_or(black_box(&[]))));
+                    }
+                    Arm::Borrowed => {
+                        let (width, dash) =
+                            legacy_edge_stroke(black_box(ArrowType::DottedArrow), black_box(1.25));
+                        checksum = checksum.wrapping_add(digest(width, black_box(dash)));
+                    }
+                }
+            }
+            (
+                u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                black_box(checksum),
+            )
+        }
+
+        fn time_min(arm: Arm, iterations: u32) -> (u64, u64) {
+            let mut best = u64::MAX;
+            let mut checksum = 0_u64;
+            for _ in 0..MIN_OF {
+                let (elapsed, digest) = time_arm(arm, iterations);
+                best = best.min(elapsed);
+                checksum = checksum.wrapping_add(digest);
+            }
+            (best, checksum)
+        }
+
+        fn calibrate() -> u32 {
+            let mut iterations = 1_024_u32;
+            loop {
+                let (elapsed, _) = time_arm(Arm::Borrowed, iterations);
+                if elapsed >= MIN_SAMPLE_NS || iterations >= 1 << 28 {
+                    return iterations;
+                }
+                iterations = iterations.saturating_mul(2);
+            }
+        }
+
+        fn paired(arm_a: Arm, arm_b: Arm, iterations: u32) -> Stats {
+            let mut a_samples = Vec::with_capacity(ROUNDS);
+            let mut b_samples = Vec::with_capacity(ROUNDS);
+            let mut ratios = Vec::with_capacity(ROUNDS);
+            let mut checksum = 0_u64;
+            for round in 0..ROUNDS {
+                let (a_ns, b_ns, a_digest, b_digest) = if round.is_multiple_of(2) {
+                    let (a_ns, a_digest) = time_min(arm_a, iterations);
+                    let (b_ns, b_digest) = time_min(arm_b, iterations);
+                    (a_ns, b_ns, a_digest, b_digest)
+                } else {
+                    let (b_ns, b_digest) = time_min(arm_b, iterations);
+                    let (a_ns, a_digest) = time_min(arm_a, iterations);
+                    (a_ns, b_ns, a_digest, b_digest)
+                };
+                checksum = checksum.wrapping_add(a_digest).wrapping_add(b_digest);
+                a_samples.push(a_ns as f64);
+                b_samples.push(b_ns as f64);
+                ratios.push(a_ns as f64 / b_ns.max(1) as f64);
+            }
+            let a_p50_ns = median(&mut a_samples);
+            let b_p50_ns = median(&mut b_samples);
+            let ratio_p50 = median(&mut ratios.clone());
+            let ratio_ci = bootstrap_median_ci(&ratios);
+            let mean = ratios.iter().sum::<f64>() / ratios.len() as f64;
+            let variance = ratios
+                .iter()
+                .map(|ratio| (ratio - mean).powi(2))
+                .sum::<f64>()
+                / ratios.len() as f64;
+            let mut deviations = ratios
+                .iter()
+                .map(|ratio| (ratio - ratio_p50).abs())
+                .collect::<Vec<_>>();
+            Stats {
+                a_p50_ns,
+                b_p50_ns,
+                ratio_p50,
+                ratio_ci,
+                cv_pct: variance.sqrt() / mean * 100.0,
+                mad_pct: median(&mut deviations) / ratio_p50 * 100.0,
+                checksum,
+            }
+        }
+
+        println!("bench_elf_sha256={}", self_identity());
+        legacy_edge_stroke_borrow_preserves_branch_mappings();
+
+        let iterations = calibrate();
+        let null = paired(Arm::Owned, Arm::Owned, iterations);
+        let real = paired(Arm::Owned, Arm::Borrowed, iterations);
+        let null_half_width = (null.ratio_ci.0 - 1.0)
+            .abs()
+            .max((null.ratio_ci.1 - 1.0).abs());
+        let ci_margin = if null_half_width > 0.0 {
+            (real.ratio_p50 - 1.0).abs() / null_half_width
+        } else {
+            f64::INFINITY
+        };
+        let decidable = ci_margin >= 2.0;
+        let verdict = if !decidable {
+            "INDETERMINATE"
+        } else if real.ratio_p50 > 1.0 {
+            "CAND_FASTER"
+        } else {
+            "CAND_SLOWER"
+        };
+        println!(
+            "PERF legacy_canvas_dotted_dash null_ratio={:.6} \
+             null_ci95=[{:.6},{:.6}] ab_ratio={:.6} ab_ci95=[{:.6},{:.6}] \
+             ci_margin={ci_margin:.2}x verdict={verdict} baseline_p50_ns={:.0} \
+             candidate_p50_ns={:.0} null_cv={:.2}% null_mad={:.2}% ab_cv={:.2}% \
+             ab_mad={:.2}% parity=exact checksum={} iterations={iterations} min_of={MIN_OF} \
+             rounds={ROUNDS}",
+            null.ratio_p50,
+            null.ratio_ci.0,
+            null.ratio_ci.1,
+            real.ratio_p50,
+            real.ratio_ci.0,
+            real.ratio_ci.1,
+            real.a_p50_ns,
+            real.b_p50_ns,
+            null.cv_pct,
+            null.mad_pct,
+            real.cv_pct,
+            real.mad_pct,
+            null.checksum.wrapping_add(real.checksum),
+        );
+    }
+
+    #[test]
+    fn source_index_set_counts_dense_duplicates_and_sparse_indexes() {
+        let mut indexes = SourceIndexSet::default();
+        for index in [
+            0,
+            0,
+            63,
+            64,
+            DENSE_SOURCE_INDEX_LIMIT - 1,
+            DENSE_SOURCE_INDEX_LIMIT,
+            usize::MAX,
+            usize::MAX,
+        ] {
+            indexes.insert(index);
+        }
+        assert_eq!(indexes.len(), 6);
+        assert_eq!(indexes.words.len(), DENSE_SOURCE_INDEX_LIMIT / 64);
+        assert_eq!(indexes.sparse.len(), 2);
     }
 
     #[test]

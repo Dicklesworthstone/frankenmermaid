@@ -10,6 +10,12 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
+// Match the shipped CLI (fm-cli/src/main.rs): benchmark the pipeline under the same
+// native global allocator the `frankenmermaid` binary uses, so the numbers reflect reality.
+#[cfg(not(target_arch = "wasm32"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn gen_flowchart(node_count: usize) -> String {
     let mut lines = vec![String::from("flowchart LR")];
     for i in 0..node_count {
@@ -45,6 +51,220 @@ fn gen_cyclic(node_count: usize) -> String {
     // Extra cross-edges
     for i in (0..node_count).step_by(3) {
         lines.push(format!("  N{i}-->N{}", (i + 2) % node_count));
+    }
+    lines.join("\n")
+}
+
+/// Generate a *wide* layered DAG: `layers` ranks of `width` nodes each, with each
+/// node fanning out to two nodes in the next layer. This produces ranks with many
+/// nodes — the realistic shape for fan-out pipelines, ER/state diagrams, and org
+/// charts — which exercises the crossing-minimization barycenter sweep far more than
+/// a linear chain (where every rank holds a single node).
+fn gen_wide(layers: usize, width: usize) -> String {
+    let mut lines = vec![String::from("flowchart TD")];
+    for layer in 0..layers {
+        for w in 0..width {
+            lines.push(format!("  N{layer}_{w}[L{layer} W{w}]"));
+        }
+    }
+    for layer in 0..layers.saturating_sub(1) {
+        for w in 0..width {
+            lines.push(format!("  N{layer}_{w}-->N{}_{w}", layer + 1));
+            lines.push(format!(
+                "  N{layer}_{w}-->N{}_{}",
+                layer + 1,
+                (w + 1) % width
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+fn gen_dotted_wide(layers: usize, width: usize) -> String {
+    let mut lines = vec![String::from("flowchart TD")];
+    for layer in 0..layers {
+        for w in 0..width {
+            lines.push(format!("  N{layer}_{w}[L{layer} W{w}]"));
+        }
+    }
+    for layer in 0..layers.saturating_sub(1) {
+        for w in 0..width {
+            lines.push(format!("  N{layer}_{w}-.->N{}_{w}", layer + 1));
+            lines.push(format!(
+                "  N{layer}_{w}-.-N{}_{}",
+                layer + 1,
+                (w + 1) % width
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+fn gen_marker_start_wide(layers: usize, width: usize) -> String {
+    let mut lines = vec![String::from("flowchart TD")];
+    for layer in 0..layers {
+        for w in 0..width {
+            lines.push(format!("  N{layer}_{w}[L{layer} W{w}]"));
+        }
+    }
+    for layer in 0..layers.saturating_sub(1) {
+        for w in 0..width {
+            lines.push(format!("  N{layer}_{w}<-->N{}_{w}", layer + 1));
+            lines.push(format!(
+                "  N{layer}_{w}<-.->N{}_{}",
+                layer + 1,
+                (w + 1) % width
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+fn gen_highlighted_wide(layers: usize, width: usize) -> String {
+    let mut lines = vec![String::from("flowchart TD")];
+    for layer in 0..layers {
+        for w in 0..width {
+            lines.push(format!("  N{layer}_{w}[L{layer} W{w}]"));
+        }
+    }
+    for layer in 0..layers.saturating_sub(1) {
+        for w in 0..width {
+            lines.push(format!("  N{layer}_{w}-->N{}_{w}", layer + 1));
+            lines.push(format!(
+                "  N{layer}_{w}-->N{}_{}",
+                layer + 1,
+                (w + 1) % width
+            ));
+        }
+    }
+    for layer in 0..layers {
+        let mut class_line = String::from("  class ");
+        for w in 0..width {
+            if w != 0 {
+                class_line.push(',');
+            }
+            class_line.push_str(&format!("N{layer}_{w}"));
+        }
+        class_line.push_str(" hot-highlight-dashed-border");
+        lines.push(class_line);
+    }
+    lines.join("\n")
+}
+
+fn gen_requirement_chain(node_count: usize) -> String {
+    let mut lines = vec![String::from("requirementDiagram")];
+    for i in 0..node_count {
+        lines.push(format!("  requirement R{i} {{"));
+        lines.push(format!("    id: REQ-{i:04}"));
+        lines.push(format!(
+            "    text: Requirement {i} must preserve rendered output"
+        ));
+        lines.push("    risk: high".to_string());
+        lines.push("    verifymethod: test".to_string());
+        lines.push("  }".to_string());
+    }
+    for i in 0..node_count.saturating_sub(1) {
+        lines.push(format!("  R{i} - satisfies -> R{}", i + 1));
+    }
+    lines.join("\n")
+}
+
+fn gen_class(class_count: usize) -> String {
+    let mut lines = vec![String::from("classDiagram")];
+    for i in 0..class_count {
+        lines.push(format!("  class C{i} {{"));
+        lines.push(format!("    +int field{i}"));
+        lines.push(format!("    +String name{i}"));
+        lines.push(format!("    +compute{i}(int x) bool"));
+        lines.push(format!("    -reset{i}() void"));
+        lines.push("  }".to_string());
+    }
+    for i in 0..class_count.saturating_sub(1) {
+        lines.push(format!("  C{i} <|-- C{}", i + 1));
+    }
+    lines.join("\n")
+}
+
+fn gen_er(entity_count: usize) -> String {
+    let mut lines = vec![String::from("erDiagram")];
+    for i in 0..entity_count {
+        lines.push(format!("  E{i} {{"));
+        lines.push("    int id PK".to_string());
+        lines.push("    string name".to_string());
+        lines.push(format!("    int e{i}_ref FK"));
+        lines.push("    string description".to_string());
+        lines.push("  }".to_string());
+    }
+    for i in 0..entity_count.saturating_sub(1) {
+        lines.push(format!("  E{i} ||--o{{ E{} : has", i + 1));
+    }
+    lines.join("\n")
+}
+
+fn gen_xychart(point_count: usize) -> String {
+    let mut lines = vec![String::from("xychart-beta")];
+    lines.push("  title Throughput".to_string());
+    let categories: Vec<String> = (0..point_count).map(|i| format!("c{i}")).collect();
+    lines.push(format!("  x-axis [{}]", categories.join(", ")));
+    lines.push("  y-axis \"Value\" 0 --> 1000".to_string());
+
+    let bars: Vec<String> = (0..point_count)
+        .map(|i| (100 + (i * 13) % 700).to_string())
+        .collect();
+    let line: Vec<String> = (0..point_count)
+        .map(|i| (50 + (i * 17) % 850).to_string())
+        .collect();
+    let area: Vec<String> = (0..point_count)
+        .map(|i| (75 + (i * 19) % 750).to_string())
+        .collect();
+    lines.push(format!("  bar Bars [{}]", bars.join(", ")));
+    lines.push(format!("  line Line [{}]", line.join(", ")));
+    lines.push(format!("  area Area [{}]", area.join(", ")));
+    lines.join("\n")
+}
+
+fn gen_timeline(event_count: usize) -> String {
+    let mut lines = vec![String::from("timeline"), String::from("  title Timeline")];
+    let sections = ((event_count as f64).sqrt() as usize).max(2);
+    for section in 0..sections {
+        lines.push(format!("  section Period {section}"));
+        let per_section = event_count / sections;
+        for item in 0..per_section {
+            let idx = section * per_section + item;
+            lines.push(format!("    {} : Event {idx}", 2000 + idx));
+        }
+    }
+    lines.join("\n")
+}
+
+fn gen_polygon_shape_chain(shape: &str, node_count: usize) -> String {
+    let mut lines = vec![String::from("flowchart TB")];
+    for i in 0..node_count {
+        let node = match shape {
+            "hexagon" => format!("  N{i}{{{{Hex {i}}}}}"),
+            "subroutine" => format!("  N{i}[[Sub {i}]]"),
+            "cylinder" => format!("  N{i}[(DB {i})]"),
+            "parallel" => format!("  N{i}[/Para {i}/]"),
+            "invparallel" => format!("  N{i}[\\InvPara {i}\\]"),
+            "trapez" => format!("  N{i}[/Trap {i}\\]"),
+            "invtrap" => format!("  N{i}[\\Inv {i}/]"),
+            "asym" => format!("  N{i}>Flag {i}]"),
+            _ => format!("  N{i}[Node {i}]"),
+        };
+        lines.push(node);
+    }
+    for i in 0..node_count.saturating_sub(1) {
+        lines.push(format!("  N{i}-->N{}", i + 1));
+    }
+    lines.join("\n")
+}
+
+fn gen_mindmap(node_count: usize) -> String {
+    let mut lines = Vec::with_capacity(node_count.saturating_add(1));
+    lines.push(String::from("mindmap"));
+    lines.push(String::from("  root((Root))"));
+    for i in 1..node_count {
+        lines.push(format!("    N{i}[Node {i}]"));
     }
     lines.join("\n")
 }
@@ -111,7 +331,216 @@ fn bench_layout(c: &mut Criterion) {
     group.finish();
 }
 
+// ─── Wide layered layout benchmarks ─────────────────────────────────────────
+// These isolate the crossing-minimization barycenter sweep on graphs whose ranks
+// contain many nodes (the cost driver that linear-chain benches never trigger).
+
+/// Dense DAG: `n` nodes, each with forward edges to a few successors, so `edges ≈ 4·nodes` while the
+/// obstacle count stays `= nodes`. This is the shape the obstacle-index work-gate targets — the count-only
+/// `DENSE_INDEX_OBSTACLES` floor excludes it, but its O(edges·obstacles) linear scan is the cost driver.
+fn gen_dense_dag(n: usize) -> String {
+    let mut lines = vec![String::from("flowchart TD")];
+    for i in 0..n {
+        lines.push(format!("  N{i}[Node {i}]"));
+    }
+    for i in 0..n {
+        for step in [1_usize, 2, 3, 5] {
+            if i + step < n {
+                lines.push(format!("  N{i}-->N{}", i + step));
+            }
+        }
+    }
+    lines.join("\n")
+}
+
+/// Layout of dense DAGs — the workload the obstacle-index work-gate lever affects. `dense_200` mirrors the
+/// corpus `dense_dag_200` (≈200 nodes / ≈790 edges); the larger rows check the O(edges·obstacles) scaling.
+fn bench_layout_dense(c: &mut Criterion) {
+    let mut group = c.benchmark_group("layout_dense");
+    for (label, n) in [
+        ("dense_200", 200_usize),
+        ("dense_400", 400),
+        ("dense_800", 800),
+    ] {
+        let input = gen_dense_dag(n);
+        let parsed = fm_parser::parse(&input);
+        group.bench_with_input(BenchmarkId::new("dag", label), &parsed.ir, |b, ir| {
+            b.iter(|| fm_layout::layout_diagram(ir));
+        });
+    }
+    group.finish();
+}
+
+/// Cyclic SCC graph: rings of `ring` nodes each fully cyclic, chained forward — the shape that routes to
+/// Sugiyama (cycles ⇒ `detect_cycle_components`), so `layout_diagram` runs the full Brandes-Köpf coordinate
+/// assignment. Mirrors the corpus `cyclic_scc_100`.
+fn gen_cyclic_scc(node_count: usize, ring: usize) -> String {
+    let mut lines = vec![String::from("flowchart TD")];
+    for i in 0..node_count {
+        lines.push(format!("  C{i}[Node {i}]"));
+    }
+    for i in 0..node_count {
+        let ring_start = (i / ring) * ring;
+        let next = ring_start + ((i - ring_start + 1) % ring);
+        if next < node_count {
+            lines.push(format!("  C{i}-->C{next}"));
+        }
+        if i + ring < node_count {
+            lines.push(format!("  C{i}-->C{}", i + ring));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Layout of cyclic-SCC graphs — the Sugiyama path, exercising Brandes-Köpf coordinate assignment (the
+/// `bk_vertical_alignment` dense-lookup lever). `scc_100` mirrors the corpus `cyclic_scc_100`.
+fn bench_layout_sugiyama(c: &mut Criterion) {
+    let mut group = c.benchmark_group("layout_sugiyama");
+    for (label, n) in [("scc_100", 100_usize), ("scc_300", 300), ("scc_600", 600)] {
+        let input = gen_cyclic_scc(n, 5);
+        let parsed = fm_parser::parse(&input);
+        group.bench_with_input(BenchmarkId::new("scc", label), &parsed.ir, |b, ir| {
+            b.iter(|| fm_layout::layout_diagram(ir));
+        });
+    }
+    group.finish();
+}
+
+fn bench_layout_wide(c: &mut Criterion) {
+    let mut group = c.benchmark_group("layout_wide");
+
+    for (label, layers, width) in [
+        ("8x16", 8_usize, 16_usize),
+        ("12x24", 12, 24),
+        ("16x32", 16, 32),
+    ] {
+        let input = gen_wide(layers, width);
+        let parsed = fm_parser::parse(&input);
+        group.bench_with_input(BenchmarkId::new("layered", label), &parsed.ir, |b, ir| {
+            b.iter(|| fm_layout::layout_diagram(ir));
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_full_pipeline_wide(c: &mut Criterion) {
+    let mut group = c.benchmark_group("full_pipeline_wide");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    for (label, layers, width) in [
+        ("8x16", 8_usize, 16_usize),
+        ("12x24", 12, 24),
+        ("16x32", 16, 32),
+    ] {
+        let input = gen_wide(layers, width);
+        group.bench_with_input(
+            BenchmarkId::new("parse_layout_svg", label),
+            &input,
+            |b, input| {
+                b.iter(|| {
+                    let parsed = fm_parser::parse(input);
+                    let layout = fm_layout::layout_diagram(&parsed.ir);
+                    fm_render_svg::render_svg_with_layout(&parsed.ir, &layout, &config)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_full_pipeline_mindmap(c: &mut Criterion) {
+    let mut group = c.benchmark_group("full_pipeline_mindmap");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    for (label, node_count) in [("200", 200_usize), ("800", 800), ("1600", 1600)] {
+        let input = gen_mindmap(node_count);
+        group.bench_with_input(
+            BenchmarkId::new("parse_layout_svg", label),
+            &input,
+            |b, input| {
+                b.iter(|| {
+                    let parsed = fm_parser::parse(input);
+                    let layout = fm_layout::layout_diagram(&parsed.ir);
+                    fm_render_svg::render_svg_with_layout(&parsed.ir, &layout, &config)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 // ─── Render SVG benchmarks ──────────────────────────────────────────────────
+
+fn gen_sankey(links: usize) -> String {
+    let mut s = String::from("sankey-beta\n");
+    for i in 0..links {
+        s.push_str(&format!("A{i},B{},{}\n", i % 20, 5 + i));
+    }
+    s
+}
+
+fn gen_pie(slices: usize) -> String {
+    let mut s = String::from("pie title Distribution\n");
+    for i in 0..slices {
+        s.push_str(&format!("  \"Category {i}\" : {}\n", 10 + i * 3));
+    }
+    s
+}
+
+/// A C4 context diagram: Person/System elements (multi-element node content: stereotype + name +
+/// description, plus a person icon) — the render path whose nodes still build an `Element` subtree.
+fn gen_c4(elements: usize) -> String {
+    let mut s = String::from("C4Context\n  title System Context\n");
+    for i in 0..elements {
+        if i % 2 == 0 {
+            s.push_str(&format!(
+                "  Person(user{i}, \"User {i}\", \"A user number {i}\")\n"
+            ));
+        } else {
+            s.push_str(&format!(
+                "  System(sys{i}, \"System {i}\", \"The system {i}\")\n"
+            ));
+        }
+    }
+    for i in 0..elements.saturating_sub(1) {
+        s.push_str(&format!(
+            "  Rel(user{}, sys{}, \"Uses\", \"HTTPS\")\n",
+            i & !1,
+            (i + 1) | 1
+        ));
+    }
+    s
+}
+
+/// Render of non-flowchart types where the CSS post-passes (minify) are a larger fraction than on
+/// flowcharts — `minify_css` profiled at 2.26% of the sankey pipeline. The `render_svg` bench above only
+/// covers flowcharts, which is where the 2026-06-29 bulk-copy-minify A/B looked (and missed the payoff).
+fn bench_render_nonflowchart(c: &mut Criterion) {
+    let mut group = c.benchmark_group("render_nonflowchart");
+    let config = fm_render_svg::SvgRenderConfig::default();
+    let inputs = [
+        ("sankey_60", gen_sankey(60)),
+        ("pie_40", gen_pie(40)),
+        ("sequence_40", gen_sequence(40)),
+        ("er_40", gen_er(40)),
+        ("c4_40", gen_c4(40)),
+    ];
+    for (label, input) in &inputs {
+        let parsed = fm_parser::parse(input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+        group.bench_with_input(
+            BenchmarkId::new("nf", label),
+            &(&parsed.ir, &layout),
+            |b, (ir, layout)| {
+                b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+            },
+        );
+    }
+    group.finish();
+}
 
 fn bench_render_svg(c: &mut Criterion) {
     let mut group = c.benchmark_group("render_svg");
@@ -189,11 +618,422 @@ fn bench_full_pipeline(c: &mut Criterion) {
     group.finish();
 }
 
+/// Per-stage split (parse vs layout vs render) on the *wide* (edge-heavy) corpus.
+///
+/// The other groups bench layout in isolation (`layout_wide`) or the whole pipeline
+/// fused (`full_pipeline_wide`), and the `render_svg` group only renders *linear*
+/// flowcharts. None of them reveal where wide-pipeline time actually goes — which
+/// turns out to be SVG render of the many-edge graph, not layout. This group isolates
+/// each stage on the same wide inputs so render work can be targeted directly.
+fn bench_wide_stages(c: &mut Criterion) {
+    let mut group = c.benchmark_group("wide_stages");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    for (label, layers, width) in [
+        ("8x16", 8_usize, 16_usize),
+        ("12x24", 12, 24),
+        ("16x32", 16, 32),
+    ] {
+        let input = gen_wide(layers, width);
+        let parsed = fm_parser::parse(&input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+
+        group.bench_with_input(BenchmarkId::new("parse", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+        group.bench_with_input(BenchmarkId::new("layout", label), &parsed.ir, |b, ir| {
+            b.iter(|| fm_layout::layout_diagram(ir));
+        });
+        group.bench_with_input(
+            BenchmarkId::new("render", label),
+            &(&parsed.ir, &layout),
+            |b, (ir, layout)| {
+                b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_large_wide_stages(c: &mut Criterion) {
+    let mut group = c.benchmark_group("large_wide_stages");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    let input = gen_wide(40, 80);
+    let parsed = fm_parser::parse(&input);
+    let layout = fm_layout::layout_diagram(&parsed.ir);
+
+    group.bench_with_input(
+        BenchmarkId::new("render", "40x80"),
+        &(&parsed.ir, &layout),
+        |b, (ir, layout)| {
+            b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+        },
+    );
+
+    group.finish();
+}
+
+fn bench_dotted_wide_stages(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dotted_wide_stages");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    for (label, layers, width) in [
+        ("8x16", 8_usize, 16_usize),
+        ("12x24", 12, 24),
+        ("16x32", 16, 32),
+    ] {
+        let input = gen_dotted_wide(layers, width);
+        let parsed = fm_parser::parse(&input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+
+        group.bench_with_input(BenchmarkId::new("parse", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+        group.bench_with_input(BenchmarkId::new("layout", label), &parsed.ir, |b, ir| {
+            b.iter(|| fm_layout::layout_diagram(ir));
+        });
+        group.bench_with_input(
+            BenchmarkId::new("render", label),
+            &(&parsed.ir, &layout),
+            |b, (ir, layout)| {
+                b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_marker_start_wide_stages(c: &mut Criterion) {
+    let mut group = c.benchmark_group("marker_start_wide_stages");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    for (label, layers, width) in [
+        ("8x16", 8_usize, 16_usize),
+        ("12x24", 12, 24),
+        ("16x32", 16, 32),
+    ] {
+        let input = gen_marker_start_wide(layers, width);
+        let parsed = fm_parser::parse(&input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+
+        group.bench_with_input(BenchmarkId::new("parse", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+        group.bench_with_input(BenchmarkId::new("layout", label), &parsed.ir, |b, ir| {
+            b.iter(|| fm_layout::layout_diagram(ir));
+        });
+        group.bench_with_input(
+            BenchmarkId::new("render", label),
+            &(&parsed.ir, &layout),
+            |b, (ir, layout)| {
+                b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_highlighted_wide_stages(c: &mut Criterion) {
+    let mut group = c.benchmark_group("highlighted_wide_stages");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    for (label, layers, width) in [
+        ("8x16", 8_usize, 16_usize),
+        ("12x24", 12, 24),
+        ("16x32", 16, 32),
+    ] {
+        let input = gen_highlighted_wide(layers, width);
+        let parsed = fm_parser::parse(&input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+
+        group.bench_with_input(BenchmarkId::new("parse", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+        group.bench_with_input(BenchmarkId::new("layout", label), &parsed.ir, |b, ir| {
+            b.iter(|| fm_layout::layout_diagram(ir));
+        });
+        group.bench_with_input(
+            BenchmarkId::new("render", label),
+            &(&parsed.ir, &layout),
+            |b, (ir, layout)| {
+                b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_requirement_stages(c: &mut Criterion) {
+    let mut group = c.benchmark_group("requirement_stages");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    for (label, node_count) in [("64", 64_usize), ("256", 256), ("512", 512)] {
+        let input = gen_requirement_chain(node_count);
+        let parsed = fm_parser::parse(&input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+
+        group.bench_with_input(BenchmarkId::new("parse", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+        group.bench_with_input(BenchmarkId::new("layout", label), &parsed.ir, |b, ir| {
+            b.iter(|| fm_layout::layout_diagram(ir));
+        });
+        group.bench_with_input(
+            BenchmarkId::new("render", label),
+            &(&parsed.ir, &layout),
+            |b, (ir, layout)| {
+                b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_class_stages(c: &mut Criterion) {
+    let mut group = c.benchmark_group("class_stages");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    for (label, class_count) in [("64", 64_usize), ("256", 256), ("512", 512)] {
+        let input = gen_class(class_count);
+        let parsed = fm_parser::parse(&input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+
+        group.bench_with_input(BenchmarkId::new("parse", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+        group.bench_with_input(BenchmarkId::new("layout", label), &parsed.ir, |b, ir| {
+            b.iter(|| fm_layout::layout_diagram(ir));
+        });
+        group.bench_with_input(
+            BenchmarkId::new("render", label),
+            &(&parsed.ir, &layout),
+            |b, (ir, layout)| {
+                b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_er_stages(c: &mut Criterion) {
+    let mut group = c.benchmark_group("er_stages");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    for (label, entity_count) in [("64", 64_usize), ("256", 256), ("512", 512)] {
+        let input = gen_er(entity_count);
+        let parsed = fm_parser::parse(&input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+
+        group.bench_with_input(BenchmarkId::new("parse", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+        group.bench_with_input(BenchmarkId::new("layout", label), &parsed.ir, |b, ir| {
+            b.iter(|| fm_layout::layout_diagram(ir));
+        });
+        group.bench_with_input(
+            BenchmarkId::new("render", label),
+            &(&parsed.ir, &layout),
+            |b, (ir, layout)| {
+                b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_xychart_stages(c: &mut Criterion) {
+    let mut group = c.benchmark_group("xychart_stages");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    for (label, point_count) in [("128", 128_usize), ("512", 512)] {
+        let input = gen_xychart(point_count);
+        let parsed = fm_parser::parse(&input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+
+        group.bench_with_input(BenchmarkId::new("parse", label), &input, |b, input| {
+            b.iter(|| fm_parser::parse(input));
+        });
+        group.bench_with_input(BenchmarkId::new("layout", label), &parsed.ir, |b, ir| {
+            b.iter(|| fm_layout::layout_diagram(ir));
+        });
+        group.bench_with_input(
+            BenchmarkId::new("render", label),
+            &(&parsed.ir, &layout),
+            |b, (ir, layout)| {
+                b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_timeline_stages(c: &mut Criterion) {
+    let mut group = c.benchmark_group("timeline_stages");
+    let config = fm_render_svg::SvgRenderConfig::default();
+    let input = gen_timeline(1600);
+    let parsed = fm_parser::parse(&input);
+    let layout = fm_layout::layout_diagram(&parsed.ir);
+
+    group.bench_with_input(BenchmarkId::new("parse", "1600"), &input, |b, input| {
+        b.iter(|| fm_parser::parse(input));
+    });
+    group.bench_with_input(BenchmarkId::new("layout", "1600"), &parsed.ir, |b, ir| {
+        b.iter(|| fm_layout::layout_diagram(ir));
+    });
+    group.bench_with_input(
+        BenchmarkId::new("render", "1600"),
+        &(&parsed.ir, &layout),
+        |b, (ir, layout)| {
+            b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+        },
+    );
+
+    group.finish();
+}
+
+fn bench_polygon_shape_render(c: &mut Criterion) {
+    let mut group = c.benchmark_group("polygon_shape_render");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    for shape in [
+        "hexagon",
+        "parallel",
+        "invparallel",
+        "trapez",
+        "invtrap",
+        "asym",
+    ] {
+        let input = gen_polygon_shape_chain(shape, 256);
+        let parsed = fm_parser::parse(&input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+
+        group.bench_with_input(
+            BenchmarkId::new("render", shape),
+            &(&parsed.ir, &layout),
+            |b, (ir, layout)| {
+                b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+            },
+        );
+    }
+
+    let input = gen_polygon_shape_chain("invparallel", 768);
+    let parsed = fm_parser::parse(&input);
+    let layout = fm_layout::layout_diagram(&parsed.ir);
+    group.bench_with_input(
+        BenchmarkId::new("render_768", "invparallel"),
+        &(&parsed.ir, &layout),
+        |b, (ir, layout)| {
+            b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+        },
+    );
+
+    group.finish();
+}
+
+fn bench_cylinder_shape_render(c: &mut Criterion) {
+    let mut group = c.benchmark_group("cylinder_shape_render");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    let input = gen_polygon_shape_chain("cylinder", 256);
+    let parsed = fm_parser::parse(&input);
+    let layout = fm_layout::layout_diagram(&parsed.ir);
+
+    group.bench_with_input(
+        BenchmarkId::new("render", "cylinder"),
+        &(&parsed.ir, &layout),
+        |b, (ir, layout)| {
+            b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+        },
+    );
+
+    group.finish();
+}
+
+fn bench_subroutine_shape_render(c: &mut Criterion) {
+    let mut group = c.benchmark_group("subroutine_shape_render");
+    let config = fm_render_svg::SvgRenderConfig::default();
+
+    let input = gen_polygon_shape_chain("subroutine", 256);
+    let parsed = fm_parser::parse(&input);
+    let layout = fm_layout::layout_diagram(&parsed.ir);
+
+    group.bench_with_input(
+        BenchmarkId::new("render", "subroutine"),
+        &(&parsed.ir, &layout),
+        |b, (ir, layout)| {
+            b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+        },
+    );
+
+    group.finish();
+}
+
+/// Render the wide corpus with `include_source_spans = true`. Source-span metadata is
+/// off by default (matching Mermaid.js, which emits no source maps), so the default-config
+/// groups never exercise the span-emission path. This group isolates the spans-on render
+/// cost — where redundant per-element source attributes dominate output bytes — so that
+/// emit-side reductions there can be measured.
+fn bench_render_spans_on(c: &mut Criterion) {
+    let mut group = c.benchmark_group("render_spans_on");
+    let config = fm_render_svg::SvgRenderConfig {
+        include_source_spans: true,
+        ..Default::default()
+    };
+
+    for (label, layers, width) in [
+        ("8x16", 8_usize, 16_usize),
+        ("12x24", 12, 24),
+        ("16x32", 16, 32),
+    ] {
+        let input = gen_wide(layers, width);
+        let parsed = fm_parser::parse(&input);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+        group.bench_with_input(
+            BenchmarkId::new("render", label),
+            &(&parsed.ir, &layout),
+            |b, (ir, layout)| {
+                b.iter(|| fm_render_svg::render_svg_with_layout(ir, layout, &config));
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_parse,
     bench_layout,
+    bench_layout_wide,
+    bench_layout_dense,
+    bench_layout_sugiyama,
+    bench_full_pipeline_wide,
+    bench_full_pipeline_mindmap,
     bench_render_svg,
-    bench_full_pipeline
+    bench_render_nonflowchart,
+    bench_full_pipeline,
+    bench_wide_stages,
+    bench_large_wide_stages,
+    bench_dotted_wide_stages,
+    bench_marker_start_wide_stages,
+    bench_highlighted_wide_stages,
+    bench_requirement_stages,
+    bench_class_stages,
+    bench_er_stages,
+    bench_xychart_stages,
+    bench_timeline_stages,
+    bench_polygon_shape_render,
+    bench_cylinder_shape_render,
+    bench_subroutine_shape_render,
+    bench_render_spans_on
 );
 criterion_main!(benches);

@@ -178,14 +178,19 @@ impl ConstraintSet {
     pub fn add(&mut self, constraint: LayoutConstraint) {
         let new_idx = self.constraints.len();
 
-        // Check for conflicts with existing constraints.
-        for (existing_idx, existing) in self.constraints.iter().enumerate() {
-            if let Some(desc) = detect_conflict(existing, &constraint) {
-                self.conflicts.push(ConstraintConflict {
-                    constraint_a: existing_idx,
-                    constraint_b: new_idx,
-                    description: desc,
-                });
+        // Only pins and ordering constraints have conflict rules.
+        if matches!(
+            &constraint,
+            LayoutConstraint::Pin(_) | LayoutConstraint::Order(_)
+        ) {
+            for (existing_idx, existing) in self.constraints.iter().enumerate() {
+                if let Some(desc) = detect_conflict(existing, &constraint) {
+                    self.conflicts.push(ConstraintConflict {
+                        constraint_a: existing_idx,
+                        constraint_b: new_idx,
+                        description: desc,
+                    });
+                }
             }
         }
 
@@ -320,6 +325,243 @@ fn contradictory_relations(a: OrderRelation, b: OrderRelation) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    fn non_conflicting_constraint_fixture(len: usize) -> Vec<LayoutConstraint> {
+        (0..len)
+            .map(|index| match index % 4 {
+                0 => LayoutConstraint::Align(AlignConstraint {
+                    nodes: vec![format!("A{index}"), format!("B{index}")],
+                    axis: AlignAxis::Horizontal,
+                    strength: ConstraintStrength::Hard,
+                }),
+                1 => LayoutConstraint::Group(GroupConstraint {
+                    name: format!("group_{index}"),
+                    nodes: vec![format!("G{index}")],
+                    padding: 12.0,
+                    strength: ConstraintStrength::Soft,
+                }),
+                2 => LayoutConstraint::Spacing(SpacingConstraint {
+                    dimension: SpacingDimension::Node,
+                    min_value: 24.0,
+                }),
+                _ => LayoutConstraint::Mirror(MirrorConstraint {
+                    group_a: vec![format!("L{index}")],
+                    group_b: vec![format!("R{index}")],
+                    axis: AlignAxis::Vertical,
+                }),
+            })
+            .collect()
+    }
+
+    fn add_with_full_scan(set: &mut ConstraintSet, constraint: LayoutConstraint) {
+        let new_idx = set.constraints.len();
+        for (existing_idx, existing) in set.constraints.iter().enumerate() {
+            if let Some(description) = detect_conflict(existing, &constraint) {
+                set.conflicts.push(ConstraintConflict {
+                    constraint_a: existing_idx,
+                    constraint_b: new_idx,
+                    description,
+                });
+            }
+        }
+        set.constraints.push(constraint);
+    }
+
+    fn build_with_full_scan(constraints: Vec<LayoutConstraint>) -> ConstraintSet {
+        let mut set = ConstraintSet::new();
+        for constraint in constraints {
+            add_with_full_scan(&mut set, constraint);
+        }
+        set
+    }
+
+    fn build_with_optimized_add(constraints: Vec<LayoutConstraint>) -> ConstraintSet {
+        let mut set = ConstraintSet::new();
+        for constraint in constraints {
+            set.add(constraint);
+        }
+        set
+    }
+
+    fn conflict_signature(set: &ConstraintSet) -> Vec<(usize, usize, &str)> {
+        set.conflicts()
+            .iter()
+            .map(|conflict| {
+                (
+                    conflict.constraint_a,
+                    conflict.constraint_b,
+                    conflict.description.as_str(),
+                )
+            })
+            .collect()
+    }
+
+    fn mixed_conflict_fixture() -> Vec<LayoutConstraint> {
+        vec![
+            LayoutConstraint::Align(AlignConstraint {
+                nodes: vec!["A".into(), "B".into()],
+                axis: AlignAxis::Horizontal,
+                strength: ConstraintStrength::Hard,
+            }),
+            LayoutConstraint::Pin(PinConstraint {
+                node: "A".into(),
+                x: 10.0,
+                y: 20.0,
+            }),
+            LayoutConstraint::Pin(PinConstraint {
+                node: "A".into(),
+                x: 10.0,
+                y: 20.0,
+            }),
+            LayoutConstraint::Group(GroupConstraint {
+                name: "group".into(),
+                nodes: vec!["A".into(), "B".into()],
+                padding: 12.0,
+                strength: ConstraintStrength::Soft,
+            }),
+            LayoutConstraint::Pin(PinConstraint {
+                node: "A".into(),
+                x: 30.0,
+                y: 40.0,
+            }),
+            LayoutConstraint::Order(OrderConstraint {
+                subject: "A".into(),
+                relation: OrderRelation::LeftOf,
+                reference: "B".into(),
+                min_gap: 10.0,
+                strength: ConstraintStrength::Hard,
+            }),
+            LayoutConstraint::Spacing(SpacingConstraint {
+                dimension: SpacingDimension::Rank,
+                min_value: 24.0,
+            }),
+            LayoutConstraint::Order(OrderConstraint {
+                subject: "A".into(),
+                relation: OrderRelation::RightOf,
+                reference: "B".into(),
+                min_gap: 10.0,
+                strength: ConstraintStrength::Hard,
+            }),
+            LayoutConstraint::Order(OrderConstraint {
+                subject: "C".into(),
+                relation: OrderRelation::Above,
+                reference: "D".into(),
+                min_gap: 10.0,
+                strength: ConstraintStrength::Soft,
+            }),
+            LayoutConstraint::Mirror(MirrorConstraint {
+                group_a: vec!["L".into()],
+                group_b: vec!["R".into()],
+                axis: AlignAxis::Vertical,
+            }),
+            LayoutConstraint::Order(OrderConstraint {
+                subject: "D".into(),
+                relation: OrderRelation::Above,
+                reference: "C".into(),
+                min_gap: 10.0,
+                strength: ConstraintStrength::Soft,
+            }),
+        ]
+    }
+
+    #[test]
+    fn optimized_add_matches_full_scan_reference() {
+        let fixture = mixed_conflict_fixture();
+        let reference = build_with_full_scan(fixture.clone());
+        let optimized = build_with_optimized_add(fixture);
+
+        assert_eq!(optimized.constraints(), reference.constraints());
+        assert_eq!(
+            conflict_signature(&optimized),
+            conflict_signature(&reference)
+        );
+    }
+
+    #[test]
+    #[ignore = "release-only ConstraintSet::add profile"]
+    fn constraint_set_add_profile() {
+        let fixture = non_conflicting_constraint_fixture(8_192);
+        let batches: Vec<Vec<LayoutConstraint>> = (0..8).map(|_| fixture.clone()).collect();
+        let started = Instant::now();
+        let mut digest = 0_usize;
+        for constraints in batches {
+            let mut set = ConstraintSet::new();
+            for constraint in constraints {
+                set.add(black_box(constraint));
+            }
+            digest = digest
+                .wrapping_add(set.len())
+                .wrapping_add(set.conflicts().len());
+            black_box(&set);
+        }
+        eprintln!(
+            "constraint_set_add_profile constraints={} batches=8 elapsed_ns={} digest={digest}",
+            fixture.len(),
+            started.elapsed().as_nanos()
+        );
+    }
+
+    #[test]
+    #[ignore = "release-only ConstraintSet::add A/B"]
+    fn constraint_set_add_ab() {
+        const ROUNDS: usize = 11;
+
+        let fixture = non_conflicting_constraint_fixture(8_192);
+        let mut baseline_ns = Vec::with_capacity(ROUNDS);
+        let mut candidate_ns = Vec::with_capacity(ROUNDS);
+        let mut digest = 0_usize;
+
+        for round in 0..ROUNDS {
+            let baseline_input = fixture.clone();
+            let candidate_input = fixture.clone();
+
+            let (baseline, baseline_elapsed, candidate, candidate_elapsed) = if round % 2 == 0 {
+                let started = Instant::now();
+                let baseline = build_with_full_scan(black_box(baseline_input));
+                let baseline_elapsed = started.elapsed().as_nanos();
+
+                let started = Instant::now();
+                let candidate = build_with_optimized_add(black_box(candidate_input));
+                let candidate_elapsed = started.elapsed().as_nanos();
+                (baseline, baseline_elapsed, candidate, candidate_elapsed)
+            } else {
+                let started = Instant::now();
+                let candidate = build_with_optimized_add(black_box(candidate_input));
+                let candidate_elapsed = started.elapsed().as_nanos();
+
+                let started = Instant::now();
+                let baseline = build_with_full_scan(black_box(baseline_input));
+                let baseline_elapsed = started.elapsed().as_nanos();
+                (baseline, baseline_elapsed, candidate, candidate_elapsed)
+            };
+
+            assert_eq!(candidate.constraints(), baseline.constraints());
+            assert_eq!(
+                conflict_signature(&candidate),
+                conflict_signature(&baseline)
+            );
+            digest = digest
+                .wrapping_add(baseline.len())
+                .wrapping_add(candidate.len())
+                .wrapping_add(baseline.conflicts().len())
+                .wrapping_add(candidate.conflicts().len());
+            black_box((&baseline, &candidate));
+            baseline_ns.push(baseline_elapsed);
+            candidate_ns.push(candidate_elapsed);
+        }
+
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median = baseline_ns[ROUNDS / 2];
+        let candidate_median = candidate_ns[ROUNDS / 2];
+        let ratio = baseline_median as f64 / candidate_median as f64;
+        eprintln!(
+            "constraint_set_add_ab constraints={} rounds={ROUNDS} baseline_ns={baseline_ns:?} candidate_ns={candidate_ns:?} baseline_median_ns={baseline_median} candidate_median_ns={candidate_median} ratio={ratio:.4} digest={digest}",
+            fixture.len()
+        );
+    }
 
     #[test]
     fn empty_constraint_set() {

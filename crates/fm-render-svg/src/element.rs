@@ -3,13 +3,12 @@
 //! Provides structs for creating SVG elements like rect, circle, path, etc.
 //! with a fluent builder API.
 
-use std::fmt::Write;
-
 use crate::attributes::Attributes;
 
 /// Types of SVG elements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElementKind {
+    Raw,
     Rect,
     Circle,
     Ellipse,
@@ -45,6 +44,7 @@ impl ElementKind {
     #[must_use]
     pub const fn tag_name(self) -> &'static str {
         match self {
+            Self::Raw => "",
             Self::Rect => "rect",
             Self::Circle => "circle",
             Self::Ellipse => "ellipse",
@@ -105,10 +105,38 @@ pub struct Element {
     kind: ElementKind,
     attrs: Attributes,
     children: Vec<Self>,
-    text_content: Option<String>,
+    text_content: Option<ElementText>,
+}
+
+#[derive(Debug, Clone)]
+enum ElementText {
+    Text(String),
+    RawParts(Vec<String>),
 }
 
 impl Element {
+    /// Create a raw SVG fragment element from markup emitted by this crate's own serializer.
+    #[must_use]
+    pub(crate) fn raw_svg(svg: String) -> Self {
+        Self {
+            kind: ElementKind::Raw,
+            attrs: Attributes::new(),
+            children: Vec::new(),
+            text_content: Some(ElementText::Text(svg)),
+        }
+    }
+
+    /// Create a raw SVG fragment from ordered chunks emitted by this crate's own serializer.
+    #[must_use]
+    pub(crate) fn raw_svg_parts(parts: Vec<String>) -> Self {
+        Self {
+            kind: ElementKind::Raw,
+            attrs: Attributes::new(),
+            children: Vec::new(),
+            text_content: Some(ElementText::RawParts(parts)),
+        }
+    }
+
     /// Create a new element of the given kind.
     #[must_use]
     pub fn new(kind: ElementKind) -> Self {
@@ -438,6 +466,34 @@ impl Element {
         self
     }
 
+    /// Add a CSS class made from a prefix and string suffix.
+    #[must_use]
+    pub fn class_prefixed(mut self, prefix: &str, suffix: &str) -> Self {
+        self.attrs = self.attrs.class_prefixed(prefix, suffix);
+        self
+    }
+
+    /// Add a CSS class made from a prefix plus a caller-written suffix.
+    #[must_use]
+    pub(crate) fn class_prefixed_by(
+        mut self,
+        prefix: &str,
+        suffix_capacity: usize,
+        write_suffix: impl FnOnce(&mut String),
+    ) -> Self {
+        self.attrs = self
+            .attrs
+            .class_prefixed_by(prefix, suffix_capacity, write_suffix);
+        self
+    }
+
+    /// Add a CSS class made from a prefix and integer suffix.
+    #[must_use]
+    pub fn class_prefixed_usize(mut self, prefix: &str, value: usize) -> Self {
+        self.attrs = self.attrs.class_prefixed_usize(prefix, value);
+        self
+    }
+
     /// Set a data-* attribute.
     #[must_use]
     pub fn data(mut self, name: &str, value: &str) -> Self {
@@ -445,24 +501,95 @@ impl Element {
         self
     }
 
-    /// Set a custom attribute.
+    /// Set a custom attribute. Takes `Into<Cow<'static, str>>` (like [`attr_int`]/[`attr_owned`]) so a
+    /// `&'static str` name — every call site is a string literal — is stored borrowed instead of paying a
+    /// `name.to_string()` heap allocation per call (hot on the text-element path: `text-anchor`,
+    /// `dominant-baseline`, `style`, …). Byte-identical.
     #[must_use]
-    pub fn attr(mut self, name: &str, value: &str) -> Self {
+    pub fn attr<K: Into<std::borrow::Cow<'static, str>>>(mut self, name: K, value: &str) -> Self {
         self.attrs = self.attrs.str(name, value);
         self
     }
 
-    /// Set a custom numeric attribute.
+    /// Set a custom numeric attribute. Borrows a `&'static str` name (all call sites are literals, e.g.
+    /// `font-size`, `x1`) instead of a per-call `name.to_string()` allocation. Byte-identical.
     #[must_use]
-    pub fn attr_num(mut self, name: &str, value: f32) -> Self {
+    pub fn attr_num<K: Into<std::borrow::Cow<'static, str>>>(
+        mut self,
+        name: K,
+        value: f32,
+    ) -> Self {
         self.attrs = self.attrs.num(name, value);
         self
+    }
+
+    /// Set a custom integer attribute. Unlike `data(name, &n.to_string())`, this stores the
+    /// value as an `Integer` (no per-call `String` allocation) and, with a `&'static` name,
+    /// allocates nothing — while serializing byte-identically to the decimal string.
+    #[must_use]
+    pub fn attr_int<K: Into<std::borrow::Cow<'static, str>>>(
+        mut self,
+        name: K,
+        value: i32,
+    ) -> Self {
+        self.attrs = self.attrs.int(name, value);
+        self
+    }
+
+    /// Set a custom attribute from an OWNED `String` value. Unlike `data`/`attr` (which take `&str`
+    /// and clone the value, and may `format!` the name), this MOVES the `String` in and — with a
+    /// `&'static` name — allocates nothing extra. Serializes byte-identically. Used on the per-element
+    /// source-span hot path (`include_source_spans`).
+    #[must_use]
+    pub fn attr_owned<K: Into<std::borrow::Cow<'static, str>>>(
+        mut self,
+        name: K,
+        value: String,
+    ) -> Self {
+        self.attrs = self.attrs.set(name, value);
+        self
+    }
+
+    /// Add a `stroke` attribute only when the theme CSS is **not** embedded. With CSS embedded
+    /// (the default), `.fm-node <shape> { stroke: var(--fm-node-accent) }` (and `.fm-node line`)
+    /// already styles every node element and overrides this presentation attribute, so the inline
+    /// copy is redundant. Attribute-driven exports (`embed_theme_css = false`, e.g. the PNG raster
+    /// path) keep it. Per-node `classDef`/`style` colors ride a separate `style="…"` that wins
+    /// regardless, so dropping the base stroke never affects custom colors.
+    #[must_use]
+    pub fn stroke_unless_embedded_css(self, color: &str, embed_css: bool) -> Self {
+        if embed_css { self } else { self.stroke(color) }
+    }
+
+    /// Add a `stroke-width` attribute only when the theme CSS is **not** embedded. With CSS
+    /// embedded, `.fm-node <shape> { stroke-width: 1.6 }` (and the shape-variant rules) already
+    /// sets it and overrides this presentation attribute, so the inline copy is redundant.
+    /// Attribute-driven exports (`embed_theme_css = false`, PNG raster) keep it.
+    #[must_use]
+    pub fn stroke_width_unless_embedded_css(self, width: f32, embed_css: bool) -> Self {
+        if embed_css {
+            self
+        } else {
+            self.stroke_width(width)
+        }
+    }
+
+    /// Add an inline `font-family` only when the theme CSS is **not** embedded. With CSS embedded
+    /// the root `<svg>` carries `font-family` (inherited by every `<text>`), so this per-element
+    /// copy is redundant; attribute-driven exports keep it.
+    #[must_use]
+    pub fn font_family_unless_embedded_css(self, family: &str, embed_css: bool) -> Self {
+        if embed_css {
+            self
+        } else {
+            self.attr("font-family", family)
+        }
     }
 
     /// Set text content for text elements.
     #[must_use]
     pub fn content(mut self, text: impl Into<String>) -> Self {
-        self.text_content = Some(text.into());
+        self.text_content = Some(ElementText::Text(text.into()));
         self
     }
 
@@ -496,24 +623,43 @@ impl Element {
 
     /// Write the element to a string.
     pub fn write_to_string(&self, output: &mut String) {
+        if self.kind == ElementKind::Raw {
+            if let Some(ref raw_svg) = self.text_content {
+                match raw_svg {
+                    ElementText::Text(raw_svg) => output.push_str(raw_svg),
+                    ElementText::RawParts(parts) => {
+                        for part in parts {
+                            output.push_str(part);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
         let tag = self.kind.tag_name();
-        let _ = write!(output, "<{tag}");
-        output.push_str(&self.attrs.render());
+        // Direct pushes instead of write!/format_args (which routes `tag` through
+        // fmt::Formatter) on this per-element hot path. Byte-identical to `<{tag}`.
+        output.push('<');
+        output.push_str(tag);
+        self.attrs.write_into(output);
 
         if self.kind.is_self_closing() && self.children.is_empty() && self.text_content.is_none() {
             output.push_str("/>");
         } else {
             output.push('>');
 
-            if let Some(ref text) = self.text_content {
-                output.push_str(&crate::attributes::escape_xml_text(text));
+            if let Some(ElementText::Text(text)) = &self.text_content {
+                let _ = crate::attributes::write_escaped_text(output, text);
             }
 
             for child in &self.children {
                 child.write_to_string(output);
             }
 
-            let _ = write!(output, "</{tag}>");
+            output.push_str("</");
+            output.push_str(tag);
+            output.push('>');
         }
     }
 }
@@ -601,5 +747,16 @@ mod tests {
         assert!(svg.contains("<text"));
         assert!(svg.contains("Hello &amp; World"));
         assert!(svg.ends_with("</text>"));
+    }
+
+    #[test]
+    fn raw_svg_parts_render_in_order_without_escaping() {
+        let elem = Element::raw_svg_parts(vec![
+            "<g>".to_string(),
+            "<path d=\"M0 0\"/>".to_string(),
+            "</g>".to_string(),
+        ]);
+
+        assert_eq!(elem.render(), "<g><path d=\"M0 0\"/></g>");
     }
 }

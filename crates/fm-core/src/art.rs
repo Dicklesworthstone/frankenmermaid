@@ -44,6 +44,22 @@ enum ArtChildren<V> {
     Map(std::collections::BTreeMap<u8, Box<ArtNode<V>>>),
 }
 
+enum ArtChildrenIter<'a, V> {
+    Small(std::slice::Iter<'a, (u8, Box<ArtNode<V>>)>),
+    Map(std::collections::btree_map::Iter<'a, u8, Box<ArtNode<V>>>),
+}
+
+impl<'a, V> Iterator for ArtChildrenIter<'a, V> {
+    type Item = (&'a u8, &'a ArtNode<V>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Small(iter) => iter.next().map(|(key, child)| (key, child.as_ref())),
+            Self::Map(iter) => iter.next().map(|(key, child)| (key, child.as_ref())),
+        }
+    }
+}
+
 const SMALL_THRESHOLD: usize = 8;
 
 impl<V> ArtChildren<V> {
@@ -90,10 +106,18 @@ impl<V> ArtChildren<V> {
         }
     }
 
-    fn iter(&self) -> Box<dyn Iterator<Item = (&u8, &ArtNode<V>)> + '_> {
+    fn iter(&self) -> ArtChildrenIter<'_, V> {
         match self {
-            Self::Small(vec) => Box::new(vec.iter().map(|(k, v)| (k, v.as_ref()))),
-            Self::Map(map) => Box::new(map.iter().map(|(k, v)| (k, v.as_ref()))),
+            Self::Small(vec) => ArtChildrenIter::Small(vec.iter()),
+            Self::Map(map) => ArtChildrenIter::Map(map.iter()),
+        }
+    }
+
+    #[cfg(test)]
+    fn iter_boxed(&self) -> Box<dyn Iterator<Item = (&u8, &ArtNode<V>)> + '_> {
+        match self {
+            Self::Small(vec) => Box::new(vec.iter().map(|(key, child)| (key, child.as_ref()))),
+            Self::Map(map) => Box::new(map.iter().map(|(key, child)| (key, child.as_ref()))),
         }
     }
 }
@@ -440,6 +464,191 @@ impl<V> StringArt<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    fn collect_all_boxed_reference<'a, V>(
+        node: &'a ArtNode<V>,
+        path: &mut Vec<u8>,
+        results: &mut Vec<(Vec<u8>, &'a V)>,
+    ) {
+        let start_len = path.len();
+        path.extend_from_slice(&node.prefix);
+
+        if let Some(value) = &node.value {
+            results.push((path.clone(), value));
+        }
+
+        for (&byte, child) in node.children.iter_boxed() {
+            path.push(byte);
+            collect_all_boxed_reference(child, path, results);
+            path.pop();
+        }
+
+        path.truncate(start_len);
+    }
+
+    fn collect_prefix_boxed_reference<'a, V>(
+        node: &'a ArtNode<V>,
+        prefix: &[u8],
+        depth: usize,
+        path: &mut Vec<u8>,
+        results: &mut Vec<(Vec<u8>, &'a V)>,
+    ) {
+        let start_len = path.len();
+        let remaining_prefix = &prefix[depth..];
+        let common = node
+            .prefix
+            .iter()
+            .zip(remaining_prefix.iter())
+            .take_while(|(left, right)| left == right)
+            .count();
+
+        if common < remaining_prefix.len() && common < node.prefix.len() {
+            return;
+        }
+
+        path.extend_from_slice(&node.prefix);
+        let new_depth = depth + node.prefix.len();
+
+        if new_depth >= prefix.len() {
+            if let Some(value) = &node.value {
+                results.push((path.clone(), value));
+            }
+            for (&byte, child) in node.children.iter_boxed() {
+                path.push(byte);
+                collect_all_boxed_reference(child, path, results);
+                path.pop();
+            }
+        } else {
+            let byte = prefix[new_depth];
+            if let Some(child) = node.children.get(byte) {
+                path.push(byte);
+                collect_prefix_boxed_reference(child, prefix, new_depth + 1, path, results);
+                path.pop();
+            }
+        }
+
+        path.truncate(start_len);
+    }
+
+    fn prefix_search_boxed_reference<'a, V>(
+        tree: &'a AdaptiveRadixTree<V>,
+        prefix: &[u8],
+    ) -> Vec<(Vec<u8>, &'a V)> {
+        let mut results = Vec::new();
+        if let Some(root) = &tree.root {
+            collect_prefix_boxed_reference(root, prefix, 0, &mut Vec::new(), &mut results);
+        }
+        results
+    }
+
+    fn traversal_digest(results: &[(Vec<u8>, &u64)]) -> u64 {
+        (results.len() as u64)
+            .wrapping_add(
+                results
+                    .first()
+                    .map_or(0, |(key, value)| key.len() as u64 ^ **value),
+            )
+            .wrapping_add(
+                results
+                    .last()
+                    .map_or(0, |(key, value)| key.len() as u64 ^ **value),
+            )
+    }
+
+    fn time_prefix_search_candidate(tree: &AdaptiveRadixTree<u64>, sweeps: usize) -> (u128, u64) {
+        let started = Instant::now();
+        let mut digest = 0_u64;
+        for _ in 0..sweeps {
+            let results = black_box(tree).prefix_search(black_box(b"subgraph_"));
+            digest = digest.wrapping_add(traversal_digest(&results));
+            drop(black_box(results));
+        }
+        (started.elapsed().as_nanos(), digest)
+    }
+
+    fn time_prefix_search_boxed(tree: &AdaptiveRadixTree<u64>, sweeps: usize) -> (u128, u64) {
+        let started = Instant::now();
+        let mut digest = 0_u64;
+        for _ in 0..sweeps {
+            let results = prefix_search_boxed_reference(black_box(tree), black_box(b"subgraph_"));
+            digest = digest.wrapping_add(traversal_digest(&results));
+            drop(black_box(results));
+        }
+        (started.elapsed().as_nanos(), digest)
+    }
+
+    fn art_fixture() -> AdaptiveRadixTree<u64> {
+        let mut tree = AdaptiveRadixTree::new();
+        for index in 0_u64..16_384 {
+            let key = format!("subgraph_{:03}/node_{index:05}", index / 128);
+            tree.insert(key.as_bytes(), index);
+        }
+        tree
+    }
+
+    #[test]
+    fn allocation_free_child_traversal_matches_boxed_reference() {
+        let tree = art_fixture();
+        for prefix in [
+            b"".as_slice(),
+            b"subgraph_".as_slice(),
+            b"subgraph_127".as_slice(),
+            b"missing".as_slice(),
+        ] {
+            assert_eq!(
+                tree.prefix_search(prefix),
+                prefix_search_boxed_reference(&tree, prefix)
+            );
+        }
+
+        let mut sorted_reference = prefix_search_boxed_reference(&tree, b"");
+        sorted_reference.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(tree.to_sorted_vec(), sorted_reference);
+    }
+
+    #[test]
+    #[ignore = "release-only ART child traversal A/B"]
+    fn prefix_search_child_traversal_perf_ab() {
+        const ROUNDS: usize = 9;
+        const SWEEPS: usize = 32;
+
+        let tree = art_fixture();
+        let expected = prefix_search_boxed_reference(&tree, b"subgraph_");
+        assert_eq!(tree.prefix_search(b"subgraph_"), expected);
+
+        let mut boxed_samples = Vec::with_capacity(ROUNDS);
+        let mut candidate_samples = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (boxed_ns, boxed_digest, candidate_ns, candidate_digest) = if round % 2 == 0 {
+                let (boxed_ns, boxed_digest) = time_prefix_search_boxed(&tree, SWEEPS);
+                let (candidate_ns, candidate_digest) = time_prefix_search_candidate(&tree, SWEEPS);
+                (boxed_ns, boxed_digest, candidate_ns, candidate_digest)
+            } else {
+                let (candidate_ns, candidate_digest) = time_prefix_search_candidate(&tree, SWEEPS);
+                let (boxed_ns, boxed_digest) = time_prefix_search_boxed(&tree, SWEEPS);
+                (boxed_ns, boxed_digest, candidate_ns, candidate_digest)
+            };
+            assert_eq!(candidate_digest, boxed_digest);
+            boxed_samples.push(boxed_ns);
+            candidate_samples.push(candidate_ns);
+        }
+
+        boxed_samples.sort_unstable();
+        candidate_samples.sort_unstable();
+        let boxed_median = boxed_samples[ROUNDS / 2];
+        let candidate_median = candidate_samples[ROUNDS / 2];
+        let improvement =
+            (boxed_median as f64 - candidate_median as f64) * 100.0 / boxed_median as f64;
+        eprintln!(
+            "art_child_traversal_ab boxed_ns={boxed_samples:?} candidate_ns={candidate_samples:?} boxed_median_ns={boxed_median} candidate_median_ns={candidate_median} improvement_pct={improvement:.3}"
+        );
+        assert!(
+            candidate_median * 100 <= boxed_median * 97,
+            "candidate must clear the 3% keep gate; improvement was {improvement:.3}%"
+        );
+    }
 
     #[test]
     fn empty_tree() {

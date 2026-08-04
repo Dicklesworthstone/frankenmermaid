@@ -1,0 +1,71 @@
+{
+  "schema": "frankenmermaid.headtohead.v1",
+  "env": {
+    "captured_at": "2026-07-26T00:51:54.349Z",
+    "git_rev": "ca4e1d65910ef9bf3453f6a0c8d178c65c5220ae",
+    "git_dirty": true,
+    "rustc": "rustc 1.99.0-nightly (da86f4d07 2026-07-24)",
+    "cargo_profile": "release (opt-level=3 for fm-core/parser/layout/render-svg, lto=fat, codegen-units=1)",
+    "rustflags": "-C target-cpu=x86-64-v2 (.cargo/config.toml)",
+    "node": "v24.14.0",
+    "chromium": "Chromium 150.0.7871.114 snap",
+    "kernel": "6.17.0-35-generic",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "cpu_count": 64,
+    "total_mem_gb": 215.8,
+    "loadavg_1m": 12.46,
+    "load_warning": null,
+    "pinned_cpu": {
+      "cpu": 0,
+      "busy_pct": 0
+    },
+    "fm_elf_sha256": "f4d035f2cf4676424fe402728f4bcdbee008d96332a68f0964bcdab2ceca1289",
+    "fm_elf_bytes": 7079056
+  },
+  "pins": {
+    "mermaid": "11.15.0",
+    "bundle_url": "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js",
+    "security_level": "strict"
+  },
+  "corpus_items": 1,
+  "ok_items": 0,
+  "dnf_items": 1,
+  "dnf": [
+    {
+      "id": "flowchart_xl_5000",
+      "budget_ms": 6000,
+      "phase": "probe",
+      "fm_p50_ns": 4189990,
+      "speedup_lower_bound": 1431.9843245449274,
+      "error": "mermaid did not finish one render, exceeded the 6 s budget"
+    }
+  ],
+  "mad_gate_pct": 5,
+  "mad_gate_failures": [],
+  "speedup": null,
+  "speedup_min_estimator": null,
+  "rows": [
+    {
+      "id": "flowchart_xl_5000",
+      "class": "single",
+      "nodes": 5000,
+      "edges": 4999,
+      "revisions": 1,
+      "fm_p50_ns": 4189990,
+      "fm_min_ns": 3956467,
+      "fm_cv_pct": 7.95,
+      "fm_mad_pct": 3.76,
+      "fm_bytes": 3432892,
+      "fm_bytes_lean": 2307221,
+      "fm_lean_p50_ns": 3788628,
+      "lean_slowdown": 0.9042093179219998,
+      "status": "comparator_dnf",
+      "mjs_budget_ms": 6000,
+      "mjs_elapsed_ms": 6015,
+      "mjs_dnf_phase": "probe",
+      "error": "mermaid did not finish one render, exceeded the 6 s budget",
+      "speedup_lower_bound": 1431.9843245449274,
+      "mad_gate": "pass"
+    }
+  ]
+}

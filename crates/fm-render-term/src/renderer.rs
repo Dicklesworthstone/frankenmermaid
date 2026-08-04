@@ -37,6 +37,50 @@ pub struct TermRenderer {
     cluster_glyphs: ClusterGlyphs,
 }
 
+#[inline]
+fn compact_label_width(line: &str) -> usize {
+    line.chars().count()
+}
+
+const fn edge_marker_ends(arrow: ArrowType) -> (bool, bool) {
+    match arrow {
+        ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine => (false, false),
+        ArrowType::DoubleArrow | ArrowType::DoubleThickArrow | ArrowType::DoubleDottedArrow => {
+            (true, true)
+        }
+        ArrowType::HalfArrowTopReverse
+        | ArrowType::HalfArrowBottomReverse
+        | ArrowType::StickArrowTopReverse
+        | ArrowType::StickArrowBottomReverse
+        | ArrowType::HalfArrowTopReverseDotted
+        | ArrowType::HalfArrowBottomReverseDotted
+        | ArrowType::StickArrowTopReverseDotted
+        | ArrowType::StickArrowBottomReverseDotted
+        | ArrowType::Aggregation
+        | ArrowType::Composition
+        | ArrowType::Inheritance => (true, false),
+        ArrowType::Arrow
+        | ArrowType::OpenArrow
+        | ArrowType::HalfArrowTop
+        | ArrowType::HalfArrowBottom
+        | ArrowType::StickArrowTop
+        | ArrowType::StickArrowBottom
+        | ArrowType::ThickArrow
+        | ArrowType::DottedArrow
+        | ArrowType::DottedOpenArrow
+        | ArrowType::DottedCross
+        | ArrowType::HalfArrowTopDotted
+        | ArrowType::HalfArrowBottomDotted
+        | ArrowType::StickArrowTopDotted
+        | ArrowType::StickArrowBottomDotted
+        | ArrowType::Circle
+        | ArrowType::Cross
+        | ArrowType::AggregationReverse
+        | ArrowType::CompositionReverse
+        | ArrowType::InheritanceReverse => (false, true),
+    }
+}
+
 impl TermRenderer {
     /// Create a new renderer with resolved configuration.
     #[must_use]
@@ -143,7 +187,7 @@ impl TermRenderer {
         }
 
         self.render_generic_diagram_title(&mut buffer.cells, cell_width, ir);
-        let output = buffer.to_string();
+        let output = buffer.to_output_string();
 
         TermRenderResult {
             output,
@@ -302,10 +346,11 @@ impl TermRenderer {
             );
         }
 
-        // Render canvas to string and overlay labels.
-        let base_output = canvas.render();
+        // Render the canvas straight to its char grid (skipping the String the overlay would re-parse)
+        // and overlay labels.
+        let base_grid = canvas.render_char_grid();
         let output = self.overlay_labels(
-            base_output,
+            base_grid,
             ir,
             layout,
             cell_width,
@@ -453,12 +498,12 @@ impl TermRenderer {
             self.draw_line_cell(buffer, x0, y0, x1, y1, glyphs, edge_path.reversed, arrow);
         }
 
-        // Draw arrowhead at start for double arrows.
-        if matches!(
-            arrow,
-            ArrowType::DoubleArrow | ArrowType::DoubleThickArrow | ArrowType::DoubleDottedArrow
-        ) && let Some(first) = edge_path.points.first()
-        {
+        let (marker_at_start, marker_at_end) = edge_marker_ends(arrow);
+
+        // The operator determines the semantic endpoint. In particular, UML ownership and
+        // inheritance operators place their marker at the source for `o--`, `*--`, and `<|--`,
+        // while their reverse spellings place it at the target.
+        if marker_at_start && let Some(first) = edge_path.points.first() {
             let (x, y) = self.point_to_cells(first, scale_x, scale_y);
             if edge_path.points.len() >= 2 {
                 let next = &edge_path.points[1];
@@ -468,8 +513,7 @@ impl TermRenderer {
             }
         }
 
-        // Draw arrowhead at end.
-        if let Some(last) = edge_path.points.last() {
+        if marker_at_end && let Some(last) = edge_path.points.last() {
             let (x, y) = self.point_to_cells(last, scale_x, scale_y);
             let arrow_char = if edge_path.points.len() >= 2 {
                 let prev = &edge_path.points[edge_path.points.len() - 2];
@@ -478,12 +522,7 @@ impl TermRenderer {
             } else {
                 glyphs.arrow_right
             };
-            if !matches!(
-                arrow,
-                ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine
-            ) {
-                buffer.set(x, y, arrow_char);
-            }
+            buffer.set(x, y, arrow_char);
         }
     }
 
@@ -637,8 +676,7 @@ impl TermRenderer {
         let start_y = y + (h.saturating_sub(lines.len())) / 2;
 
         for (i, line) in lines.iter().enumerate() {
-            let label_chars: Vec<char> = line.chars().collect();
-            let label_len = label_chars.len();
+            let label_len = compact_label_width(line);
             let label_x = x + (w.saturating_sub(label_len)) / 2;
             buffer.set_string(label_x, start_y + i, line);
         }
@@ -1091,7 +1129,7 @@ impl TermRenderer {
     #[allow(clippy::too_many_arguments)]
     fn overlay_labels(
         &self,
-        base: String,
+        mut lines: Vec<Vec<char>>,
         ir: &MermaidDiagramIr,
         layout: &DiagramLayout,
         cell_width: usize,
@@ -1099,7 +1137,9 @@ impl TermRenderer {
         scale_x: f32,
         scale_y: f32,
     ) -> String {
-        let mut lines: Vec<Vec<char>> = base.lines().map(|l| l.chars().collect()).collect();
+        // `lines` arrives as the canvas's char grid (`Canvas::render_char_grid`) — one row per cell
+        // row — instead of a rendered `String` this fn used to re-parse with `lines().chars().collect()`.
+        // Skips a full encode+decode of the whole raster.
 
         // Pad lines to consistent width.
         for line in &mut lines {
@@ -1137,13 +1177,16 @@ impl TermRenderer {
             let start_y = y + (h.saturating_sub(label_lines.len())) / 2;
 
             for (i, line) in label_lines.iter().enumerate() {
-                let label_chars: Vec<char> = line.chars().collect();
-                let label_len = label_chars.len();
+                // Iterate the label line's chars directly for both the centering width and the placement —
+                // the previous `chars().collect::<Vec<char>>()` allocated a Vec per label line only to read
+                // its `.len()` and then consume it sequentially. `chars().count()` gives the same width and
+                // `chars().enumerate()` the same `(j, ch)`. Byte-identical, no per-line allocation.
+                let label_len = line.chars().count();
                 let label_x = x + (w.saturating_sub(label_len)) / 2;
                 let label_y = start_y + i;
 
                 if label_y < lines.len() {
-                    for (j, ch) in label_chars.into_iter().enumerate() {
+                    for (j, ch) in line.chars().enumerate() {
                         let col = label_x + j;
                         if col < cell_width && col < lines[label_y].len() {
                             lines[label_y][col] = ch;
@@ -1169,13 +1212,16 @@ impl TermRenderer {
             let start_y = y + (h.saturating_sub(label_lines.len())) / 2;
 
             for (i, line) in label_lines.iter().enumerate() {
-                let label_chars: Vec<char> = line.chars().collect();
-                let label_len = label_chars.len();
+                // Iterate the label line's chars directly for both the centering width and the placement —
+                // the previous `chars().collect::<Vec<char>>()` allocated a Vec per label line only to read
+                // its `.len()` and then consume it sequentially. `chars().count()` gives the same width and
+                // `chars().enumerate()` the same `(j, ch)`. Byte-identical, no per-line allocation.
+                let label_len = line.chars().count();
                 let label_x = x + (w.saturating_sub(label_len)) / 2;
                 let label_y = start_y + i;
 
                 if label_y < lines.len() {
-                    for (j, ch) in label_chars.into_iter().enumerate() {
+                    for (j, ch) in line.chars().enumerate() {
                         let col = label_x + j;
                         if col < cell_width && col < lines[label_y].len() {
                             lines[label_y][col] = ch;
@@ -1225,13 +1271,14 @@ impl TermRenderer {
                 let start_y = mid_y.saturating_sub(label_lines.len() / 2);
 
                 for (i, line) in label_lines.iter().enumerate() {
-                    let label_chars: Vec<char> = line.chars().collect();
-                    let label_len = label_chars.len();
+                    // Iterate chars directly (see the node-label loops above): `chars().count()` for the
+                    // centering width, `chars().enumerate()` for placement — no per-line Vec allocation.
+                    let label_len = line.chars().count();
                     let label_x = mid_x.saturating_sub(label_len / 2);
                     let label_y = start_y + i;
 
                     if label_y < lines.len() {
-                        for (j, ch) in label_chars.into_iter().enumerate() {
+                        for (j, ch) in line.chars().enumerate() {
                             let col = label_x + j;
                             if col < cell_width && col < lines[label_y].len() {
                                 lines[label_y][col] = ch;
@@ -1256,11 +1303,22 @@ impl TermRenderer {
             }
         }
 
-        lines
-            .into_iter()
-            .map(|l| l.into_iter().collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n")
+        // Single-pass serialization: push every cell char into one pre-sized `String`, with a `'\n'`
+        // between rows. The previous `map(collect::<String>).collect::<Vec>().join("\n")` built one
+        // `String` per row (cell_height allocations) and then RE-COPIED every byte in `join`. Byte-
+        // identical: same chars in row-major order, `'\n'` between rows, no trailing newline. Reserve for
+        // the worst case (every cell a 3-byte U+2800.. braille/box glyph) so no push ever reallocates.
+        let total_chars: usize = lines.iter().map(Vec::len).sum();
+        let mut out = String::with_capacity(total_chars * 3 + lines.len());
+        for (row_index, row) in lines.into_iter().enumerate() {
+            if row_index > 0 {
+                out.push('\n');
+            }
+            for ch in row {
+                out.push(ch);
+            }
+        }
+        out
     }
 
     fn render_generic_diagram_title(
@@ -1277,11 +1335,12 @@ impl TermRenderer {
         }
 
         let title = self.truncate_label(title);
-        let title_chars: Vec<char> = title.chars().collect();
-        let title_len = title_chars.len().min(row_width);
+        // Iterate the title chars directly (matches the other title path above): `chars().count()` for the
+        // width, `chars().take().enumerate()` for placement — no per-title Vec<char> allocation.
+        let title_len = title.chars().count().min(row_width);
         let start_x = row_width.saturating_sub(title_len) / 2;
 
-        for (index, ch) in title_chars.into_iter().take(title_len).enumerate() {
+        for (index, ch) in title.chars().take(title_len).enumerate() {
             cells[start_x + index] = ch;
         }
     }
@@ -1315,6 +1374,21 @@ impl TermRenderer {
     fn truncate_label(&self, text: &str) -> String {
         let max_chars = self.config.max_label_chars.max(1);
         let max_lines = self.config.max_label_lines.max(1);
+        let bytes = text.as_bytes();
+        let mut previous_space = false;
+        let unchanged_short_ascii = bytes.len() <= max_chars
+            && bytes.first() != Some(&b' ')
+            && bytes.iter().copied().all(|byte| {
+                let is_space = byte == b' ';
+                let valid = byte.is_ascii_graphic() || (is_space && !previous_space);
+                previous_space = is_space;
+                valid
+            })
+            && !previous_space;
+        if unchanged_short_ascii {
+            return text.to_owned();
+        }
+
         let sanitized: String = text
             .chars()
             .map(|ch| match ch {
@@ -1599,6 +1673,27 @@ impl CellBuffer {
             self.set(x + i, y, ch);
         }
     }
+
+    fn to_output_string(&self) -> String {
+        let mut output = String::with_capacity(
+            self.cells
+                .len()
+                .saturating_add(self.height.saturating_sub(1)),
+        );
+        for y in 0..self.height {
+            if y > 0 {
+                output.push('\n');
+            }
+            let start = y * self.width;
+            let row = &self.cells[start..start + self.width];
+            let retained_len = row
+                .iter()
+                .rposition(|ch| !ch.is_whitespace())
+                .map_or(0, |index| index + 1);
+            output.extend(row[..retained_len].iter().copied());
+        }
+        output
+    }
 }
 
 impl std::fmt::Display for CellBuffer {
@@ -1786,6 +1881,32 @@ fn render_gantt_cell(
         return;
     }
 
+    // Large Gantt charts previously scanned every layout node for every task, making terminal rendering
+    // O(tasks * nodes). Build an order-preserving dense index once when it can amortize the allocation.
+    // Only fill an empty slot so duplicate node indexes retain `.find()`'s first-match behavior; sparse
+    // external layouts keep the allocation-free linear path rather than sizing from an arbitrary index.
+    let layout_nodes_by_index = (gantt_meta.tasks.len() >= 16)
+        .then(|| {
+            layout
+                .nodes
+                .iter()
+                .map(|node| node.node_index)
+                .max()
+                .map_or(0, |max_index| max_index.saturating_add(1))
+        })
+        .filter(|lookup_len| *lookup_len <= layout.nodes.len().saturating_mul(2))
+        .map(|lookup_len| {
+            let mut nodes_by_index = vec![None; lookup_len];
+            for node in &layout.nodes {
+                if let Some(slot) = nodes_by_index.get_mut(node.node_index)
+                    && slot.is_none()
+                {
+                    *slot = Some(node);
+                }
+            }
+            nodes_by_index
+        });
+
     // Title
     if let Some(title) = &gantt_meta.title {
         let tx = cell_width.saturating_sub(title.len()) / 2;
@@ -1830,10 +1951,14 @@ fn render_gantt_cell(
             buffer.set_string(0, row, &task_label);
 
             let bar_origin = label_width + 2;
-            let (bar_start, bar_end) = layout
-                .nodes
-                .iter()
-                .find(|node_box| node_box.node_index == task.node.0)
+            let node_box = match &layout_nodes_by_index {
+                Some(nodes_by_index) => nodes_by_index.get(task.node.0).and_then(|node| *node),
+                None => layout
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_index == task.node.0),
+            };
+            let (bar_start, bar_end) = node_box
                 .map(|node_box| {
                     let start_ratio =
                         ((node_box.bounds.x - layout.bounds.x) / schedule_width).clamp(0.0, 1.0);
@@ -2088,6 +2213,70 @@ mod tests {
     }
 
     #[test]
+    fn cell_mode_places_uml_markers_on_the_semantic_endpoint() {
+        let config = TermRenderConfig {
+            tier: MermaidTier::Compact,
+            render_mode: MermaidRenderMode::CellOnly,
+            padding: 0,
+            ..Default::default()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 8, 1));
+        let edge_path = LayoutEdgePath {
+            edge_index: 0,
+            span: Default::default(),
+            points: [
+                fm_layout::LayoutPoint { x: 1.0, y: 0.0 },
+                fm_layout::LayoutPoint { x: 6.0, y: 0.0 },
+            ]
+            .into_iter()
+            .collect(),
+            reversed: false,
+            is_self_loop: false,
+            parallel_offset: 0.0,
+            bundle_count: 1,
+            bundled: false,
+        };
+
+        for arrow in [
+            ArrowType::Aggregation,
+            ArrowType::Composition,
+            ArrowType::Inheritance,
+        ] {
+            let mut ir = sample_ir();
+            ir.edges[0].arrow = arrow;
+            let mut buffer = CellBuffer::new(8, 1);
+            renderer.render_edge_cell(&mut buffer, &ir, &edge_path, 1.0, 1.0);
+            assert_eq!(
+                buffer.cells[1], renderer.edge_glyphs.arrow_left,
+                "{arrow:?} must mark the source"
+            );
+            assert_eq!(
+                buffer.cells[6], renderer.edge_glyphs.line_h,
+                "{arrow:?} must not mark the target"
+            );
+        }
+
+        for arrow in [
+            ArrowType::AggregationReverse,
+            ArrowType::CompositionReverse,
+            ArrowType::InheritanceReverse,
+        ] {
+            let mut ir = sample_ir();
+            ir.edges[0].arrow = arrow;
+            let mut buffer = CellBuffer::new(8, 1);
+            renderer.render_edge_cell(&mut buffer, &ir, &edge_path, 1.0, 1.0);
+            assert_eq!(
+                buffer.cells[1], renderer.edge_glyphs.line_h,
+                "{arrow:?} must not mark the source"
+            );
+            assert_eq!(
+                buffer.cells[6], renderer.edge_glyphs.arrow_right,
+                "{arrow:?} must mark the target"
+            );
+        }
+    }
+
+    #[test]
     fn compact_mode_produces_smaller_output() {
         let ir = sample_ir();
         let config = TermRenderConfig::compact();
@@ -2136,6 +2325,253 @@ mod tests {
         }
         let result = render_diagram(&ir);
         assert!(!result.output.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn short_ascii_label_fast_path_preserves_wrapping_contract() {
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(
+            &TermRenderConfig::default(),
+            120,
+            40,
+        ));
+        assert_eq!(renderer.truncate_label("Node 42"), "Node 42");
+        assert_eq!(renderer.truncate_label(""), "");
+        assert_eq!(renderer.truncate_label(" leading"), "leading");
+        assert_eq!(renderer.truncate_label("trailing "), "trailing");
+        assert_eq!(renderer.truncate_label("two  spaces"), "two spaces");
+        assert_eq!(renderer.truncate_label("tab\there"), "tab here");
+        assert_eq!(renderer.truncate_label("界面 42"), "界面 42");
+    }
+
+    #[inline]
+    fn owned_compact_label_width_reference(line: &str) -> usize {
+        let chars: Vec<char> = line.chars().collect();
+        chars.len()
+    }
+
+    #[test]
+    fn compact_label_width_preserves_unicode_scalar_centering() {
+        for line in [
+            "",
+            "Node 42",
+            "界面 → 缓存",
+            "e\u{301}quipe",
+            "🦀 worker",
+            "مرحبا",
+            "🏳️‍🌈",
+        ] {
+            assert_eq!(
+                compact_label_width(line),
+                owned_compact_label_width_reference(line),
+                "Unicode-scalar width changed for {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "release-only same-binary performance probe"]
+    fn compact_label_width_streaming_perf_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const SAMPLE_COUNT: usize = 9;
+        const SWEEPS: usize = 16;
+        const BOX_WIDTH: usize = 48;
+        const BOX_X: usize = 7;
+
+        let patterns = [
+            "Node 0042",
+            "API gateway",
+            "界面 → 缓存",
+            "e\u{301}quipe worker",
+            "Δ-state_17",
+            "🦀 render worker",
+            "مرحبا service",
+            "request\nresponse",
+        ];
+        let labels: Vec<String> = (0..4_096)
+            .map(|index| format!("{}-{index}", patterns[index % patterns.len()]))
+            .collect();
+
+        fn centered_cell_stream(
+            labels: &[String],
+            width: impl Fn(&str) -> usize,
+        ) -> Vec<(usize, usize, usize, char)> {
+            let mut cells = Vec::new();
+            for (label_index, label) in labels.iter().enumerate() {
+                for (line_index, line) in label.lines().enumerate() {
+                    let label_x = BOX_X + (BOX_WIDTH.saturating_sub(width(line))) / 2;
+                    cells.extend(
+                        line.chars()
+                            .enumerate()
+                            .map(|(offset, ch)| (label_index, line_index, label_x + offset, ch)),
+                    );
+                }
+            }
+            cells
+        }
+
+        fn measure(labels: &[String], width: impl Fn(&str) -> usize) -> (u128, u64) {
+            let started = Instant::now();
+            let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+            for _ in 0..SWEEPS {
+                for label in labels {
+                    for line in black_box(label.as_str()).lines() {
+                        let label_width = black_box(width(black_box(line)));
+                        let label_x = BOX_X + (BOX_WIDTH.saturating_sub(label_width)) / 2;
+                        digest ^= label_width as u64;
+                        digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                        digest ^= label_x as u64;
+                        digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                        for (offset, ch) in line.chars().enumerate() {
+                            digest ^= ((label_x + offset) as u64).rotate_left(32)
+                                ^ u64::from(u32::from(ch));
+                            digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                        }
+                    }
+                }
+            }
+            (started.elapsed().as_nanos(), black_box(digest))
+        }
+
+        assert_eq!(
+            centered_cell_stream(&labels, owned_compact_label_width_reference),
+            centered_cell_stream(&labels, compact_label_width),
+        );
+
+        let mut baseline_samples = Vec::with_capacity(SAMPLE_COUNT);
+        let mut candidate_samples = Vec::with_capacity(SAMPLE_COUNT);
+        let mut expected_digest = None;
+        for sample in 0..SAMPLE_COUNT {
+            let (baseline, candidate) = if sample % 2 == 0 {
+                (
+                    measure(&labels, owned_compact_label_width_reference),
+                    measure(&labels, compact_label_width),
+                )
+            } else {
+                let candidate = measure(&labels, compact_label_width);
+                let baseline = measure(&labels, owned_compact_label_width_reference);
+                (baseline, candidate)
+            };
+            assert_eq!(candidate.1, baseline.1);
+            assert_eq!(*expected_digest.get_or_insert(baseline.1), baseline.1);
+            baseline_samples.push(baseline.0);
+            candidate_samples.push(candidate.0);
+        }
+
+        baseline_samples.sort_unstable();
+        candidate_samples.sort_unstable();
+        let baseline_median = baseline_samples[SAMPLE_COUNT / 2];
+        let candidate_median = candidate_samples[SAMPLE_COUNT / 2];
+        let improvement = (1.0 - candidate_median as f64 / baseline_median as f64) * 100.0;
+
+        eprintln!("baseline_ns={baseline_samples:?}");
+        eprintln!("candidate_ns={candidate_samples:?}");
+        eprintln!(
+            "PERF compact_terminal_label_width baseline_median_ns={baseline_median} candidate_median_ns={candidate_median} improvement_pct={improvement:.3} parity=exact rounds={SAMPLE_COUNT} labels={} sweeps={SWEEPS} digest={:016x}",
+            labels.len(),
+            expected_digest.expect("at least one performance sample")
+        );
+    }
+
+    #[test]
+    fn cell_buffer_direct_output_matches_display() {
+        for (width, height) in [(0, 0), (0, 3), (1, 1), (12, 4)] {
+            let mut buffer = CellBuffer::new(width, height);
+            if width >= 12 && height >= 4 {
+                buffer.set_string(1, 0, "Node A");
+                buffer.set_string(1, 1, "界面 → 缓存");
+                buffer.set_string(1, 2, "a\tb\u{00a0}\u{2003}");
+                buffer.set_string(0, 3, "full-row-1234");
+            }
+            assert_eq!(
+                buffer.to_output_string(),
+                buffer.to_string(),
+                "direct output changed Display semantics for {width}x{height} buffer"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "release-only same-binary performance probe"]
+    fn cell_buffer_direct_output_perf_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const SAMPLE_COUNT: usize = 9;
+        const ITERATIONS: usize = 512;
+        const WIDTH: usize = 160;
+        const HEIGHT: usize = 72;
+
+        let mut buffer = CellBuffer::new(WIDTH, HEIGHT);
+        for row in 0..HEIGHT {
+            match row % 7 {
+                0 => buffer.set_string(2, row, "service_0042 --> cache"),
+                1 => buffer.set_string(3, row, "界面 → 缓存 🦀"),
+                2 => buffer.set_string(4, row, "internal   spaces remain"),
+                3 => buffer.set_string(5, row, "a\tb\u{00a0}c\u{2003}"),
+                4 => buffer.set_string(1, row, "request\u{2003}\u{00a0}"),
+                5 => {}
+                _ => {
+                    for column in 0..WIDTH {
+                        buffer.set(column, row, if column % 17 == 0 { '┼' } else { '─' });
+                    }
+                }
+            }
+        }
+
+        let baseline_output = buffer.to_string();
+        let candidate_output = buffer.to_output_string();
+        assert_eq!(candidate_output, baseline_output);
+
+        fn measure(buffer: &CellBuffer, serializer: impl Fn(&CellBuffer) -> String) -> (u128, u64) {
+            let started = Instant::now();
+            let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+            for iteration in 0..ITERATIONS {
+                let output = black_box(serializer(black_box(buffer)));
+                let bytes = black_box(output.as_bytes());
+                digest ^= bytes.len() as u64;
+                if !bytes.is_empty() {
+                    digest ^= u64::from(bytes[(iteration * 131) % bytes.len()]);
+                }
+                digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                black_box(output);
+            }
+            (started.elapsed().as_nanos(), black_box(digest))
+        }
+
+        let mut baseline_samples = Vec::with_capacity(SAMPLE_COUNT);
+        let mut candidate_samples = Vec::with_capacity(SAMPLE_COUNT);
+        let mut expected_digest = None;
+        for sample in 0..SAMPLE_COUNT {
+            let (baseline, candidate) = if sample % 2 == 0 {
+                (
+                    measure(&buffer, CellBuffer::to_string),
+                    measure(&buffer, CellBuffer::to_output_string),
+                )
+            } else {
+                let candidate = measure(&buffer, CellBuffer::to_output_string);
+                let baseline = measure(&buffer, CellBuffer::to_string);
+                (baseline, candidate)
+            };
+            assert_eq!(candidate.1, baseline.1);
+            assert_eq!(*expected_digest.get_or_insert(baseline.1), baseline.1);
+            baseline_samples.push(baseline.0);
+            candidate_samples.push(candidate.0);
+        }
+
+        baseline_samples.sort_unstable();
+        candidate_samples.sort_unstable();
+        let baseline_median = baseline_samples[SAMPLE_COUNT / 2];
+        let candidate_median = candidate_samples[SAMPLE_COUNT / 2];
+        let improvement = (1.0 - candidate_median as f64 / baseline_median as f64) * 100.0;
+
+        eprintln!("baseline_ns={baseline_samples:?}");
+        eprintln!("candidate_ns={candidate_samples:?}");
+        eprintln!(
+            "PERF terminal_cell_buffer_direct_output baseline_median_ns={baseline_median} candidate_median_ns={candidate_median} improvement_pct={improvement:.3} parity=exact rounds={SAMPLE_COUNT} iterations={ITERATIONS} dimensions={WIDTH}x{HEIGHT} digest={:016x}",
+            expected_digest.expect("at least one performance sample")
+        );
     }
 
     #[test]
@@ -2402,10 +2838,12 @@ mod tests {
                 LayoutEdgePath {
                     edge_index: 0,
                     span: Default::default(),
-                    points: vec![
+                    points: [
                         fm_layout::LayoutPoint { x: 5.0, y: 6.0 },
                         fm_layout::LayoutPoint { x: 30.0, y: 6.0 },
-                    ],
+                    ]
+                    .into_iter()
+                    .collect(),
                     reversed: false,
                     is_self_loop: false,
                     parallel_offset: 0.0,
@@ -2415,10 +2853,12 @@ mod tests {
                 LayoutEdgePath {
                     edge_index: 1,
                     span: Default::default(),
-                    points: vec![
+                    points: [
                         fm_layout::LayoutPoint { x: 30.0, y: 12.0 },
                         fm_layout::LayoutPoint { x: 5.0, y: 12.0 },
-                    ],
+                    ]
+                    .into_iter()
+                    .collect(),
                     reversed: false,
                     is_self_loop: false,
                     parallel_offset: 0.0,
@@ -2468,30 +2908,40 @@ mod tests {
             label: Some(IrLabelId(1)),
             ..Default::default()
         });
+        let mut tasks = vec![
+            IrGanttTask {
+                node: IrNodeId(0),
+                section_idx: 0,
+                task_id: Some("build_1".to_string()),
+                start: Some(GanttDate::Absolute("2026-02-01".to_string())),
+                end: Some(GanttDate::DurationDays(2)),
+                task_type: GanttTaskType::Done,
+                ..Default::default()
+            },
+            IrGanttTask {
+                node: IrNodeId(1),
+                section_idx: 0,
+                task_id: Some("verify_1".to_string()),
+                start: Some(GanttDate::Absolute("2026-02-05".to_string())),
+                end: Some(GanttDate::DurationDays(2)),
+                ..Default::default()
+            },
+        ];
+        // Exercise the dense node-box lookup used by larger Gantt diagrams.
+        for index in 2..16 {
+            tasks.push(IrGanttTask {
+                node: IrNodeId(index % 2),
+                section_idx: 0,
+                task_type: GanttTaskType::Normal,
+                ..Default::default()
+            });
+        }
         ir.gantt_meta = Some(IrGanttMeta {
             title: Some("Roadmap".to_string()),
             sections: vec![IrGanttSection {
                 name: "Alpha".to_string(),
             }],
-            tasks: vec![
-                IrGanttTask {
-                    node: IrNodeId(0),
-                    section_idx: 0,
-                    task_id: Some("build_1".to_string()),
-                    start: Some(GanttDate::Absolute("2026-02-01".to_string())),
-                    end: Some(GanttDate::DurationDays(2)),
-                    task_type: GanttTaskType::Done,
-                    ..Default::default()
-                },
-                IrGanttTask {
-                    node: IrNodeId(1),
-                    section_idx: 0,
-                    task_id: Some("verify_1".to_string()),
-                    start: Some(GanttDate::Absolute("2026-02-05".to_string())),
-                    end: Some(GanttDate::DurationDays(2)),
-                    ..Default::default()
-                },
-            ],
+            tasks,
             ..Default::default()
         });
 
@@ -2520,6 +2970,20 @@ mod tests {
                         x: 60.0,
                         y: 10.0,
                         width: 20.0,
+                        height: 6.0,
+                    },
+                },
+                // A duplicate index proves the dense lookup retains the old linear search's first match.
+                LayoutNodeBox {
+                    node_index: 0,
+                    node_id: "duplicate_build".to_string(),
+                    rank: 2,
+                    order: 2,
+                    span: Default::default(),
+                    bounds: LayoutRect {
+                        x: 90.0,
+                        y: 20.0,
+                        width: 10.0,
                         height: 6.0,
                     },
                 },

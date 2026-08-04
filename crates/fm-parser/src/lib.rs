@@ -4,6 +4,8 @@ mod dot_parser;
 mod ir_builder;
 mod mermaid_parser;
 
+use std::sync::Arc;
+
 use fm_core::{
     DiagramType, MermaidDiagramIr, MermaidLensBinding, MermaidLensEdit, MermaidLensEditResult,
     MermaidLensError, MermaidParseMode, MermaidSourceMap, MermaidTextRange, Position, Span,
@@ -23,7 +25,7 @@ pub use mermaid_parser::first_significant_line;
 /// for backend layout engines and rendering formats.
 #[must_use]
 pub fn normalize_identifier(raw: &str) -> String {
-    let trimmed = raw.trim();
+    let trimmed = crate::mermaid_parser::trim_fast(raw);
     if trimmed.is_empty() {
         return String::new();
     }
@@ -43,6 +45,22 @@ pub fn normalize_identifier(raw: &str) -> String {
 
     if cleaned.is_empty() {
         return String::new();
+    }
+
+    // Fast path: an identifier already made up entirely of the bytes the loop below keeps verbatim
+    // (ASCII alphanumerics + `_ - . /`) with no trailing `_` (so `trim_end_matches('_')` is a no-op)
+    // normalizes to ITSELF — the overwhelmingly common case for generated/most node ids. Return a
+    // single owned copy and skip the char-by-char rebuild plus its throwaway `out` allocation (the
+    // slow path allocates `out`, then reallocates for `out.trim_end_matches(..).to_string()`).
+    // Byte-identical: the loop pushes each such char unchanged and the trim/fallback leave it as-is;
+    // a non-ASCII byte fails `is_ascii_alphanumeric`, correctly deferring to the slow path.
+    let cleaned_bytes = cleaned.as_bytes();
+    if cleaned_bytes[cleaned_bytes.len() - 1] != b'_'
+        && cleaned_bytes
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/'))
+    {
+        return cleaned.to_owned();
     }
 
     let mut out = String::with_capacity(cleaned.len());
@@ -67,7 +85,13 @@ pub fn normalize_identifier(raw: &str) -> String {
         }
     }
 
-    let mut result = out.trim_end_matches('_').to_string();
+    // `out` is a fresh owned String; the old `out.trim_end_matches('_').to_string()` reallocated a
+    // second buffer on EVERY identifier even when nothing is trimmed (no trailing `_` — the common
+    // case, e.g. "Event_0"). `trim_end_matches` only removes from the tail, so the kept text is the
+    // `out[..k]` prefix — truncate in place and move `out` instead of copying. Byte-identical.
+    let trimmed_len = out.trim_end_matches('_').len();
+    out.truncate(trimmed_len);
+    let mut result = out;
     if result.is_empty() {
         let mut fallback = String::with_capacity(cleaned.len());
         for grapheme in cleaned.graphemes(true) {
@@ -118,6 +142,239 @@ impl ParseResult {
     #[must_use]
     pub const fn parse_mode(&self) -> MermaidParseMode {
         self.ir.meta.parse_mode
+    }
+}
+
+/// Exact immutable prefix certified by a batch parser for downstream layout/render reuse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowchartBatchPrefix {
+    /// Pointer-stable identity of the exact source prefix compiled by this plan.
+    pub identity: Arc<str>,
+    /// Number of leading IR nodes proven unchanged after suffix lowering.
+    pub node_count: usize,
+    /// Number of leading IR edges proven unchanged after suffix lowering.
+    pub edge_count: usize,
+}
+
+/// Borrowed parse result backed by a caller-owned reusable batch slot.
+#[derive(Debug, Clone, Copy)]
+pub struct FlowchartBatchParseRef<'a> {
+    pub ir: &'a MermaidDiagramIr,
+    pub warnings: &'a [String],
+    pub confidence: f32,
+    pub detection_method: DetectionMethod,
+    pub reusable_prefix: Option<&'a FlowchartBatchPrefix>,
+}
+
+/// Per-worker storage for [`FlowchartBatchParsePlan::with_parse_scratch`].
+///
+/// Keep one beside each batch renderer. Repeated suffix parses then overwrite the same builder
+/// slot, reusing prefix vector and string allocations without locks or cross-worker ownership.
+#[derive(Default)]
+pub struct FlowchartBatchParseScratch {
+    inner: mermaid_parser::CompiledFlowchartScratch,
+}
+
+/// Work eliminated by a [`FlowchartBatchParsePlan`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct FlowchartBatchParseStats {
+    /// Distinct exact subgraph prefixes compiled once for two or more inputs.
+    pub shared_prefix_groups: usize,
+    /// Inputs served from a compiled prefix, including each group's compiling owner.
+    pub shared_prefix_inputs: usize,
+    /// Repeated prefix parses removed (`group_len - 1` summed across groups).
+    pub reused_prefix_parses: usize,
+    /// Source bytes that no longer pass through tokenization/lowering.
+    pub reused_prefix_bytes: usize,
+}
+
+/// Immutable batch compilation plan for diagrams with repeated prefix subgraphs.
+///
+/// The ordinary parser remains the fallback for every ungrouped input. When two or more explicit
+/// flowcharts begin with the same complete, closed subgraph block, the plan lowers that prefix once
+/// and seeds a caller-owned builder slot before parsing each suffix. Callers may invoke
+/// [`Self::parse`] concurrently; callers pursuing allocation reuse give each worker an independent
+/// [`FlowchartBatchParseScratch`] through [`Self::with_parse_scratch`].
+pub struct FlowchartBatchParsePlan {
+    compiled: Vec<mermaid_parser::CompiledFlowchartPrefix>,
+    assignment: Vec<Option<usize>>,
+    parse_mode: MermaidParseMode,
+    parser_config: ParserConfig,
+    stats: FlowchartBatchParseStats,
+}
+
+impl FlowchartBatchParsePlan {
+    #[must_use]
+    pub fn new(inputs: &[&str], parse_mode: MermaidParseMode, config: &ParserConfig) -> Self {
+        if let Some(prefix) = inputs
+            .first()
+            .and_then(|input| mermaid_parser::reusable_flowchart_prefix(input))
+            && inputs.len() >= 2
+            && inputs
+                .iter()
+                .all(|input| mermaid_parser::can_reuse_flowchart_prefix(input, prefix))
+            && let Some(prefix_parser) =
+                mermaid_parser::CompiledFlowchartPrefix::new(prefix, parse_mode, config)
+        {
+            return Self {
+                compiled: vec![prefix_parser],
+                assignment: vec![Some(0); inputs.len()],
+                parse_mode,
+                parser_config: *config,
+                stats: FlowchartBatchParseStats {
+                    shared_prefix_groups: 1,
+                    shared_prefix_inputs: inputs.len(),
+                    reused_prefix_parses: inputs.len() - 1,
+                    reused_prefix_bytes: prefix.len().saturating_mul(inputs.len() - 1),
+                },
+            };
+        }
+
+        // The largest reusable prefix can differ because later leading subgraphs are unique even
+        // when an earlier, expensive subgraph is shared by the entire batch. Find the byte LCP in
+        // one streaming pass, then snap it back to the last complete subgraph boundary. This keeps
+        // grouping O(total shared bytes), avoiding ordered comparisons of every long prefix.
+        if let Some(first) = inputs.first()
+            && inputs.len() >= 2
+        {
+            let first_bytes = first.as_bytes();
+            let common_len = inputs
+                .iter()
+                .skip(1)
+                .fold(first_bytes.len(), |limit, input| {
+                    let input_bytes = input.as_bytes();
+                    let compared = limit.min(input_bytes.len());
+                    first_bytes[..compared]
+                        .iter()
+                        .zip(&input_bytes[..compared])
+                        .position(|(left, right)| left != right)
+                        .unwrap_or(compared)
+                });
+            if let Some(prefix) =
+                mermaid_parser::reusable_flowchart_prefix_at_or_before(first, common_len)
+                && inputs
+                    .iter()
+                    .all(|input| mermaid_parser::can_reuse_flowchart_prefix(input, prefix))
+                && let Some(prefix_parser) =
+                    mermaid_parser::CompiledFlowchartPrefix::new(prefix, parse_mode, config)
+            {
+                return Self {
+                    compiled: vec![prefix_parser],
+                    assignment: vec![Some(0); inputs.len()],
+                    parse_mode,
+                    parser_config: *config,
+                    stats: FlowchartBatchParseStats {
+                        shared_prefix_groups: 1,
+                        shared_prefix_inputs: inputs.len(),
+                        reused_prefix_parses: inputs.len() - 1,
+                        reused_prefix_bytes: prefix.len().saturating_mul(inputs.len() - 1),
+                    },
+                };
+            }
+        }
+
+        let mut groups: std::collections::BTreeMap<&str, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (index, input) in inputs.iter().enumerate() {
+            if let Some(prefix) = mermaid_parser::reusable_flowchart_prefix(input) {
+                groups.entry(prefix).or_default().push(index);
+            }
+        }
+
+        let mut compiled = Vec::new();
+        let mut assignment = vec![None; inputs.len()];
+        let mut stats = FlowchartBatchParseStats::default();
+        for (prefix, indexes) in groups {
+            if indexes.len() < 2 {
+                continue;
+            }
+            let Some(prefix_parser) =
+                mermaid_parser::CompiledFlowchartPrefix::new(prefix, parse_mode, config)
+            else {
+                continue;
+            };
+            let compiled_index = compiled.len();
+            compiled.push(prefix_parser);
+            for &index in &indexes {
+                assignment[index] = Some(compiled_index);
+            }
+            stats.shared_prefix_groups += 1;
+            stats.shared_prefix_inputs += indexes.len();
+            stats.reused_prefix_parses += indexes.len() - 1;
+            stats.reused_prefix_bytes += prefix.len().saturating_mul(indexes.len() - 1);
+        }
+
+        Self {
+            compiled,
+            assignment,
+            parse_mode,
+            parser_config: *config,
+            stats,
+        }
+    }
+
+    /// Parse one input at the same index used to construct the plan.
+    ///
+    /// A mismatched index/input or an input outside a reusable group takes the standard full parser
+    /// path, preserving the public parser's behavior instead of turning cache eligibility into a
+    /// correctness requirement.
+    #[must_use]
+    pub fn parse(&self, index: usize, input: &str) -> ParseResult {
+        self.assignment
+            .get(index)
+            .and_then(|entry| *entry)
+            .and_then(|compiled_index| self.compiled.get(compiled_index))
+            .and_then(|compiled| compiled.parse(input))
+            .unwrap_or_else(|| {
+                parse_with_mode_and_config(input, self.parse_mode, &self.parser_config)
+            })
+    }
+
+    /// Parse one input into a caller-owned reusable slot and borrow the result for `consume`.
+    ///
+    /// The borrowed result cannot escape `consume`, which lets the next diagram reuse its backing
+    /// allocations. Inputs outside a certified group transparently use the ordinary parser.
+    pub fn with_parse_scratch<R>(
+        &self,
+        index: usize,
+        input: &str,
+        scratch: &mut FlowchartBatchParseScratch,
+        consume: impl FnOnce(FlowchartBatchParseRef<'_>) -> R,
+    ) -> R {
+        let compiled = self
+            .assignment
+            .get(index)
+            .and_then(|entry| *entry)
+            .and_then(|compiled_index| self.compiled.get(compiled_index));
+        if let Some(compiled) = compiled
+            && let Some(parsed) = compiled.parse_with_scratch(input, &mut scratch.inner)
+        {
+            return consume(parsed);
+        }
+
+        let parsed = parse_with_mode_and_config(input, self.parse_mode, &self.parser_config);
+        consume(FlowchartBatchParseRef {
+            ir: &parsed.ir,
+            warnings: &parsed.warnings,
+            confidence: parsed.confidence,
+            detection_method: parsed.detection_method,
+            reusable_prefix: None,
+        })
+    }
+
+    #[must_use]
+    pub const fn stats(&self) -> FlowchartBatchParseStats {
+        self.stats
+    }
+
+    /// Return the plan-local reusable-prefix group assigned to `index`.
+    ///
+    /// Batch executors can use this opaque index to keep one downstream layout/render state per
+    /// compiled prefix. The value is meaningful only for this plan and deliberately exposes no
+    /// parser internals; `None` means the input takes the ordinary full-parser path.
+    #[must_use]
+    pub fn reusable_prefix_group(&self, index: usize) -> Option<usize> {
+        self.assignment.get(index).copied().flatten()
     }
 }
 
@@ -297,8 +554,23 @@ pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig
         };
     }
 
-    // Strategy 1: DOT format detection (high priority for interop)
-    if looks_like_dot(input) {
+    // Get the first significant line up front. An UNAMBIGUOUS mermaid keyword — anything but a bare
+    // `graph` / `digraph` / `strict` DOT header — lets us return WITHOUT running the DOT probe
+    // (Strategy 1), whose comment-strip + whole-input "graph" scan is pure overhead for
+    // class/er/state/sequence/… (and even the brace scan for a plain flowchart). Only
+    // `graph`/`digraph`/`strict`/comment/unknown first lines can actually be DOT, so those still run
+    // `looks_like_dot`. Byte-identical: a real DOT header always starts with one of those prefixes.
+    let first_line = mermaid_parser::first_significant_line(input).unwrap_or("");
+    let keyword = exact_keyword_match(first_line);
+    let could_be_dot = ["graph", "digraph", "strict"].iter().any(|prefix| {
+        first_line
+            .as_bytes()
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+    });
+
+    // Strategy 1: DOT format detection (high priority for interop).
+    if (keyword.is_none() || could_be_dot) && looks_like_dot(input) {
         return DetectedType {
             diagram_type: DiagramType::Flowchart,
             confidence: 0.95,
@@ -307,17 +579,14 @@ pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig
         };
     }
 
-    // Get first significant line
-    let first_line = mermaid_parser::first_significant_line(input).unwrap_or("");
-    let lower = first_line.to_ascii_lowercase();
-
     // Strategy 2: Exact keyword match
-    if let Some(detected) = exact_keyword_match(&lower, first_line) {
+    if let Some(detected) = keyword {
         return detected;
     }
 
     if config.intent_inference {
         // Strategy 3: Fuzzy keyword match
+        let lower = first_line.to_ascii_lowercase();
         if let Some(detected) = fuzzy_keyword_match(&lower, config.fuzzy_keyword_distance) {
             return detected;
         }
@@ -338,76 +607,73 @@ pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig
 }
 
 /// Exact keyword matching for diagram type detection.
-fn exact_keyword_match(lower: &str, original: &str) -> Option<DetectedType> {
-    let (diagram_type, confidence) =
-        if matches_keyword_header(lower, "flowchart") || matches_keyword_header(lower, "graph") {
-            (DiagramType::Flowchart, 1.0)
-        } else if matches_keyword_header(lower, "sequencediagram") {
-            (DiagramType::Sequence, 1.0)
-        } else if matches_keyword_header(lower, "classdiagram") {
-            (DiagramType::Class, 1.0)
-        } else if matches_keyword_header(lower, "statediagram") {
-            (DiagramType::State, 1.0)
-        } else if matches_keyword_header(lower, "gantt") {
-            (DiagramType::Gantt, 1.0)
-        } else if matches_keyword_header(lower, "erdiagram") {
-            (DiagramType::Er, 1.0)
-        } else if matches_keyword_header(lower, "mindmap") {
-            (DiagramType::Mindmap, 1.0)
-        } else if matches_keyword_header(lower, "pie") {
-            (DiagramType::Pie, 1.0)
-        } else if matches_keyword_header(lower, "gitgraph") {
-            (DiagramType::GitGraph, 1.0)
-        } else if matches_keyword_header(lower, "journey") {
-            (DiagramType::Journey, 1.0)
-        } else if matches_keyword_header(lower, "requirementdiagram") {
-            (DiagramType::Requirement, 1.0)
-        } else if matches_keyword_header(lower, "timeline") {
-            (DiagramType::Timeline, 1.0)
-        } else if matches_keyword_header(lower, "quadrantchart") {
-            (DiagramType::QuadrantChart, 1.0)
-        } else if matches_keyword_header(lower, "sankey") {
-            (DiagramType::Sankey, 1.0)
-        } else if matches_keyword_header(lower, "xychart") {
-            (DiagramType::XyChart, 1.0)
-        } else if is_block_beta_header(lower) {
-            (DiagramType::BlockBeta, 1.0)
-        } else if matches_keyword_header(lower, "packet-beta") {
-            (DiagramType::PacketBeta, 1.0)
-        } else if matches_keyword_header(lower, "architecture-beta") {
-            (DiagramType::ArchitectureBeta, 1.0)
-        } else if matches_keyword_header(original, "C4Context")
-            || matches_keyword_header(lower, "c4context")
-        {
-            (DiagramType::C4Context, 1.0)
-        } else if matches_keyword_header(original, "C4Container")
-            || matches_keyword_header(lower, "c4container")
-        {
-            (DiagramType::C4Container, 1.0)
-        } else if matches_keyword_header(original, "C4Component")
-            || matches_keyword_header(lower, "c4component")
-        {
-            (DiagramType::C4Component, 1.0)
-        } else if matches_keyword_header(original, "C4Dynamic")
-            || matches_keyword_header(lower, "c4dynamic")
-        {
-            (DiagramType::C4Dynamic, 1.0)
-        } else if matches_keyword_header(original, "C4Deployment")
-            || matches_keyword_header(lower, "c4deployment")
-        {
-            (DiagramType::C4Deployment, 1.0)
-        } else if matches_keyword_header(lower, "kanban") {
-            (DiagramType::Kanban, 1.0)
-        } else {
-            return None;
-        };
+fn exact_keyword_match(line: &str) -> Option<DetectedType> {
+    let diagram_type = exact_diagram_type_with(line, matches_keyword_header_ci)?;
 
     Some(DetectedType {
         diagram_type,
-        confidence,
+        confidence: 1.0,
         method: DetectionMethod::ExactKeyword,
         warnings: vec![],
     })
+}
+
+#[inline]
+fn exact_diagram_type_with(
+    line: &str,
+    matches: impl Fn(&str, &str) -> bool + Copy,
+) -> Option<DiagramType> {
+    if matches(line, "flowchart") || matches(line, "graph") {
+        Some(DiagramType::Flowchart)
+    } else if matches(line, "sequencediagram") {
+        Some(DiagramType::Sequence)
+    } else if matches(line, "classdiagram") {
+        Some(DiagramType::Class)
+    } else if matches(line, "statediagram") {
+        Some(DiagramType::State)
+    } else if matches(line, "gantt") {
+        Some(DiagramType::Gantt)
+    } else if matches(line, "erdiagram") {
+        Some(DiagramType::Er)
+    } else if matches(line, "mindmap") {
+        Some(DiagramType::Mindmap)
+    } else if matches(line, "pie") {
+        Some(DiagramType::Pie)
+    } else if matches(line, "gitgraph") {
+        Some(DiagramType::GitGraph)
+    } else if matches(line, "journey") {
+        Some(DiagramType::Journey)
+    } else if matches(line, "requirementdiagram") {
+        Some(DiagramType::Requirement)
+    } else if matches(line, "timeline") {
+        Some(DiagramType::Timeline)
+    } else if matches(line, "quadrantchart") {
+        Some(DiagramType::QuadrantChart)
+    } else if matches(line, "sankey") {
+        Some(DiagramType::Sankey)
+    } else if matches(line, "xychart") {
+        Some(DiagramType::XyChart)
+    } else if matches(line, "block-beta") || matches(line, "block") {
+        Some(DiagramType::BlockBeta)
+    } else if matches(line, "packet-beta") {
+        Some(DiagramType::PacketBeta)
+    } else if matches(line, "architecture-beta") {
+        Some(DiagramType::ArchitectureBeta)
+    } else if matches(line, "c4context") {
+        Some(DiagramType::C4Context)
+    } else if matches(line, "c4container") {
+        Some(DiagramType::C4Container)
+    } else if matches(line, "c4component") {
+        Some(DiagramType::C4Component)
+    } else if matches(line, "c4dynamic") {
+        Some(DiagramType::C4Dynamic)
+    } else if matches(line, "c4deployment") {
+        Some(DiagramType::C4Deployment)
+    } else if matches(line, "kanban") {
+        Some(DiagramType::Kanban)
+    } else {
+        None
+    }
 }
 
 /// Known diagram keywords for fuzzy matching.
@@ -432,12 +698,7 @@ const DIAGRAM_KEYWORDS: &[(&str, DiagramType)] = &[
 ];
 
 pub(crate) fn is_sankey_header(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    matches_keyword_header(&lower, "sankey") || matches_keyword_header(&lower, "sankey-beta")
-}
-
-pub(crate) fn is_block_beta_header(line: &str) -> bool {
-    matches_keyword_header(line, "block-beta") || matches_keyword_header(line, "block")
+    matches_keyword_header_ci(line, "sankey") || matches_keyword_header_ci(line, "sankey-beta")
 }
 
 pub(crate) fn matches_keyword_header(line: &str, keyword: &str) -> bool {
@@ -446,6 +707,23 @@ pub(crate) fn matches_keyword_header(line: &str, keyword: &str) -> bool {
             .strip_prefix(keyword)
             .and_then(|rest| rest.chars().next())
             .is_some_and(|c| c.is_whitespace() || c == '-')
+}
+
+/// ASCII-case-insensitive [`matches_keyword_header`] that avoids the caller's per-line
+/// `to_ascii_lowercase()` heap allocation. Byte-identical to
+/// `matches_keyword_header(&line.to_ascii_lowercase(), keyword)` for a lowercase-ASCII `keyword`:
+/// the prefix compare folds ASCII case (matching the lowercasing), and `to_ascii_lowercase` never
+/// changes a char's whitespace-ness or the `'-'` byte, so the post-keyword char test is unaffected.
+/// `keyword` is ASCII, so `keyword.len()` is a char boundary once the prefix matches.
+pub(crate) fn matches_keyword_header_ci(line: &str, keyword: &str) -> bool {
+    let kb = keyword.as_bytes();
+    if line.len() < kb.len() || !line.as_bytes()[..kb.len()].eq_ignore_ascii_case(kb) {
+        return false;
+    }
+    match line[kb.len()..].chars().next() {
+        None => true,
+        Some(c) => c.is_whitespace() || c == '-',
+    }
 }
 
 /// Fuzzy keyword matching using Levenshtein distance.
@@ -606,7 +884,10 @@ pub fn detect_type(input: &str) -> DiagramType {
 
 #[must_use]
 pub fn build_parse_lens(input: &str) -> ParseLensSnapshot {
-    let parsed = parse(input);
+    let mut parsed = parse(input);
+    // The lens needs the format complement for round-trip editing; `parse` no longer
+    // captures it on the hot path, so capture it explicitly here.
+    parsed.format_complement = capture_format_complement(input);
     let source_map = parsed.ir.source_map();
     let bindings = build_lens_bindings(input, &source_map);
     ParseLensSnapshot {
@@ -631,7 +912,7 @@ pub fn apply_parse_lens_edit(
 
 #[must_use]
 pub fn capture_format_complement(input: &str) -> MermaidFormatComplement {
-    let offsets = line_offsets(input);
+    let (offsets, line_ending) = line_offsets_and_ending_style(input);
     let mut whitespace = Vec::new();
     let mut comments = Vec::new();
     let mut directives = Vec::new();
@@ -706,7 +987,7 @@ pub fn capture_format_complement(input: &str) -> MermaidFormatComplement {
     collect_quoted_literals(input, &mut quoted_literals, &offsets);
 
     MermaidFormatComplement {
-        line_ending: detect_line_ending_style(input),
+        line_ending,
         trailing_newline: input.ends_with('\n'),
         whitespace,
         comments,
@@ -739,7 +1020,7 @@ pub fn parse_with_mode_and_config(
             warnings: vec!["Input was empty; returning empty IR".to_string()],
             confidence: 0.0,
             detection_method: DetectionMethod::Fallback,
-            format_complement: capture_format_complement(input),
+            format_complement: MermaidFormatComplement::default(),
         };
     }
 
@@ -755,14 +1036,19 @@ pub fn parse_with_mode_and_config(
         result.confidence = detection.confidence;
         result.detection_method = detection.method;
         result.ir.meta.parse_mode = parse_mode;
-        result.format_complement = capture_format_complement(input);
+        result.format_complement = MermaidFormatComplement::default();
         return result;
     }
 
     let mut result = mermaid_parser::parse_mermaid_with_detection_and_config(
         input, detection, parse_mode, config,
     );
-    result.format_complement = capture_format_complement(input);
+    // The format complement (whitespace/comment/directive/quoted-literal spans) is
+    // only needed for round-trip editing (`build_parse_lens`) and evidence output —
+    // never by the parse → layout → render hot path. Capturing it costs ~10-22% of
+    // parse time, so it is left empty here and captured explicitly by the consumers
+    // that need it (see `capture_format_complement`).
+    result.format_complement = MermaidFormatComplement::default();
     result
 }
 
@@ -789,33 +1075,6 @@ pub fn parse_evidence_json(parsed: &ParseResult) -> String {
         },
     })
     .to_string()
-}
-
-fn detect_line_ending_style(input: &str) -> MermaidLineEndingStyle {
-    let mut crlf = 0_usize;
-    let mut lf = 0_usize;
-    let bytes = input.as_bytes();
-    let mut index = 0_usize;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\r' if bytes.get(index + 1) == Some(&b'\n') => {
-                crlf += 1;
-                index += 2;
-            }
-            b'\n' => {
-                lf += 1;
-                index += 1;
-            }
-            _ => index += 1,
-        }
-    }
-
-    match (crlf > 0, lf > 0) {
-        (false, false) => MermaidLineEndingStyle::None,
-        (false, true) => MermaidLineEndingStyle::Lf,
-        (true, false) => MermaidLineEndingStyle::Crlf,
-        (true, true) => MermaidLineEndingStyle::Mixed,
-    }
 }
 
 fn collect_inter_token_whitespace(
@@ -849,43 +1108,55 @@ fn collect_quoted_literals(
     quoted_literals: &mut Vec<MermaidQuotedSpan>,
     offsets: &[usize],
 ) {
-    let mut active: Option<(MermaidQuoteStyle, usize, char)> = None;
-    let mut escaped = false;
+    let bytes = source.as_bytes();
+    let mut cursor = 0_usize;
 
-    for (byte_index, ch) in source.char_indices() {
-        if let Some((style, start_byte, terminator)) = active {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if terminator != '`' && ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == terminator {
-                push_quoted_span(
-                    source,
-                    quoted_literals,
-                    style,
-                    start_byte,
-                    byte_index + ch.len_utf8(),
-                    offsets,
-                );
-                active = None;
-            }
-            continue;
-        }
-
-        let style = match ch {
-            '"' => Some(MermaidQuoteStyle::Double),
-            '\'' => Some(MermaidQuoteStyle::Single),
-            '`' => Some(MermaidQuoteStyle::Backtick),
-            _ => None,
+    while cursor < bytes.len() {
+        let Some(relative_start) = memchr::memchr3(b'"', b'\'', b'`', &bytes[cursor..]) else {
+            break;
         };
-        if let Some(style) = style {
-            active = Some((style, byte_index, ch));
-            escaped = false;
-        }
+        let start_byte = cursor + relative_start;
+        let (style, terminator) = match bytes[start_byte] {
+            b'"' => (MermaidQuoteStyle::Double, b'"'),
+            b'\'' => (MermaidQuoteStyle::Single, b'\''),
+            _ => (MermaidQuoteStyle::Backtick, b'`'),
+        };
+        cursor = start_byte + 1;
+
+        let end_byte = if terminator == b'`' {
+            memchr::memchr(terminator, &bytes[cursor..]).map(|relative| cursor + relative + 1)
+        } else {
+            let mut end_byte = None;
+            while cursor < bytes.len() {
+                let Some(relative) = memchr::memchr2(terminator, b'\\', &bytes[cursor..]) else {
+                    break;
+                };
+                let delimiter = cursor + relative;
+                if bytes[delimiter] == terminator {
+                    end_byte = Some(delimiter + 1);
+                    break;
+                }
+
+                cursor = delimiter + 1;
+                if let Some(escaped) = source[cursor..].chars().next() {
+                    cursor += escaped.len_utf8();
+                }
+            }
+            end_byte
+        };
+
+        let Some(end_byte) = end_byte else {
+            break;
+        };
+        push_quoted_span(
+            source,
+            quoted_literals,
+            style,
+            start_byte,
+            end_byte,
+            offsets,
+        );
+        cursor = end_byte;
     }
 }
 
@@ -985,14 +1256,26 @@ fn push_quoted_span(
     });
 }
 
-fn line_offsets(source: &str) -> Vec<usize> {
+fn line_offsets_and_ending_style(source: &str) -> (Vec<usize>, MermaidLineEndingStyle) {
+    let bytes = source.as_bytes();
     let mut offsets = vec![0];
-    for (i, b) in source.bytes().enumerate() {
-        if b == b'\n' {
-            offsets.push(i + 1);
+    let mut has_crlf = false;
+    let mut has_lf = false;
+    for newline in memchr::memchr_iter(b'\n', bytes) {
+        offsets.push(newline + 1);
+        if newline > 0 && bytes[newline - 1] == b'\r' {
+            has_crlf = true;
+        } else {
+            has_lf = true;
         }
     }
-    offsets
+    let line_ending = match (has_crlf, has_lf) {
+        (false, false) => MermaidLineEndingStyle::None,
+        (false, true) => MermaidLineEndingStyle::Lf,
+        (true, false) => MermaidLineEndingStyle::Crlf,
+        (true, true) => MermaidLineEndingStyle::Mixed,
+    };
+    (offsets, line_ending)
 }
 
 fn span_for_range(source: &str, start_byte: usize, end_byte: usize, offsets: &[usize]) -> Span {
@@ -1015,9 +1298,9 @@ fn position_for_byte(source: &str, byte_index: usize, offsets: &[usize]) -> Posi
     let line_start = offsets[line.saturating_sub(1)];
     let col = source[line_start..clamped].chars().count() + 1;
     Position {
-        line,
-        col,
-        byte: clamped,
+        line: u32::try_from(line).unwrap_or(u32::MAX),
+        col: u32::try_from(col).unwrap_or(u32::MAX),
+        byte: u32::try_from(clamped).unwrap_or(u32::MAX),
     }
 }
 
@@ -1026,9 +1309,303 @@ mod tests {
     use std::fmt::Write;
 
     use super::{
-        MermaidLineEndingStyle, MermaidWhitespaceKind, apply_parse_lens_edit, build_parse_lens,
+        FlowchartBatchParsePlan, FlowchartBatchParseScratch, MermaidLineEndingStyle,
+        MermaidWhitespaceKind, ParserConfig, apply_parse_lens_edit, build_parse_lens,
         capture_format_complement, detect_type, normalize_identifier, parse, parse_with_mode,
     };
+
+    #[test]
+    fn batch_plan_reuses_complete_prefix_subgraphs_exactly() {
+        let prefix = concat!(
+            "flowchart LR\n",
+            "  subgraph Shared[\"Shared ingestion platform\"]\n",
+            "    S0[\"Receive & validate events\"]\n",
+            "    S1[\"Normalize payload safely\"]\n",
+            "    S2[\"Publish canonical records\"]\n",
+            "    S0-->S1\n",
+            "    S1-->S2\n",
+            "  end\n",
+        );
+        let inputs = [
+            format!("{prefix}  S2-->A[\"Analytics consumer\"]"),
+            format!("{prefix}  S2-->B[\"Billing consumer\"]"),
+            "flowchart TD\nX[Independent]-->Y[Diagram]".to_owned(),
+        ];
+        let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan =
+            FlowchartBatchParsePlan::new(&refs, MermaidParseMode::Compat, &ParserConfig::default());
+
+        assert_eq!(plan.stats().shared_prefix_groups, 1);
+        assert_eq!(plan.stats().shared_prefix_inputs, 2);
+        assert_eq!(plan.stats().reused_prefix_parses, 1);
+        assert_eq!(plan.stats().reused_prefix_bytes, prefix.len());
+        for (index, input) in inputs.iter().enumerate() {
+            assert_eq!(plan.parse(index, input), parse(input));
+        }
+    }
+
+    #[test]
+    fn batch_plan_reuses_common_early_subgraph_when_later_blocks_diverge() {
+        let shared = concat!(
+            "flowchart LR\n",
+            "  subgraph Shared[\"Shared ingestion platform\"]\n",
+            "    S0[\"Receive & validate events\"]\n",
+            "    S1[\"Normalize payload safely\"]\n",
+            "    S2[\"Publish canonical records\"]\n",
+            "    S0-->S1\n",
+            "    S1-->S2\n",
+            "  end\n",
+        );
+        let inputs = [
+            format!(
+                "{shared}  subgraph Analytics\n    A0[Warehouse]-->A1[Dashboard]\n  end\n  S2-->A0"
+            ),
+            format!("{shared}  subgraph Billing\n    B0[Ledger]-->B1[Invoice]\n  end\n  S2-->B0"),
+        ];
+        let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan =
+            FlowchartBatchParsePlan::new(&refs, MermaidParseMode::Compat, &ParserConfig::default());
+
+        assert_eq!(plan.stats().shared_prefix_groups, 1);
+        assert_eq!(plan.stats().shared_prefix_inputs, 2);
+        assert_eq!(plan.stats().reused_prefix_parses, 1);
+        assert_eq!(plan.stats().reused_prefix_bytes, shared.len());
+        for (index, input) in inputs.iter().enumerate() {
+            assert_eq!(plan.parse(index, input), parse(input));
+        }
+    }
+
+    #[test]
+    fn batch_plan_reuses_builder_allocations_without_changing_parse_output() {
+        let shared = concat!(
+            "flowchart LR\n",
+            "  subgraph Shared[\"Shared ingestion platform\"]\n",
+            "    S0[\"Receive & validate events\"]\n",
+            "    S1[\"Normalize payload safely\"]\n",
+            "    S2[\"Publish canonical records\"]\n",
+            "    S0-->S1\n",
+            "    S1-->S2\n",
+            "  end\n",
+        );
+        let inputs = [
+            format!("{shared}  S2-->A[\"Analytics consumer\"]"),
+            format!("{shared}  S2-->B[\"Billing consumer\"]"),
+        ];
+        let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan =
+            FlowchartBatchParsePlan::new(&refs, MermaidParseMode::Compat, &ParserConfig::default());
+        let mut scratch = FlowchartBatchParseScratch::default();
+        let mut first_prefix_id_allocation = None;
+
+        for (index, input) in inputs.iter().enumerate() {
+            plan.with_parse_scratch(index, input, &mut scratch, |actual| {
+                let expected = parse(input);
+                assert_eq!(actual.ir, &expected.ir);
+                assert_eq!(actual.warnings, expected.warnings);
+                assert_eq!(actual.confidence, expected.confidence);
+                assert_eq!(actual.detection_method, expected.detection_method);
+                assert!(actual.reusable_prefix.is_some());
+
+                let prefix_id_allocation = actual.ir.nodes[0].id.as_ptr();
+                if let Some(first) = first_prefix_id_allocation {
+                    assert_eq!(prefix_id_allocation, first);
+                } else {
+                    first_prefix_id_allocation = Some(prefix_id_allocation);
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn batch_scratch_restores_full_prefix_after_a_mutating_suffix() {
+        let shared = concat!(
+            "flowchart LR\n",
+            "  subgraph Shared[\"Shared ingestion platform\"]\n",
+            "    S0[\"Receive events\"]\n",
+            "    S1[\"Publish records\"]\n",
+            "    S0-->S1\n",
+            "  end\n",
+        );
+        let inputs = [
+            format!("{shared}  S0((Changed shape))-->A"),
+            format!("{shared}  S1-->B[\"Independent suffix\"]"),
+        ];
+        let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan =
+            FlowchartBatchParsePlan::new(&refs, MermaidParseMode::Compat, &ParserConfig::default());
+        let mut scratch = FlowchartBatchParseScratch::default();
+
+        plan.with_parse_scratch(0, &inputs[0], &mut scratch, |actual| {
+            assert_eq!(actual.ir, &parse(&inputs[0]).ir);
+            assert!(actual.reusable_prefix.is_none());
+        });
+        plan.with_parse_scratch(1, &inputs[1], &mut scratch, |actual| {
+            assert_eq!(actual.ir, &parse(&inputs[1]).ir);
+            assert!(actual.reusable_prefix.is_some());
+        });
+    }
+
+    #[test]
+    fn batch_scratch_invalidates_every_flowchart_prefix_mutation_family() {
+        let shared = concat!(
+            "flowchart LR\n",
+            "  subgraph Shared[\"Shared ingestion platform\"]\n",
+            "    S0[\"Receive events\"]\n",
+            "    S1[\"Publish records\"]\n",
+            "    S0-->S1\n",
+            "  end\n",
+        );
+        let inputs = [
+            format!("{shared}  direction TB\n  S1-->A"),
+            format!("{shared}  class S0 hot\n  S1-->B"),
+            format!("{shared}  click S0 \"https://example.com\"\n  S1-->C"),
+            format!("{shared}  subgraph Shared[\"Shared ingestion platform\"]\n    S1-->D\n  end"),
+        ];
+        let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan =
+            FlowchartBatchParsePlan::new(&refs, MermaidParseMode::Compat, &ParserConfig::default());
+        let mut scratch = FlowchartBatchParseScratch::default();
+
+        for (index, input) in inputs.iter().enumerate() {
+            plan.with_parse_scratch(index, input, &mut scratch, |actual| {
+                assert_eq!(actual.ir, &parse(input).ir);
+                assert!(actual.reusable_prefix.is_none());
+            });
+        }
+    }
+
+    #[test]
+    fn batch_plan_falls_back_when_global_directives_cross_the_prefix_boundary() {
+        let prefix = concat!(
+            "flowchart LR\n",
+            "  subgraph Shared[\"Shared platform with enough source to clear the cache floor\"]\n",
+            "    S0[Receive]-->S1[Normalize]\n",
+            "    S1-->S2[Publish]\n",
+            "  end\n",
+        );
+        let inputs = [
+            format!("{prefix}  style S0 fill:#fff\n  S2-->A"),
+            format!("{prefix}  style S0 fill:#fff\n  S2-->B"),
+        ];
+        let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan =
+            FlowchartBatchParsePlan::new(&refs, MermaidParseMode::Compat, &ParserConfig::default());
+
+        assert_eq!(plan.stats(), super::FlowchartBatchParseStats::default());
+        for (index, input) in inputs.iter().enumerate() {
+            assert_eq!(plan.parse(index, input), parse(input));
+        }
+    }
+
+    #[test]
+    fn matches_keyword_header_ci_is_byte_identical() {
+        // Pin the alloc-free CI matcher to `matches_keyword_header(&line.to_ascii_lowercase(), kw)`.
+        let lines = [
+            "sankey",
+            "Sankey",
+            "SANKEY-BETA",
+            "sankey-beta",
+            "sankey ",
+            "Sankey-Beta title",
+            "sankeyx",
+            "sankey_beta",
+            "san",
+            "",
+            "sankey\t",
+            "sankey-",
+            "title x",
+            "TITLE",
+            "sÄnkey",
+            "sankeyÄ",
+            "  sankey",
+            "block-beta",
+            "sankey beta extra",
+        ];
+        for kw in ["sankey", "sankey-beta", "title", "block-beta"] {
+            for l in lines {
+                let want = super::matches_keyword_header(&l.to_ascii_lowercase(), kw);
+                assert_eq!(
+                    super::matches_keyword_header_ci(l, kw),
+                    want,
+                    "line={l:?} kw={kw:?}"
+                );
+            }
+        }
+    }
+
+    fn exact_keyword_match_lower_reference(line: &str) -> Option<super::DetectedType> {
+        let lower = line.to_ascii_lowercase();
+        let diagram_type = super::exact_diagram_type_with(&lower, super::matches_keyword_header)?;
+        Some(super::DetectedType {
+            diagram_type,
+            confidence: 1.0,
+            method: super::DetectionMethod::ExactKeyword,
+            warnings: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn exact_keyword_match_ci_matches_lowercase_reference() {
+        let headers = [
+            "flowchart",
+            "graph",
+            "sequenceDiagram",
+            "classDiagram",
+            "stateDiagram",
+            "gantt",
+            "erDiagram",
+            "mindmap",
+            "pie",
+            "gitGraph",
+            "journey",
+            "requirementDiagram",
+            "timeline",
+            "quadrantChart",
+            "sankey",
+            "xychart",
+            "block-beta",
+            "block",
+            "packet-beta",
+            "architecture-beta",
+            "C4Context",
+            "C4Container",
+            "C4Component",
+            "C4Dynamic",
+            "C4Deployment",
+            "kanban",
+        ];
+
+        for header in headers {
+            for line in [
+                header.to_string(),
+                header.to_ascii_uppercase(),
+                format!("{header} LR"),
+                format!("{header}-beta"),
+                format!("{header}x"),
+            ] {
+                assert_eq!(
+                    super::exact_keyword_match(&line),
+                    exact_keyword_match_lower_reference(&line),
+                    "line={line:?}"
+                );
+            }
+        }
+
+        for line in [
+            "",
+            " flowchart",
+            "sequence_Diagram",
+            "not-a-diagram",
+            "Ägraph",
+        ] {
+            assert_eq!(
+                super::exact_keyword_match(line),
+                exact_keyword_match_lower_reference(line),
+                "line={line:?}"
+            );
+        }
+    }
+
     use fm_core::{
         ArrowType, DiagnosticCategory, DiagramType, GraphDirection, IrEndpoint, MermaidDiagramIr,
         MermaidLensEdit, MermaidParseMode,
@@ -1124,11 +1701,144 @@ mod tests {
         );
     }
 
+    fn newline_metadata_scalar_reference(source: &str) -> (Vec<usize>, MermaidLineEndingStyle) {
+        let mut offsets = vec![0];
+        for (index, byte) in source.bytes().enumerate() {
+            if byte == b'\n' {
+                offsets.push(index + 1);
+            }
+        }
+
+        let mut crlf = 0_usize;
+        let mut lf = 0_usize;
+        let bytes = source.as_bytes();
+        let mut index = 0_usize;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\r' if bytes.get(index + 1) == Some(&b'\n') => {
+                    crlf += 1;
+                    index += 2;
+                }
+                b'\n' => {
+                    lf += 1;
+                    index += 1;
+                }
+                _ => index += 1,
+            }
+        }
+
+        let style = match (crlf > 0, lf > 0) {
+            (false, false) => MermaidLineEndingStyle::None,
+            (false, true) => MermaidLineEndingStyle::Lf,
+            (true, false) => MermaidLineEndingStyle::Crlf,
+            (true, true) => MermaidLineEndingStyle::Mixed,
+        };
+        (offsets, style)
+    }
+
+    #[test]
+    fn fused_newline_metadata_matches_scalar_reference() {
+        for source in [
+            "",
+            "no newline",
+            "\n",
+            "\r\n",
+            "lone carriage return\r",
+            "one\n",
+            "one\r\n",
+            "one\ntwo\r\nthree",
+            "α\r\nβ\n中文",
+            "\n\n",
+            "\r\n\r\n",
+            "prefix\r\r\nsuffix",
+        ] {
+            assert_eq!(
+                super::line_offsets_and_ending_style(source),
+                newline_metadata_scalar_reference(source),
+                "source={source:?}"
+            );
+        }
+    }
+
+    fn quoted_literals_scalar_reference(
+        source: &str,
+        offsets: &[usize],
+    ) -> Vec<super::MermaidQuotedSpan> {
+        let mut quoted_literals = Vec::new();
+        let mut active: Option<(super::MermaidQuoteStyle, usize, char)> = None;
+        let mut escaped = false;
+
+        for (byte_index, ch) in source.char_indices() {
+            if let Some((style, start_byte, terminator)) = active {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if terminator != '`' && ch == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if ch == terminator {
+                    super::push_quoted_span(
+                        source,
+                        &mut quoted_literals,
+                        style,
+                        start_byte,
+                        byte_index + ch.len_utf8(),
+                        offsets,
+                    );
+                    active = None;
+                }
+                continue;
+            }
+
+            let style = match ch {
+                '"' => Some(super::MermaidQuoteStyle::Double),
+                '\'' => Some(super::MermaidQuoteStyle::Single),
+                '`' => Some(super::MermaidQuoteStyle::Backtick),
+                _ => None,
+            };
+            if let Some(style) = style {
+                active = Some((style, byte_index, ch));
+                escaped = false;
+            }
+        }
+
+        quoted_literals
+    }
+
+    #[test]
+    fn delimiter_indexed_quoted_literals_match_scalar_reference() {
+        for source in [
+            "",
+            "flowchart LR\nA --> B\n",
+            "A[\"double\"] B['single'] C[`backtick`]",
+            r#"A["escaped \" quote"] B['escaped \' quote']"#,
+            "A[`backslash does not escape \\` tail `]",
+            "A[\"Unicode αβ 中文 🚀\"] --> B['café']",
+            "A[\"line one\nline two\"]\r\nB[`multi\nline`]",
+            "\"outer 'single' `tick` outer\" 'outer \"double\" outer'",
+            "dangling \"quote",
+            "dangling 'escape\\",
+            "%%{init: {\"theme\":\"dark\", \"label\":\"a\\\"b\"}}%%",
+            "'' \"\" `` '\\\\' \"\\\\\"",
+        ] {
+            let (offsets, _) = super::line_offsets_and_ending_style(source);
+            let expected = quoted_literals_scalar_reference(source, &offsets);
+            let mut actual = Vec::new();
+            super::collect_quoted_literals(source, &mut actual, &offsets);
+            assert_eq!(actual, expected, "source={source:?}");
+        }
+    }
+
     #[test]
     fn parse_result_exposes_format_complement() {
         let input =
             "%%{init: {\"theme\":\"dark\"}}%%\n%% comment\nflowchart LR\nA[Alpha] --> B[Beta]\n";
-        let result = parse(input);
+        // `parse` no longer captures the format complement on the hot path; consumers
+        // (here and `build_parse_lens`) capture it explicitly when needed.
+        let mut result = parse(input);
+        result.format_complement = capture_format_complement(input);
 
         assert_eq!(result.format_complement.directives.len(), 1);
         assert_eq!(result.format_complement.comments.len(), 1);
@@ -1911,7 +2621,7 @@ mod tests {
         let node = result.ir.nodes.iter().find(|n| n.id == "A");
         if let Some(node) = node {
             assert!(
-                node.href.is_none() || !node.href.as_ref().unwrap().contains("javascript:"),
+                node.href().is_none() || !node.href().unwrap().contains("javascript:"),
                 "javascript: URLs must be blocked"
             );
         }

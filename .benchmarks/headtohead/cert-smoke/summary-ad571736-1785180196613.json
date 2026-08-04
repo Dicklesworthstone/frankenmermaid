@@ -1,0 +1,154 @@
+{
+  "schema": "frankenmermaid.headtohead.v2",
+  "env": {
+    "captured_at": "2026-07-27T19:23:08.843Z",
+    "git_rev": "ad5717362fe888286fce07d694e5ba37abc53fa3",
+    "git_dirty": true,
+    "rustc": "rustc 1.99.0-nightly (dc3f85158 2026-07-26)",
+    "cargo_profile": "release (opt-level=3 for fm-core/parser/layout/render-svg, lto=fat, codegen-units=1)",
+    "rustflags": "-C target-cpu=x86-64-v2 (.cargo/config.toml)",
+    "node": "v24.14.0",
+    "chromium": "Chromium 150.0.7871.128 snap",
+    "kernel": "6.17.0-35-generic",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "cpu_count": 64,
+    "total_mem_gb": 215.8,
+    "loadavg_1m": 10.9,
+    "load_warning": null,
+    "pinned_cpu": {
+      "cpu": 0,
+      "busy_pct": 0
+    },
+    "fm_elf_sha256": "a23cf867fd18608c0c3d6a75671dc57573847fb4db6724bc87942944a74cbd6a",
+    "fm_elf_bytes": 7778704
+  },
+  "pins": {
+    "mermaid": "11.15.0",
+    "bundle_url": "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js",
+    "security_level": "strict"
+  },
+  "corpus_items": 1,
+  "ok_items": 1,
+  "dnf_items": 0,
+  "dnf": [],
+  "median_ci_gate_rule": "claim magnitude >= max(1.01, 1 + 2 * max(per-engine A/A CI radius))",
+  "arm_asymmetry": {
+    "phases": [
+      {
+        "phase": "frankenmermaid",
+        "seconds": 0.882,
+        "load_before": 10.9,
+        "load_after": 10.9,
+        "load_mean": 10.9
+      },
+      {
+        "phase": "mermaid-js",
+        "seconds": 6.209,
+        "load_before": 10.9,
+        "load_after": 10.43,
+        "load_mean": 10.665
+      }
+    ],
+    "load_ratio": 1.022034692920769,
+    "heavier_phase": "frankenmermaid",
+    "verdict": "pass",
+    "rule": "phase mean-load ratio <= 1.25"
+  },
+  "cv_gate": "never",
+  "median_ci_gate_failures": [],
+  "speedup": {
+    "min": 1877.5220760801662,
+    "median": 1877.5220760801662,
+    "max": 1877.5220760801662
+  },
+  "speedup_min_estimator": {
+    "min": 1669.6330197474363,
+    "median": 1669.6330197474363,
+    "max": 1669.6330197474363
+  },
+  "rows": [
+    {
+      "id": "er_40",
+      "class": "single",
+      "nodes": 40,
+      "edges": 39,
+      "nodes_max": 40,
+      "edges_max": 39,
+      "nodes_total": 40,
+      "edges_total": 39,
+      "revisions": 1,
+      "fm_p50_ns": 59227,
+      "fm_min_ns": 58995,
+      "fm_cv_pct": 4.32,
+      "fm_mad_pct": 0.22,
+      "fm_null_control": {
+        "arm_a_sha256": "354f13007b65bfff6705e1006114e035d29fd81d0d67a261a95c1b0a8820c5b6",
+        "arm_b_sha256": "354f13007b65bfff6705e1006114e035d29fd81d0d67a261a95c1b0a8820c5b6",
+        "ci95_hi": 1.000984786742733,
+        "ci95_lo": 0.9956796945644529,
+        "cv_gate": "never",
+        "cv_pct": 4.77,
+        "half_width": 0.004320305435547067,
+        "kind": "aa_null",
+        "mad_pct": 0.74,
+        "median": 0.9990952701540661,
+        "min_decidable_2x": 1.01,
+        "n": 100,
+        "sufficient": true
+      },
+      "fm_profile_ab": {
+        "arm_a_sha256": "354f13007b65bfff6705e1006114e035d29fd81d0d67a261a95c1b0a8820c5b6",
+        "arm_b_sha256": "9e5ccbdee49d5de0f4d6b0ba61ce945d15c72850c47fdee5a94e387810135803",
+        "ci95_hi": 1.0911085301329204,
+        "ci95_lo": 1.0877673256412141,
+        "cv_gate": "never",
+        "cv_pct": 9.37,
+        "half_width": null,
+        "kind": "default_vs_lean",
+        "mad_pct": 0.42,
+        "median": 1.089092720452328,
+        "min_decidable_2x": null,
+        "n": 100,
+        "sufficient": true
+      },
+      "fm_bytes": 52760,
+      "fm_bytes_lean": 44781,
+      "fm_lean_p50_ns": 54347,
+      "lean_slowdown": 0.9176051463015179,
+      "mjs_p50_ns": 111200000,
+      "mjs_min_ns": 98500000,
+      "mjs_cv_pct": 7.4,
+      "mjs_mad_pct": 6.12,
+      "mjs_null_control": {
+        "n": 15,
+        "sufficient": true,
+        "median": 1.0235546017882098,
+        "ci95_lo": 0.9799999983414359,
+        "ci95_hi": 1.0787476298218681,
+        "half_width": 0.07874762982186811,
+        "min_decidable_2x": 1.1574952596437362,
+        "cv_pct": 11.93,
+        "mad_pct": 5.39,
+        "cv_gate": "never",
+        "checksum_bytes": 2019740
+      },
+      "mjs_bytes": 66194,
+      "speedup": 1877.5220760801662,
+      "speedup_min": 1669.6330197474363,
+      "speedup_lean": 2046.1111008887335,
+      "bytes_ratio": 1.2546247156937074,
+      "bytes_ratio_lean": 1.4781715459681561,
+      "median_ci_gate": {
+        "verdict": "pass",
+        "rule": "null_ci95_2x_margin",
+        "cv_gate": "never",
+        "reason": null,
+        "claim_ratio": 1877.5220760801662,
+        "claim_magnitude": 1877.5220760801662,
+        "null_radius": 0.07874762982186811,
+        "min_decidable_2x": 1.1574952596437362
+      },
+      "status": "ok"
+    }
+  ]
+}

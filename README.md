@@ -22,6 +22,12 @@ curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/frankenmermaid/m
 
 ---
 
+## mermaid-js fails to render the certified large-graph corpus from 2,000 nodes upward
+
+`mermaid-js 11.15.0` raises `RangeError: Maximum call stack size exceeded` on all seven pinned
+2,000–10,000-node architecture, flowchart, and database-schema workloads. frankenmermaid renders
+all seven.
+
 <!-- BEGIN GENERATED: runtime-capability-metadata -->
 | Surface | Status | Evidence |
 |---------|--------|----------|
@@ -210,7 +216,7 @@ cargo build --release --workspace
 
 ### JavaScript / WASM
 
-> **Note on npm distribution.** The `@frankenmermaid/core` package builds cleanly to `pkg/` via `./build-wasm.sh` and the `npm-publish` CI job in `.github/workflows/ci.yml` is wired up, but it is gated to `refs/tags/v*` pushes and the project has not yet cut a tagged release — so the package is not currently on npm. Until a version is published, use one of the two methods below.
+> **Note on npm distribution.** The `@frankenmermaid/core` package builds cleanly to `pkg/` via `./build-wasm.sh` and the `npm-publish` CI job in `.github/workflows/ci.yml` is wired up, but it is gated to `refs/tags/v*` pushes; the `v0.2.0` tag is the project's first tagged release and triggers that job. Until the publish job's first run is confirmed, use one of the two methods below.
 
 **Option 1 — build from source (recommended):**
 
@@ -240,7 +246,7 @@ Default builds remain FNX-free and crates.io-clean. As of 2026-04-21 the formerl
 
 ### Crates.io status
 
-The workspace is at version `0.1.0`. Per [`CRATES_IO_PUBLISHING.md`](CRATES_IO_PUBLISHING.md), the publish order is:
+The workspace is at version `0.2.0`. Per [`CRATES_IO_PUBLISHING.md`](CRATES_IO_PUBLISHING.md), the publish order is:
 
 ```
 fm-core → fm-parser → fm-layout → fm-render-svg → fm-render-term →
@@ -649,7 +655,7 @@ The complete runtime configuration surface, defined in `fm-core/src/lib.rs`:
 
 ```
 frankenmermaid/
-├── Cargo.toml                 # Workspace root (version 0.1.0)
+├── Cargo.toml                 # Workspace root (version 0.2.0)
 ├── rust-toolchain.toml        # Nightly toolchain pin
 ├── crates/
 │   ├── fm-core/               # Shared IR, config, errors, diagnostics, CGA primitives
@@ -1589,7 +1595,106 @@ Property-based tests verify determinism across random graph shapes (up to 20 nod
 
 ## Performance and scaling
 
-The engine is designed for diagrams in the 1–500 node range (typical documentation diagrams), with graceful degradation up to 10,000+ nodes via the guardrail fallback chain. Approximate per-phase scaling:
+### Measured head-to-head vs mermaid-js
+
+**From 2,000 nodes upward, mermaid-js 11.15.0 does not render the diagram at all.** It raises
+`RangeError: Maximum call stack size exceeded`. frankenmermaid renders every one of these:
+
+| Workload | frankenmermaid | mermaid-js 11.15.0 |
+|---|---|---|
+| 2,000-node flowchart | 1.43 ms | `RangeError` after 6.5 s |
+| 5,000-node flowchart | 4.08 ms | `RangeError` after 14.4 s |
+| 5,000-node architecture diagram | 5.21 ms | `RangeError` after 16.3 s |
+| 2,500-entity database schema | 6.89 ms | `RangeError` after 69.3 s |
+| 5,000-entity database schema | 15.13 ms | `RangeError` after 201.6 s |
+| 10,000-node architecture diagram | 10.80 ms | `RangeError` after 57.8 s |
+| 10,000-entity database schema | 33.03 ms | `RangeError` after 625.4 s |
+
+This is a crash, not a timeout, so no speedup ratio is stated for these rows — a figure derived from
+a wall-clock budget would be an invented number. The harness records them as `CANNOT` and excludes
+them from every aggregate.
+
+A 1,001-revision live-edit job over a growing 500-node flowchart completes in 0.956 s with
+frankenmermaid. Mermaid-js remains working at the 600-second deadline. That row is a `DNF-timeout`,
+not a crash, and has no point ratio.
+
+#### Numeric campaign status
+
+The certified concurrent CI workload renders 512 right-skewed documentation flowcharts as **one
+job**: 10,635 nodes, 10,123 edges, and 402,843 input bytes, input SHA-256
+`228414f81bb6e73135bcc5244cb93503237f670bfa327b5da9310e6d777904aa`. One logical sample parses, lays
+out, renders, and serializes all 512 diagrams; frankenmermaid's timer-floor batching repeats whole
+512-diagram jobs and divides only by the repeat count, so no per-diagram mean enters a verdict.
+
+The comparator is live, not a recorded number: the same driver invocation drove the pinned
+mermaid-js 11.15.0 bundle (SHA-256 `70137e77…`, `securityLevel=strict`) through Chrome
+150.0.7871.128, which reported **one** requested and one actually-used main execution thread. Nine
+independent whole-job samples give a **23,143.400 ms** median.
+
+The full caller-width sweep, with worker threads *observed* by an instrumented caller-worker union
+over the exact workload rather than merely requested:
+
+| Caller workers requested / observed | frankenmermaid whole-job median | mermaid-js / frankenmermaid (95% effect CI) | Disposition |
+|---:|---:|---:|---|
+| 1 / 1 | 27.163878 ms | **851.991752×** [829.496662×, 864.950012×] | published |
+| 16 / 16 | 2.268598 ms | **10,201.631140×** [9,948.470738×, 10,354.943811×] | published |
+| 64 / 64 | 0.844039 ms | **27,419.823018×** [26,615.673663×, 28,086.705990×] | published |
+| 128 / 128, oversubscribed | 0.929700 ms | **24,893.406475×** [24,587.586149×, 25,479.865441×] | published |
+
+Observed width matched the request at every point, and all four widths carried a passing
+equivalence verdict, same-ELF pre/post bracket, and corrected A/A median-CI gate. The fastest width
+is the 64-physical-core frontier: **32.18×** the single-worker job at 50.3% observed parallel
+efficiency. Deliberate 128-way SMT oversubscription remains faster than 16 workers but regresses
+slightly from the physical-core optimum.
+
+A complementary 384-diagram job exercises structurally repeated documents: every distinct
+flowchart shares one complete 48-node subgraph prefix and has a unique suffix. frankenmermaid
+compiles that prefix once into immutable replay syntax, then parses, lays out, renders, and
+serializes the 384 suffixes across 64 observed workers. The whole job measured **2.995355 ms**
+versus live mermaid-js's **51,101.900 ms**, or **17,060.381825×** with bootstrap 95% effect CI
+**[16,581.249829×, 17,414.945596×]**; all **384/384** outputs passed structural equivalence.
+
+**The output-equivalence check is SVG structural equivalence** — not byte equality, and not a
+rasterized perceptual diff. A pixel diff would report a large distance between two correct renders
+because the engines differ in fonts, padding, and stroke widths, and the engines deliberately emit
+different SVG (`foreignObject` labels vs `<text>`, different class vocabularies). A single shared
+extractor is applied to both engines, since a per-engine extractor pair could agree by
+construction. All **512/512** diagrams passed, with zero divergent and zero unverified, on four
+gating invariants: rendered-text token containment (every token mermaid-js renders must be present
+in ours), node-ID set equality, cross-engine rendered-path edge topology, and each engine's edge
+topology checked separately against the input-derived graph. Undecidable is not a pass. The check
+is one-directional on text — rendering *more* than mermaid-js is reported, not failed. Its
+self-test carries 5 mutation controls (dropped label, either engine dropping an edge, rewired edge,
+displaced node) and 2 negative controls. The timing input, the process-self-reported Rust ELF, and
+the mermaid bundle are cryptographically linked to that 512/512 artifact.
+
+**How numeric claims are admitted:**
+
+- **Actual incumbent in the same invocation.** The pinned mermaid-js arm runs beside
+  frankenmermaid over the same input, render target, and warmup policy.
+- **Cross-engine output equivalence.** One shared structural extractor checks rendered content for
+  both engines; same-engine byte identity proves determinism but cannot prove equivalent work.
+- **Paired-null median-CI gate.** Each engine carries a same-invocation A/A control. The identical
+  self-reporting Rust ELF runs before and after Chromium, and the slower Rust median is used. The
+  whole-job effect CI must exclude 1.0, its deviation must clear twice the largest bootstrap 95%
+  null-CI radius, and every null median must remain within 2% of 1.0. CV, MAD, and phase load are
+  provenance only.
+- **Counted work before timing.** Requested and rendered revision counts, input hashes, and observed
+  worker counts must agree. A renderer that omits content is not a faster implementation of the
+  same job.
+- **Every rejected lever is logged.** [`docs/NEGATIVE_EVIDENCE.md`](docs/NEGATIVE_EVIDENCE.md)
+  records failed and inconclusive experiments with concrete retry predicates.
+- **Comparator failures stay nonnumeric.** A mermaid-js crash is recorded as `CANNOT`, and a
+  timeout as `DNF`; neither is converted into a point ratio or mixed into a numeric aggregate.
+
+### Per-phase scaling
+
+The engine is designed for diagrams in the 1–500 node range (typical documentation diagrams) and
+the pinned 10,000-node architecture case completes deterministically.
+
+The table below is a **complexity sketch with order-of-magnitude estimates**, not measured figures.
+Treat the *complexity* column as the claim and the millisecond columns as illustrative;
+the measured numbers are the head-to-head table and `.benchmarks/headtohead/`:
 
 | Phase | Complexity | 10 nodes | 100 nodes | 1,000 nodes |
 |---|---|---|---|---|
@@ -2041,7 +2146,7 @@ When `fnx-integration` is on, `fm-layout` consults `franken_networkx` for graph 
 
 ### Is the WASM binary small?
 
-The release profile is tuned for it: `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`. The layout crate is the exception (`opt-level = 3`) because it's the computational bottleneck. The exact bundle size depends on which features you enable; the default WASM build is competitive with mermaid-js's gzipped bundle while running orders of magnitude faster on large graphs.
+The release profile is tuned for it: `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`. The layout crate is the exception (`opt-level = 3`) because it's the computational bottleneck. The exact bundle size depends on which features you enable; competitive performance claims are admitted only by the pinned head-to-head output-equivalence and timing gates described above.
 
 ## Using frankenmermaid as a Rust library
 
@@ -2556,14 +2661,14 @@ The exhaustive backlog lives in [`.beads/`](.beads/). The largest pieces of in-f
 
 | Area | Status | Notes |
 |---|---|---|
-| **VS Code extension with live preview** (`bd-kgi4`) | Planned | Uses the WASM build; expected to be faster than the mermaid.js extension thanks to incremental computation |
+| **VS Code extension with live preview** (`bd-kgi4`) | Planned | Uses the WASM build and the incremental re-layout path |
 | **CEGIS layout constraint synthesis** (`bd-1iwz`) | Speculative | Counterexample-guided synthesis to auto-generate layout constraints from user-provided examples |
 | **Geometric/Conformal Algebra extensions** (`bd-3cd8`) | In progress | The CGA pipeline currently covers transforms + intersection queries; the broader epic includes coordinate-free PGA/CGA for layout primitives |
 | **Stochastic superoptimization for hot kernels** (`bd-ejxz`) | Speculative | Apply stochastic superoptimization to the crossing-minimization inner loop |
 | **WebGPU diagram renderer** (`bd-2u0.2`) | Partial | The WebRenderer selector exists; Canvas2D is the current fallback; full WebGPU implementation is queued |
 | **Web Worker / OffscreenCanvas path** (`bd-2u0.6`) | Planned | Off-main-thread rendering for large in-browser diagrams |
 | **LP/MIP solver backend for constraint layout** (`bd-1fef.2`) | Partial | Constraint-based layout exists; the LP/MIP backend would replace the heuristic solver for hard constraints |
-| **`@frankenmermaid/core` npm publish** | CI wired, awaiting tag | The npm-publish CI job exists (`bd-hye0`) and is gated to `refs/tags/v*`. The first `v0.1.0` tag will publish to npm automatically; the job idempotently no-ops if the version is already on npm |
+| **`@frankenmermaid/core` npm publish** | CI wired, awaiting tag | The npm-publish CI job exists (`bd-hye0`) and is gated to `refs/tags/v*`. The first `v0.2.0` tag publishes to npm automatically; the job idempotently no-ops if the version is already on npm |
 | **Crates.io publish** | Blocker-clear | Per `CRATES_IO_PUBLISHING.md`, all blockers are resolved as of 2026-04-21 (`franken-kernel` migrated). Awaiting publish-order execution |
 | **Swiss Tables for node/edge maps** (`bd-2gr9`) | Planned | Replace `BTreeMap` hot paths with deterministic hash-based maps; needs a determinism story |
 | **Triage UBS warning baseline** (`bd-tp4z`) | In progress | Bringing the UBS scanner output to zero |

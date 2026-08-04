@@ -22,6 +22,7 @@ pub use font_metrics::{
     FontPreset, is_east_asian_wide,
 };
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use franken_kernel::{Budget, Cx, DecisionId, NoCaps, PolicyId, SchemaVersion, TraceId};
@@ -78,27 +79,36 @@ pub fn mermaid_decision_id(
 }
 
 fn stable_u128_hash(domain: &str, parts: &[&str]) -> u128 {
-    let upper = stable_u64_hash("upper", domain, parts);
-    let lower = stable_u64_hash("lower", domain, parts);
-    (u128::from(upper) << 64) | u128::from(lower)
-}
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0100_0000_01b3;
 
-fn stable_u64_hash(salt: &str, domain: &str, parts: &[&str]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut upper = OFFSET_BASIS;
+    let mut lower = OFFSET_BASIS;
+    for &byte in b"upper" {
+        upper ^= u64::from(byte);
+        upper = upper.wrapping_mul(PRIME);
+    }
+    for &byte in b"lower" {
+        lower ^= u64::from(byte);
+        lower = lower.wrapping_mul(PRIME);
+    }
 
-    let mut update = |s: &str| {
-        for byte in s.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0100_0000_01b3);
+    let mut update_both = |s: &str| {
+        for &byte in s.as_bytes() {
+            let byte = u64::from(byte);
+            upper ^= byte;
+            upper = upper.wrapping_mul(PRIME);
+            lower ^= byte;
+            lower = lower.wrapping_mul(PRIME);
         }
     };
 
-    update(salt);
-    update(domain);
+    update_both(domain);
     for part in parts {
-        update(part);
+        update_both(part);
     }
-    hash
+
+    (u128::from(upper) << 64) | u128::from(lower)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -145,11 +155,15 @@ pub fn mermaid_layout_guard_observability(
     )
 }
 
+/// A source position. Line/column/byte are stored as `u32` (max ~4.3 B) rather than
+/// `usize`: no realistic Mermaid source approaches 4 GiB, and halving this struct
+/// (24 → 12 B) halves every [`Span`] (48 → 24 B) — the single largest field on both
+/// `IrNode` and `IrEdge`, present on every node/edge on the hot parse path.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Position {
-    pub line: usize,
-    pub col: usize,
-    pub byte: usize,
+    pub line: u32,
+    pub col: u32,
+    pub byte: u32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -166,6 +180,7 @@ impl Span {
 
     #[must_use]
     pub fn at_line(line: usize, line_len: usize) -> Self {
+        let line = u32::try_from(line).unwrap_or(u32::MAX);
         let start = Position {
             line,
             col: 1,
@@ -173,7 +188,7 @@ impl Span {
         };
         let end = Position {
             line,
-            col: line_len.max(1),
+            col: u32::try_from(line_len).unwrap_or(u32::MAX).max(1),
             byte: 0,
         };
         Self::new(start, end)
@@ -1083,6 +1098,21 @@ pub enum ArrowType {
     DoubleArrow,
     DoubleThickArrow,
     DoubleDottedArrow,
+    /// UML aggregation (`o--`): hollow diamond on the owning end. The diamond marks the *source*,
+    /// so `AggregationReverse` is a distinct variant rather than a rendering flag.
+    Aggregation,
+    /// UML aggregation written target-first (`--o`).
+    AggregationReverse,
+    /// UML composition (`*--`): filled diamond on the owning end.
+    Composition,
+    /// UML composition written target-first (`--*`).
+    CompositionReverse,
+    /// UML inheritance (`<|--`): hollow triangle on the PARENT end, which is the source, since
+    /// `Animal <|-- Dog` reads "Dog inherits Animal".
+    Inheritance,
+    /// UML inheritance written child-first (`--|>`), putting the parent — and the triangle — at the
+    /// target end.
+    InheritanceReverse,
 }
 
 impl ArrowType {
@@ -1119,6 +1149,12 @@ impl ArrowType {
             Self::DoubleArrow => "<-->",
             Self::DoubleThickArrow => "<==>",
             Self::DoubleDottedArrow => "<-.->",
+            Self::Aggregation => "o--",
+            Self::AggregationReverse => "--o",
+            Self::Composition => "*--",
+            Self::CompositionReverse => "--*",
+            Self::Inheritance => "<|--",
+            Self::InheritanceReverse => "--|>",
         }
     }
 }
@@ -1227,10 +1263,49 @@ pub struct IrNode {
     pub id: String,
     pub label: Option<IrLabelId>,
     pub shape: NodeShape,
-    /// Optional icon metadata attached to the node (`::icon(...)`, architecture icons, etc.).
+    pub classes: Vec<String>,
+    /// Icon/link/interaction metadata (`::icon(...)`, `click` href/callback/tooltip), grouped and
+    /// boxed because ALL of it is `None` on the overwhelmingly common flowchart/sequence node —
+    /// one `Option<Box<IrNodeInteraction>>` (8 B, heap only when set) replaces four inline
+    /// `Option<String>` (96 B), shrinking `IrNode` on the hot parse path. Read via the
+    /// `icon()`/`href()`/`callback()`/`tooltip()` accessors; write via `interaction_mut()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction: Option<Box<IrNodeInteraction>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub menu_links: Vec<IrMenuLink>,
+    pub span_primary: Span,
+    pub implicit: bool,
+    /// Entity attributes/members (for ER diagrams)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<IrEntityAttribute>,
+    /// Class-diagram-specific metadata (attributes, methods, stereotypes). Boxed: this and the
+    /// other two diagram-specific metas below are `None` for the overwhelmingly common
+    /// flowchart/sequence node, so boxing keeps their ~90/70/100-byte payloads off every `IrNode`
+    /// (heap only when actually present) — `IrNode` shrinks from 584 to ~360 bytes, cutting the
+    /// per-node move/copy/drop and cache traffic on the hot parse→layout→render path. `Box<T>`
+    /// serializes transparently as `T`, so the JSON form is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_meta: Option<Box<IrClassNodeMeta>>,
+    /// Requirement-diagram metadata (type, id, text, risk, verifymethod). Boxed — see `class_meta`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requirement_meta: Option<Box<IrRequirementNodeMeta>>,
+    /// C4-diagram-specific metadata (element type, technology, description). Boxed — see `class_meta`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub c4_meta: Option<Box<IrC4NodeMeta>>,
+    /// Parsed inline style from `style nodeId ...` directives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_style: Option<Box<IrInlineStyle>>,
+}
+
+/// Rarely-populated icon/link/interaction fields split off `IrNode` (see [`IrNode::interaction`])
+/// so the common flowchart/sequence node pays only a null pointer for all of them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct IrNodeInteraction {
+    /// Icon metadata (`::icon(...)`, architecture icons, etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
-    pub classes: Vec<String>,
+    /// `click nodeId href "url"` target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub href: Option<String>,
     /// JavaScript callback function name from `click nodeId call functionName`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1238,26 +1313,36 @@ pub struct IrNode {
     /// Tooltip text from `click nodeId "url" "tooltip"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tooltip: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub menu_links: Vec<IrMenuLink>,
-    pub span_primary: Span,
-    pub span_all: Vec<Span>,
-    pub implicit: bool,
-    /// Entity attributes/members (for ER diagrams)
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub members: Vec<IrEntityAttribute>,
-    /// Class-diagram-specific metadata (attributes, methods, stereotypes)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub class_meta: Option<IrClassNodeMeta>,
-    /// Requirement-diagram metadata (type, id, text, risk, verifymethod)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requirement_meta: Option<IrRequirementNodeMeta>,
-    /// C4-diagram-specific metadata (element type, technology, description)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub c4_meta: Option<IrC4NodeMeta>,
-    /// Parsed inline style from `style nodeId ...` directives.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inline_style: Option<IrInlineStyle>,
+}
+
+impl IrNode {
+    /// Icon metadata, if any.
+    #[must_use]
+    pub fn icon(&self) -> Option<&str> {
+        self.interaction.as_ref().and_then(|i| i.icon.as_deref())
+    }
+    /// `click` href target, if any.
+    #[must_use]
+    pub fn href(&self) -> Option<&str> {
+        self.interaction.as_ref().and_then(|i| i.href.as_deref())
+    }
+    /// `click` callback function name, if any.
+    #[must_use]
+    pub fn callback(&self) -> Option<&str> {
+        self.interaction
+            .as_ref()
+            .and_then(|i| i.callback.as_deref())
+    }
+    /// `click` tooltip text, if any.
+    #[must_use]
+    pub fn tooltip(&self) -> Option<&str> {
+        self.interaction.as_ref().and_then(|i| i.tooltip.as_deref())
+    }
+    /// Mutable access to the icon/link/interaction fields, allocating the box on first use.
+    pub fn interaction_mut(&mut self) -> &mut IrNodeInteraction {
+        self.interaction
+            .get_or_insert_with(|| Box::new(IrNodeInteraction::default()))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
@@ -1309,24 +1394,76 @@ pub struct IrEdge {
     pub arrow: ArrowType,
     pub label: Option<IrLabelId>,
     pub span: Span,
-    /// Raw ER cardinality operator (e.g., `"||--o{"`), stored only for ER diagrams.
+    /// Diagram-specific edge metadata (ER cardinality, class cardinality, state guard/action),
+    /// boxed together because ALL of it is `None` on every flowchart/sequence edge — the
+    /// overwhelmingly common case. Grouping the five rarely-set fields behind one
+    /// `Option<Box<IrEdgeExtras>>` (8 B, heap only when present) instead of five inline
+    /// `Option<Box<str>>` (80 B) shrinks `IrEdge` 192 → 120 B, cutting the `ir.edges` Vec
+    /// allocation + per-edge move/copy on the hot parse path. Access the fields via the
+    /// `er_notation()` / `guard()` / … accessors (read) and `extras_mut()` (write).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub er_notation: Option<String>,
-    /// Source-side cardinality label (e.g., `"1"`, `"0..*"`) for class diagrams.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_cardinality: Option<String>,
-    /// Target-side cardinality label (e.g., `"*"`, `"1..*"`) for class diagrams.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_cardinality: Option<String>,
-    /// Guard condition on a state transition (e.g., `[isValid]`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub guard: Option<String>,
-    /// Action on a state transition (e.g., `cleanup()`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub action: Option<String>,
+    pub extras: Option<Box<IrEdgeExtras>>,
     /// Parsed inline style from `linkStyle N ...` directives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inline_style: Option<IrInlineStyle>,
+    pub inline_style: Option<Box<IrInlineStyle>>,
+}
+
+/// Rarely-populated, diagram-specific fields split off `IrEdge` (see [`IrEdge::extras`]) so the
+/// common flowchart/sequence edge pays only a null pointer for all of them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct IrEdgeExtras {
+    /// Raw ER cardinality operator (e.g., `"||--o{"`), stored only for ER diagrams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub er_notation: Option<Box<str>>,
+    /// Source-side cardinality label (e.g., `"1"`, `"0..*"`) for class diagrams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_cardinality: Option<Box<str>>,
+    /// Target-side cardinality label (e.g., `"*"`, `"1..*"`) for class diagrams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_cardinality: Option<Box<str>>,
+    /// Guard condition on a state transition (e.g., `[isValid]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<Box<str>>,
+    /// Action on a state transition (e.g., `cleanup()`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<Box<str>>,
+}
+
+impl IrEdge {
+    /// Raw ER cardinality operator, if any.
+    #[must_use]
+    pub fn er_notation(&self) -> Option<&str> {
+        self.extras.as_ref().and_then(|e| e.er_notation.as_deref())
+    }
+    /// Source-side cardinality label, if any.
+    #[must_use]
+    pub fn source_cardinality(&self) -> Option<&str> {
+        self.extras
+            .as_ref()
+            .and_then(|e| e.source_cardinality.as_deref())
+    }
+    /// Target-side cardinality label, if any.
+    #[must_use]
+    pub fn target_cardinality(&self) -> Option<&str> {
+        self.extras
+            .as_ref()
+            .and_then(|e| e.target_cardinality.as_deref())
+    }
+    /// State-transition guard, if any.
+    #[must_use]
+    pub fn guard(&self) -> Option<&str> {
+        self.extras.as_ref().and_then(|e| e.guard.as_deref())
+    }
+    /// State-transition action, if any.
+    #[must_use]
+    pub fn action(&self) -> Option<&str> {
+        self.extras.as_ref().and_then(|e| e.action.as_deref())
+    }
+    /// Mutable access to the diagram-specific extras, allocating the box on first use.
+    pub fn extras_mut(&mut self) -> &mut IrEdgeExtras {
+        self.extras
+            .get_or_insert_with(|| Box::new(IrEdgeExtras::default()))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
@@ -1524,20 +1661,38 @@ impl MermaidGraphIr {
     /// Returns unique member nodes from this subgraph and all descendant subgraphs.
     #[must_use]
     pub fn subgraph_members_recursive(&self, subgraph_id: IrSubgraphId) -> Vec<IrNodeId> {
-        let mut members = Vec::new();
+        let mut seen = vec![false; self.nodes.len()];
+        let mut out_of_range = Vec::new();
         let mut stack = vec![subgraph_id];
 
         while let Some(current_id) = stack.pop() {
             let Some(subgraph) = self.subgraph(current_id) else {
                 continue;
             };
-            members.extend(subgraph.members.iter().copied());
-            // Order does not matter since we sort and dedup at the end.
+            for &member in &subgraph.members {
+                if member.0 < seen.len() {
+                    seen[member.0] = true;
+                } else {
+                    // Preserve the public helper's behavior for malformed IR whose
+                    // membership IDs do not have corresponding graph-node records.
+                    out_of_range.push(member);
+                }
+            }
+            // Traversal order does not matter because IDs are emitted in sorted order.
             stack.extend(subgraph.children.iter().copied());
         }
 
-        members.sort_unstable();
-        members.dedup();
+        out_of_range.sort_unstable();
+        out_of_range.dedup();
+
+        let valid_count = seen.iter().filter(|&&is_member| is_member).count();
+        let mut members = Vec::with_capacity(valid_count + out_of_range.len());
+        for (index, is_member) in seen.into_iter().enumerate() {
+            if is_member {
+                members.push(IrNodeId(index));
+            }
+        }
+        members.extend(out_of_range);
         members
     }
 }
@@ -1652,7 +1807,8 @@ impl IrInlineStyle {
 /// The set of CSS-like properties that are safe to pass through to SVG
 /// attributes. Anything not in this list is silently dropped by the
 /// style parsing helpers (e.g. [`parse_style_string_with_rejections`]).
-const ALLOWED_STYLE_PROPERTIES: &[&str] = &[
+#[cfg(test)]
+const ALLOWED_STYLE_PROPERTIES_REFERENCE: &[&str] = &[
     "fill",
     "stroke",
     "stroke-width",
@@ -1679,7 +1835,30 @@ const ALLOWED_STYLE_PROPERTIES: &[&str] = &[
 /// Returns `true` if `property` is in the allowed-list.
 #[must_use]
 pub fn is_allowed_style_property(property: &str) -> bool {
-    ALLOWED_STYLE_PROPERTIES.contains(&property)
+    matches!(
+        property,
+        "fill"
+            | "stroke"
+            | "stroke-width"
+            | "stroke-dasharray"
+            | "stroke-linecap"
+            | "stroke-linejoin"
+            | "stroke-opacity"
+            | "fill-opacity"
+            | "opacity"
+            | "filter"
+            | "color"
+            | "font-size"
+            | "font-weight"
+            | "font-family"
+            | "font-style"
+            | "text-decoration"
+            | "background"
+            | "border-radius"
+            | "padding"
+            | "rx"
+            | "ry"
+    )
 }
 
 /// Sanitize a CSS-like value for safe inclusion in SVG.
@@ -1690,7 +1869,7 @@ pub fn is_allowed_style_property(property: &str) -> bool {
 #[must_use]
 pub fn sanitize_style_value(value: &str) -> Option<String> {
     let lower = value.to_ascii_lowercase();
-    let trimmed = lower.trim();
+    let lower_trimmed = lower.trim();
 
     let contains_url_function = |input: &str| -> bool {
         let bytes = input.as_bytes();
@@ -1719,23 +1898,22 @@ pub fn sanitize_style_value(value: &str) -> Option<String> {
     };
 
     // Reject url() values — can load external resources.
-    if contains_url_function(trimmed) {
+    if contains_url_function(lower_trimmed) {
         return None;
     }
     // Reject CSS comment markers to prevent obfuscated url()/javascript: payloads.
     if value.contains("/*") || value.contains("*/") {
         return None;
     }
-    let lower = trimmed.to_ascii_lowercase();
     // Reject javascript: protocol (case-insensitive).
-    if lower.contains("javascript:") {
+    if lower_trimmed.contains("javascript:") {
         return None;
     }
     // Reject event-handler attributes smuggled as values.
-    if lower.contains("onclick")
-        || lower.contains("onerror")
-        || lower.contains("onload")
-        || lower.contains("onmouseover")
+    if lower_trimmed.contains("onclick")
+        || lower_trimmed.contains("onerror")
+        || lower_trimmed.contains("onload")
+        || lower_trimmed.contains("onmouseover")
     {
         return None;
     }
@@ -1752,7 +1930,7 @@ pub fn sanitize_style_value(value: &str) -> Option<String> {
         return None;
     }
     // Reject expression() (IE legacy XSS vector).
-    if lower.contains("expression(") {
+    if lower_trimmed.contains("expression(") {
         return None;
     }
 
@@ -1795,6 +1973,10 @@ pub fn is_safe_link_target(target: &str, sanitize_mode: MermaidSanitizeMode) -> 
 
 fn decode_percent_triplets(input: &str) -> String {
     let bytes = input.as_bytes();
+    if !bytes.contains(&b'%') {
+        return input.to_owned();
+    }
+
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
 
@@ -2622,7 +2804,7 @@ impl MermaidWasmPressureSignals {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MermaidStageBudgetLedger {
-    pub stage: String,
+    pub stage: Cow<'static, str>,
     pub allocated_ms: u64,
     pub used_ms: u64,
     pub remaining_ms: u64,
@@ -2631,9 +2813,9 @@ pub struct MermaidStageBudgetLedger {
 
 impl MermaidStageBudgetLedger {
     #[must_use]
-    pub fn new(stage: &str, allocated_ms: u64) -> Self {
+    pub fn new(stage: impl Into<Cow<'static, str>>, allocated_ms: u64) -> Self {
         Self {
-            stage: stage.to_string(),
+            stage: stage.into(),
             allocated_ms,
             used_ms: 0,
             remaining_ms: allocated_ms,
@@ -2650,19 +2832,19 @@ impl MermaidStageBudgetLedger {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MermaidBudgetEvent {
-    pub kind: String,
-    pub stage: Option<String>,
+    pub kind: Cow<'static, str>,
+    pub stage: Option<Cow<'static, str>>,
     pub allocated_ms: Option<u64>,
     pub used_ms: Option<u64>,
     pub remaining_ms: Option<u64>,
     pub remaining_total_ms: u64,
     pub exceeded: bool,
-    pub note: Option<String>,
+    pub note: Option<Cow<'static, str>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MermaidBudgetLedger {
-    pub arbitration_policy: String,
+    pub arbitration_policy: Cow<'static, str>,
     pub total_budget_ms: u64,
     pub remaining_total_ms: u64,
     pub exhausted: bool,
@@ -2681,8 +2863,15 @@ impl Default for MermaidBudgetLedger {
 }
 
 impl MermaidBudgetLedger {
+    const ARBITRATION_POLICY: &'static str = "parse_first_then_layout_heavy_then_render_tail";
+    const EXPECTED_EVENT_CAPACITY: usize = 12;
+
     #[must_use]
     pub fn new(pressure: &MermaidPressureReport) -> Self {
+        Self::new_with_event_capacity(pressure, Self::EXPECTED_EVENT_CAPACITY)
+    }
+
+    fn new_with_event_capacity(pressure: &MermaidPressureReport, event_capacity: usize) -> Self {
         let total_budget_ms: u64 = match pressure.tier {
             MermaidPressureTier::Unknown | MermaidPressureTier::High => 120,
             MermaidPressureTier::Nominal => 250,
@@ -2701,7 +2890,7 @@ impl MermaidBudgetLedger {
             ));
         }
         let mut ledger = Self {
-            arbitration_policy: String::from("parse_first_then_layout_heavy_then_render_tail"),
+            arbitration_policy: Cow::Borrowed(Self::ARBITRATION_POLICY),
             total_budget_ms,
             remaining_total_ms: total_budget_ms,
             exhausted: false,
@@ -2710,7 +2899,7 @@ impl MermaidBudgetLedger {
             layout: MermaidStageBudgetLedger::new("layout", layout_budget_ms),
             render: MermaidStageBudgetLedger::new("render", render_budget_ms),
             notes,
-            events: Vec::new(),
+            events: Vec::with_capacity(event_capacity),
         };
         ledger.push_stage_event(
             "allocate",
@@ -2741,14 +2930,14 @@ impl MermaidBudgetLedger {
         );
         if pressure.conservative_fallback {
             ledger.events.push(MermaidBudgetEvent {
-                kind: String::from("policy_note"),
+                kind: Cow::Borrowed("policy_note"),
                 stage: None,
                 allocated_ms: None,
                 used_ms: None,
                 remaining_ms: None,
                 remaining_total_ms: ledger.snapshot_remaining_total_ms(),
                 exceeded: false,
-                note: Some(String::from(
+                note: Some(Cow::Borrowed(
                     "telemetry unavailable; broker used conservative global budget defaults",
                 )),
             });
@@ -2837,9 +3026,7 @@ impl MermaidBudgetLedger {
             self.layout.used_ms,
             self.layout.remaining_ms,
             self.layout.exceeded,
-            Some(String::from(
-                "layout share increased after parse arbitration",
-            )),
+            Some("layout share increased after parse arbitration"),
         );
         self.push_stage_event(
             "rebalance",
@@ -2848,9 +3035,7 @@ impl MermaidBudgetLedger {
             self.render.used_ms,
             self.render.remaining_ms,
             self.render.exceeded,
-            Some(String::from(
-                "render tail budget recalculated after parse arbitration",
-            )),
+            Some("render tail budget recalculated after parse arbitration"),
         );
     }
 
@@ -2863,41 +3048,41 @@ impl MermaidBudgetLedger {
         self.remaining_total_ms = self.total_budget_ms.saturating_sub(used_total);
         self.exhausted = used_total > self.total_budget_ms;
         self.events.push(MermaidBudgetEvent {
-            kind: String::from("accounting"),
+            kind: Cow::Borrowed("accounting"),
             stage: None,
             allocated_ms: None,
             used_ms: Some(used_total),
             remaining_ms: None,
             remaining_total_ms: self.snapshot_remaining_total_ms(),
             exceeded: self.exhausted,
-            note: Some(if self.exhausted {
-                String::from("global budget exhausted")
+            note: Some(Cow::Borrowed(if self.exhausted {
+                "global budget exhausted"
             } else {
-                String::from("global budget accounting updated")
-            }),
+                "global budget accounting updated"
+            })),
         });
     }
 
     #[allow(clippy::too_many_arguments)]
     fn push_stage_event(
         &mut self,
-        kind: &str,
-        stage: &str,
+        kind: &'static str,
+        stage: &'static str,
         allocated_ms: u64,
         used_ms: u64,
         remaining_ms: u64,
         exceeded: bool,
-        note: Option<String>,
+        note: Option<&'static str>,
     ) {
         self.events.push(MermaidBudgetEvent {
-            kind: kind.to_string(),
-            stage: Some(stage.to_string()),
+            kind: Cow::Borrowed(kind),
+            stage: Some(Cow::Borrowed(stage)),
             allocated_ms: Some(allocated_ms),
             used_ms: Some(used_ms),
             remaining_ms: Some(remaining_ms),
             remaining_total_ms: self.snapshot_remaining_total_ms(),
             exceeded,
-            note,
+            note: note.map(Cow::Borrowed),
         });
     }
 
@@ -3885,7 +4070,10 @@ impl StructuredDiagnostic {
     #[must_use]
     pub fn from_diagnostic(diagnostic: &Diagnostic) -> Self {
         let (source_line, source_column) = diagnostic.span.map_or((None, None), |span| {
-            (Some(span.start.line), Some(span.start.col))
+            (
+                Some(span.start.line as usize),
+                Some(span.start.col as usize),
+            )
         });
 
         Self {
@@ -3908,8 +4096,8 @@ impl StructuredDiagnostic {
             severity: DiagnosticSeverity::Warning.as_str().to_string(),
             message: warning.message.clone(),
             span: Some(warning.span),
-            source_line: Some(warning.span.start.line),
-            source_column: Some(warning.span.start.col),
+            source_line: Some(warning.span.start.line as usize),
+            source_column: Some(warning.span.start.col as usize),
             rule_id: None,
             confidence: None,
             remediation_hint: None,
@@ -3931,8 +4119,8 @@ impl StructuredDiagnostic {
             severity: DiagnosticSeverity::Error.as_str().to_string(),
             message: error.to_string(),
             span: Some(span),
-            source_line: Some(span.start.line),
-            source_column: Some(span.start.col),
+            source_line: Some(span.start.line as usize),
+            source_column: Some(span.start.col as usize),
             rule_id: None,
             confidence: None,
             remediation_hint,
@@ -4625,7 +4813,7 @@ impl MermaidDiagramIr {
             }
 
             if !merged.is_empty() {
-                node.inline_style = Some(IrInlineStyle { properties: merged });
+                node.inline_style = Some(Box::new(IrInlineStyle { properties: merged }));
             }
         }
 
@@ -4651,14 +4839,19 @@ impl MermaidDiagramIr {
             }
 
             if !merged.is_empty() {
-                edge.inline_style = Some(IrInlineStyle { properties: merged });
+                edge.inline_style = Some(Box::new(IrInlineStyle { properties: merged }));
             }
         }
     }
 
     #[must_use]
     pub fn source_map(&self) -> MermaidSourceMap {
-        let mut entries = Vec::new();
+        let entry_capacity = self.nodes.len() + self.edges.len() + self.clusters.len();
+        self.source_map_with_entry_capacity(entry_capacity)
+    }
+
+    fn source_map_with_entry_capacity(&self, entry_capacity: usize) -> MermaidSourceMap {
+        let mut entries = Vec::with_capacity(entry_capacity);
 
         for (index, node) in self.nodes.iter().enumerate() {
             if node.span_primary.is_unknown() {
@@ -4782,11 +4975,20 @@ pub enum MermaidLensError {
 
 #[must_use]
 pub fn build_lens_bindings(source: &str, source_map: &MermaidSourceMap) -> Vec<MermaidLensBinding> {
+    let line_starts = source_map
+        .entries
+        .iter()
+        .any(|entry| span_needs_line_starts(entry.span))
+        .then(|| source_line_starts(source));
     source_map
         .entries
         .iter()
         .map(|entry| {
-            let text_range = resolve_span_text_range(source, entry.span);
+            let text_range = resolve_span_text_range_with_line_starts(
+                source,
+                entry.span,
+                line_starts.as_deref(),
+            );
             let snippet = text_range
                 .as_ref()
                 .and_then(|range| source.get(range.start_byte..range.end_byte))
@@ -4809,26 +5011,26 @@ pub fn apply_lens_edit(
     source_map: &MermaidSourceMap,
     edit: &MermaidLensEdit,
 ) -> Result<MermaidLensEditResult, MermaidLensError> {
-    let binding = build_lens_bindings(source, source_map)
-        .into_iter()
-        .find(|binding| binding.element_id == edit.element_id)
+    let entry = source_map
+        .entries
+        .iter()
+        .find(|entry| entry.element_id == edit.element_id)
         .ok_or_else(|| MermaidLensError::ElementNotFound(edit.element_id.clone()))?;
-    let replaced_range = binding
-        .text_range
+    let replaced_range = resolve_span_text_range(source, entry.span)
         .ok_or_else(|| MermaidLensError::UnresolvedSpan(edit.element_id.clone()))?;
-    let previous_snippet = binding
-        .snippet
-        .clone()
+    let previous_snippet = source
+        .get(replaced_range.start_byte..replaced_range.end_byte)
+        .map(str::to_string)
         .ok_or_else(|| MermaidLensError::UnresolvedSpan(edit.element_id.clone()))?;
 
-    let mut updated_source = source.to_string();
-    updated_source.replace_range(
-        replaced_range.start_byte..replaced_range.end_byte,
-        &edit.replacement,
-    );
+    let mut updated_source =
+        String::with_capacity(source.len() - previous_snippet.len() + edit.replacement.len());
+    updated_source.push_str(&source[..replaced_range.start_byte]);
+    updated_source.push_str(&edit.replacement);
+    updated_source.push_str(&source[replaced_range.end_byte..]);
 
     Ok(MermaidLensEditResult {
-        element_id: binding.element_id,
+        element_id: entry.element_id.clone(),
         replaced_range,
         previous_snippet,
         replacement: edit.replacement.clone(),
@@ -4838,22 +5040,62 @@ pub fn apply_lens_edit(
 
 #[must_use]
 pub fn resolve_span_text_range(source: &str, span: Span) -> Option<MermaidTextRange> {
+    resolve_span_text_range_with_line_starts(source, span, None)
+}
+
+fn span_needs_line_starts(span: Span) -> bool {
+    !span.is_unknown() && span.end.byte <= span.start.byte
+}
+
+fn resolve_span_text_range_with_line_starts(
+    source: &str,
+    span: Span,
+    shared_line_starts: Option<&[usize]>,
+) -> Option<MermaidTextRange> {
     if span.is_unknown() {
         return None;
     }
 
     if span.end.byte > span.start.byte {
         return Some(MermaidTextRange {
-            start_byte: span.start.byte,
-            end_byte: span.end.byte,
+            start_byte: span.start.byte as usize,
+            end_byte: span.end.byte as usize,
         });
     }
 
-    let line_starts = source_line_starts(source);
-    let start_byte =
-        byte_index_for_line_col(source, &line_starts, span.start.line, span.start.col)?;
-    let end_col_exclusive = span.end.col.saturating_add(1);
-    let end_byte = byte_index_for_line_col(source, &line_starts, span.end.line, end_col_exclusive)?;
+    if shared_line_starts.is_none() && span.start.line == span.end.line {
+        let (line_start, line_end) = source_line_bounds(source, span.start.line as usize)?;
+        let start_byte =
+            byte_index_for_line_bounds(source, line_start, line_end, span.start.col as usize)?;
+        let end_byte =
+            byte_index_for_line_bounds(source, line_start, line_end, span.end.col as usize + 1)?;
+        return (end_byte >= start_byte).then_some(MermaidTextRange {
+            start_byte,
+            end_byte,
+        });
+    }
+
+    let owned_line_starts;
+    let line_starts = match shared_line_starts {
+        Some(line_starts) => line_starts,
+        None => {
+            owned_line_starts = source_line_starts(source);
+            &owned_line_starts
+        }
+    };
+    let start_byte = byte_index_for_line_col(
+        source,
+        line_starts,
+        span.start.line as usize,
+        span.start.col as usize,
+    )?;
+    let end_col_exclusive = span.end.col as usize + 1;
+    let end_byte = byte_index_for_line_col(
+        source,
+        line_starts,
+        span.end.line as usize,
+        end_col_exclusive,
+    )?;
     (end_byte >= start_byte).then_some(MermaidTextRange {
         start_byte,
         end_byte,
@@ -4862,12 +5104,34 @@ pub fn resolve_span_text_range(source: &str, span: Span) -> Option<MermaidTextRa
 
 fn source_line_starts(source: &str) -> Vec<usize> {
     let mut starts = vec![0];
-    for (idx, ch) in source.char_indices() {
-        if ch == '\n' {
-            starts.push(idx + ch.len_utf8());
-        }
-    }
+    starts.extend(memchr::memchr_iter(b'\n', source.as_bytes()).map(|index| index + 1));
     starts
+}
+
+fn source_line_bounds(source: &str, line: usize) -> Option<(usize, usize)> {
+    if line == 0 {
+        return None;
+    }
+
+    let bytes = source.as_bytes();
+    let line_start = if line == 1 {
+        0
+    } else {
+        memchr::memchr_iter(b'\n', bytes).nth(line - 2)? + 1
+    };
+    let next_line_start = memchr::memchr(b'\n', &bytes[line_start..])
+        .map_or(source.len(), |offset| line_start + offset + 1);
+    Some((line_start, trimmed_source_line_end(bytes, next_line_start)))
+}
+
+fn trimmed_source_line_end(bytes: &[u8], mut line_end: usize) -> usize {
+    if bytes.get(line_end.wrapping_sub(1)) == Some(&b'\n') {
+        line_end -= 1;
+    }
+    if bytes.get(line_end.wrapping_sub(1)) == Some(&b'\r') {
+        line_end -= 1;
+    }
+    line_end
 }
 
 fn byte_index_for_line_col(
@@ -4881,15 +5145,29 @@ fn byte_index_for_line_col(
     }
 
     let line_start = *line_starts.get(line - 1)?;
-    let mut line_end = line_starts.get(line).copied().unwrap_or(source.len());
-    if source.as_bytes().get(line_end.wrapping_sub(1)) == Some(&b'\n') {
-        line_end -= 1;
+    let line_end = trimmed_source_line_end(
+        source.as_bytes(),
+        line_starts.get(line).copied().unwrap_or(source.len()),
+    );
+
+    byte_index_for_line_bounds(source, line_start, line_end, col)
+}
+
+fn byte_index_for_line_bounds(
+    source: &str,
+    line_start: usize,
+    line_end: usize,
+    col: usize,
+) -> Option<usize> {
+    if col == 0 {
+        return None;
     }
-    if source.as_bytes().get(line_end.wrapping_sub(1)) == Some(&b'\r') {
-        line_end -= 1;
+    let line_slice = source.get(line_start..line_end)?;
+    let byte_offset = col - 1;
+    if line_slice.get(..byte_offset).is_some_and(str::is_ascii) {
+        return Some(line_start + byte_offset);
     }
 
-    let line_slice = source.get(line_start..line_end)?;
     let mut current_col = 1;
     for (offset, _) in line_slice.char_indices() {
         if current_col == col {
@@ -4903,24 +5181,94 @@ fn byte_index_for_line_col(
 
 fn sanitize_render_element_fragment(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
-    let mut last_was_dash = false;
+    write_sanitized_render_element_fragment_into(&mut out, raw);
+    out
+}
 
-    for ch in raw.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-            last_was_dash = false;
-        } else if !last_was_dash && !out.is_empty() {
-            out.push('-');
-            last_was_dash = true;
+/// Stream the sanitized fragment of `raw` directly into `out` — **byte-identical** to
+/// [`sanitize_render_element_fragment`] but without the intermediate `String` + its trailing
+/// `trim_matches('-').to_string()` (a second allocation). Used by the id-writer hot path. A leading
+/// dash is never produced (the deferred dash only flushes once an alphanumeric has been written) and
+/// a trailing dash is never produced (a pending dash is dropped if no alphanumeric follows) — exactly
+/// the leading/trailing trim the collect-then-trim version performs.
+fn write_sanitized_render_element_fragment_into(out: &mut String, raw: &str) {
+    // Byte scan (was `chars()`): only ASCII alphanumerics are kept (lowercased); every other byte is a
+    // separator. A non-ASCII byte (>= 128, a UTF-8 lead/continuation) is non-alphanumeric exactly as its
+    // char is, and because `pending_dash` is a *bool* (not a count) a run of separator bytes still
+    // collapses to a single `-` — so byte iteration is byte-identical to the char scan while skipping the
+    // per-char UTF-8 decode (this runs per element id on the render hot path). Pushing an ASCII byte as a
+    // `char` appends exactly one byte and keeps `out` valid UTF-8.
+    let mut wrote_alnum = false;
+    let mut pending_dash = false;
+    for &b in raw.as_bytes() {
+        if b.is_ascii_alphanumeric() {
+            if pending_dash {
+                out.push('-');
+                pending_dash = false;
+            }
+            out.push(b.to_ascii_lowercase() as char);
+            wrote_alnum = true;
+        } else if wrote_alnum {
+            pending_dash = true;
         }
     }
+}
 
-    out.trim_matches('-').to_string()
+/// Append `value`'s decimal digits to `out` without going through the `fmt::Formatter`
+/// machinery that `format!`/`write!` route through. Used by the per-element id builders, which
+/// the render profile shows spend a measurable share in `format::format_inner`.
+/// `"00".."99"` concatenated (200 ASCII bytes), as a `&str` so two-digit slices push without any
+/// `from_utf8` revalidation. Byte-slicing at even/odd offsets is always a char boundary (all ASCII).
+const DIGIT_PAIRS_SRC: &str = "00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899";
+
+/// Append `value` in decimal to `out` — byte-identical to the old digit-by-digit reverse-buffer build,
+/// but forward and table-driven (mirrors `fm-render-svg`'s `write_uint_into`): two digits per step via
+/// [`DIGIT_PAIRS_SRC`] slices, no per-digit `%10`/`/10`, and no `from_utf8` revalidation of a scratch
+/// buffer. Node/edge element-id index writing measured ~3.8% of coordinate-heavy render (the naive loop
+/// plus its `from_utf8`).
+// `pub` so id-building callers in other workspace crates (e.g. the gantt task-id `"{id}_{line}"`
+// concatenation in `fm-parser`) can append a decimal without the `format!`/`Formatter` machinery.
+pub fn push_usize_decimal(out: &mut String, value: usize) {
+    if value < 10 {
+        out.push_str(&DIGIT_PAIRS_SRC[value * 2 + 1..value * 2 + 2]);
+    } else if value < 100 {
+        out.push_str(&DIGIT_PAIRS_SRC[value * 2..value * 2 + 2]);
+    } else if value < 10_000 {
+        let hi = value / 100;
+        let lo = value % 100;
+        if hi < 10 {
+            out.push_str(&DIGIT_PAIRS_SRC[hi * 2 + 1..hi * 2 + 2]);
+        } else {
+            out.push_str(&DIGIT_PAIRS_SRC[hi * 2..hi * 2 + 2]);
+        }
+        out.push_str(&DIGIT_PAIRS_SRC[lo * 2..lo * 2 + 2]);
+    } else {
+        push_usize_decimal(out, value / 100);
+        out.push_str(&DIGIT_PAIRS_SRC[(value % 100) * 2..(value % 100) * 2 + 2]);
+    }
 }
 
 #[must_use]
 pub fn mermaid_node_element_id(node_id: &str, index: usize) -> String {
-    mermaid_node_element_id_with_variant(node_id, index, None)
+    let mut id = String::with_capacity("fm-node-".len() + node_id.len() + 21);
+    write_mermaid_node_element_id_into(&mut id, node_id, index);
+    id
+}
+
+/// Write the (no-variant) node element id directly into `out` — **byte-identical** to
+/// [`mermaid_node_element_id`] but allocating nothing: it streams the sanitized `node_id` fragment in
+/// place (no intermediate `sanitize_render_element_fragment` String, which itself allocates twice) and
+/// writes the index decimal directly. The result is `fm-node-[{fragment}-]{index}` where `{fragment}`
+/// contains only `[a-z0-9-]`, so a caller may write it without XML-escaping (the id can never contain
+/// an escapable byte). Used on the per-node render fast path.
+pub fn write_mermaid_node_element_id_into(out: &mut String, node_id: &str, index: usize) {
+    out.push_str("fm-node-");
+    let before = out.len();
+    write_sanitized_render_element_fragment_into(out, node_id);
+    if out.len() > before {
+        out.push('-');
+    }
+    push_usize_decimal(out, index);
 }
 
 #[must_use]
@@ -4930,11 +5278,16 @@ pub fn mermaid_node_element_id_with_variant(
     variant: Option<&str>,
 ) -> String {
     let fragment = sanitize_render_element_fragment(node_id);
-    let mut id = if fragment.is_empty() {
-        format!("fm-node-{index}")
-    } else {
-        format!("fm-node-{fragment}-{index}")
-    };
+    // Build the id with direct pushes instead of `format!` (whose `format_inner` machinery is a
+    // measurable render cost across hundreds of elements). Byte-identical to the prior
+    // `fm-node-[{fragment}-]{index}` formatting.
+    let mut id = String::with_capacity("fm-node-".len() + fragment.len() + 21);
+    id.push_str("fm-node-");
+    if !fragment.is_empty() {
+        id.push_str(&fragment);
+        id.push('-');
+    }
+    push_usize_decimal(&mut id, index);
 
     if let Some(variant) = variant
         .map(sanitize_render_element_fragment)
@@ -4949,12 +5302,18 @@ pub fn mermaid_node_element_id_with_variant(
 
 #[must_use]
 pub fn mermaid_edge_element_id(index: usize) -> String {
-    format!("fm-edge-{index}")
+    let mut id = String::with_capacity("fm-edge-".len() + 20);
+    id.push_str("fm-edge-");
+    push_usize_decimal(&mut id, index);
+    id
 }
 
 #[must_use]
 pub fn mermaid_cluster_element_id(index: usize) -> String {
-    format!("fm-cluster-{index}")
+    let mut id = String::with_capacity("fm-cluster-".len() + 20);
+    id.push_str("fm-cluster-");
+    push_usize_decimal(&mut id, index);
+    id
 }
 
 /// Counts of diagnostics by severity level.
@@ -5008,28 +5367,230 @@ mod schema_version_semver {
 mod tests {
     use serde_json::json;
 
+    fn stable_u128_hash_two_pass_reference(domain: &str, parts: &[&str]) -> u128 {
+        fn hash_half(salt: &str, domain: &str, parts: &[&str]) -> u64 {
+            let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+            let mut update = |s: &str| {
+                for &byte in s.as_bytes() {
+                    hash ^= u64::from(byte);
+                    hash = hash.wrapping_mul(0x0100_0000_01b3);
+                }
+            };
+
+            update(salt);
+            update(domain);
+            for part in parts {
+                update(part);
+            }
+            hash
+        }
+
+        let upper = hash_half("upper", domain, parts);
+        let lower = hash_half("lower", domain, parts);
+        (u128::from(upper) << 64) | u128::from(lower)
+    }
+
+    #[test]
+    fn stable_u128_hash_single_pass_matches_two_pass_reference() {
+        let long_source = "flowchart LR\nnode_a[Alpha] --> node_b[Beta]\n".repeat(512);
+        let cases = [
+            ("", Vec::new()),
+            ("trace", vec!["cli.render", ""]),
+            (
+                "decision",
+                vec!["0", "fm.layout.guard", "1", "layout.guard"],
+            ),
+            (
+                "trace",
+                vec!["wasm.render", "stateDiagram-v2\nA --> B: café 💡"],
+            ),
+            ("trace", vec!["cli.validate", long_source.as_str()]),
+        ];
+
+        for (domain, parts) in cases {
+            assert_eq!(
+                super::stable_u128_hash(domain, &parts),
+                stable_u128_hash_two_pass_reference(domain, &parts),
+                "hash mismatch for domain={domain:?} parts={parts:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_stable_u128_hash_single_pass_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ROUNDS: usize = 9;
+        const ITERATIONS: usize = 384;
+        const LINES: usize = 1024;
+
+        let source = (0..LINES)
+            .map(|index| format!("node_{index}[Label {index}] --> node_{}\n", index + 1))
+            .collect::<String>();
+        let parts = ["cli.render", source.as_str()];
+
+        let measure = |hasher: fn(&str, &[&str]) -> u128| {
+            let mut digest = 0_u128;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                digest ^= black_box(hasher(black_box("trace"), black_box(&parts)));
+                digest = digest.rotate_left(1);
+            }
+            (started.elapsed().as_nanos(), digest)
+        };
+
+        let expected = stable_u128_hash_two_pass_reference("trace", &parts);
+        assert_eq!(super::stable_u128_hash("trace", &parts), expected);
+        black_box(measure(stable_u128_hash_two_pass_reference));
+        black_box(measure(super::stable_u128_hash));
+
+        let mut two_pass_ns = Vec::with_capacity(ROUNDS);
+        let mut single_pass_ns = Vec::with_capacity(ROUNDS);
+        let mut proof_digest = 0_u128;
+        for round in 0..ROUNDS {
+            let ((baseline_ns, baseline_digest), (candidate_ns, candidate_digest)) =
+                if round % 2 == 0 {
+                    (
+                        measure(stable_u128_hash_two_pass_reference),
+                        measure(super::stable_u128_hash),
+                    )
+                } else {
+                    let candidate = measure(super::stable_u128_hash);
+                    let baseline = measure(stable_u128_hash_two_pass_reference);
+                    (baseline, candidate)
+                };
+            assert_eq!(baseline_digest, candidate_digest);
+            proof_digest ^= baseline_digest.rotate_left(round as u32);
+            two_pass_ns.push(baseline_ns);
+            single_pass_ns.push(candidate_ns);
+        }
+
+        two_pass_ns.sort_unstable();
+        single_pass_ns.sort_unstable();
+        let two_pass_median_ns = two_pass_ns[ROUNDS / 2];
+        let single_pass_median_ns = single_pass_ns[ROUNDS / 2];
+        let improvement_pct = (two_pass_median_ns as f64 - single_pass_median_ns as f64) * 100.0
+            / two_pass_median_ns as f64;
+        let speedup = two_pass_median_ns as f64 / single_pass_median_ns as f64;
+
+        eprintln!(
+            "PERF stable_u128_hash two_pass_ns={two_pass_ns:?} single_pass_ns={single_pass_ns:?} two_pass_median_ns={two_pass_median_ns} single_pass_median_ns={single_pass_median_ns} improvement_pct={improvement_pct:.3} speedup={speedup:.3}x parity=exact digest={proof_digest:032x} rounds={ROUNDS} iterations={ITERATIONS} lines={LINES} source_bytes={}",
+            source.len()
+        );
+    }
+
+    #[test]
+    fn push_usize_decimal_matches_std_to_string() {
+        // The digit-pair-table writer must be byte-identical to `n.to_string()` for every value.
+        for n in 0usize..2000 {
+            let mut s = String::new();
+            super::push_usize_decimal(&mut s, n);
+            assert_eq!(s, n.to_string(), "n={n}");
+        }
+        for &n in &[
+            9999usize,
+            10_000,
+            12_345,
+            99_999,
+            100_000,
+            1_234_567,
+            usize::MAX,
+        ] {
+            let mut s = String::new();
+            super::push_usize_decimal(&mut s, n);
+            assert_eq!(s, n.to_string(), "n={n}");
+        }
+    }
+
+    /// Reference implementation: the original collect-then-trim sanitizer, kept here so the streaming
+    /// writer can be proven byte-identical to it.
+    fn sanitize_reference(raw: &str) -> String {
+        let mut out = String::new();
+        let mut last_was_dash = false;
+        for ch in raw.chars() {
+            if ch.is_ascii_alphanumeric() {
+                out.push(ch.to_ascii_lowercase());
+                last_was_dash = false;
+            } else if !last_was_dash && !out.is_empty() {
+                out.push('-');
+                last_was_dash = true;
+            }
+        }
+        out.trim_matches('-').to_string()
+    }
+
+    #[test]
+    fn streaming_sanitize_and_node_id_writer_are_byte_identical() {
+        let cases = [
+            "",
+            "N5_3",
+            "Node 12",
+            "  leading",
+            "trailing  ",
+            "--dashes--",
+            "a__b..c--d",
+            "ALLCAPS",
+            "mixedCASE_99",
+            "!!!",
+            "💡emoji_x",
+            "a",
+            "1",
+            "_only_underscores_",
+            "x-y-z",
+        ];
+        for raw in cases {
+            // streaming fragment sanitizer == reference
+            let streamed = super::sanitize_render_element_fragment(raw);
+            assert_eq!(
+                streamed,
+                sanitize_reference(raw),
+                "fragment sanitize diverged for {raw:?}"
+            );
+            // direct node-id writer == the String-building (no-variant) builder, for several indices
+            for index in [0usize, 7, 42, 1000, 999_999] {
+                let mut written = String::new();
+                super::write_mermaid_node_element_id_into(&mut written, raw, index);
+                let built = super::mermaid_node_element_id(raw, index);
+                let with_variant_none =
+                    super::mermaid_node_element_id_with_variant(raw, index, None);
+                assert_eq!(
+                    written, built,
+                    "id writer != builder for ({raw:?}, {index})"
+                );
+                assert_eq!(
+                    written, with_variant_none,
+                    "id writer != variant(None) for ({raw:?}, {index})"
+                );
+            }
+        }
+    }
+
+    use std::borrow::Cow;
     use std::collections::BTreeMap;
 
     use super::{
-        ArrowType, DegradationContext, DegradationOperator, Diagnostic, DiagnosticCategory,
-        DiagnosticSeverity, DiagramPalettePreset, DiagramType, EdgeMap, FragmentAlternative,
-        FragmentKind, GanttDate, GanttExclude, GanttTaskType, GanttTickInterval, GraphDirection,
-        IrActivation, IrAttributeKey, IrCluster, IrClusterId, IrEdge, IrEdgeKind, IrEndpoint,
-        IrEntityAttribute, IrGanttMeta, IrGanttSection, IrGanttTask, IrGraphCluster, IrGraphEdge,
-        IrGraphNode, IrInlineStyle, IrLabel, IrLabelId, IrLifecycleEvent, IrNode, IrNodeId,
-        IrNodeKind, IrParticipantGroup, IrPort, IrPortId, IrPortSideHint, IrSequenceFragment,
-        IrSequenceMeta, IrSequenceNote, IrStyleDef, IrStyleRef, IrStyleTarget, IrSubgraph,
-        IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind, LifecycleEventKind,
-        MERMAID_SCHEMA_VERSION, MermaidBudgetLedger, MermaidConfig, MermaidDecisionWeight,
-        MermaidDegradationPlan, MermaidDiagramIr, MermaidError, MermaidErrorCode,
-        MermaidFallbackAction, MermaidFallbackPolicy, MermaidFidelity, MermaidGlyphMode,
-        MermaidGuardReport, MermaidLayoutDecisionAlternative, MermaidLayoutDecisionLedger,
-        MermaidLayoutDecisionRecord, MermaidLensEdit, MermaidNativePressureSignals,
+        ALLOWED_STYLE_PROPERTIES_REFERENCE, ArrowType, DegradationContext, DegradationOperator,
+        Diagnostic, DiagnosticCategory, DiagnosticSeverity, DiagramPalettePreset, DiagramType,
+        EdgeMap, FragmentAlternative, FragmentKind, GanttDate, GanttExclude, GanttTaskType,
+        GanttTickInterval, GraphDirection, IrActivation, IrAttributeKey, IrCluster, IrClusterId,
+        IrEdge, IrEdgeKind, IrEndpoint, IrEntityAttribute, IrGanttMeta, IrGanttSection,
+        IrGanttTask, IrGraphCluster, IrGraphEdge, IrGraphNode, IrInlineStyle, IrLabel, IrLabelId,
+        IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup, IrPort, IrPortId,
+        IrPortSideHint, IrSequenceFragment, IrSequenceMeta, IrSequenceNote, IrStyleDef, IrStyleRef,
+        IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries,
+        IrXySeriesKind, LifecycleEventKind, MERMAID_SCHEMA_VERSION, MermaidBudgetLedger,
+        MermaidConfig, MermaidDecisionWeight, MermaidDegradationPlan, MermaidDiagramIr,
+        MermaidError, MermaidErrorCode, MermaidFallbackAction, MermaidFallbackPolicy,
+        MermaidFidelity, MermaidGlyphMode, MermaidGuardReport, MermaidLayoutDecisionAlternative,
+        MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidLensBinding,
+        MermaidLensEdit, MermaidLensEditResult, MermaidLensError, MermaidNativePressureSignals,
         MermaidPressureReport, MermaidPressureTier, MermaidQualityMode, MermaidSanitizeMode,
         MermaidSourceMap, MermaidSourceMapEntry, MermaidSourceMapKind, MermaidSupportLevel,
-        MermaidWarningCode, MermaidWasmPressureSignals, NodeMap, NodeSet, NodeShape, NotePosition,
-        Position, Span, StructuredDiagnostic, apply_lens_edit, build_lens_bindings,
-        capability_matrix, capability_matrix_json_pretty,
+        MermaidTextRange, MermaidWarningCode, MermaidWasmPressureSignals, NodeMap, NodeSet,
+        NodeShape, NotePosition, Position, Span, StructuredDiagnostic, apply_lens_edit,
+        build_lens_bindings, capability_matrix, capability_matrix_json_pretty,
         capability_readme_supported_diagram_types_markdown, capability_readme_surface_markdown,
         documented_diagram_types, is_allowed_style_property, is_safe_link_target,
         mermaid_layout_guard_observability, parse_mermaid_js_config_value, parse_style_string,
@@ -5037,7 +5598,7 @@ mod tests {
         scale_budget, to_init_parse,
     };
 
-    fn sample_span(line: usize, start_col: usize, end_col: usize) -> Span {
+    fn sample_span(line: u32, start_col: u32, end_col: u32) -> Span {
         Span::new(
             Position {
                 line,
@@ -5050,6 +5611,32 @@ mod tests {
                 byte: 0,
             },
         )
+    }
+
+    fn build_lens_bindings_repeated_line_starts_reference(
+        source: &str,
+        source_map: &MermaidSourceMap,
+    ) -> Vec<MermaidLensBinding> {
+        source_map
+            .entries
+            .iter()
+            .map(|entry| {
+                let text_range = resolve_span_text_range(source, entry.span);
+                let snippet = text_range
+                    .as_ref()
+                    .and_then(|range| source.get(range.start_byte..range.end_byte))
+                    .map(str::to_string);
+                MermaidLensBinding {
+                    kind: entry.kind,
+                    index: entry.index,
+                    element_id: entry.element_id.clone(),
+                    source_id: entry.source_id.clone(),
+                    span: entry.span,
+                    text_range,
+                    snippet,
+                }
+            })
+            .collect()
     }
 
     #[test]
@@ -5427,6 +6014,1155 @@ mod tests {
     }
 
     #[test]
+    fn source_map_reserved_capacity_preserves_filtering_and_order() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            span_primary: Span::at_line(2, 1),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "unknown".to_string(),
+            ..IrNode::default()
+        });
+        ir.edges.push(IrEdge {
+            span: Span::at_line(2, 5),
+            ..IrEdge::default()
+        });
+        ir.clusters.push(IrCluster {
+            id: IrClusterId(7),
+            span: Span::at_line(3, 8),
+            ..IrCluster::default()
+        });
+
+        assert_eq!(ir.source_map(), ir.source_map_with_entry_capacity(0));
+    }
+
+    fn source_line_starts_char_reference(source: &str) -> Vec<usize> {
+        let mut starts = vec![0];
+        for (index, ch) in source.char_indices() {
+            if ch == '\n' {
+                starts.push(index + ch.len_utf8());
+            }
+        }
+        starts
+    }
+
+    fn byte_index_for_line_col_char_reference(
+        source: &str,
+        line_starts: &[usize],
+        line: usize,
+        col: usize,
+    ) -> Option<usize> {
+        if line == 0 || col == 0 {
+            return None;
+        }
+
+        let line_start = *line_starts.get(line - 1)?;
+        let mut line_end = line_starts.get(line).copied().unwrap_or(source.len());
+        if source.as_bytes().get(line_end.wrapping_sub(1)) == Some(&b'\n') {
+            line_end -= 1;
+        }
+        if source.as_bytes().get(line_end.wrapping_sub(1)) == Some(&b'\r') {
+            line_end -= 1;
+        }
+
+        let line_slice = source.get(line_start..line_end)?;
+        let mut current_col = 1;
+        for (offset, _) in line_slice.char_indices() {
+            if current_col == col {
+                return Some(line_start + offset);
+            }
+            current_col += 1;
+        }
+
+        (current_col == col).then_some(line_end)
+    }
+
+    fn resolve_span_text_range_indexed_reference(
+        source: &str,
+        span: Span,
+    ) -> Option<MermaidTextRange> {
+        if span.is_unknown() {
+            return None;
+        }
+        if span.end.byte > span.start.byte {
+            return Some(MermaidTextRange {
+                start_byte: span.start.byte as usize,
+                end_byte: span.end.byte as usize,
+            });
+        }
+
+        let line_starts = super::source_line_starts(source);
+        let start_byte = super::byte_index_for_line_col(
+            source,
+            &line_starts,
+            span.start.line as usize,
+            span.start.col as usize,
+        )?;
+        let end_byte = super::byte_index_for_line_col(
+            source,
+            &line_starts,
+            span.end.line as usize,
+            span.end.col as usize + 1,
+        )?;
+        (end_byte >= start_byte).then_some(MermaidTextRange {
+            start_byte,
+            end_byte,
+        })
+    }
+
+    #[test]
+    fn memchr_line_starts_match_char_reference() {
+        let cases = [
+            "",
+            "one line",
+            "\n",
+            "\n\n",
+            "alpha\nbeta",
+            "alpha\nbeta\n",
+            "alpha\r\nbeta\r\n",
+            "東京\nα-->β\n🙂 end",
+            "mixed\r\n東京\n\r\nlast\n",
+        ];
+
+        for source in cases {
+            assert_eq!(
+                super::source_line_starts(source),
+                source_line_starts_char_reference(source),
+                "source={source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ascii_prefix_column_indexes_match_char_reference() {
+        let cases = [
+            "",
+            "\n",
+            "abc",
+            "abc\n",
+            "abc\r\n",
+            "αβ",
+            "abcαdef",
+            "αabc",
+            "a🙂b\r\n東京\nlast",
+            "ascii first\r\nα then ascii\n\r\n",
+        ];
+
+        for source in cases {
+            let line_starts = super::source_line_starts(source);
+            for line in 0..=line_starts.len() + 1 {
+                for col in 0..=16 {
+                    assert_eq!(
+                        super::byte_index_for_line_col(source, &line_starts, line, col),
+                        byte_index_for_line_col_char_reference(source, &line_starts, line, col),
+                        "source={source:?} line={line} col={col}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn single_line_span_resolution_matches_indexed_reference() {
+        let direct_bytes = Span::new(
+            Position {
+                line: 99,
+                col: 99,
+                byte: 1,
+            },
+            Position {
+                line: 99,
+                col: 99,
+                byte: 3,
+            },
+        );
+        let multi_line = Span::new(
+            Position {
+                line: 1,
+                col: 1,
+                byte: 0,
+            },
+            Position {
+                line: 2,
+                col: 2,
+                byte: 0,
+            },
+        );
+        let spans = [
+            Span::default(),
+            sample_span(1, 0, 1),
+            sample_span(1, 1, 1),
+            sample_span(1, 1, 8),
+            sample_span(2, 1, 1),
+            sample_span(2, 1, 4),
+            sample_span(3, 1, 8),
+            sample_span(4, 1, 1),
+            multi_line,
+            direct_bytes,
+        ];
+        let sources = [
+            "",
+            "\n",
+            "head\nbody\n",
+            "head\r\nbody\r\n",
+            "head\r\nαβ🙂\r\nlast\n",
+            "東京\nabcαdef\n\r\n",
+        ];
+
+        for source in sources {
+            for span in spans {
+                assert_eq!(
+                    resolve_span_text_range(source, span),
+                    resolve_span_text_range_indexed_reference(source, span),
+                    "source={source:?} span={span:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_single_line_span_without_index_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const LINES: usize = 256;
+        const ITERATIONS: usize = 4_096;
+        const ROUNDS: usize = 9;
+
+        type SpanResolver = fn(&str, Span) -> Option<MermaidTextRange>;
+
+        fn measure(source: &str, span: Span, resolver: SpanResolver) -> (u128, u64) {
+            let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                let range = resolver(black_box(source), black_box(span))
+                    .expect("benchmark span should resolve");
+                for value in [range.start_byte, range.end_byte] {
+                    digest ^= value as u64;
+                    digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                black_box(range);
+            }
+            (started.elapsed().as_nanos(), digest)
+        }
+
+        let mut source = String::from("flowchart LR\r\n");
+        let mut last_end_col = 0;
+        for index in 0..LINES {
+            let line = format!("N{index:03} --> N{:03}: label-{index:03}\r\n", index + 1);
+            last_end_col = line.trim_end().chars().count();
+            source.push_str(&line);
+        }
+        let span = sample_span(
+            u32::try_from(LINES + 1).expect("small corpus"),
+            1,
+            u32::try_from(last_end_col).expect("short line"),
+        );
+        assert_eq!(
+            resolve_span_text_range(&source, span),
+            resolve_span_text_range_indexed_reference(&source, span)
+        );
+
+        let mut indexed_ns = Vec::with_capacity(ROUNDS);
+        let mut direct_ns = Vec::with_capacity(ROUNDS);
+        let mut proof_digest = 0_u64;
+        for round in 0..ROUNDS {
+            let (indexed, direct) = if round % 2 == 0 {
+                (
+                    measure(&source, span, resolve_span_text_range_indexed_reference),
+                    measure(&source, span, resolve_span_text_range),
+                )
+            } else {
+                let direct = measure(&source, span, resolve_span_text_range);
+                let indexed = measure(&source, span, resolve_span_text_range_indexed_reference);
+                (indexed, direct)
+            };
+            assert_eq!(indexed.1, direct.1);
+            proof_digest = direct.1;
+            indexed_ns.push(indexed.0);
+            direct_ns.push(direct.0);
+        }
+
+        indexed_ns.sort_unstable();
+        direct_ns.sort_unstable();
+        let indexed_median_ns = indexed_ns[ROUNDS / 2];
+        let direct_median_ns = direct_ns[ROUNDS / 2];
+        let improvement_pct =
+            (indexed_median_ns as f64 - direct_median_ns as f64) * 100.0 / indexed_median_ns as f64;
+        let speedup = indexed_median_ns as f64 / direct_median_ns as f64;
+        println!(
+            "PERF single_line_span indexed_ns={indexed_ns:?} direct_ns={direct_ns:?} indexed_median_ns={indexed_median_ns} direct_median_ns={direct_median_ns} improvement_pct={improvement_pct:.3} speedup={speedup:.3}x parity=exact digest={proof_digest:016x} rounds={ROUNDS} iterations={ITERATIONS} lines={LINES} source_bytes={}",
+            source.len()
+        );
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_ascii_prefix_column_index_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const LINES: usize = 256;
+        const ITERATIONS: usize = 1_024;
+        const ROUNDS: usize = 9;
+
+        type ColumnIndexer = fn(&str, &[usize], usize, usize) -> Option<usize>;
+
+        fn measure(
+            source: &str,
+            line_starts: &[usize],
+            end_columns: &[usize],
+            indexer: ColumnIndexer,
+        ) -> (u128, u64) {
+            let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                for (index, &end_column) in end_columns.iter().enumerate() {
+                    let line = index + 2;
+                    for column in [1, end_column] {
+                        let byte = indexer(
+                            black_box(source),
+                            black_box(line_starts),
+                            black_box(line),
+                            black_box(column),
+                        )
+                        .expect("benchmark column should resolve");
+                        digest ^= byte as u64;
+                        digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                    }
+                }
+            }
+            (started.elapsed().as_nanos(), digest)
+        }
+
+        let mut source = String::from("flowchart LR\r\n");
+        let mut end_columns = Vec::with_capacity(LINES);
+        for index in 0..LINES {
+            let line = format!("N{index:03} --> N{:03}: label-{index:03}\r\n", index + 1);
+            end_columns.push(line.trim_end().chars().count() + 1);
+            source.push_str(&line);
+        }
+        let line_starts = super::source_line_starts(&source);
+
+        let mut char_ns = Vec::with_capacity(ROUNDS);
+        let mut ascii_ns = Vec::with_capacity(ROUNDS);
+        let mut proof_digest = 0_u64;
+        for round in 0..ROUNDS {
+            let (char_scan, ascii_prefix) = if round % 2 == 0 {
+                (
+                    measure(
+                        &source,
+                        &line_starts,
+                        &end_columns,
+                        byte_index_for_line_col_char_reference,
+                    ),
+                    measure(
+                        &source,
+                        &line_starts,
+                        &end_columns,
+                        super::byte_index_for_line_col,
+                    ),
+                )
+            } else {
+                let ascii_prefix = measure(
+                    &source,
+                    &line_starts,
+                    &end_columns,
+                    super::byte_index_for_line_col,
+                );
+                let char_scan = measure(
+                    &source,
+                    &line_starts,
+                    &end_columns,
+                    byte_index_for_line_col_char_reference,
+                );
+                (char_scan, ascii_prefix)
+            };
+            assert_eq!(char_scan.1, ascii_prefix.1);
+            proof_digest = ascii_prefix.1;
+            char_ns.push(char_scan.0);
+            ascii_ns.push(ascii_prefix.0);
+        }
+
+        char_ns.sort_unstable();
+        ascii_ns.sort_unstable();
+        let char_median_ns = char_ns[ROUNDS / 2];
+        let ascii_median_ns = ascii_ns[ROUNDS / 2];
+        let improvement_pct =
+            (char_median_ns as f64 - ascii_median_ns as f64) * 100.0 / char_median_ns as f64;
+        let speedup = char_median_ns as f64 / ascii_median_ns as f64;
+        println!(
+            "PERF ascii_prefix_columns char_ns={char_ns:?} ascii_ns={ascii_ns:?} char_median_ns={char_median_ns} ascii_median_ns={ascii_median_ns} improvement_pct={improvement_pct:.3} speedup={speedup:.3}x parity=exact digest={proof_digest:016x} rounds={ROUNDS} iterations={ITERATIONS} lines={LINES} source_bytes={}",
+            source.len()
+        );
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_memchr_line_starts_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const LINES: usize = 256;
+        const ITERATIONS: usize = 4_096;
+        const ROUNDS: usize = 9;
+
+        type LineIndexer = fn(&str) -> Vec<usize>;
+
+        fn measure(source: &str, indexer: LineIndexer) -> (u128, u64) {
+            let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                let starts = indexer(black_box(source));
+                for value in [starts.len(), starts.last().copied().unwrap_or_default()] {
+                    digest ^= value as u64;
+                    digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                black_box(starts);
+            }
+            (started.elapsed().as_nanos(), digest)
+        }
+
+        let mut source = String::from("flowchart LR\r\n");
+        for index in 0..LINES {
+            if index % 16 == 0 {
+                source.push_str(&format!("N{index:03}[東京🙂] --> N{:03}\r\n", index + 1));
+            } else {
+                source.push_str(&format!(
+                    "N{index:03} --> N{:03}: label-{index:03}\r\n",
+                    index + 1
+                ));
+            }
+        }
+        assert_eq!(
+            super::source_line_starts(&source),
+            source_line_starts_char_reference(&source)
+        );
+
+        let mut char_ns = Vec::with_capacity(ROUNDS);
+        let mut memchr_ns = Vec::with_capacity(ROUNDS);
+        let mut proof_digest = 0_u64;
+        for round in 0..ROUNDS {
+            let (char_scan, memchr_scan) = if round % 2 == 0 {
+                (
+                    measure(&source, source_line_starts_char_reference),
+                    measure(&source, super::source_line_starts),
+                )
+            } else {
+                let memchr_scan = measure(&source, super::source_line_starts);
+                let char_scan = measure(&source, source_line_starts_char_reference);
+                (char_scan, memchr_scan)
+            };
+            assert_eq!(char_scan.1, memchr_scan.1);
+            proof_digest = memchr_scan.1;
+            char_ns.push(char_scan.0);
+            memchr_ns.push(memchr_scan.0);
+        }
+
+        char_ns.sort_unstable();
+        memchr_ns.sort_unstable();
+        let char_median_ns = char_ns[ROUNDS / 2];
+        let memchr_median_ns = memchr_ns[ROUNDS / 2];
+        let improvement_pct =
+            (char_median_ns as f64 - memchr_median_ns as f64) * 100.0 / char_median_ns as f64;
+        let speedup = char_median_ns as f64 / memchr_median_ns as f64;
+        println!(
+            "PERF memchr_line_starts char_ns={char_ns:?} memchr_ns={memchr_ns:?} char_median_ns={char_median_ns} memchr_median_ns={memchr_median_ns} improvement_pct={improvement_pct:.3} speedup={speedup:.3}x parity=exact digest={proof_digest:016x} rounds={ROUNDS} iterations={ITERATIONS} lines={LINES} source_bytes={}",
+            source.len()
+        );
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_source_map_entry_capacity_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const NODES: usize = 512;
+        const CLUSTERS: usize = 64;
+        const ITERATIONS: usize = 256;
+        const ROUNDS: usize = 9;
+
+        fn measure(ir: &MermaidDiagramIr, entry_capacity: usize) -> (u128, usize, usize) {
+            let mut entry_count = 0usize;
+            let mut element_bytes = 0usize;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                let source_map =
+                    black_box(ir).source_map_with_entry_capacity(black_box(entry_capacity));
+                entry_count = entry_count.wrapping_add(source_map.entries.len());
+                element_bytes = element_bytes.wrapping_add(
+                    source_map
+                        .entries
+                        .iter()
+                        .map(|entry| entry.element_id.len())
+                        .sum::<usize>(),
+                );
+                black_box(&source_map);
+            }
+            (started.elapsed().as_nanos(), entry_count, element_bytes)
+        }
+
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for index in 0..NODES {
+            ir.nodes.push(IrNode {
+                id: format!("N{index}"),
+                span_primary: Span::at_line(index + 2, 12),
+                ..IrNode::default()
+            });
+            ir.edges.push(IrEdge {
+                span: Span::at_line(index + 2, 18),
+                ..IrEdge::default()
+            });
+        }
+        for index in 0..CLUSTERS {
+            ir.clusters.push(IrCluster {
+                id: IrClusterId(index),
+                span: Span::at_line(NODES + index + 2, 10),
+                ..IrCluster::default()
+            });
+        }
+        let entry_capacity = ir.nodes.len() + ir.edges.len() + ir.clusters.len();
+        assert_eq!(
+            ir.source_map_with_entry_capacity(0),
+            ir.source_map_with_entry_capacity(entry_capacity)
+        );
+
+        let mut baseline_ns = Vec::with_capacity(ROUNDS);
+        let mut candidate_ns = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (baseline, candidate) = if round % 2 == 0 {
+                (measure(&ir, 0), measure(&ir, entry_capacity))
+            } else {
+                let candidate = measure(&ir, entry_capacity);
+                let baseline = measure(&ir, 0);
+                (baseline, candidate)
+            };
+            assert_eq!((baseline.1, baseline.2), (candidate.1, candidate.2));
+            baseline_ns.push(baseline.0);
+            candidate_ns.push(candidate.0);
+        }
+
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median_ns = baseline_ns[ROUNDS / 2];
+        let candidate_median_ns = candidate_ns[ROUNDS / 2];
+        let improvement_pct = (baseline_median_ns as f64 - candidate_median_ns as f64) * 100.0
+            / baseline_median_ns as f64;
+        println!(
+            "PERF source_map_entry_capacity baseline_median_ns={baseline_median_ns} candidate_median_ns={candidate_median_ns} improvement_pct={improvement_pct:.3} parity=exact rounds={ROUNDS} iterations={ITERATIONS} entries={entry_capacity}"
+        );
+    }
+
+    #[test]
+    fn shared_lens_line_starts_match_repeated_reference() {
+        let source = "flowchart LR\r\nα-->β\r\nC-->D\r\n";
+        let direct_start = source.find('C').expect("direct span start");
+        let direct_end = direct_start + 'C'.len_utf8();
+        let source_map = MermaidSourceMap {
+            diagram_type: DiagramType::Flowchart,
+            entries: vec![
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Edge,
+                    index: 0,
+                    element_id: "fm-edge-0".to_string(),
+                    source_id: None,
+                    span: sample_span(2, 1, 5),
+                },
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Node,
+                    index: 1,
+                    element_id: "fm-node-c-1".to_string(),
+                    source_id: Some("C".to_string()),
+                    span: Span::new(
+                        Position {
+                            line: 3,
+                            col: 1,
+                            byte: u32::try_from(direct_start).expect("small source"),
+                        },
+                        Position {
+                            line: 3,
+                            col: 1,
+                            byte: u32::try_from(direct_end).expect("small source"),
+                        },
+                    ),
+                },
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Cluster,
+                    index: 0,
+                    element_id: "fm-cluster-0".to_string(),
+                    source_id: None,
+                    span: Span::default(),
+                },
+            ],
+        };
+
+        assert_eq!(
+            build_lens_bindings(source, &source_map),
+            build_lens_bindings_repeated_line_starts_reference(source, &source_map)
+        );
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_shared_lens_line_starts_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const LINES: usize = 128;
+        const ITERATIONS: usize = 200;
+        const ROUNDS: usize = 9;
+
+        type BindingBuilder = fn(&str, &MermaidSourceMap) -> Vec<MermaidLensBinding>;
+
+        fn measure(
+            source: &str,
+            source_map: &MermaidSourceMap,
+            iterations: usize,
+            builder: BindingBuilder,
+        ) -> (u128, usize) {
+            let mut binding_count = 0usize;
+            let started = Instant::now();
+            for _ in 0..iterations {
+                let bindings = black_box(builder(black_box(source), black_box(source_map)));
+                binding_count = binding_count.wrapping_add(bindings.len());
+                black_box(bindings);
+            }
+            (started.elapsed().as_nanos(), binding_count)
+        }
+
+        let mut source = String::from("flowchart LR\n");
+        let mut entries = Vec::with_capacity(LINES);
+        for index in 0..LINES {
+            let line = format!("N{index:03} --> N{:03}: label-{index:03}\n", index + 1);
+            let line_number = u32::try_from(index + 2).expect("small corpus");
+            let end_col = u32::try_from(line.trim_end().chars().count()).expect("short line");
+            source.push_str(&line);
+            entries.push(MermaidSourceMapEntry {
+                kind: MermaidSourceMapKind::Edge,
+                index,
+                element_id: format!("fm-edge-{index}"),
+                source_id: None,
+                span: sample_span(line_number, 1, end_col),
+            });
+        }
+        let source_map = MermaidSourceMap {
+            diagram_type: DiagramType::Flowchart,
+            entries,
+        };
+        assert_eq!(
+            build_lens_bindings(&source, &source_map),
+            build_lens_bindings_repeated_line_starts_reference(&source, &source_map)
+        );
+
+        let mut repeated_ns = Vec::with_capacity(ROUNDS);
+        let mut shared_ns = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (repeated, shared) = if round % 2 == 0 {
+                (
+                    measure(
+                        &source,
+                        &source_map,
+                        ITERATIONS,
+                        build_lens_bindings_repeated_line_starts_reference,
+                    ),
+                    measure(&source, &source_map, ITERATIONS, build_lens_bindings),
+                )
+            } else {
+                let shared = measure(&source, &source_map, ITERATIONS, build_lens_bindings);
+                let repeated = measure(
+                    &source,
+                    &source_map,
+                    ITERATIONS,
+                    build_lens_bindings_repeated_line_starts_reference,
+                );
+                (repeated, shared)
+            };
+            assert_eq!(repeated.1, shared.1);
+            repeated_ns.push(repeated.0);
+            shared_ns.push(shared.0);
+        }
+
+        repeated_ns.sort_unstable();
+        shared_ns.sort_unstable();
+        let repeated_median_ns = repeated_ns[ROUNDS / 2];
+        let shared_median_ns = shared_ns[ROUNDS / 2];
+        let improvement_pct = (repeated_median_ns as f64 - shared_median_ns as f64) * 100.0
+            / repeated_median_ns as f64;
+
+        println!(
+            "PERF lens_line_starts repeated_median_ns={repeated_median_ns} shared_median_ns={shared_median_ns} improvement_pct={improvement_pct:.3} parity=exact rounds={ROUNDS} iterations={ITERATIONS} entries={LINES} source_bytes={}",
+            source.len()
+        );
+    }
+
+    fn apply_lens_edit_materialized_reference(
+        source: &str,
+        source_map: &MermaidSourceMap,
+        edit: &MermaidLensEdit,
+    ) -> Result<MermaidLensEditResult, MermaidLensError> {
+        let binding = build_lens_bindings(source, source_map)
+            .into_iter()
+            .find(|binding| binding.element_id == edit.element_id)
+            .ok_or_else(|| MermaidLensError::ElementNotFound(edit.element_id.clone()))?;
+        let replaced_range = binding
+            .text_range
+            .ok_or_else(|| MermaidLensError::UnresolvedSpan(edit.element_id.clone()))?;
+        let previous_snippet = binding
+            .snippet
+            .clone()
+            .ok_or_else(|| MermaidLensError::UnresolvedSpan(edit.element_id.clone()))?;
+
+        let mut updated_source = source.to_string();
+        updated_source.replace_range(
+            replaced_range.start_byte..replaced_range.end_byte,
+            &edit.replacement,
+        );
+
+        Ok(MermaidLensEditResult {
+            element_id: binding.element_id,
+            replaced_range,
+            previous_snippet,
+            replacement: edit.replacement.clone(),
+            updated_source,
+        })
+    }
+
+    fn apply_lens_edit_replace_range_reference(
+        source: &str,
+        source_map: &MermaidSourceMap,
+        edit: &MermaidLensEdit,
+    ) -> Result<MermaidLensEditResult, MermaidLensError> {
+        let entry = source_map
+            .entries
+            .iter()
+            .find(|entry| entry.element_id == edit.element_id)
+            .ok_or_else(|| MermaidLensError::ElementNotFound(edit.element_id.clone()))?;
+        let replaced_range = resolve_span_text_range(source, entry.span)
+            .ok_or_else(|| MermaidLensError::UnresolvedSpan(edit.element_id.clone()))?;
+        let previous_snippet = source
+            .get(replaced_range.start_byte..replaced_range.end_byte)
+            .map(str::to_string)
+            .ok_or_else(|| MermaidLensError::UnresolvedSpan(edit.element_id.clone()))?;
+
+        let mut updated_source = source.to_string();
+        updated_source.replace_range(
+            replaced_range.start_byte..replaced_range.end_byte,
+            &edit.replacement,
+        );
+
+        Ok(MermaidLensEditResult {
+            element_id: entry.element_id.clone(),
+            replaced_range,
+            previous_snippet,
+            replacement: edit.replacement.clone(),
+            updated_source,
+        })
+    }
+
+    #[test]
+    fn final_size_lens_splice_matches_replace_range_reference() {
+        let source = "flowchart LR\r\n\u{03b1}-->\u{03b2}\r\nA-->B\r\nC-->D\r\n";
+        let direct_span = |needle: &str| {
+            let start = source.find(needle).expect("fixture needle");
+            Span::new(
+                Position {
+                    line: 0,
+                    col: 0,
+                    byte: u32::try_from(start).expect("small fixture"),
+                },
+                Position {
+                    line: 0,
+                    col: 0,
+                    byte: u32::try_from(start + needle.len()).expect("small fixture"),
+                },
+            )
+        };
+        let source_map = MermaidSourceMap {
+            diagram_type: DiagramType::Flowchart,
+            entries: vec![
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Edge,
+                    index: 0,
+                    element_id: "unicode-first".to_string(),
+                    source_id: None,
+                    span: direct_span("\u{03b1}-->\u{03b2}"),
+                },
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Edge,
+                    index: 1,
+                    element_id: "middle".to_string(),
+                    source_id: None,
+                    span: direct_span("A-->B"),
+                },
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Edge,
+                    index: 2,
+                    element_id: "last".to_string(),
+                    source_id: None,
+                    span: direct_span("C-->D"),
+                },
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Cluster,
+                    index: 0,
+                    element_id: "unresolved".to_string(),
+                    source_id: None,
+                    span: Span::default(),
+                },
+            ],
+        };
+        let edits = [
+            MermaidLensEdit {
+                element_id: "unicode-first".to_string(),
+                replacement: "X".to_string(),
+            },
+            MermaidLensEdit {
+                element_id: "middle".to_string(),
+                replacement: "A-.->B".to_string(),
+            },
+            MermaidLensEdit {
+                element_id: "last".to_string(),
+                replacement: String::new(),
+            },
+            MermaidLensEdit {
+                element_id: "unresolved".to_string(),
+                replacement: "ignored".to_string(),
+            },
+            MermaidLensEdit {
+                element_id: "missing".to_string(),
+                replacement: "ignored".to_string(),
+            },
+        ];
+
+        for edit in edits {
+            assert_eq!(
+                apply_lens_edit(source, &source_map, &edit),
+                apply_lens_edit_replace_range_reference(source, &source_map, &edit),
+                "edit={edit:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_final_size_lens_splice_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ENTRIES: usize = 256;
+        const ITERATIONS: usize = 256;
+        const ROUNDS: usize = 9;
+
+        type LensEditor = fn(
+            &str,
+            &MermaidSourceMap,
+            &MermaidLensEdit,
+        ) -> Result<MermaidLensEditResult, MermaidLensError>;
+
+        fn measure(
+            source: &str,
+            source_map: &MermaidSourceMap,
+            edits: &[MermaidLensEdit],
+            editor: LensEditor,
+        ) -> (u128, u64) {
+            let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                for edit in edits {
+                    let result = editor(black_box(source), black_box(source_map), black_box(edit))
+                        .expect("edit should resolve");
+                    for value in [
+                        result.replaced_range.start_byte,
+                        result.replaced_range.end_byte,
+                        result.previous_snippet.len(),
+                        result.replacement.len(),
+                        result.updated_source.len(),
+                    ] {
+                        digest ^= value as u64;
+                        digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                    }
+                    black_box(result);
+                }
+            }
+            (started.elapsed().as_nanos(), digest)
+        }
+
+        let mut source = String::from("flowchart LR\r\n");
+        let mut entries = Vec::with_capacity(ENTRIES);
+        for index in 0..ENTRIES {
+            let line = format!("N{index:03} --> N{:03}: label-{index:03}\r\n", index + 1);
+            let line_number = u32::try_from(index + 2).expect("small corpus");
+            let end_col = u32::try_from(line.trim_end().chars().count()).expect("short line");
+            source.push_str(&line);
+            entries.push(MermaidSourceMapEntry {
+                kind: MermaidSourceMapKind::Edge,
+                index,
+                element_id: format!("fm-edge-{index}"),
+                source_id: None,
+                span: sample_span(line_number, 1, end_col),
+            });
+        }
+        let source_map = MermaidSourceMap {
+            diagram_type: DiagramType::Flowchart,
+            entries,
+        };
+        let edits = [
+            MermaidLensEdit {
+                element_id: "fm-edge-0".to_string(),
+                replacement: "N000 --> N001: label-000".to_string(),
+            },
+            MermaidLensEdit {
+                element_id: "fm-edge-85".to_string(),
+                replacement: "N085-->N086".to_string(),
+            },
+            MermaidLensEdit {
+                element_id: "fm-edge-170".to_string(),
+                replacement: "N170 -.-> N171: updated-with-a-longer-label".to_string(),
+            },
+            MermaidLensEdit {
+                element_id: "fm-edge-255".to_string(),
+                replacement: String::new(),
+            },
+        ];
+        for edit in &edits {
+            assert_eq!(
+                apply_lens_edit(&source, &source_map, edit),
+                apply_lens_edit_replace_range_reference(&source, &source_map, edit)
+            );
+        }
+
+        let mut replace_range_ns = Vec::with_capacity(ROUNDS);
+        let mut final_size_ns = Vec::with_capacity(ROUNDS);
+        let mut proof_digest = 0_u64;
+        for round in 0..ROUNDS {
+            let (replace_range, final_size) = if round % 2 == 0 {
+                (
+                    measure(
+                        &source,
+                        &source_map,
+                        &edits,
+                        apply_lens_edit_replace_range_reference,
+                    ),
+                    measure(&source, &source_map, &edits, apply_lens_edit),
+                )
+            } else {
+                let final_size = measure(&source, &source_map, &edits, apply_lens_edit);
+                let replace_range = measure(
+                    &source,
+                    &source_map,
+                    &edits,
+                    apply_lens_edit_replace_range_reference,
+                );
+                (replace_range, final_size)
+            };
+            assert_eq!(replace_range.1, final_size.1);
+            proof_digest = final_size.1;
+            replace_range_ns.push(replace_range.0);
+            final_size_ns.push(final_size.0);
+        }
+
+        replace_range_ns.sort_unstable();
+        final_size_ns.sort_unstable();
+        let replace_range_median_ns = replace_range_ns[ROUNDS / 2];
+        let final_size_median_ns = final_size_ns[ROUNDS / 2];
+        let improvement_pct = (replace_range_median_ns as f64 - final_size_median_ns as f64)
+            * 100.0
+            / replace_range_median_ns as f64;
+        let speedup = replace_range_median_ns as f64 / final_size_median_ns as f64;
+        println!(
+            "PERF final_size_lens_splice replace_range_ns={replace_range_ns:?} final_size_ns={final_size_ns:?} replace_range_median_ns={replace_range_median_ns} final_size_median_ns={final_size_median_ns} improvement_pct={improvement_pct:.3} speedup={speedup:.3}x parity=exact digest={proof_digest:016x} rounds={ROUNDS} iterations={ITERATIONS} edits_per_iteration={} entries={ENTRIES} source_bytes={}",
+            edits.len(),
+            source.len()
+        );
+    }
+
+    #[test]
+    fn direct_lens_edit_matches_materialized_reference() {
+        let source = "flowchart LR\r\nα-->β\r\nC-->D\r\n";
+        let c_start = source.find('C').expect("C byte offset");
+        let c_end = c_start + 'C'.len_utf8();
+        let source_map = MermaidSourceMap {
+            diagram_type: DiagramType::Flowchart,
+            entries: vec![
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Cluster,
+                    index: 0,
+                    element_id: "unresolved-other".to_string(),
+                    source_id: None,
+                    span: Span::default(),
+                },
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Edge,
+                    index: 0,
+                    element_id: "target".to_string(),
+                    source_id: None,
+                    span: sample_span(2, 1, 5),
+                },
+                MermaidSourceMapEntry {
+                    kind: MermaidSourceMapKind::Node,
+                    index: 1,
+                    element_id: "target".to_string(),
+                    source_id: Some("C".to_string()),
+                    span: Span::new(
+                        Position {
+                            line: 3,
+                            col: 1,
+                            byte: u32::try_from(c_start).expect("small source"),
+                        },
+                        Position {
+                            line: 3,
+                            col: 1,
+                            byte: u32::try_from(c_end).expect("small source"),
+                        },
+                    ),
+                },
+            ],
+        };
+        let edit = MermaidLensEdit {
+            element_id: "target".to_string(),
+            replacement: "X-->Y".to_string(),
+        };
+        assert_eq!(
+            apply_lens_edit(source, &source_map, &edit),
+            apply_lens_edit_materialized_reference(source, &source_map, &edit)
+        );
+
+        let unresolved = MermaidLensEdit {
+            element_id: "unresolved-other".to_string(),
+            replacement: "ignored".to_string(),
+        };
+        assert_eq!(
+            apply_lens_edit(source, &source_map, &unresolved),
+            apply_lens_edit_materialized_reference(source, &source_map, &unresolved)
+        );
+
+        let missing = MermaidLensEdit {
+            element_id: "missing".to_string(),
+            replacement: "ignored".to_string(),
+        };
+        assert_eq!(
+            apply_lens_edit(source, &source_map, &missing),
+            apply_lens_edit_materialized_reference(source, &source_map, &missing)
+        );
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_direct_lens_edit_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ENTRIES: usize = 256;
+        const ITERATIONS: usize = 64;
+        const ROUNDS: usize = 9;
+
+        type LensEditor = fn(
+            &str,
+            &MermaidSourceMap,
+            &MermaidLensEdit,
+        ) -> Result<MermaidLensEditResult, MermaidLensError>;
+
+        fn measure(
+            source: &str,
+            source_map: &MermaidSourceMap,
+            edit: &MermaidLensEdit,
+            editor: LensEditor,
+        ) -> (u128, u64) {
+            let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                let result = editor(black_box(source), black_box(source_map), black_box(edit))
+                    .expect("edit should resolve");
+                for value in [
+                    result.replaced_range.start_byte,
+                    result.replaced_range.end_byte,
+                    result.previous_snippet.len(),
+                    result.updated_source.len(),
+                ] {
+                    digest ^= value as u64;
+                    digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                black_box(result);
+            }
+            (started.elapsed().as_nanos(), digest)
+        }
+
+        let mut source = String::from("flowchart LR\r\n");
+        let mut entries = Vec::with_capacity(ENTRIES);
+        for index in 0..ENTRIES {
+            let line = format!("N{index:03} --> N{:03}: label-{index:03}\r\n", index + 1);
+            let line_number = u32::try_from(index + 2).expect("small corpus");
+            let end_col = u32::try_from(line.trim_end().chars().count()).expect("short line");
+            source.push_str(&line);
+            entries.push(MermaidSourceMapEntry {
+                kind: MermaidSourceMapKind::Edge,
+                index,
+                element_id: format!("fm-edge-{index}"),
+                source_id: None,
+                span: sample_span(line_number, 1, end_col),
+            });
+        }
+        let source_map = MermaidSourceMap {
+            diagram_type: DiagramType::Flowchart,
+            entries,
+        };
+        let edit = MermaidLensEdit {
+            element_id: format!("fm-edge-{}", ENTRIES - 1),
+            replacement: "N255 -.-> N256: updated".to_string(),
+        };
+        assert_eq!(
+            apply_lens_edit(&source, &source_map, &edit),
+            apply_lens_edit_materialized_reference(&source, &source_map, &edit)
+        );
+
+        let mut materialized_ns = Vec::with_capacity(ROUNDS);
+        let mut direct_ns = Vec::with_capacity(ROUNDS);
+        let mut proof_digest = 0_u64;
+        for round in 0..ROUNDS {
+            let (materialized, direct) = if round % 2 == 0 {
+                (
+                    measure(
+                        &source,
+                        &source_map,
+                        &edit,
+                        apply_lens_edit_materialized_reference,
+                    ),
+                    measure(&source, &source_map, &edit, apply_lens_edit),
+                )
+            } else {
+                let direct = measure(&source, &source_map, &edit, apply_lens_edit);
+                let materialized = measure(
+                    &source,
+                    &source_map,
+                    &edit,
+                    apply_lens_edit_materialized_reference,
+                );
+                (materialized, direct)
+            };
+            assert_eq!(materialized.1, direct.1);
+            proof_digest = direct.1;
+            materialized_ns.push(materialized.0);
+            direct_ns.push(direct.0);
+        }
+
+        materialized_ns.sort_unstable();
+        direct_ns.sort_unstable();
+        let materialized_median_ns = materialized_ns[ROUNDS / 2];
+        let direct_median_ns = direct_ns[ROUNDS / 2];
+        let improvement_pct = (materialized_median_ns as f64 - direct_median_ns as f64) * 100.0
+            / materialized_median_ns as f64;
+        let speedup = materialized_median_ns as f64 / direct_median_ns as f64;
+        println!(
+            "PERF direct_lens_edit materialized_ns={materialized_ns:?} direct_ns={direct_ns:?} materialized_median_ns={materialized_median_ns} direct_median_ns={direct_median_ns} improvement_pct={improvement_pct:.3} speedup={speedup:.3}x parity=exact digest={:016x} rounds={ROUNDS} iterations={ITERATIONS} entries={ENTRIES} source_bytes={}",
+            proof_digest,
+            source.len()
+        );
+    }
+
+    #[test]
     fn apply_lens_edit_rewrites_the_selected_source_region() {
         let source = "flowchart LR\nA-->B\n";
         let source_map = MermaidSourceMap {
@@ -5620,6 +7356,14 @@ mod tests {
             (ArrowType::DoubleArrow, "<-->"),
             (ArrowType::DoubleThickArrow, "<==>"),
             (ArrowType::DoubleDottedArrow, "<-.->"),
+            (ArrowType::Aggregation, "o--"),
+            // Shares its rendering with `Circle`'s "--o": `as_str` is display-only (there is no
+            // reverse mapping), and the two are the same surface syntax in different diagram types.
+            (ArrowType::AggregationReverse, "--o"),
+            (ArrowType::Composition, "*--"),
+            (ArrowType::CompositionReverse, "--*"),
+            (ArrowType::Inheritance, "<|--"),
+            (ArrowType::InheritanceReverse, "--|>"),
         ];
 
         for (arrow, expected) in expectations {
@@ -5784,12 +7528,345 @@ mod tests {
         broker.record_layout(40);
         broker.record_render(20);
         assert!(broker.exhausted);
+        assert!(broker.events.iter().all(|event| {
+            matches!(event.kind, Cow::Borrowed(_))
+                && event
+                    .stage
+                    .as_ref()
+                    .is_none_or(|stage| matches!(stage, Cow::Borrowed(_)))
+                && event
+                    .note
+                    .as_ref()
+                    .is_none_or(|note| matches!(note, Cow::Borrowed(_)))
+        }));
         assert!(broker.events.iter().any(|event| {
             event.kind == "rebalance" && event.stage.as_deref() == Some("layout")
         }));
         assert!(broker.events.iter().any(|event| {
             event.kind == "accounting" && event.note.as_deref() == Some("global budget exhausted")
         }));
+    }
+
+    fn budget_ledger_with_owned_stage_names(
+        pressure: &MermaidPressureReport,
+    ) -> MermaidBudgetLedger {
+        let mut broker = MermaidBudgetLedger::new(pressure);
+        broker.parse.stage = Cow::Owned(broker.parse.stage.to_string());
+        broker.layout.stage = Cow::Owned(broker.layout.stage.to_string());
+        broker.render.stage = Cow::Owned(broker.render.stage.to_string());
+        broker
+    }
+
+    fn budget_ledger_with_owned_arbitration_policy(
+        pressure: &MermaidPressureReport,
+    ) -> MermaidBudgetLedger {
+        let mut broker = MermaidBudgetLedger::new(pressure);
+        broker.arbitration_policy = Cow::Owned(broker.arbitration_policy.to_string());
+        broker
+    }
+
+    #[test]
+    fn borrowed_budget_arbitration_policy_matches_owned_json_reference() {
+        let pressure = MermaidNativePressureSignals::default().into_report();
+        let borrowed = MermaidBudgetLedger::new(&pressure);
+        let owned = budget_ledger_with_owned_arbitration_policy(&pressure);
+
+        assert_eq!(borrowed, owned);
+        assert!(matches!(
+            &borrowed.arbitration_policy,
+            Cow::Borrowed("parse_first_then_layout_heavy_then_render_tail")
+        ));
+
+        let borrowed_json = serde_json::to_string(&borrowed).unwrap();
+        assert_eq!(borrowed_json, serde_json::to_string(&owned).unwrap());
+        let roundtrip: MermaidBudgetLedger = serde_json::from_str(&borrowed_json).unwrap();
+        assert_eq!(roundtrip, borrowed);
+        assert!(matches!(roundtrip.arbitration_policy, Cow::Owned(_)));
+
+        let mut dynamic = MermaidBudgetLedger::new(&pressure);
+        dynamic.arbitration_policy = Cow::Owned(String::from("custom"));
+        assert!(matches!(
+            dynamic.arbitration_policy,
+            Cow::Owned(ref policy) if policy == "custom"
+        ));
+    }
+
+    #[test]
+    fn borrowed_budget_stage_names_match_owned_json_reference() {
+        let pressure = MermaidNativePressureSignals::default().into_report();
+        let borrowed = MermaidBudgetLedger::new(&pressure);
+        let owned = budget_ledger_with_owned_stage_names(&pressure);
+
+        assert_eq!(borrowed, owned);
+        assert!(matches!(&borrowed.parse.stage, Cow::Borrowed("parse")));
+        assert!(matches!(&borrowed.layout.stage, Cow::Borrowed("layout")));
+        assert!(matches!(&borrowed.render.stage, Cow::Borrowed("render")));
+
+        let borrowed_json = serde_json::to_string(&borrowed).unwrap();
+        assert_eq!(borrowed_json, serde_json::to_string(&owned).unwrap());
+        let roundtrip: MermaidBudgetLedger = serde_json::from_str(&borrowed_json).unwrap();
+        assert_eq!(roundtrip, borrowed);
+        assert!(matches!(roundtrip.parse.stage, Cow::Owned(_)));
+
+        let dynamic = crate::MermaidStageBudgetLedger::new(String::from("custom"), 10);
+        assert!(matches!(dynamic.stage, Cow::Owned(ref stage) if stage == "custom"));
+    }
+
+    const BUDGET_EVENT_TAGS: [(&str, Option<&str>); 12] = [
+        ("allocate", Some("parse")),
+        ("allocate", Some("layout")),
+        ("allocate", Some("render")),
+        ("policy_note", None),
+        ("consume", Some("parse")),
+        ("rebalance", Some("layout")),
+        ("rebalance", Some("render")),
+        ("accounting", None),
+        ("consume", Some("layout")),
+        ("accounting", None),
+        ("consume", Some("render")),
+        ("accounting", None),
+    ];
+
+    const BUDGET_EVENT_NOTES: [Option<&str>; 12] = [
+        None,
+        None,
+        None,
+        Some("telemetry unavailable; broker used conservative global budget defaults"),
+        None,
+        Some("layout share increased after parse arbitration"),
+        Some("render tail budget recalculated after parse arbitration"),
+        Some("global budget accounting updated"),
+        None,
+        Some("global budget accounting updated"),
+        None,
+        Some("global budget accounting updated"),
+    ];
+
+    fn build_budget_events_with(
+        tag: impl Fn(&'static str) -> Cow<'static, str> + Copy,
+        note: impl Fn(&'static str) -> Cow<'static, str> + Copy,
+    ) -> Vec<crate::MermaidBudgetEvent> {
+        let mut events = Vec::with_capacity(BUDGET_EVENT_TAGS.len());
+        for (index, &(kind, stage)) in BUDGET_EVENT_TAGS.iter().enumerate() {
+            events.push(crate::MermaidBudgetEvent {
+                kind: tag(kind),
+                stage: stage.map(tag),
+                allocated_ms: Some(120 - index as u64),
+                used_ms: Some(index as u64),
+                remaining_ms: Some(120 - index as u64),
+                remaining_total_ms: 120 - index as u64,
+                exceeded: false,
+                note: BUDGET_EVENT_NOTES[index].map(note),
+            });
+        }
+        events
+    }
+
+    #[test]
+    fn borrowed_budget_event_tags_match_owned_json_reference() {
+        let borrowed = build_budget_events_with(Cow::Borrowed, Cow::Borrowed);
+        let owned = build_budget_events_with(|tag| Cow::Owned(tag.to_owned()), Cow::Borrowed);
+        assert_eq!(borrowed, owned);
+        assert!(borrowed.iter().all(|event| {
+            matches!(event.kind, Cow::Borrowed(_))
+                && event
+                    .stage
+                    .as_ref()
+                    .is_none_or(|stage| matches!(stage, Cow::Borrowed(_)))
+        }));
+
+        let borrowed_json = serde_json::to_string(&borrowed).unwrap();
+        assert_eq!(borrowed_json, serde_json::to_string(&owned).unwrap());
+        let roundtrip: Vec<crate::MermaidBudgetEvent> =
+            serde_json::from_str(&borrowed_json).unwrap();
+        assert_eq!(roundtrip, borrowed);
+    }
+
+    #[test]
+    fn borrowed_budget_event_notes_match_owned_json_reference() {
+        let borrowed = build_budget_events_with(Cow::Borrowed, Cow::Borrowed);
+        let owned = build_budget_events_with(Cow::Borrowed, |note| Cow::Owned(note.to_owned()));
+        assert_eq!(borrowed, owned);
+        assert_eq!(
+            borrowed.iter().filter(|event| event.note.is_some()).count(),
+            6
+        );
+        assert!(borrowed.iter().all(|event| {
+            event
+                .note
+                .as_ref()
+                .is_none_or(|note| matches!(note, Cow::Borrowed(_)))
+        }));
+
+        let borrowed_json = serde_json::to_string(&borrowed).unwrap();
+        assert_eq!(borrowed_json, serde_json::to_string(&owned).unwrap());
+        let roundtrip: Vec<crate::MermaidBudgetEvent> =
+            serde_json::from_str(&borrowed_json).unwrap();
+        assert_eq!(roundtrip, borrowed);
+
+        let pressure = MermaidNativePressureSignals::default().into_report();
+        let mut broker = MermaidBudgetLedger::new(&pressure);
+        broker.record_parse(5);
+        broker.record_layout(30);
+        broker.record_render(10);
+        assert_eq!(
+            broker
+                .events
+                .iter()
+                .filter(|event| event.note.is_some())
+                .count(),
+            6
+        );
+        assert!(broker.events.iter().all(|event| {
+            event
+                .note
+                .as_ref()
+                .is_none_or(|note| matches!(note, Cow::Borrowed(_)))
+        }));
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_budget_ledger_event_capacity_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 30_000;
+        const ROUNDS: usize = 9;
+
+        fn build_lifecycle(
+            pressure: &MermaidPressureReport,
+            event_capacity: usize,
+        ) -> MermaidBudgetLedger {
+            let mut broker = MermaidBudgetLedger::new_with_event_capacity(pressure, event_capacity);
+            broker.record_parse(5);
+            broker.record_layout(30);
+            broker.record_render(10);
+            broker
+        }
+
+        fn measure(pressure: &MermaidPressureReport, event_capacity: usize) -> (u128, usize, u64) {
+            let mut event_count = 0usize;
+            let mut remaining_total = 0u64;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                let broker = build_lifecycle(black_box(pressure), black_box(event_capacity));
+                event_count += black_box(broker.events.len());
+                remaining_total ^= black_box(broker.remaining_total_ms);
+                black_box(broker);
+            }
+            (started.elapsed().as_nanos(), event_count, remaining_total)
+        }
+
+        let pressure = MermaidNativePressureSignals::default().into_report();
+        let baseline = build_lifecycle(&pressure, 0);
+        let candidate = build_lifecycle(&pressure, MermaidBudgetLedger::EXPECTED_EVENT_CAPACITY);
+        assert_eq!(candidate, baseline);
+        assert_eq!(candidate.events.len(), 12);
+
+        let mut baseline_ns = Vec::with_capacity(ROUNDS);
+        let mut candidate_ns = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (baseline, candidate) = if round % 2 == 0 {
+                (
+                    measure(&pressure, 0),
+                    measure(&pressure, MermaidBudgetLedger::EXPECTED_EVENT_CAPACITY),
+                )
+            } else {
+                let candidate = measure(&pressure, MermaidBudgetLedger::EXPECTED_EVENT_CAPACITY);
+                let baseline = measure(&pressure, 0);
+                (baseline, candidate)
+            };
+            assert_eq!((baseline.1, baseline.2), (candidate.1, candidate.2));
+            baseline_ns.push(baseline.0);
+            candidate_ns.push(candidate.0);
+        }
+
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median_ns = baseline_ns[ROUNDS / 2];
+        let candidate_median_ns = candidate_ns[ROUNDS / 2];
+        let improvement_pct = (baseline_median_ns as f64 - candidate_median_ns as f64) * 100.0
+            / baseline_median_ns as f64;
+
+        println!(
+            "PERF budget_ledger_event_capacity baseline_median_ns={baseline_median_ns} candidate_median_ns={candidate_median_ns} improvement_pct={improvement_pct:.3} parity=exact rounds={ROUNDS} iterations={ITERATIONS} events=12"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_budget_arbitration_policy_borrow_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 150_000;
+        const ROUNDS: usize = 9;
+
+        fn measure(pressure: &MermaidPressureReport, owned_policy: bool) -> (u128, usize, u64) {
+            let mut policy_bytes = 0usize;
+            let mut remaining_total = 0u64;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                let mut broker = MermaidBudgetLedger::new(black_box(pressure));
+                if black_box(owned_policy) {
+                    broker.arbitration_policy =
+                        Cow::Owned(String::from(MermaidBudgetLedger::ARBITRATION_POLICY));
+                }
+                policy_bytes += black_box(broker.arbitration_policy.len());
+                remaining_total ^= black_box(broker.remaining_total_ms);
+                black_box(broker);
+            }
+            (started.elapsed().as_nanos(), policy_bytes, remaining_total)
+        }
+
+        let pressure = MermaidNativePressureSignals {
+            cpu_pressure_permille: Some(100),
+            memory_pressure_permille: Some(100),
+            io_pressure_permille: Some(100),
+            available_parallelism: Some(16),
+            rss_mib: Some(128),
+        }
+        .into_report();
+        assert!(!pressure.conservative_fallback);
+        assert!(pressure.notes.is_empty());
+
+        let baseline = budget_ledger_with_owned_arbitration_policy(&pressure);
+        let candidate = MermaidBudgetLedger::new(&pressure);
+        assert_eq!(candidate, baseline);
+        assert_eq!(
+            serde_json::to_string(&candidate).unwrap(),
+            serde_json::to_string(&baseline).unwrap()
+        );
+
+        let mut baseline_ns = Vec::with_capacity(ROUNDS);
+        let mut candidate_ns = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (baseline, candidate) = if round % 2 == 0 {
+                (measure(&pressure, true), measure(&pressure, false))
+            } else {
+                let candidate = measure(&pressure, false);
+                let baseline = measure(&pressure, true);
+                (baseline, candidate)
+            };
+            assert_eq!((baseline.1, baseline.2), (candidate.1, candidate.2));
+            baseline_ns.push(baseline.0);
+            candidate_ns.push(candidate.0);
+        }
+
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median_ns = baseline_ns[ROUNDS / 2];
+        let candidate_median_ns = candidate_ns[ROUNDS / 2];
+        let candidate_over_baseline = candidate_median_ns as f64 / baseline_median_ns as f64;
+        let improvement_pct = (1.0 - candidate_over_baseline) * 100.0;
+
+        println!(
+            "PERF budget_arbitration_policy_borrow baseline_median_ns={baseline_median_ns} candidate_median_ns={candidate_median_ns} candidate_over_baseline={candidate_over_baseline:.6} improvement_pct={improvement_pct:.3} parity=exact rounds={ROUNDS} iterations={ITERATIONS}"
+        );
+        println!(
+            "PERF budget_arbitration_policy_borrow baseline_ns={baseline_ns:?} candidate_ns={candidate_ns:?}"
+        );
     }
 
     #[test]
@@ -6480,11 +8557,7 @@ mod tests {
             arrow: ArrowType::Arrow,
             label: Some(IrLabelId(0)),
             span: sample_span(2, 1, 6),
-            er_notation: None,
-            source_cardinality: None,
-            target_cardinality: None,
-            guard: None,
-            action: None,
+            extras: None,
             inline_style: None,
         });
 
@@ -6544,11 +8617,7 @@ mod tests {
             arrow: ArrowType::Circle,
             label: Some(IrLabelId(3)),
             span: sample_span(6, 1, 9),
-            er_notation: None,
-            source_cardinality: None,
-            target_cardinality: None,
-            guard: None,
-            action: None,
+            extras: None,
             inline_style: None,
         };
 
@@ -6830,6 +8899,144 @@ mod tests {
                 .map(|subgraph| subgraph.id)
                 .collect::<Vec<_>>(),
             vec![IrSubgraphId(0), IrSubgraphId(1), IrSubgraphId(2)]
+        );
+    }
+
+    fn subgraph_members_recursive_sort_reference(
+        graph: &super::MermaidGraphIr,
+        subgraph_id: IrSubgraphId,
+    ) -> Vec<IrNodeId> {
+        let mut members = Vec::new();
+        let mut stack = vec![subgraph_id];
+
+        while let Some(current_id) = stack.pop() {
+            let Some(subgraph) = graph.subgraph(current_id) else {
+                continue;
+            };
+            members.extend(subgraph.members.iter().copied());
+            stack.extend(subgraph.children.iter().copied());
+        }
+
+        members.sort_unstable();
+        members.dedup();
+        members
+    }
+
+    #[test]
+    fn subgraph_members_recursive_preserves_out_of_range_ids() {
+        let mut graph = super::MermaidGraphIr::default();
+        graph.nodes.extend((0..2).map(|index| IrGraphNode {
+            node_id: IrNodeId(index),
+            ..Default::default()
+        }));
+        graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(0),
+            children: vec![IrSubgraphId(1)],
+            members: vec![IrNodeId(9), IrNodeId(1), IrNodeId(3), IrNodeId(1)],
+            ..Default::default()
+        });
+        graph.subgraphs.push(IrSubgraph {
+            id: IrSubgraphId(1),
+            parent: Some(IrSubgraphId(0)),
+            members: vec![IrNodeId(0), IrNodeId(9), IrNodeId(4)],
+            ..Default::default()
+        });
+
+        let expected = subgraph_members_recursive_sort_reference(&graph, IrSubgraphId(0));
+        assert_eq!(
+            expected,
+            vec![
+                IrNodeId(0),
+                IrNodeId(1),
+                IrNodeId(3),
+                IrNodeId(4),
+                IrNodeId(9)
+            ]
+        );
+        assert_eq!(graph.subgraph_members_recursive(IrSubgraphId(0)), expected);
+    }
+
+    fn nested_subgraph_perf_graph() -> super::MermaidGraphIr {
+        const NODE_COUNT: usize = 256;
+        const DEPTH: usize = 12;
+
+        let mut graph = super::MermaidGraphIr::default();
+        graph.nodes.extend((0..NODE_COUNT).map(|index| IrGraphNode {
+            node_id: IrNodeId(index),
+            ..Default::default()
+        }));
+        for depth in 0..DEPTH {
+            graph.subgraphs.push(IrSubgraph {
+                id: IrSubgraphId(depth),
+                parent: (depth > 0).then_some(IrSubgraphId(depth - 1)),
+                children: if depth + 1 < DEPTH {
+                    vec![IrSubgraphId(depth + 1)]
+                } else {
+                    Vec::new()
+                },
+                members: (0..NODE_COUNT).map(IrNodeId).collect(),
+                ..Default::default()
+            });
+        }
+        graph
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_subgraph_members_recursive_marking_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 1_500;
+        const ROUNDS: usize = 9;
+
+        fn marked(graph: &super::MermaidGraphIr, id: IrSubgraphId) -> Vec<IrNodeId> {
+            graph.subgraph_members_recursive(id)
+        }
+
+        fn measure(
+            graph: &super::MermaidGraphIr,
+            traversal: fn(&super::MermaidGraphIr, IrSubgraphId) -> Vec<IrNodeId>,
+        ) -> (u128, usize) {
+            let mut member_count = 0usize;
+            let started = Instant::now();
+            for _ in 0..ITERATIONS {
+                member_count += black_box(traversal(black_box(graph), IrSubgraphId(0))).len();
+            }
+            (started.elapsed().as_nanos(), member_count)
+        }
+
+        let graph = nested_subgraph_perf_graph();
+        let expected = subgraph_members_recursive_sort_reference(&graph, IrSubgraphId(0));
+        assert_eq!(graph.subgraph_members_recursive(IrSubgraphId(0)), expected);
+
+        let mut baseline_ns = Vec::with_capacity(ROUNDS);
+        let mut candidate_ns = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (baseline, candidate) = if round % 2 == 0 {
+                (
+                    measure(&graph, subgraph_members_recursive_sort_reference),
+                    measure(&graph, marked),
+                )
+            } else {
+                let candidate = measure(&graph, marked);
+                let baseline = measure(&graph, subgraph_members_recursive_sort_reference);
+                (baseline, candidate)
+            };
+            assert_eq!(baseline.1, candidate.1);
+            baseline_ns.push(baseline.0);
+            candidate_ns.push(candidate.0);
+        }
+
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median_ns = baseline_ns[ROUNDS / 2];
+        let candidate_median_ns = candidate_ns[ROUNDS / 2];
+        let improvement_pct = (baseline_median_ns as f64 - candidate_median_ns as f64) * 100.0
+            / baseline_median_ns as f64;
+
+        println!(
+            "PERF subgraph_members_recursive sort_median_ns={baseline_median_ns} mark_median_ns={candidate_median_ns} improvement_pct={improvement_pct:.3} parity=exact rounds={ROUNDS} iterations={ITERATIONS} nodes=256 depth=12"
         );
     }
 
@@ -7934,6 +10141,162 @@ mod tests {
         assert_eq!(sanitize_style_value("  #fff  ").unwrap(), "#fff");
     }
 
+    fn sanitize_style_value_double_lowercase_reference(value: &str) -> Option<String> {
+        let lower = value.to_ascii_lowercase();
+        let trimmed = lower.trim();
+
+        let contains_url_function = |input: &str| -> bool {
+            let bytes = input.as_bytes();
+            let mut index = 0usize;
+            while index + 3 <= bytes.len() {
+                if bytes[index] == b'u' && bytes[index + 1] == b'r' && bytes[index + 2] == b'l' {
+                    if index > 0
+                        && (bytes[index - 1].is_ascii_alphanumeric()
+                            || bytes[index - 1] == b'-'
+                            || bytes[index - 1] == b'_')
+                    {
+                        index += 1;
+                        continue;
+                    }
+                    let mut cursor = index + 3;
+                    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                        cursor += 1;
+                    }
+                    if cursor < bytes.len() && bytes[cursor] == b'(' {
+                        return true;
+                    }
+                }
+                index += 1;
+            }
+            false
+        };
+
+        if contains_url_function(trimmed) {
+            return None;
+        }
+        if value.contains("/*") || value.contains("*/") {
+            return None;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.contains("javascript:") {
+            return None;
+        }
+        if lower.contains("onclick")
+            || lower.contains("onerror")
+            || lower.contains("onload")
+            || lower.contains("onmouseover")
+        {
+            return None;
+        }
+        if value.contains('<') || value.contains('>') {
+            return None;
+        }
+        if value.contains('{') || value.contains('}') {
+            return None;
+        }
+        if value.contains('\\') || value.chars().any(char::is_control) {
+            return None;
+        }
+        if lower.contains("expression(") {
+            return None;
+        }
+
+        Some(value.trim().to_owned())
+    }
+
+    const SANITIZE_STYLE_VALUE_PERF_CORPUS: &[&str] = &[
+        "#f9f",
+        "  #334155  ",
+        "2px",
+        "0.75",
+        "rgb(255,128,0)",
+        "rgba(15,23,42,0.65)",
+        "bold",
+        "Inter, sans-serif",
+        "drop-shadow(0 1px 2px #000)",
+        "5,5,10",
+        "round",
+        "none",
+        "JaVaScRiPt:alert(1)",
+        "url (#marker)",
+        "OnLoAd=alert(1)",
+        "red} .evil{color:red",
+    ];
+
+    #[test]
+    fn sanitize_style_value_single_lowercase_matches_reference() {
+        for value in SANITIZE_STYLE_VALUE_PERF_CORPUS {
+            assert_eq!(
+                sanitize_style_value(value),
+                sanitize_style_value_double_lowercase_reference(value),
+                "style value {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_sanitize_style_value_redundant_lowercase_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 40_000;
+        const ROUNDS: usize = 9;
+
+        fn measure(
+            sanitizer: fn(&str) -> Option<String>,
+            iterations: usize,
+        ) -> std::time::Duration {
+            let started = Instant::now();
+            for _ in 0..iterations {
+                for value in SANITIZE_STYLE_VALUE_PERF_CORPUS {
+                    black_box(sanitizer(black_box(value)));
+                }
+            }
+            started.elapsed()
+        }
+
+        for value in SANITIZE_STYLE_VALUE_PERF_CORPUS {
+            assert_eq!(
+                sanitize_style_value(value),
+                sanitize_style_value_double_lowercase_reference(value)
+            );
+        }
+
+        black_box(measure(
+            sanitize_style_value_double_lowercase_reference,
+            ITERATIONS / 10,
+        ));
+        black_box(measure(sanitize_style_value, ITERATIONS / 10));
+
+        let mut baseline_ns = Vec::with_capacity(ROUNDS);
+        let mut candidate_ns = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            if round % 2 == 0 {
+                baseline_ns.push(
+                    measure(sanitize_style_value_double_lowercase_reference, ITERATIONS).as_nanos(),
+                );
+                candidate_ns.push(measure(sanitize_style_value, ITERATIONS).as_nanos());
+            } else {
+                candidate_ns.push(measure(sanitize_style_value, ITERATIONS).as_nanos());
+                baseline_ns.push(
+                    measure(sanitize_style_value_double_lowercase_reference, ITERATIONS).as_nanos(),
+                );
+            }
+        }
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median_ns = baseline_ns[ROUNDS / 2];
+        let candidate_median_ns = candidate_ns[ROUNDS / 2];
+        let improvement_pct = (baseline_median_ns as f64 - candidate_median_ns as f64) * 100.0
+            / baseline_median_ns as f64;
+
+        println!(
+            "PERF sanitize_style_value redundant_lowercase baseline_median_ns={baseline_median_ns} candidate_median_ns={candidate_median_ns} improvement_pct={improvement_pct:.3} parity=exact rounds={ROUNDS} iterations={ITERATIONS} values={}",
+            SANITIZE_STYLE_VALUE_PERF_CORPUS.len()
+        );
+    }
+
     #[test]
     fn safe_link_target_blocks_unsafe_schemes_in_strict_mode() {
         assert!(!is_safe_link_target(
@@ -7968,6 +10331,150 @@ mod tests {
             "javascript:alert(1)",
             MermaidSanitizeMode::Lenient
         ));
+    }
+
+    fn decode_percent_triplets_linear_reference(input: &str) -> String {
+        let bytes = input.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut index = 0usize;
+
+        while index < bytes.len() {
+            if bytes[index] == b'%' && index + 2 < bytes.len() {
+                let high = super::decode_hex_nibble(bytes[index + 1]);
+                let low = super::decode_hex_nibble(bytes[index + 2]);
+                if let (Some(high), Some(low)) = (high, low) {
+                    decoded.push((high << 4) | low);
+                    index += 3;
+                    continue;
+                }
+            }
+
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+
+        String::from_utf8_lossy(&decoded).to_string()
+    }
+
+    fn is_safe_link_target_linear_decode_reference(
+        target: &str,
+        sanitize_mode: MermaidSanitizeMode,
+    ) -> bool {
+        let decoded = decode_percent_triplets_linear_reference(target);
+        let trimmed = decoded.trim_matches(|c: char| c.is_whitespace() || c.is_control());
+        if trimmed.is_empty() {
+            return false;
+        }
+        if sanitize_mode == MermaidSanitizeMode::Lenient {
+            return true;
+        }
+        if trimmed.starts_with("//") || trimmed.starts_with("\\\\") {
+            return false;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+
+        if let Some(colon_idx) = lower.find(':') {
+            matches!(&lower[..colon_idx], "http" | "https" | "mailto" | "tel")
+        } else {
+            !lower.contains("&#") && !lower.contains("&colon")
+        }
+    }
+
+    const SAFE_LINK_TARGET_PERF_CORPUS: &[&str] = &[
+        "https://example.com/docs/index.html",
+        "http://example.com/a?b=c#fragment",
+        "mailto:user@example.com",
+        "tel:+15551234567",
+        "/docs/guide/index.html",
+        "../relative/path",
+        "#section-anchor",
+        "docs/My Diagram.html",
+        "https://例え.テスト/路径",
+        "  HTTPS://EXAMPLE.COM/docs  ",
+        "javascript:alert(1)",
+        "data:text/html,evil",
+        "//evil.example/path",
+        "\\\\evil.example\\share",
+        "java&#115;cript:alert(1)",
+        "relative&colon;payload",
+        "",
+        "   ",
+        "%68ttps://example.com",
+        "java%73cript:alert(1)",
+        "https%3A//example.com/docs",
+        "%2F%2Fevil.example/path",
+        "%FF",
+        "relative%20path",
+    ];
+
+    #[test]
+    fn safe_link_target_no_percent_fast_path_matches_reference() {
+        for mode in [MermaidSanitizeMode::Strict, MermaidSanitizeMode::Lenient] {
+            for target in SAFE_LINK_TARGET_PERF_CORPUS {
+                assert_eq!(
+                    is_safe_link_target(target, mode),
+                    is_safe_link_target_linear_decode_reference(target, mode),
+                    "link target {target:?} in {mode:?} mode"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_safe_link_target_no_percent_decode_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 30_000;
+        const ROUNDS: usize = 9;
+
+        fn measure(
+            validator: fn(&str, MermaidSanitizeMode) -> bool,
+            iterations: usize,
+        ) -> (u128, usize) {
+            let mut accepted = 0usize;
+            let started = Instant::now();
+            for _ in 0..iterations {
+                for mode in [MermaidSanitizeMode::Strict, MermaidSanitizeMode::Lenient] {
+                    for target in SAFE_LINK_TARGET_PERF_CORPUS {
+                        accepted +=
+                            usize::from(black_box(validator(black_box(target), black_box(mode))));
+                    }
+                }
+            }
+            (started.elapsed().as_nanos(), accepted)
+        }
+
+        let mut baseline_ns = Vec::with_capacity(ROUNDS);
+        let mut candidate_ns = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (baseline, candidate) = if round % 2 == 0 {
+                (
+                    measure(is_safe_link_target_linear_decode_reference, ITERATIONS),
+                    measure(is_safe_link_target, ITERATIONS),
+                )
+            } else {
+                let candidate = measure(is_safe_link_target, ITERATIONS);
+                let baseline = measure(is_safe_link_target_linear_decode_reference, ITERATIONS);
+                (baseline, candidate)
+            };
+            assert_eq!(baseline.1, candidate.1);
+            baseline_ns.push(baseline.0);
+            candidate_ns.push(candidate.0);
+        }
+
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median_ns = baseline_ns[ROUNDS / 2];
+        let candidate_median_ns = candidate_ns[ROUNDS / 2];
+        let improvement_pct = (baseline_median_ns as f64 - candidate_median_ns as f64) * 100.0
+            / baseline_median_ns as f64;
+
+        println!(
+            "PERF safe_link_target_decode linear_median_ns={baseline_median_ns} no_percent_fast_median_ns={candidate_median_ns} improvement_pct={improvement_pct:.3} parity=exact rounds={ROUNDS} iterations={ITERATIONS} targets={} modes=2",
+            SAFE_LINK_TARGET_PERF_CORPUS.len()
+        );
     }
 
     #[test]
@@ -8152,6 +10659,93 @@ mod tests {
         assert!(!is_allowed_style_property("position"));
     }
 
+    const REJECTED_STYLE_PROPERTIES: &[&str] = &[
+        "",
+        "Fill",
+        "display",
+        "position",
+        "visibility",
+        "transform",
+        "stroke_width",
+        "font",
+        "font-colour",
+        "onclick",
+        "--custom",
+    ];
+
+    fn is_allowed_style_property_linear_reference(property: &str) -> bool {
+        ALLOWED_STYLE_PROPERTIES_REFERENCE.contains(&property)
+    }
+
+    #[test]
+    fn style_property_literal_match_equals_linear_reference() {
+        for property in ALLOWED_STYLE_PROPERTIES_REFERENCE
+            .iter()
+            .chain(REJECTED_STYLE_PROPERTIES)
+        {
+            assert_eq!(
+                is_allowed_style_property(property),
+                is_allowed_style_property_linear_reference(property),
+                "style property {property:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_style_property_literal_match_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 250_000;
+        const ROUNDS: usize = 9;
+
+        fn measure(validator: fn(&str) -> bool, iterations: usize) -> (u128, usize) {
+            let mut accepted = 0usize;
+            let started = Instant::now();
+            for _ in 0..iterations {
+                for property in ALLOWED_STYLE_PROPERTIES_REFERENCE
+                    .iter()
+                    .chain(REJECTED_STYLE_PROPERTIES)
+                {
+                    accepted += usize::from(black_box(validator(black_box(property))));
+                }
+            }
+            (started.elapsed().as_nanos(), accepted)
+        }
+
+        let expected_accepted = ALLOWED_STYLE_PROPERTIES_REFERENCE.len() * ITERATIONS;
+        let mut baseline_ns = Vec::with_capacity(ROUNDS);
+        let mut candidate_ns = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (first, first_accepted, second, second_accepted) = if round % 2 == 0 {
+                let baseline = measure(is_allowed_style_property_linear_reference, ITERATIONS);
+                let candidate = measure(is_allowed_style_property, ITERATIONS);
+                (baseline.0, baseline.1, candidate.0, candidate.1)
+            } else {
+                let candidate = measure(is_allowed_style_property, ITERATIONS);
+                let baseline = measure(is_allowed_style_property_linear_reference, ITERATIONS);
+                (baseline.0, baseline.1, candidate.0, candidate.1)
+            };
+            assert_eq!(first_accepted, expected_accepted);
+            assert_eq!(second_accepted, expected_accepted);
+            baseline_ns.push(first);
+            candidate_ns.push(second);
+        }
+
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median_ns = baseline_ns[ROUNDS / 2];
+        let candidate_median_ns = candidate_ns[ROUNDS / 2];
+        let improvement_pct = (baseline_median_ns as f64 - candidate_median_ns as f64) * 100.0
+            / baseline_median_ns as f64;
+
+        println!(
+            "PERF style_property_lookup linear_median_ns={baseline_median_ns} literal_match_median_ns={candidate_median_ns} improvement_pct={improvement_pct:.3} parity=exact accepted={expected_accepted} rounds={ROUNDS} iterations={ITERATIONS} values={}",
+            ALLOWED_STYLE_PROPERTIES_REFERENCE.len() + REJECTED_STYLE_PROPERTIES.len()
+        );
+    }
+
     #[test]
     fn parse_style_string_rejects_unsafe_values() {
         let style =
@@ -8167,9 +10761,9 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         ir.nodes.push(IrNode {
             id: "A".to_string(),
-            inline_style: Some(IrInlineStyle {
+            inline_style: Some(Box::new(IrInlineStyle {
                 properties: BTreeMap::from([("fill".to_string(), "#abc".to_string())]),
-            }),
+            })),
             ..Default::default()
         });
 

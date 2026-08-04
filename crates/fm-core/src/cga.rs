@@ -1129,14 +1129,19 @@ impl CgaRect {
     #[must_use]
     pub fn closest_boundary_point(&self, point: &CgaPoint) -> CgaPoint {
         let mut closest = self.edges()[0].closest_point(point);
-        let mut min_dist = point.distance(&closest);
+        let mut min_dist_squared = point.distance_squared(&closest);
+        let mut min_dist = min_dist_squared.sqrt();
 
         for edge in self.edges().iter().skip(1) {
             let p = edge.closest_point(point);
-            let dist = point.distance(&p);
-            if dist < min_dist {
-                min_dist = dist;
-                closest = p;
+            let dist_squared = point.distance_squared(&p);
+            if dist_squared < min_dist_squared {
+                let dist = dist_squared.sqrt();
+                if dist < min_dist {
+                    min_dist_squared = dist_squared;
+                    min_dist = dist;
+                    closest = p;
+                }
             }
         }
         closest
@@ -1536,5 +1541,99 @@ mod geometry_tests {
         // Top edge
         assert!((edges[0].start.x - 0.0).abs() < 1e-10);
         assert!((edges[0].end.x - 10.0).abs() < 1e-10);
+    }
+
+    fn closest_boundary_cases() -> [(CgaRect, CgaPoint); 8] {
+        [
+            (CgaRect::new(0.0, 0.0, 10.0, 5.0), CgaPoint::new(5.0, 2.5)),
+            (CgaRect::new(0.0, 0.0, 10.0, 5.0), CgaPoint::new(14.0, 1.0)),
+            (CgaRect::new(0.0, 0.0, 10.0, 5.0), CgaPoint::new(6.0, 9.0)),
+            (CgaRect::new(0.0, 0.0, 10.0, 5.0), CgaPoint::new(-4.0, 3.0)),
+            (
+                CgaRect::new(-100.0, -50.0, 200.0, 100.0),
+                CgaPoint::new(130.0, -80.0),
+            ),
+            (
+                CgaRect::new(1.5, -2.5, 0.75, 30.0),
+                CgaPoint::new(1.875, 17.0),
+            ),
+            (
+                CgaRect::new(-1_000_000.0, 750_000.0, 40.0, 80.0),
+                CgaPoint::new(-999_970.0, 749_950.0),
+            ),
+            (
+                CgaRect::new(-8.0, -4.0, 16.0, 8.0),
+                CgaPoint::new(-11.0, 9.0),
+            ),
+        ]
+    }
+
+    #[inline(never)]
+    fn closest_boundary_reference(rect: &CgaRect, point: &CgaPoint) -> CgaPoint {
+        let mut closest = rect.edges()[0].closest_point(point);
+        let mut min_dist = point.distance(&closest);
+
+        for edge in rect.edges().iter().skip(1) {
+            let candidate = edge.closest_point(point);
+            let dist = point.distance(&candidate);
+            if dist < min_dist {
+                min_dist = dist;
+                closest = candidate;
+            }
+        }
+        closest
+    }
+
+    fn assert_point_bits_eq(actual: CgaPoint, expected: CgaPoint) {
+        assert_eq!(actual.x.to_bits(), expected.x.to_bits());
+        assert_eq!(actual.y.to_bits(), expected.y.to_bits());
+    }
+
+    #[test]
+    fn rect_closest_boundary_matches_sqrt_reference() {
+        for (rect, point) in closest_boundary_cases() {
+            assert_point_bits_eq(
+                rect.closest_boundary_point(&point),
+                closest_boundary_reference(&rect, &point),
+            );
+        }
+
+        let special_cases = [
+            (
+                CgaRect::new(0.0, 0.0, 10.0, 5.0),
+                CgaPoint::new(f64::NAN, 1.0),
+            ),
+            (
+                CgaRect::new(0.0, 0.0, 10.0, 5.0),
+                CgaPoint::new(f64::INFINITY, f64::NEG_INFINITY),
+            ),
+            (
+                CgaRect::new(f64::MAX, -f64::MAX, f64::MAX, f64::MAX),
+                CgaPoint::new(0.0, -0.0),
+            ),
+            (CgaRect::new(-0.0, 0.0, -0.0, 0.0), CgaPoint::new(-0.0, 0.0)),
+        ];
+        for (rect, point) in special_cases {
+            assert_point_bits_eq(
+                rect.closest_boundary_point(&point),
+                closest_boundary_reference(&rect, &point),
+            );
+        }
+
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next_finite = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (f64::from_bits(0x3ff0_0000_0000_0000 | (state >> 12)) - 1.0) * 2_000.0 - 1_000.0
+        };
+        for _ in 0..20_000 {
+            let rect = CgaRect::new(next_finite(), next_finite(), next_finite(), next_finite());
+            let point = CgaPoint::new(next_finite(), next_finite());
+            assert_point_bits_eq(
+                rect.closest_boundary_point(&point),
+                closest_boundary_reference(&rect, &point),
+            );
+        }
     }
 }

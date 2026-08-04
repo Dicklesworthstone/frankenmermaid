@@ -84,13 +84,12 @@ pub fn classify_line(line: &str) -> LineClass {
         return LineClass::Empty;
     }
 
-    let chars: Vec<char> = trimmed.chars().collect();
-    let total = chars.len();
-
+    let mut total = 0_usize;
     let mut diagram_count = 0_usize;
     let mut text_count = 0_usize;
 
-    for ch in chars {
+    for ch in trimmed.chars() {
+        total += 1;
         match classify_char(ch) {
             CharClass::BoxDrawing
             | CharClass::Arrow
@@ -399,6 +398,53 @@ fn is_horizontal_connector(ch: char) -> bool {
 mod tests {
     use super::*;
 
+    fn classify_line_collect_baseline(line: &str) -> LineClass {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return LineClass::Empty;
+        }
+
+        let chars: Vec<char> = trimmed.chars().collect();
+        let total = chars.len();
+        let mut diagram_count = 0_usize;
+        let mut text_count = 0_usize;
+
+        for ch in chars {
+            match classify_char(ch) {
+                CharClass::BoxDrawing
+                | CharClass::Arrow
+                | CharClass::Junction
+                | CharClass::HorizontalLine
+                | CharClass::VerticalLine
+                | CharClass::DiagonalLine => diagram_count += 1,
+                CharClass::Text => text_count += 1,
+                _ => {}
+            }
+        }
+
+        let diagram_ratio = diagram_count as f32 / total as f32;
+        let text_ratio = text_count as f32 / total as f32;
+
+        if diagram_ratio > 0.6 {
+            LineClass::Diagram
+        } else if text_ratio > 0.7 {
+            LineClass::Text
+        } else if diagram_count > 0 && text_count > 0 {
+            LineClass::Mixed
+        } else {
+            LineClass::Text
+        }
+    }
+
+    fn line_class_code(class: LineClass) -> u64 {
+        match class {
+            LineClass::Diagram => 1,
+            LineClass::Text => 2,
+            LineClass::Empty => 3,
+            LineClass::Mixed => 4,
+        }
+    }
+
     #[test]
     fn classifies_box_drawing() {
         assert_eq!(classify_char('─'), CharClass::BoxDrawing);
@@ -420,6 +466,104 @@ mod tests {
         assert_eq!(classify_line("│  text  │"), LineClass::Mixed);
         assert_eq!(classify_line("This is text"), LineClass::Text);
         assert_eq!(classify_line(""), LineClass::Empty);
+    }
+
+    #[test]
+    fn streaming_line_classification_matches_collect_baseline() {
+        let lines = [
+            "",
+            "   \t",
+            "+--------+",
+            "┌────────┐",
+            "│  text  │",
+            "A-->B",
+            "This is ordinary text",
+            "  ╠═╦═╣  ",
+            "Αβγ → 東京",
+            "... ??? !!!",
+            "_/\\_",
+        ];
+
+        for line in lines {
+            assert_eq!(
+                classify_line(line),
+                classify_line_collect_baseline(line),
+                "classification changed for {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "release-only same-binary performance probe"]
+    fn classify_line_streaming_perf_probe() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const SAMPLE_COUNT: usize = 9;
+        const SWEEPS: usize = 64;
+
+        let patterns = [
+            "+----------------------+",
+            "| service --> database |",
+            "┌──────────────────────┐",
+            "│ Unicode label → cache │",
+            "ordinary prose around a diagram block",
+            "    A -- event --> B    ",
+            "├── worker-01 ──┤",
+            "[client] .... [gateway]",
+        ];
+        let lines: Vec<String> = (0..4_096)
+            .map(|index| patterns[index % patterns.len()].repeat(1 + index % 3))
+            .collect();
+
+        fn measure(lines: &[String], classifier: impl Fn(&str) -> LineClass) -> (u128, u64) {
+            let started = Instant::now();
+            let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+            for _ in 0..SWEEPS {
+                for line in lines {
+                    let class = black_box(classifier(black_box(line.as_str())));
+                    digest ^= line_class_code(class);
+                    digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+            (started.elapsed().as_nanos(), digest)
+        }
+
+        let (_, baseline_digest) = measure(&lines, classify_line_collect_baseline);
+        let (_, candidate_digest) = measure(&lines, classify_line);
+        assert_eq!(candidate_digest, baseline_digest);
+
+        let mut baseline_samples = Vec::with_capacity(SAMPLE_COUNT);
+        let mut candidate_samples = Vec::with_capacity(SAMPLE_COUNT);
+        for sample in 0..SAMPLE_COUNT {
+            let ((baseline_ns, baseline_digest), (candidate_ns, candidate_digest)) =
+                if sample % 2 == 0 {
+                    (
+                        measure(&lines, classify_line_collect_baseline),
+                        measure(&lines, classify_line),
+                    )
+                } else {
+                    let candidate = measure(&lines, classify_line);
+                    let baseline = measure(&lines, classify_line_collect_baseline);
+                    (baseline, candidate)
+                };
+            assert_eq!(candidate_digest, baseline_digest);
+            baseline_samples.push(baseline_ns);
+            candidate_samples.push(candidate_ns);
+        }
+
+        baseline_samples.sort_unstable();
+        candidate_samples.sort_unstable();
+        let baseline_median = baseline_samples[SAMPLE_COUNT / 2];
+        let candidate_median = candidate_samples[SAMPLE_COUNT / 2];
+        let speedup = baseline_median as f64 / candidate_median as f64;
+        let improvement = (1.0 - candidate_median as f64 / baseline_median as f64) * 100.0;
+
+        eprintln!("baseline_ns={baseline_samples:?}");
+        eprintln!("candidate_ns={candidate_samples:?}");
+        eprintln!(
+            "baseline_median_ns={baseline_median} candidate_median_ns={candidate_median} improvement_pct={improvement:.3} speedup={speedup:.3}x digest={baseline_digest:016x}"
+        );
     }
 
     #[test]

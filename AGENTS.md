@@ -10,6 +10,31 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 ---
 
+## RULE 0.5 - SUITE-WIDE RULES LIVE IN /data/projects/AGENTS.md
+
+The suite-wide rules in **`/data/projects/AGENTS.md`** bind you here too. Read it. Two sections
+are load-bearing for perf work and are NOT duplicated below, so they cannot drift out of sync:
+
+- **`## Named Reward-Hacking Patterns (ALL FORBIDDEN)`** — 12 named patterns, several already
+  observed in this suite: gate self-weakening (and the exact price of a legitimate gate fix),
+  proof-class inflation, golden regeneration reflex, commit-stream pumping, tautological tests,
+  easy-lever cherry-picking, close-pump abuse, scope-splitting, spec-editing as progress,
+  conformance metastasis, dependency smuggling, bench-path hardcoding.
+- **`### Work-Graph Discipline`** — JSONL is truth and `beads.db` is disposable, `br sync
+  --import-only` after every pull, single-writer on graph structure, closure on cited evidence
+  with blocker beads gated on their named probe, `br dep cycles` stays empty.
+
+The three that most often decide whether a number here is real: a **self-speedup is
+MAINTENANCE, not a win** — a win needs the incumbent live in the SAME invocation; **never
+weaken a gate to land a change**, and if a gate is genuinely defective, meet the evidence
+standard and publish the win/lose split of what the fix admits; and **reporting a loss is a
+success** — one line, revert, next lever, no retraction narrative.
+
+Note: cross-engine output equivalence is part of the ratio here, not a separate nicety. A
+renderer that drops an edge or mislays a subgraph is not faster, it is wrong.
+
+---
+
 ## RULE NUMBER 1: NO FILE DELETION
 
 **YOU ARE NEVER ALLOWED TO DELETE A FILE WITHOUT EXPRESS PERMISSION.** Even a new file that you yourself created, such as a test code file. You have a horrible track record of deleting critically important files or otherwise throwing away tons of expensive work. As a result, you have permanently lost any and all rights to determine that a file or folder should be deleted.
@@ -722,6 +747,99 @@ git push                # Push to remote
 4. **Sync beads** - `br sync --flush-only` to export to JSONL
 5. **Hand off** - Provide context for next session
 
+
+---
+
+## Ledger Integrity Preflight — Mandatory
+
+Before editing a performance lever, run:
+
+```bash
+node scripts/ledger_preflight.mjs \
+  --lever "<proposed mechanism>" \
+  --surface "<target file, function, or benchmark>"
+```
+
+Exit `0` means no matching REJECT was found. Exit `2` means blocked: read every
+reported row and satisfy its concrete retry predicate before proceeding.
+
+New performance verdict rows use explicit evidence markers so prose cannot be
+mistaken for proof:
+
+```markdown
+**A/A null control (same invocation):** baseline/null median ratio ..., CI ...
+```
+
+or:
+
+```markdown
+**Counted mechanism:** instructions/cycles/syscalls/allocations/faults ...
+```
+
+A structural argument, theoretical ceiling, unrelated control phase, future
+retry requirement, or source-file hash does not satisfy the REJECT gate.
+
+Every KEEP row must also record:
+
+```markdown
+**Executing ELF SHA-256 (self-reported by process):** `<64 lowercase hex characters>`
+```
+
+Computing a hash beside the run is not sufficient. The executing process must
+identify its own ELF.
+
+Every kept performance result must also use exactly one result class:
+
+```markdown
+**Campaign result class:** maintenance-self-speedup
+```
+
+Use `maintenance-self-speedup` for this repository's own before/after comparison.
+It may justify landing a maintenance improvement, but it is not campaign output
+and must never be quoted as a competitive claim.
+
+A campaign win requires the actual legacy incumbent, mermaid-js, measured
+side-by-side in the same harness invocation:
+
+```markdown
+**Campaign result class:** incumbent-win
+**A/A null control (same invocation):** baseline/null median ratio ..., CI ...
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=<pin> artifact_sha256=<64 lowercase hex> invocation_id=<id> measured_ratio=<number>x
+```
+
+A self baseline, a prior frankenmermaid revision, separate invocations, or an
+un-pinned comparator cannot satisfy `incumbent-win`.
+
+The local pre-commit hook checks added or modified verdict entries in both
+`docs/NEGATIVE_EVIDENCE.md` and `docs/PERF_LEDGER.md`; CI checks the same two
+ledgers against the merge base:
+
+```bash
+node scripts/ledger_preflight.mjs --lint --staged --base HEAD
+```
+
+Do not bypass this gate.
+
+---
+
+## Public Performance Claims
+
+Public surfaces — `README.md`, scorecards, website copy, and release notes —
+state only the current correct claim. Replace an obsolete figure in place; do
+not publish retraction narratives, previously-claimed prose, withdrawal
+explanations, or self-critical framing.
+
+Retraction and correction history belongs in internal evidence machinery:
+`docs/NEGATIVE_EVIDENCE.md`, `docs/LEDGER_RESURRECTION.md`,
+`docs/progress/perf-negative-results.md`, `docs/PERF_LEDGER.md`, and Beads
+bodies. Those records remain complete so future agents do not retry dead work.
+
+Only a measurement against the actual legacy incumbent, produced side-by-side
+in the same invocation, may support a public competitive ratio. New campaign
+rows supporting such a claim must be classified `incumbent-win`.
+`maintenance-self-speedup` figures stay in the internal performance ledger and
+must not be promoted to README, scorecards, website copy, or release notes as
+campaign output.
 
 ---
 

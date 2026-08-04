@@ -1,0 +1,135 @@
+{
+  "schema": "frankenmermaid.headtohead.equivalence.v1",
+  "env": {
+    "captured_at": "2026-07-30T03:32:38.464Z",
+    "host_identity": "thinkstation1",
+    "git_rev": "76db6f6617972abc94afe4821d95170ab0cd4ecf",
+    "git_dirty": false,
+    "kernel": "6.17.0-35-generic",
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "logical_threads": 64,
+    "total_mem_gb": 215.8,
+    "loadavg_1m": 25.05,
+    "node": "v24.14.0",
+    "load_affects_verdict": false
+  },
+  "method": {
+    "kind": "svg_structural",
+    "rasterized_perceptual_diff": false,
+    "why_not_raster": "the engines use different fonts, paddings and stroke widths, so a pixel diff would report a large distance for two correct renders -- it measures styling, not content",
+    "why_not_byte_equality": "the engines emit deliberately different SVG (HTML foreignObject labels vs <text>, different class vocabularies, different layout engines)",
+    "tier1": "rendered-text token multiset, containment-gated: every token mermaid-js renders must be present in ours. Applies to every syntax family. Rendering MORE than mermaid is reported, not failed.",
+    "tier2": "edge topology reconstructed geometrically from path endpoints resolved to node anchors, by one shared extractor, compared cross-engine AND against input-derived ground truth. Claimed for: flowchart, state.",
+    "extractor": "single shared implementation applied to both engines (svg_equivalence.mjs); a per-engine extractor pair could agree by construction",
+    "self_test": "svg_equivalence.mjs --self-test: 4 mutation controls (dropped label, dropped edge, rewired edge, displaced node) and 2 negative controls (extra content, differing text segmentation)",
+    "undecidable_is_not_a_pass": true
+  },
+  "pins": {
+    "mermaid": "11.15.0",
+    "bundle_sha256": "70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de"
+  },
+  "provenance": {
+    "fm_elf_sha256": "08cca9e1f3c90784fc232a510917c5c684f04ae4ec87cb878521a4cef47aa030",
+    "fm_elf_bytes": 7812640,
+    "fm_execution_model": "scalar",
+    "chromium_binary": "/usr/bin/chromium-browser",
+    "chromium_version": "Chrome/150.0.7871.128",
+    "mermaid_bundle_url": "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js"
+  },
+  "rows": [
+    {
+      "id": "flowchart_small_10",
+      "status": "compared",
+      "revisions": 1,
+      "input_sha256": "b5402490faa78c6a7c71554296d03b46016ae1156d7cd38d258b280363b6900a",
+      "fm_input_sha256": "b5402490faa78c6a7c71554296d03b46016ae1156d7cd38d258b280363b6900a",
+      "js_input_sha256": "b5402490faa78c6a7c71554296d03b46016ae1156d7cd38d258b280363b6900a",
+      "inputs_identical": true,
+      "linkage": {
+        "fm_revisions_dumped": 1,
+        "js_revisions_dumped": 1,
+        "revisions_expected": 1,
+        "fm_dump_sha256": "2ae42a001b97fb01146a0930f93d67c7e26f8ecb8221d6faa827b2b92d51bdd6",
+        "fm_reported_sha256": "2ae42a001b97fb01146a0930f93d67c7e26f8ecb8221d6faa827b2b92d51bdd6",
+        "js_dump_sha256": "b4e60c0910d8b7a45565b3d673443a31189a7e747bec3c8f869bd650cd6bd098",
+        "js_reported_sha256": "b4e60c0910d8b7a45565b3d673443a31189a7e747bec3c8f869bd650cd6bd098",
+        "fm_matches_measured": true,
+        "js_matches_measured": true,
+        "counts_match": true
+      },
+      "equivalence": {
+        "method": "svg_structural",
+        "rasterized_perceptual_diff": false,
+        "claim": "engine-neutral structural equivalence: rendered-text multiset (all families) plus geometrically reconstructed edge topology cross-engine and against input-derived ground truth (node/edge families only). Not byte equality; not a pixel diff.",
+        "diagrams": 1,
+        "equivalent": 1,
+        "divergent": 0,
+        "unverified": 0,
+        "verdict": "pass",
+        "tier2_diagrams": 1,
+        "by_invariant": {
+          "rendered_text_no_loss": {
+            "gating": true,
+            "decided": 1,
+            "passed": 1,
+            "failed": 0,
+            "undecided": 0
+          },
+          "rendered_text_exact_runs": {
+            "gating": false,
+            "decided": 0,
+            "passed": 0,
+            "failed": 0,
+            "undecided": 1
+          },
+          "node_id_set": {
+            "gating": true,
+            "decided": 1,
+            "passed": 1,
+            "failed": 0,
+            "undecided": 0
+          },
+          "edge_topology_cross_engine": {
+            "gating": true,
+            "decided": 1,
+            "passed": 1,
+            "failed": 0,
+            "undecided": 0
+          },
+          "incumbent_geometry_matches_declared_ids": {
+            "gating": true,
+            "decided": 1,
+            "passed": 1,
+            "failed": 0,
+            "undecided": 0
+          },
+          "edge_topology_vs_input__frankenmermaid": {
+            "gating": true,
+            "decided": 1,
+            "passed": 1,
+            "failed": 0,
+            "undecided": 0
+          },
+          "edge_topology_vs_input__mermaid-js": {
+            "gating": true,
+            "decided": 1,
+            "passed": 1,
+            "failed": 0,
+            "undecided": 0
+          }
+        },
+        "by_family": {
+          "flowchart": {
+            "diagrams": 1,
+            "divergent": 0,
+            "unverified": 0,
+            "tier2": 1
+          }
+        },
+        "divergent_samples": [],
+        "unverified_samples": []
+      }
+    }
+  ],
+  "verdict": "pass"
+}

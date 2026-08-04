@@ -93,16 +93,28 @@ impl PathCommand {
     fn render(&self, output: &mut String) {
         match self {
             Self::MoveTo { x, y } => {
-                let _ = write!(output, "M{} {}", FmtNum(*x), FmtNum(*y));
+                output.push('M');
+                let _ = FmtNum(*x).write_into(output);
+                output.push(' ');
+                let _ = FmtNum(*y).write_into(output);
             }
             Self::MoveToRel { dx, dy } => {
-                let _ = write!(output, "m{} {}", FmtNum(*dx), FmtNum(*dy));
+                output.push('m');
+                let _ = FmtNum(*dx).write_into(output);
+                output.push(' ');
+                let _ = FmtNum(*dy).write_into(output);
             }
             Self::LineTo { x, y } => {
-                let _ = write!(output, "L{} {}", FmtNum(*x), FmtNum(*y));
+                output.push('L');
+                let _ = FmtNum(*x).write_into(output);
+                output.push(' ');
+                let _ = FmtNum(*y).write_into(output);
             }
             Self::LineToRel { dx, dy } => {
-                let _ = write!(output, "l{} {}", FmtNum(*dx), FmtNum(*dy));
+                output.push('l');
+                let _ = FmtNum(*dx).write_into(output);
+                output.push(' ');
+                let _ = FmtNum(*dy).write_into(output);
             }
             Self::HorizontalTo { x } => {
                 let _ = write!(output, "H{}", FmtNum(*x));
@@ -124,16 +136,7 @@ impl PathCommand {
                 x,
                 y,
             } => {
-                let _ = write!(
-                    output,
-                    "C{} {},{} {},{} {}",
-                    FmtNum(*x1),
-                    FmtNum(*y1),
-                    FmtNum(*x2),
-                    FmtNum(*y2),
-                    FmtNum(*x),
-                    FmtNum(*y)
-                );
+                write_cubic(output, 'C', (*x1, *y1), (*x2, *y2), (*x, *y));
             }
             Self::CurveToRel {
                 dx1,
@@ -143,16 +146,7 @@ impl PathCommand {
                 dx,
                 dy,
             } => {
-                let _ = write!(
-                    output,
-                    "c{} {},{} {},{} {}",
-                    FmtNum(*dx1),
-                    FmtNum(*dy1),
-                    FmtNum(*dx2),
-                    FmtNum(*dy2),
-                    FmtNum(*dx),
-                    FmtNum(*dy)
-                );
+                write_cubic(output, 'c', (*dx1, *dy1), (*dx2, *dy2), (*dx, *dy));
             }
             Self::SmoothCurveTo { x2, y2, x, y } => {
                 let _ = write!(
@@ -250,17 +244,121 @@ impl PathCommand {
 /// Helper for efficient, zero-allocation number formatting in SVG.
 struct FmtNum(f32);
 
-impl std::fmt::Display for FmtNum {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl FmtNum {
+    /// Write the number directly into `out`, bypassing the `fmt::Formatter` indirection on
+    /// the hot per-path-command serialization path. [`Display`](std::fmt::Display) delegates here.
+    fn write_into<W: std::fmt::Write>(&self, out: &mut W) -> std::fmt::Result {
         let n = self.0;
         if !n.is_finite() {
-            return f.write_str("0");
+            return out.write_str("0");
         }
-        if n.fract() == 0.0 && n >= i32::MIN as f32 && n <= i32::MAX as f32 {
-            write!(f, "{}", n as i32)
+        // For finite `n`, `n as i32` is a saturating cast, so the round-trip compare
+        // `i as f32 == n` reproduces the old `n.fract() == 0.0 && n in i32 range` branch
+        // byte-for-byte (a fractional value truncates and fails the compare; a whole
+        // in-range value round-trips; an out-of-range whole saturates and fails). This
+        // drops the `f32::fract` → `truncf` libm call — ~9% of coordinate-heavy render
+        // on the per-path-coordinate serialization hot loop.
+        let i = n as i32;
+        if i as f32 == n {
+            crate::attributes::write_int_into(out, i)
         } else {
-            write!(f, "{n:.2}")
+            crate::attributes::write_fixed2(out, n)
         }
+    }
+}
+
+impl std::fmt::Display for FmtNum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.write_into(f)
+    }
+}
+
+/// Write a cubic-Bézier path segment (`C`/`c`) directly, bypassing the `write!`/
+/// `fmt::Formatter` machinery on this per-edge-segment hot path. Byte-identical to
+/// `{prefix}{x1} {y1},{x2} {y2},{x} {y}`.
+fn write_cubic(output: &mut String, prefix: char, c1: (f32, f32), c2: (f32, f32), end: (f32, f32)) {
+    output.push(prefix);
+    let _ = FmtNum(c1.0).write_into(output);
+    output.push(' ');
+    let _ = FmtNum(c1.1).write_into(output);
+    output.push(',');
+    let _ = FmtNum(c2.0).write_into(output);
+    output.push(' ');
+    let _ = FmtNum(c2.1).write_into(output);
+    output.push(',');
+    let _ = FmtNum(end.0).write_into(output);
+    output.push(' ');
+    let _ = FmtNum(end.1).write_into(output);
+}
+
+fn write_point(output: &mut String, prefix: char, x: f32, y: f32) {
+    output.push(prefix);
+    let _ = FmtNum(x).write_into(output);
+    output.push(' ');
+    let _ = FmtNum(y).write_into(output);
+}
+
+/// Build a smooth cubic-Bézier path `d` string directly, with no intermediate
+/// `Vec<PathCommand>` — Catmull-Rom→cubic conversion (tension 1/4), the same shape a
+/// `PathBuilder` of `move_to`/`line_to`/`curve_to` would produce. Byte-identical to the
+/// builder output (commands joined by single spaces). This is the per-edge hot path on
+/// curve-heavy graphs, where the builder's per-segment enum push + dispatch is pure
+/// overhead on top of the byte writing.
+pub(crate) fn build_smooth_path_by<F>(n: usize, point_at: F) -> String
+where
+    F: FnMut(usize) -> (f32, f32),
+{
+    // Right-size the `d` buffer. n<=2 is `M` (or `M ... L ...`), ~24-48 bytes — keep the tight
+    // `n*24` so short edges never over-allocate. n>=3 emits an `M` plus (n-1) cubic segments
+    // (`C cp1x cp1y,cp2x cp2y,x y`, six `write_fixed2` coords ~8 chars + separators ≈ 56 bytes each),
+    // which the old `n*24` under-sized — forcing 1-2 reallocate-and-copy (memmove) per multi-point
+    // edge. Size the cubic case for one allocation. Capacity-only, output byte-identical.
+    let mut d = String::with_capacity(if n < 3 { n * 24 } else { 24 + (n - 1) * 56 });
+    build_smooth_path_by_into(&mut d, n, point_at);
+    d
+}
+
+/// Append the smooth cubic-Bézier path `d` data directly into `out` — byte-identical to
+/// [`build_smooth_path_by`] but writing into a caller-provided buffer so a whole edge fragment can be
+/// assembled without allocating the per-edge `d` String first. Pinned by
+/// `build_smooth_path_into_matches_build_smooth_path`.
+pub(crate) fn build_smooth_path_by_into<F>(out: &mut String, n: usize, mut point_at: F)
+where
+    F: FnMut(usize) -> (f32, f32),
+{
+    if n == 0 {
+        return;
+    }
+    let first = point_at(0);
+    write_point(out, 'M', first.0, first.1);
+    if n == 1 {
+        return;
+    }
+    if n == 2 {
+        let second = point_at(1);
+        out.push(' ');
+        write_point(out, 'L', second.0, second.1);
+        return;
+    }
+
+    let t: f32 = 0.25;
+    for i in 0..(n - 1) {
+        let p_prev = if i == 0 { point_at(0) } else { point_at(i - 1) };
+        let p_cur = point_at(i);
+        let p_next = point_at(i + 1);
+        let p_next2 = if i + 2 < n {
+            point_at(i + 2)
+        } else {
+            point_at(n - 1)
+        };
+
+        let cp1x = p_cur.0 + (p_next.0 - p_prev.0) * t;
+        let cp1y = p_cur.1 + (p_next.1 - p_prev.1) * t;
+        let cp2x = p_next.0 - (p_next2.0 - p_cur.0) * t;
+        let cp2y = p_next.1 - (p_next2.1 - p_cur.1) * t;
+
+        out.push(' ');
+        write_cubic(out, 'C', (cp1x, cp1y), (cp2x, cp2y), (p_next.0, p_next.1));
     }
 }
 
@@ -506,6 +604,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn build_smooth_path_into_matches_build_smooth_path() {
+        // The append-into variant must be byte-identical to the String-returning builder for every
+        // point count (M-only, M+L, and the cubic-Bézier path), incl. negative/fractional coords.
+        let point_sets: &[&[(f32, f32)]] = &[
+            &[],
+            &[(0.0, 0.0)],
+            &[(0.0, 0.0), (10.0, 10.0)],
+            &[(0.0, 0.0), (10.0, 10.0), (20.0, 5.0), (30.0, 30.0)],
+            &[
+                (-5.25, 0.0),
+                (0.0, -3.5),
+                (12.75, 8.0),
+                (40.0, -1.0),
+                (50.0, 50.0),
+            ],
+        ];
+        for pts in point_sets {
+            let returned = build_smooth_path_by(pts.len(), |i| pts[i]);
+            let mut appended = String::from("PREFIX:");
+            build_smooth_path_by_into(&mut appended, pts.len(), |i| pts[i]);
+            assert_eq!(
+                appended,
+                format!("PREFIX:{returned}"),
+                "into-variant diverged for {} points",
+                pts.len()
+            );
+        }
+    }
+
+    #[test]
     fn builds_simple_path() {
         let path = PathBuilder::new()
             .move_to(0.0, 0.0)
@@ -534,6 +662,17 @@ mod tests {
             .curve_to(25.0, 50.0, 75.0, 50.0, 100.0, 0.0)
             .build();
         assert!(path.contains("C25 50,75 50,100 0"));
+    }
+
+    #[test]
+    fn smooth_path_by_index_matches_expected_bytes() {
+        let points = [(10.0, 20.0), (30.0, 60.0), (70.0, 60.0), (90.0, 20.0)];
+        let path = build_smooth_path_by(points.len(), |index| points[index]);
+
+        assert_eq!(
+            path,
+            "M10 20 C15 30,15 50,30 60 C45 70,55 70,70 60 C85 50,85 30,90 20"
+        );
     }
 
     #[test]

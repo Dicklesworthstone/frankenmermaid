@@ -3,6 +3,8 @@
 //! Provides builders for creating reusable definitions like arrowhead markers,
 //! linear/radial gradients, and filter effects (drop shadow, blur).
 
+use std::borrow::Cow;
+
 use crate::element::Element;
 use crate::path::PathBuilder;
 
@@ -295,6 +297,59 @@ impl ArrowheadMarker {
         }
     }
 
+    /// Hollow diamond, the UML aggregation marker. Same geometry as [`Self::diamond_marker`] (the
+    /// filled composition diamond); only the fill differs, which is precisely what distinguishes
+    /// aggregation from composition in UML.
+    #[must_use]
+    pub fn diamond_open_marker(id: &str, stroke: &str) -> Self {
+        let path = PathBuilder::new()
+            .move_to(4.0, 0.0)
+            .line_to(8.0, 4.0)
+            .line_to(4.0, 8.0)
+            .line_to(0.0, 4.0)
+            .close()
+            .build();
+
+        Self {
+            id: id.to_string(),
+            marker_width: 8.0,
+            marker_height: 8.0,
+            ref_x: 8.0,
+            ref_y: 4.0,
+            orient: MarkerOrient::Auto,
+            path,
+            fill: "none".to_string(),
+            stroke: Some(stroke.to_string()),
+            stroke_width: Some(1.0),
+        }
+    }
+
+    /// Hollow triangle, the UML inheritance/generalization marker. Unlike the arrowheads, UML draws
+    /// this as an unfilled outline, which is exactly what distinguishes generalization from a plain
+    /// association arrow.
+    #[must_use]
+    pub fn triangle_open_marker(id: &str, stroke: &str) -> Self {
+        let path = PathBuilder::new()
+            .move_to(0.0, 0.0)
+            .line_to(10.0, 5.0)
+            .line_to(0.0, 10.0)
+            .close()
+            .build();
+
+        Self {
+            id: id.to_string(),
+            marker_width: 10.0,
+            marker_height: 10.0,
+            ref_x: 10.0,
+            ref_y: 5.0,
+            orient: MarkerOrient::Auto,
+            path,
+            fill: "none".to_string(),
+            stroke: Some(stroke.to_string()),
+            stroke_width: Some(1.0),
+        }
+    }
+
     /// Set the orientation of the marker.
     #[must_use]
     pub fn with_orient(mut self, orient: MarkerOrient) -> Self {
@@ -582,7 +637,15 @@ impl Filter {
 /// Builder for the SVG defs section.
 #[derive(Debug, Clone, Default)]
 pub struct DefsBuilder {
+    /// Pre-serialized marker fragment (emitted by this crate's own marker serializer), rendered in
+    /// the MARKERS slot ahead of `markers`. Lets a caller stream a memoized marker set in place of
+    /// per-marker `.marker()` children, byte-identically.
+    raw_markers: Option<Cow<'static, str>>,
     markers: Vec<ArrowheadMarker>,
+    /// Pre-serialized gradient fragment, rendered in the GRADIENTS slot ahead of `gradients` (i.e.
+    /// after markers, before filters/custom). Same byte-identical-streaming contract as `raw_markers`,
+    /// for a memoized node gradient.
+    raw_gradients: Option<Cow<'static, str>>,
     gradients: Vec<Gradient>,
     filters: Vec<Filter>,
     custom_elements: Vec<Element>,
@@ -599,6 +662,29 @@ impl DefsBuilder {
     #[must_use]
     pub fn marker(mut self, marker: ArrowheadMarker) -> Self {
         self.markers.push(marker);
+        self
+    }
+
+    /// Insert a pre-serialized arrowhead-marker fragment in the MARKERS slot — serialized before
+    /// gradients/filters/custom, exactly where per-marker `.marker()` children would appear. The
+    /// fragment must be markup this crate's own marker serializer produced (a concatenation of
+    /// `ArrowheadMarker::…().to_element()` renders), so the output is byte-identical to adding those
+    /// markers one at a time. Used to stream a memoized marker set (the build+serialize of the
+    /// 12-marker set is ~6 µs and is a pure function of the edge color + fancy flag).
+    #[must_use]
+    pub fn raw_markers(mut self, svg: impl Into<Cow<'static, str>>) -> Self {
+        self.raw_markers = Some(svg.into());
+        self
+    }
+
+    /// Insert a pre-serialized gradient fragment in the GRADIENTS slot — serialized after markers and
+    /// before filters/custom, exactly where a `.gradient(..)` child would appear. Same
+    /// crate-own-serializer / byte-identical contract as [`Self::raw_markers`]; used to stream a
+    /// memoized node gradient (`<linearGradient>` build+serialize is ~1.1 µs, a pure function of the
+    /// gradient style + theme colors).
+    #[must_use]
+    pub fn raw_gradients(mut self, svg: impl Into<Cow<'static, str>>) -> Self {
+        self.raw_gradients = Some(svg.into());
         self
     }
 
@@ -626,7 +712,9 @@ impl DefsBuilder {
     /// Check if the defs section is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.markers.is_empty()
+        self.raw_markers.is_none()
+            && self.markers.is_empty()
+            && self.raw_gradients.is_none()
             && self.gradients.is_empty()
             && self.filters.is_empty()
             && self.custom_elements.is_empty()
@@ -637,8 +725,20 @@ impl DefsBuilder {
     pub fn to_element(&self) -> Element {
         let mut defs = Element::new(crate::element::ElementKind::Defs);
 
+        // The pre-serialized marker fragment occupies the markers slot (before gradients/filters/
+        // custom), byte-identical to the per-marker children it replaces.
+        if let Some(ref raw) = self.raw_markers {
+            defs = defs.child(Element::raw_svg(raw.clone().into_owned()));
+        }
+
         for marker in &self.markers {
             defs = defs.child(marker.to_element());
+        }
+
+        // Pre-serialized gradient fragment occupies the gradients slot (after markers, before
+        // filters/custom), byte-identical to the per-gradient children it replaces.
+        if let Some(ref raw) = self.raw_gradients {
+            defs = defs.child(Element::raw_svg(raw.clone().into_owned()));
         }
 
         for gradient in &self.gradients {
@@ -662,8 +762,35 @@ impl DefsBuilder {
             return;
         }
 
-        let elem = self.to_element();
-        elem.write_to_string(output);
+        // Stream the `<defs>` section directly instead of building a transient `Defs` `Element` tree
+        // (via `to_element`) only to serialize and drop it — that materialized a `Defs` `Element`,
+        // its `children` `Vec`, and a `raw_svg` `Element` per render, cloning the memoized
+        // marker/gradient `String` into each. `Element::new(Defs)` carries no attributes, so it
+        // serializes as `<defs>` + children + `</defs>`; the child order (raw markers, markers, raw
+        // gradients, gradients, filters, custom) and each child's own serialization are preserved
+        // exactly, so this is byte-identical to `self.to_element().write_to_string(output)` (verified
+        // via `BLESS`-diffing every `golden_svg_test` case). The raw fragments are `push_str`'d in
+        // place (an `Element::raw_svg` serializes to its text verbatim), dropping the per-render clone.
+        output.push_str("<defs>");
+        if let Some(ref raw) = self.raw_markers {
+            output.push_str(raw);
+        }
+        for marker in &self.markers {
+            marker.to_element().write_to_string(output);
+        }
+        if let Some(ref raw) = self.raw_gradients {
+            output.push_str(raw);
+        }
+        for gradient in &self.gradients {
+            gradient.to_element().write_to_string(output);
+        }
+        for filter in &self.filters {
+            filter.to_element().write_to_string(output);
+        }
+        for elem in &self.custom_elements {
+            elem.write_to_string(output);
+        }
+        output.push_str("</defs>");
     }
 }
 

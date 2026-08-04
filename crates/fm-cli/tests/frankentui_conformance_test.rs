@@ -169,7 +169,7 @@ fn assert_node_expectations(case: &FixtureCase, ir: &fm_core::MermaidDiagramIr) 
 
         if let Some(href) = &expected.href {
             assert_eq!(
-                node.href.as_deref(),
+                node.href(),
                 Some(href.as_str()),
                 "{}: node '{}' href mismatch",
                 case.id,
@@ -178,7 +178,7 @@ fn assert_node_expectations(case: &FixtureCase, ir: &fm_core::MermaidDiagramIr) 
         }
         if let Some(callback) = &expected.callback {
             assert_eq!(
-                node.callback.as_deref(),
+                node.callback(),
                 Some(callback.as_str()),
                 "{}: node '{}' callback mismatch",
                 case.id,
@@ -187,7 +187,7 @@ fn assert_node_expectations(case: &FixtureCase, ir: &fm_core::MermaidDiagramIr) 
         }
         if let Some(tooltip) = &expected.tooltip {
             assert_eq!(
-                node.tooltip.as_deref(),
+                node.tooltip(),
                 Some(tooltip.as_str()),
                 "{}: node '{}' tooltip mismatch",
                 case.id,

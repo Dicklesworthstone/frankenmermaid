@@ -1,0 +1,137 @@
+{
+  "schema": "frankenmermaid.headtohead.recertification.v1",
+  "gate_rule": "effect_ci_excludes_1_and_2x_null_radius_and_null_median_within_2pct",
+  "null_median_max_bias": 0.02,
+  "null_radius_definition": "max(|ci95_hi - 1|, |ci95_lo - 1|) -- distance from 1.0 to the farther endpoint, NOT (hi-lo)/2",
+  "straddle_veto": "never present in this harness; null CIs are telemetry only",
+  "rows_recertified": 88,
+  "unchanged": 68,
+  "newly_refused_by_clause3": 20,
+  "newly_decidable": 0,
+  "new_wins": 0,
+  "new_losses": 0,
+  "integrity_check": "PASS: 0 rows newly decidable, so 0 new wins and 0 new losses; the change can only subtract decidability",
+  "recomputation_scope": "uses each summary's recorded fm_null_control and mjs_null_control; the live gate also sees the second Rust bracket null, so this is a LOWER bound on clause-3 refusals",
+  "refused": [
+    {
+      "label": "flowchart_small_10",
+      "art": "headtohead/summary-2426fa7a-1785379374416.json",
+      "speedup": 1079.1600402453669,
+      "why": "clause3(11.765%)"
+    },
+    {
+      "label": "flowchart_small_10",
+      "art": "cert-v2/summary-ad571736-1785181091235.json",
+      "speedup": 914.7350993377484,
+      "why": "clause3(5.551%)"
+    },
+    {
+      "label": "doc_build_40",
+      "art": "cert-v2/summary-ad571736-1785181091235.json",
+      "speedup": 778.805316847267,
+      "why": "clause3(5.239%)"
+    },
+    {
+      "label": "sequence_20",
+      "art": "headtohead/summary-2426fa7a-1785379083759.json",
+      "speedup": 451.2245017242387,
+      "why": "clause3(4.899%)"
+    },
+    {
+      "label": "wide_8x16",
+      "art": "cert-v8/summary-7b3caf62-1785228548577.json",
+      "speedup": 2326.857934565009,
+      "why": "clause3(4.704%)"
+    },
+    {
+      "label": "sequence_20",
+      "art": "cert-v2/summary-ad571736-1785181091235.json",
+      "speedup": 329.7854853291691,
+      "why": "clause3(3.216%)"
+    },
+    {
+      "label": "ci_batch_500@t8",
+      "art": "ci-thread-sweep-v3/summary-ffeab05f-1785311982943.json",
+      "speedup": 5875.127019038716,
+      "why": "clause3(3.154%)"
+    },
+    {
+      "label": "class_50",
+      "art": "cert-v3/summary-892761e9-1785182202902.json",
+      "speedup": 1002.5685640898168,
+      "why": "clause3(3.083%)"
+    },
+    {
+      "label": "edit_trace_60x20",
+      "art": "cert-v3/summary-892761e9-1785182202902.json",
+      "speedup": 1129.088241556631,
+      "why": "clause3(2.687%)"
+    },
+    {
+      "label": "wide_16x32",
+      "art": "cert-v8/summary-7b3caf62-1785228548577.json",
+      "speedup": 4548.660925748597,
+      "why": "clause3(2.679%)"
+    },
+    {
+      "label": "schema_catalog_25",
+      "art": "realistic-schema-v1/summary-a9373031-1785282801275.json",
+      "speedup": 412.8255193593572,
+      "why": "clause3(2.640%)"
+    },
+    {
+      "label": "cyclic_scc_100",
+      "art": "cert-v2/summary-ad571736-1785181091235.json",
+      "speedup": 1407.30543906265,
+      "why": "clause3(2.424%)"
+    },
+    {
+      "label": "er_40",
+      "art": "cert-smoke/summary-ad571736-1785180196613.json",
+      "speedup": 1877.5220760801662,
+      "why": "clause3(2.355%)"
+    },
+    {
+      "label": "state_40",
+      "art": "cert-v3/summary-892761e9-1785182202902.json",
+      "speedup": 624.0617628136392,
+      "why": "clause3(2.314%)"
+    },
+    {
+      "label": "ci_batch_500@t4",
+      "art": "ci-thread-sweep-v2/summary-f6cb0760-1785310166784.json",
+      "speedup": 2888.451537840777,
+      "why": "clause3(2.263%)"
+    },
+    {
+      "label": "typing_trace_60",
+      "art": "realistic-typing-v1/summary-a9373031-1785282622219.json",
+      "speedup": 1193.1495976257813,
+      "why": "clause3(2.204%)"
+    },
+    {
+      "label": "cyclic_scc_100",
+      "art": "cert-v3/summary-892761e9-1785182202902.json",
+      "speedup": 1380.9653329844482,
+      "why": "clause3(2.085%)"
+    },
+    {
+      "label": "flowchart_small_10",
+      "art": "cert-v8/summary-7b3caf62-1785228548577.json",
+      "speedup": 897.3426758328926,
+      "why": "clause3(2.042%)"
+    },
+    {
+      "label": "er_40",
+      "art": "cert-v2/summary-ad571736-1785181091235.json",
+      "speedup": 1414.8112584768649,
+      "why": "clause3(2.041%)"
+    },
+    {
+      "label": "flowchart_small_10",
+      "art": "headtohead/summary-2426fa7a-1785379032605.json",
+      "speedup": 917.5799234809675,
+      "why": "clause3(2.035%)"
+    }
+  ]
+}

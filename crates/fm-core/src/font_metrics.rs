@@ -6,12 +6,43 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Invoke `f` on each line of `text`, byte-identically to [`str::lines`], but locate the `'\n'`
+/// separators with a SIMD `memchr` scan instead of std's UTF-8-decoding `CharSearcher` (which
+/// showed as ~2.5% of layout self-time on node-label sizing). Semantics match `str::lines`
+/// exactly: split on `'\n'`; strip a single trailing `'\r'` only when it immediately precedes a
+/// `'\n'` (a lone `'\r'` is kept); and emit no trailing empty segment when `text` ends in `'\n'`.
+#[inline]
+fn for_each_line(text: &str, mut f: impl FnMut(&str)) {
+    let bytes = text.as_bytes();
+    let mut start = 0usize;
+    for nl in memchr::memchr_iter(b'\n', bytes) {
+        let mut end = nl;
+        if end > start && bytes[end - 1] == b'\r' {
+            end -= 1;
+        }
+        // `'\n'`/`'\r'` are ASCII, so `start`/`end` land on char boundaries.
+        f(&text[start..end]);
+        start = nl + 1;
+    }
+    if start < bytes.len() {
+        f(&text[start..]);
+    }
+}
+
 /// Returns true for characters that occupy approximately 2 columns in
 /// monospace/proportional fonts — CJK ideographs, fullwidth forms, and
 /// common emoji. Based on UAX #11 East Asian Width property (W/F categories).
 #[must_use]
 pub const fn is_east_asian_wide(c: char) -> bool {
     let cp = c as u32;
+    // Fast path: every East-Asian-wide range below begins at U+3000 or above, so any code
+    // point under it (all ASCII / Latin / Cyrillic / … — the overwhelming majority of
+    // label text) is not wide. This returns in a single comparison instead of walking the
+    // ~14 range checks, which run for every non-special character during per-character
+    // text-width measurement. Output-identical: the `matches!` is also false below U+3000.
+    if cp < 0x3000 {
+        return false;
+    }
     matches!(cp,
         // CJK Unified Ideographs
         0x4E00..=0x9FFF
@@ -181,6 +212,23 @@ impl CharWidthClass {
     }
 }
 
+/// Precomputed width multiplier per ASCII byte = `classify(byte).multiplier()`. A direct
+/// `f32` table (no intermediate `CharWidthClass` enum) so per-char measurement on ASCII
+/// text — the overwhelmingly common label case — is one array load + multiply instead of
+/// the `classify`→`multiplier` match chain. Bit-identical to that chain: each entry is
+/// exactly `classify(b as char).multiplier()`, computed at compile time from the same const
+/// fns. (Unlike the rejected `CharWidthClass` lookup table, this stores the final multiplier,
+/// so there is no intermediate enum load to break the compiler's match fusion.)
+const ASCII_WIDTH_MULT: [f32; 128] = {
+    let mut table = [0.0_f32; 128];
+    let mut i = 0usize;
+    while i < 128 {
+        table[i] = CharWidthClass::classify(i as u8 as char).multiplier();
+        i += 1;
+    }
+    table
+};
+
 /// Font metrics calculator for deterministic text measurement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FontMetrics {
@@ -267,6 +315,17 @@ impl FontMetrics {
     /// Estimate the width of a single line of text.
     #[must_use]
     pub fn estimate_width(&self, text: &str) -> f32 {
+        // ASCII fast path (common labels, non-monospace): a direct multiplier-table load per
+        // byte replaces the per-char `classify().multiplier()` match chain. Bit-identical —
+        // `ASCII_WIDTH_MULT[b]` IS `classify(b as char).multiplier()`, and the `avg * mult`
+        // op + left-to-right f32 sum are unchanged. Monospace / non-ASCII keep the char path.
+        if self.config.preset != FontPreset::Monospace && text.is_ascii() {
+            let avg = self.avg_char_width;
+            return text
+                .bytes()
+                .map(|b| avg * ASCII_WIDTH_MULT[b as usize])
+                .sum();
+        }
         text.chars().map(|c| self.char_width(c)).sum()
     }
 
@@ -281,9 +340,13 @@ impl FontMetrics {
     /// Estimate the width of multi-line text (returns max line width).
     #[must_use]
     pub fn estimate_multiline_width(&self, text: &str) -> f32 {
-        text.lines()
-            .map(|line| self.estimate_width(line))
-            .fold(0.0_f32, f32::max)
+        // `memchr`-split lines fed through the same left-to-right `f32::max` from a 0.0 seed
+        // (empty text yields 0.0, matching `fold(0.0, f32::max)` on an empty `lines()`).
+        let mut max_width = 0.0_f32;
+        for_each_line(text, |line| {
+            max_width = max_width.max(self.estimate_width(line))
+        });
+        max_width
     }
 
     /// Get the height of a single line.
@@ -295,7 +358,13 @@ impl FontMetrics {
     /// Estimate the height of text (multi-line aware).
     #[must_use]
     pub fn estimate_height(&self, text: &str) -> f32 {
-        let line_count = text.lines().count().max(1);
+        // `str::lines().count()` == number of `'\n'` plus one when the text is non-empty and
+        // does not end in `'\n'` (no trailing empty line). Counting `'\n'` with `memchr` avoids
+        // materializing/scanning line slices for the height-only path.
+        let bytes = text.as_bytes();
+        let newline_count = memchr::memchr_iter(b'\n', bytes).count();
+        let trailing = usize::from(!bytes.is_empty() && bytes[bytes.len() - 1] != b'\n');
+        let line_count = (newline_count + trailing).max(1);
         #[allow(clippy::cast_precision_loss)]
         let line_count_f32 = u32::try_from(line_count).unwrap_or(u32::MAX) as f32;
         line_count_f32 * self.line_height_px()
@@ -304,10 +373,20 @@ impl FontMetrics {
     /// Estimate both width and height.
     #[must_use]
     pub fn estimate_dimensions(&self, text: &str) -> (f32, f32) {
-        (
-            self.estimate_multiline_width(text),
-            self.estimate_height(text),
-        )
+        // Single `lines()` traversal for both axes: the split-out `estimate_multiline_width`
+        // + `estimate_height` each scanned the whole string for '\n' independently, so every
+        // node label was walked twice. Fusing folds max-width and line-count in one pass.
+        // Byte-identical: same left-to-right `f32::max` over `estimate_width(line)` and the
+        // same `lines().count().max(1)` height (an empty string still yields 1 line).
+        let mut max_width = 0.0_f32;
+        let mut line_count: u32 = 0;
+        for_each_line(text, |line| {
+            max_width = max_width.max(self.estimate_width(line));
+            line_count = line_count.saturating_add(1);
+        });
+        #[allow(clippy::cast_precision_loss)]
+        let line_count_f32 = line_count.max(1) as f32;
+        (max_width, line_count_f32 * self.line_height_px())
     }
 
     /// Get the font size.

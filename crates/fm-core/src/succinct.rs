@@ -49,10 +49,14 @@ impl BitVector {
     #[must_use]
     pub fn from_bools(bits: &[bool]) -> Self {
         let mut bv = Self::new(bits.len());
-        for (i, &b) in bits.iter().enumerate() {
-            if b {
-                bv.set(i);
+        for (word_index, chunk) in bits.chunks(64).enumerate() {
+            let mut word = 0_u64;
+            for (bit_index, &bit) in chunk.iter().enumerate() {
+                if bit {
+                    word |= 1_u64 << bit_index;
+                }
             }
+            bv.words[word_index] = word;
         }
         bv.build_rank();
         bv
@@ -155,19 +159,14 @@ impl BitVector {
             let word = self.words[word_idx];
             let pc = word.count_ones();
             if pc >= remaining {
-                // The target bit is in this word.
+                // The target bit is in this word. Discard the preceding set bits,
+                // then locate the remaining least-significant bit directly.
                 let mut w = word;
-                let mut r = remaining;
-                for bit in 0..64 {
-                    if w & 1 == 1 {
-                        r -= 1;
-                        if r == 0 {
-                            let pos = word_idx * 64 + bit;
-                            return if pos < self.len { Some(pos) } else { None };
-                        }
-                    }
-                    w >>= 1;
+                for _ in 1..remaining {
+                    w &= w - 1;
                 }
+                let pos = word_idx * 64 + w.trailing_zeros() as usize;
+                return if pos < self.len { Some(pos) } else { None };
             }
             remaining -= pc;
         }
@@ -242,15 +241,18 @@ impl CsrGraph {
         let mut offsets = Vec::with_capacity(num_nodes + 1);
         offsets.push(0);
         let mut last = 0;
-        for &d in &degrees {
-            last += d;
+        for degree in &mut degrees {
+            last += *degree;
             offsets.push(last);
+            *degree = 0;
         }
         let total_edges = last as usize;
 
         // Fill targets.
         let mut targets = vec![0_u32; total_edges];
-        let mut current = vec![0_u32; num_nodes]; // current write position per node
+        // Degree counts are dead after the prefix sum; reuse their zeroed storage
+        // as the current write position for each node.
+        let mut current = degrees;
 
         for &(src, tgt) in edges {
             if src < num_nodes && tgt < num_nodes {
@@ -409,6 +411,136 @@ mod tests {
         assert_eq!(bv.select(3), None);
     }
 
+    #[inline(never)]
+    fn select_shift_reference(bv: &BitVector, k: u32) -> Option<usize> {
+        let mut remaining = k.checked_add(1)?;
+        let block_idx = bv
+            .rank_blocks
+            .partition_point(|&rank| rank < remaining)
+            .saturating_sub(1);
+
+        if let Some(&block_rank) = bv.rank_blocks.get(block_idx) {
+            remaining -= block_rank;
+        }
+
+        let start_word = block_idx * 8;
+        let end_word = (start_word + 8).min(bv.words.len());
+        for word_idx in start_word..end_word {
+            let word = bv.words[word_idx];
+            let pc = word.count_ones();
+            if pc >= remaining {
+                let mut w = word;
+                let mut rank = remaining;
+                for bit in 0..64 {
+                    if w & 1 == 1 {
+                        rank -= 1;
+                        if rank == 0 {
+                            let pos = word_idx * 64 + bit;
+                            return if pos < bv.len { Some(pos) } else { None };
+                        }
+                    }
+                    w >>= 1;
+                }
+            }
+            remaining -= pc;
+        }
+        None
+    }
+
+    #[inline(never)]
+    fn select_candidate(bv: &BitVector, k: u32) -> Option<usize> {
+        bv.select(k)
+    }
+
+    fn select_fixture(len: usize) -> BitVector {
+        let mut bv = BitVector::new(len);
+        for i in (0..len).step_by(7) {
+            bv.set(i);
+        }
+        bv.build_rank();
+        bv
+    }
+
+    #[test]
+    fn bitvec_select_matches_shift_reference() {
+        let bv = select_fixture(4_123);
+        let ones = bv.count_ones();
+        for k in 0..=ones {
+            assert_eq!(bv.select(k), select_shift_reference(&bv, k), "k={k}");
+        }
+        assert_eq!(bv.select(u32::MAX), select_shift_reference(&bv, u32::MAX));
+    }
+
+    #[test]
+    #[ignore = "manual short release A/B"]
+    fn perf_bitvec_select_target_word_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const LEN: usize = 131_072;
+        const PASSES: usize = 64;
+        const ROUNDS: usize = 9;
+
+        #[inline(never)]
+        fn measure(
+            bv: &BitVector,
+            ones: u32,
+            passes: usize,
+            select: fn(&BitVector, u32) -> Option<usize>,
+        ) -> (u128, usize) {
+            let started = Instant::now();
+            let mut checksum = 0_usize;
+            for pass in 0..passes {
+                for k in 0..ones {
+                    let selected = black_box(select)(black_box(bv), black_box(k))
+                        .expect("measured queries stay in range");
+                    checksum = checksum.wrapping_add(selected ^ pass);
+                }
+            }
+            (started.elapsed().as_nanos(), black_box(checksum))
+        }
+
+        let bv = select_fixture(LEN);
+        let ones = bv.count_ones();
+        for k in 0..=ones {
+            assert_eq!(select_candidate(&bv, k), select_shift_reference(&bv, k));
+        }
+
+        let warm_baseline = measure(&bv, ones, 8, select_shift_reference);
+        let warm_candidate = measure(&bv, ones, 8, select_candidate);
+        assert_eq!(warm_baseline.1, warm_candidate.1);
+
+        let mut baseline_ns = Vec::with_capacity(ROUNDS);
+        let mut candidate_ns = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (baseline, candidate) = if round % 2 == 0 {
+                (
+                    measure(&bv, ones, PASSES, select_shift_reference),
+                    measure(&bv, ones, PASSES, select_candidate),
+                )
+            } else {
+                let candidate = measure(&bv, ones, PASSES, select_candidate);
+                let baseline = measure(&bv, ones, PASSES, select_shift_reference);
+                (baseline, candidate)
+            };
+            assert_eq!(baseline.1, candidate.1);
+            baseline_ns.push(baseline.0);
+            candidate_ns.push(candidate.0);
+        }
+
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median_ns = baseline_ns[ROUNDS / 2];
+        let candidate_median_ns = candidate_ns[ROUNDS / 2];
+        let improvement_pct = (baseline_median_ns as f64 - candidate_median_ns as f64) * 100.0
+            / baseline_median_ns as f64;
+
+        println!(
+            "PERF bitvec_select_target_word baseline_median_ns={baseline_median_ns} candidate_median_ns={candidate_median_ns} improvement_pct={improvement_pct:.3} parity=exact rounds={ROUNDS} passes={PASSES} calls_per_arm={} baseline_ns={baseline_ns:?} candidate_ns={candidate_ns:?}",
+            usize::try_from(ones).expect("bit count fits usize") * PASSES
+        );
+    }
+
     #[test]
     fn bitvec_from_bools() {
         let bits = vec![true, false, true, false, true];
@@ -420,7 +552,250 @@ mod tests {
         assert_eq!(bv.count_ones(), 3);
     }
 
+    #[inline(never)]
+    fn bitvec_from_bools_set_reference(bits: &[bool]) -> BitVector {
+        let mut bv = BitVector::new(bits.len());
+        for (i, &bit) in bits.iter().enumerate() {
+            if bit {
+                bv.set(i);
+            }
+        }
+        bv.build_rank();
+        bv
+    }
+
+    fn assert_from_bools_parity(bits: &[bool]) {
+        let reference = bitvec_from_bools_set_reference(bits);
+        let candidate = BitVector::from_bools(bits);
+
+        assert_eq!(candidate, reference);
+        for i in 0..=bits.len() {
+            assert_eq!(candidate.get(i), reference.get(i), "get({i})");
+            assert_eq!(candidate.rank(i), reference.rank(i), "rank({i})");
+        }
+        assert_eq!(
+            candidate.rank(bits.len().saturating_add(17)),
+            reference.rank(bits.len().saturating_add(17))
+        );
+
+        let ones = reference.count_ones();
+        assert_eq!(candidate.count_ones(), ones);
+        for k in 0..=ones {
+            assert_eq!(candidate.select(k), reference.select(k), "select({k})");
+        }
+        assert_eq!(candidate.select(u32::MAX), reference.select(u32::MAX));
+    }
+
+    #[test]
+    fn bitvec_from_bools_word_packing_matches_set_reference() {
+        for len in [0, 1, 2, 63, 64, 65, 127, 513, 4_099] {
+            let patterns = [
+                vec![false; len],
+                vec![true; len],
+                (0..len).map(|i| i.is_multiple_of(2)).collect(),
+                (0..len).map(|i| i.is_multiple_of(17)).collect(),
+                (0..len)
+                    .map(|i| {
+                        let mixed = i.wrapping_mul(0x9e37_79b9).rotate_left(11) ^ (i >> 3);
+                        mixed.count_ones().is_multiple_of(2)
+                    })
+                    .collect(),
+            ];
+            for bits in &patterns {
+                assert_from_bools_parity(bits);
+            }
+        }
+    }
+
     // -- CSR graph tests --
+
+    #[inline(never)]
+    fn csr_from_edges_separate_cursor_reference(
+        num_nodes: usize,
+        edges: &[(usize, usize)],
+        directed: bool,
+    ) -> CsrGraph {
+        let mut degrees = vec![0_u32; num_nodes];
+        for &(src, tgt) in edges {
+            if src < num_nodes && tgt < num_nodes {
+                degrees[src] += 1;
+                if !directed && src != tgt {
+                    degrees[tgt] += 1;
+                }
+            }
+        }
+
+        let mut offsets = Vec::with_capacity(num_nodes + 1);
+        offsets.push(0);
+        let mut last = 0;
+        for &degree in &degrees {
+            last += degree;
+            offsets.push(last);
+        }
+        let total_edges = last as usize;
+
+        let mut targets = vec![0_u32; total_edges];
+        let mut current = vec![0_u32; num_nodes];
+        for &(src, tgt) in edges {
+            if src < num_nodes && tgt < num_nodes {
+                let pos = (offsets[src] + current[src]) as usize;
+                targets[pos] = tgt as u32;
+                current[src] += 1;
+
+                if !directed && src != tgt {
+                    let pos = (offsets[tgt] + current[tgt]) as usize;
+                    targets[pos] = src as u32;
+                    current[tgt] += 1;
+                }
+            }
+        }
+
+        for i in 0..num_nodes {
+            let start = offsets[i] as usize;
+            let end = offsets[i + 1] as usize;
+            targets[start..end].sort_unstable();
+        }
+
+        CsrGraph {
+            offsets,
+            targets,
+            num_nodes,
+            directed,
+        }
+    }
+
+    #[inline(never)]
+    fn csr_from_edges_reused_degrees(
+        num_nodes: usize,
+        edges: &[(usize, usize)],
+        directed: bool,
+    ) -> CsrGraph {
+        CsrGraph::from_edges(num_nodes, edges, directed)
+    }
+
+    fn csr_sparse_fixture(num_nodes: usize) -> Vec<(usize, usize)> {
+        (0..num_nodes)
+            .step_by(16)
+            .map(|source| (source, (source + 7_919) % num_nodes))
+            .collect()
+    }
+
+    #[test]
+    fn csr_reused_degrees_matches_separate_cursor_reference() {
+        let cases = [
+            (0, Vec::new(), true),
+            (
+                6,
+                vec![(4, 1), (0, 5), (0, 2), (0, 2), (3, 3), (9, 1), (1, 9)],
+                true,
+            ),
+            (
+                6,
+                vec![(4, 1), (0, 5), (0, 2), (3, 3), (9, 1), (1, 9)],
+                false,
+            ),
+        ];
+
+        for (num_nodes, edges, directed) in cases {
+            assert_eq!(
+                csr_from_edges_reused_degrees(num_nodes, &edges, directed),
+                csr_from_edges_separate_cursor_reference(num_nodes, &edges, directed)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "release-only CsrGraph::from_edges profile"]
+    fn csr_from_edges_profile() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const NUM_NODES: usize = 1 << 20;
+        const BUILDS: usize = 32;
+
+        let edges = csr_sparse_fixture(NUM_NODES);
+        // ubs:ignore -- benchmark timing, not security randomness.
+        let started = Instant::now();
+        let mut work_sum = 0_usize;
+        for build in 0..BUILDS {
+            let graph = CsrGraph::from_edges(
+                black_box(NUM_NODES),
+                black_box(edges.as_slice()),
+                black_box(true),
+            );
+            work_sum = work_sum
+                .wrapping_add(graph.num_nodes())
+                .wrapping_add(graph.num_edges())
+                .wrapping_add(graph.degree((build * 16) % NUM_NODES) as usize);
+            black_box(graph);
+        }
+        eprintln!(
+            "csr_from_edges_profile nodes={NUM_NODES} edges={} builds={BUILDS} elapsed_ns={} work_sum={work_sum}",
+            edges.len(),
+            started.elapsed().as_nanos()
+        );
+    }
+
+    #[test]
+    #[ignore = "release-only CsrGraph::from_edges A/B"]
+    fn csr_from_edges_cursor_reuse_ab() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const NUM_NODES: usize = 1 << 20;
+        const ROUNDS: usize = 11;
+
+        fn measure(
+            edges: &[(usize, usize)],
+            build: fn(usize, &[(usize, usize)], bool) -> CsrGraph,
+        ) -> (u128, CsrGraph) {
+            let started = Instant::now();
+            let graph = black_box(build)(black_box(NUM_NODES), black_box(edges), black_box(true));
+            (started.elapsed().as_nanos(), graph)
+        }
+
+        let edges = csr_sparse_fixture(NUM_NODES);
+        let reference = csr_from_edges_separate_cursor_reference(NUM_NODES, &edges, true);
+        let candidate = csr_from_edges_reused_degrees(NUM_NODES, &edges, true);
+        assert_eq!(candidate, reference);
+        black_box((&reference, &candidate));
+
+        let mut baseline_ns = Vec::with_capacity(ROUNDS);
+        let mut candidate_ns = Vec::with_capacity(ROUNDS);
+        let mut work_sum = 0_usize;
+        for round in 0..ROUNDS {
+            let (baseline, candidate) = if round % 2 == 0 {
+                (
+                    measure(&edges, csr_from_edges_separate_cursor_reference),
+                    measure(&edges, csr_from_edges_reused_degrees),
+                )
+            } else {
+                let candidate = measure(&edges, csr_from_edges_reused_degrees);
+                let baseline = measure(&edges, csr_from_edges_separate_cursor_reference);
+                (baseline, candidate)
+            };
+
+            assert_eq!(candidate.1, baseline.1);
+            work_sum = work_sum
+                .wrapping_add(baseline.1.num_nodes())
+                .wrapping_add(candidate.1.num_nodes())
+                .wrapping_add(baseline.1.num_edges())
+                .wrapping_add(candidate.1.num_edges());
+            black_box((&baseline.1, &candidate.1));
+            baseline_ns.push(baseline.0);
+            candidate_ns.push(candidate.0);
+        }
+
+        baseline_ns.sort_unstable();
+        candidate_ns.sort_unstable();
+        let baseline_median = baseline_ns[ROUNDS / 2];
+        let candidate_median = candidate_ns[ROUNDS / 2];
+        let ratio = candidate_median as f64 / baseline_median as f64;
+        eprintln!(
+            "csr_from_edges_cursor_reuse_ab nodes={NUM_NODES} edges={} rounds={ROUNDS} baseline_ns={baseline_ns:?} candidate_ns={candidate_ns:?} baseline_median_ns={baseline_median} candidate_median_ns={candidate_median} candidate_over_baseline={ratio:.6} work_sum={work_sum}",
+            edges.len()
+        );
+    }
 
     #[test]
     fn csr_empty_graph() {

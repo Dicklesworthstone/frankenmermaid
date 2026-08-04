@@ -483,17 +483,24 @@ fn border_glyphs(glyph_mode: MermaidGlyphMode) -> (char, char, char, char, char,
 }
 
 fn colorize_output(output: &str) -> String {
-    output
-        .chars()
-        .map(|ch| match ch {
+    let mut colored = String::with_capacity(output.len());
+    for ch in output.chars() {
+        match ch {
             '┌' | '┐' | '└' | '┘' | '─' | '│' | '+' | '-' | '|' => {
-                format!("\x1b[90m{ch}\x1b[0m")
+                colored.push_str("\x1b[90m");
+                colored.push(ch);
+                colored.push_str("\x1b[0m");
             }
             // Block characters and full Braille range (U+2800..=U+28FF)
-            '█' | '▀' | '▄' | '\u{2800}'..='\u{28FF}' => format!("\x1b[36m{ch}\x1b[0m"),
-            _ => ch.to_string(),
-        })
-        .collect()
+            '█' | '▀' | '▄' | '\u{2800}'..='\u{28FF}' => {
+                colored.push_str("\x1b[36m");
+                colored.push(ch);
+                colored.push_str("\x1b[0m");
+            }
+            _ => colored.push(ch),
+        }
+    }
+    colored
 }
 
 /// Overlay minimap onto a main diagram rendering at the specified corner.
@@ -653,6 +660,32 @@ mod tests {
         let config = MinimapConfig::default();
         let result = render_minimap_colored(&ir, &config, None);
         assert!(result.output.contains("\x1b["));
+    }
+
+    #[test]
+    fn colorize_output_preserves_exact_ansi_contract() {
+        let input = "plain +-|┌┐└┘─│ █▀▄\u{2800}\u{28ff}🙂\n";
+        let expected = concat!(
+            "plain ",
+            "\x1b[90m+\x1b[0m",
+            "\x1b[90m-\x1b[0m",
+            "\x1b[90m|\x1b[0m",
+            "\x1b[90m┌\x1b[0m",
+            "\x1b[90m┐\x1b[0m",
+            "\x1b[90m└\x1b[0m",
+            "\x1b[90m┘\x1b[0m",
+            "\x1b[90m─\x1b[0m",
+            "\x1b[90m│\x1b[0m",
+            " ",
+            "\x1b[36m█\x1b[0m",
+            "\x1b[36m▀\x1b[0m",
+            "\x1b[36m▄\x1b[0m",
+            "\x1b[36m\u{2800}\x1b[0m",
+            "\x1b[36m\u{28ff}\x1b[0m",
+            "🙂\n",
+        );
+        assert_eq!(colorize_output(input), expected);
+        assert_eq!(colorize_output(""), "");
     }
 
     #[test]

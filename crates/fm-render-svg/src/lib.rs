@@ -34,7 +34,12 @@ pub use text::{TextAnchor, TextBuilder};
 pub use theme::{FontConfig, Theme, ThemeColors, ThemePreset, generate_palette};
 pub use transform::{Transform, TransformBuilder};
 
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    borrow::Cow,
+    cell::RefCell,
+    collections::{BTreeMap, HashMap},
+    sync::{Arc, OnceLock},
+};
 
 use fm_core::{
     DiagramType, IrLabelId, IrLabelSegment, IrXyChartMeta, IrXySeriesKind, MermaidDiagramIr,
@@ -43,11 +48,12 @@ use fm_core::{
     mermaid_node_element_id_with_variant,
 };
 use fm_layout::{
-    CentralityTier, DiagramLayout, FillStyle, LayoutBand, LayoutBandKind, LayoutEdgePath,
-    LayoutNodeBox, LineCap as RenderLineCap, LineJoin as RenderLineJoin, MarkerKind, PathCmd,
-    RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene, RenderSource, RenderText,
-    RenderTransform, StrokeStyle, TextAlign as RenderTextAlign, TextBaseline as RenderTextBaseline,
-    build_render_scene,
+    CentralityTier, DiagramLayout, DirectedPathLayoutPrefix, FillStyle, LayoutBand, LayoutBandKind,
+    LayoutEdgePath, LayoutNodeBox, LineCap as RenderLineCap, LineJoin as RenderLineJoin,
+    MarkerKind, PathCmd, RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene,
+    RenderSource, RenderText, RenderTransform, StrokeStyle, TextAlign as RenderTextAlign,
+    TextBaseline as RenderTextBaseline, build_render_scene, certify_directed_path_layout_prefix,
+    try_relayout_directed_path_suffix,
 };
 
 /// Node fill gradient mode.
@@ -100,7 +106,7 @@ pub struct CustomSvgIcon {
 }
 
 /// Configuration for SVG rendering.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SvgRenderConfig {
     /// Backend implementation used for rendering.
     pub backend: SvgBackend,
@@ -278,7 +284,7 @@ enum RenderDetailTier {
     Rich,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct RenderDetailProfile {
     tier: RenderDetailTier,
     show_node_labels: bool,
@@ -290,6 +296,290 @@ struct RenderDetailProfile {
     edge_font_size: f32,
     cluster_font_size: f32,
     enable_shadows: bool,
+}
+
+const POST_PASS_MAX_SVG_BYTES: usize = 100_000;
+
+#[derive(Debug, Clone, Default)]
+struct SvgBatchFragments {
+    edge_svg: String,
+    edge_ends: Vec<usize>,
+    node_svg: String,
+    node_ends: Vec<usize>,
+    reused_edges: usize,
+    reused_nodes: usize,
+    detail: Option<RenderDetailProfile>,
+    offset_x_bits: u32,
+    offset_y_bits: u32,
+    active: bool,
+}
+
+#[derive(Debug, Clone)]
+struct SvgBatchSnapshot {
+    ir: Option<Arc<MermaidDiagramIr>>,
+    layout: Arc<DiagramLayout>,
+    config: SvgRenderConfig,
+    fragments: SvgBatchFragments,
+    certified_prefix: Option<CertifiedSvgBatchPrefix>,
+    layout_prefix: Option<DirectedPathLayoutPrefix>,
+}
+
+/// Parser-certified immutable IR prefix for allocation-reusing batch rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedSvgBatchPrefix {
+    identity: Arc<str>,
+    node_count: usize,
+    edge_count: usize,
+}
+
+/// Immutable cold-start state that can initialize independent batch renderers.
+///
+/// A coordinator renders one representative of a parser-certified prefix group, then broadcasts
+/// this seed to its workers. Each worker receives private mutable state while the seed's layout is
+/// shared copy-on-write, replacing one full prefix layout/render per worker with a cheap snapshot
+/// clone. The ordinary stateless renderer and unseeded batch path are unchanged.
+#[derive(Debug, Clone)]
+pub struct SvgBatchRendererSeed {
+    snapshot: Arc<SvgBatchSnapshot>,
+}
+
+impl CertifiedSvgBatchPrefix {
+    #[must_use]
+    pub const fn new(identity: Arc<str>, node_count: usize, edge_count: usize) -> Self {
+        Self {
+            identity,
+            node_count,
+            edge_count,
+        }
+    }
+}
+
+/// Stateful renderer for a batch whose diagrams may share an unchanged flowchart prefix.
+///
+/// The ordinary renderer remains stateless. This opt-in surface retains the previous owned IR and
+/// layout so it can prove, with exact equality rather than a hash, which leading node and edge
+/// fragments are unchanged. Those already-serialized bytes are copied into the next SVG while only
+/// the distinct suffix is formatted. The cache is caller-owned and therefore shared-nothing: give
+/// each worker its own instance and no lock or cross-thread coordination is required.
+#[derive(Debug, Default)]
+pub struct SvgBatchRenderer {
+    previous: Option<SvgBatchSnapshot>,
+}
+
+impl SvgBatchRenderer {
+    /// Capture the current parser-certified snapshot for cold-start broadcast.
+    ///
+    /// Uncertified renders return `None`: a seed must never turn cache eligibility into a
+    /// correctness assumption.
+    #[must_use]
+    pub fn seed(&self) -> Option<SvgBatchRendererSeed> {
+        self.previous.as_ref().and_then(|snapshot| {
+            snapshot
+                .certified_prefix
+                .as_ref()
+                .map(|_| SvgBatchRendererSeed {
+                    snapshot: Arc::new(snapshot.clone()),
+                })
+        })
+    }
+
+    /// Create private worker state from a coordinator-produced seed.
+    #[must_use]
+    pub fn from_seed(seed: &SvgBatchRendererSeed) -> Self {
+        Self {
+            previous: Some(seed.snapshot.as_ref().clone()),
+        }
+    }
+
+    /// Render one owned diagram, retaining it as the exact comparison source for the next call.
+    #[must_use]
+    pub fn render(
+        &mut self,
+        ir: Arc<MermaidDiagramIr>,
+        layout: Arc<DiagramLayout>,
+        config: &SvgRenderConfig,
+    ) -> String {
+        let previous = self.previous.take();
+        let same_config = previous
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.config == *config);
+        let mut next_fragments = SvgBatchFragments::default();
+        let reusable_snapshot =
+            same_config.then(|| previous.as_ref().expect("same config requires snapshot"));
+        let svg = {
+            let mut reuse = SvgBatchFragmentReuse {
+                previous_ir: reusable_snapshot.and_then(|snapshot| snapshot.ir.as_deref()),
+                previous_layout: reusable_snapshot.map(|snapshot| snapshot.layout.as_ref()),
+                previous: reusable_snapshot.map(|snapshot| &snapshot.fragments),
+                previous_certified_prefix: reusable_snapshot
+                    .and_then(|snapshot| snapshot.certified_prefix.as_ref()),
+                current_certified_prefix: None,
+                certified_geometry_prefix: false,
+                next: &mut next_fragments,
+            };
+            render_svg_with_layout_impl_reusing(&ir, &layout, config, true, Some(&mut reuse))
+        };
+        let stored_config = if same_config {
+            previous.expect("same config requires snapshot").config
+        } else {
+            config.clone()
+        };
+        self.previous = Some(SvgBatchSnapshot {
+            ir: Some(ir),
+            layout,
+            config: stored_config,
+            fragments: next_fragments,
+            certified_prefix: None,
+            layout_prefix: None,
+        });
+        svg
+    }
+
+    /// Render a borrowed batch IR whose immutable prefix was certified by the parser.
+    ///
+    /// Unlike [`Self::render`], this path does not retain the IR. The caller may therefore overwrite
+    /// its builder slot after return. Exact prefix identity plus layout-box equality replaces the
+    /// previous full-IR equality walk; a missing/mismatched certificate simply renders normally.
+    #[must_use]
+    pub fn render_borrowed(
+        &mut self,
+        ir: &MermaidDiagramIr,
+        layout: Arc<DiagramLayout>,
+        config: &SvgRenderConfig,
+        certified_prefix: Option<CertifiedSvgBatchPrefix>,
+    ) -> String {
+        let previous = self.previous.take();
+        let same_config = previous
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.config == *config);
+        let mut next_fragments = SvgBatchFragments::default();
+        let reusable_snapshot = same_config.then_some(previous.as_ref()).flatten();
+        let svg = {
+            let mut reuse = SvgBatchFragmentReuse {
+                previous_ir: reusable_snapshot.and_then(|snapshot| snapshot.ir.as_deref()),
+                previous_layout: reusable_snapshot.map(|snapshot| snapshot.layout.as_ref()),
+                previous: reusable_snapshot.map(|snapshot| &snapshot.fragments),
+                previous_certified_prefix: reusable_snapshot
+                    .and_then(|snapshot| snapshot.certified_prefix.as_ref()),
+                current_certified_prefix: certified_prefix.as_ref(),
+                certified_geometry_prefix: false,
+                next: &mut next_fragments,
+            };
+            render_svg_with_layout_impl_reusing(ir, &layout, config, true, Some(&mut reuse))
+        };
+        let stored_config = if same_config {
+            previous.expect("same config requires snapshot").config
+        } else {
+            config.clone()
+        };
+        self.previous = Some(SvgBatchSnapshot {
+            ir: None,
+            layout,
+            config: stored_config,
+            fragments: next_fragments,
+            certified_prefix,
+            layout_prefix: None,
+        });
+        svg
+    }
+
+    /// Lay out and render a borrowed diagram while transplanting a certified LR path prefix.
+    ///
+    /// The first diagram uses the ordinary auto-layout pipeline and records an opaque geometry
+    /// proof. Later diagrams with the same parser certificate mutate a private or copy-on-write
+    /// prior layout: prefix node boxes and edge paths stay untouched while only the appended suffix
+    /// is sized and routed. Every unsupported shape falls back to
+    /// [`fm_layout::layout_diagram_traced`] before rendering.
+    #[must_use]
+    pub fn layout_and_render_borrowed(
+        &mut self,
+        ir: &MermaidDiagramIr,
+        config: &SvgRenderConfig,
+        certified_prefix: Option<CertifiedSvgBatchPrefix>,
+    ) -> String {
+        let mut previous = self.previous.take();
+        let mut certified_geometry_prefix = false;
+        let mut next_layout_prefix = None;
+
+        let reused_layout = previous.as_mut().and_then(|snapshot| {
+            let previous_prefix = snapshot.certified_prefix.as_ref()?;
+            let current_prefix = certified_prefix.as_ref()?;
+            let same_identity = Arc::ptr_eq(&previous_prefix.identity, &current_prefix.identity)
+                || previous_prefix.identity == current_prefix.identity;
+            if !same_identity
+                || previous_prefix.node_count != current_prefix.node_count
+                || previous_prefix.edge_count != current_prefix.edge_count
+            {
+                return None;
+            }
+            let layout_prefix = snapshot.layout_prefix.as_ref()?;
+            if !try_relayout_directed_path_suffix(
+                ir,
+                Arc::make_mut(&mut snapshot.layout),
+                layout_prefix,
+            ) {
+                return None;
+            }
+            certified_geometry_prefix = true;
+            next_layout_prefix = Some(layout_prefix.clone());
+            Some(Arc::clone(&snapshot.layout))
+        });
+
+        let layout = reused_layout.unwrap_or_else(|| fm_layout::layout_diagram_traced(ir).layout);
+        if next_layout_prefix.is_none()
+            && let Some(prefix) = certified_prefix.as_ref()
+        {
+            next_layout_prefix = certify_directed_path_layout_prefix(
+                ir,
+                &layout,
+                prefix.node_count,
+                prefix.edge_count,
+            );
+        }
+
+        let same_config = previous
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.config == *config);
+        let mut next_fragments = SvgBatchFragments::default();
+        let reusable_snapshot = same_config.then_some(previous.as_ref()).flatten();
+        let svg = {
+            let mut reuse = SvgBatchFragmentReuse {
+                previous_ir: reusable_snapshot.and_then(|snapshot| snapshot.ir.as_deref()),
+                previous_layout: reusable_snapshot.map(|snapshot| snapshot.layout.as_ref()),
+                previous: reusable_snapshot.map(|snapshot| &snapshot.fragments),
+                previous_certified_prefix: reusable_snapshot
+                    .and_then(|snapshot| snapshot.certified_prefix.as_ref()),
+                current_certified_prefix: certified_prefix.as_ref(),
+                certified_geometry_prefix,
+                next: &mut next_fragments,
+            };
+            render_svg_with_layout_impl_reusing(ir, &layout, config, true, Some(&mut reuse))
+        };
+        let stored_config = if same_config {
+            previous.expect("same config requires snapshot").config
+        } else {
+            config.clone()
+        };
+        self.previous = Some(SvgBatchSnapshot {
+            ir: None,
+            layout,
+            config: stored_config,
+            fragments: next_fragments,
+            certified_prefix,
+            layout_prefix: next_layout_prefix,
+        });
+        svg
+    }
+}
+
+struct SvgBatchFragmentReuse<'a> {
+    previous_ir: Option<&'a MermaidDiagramIr>,
+    previous_layout: Option<&'a DiagramLayout>,
+    previous: Option<&'a SvgBatchFragments>,
+    previous_certified_prefix: Option<&'a CertifiedSvgBatchPrefix>,
+    current_certified_prefix: Option<&'a CertifiedSvgBatchPrefix>,
+    certified_geometry_prefix: bool,
+    next: &'a mut SvgBatchFragments,
 }
 
 /// Render an IR diagram to SVG string.
@@ -316,13 +606,874 @@ pub fn render_svg_with_layout(
     layout: &DiagramLayout,
     config: &SvgRenderConfig,
 ) -> String {
-    match config.backend {
-        SvgBackend::LegacyLayout => render_layout_to_svg(layout, ir, config),
+    render_svg_with_layout_impl(ir, layout, config, true)
+}
+
+fn render_svg_with_layout_impl(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    config: &SvgRenderConfig,
+    use_post_pass_cache: bool,
+) -> String {
+    render_svg_with_layout_impl_reusing(ir, layout, config, use_post_pass_cache, None)
+}
+
+fn render_svg_with_layout_impl_reusing(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    config: &SvgRenderConfig,
+    use_post_pass_cache: bool,
+    batch_reuse: Option<&mut SvgBatchFragmentReuse<'_>>,
+) -> String {
+    let direct_minified_css = matches!(config.backend, SvgBackend::LegacyLayout)
+        && config.embed_theme_css
+        && ir.diagram_type == DiagramType::Flowchart;
+    let (mut svg, known_live_marker_mask) = match config.backend {
+        SvgBackend::LegacyLayout => {
+            let live_marker_mask = flowchart_marker_mask(ir, layout);
+            (
+                render_layout_to_svg(
+                    layout,
+                    ir,
+                    config,
+                    live_marker_mask,
+                    direct_minified_css,
+                    use_post_pass_cache,
+                    batch_reuse,
+                ),
+                live_marker_mask,
+            )
+        }
         SvgBackend::Scene => {
             let scene = build_render_scene(ir, layout);
-            render_scene_document_with_ir(&scene, config, Some(ir))
+            (
+                render_scene_document_with_ir(&scene, config, Some(ir)),
+                None,
+            )
+        }
+    };
+    if direct_minified_css {
+        return svg;
+    }
+    apply_output_post_passes(&mut svg, use_post_pass_cache, known_live_marker_mask);
+    svg
+}
+
+/// Post-pass: drop the contiguous node-STATE rule region (inactive / block-beta / highlighted /
+/// border-dashed / border-double) from the embedded `<style>` when the rendered BODY uses none of
+/// those state classes. These classes come from classDef / diagram features (not one IR field), so
+/// detection is done on the final SVG body — exact and drift-proof. Safe by construction: no-op if
+/// any state class is used, if the boundary markers are absent (CSS drift), or if the bounded region
+/// is implausibly large (mis-grab guard). Byte-identical rendering — the dropped selectors match
+/// nothing in the body.
+fn strip_unused_state_css(svg: &mut String) {
+    // The fixed theme CSS this trims (~1.3 KB of states/accents) is a meaningful fraction only for
+    // small/medium diagrams; on a large SVG it is <1% of output while the pass still costs render time.
+    // Cap the work to outputs where the win clearly beats the scan cost (covers small flowcharts
+    // through the sequence diagram ~62 KB; skips the 200 KB+ chain / wide renders).
+    if svg.len() > POST_PASS_MAX_SVG_BYTES {
+        return;
+    }
+    // `memmem` (SIMD) instead of `str::find` throughout: `str::find` builds a Two-Way `StrSearcher`
+    // per call (setup measured ~7% of small-diagram render across these post-pass needles); `memmem`
+    // returns the identical first-match byte offset with a cheaper prefilter. Byte-identical.
+    let body_start =
+        memchr::memmem::find(svg.as_bytes(), b"</style>").map_or(0, |i| i + "</style>".len());
+    // ONE walk of the body answers both questions the per-needle `contains` chain used to ask with a
+    // full body scan each. Computing it BEFORE the inactive-region strip below is sound: that strip
+    // only edits bytes inside the `<style>` block, so the body text — and hence every flag here — is
+    // unchanged by it. That is the same invariant that let the old code re-`find("</style>")`
+    // afterwards and read the identical body.
+    let (state_used, accent_used) = scan_body_fm_node_classes(&svg[body_start..]);
+    if state_used {
+        return;
+    }
+    if let (Some(start), Some(after)) = (
+        memchr::memmem::find(svg.as_bytes(), b".fm-node-inactive { opacity:"),
+        memchr::memmem::find(svg.as_bytes(), b".fm-cluster { fill-opacity:"),
+    ) && after > start
+        && after - start < 1500
+    {
+        svg.replace_range(start..after, "");
+    }
+
+    // The 8 accent palettes (`.fm-node-accent-1..8`) are assigned per node, so a diagram with few
+    // nodes uses only some. Drop each `.fm-node-accent-N` rule whose class is absent from the body.
+    // Body-based + exact-selector; no-op if the class is used or the rule is missing.
+    for (n, &is_used) in accent_used.iter().enumerate().skip(1) {
+        if !is_used {
+            let selector = format!(".fm-node-accent-{n} {{");
+            if let Some(start) = memchr::memmem::find(svg.as_bytes(), selector.as_bytes())
+                && let Some(rel_end) = memchr::memmem::find(&svg.as_bytes()[start..], b"}\n")
+            {
+                svg.replace_range(start..start + rel_end + 2, "");
+            }
         }
     }
+
+    // Drop each `:root` accent custom property `--fm-accent-N` that is no longer referenced anywhere
+    // (its accent rule was stripped above and no node-shape/gradient uses it). Reference-counted, so
+    // it is a no-op while ANY `var(--fm-accent-N)` remains — safe.
+    let var_used = scan_accent_var_refs(svg);
+    for (n, &is_used) in var_used.iter().enumerate().skip(1) {
+        if !is_used {
+            let decl = format!("  --fm-accent-{n}:");
+            if let Some(start) = memchr::memmem::find(svg.as_bytes(), decl.as_bytes())
+                && let Some(rel_end) = memchr::memmem::find(&svg.as_bytes()[start..], b";\n")
+            {
+                svg.replace_range(start..start + rel_end + 2, "");
+            }
+        }
+    }
+}
+
+/// Which of [`strip_unused_state_css`]'s 13 `fm-node-*` needles occur in the rendered body: the 5
+/// node-STATE classes (returned as one "any" flag, since the caller bails out on the first) and the 8
+/// `fm-node-accent-{n}` classes.
+///
+/// **Why one pass.** The old shape was one `str::contains` per needle. `str::contains` on an *absent*
+/// needle scans the whole body, and absent is the common case — a typical flowchart carries no state
+/// class at all — so it was worst-case `O(body_len * 13)`. Measured at **10.6–25.3% of the entire
+/// parse+layout+render pipeline** on every diagram under `POST_PASS_MAX_SVG_BYTES`, in *both* output
+/// profiles.
+///
+/// **Why one pass is byte-identical.** All 13 needles begin with `fm-node-`, which has no self-overlap
+/// (no proper prefix of `fm-node-` is also a proper suffix of it), so a single *non-overlapping*
+/// `memmem` walk observes the start of every occurrence of every needle. At each hit:
+/// - a state class is matched with `starts_with(suffix)`, which accepts exactly the strings
+///   `contains("fm-node-{suffix}")` accepted (including a longer `fm-node-inactive-foo`);
+/// - an accent digit is read with **no terminator check**, because the old needle `fm-node-accent-{n}`
+///   had none — `fm-node-accent-12` marked accent 1 used, and still does.
+fn scan_body_fm_node_classes(body: &str) -> (bool, [bool; 9]) {
+    const PREFIX: &[u8] = b"fm-node-";
+    const STATE_SUFFIXES: [&str; 5] = [
+        "inactive",
+        "block-beta",
+        "highlighted",
+        "border-dashed",
+        "border-double",
+    ];
+    let mut accent = [false; 9];
+    let bytes = body.as_bytes();
+    for at in memchr::memmem::Finder::new(PREFIX).find_iter(bytes) {
+        let rest = &bytes[at + PREFIX.len()..];
+        if let Some(tail) = rest.strip_prefix(b"accent-".as_slice()) {
+            if let Some(&digit) = tail.first()
+                && matches!(digit, b'1'..=b'8')
+            {
+                accent[usize::from(digit - b'0')] = true;
+            }
+        } else if STATE_SUFFIXES
+            .iter()
+            .any(|s| rest.starts_with(s.as_bytes()))
+        {
+            // The caller returns immediately on any state class, so the accent flags gathered so far
+            // are dead — stop walking.
+            return (true, accent);
+        }
+    }
+    (false, accent)
+}
+
+/// Which `var(--fm-accent-{n})` references survive anywhere in `svg`, in ONE pass instead of 8
+/// whole-document `contains` scans (each *absent* one of which scanned the entire document).
+///
+/// Must run AFTER the accent-rule strips — that reference count is the whole point of the check — but a
+/// single pass there is byte-identical to the old per-`n` `svg.contains(..)` evaluated inside the
+/// declaration-strip loop below: the only bytes that loop removes are `  --fm-accent-{n}: <color>;`
+/// lines, and an accent declaration never contains a `var(` (`theme.rs` writes a literal color), so no
+/// iteration can change a later iteration's answer.
+///
+/// The needle keeps its closing `)` — unlike the class needle above — because the old needle had one:
+/// `var(--fm-accent-12)` must NOT mark accent 1 as referenced.
+fn scan_accent_var_refs(svg: &str) -> [bool; 9] {
+    const PREFIX: &[u8] = b"var(--fm-accent-";
+    let mut used = [false; 9];
+    let bytes = svg.as_bytes();
+    for at in memchr::memmem::Finder::new(PREFIX).find_iter(bytes) {
+        if let [digit @ b'1'..=b'8', b')', ..] = &bytes[at + PREFIX.len()..] {
+            used[usize::from(*digit - b'0')] = true;
+        }
+    }
+    used
+}
+
+/// Render post-pass: drop `<marker>` arrowhead defs that the rendered body never references.
+///
+/// The non-flowchart render paths emit the FULL arrow-marker set (12 markers, ~2.4 KB) because
+/// they cannot cheaply predict which arrow shapes a sequence/class/state/er diagram will use, but
+/// the typical such diagram references only `arrow-end` — leaving ~2 KB of dead `<marker>` defs.
+/// An SVG `<marker>` is purely declarative: it renders NOTHING unless a `marker-start/-mid/-end`
+/// (i.e. a `url(#id)`) points at it, so removing an unreferenced marker is visually identical.
+///
+/// Detection is body-based and drift-proof (the exact pattern of [`strip_unused_state_css`]): a
+/// marker is kept iff its id appears inside a `url(#id)` somewhere in the document. Marker DEFS
+/// contain no `url(#...)`, and the theme CSS targets markers with `marker#id` selectors (never
+/// `url(#id)`), so the live-set is exactly the markers an edge actually points at. Safe by
+/// construction: any referenced or future marker is kept; a CSS/markup drift can only leave a dead
+/// def in place, never strip a live one. Single O(n) rebuild (no per-marker rescans), so it adds
+/// no large-render cost — and large flowcharts already emit a minimal marker set (nothing to strip).
+fn strip_unused_markers(svg: &mut String) -> Option<u16> {
+    // Multi-byte needles searched in tight loops (once per `url(#…)` ref / `<marker>` def): build each
+    // SIMD `Finder` ONCE and reuse it, instead of `str::find` rebuilding a `TwoWaySearcher` per call.
+    let marker_finder = memchr::memmem::Finder::new(b"<marker ");
+    if marker_finder.find(svg.as_bytes()).is_none() {
+        return Some(0);
+    }
+    let url_finder = memchr::memmem::Finder::new(b"url(#");
+    // 1. Collect every id referenced via `url(#id)` (marker assignments live only here).
+    // FxHashSet (not SipHash std HashSet): membership-only (no iteration-order dependency), and the
+    // marker ids are short — FxHash is ~3-4x faster than SipHash here. Byte-identical.
+    let mut referenced: fm_core::FxHashSet<&str> = fm_core::FxHashSet::default();
+    let mut at = 0;
+    while let Some(rel) = url_finder.find(&svg.as_bytes()[at..]) {
+        let id_start = at + rel + "url(#".len();
+        let Some(close) = memchr::memchr(b')', &svg.as_bytes()[id_start..]) else {
+            break;
+        };
+        referenced.insert(&svg[id_start..id_start + close]);
+        at = id_start + close + 1;
+    }
+    // 2. Find each `<marker id="..">…</marker>` span whose id is not referenced.
+    let endmarker_finder = memchr::memmem::Finder::new(b"</marker>");
+    let id_finder = memchr::memmem::Finder::new(b"id=\"");
+    let mut dead_spans: Vec<(usize, usize)> = Vec::new();
+    let mut live_mask = 0u16;
+    let mut cacheable = true;
+    let mut at = 0;
+    while let Some(rel) = marker_finder.find(&svg.as_bytes()[at..]) {
+        let m_start = at + rel;
+        let Some(end_rel) = endmarker_finder.find(&svg.as_bytes()[m_start..]) else {
+            cacheable = false;
+            break;
+        };
+        let m_end = m_start + end_rel + "</marker>".len();
+        // The marker id is the first `id="…"` inside the opening tag.
+        let tag_end =
+            memchr::memchr(b'>', &svg.as_bytes()[m_start..m_end]).map_or(m_end, |g| m_start + g);
+        if let Some(idrel) = id_finder.find(&svg.as_bytes()[m_start..tag_end]) {
+            let id_start = m_start + idrel + "id=\"".len();
+            if let Some(idclose) = memchr::memchr(b'"', &svg.as_bytes()[id_start..tag_end]) {
+                let id = &svg[id_start..id_start + idclose];
+                if !referenced.contains(id) {
+                    dead_spans.push((m_start, m_end));
+                } else if let Some(bit) = marker_id_bit(id) {
+                    live_mask |= bit;
+                } else {
+                    // A future/custom marker can still take the exact legacy passes. It is excluded
+                    // from the cache until its identity is represented in the bounded key.
+                    cacheable = false;
+                }
+            } else {
+                cacheable = false;
+            }
+        } else {
+            cacheable = false;
+        }
+        at = m_end;
+    }
+    if dead_spans.is_empty() {
+        return cacheable.then_some(live_mask);
+    }
+    // 3. Rebuild once, skipping the dead spans (O(n), no repeated tail-shifts).
+    let mut out = String::with_capacity(svg.len());
+    let mut cursor = 0;
+    for (start, end) in &dead_spans {
+        out.push_str(&svg[cursor..*start]);
+        cursor = *end;
+    }
+    out.push_str(&svg[cursor..]);
+    *svg = out;
+    cacheable.then_some(live_mask)
+}
+
+const MARKER_END: u16 = 1 << 0;
+const MARKER_FILLED: u16 = 1 << 1;
+const MARKER_OPEN: u16 = 1 << 2;
+const MARKER_HALF_TOP: u16 = 1 << 3;
+const MARKER_HALF_BOTTOM: u16 = 1 << 4;
+const MARKER_STICK_TOP: u16 = 1 << 5;
+const MARKER_STICK_BOTTOM: u16 = 1 << 6;
+const MARKER_START: u16 = 1 << 7;
+const MARKER_START_FILLED: u16 = 1 << 8;
+const MARKER_CIRCLE: u16 = 1 << 9;
+const MARKER_CROSS: u16 = 1 << 10;
+const MARKER_DIAMOND: u16 = 1 << 11;
+const MARKER_DIAMOND_OPEN: u16 = 1 << 12;
+const MARKER_TRIANGLE_OPEN: u16 = 1 << 13;
+const MARKER_START_TRIANGLE_OPEN: u16 = 1 << 14;
+const BASIC_MARKER_MASK: u16 = MARKER_END | MARKER_OPEN;
+const ALL_MARKER_MASK: u16 = (1 << 15) - 1;
+
+fn marker_id_bit(id: &str) -> Option<u16> {
+    const IDS: [&str; 15] = [
+        "arrow-end",
+        "arrow-filled",
+        "arrow-open",
+        "arrow-half-top",
+        "arrow-half-bottom",
+        "arrow-stick-top",
+        "arrow-stick-bottom",
+        "arrow-start",
+        "arrow-start-filled",
+        "arrow-circle",
+        "arrow-cross",
+        "arrow-diamond",
+        "arrow-diamond-open",
+        "arrow-triangle-open",
+        "start-arrow-triangle-open",
+    ];
+    IDS.iter()
+        .position(|candidate| *candidate == id)
+        .map(|index| 1u16 << index)
+}
+
+/// Companion to [`strip_unused_markers`]: prune `marker#arrow-*` selectors from the theme CSS once
+/// their `<marker>` defs have been stripped. The theme stylesheet ships fixed rules that style the
+/// arrowhead markers (`marker#arrow-end/filled/circle/diamond path`, `marker#arrow-open path`,
+/// `marker#arrow-cross path`, and the `:hover` variants). After the marker-def strip, any such
+/// selector whose marker is gone matches nothing — pure dead CSS (225 B on a typical arrow-end-only
+/// diagram, 584 B on an edge-less one where every marker rule dies).
+///
+/// A selector is kept iff it references no DEAD marker (a live marker, or no `marker#` at all);
+/// a rule with every selector pruned is dropped whole. Runs on the pre-minify (pretty) stylesheet
+/// in the render funnel, after `strip_unused_markers`. Safe by construction: a live marker keeps its
+/// styling (its selector references a present def), and CSS drift can only leave a dead selector in
+/// place, never drop a live one. Brace-depth tracking emits nested at-rules (`@media`) verbatim.
+fn strip_dead_marker_css(svg: &mut String) {
+    if memchr::memmem::find(svg.as_bytes(), b"marker#arrow-").is_none() {
+        return;
+    }
+    // Live marker ids = those still present as `<marker id="…">` defs. Reuse one SIMD `Finder` per
+    // needle across the loop instead of `str::find` rebuilding a `TwoWaySearcher` every iteration.
+    let marker_finder = memchr::memmem::Finder::new(b"<marker ");
+    let id_finder = memchr::memmem::Finder::new(b"id=\"");
+    // FxHashSet over SipHash std HashSet (membership-only, short keys — byte-identical).
+    let mut live: fm_core::FxHashSet<&str> = fm_core::FxHashSet::default();
+    let mut at = 0;
+    while let Some(rel) = marker_finder.find(&svg.as_bytes()[at..]) {
+        let m = at + rel;
+        if let Some(i) = id_finder.find(&svg.as_bytes()[m..]) {
+            let s = m + i + "id=\"".len();
+            if let Some(e) = memchr::memchr(b'"', &svg.as_bytes()[s..]) {
+                live.insert(&svg[s..s + e]);
+            }
+        }
+        at = m + "<marker ".len();
+    }
+    let Some(open) = memchr::memmem::find(svg.as_bytes(), b"<style") else {
+        return;
+    };
+    let Some(gt) = memchr::memchr(b'>', &svg.as_bytes()[open..]) else {
+        return;
+    };
+    let cs = open + gt + 1;
+    let Some(er) = memchr::memmem::find(&svg.as_bytes()[cs..], b"</style>") else {
+        return;
+    };
+    let ce = cs + er;
+    let css = &svg[cs..ce];
+    let bytes = css.as_bytes();
+    let marker_hash_finder = memchr::memmem::Finder::new(b"marker#");
+    let mut out = String::with_capacity(css.len());
+    let mut i = 0;
+    let mut seg_start = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            let selectors = &css[seg_start..i];
+            // Body = the balanced `{ … }` (track depth so a nested at-rule body is one unit).
+            let mut depth = 1;
+            let mut j = i + 1;
+            while j < bytes.len() && depth > 0 {
+                match bytes[j] {
+                    b'{' => depth += 1,
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            let body = &css[i..j];
+            if marker_hash_finder.find(selectors.as_bytes()).is_some() {
+                let kept: Vec<&str> = selectors
+                    .split(',')
+                    .filter(|sel| match marker_hash_finder.find(sel.as_bytes()) {
+                        Some(p) => {
+                            let rest = &sel[p + "marker#".len()..];
+                            let end = rest
+                                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                                .unwrap_or(rest.len());
+                            live.contains(&rest[..end])
+                        }
+                        None => true,
+                    })
+                    .collect();
+                if !kept.is_empty() {
+                    out.push_str(&kept.join(","));
+                    out.push_str(body);
+                }
+            } else {
+                out.push_str(selectors);
+                out.push_str(body);
+            }
+            i = j;
+            seg_start = j;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&css[seg_start..]);
+    if out.len() < css.len() {
+        svg.replace_range(cs..ce, &out);
+    }
+}
+
+/// Final render post-pass: minify the embedded `<style>` CSS. Mermaid ships minified CSS;
+/// frankenmermaid emitted pretty-printed CSS (2-space indent + a newline per line), which is
+/// fixed dead weight on EVERY diagram — including the large renders the conditional dead-CSS
+/// strips skip (size-guarded). Runs once over the ~9 KB style region only (the SVG body is
+/// untouched), so the cost is a single constant-size scan with no size guard needed. No-op when
+/// there is no `<style>` block. See [`minify_css`] for the whitespace-only contract.
+fn minify_style_block(svg: &mut String) {
+    let Some(open) = memchr::memmem::find(svg.as_bytes(), b"<style") else {
+        return;
+    };
+    let Some(gt_rel) = memchr::memchr(b'>', &svg.as_bytes()[open..]) else {
+        return;
+    };
+    let content_start = open + gt_rel + 1;
+    let Some(end_rel) = memchr::memmem::find(&svg.as_bytes()[content_start..], b"</style>") else {
+        return;
+    };
+    let content_end = content_start + end_rel;
+    let minified = minify_css(&svg[content_start..content_end]);
+    if minified.len() < content_end - content_start {
+        svg.replace_range(content_start..content_end, &minified);
+    }
+}
+
+/// Collapse non-semantic whitespace in a CSS string to mermaid-style minified form.
+///
+/// WHITESPACE-ONLY by construction: no non-whitespace byte is ever added or removed, so the
+/// CSS parses identically. A run of whitespace is dropped when an adjacent delimiter already
+/// separates the tokens (`{ } ; , :` immediately before, or `}` immediately after) and otherwise
+/// collapses to a single space. This preserves the two whitespace classes that ARE semantic in
+/// CSS — descendant combinators (`.a .b`) and value-internal spaces (`2px 8px`, `in srgb`,
+/// `var(--x) 4%`, `prop: value`) — while removing indentation, line breaks, and delimiter-hugging
+/// spaces. Spaces after `:` are intentionally kept (selectors, pseudo-elements, and declarations
+/// all share `:`, so leaving it untouched is the maximally drift-safe choice). The invariant is
+/// machine-checked: stripping ALL whitespace from the input and from the output yields identical
+/// strings (verified per-test and across every golden), proving only whitespace changed.
+fn minify_css(css: &str) -> String {
+    let b = css.as_bytes();
+    let n = b.len();
+    let mut out: Vec<u8> = Vec::with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        match b[i] {
+            b' ' | b'\t' | b'\n' | b'\r' => {
+                let mut has_nl = false;
+                while i < n {
+                    match b[i] {
+                        b' ' | b'\t' => i += 1,
+                        b'\n' | b'\r' => {
+                            has_nl = true;
+                            i += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                let prev = out.last().copied().unwrap_or(0);
+                let nxt = if i < n { b[i] } else { 0 };
+                let drop = if has_nl {
+                    prev == 0 || matches!(prev, b'{' | b'}' | b';' | b',' | b':') || nxt == b'}'
+                } else {
+                    matches!(prev, b'{' | b'}' | b';' | b',')
+                        || matches!(nxt, b'{' | b'}' | b';' | b',' | 0)
+                };
+                if !drop {
+                    out.push(b' ');
+                }
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    // A pure whitespace transformation over valid UTF-8 input is always valid UTF-8; the fallback
+    // is defensive only.
+    String::from_utf8(out).unwrap_or_else(|_| css.to_string())
+}
+
+const FULL_CSS_CACHE_CAPACITY: usize = 8;
+
+struct FullCssCacheEntry {
+    raw: Box<str>,
+    minified: Box<str>,
+}
+
+thread_local! {
+    /// Flowchart batches repeat a tiny set of theme/config combinations on each persistent worker.
+    /// Cache the directly-emitted minified stylesheet so the hot render path neither minifies nor
+    /// scans/moves the completed SVG. The bound keeps arbitrary custom themes from growing memory.
+    static FULL_CSS_CACHE: RefCell<Vec<FullCssCacheEntry>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+fn cached_minified_full_css(raw: String) -> String {
+    if let Some(hit) = FULL_CSS_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .iter()
+            .rev()
+            .find(|entry| entry.raw.as_ref() == raw)
+            .map(|entry| entry.minified.to_string())
+    }) {
+        return hit;
+    }
+
+    let minified = minify_css(&raw);
+    FULL_CSS_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() == FULL_CSS_CACHE_CAPACITY {
+            cache.remove(0);
+        }
+        cache.push(FullCssCacheEntry {
+            raw: raw.into_boxed_str(),
+            minified: minified.clone().into_boxed_str(),
+        });
+    });
+    minified
+}
+
+const CSS_POST_PASS_CACHE_CAPACITY: usize = 32;
+
+struct CssPostPassCacheEntry {
+    raw_css: Box<str>,
+    state_used: bool,
+    accent_mask: u16,
+    body_var_mask: u16,
+    live_marker_mask: u16,
+    processed_css: Box<str>,
+}
+
+thread_local! {
+    /// A render thread usually sees only a handful of theme/config/feature combinations. Keep the
+    /// cache thread-local so the hot path needs no lock, and bound it so custom themes cannot grow
+    /// process memory without limit.
+    static CSS_POST_PASS_CACHE: RefCell<Vec<CssPostPassCacheEntry>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+fn style_content_bounds(svg: &str) -> Option<(usize, usize)> {
+    let open = memchr::memmem::find(svg.as_bytes(), b"<style")?;
+    let gt = memchr::memchr(b'>', &svg.as_bytes()[open..])?;
+    let content_start = open + gt + 1;
+    let end = memchr::memmem::find(&svg.as_bytes()[content_start..], b"</style>")?;
+    Some((content_start, content_start + end))
+}
+
+fn bool_mask(flags: &[bool]) -> u16 {
+    flags.iter().enumerate().fold(0u16, |mask, (index, used)| {
+        mask | (u16::from(*used) << index)
+    })
+}
+
+fn css_post_pass_observation(svg: &str) -> Option<(usize, usize, bool, u16, u16)> {
+    let (content_start, content_end) = style_content_bounds(svg)?;
+    let body_start = content_end + "</style>".len();
+    let body = svg.get(body_start..)?;
+    let (state_used, accent_used) = scan_body_fm_node_classes(body);
+    let body_var_used = scan_accent_var_refs(body);
+    Some((
+        content_start,
+        content_end,
+        state_used,
+        bool_mask(&accent_used),
+        bool_mask(&body_var_used),
+    ))
+}
+
+fn cached_processed_css(
+    raw_css: &str,
+    state_used: bool,
+    accent_mask: u16,
+    body_var_mask: u16,
+    live_marker_mask: u16,
+) -> Option<String> {
+    CSS_POST_PASS_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.state_used == state_used
+                    && entry.accent_mask == accent_mask
+                    && entry.body_var_mask == body_var_mask
+                    && entry.live_marker_mask == live_marker_mask
+                    && entry.raw_css.as_ref() == raw_css
+            })
+            .map(|entry| entry.processed_css.to_string())
+    })
+}
+
+fn cache_processed_css(
+    raw_css: String,
+    state_used: bool,
+    accent_mask: u16,
+    body_var_mask: u16,
+    live_marker_mask: u16,
+    processed_css: String,
+) {
+    CSS_POST_PASS_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() == CSS_POST_PASS_CACHE_CAPACITY {
+            cache.remove(0);
+        }
+        cache.push(CssPostPassCacheEntry {
+            raw_css: raw_css.into_boxed_str(),
+            state_used,
+            accent_mask,
+            body_var_mask,
+            live_marker_mask,
+            processed_css: processed_css.into_boxed_str(),
+        });
+    });
+}
+
+#[cfg(test)]
+fn clear_css_post_pass_cache() {
+    CSS_POST_PASS_CACHE.with(|cache| cache.borrow_mut().clear());
+}
+
+/// Apply the output-size post-passes, memoizing the exact transformed stylesheet for the bounded
+/// `(raw CSS, body state/accent usage, live markers)` feature key. The key is deliberately derived
+/// with the same scanners as the legacy passes; label text and geometry are absent, so separate
+/// diagrams and label-only edits can hit without risking stale CSS. Any unknown marker identity
+/// takes the legacy path.
+fn apply_output_post_passes(
+    svg: &mut String,
+    use_cache: bool,
+    known_live_marker_mask: Option<u16>,
+) {
+    if !use_cache {
+        strip_unused_state_css(svg);
+        if svg.len() <= POST_PASS_MAX_SVG_BYTES {
+            if known_live_marker_mask.is_none() {
+                let _ = strip_unused_markers(svg);
+            }
+            strip_dead_marker_css(svg);
+            minify_style_block(svg);
+        }
+        return;
+    }
+
+    // Preserve the exact large-output behavior: state stripping self-gates at this threshold and
+    // the other three passes do not run.
+    if svg.len() > POST_PASS_MAX_SVG_BYTES {
+        strip_unused_state_css(svg);
+        return;
+    }
+
+    // Marker pruning changes only <defs>; doing it first exposes the live-marker feature mask while
+    // leaving the raw stylesheet and every state/accent body observation unchanged.
+    let live_marker_mask = known_live_marker_mask.or_else(|| strip_unused_markers(svg));
+    let Some((content_start, content_end, state_used, accent_mask, body_var_mask)) =
+        css_post_pass_observation(svg)
+    else {
+        strip_unused_state_css(svg);
+        strip_dead_marker_css(svg);
+        minify_style_block(svg);
+        return;
+    };
+    let Some(live_marker_mask) = live_marker_mask else {
+        strip_unused_state_css(svg);
+        strip_dead_marker_css(svg);
+        minify_style_block(svg);
+        return;
+    };
+
+    if let Some(processed_css) = cached_processed_css(
+        &svg[content_start..content_end],
+        state_used,
+        accent_mask,
+        body_var_mask,
+        live_marker_mask,
+    ) {
+        svg.replace_range(content_start..content_end, &processed_css);
+        return;
+    }
+
+    let raw_css = svg[content_start..content_end].to_string();
+    strip_unused_state_css(svg);
+    strip_dead_marker_css(svg);
+    minify_style_block(svg);
+    let Some((processed_start, processed_end)) = style_content_bounds(svg) else {
+        return;
+    };
+    cache_processed_css(
+        raw_css,
+        state_used,
+        accent_mask,
+        body_var_mask,
+        live_marker_mask,
+        svg[processed_start..processed_end].to_string(),
+    );
+}
+
+/// The default-preset theme's edge color. The arrowhead-marker `<defs>` for this color are memoized
+/// (see [`marker_defs_body`]). Pinned to the preset by `default_edge_color_matches_preset`.
+const DEFAULT_EDGE_COLOR: &str = "#94a3b8";
+
+/// Serialize the arrowhead-marker `<defs>` children for `edge_color` EXACTLY as the per-marker
+/// `ArrowheadMarker::…(id, edge_color).to_element()` sequence (same order + `emit_fancy` gating) that
+/// both render backends add via `DefsBuilder::marker`. Byte-identical to those children because it
+/// calls the same `Element::write_to_string`.
+fn build_marker_defs_body(edge_color: &str, marker_mask: u16) -> String {
+    use crate::defs::MarkerOrient;
+    let mut s = String::new();
+    let push = |s: &mut String, bit: u16, m: ArrowheadMarker| {
+        if marker_mask & bit != 0 {
+            m.to_element().write_to_string(s);
+        }
+    };
+    push(
+        &mut s,
+        MARKER_END,
+        ArrowheadMarker::standard("arrow-end", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_FILLED,
+        ArrowheadMarker::filled("arrow-filled", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_OPEN,
+        ArrowheadMarker::open("arrow-open", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_HALF_TOP,
+        ArrowheadMarker::half_top("arrow-half-top", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_HALF_BOTTOM,
+        ArrowheadMarker::half_bottom("arrow-half-bottom", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_STICK_TOP,
+        ArrowheadMarker::stick_top("arrow-stick-top", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_STICK_BOTTOM,
+        ArrowheadMarker::stick_bottom("arrow-stick-bottom", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_START,
+        ArrowheadMarker::standard("arrow-start", edge_color)
+            .with_orient(MarkerOrient::AutoStartReverse),
+    );
+    push(
+        &mut s,
+        MARKER_START_FILLED,
+        ArrowheadMarker::filled("arrow-start-filled", edge_color)
+            .with_orient(MarkerOrient::AutoStartReverse),
+    );
+    push(
+        &mut s,
+        MARKER_CIRCLE,
+        ArrowheadMarker::circle_marker("arrow-circle", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_CROSS,
+        ArrowheadMarker::cross_marker("arrow-cross", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_DIAMOND,
+        ArrowheadMarker::diamond_marker("arrow-diamond", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_DIAMOND_OPEN,
+        ArrowheadMarker::diamond_open_marker("arrow-diamond-open", edge_color),
+    );
+    push(
+        &mut s,
+        MARKER_TRIANGLE_OPEN,
+        ArrowheadMarker::triangle_open_marker("arrow-triangle-open", edge_color),
+    );
+    // Leading `start-` is LOAD-BEARING, not styling: the cross-engine checker recognises our
+    // inheritance markers by an anchored id pattern (`(?:^|-)arrow-(?:inheritance(-open)?|
+    // triangle-open)$`), so a trailing `-start` suffix would fall outside its vocabulary and the
+    // marker would score as `unknown` even though it renders correctly. Conform to the checker's
+    // contract rather than widening the checker.
+    //
+    // A triangle is NOT symmetric under 180 degrees, so the start slot needs its own
+    // auto-start-reverse def or `orient="auto"` rotates it to point INTO the path — which the
+    // cross-engine checker rejects as invalid:inheritance:points_into_path(slot=start). This
+    // mirrors the existing arrow-start / arrow-start-filled pair. The diamonds need no such
+    // twin because a diamond looks identical either way round.
+    push(
+        &mut s,
+        MARKER_START_TRIANGLE_OPEN,
+        ArrowheadMarker::triangle_open_marker("start-arrow-triangle-open", edge_color)
+            .with_orient(MarkerOrient::AutoStartReverse),
+    );
+    s
+}
+
+/// The arrowhead-marker `<defs>` body for `(edge_color, emit_fancy)`, memoized for the default theme.
+///
+/// Building + serializing the marker set is ~1 µs (2-marker flowchart) to ~6 µs (12-marker non-
+/// flowchart) and is a pure function of `(edge_color, emit_fancy)` — a fixed per-render cost paid on
+/// every diagram. The overwhelmingly common default theme is memoized via process-global `OnceLock`s
+/// built once from the real markers (byte-identical by construction, no source drift, no unbounded
+/// cache); custom themes build fresh (rare). The returned body is streamed as one
+/// `DefsBuilder::raw_markers`, byte-identical to the per-marker children it replaces.
+fn marker_defs_body(edge_color: &str, emit_fancy: bool) -> Cow<'static, str> {
+    marker_defs_body_for_mask(
+        edge_color,
+        if emit_fancy {
+            ALL_MARKER_MASK
+        } else {
+            BASIC_MARKER_MASK
+        },
+    )
+}
+
+fn marker_defs_body_for_mask(edge_color: &str, marker_mask: u16) -> Cow<'static, str> {
+    if edge_color == DEFAULT_EDGE_COLOR {
+        static EMPTY: OnceLock<String> = OnceLock::new();
+        static END_ONLY: OnceLock<String> = OnceLock::new();
+        static OPEN_ONLY: OnceLock<String> = OnceLock::new();
+        static BASIC: OnceLock<String> = OnceLock::new();
+        static FANCY: OnceLock<String> = OnceLock::new();
+        let cell = match marker_mask {
+            0 => Some(&EMPTY),
+            MARKER_END => Some(&END_ONLY),
+            MARKER_OPEN => Some(&OPEN_ONLY),
+            BASIC_MARKER_MASK => Some(&BASIC),
+            ALL_MARKER_MASK => Some(&FANCY),
+            _ => None,
+        };
+        // Borrow the process-global memoized body instead of cloning it into a fresh `String` on
+        // every render — `DefsBuilder::raw_markers` now streams it via `push_str`, so a borrow is
+        // sufficient. Custom themes still build fresh (rare) as `Cow::Owned`.
+        if let Some(cell) = cell {
+            return Cow::Borrowed(
+                cell.get_or_init(|| build_marker_defs_body(edge_color, marker_mask))
+                    .as_str(),
+            );
+        }
+    }
+    Cow::Owned(build_marker_defs_body(edge_color, marker_mask))
 }
 
 /// Render a target-agnostic scene to SVG string with custom configuration.
@@ -379,6 +1530,116 @@ fn resolve_theme(ir: Option<&MermaidDiagramIr>, config: &SvgRenderConfig) -> The
     theme
 }
 
+/// The `.fm-cluster*` theme CSS block, captured EXACTLY as `Theme::to_svg_style` emits it. When a
+/// diagram has no clusters these selectors match no element, so stripping the block is byte-identical
+/// rendering while shrinking the fixed ~9 KB `<style>` (clusters ≈ 532 B). Kept as an exact constant
+/// so a drift (CSS edit) makes `strip_unused_theme_css` a safe NO-OP (it matches nothing → no strip),
+/// never a corruption. See docs/NEGATIVE_EVIDENCE.md (CSS dead-weight lever).
+const CLUSTER_THEME_CSS: &str = ".fm-cluster {\n  fill: var(--fm-cluster-fill);\n  stroke: var(--fm-cluster-stroke);\n  stroke-width: 1;\n  stroke-dasharray: 5 3;\n  rx: 12;\n  ry: 12;\n}\n.fm-cluster-label {\n  fill: var(--fm-cluster-label-color);\n  font-weight: 700;\n  font-size: 0.85em;\n  letter-spacing: 0.01em;\n}\n.fm-cluster-c4 {\n  fill: var(--fm-cluster-c4-fill);\n  stroke: var(--fm-cluster-c4-stroke);\n  stroke-dasharray: none;\n}\n.fm-cluster-swimlane {\n  fill: var(--fm-cluster-swimlane-fill);\n  stroke: var(--fm-cluster-swimlane-stroke);\n  stroke-dasharray: none;\n}\n";
+
+/// The special-node-shape theme CSS block (`note`/`cloud`/`cylinder`/`star`/`pentagon`), captured
+/// EXACTLY as `Theme::to_svg_style` emits it. Stripped when the diagram uses none of those shapes
+/// (the common rect/diamond/round/stadium case). Same byte-identical, safe-no-op-if-drifts contract
+/// as `CLUSTER_THEME_CSS`.
+const NODE_SHAPE_THEME_CSS: &str = ".fm-node.fm-node-shape-note path,\n.fm-node.fm-node-shape-note rect {\n  fill: var(--fm-node-fill);\n  fill: color-mix(in srgb, #fef3c7 40%, var(--fm-node-fill));\n}\n.fm-node.fm-node-shape-cloud path {\n  fill: var(--fm-node-fill);\n  fill: color-mix(in srgb, var(--fm-accent-2) 15%, var(--fm-node-fill));\n}\n.fm-node.fm-node-shape-cylinder path {\n  fill: var(--fm-node-fill);\n  fill: color-mix(in srgb, var(--fm-accent-1) 12%, var(--fm-node-fill));\n}\n.fm-node.fm-node-shape-star path,\n.fm-node.fm-node-shape-pentagon path {\n  stroke-width: 1.8;\n}\n";
+
+/// Remove the first occurrence of `block` from `css` in place. Equivalent to
+/// `*css = css.replace(block, "")` for every theme rule block here, because each is emitted EXACTLY
+/// once by `Theme::to_svg_style` (so "first occurrence" == "all occurrences"), but allocation-free:
+/// `str::replace` always heap-allocates a fresh String and copies the retained bytes into it, whereas
+/// `drain` shifts only the tail left in place. On the common flowchart (no clusters / special shapes /
+/// dashed-or-thick edges) all four blocks strip, so this turns 4 fixed-size String allocations +
+/// full-buffer copies per render into 4 tail memmoves — a pure fixed-overhead cut that matters most on
+/// the small diagrams where the ~9 KB `<style>` dominates output. A non-matching block is a no-op
+/// (search → `None`), preserving the safe-if-drifts contract of the block constants.
+///
+/// The search uses a PRECOMPUTED `memchr::memmem::Finder` (SIMD), not `str::find` nor one-shot
+/// `memmem::find`: `str::find`'s Two-Way `StrSearcher::new` needle-table setup measured ~3.3% of flowchart
+/// render across the 4 long (~300-500 B) block needles, and even one-shot `memmem::find` rebuilds a
+/// two-way `Searcher::new` (~2.5%) every call. Building one `Finder` per block ONCE (process-global
+/// `OnceLock`) moves that setup off the per-render path entirely; only the SIMD scan remains. The
+/// returned first-match byte offset is identical to `str::find`, so the `drain` is byte-identical.
+fn strip_css_block(
+    css: &mut String,
+    cell: &OnceLock<memchr::memmem::Finder<'static>>,
+    block: &'static str,
+) {
+    let finder = cell.get_or_init(|| memchr::memmem::Finder::new(block.as_bytes()));
+    if let Some(pos) = finder.find(css.as_bytes()) {
+        css.drain(pos..pos + block.len());
+    }
+}
+
+/// The `:root` cluster-only custom properties — dead when there are no clusters (they feed only the
+/// stripped cluster rules). Named so its `strip_css_block` finder can be a `OnceLock` like the others.
+const CLUSTER_VARS_THEME_CSS: &str = "  --fm-cluster-label-color: var(--fm-text-color);\n  --fm-cluster-c4-fill: var(--fm-cluster-fill);\n  --fm-cluster-c4-stroke: var(--fm-cluster-stroke);\n  --fm-cluster-swimlane-fill: var(--fm-cluster-fill);\n  --fm-cluster-swimlane-stroke: var(--fm-cluster-stroke);\n";
+
+/// Drop theme CSS rule blocks the diagram cannot use — the cluster block when there are no clusters,
+/// and the special-node-shape block when none of those shapes are present. Byte-identical rendering
+/// (the removed selectors match nothing); safe by construction (a non-matching constant is a no-op).
+fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
+    static CLUSTER_F: OnceLock<memchr::memmem::Finder<'static>> = OnceLock::new();
+    static CLUSTER_VARS_F: OnceLock<memchr::memmem::Finder<'static>> = OnceLock::new();
+    static NODE_SHAPE_F: OnceLock<memchr::memmem::Finder<'static>> = OnceLock::new();
+    static EDGE_STYLE_F: OnceLock<memchr::memmem::Finder<'static>> = OnceLock::new();
+    if !ir.is_some_and(|ir| !ir.clusters.is_empty()) {
+        strip_css_block(css, &CLUSTER_F, CLUSTER_THEME_CSS);
+        // The `:root` cluster-only custom properties feed ONLY the stripped cluster rules, so they
+        // are dead too when there are no clusters. Same exact-substring / safe-no-op contract.
+        strip_css_block(css, &CLUSTER_VARS_F, CLUSTER_VARS_THEME_CSS);
+    }
+    let has_special_shapes = ir.is_some_and(|ir| {
+        ir.nodes.iter().any(|node| {
+            matches!(
+                node.shape,
+                fm_core::NodeShape::Note
+                    | fm_core::NodeShape::Cloud
+                    | fm_core::NodeShape::Cylinder
+                    | fm_core::NodeShape::Star
+                    | fm_core::NodeShape::Pentagon
+            )
+        })
+    });
+    if !has_special_shapes {
+        strip_css_block(css, &NODE_SHAPE_F, NODE_SHAPE_THEME_CSS);
+    }
+    // `.fm-edge-dashed`/`.fm-edge-thick` style only dotted/thick arrows. The arrow lists below are
+    // copied VERBATIM from `render_edge`'s `style_class` match so detection cannot drift from the
+    // class actually emitted. `.fm-edge-back` is layout-determined (reversed edges) so it is NOT
+    // gated here — it stays in the kept tail of the block.
+    let has_dashed_or_thick = ir.is_some_and(|ir| {
+        ir.edges.iter().any(|e| {
+            matches!(
+                e.arrow,
+                fm_core::ArrowType::DottedArrow
+                    | fm_core::ArrowType::DottedOpenArrow
+                    | fm_core::ArrowType::DottedCross
+                    | fm_core::ArrowType::HalfArrowTopDotted
+                    | fm_core::ArrowType::HalfArrowBottomDotted
+                    | fm_core::ArrowType::HalfArrowTopReverseDotted
+                    | fm_core::ArrowType::HalfArrowBottomReverseDotted
+                    | fm_core::ArrowType::StickArrowTopDotted
+                    | fm_core::ArrowType::StickArrowBottomDotted
+                    | fm_core::ArrowType::StickArrowTopReverseDotted
+                    | fm_core::ArrowType::StickArrowBottomReverseDotted
+                    | fm_core::ArrowType::DottedLine
+                    | fm_core::ArrowType::DoubleDottedArrow
+                    | fm_core::ArrowType::ThickArrow
+                    | fm_core::ArrowType::DoubleThickArrow
+                    | fm_core::ArrowType::ThickLine
+            )
+        })
+    });
+    if !has_dashed_or_thick {
+        strip_css_block(css, &EDGE_STYLE_F, EDGE_STYLE_THEME_CSS);
+    }
+}
+
+/// The `.fm-edge-dashed` + `.fm-edge-thick`(+`:hover`) theme rules — captured EXACTLY as
+/// `Theme::to_svg_style` emits them — stripped when no edge uses a dotted/thick arrow. Same
+/// byte-identical, safe-no-op-if-drifts contract as the other blocks.
+const EDGE_STYLE_THEME_CSS: &str = ".fm-edge-dashed {\n  stroke-dasharray: 6 6;\n}\n.fm-edge-thick {\n  stroke-width: 2.5;\n}\n.fm-edge-thick:hover {\n  stroke-width: 3.5;\n}\n";
+
 fn render_scene_document_with_ir(
     scene: &RenderScene,
     config: &SvgRenderConfig,
@@ -403,6 +1664,12 @@ fn render_scene_document_with_ir(
         )
         .preserve_aspect_ratio("xMidYMid meet");
 
+    // Root `font-family` (inherited by every `<text>`) when the theme CSS is embedded; the
+    // per-label inline copies are gated off.
+    if config.embed_theme_css {
+        doc = doc.font_family(&config.font_family);
+    }
+
     if config.responsive {
         doc = doc.responsive();
     }
@@ -424,7 +1691,7 @@ fn render_scene_document_with_ir(
                 .x(scene.bounds.x + scene.bounds.width / 2.0)
                 .y(scene.bounds.y - 8.0)
                 .anchor(TextAnchor::Middle)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(config.font_size + 4.0)
                 .font_weight("600")
                 .fill("var(--fm-text-color, #1f2937)")
@@ -455,7 +1722,12 @@ fn render_scene_document_with_ir(
 
     let mut css = String::new();
     if config.embed_theme_css {
-        css.push_str(&theme.to_svg_style(config.shadows));
+        let mut theme_css = theme.to_svg_style(
+            config.shadows,
+            ir.is_some_and(|ir| ir.edges.iter().any(|edge| edge.label.is_some())),
+        );
+        strip_unused_theme_css(&mut theme_css, ir);
+        css.push_str(&theme_css);
     }
     if effects_enabled {
         css.push_str(&effects_css(config));
@@ -478,46 +1750,25 @@ fn render_scene_document_with_ir(
 
     let mut defs = DefsBuilder::new();
 
-    // Add standard arrowhead markers
-    defs = defs.marker(ArrowheadMarker::standard("arrow-end", &theme.colors.edge));
-    defs = defs.marker(ArrowheadMarker::filled("arrow-filled", &theme.colors.edge));
-    defs = defs.marker(ArrowheadMarker::open("arrow-open", &theme.colors.edge));
-    defs = defs.marker(ArrowheadMarker::half_top(
-        "arrow-half-top",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::half_bottom(
-        "arrow-half-bottom",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::stick_top(
-        "arrow-stick-top",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::stick_bottom(
-        "arrow-stick-bottom",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(
-        ArrowheadMarker::standard("arrow-start", &theme.colors.edge)
-            .with_orient(crate::defs::MarkerOrient::AutoStartReverse),
-    );
-    defs = defs.marker(
-        ArrowheadMarker::filled("arrow-start-filled", &theme.colors.edge)
-            .with_orient(crate::defs::MarkerOrient::AutoStartReverse),
-    );
-    defs = defs.marker(ArrowheadMarker::circle_marker(
-        "arrow-circle",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::cross_marker(
-        "arrow-cross",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::diamond_marker(
-        "arrow-diamond",
-        &theme.colors.edge,
-    ));
+    // Arrowhead markers: emit only what the diagram can reference (see
+    // `arrow_uses_only_basic_markers`). Kept identical to the legacy backend's gating so the
+    // two backends produce the same marker set for the same diagram. Without an IR
+    // (`render_scene_to_svg`) we cannot inspect arrow types, so conservatively emit the full
+    // set. Emission order is preserved, so output is byte-identical whenever a fancy arrow is
+    // present.
+    let emit_fancy_markers = ir.is_none_or(|diagram_ir| {
+        diagram_ir.diagram_type != fm_core::DiagramType::Flowchart
+            || diagram_ir
+                .edges
+                .iter()
+                .any(|edge| !arrow_uses_only_basic_markers(edge.arrow))
+    });
+    let edge_color = &theme.colors.edge;
+    // The 2- (basic) or 12-marker (fancy) arrowhead `<defs>` — a pure function of the edge color and
+    // `emit_fancy_markers`, memoized for the default theme (see `marker_defs_body`). Streamed in the
+    // markers slot so the output is byte-identical to the per-marker `.marker()` children it replaces,
+    // skipping the ~1-6 µs of Element construction + serialization rebuilt on every render.
+    defs = defs.raw_markers(marker_defs_body(edge_color, emit_fancy_markers));
 
     let mut clip_defs = Vec::new();
     let mut clip_id_counter = 0usize;
@@ -663,6 +1914,9 @@ fn map_marker_kind(kind: fm_layout::MarkerKind) -> &'static str {
         MarkerKind::Circle => "url(#arrow-circle)",
         MarkerKind::Cross => "url(#arrow-cross)",
         MarkerKind::Diamond => "url(#arrow-diamond)",
+        MarkerKind::DiamondOpen => "url(#arrow-diamond-open)",
+        MarkerKind::TriangleOpen => "url(#arrow-triangle-open)",
+        MarkerKind::TriangleOpenStart => "url(#start-arrow-triangle-open)",
         MarkerKind::Open => "url(#arrow-open)",
     }
 }
@@ -675,7 +1929,7 @@ fn render_scene_text(
     let mut elem = TextBuilder::new(&text.text)
         .x(text.x)
         .y(text.y)
-        .font_family(&config.font_family)
+        .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
         .font_size(text.font_size)
         .line_height(config.line_height)
         .anchor(map_text_align(text.align))
@@ -767,18 +2021,20 @@ fn render_source_span(ir: &MermaidDiagramIr, source: RenderSource) -> Option<Spa
     (!span.is_unknown()).then_some(span)
 }
 
-fn apply_span_metadata(mut elem: Element, span: Span) -> Element {
+fn apply_span_metadata(elem: Element, span: Span) -> Element {
     if span.is_unknown() {
         return elem;
     }
 
-    elem = elem.data("fm-source-span", &span.compact_display());
-    elem = elem.data("fm-source-start-line", &span.start.line.to_string());
-    elem = elem.data("fm-source-start-col", &span.start.col.to_string());
-    elem = elem.data("fm-source-start-byte", &span.start.byte.to_string());
-    elem = elem.data("fm-source-end-line", &span.end.line.to_string());
-    elem = elem.data("fm-source-end-col", &span.end.col.to_string());
-    elem.data("fm-source-end-byte", &span.end.byte.to_string())
+    // Emit only the compact `data-fm-source-span` attribute, which already encodes all six
+    // values (`{start.line}:{start.col}-{end.line}:{end.col}@{start.byte}-{end.byte}`, see
+    // `Span::compact_display`). The six former `data-fm-source-{start,end}-{line,col,byte}`
+    // attributes duplicated those exact values, had zero consumers anywhere in the tree, and
+    // — being long repeated names across every element — dominated source-span output bytes.
+    // Source spans are off by default, so this is byte-identical for the default config and
+    // roughly halves render output (and time) when `include_source_spans` is enabled.
+    // Static name + owned value: no `format!("data-…")` name alloc and no value clone (vs `data`).
+    elem.attr_owned("data-fm-source-span", span.compact_display())
 }
 
 fn register_clip_path(
@@ -914,17 +2170,173 @@ fn clamp_unit_interval(value: f32) -> f32 {
     value.clamp(0.0, 1.0)
 }
 
-fn sanitize_css_token(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
+/// The substring-keyword flags a single node class can raise (highlight/inactive/dashed/double
+/// border). Exact-match keywords (`c4-external`, `block-beta`, …) are handled by the caller.
+#[derive(Default)]
+struct NodeClassKeywords {
+    highlighted: bool,
+    inactive: bool,
+    dashed_border: bool,
+    double_border: bool,
+}
+
+/// Whether `needle` (lowercase ASCII) equals `haystack[at..]`'s prefix, case-insensitively.
+#[inline]
+fn matches_ci_at(haystack: &[u8], at: usize, needle: &[u8]) -> bool {
+    haystack.len() - at >= needle.len()
+        && haystack[at..at + needle.len()]
+            .iter()
+            .zip(needle)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
+/// Single-pass ASCII-case-insensitive keyword scan for one node class. Replaces the ~11 separate
+/// `contains_ascii_ci` substring scans that ran on EVERY styled node (each a full window sweep) with
+/// one pass over the class bytes, dispatching on the lowercased first byte (`b | 0x20`) — a 1-level
+/// trie / hand-rolled Aho-Corasick root — so a keyword's full compare only runs at a candidate start
+/// byte. Byte-identical to OR-ing the individual `to_ascii_lowercase().contains(needle)` checks it
+/// replaces: `b | 0x20` maps both cases of any ASCII letter to its lowercase, so every position that
+/// the old per-needle scan would match is routed to that needle's `matches_ci_at`, which re-verifies
+/// the full substring (no false positives from the loose first-byte dispatch).
+fn scan_node_class_keywords(class: &str) -> NodeClassKeywords {
+    scan_class_keywords_and_clean(class).0
+}
+
+/// One pass over `class` that both detects the state keywords (as [`scan_node_class_keywords`]) AND
+/// reports whether the class is an already-valid lowercase CSS token (the `all(clean)` fast-path check
+/// [`write_sanitized_css_token_into`] does). The node-class fast paths call this once and reuse both
+/// results, replacing TWO independent byte scans of the same string with one — on classed nodes
+/// (timeline/journey/class/…) each node has 1-2 user classes, so this halves the per-class scan work.
+/// Byte-identical: the keyword arms are unchanged and `clean` matches `write_sanitized`'s predicate.
+/// Per-byte gate for [`scan_class_keywords_and_clean`], indexed by the raw byte. Bit 0 (`SCAN_NOT_CLEAN`)
+/// is set when the byte is NOT a valid lowercase CSS token char (`[a-z0-9-_]`); bit 1
+/// (`SCAN_KW_CANDIDATE`) is set when the byte's lowercased form is a keyword START byte (`h s a f i m d b`,
+/// either case). The overwhelmingly common class byte (a clean lowercase letter that starts no keyword,
+/// e.g. every byte of `journey-actor`/`timeline-section-…`) has flags `0`, so the per-byte work collapses
+/// to one table load + two predicted-not-taken branches — skipping BOTH the 4-way clean OR-chain and the
+/// `match raw|0x20` keyword dispatch. Bit-identical to the inline predicates it replaces.
+const SCAN_NOT_CLEAN: u8 = 1;
+const SCAN_KW_CANDIDATE: u8 = 2;
+const CLASS_SCAN_GATE: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        let b = i as u8;
+        if !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_') {
+            t[i] |= SCAN_NOT_CLEAN;
+        }
+        match b | 0x20 {
+            b'h' | b's' | b'a' | b'f' | b'i' | b'm' | b'd' | b'b' => t[i] |= SCAN_KW_CANDIDATE,
+            _ => {}
+        }
+        i += 1;
+    }
+    t
+};
+
+fn scan_class_keywords_and_clean(class: &str) -> (NodeClassKeywords, bool) {
+    let b = class.as_bytes();
+    let mut f = NodeClassKeywords::default();
+    let mut clean = true;
+    for i in 0..b.len() {
+        let raw = b[i];
+        let gate = CLASS_SCAN_GATE[raw as usize];
+        if gate & SCAN_NOT_CLEAN != 0 {
+            clean = false;
+        }
+        // Only keyword-START bytes (`h s a f i m d b`) can begin a state keyword; every other byte would
+        // hit the old `match`'s `_ => {}`, so gate the whole dispatch behind the candidate bit.
+        if gate & SCAN_KW_CANDIDATE == 0 {
+            continue;
+        }
+        match raw | 0x20 {
+            b'h' if matches_ci_at(b, i, b"highlight") => {
+                f.highlighted = true;
             }
-        })
-        .collect()
+            b's' if matches_ci_at(b, i, b"selected") => {
+                f.highlighted = true;
+            }
+            b'a' if matches_ci_at(b, i, b"active") => {
+                f.highlighted = true;
+            }
+            b'f' if matches_ci_at(b, i, b"focus") => {
+                f.highlighted = true;
+            }
+            b'i' => {
+                if matches_ci_at(b, i, b"important") {
+                    f.highlighted = true;
+                }
+                if matches_ci_at(b, i, b"inactive") {
+                    f.inactive = true;
+                }
+            }
+            b'm' if matches_ci_at(b, i, b"muted") => {
+                f.inactive = true;
+            }
+            b'd' => {
+                if matches_ci_at(b, i, b"dim") || matches_ci_at(b, i, b"disabled") {
+                    f.inactive = true;
+                }
+                if matches_ci_at(b, i, b"dashed-border") {
+                    f.dashed_border = true;
+                }
+                if matches_ci_at(b, i, b"double-border") {
+                    f.double_border = true;
+                }
+            }
+            b'b' => {
+                if matches_ci_at(b, i, b"border-dashed") {
+                    f.dashed_border = true;
+                }
+                if matches_ci_at(b, i, b"border-double") {
+                    f.double_border = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    (f, clean)
+}
+
+/// Write the CSS-sanitized form of `value` straight into `buf` — the alloc-free core of
+/// [`sanitize_css_token`]. Used by the node-class fast paths (`simple_node_user_class_suffix` etc.) which
+/// only need to append the token to a suffix buffer, so they skip the throwaway per-class `String`
+/// (`sanitize_css_token` was ~4.5-4.9% of classed-node render — mindmap/git/styled — almost entirely the
+/// `collect()` allocation). Byte-identical: same per-char mapping in the same order.
+fn write_sanitized_css_token_into(buf: &mut String, value: &str) {
+    // Bulk-copy the already-clean PREFIX, then per-`char` map only the tail. Every byte before the first
+    // non-`[a-z0-9-_]` byte maps to itself (`to_ascii_lowercase` is the identity on lowercase alnum / `-` /
+    // `_`, and each is kept), so it can go in one `push_str` instead of a per-`char` decode+map+push. A
+    // fully-clean token (`kanban-card`, `timeline-section-0`, …) copies in one shot and returns; a
+    // capitalised user class (`journey-actor-Actor1`, `:::MyClass`) — the common non-clean case — still
+    // copies its long clean run in bulk and only decodes the short dirty tail. `position` scans exactly the
+    // clean prefix the old `.all` did before it short-circuited, so no extra work on either case.
+    // Byte-identical to the old fast-path-then-full-char-loop. `clean_len` lands on an ASCII byte boundary
+    // (every clean char is single-byte), so both slices are valid UTF-8.
+    let clean_len = value
+        .bytes()
+        .position(|b| !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'))
+        .unwrap_or(value.len());
+    buf.push_str(&value[..clean_len]);
+    if clean_len == value.len() {
+        return;
+    }
+    for ch in value[clean_len..].chars() {
+        let mapped = if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            ch.to_ascii_lowercase()
+        } else {
+            '-'
+        };
+        buf.push(mapped);
+    }
+}
+
+fn sanitize_css_token(value: &str) -> String {
+    // Each source char maps to exactly one output char whose byte length never exceeds the source's
+    // (ASCII lowercase / a 1-byte `-`), so `value.len()` is a safe no-realloc capacity.
+    let mut token = String::with_capacity(value.len());
+    write_sanitized_css_token_into(&mut token, value);
+    token
 }
 
 pub(crate) fn sanitize_svg_paint(value: &str) -> Option<String> {
@@ -939,7 +2351,7 @@ pub(crate) fn sanitize_svg_paint(value: &str) -> Option<String> {
     }
 
     if trimmed.starts_with('#')
-        && trimmed[1..].chars().all(|ch| ch.is_ascii_hexdigit())
+        && trimmed[1..].bytes().all(|b| b.is_ascii_hexdigit())
         && matches!(trimmed.len(), 4 | 5 | 7 | 9)
     {
         return Some(trimmed.to_string());
@@ -1263,6 +2675,9 @@ fn resolve_edge_inline_style(ir: &MermaidDiagramIr, edge_index: usize) -> Option
     {
         return style_map_to_css(&style.properties);
     }
+    if ir.style_refs.is_empty() {
+        return None;
+    }
 
     let mut merged = BTreeMap::new();
     for sr in &ir.style_refs {
@@ -1281,14 +2696,14 @@ fn resolve_edge_inline_style(ir: &MermaidDiagramIr, edge_index: usize) -> Option
     style_map_to_css(&merged)
 }
 
-fn truncate_label(label: &str, max_chars: Option<usize>) -> String {
+fn truncate_label(label: &str, max_chars: Option<usize>) -> Cow<'_, str> {
     let Some(limit) = max_chars else {
-        return label.to_string();
+        return Cow::Borrowed(label);
     };
     let mut chars = label.chars();
     let needs_truncation = chars.clone().count() > limit;
     if !needs_truncation {
-        return label.to_string();
+        return Cow::Borrowed(label);
     }
     let mut text = String::new();
     for _ in 0..limit.saturating_sub(1) {
@@ -1298,7 +2713,7 @@ fn truncate_label(label: &str, max_chars: Option<usize>) -> String {
         text.push(ch);
     }
     text.push('…');
-    text
+    Cow::Owned(text)
 }
 
 fn detail_tier_name(tier: RenderDetailTier) -> &'static str {
@@ -1392,6 +2807,50 @@ fn node_gradient_for(config: &SvgRenderConfig, theme: &Theme) -> Option<Gradient
         NodeGradientStyle::Radial => Gradient::radial("fm-node-gradient", 0.5, 0.45, 0.8, stops),
     };
     Some(gradient)
+}
+
+/// The default-preset theme's node fill + background — the memo key for [`node_gradient_svg`].
+/// Pinned by `default_node_gradient_colors_match_preset`.
+const DEFAULT_NODE_FILL: &str = "#ffffff";
+const DEFAULT_NODE_BG: &str = "#fafbfc";
+
+/// The node-gradient `<defs>` fragment for `(config, theme)` — the serialized `<linearGradient>`/
+/// `<radialGradient>` that [`node_gradient_for`] builds — memoized for the default theme + style.
+///
+/// Building the 3-stop `Gradient` (Vec + 4-element tree) and serializing it is ~1.1 µs and is a pure
+/// function of `(node_gradient_style, node_fill, background)` — a fixed per-render cost on every
+/// `node_gradients` render (the default, so every flowchart + most types). The overwhelmingly common
+/// default `LinearVertical` + default theme is memoized via a process-global `OnceLock` built from the
+/// real `node_gradient_for` output (byte-identical, no drift); other themes/styles build fresh.
+/// Returns `None` when gradients are off, matching the former `if let Some(gradient)` skip. Streamed as
+/// one [`DefsBuilder::raw_gradients`], byte-identical to the `.gradient(..)` child it replaces.
+fn node_gradient_svg(config: &SvgRenderConfig, theme: &Theme) -> Option<Cow<'static, str>> {
+    if !config.node_gradients {
+        return None;
+    }
+    if matches!(
+        config.node_gradient_style,
+        NodeGradientStyle::LinearVertical
+    ) && theme.colors.node_fill == DEFAULT_NODE_FILL
+        && theme.colors.background == DEFAULT_NODE_BG
+    {
+        static DEFAULT_GRAD: OnceLock<String> = OnceLock::new();
+        // Borrow the memoized default gradient rather than cloning it every render — `raw_gradients`
+        // streams it via `push_str`. Custom gradients build fresh as `Cow::Owned`.
+        return Some(Cow::Borrowed(
+            DEFAULT_GRAD
+                .get_or_init(|| {
+                    node_gradient_for(config, theme)
+                        .expect("gradient present when node_gradients is on")
+                        .to_element()
+                        .render()
+                })
+                .as_str(),
+        ));
+    }
+    Some(Cow::Owned(
+        node_gradient_for(config, theme)?.to_element().render(),
+    ))
 }
 
 fn effects_css(config: &SvgRenderConfig) -> String {
@@ -1544,10 +3003,401 @@ fn edge_animation_order(edge_path: &LayoutEdgePath, ir: &MermaidDiagramIr) -> us
 }
 
 /// Render a computed layout to SVG.
+/// Whether an edge arrow type renders using only the basic arrowhead markers
+/// (`arrow-end` / `arrow-open`) or no marker at all. When every edge in a diagram is basic,
+/// `<defs>` can omit the ten "fancy" markers (half/stick/thick/circle/cross/diamond/double).
+/// This list must stay a subset of the arrow types in `render_edge`'s marker match that map
+/// only to `arrow-end`, `arrow-open`, or no marker — any arrow type not listed here is
+/// treated as fancy (the safe default, never dropping a referenced marker).
+fn arrow_uses_only_basic_markers(arrow: fm_core::ArrowType) -> bool {
+    use fm_core::ArrowType;
+    matches!(
+        arrow,
+        ArrowType::Line
+            | ArrowType::ThickLine
+            | ArrowType::Arrow
+            | ArrowType::OpenArrow
+            | ArrowType::DottedArrow
+            | ArrowType::DottedOpenArrow
+            | ArrowType::DottedLine
+    )
+}
+
+fn arrow_marker_mask(arrow: fm_core::ArrowType) -> u16 {
+    use fm_core::ArrowType;
+    match arrow {
+        ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine => 0,
+        ArrowType::Arrow | ArrowType::DottedArrow => MARKER_END,
+        ArrowType::OpenArrow | ArrowType::DottedOpenArrow => MARKER_OPEN,
+        ArrowType::HalfArrowTop
+        | ArrowType::HalfArrowBottomReverse
+        | ArrowType::HalfArrowTopDotted
+        | ArrowType::HalfArrowBottomReverseDotted => MARKER_HALF_TOP,
+        ArrowType::HalfArrowBottom
+        | ArrowType::HalfArrowTopReverse
+        | ArrowType::HalfArrowBottomDotted
+        | ArrowType::HalfArrowTopReverseDotted => MARKER_HALF_BOTTOM,
+        ArrowType::StickArrowTop
+        | ArrowType::StickArrowBottomReverse
+        | ArrowType::StickArrowTopDotted
+        | ArrowType::StickArrowBottomReverseDotted => MARKER_STICK_TOP,
+        ArrowType::StickArrowBottom
+        | ArrowType::StickArrowTopReverse
+        | ArrowType::StickArrowBottomDotted
+        | ArrowType::StickArrowTopReverseDotted => MARKER_STICK_BOTTOM,
+        ArrowType::ThickArrow => MARKER_FILLED,
+        ArrowType::Circle => MARKER_CIRCLE,
+        ArrowType::Cross | ArrowType::DottedCross => MARKER_CROSS,
+        ArrowType::DoubleArrow | ArrowType::DoubleDottedArrow => MARKER_START | MARKER_END,
+        ArrowType::DoubleThickArrow => MARKER_START_FILLED | MARKER_FILLED,
+        ArrowType::Aggregation | ArrowType::AggregationReverse => MARKER_DIAMOND_OPEN,
+        ArrowType::Composition | ArrowType::CompositionReverse => MARKER_DIAMOND,
+        ArrowType::Inheritance => MARKER_START_TRIANGLE_OPEN,
+        ArrowType::InheritanceReverse => MARKER_TRIANGLE_OPEN,
+    }
+}
+
+/// Flowchart layout edges are the complete marker source, so derive the exact live set before SVG
+/// serialization. Other diagram families retain the drift-proof output scan because their renderers
+/// may synthesize markers outside `ir.edges`.
+fn flowchart_marker_mask(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Option<u16> {
+    (ir.diagram_type == fm_core::DiagramType::Flowchart).then(|| {
+        layout.edges.iter().fold(0, |mask, edge_path| {
+            let edge_mask = if edge_path.reversed {
+                MARKER_OPEN
+            } else {
+                ir.edges
+                    .get(edge_path.edge_index)
+                    .map_or(MARKER_END, |edge| arrow_marker_mask(edge.arrow))
+            };
+            mask | edge_mask
+        })
+    })
+}
+
+/// Serial node-render loop, shared by the WASM path and the below-threshold native path (and inlined
+/// per-chunk by the parallel native path). Factored out so all three render byte-identically.
+#[allow(clippy::too_many_arguments)]
+fn render_nodes_serial(
+    out: &mut String,
+    nodes: &[LayoutNodeBox],
+    ir: &MermaidDiagramIr,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+    detail: RenderDetailProfile,
+    colors: &ThemeColors,
+    emit_classdef_classes: bool,
+    centrality_map: &HashMap<usize, CentralityTier>,
+) {
+    for node_box in nodes {
+        // Render straight into `out` — the fast path streams the node fragment in place (no per-node
+        // fragment `String`); non-fast nodes delegate to `render_node`.
+        render_node_into(
+            out,
+            node_box,
+            ir,
+            offset_x,
+            offset_y,
+            config,
+            detail,
+            colors,
+            emit_classdef_classes,
+            centrality_map,
+        );
+    }
+}
+
+/// Serial edge-render loop (skips bundled edges, which are rendered by the later bundle passes),
+/// shared by the WASM path, the below-threshold native path, and the per-chunk parallel native path so
+/// all render byte-identically.
+fn render_edges_serial(
+    out: &mut String,
+    edges: &[LayoutEdgePath],
+    context: &EdgeRenderContext<'_>,
+) {
+    for edge_path in edges {
+        if edge_path.bundled {
+            continue;
+        }
+        render_edge_into(out, edge_path, context);
+    }
+}
+
+fn batch_fragment_globals_match(
+    reuse: &SvgBatchFragmentReuse<'_>,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    detail: RenderDetailProfile,
+    offset_x: f32,
+    offset_y: f32,
+) -> bool {
+    let (Some(previous_ir), Some(previous_layout), Some(previous)) =
+        (reuse.previous_ir, reuse.previous_layout, reuse.previous)
+    else {
+        return false;
+    };
+    previous.active
+        && previous.detail == Some(detail)
+        && previous.offset_x_bits == offset_x.to_bits()
+        && previous.offset_y_bits == offset_y.to_bits()
+        && previous_ir.diagram_type == DiagramType::Flowchart
+        && ir.diagram_type == DiagramType::Flowchart
+        && previous_ir.direction == ir.direction
+        && previous_ir.meta.theme_overrides == ir.meta.theme_overrides
+        && previous_ir.style_refs == ir.style_refs
+        && previous_ir.style_defs == ir.style_defs
+        && previous_ir.label_markup == ir.label_markup
+        && previous_layout.extensions.node_centrality == layout.extensions.node_centrality
+}
+
+fn certified_batch_prefix_match<'a>(
+    reuse: &'a SvgBatchFragmentReuse<'_>,
+    layout: &DiagramLayout,
+    detail: RenderDetailProfile,
+    offset_x: f32,
+    offset_y: f32,
+) -> Option<&'a CertifiedSvgBatchPrefix> {
+    let previous = reuse.previous?;
+    let previous_layout = reuse.previous_layout?;
+    let previous_prefix = reuse.previous_certified_prefix?;
+    let current_prefix = reuse.current_certified_prefix?;
+    let same_identity = Arc::ptr_eq(&previous_prefix.identity, &current_prefix.identity)
+        || previous_prefix.identity == current_prefix.identity;
+    (same_identity
+        && previous_prefix.node_count == current_prefix.node_count
+        && previous_prefix.edge_count == current_prefix.edge_count
+        && previous.active
+        && previous.detail == Some(detail)
+        && previous.offset_x_bits == offset_x.to_bits()
+        && previous.offset_y_bits == offset_y.to_bits()
+        && previous_layout.extensions.node_centrality == layout.extensions.node_centrality)
+        .then_some(current_prefix)
+}
+
+fn node_label_matches(
+    previous_ir: &MermaidDiagramIr,
+    previous_node: &fm_core::IrNode,
+    ir: &MermaidDiagramIr,
+    node: &fm_core::IrNode,
+) -> bool {
+    previous_node.label.map(|label| label.0) == node.label.map(|label| label.0)
+        && previous_node
+            .label
+            .and_then(|label| previous_ir.labels.get(label.0))
+            == node.label.and_then(|label| ir.labels.get(label.0))
+}
+
+fn reusable_node_prefix_len(
+    reuse: &SvgBatchFragmentReuse<'_>,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    detail: RenderDetailProfile,
+    offset_x: f32,
+    offset_y: f32,
+) -> usize {
+    if let Some(prefix) = certified_batch_prefix_match(reuse, layout, detail, offset_x, offset_y) {
+        if reuse.certified_geometry_prefix {
+            return prefix.node_count.min(layout.nodes.len());
+        }
+        let previous_layout = reuse.previous_layout.expect("certified previous layout");
+        return previous_layout
+            .nodes
+            .iter()
+            .zip(&layout.nodes)
+            .take(prefix.node_count)
+            .take_while(|(previous_box, node_box)| previous_box == node_box)
+            .count();
+    }
+    if !batch_fragment_globals_match(reuse, ir, layout, detail, offset_x, offset_y) {
+        return 0;
+    }
+    let previous_ir = reuse.previous_ir.expect("matched previous IR");
+    let previous_layout = reuse.previous_layout.expect("matched previous layout");
+    previous_layout
+        .nodes
+        .iter()
+        .zip(&layout.nodes)
+        .take_while(|(previous_box, node_box)| {
+            if previous_box != node_box || previous_box.node_index != node_box.node_index {
+                return false;
+            }
+            let Some(previous_node) = previous_ir.nodes.get(previous_box.node_index) else {
+                return false;
+            };
+            let Some(node) = ir.nodes.get(node_box.node_index) else {
+                return false;
+            };
+            previous_node == node && node_label_matches(previous_ir, previous_node, ir, node)
+        })
+        .count()
+}
+
+fn reusable_edge_prefix_len(
+    reuse: &SvgBatchFragmentReuse<'_>,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    detail: RenderDetailProfile,
+    offset_x: f32,
+    offset_y: f32,
+) -> usize {
+    if let Some(prefix) = certified_batch_prefix_match(reuse, layout, detail, offset_x, offset_y) {
+        if reuse.certified_geometry_prefix {
+            return prefix.edge_count.min(layout.edges.len());
+        }
+        let previous_layout = reuse.previous_layout.expect("certified previous layout");
+        return previous_layout
+            .edges
+            .iter()
+            .zip(&layout.edges)
+            .take(prefix.edge_count)
+            .take_while(|(previous_path, edge_path)| previous_path == edge_path)
+            .count();
+    }
+    if !batch_fragment_globals_match(reuse, ir, layout, detail, offset_x, offset_y) {
+        return 0;
+    }
+    let previous_ir = reuse.previous_ir.expect("matched previous IR");
+    let previous_layout = reuse.previous_layout.expect("matched previous layout");
+    previous_layout
+        .edges
+        .iter()
+        .zip(&layout.edges)
+        .take_while(|(previous_path, edge_path)| {
+            if previous_path != edge_path || previous_path.edge_index != edge_path.edge_index {
+                return false;
+            }
+            let Some(previous_edge) = previous_ir.edges.get(previous_path.edge_index) else {
+                return false;
+            };
+            let Some(edge) = ir.edges.get(edge_path.edge_index) else {
+                return false;
+            };
+            if previous_edge != edge
+                || previous_edge
+                    .label
+                    .and_then(|label| previous_ir.labels.get(label.0))
+                    != edge.label.and_then(|label| ir.labels.get(label.0))
+            {
+                return false;
+            }
+            edge_endpoint_accessible_labels(previous_edge, previous_ir, None)
+                == edge_endpoint_accessible_labels(edge, ir, None)
+        })
+        .count()
+}
+
+fn render_edges_with_batch_reuse(
+    out: &mut String,
+    edges: &[LayoutEdgePath],
+    context: &EdgeRenderContext<'_>,
+    layout: &DiagramLayout,
+    reuse: &mut SvgBatchFragmentReuse<'_>,
+) {
+    let common = reusable_edge_prefix_len(
+        reuse,
+        context.ir,
+        layout,
+        context.detail,
+        context.offset_x,
+        context.offset_y,
+    )
+    .min(
+        reuse
+            .previous
+            .map_or(0, |previous| previous.edge_ends.len()),
+    );
+    let prefix_end = common
+        .checked_sub(1)
+        .and_then(|index| reuse.previous?.edge_ends.get(index).copied())
+        .unwrap_or(0);
+    reuse.next.reused_edges = common;
+    let expected = edges.len().saturating_mul(480);
+    reuse.next.edge_svg.reserve(expected);
+    reuse.next.edge_ends.reserve(edges.len());
+    if let Some(previous) = reuse.previous {
+        reuse
+            .next
+            .edge_svg
+            .push_str(&previous.edge_svg[..prefix_end.min(previous.edge_svg.len())]);
+        reuse
+            .next
+            .edge_ends
+            .extend_from_slice(&previous.edge_ends[..common]);
+    }
+    for edge_path in &edges[common..] {
+        if !edge_path.bundled {
+            render_edge_into(&mut reuse.next.edge_svg, edge_path, context);
+        }
+        reuse.next.edge_ends.push(reuse.next.edge_svg.len());
+    }
+    out.push_str(&reuse.next.edge_svg);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_nodes_with_batch_reuse(
+    out: &mut String,
+    nodes: &[LayoutNodeBox],
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+    detail: RenderDetailProfile,
+    colors: &ThemeColors,
+    emit_classdef_classes: bool,
+    centrality_map: &HashMap<usize, CentralityTier>,
+    reuse: &mut SvgBatchFragmentReuse<'_>,
+) {
+    let common = reusable_node_prefix_len(reuse, ir, layout, detail, offset_x, offset_y).min(
+        reuse
+            .previous
+            .map_or(0, |previous| previous.node_ends.len()),
+    );
+    let prefix_end = common
+        .checked_sub(1)
+        .and_then(|index| reuse.previous?.node_ends.get(index).copied())
+        .unwrap_or(0);
+    reuse.next.reused_nodes = common;
+    let expected = nodes.len().saturating_mul(640);
+    reuse.next.node_svg.reserve(expected);
+    reuse.next.node_ends.reserve(nodes.len());
+    if let Some(previous) = reuse.previous {
+        reuse
+            .next
+            .node_svg
+            .push_str(&previous.node_svg[..prefix_end.min(previous.node_svg.len())]);
+        reuse
+            .next
+            .node_ends
+            .extend_from_slice(&previous.node_ends[..common]);
+    }
+    for node_box in &nodes[common..] {
+        render_node_into(
+            &mut reuse.next.node_svg,
+            node_box,
+            ir,
+            offset_x,
+            offset_y,
+            config,
+            detail,
+            colors,
+            emit_classdef_classes,
+            centrality_map,
+        );
+        reuse.next.node_ends.push(reuse.next.node_svg.len());
+    }
+    out.push_str(&reuse.next.node_svg);
+}
+
 fn render_layout_to_svg(
     layout: &DiagramLayout,
     ir: &MermaidDiagramIr,
     config: &SvgRenderConfig,
+    known_live_marker_mask: Option<u16>,
+    direct_minified_css: bool,
+    cache_direct_minified_css: bool,
+    mut batch_reuse: Option<&mut SvgBatchFragmentReuse<'_>>,
 ) -> String {
     let padding = config.padding;
     let legend_enabled = is_c4_legend_enabled(ir);
@@ -1582,6 +3432,12 @@ fn render_layout_to_svg(
         .viewbox(0.0, 0.0, width, height)
         .preserve_aspect_ratio("xMidYMid meet");
 
+    // With the theme CSS embedded, set `font-family` once on the root so every `<text>` inherits
+    // it — the per-label inline copies are gated off (see `font_family_unless_embedded_css`).
+    if config.embed_theme_css {
+        doc = doc.font_family(&config.font_family);
+    }
+
     if config.responsive {
         doc = doc.responsive();
     }
@@ -1611,6 +3467,10 @@ fn render_layout_to_svg(
     let theme = resolve_theme(Some(ir), config);
     let classdef_css = collect_classdef_css(ir);
     let emit_classdef_classes = !classdef_css.is_empty();
+    let accessible_node_labels = config
+        .a11y
+        .text_alternatives
+        .then(|| build_accessible_node_label_cache(ir));
     let effects_enabled = config.node_gradients
         || config.glow_enabled
         || clamp_unit_interval(config.inactive_opacity) < 0.999
@@ -1619,49 +3479,36 @@ fn render_layout_to_svg(
     // Build defs section
     let mut defs = DefsBuilder::new();
 
-    // Add standard arrowhead markers
-    defs = defs.marker(ArrowheadMarker::standard("arrow-end", &theme.colors.edge));
-    defs = defs.marker(ArrowheadMarker::filled("arrow-filled", &theme.colors.edge));
-    defs = defs.marker(ArrowheadMarker::open("arrow-open", &theme.colors.edge));
-    defs = defs.marker(ArrowheadMarker::half_top(
-        "arrow-half-top",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::half_bottom(
-        "arrow-half-bottom",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::stick_top(
-        "arrow-stick-top",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::stick_bottom(
-        "arrow-stick-bottom",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(
-        ArrowheadMarker::standard("arrow-start", &theme.colors.edge)
-            .with_orient(crate::defs::MarkerOrient::AutoStartReverse),
-    );
-    defs = defs.marker(
-        ArrowheadMarker::filled("arrow-start-filled", &theme.colors.edge)
-            .with_orient(crate::defs::MarkerOrient::AutoStartReverse),
-    );
-    defs = defs.marker(ArrowheadMarker::circle_marker(
-        "arrow-circle",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::cross_marker(
-        "arrow-cross",
-        &theme.colors.edge,
-    ));
-    defs = defs.marker(ArrowheadMarker::diamond_marker(
-        "arrow-diamond",
-        &theme.colors.edge,
+    // Arrowhead markers: emit only what the diagram can reference, like Mermaid.js (which
+    // never emits unused markers). Every edge whose arrow uses one of the basic markers
+    // (`arrow-end` / `arrow-open` / none) — and back-edges always use `arrow-open` — needs
+    // only those two; a single "fancy" arrow (half/stick/thick/circle/cross/diamond/double)
+    // falls back to the complete set so a referenced marker can never be missing. Emission
+    // order is preserved, so output is byte-identical for any diagram that uses a fancy
+    // arrow, and typical flowcharts shed the ~10 unused marker definitions.
+    // Restricted to flowcharts: there, edges (`ir.edges`) are the only marker source, so the
+    // basic-arrow check is complete. Other diagram types (sequence, etc.) may reference
+    // markers outside `ir.edges`, so they keep the full set.
+    let emit_fancy_markers = ir.diagram_type != fm_core::DiagramType::Flowchart
+        || ir
+            .edges
+            .iter()
+            .any(|edge| !arrow_uses_only_basic_markers(edge.arrow));
+    let edge_color = &theme.colors.edge;
+    // The 2- (basic) or 12-marker (fancy) arrowhead `<defs>` — a pure function of the edge color and
+    // `emit_fancy_markers`, memoized for the default theme (see `marker_defs_body`). Streamed in the
+    // markers slot so the output is byte-identical to the per-marker `.marker()` children it replaces,
+    // skipping the ~1-6 µs of Element construction + serialization rebuilt on every render.
+    defs = defs.raw_markers(known_live_marker_mask.map_or_else(
+        || marker_defs_body(edge_color, emit_fancy_markers),
+        |mask| marker_defs_body_for_mask(edge_color, mask),
     ));
 
-    // Add drop shadow filter if enabled
-    if detail.enable_shadows {
+    // Add drop shadow filter if enabled. Skip the `<filter id="drop-shadow">` def when the theme
+    // CSS is embedded: its only referrer is the inline `filter="url(#drop-shadow)"` on node shapes,
+    // which is gated off in that case (the CSS `filter: drop-shadow(…)` renders the shadow), so the
+    // def would be dead output. Attribute-driven exports (`embed_theme_css = false`) keep both.
+    if detail.enable_shadows && !config.embed_theme_css {
         if config.shadow_color.trim().is_empty() {
             defs = defs.filter(Filter::drop_shadow(
                 "drop-shadow",
@@ -1691,15 +3538,21 @@ fn render_layout_to_svg(
             &config.glow_color,
         ));
     }
-    if let Some(gradient) = node_gradient_for(config, &theme) {
-        defs = defs.gradient(gradient);
+    // Memoized node-gradient `<defs>` (default theme + style built once; ~1.1 µs build skipped per
+    // render), streamed in the gradients slot — byte-identical to `defs.gradient(node_gradient_for(..))`.
+    if let Some(grad_svg) = node_gradient_svg(config, &theme) {
+        defs = defs.raw_gradients(grad_svg);
     }
 
     doc = doc.defs(defs);
 
     // Embed theme CSS if enabled
     if config.embed_theme_css {
-        let mut css = theme.to_svg_style(detail.enable_shadows);
+        let mut css = theme.to_svg_style(
+            detail.enable_shadows,
+            ir.edges.iter().any(|edge| edge.label.is_some()),
+        );
+        strip_unused_theme_css(&mut css, Some(ir));
         if effects_enabled {
             css.push_str(&effects_css(config));
         }
@@ -1716,6 +3569,13 @@ fn render_layout_to_svg(
         }
         if !classdef_css.is_empty() {
             css.push_str(&classdef_css);
+        }
+        if direct_minified_css {
+            css = if cache_direct_minified_css {
+                cached_minified_full_css(css)
+            } else {
+                minify_css(&css)
+            };
         }
 
         doc = doc.style(css);
@@ -1761,7 +3621,7 @@ fn render_layout_to_svg(
             config,
             &theme,
         );
-        return doc.to_string();
+        return doc.to_string_with_capacity(layout_svg_capacity_hint(ir, layout));
     }
 
     // Pie chart rendering: draw wedges from pie metadata.
@@ -1769,7 +3629,7 @@ fn render_layout_to_svg(
         doc = render_pie_svg(
             doc, ir, layout, pie_meta, offset_x, offset_y, config, &theme,
         );
-        return doc.to_string();
+        return doc.to_string_with_capacity(layout_svg_capacity_hint(ir, layout));
     }
 
     // Quadrant chart rendering.
@@ -1777,13 +3637,13 @@ fn render_layout_to_svg(
         doc = render_quadrant_svg(
             doc, ir, layout, quad_meta, offset_x, offset_y, config, &theme,
         );
-        return doc.to_string();
+        return doc.to_string_with_capacity(layout_svg_capacity_hint(ir, layout));
     }
 
     // Gantt chart: type-based task bar colors and section headers.
     if ir.diagram_type == fm_core::DiagramType::Gantt && ir.gantt_meta.is_some() {
         doc = render_gantt_svg(doc, ir, layout, offset_x, offset_y, config, &theme);
-        return doc.to_string();
+        return doc.to_string_with_capacity(layout_svg_capacity_hint(ir, layout));
     }
 
     if let Some(title) = generic_title {
@@ -1792,7 +3652,7 @@ fn render_layout_to_svg(
                 .x(width / 2.0)
                 .y(padding + config.font_size + 2.0)
                 .anchor(TextAnchor::Middle)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(config.font_size + 4.0)
                 .font_weight("600")
                 .fill(&theme.colors.text)
@@ -1801,16 +3661,35 @@ fn render_layout_to_svg(
         );
     }
 
-    for band in &layout.extensions.bands {
-        doc = doc.child(render_layout_band(band, offset_x, offset_y, config));
+    // Stream all bands (sequence lifelines / journey sections / xychart columns) into ONE raw fragment
+    // instead of building N `<g><rect/></g>` element trees as separate `doc.child`ren. Byte-identical:
+    // `write_layout_band_into` emits the same bytes `render_layout_band(..).write_to_string` does, and the
+    // concatenated children serialize identically to the same sequence of `doc.child`ren. For sequence
+    // diagrams these lifeline bands are the LAST per-item Element-build loop (nodes + messages stream).
+    if !layout.extensions.bands.is_empty() {
+        let mut bands_svg = String::new();
+        for band in &layout.extensions.bands {
+            write_layout_band_into(&mut bands_svg, band, offset_x, offset_y, config);
+        }
+        doc = doc.child(Element::raw_svg(bands_svg));
     }
-    for tick in &layout.extensions.axis_ticks {
-        doc = doc.child(render_layout_axis_tick(
-            tick.label.as_str(),
-            tick.position + offset_x,
-            layout.bounds.y + offset_y - 12.0,
-            config,
-        ));
+    // Stream all axis ticks (gantt date labels / xychart axis labels) into ONE raw fragment instead of N
+    // group+line+text element trees as separate `doc.child`ren — the same win as the bands loop above.
+    // Byte-identical: `write_layout_axis_tick_into` emits the same bytes as
+    // `render_layout_axis_tick(..).write_to_string`, and concatenated children serialize identically.
+    if !layout.extensions.axis_ticks.is_empty() {
+        let mut ticks_svg = String::new();
+        let tick_y = layout.bounds.y + offset_y - 12.0;
+        for tick in &layout.extensions.axis_ticks {
+            write_layout_axis_tick_into(
+                &mut ticks_svg,
+                tick.label.as_str(),
+                tick.position + offset_x,
+                tick_y,
+                config,
+            );
+        }
+        doc = doc.child(Element::raw_svg(ticks_svg));
     }
 
     // Render sequence diagram activation bars.
@@ -1891,7 +3770,7 @@ fn render_layout_to_svg(
                 TextBuilder::new(&note.text)
                     .x(nx + 8.0)
                     .y(ny + 8.0)
-                    .font_family(&config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .font_size(note_font_size)
                     .line_height(config.line_height)
                     .baseline(text::DominantBaseline::Hanging)
@@ -1981,7 +3860,7 @@ fn render_layout_to_svg(
                 .attr("dominant-baseline", "middle")
                 .attr_num("font-size", config.font_size * 0.75)
                 .attr("font-weight", "bold")
-                .attr("font-family", &config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .fill(&theme.colors.text)
                 .class("fm-sequence-fragment-label"),
         );
@@ -2102,13 +3981,25 @@ fn render_layout_to_svg(
 
         // Cluster label if present
         if detail.show_cluster_labels && !title_text.is_empty() {
-            // For C4 boundaries, strip the boundary type prefix for display
+            // For C4 boundaries, strip the boundary type prefix for display. A boundary carries
+            // exactly ONE of these type keywords, so the old 4-chained `String::replace` allocated a
+            // full fresh copy for each of the (typically 3) absent needles — pure alloc+memcpy waste.
+            // Gate each removal on `contains` and only allocate when the needle is actually present;
+            // byte-identical (an absent-needle `replace` returns an identical copy) with the same
+            // left-to-right application order, but ≤1 allocation instead of 4.
             let display_title = if is_c4_boundary {
-                title_text
-                    .replace("System_Boundary", "")
-                    .replace("Container_Boundary", "")
-                    .replace("Enterprise_Boundary", "")
-                    .replace("Deployment_Node", "")
+                let mut stripped = std::borrow::Cow::Borrowed(title_text);
+                for keyword in [
+                    "System_Boundary",
+                    "Container_Boundary",
+                    "Enterprise_Boundary",
+                    "Deployment_Node",
+                ] {
+                    if stripped.contains(keyword) {
+                        stripped = std::borrow::Cow::Owned(stripped.replace(keyword, ""));
+                    }
+                }
+                stripped
                     .trim_matches(|c: char| c == '(' || c == ')' || c == ',' || c.is_whitespace())
                     .to_string()
             } else if is_swimlane && title_text.starts_with("swimlane:") {
@@ -2123,7 +4014,7 @@ fn render_layout_to_svg(
                 let text = TextBuilder::new(&display_title)
                     .x(cluster.bounds.x + offset_x + 8.0)
                     .y(cluster.bounds.y + offset_y + 16.0)
-                    .font_family(&config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .font_size(detail.cluster_font_size)
                     .fill(&label_color)
                     .class("fm-cluster-label")
@@ -2160,21 +4051,213 @@ fn render_layout_to_svg(
         doc = doc.child(line);
     }
 
-    // Render edges (skip edges absorbed into bundles).
-    for edge_path in &layout.edges {
-        if edge_path.bundled {
-            continue;
+    // Build centrality tier lookup map for O(1) access during node rendering. Hoisted above the
+    // edge/node emission so the flowchart fast path below can reference it.
+    let centrality_map: HashMap<usize, CentralityTier> = layout
+        .extensions
+        .node_centrality
+        .iter()
+        .map(|nc| (nc.node_index, nc.tier))
+        .collect();
+
+    let edge_context = EdgeRenderContext {
+        ir,
+        offset_x,
+        offset_y,
+        config,
+        detail,
+        colors: &theme.colors,
+        accessible_node_labels: accessible_node_labels.as_deref(),
+    };
+
+    // Fast path for the common case: a diagram small enough that both loops render serially AND for
+    // which the slow path inserts NO child BETWEEN the edge and node fragments (bundle-count labels,
+    // ER cardinality, class cardinality) or AFTER them (sequence mirror headers, C4 legend). When none
+    // of those fire the document is exactly `[prefix children] + edges + nodes`, so we stream the edges
+    // and nodes STRAIGHT into the final output buffer via `to_string_with_body` instead of rendering
+    // them into intermediate `edge_svg`/`node_svg` Strings that `write_to_string` then copies a SECOND
+    // time (~18% of render / ~9% of the wide pipeline, measured). Byte-identical: the same
+    // `render_edges_serial`/`render_nodes_serial` bytes in the same position.
+    //
+    // The gate tests the ACTUAL insertion conditions (see the 9 `doc.child` sites below), not just
+    // `== Flowchart`, so it's a strict superset of the old flowchart-only gate: every simple type —
+    // state, sankey, journey, gitgraph, requirement, mindmap, plain flowchart — now streams, while ER /
+    // class-cardinality / sequence-mirror / C4-legend / bundled / very-large renders take the verbatim
+    // slow-path fallback below. Keep this in sync with those insertion guards.
+    // The only children the slow path inserts BETWEEN the edge and node fragments are the ER / class
+    // cardinality labels and bundle-count labels; the only ones AFTER are sequence mirror headers and the
+    // C4 legend. Bundle labels / legend still force the slow path, but ER and class cardinality (between
+    // edges and nodes) AND sequence mirror headers (after nodes) are now emitted INSIDE the streaming body
+    // in byte-identical order, so they no longer disqualify a diagram. This pulls ER, class-relation, and
+    // sequence diagrams (previously always slow-path) onto the streaming path — killing the second copy of
+    // `edge_svg`+`cardinality_svg`+`node_svg`+mirror-header fragments.
+    let no_between_or_after_children =
+        !legend_enabled && layout.edges.iter().all(|edge| edge.bundle_count <= 1);
+    #[cfg(not(target_arch = "wasm32"))]
+    let stream_fast_path =
+        no_between_or_after_children && layout.edges.len() < 4096 && layout.nodes.len() < 2048;
+    #[cfg(target_arch = "wasm32")]
+    let stream_fast_path = no_between_or_after_children;
+    if stream_fast_path {
+        if let Some(reuse) = batch_reuse.as_mut()
+            && ir.diagram_type == DiagramType::Flowchart
+        {
+            reuse.next.detail = Some(detail);
+            reuse.next.offset_x_bits = offset_x.to_bits();
+            reuse.next.offset_y_bits = offset_y.to_bits();
+            reuse.next.active = true;
         }
-        let edge_elem = render_edge(
-            edge_path,
-            ir,
-            offset_x,
-            offset_y,
-            config,
-            detail,
-            &theme.colors,
-        );
-        doc = doc.child(edge_elem);
+        return doc.to_string_with_body(layout_svg_capacity_hint(ir, layout), |out| {
+            if let Some(reuse) = batch_reuse.as_mut()
+                && ir.diagram_type == DiagramType::Flowchart
+            {
+                render_edges_with_batch_reuse(out, &layout.edges, &edge_context, layout, reuse);
+            } else {
+                render_edges_serial(out, &layout.edges, &edge_context);
+            }
+            // Cardinality labels sit between edges and nodes in the slow path's child order; stream them in
+            // the same position. Each writer self-guards (ER emits only for ER edges, class only for edges
+            // with source/target cardinality), so both are no-ops for a plain flowchart.
+            if ir.diagram_type == fm_core::DiagramType::Er {
+                write_er_cardinality_labels_into(
+                    out,
+                    ir,
+                    layout,
+                    offset_x,
+                    offset_y,
+                    config,
+                    &theme.colors,
+                );
+            }
+            write_class_cardinality_labels_into(
+                out,
+                ir,
+                layout,
+                offset_x,
+                offset_y,
+                config,
+                &theme.colors,
+            );
+            if let Some(reuse) = batch_reuse.as_mut()
+                && ir.diagram_type == DiagramType::Flowchart
+            {
+                render_nodes_with_batch_reuse(
+                    out,
+                    &layout.nodes,
+                    ir,
+                    layout,
+                    offset_x,
+                    offset_y,
+                    config,
+                    detail,
+                    &theme.colors,
+                    emit_classdef_classes,
+                    &centrality_map,
+                    reuse,
+                );
+            } else {
+                render_nodes_serial(
+                    out,
+                    &layout.nodes,
+                    ir,
+                    offset_x,
+                    offset_y,
+                    config,
+                    detail,
+                    &theme.colors,
+                    emit_classdef_classes,
+                    &centrality_map,
+                );
+            }
+            // Sequence mirror headers (participant boxes repeated at the bottom) sit AFTER the nodes in the
+            // slow path's child order; stream each straight into `out` in the same position instead of
+            // building it as a `doc.child` the final `to_string` copies a second time. Byte-identical: the
+            // same `render_node(..).id(..).class(..)` Element bytes, written directly. No-op for non-sequence
+            // diagrams (`sequence_mirror_headers` is empty).
+            for node_box in &layout.extensions.sequence_mirror_headers {
+                render_node(
+                    node_box,
+                    ir,
+                    offset_x,
+                    offset_y,
+                    config,
+                    detail,
+                    &theme.colors,
+                    emit_classdef_classes,
+                    &centrality_map,
+                    // Post-processed (.id + .class) — must NOT take the opaque fast path.
+                    false,
+                )
+                .id(&mermaid_node_element_id_with_variant(
+                    &node_box.node_id,
+                    node_box.node_index,
+                    Some("mirror-header"),
+                ))
+                .class("fm-sequence-mirror-header")
+                .write_to_string(out);
+            }
+        });
+    }
+
+    // Render edges (skip edges absorbed into bundles). Edge subtrees are serialized immediately
+    // and inserted as one internal raw fragment so the root document does not retain thousands of
+    // short-lived edge element trees until final serialization.
+    // 480 B/edge, not 384: the per-edge a11y group (`<g id role tabindex>…<title/></g>`) plus the
+    // cubic `d` string average ~422 B/edge on wide flowcharts (measured), so 384 overflowed the
+    // accumulator and forced a ~370 KB realloc+copy every render. 480 keeps the common wide edge
+    // within one allocation. Capacity-only: byte-identical output.
+    // Parallel fan-out mirrors the node loop: `render_edge` is pure (reads `edge_path` + the Sync
+    // `EdgeRenderContext`, no shared mutable state), chunks are emitted in edge order so output is
+    // byte-identical and thread-count-independent, native-only (WASM serial), size-gated.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Threshold 4096, not 256: after the direct-into-buffer serial edge writer (c282ff1) the
+        // serial path is so cheap that std::thread spawn + join (~15-30 µs/thread on native, paid
+        // twice/render since nodes fan out too) DOMINATES the parallel win below the crossover.
+        // Deterministic time A/B on the wide head-to-head shapes (64-core box, this bench machine):
+        // serial BEATS 8-thread render by ~37% at 16x32 (992 edges), ~19% at 24x48 (2256 edges);
+        // parallel only pulls ahead past ~4032 edges (32x64, +4.5%) and is a genuine ~12-13% win
+        // only on huge graphs (40x80 = 6320 edges, 48x96 = 9120 edges). Gating at 4096 keeps the
+        // entire realistic corpus — every 8x16/12x24/16x32/24x48 diagram — on the fast serial path
+        // while preserving the parallel win for the rare 3000+-node diagram. Byte-identical output.
+        const PARALLEL_EDGE_THRESHOLD: usize = 4096;
+        let edge_count = layout.edges.len();
+        if edge_count >= PARALLEL_EDGE_THRESHOLD {
+            let threads = std::thread::available_parallelism()
+                .map_or(1, |c| c.get())
+                .clamp(1, 8);
+            let chunk_size = edge_count.div_ceil(threads);
+            let ctx = &edge_context;
+            let parts: Vec<String> = std::thread::scope(|scope| {
+                let handles: Vec<_> = layout
+                    .edges
+                    .chunks(chunk_size)
+                    .map(|chunk| {
+                        scope.spawn(move || {
+                            let mut buf = String::with_capacity(chunk.len().saturating_mul(480));
+                            render_edges_serial(&mut buf, chunk, ctx);
+                            buf
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            doc = doc.child(Element::raw_svg_parts(parts));
+        } else {
+            let mut edge_svg = String::with_capacity(layout.edges.len().saturating_mul(480));
+            render_edges_serial(&mut edge_svg, &layout.edges, &edge_context);
+            if !edge_svg.is_empty() {
+                doc = doc.child(Element::raw_svg(edge_svg));
+            }
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut edge_svg = String::with_capacity(layout.edges.len().saturating_mul(480));
+        render_edges_serial(&mut edge_svg, &layout.edges, &edge_context);
+        if !edge_svg.is_empty() {
+            doc = doc.child(Element::raw_svg(edge_svg));
+        }
     }
 
     // Render bundle count labels for bundled edges (e.g., "×3").
@@ -2191,7 +4274,7 @@ fn render_layout_to_svg(
                     .attr("text-anchor", "start")
                     .attr("dominant-baseline", "auto")
                     .attr_num("font-size", config.font_size * 0.65)
-                    .attr("font-family", &config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .fill(&theme.colors.edge)
                     .attr("fill-opacity", "0.7")
                     .class("fm-bundle-count"),
@@ -2199,107 +4282,123 @@ fn render_layout_to_svg(
         }
     }
 
-    // Render ER cardinality labels near edge endpoints.
+    // Render ER cardinality labels near edge endpoints — one raw fragment, byte-identical to the
+    // per-label `Element::text()` (shared with the streaming fast path via `write_er_cardinality_labels_into`).
     if ir.diagram_type == fm_core::DiagramType::Er {
-        for edge_path in &layout.edges {
-            if let Some(ir_edge) = ir.edges.get(edge_path.edge_index)
-                && let Some(notation) = &ir_edge.er_notation
-                && edge_path.points.len() >= 2
-            {
-                let (left_label, right_label) = parse_er_cardinality(notation);
-                let font_size = config.font_size * 0.7;
-
-                // Left cardinality near first waypoint.
-                if !left_label.is_empty() {
-                    let p = &edge_path.points[0];
-                    doc = doc.child(
-                        Element::text()
-                            .x(p.x + offset_x + 8.0)
-                            .y(p.y + offset_y - 8.0)
-                            .content(left_label)
-                            .attr("text-anchor", "start")
-                            .attr("dominant-baseline", "auto")
-                            .attr_num("font-size", font_size)
-                            .attr("font-family", &config.font_family)
-                            .fill(&theme.colors.text)
-                            .class("fm-er-cardinality"),
-                    );
-                }
-
-                // Right cardinality near last waypoint.
-                if !right_label.is_empty() {
-                    let p = &edge_path.points[edge_path.points.len() - 1];
-                    doc = doc.child(
-                        Element::text()
-                            .x(p.x + offset_x + 8.0)
-                            .y(p.y + offset_y - 8.0)
-                            .content(right_label)
-                            .attr("text-anchor", "start")
-                            .attr("dominant-baseline", "auto")
-                            .attr_num("font-size", font_size)
-                            .attr("font-family", &config.font_family)
-                            .fill(&theme.colors.text)
-                            .class("fm-er-cardinality"),
-                    );
-                }
-            }
+        let mut cardinality_svg = String::new();
+        write_er_cardinality_labels_into(
+            &mut cardinality_svg,
+            ir,
+            layout,
+            offset_x,
+            offset_y,
+            config,
+            &theme.colors,
+        );
+        if !cardinality_svg.is_empty() {
+            doc = doc.child(Element::raw_svg(cardinality_svg));
         }
     }
 
-    // Render class diagram cardinality labels near edge endpoints.
-    for edge_path in &layout.edges {
-        if let Some(ir_edge) = ir.edges.get(edge_path.edge_index)
-            && (ir_edge.source_cardinality.is_some() || ir_edge.target_cardinality.is_some())
-            && edge_path.points.len() >= 2
-        {
-            let font_size = config.font_size * 0.7;
+    // Render class diagram cardinality labels near edge endpoints — one raw fragment, byte-identical to the
+    // per-label `Element::text()` (shared with the streaming fast path via `write_class_cardinality_labels_into`).
+    let mut class_cardinality_svg = String::new();
+    write_class_cardinality_labels_into(
+        &mut class_cardinality_svg,
+        ir,
+        layout,
+        offset_x,
+        offset_y,
+        config,
+        &theme.colors,
+    );
+    if !class_cardinality_svg.is_empty() {
+        doc = doc.child(Element::raw_svg(class_cardinality_svg));
+    }
 
-            if let Some(card) = &ir_edge.source_cardinality {
-                let p = &edge_path.points[0];
-                doc = doc.child(
-                    Element::text()
-                        .x(p.x + offset_x + 8.0)
-                        .y(p.y + offset_y - 8.0)
-                        .content(card)
-                        .attr("text-anchor", "start")
-                        .attr("dominant-baseline", "auto")
-                        .attr_num("font-size", font_size)
-                        .attr("font-family", &config.font_family)
-                        .fill(&theme.colors.text)
-                        .class("fm-class-cardinality"),
-                );
-            }
-
-            if let Some(card) = &ir_edge.target_cardinality {
-                let p = &edge_path.points[edge_path.points.len() - 1];
-                doc = doc.child(
-                    Element::text()
-                        .x(p.x + offset_x + 8.0)
-                        .y(p.y + offset_y - 8.0)
-                        .content(card)
-                        .attr("text-anchor", "start")
-                        .attr("dominant-baseline", "auto")
-                        .attr_num("font-size", font_size)
-                        .attr("font-family", &config.font_family)
-                        .fill(&theme.colors.text)
-                        .class("fm-class-cardinality"),
-                );
+    // Render nodes. Serialize each node subtree immediately into a shared buffer (as the edge loop
+    // above does) and insert one internal raw fragment, so the root document does not retain
+    // hundreds of node element trees — each a `<g>` with rect + text children — until final
+    // serialization. Byte-identical: the same `render_node` elements are serialized in the same
+    // order, just streamed rather than deferred.
+    // The per-node render (`render_node` -> serialize) is the single largest pipeline cost (~43% of the
+    // whole pipeline) and is embarrassingly parallel: `render_node` is pure (read-only `ir`/`config`/
+    // `theme`/`centrality_map` + `Copy` scalars, no shared mutable state). For large diagrams on native
+    // we fan the nodes across stdlib scoped threads (no new dependency — the crate stays zero-dep) and
+    // emit the per-chunk buffers IN ORDER, so the output is byte-identical to the serial path.
+    // Below the threshold the thread-spawn overhead would dominate, and WASM (no usable threads) always
+    // takes the serial path — so small/medium renders and every browser render are unchanged.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Threshold 2048, not 256: since the direct-into-buffer serial node writer (5e42d39) the
+        // serial path out-runs the parallel one until the node count is large enough to amortize the
+        // std::thread spawn + join cost. Deterministic time A/B on the wide head-to-head shapes
+        // (64-core box): serial BEATS 8-thread render by ~37% at 16x32 (512 nodes), ~19% at 24x48
+        // (1152 nodes); the crossover sits at ~2048 nodes and parallel is a real ~12-13% win only on
+        // huge graphs (40x80 = 3200 nodes). Gating at 2048 keeps the whole realistic corpus on the
+        // fast serial path while retaining parallelism for the rare very large diagram. Byte-identical.
+        const PARALLEL_NODE_THRESHOLD: usize = 2048;
+        let node_count = layout.nodes.len();
+        if node_count >= PARALLEL_NODE_THRESHOLD {
+            let threads = std::thread::available_parallelism()
+                .map_or(1, |c| c.get())
+                .clamp(1, 8);
+            let chunk_size = node_count.div_ceil(threads);
+            // Bind shared references once so each `move` thread closure captures a `Copy` `&_` rather
+            // than trying to move the underlying value.
+            let colors = &theme.colors;
+            let centrality = &centrality_map;
+            let parts: Vec<String> = std::thread::scope(|scope| {
+                let handles: Vec<_> = layout
+                    .nodes
+                    .chunks(chunk_size)
+                    .map(|chunk| {
+                        scope.spawn(move || {
+                            let mut buf = String::with_capacity(chunk.len().saturating_mul(640));
+                            render_nodes_serial(
+                                &mut buf,
+                                chunk,
+                                ir,
+                                offset_x,
+                                offset_y,
+                                config,
+                                detail,
+                                colors,
+                                emit_classdef_classes,
+                                centrality,
+                            );
+                            buf
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            doc = doc.child(Element::raw_svg_parts(parts));
+        } else {
+            let mut node_svg = String::with_capacity(layout.nodes.len().saturating_mul(640));
+            render_nodes_serial(
+                &mut node_svg,
+                &layout.nodes,
+                ir,
+                offset_x,
+                offset_y,
+                config,
+                detail,
+                &theme.colors,
+                emit_classdef_classes,
+                &centrality_map,
+            );
+            if !node_svg.is_empty() {
+                doc = doc.child(Element::raw_svg(node_svg));
             }
         }
     }
-
-    // Build centrality tier lookup map for O(1) access during node rendering
-    let centrality_map: HashMap<usize, CentralityTier> = layout
-        .extensions
-        .node_centrality
-        .iter()
-        .map(|nc| (nc.node_index, nc.tier))
-        .collect();
-
-    // Render nodes
-    for node_box in &layout.nodes {
-        let node_elem = render_node(
-            node_box,
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut node_svg = String::with_capacity(layout.nodes.len().saturating_mul(640));
+        render_nodes_serial(
+            &mut node_svg,
+            &layout.nodes,
             ir,
             offset_x,
             offset_y,
@@ -2309,7 +4408,9 @@ fn render_layout_to_svg(
             emit_classdef_classes,
             &centrality_map,
         );
-        doc = doc.child(node_elem);
+        if !node_svg.is_empty() {
+            doc = doc.child(Element::raw_svg(node_svg));
+        }
     }
 
     for node_box in &layout.extensions.sequence_mirror_headers {
@@ -2323,6 +4424,8 @@ fn render_layout_to_svg(
             &theme.colors,
             emit_classdef_classes,
             &centrality_map, // Use same map (mirror headers will have no entries)
+            // Post-processed below (.id + .class) — must NOT take the opaque fast path.
+            false,
         )
         .id(&mermaid_node_element_id_with_variant(
             &node_box.node_id,
@@ -2344,9 +4447,147 @@ fn render_layout_to_svg(
         ));
     }
 
-    doc.to_string()
+    finish_layout_svg_document(doc, ir, layout)
 }
 
+fn finish_layout_svg_document(
+    doc: SvgDocument,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+) -> String {
+    doc.to_string_with_capacity(layout_svg_capacity_hint(ir, layout))
+}
+
+fn build_accessible_node_label_cache(ir: &MermaidDiagramIr) -> Vec<&str> {
+    ir.nodes
+        .iter()
+        .map(|node| crate::a11y::accessible_node_label(node, ir))
+        .collect()
+}
+
+fn layout_svg_capacity_hint(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> usize {
+    const BASE_DOCUMENT_BYTES: usize = 16 * 1024;
+    const NODE_BYTES: usize = 768;
+    const EDGE_BYTES: usize = 384;
+    const CLUSTER_BYTES: usize = 512;
+    const AUXILIARY_ITEM_BYTES: usize = 192;
+
+    let auxiliary_items = layout.extensions.bands.len()
+        + layout.extensions.axis_ticks.len()
+        + layout.extensions.activation_bars.len()
+        + layout.extensions.sequence_lifecycle_markers.len()
+        + layout.extensions.sequence_notes.len()
+        + layout.extensions.sequence_fragments.len()
+        + layout.extensions.cluster_dividers.len()
+        + layout.extensions.sequence_mirror_headers.len();
+
+    BASE_DOCUMENT_BYTES
+        + ir.nodes.len().saturating_mul(NODE_BYTES)
+        + layout.edges.len().saturating_mul(EDGE_BYTES)
+        + layout.clusters.len().saturating_mul(CLUSTER_BYTES)
+        + auxiliary_items.saturating_mul(AUXILIARY_ITEM_BYTES)
+}
+
+/// Stream a layout band (`<g class="fm-band fm-band-…"><rect/>[<text>label</text>]</g>`) directly into
+/// `out`, byte-identical to [`render_layout_band`]'s `Element`. The rect attrs replicate that builder's
+/// call order exactly (`x y width height rx fill stroke stroke-width stroke-dasharray fill-opacity
+/// stroke-opacity`); float attrs go through `write_number_into` (so `0.8`→`"0.80"`). The optional band
+/// label is rare (journey sections / xychart columns; sequence lifelines are unlabelled), so it reuses the
+/// exact `TextBuilder` `Element` written in place — no from-scratch text replication. Lets the bands loop
+/// stream N group+rect `Element`s into one raw fragment instead of N `doc.child` element trees.
+fn write_layout_band_into(
+    out: &mut String,
+    band: &LayoutBand,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+) {
+    use crate::attributes::{write_escaped_attr, write_escaped_text, write_number_into};
+    let (fill, stroke, class_name) = match band.kind {
+        LayoutBandKind::Section => (
+            "rgba(191,219,254,0.18)",
+            "#bfd7ff",
+            "fm-band fm-band-section",
+        ),
+        LayoutBandKind::Lane => ("rgba(196,181,253,0.14)", "#c4b5fd", "fm-band fm-band-lane"),
+        LayoutBandKind::Column => (
+            "rgba(254,240,138,0.16)",
+            "#fde68a",
+            "fm-band fm-band-column",
+        ),
+    };
+    out.push_str("<g class=\"");
+    out.push_str(class_name);
+    out.push_str("\"><rect x=\"");
+    let _ = write_number_into(out, band.bounds.x + offset_x);
+    out.push_str("\" y=\"");
+    let _ = write_number_into(out, band.bounds.y + offset_y);
+    out.push_str("\" width=\"");
+    let _ = write_number_into(out, band.bounds.width);
+    out.push_str("\" height=\"");
+    let _ = write_number_into(out, band.bounds.height);
+    out.push_str("\" rx=\"");
+    let _ = write_number_into(out, config.rounded_corners.max(4.0));
+    out.push_str("\" fill=\"");
+    let _ = write_escaped_attr(out, fill);
+    out.push_str("\" stroke=\"");
+    let _ = write_escaped_attr(out, stroke);
+    out.push_str("\" stroke-width=\"1\" stroke-dasharray=\"6,4\" fill-opacity=\"");
+    let _ = write_number_into(out, 0.8);
+    out.push_str("\" stroke-opacity=\"");
+    let _ = write_number_into(out, 0.9);
+    out.push_str("\"/>");
+    if !band.label.is_empty() {
+        // A journey/gantt/kanban diagram puts a LABEL on every lane/section/column band (289 per
+        // 300-task journey render), so this is a per-item hot path, not the "rare" case it once was.
+        // Stream the single-line label `<text>` straight into `out` — byte-identical to the
+        // `TextBuilder` `Element` under this call set (`x y text-anchor="start" [font-family] font-size
+        // fill class` then escaped content; default anchor is `Start`, `font-family` present only when
+        // the theme CSS is NOT embedded), exactly as the axis-tick streamer does. This kills the
+        // per-band `Element` + `Attributes` Vec build + serialize + copy (TextBuilder/Attributes builder
+        // was ~8% of journey render, plus the malloc/free churn on those transient Vecs). A multi-line
+        // label (`\n`), which `TextBuilder::build` splits into `<tspan>`s, keeps the exact slow path.
+        // Pinned by `layout_band_streaming_matches_element`.
+        if band.label.contains('\n') {
+            TextBuilder::new(&band.label)
+                .x(band.bounds.x + offset_x + 8.0)
+                .y(band.bounds.y + offset_y + 16.0)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                .font_size(clamp_font_size(
+                    config.font_size * 0.82,
+                    config.min_font_size,
+                ))
+                .fill("var(--fm-text-color, #4a5568)")
+                .class("fm-band-label")
+                .build()
+                .write_to_string(out);
+        } else {
+            out.push_str("<text x=\"");
+            let _ = write_number_into(out, band.bounds.x + offset_x + 8.0);
+            out.push_str("\" y=\"");
+            let _ = write_number_into(out, band.bounds.y + offset_y + 16.0);
+            out.push_str("\" text-anchor=\"start\"");
+            if !config.embed_theme_css {
+                out.push_str(" font-family=\"");
+                let _ = write_escaped_attr(out, &config.font_family);
+                out.push('"');
+            }
+            out.push_str(" font-size=\"");
+            let _ = write_number_into(
+                out,
+                clamp_font_size(config.font_size * 0.82, config.min_font_size),
+            );
+            out.push_str("\" fill=\"var(--fm-text-color, #4a5568)\" class=\"fm-band-label\">");
+            let _ = write_escaped_text(out, &band.label);
+            out.push_str("</text>");
+        }
+    }
+    out.push_str("</g>");
+}
+
+/// The `Element`-building band renderer, now superseded by [`write_layout_band_into`] on the render path
+/// and retained only as the byte-identity oracle for `layout_band_streaming_matches_element`.
+#[cfg(test)]
 fn render_layout_band(
     band: &LayoutBand,
     offset_x: f32,
@@ -2387,7 +4628,7 @@ fn render_layout_band(
             TextBuilder::new(&band.label)
                 .x(band.bounds.x + offset_x + 8.0)
                 .y(band.bounds.y + offset_y + 16.0)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(clamp_font_size(
                     config.font_size * 0.82,
                     config.min_font_size,
@@ -2401,6 +4642,51 @@ fn render_layout_band(
     group
 }
 
+/// Stream an axis tick (`<g class="fm-axis-tick"><line/><text>label</text></g>`) directly into `out`,
+/// byte-identical to [`render_layout_axis_tick`]'s `Element`. The `<line>` and `<text>` attrs replicate
+/// that builder's call order; float attrs go through `write_number_into`. The label `<text>` mirrors
+/// `TextBuilder::build` under this call set: `x y text-anchor="start" [font-family] font-size fill class`
+/// then escaped content (default anchor is `Start`; `font-family` present only when the theme CSS is NOT
+/// embedded). Lets the axis-ticks loop stream N group+line+text `Element`s into one raw fragment.
+fn write_layout_axis_tick_into(
+    out: &mut String,
+    label: &str,
+    x: f32,
+    y: f32,
+    config: &SvgRenderConfig,
+) {
+    use crate::attributes::{write_escaped_attr, write_escaped_text, write_number_into};
+    out.push_str("<g class=\"fm-axis-tick\"><line x1=\"");
+    let _ = write_number_into(out, x);
+    out.push_str("\" y1=\"");
+    let _ = write_number_into(out, y + 4.0);
+    out.push_str("\" x2=\"");
+    let _ = write_number_into(out, x);
+    out.push_str("\" y2=\"");
+    let _ = write_number_into(out, y + 16.0);
+    out.push_str("\" stroke=\"var(--fm-edge-color, #94a3b8)\" stroke-width=\"1\"/><text x=\"");
+    let _ = write_number_into(out, x + 3.0);
+    out.push_str("\" y=\"");
+    let _ = write_number_into(out, y);
+    out.push_str("\" text-anchor=\"start\"");
+    if !config.embed_theme_css {
+        out.push_str(" font-family=\"");
+        let _ = write_escaped_attr(out, &config.font_family);
+        out.push('"');
+    }
+    out.push_str(" font-size=\"");
+    let _ = write_number_into(
+        out,
+        clamp_font_size(config.font_size * 0.72, config.min_font_size),
+    );
+    out.push_str("\" fill=\"var(--fm-text-color, #64748b)\" class=\"fm-axis-tick-label\">");
+    let _ = write_escaped_text(out, label);
+    out.push_str("</text></g>");
+}
+
+/// The `Element`-building axis-tick renderer, superseded by [`write_layout_axis_tick_into`] on the render
+/// path and retained only as the byte-identity oracle for `layout_axis_tick_streaming_matches_element`.
+#[cfg(test)]
 fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig) -> Element {
     let mut group = Element::group().class("fm-axis-tick");
     group = group.child(
@@ -2416,7 +4702,7 @@ fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig
         TextBuilder::new(label)
             .x(x + 3.0)
             .y(y)
-            .font_family(&config.font_family)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(clamp_font_size(
                 config.font_size * 0.72,
                 config.min_font_size,
@@ -2429,6 +4715,146 @@ fn render_layout_axis_tick(label: &str, x: f32, y: f32, config: &SvgRenderConfig
 
 /// Parse an ER cardinality notation string (e.g., `"||--o{"`) into display labels
 /// for the left and right endpoints.
+/// Stream every ER cardinality `<text>` (left-then-right per edge, edge order) into `out`. Extracted from
+/// the slow-path loop so both the slow path and the whole-document streaming fast path share ONE
+/// implementation; emits nothing for non-ER edges. Byte-identical to the slow path's `cardinality_svg`.
+fn write_er_cardinality_labels_into(
+    out: &mut String,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) {
+    for edge_path in &layout.edges {
+        if let Some(ir_edge) = ir.edges.get(edge_path.edge_index)
+            && let Some(notation) = ir_edge.er_notation()
+            && edge_path.points.len() >= 2
+        {
+            let (left_label, right_label) = parse_er_cardinality(notation);
+            let font_size = config.font_size * 0.7;
+            if !left_label.is_empty() {
+                let p = &edge_path.points[0];
+                write_cardinality_text_into(
+                    out,
+                    p.x + offset_x + 8.0,
+                    p.y + offset_y - 8.0,
+                    font_size,
+                    &colors.text,
+                    &config.font_family,
+                    config.embed_theme_css,
+                    "fm-er-cardinality",
+                    left_label,
+                );
+            }
+            if !right_label.is_empty() {
+                let p = &edge_path.points[edge_path.points.len() - 1];
+                write_cardinality_text_into(
+                    out,
+                    p.x + offset_x + 8.0,
+                    p.y + offset_y - 8.0,
+                    font_size,
+                    &colors.text,
+                    &config.font_family,
+                    config.embed_theme_css,
+                    "fm-er-cardinality",
+                    right_label,
+                );
+            }
+        }
+    }
+}
+
+/// Stream every class-relation cardinality `<text>` (source-then-target per edge, edge order) into `out`.
+/// Extracted twin of [`write_er_cardinality_labels_into`]; emits nothing for edges without source/target
+/// cardinality. Byte-identical to the slow path's `class_cardinality_svg`.
+fn write_class_cardinality_labels_into(
+    out: &mut String,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) {
+    for edge_path in &layout.edges {
+        if let Some(ir_edge) = ir.edges.get(edge_path.edge_index)
+            && (ir_edge.source_cardinality().is_some() || ir_edge.target_cardinality().is_some())
+            && edge_path.points.len() >= 2
+        {
+            let font_size = config.font_size * 0.7;
+            if let Some(card) = ir_edge.source_cardinality() {
+                let p = &edge_path.points[0];
+                write_cardinality_text_into(
+                    out,
+                    p.x + offset_x + 8.0,
+                    p.y + offset_y - 8.0,
+                    font_size,
+                    &colors.text,
+                    &config.font_family,
+                    config.embed_theme_css,
+                    "fm-class-cardinality",
+                    card,
+                );
+            }
+            if let Some(card) = ir_edge.target_cardinality() {
+                let p = &edge_path.points[edge_path.points.len() - 1];
+                write_cardinality_text_into(
+                    out,
+                    p.x + offset_x + 8.0,
+                    p.y + offset_y - 8.0,
+                    font_size,
+                    &colors.text,
+                    &config.font_family,
+                    config.embed_theme_css,
+                    "fm-class-cardinality",
+                    card,
+                );
+            }
+        }
+    }
+}
+
+/// Stream one cardinality `<text>` directly into `out`, byte-identical to the `Element::text()` the slow
+/// path built: attrs in insertion order `x, y, text-anchor, dominant-baseline, font-size,
+/// [font-family when NOT embedded], fill, class`, with the label as escaped text content. Numbers use the
+/// shared 2-decimal `AttributeValue::Number` serializer; the label/fill escape identically to the element.
+/// `class_name` is `fm-er-cardinality` (ER) or `fm-class-cardinality` (class relations).
+#[allow(clippy::too_many_arguments)]
+fn write_cardinality_text_into(
+    out: &mut String,
+    x: f32,
+    y: f32,
+    font_size: f32,
+    fill: &str,
+    font_family: &str,
+    embed_css: bool,
+    class_name: &str,
+    label: &str,
+) {
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
+    out.push_str("<text x=\"");
+    let _ = crate::attributes::write_number_into(out, x);
+    out.push_str("\" y=\"");
+    let _ = crate::attributes::write_number_into(out, y);
+    out.push_str("\" text-anchor=\"start\" dominant-baseline=\"auto\" font-size=\"");
+    let _ = crate::attributes::write_number_into(out, font_size);
+    out.push('"');
+    if !embed_css {
+        out.push_str(" font-family=\"");
+        let _ = write_escaped_attr(out, font_family);
+        out.push('"');
+    }
+    out.push_str(" fill=\"");
+    let _ = write_escaped_attr(out, fill);
+    out.push_str("\" class=\"");
+    out.push_str(class_name);
+    out.push_str("\">");
+    let _ = write_escaped_text(out, label);
+    out.push_str("</text>");
+}
+
 fn parse_er_cardinality(notation: &str) -> (&str, &str) {
     // Find the connector: `--`, `..`, or `==`.
     let connector_idx = notation
@@ -2541,7 +4967,7 @@ fn render_quadrant_svg(
                     .attr("text-anchor", "middle")
                     .attr("dominant-baseline", "middle")
                     .attr_num("font-size", config.font_size * 0.9)
-                    .attr("font-family", &config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .attr("fill-opacity", "0.5")
                     .fill(&theme.colors.text)
                     .class("fm-quadrant-label"),
@@ -2613,7 +5039,7 @@ fn render_quadrant_svg(
                 .content(left)
                 .attr("text-anchor", "start")
                 .attr_num("font-size", config.font_size * 0.8)
-                .attr("font-family", &config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .fill(&theme.colors.text)
                 .class("fm-quadrant-axis-label"),
         );
@@ -2626,7 +5052,7 @@ fn render_quadrant_svg(
                 .content(right)
                 .attr("text-anchor", "end")
                 .attr_num("font-size", config.font_size * 0.8)
-                .attr("font-family", &config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .fill(&theme.colors.text)
                 .class("fm-quadrant-axis-label"),
         );
@@ -2641,7 +5067,7 @@ fn render_quadrant_svg(
                 .content(bottom)
                 .attr("text-anchor", "end")
                 .attr_num("font-size", config.font_size * 0.8)
-                .attr("font-family", &config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .fill(&theme.colors.text)
                 .class("fm-quadrant-axis-label"),
         );
@@ -2654,7 +5080,7 @@ fn render_quadrant_svg(
                 .content(top)
                 .attr("text-anchor", "end")
                 .attr_num("font-size", config.font_size * 0.8)
-                .attr("font-family", &config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .fill(&theme.colors.text)
                 .class("fm-quadrant-axis-label"),
         );
@@ -2669,7 +5095,7 @@ fn render_quadrant_svg(
                 .content(title)
                 .attr("text-anchor", "middle")
                 .attr_num("font-size", config.font_size + 4.0)
-                .attr("font-family", &config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .fill(&theme.colors.text)
                 .class("fm-quadrant-title"),
         );
@@ -2677,6 +5103,40 @@ fn render_quadrant_svg(
 
     // Data points.
     let accent_colors: Vec<&str> = theme.colors.accents.iter().map(String::as_str).collect();
+    // Stream all data points (circle + label) into one raw fragment under embedded CSS — the label's only
+    // config-dependent attribute (`font-family`) is then CSS-driven/absent, so the whole point stack is a
+    // fixed set of bytes. Skips two `Element` builds + `Attributes` Vecs per point. Byte-identical; the
+    // non-embedded (attribute-driven) export keeps the Element path so `font-family` is emitted inline.
+    if config.embed_theme_css {
+        let mut points_svg = String::with_capacity(layout.nodes.len().saturating_mul(160));
+        for (i, node_box) in layout.nodes.iter().enumerate() {
+            let cx = node_box.bounds.x + node_box.bounds.width / 2.0 + offset_x;
+            let cy = node_box.bounds.y + node_box.bounds.height / 2.0 + offset_y;
+            let color = accent_colors[i % accent_colors.len()];
+            let label = quad_meta
+                .points
+                .get(i)
+                .map(|p| p.label.as_str())
+                .unwrap_or(&node_box.node_id);
+            write_quadrant_point_into(
+                &mut points_svg,
+                cx,
+                cy,
+                color,
+                &theme.colors.background,
+                cx + 10.0,
+                cy + 4.0,
+                config.font_size * 0.75,
+                &theme.colors.text,
+                label,
+            );
+        }
+        if !points_svg.is_empty() {
+            doc = doc.child(Element::raw_svg(points_svg));
+        }
+        return doc;
+    }
+
     for (i, node_box) in layout.nodes.iter().enumerate() {
         let cx = node_box.bounds.x + node_box.bounds.width / 2.0 + offset_x;
         let cy = node_box.bounds.y + node_box.bounds.height / 2.0 + offset_y;
@@ -2704,13 +5164,116 @@ fn render_quadrant_svg(
                 .content(label)
                 .attr("text-anchor", "start")
                 .attr_num("font-size", config.font_size * 0.75)
-                .attr("font-family", &config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .fill(&theme.colors.text)
                 .class("fm-quadrant-point-label"),
         );
     }
 
     doc
+}
+
+/// Stream a quadrant data point (`<circle>` + `<text>` label) byte-identical to the slow path's
+/// `Element`s under embedded CSS (the label's `font-family` is CSS-driven, so absent inline). `r="6"` /
+/// `stroke-width="1.50"` are the fixed `r(6.0)`/`stroke_width(1.5)` serializations. Skips the two per-point
+/// `Element` builds + their `Attributes` Vecs (`Attributes::set` was ~8% of quadrant render).
+#[allow(clippy::too_many_arguments)]
+fn write_quadrant_point_into(
+    f: &mut String,
+    cx: f32,
+    cy: f32,
+    color: &str,
+    bg: &str,
+    label_x: f32,
+    label_y: f32,
+    label_font_size: f32,
+    text_fill: &str,
+    label: &str,
+) {
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
+    f.push_str("<circle cx=\"");
+    let _ = crate::attributes::write_number_into(f, cx);
+    f.push_str("\" cy=\"");
+    let _ = crate::attributes::write_number_into(f, cy);
+    f.push_str("\" r=\"6\" fill=\"");
+    let _ = write_escaped_attr(f, color);
+    f.push_str("\" stroke=\"");
+    let _ = write_escaped_attr(f, bg);
+    f.push_str("\" stroke-width=\"1.50\" class=\"fm-quadrant-point\"/><text x=\"");
+    let _ = crate::attributes::write_number_into(f, label_x);
+    f.push_str("\" y=\"");
+    let _ = crate::attributes::write_number_into(f, label_y);
+    f.push_str("\" text-anchor=\"start\" font-size=\"");
+    let _ = crate::attributes::write_number_into(f, label_font_size);
+    f.push_str("\" fill=\"");
+    let _ = write_escaped_attr(f, text_fill);
+    f.push_str("\" class=\"fm-quadrant-point-label\">");
+    let _ = write_escaped_text(f, label);
+    f.push_str("</text>");
+}
+
+/// Stream a gantt task bar `<rect>` byte-identical to the slow path's `Element::rect()`:
+/// `x y width height fill stroke stroke-width="1" rx="3" class="fm-gantt-task {type_class}"`.
+#[allow(clippy::too_many_arguments)]
+fn write_gantt_bar_into(
+    f: &mut String,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    fill: &str,
+    stroke: &str,
+    type_class: &str,
+) {
+    use crate::attributes::write_escaped_attr;
+    f.push_str("<rect x=\"");
+    let _ = crate::attributes::write_number_into(f, x);
+    f.push_str("\" y=\"");
+    let _ = crate::attributes::write_number_into(f, y);
+    f.push_str("\" width=\"");
+    let _ = crate::attributes::write_number_into(f, w);
+    f.push_str("\" height=\"");
+    let _ = crate::attributes::write_number_into(f, h);
+    f.push_str("\" fill=\"");
+    let _ = write_escaped_attr(f, fill);
+    f.push_str("\" stroke=\"");
+    let _ = write_escaped_attr(f, stroke);
+    f.push_str("\" stroke-width=\"1\" rx=\"3\" class=\"fm-gantt-task ");
+    f.push_str(type_class);
+    f.push_str("\"/>");
+}
+
+/// Stream a gantt task label `<text>` byte-identical to the slow path's `Element::text()`:
+/// `x y text-anchor="middle" dominant-baseline="central" font-size [font-family] fill class`.
+#[allow(clippy::too_many_arguments)]
+fn write_gantt_label_into(
+    f: &mut String,
+    x: f32,
+    y: f32,
+    font_size: f32,
+    family: &str,
+    embed: bool,
+    fill: &str,
+    label: &str,
+) {
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
+    f.push_str("<text x=\"");
+    let _ = crate::attributes::write_number_into(f, x);
+    f.push_str("\" y=\"");
+    let _ = crate::attributes::write_number_into(f, y);
+    f.push_str("\" text-anchor=\"middle\" dominant-baseline=\"central\" font-size=\"");
+    let _ = crate::attributes::write_number_into(f, font_size);
+    f.push('"');
+    if !embed {
+        f.push_str(" font-family=\"");
+        let _ = write_escaped_attr(f, family);
+        f.push('"');
+    }
+    f.push_str(" fill=\"");
+    let _ = write_escaped_attr(f, fill);
+    f.push_str("\" class=\"fm-gantt-task-label\">");
+    let _ = write_escaped_text(f, label);
+    f.push_str("</text>");
 }
 
 /// Render a gantt chart with type-based task bar colors, section headers,
@@ -2737,7 +5300,7 @@ fn render_gantt_svg(
                 .x(layout.bounds.width / 2.0 + offset_x)
                 .y(offset_y + config.font_size + 4.0)
                 .anchor(TextAnchor::Middle)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(config.font_size + 4.0)
                 .font_weight("600")
                 .fill(&theme.colors.text)
@@ -2770,7 +5333,7 @@ fn render_gantt_svg(
                     .attr("text-anchor", "start")
                     .attr("font-weight", "600")
                     .attr_num("font-size", config.font_size * 0.85)
-                    .attr("font-family", &config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .fill(&theme.colors.text)
                     .class("fm-gantt-section-label"),
             );
@@ -2788,132 +5351,184 @@ fn render_gantt_svg(
         }
     };
 
-    for (node_idx, node_box) in layout.nodes.iter().enumerate() {
-        let x = node_box.bounds.x + offset_x;
-        let y = node_box.bounds.y + offset_y;
-        let w = node_box.bounds.width;
-        let h = node_box.bounds.height;
+    // Stream all task bars/milestones/progress/labels into ONE raw fragment instead of ~2-3 `Element`s
+    // per task (the dominant cost of gantt render). Byte-identical: the same `<rect>`/`<path>`/`<text>`
+    // bytes in the same per-task order (bar/milestone, then progress, then label) the `Element` children
+    // serialized to.
+    {
+        use crate::attributes::write_escaped_attr;
+        let mut task_svg = String::new();
+        for (node_idx, node_box) in layout.nodes.iter().enumerate() {
+            let x = node_box.bounds.x + offset_x;
+            let y = node_box.bounds.y + offset_y;
+            let w = node_box.bounds.width;
+            let h = node_box.bounds.height;
 
-        let task_type = gantt_meta
-            .tasks
-            .get(node_idx)
-            .map(|t| &t.task_type)
-            .unwrap_or(&fm_core::GanttTaskType::Normal);
-        let fill = task_color(task_type);
-        let is_milestone = matches!(task_type, fm_core::GanttTaskType::Milestone);
+            let task_type = gantt_meta
+                .tasks
+                .get(node_idx)
+                .map(|t| &t.task_type)
+                .unwrap_or(&fm_core::GanttTaskType::Normal);
+            let fill = task_color(task_type);
+            let is_milestone = matches!(task_type, fm_core::GanttTaskType::Milestone);
 
-        if is_milestone {
-            let cx = x + w / 2.0;
-            let cy = y + h / 2.0;
-            let r = h.min(w) * 0.4;
-            let d = format!(
-                "M{},{} L{},{} L{},{} L{},{} Z",
-                cx,
-                cy - r,
-                cx + r,
-                cy,
-                cx,
-                cy + r,
-                cx - r,
-                cy
-            );
-            doc = doc.child(
-                Element::path()
-                    .d(&d)
-                    .fill(fill)
-                    .stroke(&theme.colors.node_stroke)
-                    .stroke_width(1.5)
-                    .class("fm-gantt-milestone"),
-            );
-        } else {
-            let type_class = match task_type {
-                fm_core::GanttTaskType::Done => "fm-gantt-task-done",
-                fm_core::GanttTaskType::Active => "fm-gantt-task-active",
-                fm_core::GanttTaskType::Critical => "fm-gantt-task-critical",
-                fm_core::GanttTaskType::Milestone => "fm-gantt-task-milestone",
-                fm_core::GanttTaskType::Normal => "fm-gantt-task-normal",
-            };
-            doc = doc.child(
-                Element::rect()
-                    .x(x)
-                    .y(y)
-                    .width(w)
-                    .height(h)
-                    .fill(fill)
-                    .stroke(&theme.colors.node_stroke)
-                    .stroke_width(1.0)
-                    .rx(3.0)
-                    .class("fm-gantt-task")
-                    .class(type_class),
-            );
+            if is_milestone {
+                let cx = x + w / 2.0;
+                let cy = y + h / 2.0;
+                let r = h.min(w) * 0.4;
+                let d = format!(
+                    "M{},{} L{},{} L{},{} L{},{} Z",
+                    cx,
+                    cy - r,
+                    cx + r,
+                    cy,
+                    cx,
+                    cy + r,
+                    cx - r,
+                    cy
+                );
+                task_svg.push_str("<path d=\"");
+                task_svg.push_str(&d);
+                task_svg.push_str("\" fill=\"");
+                let _ = write_escaped_attr(&mut task_svg, fill);
+                task_svg.push_str("\" stroke=\"");
+                let _ = write_escaped_attr(&mut task_svg, &theme.colors.node_stroke);
+                task_svg.push_str("\" stroke-width=\"1.5\" class=\"fm-gantt-milestone\"/>");
+            } else {
+                let type_class = match task_type {
+                    fm_core::GanttTaskType::Done => "fm-gantt-task-done",
+                    fm_core::GanttTaskType::Active => "fm-gantt-task-active",
+                    fm_core::GanttTaskType::Critical => "fm-gantt-task-critical",
+                    fm_core::GanttTaskType::Milestone => "fm-gantt-task-milestone",
+                    fm_core::GanttTaskType::Normal => "fm-gantt-task-normal",
+                };
+                write_gantt_bar_into(
+                    &mut task_svg,
+                    x,
+                    y,
+                    w,
+                    h,
+                    fill,
+                    &theme.colors.node_stroke,
+                    type_class,
+                );
 
-            // Progress bar overlay.
-            if let Some(task) = gantt_meta.tasks.get(node_idx)
-                && let Some(progress) = task.progress
-                && progress > 0.0
-            {
-                let progress_w = w * progress.clamp(0.0, 1.0);
-                doc = doc.child(
-                    Element::rect()
-                        .x(x)
-                        .y(y)
-                        .width(progress_w)
-                        .height(h)
-                        .fill(fill)
-                        .attr("fill-opacity", "0.6")
-                        .rx(3.0)
-                        .class("fm-gantt-progress"),
+                // Progress bar overlay.
+                if let Some(task) = gantt_meta.tasks.get(node_idx)
+                    && let Some(progress) = task.progress
+                    && progress > 0.0
+                {
+                    let progress_w = w * progress.clamp(0.0, 1.0);
+                    task_svg.push_str("<rect x=\"");
+                    let _ = crate::attributes::write_number_into(&mut task_svg, x);
+                    task_svg.push_str("\" y=\"");
+                    let _ = crate::attributes::write_number_into(&mut task_svg, y);
+                    task_svg.push_str("\" width=\"");
+                    let _ = crate::attributes::write_number_into(&mut task_svg, progress_w);
+                    task_svg.push_str("\" height=\"");
+                    let _ = crate::attributes::write_number_into(&mut task_svg, h);
+                    task_svg.push_str("\" fill=\"");
+                    let _ = write_escaped_attr(&mut task_svg, fill);
+                    task_svg
+                        .push_str("\" fill-opacity=\"0.6\" rx=\"3\" class=\"fm-gantt-progress\"/>");
+                }
+            }
+
+            // Task label.
+            let label_text = ir
+                .nodes
+                .get(node_box.node_index)
+                .and_then(|n| n.label)
+                .and_then(|lid| ir.labels.get(lid.0))
+                .map(|l| l.text.as_str())
+                .or_else(|| ir.nodes.get(node_box.node_index).map(|n| n.id.as_str()))
+                .unwrap_or("");
+            if !label_text.is_empty() {
+                write_gantt_label_into(
+                    &mut task_svg,
+                    x + w / 2.0,
+                    y + h / 2.0 + config.font_size * 0.3,
+                    config.font_size * 0.8,
+                    &config.font_family,
+                    config.embed_theme_css,
+                    &theme.colors.text,
+                    label_text,
                 );
             }
         }
-
-        // Task label.
-        let label_text = ir
-            .nodes
-            .get(node_box.node_index)
-            .and_then(|n| n.label)
-            .and_then(|lid| ir.labels.get(lid.0))
-            .map(|l| l.text.as_str())
-            .or_else(|| ir.nodes.get(node_box.node_index).map(|n| n.id.as_str()))
-            .unwrap_or("");
-        if !label_text.is_empty() {
-            doc = doc.child(
-                Element::text()
-                    .x(x + w / 2.0)
-                    .y(y + h / 2.0 + config.font_size * 0.3)
-                    .content(label_text)
-                    .attr("text-anchor", "middle")
-                    .attr("dominant-baseline", "central")
-                    .attr_num("font-size", config.font_size * 0.8)
-                    .attr("font-family", &config.font_family)
-                    .fill(&theme.colors.text)
-                    .class("fm-gantt-task-label"),
-            );
+        if !task_svg.is_empty() {
+            doc = doc.child(Element::raw_svg(task_svg));
         }
-    }
 
-    // Dependency arrows.
-    for edge_path in &layout.edges {
-        if edge_path.points.len() >= 2 {
-            let pts: Vec<(f32, f32)> = edge_path
-                .points
-                .iter()
-                .map(|p| (p.x + offset_x, p.y + offset_y))
-                .collect();
-            let path_d = smooth_edge_path(&pts, edge_path.is_self_loop);
-            doc = doc.child(
-                Element::path()
-                    .d(&path_d)
-                    .fill("none")
-                    .stroke(&theme.colors.edge)
-                    .stroke_width(1.2)
-                    .attr("marker-end", "url(#arrowhead)")
-                    .class("fm-gantt-dependency"),
-            );
+        // Dependency arrows — streamed into one raw fragment (path per edge).
+        let mut dep_svg = String::new();
+        for edge_path in &layout.edges {
+            if edge_path.points.len() >= 2 {
+                let path_d = smooth_layout_edge_path(edge_path, offset_x, offset_y);
+                dep_svg.push_str("<path d=\"");
+                dep_svg.push_str(&path_d);
+                dep_svg.push_str("\" fill=\"none\" stroke=\"");
+                let _ = write_escaped_attr(&mut dep_svg, &theme.colors.edge);
+                dep_svg.push_str(
+                    "\" stroke-width=\"1.2\" marker-end=\"url(#arrowhead)\" class=\"fm-gantt-dependency\"/>",
+                );
+            }
+        }
+        if !dep_svg.is_empty() {
+            doc = doc.child(Element::raw_svg(dep_svg));
         }
     }
 
     doc
+}
+
+/// Stream one pie `<text>` byte-identical to the slow path's `TextBuilder`: attrs in `TextBuilder::build`
+/// order `x, y, text-anchor, [dominant-baseline="middle"], [font-family], font-size, [font-weight="600"],
+/// fill, class`, then escaped content. Covers the pie title, slice labels, legend title, and legend rows.
+#[allow(clippy::too_many_arguments)]
+fn write_pie_text_into(
+    f: &mut String,
+    x: f32,
+    y: f32,
+    anchor: &str,
+    baseline_middle: bool,
+    family: &str,
+    embed: bool,
+    font_size: f32,
+    weight_600: bool,
+    fill: &str,
+    class: &str,
+    text: &str,
+) {
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
+    f.push_str("<text x=\"");
+    let _ = crate::attributes::write_number_into(f, x);
+    f.push_str("\" y=\"");
+    let _ = crate::attributes::write_number_into(f, y);
+    f.push_str("\" text-anchor=\"");
+    f.push_str(anchor);
+    f.push('"');
+    if baseline_middle {
+        f.push_str(" dominant-baseline=\"middle\"");
+    }
+    if !embed {
+        f.push_str(" font-family=\"");
+        let _ = write_escaped_attr(f, family);
+        f.push('"');
+    }
+    f.push_str(" font-size=\"");
+    let _ = crate::attributes::write_number_into(f, font_size);
+    f.push('"');
+    if weight_600 {
+        f.push_str(" font-weight=\"600\"");
+    }
+    f.push_str(" fill=\"");
+    let _ = write_escaped_attr(f, fill);
+    f.push_str("\" class=\"");
+    f.push_str(class);
+    f.push_str("\">");
+    let _ = write_escaped_text(f, text);
+    f.push_str("</text>");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2962,97 +5577,137 @@ fn render_pie_svg(
         .sum::<f32>()
         .max(f32::EPSILON);
 
+    // Stream the whole pie (title + per-slice wedge+label + legend group) into ONE raw fragment instead
+    // of ~4 `Element`s per slice + the legend group/box/title. Byte-identical: same element bytes/attr
+    // order (`TextBuilder`/`Element::rect`/`circle`/`path`) in the same doc-child order; the wedge `<path
+    // d>` keeps the same full-precision `format!`; label/legend `font-family` gated on `!embed`.
+    use crate::attributes::write_escaped_attr;
+    let text_fill = theme.colors.text.as_str();
+    let family = config.font_family.as_str();
+    let embed = config.embed_theme_css;
+    let bg = theme.colors.background.as_str();
+    let mut pie_svg = String::new();
+
     if let Some(title) = title {
-        doc = doc.child(
-            TextBuilder::new(title)
-                .x(cx)
-                .y(bounds.y + offset_y + config.font_size + 2.0)
-                .anchor(TextAnchor::Middle)
-                .font_family(&config.font_family)
-                .font_size(config.font_size + 4.0)
-                .font_weight("600")
-                .fill(&theme.colors.text)
-                .class("fm-pie-title")
-                .build(),
+        write_pie_text_into(
+            &mut pie_svg,
+            cx,
+            bounds.y + offset_y + config.font_size + 2.0,
+            "middle",
+            false,
+            family,
+            embed,
+            config.font_size + 4.0,
+            true,
+            text_fill,
+            "fm-pie-title",
+            title,
         );
     }
 
+    // The wedge `<path d>` framing is loop-invariant: `cx`/`cy` (center) and `radius` never change
+    // across slices, so the `format!("M {cx} {cy} L …")`'s four Grisu float formats for them were
+    // re-run once per wedge (float formatting was ~36% of pie render). Format the invariant head
+    // (`M cx cy L `) and arc (` A radius radius 0 `) fragments once; per wedge only the four variable
+    // arc endpoints go through Grisu, written straight into `pie_svg` (no per-wedge `d` String).
+    // Byte-identical: the pieces concatenate to exactly the old format string.
+    use std::fmt::Write as _;
+    let pie_head = format!("M {cx} {cy} L ");
+    let pie_arc = format!(" A {radius} {radius} 0 ");
     let mut angle = -PI / 2.0;
-
+    // A normal wedge's END point (at `angle + sweep`) is the NEXT wedge's START point (at the
+    // next `angle`, since `angle += sweep` below) — bit-for-bit the same float, so its
+    // Grisu-formatted `"{x} {y}"` text is identical. Cache it and reuse it as the next wedge's
+    // start instead of re-running Grisu on `x1 y1` (wedge-boundary float formatting is ~19% of
+    // pie render). Only valid immediately after a normal wedge: zero-value and full-circle wedges
+    // emit no boundary point yet still advance `angle`, so they clear the cache. One reused buffer.
+    let mut prev_end_point = String::new();
+    let mut have_prev_end = false;
     for (i, slice) in pie_meta.slices.iter().enumerate() {
         let value = slice.value.max(0.0);
         let sweep = (value / total) * 2.0 * PI;
         let color = accent_colors[i % accent_colors.len()];
 
-        let wedge = if value <= f32::EPSILON {
-            Element::path()
-                .d("")
-                .fill("none")
-                .stroke("none")
-                .class("fm-pie-slice fm-pie-slice-zero")
+        if value <= f32::EPSILON {
+            pie_svg.push_str(
+                "<path d=\"\" fill=\"none\" stroke=\"none\" class=\"fm-pie-slice fm-pie-slice-zero\"/>",
+            );
+            have_prev_end = false;
         } else if (sweep - 2.0 * PI).abs() <= 0.0001 {
-            Element::circle()
-                .cx(cx)
-                .cy(cy)
-                .r(radius)
-                .fill(color)
-                .stroke(&theme.colors.background)
-                .stroke_width(2.0)
-                .class("fm-pie-slice fm-pie-slice-full")
+            pie_svg.push_str("<circle cx=\"");
+            let _ = crate::attributes::write_number_into(&mut pie_svg, cx);
+            pie_svg.push_str("\" cy=\"");
+            let _ = crate::attributes::write_number_into(&mut pie_svg, cy);
+            pie_svg.push_str("\" r=\"");
+            let _ = crate::attributes::write_number_into(&mut pie_svg, radius);
+            pie_svg.push_str("\" fill=\"");
+            let _ = write_escaped_attr(&mut pie_svg, color);
+            pie_svg.push_str("\" stroke=\"");
+            let _ = write_escaped_attr(&mut pie_svg, bg);
+            pie_svg.push_str("\" stroke-width=\"2\" class=\"fm-pie-slice fm-pie-slice-full\"/>");
+            have_prev_end = false;
         } else {
-            let x1 = cx + radius * angle.cos();
-            let y1 = cy + radius * angle.sin();
             let x2 = cx + radius * (angle + sweep).cos();
             let y2 = cy + radius * (angle + sweep).sin();
             let large_arc = i32::from(sweep > PI);
-            let d =
-                format!("M {cx} {cy} L {x1} {y1} A {radius} {radius} 0 {large_arc} 1 {x2} {y2} Z");
-            Element::path()
-                .d(&d)
-                .fill(color)
-                .stroke(&theme.colors.background)
-                .stroke_width(2.0)
-                .class("fm-pie-slice")
-        };
-
-        doc = doc.child(wedge);
+            pie_svg.push_str("<path d=\"");
+            pie_svg.push_str(&pie_head);
+            // Start point: reuse the previous normal wedge's cached end-point text (byte-identical,
+            // skips two Grisu formats + two trig calls), else format `x1 y1` for the first/after-reset wedge.
+            if have_prev_end {
+                pie_svg.push_str(&prev_end_point);
+            } else {
+                let x1 = cx + radius * angle.cos();
+                let y1 = cy + radius * angle.sin();
+                let _ = write!(pie_svg, "{x1} {y1}");
+            }
+            pie_svg.push_str(&pie_arc);
+            // End point, isolated so its exact `"{x2} {y2}"` bytes can seed the next wedge's start.
+            let _ = write!(pie_svg, "{large_arc} 1 ");
+            let end_start = pie_svg.len();
+            let _ = write!(pie_svg, "{x2} {y2}");
+            prev_end_point.clear();
+            prev_end_point.push_str(&pie_svg[end_start..]);
+            have_prev_end = true;
+            pie_svg.push_str(" Z");
+            pie_svg.push_str("\" fill=\"");
+            let _ = write_escaped_attr(&mut pie_svg, color);
+            pie_svg.push_str("\" stroke=\"");
+            let _ = write_escaped_attr(&mut pie_svg, bg);
+            pie_svg.push_str("\" stroke-width=\"2\" class=\"fm-pie-slice\"/>");
+        }
 
         let mid_angle = angle + sweep / 2.0;
         let label_radius = radius + 24.0;
         let lx = cx + label_radius * mid_angle.cos();
         let ly = cy + label_radius * mid_angle.sin();
         let pct = (value / total) * 100.0;
-
         let label_text = if pie_meta.show_data {
             format!("{}: {:.0} ({:.1}%)", slice.label, value, pct)
         } else {
             slice.label.clone()
         };
-
         let anchor = if mid_angle.cos() < -0.1 {
-            TextAnchor::End
+            "end"
         } else if mid_angle.cos() > 0.1 {
-            TextAnchor::Start
+            "start"
         } else {
-            TextAnchor::Middle
+            "middle"
         };
-
-        doc = doc.child(
-            TextBuilder::new(&label_text)
-                .x(lx)
-                .y(ly)
-                .anchor(anchor)
-                .baseline(crate::text::DominantBaseline::Middle)
-                .font_family(&config.font_family)
-                .font_size(clamp_font_size(
-                    config.font_size * 0.85,
-                    config.min_font_size,
-                ))
-                .fill(&theme.colors.text)
-                .class("fm-pie-label")
-                .build(),
+        write_pie_text_into(
+            &mut pie_svg,
+            lx,
+            ly,
+            anchor,
+            true,
+            family,
+            embed,
+            clamp_font_size(config.font_size * 0.85, config.min_font_size),
+            false,
+            text_fill,
+            "fm-pie-label",
+            &label_text,
         );
-
         angle += sweep;
     }
 
@@ -3060,32 +5715,34 @@ fn render_pie_svg(
     let legend_y = chart_top + 12.0;
     let legend_height = (pie_meta.slices.len() as f32 * 24.0 + 44.0).max(64.0);
 
-    let mut legend = Element::group().class("fm-pie-legend");
-    legend = legend.child(
-        Element::rect()
-            .x(legend_x)
-            .y(legend_y)
-            .width(legend_width)
-            .height(legend_height)
-            .rx(config.rounded_corners.max(6.0))
-            .fill(&theme.colors.node_fill)
-            .stroke(&theme.colors.node_stroke)
-            .stroke_width(1.2)
-            .class("fm-pie-legend-box"),
-    );
-    legend = legend.child(
-        TextBuilder::new("Legend")
-            .x(legend_x + 14.0)
-            .y(legend_y + 18.0)
-            .font_family(&config.font_family)
-            .font_size(clamp_font_size(
-                config.font_size * 0.82,
-                config.min_font_size,
-            ))
-            .font_weight("600")
-            .fill(&theme.colors.text)
-            .class("fm-pie-legend-title")
-            .build(),
+    pie_svg.push_str("<g class=\"fm-pie-legend\"><rect x=\"");
+    let _ = crate::attributes::write_number_into(&mut pie_svg, legend_x);
+    pie_svg.push_str("\" y=\"");
+    let _ = crate::attributes::write_number_into(&mut pie_svg, legend_y);
+    pie_svg.push_str("\" width=\"");
+    let _ = crate::attributes::write_number_into(&mut pie_svg, legend_width);
+    pie_svg.push_str("\" height=\"");
+    let _ = crate::attributes::write_number_into(&mut pie_svg, legend_height);
+    pie_svg.push_str("\" rx=\"");
+    let _ = crate::attributes::write_number_into(&mut pie_svg, config.rounded_corners.max(6.0));
+    pie_svg.push_str("\" fill=\"");
+    let _ = write_escaped_attr(&mut pie_svg, &theme.colors.node_fill);
+    pie_svg.push_str("\" stroke=\"");
+    let _ = write_escaped_attr(&mut pie_svg, &theme.colors.node_stroke);
+    pie_svg.push_str("\" stroke-width=\"1.2\" class=\"fm-pie-legend-box\"/>");
+    write_pie_text_into(
+        &mut pie_svg,
+        legend_x + 14.0,
+        legend_y + 18.0,
+        "start",
+        false,
+        family,
+        embed,
+        clamp_font_size(config.font_size * 0.82, config.min_font_size),
+        true,
+        text_fill,
+        "fm-pie-legend-title",
+        "Legend",
     );
 
     for (index, slice) in pie_meta.slices.iter().enumerate() {
@@ -3097,35 +5754,33 @@ fn render_pie_svg(
         } else {
             slice.label.clone()
         };
-        legend = legend.child(
-            Element::rect()
-                .x(legend_x + 14.0)
-                .y(row_y - 9.0)
-                .width(12.0)
-                .height(12.0)
-                .rx(2.0)
-                .fill(color)
-                .stroke(&theme.colors.background)
-                .stroke_width(1.0)
-                .class("fm-pie-legend-swatch"),
-        );
-        legend = legend.child(
-            TextBuilder::new(&entry_label)
-                .x(legend_x + 34.0)
-                .y(row_y)
-                .baseline(crate::text::DominantBaseline::Middle)
-                .font_family(&config.font_family)
-                .font_size(clamp_font_size(
-                    config.font_size * 0.8,
-                    config.min_font_size,
-                ))
-                .fill(&theme.colors.text)
-                .class("fm-pie-legend-entry")
-                .build(),
+        pie_svg.push_str("<rect x=\"");
+        let _ = crate::attributes::write_number_into(&mut pie_svg, legend_x + 14.0);
+        pie_svg.push_str("\" y=\"");
+        let _ = crate::attributes::write_number_into(&mut pie_svg, row_y - 9.0);
+        pie_svg.push_str("\" width=\"12\" height=\"12\" rx=\"2\" fill=\"");
+        let _ = write_escaped_attr(&mut pie_svg, color);
+        pie_svg.push_str("\" stroke=\"");
+        let _ = write_escaped_attr(&mut pie_svg, bg);
+        pie_svg.push_str("\" stroke-width=\"1\" class=\"fm-pie-legend-swatch\"/>");
+        write_pie_text_into(
+            &mut pie_svg,
+            legend_x + 34.0,
+            row_y,
+            "start",
+            true,
+            family,
+            embed,
+            clamp_font_size(config.font_size * 0.8, config.min_font_size),
+            false,
+            text_fill,
+            "fm-pie-legend-entry",
+            &entry_label,
         );
     }
+    pie_svg.push_str("</g>");
 
-    doc = doc.child(legend);
+    doc = doc.child(Element::raw_svg(pie_svg));
 
     doc
 }
@@ -3151,6 +5806,22 @@ fn render_xychart_svg(
     let baseline_y = xychart_value_to_y(baseline_value, y_min, y_max, plot_bounds) + offset_y;
     let categories = xychart_categories(xy_chart_meta);
     let palette = theme.colors.accents.clone();
+    let lookup_len = layout
+        .nodes
+        .iter()
+        .map(|node| node.node_index)
+        .max()
+        .map_or(ir.nodes.len(), |max_index| {
+            ir.nodes.len().max(max_index.saturating_add(1))
+        });
+    let mut layout_nodes_by_index = vec![None; lookup_len];
+    for node in &layout.nodes {
+        if let Some(slot) = layout_nodes_by_index.get_mut(node.node_index)
+            && slot.is_none()
+        {
+            *slot = Some(node);
+        }
+    }
 
     doc = doc.child(
         Element::rect()
@@ -3185,7 +5856,7 @@ fn render_xychart_svg(
                 .x(plot_x - 10.0)
                 .y(tick_y + 4.0)
                 .anchor(TextAnchor::End)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(clamp_font_size(
                     config.font_size * 0.72,
                     config.min_font_size,
@@ -3218,22 +5889,65 @@ fn render_xychart_svg(
     );
 
     let band_width = plot_bounds.width / categories.len().max(1) as f32;
-    for (index, category) in categories.iter().enumerate() {
-        let x = plot_x + band_width * (index as f32 + 0.5);
-        doc = doc.child(
-            TextBuilder::new(category)
-                .x(x)
-                .y(plot_bottom + 24.0)
-                .anchor(TextAnchor::Middle)
-                .font_family(&config.font_family)
-                .font_size(clamp_font_size(
-                    config.font_size * 0.74,
-                    config.min_font_size,
-                ))
-                .fill(&theme.colors.text)
-                .class("fm-xychart-x-tick")
-                .build(),
+    // Stream the per-category x-tick `<text>` labels when the config matches the fast shape: embedded
+    // theme CSS (so no per-label `font-family` — it is inherited from the root `<svg>`) and every
+    // category single-line (a multi-line label needs `<tspan>` children). Byte-identical to the
+    // TextBuilder/`Element` build: attribute order `x, y, text-anchor, font-size, fill, class` (baseline
+    // is Auto and weight/style unset here, so those are absent), `write_value` numbers, `write_escaped
+    // _attr` fill, and `write_escaped_text` content — exactly what `Element`'s `.content` serializes
+    // (element.rs). Any other config falls back to the TextBuilder path below.
+    let labels_streamable = config.embed_theme_css
+        && categories
+            .iter()
+            .all(|c| !c.contains('\n') && !c.contains('\r'));
+    if labels_streamable {
+        use crate::attributes::{write_escaped_attr, write_escaped_text};
+        let mut y_text = String::new();
+        let _ = crate::attributes::write_number_into(&mut y_text, plot_bottom + 24.0);
+        let mut fs_text = String::new();
+        let _ = crate::attributes::write_number_into(
+            &mut fs_text,
+            clamp_font_size(config.font_size * 0.74, config.min_font_size),
         );
+        let mut esc_fill = String::new();
+        let _ = write_escaped_attr(&mut esc_fill, &theme.colors.text);
+        let mut x_text = String::new();
+        let mut label_svg = String::new();
+        for (index, category) in categories.iter().enumerate() {
+            let x = plot_x + band_width * (index as f32 + 0.5);
+            x_text.clear();
+            let _ = crate::attributes::write_number_into(&mut x_text, x);
+            label_svg.push_str("<text x=\"");
+            label_svg.push_str(&x_text);
+            label_svg.push_str("\" y=\"");
+            label_svg.push_str(&y_text);
+            label_svg.push_str("\" text-anchor=\"middle\" font-size=\"");
+            label_svg.push_str(&fs_text);
+            label_svg.push_str("\" fill=\"");
+            label_svg.push_str(&esc_fill);
+            label_svg.push_str("\" class=\"fm-xychart-x-tick\">");
+            let _ = write_escaped_text(&mut label_svg, category);
+            label_svg.push_str("</text>");
+        }
+        doc = doc.child(Element::raw_svg(label_svg));
+    } else {
+        for (index, category) in categories.iter().enumerate() {
+            let x = plot_x + band_width * (index as f32 + 0.5);
+            doc = doc.child(
+                TextBuilder::new(category)
+                    .x(x)
+                    .y(plot_bottom + 24.0)
+                    .anchor(TextAnchor::Middle)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                    .font_size(clamp_font_size(
+                        config.font_size * 0.74,
+                        config.min_font_size,
+                    ))
+                    .fill(&theme.colors.text)
+                    .class("fm-xychart-x-tick")
+                    .build(),
+            );
+        }
     }
 
     if let Some(title) = diagram_title(ir, xy_chart_meta.title.as_deref()) {
@@ -3242,7 +5956,7 @@ fn render_xychart_svg(
                 .x((layout.bounds.width / 2.0) + offset_x)
                 .y(plot_y - 34.0)
                 .anchor(TextAnchor::Middle)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(clamp_font_size(
                     config.font_size * 1.18,
                     config.min_font_size,
@@ -3259,7 +5973,7 @@ fn render_xychart_svg(
             TextBuilder::new(y_label)
                 .x(plot_x - 52.0)
                 .y(plot_y - 12.0)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(clamp_font_size(
                     config.font_size * 0.76,
                     config.min_font_size,
@@ -3277,7 +5991,7 @@ fn render_xychart_svg(
                 .x(plot_x + plot_bounds.width / 2.0)
                 .y(plot_bottom + 48.0)
                 .anchor(TextAnchor::Middle)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(clamp_font_size(
                     config.font_size * 0.76,
                     config.min_font_size,
@@ -3304,18 +6018,38 @@ fn render_xychart_svg(
                 .class("fm-xychart-tick"),
         );
     }
-    for (index, _category) in categories.iter().enumerate() {
-        let x = plot_x + band_width * (index as f32 + 0.5);
-        doc = doc.child(
-            Element::line()
-                .x1(x)
-                .y1(plot_bottom)
-                .x2(x)
-                .y2(plot_bottom + tick_len)
-                .stroke(&theme.colors.text)
-                .stroke_width(1.0)
-                .class("fm-xychart-tick"),
-        );
+    {
+        // Per-category x-axis tick `<line>`s: only `x` varies (x1 == x2 == x); y1 (plot_bottom), y2
+        // (plot_bottom + tick_len), the stroke colour, stroke-width and class are all invariant across
+        // the loop. Hoist those, format `x` once per tick (shared by x1/x2), and stream into one
+        // `raw_svg` child — no span metadata here, so no gate. Byte-identical to the `Element` build
+        // (attribute order x1,y1,x2,y2,stroke,stroke-width,class; `stroke-width="1"` = `1.0`).
+        use crate::attributes::write_escaped_attr;
+        let mut y1_text = String::new();
+        let _ = crate::attributes::write_number_into(&mut y1_text, plot_bottom);
+        let mut y2_text = String::new();
+        let _ = crate::attributes::write_number_into(&mut y2_text, plot_bottom + tick_len);
+        let mut esc_stroke = String::new();
+        let _ = write_escaped_attr(&mut esc_stroke, &theme.colors.text);
+        let mut x_text = String::new();
+        let mut tick_svg = String::new();
+        for (index, _category) in categories.iter().enumerate() {
+            let x = plot_x + band_width * (index as f32 + 0.5);
+            x_text.clear();
+            let _ = crate::attributes::write_number_into(&mut x_text, x);
+            tick_svg.push_str("<line x1=\"");
+            tick_svg.push_str(&x_text);
+            tick_svg.push_str("\" y1=\"");
+            tick_svg.push_str(&y1_text);
+            tick_svg.push_str("\" x2=\"");
+            tick_svg.push_str(&x_text);
+            tick_svg.push_str("\" y2=\"");
+            tick_svg.push_str(&y2_text);
+            tick_svg.push_str("\" stroke=\"");
+            tick_svg.push_str(&esc_stroke);
+            tick_svg.push_str("\" stroke-width=\"1\" class=\"fm-xychart-tick\"/>");
+        }
+        doc = doc.child(Element::raw_svg(tick_svg));
     }
 
     // Legend for named series.
@@ -3363,7 +6097,7 @@ fn render_xychart_svg(
                     .x(legend_x + 24.0)
                     .y(row_y)
                     .baseline(crate::text::DominantBaseline::Middle)
-                    .font_family(&config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .font_size(clamp_font_size(
                         config.font_size * 0.72,
                         config.min_font_size,
@@ -3381,32 +6115,72 @@ fn render_xychart_svg(
         let series_nodes: Vec<_> = series
             .nodes
             .iter()
-            .filter_map(|node_id| {
-                layout
-                    .nodes
-                    .iter()
-                    .find(|node| node.node_index == node_id.0)
-            })
+            .filter_map(|node_id| layout_nodes_by_index.get(node_id.0).and_then(|node| *node))
             .collect();
 
         match series.kind {
             IrXySeriesKind::Bar => {
-                for node in series_nodes {
-                    let mut rect = Element::rect()
-                        .x(node.bounds.x + offset_x)
-                        .y(node.bounds.y + offset_y)
-                        .width(node.bounds.width)
-                        .height(node.bounds.height)
-                        .fill(color)
-                        .fill_opacity(0.78)
-                        .stroke(color)
-                        .stroke_width(1.0)
-                        .rx((config.rounded_corners * 0.45).max(3.0))
-                        .class("fm-xychart-bar");
-                    if config.include_source_spans {
-                        rect = apply_span_metadata(rect, node.span);
+                let rx = (config.rounded_corners * 0.45).max(3.0);
+                if config.include_source_spans {
+                    // Spans on: keep the per-bar `Element` build so `apply_span_metadata` can attach the
+                    // `data-fm-source-*` attributes (rare config; not worth reproducing inline).
+                    for node in series_nodes {
+                        let rect = Element::rect()
+                            .x(node.bounds.x + offset_x)
+                            .y(node.bounds.y + offset_y)
+                            .width(node.bounds.width)
+                            .height(node.bounds.height)
+                            .fill(color)
+                            .fill_opacity(0.78)
+                            .stroke(color)
+                            .stroke_width(1.0)
+                            .rx(rx)
+                            .class("fm-xychart-bar");
+                        doc = doc.child(apply_span_metadata(rect, node.span));
                     }
-                    doc = doc.child(rect);
+                } else {
+                    // Stream the bar `<rect>`s straight into one `raw_svg` child instead of building ~N
+                    // per-bar `Element`/`Attributes` trees (Attributes churn was ~18% of xychart render).
+                    // Byte-identical to the `Element` build above: same attribute order (x, y, width,
+                    // height, fill, fill-opacity, stroke, stroke-width, rx, class), same `write_value`
+                    // number formatting, same `write_escaped_attr` for the colour. `fill-opacity="0.78"`
+                    // and `stroke-width="1"` are the fixed serializations of `0.78`/`1.0`.
+                    use crate::attributes::write_escaped_attr;
+                    // Per-series invariants: the fill/stroke colour and the corner radius are identical
+                    // for every bar, so escape/format them ONCE and reuse the bytes rather than
+                    // re-escaping the colour twice + re-formatting `rx` per bar (write_escaped_attr was
+                    // the top xychart frame after marker streaming). Byte-identical.
+                    let mut esc_color = String::new();
+                    let _ = write_escaped_attr(&mut esc_color, color);
+                    let mut rx_text = String::new();
+                    let _ = crate::attributes::write_number_into(&mut rx_text, rx);
+                    let mut bar_svg = String::new();
+                    for node in series_nodes {
+                        bar_svg.push_str("<rect x=\"");
+                        let _ = crate::attributes::write_number_into(
+                            &mut bar_svg,
+                            node.bounds.x + offset_x,
+                        );
+                        bar_svg.push_str("\" y=\"");
+                        let _ = crate::attributes::write_number_into(
+                            &mut bar_svg,
+                            node.bounds.y + offset_y,
+                        );
+                        bar_svg.push_str("\" width=\"");
+                        let _ =
+                            crate::attributes::write_number_into(&mut bar_svg, node.bounds.width);
+                        bar_svg.push_str("\" height=\"");
+                        let _ =
+                            crate::attributes::write_number_into(&mut bar_svg, node.bounds.height);
+                        bar_svg.push_str("\" fill=\"");
+                        bar_svg.push_str(&esc_color);
+                        bar_svg.push_str("\" fill-opacity=\"0.78\" stroke=\"");
+                        bar_svg.push_str(&esc_color);
+                        bar_svg.push_str("\" stroke-width=\"1\" rx=\"");
+                        bar_svg.push_str(&rx_text);
+                        bar_svg.push_str("\" class=\"fm-xychart-bar\"/>");
+                    }
+                    doc = doc.child(Element::raw_svg(bar_svg));
                 }
             }
             IrXySeriesKind::Line | IrXySeriesKind::Area => {
@@ -3458,20 +6232,55 @@ fn render_xychart_svg(
                         .class("fm-xychart-line"),
                 );
 
-                for node in series_nodes {
-                    let center = node.bounds.center();
-                    let mut point = Element::circle()
-                        .cx(center.x + offset_x)
-                        .cy(center.y + offset_y)
-                        .r((node.bounds.width.min(node.bounds.height) / 2.0).max(3.5))
-                        .fill(color)
-                        .stroke(&theme.colors.background)
-                        .stroke_width(2.0)
-                        .class("fm-xychart-point");
-                    if config.include_source_spans {
-                        point = apply_span_metadata(point, node.span);
+                if config.include_source_spans {
+                    for node in series_nodes {
+                        let center = node.bounds.center();
+                        let point = Element::circle()
+                            .cx(center.x + offset_x)
+                            .cy(center.y + offset_y)
+                            .r((node.bounds.width.min(node.bounds.height) / 2.0).max(3.5))
+                            .fill(color)
+                            .stroke(&theme.colors.background)
+                            .stroke_width(2.0)
+                            .class("fm-xychart-point");
+                        doc = doc.child(apply_span_metadata(point, node.span));
                     }
-                    doc = doc.child(point);
+                } else {
+                    // Stream the series point `<circle>`s (see the bar-`<rect>` streaming above). Same
+                    // attribute order as the `Element` build (cx, cy, r, fill, stroke, stroke-width, class);
+                    // `stroke-width="2"` is the fixed serialization of `2.0`. Byte-identical.
+                    use crate::attributes::write_escaped_attr;
+                    // Per-series invariants: fill (series colour) and stroke (theme background) are the
+                    // same for every point — escape once, reuse. Only cx/cy/r vary. Byte-identical.
+                    let mut esc_color = String::new();
+                    let _ = write_escaped_attr(&mut esc_color, color);
+                    let mut esc_bg = String::new();
+                    let _ = write_escaped_attr(&mut esc_bg, &theme.colors.background);
+                    let mut point_svg = String::new();
+                    for node in series_nodes {
+                        let center = node.bounds.center();
+                        point_svg.push_str("<circle cx=\"");
+                        let _ = crate::attributes::write_number_into(
+                            &mut point_svg,
+                            center.x + offset_x,
+                        );
+                        point_svg.push_str("\" cy=\"");
+                        let _ = crate::attributes::write_number_into(
+                            &mut point_svg,
+                            center.y + offset_y,
+                        );
+                        point_svg.push_str("\" r=\"");
+                        let _ = crate::attributes::write_number_into(
+                            &mut point_svg,
+                            (node.bounds.width.min(node.bounds.height) / 2.0).max(3.5),
+                        );
+                        point_svg.push_str("\" fill=\"");
+                        point_svg.push_str(&esc_color);
+                        point_svg.push_str("\" stroke=\"");
+                        point_svg.push_str(&esc_bg);
+                        point_svg.push_str("\" stroke-width=\"2\" class=\"fm-xychart-point\"/>");
+                    }
+                    doc = doc.child(Element::raw_svg(point_svg));
                 }
             }
         }
@@ -3591,6 +6400,1875 @@ fn lookup_centrality_tier(
     centrality_map.get(&node_index).copied()
 }
 
+/// Serialize a complete common rectangle node (`<g>` + gradient `<rect>` + centered `<text>` +
+/// `<title>`) directly into raw SVG bytes, **byte-identical** to what `render_node` builds via
+/// `Element`s for the default themed config. Every value goes through the same serializers
+/// (`AttributeValue::write_value` / `write_escaped_attr` / `write_escaped_text`); only attribute
+/// names/order and tag structure are replicated here (pinned by `node_fast_fragment_matches_render`).
+/// Used only via the `common_node_fast` gate, which guarantees none of `render_node`'s conditional
+/// classes/children/post-processing apply, so this is the entire node. Skips four `Element` builds +
+/// their `Attributes` Vecs + `write_into` walks — the per-node construction is ~60% of wide render.
+/// The ` fm-node-user-{sanitized}` class suffix the slow path appends for a node's custom classes, but
+/// ONLY when every class is "simple" — none triggers a state/border keyword (highlight/inactive/dashed/
+/// double) or a special class that changes the node's rendered fill/stroke/structure. Returns `None` when
+/// any class needs the `Element` slow path, so the fast node fragment stays byte-identical. Empty/no
+/// classes yield `Some("")` (no allocation).
+fn simple_node_user_class_suffix(node: &fm_core::IrNode) -> Option<String> {
+    // Nodes with compartments (class diagrams), an ER entity's attribute list, or C4 metadata render
+    // extra content the plain-rect fast fragment does not produce; they were implicitly excluded by the
+    // old `classes.is_empty()` gate, so keep excluding them now that arbitrary simple classes are allowed.
+    // `members` is populated only for ER entities (`render_node`'s ER branch draws a name header + divider
+    // + one `<text>` per attribute); without this exclusion a themed ER entity (the default `node_gradients`
+    // config) was streamed as a plain rectangle with only its name, silently dropping every attribute row.
+    if node.class_meta.is_some() || node.c4_meta.is_some() || !node.members.is_empty() {
+        return None;
+    }
+    let mut suffix = String::new();
+    let mut block_beta = false;
+    for class in &node.classes {
+        // One fused pass yields both the keyword flags (for the reject gate) and whether the class is an
+        // already-clean CSS token (so the write below can bulk-`push_str` without re-scanning).
+        let (kw, is_clean) = scan_class_keywords_and_clean(class);
+        if kw.highlighted
+            || kw.inactive
+            || kw.dashed_border
+            || kw.double_border
+            || class.eq_ignore_ascii_case("c4-external")
+            || class.eq_ignore_ascii_case("block-beta-space")
+        {
+            return None;
+        }
+        // `block-beta` only makes the slow path add a plain `fm-node-block-beta` class (no fill/structure
+        // change), so keep it on the fast path and replicate that class below. `block-beta-space` is a
+        // placeholder node (already excluded by the fast gate's `!placeholder_space_node`) — reject it.
+        if class.eq_ignore_ascii_case("block-beta") {
+            block_beta = true;
+        }
+        // A non-empty class always sanitizes to a non-empty token (every char maps to one char), so gate
+        // on the raw class and write the token straight into `suffix` — no throwaway per-class `String`.
+        // `is_clean` from the fused scan skips `write_sanitized_css_token_into`'s redundant `all(clean)`
+        // re-scan on the common already-clean class.
+        if !class.is_empty() {
+            suffix.push_str(" fm-node-user-");
+            if is_clean {
+                suffix.push_str(class);
+            } else {
+                write_sanitized_css_token_into(&mut suffix, class);
+            }
+        }
+    }
+    // The slow path appends `fm-node-block-beta` AFTER the per-class `fm-node-user-…` loop (see the
+    // `is_block_beta` block in `render_node`), so it goes last here too. Byte-identical.
+    if block_beta {
+        suffix.push_str(" fm-node-block-beta");
+    }
+    Some(suffix)
+}
+
+/// The ` fm-node-user-{sanitized}` class suffix for a **class-diagram node's** custom classes — the
+/// class-node twin of [`simple_node_user_class_suffix`] (which excludes `class_meta` nodes outright).
+/// Returns `None` (forcing the `Element` slow path) whenever any class would make `render_node` add a
+/// state/border keyword class, a special fill/structure, or a block-beta marker — none of which the
+/// class-node streaming fragment reproduces. Empty/no classes yield `Some("")`. Class nodes are never
+/// block-beta/kanban/journey in practice, but every such case is rejected so the fragment stays
+/// byte-identical to the slow path (pinned by `svg_golden_snapshots_are_stable`).
+fn simple_class_node_user_suffix(node: &fm_core::IrNode) -> Option<String> {
+    let mut suffix = String::new();
+    for class in &node.classes {
+        let (kw, is_clean) = scan_class_keywords_and_clean(class);
+        if kw.highlighted
+            || kw.inactive
+            || kw.dashed_border
+            || kw.double_border
+            || class.eq_ignore_ascii_case("c4-external")
+            || class.eq_ignore_ascii_case("block-beta")
+            || class.eq_ignore_ascii_case("block-beta-space")
+        {
+            return None;
+        }
+        // kanban-priority / journey-score classes drive an inline `style="fill: …"` on the shape in the
+        // slow path (the streaming rect always uses the gradient fill), so reject them.
+        match class.as_str() {
+            "kanban-priority-high"
+            | "kanban-priority-critical"
+            | "kanban-priority-medium"
+            | "kanban-priority-low"
+            | "journey-score-1"
+            | "journey-score-2"
+            | "journey-score-3"
+            | "journey-score-4"
+            | "journey-score-5" => return None,
+            _ => {}
+        }
+        if !class.is_empty() {
+            suffix.push_str(" fm-node-user-");
+            if is_clean {
+                suffix.push_str(class);
+            } else {
+                write_sanitized_css_token_into(&mut suffix, class);
+            }
+        }
+    }
+    Some(suffix)
+}
+
+/// Stream a class node's compartment stack (stereotype + name + separators + attribute/method rows) into
+/// `f`. Extracted from [`render_class_compartments`]' streaming fast path so the whole-class-node fast
+/// path ([`write_class_node_fragment_into`]) can reuse the exact same body — same `<text>`/`<line>`
+/// attrs, order, positions, and cursor advance. Byte-identical to the `Element` slow path.
+#[allow(clippy::too_many_arguments)]
+fn write_class_compartments_into(
+    f: &mut String,
+    node: &fm_core::IrNode,
+    meta: &fm_core::IrClassNodeMeta,
+    ir: &MermaidDiagramIr,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) {
+    let line_h = font_size * config.line_height;
+    let text_x = x + 8.0;
+    let mut cursor_y = y + line_h;
+    let fill = colors.text.as_str();
+    let class_name = node
+        .label
+        .and_then(|lid| ir.labels.get(lid.0))
+        .map(|l| l.text.as_str())
+        .unwrap_or(&node.id);
+    if let Some(stereotype) = &meta.stereotype {
+        let stereo_text = match stereotype {
+            fm_core::ClassStereotype::Interface => "<<interface>>",
+            fm_core::ClassStereotype::Abstract => "<<abstract>>",
+            fm_core::ClassStereotype::Enum => "<<enumeration>>",
+            fm_core::ClassStereotype::Service => "<<service>>",
+            fm_core::ClassStereotype::Custom(s) => s.as_str(),
+        };
+        write_class_text_into(
+            f,
+            x + w / 2.0,
+            cursor_y,
+            "middle",
+            font_size * 0.85,
+            " font-style=\"italic\"",
+            fill,
+            stereo_text,
+        );
+        cursor_y += line_h;
+    }
+    // No-generics name is written directly (the slow path's `class_name.to_string()` copy is avoided).
+    if meta.generics.is_empty() {
+        write_class_text_into(
+            f,
+            x + w / 2.0,
+            cursor_y,
+            "middle",
+            font_size,
+            " font-weight=\"bold\"",
+            fill,
+            class_name,
+        );
+    } else {
+        let display_name = format!("{class_name}<{}>", meta.generics.join(", "));
+        write_class_text_into(
+            f,
+            x + w / 2.0,
+            cursor_y,
+            "middle",
+            font_size,
+            " font-weight=\"bold\"",
+            fill,
+            &display_name,
+        );
+    }
+    cursor_y += line_h * 0.5;
+    write_class_separator_into(f, x, cursor_y, x + w);
+    cursor_y += line_h * 0.3;
+    let member_font_size = font_size * 0.9;
+    for attr in &meta.attributes {
+        cursor_y += member_font_size * config.line_height * 0.9;
+        if cursor_y > y + h - line_h * 0.5 {
+            break;
+        }
+        let vis = visibility_symbol(attr.visibility);
+        let text = if let Some(ref ret) = attr.return_type {
+            format!("{vis}{}: {ret}", attr.name)
+        } else {
+            format!("{vis}{}", attr.name)
+        };
+        write_class_text_into(
+            f,
+            text_x,
+            cursor_y,
+            "start",
+            member_font_size,
+            "",
+            fill,
+            &text,
+        );
+    }
+    if !meta.attributes.is_empty() && !meta.methods.is_empty() {
+        cursor_y += line_h * 0.3;
+        write_class_separator_into(f, x, cursor_y, x + w);
+        cursor_y += line_h * 0.3;
+    }
+    for method in &meta.methods {
+        cursor_y += member_font_size * config.line_height * 0.9;
+        if cursor_y > y + h - line_h * 0.5 {
+            break;
+        }
+        let vis = visibility_symbol(method.visibility);
+        let suffix = if method.is_abstract {
+            "*"
+        } else if method.is_static {
+            "$"
+        } else {
+            ""
+        };
+        let ret = method
+            .return_type
+            .as_deref()
+            .map(|t| format!(": {t}"))
+            .unwrap_or_default();
+        let text = format!("{vis}{}{suffix}{ret}", method.name);
+        write_class_text_into(
+            f,
+            text_x,
+            cursor_y,
+            "start",
+            member_font_size,
+            "",
+            fill,
+            &text,
+        );
+    }
+}
+
+/// Stream an ER entity's body (name header `<text>` + divider `<line>` + one `<text>` per attribute)
+/// byte-identical to what `render_node`'s ER branch builds via `Element`s under embedded CSS with no
+/// per-label style and no classdef class. Attrs replicate that branch's builder call order exactly:
+/// name/attr `<text>` carry `x, y, text-anchor, dominant-baseline, font-size, font-weight, fill, class`
+/// (font-family is embedded-CSS-driven, so absent); the divider `<line>` carries `x1, y1, x2, y2,
+/// stroke-width` (stroke is CSS-driven, so absent). The per-attribute content `{key_prefix}{data_type}
+/// {name}` streams in pieces instead of a `format!` temp — byte-identical because `write_escaped_text`
+/// escapes per char and `key_prefix`/the separating space hold no XML specials. Used only via the ER
+/// branch's fast path, mirroring [`write_class_compartments_into`]; replaces ~2 + N `Element`s per
+/// entity (~400 for a 40-entity diagram) with one raw fragment.
+#[allow(clippy::too_many_arguments)]
+fn write_er_entity_into(
+    f: &mut String,
+    node: &fm_core::IrNode,
+    label_text: &str,
+    cx: f32,
+    x: f32,
+    y: f32,
+    w: f32,
+    node_font_size: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) {
+    use crate::attributes::{write_escaped_attr, write_escaped_text, write_number_into};
+    let attr_font_size = clamp_font_size(node_font_size * 0.8, config.min_font_size);
+    let header_height = node_font_size * 1.5;
+    let fill = colors.text.as_str();
+
+    // Entity name header.
+    f.push_str("<text x=\"");
+    let _ = write_number_into(f, cx);
+    f.push_str("\" y=\"");
+    let _ = write_number_into(f, y + header_height * 0.6);
+    f.push_str("\" text-anchor=\"middle\" dominant-baseline=\"central\" font-size=\"");
+    let _ = write_number_into(f, node_font_size);
+    f.push_str("\" font-weight=\"bold\" fill=\"");
+    let _ = write_escaped_attr(f, fill);
+    f.push_str("\" class=\"fm-er-entity-name\">");
+    let _ = write_escaped_text(f, label_text);
+    f.push_str("</text>");
+
+    // Divider line.
+    f.push_str("<line x1=\"");
+    let _ = write_number_into(f, x + 2.0);
+    f.push_str("\" y1=\"");
+    let _ = write_number_into(f, y + header_height);
+    f.push_str("\" x2=\"");
+    let _ = write_number_into(f, x + w - 2.0);
+    f.push_str("\" y2=\"");
+    let _ = write_number_into(f, y + header_height);
+    // `stroke_width(0.8)` serializes via `write_number_into` -> two decimals ("0.80"), NOT "0.8".
+    f.push_str("\" stroke-width=\"0.80\"/>");
+
+    // Attribute list.
+    let mut attr_y = y + header_height + attr_font_size * 0.9;
+    for attr in &node.members {
+        let key_prefix = match attr.key {
+            fm_core::IrAttributeKey::Pk => "PK ",
+            fm_core::IrAttributeKey::Fk => "FK ",
+            fm_core::IrAttributeKey::Uk => "UK ",
+            fm_core::IrAttributeKey::None => "",
+        };
+        let font_weight = if attr.key == fm_core::IrAttributeKey::None {
+            "normal"
+        } else {
+            "bold"
+        };
+        f.push_str("<text x=\"");
+        let _ = write_number_into(f, x + 8.0);
+        f.push_str("\" y=\"");
+        let _ = write_number_into(f, attr_y);
+        f.push_str("\" text-anchor=\"start\" dominant-baseline=\"central\" font-size=\"");
+        let _ = write_number_into(f, attr_font_size);
+        f.push_str("\" font-weight=\"");
+        f.push_str(font_weight);
+        f.push_str("\" fill=\"");
+        let _ = write_escaped_attr(f, fill);
+        f.push_str("\" class=\"fm-er-attribute\">");
+        // `attr_text = format!("{key_prefix}{data_type} {name}")`, escaped in pieces (identical bytes).
+        f.push_str(key_prefix);
+        let _ = write_escaped_text(f, &attr.data_type);
+        f.push(' ');
+        let _ = write_escaped_text(f, &attr.name);
+        f.push_str("</text>");
+        attr_y += attr_font_size * 1.3;
+    }
+}
+
+/// Stream a complete class-diagram node (`<g>` + gradient `<rect>` + compartment stack + `<title>`)
+/// directly into `out`, **byte-identical** to what `render_node` builds via `Element`s — the class-node
+/// analogue of [`write_common_node_fragment_into`]. The `<g>`/rect/title bytes replicate that helper's
+/// (proven) sequence for a `Rect` shape; the body is [`write_class_compartments_into`] (the same code
+/// `render_class_compartments`' fast path runs). Used only via `render_node_into`'s class gate, which
+/// guarantees none of `render_node`'s conditional classes/children/post-processing apply. Skips the
+/// group + rect `Element` builds, their `Attributes` Vecs, and the compartment fragment's second copy.
+/// `A11Y` selects the accessibility variant at compile time, mirroring `write_common_node_fragment_into`.
+/// `true` (`A11yConfig::full()`, default) emits `role="graphics-symbol" aria-label=".." tabindex="0"` and the
+/// trailing `<title>`; `false` (`A11yConfig::none()`, lean) skips exactly those two spots — the `<g id/class/
+/// data-id>` wrapper, `<rect>`, and the compartment stack are all a11y-independent, so the lean fragment is
+/// the slow `Element` path's lean output by construction.
+#[allow(clippy::too_many_arguments)]
+fn write_class_node_fragment_into<const A11Y: bool>(
+    out: &mut String,
+    node: &fm_core::IrNode,
+    meta: &fm_core::IrClassNodeMeta,
+    node_id: &str,
+    node_index: usize,
+    raw_label: &str,
+    ir: &MermaidDiagramIr,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rx: f32,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+    user_classes: &str,
+) {
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
+    // <g id=".." class="fm-node fm-node-accent-N fm-node-shape-rect[ fm-node-user-…]" data-id=".." …>
+    out.push_str("<g id=\"");
+    fm_core::write_mermaid_node_element_id_into(out, node_id, node_index);
+    out.push_str("\" class=\"fm-node fm-node-accent-");
+    // `stable_accent_index` (small palette index) via the digit-table writer, not `write!`'s
+    // Formatter/`pad_integral` machinery. Byte-identical: same decimal digits.
+    let _ = crate::attributes::write_uint_into(out, stable_accent_index(node_id) as u64);
+    out.push(' ');
+    out.push_str(node_shape_css_class(fm_core::NodeShape::Rect));
+    out.push_str(user_classes);
+    out.push_str("\" data-id=\"");
+    let _ = write_escaped_attr(out, node_id);
+    if A11Y {
+        out.push_str("\" role=\"graphics-symbol\" aria-label=\"");
+        let _ = write_escaped_attr(out, raw_label);
+        out.push_str("\" tabindex=\"0\">");
+    } else {
+        out.push_str("\">");
+    }
+    // <rect x y width height rx fill="url(#fm-node-gradient)"/> — same attr order as the common fragment.
+    out.push_str("<rect x=\"");
+    let _ = crate::attributes::write_number_into(out, x);
+    out.push_str("\" y=\"");
+    let _ = crate::attributes::write_number_into(out, y);
+    out.push_str("\" width=\"");
+    let _ = crate::attributes::write_number_into(out, w);
+    out.push_str("\" height=\"");
+    let _ = crate::attributes::write_number_into(out, h);
+    out.push_str("\" rx=\"");
+    let _ = crate::attributes::write_number_into(out, rx);
+    out.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
+    write_class_compartments_into(out, node, meta, ir, x, y, w, h, font_size, config, colors);
+    if A11Y {
+        // <title>Node: {raw_label}, rectangle</title></g> — describe_node's Rect form, written piecewise.
+        out.push_str("<title>Node: ");
+        let _ = write_escaped_text(out, raw_label);
+        out.push_str(", rectangle</title></g>");
+    } else {
+        out.push_str("</g>");
+    }
+}
+
+/// Stream a complete C4 node (`<g>` + solid-fill rounded `<rect>` + stereotype/[person icon]/name/description +
+/// `<title>`) directly into `out`, **byte-identical** to what `render_node` builds via `Element`s (the C4
+/// analogue of [`write_class_node_fragment_into`]). Used only via `render_node_into`'s C4 gate, which guarantees
+/// a `Rounded` node with `c4_meta`, no `technology`, and an absent-or-single-line description — so none of
+/// `render_node`'s conditional classes/children/post-processing apply. The wrapper mirrors the class fragment's
+/// (proven) `<g>`/title bytes; the rect uses the Rounded shape's SOLID `node_fill` (NOT the gradient the class/ER
+/// fragments use, matching `render_node`'s `NodeShape::Rounded => rect.fill(node_fill).rx(rounded_corners)`); the
+/// content mirrors `render_c4_node_content`. Skips the group + rect + per-`<text>` `Element` builds and the
+/// whole-group serialize+copy.
+#[allow(clippy::too_many_arguments)]
+fn write_c4_node_fragment_into(
+    out: &mut String,
+    node: &fm_core::IrNode,
+    c4_meta: &fm_core::IrC4NodeMeta,
+    node_id: &str,
+    node_index: usize,
+    raw_label: &str,
+    ir: &MermaidDiagramIr,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rx: f32,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+    user_classes: &str,
+) {
+    use crate::attributes::{write_escaped_attr, write_escaped_text, write_number_into};
+    // <g id=".." class="fm-node fm-node-accent-N fm-node-shape-rounded[ fm-node-user-…]" data-id=".." …>
+    out.push_str("<g id=\"");
+    fm_core::write_mermaid_node_element_id_into(out, node_id, node_index);
+    out.push_str("\" class=\"fm-node fm-node-accent-");
+    let _ = crate::attributes::write_uint_into(out, stable_accent_index(node_id) as u64);
+    out.push(' ');
+    out.push_str(node_shape_css_class(fm_core::NodeShape::Rounded));
+    out.push_str(user_classes);
+    out.push_str("\" data-id=\"");
+    let _ = write_escaped_attr(out, node_id);
+    out.push_str("\" role=\"graphics-symbol\" aria-label=\"");
+    let _ = write_escaped_attr(out, raw_label);
+    out.push_str("\" tabindex=\"0\">");
+    // <rect x y width height rx fill="url(#fm-node-gradient)"/> — under `node_gradients` the Rounded rect's
+    // fill is overridden to the gradient (same attr order the class fragment uses), NOT `node_fill`. (The
+    // `c4_basic` golden's solid `#ffffff` is the gradients-OFF path, which this fast path is gated out of.)
+    out.push_str("<rect x=\"");
+    let _ = write_number_into(out, x);
+    out.push_str("\" y=\"");
+    let _ = write_number_into(out, y);
+    out.push_str("\" width=\"");
+    let _ = write_number_into(out, w);
+    out.push_str("\" height=\"");
+    let _ = write_number_into(out, h);
+    out.push_str("\" rx=\"");
+    let _ = write_number_into(out, rx);
+    out.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
+
+    // Content — mirrors `render_c4_node_content` (same arithmetic + `write_number_into`, so numbers are identical).
+    let label_text = node
+        .label
+        .and_then(|lid| ir.labels.get(lid.0))
+        .map(|label| label.text.as_str())
+        .unwrap_or(node.id.as_str());
+    let line_h = font_size * config.line_height;
+    let small_font = clamp_font_size(font_size * 0.78, config.min_font_size);
+    let description_font = clamp_font_size(font_size * 0.72, config.min_font_size);
+    let mut cursor_y = y + (small_font * 1.25);
+
+    // Stereotype `<<type>>` — `write_escaped_text("<<…>>")` = `&lt;&lt;…>>` (`<` escaped, `>` literal), in pieces.
+    out.push_str("<text x=\"");
+    let _ = write_number_into(out, x + w / 2.0);
+    out.push_str("\" y=\"");
+    let _ = write_number_into(out, cursor_y);
+    out.push_str("\" text-anchor=\"middle\" font-size=\"");
+    let _ = write_number_into(out, small_font);
+    out.push_str("\" font-weight=\"600\" fill=\"");
+    let _ = write_escaped_attr(out, &colors.cluster_stroke);
+    out.push_str("\" class=\"fm-c4-type-label\">&lt;&lt;");
+    let _ = write_escaped_text(out, &c4_meta.element_type);
+    out.push_str(">></text>");
+
+    // Optional person icon.
+    if node
+        .classes
+        .iter()
+        .any(|class_name| class_name == "c4-person")
+    {
+        write_c4_person_icon_into(out, x + 18.0, y + 18.0, &colors.node_stroke);
+    }
+
+    // Name.
+    cursor_y += line_h * 0.95;
+    out.push_str("<text x=\"");
+    let _ = write_number_into(out, x + w / 2.0);
+    out.push_str("\" y=\"");
+    let _ = write_number_into(out, cursor_y);
+    out.push_str("\" text-anchor=\"middle\" font-size=\"");
+    let _ = write_number_into(out, font_size);
+    out.push_str("\" font-weight=\"600\" fill=\"");
+    let _ = write_escaped_attr(out, &colors.text);
+    out.push_str("\" class=\"fm-c4-name\">");
+    let _ = write_escaped_text(out, label_text);
+    out.push_str("</text>");
+
+    // Description (gate guarantees single-line, so no tspans / no `line-height` attr and `description_height` = 0).
+    if let Some(description) = &c4_meta.description {
+        cursor_y += line_h * 0.9;
+        let available_width = (w - 20.0).max(32.0);
+        let description_lines =
+            wrap_text_to_lines(description, available_width, config.avg_char_width * 0.92);
+        if !description_lines.is_empty() {
+            let description_height = (description_lines.len().saturating_sub(1) as f32)
+                * description_font
+                * config.line_height;
+            let baseline_y =
+                (cursor_y + description_height.min((h * 0.35).max(0.0))).min(y + h - 8.0);
+            out.push_str("<text x=\"");
+            let _ = write_number_into(out, x + w / 2.0);
+            out.push_str("\" y=\"");
+            let _ = write_number_into(out, baseline_y);
+            out.push_str("\" text-anchor=\"middle\" font-size=\"");
+            let _ = write_number_into(out, description_font);
+            out.push_str("\" fill=\"");
+            let _ = write_escaped_attr(out, &colors.text);
+            out.push_str("\" class=\"fm-c4-description\">");
+            let _ = write_escaped_text(out, &description_lines.join("\n"));
+            out.push_str("</text>");
+        }
+    }
+
+    // <title>Node: {raw_label}, rounded rectangle</title></g>
+    out.push_str("<title>Node: ");
+    let _ = write_escaped_text(out, raw_label);
+    out.push_str(", rounded rectangle</title></g>");
+}
+
+/// Stream `render_c4_person_icon`'s `<g class="fm-c4-person-icon">` (circle + 4 lines) byte-identically.
+fn write_c4_person_icon_into(f: &mut String, x: f32, y: f32, stroke: &str) {
+    use crate::attributes::{write_escaped_attr, write_number_into};
+    f.push_str("<g class=\"fm-c4-person-icon\"><circle cx=\"");
+    let _ = write_number_into(f, x);
+    f.push_str("\" cy=\"");
+    let _ = write_number_into(f, y - 6.0);
+    f.push_str("\" r=\"3\" fill=\"none\" stroke=\"");
+    let _ = write_escaped_attr(f, stroke);
+    f.push_str("\" stroke-width=\"1.10\"/>");
+    write_c4_icon_line_into(f, x, y - 2.0, x, y + 7.0, stroke);
+    write_c4_icon_line_into(f, x - 5.0, y + 1.0, x + 5.0, y + 1.0, stroke);
+    write_c4_icon_line_into(f, x, y + 7.0, x - 4.5, y + 13.0, stroke);
+    write_c4_icon_line_into(f, x, y + 7.0, x + 4.5, y + 13.0, stroke);
+    f.push_str("</g>");
+}
+
+fn write_c4_icon_line_into(f: &mut String, x1: f32, y1: f32, x2: f32, y2: f32, stroke: &str) {
+    use crate::attributes::{write_escaped_attr, write_number_into};
+    f.push_str("<line x1=\"");
+    let _ = write_number_into(f, x1);
+    f.push_str("\" y1=\"");
+    let _ = write_number_into(f, y1);
+    f.push_str("\" x2=\"");
+    let _ = write_number_into(f, x2);
+    f.push_str("\" y2=\"");
+    let _ = write_number_into(f, y2);
+    f.push_str("\" stroke=\"");
+    let _ = write_escaped_attr(f, stroke);
+    f.push_str("\" stroke-width=\"1.10\"/>");
+}
+
+/// Stream a complete ER entity node (`<g>` + gradient `<rect>` + entity body + `<title>`) directly into
+/// `out`, **byte-identical** to what `render_node` builds via `Element`s — the ER analogue of
+/// [`write_class_node_fragment_into`]. The `<g>`/rect/title bytes replicate that helper's (proven)
+/// sequence for a `Rect` shape (a Rect ER entity's shape and `describe_node` form are both identical to a
+/// class node's); the body is [`write_er_entity_into`] (the same code `render_node`'s ER fast path runs).
+/// Used only via `render_node_into`'s ER gate, which guarantees none of `render_node`'s conditional
+/// classes/children/post-processing apply. Skips the group + rect `Element` builds, their `Attributes`
+/// Vecs, the entity-body fragment's second copy, and the whole-group serialize+copy.
+#[allow(clippy::too_many_arguments)]
+/// `A11Y` selects the accessibility variant at compile time (see `write_class_node_fragment_into`): `true`
+/// emits `role`/`aria-label`/`tabindex` + the trailing `<title>`; `false` (lean) skips exactly those two
+/// spots. The `<g id/class/data-id>` wrapper, `<rect>`, and the entity attribute body are a11y-independent,
+/// so the lean fragment matches the slow `Element` path's lean output by construction.
+fn write_er_node_fragment_into<const A11Y: bool>(
+    out: &mut String,
+    node: &fm_core::IrNode,
+    node_id: &str,
+    node_index: usize,
+    raw_label: &str,
+    label_text: &str,
+    cx: f32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rx: f32,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+    user_classes: &str,
+) {
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
+    // <g id=".." class="fm-node fm-node-accent-N fm-node-shape-rect[ fm-node-user-…]" data-id=".." …>
+    out.push_str("<g id=\"");
+    fm_core::write_mermaid_node_element_id_into(out, node_id, node_index);
+    out.push_str("\" class=\"fm-node fm-node-accent-");
+    let _ = crate::attributes::write_uint_into(out, stable_accent_index(node_id) as u64);
+    out.push(' ');
+    out.push_str(node_shape_css_class(fm_core::NodeShape::Rect));
+    out.push_str(user_classes);
+    out.push_str("\" data-id=\"");
+    let _ = write_escaped_attr(out, node_id);
+    if A11Y {
+        out.push_str("\" role=\"graphics-symbol\" aria-label=\"");
+        let _ = write_escaped_attr(out, raw_label);
+        out.push_str("\" tabindex=\"0\">");
+    } else {
+        out.push_str("\">");
+    }
+    // <rect x y width height rx fill="url(#fm-node-gradient)"/> — same attr order as the class fragment.
+    out.push_str("<rect x=\"");
+    let _ = crate::attributes::write_number_into(out, x);
+    out.push_str("\" y=\"");
+    let _ = crate::attributes::write_number_into(out, y);
+    out.push_str("\" width=\"");
+    let _ = crate::attributes::write_number_into(out, w);
+    out.push_str("\" height=\"");
+    let _ = crate::attributes::write_number_into(out, h);
+    out.push_str("\" rx=\"");
+    let _ = crate::attributes::write_number_into(out, rx);
+    out.push_str("\" fill=\"url(#fm-node-gradient)\"/>");
+    write_er_entity_into(
+        out, node, label_text, cx, x, y, w, font_size, config, colors,
+    );
+    if A11Y {
+        // <title>Node: {raw_label}, rectangle</title></g> — describe_node's Rect form, written piecewise.
+        out.push_str("<title>Node: ");
+        let _ = write_escaped_text(out, raw_label);
+        out.push_str(", rectangle</title></g>");
+    } else {
+        out.push_str("</g>");
+    }
+}
+
+/// The inline `style="fill: …"` color the slow path (`render_node`) applies to a node's shape rect for
+/// journey-score / kanban-priority classes (`journey_score_fill`/`kanban_priority_fill`). The common
+/// streaming fragment must emit the identical `style` or it silently drops the score/priority color under
+/// the default embedded-CSS + gradient config. Requirement-risk fills never reach the common fragment (its
+/// gate excludes `requirement_meta`), so they're intentionally not handled here.
+fn common_fragment_special_fill(node: &fm_core::IrNode) -> Option<&'static str> {
+    node.classes.iter().find_map(|class| match class.as_str() {
+        "journey-score-1" => Some("#fca5a5"),
+        "journey-score-2" => Some("#fdba74"),
+        "journey-score-3" => Some("#fde68a"),
+        "journey-score-4" => Some("#bef264"),
+        "journey-score-5" => Some("#86efac"),
+        "kanban-priority-high" | "kanban-priority-critical" => Some("#fca5a5"),
+        "kanban-priority-medium" => Some("#fde68a"),
+        "kanban-priority-low" => Some("#bbf7d0"),
+        _ => None,
+    })
+}
+
+/// Emit ` style="fill: {color}"` for a node whose journey-score/kanban-priority class overrides the shape
+/// fill. Byte-identical to `render_node`'s slow path, which builds the same attr via
+/// `Element::attr("style", &format!("fill: {fill}"))` (the color is a fixed `#rrggbb`, never escapable).
+fn write_special_fill_style_into(f: &mut String, special_fill: Option<&str>) {
+    if let Some(fill) = special_fill {
+        f.push_str(" style=\"fill: ");
+        f.push_str(fill);
+        f.push('"');
+    }
+}
+
+/// Stream a closed polygon `<path>` — the common streaming fast path's shape element for the single-path
+/// polygon shapes (Diamond/Hexagon/Trapezoid/InvTrapezoid/Parallelogram/Asymmetric). Byte-identical to
+/// `render_node`'s `PathBuilder::move_to(p0).line_to(p1)…close().build()`: commands join with single spaces
+/// (`M{x0} {y0} L{x1} {y1} … Z`), and coords use `AttributeValue::Number::write_value`, which is bit-for-bit
+/// identical to `PathBuilder`'s `FmtNum` (both: `n as i32` round-trip → `write_int_into` else `write_fixed2`).
+fn write_polygon_shape_into(f: &mut String, points: &[(f32, f32)], special_fill: Option<&str>) {
+    f.push_str("<path d=\"");
+    for (i, &(px, py)) in points.iter().enumerate() {
+        f.push_str(if i == 0 { "M" } else { " L" });
+        let _ = crate::attributes::write_number_into(f, px);
+        f.push(' ');
+        let _ = crate::attributes::write_number_into(f, py);
+    }
+    f.push_str(" Z\" fill=\"url(#fm-node-gradient)\"");
+    write_special_fill_style_into(f, special_fill);
+    f.push_str("/>");
+}
+
+/// Stream the cylinder/database node path. This reproduces the slow `PathBuilder` bytes exactly:
+/// `M x y+ry A w/2 ry 0 0 1 x+w y+ry L x+w y+h-ry A w/2 ry 0 0 0 x y+h-ry Z M x y+ry
+/// A w/2 ry 0 0 0 x+w y+ry`.
+fn write_cylinder_shape_into(
+    f: &mut String,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    special_fill: Option<&str>,
+) {
+    let ry = h * 0.1;
+    let rx = w / 2.0;
+    let top_y = y + ry;
+    let bottom_y = y + h - ry;
+    let right_x = x + w;
+
+    f.push_str("<path d=\"M");
+    let _ = crate::attributes::write_number_into(f, x);
+    f.push(' ');
+    let _ = crate::attributes::write_number_into(f, top_y);
+    f.push_str(" A");
+    let _ = crate::attributes::write_number_into(f, rx);
+    f.push(' ');
+    let _ = crate::attributes::write_number_into(f, ry);
+    f.push_str(" 0 0 1 ");
+    let _ = crate::attributes::write_number_into(f, right_x);
+    f.push(' ');
+    let _ = crate::attributes::write_number_into(f, top_y);
+    f.push_str(" L");
+    let _ = crate::attributes::write_number_into(f, right_x);
+    f.push(' ');
+    let _ = crate::attributes::write_number_into(f, bottom_y);
+    f.push_str(" A");
+    let _ = crate::attributes::write_number_into(f, rx);
+    f.push(' ');
+    let _ = crate::attributes::write_number_into(f, ry);
+    f.push_str(" 0 0 0 ");
+    let _ = crate::attributes::write_number_into(f, x);
+    f.push(' ');
+    let _ = crate::attributes::write_number_into(f, bottom_y);
+    f.push_str(" Z M");
+    let _ = crate::attributes::write_number_into(f, x);
+    f.push(' ');
+    let _ = crate::attributes::write_number_into(f, top_y);
+    f.push_str(" A");
+    let _ = crate::attributes::write_number_into(f, rx);
+    f.push(' ');
+    let _ = crate::attributes::write_number_into(f, ry);
+    f.push_str(" 0 0 0 ");
+    let _ = crate::attributes::write_number_into(f, right_x);
+    f.push(' ');
+    let _ = crate::attributes::write_number_into(f, top_y);
+    f.push_str("\" fill=\"url(#fm-node-gradient)\"");
+    write_special_fill_style_into(f, special_fill);
+    f.push_str("/>");
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_subroutine_node_fragment_into(
+    out: &mut String,
+    node_id: &str,
+    node_index: usize,
+    accent: usize,
+    raw_label: &str,
+    label: &str,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rx: f32,
+    text_x: f32,
+    text_y: f32,
+    font_size: f32,
+    text_fill: &str,
+    user_classes: &str,
+) {
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
+
+    out.push_str("<g id=\"");
+    fm_core::write_mermaid_node_element_id_into(out, node_id, node_index);
+    out.push_str("\" class=\"fm-node fm-node-accent-");
+    // `accent` (small palette index) via the digit-table writer, not `write!`'s Formatter/`pad_integral`
+    // machinery (measured ~1.87% of node-heavy render). Byte-identical: same decimal digits.
+    let _ = crate::attributes::write_uint_into(out, accent as u64);
+    out.push(' ');
+    out.push_str(node_shape_css_class(fm_core::NodeShape::Subroutine));
+    out.push_str(user_classes);
+    out.push_str("\" data-id=\"");
+    let _ = write_escaped_attr(out, node_id);
+    out.push_str("\" role=\"graphics-symbol\" aria-label=\"");
+    let _ = write_escaped_attr(out, raw_label);
+    out.push_str("\" tabindex=\"0\"><g><rect x=\"");
+    let _ = crate::attributes::write_number_into(out, x);
+    out.push_str("\" y=\"");
+    let _ = crate::attributes::write_number_into(out, y);
+    out.push_str("\" width=\"");
+    let _ = crate::attributes::write_number_into(out, w);
+    out.push_str("\" height=\"");
+    let _ = crate::attributes::write_number_into(out, h);
+    out.push_str("\" fill=\"url(#fm-node-gradient)\" rx=\"");
+    let _ = crate::attributes::write_number_into(out, rx);
+    out.push_str("\"/><line x1=\"");
+    let _ = crate::attributes::write_number_into(out, x + 8.0);
+    out.push_str("\" y1=\"");
+    let _ = crate::attributes::write_number_into(out, y);
+    out.push_str("\" x2=\"");
+    let _ = crate::attributes::write_number_into(out, x + 8.0);
+    out.push_str("\" y2=\"");
+    let _ = crate::attributes::write_number_into(out, y + h);
+    out.push_str("\" stroke-width=\"1\"/><line x1=\"");
+    let _ = crate::attributes::write_number_into(out, x + w - 8.0);
+    out.push_str("\" y1=\"");
+    let _ = crate::attributes::write_number_into(out, y);
+    out.push_str("\" x2=\"");
+    let _ = crate::attributes::write_number_into(out, x + w - 8.0);
+    out.push_str("\" y2=\"");
+    let _ = crate::attributes::write_number_into(out, y + h);
+    out.push_str("\" stroke-width=\"1\"/></g><text x=\"");
+    let _ = crate::attributes::write_number_into(out, text_x);
+    out.push_str("\" y=\"");
+    let _ = crate::attributes::write_number_into(out, text_y);
+    out.push_str("\" text-anchor=\"middle\" font-size=\"");
+    let _ = crate::attributes::write_number_into(out, font_size);
+    out.push_str("\" fill=\"");
+    let _ = write_escaped_attr(out, text_fill);
+    out.push_str("\">");
+    let _ = write_escaped_text(out, label);
+    out.push_str("</text></g>");
+}
+
+/// Whether the per-element accessibility flags are uniformly on (`Some(true)`) or uniformly off
+/// (`Some(false)`), the two shapes the streaming node fragment can emit. Mixed combinations such as
+/// [`A11yConfig::minimal`] return `None` and take the slow `Element` path, as they always have.
+///
+/// `accessibility_css` is deliberately not consulted: it controls a document-level `<style>` block, not
+/// any per-element attribute.
+const fn uniform_a11y(a11y: &A11yConfig) -> Option<bool> {
+    match (a11y.aria_labels, a11y.keyboard_nav, a11y.text_alternatives) {
+        (true, true, true) => Some(true),
+        (false, false, false) => Some(false),
+        _ => None,
+    }
+}
+
+/// `A11Y` selects the accessibility variant at compile time: `true` emits the
+/// `role`/`aria-label`/`tabindex`/`<title>` set that `A11yConfig::full()` produces, `false` emits none of
+/// it, matching `A11yConfig::none()`. Making it a const parameter rather than a runtime flag keeps the
+/// default (full) monomorphization exactly as branch-free as it was before the lean variant existed --
+/// a runtime flag cost a measured +0.1..0.33% instructions on the default path.
+#[allow(clippy::too_many_arguments)]
+fn build_common_node_fragment<const A11Y: bool>(
+    node_id: &str,
+    node_index: usize,
+    accent: usize,
+    raw_label: &str,
+    label: &str,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rx: f32,
+    text_x: f32,
+    text_y: f32,
+    font_size: f32,
+    text_fill: &str,
+    user_classes: &str,
+    shape: fm_core::NodeShape,
+    special_fill: Option<&str>,
+) -> String {
+    // `raw_label` is written twice (the `aria-label` and the `<title>` text), so size for both copies
+    // plus the fixed tag/literal bytes.
+    let mut f = String::with_capacity(label.len() + raw_label.len() * 2 + user_classes.len() + 340);
+    write_common_node_fragment_into::<A11Y>(
+        &mut f,
+        node_id,
+        node_index,
+        accent,
+        raw_label,
+        label,
+        x,
+        y,
+        w,
+        h,
+        rx,
+        text_x,
+        text_y,
+        font_size,
+        text_fill,
+        user_classes,
+        shape,
+        special_fill,
+    );
+    f
+}
+
+/// Write-into core of [`build_common_node_fragment`]: streams the common rect node straight into `f` with
+/// no intermediate `String`, so `render_node_into` can render it directly into the chunk output buffer.
+#[allow(clippy::too_many_arguments)]
+fn write_common_node_fragment_into<const A11Y: bool>(
+    f: &mut String,
+    node_id: &str,
+    node_index: usize,
+    accent: usize,
+    raw_label: &str,
+    label: &str,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rx: f32,
+    text_x: f32,
+    text_y: f32,
+    font_size: f32,
+    text_fill: &str,
+    user_classes: &str,
+    shape: fm_core::NodeShape,
+    special_fill: Option<&str>,
+) {
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
+    // <g id=".." class="fm-node fm-node-accent-N fm-node-shape-rect[ fm-node-user-…]" data-id=".." …>
+    f.push_str("<g id=\"");
+    // The node id is `fm-node-[{sanitized}-]{index}` — only `[a-z0-9-]`, never an escapable byte — so
+    // write it straight into `f` (skipping `mermaid_node_element_id`'s 3 throwaway allocations: the
+    // sanitizer's two Strings + the id String). Byte-identical to `write_escaped_attr(id)` because the
+    // id can never contain `& < > " '`; pinned by `node_fast_fragment_matches_render`.
+    fm_core::write_mermaid_node_element_id_into(f, node_id, node_index);
+    f.push_str("\" class=\"fm-node fm-node-accent-");
+    // `accent` (small palette index) via the digit-table writer, not `write!`'s Formatter/`pad_integral`.
+    let _ = crate::attributes::write_uint_into(f, accent as u64);
+    f.push(' ');
+    f.push_str(node_shape_css_class(shape));
+    // Simple custom classes (`class X foo` / `:::foo` on nodes with no state-keyword or special class);
+    // empty for the overwhelmingly common no-class node. Matches the slow path's ` fm-node-user-…` tail.
+    f.push_str(user_classes);
+    f.push_str("\" data-id=\"");
+    let _ = write_escaped_attr(f, node_id);
+    // The a11y attributes appear in the same insertion order `render_node`'s slow path builds them
+    // (`aria_labels` -> role + aria-label, then `keyboard_nav` -> tabindex). `A11Y` is const, so the
+    // full variant compiles to the same straight-line pushes it always did, and the lean variant compiles
+    // them away entirely -- matching, byte for byte, what the slow Element path emits under
+    // `A11yConfig::none()`.
+    if A11Y {
+        f.push_str("\" role=\"graphics-symbol\" aria-label=\"");
+        let _ = write_escaped_attr(f, raw_label);
+        f.push_str("\" tabindex=\"0\">");
+    } else {
+        f.push_str("\">");
+    }
+    // Shape element with the gradient fill (stroke/stroke-width are CSS-driven under embedded theme, so
+    // absent inline). `<rect x y width height rx …/>` for the rect family (Rect/Rounded/Stadium — the
+    // caller passes each shape's `rx`); `<circle cx cy r …/>` for Circle, whose cx/cy/r match render_node's
+    // slow path (cx=x+w/2, cy=y+h/2, r=w.min(h)/2) and whose serialized attr order (cx,cy,r,fill) matches
+    // the slow `Element::circle()` after the gradient-fill override.
+    match shape {
+        fm_core::NodeShape::Circle => {
+            f.push_str("<circle cx=\"");
+            let _ = crate::attributes::write_number_into(f, x + w / 2.0);
+            f.push_str("\" cy=\"");
+            let _ = crate::attributes::write_number_into(f, y + h / 2.0);
+            f.push_str("\" r=\"");
+            let _ = crate::attributes::write_number_into(f, w.min(h) / 2.0);
+            f.push_str("\" fill=\"url(#fm-node-gradient)\"");
+            write_special_fill_style_into(f, special_fill);
+            f.push_str("/>");
+        }
+        // Single-`<path>` polygon shapes: each reproduces `render_node`'s slow-path `PathBuilder` point
+        // sequence exactly (see `write_polygon_shape_into`). `inset`/`flag` = `w * 0.15` as in the slow path.
+        fm_core::NodeShape::Diamond => {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            write_polygon_shape_into(
+                f,
+                &[(cx, y), (x + w, cy), (cx, y + h), (x, cy)],
+                special_fill,
+            );
+        }
+        fm_core::NodeShape::Hexagon => {
+            let cy = y + h / 2.0;
+            let inset = w * 0.15;
+            write_polygon_shape_into(
+                f,
+                &[
+                    (x + inset, y),
+                    (x + w - inset, y),
+                    (x + w, cy),
+                    (x + w - inset, y + h),
+                    (x + inset, y + h),
+                    (x, cy),
+                ],
+                special_fill,
+            );
+        }
+        fm_core::NodeShape::Cylinder => {
+            write_cylinder_shape_into(f, x, y, w, h, special_fill);
+        }
+        fm_core::NodeShape::Trapezoid => {
+            let inset = w * 0.15;
+            write_polygon_shape_into(
+                f,
+                &[
+                    (x + inset, y),
+                    (x + w - inset, y),
+                    (x + w, y + h),
+                    (x, y + h),
+                ],
+                special_fill,
+            );
+        }
+        fm_core::NodeShape::InvTrapezoid => {
+            let inset = w * 0.15;
+            write_polygon_shape_into(
+                f,
+                &[
+                    (x, y),
+                    (x + w, y),
+                    (x + w - inset, y + h),
+                    (x + inset, y + h),
+                ],
+                special_fill,
+            );
+        }
+        fm_core::NodeShape::Parallelogram => {
+            let inset = w * 0.15;
+            write_polygon_shape_into(
+                f,
+                &[
+                    (x + inset, y),
+                    (x + w, y),
+                    (x + w - inset, y + h),
+                    (x, y + h),
+                ],
+                special_fill,
+            );
+        }
+        fm_core::NodeShape::InvParallelogram => {
+            let inset = w * 0.15;
+            write_polygon_shape_into(
+                f,
+                &[
+                    (x, y),
+                    (x + w - inset, y),
+                    (x + w, y + h),
+                    (x + inset, y + h),
+                ],
+                special_fill,
+            );
+        }
+        fm_core::NodeShape::Asymmetric => {
+            let cy = y + h / 2.0;
+            let flag = w * 0.15;
+            write_polygon_shape_into(
+                f,
+                &[
+                    (x, y),
+                    (x + w - flag, y),
+                    (x + w, cy),
+                    (x + w - flag, y + h),
+                    (x, y + h),
+                ],
+                special_fill,
+            );
+        }
+        _ => {
+            // Rect / Rounded / Stadium — all rect elements, differing only in `rx` (set by the caller).
+            f.push_str("<rect x=\"");
+            let _ = crate::attributes::write_number_into(f, x);
+            f.push_str("\" y=\"");
+            let _ = crate::attributes::write_number_into(f, y);
+            f.push_str("\" width=\"");
+            let _ = crate::attributes::write_number_into(f, w);
+            f.push_str("\" height=\"");
+            let _ = crate::attributes::write_number_into(f, h);
+            f.push_str("\" rx=\"");
+            let _ = crate::attributes::write_number_into(f, rx);
+            f.push_str("\" fill=\"url(#fm-node-gradient)\"");
+            write_special_fill_style_into(f, special_fill);
+            f.push_str("/>");
+        }
+    }
+    // <text x y text-anchor="middle" font-size=".." fill="..">label</text>
+    f.push_str("<text x=\"");
+    let _ = crate::attributes::write_number_into(f, text_x);
+    f.push_str("\" y=\"");
+    let _ = crate::attributes::write_number_into(f, text_y);
+    f.push_str("\" text-anchor=\"middle\" font-size=\"");
+    let _ = crate::attributes::write_number_into(f, font_size);
+    f.push_str("\" fill=\"");
+    let _ = write_escaped_attr(f, text_fill);
+    f.push_str("\">");
+    let _ = write_escaped_text(f, label);
+    f.push_str("</text>");
+    // <title>Node: {raw_label}, rectangle</title> -- this is `describe_node(node, ir)` for the gated
+    // Rect shape (its `shape_desc` is always "rectangle" here, and its label is exactly `raw_label`),
+    // written piecewise so the per-node description String is never allocated. Byte-identical to
+    // `write_escaped_text(describe_node(..))` because the `"Node: "` / `", rectangle"` literals carry no
+    // escapable byte (escape is the identity on them) and the label is escaped the same either way.
+    // Emitted only in the `A11Y` variant, exactly as the slow path's `Element::title` child is gated on
+    // `text_alternatives`. Pinned by `node_fast_fragment_matches_render` (full) and
+    // `node_lean_fast_fragment_omits_a11y` (lean).
+    if A11Y {
+        f.push_str("<title>Node: ");
+        let _ = write_escaped_text(f, raw_label);
+        // `describe_node`'s shape word for the gated shapes; the `</title></g>` tail is fused into the
+        // literal so the full variant emits the whole title in one `push_str`, as it did before.
+        f.push_str(match shape {
+            fm_core::NodeShape::Rect => ", rectangle</title></g>",
+            fm_core::NodeShape::Rounded => ", rounded rectangle</title></g>",
+            fm_core::NodeShape::Stadium => ", stadium shape</title></g>",
+            fm_core::NodeShape::Diamond => ", diamond</title></g>",
+            fm_core::NodeShape::Hexagon => ", hexagon</title></g>",
+            fm_core::NodeShape::Cylinder => ", cylinder</title></g>",
+            fm_core::NodeShape::Trapezoid => ", trapezoid</title></g>",
+            fm_core::NodeShape::InvTrapezoid => ", inverted trapezoid</title></g>",
+            fm_core::NodeShape::Parallelogram => ", parallelogram</title></g>",
+            fm_core::NodeShape::InvParallelogram => ", inverted parallelogram</title></g>",
+            fm_core::NodeShape::Asymmetric => ", flag shape</title></g>",
+            _ => ", circle</title></g>",
+        });
+    } else {
+        f.push_str("</g>");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+/// `A11Y` selects the accessibility variant at compile time (see `write_class_node_fragment_into`): `true`
+/// emits `role`/`aria-label`/`tabindex` + the trailing `<title>`; `false` (lean) skips exactly those two
+/// spots. The `<g id/class/data-id>` wrapper, `<rect>`, and the subtitle rows are a11y-independent, so the
+/// lean fragment matches the slow `Element` path's lean output by construction.
+fn write_requirement_node_fragment_into<const A11Y: bool>(
+    out: &mut String,
+    meta: &fm_core::IrRequirementNodeMeta,
+    node_id: &str,
+    node_index: usize,
+    raw_label: &str,
+    label: &str,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rx: f32,
+    cx: f32,
+    font_size: f32,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) {
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
+
+    out.push_str("<g id=\"");
+    fm_core::write_mermaid_node_element_id_into(out, node_id, node_index);
+    out.push_str("\" class=\"fm-node fm-node-accent-");
+    // `stable_accent_index` (small palette index) via the digit-table writer, not `write!`'s
+    // Formatter/`pad_integral` machinery. Byte-identical: same decimal digits.
+    let _ = crate::attributes::write_uint_into(out, stable_accent_index(node_id) as u64);
+    out.push_str(" fm-node-shape-rect");
+    if let Some(risk) = meta.risk.as_deref() {
+        out.push_str(" fm-req-risk-");
+        // `write_sanitized_css_token_into` lowercases every ASCII-alphanumeric char and maps the rest
+        // to `-` regardless of case, so a pre-`to_ascii_lowercase()` (a per-node throwaway String) is
+        // redundant — passing the raw `&str` is byte-identical.
+        write_sanitized_css_token_into(out, risk);
+    }
+    if let Some(req_type) = meta.requirement_type.as_deref() {
+        out.push_str(" fm-req-type-");
+        write_sanitized_css_token_into(out, req_type);
+    }
+    if meta.verify_method.is_some() {
+        out.push_str(" fm-req-has-verify");
+    }
+    out.push_str("\" data-id=\"");
+    let _ = write_escaped_attr(out, node_id);
+    if A11Y {
+        out.push_str("\" role=\"graphics-symbol\" aria-label=\"");
+        let _ = write_escaped_attr(out, raw_label);
+        out.push_str("\" tabindex=\"0\">");
+    } else {
+        out.push_str("\">");
+    }
+
+    out.push_str("<rect x=\"");
+    let _ = crate::attributes::write_number_into(out, x);
+    out.push_str("\" y=\"");
+    let _ = crate::attributes::write_number_into(out, y);
+    out.push_str("\" width=\"");
+    let _ = crate::attributes::write_number_into(out, w);
+    out.push_str("\" height=\"");
+    let _ = crate::attributes::write_number_into(out, h);
+    out.push_str("\" rx=\"");
+    let _ = crate::attributes::write_number_into(out, rx);
+    out.push_str("\" fill=\"url(#fm-node-gradient)\"");
+    if let Some(fill) = requirement_risk_fill(meta) {
+        out.push_str(" style=\"fill: ");
+        out.push_str(fill);
+        out.push('"');
+    }
+    out.push_str("/>");
+
+    let subtitle_font_size = clamp_font_size(font_size * 0.75, config.min_font_size);
+    let mut text_y = y + h * 0.25 + font_size * 0.35;
+    if let Some(req_type) = meta.requirement_type.as_deref() {
+        // Stream `«{type}»` — «/» are non-XML-special, so this is byte-identical to escaping the
+        // `format!("\u{00ab}{req_type}\u{00bb}")` whole, without the per-node String.
+        write_req_subtitle_body_into(
+            out,
+            cx,
+            text_y,
+            subtitle_font_size,
+            " font-style=\"italic\"",
+            "",
+            &colors.text,
+            "fm-req-type-label",
+            |f| {
+                f.push('\u{00ab}');
+                let _ = write_escaped_text(f, req_type);
+                f.push('\u{00bb}');
+            },
+        );
+        text_y += font_size * 0.85;
+    }
+
+    out.push_str("<text x=\"");
+    let _ = crate::attributes::write_number_into(out, cx);
+    out.push_str("\" y=\"");
+    let _ = crate::attributes::write_number_into(out, text_y);
+    out.push_str("\" text-anchor=\"middle\" font-size=\"");
+    let _ = crate::attributes::write_number_into(out, font_size);
+    out.push_str("\" fill=\"");
+    let _ = write_escaped_attr(out, &colors.text);
+    out.push_str("\">");
+    let _ = write_escaped_text(out, label);
+    out.push_str("</text>");
+    text_y += font_size * 0.85;
+
+    // Stream `Risk: …[ | Verify: …]` — the fixed labels hold no XML specials, so streaming the parts is
+    // byte-identical to escaping the old joined `format!` whole, without the per-node String alloc.
+    match (meta.risk.as_deref(), meta.verify_method.as_deref()) {
+        (Some(risk), Some(verify_method)) => {
+            write_req_subtitle_body_into(
+                out,
+                cx,
+                text_y,
+                subtitle_font_size,
+                "",
+                " opacity=\"0.7\"",
+                &colors.text,
+                "fm-req-metadata",
+                |f| {
+                    f.push_str("Risk: ");
+                    let _ = write_escaped_text(f, risk);
+                    f.push_str(" | Verify: ");
+                    let _ = write_escaped_text(f, verify_method);
+                },
+            );
+        }
+        (Some(risk), None) => {
+            write_req_subtitle_body_into(
+                out,
+                cx,
+                text_y,
+                subtitle_font_size,
+                "",
+                " opacity=\"0.7\"",
+                &colors.text,
+                "fm-req-metadata",
+                |f| {
+                    f.push_str("Risk: ");
+                    let _ = write_escaped_text(f, risk);
+                },
+            );
+        }
+        (None, Some(verify_method)) => {
+            write_req_subtitle_body_into(
+                out,
+                cx,
+                text_y,
+                subtitle_font_size,
+                "",
+                " opacity=\"0.7\"",
+                &colors.text,
+                "fm-req-metadata",
+                |f| {
+                    f.push_str("Verify: ");
+                    let _ = write_escaped_text(f, verify_method);
+                },
+            );
+        }
+        (None, None) => {}
+    }
+
+    if A11Y {
+        out.push_str("<title>Node: ");
+        let _ = write_escaped_text(out, raw_label);
+        out.push_str(", rectangle</title></g>");
+    } else {
+        out.push_str("</g>");
+    }
+}
+
+fn requirement_risk_fill(meta: &fm_core::IrRequirementNodeMeta) -> Option<&'static str> {
+    let risk = meta.risk.as_deref()?;
+    if risk.eq_ignore_ascii_case("high") {
+        Some("#fca5a5")
+    } else if risk.eq_ignore_ascii_case("medium") {
+        Some("#fde68a")
+    } else if risk.eq_ignore_ascii_case("low") {
+        Some("#bbf7d0")
+    } else {
+        None
+    }
+}
+
+/// True if `s` contains a line break (`\n` or `\r`). One byte-scan pass, byte-identical to
+/// `s.contains('\n') || s.contains('\r')` (both needles are ASCII, so a byte scan matches the
+/// `char` scan) but the two separate `str::contains(char)` calls each scan the whole label, so the
+/// common single-line label was read twice per node — this reads it once. Same ASCII-`bytes().any`
+/// family as the parser's nested-bracket fast scan. Used by the node fast-path gates, where a
+/// multi-line label must fall back to the slow multi-line `TextBuilder` path.
+#[inline]
+fn label_has_line_break(s: &str) -> bool {
+    s.as_bytes().iter().any(|&b| b == b'\n' || b == b'\r')
+}
+
+/// Render a single node straight into the output buffer. For the overwhelmingly common themed rectangle
+/// node (the same gate as `render_node`'s fast path) the `<g><rect/><text/><title/></g>` is streamed
+/// directly into `out` via `write_common_node_fragment_into` — eliminating the per-node fragment `String`
+/// that `render_node` would build, wrap in `Element::raw_svg`, and immediately copy out then drop. Every
+/// other node delegates to the `render_node` Element path. The prelude/gate here mirror `render_node`'s
+/// (any divergence is caught byte-for-byte by `svg_golden_snapshots_are_stable` +
+/// `node_fast_fragment_matches_render`).
+#[allow(clippy::too_many_arguments)]
+fn render_node_into(
+    out: &mut String,
+    node_box: &LayoutNodeBox,
+    ir: &MermaidDiagramIr,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+    detail: RenderDetailProfile,
+    colors: &ThemeColors,
+    emit_classdef_classes: bool,
+    centrality_map: &HashMap<usize, CentralityTier>,
+) {
+    use fm_core::NodeShape;
+
+    let ir_node = ir.nodes.get(node_box.node_index);
+    let shape = ir_node.map_or(NodeShape::Rect, |n| n.shape);
+    let (shape_style, text_style) = resolve_node_inline_styles(ir, node_box.node_index);
+    let node_id = ir_node
+        .map(|node| node.id.as_str())
+        .unwrap_or_else(|| node_box.node_id.as_str());
+
+    let x = node_box.bounds.x + offset_x;
+    let y = node_box.bounds.y + offset_y;
+    let w = node_box.bounds.width;
+    let h = node_box.bounds.height;
+    let cx = x + w / 2.0;
+    let cy = y + h / 2.0;
+
+    let placeholder_space_node = ir_node.is_some_and(is_block_beta_space_node);
+    let label_id = ir_node.and_then(|node| node.label);
+    let raw_label_text = if placeholder_space_node {
+        ""
+    } else {
+        label_id
+            .and_then(|lid| ir.labels.get(lid.0))
+            .map(|l| l.text.as_str())
+            .or_else(|| {
+                ir_node.and_then(|node| match node.shape {
+                    NodeShape::DoubleCircle if node.label.is_none() => None,
+                    NodeShape::FilledCircle | NodeShape::HorizontalBar => None,
+                    _ => Some(node.id.as_str()),
+                })
+            })
+            .unwrap_or("")
+    };
+    let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
+    let node_font_size = detail.node_font_size;
+    let node_icon = ir_node
+        .and_then(|node| node.icon())
+        .map(str::trim)
+        .filter(|icon| !icon.is_empty())
+        .filter(|_| ir_node.is_none_or(|node| node.class_meta.is_none() && node.c4_meta.is_none()));
+
+    // Two a11y-uniform gates (see the class path below for the rationale): the full-a11y gate is unchanged
+    // (direct `::<true>`) so the default path takes no regression; the lean gate streams a11y-off
+    // requirement nodes that used to fall to the slow `Element` path. Mixed a11y → slow path, as before.
+    if let Some(node) = ir_node
+        && matches!(shape, NodeShape::Rect)
+        && let Some(meta) = node.requirement_meta.as_deref()
+        && detail.show_node_labels
+        && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && config.a11y.aria_labels
+        && config.a11y.keyboard_nav
+        && config.a11y.text_alternatives
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && !label_has_line_break(&label_text)
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
+        && node.class_meta.is_none()
+        && node.c4_meta.is_none()
+        && node.classes.is_empty()
+        && node.menu_links.is_empty()
+        && node.href().is_none()
+        && node.callback().is_none()
+    {
+        write_requirement_node_fragment_into::<true>(
+            out,
+            meta,
+            node_id,
+            node_box.node_index,
+            raw_label_text,
+            &label_text,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners * 0.55,
+            cx,
+            node_font_size,
+            config,
+            colors,
+        );
+        return;
+    }
+    if let Some(node) = ir_node
+        && matches!(shape, NodeShape::Rect)
+        && let Some(meta) = node.requirement_meta.as_deref()
+        && detail.show_node_labels
+        && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && !config.a11y.aria_labels
+        && !config.a11y.keyboard_nav
+        && !config.a11y.text_alternatives
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && !label_has_line_break(&label_text)
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
+        && node.class_meta.is_none()
+        && node.c4_meta.is_none()
+        && node.classes.is_empty()
+        && node.menu_links.is_empty()
+        && node.href().is_none()
+        && node.callback().is_none()
+    {
+        write_requirement_node_fragment_into::<false>(
+            out,
+            meta,
+            node_id,
+            node_box.node_index,
+            raw_label_text,
+            &label_text,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners * 0.55,
+            cx,
+            node_font_size,
+            config,
+            colors,
+        );
+        return;
+    }
+
+    // Whole-class-node streaming fast path: a themed class-diagram node with compartments (name +
+    // attribute/method rows) whose config carries no conditional render (same gate class as the common
+    // node fast path, plus the class-node specifics). `render_node`'s slow path would build a group
+    // `Element` + rect `Element` + a *separate* compartment fragment `String` wrapped in a child; stream
+    // the whole `<g>…</g>` in place instead. Byte-identical (pinned by `svg_golden_snapshots_are_stable`).
+    // Two a11y-uniform gates instead of one relaxed `uniform_a11y()` gate + runtime dispatch. Keeping the
+    // default (full-a11y) gate exactly as it was — direct `::<true>`, no `uniform_a11y` in the per-node hot
+    // path — avoids a measured +0.37% default-`class` regression the single relaxed gate caused. The second
+    // gate is the new lean behaviour: it streams a11y-off class nodes (`::<false>`) that used to fall to the
+    // common gate (the +0.31% class_50 regression from bd-b2b6). `A11yConfig::minimal()` matches neither
+    // (`aria_labels` on but `keyboard_nav`/`text_alternatives` off) → slow `Element` path, exactly as before.
+    if let Some(node) = ir_node
+        && matches!(shape, NodeShape::Rect)
+        && let Some(meta) = node.class_meta.as_deref()
+        && (!meta.attributes.is_empty() || !meta.methods.is_empty())
+        && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && config.a11y.aria_labels
+        && config.a11y.keyboard_nav
+        && config.a11y.text_alternatives
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && node.requirement_meta.is_none()
+        && node.menu_links.is_empty()
+        && node.href().is_none()
+        && node.callback().is_none()
+        && let Some(user_classes) = simple_class_node_user_suffix(node)
+    {
+        write_class_node_fragment_into::<true>(
+            out,
+            node,
+            meta,
+            node_id,
+            node_box.node_index,
+            raw_label_text,
+            ir,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners * 0.55,
+            node_font_size,
+            config,
+            colors,
+            &user_classes,
+        );
+        return;
+    }
+    if let Some(node) = ir_node
+        && matches!(shape, NodeShape::Rect)
+        && let Some(meta) = node.class_meta.as_deref()
+        && (!meta.attributes.is_empty() || !meta.methods.is_empty())
+        && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && !config.a11y.aria_labels
+        && !config.a11y.keyboard_nav
+        && !config.a11y.text_alternatives
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && node.requirement_meta.is_none()
+        && node.menu_links.is_empty()
+        && node.href().is_none()
+        && node.callback().is_none()
+        && let Some(user_classes) = simple_class_node_user_suffix(node)
+    {
+        write_class_node_fragment_into::<false>(
+            out,
+            node,
+            meta,
+            node_id,
+            node_box.node_index,
+            raw_label_text,
+            ir,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners * 0.55,
+            node_font_size,
+            config,
+            colors,
+            &user_classes,
+        );
+        return;
+    }
+
+    // Whole-C4-node streaming fast path: a themed C4 node (a `Rounded` node with `c4_meta`) with no `technology`
+    // and an absent/single-line description, whose config carries no conditional render — the C4 twin of the
+    // class/ER fast paths. `render_node`'s slow path builds a group `Element` + solid-fill rect `Element` +
+    // `render_c4_node_content`'s child subtree + a title, serializes the whole group, then COPIES it into `out`;
+    // stream the `<g>…</g>` in place instead. Reuses `simple_class_node_user_suffix` (byte-identical
+    // ` fm-node-user-c4…` output; rejects the `c4-external` variant → slow path). Byte-identical, pinned by
+    // `svg_golden_snapshots_are_stable`'s `c4_basic`.
+    if let Some(node) = ir_node
+        && matches!(shape, NodeShape::Rounded)
+        && let Some(c4_meta) = node.c4_meta.as_deref()
+        && c4_meta.technology.is_none()
+        && node.class_meta.is_none()
+        && node.requirement_meta.is_none()
+        && node.members.is_empty()
+        && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && config.a11y.aria_labels
+        && config.a11y.keyboard_nav
+        && config.a11y.text_alternatives
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && node.menu_links.is_empty()
+        && node.href().is_none()
+        && node.callback().is_none()
+        && c4_meta.description.as_ref().is_none_or(|d| {
+            wrap_text_to_lines(d, (w - 20.0).max(32.0), config.avg_char_width * 0.92).len() <= 1
+        })
+        && let Some(user_classes) = simple_class_node_user_suffix(node)
+    {
+        write_c4_node_fragment_into(
+            out,
+            node,
+            c4_meta,
+            node_id,
+            node_box.node_index,
+            raw_label_text,
+            ir,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners,
+            node_font_size,
+            config,
+            colors,
+            &user_classes,
+        );
+        return;
+    }
+
+    // Whole-ER-entity streaming fast path: a themed ER entity (a `Rect` node with a non-empty attribute
+    // list) whose config carries no conditional render. `render_node`'s slow path would build a group
+    // `Element` + rect `Element` + the entity-body fragment child + a title `Element`, serialize the whole
+    // group into a temp, then COPY it into `out`. Stream the whole `<g>…</g>` in place instead — the exact
+    // double-copy the class node fast path above kills, now for ER. Gate mirrors the class one (the ER
+    // branch sits after class/requirement in `render_node`'s content chain, so `class_meta`/`c4_meta`/
+    // `requirement_meta` must be absent; `show_node_labels` gates the body). Byte-identical (pinned by
+    // `er_entity_node_streaming_matches_slow_render`).
+    // Two a11y-uniform gates (see the class path for the rationale): the full-a11y gate is unchanged
+    // (direct `::<true>`) so the default path takes no regression; the lean gate streams a11y-off ER
+    // entities that used to fall to the ~1-Element-per-attribute slow path. Mixed a11y → slow path.
+    if let Some(node) = ir_node
+        && matches!(shape, NodeShape::Rect)
+        && !node.members.is_empty()
+        && ir.diagram_type == fm_core::DiagramType::Er
+        && detail.show_node_labels
+        && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && config.a11y.aria_labels
+        && config.a11y.keyboard_nav
+        && config.a11y.text_alternatives
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && node.class_meta.is_none()
+        && node.c4_meta.is_none()
+        && node.requirement_meta.is_none()
+        && node.menu_links.is_empty()
+        && node.href().is_none()
+        && node.callback().is_none()
+        && let Some(user_classes) = simple_class_node_user_suffix(node)
+    {
+        write_er_node_fragment_into::<true>(
+            out,
+            node,
+            node_id,
+            node_box.node_index,
+            raw_label_text,
+            label_text.as_ref(),
+            cx,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners * 0.55,
+            node_font_size,
+            config,
+            colors,
+            &user_classes,
+        );
+        return;
+    }
+    if let Some(node) = ir_node
+        && matches!(shape, NodeShape::Rect)
+        && !node.members.is_empty()
+        && ir.diagram_type == fm_core::DiagramType::Er
+        && detail.show_node_labels
+        && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && !config.a11y.aria_labels
+        && !config.a11y.keyboard_nav
+        && !config.a11y.text_alternatives
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && node.class_meta.is_none()
+        && node.c4_meta.is_none()
+        && node.requirement_meta.is_none()
+        && node.menu_links.is_empty()
+        && node.href().is_none()
+        && node.callback().is_none()
+        && let Some(user_classes) = simple_class_node_user_suffix(node)
+    {
+        write_er_node_fragment_into::<false>(
+            out,
+            node,
+            node_id,
+            node_box.node_index,
+            raw_label_text,
+            label_text.as_ref(),
+            cx,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners * 0.55,
+            node_font_size,
+            config,
+            colors,
+            &user_classes,
+        );
+        return;
+    }
+
+    // Same gate as `render_node`'s fast path (permit_fast is always true on this serialize-only path).
+    // `user_class_suffix` is `Some("")` for the common no-class node and `Some(" fm-node-user-…")` for a
+    // node whose custom classes are all simple; `None` (slow path) when a class needs conditional render.
+    let user_class_suffix = ir_node.and_then(simple_node_user_class_suffix);
+    if matches!(shape, NodeShape::Subroutine)
+        && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && config.a11y.aria_labels
+        && config.a11y.keyboard_nav
+        && config.a11y.text_alternatives
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && !label_has_line_break(&label_text)
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
+        && let Some(node) = ir_node
+        && let Some(user_classes) = user_class_suffix.as_deref()
+        && common_fragment_special_fill(node).is_none()
+        && node.requirement_meta.is_none()
+        && node.menu_links.is_empty()
+        && node.href().is_none()
+        && node.callback().is_none()
+    {
+        write_subroutine_node_fragment_into(
+            out,
+            node_id,
+            node_box.node_index,
+            stable_accent_index(node_id),
+            raw_label_text,
+            &label_text,
+            x,
+            y,
+            w,
+            h,
+            config.rounded_corners * 0.45,
+            cx,
+            cy + node_font_size / 3.0,
+            node_font_size,
+            colors.text.as_str(),
+            user_classes,
+        );
+        return;
+    }
+
+    if matches!(
+        shape,
+        NodeShape::Rect
+            | NodeShape::Circle
+            | NodeShape::Rounded
+            | NodeShape::Stadium
+            | NodeShape::Diamond
+            | NodeShape::Hexagon
+            | NodeShape::Cylinder
+            | NodeShape::Trapezoid
+            | NodeShape::InvTrapezoid
+            | NodeShape::Parallelogram
+            | NodeShape::InvParallelogram
+            | NodeShape::Asymmetric
+    ) && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !config.animations_enabled
+        && !config.include_source_spans
+        // Was `aria_labels && keyboard_nav && text_alternatives`. The fragment writer now has a lean
+        // monomorphization, so uniformly-OFF a11y streams too -- previously `A11yConfig::none()` fell all
+        // the way back to the per-element `Element` builder, which made the *smaller* output ~2x more
+        // expensive to produce. Mixed combinations (e.g. `A11yConfig::minimal()`) still take the slow
+        // path, exactly as they did before.
+        && uniform_a11y(&config.a11y).is_some()
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && !label_has_line_break(&label_text)
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
+        && let Some(node) = ir_node
+        && let Some(user_classes) = user_class_suffix.as_deref()
+        && node.requirement_meta.is_none()
+        && node.menu_links.is_empty()
+        && node.href().is_none()
+        && node.callback().is_none()
+    {
+        let write = if matches!(uniform_a11y(&config.a11y), Some(true)) {
+            write_common_node_fragment_into::<true>
+        } else {
+            write_common_node_fragment_into::<false>
+        };
+        write(
+            out,
+            node_id,
+            node_box.node_index,
+            stable_accent_index(node_id),
+            raw_label_text,
+            &label_text,
+            x,
+            y,
+            w,
+            h,
+            match shape {
+                NodeShape::Rounded => config.rounded_corners,
+                NodeShape::Stadium => w.min(h) / 2.0,
+                _ => config.rounded_corners * 0.55,
+            },
+            cx,
+            cy + node_font_size / 3.0,
+            node_font_size,
+            colors.text.as_str(),
+            user_classes,
+            shape,
+            common_fragment_special_fill(node),
+        );
+        return;
+    }
+
+    render_node(
+        node_box,
+        ir,
+        offset_x,
+        offset_y,
+        config,
+        detail,
+        colors,
+        emit_classdef_classes,
+        centrality_map,
+        true,
+    )
+    .write_to_string(out);
+}
+
 /// Render a single node to an SVG element.
 #[allow(clippy::too_many_arguments)]
 fn render_node(
@@ -3603,6 +8281,8 @@ fn render_node(
     colors: &ThemeColors,
     emit_classdef_classes: bool,
     centrality_map: &HashMap<usize, CentralityTier>,
+    // False forces the slow `Element` path for callers that post-process the result (e.g. add a class).
+    permit_fast: bool,
 ) -> Element {
     use fm_core::NodeShape;
 
@@ -3641,14 +8321,13 @@ fn render_node(
     let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
     let node_font_size = detail.node_font_size;
     let node_icon = ir_node
-        .and_then(|node| node.icon.as_deref())
+        .and_then(|node| node.icon())
         .map(str::trim)
         .filter(|icon| !icon.is_empty())
         .filter(|_| ir_node.is_none_or(|node| node.class_meta.is_none() && node.c4_meta.is_none()));
     let apply_label_class =
         |elem: Element| maybe_add_class(elem, "fm-node-label", emit_classdef_classes);
 
-    let accent_class = format!("fm-node-accent-{}", stable_accent_index(node_id));
     let mut is_highlighted = false;
     let mut is_inactive = false;
     let mut dashed_border = false;
@@ -3656,17 +8335,97 @@ fn render_node(
     let mut is_block_beta = false;
     let mut is_block_beta_space = false;
 
+    // Fast path: the overwhelmingly common themed rectangle node — plain single-line label, no
+    // conditional class/child/post-processing — serializes to a fixed
+    // `<g><rect/><text/><title/></g>`. Emit it directly, skipping four `Element` builds + their
+    // `Attributes` Vecs + `write_into` walks (per-node construction is ~60% of wide render). Each
+    // gate clause corresponds to a branch below that would add/alter a class, child, attribute, or
+    // post-processing step; when all are absent the node bytes are fully determined.
+    // `detail.enable_shadows` is NOT gated: the per-node shadow is the inline `filter="url(#drop-shadow)"`,
+    // emitted only when `!config.embed_theme_css` (required true here), so with the theme CSS embedded the
+    // shadow is a CSS rule and changes no node byte. `permit_fast` lets a caller that POST-PROCESSES the
+    // returned `Element` (the sequence mirror-header loop adds a class) force the slow path. The
+    // `menu_links`/`href`/`callback` clauses exclude the only node-field features the fragment omits (all
+    // other conditionals — states, accents, journey/kanban/req fills, icons — derive from `node.classes`/
+    // `requirement_meta`/icon/centrality already gated below).
+    let user_class_suffix = ir_node.and_then(simple_node_user_class_suffix);
+    if permit_fast
+        && matches!(
+            shape,
+            NodeShape::Rect
+                | NodeShape::Circle
+                | NodeShape::Rounded
+                | NodeShape::Stadium
+                | NodeShape::Diamond
+                | NodeShape::Hexagon
+                | NodeShape::Cylinder
+                | NodeShape::Trapezoid
+                | NodeShape::InvTrapezoid
+                | NodeShape::Parallelogram
+                | NodeShape::InvParallelogram
+                | NodeShape::Asymmetric
+        )
+        && config.embed_theme_css
+        && config.node_gradients
+        && !emit_classdef_classes
+        && !config.animations_enabled
+        && !config.include_source_spans
+        // See the sibling gate in `render_node_into`. Keep these two gates in lockstep.
+        && uniform_a11y(&config.a11y).is_some()
+        && shape_style.is_none()
+        && text_style.is_none()
+        && node_icon.is_none()
+        && !placeholder_space_node
+        && !label_has_line_break(&label_text)
+        && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
+        && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
+        && let Some(node) = ir_node
+        && let Some(user_classes) = user_class_suffix.as_deref()
+        && node.requirement_meta.is_none()
+        && node.menu_links.is_empty()
+        && node.href().is_none()
+        && node.callback().is_none()
+    {
+        let build = if matches!(uniform_a11y(&config.a11y), Some(true)) {
+            build_common_node_fragment::<true>
+        } else {
+            build_common_node_fragment::<false>
+        };
+        return Element::raw_svg(build(
+            node_id,
+            node_box.node_index,
+            stable_accent_index(node_id),
+            raw_label_text,
+            &label_text,
+            x,
+            y,
+            w,
+            h,
+            match shape {
+                NodeShape::Rounded => config.rounded_corners,
+                NodeShape::Stadium => w.min(h) / 2.0,
+                _ => config.rounded_corners * 0.55,
+            },
+            cx,
+            cy + node_font_size / 3.0,
+            node_font_size,
+            colors.text.as_str(),
+            user_classes,
+            shape,
+            common_fragment_special_fill(node),
+        ));
+    }
+
     // Create group for node shape + label
     let mut group = Element::group()
         .id(&mermaid_node_element_id(node_id, node_box.node_index))
         .class("fm-node")
-        .class(&accent_class)
+        .class_prefixed_usize("fm-node-accent-", stable_accent_index(node_id))
         .class(node_shape_css_class(shape))
-        .data("id", node_id)
-        .data("fm-node-id", node_id);
+        .data("id", node_id);
     // Add centrality tier class if available (FNX semantic styling)
     if let Some(tier) = lookup_centrality_tier(centrality_map, node_box.node_index) {
-        group = group.class(&format!("fm-node-centrality-{}", tier.css_class_suffix()));
+        group = group.class_prefixed("fm-node-centrality-", tier.css_class_suffix());
     }
     if config.animations_enabled {
         group = group.attr(
@@ -3678,7 +8437,7 @@ fn render_node(
         group = group.class("fm-node-has-icon");
         let icon_class = sanitize_css_token(&normalize_icon_token(icon));
         if !icon_class.is_empty() {
-            group = group.class(&format!("fm-node-icon-{icon_class}"));
+            group = group.class_prefixed("fm-node-icon-", &icon_class);
         }
         group = group.class(match config.node_icon_position {
             NodeIconPosition::Above => "fm-node-icon-pos-above",
@@ -3691,39 +8450,27 @@ fn render_node(
 
     if let Some(node) = ir_node {
         for class in &node.classes {
-            let normalized = class.to_ascii_lowercase();
-            let sanitized = sanitize_css_token(class);
-            if !sanitized.is_empty() {
-                group = group.class(&format!("fm-node-user-{sanitized}"));
+            // One case-insensitive pass over `class` raises all substring keyword flags at once
+            // (highlight/inactive/dashed/double border) — byte-identical to the old per-needle
+            // `contains_ascii_ci` OR-chains, without allocating a lowercased copy or sweeping the
+            // class string ~11 times. Exact-match keywords stay as `eq_ignore_ascii_case`.
+            if !class.is_empty() {
+                group = group.class_prefixed_by("fm-node-user-", class.len(), |buf| {
+                    write_sanitized_css_token_into(buf, class);
+                });
             }
-            if normalized.contains("highlight")
-                || normalized.contains("selected")
-                || normalized.contains("active")
-                || normalized.contains("focus")
-                || normalized.contains("important")
-            {
-                is_highlighted = true;
-            }
-            if normalized.contains("inactive")
-                || normalized.contains("dim")
-                || normalized.contains("muted")
-                || normalized.contains("disabled")
-            {
-                is_inactive = true;
-            }
-            if normalized.contains("dashed-border") || normalized.contains("border-dashed") {
+            let kw = scan_node_class_keywords(class);
+            is_highlighted |= kw.highlighted;
+            is_inactive |= kw.inactive;
+            dashed_border |= kw.dashed_border;
+            double_border |= kw.double_border;
+            if class.eq_ignore_ascii_case("c4-external") {
                 dashed_border = true;
             }
-            if normalized == "c4-external" {
-                dashed_border = true;
-            }
-            if normalized.contains("double-border") || normalized.contains("border-double") {
-                double_border = true;
-            }
-            if normalized == "block-beta" {
+            if class.eq_ignore_ascii_case("block-beta") {
                 is_block_beta = true;
             }
-            if normalized == "block-beta-space" {
+            if class.eq_ignore_ascii_case("block-beta-space") {
                 is_block_beta_space = true;
             }
         }
@@ -3781,13 +8528,14 @@ fn render_node(
     });
     if let Some(meta) = ir_node.and_then(|n| n.requirement_meta.as_ref()) {
         if let Some(ref risk) = meta.risk {
-            group = group.class(&format!("fm-req-risk-{}", risk.to_ascii_lowercase()));
+            let risk_class = risk.to_ascii_lowercase();
+            group = group.class_prefixed("fm-req-risk-", &risk_class);
         }
         if let Some(ref req_type) = meta.requirement_type {
             let type_class = req_type
                 .replace(|c: char| !c.is_ascii_alphanumeric(), "-")
                 .to_ascii_lowercase();
-            group = group.class(&format!("fm-req-type-{type_class}"));
+            group = group.class_prefixed("fm-req-type-", &type_class);
         }
         if meta.verify_method.is_some() {
             group = group.class("fm-req-has-verify");
@@ -3813,8 +8561,8 @@ fn render_node(
             .width(w)
             .height(h)
             .fill(&colors.node_fill)
-            .stroke(&colors.node_stroke)
-            .stroke_width(1.6)
+            .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+            .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
             .rx(config.rounded_corners * 0.55),
 
         NodeShape::Rounded => Element::rect()
@@ -3823,8 +8571,8 @@ fn render_node(
             .width(w)
             .height(h)
             .fill(&colors.node_fill)
-            .stroke(&colors.node_stroke)
-            .stroke_width(1.6)
+            .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+            .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
             .rx(config.rounded_corners),
 
         NodeShape::Stadium => Element::rect()
@@ -3833,8 +8581,8 @@ fn render_node(
             .width(w)
             .height(h)
             .fill(&colors.node_fill)
-            .stroke(&colors.node_stroke)
-            .stroke_width(1.6)
+            .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+            .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
             .rx(w.min(h) / 2.0),
 
         NodeShape::Diamond => {
@@ -3848,8 +8596,8 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
-                .stroke_width(1.6)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Hexagon => {
@@ -3866,8 +8614,8 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
-                .stroke_width(1.6)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Circle | NodeShape::FilledCircle | NodeShape::DoubleCircle => {
@@ -3881,8 +8629,8 @@ fn render_node(
                 } else {
                     colors.node_fill.as_str()
                 })
-                .stroke(&colors.node_stroke)
-                .stroke_width(1.6);
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css);
 
             if shape == NodeShape::DoubleCircle {
                 // For double circle, we'll use a slightly smaller stroke
@@ -3897,7 +8645,7 @@ fn render_node(
             .width(w)
             .height((h * 0.5).max(8.0))
             .fill(&colors.node_stroke)
-            .stroke(&colors.node_stroke)
+            .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
             .stroke_width(1.0)
             .rx((h * 0.25).max(3.0)),
 
@@ -3915,8 +8663,8 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
-                .stroke_width(1.6)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Trapezoid => {
@@ -3931,8 +8679,8 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
-                .stroke_width(1.6)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Subroutine => {
@@ -3949,8 +8697,8 @@ fn render_node(
                     } else {
                         colors.node_fill.as_str()
                     })
-                    .stroke(&colors.node_stroke)
-                    .stroke_width(1.6)
+                    .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                    .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
                     .rx(config.rounded_corners * 0.45),
             );
             // Left vertical line
@@ -3960,7 +8708,7 @@ fn render_node(
                     .y1(y)
                     .x2(x + inset)
                     .y2(y + h)
-                    .stroke(&colors.node_stroke)
+                    .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                     .stroke_width(1.0),
             );
             // Right vertical line
@@ -3970,7 +8718,7 @@ fn render_node(
                     .y1(y)
                     .x2(x + w - inset)
                     .y2(y + h)
-                    .stroke(&colors.node_stroke)
+                    .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                     .stroke_width(1.0),
             );
             g = maybe_add_class(g, "fm-node-shape", emit_classdef_classes);
@@ -3978,7 +8726,7 @@ fn render_node(
                 return group.child(g).child(render_node_label_text(
                     ir,
                     label_id,
-                    &label_text,
+                    label_text.as_ref(),
                     cx,
                     cy + node_font_size / 3.0,
                     node_font_size,
@@ -4004,8 +8752,8 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
-                .stroke_width(1.6)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Note => {
@@ -4024,7 +8772,7 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width(1.0)
         }
 
@@ -4041,8 +8789,8 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
-                .stroke_width(1.6)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Parallelogram => {
@@ -4057,8 +8805,8 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
-                .stroke_width(1.6)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::InvParallelogram => {
@@ -4073,8 +8821,8 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
-                .stroke_width(1.6)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Triangle => {
@@ -4087,8 +8835,8 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
-                .stroke_width(1.6)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Pentagon => {
@@ -4109,8 +8857,8 @@ fn render_node(
             Element::path()
                 .d(&path.close().build())
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
-                .stroke_width(1.6)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Star => {
@@ -4133,8 +8881,8 @@ fn render_node(
             Element::path()
                 .d(&path.close().build())
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
-                .stroke_width(1.6)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Cloud => {
@@ -4154,8 +8902,8 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
-                .stroke_width(1.6)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::Tag => {
@@ -4172,8 +8920,8 @@ fn render_node(
             Element::path()
                 .d(&path)
                 .fill(&colors.node_fill)
-                .stroke(&colors.node_stroke)
-                .stroke_width(1.6)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
 
         NodeShape::CrossedCircle => {
@@ -4190,8 +8938,8 @@ fn render_node(
                     } else {
                         colors.node_fill.as_str()
                     })
-                    .stroke(&colors.node_stroke)
-                    .stroke_width(1.6),
+                    .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                    .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
             );
             // Diagonal lines
             let offset = r * 0.707; // r * cos(45°)
@@ -4201,8 +8949,8 @@ fn render_node(
                     .y1(cy - offset)
                     .x2(cx + offset)
                     .y2(cy + offset)
-                    .stroke(&colors.node_stroke)
-                    .stroke_width(1.6),
+                    .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                    .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
             );
             g = g.child(
                 Element::line()
@@ -4210,8 +8958,8 @@ fn render_node(
                     .y1(cy - offset)
                     .x2(cx - offset)
                     .y2(cy + offset)
-                    .stroke(&colors.node_stroke)
-                    .stroke_width(1.6),
+                    .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                    .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
             );
             g = maybe_add_class(g, "fm-node-shape", emit_classdef_classes);
             if detail.show_node_labels {
@@ -4246,7 +8994,12 @@ fn render_node(
 
     // Apply shadow filter if enabled and this isn't a special composite shape.
     // Highlighted nodes prefer glow so the effects don't visually muddy each other.
+    // The inline `filter="url(#drop-shadow)"` is redundant when the theme CSS is embedded: the
+    // unconditional `.fm-node <shape> { filter: drop-shadow(…) }` rule (emitted by `to_svg_style`
+    // under the *same* `detail.enable_shadows` gate) overrides this presentation attribute. Emit
+    // the inline copy only for attribute-driven exports (`embed_theme_css = false`, PNG raster).
     let shape_elem = if detail.enable_shadows
+        && !config.embed_theme_css
         && !(is_highlighted && config.glow_enabled)
         && !matches!(
             shape,
@@ -4345,25 +9098,49 @@ fn render_node(
             let subtitle_font_size = clamp_font_size(node_font_size * 0.75, config.min_font_size);
             let mut text_y = y + h * 0.25 + node_font_size * 0.35;
 
-            // Requirement type header (e.g., "<<requirement>>")
+            // Requirement type header (e.g., "<<requirement>>"). Stream the `<text>` bytes directly under
+            // the common themed config (embedded CSS, no per-label style/classdef) instead of building an
+            // `Element` + its `Attributes` Vec — requirement nodes always take this slow path, and the
+            // Element machinery was the top of requirement render.
+            let stream_req_subtitles =
+                config.embed_theme_css && !emit_classdef_classes && text_style.is_none();
             if let Some(ref req_type) = req_meta.requirement_type {
                 let type_label = format!("\u{00ab}{req_type}\u{00bb}");
-                let mut type_elem = Element::text()
-                    .x(cx)
-                    .y(text_y)
-                    .content(&type_label)
-                    .attr("text-anchor", "middle")
-                    .attr("dominant-baseline", "central")
-                    .attr_num("font-size", subtitle_font_size)
-                    .attr("font-style", "italic")
-                    .attr("font-family", &config.font_family)
-                    .fill(&colors.text)
-                    .class("fm-req-type-label");
-                type_elem = apply_label_class(type_elem);
-                if let Some(style) = text_style.as_deref() {
-                    type_elem = type_elem.attr("style", style);
+                if stream_req_subtitles {
+                    let mut f = String::new();
+                    write_req_subtitle_into(
+                        &mut f,
+                        cx,
+                        text_y,
+                        subtitle_font_size,
+                        " font-style=\"italic\"",
+                        "",
+                        &colors.text,
+                        "fm-req-type-label",
+                        &type_label,
+                    );
+                    group = group.child(Element::raw_svg(f));
+                } else {
+                    let mut type_elem = Element::text()
+                        .x(cx)
+                        .y(text_y)
+                        .content(&type_label)
+                        .attr("text-anchor", "middle")
+                        .attr("dominant-baseline", "central")
+                        .attr_num("font-size", subtitle_font_size)
+                        .attr("font-style", "italic")
+                        .font_family_unless_embedded_css(
+                            &config.font_family,
+                            config.embed_theme_css,
+                        )
+                        .fill(&colors.text)
+                        .class("fm-req-type-label");
+                    type_elem = apply_label_class(type_elem);
+                    if let Some(style) = text_style.as_deref() {
+                        type_elem = type_elem.attr("style", style);
+                    }
+                    group = group.child(type_elem);
                 }
-                group = group.child(type_elem);
                 text_y += node_font_size * 0.85;
             }
 
@@ -4397,92 +9174,137 @@ fn render_node(
             }
             if !info_parts.is_empty() {
                 let info_text = info_parts.join(" | ");
-                let mut meta_elem = Element::text()
-                    .x(cx)
-                    .y(text_y)
-                    .content(&info_text)
-                    .attr("text-anchor", "middle")
-                    .attr("dominant-baseline", "central")
-                    .attr_num("font-size", subtitle_font_size)
-                    .attr("font-family", &config.font_family)
-                    .fill(&colors.text)
-                    .attr("opacity", "0.7")
-                    .class("fm-req-metadata");
-                meta_elem = apply_label_class(meta_elem);
-                if let Some(style) = text_style.as_deref() {
-                    meta_elem = meta_elem.attr("style", style);
+                if stream_req_subtitles {
+                    let mut f = String::new();
+                    write_req_subtitle_into(
+                        &mut f,
+                        cx,
+                        text_y,
+                        subtitle_font_size,
+                        "",
+                        " opacity=\"0.7\"",
+                        &colors.text,
+                        "fm-req-metadata",
+                        &info_text,
+                    );
+                    group = group.child(Element::raw_svg(f));
+                } else {
+                    let mut meta_elem = Element::text()
+                        .x(cx)
+                        .y(text_y)
+                        .content(&info_text)
+                        .attr("text-anchor", "middle")
+                        .attr("dominant-baseline", "central")
+                        .attr_num("font-size", subtitle_font_size)
+                        .font_family_unless_embedded_css(
+                            &config.font_family,
+                            config.embed_theme_css,
+                        )
+                        .fill(&colors.text)
+                        .attr("opacity", "0.7")
+                        .class("fm-req-metadata");
+                    meta_elem = apply_label_class(meta_elem);
+                    if let Some(style) = text_style.as_deref() {
+                        meta_elem = meta_elem.attr("style", style);
+                    }
+                    group = group.child(meta_elem);
                 }
-                group = group.child(meta_elem);
             }
         } else if let Some(node) = ir_node
             && !node.members.is_empty()
             && ir.diagram_type == fm_core::DiagramType::Er
         {
             // ER entity: render name + attribute list.
-            let attr_font_size = clamp_font_size(node_font_size * 0.8, config.min_font_size);
-            let header_height = node_font_size * 1.5;
+            // Streaming fast path: embedded CSS, no per-label style, no classdef class -> the header +
+            // divider + attribute rows are a fixed set of `<text>`/`<line>` bytes with no per-element
+            // conditional class/style, so stream them into ONE raw fragment instead of ~2 + N `Element`s
+            // per entity (~400 for a 40-entity diagram). Byte-identical to the Element path below (same
+            // attrs/order/positions/cursor advance); mirrors `render_class_compartments`' fast path.
+            // Every other case (per-label style, classdef, non-embedded CSS) falls through.
+            if text_style.is_none() && !emit_classdef_classes && config.embed_theme_css {
+                let mut fragment = String::new();
+                write_er_entity_into(
+                    &mut fragment,
+                    node,
+                    label_text.as_ref(),
+                    cx,
+                    x,
+                    y,
+                    w,
+                    node_font_size,
+                    config,
+                    colors,
+                );
+                group = group.child(Element::raw_svg(fragment));
+            } else {
+                let attr_font_size = clamp_font_size(node_font_size * 0.8, config.min_font_size);
+                let header_height = node_font_size * 1.5;
 
-            // Entity name header
-            let mut name_elem = Element::text()
-                .x(cx)
-                .y(y + header_height * 0.6)
-                .content(&label_text)
-                .attr("text-anchor", "middle")
-                .attr("dominant-baseline", "central")
-                .attr_num("font-size", node_font_size)
-                .attr("font-weight", "bold")
-                .attr("font-family", &config.font_family)
-                .fill(&colors.text)
-                .class("fm-er-entity-name");
-            name_elem = apply_label_class(name_elem);
-            if let Some(style) = text_style.as_deref() {
-                name_elem = name_elem.attr("style", style);
-            }
-            group = group.child(name_elem);
-
-            // Divider line
-            group = group.child(
-                Element::line()
-                    .x1(x + 2.0)
-                    .y1(y + header_height)
-                    .x2(x + w - 2.0)
-                    .y2(y + header_height)
-                    .stroke(&colors.node_stroke)
-                    .stroke_width(0.8),
-            );
-
-            // Attribute list
-            let mut attr_y = y + header_height + attr_font_size * 0.9;
-            for attr in &node.members {
-                let key_prefix = match attr.key {
-                    fm_core::IrAttributeKey::Pk => "PK ",
-                    fm_core::IrAttributeKey::Fk => "FK ",
-                    fm_core::IrAttributeKey::Uk => "UK ",
-                    fm_core::IrAttributeKey::None => "",
-                };
-                let attr_text = format!("{key_prefix}{} {}", attr.data_type, attr.name);
-                let font_weight = if attr.key == fm_core::IrAttributeKey::None {
-                    "normal"
-                } else {
-                    "bold"
-                };
-                let mut attr_elem = Element::text()
-                    .x(x + 8.0)
-                    .y(attr_y)
-                    .content(&attr_text)
-                    .attr("text-anchor", "start")
+                // Entity name header
+                let mut name_elem = Element::text()
+                    .x(cx)
+                    .y(y + header_height * 0.6)
+                    .content(label_text.as_ref())
+                    .attr("text-anchor", "middle")
                     .attr("dominant-baseline", "central")
-                    .attr_num("font-size", attr_font_size)
-                    .attr("font-weight", font_weight)
-                    .attr("font-family", &config.font_family)
+                    .attr_num("font-size", node_font_size)
+                    .attr("font-weight", "bold")
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .fill(&colors.text)
-                    .class("fm-er-attribute");
-                attr_elem = apply_label_class(attr_elem);
+                    .class("fm-er-entity-name");
+                name_elem = apply_label_class(name_elem);
                 if let Some(style) = text_style.as_deref() {
-                    attr_elem = attr_elem.attr("style", style);
+                    name_elem = name_elem.attr("style", style);
                 }
-                group = group.child(attr_elem);
-                attr_y += attr_font_size * 1.3;
+                group = group.child(name_elem);
+
+                // Divider line
+                group = group.child(
+                    Element::line()
+                        .x1(x + 2.0)
+                        .y1(y + header_height)
+                        .x2(x + w - 2.0)
+                        .y2(y + header_height)
+                        .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                        .stroke_width(0.8),
+                );
+
+                // Attribute list
+                let mut attr_y = y + header_height + attr_font_size * 0.9;
+                for attr in &node.members {
+                    let key_prefix = match attr.key {
+                        fm_core::IrAttributeKey::Pk => "PK ",
+                        fm_core::IrAttributeKey::Fk => "FK ",
+                        fm_core::IrAttributeKey::Uk => "UK ",
+                        fm_core::IrAttributeKey::None => "",
+                    };
+                    let attr_text = format!("{key_prefix}{} {}", attr.data_type, attr.name);
+                    let font_weight = if attr.key == fm_core::IrAttributeKey::None {
+                        "normal"
+                    } else {
+                        "bold"
+                    };
+                    let mut attr_elem = Element::text()
+                        .x(x + 8.0)
+                        .y(attr_y)
+                        .content(&attr_text)
+                        .attr("text-anchor", "start")
+                        .attr("dominant-baseline", "central")
+                        .attr_num("font-size", attr_font_size)
+                        .attr("font-weight", font_weight)
+                        .font_family_unless_embedded_css(
+                            &config.font_family,
+                            config.embed_theme_css,
+                        )
+                        .fill(&colors.text)
+                        .class("fm-er-attribute");
+                    attr_elem = apply_label_class(attr_elem);
+                    if let Some(style) = text_style.as_deref() {
+                        attr_elem = attr_elem.attr("style", style);
+                    }
+                    group = group.child(attr_elem);
+                    attr_y += attr_font_size * 1.3;
+                }
             }
         } else if let Some(node) = ir_node
             && let Some(ref c4_meta) = node.c4_meta
@@ -4562,7 +9384,7 @@ fn render_node(
     }
 
     if let Some(node) = ir_node
-        && let Some(href) = &node.href
+        && let Some(href) = node.href()
         && is_safe_link_target(href, ir.meta.init.config.sanitize_mode)
     {
         match config.link_mode {
@@ -4586,7 +9408,7 @@ fn render_node(
 
     // Callback nodes: emit data-callback attribute for embedding JS integration.
     if let Some(node) = ir_node
-        && let Some(callback) = &node.callback
+        && let Some(callback) = node.callback()
     {
         group = group
             .attr("data-callback", callback)
@@ -4626,6 +9448,122 @@ fn stable_accent_index(node_id: &str) -> usize {
 ///
 /// Adds separator lines and member text elements to the node group.
 #[allow(clippy::too_many_arguments)]
+/// Stream one class-compartment `<text>` byte-identical to the `TextBuilder` the slow path builds under
+/// embedded CSS with no label-style/classdef class: attrs `x, y, text-anchor, font-size, [extra], fill`
+/// then escaped content. `extra` is ` font-weight="bold"` (name), ` font-style="italic"` (stereotype), or
+/// `""` (members) — placed right after `font-size` exactly as `TextBuilder::build`'s call order does.
+fn write_class_text_into(
+    f: &mut String,
+    x: f32,
+    y: f32,
+    anchor: &str,
+    font_size: f32,
+    extra: &str,
+    fill: &str,
+    text: &str,
+) {
+    use crate::attributes::{write_escaped_attr, write_escaped_text};
+    f.push_str("<text x=\"");
+    let _ = crate::attributes::write_number_into(f, x);
+    f.push_str("\" y=\"");
+    let _ = crate::attributes::write_number_into(f, y);
+    f.push_str("\" text-anchor=\"");
+    f.push_str(anchor);
+    f.push_str("\" font-size=\"");
+    let _ = crate::attributes::write_number_into(f, font_size);
+    f.push('"');
+    f.push_str(extra);
+    f.push_str(" fill=\"");
+    let _ = write_escaped_attr(f, fill);
+    f.push_str("\">");
+    let _ = write_escaped_text(f, text);
+    f.push_str("</text>");
+}
+
+/// Stream a requirement-node subtitle `<text>` (the `«type»` header / `Risk … | Verify …` metadata line)
+/// byte-identical to the `Element` the slow path builds under the common themed config (embedded CSS,
+/// no per-label style/classdef → `font-family` and `fm-node-label` absent). `before_fill`/`after_fill`
+/// carry the config-specific attribute in the slow path's exact position: the type header's
+/// `font-style="italic"` sits BEFORE `fill`, the metadata's `opacity="0.7"` AFTER it.
+#[allow(clippy::too_many_arguments)]
+fn write_req_subtitle_into(
+    f: &mut String,
+    x: f32,
+    y: f32,
+    font_size: f32,
+    before_fill: &str,
+    after_fill: &str,
+    fill: &str,
+    class: &str,
+    text: &str,
+) {
+    write_req_subtitle_body_into(
+        f,
+        x,
+        y,
+        font_size,
+        before_fill,
+        after_fill,
+        fill,
+        class,
+        |f| {
+            let _ = crate::attributes::write_escaped_text(f, text);
+        },
+    );
+}
+
+/// Writes the requirement-subtitle `<text …>…</text>` envelope, leaving the body to a caller closure so
+/// multi-part subtitles (`Risk: {risk} | Verify: {vm}`, `«{type}»`) stream their fixed labels + escaped
+/// fields straight in instead of `format!`-allocating a joined `String` per node. Byte-identical because
+/// `write_escaped_text` escapes per char (escape(a ++ b) == escape(a) ++ escape(b)) and the fixed labels
+/// hold no XML specials.
+#[allow(clippy::too_many_arguments)]
+fn write_req_subtitle_body_into(
+    f: &mut String,
+    x: f32,
+    y: f32,
+    font_size: f32,
+    before_fill: &str,
+    after_fill: &str,
+    fill: &str,
+    class: &str,
+    write_body: impl FnOnce(&mut String),
+) {
+    use crate::attributes::write_escaped_attr;
+    f.push_str("<text x=\"");
+    let _ = crate::attributes::write_number_into(f, x);
+    f.push_str("\" y=\"");
+    let _ = crate::attributes::write_number_into(f, y);
+    f.push_str("\" text-anchor=\"middle\" dominant-baseline=\"central\" font-size=\"");
+    let _ = crate::attributes::write_number_into(f, font_size);
+    f.push('"');
+    f.push_str(before_fill);
+    f.push_str(" fill=\"");
+    let _ = write_escaped_attr(f, fill);
+    f.push('"');
+    f.push_str(after_fill);
+    f.push_str(" class=\"");
+    f.push_str(class);
+    f.push_str("\">");
+    write_body(f);
+    f.push_str("</text>");
+}
+
+/// Stream a class-compartment separator `<line>` byte-identical to the slow path's `Element::Line` under
+/// embedded CSS (stroke is CSS-driven, so absent inline): `x1 y1 x2 y2 stroke-width="1"`.
+fn write_class_separator_into(f: &mut String, x1: f32, y: f32, x2: f32) {
+    f.push_str("<line x1=\"");
+    let _ = crate::attributes::write_number_into(f, x1);
+    f.push_str("\" y1=\"");
+    let _ = crate::attributes::write_number_into(f, y);
+    f.push_str("\" x2=\"");
+    let _ = crate::attributes::write_number_into(f, x2);
+    f.push_str("\" y2=\"");
+    let _ = crate::attributes::write_number_into(f, y);
+    f.push_str("\" stroke-width=\"1\"/>");
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_class_compartments(
     mut group: Element,
     node: &fm_core::IrNode,
@@ -4644,6 +9582,20 @@ fn render_class_compartments(
         Some(m) => m,
         None => return group,
     };
+
+    // Streaming fast path: no per-label style, no classdef class, embedded CSS -> the whole compartment
+    // stack (stereotype + name + separators + member rows) is a fixed set of `<text>`/`<line>` bytes with
+    // no per-element class/style, so stream it into ONE raw fragment instead of ~5+ `Element`s per class
+    // node. Byte-identical to the Element path below (same attrs/order/positions/cursor advance); every
+    // other case (label style, classdef, non-embedded CSS) falls through.
+    if label_style.is_none() && !emit_classdef_classes && config.embed_theme_css {
+        let mut f = String::new();
+        write_class_compartments_into(
+            &mut f, node, meta, ir, x, y, w, h, font_size, config, colors,
+        );
+        group = group.child(Element::raw_svg(f));
+        return group;
+    }
 
     let apply_label_style = |mut elem: Element| {
         if let Some(style) = label_style {
@@ -4678,7 +9630,7 @@ fn render_class_compartments(
         let stereo_elem = TextBuilder::new(stereo_text)
             .x(x + w / 2.0)
             .y(cursor_y)
-            .font_family(&config.font_family)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(font_size * 0.85)
             .anchor(TextAnchor::Middle)
             .italic()
@@ -4698,7 +9650,7 @@ fn render_class_compartments(
     let name_elem = TextBuilder::new(&display_name)
         .x(x + w / 2.0)
         .y(cursor_y)
-        .font_family(&config.font_family)
+        .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
         .font_size(font_size)
         .anchor(TextAnchor::Middle)
         .bold()
@@ -4713,7 +9665,7 @@ fn render_class_compartments(
         .attr_num("y1", cursor_y)
         .attr_num("x2", x + w)
         .attr_num("y2", cursor_y)
-        .stroke(&colors.node_stroke)
+        .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
         .stroke_width(1.0);
     group = group.child(sep1);
     cursor_y += line_h * 0.3;
@@ -4734,7 +9686,7 @@ fn render_class_compartments(
         let elem = TextBuilder::new(&text)
             .x(text_x)
             .y(cursor_y)
-            .font_family(&config.font_family)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(member_font_size)
             .anchor(TextAnchor::Start)
             .fill(&colors.text)
@@ -4750,7 +9702,7 @@ fn render_class_compartments(
             .attr_num("y1", cursor_y)
             .attr_num("x2", x + w)
             .attr_num("y2", cursor_y)
-            .stroke(&colors.node_stroke)
+            .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
             .stroke_width(1.0);
         group = group.child(sep2);
         cursor_y += line_h * 0.3;
@@ -4779,7 +9731,7 @@ fn render_class_compartments(
         let elem = TextBuilder::new(&text)
             .x(text_x)
             .y(cursor_y)
-            .font_family(&config.font_family)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(member_font_size)
             .anchor(TextAnchor::Start)
             .fill(&colors.text)
@@ -4830,7 +9782,7 @@ fn render_c4_node_content(
         TextBuilder::new(&format!("<<{}>>", c4_meta.element_type))
             .x(x + w / 2.0)
             .y(cursor_y)
-            .font_family(&config.font_family)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(small_font)
             .font_weight("600")
             .anchor(TextAnchor::Middle)
@@ -4856,7 +9808,7 @@ fn render_c4_node_content(
         TextBuilder::new(label_text)
             .x(x + w / 2.0)
             .y(cursor_y)
-            .font_family(&config.font_family)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(font_size)
             .font_weight("600")
             .anchor(TextAnchor::Middle)
@@ -4871,7 +9823,7 @@ fn render_c4_node_content(
             TextBuilder::new(&format!("[{technology}]"))
                 .x(x + w / 2.0)
                 .y(cursor_y)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(small_font)
                 .anchor(TextAnchor::Middle)
                 .fill(&colors.edge)
@@ -4896,7 +9848,7 @@ fn render_c4_node_content(
                 TextBuilder::new(&description_text)
                     .x(x + w / 2.0)
                     .y(baseline_y)
-                    .font_family(&config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .font_size(description_font)
                     .line_height(config.line_height)
                     .anchor(TextAnchor::Middle)
@@ -5010,7 +9962,7 @@ fn render_node_icon(
             TextBuilder::new(trimmed)
                 .x(cx)
                 .y(cy + size * 0.18)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(size)
                 .anchor(TextAnchor::Middle)
                 .class("fm-node-icon")
@@ -5029,9 +9981,10 @@ fn render_node_icon(
     let y = cy - half;
     let stroke = colors.node_stroke.as_str();
     let fill = colors.node_fill.as_str();
+    let icon_class = sanitize_css_token(&normalized);
     let mut icon = Element::group()
         .class("fm-node-icon")
-        .class(&format!("fm-node-icon-{}", sanitize_css_token(&normalized)));
+        .class_prefixed("fm-node-icon-", &icon_class);
 
     if let Some(custom_icon) = config.custom_icons.get(&normalized) {
         return Some(icon.child(render_custom_svg_icon(custom_icon, cx, cy, size, stroke)));
@@ -5360,7 +10313,7 @@ fn render_node_icon(
                 TextBuilder::new(if fallback.is_empty() { "?" } else { &fallback })
                     .x(cx)
                     .y(cy + size * 0.16)
-                    .font_family(&config.font_family)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                     .font_size(size * 0.62)
                     .anchor(TextAnchor::Middle)
                     .fill(stroke)
@@ -5475,15 +10428,26 @@ fn render_node_label_text(
         );
     }
 
-    let mut text = TextBuilder::new(label_text)
-        .x(x)
-        .y(y)
-        .font_family(&config.font_family)
-        .font_size(font_size)
-        .line_height(config.line_height)
-        .anchor(TextAnchor::Middle)
-        .fill(&colors.text)
-        .build();
+    let mut text = if label_has_line_break(label_text) {
+        TextBuilder::new(label_text)
+            .x(x)
+            .y(y)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+            .font_size(font_size)
+            .line_height(config.line_height)
+            .anchor(TextAnchor::Middle)
+            .fill(&colors.text)
+            .build()
+    } else {
+        Element::text()
+            .x(x)
+            .y(y)
+            .attr("text-anchor", TextAnchor::Middle.as_str())
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+            .attr_num("font-size", font_size)
+            .fill(&colors.text)
+            .content(label_text)
+    };
     text = maybe_add_class(text, "fm-node-label", emit_classdef_classes);
 
     if let Some(style) = label_style {
@@ -5511,7 +10475,7 @@ fn render_markdown_text_segments(
         .x(x)
         .y(y)
         .attr("text-anchor", TextAnchor::Middle.as_str())
-        .attr("font-family", &config.font_family)
+        .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
         .attr_num("font-size", font_size)
         .fill(fill);
     text = maybe_add_class(text, "fm-node-label", emit_classdef_classes);
@@ -5604,7 +10568,7 @@ fn render_c4_legend(
         TextBuilder::new("C4 Legend")
             .x(x + 14.0)
             .y(y + 18.0)
-            .font_family(&config.font_family)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(clamp_font_size(
                 config.font_size * 0.82,
                 config.min_font_size,
@@ -5635,7 +10599,7 @@ fn render_c4_legend(
             TextBuilder::new(&format!("{sample} {label}"))
                 .x(entry_x)
                 .y(entry_y)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(clamp_font_size(
                     config.font_size * 0.72,
                     config.min_font_size,
@@ -5731,84 +10695,456 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
     }
 }
 
-/// Build a smooth SVG path `d` attribute from a series of points using
-/// Catmull-Rom to cubic bezier conversion.  For 2 or fewer points a simple
-/// polyline is produced; for 3+ points each interior segment is drawn as a
-/// cubic bezier curve giving a natural, rounded appearance.
-///
-/// A `tension` factor of 0.25 (1/4) is used so curves stay close to the
-/// original waypoints while still looking smooth.
-fn smooth_edge_path(points: &[(f32, f32)], _is_self_loop: bool) -> String {
-    let n = points.len();
-    if n == 0 {
-        return String::new();
-    }
-
-    let mut pb = PathBuilder::new();
-    pb = pb.move_to(points[0].0, points[0].1);
-
-    if n == 1 {
-        return pb.build();
-    }
-
-    if n == 2 {
-        pb = pb.line_to(points[1].0, points[1].1);
-        return pb.build();
-    }
-
-    // Catmull-Rom to cubic bezier conversion with tension = 1/4.
-    // For segment from p[i] to p[i+1]:
-    //   cp1 = p[i]   + (p[i+1] - p[i-1]) * tension
-    //   cp2 = p[i+1] - (p[i+2] - p[i])   * tension
-    // At boundaries we clamp the virtual neighbor to the endpoint itself.
-    let t: f32 = 0.25;
-
-    for i in 0..(n - 1) {
-        let p_prev = if i == 0 { points[0] } else { points[i - 1] };
-        let p_cur = points[i];
-        let p_next = points[i + 1];
-        let p_next2 = if i + 2 < n {
-            points[i + 2]
-        } else {
-            points[n - 1]
-        };
-
-        let cp1x = p_cur.0 + (p_next.0 - p_prev.0) * t;
-        let cp1y = p_cur.1 + (p_next.1 - p_prev.1) * t;
-        let cp2x = p_next.0 - (p_next2.0 - p_cur.0) * t;
-        let cp2y = p_next.1 - (p_next2.1 - p_cur.1) * t;
-
-        pb = pb.curve_to(cp1x, cp1y, cp2x, cp2y, p_next.0, p_next.1);
-    }
-
-    pb.build()
+fn smooth_layout_edge_path(edge_path: &LayoutEdgePath, offset_x: f32, offset_y: f32) -> String {
+    crate::path::build_smooth_path_by(edge_path.points.len(), |index| {
+        let point = &edge_path.points[index];
+        (point.x + offset_x, point.y + offset_y)
+    })
 }
 
 /// Render a single edge to an SVG element.
-fn render_edge(
-    edge_path: &LayoutEdgePath,
-    ir: &MermaidDiagramIr,
+struct EdgeRenderContext<'a> {
+    ir: &'a MermaidDiagramIr,
     offset_x: f32,
     offset_y: f32,
-    config: &SvgRenderConfig,
+    config: &'a SvgRenderConfig,
     detail: RenderDetailProfile,
+    colors: &'a ThemeColors,
+    accessible_node_labels: Option<&'a [&'a str]>,
+}
+
+/// Serialize a common solid-arrow edge `<path>` directly into raw SVG bytes, **byte-identical** to
+/// the `Element` the slow path builds — every attribute value goes through the same serializers
+/// (`write_escaped_attr` / `AttributeValue::write_value`), so only the attribute names, order, and
+/// `<path .../>` structure are replicated here (asserted by `edge_fast_fragment_matches_element`).
+/// This skips the per-edge `Attributes` Vec build and the per-attribute `write_into` dispatch, which
+/// a ceiling probe shows is ~40% of wide render even after the keep-Element streaming.
+fn build_common_edge_fragment(
+    path_str: &str,
+    stroke_width: f32,
+    style_class: &str,
+    edge_index: i32,
+    marker_end: &str,
+) -> String {
+    let mut f = String::with_capacity(path_str.len() + 96);
+    write_common_edge_path_into(
+        &mut f,
+        path_str,
+        stroke_width,
+        style_class,
+        edge_index,
+        marker_end,
+    );
+    f
+}
+
+/// Write the common solid-arrow `<path .../>` element directly into `f`. Shared by the `<path>`-only
+/// fast path ([`build_common_edge_fragment`]) and the whole-edge fast path
+/// ([`build_common_edge_full_fragment`]) so the path serialization stays in one place and stays
+/// byte-identical to the slow `Element` build.
+fn write_common_edge_path_into(
+    f: &mut String,
+    path_str: &str,
+    stroke_width: f32,
+    style_class: &str,
+    edge_index: i32,
+    marker_end: &str,
+) {
+    // Path `d` is pure SVG path geometry (`M/L/C/A/Z` + digits/spaces/commas/dots/minus from
+    // `write_fixed2`) and can never contain an XML special (`& < > " '`), so escaping it is a no-op
+    // scan. Write it raw — byte-identical, and consistent with the streaming fast path
+    // (`write_common_edge_full_fragment_into`) which already emits `d` unescaped via
+    // `build_smooth_path_by_into`.
+    f.push_str("<path d=\"");
+    f.push_str(path_str);
+    write_common_edge_path_tail_into(f, stroke_width, style_class, edge_index, marker_end);
+}
+
+/// Write the `<path>` attributes that follow the `d` value — `" stroke-width="…" class="fm-edge {style}"
+/// data-fm-edge-id="…" marker-end="…"/>`. Shared by the pre-built-`d` writer above and the geometry-
+/// streaming whole-edge builder so the after-`d` structure stays single-sourced.
+fn write_common_edge_path_tail_into(
+    f: &mut String,
+    stroke_width: f32,
+    style_class: &str,
+    edge_index: i32,
+    marker_end: &str,
+) {
+    write_common_edge_path_tail_with_dasharray_into(
+        f,
+        stroke_width,
+        style_class,
+        edge_index,
+        marker_end,
+        "",
+    );
+}
+
+fn write_common_edge_path_tail_with_dasharray_into(
+    f: &mut String,
+    stroke_width: f32,
+    style_class: &str,
+    edge_index: i32,
+    marker_end: &str,
+    dasharray: &str,
+) {
+    // `<path>`-child callers: the `id` lives on the enclosing `<g>`, never on the path.
+    write_common_edge_path_tail_with_markers_into::<false>(
+        f,
+        stroke_width,
+        style_class,
+        edge_index,
+        "",
+        marker_end,
+        dasharray,
+    );
+}
+
+/// `EDGE_ID` appends the trailing `id="fm-edge-{index}"` that the slow path's final
+/// `elem.id(&mermaid_edge_element_id(edge_index))` puts on an *unwrapped* edge — the shape a lean
+/// (`A11yConfig::none()`) edge takes, since it gets no `<g>` wrapper to carry the id. Group-wrapped
+/// callers pass `false`: there the id is the group's, and `Attributes::set` would have placed it last
+/// anyway, which is why it is written after the markers/dasharray here.
+fn write_common_edge_path_tail_with_markers_into<const EDGE_ID: bool>(
+    f: &mut String,
+    stroke_width: f32,
+    style_class: &str,
+    edge_index: i32,
+    marker_start: &str,
+    marker_end: &str,
+    dasharray: &str,
+) {
+    use crate::attributes::{AttributeValue, write_escaped_attr};
+    f.push_str("\" stroke-width=\"");
+    let _ = crate::attributes::write_number_into(f, stroke_width);
+    f.push_str("\" class=\"fm-edge ");
+    f.push_str(style_class);
+    f.push_str("\" data-fm-edge-id=\"");
+    let _ = AttributeValue::Integer(edge_index).write_value(f);
+    // Empty marker strings mean the slow path's `render_edge` produced no marker attribute, so omit
+    // them here too. When both are present, `marker-start` must precede `marker-end`, matching the
+    // `Element` builder's insertion order.
+    if !marker_start.is_empty() {
+        f.push_str("\" marker-start=\"");
+        let _ = write_escaped_attr(f, marker_start);
+    }
+    if !marker_end.is_empty() {
+        f.push_str("\" marker-end=\"");
+        let _ = write_escaped_attr(f, marker_end);
+    }
+    if !dasharray.is_empty() {
+        f.push_str("\" stroke-dasharray=\"");
+        let _ = write_escaped_attr(f, dasharray);
+    }
+    if EDGE_ID {
+        // `mermaid_edge_element_id(i)` = "fm-edge-" + decimal(i) — no escapable byte, so the same
+        // `Integer` serializer as `data-fm-edge-id` reproduces it exactly.
+        f.push_str("\" id=\"fm-edge-");
+        let _ = AttributeValue::Integer(edge_index).write_value(f);
+    }
+    f.push_str("\"/>");
+}
+
+/// Serialize an ENTIRE common edge — `<g …><path …/><title>…</title></g>` — directly into raw SVG
+/// bytes, **byte-identical** to the `Element` group the slow path builds for an unlabeled solid-arrow
+/// edge under default (`A11yConfig::full()`) a11y. The slow path builds an `Element::group` (its
+/// `Attributes` Vec + a 2-slot children Vec), an `id`/`role`/`tabindex` triple (two heap value
+/// Strings), the `<path>` child element, and a `<title>` element (whose `content` clones the
+/// description) — ~6 allocations per edge. This collapses all of it into the single fragment String,
+/// which on wide layered flowcharts (edges dominate render allocations) is the largest remaining
+/// wide-render alloc lever. The group's attribute names/order (`id`, `class`, `data-fm-edge-id`,
+/// `role`, `tabindex`) and the `role="graphics-symbol"`/`tabindex="0"` literals are replicated here;
+/// asserted by `edge_fast_full_fragment_matches_render` and the corpus `golden_svg_test`.
+///
+/// The `<title>` text is the unlabeled solid-arrow description -- `describe_edge_labels(from, to,
+/// ArrowType::Arrow, None)` = `"{from} points to {to}"` (with `"unknown"` fallbacks) -- written
+/// piecewise so the per-edge description String never has to be allocated. Escaping the assembled
+/// string and escaping the two labels separately are byte-identical because the connective phrase
+/// (`" points to "`) and the `"unknown"` fallback contain no escapable bytes, so `write_escaped_text`
+/// is the identity on them.
+///
+/// The path `d` data is streamed in via `build_smooth_path_by_into(n, point_at)` rather than passing a
+/// pre-built `path_str` String — the geometry is written straight into the fragment buffer (no per-edge
+/// `d` allocation). Writing it unescaped is byte-identical to the slow path's `write_escaped_attr(d)`
+/// because path data is only `[MLC0-9 .,-]`, which contains no escapable byte. Pinned (incl. the path
+/// geometry, and labels with `& < >`) by `edge_fast_full_fragment_matches_render`.
+#[allow(clippy::too_many_arguments)]
+fn build_common_edge_full_fragment<F>(
+    point_count: usize,
+    point_at: F,
+    stroke_width: f32,
+    style_class: &str,
+    edge_index: i32,
+    marker_end: &str,
+    from_label: Option<&str>,
+    to_label: Option<&str>,
+) -> String
+where
+    F: FnMut(usize) -> (f32, f32),
+{
+    let mut f = String::with_capacity(24 + point_count * 56 + 192);
+    // This wrapper serves only the solid-`Arrow` callers (render_edge's fast path + its parity test), so
+    // the a11y phrase is the solid-arrow `" points to "`; the Line arm streams via the `_into` form.
+    // `render_edge`'s fast path is gated on full a11y, so only the `A11Y = true` shape is reachable here.
+    write_common_edge_full_fragment_into::<true, _>(
+        &mut f,
+        point_count,
+        point_at,
+        stroke_width,
+        style_class,
+        edge_index,
+        "",
+        marker_end,
+        "",
+        " points to ",
+        from_label,
+        to_label,
+    );
+    f
+}
+
+/// Write-into core of [`build_common_edge_full_fragment`]. Used by `render_edge_into` to stream the whole
+/// common edge straight into the chunk output buffer, with NO per-edge fragment `String` (the fragment
+/// `String` is the single largest remaining per-element render allocation on wide flowcharts).
+///
+/// `A11Y` selects the accessibility variant at compile time, mirroring `write_common_node_fragment_into`:
+///
+/// - `true` (`A11yConfig::full()`, the default profile) emits `<g id … role … tabindex><path/><title/></g>`.
+/// - `false` (`A11yConfig::none()`, the lean profile) emits the **bare `<path …  id="fm-edge-N"/>`** with no
+///   group and no title — exactly what the slow `Element` path produces when every a11y flag is off: the
+///   unlabeled-edge `<title>` group at `render_edge`'s tail is skipped, `role`/`tabindex` are skipped, and
+///   the final `elem.id(&mermaid_edge_element_id(edge_index))` lands on the `<path>` itself (last, because
+///   `Attributes::set` appends).
+///
+/// Making it a const parameter rather than a runtime flag keeps the default monomorphization exactly as
+/// branch-free as it was before the lean variant existed — a runtime flag cost a measured +0.1..0.33%
+/// instructions on the default path when the same move was made for nodes (see `bd-b2b6`).
+///
+/// `arrow_phrase` / `from_label` / `to_label` feed only the `<title>`, so the `A11Y = false`
+/// monomorphization discards them (and its callers need not compute the endpoint labels at all).
+#[allow(clippy::too_many_arguments)]
+fn write_common_edge_full_fragment_into<const A11Y: bool, F>(
+    f: &mut String,
+    point_count: usize,
+    point_at: F,
+    stroke_width: f32,
+    style_class: &str,
+    edge_index: i32,
+    marker_start: &str,
+    marker_end: &str,
+    dasharray: &str,
+    arrow_phrase: &str,
+    from_label: Option<&str>,
+    to_label: Option<&str>,
+) where
+    F: FnMut(usize) -> (f32, f32),
+{
+    use crate::attributes::{AttributeValue, write_escaped_text};
+    if A11Y {
+        // <g id="fm-edge-N" class="fm-edge" data-fm-edge-id="N" role="graphics-symbol" tabindex="0">
+        // The id is `mermaid_edge_element_id(edge_index)` = "fm-edge-" + decimal(index); it never contains
+        // an escapable byte, so it goes through the same `Integer` serializer as `data-fm-edge-id`.
+        f.push_str("<g id=\"fm-edge-");
+        let _ = AttributeValue::Integer(edge_index).write_value(f);
+        f.push_str("\" class=\"fm-edge\" data-fm-edge-id=\"");
+        let _ = AttributeValue::Integer(edge_index).write_value(f);
+        f.push_str("\" role=\"graphics-symbol\" tabindex=\"0\">");
+    }
+    f.push_str("<path d=\"");
+    crate::path::build_smooth_path_by_into(f, point_count, point_at);
+    if A11Y {
+        write_common_edge_path_tail_with_markers_into::<false>(
+            f,
+            stroke_width,
+            style_class,
+            edge_index,
+            marker_start,
+            marker_end,
+            dasharray,
+        );
+        f.push_str("<title>");
+        let _ = write_escaped_text(f, from_label.unwrap_or("unknown"));
+        // The a11y connective phrase is `describe_edge_labels`'s per-arrow word surrounded by spaces
+        // (`" points to "` for a solid arrow, `" connects to "` for a plain line). It contains no escapable
+        // byte, so writing it verbatim matches the slow path's escaped whole-description byte-for-byte.
+        f.push_str(arrow_phrase);
+        let _ = write_escaped_text(f, to_label.unwrap_or("unknown"));
+        f.push_str("</title></g>");
+    } else {
+        write_common_edge_path_tail_with_markers_into::<true>(
+            f,
+            stroke_width,
+            style_class,
+            edge_index,
+            marker_start,
+            marker_end,
+            dasharray,
+        );
+    }
+}
+
+/// Compute the rendered edge label (truncated text with optional sequence autonumber prefix) and its
+/// midpoint, exactly as the labeled-edge fragments need them. Shared by `render_edge` (slow/`Element`
+/// path) and `render_edge_into` (streaming path) so both derive byte-identical label text + position.
+fn compute_edge_label<'a>(
+    ir: &'a MermaidDiagramIr,
+    edge_path: &LayoutEdgePath,
+    edge_index: usize,
+    detail: RenderDetailProfile,
+    offset_x: f32,
+    offset_y: f32,
+) -> Option<(Cow<'a, str>, f32, f32)> {
+    let ir_edge = ir.edges.get(edge_index);
+    if detail.show_edge_labels
+        && edge_path.points.len() >= 2
+        && let Some(label_id) = ir_edge.and_then(|e| e.label)
+        && let Some(label) = ir.labels.get(label_id.0)
+    {
+        let base_label = truncate_label(&label.text, detail.edge_label_max_chars);
+        let label_text: Cow<'a, str> = if let Some(number) = ir
+            .sequence_meta
+            .as_ref()
+            .and_then(|meta| meta.autonumber_value(edge_index))
+        {
+            Cow::Owned(format!("{number} {}", base_label.as_ref()))
+        } else {
+            base_label
+        };
+        let (lx, ly) = if edge_path.points.len() == 4 {
+            let p1 = &edge_path.points[1];
+            let p2 = &edge_path.points[2];
+            (
+                f32::midpoint(p1.x, p2.x) + offset_x,
+                f32::midpoint(p1.y, p2.y) + offset_y - 8.0,
+            )
+        } else if edge_path.points.len() == 2 {
+            let p1 = &edge_path.points[0];
+            let p2 = &edge_path.points[1];
+            (
+                f32::midpoint(p1.x, p2.x) + offset_x,
+                f32::midpoint(p1.y, p2.y) + offset_y - 8.0,
+            )
+        } else {
+            let mid_idx = edge_path.points.len() / 2;
+            let mid_point = &edge_path.points[mid_idx];
+            (mid_point.x + offset_x, mid_point.y + offset_y - 8.0)
+        };
+        Some((label_text, lx, ly))
+    } else {
+        None
+    }
+}
+
+/// Stream the whole labeled-`Arrow` edge fragment (`<g><path/><rect/><text/><title/></g>`) directly into
+/// `out`. Shared by `render_edge` (into a fresh String wrapped in `Element::raw_svg`) and
+/// `render_edge_into` (straight into the output buffer, avoiding the per-edge fragment String + `Element`
+/// + the copy). Byte-identical (pinned by `golden_svg_test` + `edge_fast_full_fragment_matches_render`).
+///
+/// `A11Y` selects the accessibility variant at compile time, mirroring
+/// `write_common_edge_full_fragment_into`. `A11Y = true` (`A11yConfig::full()`, default profile) emits the
+/// group with `role="graphics-symbol" tabindex="0"` and the trailing `<title>` text alternative. `A11Y =
+/// false` (`A11yConfig::none()`, lean profile) skips `role`/`tabindex` and the `<title>` entirely — exactly
+/// what the slow `Element` path produces when every a11y flag is off (the `<g id/class/data-fm-edge-id>`
+/// wrapper, `<path>`, `<rect>`, and `<text>` are all a11y-independent, so only those two spots differ). The
+/// `from_label`/`to_label` feed only the `<title>`, so the `false` monomorphization discards them and its
+/// caller need not compute the endpoint labels.
+///
+/// A const parameter rather than a runtime flag keeps the default path exactly as branch-free as before
+/// (a runtime flag measured +0.1..0.33% instructions on the node lever, see `bd-b2b6`).
+#[allow(clippy::too_many_arguments)]
+fn write_labeled_edge_fragment_into<const A11Y: bool>(
+    out: &mut String,
+    edge_index: usize,
+    path_str: &str,
+    stroke_width: f32,
+    style_class: &str,
+    marker_end_val: &str,
+    label_str: &str,
+    lx: f32,
+    ly: f32,
+    label_font_size: f32,
+    avg_char_width: f32,
+    from_label: Option<&str>,
+    to_label: Option<&str>,
     colors: &ThemeColors,
-) -> Element {
+) {
+    use crate::attributes::{
+        AttributeValue, write_escaped_attr, write_escaped_text, write_number_into,
+    };
+    let label_width = (label_str.chars().count() as f32 * avg_char_width) + 8.0 + 20.0;
+    let label_height = label_font_size + 14.0;
+    let start_y = ly + (label_font_size / 4.0);
+    out.push_str("<g id=\"fm-edge-");
+    let _ = AttributeValue::Integer(edge_index as i32).write_value(out);
+    out.push_str("\" class=\"fm-edge-labeled\" data-fm-edge-id=\"");
+    let _ = AttributeValue::Integer(edge_index as i32).write_value(out);
+    if A11Y {
+        out.push_str("\" role=\"graphics-symbol\" tabindex=\"0\">");
+    } else {
+        out.push_str("\">");
+    }
+    write_common_edge_path_into(
+        out,
+        path_str,
+        stroke_width,
+        style_class,
+        edge_index as i32,
+        marker_end_val,
+    );
+    out.push_str("<rect x=\"");
+    let _ = write_number_into(out, lx - label_width / 2.0);
+    out.push_str("\" y=\"");
+    let _ = write_number_into(out, ly - label_height / 2.0 - 1.0);
+    out.push_str("\" width=\"");
+    let _ = write_number_into(out, label_width);
+    out.push_str("\" height=\"");
+    let _ = write_number_into(out, label_height);
+    out.push_str("\" fill=\"");
+    let _ = write_escaped_attr(out, &colors.background);
+    out.push_str("\" stroke=\"");
+    let _ = write_escaped_attr(out, &colors.cluster_stroke);
+    out.push_str("\" stroke-width=\"0.75\" rx=\"6\" ry=\"6\"/><text x=\"");
+    let _ = write_number_into(out, lx);
+    out.push_str("\" y=\"");
+    let _ = write_number_into(out, start_y);
+    out.push_str("\" text-anchor=\"middle\" font-size=\"");
+    let _ = write_number_into(out, label_font_size);
+    out.push_str("\" fill=\"");
+    let _ = write_escaped_attr(out, &colors.text);
+    out.push_str("\" class=\"edge-label\">");
+    let _ = write_escaped_text(out, label_str);
+    if A11Y {
+        out.push_str("</text><title>");
+        let _ = write_escaped_text(out, from_label.unwrap_or("unknown"));
+        out.push_str(" points to ");
+        let _ = write_escaped_text(out, to_label.unwrap_or("unknown"));
+        out.push_str(" with label: ");
+        let _ = write_escaped_text(out, label_str);
+        out.push_str("</title></g>");
+    } else {
+        // Lean: no `<title>`. `from_label`/`to_label` are unused (the caller passes `None`).
+        let _ = (from_label, to_label);
+        out.push_str("</text></g>");
+    }
+}
+
+fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> Element {
     use fm_core::ArrowType;
+
+    let EdgeRenderContext {
+        ir,
+        offset_x,
+        offset_y,
+        config,
+        detail,
+        colors,
+        accessible_node_labels,
+    } = *context;
 
     let edge_index = edge_path.edge_index;
     let ir_edge = ir.edges.get(edge_index);
     let arrow = ir_edge.map_or(ArrowType::Arrow, |e| e.arrow);
     let is_back_edge = edge_path.reversed;
-
-    // Build path from points using smooth curves
-    let pts: Vec<(f32, f32)> = edge_path
-        .points
-        .iter()
-        .map(|p| (p.x + offset_x, p.y + offset_y))
-        .collect();
-
-    let path_str = smooth_edge_path(&pts, edge_path.is_self_loop);
 
     // Back-edges get special treatment: dashed + muted color
     let (base_dasharray, marker_start, marker_end, base_color): (
@@ -5923,6 +11259,28 @@ fn render_edge(
                 Some("url(#arrow-end)"),
                 &colors.edge,
             ),
+            // UML aggregation/composition put the diamond on the OWNING end, which is the source for
+            // `o--`/`*--` and the target for the reversed `--o`/`--*` — hence marker-start vs -end
+            // rather than one variant plus a flag. Hollow diamond = aggregation, filled = composition.
+            ArrowType::Aggregation => (None, Some("url(#arrow-diamond-open)"), None, &colors.edge),
+            ArrowType::AggregationReverse => {
+                (None, None, Some("url(#arrow-diamond-open)"), &colors.edge)
+            }
+            ArrowType::Composition => (None, Some("url(#arrow-diamond)"), None, &colors.edge),
+            ArrowType::CompositionReverse => {
+                (None, None, Some("url(#arrow-diamond)"), &colors.edge)
+            }
+            // UML generalization: hollow triangle on the PARENT end. `Animal <|-- Dog` reads "Dog
+            // inherits Animal", so the parent is the source; `--|>` puts it at the target.
+            ArrowType::Inheritance => (
+                None,
+                Some("url(#start-arrow-triangle-open)"),
+                None,
+                &colors.edge,
+            ),
+            ArrowType::InheritanceReverse => {
+                (None, None, Some("url(#arrow-triangle-open)"), &colors.edge)
+            }
         }
     };
 
@@ -5956,94 +11314,200 @@ fn render_edge(
         }
     };
 
-    let mut elem = Element::path()
-        .d(&path_str)
-        .fill("none")
-        .stroke(base_color)
-        .stroke_width(stroke_width)
-        .class("fm-edge")
-        .class(style_class)
-        .data("fm-edge-id", &edge_index.to_string());
+    // `fill="none"` and the base `stroke=<theme edge color>` are redundant when the theme CSS is
+    // embedded: `.fm-edge { fill: none; stroke: var(--fm-edge-color) }` applies (a presentation
+    // attribute loses to the stylesheet), and `base_color` is *always* the theme edge color —
+    // per-edge `linkStyle` colors are emitted as a separate `style="..."` that wins over both the
+    // presentation attribute and the CSS. So emit these inline fallbacks only when CSS is absent
+    // (e.g. the PNG raster path, which resvg cannot fully style via CSS) so those exports stay
+    // self-contained. `stroke-width` is NOT gated — the unconditional CSS sets none, so the inline
+    // is the actual width.
+    //
     let animation_style = config
         .animations_enabled
         .then(|| animation_style_attr(edge_animation_order(edge_path, ir)));
-    if config.animations_enabled && base_dasharray.is_some() {
-        elem = elem.class("fm-edge-flow-animated");
-    }
 
-    // Apply inline style from linkStyle directives if present.
-    if let Some(inline_style) = resolve_edge_inline_style(ir, edge_index) {
-        let merged_style = animation_style.as_ref().map_or_else(
-            || inline_style.clone(),
-            |extra| format!("{inline_style};{extra}"),
-        );
-        elem = elem.attr("style", &merged_style);
-    } else if let Some(extra) = animation_style.as_deref() {
-        elem = elem.attr("style", extra);
-    }
-
-    if let Some(marker) = marker_start {
-        elem = elem.marker_start(marker);
-    }
-    if let Some(marker) = marker_end {
-        elem = elem.marker_end(marker);
-    }
-
-    if config.include_source_spans {
-        elem = apply_span_metadata(elem, edge_path.span);
-    }
-
-    if let Some(dasharray) = base_dasharray {
-        elem = elem.stroke_dasharray(dasharray);
-    }
-
-    // If edge has a label, wrap in group with text
-    if detail.show_edge_labels
-        && let Some(label_id) = ir_edge.and_then(|e| e.label)
-        && let Some(label) = ir.labels.get(label_id.0)
-        && edge_path.points.len() >= 2
+    // Whole-edge fast path: when the common edge ALSO carries the default a11y wrapping
+    // (`text_alternatives` + `aria_labels` + `keyboard_nav`, all true under `A11yConfig::full()`), the
+    // entire `<g …><path …/><title>…</title></g>` serializes directly to one String — skipping the
+    // `Element::group` Attributes Vec + children Vec, the `id`/`role`/`tabindex` value Strings, and the
+    // `<title>` Element + its content clone (~6 allocs/edge). Edges dominate render allocations on wide
+    // layered flowcharts, so this is the largest remaining wide-render alloc lever. The conditions are
+    // exactly the inner `<path>` fast path's plus `aria_labels && keyboard_nav` (so the hardcoded
+    // `role`/`tabindex` always match the group the slow path would build) and an explicit unlabeled
+    // check (so the title is the unlabeled-edge description). Byte-identical: see
+    // `edge_fast_full_fragment_matches_render` + `golden_svg_test`. `resolve_edge_inline_style` is last
+    // so the (potentially allocating) lookup only runs once everything cheaper has already passed.
+    if arrow == ArrowType::Arrow
+        && !is_back_edge
+        && config.embed_theme_css
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && config.a11y.text_alternatives
+        && config.a11y.aria_labels
+        && config.a11y.keyboard_nav
+        && marker_start.is_none()
+        && base_dasharray.is_none()
+        && !(detail.show_edge_labels && ir_edge.and_then(|e| e.label).is_some())
+        && let Some(edge) = ir_edge
+        && let Some(marker_end_val) = marker_end
+        && resolve_edge_inline_style(ir, edge_index).is_none()
     {
-        let base_label = truncate_label(&label.text, detail.edge_label_max_chars);
+        let (from_label, to_label) =
+            edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
+        // `build_common_edge_full_fragment` streams the path geometry and writes the title
+        // (`"{from} points to {to}"`) piecewise, so NEITHER the per-edge `d` String (`path_str`, which is
+        // computed lazily below only for the slower paths) NOR the `describe_edge_labels` String is ever
+        // allocated.
+        return Element::raw_svg(build_common_edge_full_fragment(
+            edge_path.points.len(),
+            |i| {
+                let p = &edge_path.points[i];
+                (p.x + offset_x, p.y + offset_y)
+            },
+            stroke_width,
+            style_class,
+            edge_index as i32,
+            marker_end_val,
+            from_label,
+            to_label,
+        ));
+    }
 
-        // Prepend autonumber when enabled for sequence diagrams
-        let label_text = if let Some(number) = ir
-            .sequence_meta
-            .as_ref()
-            .and_then(|meta| meta.autonumber_value(edge_index))
+    // Only the slower paths below need the materialized `d` String (the whole-edge fast path streamed it
+    // straight into its fragment above and returned).
+    let path_str = smooth_layout_edge_path(edge_path, offset_x, offset_y);
+
+    // Extract the rendered label (text + midpoint) once, up front, so the labeled fast fragment below
+    // can return before the `elem` path-`Element` is built. Shared with `render_edge_into` via
+    // `compute_edge_label` so the streaming path derives byte-identical text + position.
+    let edge_label = compute_edge_label(ir, edge_path, edge_index, detail, offset_x, offset_y);
+
+    // Whole labeled-edge fast fragment, hoisted above `elem`: for the common single-line solid-`Arrow`
+    // label under embedded CSS + default a11y, stream `<g><path/><rect/><text/><title/></g>` and RETURN
+    // before `elem` is built (it would be discarded here). Byte-identical to the slow Element path
+    // (pinned by `golden_svg_test` + `edge_fast_full_fragment_matches_render`); other cases build `elem`.
+    if let Some((label_text, lx, ly)) = &edge_label {
+        let label_str = label_text.as_ref();
+        if config.embed_theme_css
+            && config.a11y.aria_labels
+            && config.a11y.keyboard_nav
+            && config.a11y.text_alternatives
+            && !config.animations_enabled
+            && !config.include_source_spans
+            && !is_back_edge
+            && arrow == ArrowType::Arrow
+            && marker_start.is_none()
+            && base_dasharray.is_none()
+            && !label_str.contains('\n')
+            && resolve_edge_inline_style(ir, edge_index).is_none()
+            && let Some(marker_end_val) = marker_end
+            && let Some(edge) = ir_edge
         {
-            format!("{number} {base_label}")
-        } else {
-            base_label
-        };
+            let label_font_size = detail.edge_font_size;
+            let (from_label, to_label) =
+                edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
+            let mut f = String::with_capacity(path_str.len() + label_str.len() * 3 + 360);
+            write_labeled_edge_fragment_into::<true>(
+                &mut f,
+                edge_index,
+                &path_str,
+                stroke_width,
+                style_class,
+                marker_end_val,
+                label_str,
+                *lx,
+                *ly,
+                label_font_size,
+                config.avg_char_width,
+                from_label,
+                to_label,
+                colors,
+            );
+            return Element::raw_svg(f);
+        }
+    }
 
-        // Position label at geometric midpoint of edge
-        let (lx, ly) = if edge_path.points.len() == 4 {
-            // For standard orthogonal paths, the center of the middle segment
-            let p1 = &edge_path.points[1];
-            let p2 = &edge_path.points[2];
-            (
-                f32::midpoint(p1.x, p2.x) + offset_x,
-                f32::midpoint(p1.y, p2.y) + offset_y - 8.0,
-            )
-        } else if edge_path.points.len() == 2 {
-            // For straight lines, geometric center
-            let p1 = &edge_path.points[0];
-            let p2 = &edge_path.points[1];
-            (
-                f32::midpoint(p1.x, p2.x) + offset_x,
-                f32::midpoint(p1.y, p2.y) + offset_y - 8.0,
-            )
-        } else {
-            // Fallback for other path lengths
-            let mid_idx = edge_path.points.len() / 2;
-            let mid_point = &edge_path.points[mid_idx];
-            (mid_point.x + offset_x, mid_point.y + offset_y - 8.0)
-        };
+    // Fast path: the overwhelmingly common edge (solid `Arrow`, themed CSS, no back-edge, no
+    // animation, no source spans, no inline `linkStyle`, no rendered label) serializes its `<path>`
+    // child to a fixed five-attribute fragment via `Element::raw_svg`, skipping the per-edge
+    // `Attributes` Vec build + per-attribute `write_into` dispatch (a ceiling probe shows that
+    // overhead is ~40% of wide render). The fragment is ONLY the `<path>`; it then falls through to
+    // the SAME a11y wrapping tail (group / `role` / `tabindex` / `<title>`) the slow path runs, so
+    // the full output stays byte-identical to the slow Element path (proven by `golden_svg_test`).
+    // Gated on `a11y.text_alternatives && ir_edge.is_some()` so the raw fragment only ever flows
+    // into the group-child branch below, never the attribute-mutating unwrapped fallthrough (a
+    // `raw_svg` element cannot take `.attr()`/`.id()`).
+    let mut elem = if arrow == ArrowType::Arrow
+        && !is_back_edge
+        && config.embed_theme_css
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && config.a11y.text_alternatives
+        && ir_edge.is_some()
+        && marker_start.is_none()
+        && base_dasharray.is_none()
+        && resolve_edge_inline_style(ir, edge_index).is_none()
+        && !(detail.show_edge_labels && ir_edge.and_then(|e| e.label).is_some())
+        && let Some(marker_end_val) = marker_end
+    {
+        Element::raw_svg(build_common_edge_fragment(
+            &path_str,
+            stroke_width,
+            style_class,
+            edge_index as i32,
+            marker_end_val,
+        ))
+    } else {
+        let mut elem = Element::path().d(&path_str);
+        if !config.embed_theme_css {
+            elem = elem.fill("none").stroke(base_color);
+        }
+        let mut elem = elem
+            .stroke_width(stroke_width)
+            .class("fm-edge")
+            .class(style_class)
+            .attr_int("data-fm-edge-id", edge_index as i32);
+        if config.animations_enabled && base_dasharray.is_some() {
+            elem = elem.class("fm-edge-flow-animated");
+        }
 
+        // Apply inline style from linkStyle directives if present.
+        if let Some(inline_style) = resolve_edge_inline_style(ir, edge_index) {
+            let merged_style = animation_style.as_ref().map_or_else(
+                || inline_style.clone(),
+                |extra| format!("{inline_style};{extra}"),
+            );
+            elem = elem.attr("style", &merged_style);
+        } else if let Some(extra) = animation_style.as_deref() {
+            elem = elem.attr("style", extra);
+        }
+
+        if let Some(marker) = marker_start {
+            elem = elem.marker_start(marker);
+        }
+        if let Some(marker) = marker_end {
+            elem = elem.marker_end(marker);
+        }
+
+        if config.include_source_spans {
+            elem = apply_span_metadata(elem, edge_path.span);
+        }
+
+        if let Some(dasharray) = base_dasharray {
+            elem = elem.stroke_dasharray(dasharray);
+        }
+        elem
+    };
+
+    // If edge has a label, wrap in group with text. `edge_label` was extracted up front and the
+    // labeled fast fragment already returned for the common single-line solid-`Arrow` case; this is
+    // the Element slow path for the labeled edges the fragment does not cover.
+    if let Some((label_text, lx, ly)) = edge_label {
         let mut group = Element::group()
             .id(&mermaid_edge_element_id(edge_index))
             .class("fm-edge-labeled")
-            .data("fm-edge-id", &edge_index.to_string());
+            .attr_int("data-fm-edge-id", edge_index as i32);
         if let Some(extra) = animation_style.as_deref() {
             group = group.attr("style", extra);
         }
@@ -6063,6 +11527,7 @@ fn render_edge(
         group = group.child(elem);
 
         // Add background rect for label
+        let label_text = label_text.as_ref();
         let lines_count = label_text.lines().count().max(1) as f32;
         let max_line_len = label_text
             .lines()
@@ -6094,10 +11559,10 @@ fn render_edge(
 
         // Add label text
         group = group.child(
-            TextBuilder::new(&label_text)
+            TextBuilder::new(label_text)
                 .x(lx)
                 .y(start_y)
-                .font_family(&config.font_family)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
                 .font_size(label_font_size)
                 .line_height(config.line_height)
                 .anchor(TextAnchor::Middle)
@@ -6110,15 +11575,10 @@ fn render_edge(
         if config.a11y.text_alternatives
             && let Some(edge) = ir_edge
         {
-            let from_node = match &edge.from {
-                fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
-                _ => None,
-            };
-            let to_node = match &edge.to {
-                fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
-                _ => None,
-            };
-            let edge_desc = describe_edge(from_node, to_node, arrow, Some(&label_text), ir);
+            let (from_label, to_label) =
+                edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
+            let edge_desc =
+                crate::a11y::describe_edge_labels(from_label, to_label, arrow, Some(label_text));
             group = group.child(Element::title(&edge_desc));
         }
 
@@ -6129,20 +11589,14 @@ fn render_edge(
     if config.a11y.text_alternatives
         && let Some(edge) = ir_edge
     {
-        let from_node = match &edge.from {
-            fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
-            _ => None,
-        };
-        let to_node = match &edge.to {
-            fm_core::IrEndpoint::Node(nid) => ir.nodes.get(nid.0),
-            _ => None,
-        };
-        let edge_desc = describe_edge(from_node, to_node, arrow, None, ir);
+        let (from_label, to_label) =
+            edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
+        let edge_desc = crate::a11y::describe_edge_labels(from_label, to_label, arrow, None);
         // Wrap in group to add title
         let mut group = Element::group()
             .id(&mermaid_edge_element_id(edge_index))
             .class("fm-edge")
-            .data("fm-edge-id", &edge_index.to_string());
+            .attr_int("data-fm-edge-id", edge_index as i32);
         if let Some(extra) = animation_style.as_deref() {
             group = group.attr("style", extra);
         }
@@ -6173,9 +11627,1845 @@ fn render_edge(
     elem
 }
 
+/// Serialize an edge straight into the output buffer. For the overwhelmingly common solid-arrow edge under
+/// default a11y (the same conditions as `render_edge`'s whole-edge fast path) the `<g…><path/><title/></g>`
+/// is streamed directly into `out` — eliminating the per-edge fragment `String` that `render_edge` would
+/// build, wrap in `Element::raw_svg`, and immediately copy out then drop (the single largest remaining
+/// per-element render allocation on wide flowcharts). For `arrow == Arrow` the stroke-width / class /
+/// marker-end are the known solid-arrow constants, so the full arrow match is skipped too. Every other
+/// edge (back-edges, non-Arrow markers, dashed, animated, source spans, inline `linkStyle`, labeled, or
+/// reduced a11y) falls back to the existing `render_edge` Element path, so output stays byte-identical
+/// (corpus-pinned by `golden_svg_test`).
+fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) {
+    use fm_core::ArrowType;
+    let EdgeRenderContext {
+        ir,
+        offset_x,
+        offset_y,
+        config,
+        detail,
+        colors,
+        accessible_node_labels,
+    } = *context;
+    let edge_index = edge_path.edge_index;
+    let ir_edge = ir.edges.get(edge_index);
+    let arrow = ir_edge.map_or(ArrowType::Arrow, |edge| edge.arrow);
+    let is_back_edge = edge_path.reversed;
+
+    // Stream the labeled-`Arrow` fast fragment straight into `out` instead of falling through to
+    // `render_edge(..).write_to_string(out)`, which builds the fragment String + an `Element::raw_svg`
+    // then COPIES it in (a per-labeled-edge double-copy — sequence messages / ER-class relationships).
+    // The labeled fast path is Arrow-only, so `render_edge`'s Arrow-derived width/class/marker are the
+    // constants below (1.8 / "fm-edge-solid" / "url(#arrow-end)"); the same gate + the shared
+    // `compute_edge_label`/`write_labeled_edge_fragment_into` helpers keep the bytes identical. Only
+    // labeled Arrow edges enter here; unlabeled edges (`compute_edge_label` -> None) and every other
+    // labeled/complex case fall through to the tuple fast path / `Element` slow path exactly as before.
+    // Was `aria_labels && keyboard_nav && text_alternatives`. The fragment writer now has a lean
+    // (a11y-off) shape too, so the gate accepts a11y that is uniformly on OR uniformly off and dispatches
+    // to the matching monomorphization — label-heavy diagrams (sequence/er/sankey) were the last lean edge
+    // family still falling to the ~5-alloc `Element` slow path. Mixed a11y (`A11yConfig::minimal()`) still
+    // takes the slow path, exactly as before.
+    if arrow == ArrowType::Arrow
+        && !is_back_edge
+        // Cheap label-presence gate BEFORE `uniform_a11y`/`compute_edge_label`: an unlabeled Arrow edge
+        // (the common flowchart/state case) is handled by the unlabeled fast path below, so short-circuit
+        // it here instead of computing (and discarding) its label. Necessary condition for
+        // `compute_edge_label` to return `Some`; without it, relaxing the a11y gate to `uniform_a11y`
+        // regressed lean flowchart/state ~1% (the old `aria_labels` flag used to short-circuit here).
+        && detail.show_edge_labels
+        && ir_edge.is_some_and(|e| e.label.is_some())
+        && config.embed_theme_css
+        && let Some(a11y) = uniform_a11y(&config.a11y)
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && let Some(edge) = ir_edge
+        && let Some((label_text, lx, ly)) =
+            compute_edge_label(ir, edge_path, edge_index, detail, offset_x, offset_y)
+    {
+        let label_str = label_text.as_ref();
+        if !label_str.contains('\n') && resolve_edge_inline_style(ir, edge_index).is_none() {
+            let path_str = smooth_layout_edge_path(edge_path, offset_x, offset_y);
+            if a11y {
+                let (from_label, to_label) =
+                    edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
+                write_labeled_edge_fragment_into::<true>(
+                    out,
+                    edge_index,
+                    &path_str,
+                    1.8,
+                    "fm-edge-solid",
+                    "url(#arrow-end)",
+                    label_str,
+                    lx,
+                    ly,
+                    detail.edge_font_size,
+                    config.avg_char_width,
+                    from_label,
+                    to_label,
+                    colors,
+                );
+            } else {
+                // Lean fragment has no `<title>`, so endpoint labels are skipped entirely rather than
+                // computed and discarded (`accessible_node_labels` is `None` under lean anyway).
+                write_labeled_edge_fragment_into::<false>(
+                    out,
+                    edge_index,
+                    &path_str,
+                    1.8,
+                    "fm-edge-solid",
+                    "url(#arrow-end)",
+                    label_str,
+                    lx,
+                    ly,
+                    detail.edge_font_size,
+                    config.avg_char_width,
+                    None,
+                    None,
+                    colors,
+                );
+            }
+            return;
+        }
+    }
+
+    // The whole-edge streaming fragment handles every non-reversed arrow whose slow-path `render_edge`
+    // shape is a single `<path>`. Each tuple below is `(stroke_width, style_class, marker_start,
+    // marker_end, dasharray, a11y_phrase)` read straight off `render_edge`'s matches and
+    // `describe_edge_labels`'s per-arrow word (surrounded by spaces; `_ => "connects to"`).
+    // Back-edges, labels, inline styles, animations, source spans, and non-full a11y all still fall to
+    // the `Element` slow path below.
+    // Byte-identity is pinned by `golden_svg_test` + `edge_fast_full_fragment_matches_render`.
+    let (stroke_width, style_class, marker_start, marker_end, dasharray, arrow_phrase): (
+        f32,
+        &str,
+        &str,
+        &str,
+        &str,
+        &str,
+    ) = match arrow {
+        ArrowType::Arrow => (
+            1.8,
+            "fm-edge-solid",
+            "",
+            "url(#arrow-end)",
+            "",
+            " points to ",
+        ),
+        ArrowType::Line => (1.8, "fm-edge-solid", "", "", "", " connects to "),
+        ArrowType::OpenArrow => (
+            1.8,
+            "fm-edge-solid",
+            "",
+            "url(#arrow-open)",
+            "",
+            " sends to ",
+        ),
+        ArrowType::Circle => (
+            1.8,
+            "fm-edge-solid",
+            "",
+            "url(#arrow-circle)",
+            "",
+            " relates to ",
+        ),
+        ArrowType::Cross => (
+            1.8,
+            "fm-edge-solid",
+            "",
+            "url(#arrow-cross)",
+            "",
+            " blocks ",
+        ),
+        ArrowType::HalfArrowTop => (
+            1.8,
+            "fm-edge-solid",
+            "",
+            "url(#arrow-half-top)",
+            "",
+            " connects to ",
+        ),
+        ArrowType::HalfArrowBottom => (
+            1.8,
+            "fm-edge-solid",
+            "",
+            "url(#arrow-half-bottom)",
+            "",
+            " connects to ",
+        ),
+        ArrowType::HalfArrowTopReverse => (
+            1.8,
+            "fm-edge-solid",
+            "url(#arrow-half-bottom)",
+            "",
+            "",
+            " connects to ",
+        ),
+        ArrowType::HalfArrowBottomReverse => (
+            1.8,
+            "fm-edge-solid",
+            "url(#arrow-half-top)",
+            "",
+            "",
+            " connects to ",
+        ),
+        ArrowType::StickArrowTop => (
+            1.8,
+            "fm-edge-solid",
+            "",
+            "url(#arrow-stick-top)",
+            "",
+            " connects to ",
+        ),
+        ArrowType::StickArrowBottom => (
+            1.8,
+            "fm-edge-solid",
+            "",
+            "url(#arrow-stick-bottom)",
+            "",
+            " connects to ",
+        ),
+        ArrowType::StickArrowTopReverse => (
+            1.8,
+            "fm-edge-solid",
+            "url(#arrow-stick-bottom)",
+            "",
+            "",
+            " connects to ",
+        ),
+        ArrowType::StickArrowBottomReverse => (
+            1.8,
+            "fm-edge-solid",
+            "url(#arrow-stick-top)",
+            "",
+            "",
+            " connects to ",
+        ),
+        ArrowType::ThickArrow => (
+            2.5,
+            "fm-edge-thick",
+            "",
+            "url(#arrow-filled)",
+            "",
+            " strongly points to ",
+        ),
+        ArrowType::ThickLine => (2.5, "fm-edge-thick", "", "", "", " strongly connects to "),
+        ArrowType::DottedArrow => (
+            1.8,
+            "fm-edge-dashed",
+            "",
+            "url(#arrow-end)",
+            "5,5",
+            " optionally points to ",
+        ),
+        ArrowType::DottedOpenArrow => (
+            1.8,
+            "fm-edge-dashed",
+            "",
+            "url(#arrow-open)",
+            "5,5",
+            " optionally sends to ",
+        ),
+        ArrowType::DottedCross => (
+            1.8,
+            "fm-edge-dashed",
+            "",
+            "url(#arrow-cross)",
+            "5,5",
+            " connects to ",
+        ),
+        ArrowType::HalfArrowTopDotted => (
+            1.8,
+            "fm-edge-dashed",
+            "",
+            "url(#arrow-half-top)",
+            "5,5",
+            " connects to ",
+        ),
+        ArrowType::HalfArrowBottomDotted => (
+            1.8,
+            "fm-edge-dashed",
+            "",
+            "url(#arrow-half-bottom)",
+            "5,5",
+            " connects to ",
+        ),
+        ArrowType::HalfArrowTopReverseDotted => (
+            1.8,
+            "fm-edge-dashed",
+            "url(#arrow-half-bottom)",
+            "",
+            "5,5",
+            " connects to ",
+        ),
+        ArrowType::HalfArrowBottomReverseDotted => (
+            1.8,
+            "fm-edge-dashed",
+            "url(#arrow-half-top)",
+            "",
+            "5,5",
+            " connects to ",
+        ),
+        ArrowType::StickArrowTopDotted => (
+            1.8,
+            "fm-edge-dashed",
+            "",
+            "url(#arrow-stick-top)",
+            "5,5",
+            " connects to ",
+        ),
+        ArrowType::StickArrowBottomDotted => (
+            1.8,
+            "fm-edge-dashed",
+            "",
+            "url(#arrow-stick-bottom)",
+            "5,5",
+            " connects to ",
+        ),
+        ArrowType::StickArrowTopReverseDotted => (
+            1.8,
+            "fm-edge-dashed",
+            "url(#arrow-stick-bottom)",
+            "",
+            "5,5",
+            " connects to ",
+        ),
+        ArrowType::StickArrowBottomReverseDotted => (
+            1.8,
+            "fm-edge-dashed",
+            "url(#arrow-stick-top)",
+            "",
+            "5,5",
+            " connects to ",
+        ),
+        ArrowType::DottedLine => (
+            1.8,
+            "fm-edge-dashed",
+            "",
+            "",
+            "5,5",
+            " optionally connects to ",
+        ),
+        ArrowType::DoubleArrow => (
+            1.8,
+            "fm-edge-solid",
+            "url(#arrow-start)",
+            "url(#arrow-end)",
+            "",
+            " points both ways to ",
+        ),
+        ArrowType::DoubleThickArrow => (
+            2.5,
+            "fm-edge-thick",
+            "url(#arrow-start-filled)",
+            "url(#arrow-filled)",
+            "",
+            " strongly points both ways to ",
+        ),
+        ArrowType::DoubleDottedArrow => (
+            1.8,
+            "fm-edge-dashed",
+            "url(#arrow-start)",
+            "url(#arrow-end)",
+            "5,5",
+            " optionally points both ways to ",
+        ),
+        // The diamond marks the OWNING end: source for `o--`/`*--`, target for `--o`/`--*`. The
+        // spoken phrase reads owner-first in every case, so the reversed forms invert the wording
+        // rather than the marker slot alone.
+        ArrowType::Aggregation => (
+            1.8,
+            "fm-edge-solid",
+            "url(#arrow-diamond-open)",
+            "",
+            "",
+            " aggregates ",
+        ),
+        ArrowType::AggregationReverse => (
+            1.8,
+            "fm-edge-solid",
+            "",
+            "url(#arrow-diamond-open)",
+            "",
+            " is aggregated by ",
+        ),
+        ArrowType::Composition => (
+            1.8,
+            "fm-edge-solid",
+            "url(#arrow-diamond)",
+            "",
+            "",
+            " is composed of ",
+        ),
+        ArrowType::CompositionReverse => (
+            1.8,
+            "fm-edge-solid",
+            "",
+            "url(#arrow-diamond)",
+            "",
+            " composes ",
+        ),
+        ArrowType::Inheritance => (
+            1.8,
+            "fm-edge-solid",
+            "url(#start-arrow-triangle-open)",
+            "",
+            "",
+            " is inherited by ",
+        ),
+        ArrowType::InheritanceReverse => (
+            1.8,
+            "fm-edge-solid",
+            "",
+            "url(#arrow-triangle-open)",
+            "",
+            " inherits ",
+        ),
+    };
+    // Was `text_alternatives && aria_labels && keyboard_nav`. The fragment writer now has a lean
+    // (a11y-off) shape too, so the gate accepts a11y that is uniformly on OR uniformly off and dispatches
+    // to the matching monomorphization. Mixed combinations (e.g. `A11yConfig::minimal()`) still take the
+    // slow `Element` path, exactly as before — a raw fragment cannot express "role but no tabindex".
+    if !edge_path.reversed
+        && config.embed_theme_css
+        && !config.animations_enabled
+        && !config.include_source_spans
+        && let Some(a11y) = uniform_a11y(&config.a11y)
+        && !(detail.show_edge_labels && ir_edge.and_then(|edge| edge.label).is_some())
+        && let Some(edge) = ir_edge
+        && resolve_edge_inline_style(ir, edge_index).is_none()
+    {
+        let point_at = |index: usize| {
+            let point = &edge_path.points[index];
+            (point.x + offset_x, point.y + offset_y)
+        };
+        if a11y {
+            let (from_label, to_label) =
+                edge_endpoint_accessible_labels(edge, ir, accessible_node_labels);
+            write_common_edge_full_fragment_into::<true, _>(
+                out,
+                edge_path.points.len(),
+                point_at,
+                stroke_width,
+                style_class,
+                edge_index as i32,
+                marker_start,
+                marker_end,
+                dasharray,
+                arrow_phrase,
+                from_label,
+                to_label,
+            );
+        } else {
+            // The lean fragment has no `<title>`, so the endpoint-label lookup is skipped entirely rather
+            // than computed and discarded (`accessible_node_labels` is `None` under lean anyway).
+            write_common_edge_full_fragment_into::<false, _>(
+                out,
+                edge_path.points.len(),
+                point_at,
+                stroke_width,
+                style_class,
+                edge_index as i32,
+                marker_start,
+                marker_end,
+                dasharray,
+                "",
+                None,
+                None,
+            );
+        }
+        return;
+    }
+
+    render_edge(edge_path, context).write_to_string(out);
+}
+
+fn edge_endpoint_accessible_labels<'a>(
+    edge: &fm_core::IrEdge,
+    ir: &'a MermaidDiagramIr,
+    accessible_node_labels: Option<&'a [&'a str]>,
+) -> (Option<&'a str>, Option<&'a str>) {
+    (
+        endpoint_accessible_label(edge.from, ir, accessible_node_labels),
+        endpoint_accessible_label(edge.to, ir, accessible_node_labels),
+    )
+}
+
+fn endpoint_accessible_label<'a>(
+    endpoint: fm_core::IrEndpoint,
+    ir: &'a MermaidDiagramIr,
+    accessible_node_labels: Option<&'a [&'a str]>,
+) -> Option<&'a str> {
+    let fm_core::IrEndpoint::Node(node_id) = endpoint else {
+        return None;
+    };
+    accessible_node_labels
+        .and_then(|labels| labels.get(node_id.0).copied())
+        .or_else(|| {
+            ir.nodes
+                .get(node_id.0)
+                .map(|node| crate::a11y::accessible_node_label(node, ir))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batch_renderer_reuses_shared_flowchart_prefix_byte_identically() {
+        let inputs = [
+            concat!(
+                "flowchart LR\n",
+                "  subgraph Shared\n",
+                "    S0[Gateway]\n",
+                "    S1[Queue]\n",
+                "    S2[Worker]\n",
+                "    S0-->S1\n",
+                "    S1-->S2\n",
+                "  end\n",
+                "  D0[Alpha]\n",
+                "  D1[Store]\n",
+                "  S2-->D0\n",
+                "  D0-->D1",
+            ),
+            concat!(
+                "flowchart LR\n",
+                "  subgraph Shared\n",
+                "    S0[Gateway]\n",
+                "    S1[Queue]\n",
+                "    S2[Worker]\n",
+                "    S0-->S1\n",
+                "    S1-->S2\n",
+                "  end\n",
+                "  D0[Bravo]\n",
+                "  D1[Cache]\n",
+                "  S2-->D0\n",
+                "  D0-->D1",
+            ),
+        ];
+        let config = SvgRenderConfig::default();
+        let mut renderer = SvgBatchRenderer::default();
+        for input in inputs {
+            let ir = Arc::new(fm_parser::parse(input).ir);
+            let layout = fm_layout::layout_diagram_traced(&ir).layout;
+            let expected = render_svg_with_layout(&ir, &layout, &config);
+            let actual = renderer.render(ir, layout, &config);
+            assert_eq!(actual, expected);
+        }
+        let snapshot = renderer.previous.as_ref().expect("batch snapshot");
+        assert!(snapshot.fragments.reused_nodes >= 3);
+        assert!(snapshot.fragments.reused_edges >= 2);
+    }
+
+    #[test]
+    fn borrowed_batch_renderer_reuses_certified_prefix_without_retaining_ir() {
+        let inputs = [
+            concat!(
+                "flowchart LR\n",
+                "  subgraph Shared[\"Shared ingestion platform\"]\n",
+                "    S0[\"Receive & validate events\"]\n",
+                "    S1[\"Normalize payload safely\"]\n",
+                "    S2[\"Publish canonical records\"]\n",
+                "    S0-->S1\n",
+                "    S1-->S2\n",
+                "  end\n",
+                "  S2-->A[\"Consumer 000\"]",
+            ),
+            concat!(
+                "flowchart LR\n",
+                "  subgraph Shared[\"Shared ingestion platform\"]\n",
+                "    S0[\"Receive & validate events\"]\n",
+                "    S1[\"Normalize payload safely\"]\n",
+                "    S2[\"Publish canonical records\"]\n",
+                "    S0-->S1\n",
+                "    S1-->S2\n",
+                "  end\n",
+                "  S2-->B[\"Consumer 111\"]",
+            ),
+        ];
+        let plan = fm_parser::FlowchartBatchParsePlan::new(
+            &inputs,
+            fm_core::MermaidParseMode::Compat,
+            &fm_parser::ParserConfig::default(),
+        );
+        let config = SvgRenderConfig::default();
+        let mut scratch = fm_parser::FlowchartBatchParseScratch::default();
+        let mut renderer = SvgBatchRenderer::default();
+        assert_eq!(plan.stats().shared_prefix_inputs, inputs.len());
+
+        for (index, input) in inputs.iter().enumerate() {
+            plan.with_parse_scratch(index, input, &mut scratch, |parsed| {
+                let prefix = parsed
+                    .reusable_prefix
+                    .expect("shared prefix should remain unchanged");
+                let layout = fm_layout::layout_diagram_traced(parsed.ir).layout;
+                let expected = render_svg_with_layout(parsed.ir, &layout, &config);
+                let actual = renderer.render_borrowed(
+                    parsed.ir,
+                    layout,
+                    &config,
+                    Some(CertifiedSvgBatchPrefix::new(
+                        Arc::clone(&prefix.identity),
+                        prefix.node_count,
+                        prefix.edge_count,
+                    )),
+                );
+                assert_eq!(actual, expected);
+            });
+        }
+
+        let snapshot = renderer.previous.as_ref().expect("batch snapshot");
+        assert!(snapshot.ir.is_none());
+        assert!(snapshot.fragments.reused_nodes >= 3);
+        assert!(snapshot.fragments.reused_edges >= 2);
+    }
+
+    #[test]
+    fn borrowed_batch_renderer_transplants_certified_path_geometry() {
+        let make_input = |tail_labels: &[&str]| {
+            let mut input =
+                String::from("flowchart LR\n  subgraph Shared[\"Shared ingestion platform\"]\n");
+            for index in 0..48 {
+                input.push_str(&format!("    S{index}[\"Shared platform node {index}\"]\n"));
+            }
+            for index in 0..47 {
+                input.push_str(&format!("    S{index}-->S{}\n", index + 1));
+            }
+            input.push_str("  end\n");
+            for (index, label) in tail_labels.iter().enumerate() {
+                input.push_str(&format!("  D{index}[\"{label}\"]\n"));
+            }
+            input.push_str("  S47-->D0\n");
+            for index in 0..tail_labels.len() - 1 {
+                input.push_str(&format!("  D{index}-->D{}\n", index + 1));
+            }
+            input
+        };
+        let owned_inputs = [
+            make_input(&[
+                "Scheduler",
+                "Cache",
+                "Client",
+                "Queue",
+                "API",
+                "Store",
+                "Worker",
+            ]),
+            make_input(&[
+                "Scheduler",
+                "Rollback on failure 545",
+                "Scheduler",
+                "Message Queue",
+                "Read Replica",
+                "Normalize payload",
+                "Client",
+                "Scheduler",
+                "Parse config 552",
+                "Normalize payload 553",
+                "Session Store",
+            ]),
+        ];
+        let inputs = owned_inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan = fm_parser::FlowchartBatchParsePlan::new(
+            &inputs,
+            fm_core::MermaidParseMode::Compat,
+            &fm_parser::ParserConfig::default(),
+        );
+        let config = SvgRenderConfig::default();
+        let mut scratch = fm_parser::FlowchartBatchParseScratch::default();
+        let mut renderer = SvgBatchRenderer::default();
+
+        for (index, input) in inputs.iter().enumerate() {
+            plan.with_parse_scratch(index, input, &mut scratch, |parsed| {
+                let prefix = parsed.reusable_prefix.expect("certified prefix");
+                let expected_layout = fm_layout::layout_diagram_traced(parsed.ir).layout;
+                let expected = render_svg_with_layout(parsed.ir, &expected_layout, &config);
+                let actual = renderer.layout_and_render_borrowed(
+                    parsed.ir,
+                    &config,
+                    Some(CertifiedSvgBatchPrefix::new(
+                        Arc::clone(&prefix.identity),
+                        prefix.node_count,
+                        prefix.edge_count,
+                    )),
+                );
+                assert_eq!(actual, expected);
+            });
+        }
+
+        let snapshot = renderer.previous.as_ref().expect("batch snapshot");
+        assert!(snapshot.layout_prefix.is_some());
+        assert!(snapshot.fragments.reused_nodes >= 48);
+        assert!(snapshot.fragments.reused_edges >= 47);
+    }
+
+    #[test]
+    fn certified_batch_seed_bootstraps_independent_worker_renderers() {
+        let inputs = [
+            concat!(
+                "flowchart LR\n",
+                "  subgraph Shared[\"Shared ingestion platform\"]\n",
+                "    S0[\"Receive & validate events\"]\n",
+                "    S1[\"Normalize payload safely\"]\n",
+                "    S2[\"Publish canonical records\"]\n",
+                "    S0-->S1\n",
+                "    S1-->S2\n",
+                "  end\n",
+                "  S2-->A[Alpha]",
+            ),
+            concat!(
+                "flowchart LR\n",
+                "  subgraph Shared[\"Shared ingestion platform\"]\n",
+                "    S0[\"Receive & validate events\"]\n",
+                "    S1[\"Normalize payload safely\"]\n",
+                "    S2[\"Publish canonical records\"]\n",
+                "    S0-->S1\n",
+                "    S1-->S2\n",
+                "  end\n",
+                "  S2-->B[Bravo]\n",
+                "  B-->C[Cache]",
+            ),
+            concat!(
+                "flowchart LR\n",
+                "  subgraph Shared[\"Shared ingestion platform\"]\n",
+                "    S0[\"Receive & validate events\"]\n",
+                "    S1[\"Normalize payload safely\"]\n",
+                "    S2[\"Publish canonical records\"]\n",
+                "    S0-->S1\n",
+                "    S1-->S2\n",
+                "  end\n",
+                "  S2-->D[Delta]\n",
+                "  D-->E[Event log]\n",
+                "  E-->F[Fanout]",
+            ),
+        ];
+        let plan = fm_parser::FlowchartBatchParsePlan::new(
+            &inputs,
+            fm_core::MermaidParseMode::Compat,
+            &fm_parser::ParserConfig::default(),
+        );
+        let config = SvgRenderConfig::default();
+        let mut coordinator_scratch = fm_parser::FlowchartBatchParseScratch::default();
+        let mut coordinator = SvgBatchRenderer::default();
+
+        plan.with_parse_scratch(0, inputs[0], &mut coordinator_scratch, |parsed| {
+            let prefix = parsed.reusable_prefix.expect("certified prefix");
+            let actual = coordinator.layout_and_render_borrowed(
+                parsed.ir,
+                &config,
+                Some(CertifiedSvgBatchPrefix::new(
+                    Arc::clone(&prefix.identity),
+                    prefix.node_count,
+                    prefix.edge_count,
+                )),
+            );
+            let expected_layout = fm_layout::layout_diagram_traced(parsed.ir).layout;
+            assert_eq!(
+                actual,
+                render_svg_with_layout(parsed.ir, &expected_layout, &config)
+            );
+        });
+        let seed = coordinator.seed().expect("coordinator seed");
+
+        for (index, input) in inputs.iter().enumerate().skip(1) {
+            let mut scratch = fm_parser::FlowchartBatchParseScratch::default();
+            let mut worker = SvgBatchRenderer::from_seed(&seed);
+            plan.with_parse_scratch(index, input, &mut scratch, |parsed| {
+                let prefix = parsed.reusable_prefix.expect("certified prefix");
+                let expected_layout = fm_layout::layout_diagram_traced(parsed.ir).layout;
+                let expected = render_svg_with_layout(parsed.ir, &expected_layout, &config);
+                let actual = worker.layout_and_render_borrowed(
+                    parsed.ir,
+                    &config,
+                    Some(CertifiedSvgBatchPrefix::new(
+                        Arc::clone(&prefix.identity),
+                        prefix.node_count,
+                        prefix.edge_count,
+                    )),
+                );
+                assert_eq!(actual, expected);
+            });
+            let snapshot = worker.previous.as_ref().expect("worker snapshot");
+            assert!(snapshot.fragments.reused_nodes >= 3);
+            assert!(snapshot.fragments.reused_edges >= 2);
+        }
+    }
+
+    /// The full-node fast path must render byte-identical to the `Element` slow path it replaces.
+    /// Pins the assembled `<g><rect/><text/><title/></g>` against the known-correct default-config
+    /// output (captured from the slow path); conformance covers the gated-out node variants.
+    #[test]
+    fn node_fast_fragment_matches_render() {
+        let ir = create_ir_with_single_node("N0", NodeShape::Rect);
+        let config = SvgRenderConfig::default();
+        let svg = render_svg_with_config(&ir, &config);
+        let expected = concat!(
+            "<g id=\"fm-node-n0-0\" class=\"fm-node fm-node-accent-4 fm-node-shape-rect\" ",
+            "data-id=\"N0\" role=\"graphics-symbol\" aria-label=\"Single Node\" tabindex=\"0\">",
+            "<rect x=\"92\" y=\"92\" width=\"148.73\" height=\"66.50\" rx=\"5.50\" ",
+            "fill=\"url(#fm-node-gradient)\"/>",
+            "<text x=\"166.36\" y=\"129.85\" text-anchor=\"middle\" font-size=\"13.80\" ",
+            "fill=\"#1a1a2e\">Single Node</text>",
+            "<title>Node: Single Node, rectangle</title></g>",
+        );
+        let region = svg.find("<g id=\"fm-node").map_or("", |s| &svg[s..]);
+        assert!(
+            svg.contains(expected),
+            "full-node fast-path bytes must match the slow path.\nGOT node region:\n{region}\nEXPECTED:\n{expected}"
+        );
+    }
+
+    /// The lean (`A11yConfig::none()`) node now streams through the same fast path. These bytes are the
+    /// ones the slow `Element` path produced before the lean monomorphization existed -- verified at the
+    /// time by rendering the whole 13-item head-to-head corpus with both builds and comparing SHA-256s.
+    /// They are pinned here because, with the fast path now handling lean, no configuration can reach the
+    /// slow path to re-derive them.
+    #[test]
+    fn node_lean_fast_fragment_omits_a11y() {
+        let ir = create_ir_with_single_node("N0", NodeShape::Rect);
+        let config = SvgRenderConfig {
+            a11y: A11yConfig::none(),
+            accessible: false,
+            ..SvgRenderConfig::default()
+        };
+        let svg = render_svg_with_config(&ir, &config);
+        let expected = concat!(
+            "<g id=\"fm-node-n0-0\" class=\"fm-node fm-node-accent-4 fm-node-shape-rect\" ",
+            "data-id=\"N0\">",
+            "<rect x=\"92\" y=\"92\" width=\"148.73\" height=\"66.50\" rx=\"5.50\" ",
+            "fill=\"url(#fm-node-gradient)\"/>",
+            "<text x=\"166.36\" y=\"129.85\" text-anchor=\"middle\" font-size=\"13.80\" ",
+            "fill=\"#1a1a2e\">Single Node</text></g>",
+        );
+        let region = svg.find("<g id=\"fm-node").map_or("", |s| &svg[s..]);
+        assert!(
+            svg.contains(expected),
+            "lean-node fast-path bytes must match the slow path's a11y-off output.\nGOT node region:\n{region}\nEXPECTED:\n{expected}"
+        );
+        assert!(
+            !svg.contains("role=\"graphics-symbol\""),
+            "lean output must not carry per-element role"
+        );
+        assert!(
+            !svg.contains("tabindex="),
+            "lean output must not carry tabindex"
+        );
+        assert!(
+            !svg.contains("<title>Node:"),
+            "lean output must not carry per-node <title>"
+        );
+    }
+
+    /// A mixed `A11yConfig` cannot be represented by either fragment monomorphization, so it must fall to
+    /// the slow `Element` path -- which still honours each flag individually.
+    #[test]
+    fn mixed_a11y_falls_back_to_slow_path_and_honours_each_flag() {
+        assert_eq!(uniform_a11y(&A11yConfig::full()), Some(true));
+        assert_eq!(uniform_a11y(&A11yConfig::none()), Some(false));
+        assert_eq!(uniform_a11y(&A11yConfig::minimal()), None);
+
+        let ir = create_ir_with_single_node("N0", NodeShape::Rect);
+        let config = SvgRenderConfig {
+            a11y: A11yConfig::minimal(),
+            ..SvgRenderConfig::default()
+        };
+        let svg = render_svg_with_config(&ir, &config);
+        // minimal() = aria_labels only.
+        assert!(svg.contains("role=\"graphics-symbol\""));
+        assert!(svg.contains("aria-label=\"Single Node\""));
+        assert!(!svg.contains("tabindex="));
+        assert!(!svg.contains("<title>Node:"));
+    }
+
+    #[test]
+    fn node_shape_fast_fragments_match_slow_render() {
+        let config = SvgRenderConfig::default();
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+        let centrality = HashMap::new();
+
+        for shape in [
+            NodeShape::Diamond,
+            NodeShape::Hexagon,
+            NodeShape::Subroutine,
+            NodeShape::Cylinder,
+            NodeShape::Trapezoid,
+            NodeShape::InvTrapezoid,
+            NodeShape::Parallelogram,
+            NodeShape::InvParallelogram,
+            NodeShape::Asymmetric,
+        ] {
+            let ir = create_ir_with_single_node("N0", shape);
+            let node_box = LayoutNodeBox {
+                node_index: 0,
+                node_id: "N0".to_string(),
+                rank: 0,
+                order: 0,
+                span: Span::default(),
+                bounds: fm_layout::LayoutRect {
+                    x: 10.0,
+                    y: 20.0,
+                    width: 140.0,
+                    height: 90.0,
+                },
+            };
+
+            let mut streamed = String::new();
+            render_node_into(
+                &mut streamed,
+                &node_box,
+                &ir,
+                0.0,
+                0.0,
+                &config,
+                detail,
+                &colors,
+                false,
+                &centrality,
+            );
+
+            let mut slow = String::new();
+            render_node(
+                &node_box,
+                &ir,
+                0.0,
+                0.0,
+                &config,
+                detail,
+                &colors,
+                false,
+                &centrality,
+                false,
+            )
+            .write_to_string(&mut slow);
+
+            assert_eq!(streamed, slow, "shape {shape:?}");
+        }
+    }
+
+    #[test]
+    fn requirement_node_streaming_matches_slow_render() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Requirement);
+        ir.labels.push(IrLabel {
+            text: "Requirement A".to_string(),
+            span: Span::default(),
+        });
+        ir.nodes.push(IrNode {
+            id: "R0".to_string(),
+            label: Some(IrLabelId(0)),
+            shape: NodeShape::Rect,
+            requirement_meta: Some(Box::new(fm_core::IrRequirementNodeMeta {
+                requirement_type: Some("requirement".to_string()),
+                req_id: Some("REQ-0001".to_string()),
+                text: Some("Preserve rendered output".to_string()),
+                risk: Some("high".to_string()),
+                verify_method: Some("test".to_string()),
+            })),
+            ..Default::default()
+        });
+        let node_box = LayoutNodeBox {
+            node_index: 0,
+            node_id: "R0".to_string(),
+            rank: 0,
+            order: 0,
+            span: Span::default(),
+            bounds: fm_layout::LayoutRect {
+                x: 10.0,
+                y: 20.0,
+                width: 140.0,
+                height: 90.0,
+            },
+        };
+        let config = SvgRenderConfig::default();
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+        let centrality = HashMap::new();
+
+        let mut streamed = String::new();
+        render_node_into(
+            &mut streamed,
+            &node_box,
+            &ir,
+            0.0,
+            0.0,
+            &config,
+            detail,
+            &colors,
+            false,
+            &centrality,
+        );
+
+        let mut slow = String::new();
+        render_node(
+            &node_box,
+            &ir,
+            0.0,
+            0.0,
+            &config,
+            detail,
+            &colors,
+            false,
+            &centrality,
+            false,
+        )
+        .write_to_string(&mut slow);
+
+        assert_eq!(streamed, slow);
+    }
+
+    /// Regression: a themed ER entity (default `node_gradients` config) must render its attribute
+    /// compartments, not be claimed by the plain-rectangle common fast path. Before `simple_node_user_
+    /// class_suffix` excluded `members`, the whole attribute list was silently dropped whenever gradients
+    /// were on (the `er` golden runs gradients-OFF, so it never caught this). Asserts the entity body is
+    /// present AND that the streaming path is byte-identical to the `Element` slow path.
+    #[test]
+    fn er_entity_renders_attributes_with_gradients_on() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
+        ir.labels.push(IrLabel {
+            text: "USER".to_string(),
+            span: Span::default(),
+        });
+        ir.nodes.push(IrNode {
+            id: "USER".to_string(),
+            label: Some(IrLabelId(0)),
+            shape: NodeShape::Rect,
+            members: vec![
+                fm_core::IrEntityAttribute {
+                    data_type: "int".to_string(),
+                    name: "id".to_string(),
+                    key: fm_core::IrAttributeKey::Pk,
+                    comment: None,
+                },
+                fm_core::IrEntityAttribute {
+                    data_type: "string".to_string(),
+                    name: "email".to_string(),
+                    key: fm_core::IrAttributeKey::Uk,
+                    comment: None,
+                },
+            ],
+            ..Default::default()
+        });
+        let node_box = LayoutNodeBox {
+            node_index: 0,
+            node_id: "USER".to_string(),
+            rank: 0,
+            order: 0,
+            span: Span::default(),
+            bounds: fm_layout::LayoutRect {
+                x: 12.0,
+                y: 24.0,
+                width: 150.0,
+                height: 110.0,
+            },
+        };
+        let config = SvgRenderConfig::default();
+        assert!(config.node_gradients, "test assumes gradients-on default");
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+        let centrality = HashMap::new();
+
+        let mut streamed = String::new();
+        render_node_into(
+            &mut streamed,
+            &node_box,
+            &ir,
+            0.0,
+            0.0,
+            &config,
+            detail,
+            &colors,
+            false,
+            &centrality,
+        );
+
+        // The attribute compartments must be present (the bug dropped them).
+        assert!(
+            streamed.contains("fm-er-entity-name"),
+            "ER entity name header missing: {streamed}"
+        );
+        assert!(
+            streamed.contains("fm-er-attribute"),
+            "ER attribute rows missing (dropped by the common fast path?): {streamed}"
+        );
+
+        // …and the streamed output must match the `Element` slow path byte-for-byte.
+        let mut slow = String::new();
+        render_node(
+            &node_box,
+            &ir,
+            0.0,
+            0.0,
+            &config,
+            detail,
+            &colors,
+            false,
+            &centrality,
+            false,
+        )
+        .write_to_string(&mut slow);
+        assert_eq!(streamed, slow);
+    }
+
+    /// The whole-ER-entity streaming fast path (`write_er_node_fragment_into`, via `render_node_into`'s
+    /// ER gate) must be byte-identical to the `Element` slow path (`render_node`). Uses the default config
+    /// (`node_gradients` + embedded CSS on) so the gradient `<rect>` fast path is exercised — the `er`
+    /// golden runs with gradients OFF. Mixed attribute keys (Pk/None/Uk → both font-weights + the `PK `/
+    /// `UK ` prefixes) and an XML-special attribute name exercise the body writer's per-piece escaping.
+    #[test]
+    fn er_entity_node_streaming_matches_slow_render() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
+        ir.labels.push(IrLabel {
+            text: "USER".to_string(),
+            span: Span::default(),
+        });
+        ir.nodes.push(IrNode {
+            id: "USER".to_string(),
+            label: Some(IrLabelId(0)),
+            shape: NodeShape::Rect,
+            members: vec![
+                fm_core::IrEntityAttribute {
+                    data_type: "int".to_string(),
+                    name: "id".to_string(),
+                    key: fm_core::IrAttributeKey::Pk,
+                    comment: None,
+                },
+                fm_core::IrEntityAttribute {
+                    data_type: "string".to_string(),
+                    name: "na<me>".to_string(),
+                    key: fm_core::IrAttributeKey::None,
+                    comment: None,
+                },
+                fm_core::IrEntityAttribute {
+                    data_type: "string".to_string(),
+                    name: "email".to_string(),
+                    key: fm_core::IrAttributeKey::Uk,
+                    comment: None,
+                },
+            ],
+            ..Default::default()
+        });
+        let node_box = LayoutNodeBox {
+            node_index: 0,
+            node_id: "USER".to_string(),
+            rank: 0,
+            order: 0,
+            span: Span::default(),
+            bounds: fm_layout::LayoutRect {
+                x: 12.0,
+                y: 24.0,
+                width: 150.0,
+                height: 110.0,
+            },
+        };
+        let config = SvgRenderConfig::default();
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+        let centrality = HashMap::new();
+
+        let mut streamed = String::new();
+        render_node_into(
+            &mut streamed,
+            &node_box,
+            &ir,
+            0.0,
+            0.0,
+            &config,
+            detail,
+            &colors,
+            false,
+            &centrality,
+        );
+
+        let mut slow = String::new();
+        render_node(
+            &node_box,
+            &ir,
+            0.0,
+            0.0,
+            &config,
+            detail,
+            &colors,
+            false,
+            &centrality,
+            false,
+        )
+        .write_to_string(&mut slow);
+
+        assert_eq!(streamed, slow);
+        // Confirm the whole-node fast path actually fired (gradient rect + streamed body).
+        assert!(streamed.contains("url(#fm-node-gradient)"));
+        assert!(streamed.contains("fm-er-entity-name"));
+        // Text content escapes `<` (and `&`) but leaves a standalone `>` literal (only `]]>` escapes it).
+        assert!(streamed.contains("na&lt;me>"));
+    }
+
+    /// The streamed whole-C4-node fragment must be byte-identical to the `Element` the slow path builds,
+    /// under the DEFAULT (gradients-on) config the C4 fast-path gate fires on. The `c4_basic` golden uses
+    /// `node_gradients: false` (so the fast path does NOT fire there), so THIS is the real byte-pin for it.
+    #[test]
+    fn c4_node_streaming_matches_slow_render() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::C4Context);
+        ir.labels.push(IrLabel {
+            text: "User".to_string(),
+            span: Span::default(),
+        });
+        ir.nodes.push(IrNode {
+            id: "user".to_string(),
+            label: Some(IrLabelId(0)),
+            shape: NodeShape::Rounded,
+            classes: vec!["c4".to_string(), "c4-person".to_string()],
+            c4_meta: Some(Box::new(fm_core::IrC4NodeMeta {
+                element_type: "Person".to_string(),
+                technology: None,
+                description: Some("A customer".to_string()),
+            })),
+            ..Default::default()
+        });
+        let node_box = LayoutNodeBox {
+            node_index: 0,
+            node_id: "user".to_string(),
+            rank: 0,
+            order: 0,
+            span: Span::default(),
+            bounds: fm_layout::LayoutRect {
+                x: 12.0,
+                y: 24.0,
+                width: 150.0,
+                height: 90.0,
+            },
+        };
+        let config = SvgRenderConfig::default();
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+        let centrality = HashMap::new();
+
+        let mut streamed = String::new();
+        render_node_into(
+            &mut streamed,
+            &node_box,
+            &ir,
+            0.0,
+            0.0,
+            &config,
+            detail,
+            &colors,
+            false,
+            &centrality,
+        );
+
+        let mut slow = String::new();
+        render_node(
+            &node_box,
+            &ir,
+            0.0,
+            0.0,
+            &config,
+            detail,
+            &colors,
+            false,
+            &centrality,
+            false,
+        )
+        .write_to_string(&mut slow);
+
+        assert_eq!(streamed, slow);
+        // Confirm the whole-C4-node fast path actually fired (stereotype + person icon + solid, non-gradient fill).
+        assert!(streamed.contains("fm-c4-type-label"));
+        assert!(streamed.contains("fm-c4-person-icon"));
+        assert!(streamed.contains("&lt;&lt;Person>>"));
+        assert!(streamed.contains("url(#fm-node-gradient)"));
+    }
+
+    /// The streamed common-edge fragment must be byte-identical to the `Element` the slow path
+    /// builds. Pins `build_common_edge_fragment` against the canonical `Element` constructors.
+    #[test]
+    fn edge_fast_fragment_matches_element() {
+        let cases: &[(&str, i32)] = &[
+            ("M0 0 L10 10", 0),
+            ("M1.50 2.25 C3.00 4.00 5.00 6.00 7.00 8.00", 42),
+            ("M-5.25 0 L0 -3.50", 1000),
+            ("", 7),
+        ];
+        for &(d, idx) in cases {
+            let elem = Element::path()
+                .d(d)
+                .stroke_width(1.8)
+                .class("fm-edge")
+                .class("fm-edge-solid")
+                .attr_int("data-fm-edge-id", idx)
+                .marker_end("url(#arrow-end)");
+            let mut expected = String::new();
+            elem.write_to_string(&mut expected);
+            let frag = build_common_edge_fragment(d, 1.8, "fm-edge-solid", idx, "url(#arrow-end)");
+            assert_eq!(
+                frag, expected,
+                "streamed edge fragment must equal the Element serialization (d={d:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn requirement_subtitle_streaming_matches_element_render() {
+        let cases = [
+            (
+                123.25,
+                45.5,
+                10.75,
+                " font-style=\"italic\"",
+                "",
+                "fm-req-type-label",
+                "\u{00ab}functional & safe\u{00bb}",
+                true,
+            ),
+            (
+                -2.0,
+                77.25,
+                9.5,
+                "",
+                " opacity=\"0.7\"",
+                "fm-req-metadata",
+                "Risk: high | Verify: test <manual>",
+                false,
+            ),
+        ];
+
+        for (x, y, font_size, before_fill, after_fill, class, text, italic) in cases {
+            let mut elem = Element::text()
+                .x(x)
+                .y(y)
+                .content(text)
+                .attr("text-anchor", "middle")
+                .attr("dominant-baseline", "central")
+                .attr_num("font-size", font_size);
+            if italic {
+                elem = elem.attr("font-style", "italic");
+            }
+            elem = elem.fill("#1a1a2e");
+            if !after_fill.is_empty() {
+                elem = elem.attr("opacity", "0.7");
+            }
+            elem = elem.class(class);
+
+            let mut expected = String::new();
+            elem.write_to_string(&mut expected);
+
+            let mut streamed = String::new();
+            write_req_subtitle_into(
+                &mut streamed,
+                x,
+                y,
+                font_size,
+                before_fill,
+                after_fill,
+                "#1a1a2e",
+                class,
+                text,
+            );
+
+            assert_eq!(
+                streamed, expected,
+                "streamed requirement subtitle must match Element render for {class}"
+            );
+        }
+    }
+
+    #[test]
+    fn edge_fast_full_fragment_matches_render() {
+        // Pin the WHOLE-edge fast fragment against the `Element` group the slow path actually builds
+        // for an unlabeled solid-arrow edge under default a11y: the unlabeled-edge tail wraps the
+        // `<path>` fast fragment in `Element::group().id().class("fm-edge").attr_int("data-fm-edge-id")
+        // .attr("role").attr("tabindex").child(path).child(title)`, with the title text from
+        // `describe_edge_labels(from, to, Arrow, None)`. The fragment must serialize byte-identically —
+        // including the streamed path geometry and piecewise `<title>` escaping of labels with
+        // `& < > "` and the `"unknown"` fallback. The expected `d` String is the one the slow path would
+        // build (`build_smooth_path_by`), so this also pins "streamed-inline path == escaped `d` String".
+        let check = |points: &[(f32, f32)],
+                     idx: i32,
+                     style: &str,
+                     sw: f32,
+                     from_label: Option<&str>,
+                     to_label: Option<&str>| {
+            let d = crate::path::build_smooth_path_by(points.len(), |i| points[i]);
+            let desc =
+                crate::a11y::describe_edge_labels(from_label, to_label, ArrowType::Arrow, None);
+            let path_child = Element::raw_svg(build_common_edge_fragment(
+                &d,
+                sw,
+                style,
+                idx,
+                "url(#arrow-end)",
+            ));
+            let group = Element::group()
+                .id(&fm_core::mermaid_edge_element_id(idx as usize))
+                .class("fm-edge")
+                .attr_int("data-fm-edge-id", idx)
+                .attr("role", "graphics-symbol")
+                .attr("tabindex", "0")
+                .child(path_child)
+                .child(Element::title(&desc));
+            let mut expected = String::new();
+            group.write_to_string(&mut expected);
+            let frag = build_common_edge_full_fragment(
+                points.len(),
+                |i| points[i],
+                sw,
+                style,
+                idx,
+                "url(#arrow-end)",
+                from_label,
+                to_label,
+            );
+            assert_eq!(
+                frag, expected,
+                "whole-edge fast fragment must equal the slow Element group (idx={idx})"
+            );
+        };
+        check(
+            &[(0.0, 0.0), (10.0, 10.0)],
+            0,
+            "fm-edge-solid",
+            1.8,
+            Some("A"),
+            Some("B"),
+        );
+        check(
+            &[(1.5, 2.25), (3.0, 4.0), (5.0, 6.0), (7.0, 8.0)],
+            42,
+            "fm-edge-solid",
+            1.8,
+            Some("Node <1> & \"x\""),
+            Some("Node 2"),
+        );
+        check(
+            &[(-5.25, 0.0), (0.0, -3.5)],
+            1000,
+            "fm-edge-solid",
+            2.5,
+            None,
+            None,
+        );
+        check(&[(0.0, 0.0)], 7, "fm-edge-solid", 1.8, Some("start"), None);
+    }
+
+    #[test]
+    fn dotted_edge_streaming_matches_element_render() {
+        let config = SvgRenderConfig::default();
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+
+        for arrow in [
+            ArrowType::DottedArrow,
+            ArrowType::DottedOpenArrow,
+            ArrowType::DottedCross,
+            ArrowType::DottedLine,
+            ArrowType::HalfArrowTopDotted,
+            ArrowType::HalfArrowBottomDotted,
+            ArrowType::StickArrowTopDotted,
+            ArrowType::StickArrowBottomDotted,
+        ] {
+            let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+            ir.nodes.push(IrNode {
+                id: "A <&>".to_string(),
+                ..IrNode::default()
+            });
+            ir.nodes.push(IrNode {
+                id: "B \"q\"".to_string(),
+                ..IrNode::default()
+            });
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(0)),
+                to: IrEndpoint::Node(IrNodeId(1)),
+                arrow,
+                ..IrEdge::default()
+            });
+            let edge_path = LayoutEdgePath {
+                edge_index: 0,
+                span: Span::default(),
+                points: [
+                    fm_layout::LayoutPoint { x: 0.0, y: 0.0 },
+                    fm_layout::LayoutPoint { x: 32.0, y: 48.0 },
+                    fm_layout::LayoutPoint { x: 72.0, y: 48.0 },
+                    fm_layout::LayoutPoint { x: 96.0, y: 80.0 },
+                ]
+                .into_iter()
+                .collect(),
+                reversed: false,
+                is_self_loop: false,
+                parallel_offset: 0.0,
+                bundle_count: 1,
+                bundled: false,
+            };
+            let context = EdgeRenderContext {
+                ir: &ir,
+                offset_x: 1.5,
+                offset_y: -2.0,
+                config: &config,
+                detail,
+                colors: &colors,
+                accessible_node_labels: None,
+            };
+
+            let mut streamed = String::new();
+            render_edge_into(&mut streamed, &edge_path, &context);
+
+            let mut element_rendered = String::new();
+            render_edge(&edge_path, &context).write_to_string(&mut element_rendered);
+
+            assert_eq!(
+                streamed, element_rendered,
+                "streamed dotted edge must match Element render for {arrow:?}"
+            );
+            assert!(streamed.contains("stroke-dasharray=\"5,5\""));
+        }
+    }
+
+    #[test]
+    fn marker_start_edge_streaming_matches_element_render() {
+        let config = SvgRenderConfig::default();
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+
+        for arrow in [
+            ArrowType::HalfArrowTopReverse,
+            ArrowType::HalfArrowBottomReverse,
+            ArrowType::StickArrowTopReverse,
+            ArrowType::StickArrowBottomReverse,
+            ArrowType::HalfArrowTopReverseDotted,
+            ArrowType::HalfArrowBottomReverseDotted,
+            ArrowType::StickArrowTopReverseDotted,
+            ArrowType::StickArrowBottomReverseDotted,
+            ArrowType::DoubleArrow,
+            ArrowType::DoubleThickArrow,
+            ArrowType::DoubleDottedArrow,
+        ] {
+            let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+            ir.nodes.push(IrNode {
+                id: "A <&>".to_string(),
+                ..IrNode::default()
+            });
+            ir.nodes.push(IrNode {
+                id: "B \"q\"".to_string(),
+                ..IrNode::default()
+            });
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(0)),
+                to: IrEndpoint::Node(IrNodeId(1)),
+                arrow,
+                ..IrEdge::default()
+            });
+            let edge_path = LayoutEdgePath {
+                edge_index: 0,
+                span: Span::default(),
+                points: [
+                    fm_layout::LayoutPoint { x: 0.0, y: 0.0 },
+                    fm_layout::LayoutPoint { x: 32.0, y: 48.0 },
+                    fm_layout::LayoutPoint { x: 72.0, y: 48.0 },
+                    fm_layout::LayoutPoint { x: 96.0, y: 80.0 },
+                ]
+                .into_iter()
+                .collect(),
+                reversed: false,
+                is_self_loop: false,
+                parallel_offset: 0.0,
+                bundle_count: 1,
+                bundled: false,
+            };
+            let context = EdgeRenderContext {
+                ir: &ir,
+                offset_x: 1.5,
+                offset_y: -2.0,
+                config: &config,
+                detail,
+                colors: &colors,
+                accessible_node_labels: None,
+            };
+
+            let mut streamed = String::new();
+            render_edge_into(&mut streamed, &edge_path, &context);
+
+            let mut element_rendered = String::new();
+            render_edge(&edge_path, &context).write_to_string(&mut element_rendered);
+
+            assert_eq!(
+                streamed, element_rendered,
+                "streamed marker-start edge must match Element render for {arrow:?}"
+            );
+            assert!(streamed.contains("marker-start=\"url(#arrow-"));
+            if matches!(
+                arrow,
+                ArrowType::HalfArrowTopReverseDotted
+                    | ArrowType::HalfArrowBottomReverseDotted
+                    | ArrowType::StickArrowTopReverseDotted
+                    | ArrowType::StickArrowBottomReverseDotted
+                    | ArrowType::DoubleDottedArrow
+            ) {
+                assert!(streamed.contains("stroke-dasharray=\"5,5\""));
+            }
+        }
+    }
+
+    /// Build a two-node / one-edge flowchart plus the `EdgeRenderContext` scaffolding the streaming
+    /// parity tests need. Labels carry `& < > "` so escaping divergences surface.
+    fn single_edge_fixture(arrow: ArrowType) -> (MermaidDiagramIr, LayoutEdgePath) {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "A <&>".to_string(),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "B \"q\"".to_string(),
+            ..IrNode::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow,
+            ..IrEdge::default()
+        });
+        let edge_path = LayoutEdgePath {
+            edge_index: 0,
+            span: Span::default(),
+            points: [
+                fm_layout::LayoutPoint { x: 0.0, y: 0.0 },
+                fm_layout::LayoutPoint { x: 32.0, y: 48.0 },
+                fm_layout::LayoutPoint { x: 72.0, y: 48.0 },
+                fm_layout::LayoutPoint { x: 96.0, y: 80.0 },
+            ]
+            .into_iter()
+            .collect(),
+            reversed: false,
+            is_self_loop: false,
+            parallel_offset: 0.0,
+            bundle_count: 1,
+            bundled: false,
+        };
+        (ir, edge_path)
+    }
+
+    /// The lean (`A11yConfig::none()`) edge now streams through the whole-edge fast path instead of
+    /// falling back to the per-element `Element` builder. Unlike the node half — where the fast path took
+    /// over every reachable configuration, so its lean bytes had to be pinned as a literal — `render_edge`
+    /// remains the live slow path here (`render_edge_into` delegates to it for every gated-out edge). So
+    /// this asserts the streamed lean fragment against what the `Element` path *actually* produces, across
+    /// the arrow matrix: bare `<path>` (no `<g>`), no `<title>`, no `role`/`tabindex`, and the trailing
+    /// `id="fm-edge-N"` that the slow path's final `elem.id(..)` appends to an unwrapped edge.
+    #[test]
+    fn lean_edge_streaming_matches_element_render() {
+        let config = SvgRenderConfig {
+            a11y: A11yConfig::none(),
+            accessible: false,
+            ..SvgRenderConfig::default()
+        };
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+
+        for arrow in [
+            ArrowType::Arrow,
+            ArrowType::Line,
+            ArrowType::OpenArrow,
+            ArrowType::ThickArrow,
+            ArrowType::DottedArrow,
+            ArrowType::DoubleArrow,
+            ArrowType::DoubleDottedArrow,
+            ArrowType::HalfArrowTopReverse,
+            ArrowType::StickArrowBottomReverseDotted,
+        ] {
+            let (ir, edge_path) = single_edge_fixture(arrow);
+            let context = EdgeRenderContext {
+                ir: &ir,
+                offset_x: 1.5,
+                offset_y: -2.0,
+                config: &config,
+                detail,
+                colors: &colors,
+                accessible_node_labels: None,
+            };
+
+            let mut streamed = String::new();
+            render_edge_into(&mut streamed, &edge_path, &context);
+
+            let mut element_rendered = String::new();
+            render_edge(&edge_path, &context).write_to_string(&mut element_rendered);
+
+            assert_eq!(
+                streamed, element_rendered,
+                "streamed lean edge must match Element render for {arrow:?}"
+            );
+            assert!(
+                streamed.starts_with("<path d=\"") && streamed.ends_with("id=\"fm-edge-0\"/>"),
+                "lean edge is a bare <path> carrying the id: {streamed}"
+            );
+            for banned in ["<g ", "<title>", "role=", "tabindex="] {
+                assert!(
+                    !streamed.contains(banned),
+                    "lean edge must not emit {banned} for {arrow:?}: {streamed}"
+                );
+            }
+        }
+    }
+
+    /// Differential oracle for the single-pass post-pass scanners against the per-needle `str::contains`
+    /// chain they replaced. The reference implementations below are verbatim the pre-`bd-w5sn` logic.
+    ///
+    /// The generated alphabet manufactures exactly the cases the one-pass rewrite could get wrong:
+    /// truncated prefixes (`fm-nod`), longer-than-single-digit accents (`fm-node-accent-12`, which the old
+    /// needle DID match for accent 1), out-of-range digits (`accent-0`, `accent-9`), a `var(--fm-accent-12)`
+    /// that must NOT count as a reference to accent 1, adjacent/overlapping prefixes
+    /// (`fm-node-fm-node-accent-3`), and state classes with trailing text (`fm-node-inactive-foo`).
+    #[test]
+    fn single_pass_scanners_match_per_needle_contains() {
+        const STATE_CLASSES: [&str; 5] = [
+            "fm-node-inactive",
+            "fm-node-block-beta",
+            "fm-node-highlighted",
+            "fm-node-border-dashed",
+            "fm-node-border-double",
+        ];
+        const ACCENT_NEEDLES: [&str; 9] = [
+            "",
+            "fm-node-accent-1",
+            "fm-node-accent-2",
+            "fm-node-accent-3",
+            "fm-node-accent-4",
+            "fm-node-accent-5",
+            "fm-node-accent-6",
+            "fm-node-accent-7",
+            "fm-node-accent-8",
+        ];
+        const VAR_NEEDLES: [&str; 9] = [
+            "",
+            "var(--fm-accent-1)",
+            "var(--fm-accent-2)",
+            "var(--fm-accent-3)",
+            "var(--fm-accent-4)",
+            "var(--fm-accent-5)",
+            "var(--fm-accent-6)",
+            "var(--fm-accent-7)",
+            "var(--fm-accent-8)",
+        ];
+        // Verbatim pre-rewrite logic.
+        let old_body = |body: &str| -> (bool, [bool; 9]) {
+            (
+                STATE_CLASSES.iter().any(|c| body.contains(c)),
+                std::array::from_fn(|n| n != 0 && body.contains(ACCENT_NEEDLES[n])),
+            )
+        };
+        let old_var = |svg: &str| -> [bool; 9] {
+            std::array::from_fn(|n| n != 0 && svg.contains(VAR_NEEDLES[n]))
+        };
+
+        let check = |t: &str| {
+            let (old_state, old_accent) = old_body(t);
+            let (new_state, new_accent) = scan_body_fm_node_classes(t);
+            assert_eq!(old_state, new_state, "state flag mismatch on {t:?}");
+            // The one-pass scanner short-circuits on a state hit, so its accent flags are only defined
+            // (and only ever read by the caller) when no state class is present.
+            if !old_state {
+                assert_eq!(old_accent, new_accent, "accent flags mismatch on {t:?}");
+            }
+            assert_eq!(
+                old_var(t),
+                scan_accent_var_refs(t),
+                "var refs mismatch on {t:?}"
+            );
+        };
+
+        for t in [
+            "",
+            "fm-node-",
+            "fm-node-accent-",
+            "fm-node-accent-0",
+            "fm-node-accent-9",
+            "fm-node-accent-12",
+            "fm-node-inactive-foo",
+            "fm-node-fm-node-accent-3",
+            "xxfm-node-highlighted",
+            "var(--fm-accent-",
+            "var(--fm-accent-3",
+            "var(--fm-accent-12)",
+            "var(--fm-accent-1)",
+            "fm-nod e-accent-1",
+        ] {
+            check(t);
+        }
+
+        const ATOMS: [&str; 22] = [
+            "fm-node-",
+            "accent-",
+            "1",
+            "2",
+            "8",
+            "9",
+            "0",
+            "12",
+            ")",
+            "(",
+            "var(--fm-accent-",
+            "inactive",
+            "block-beta",
+            "highlighted",
+            "border-dashed",
+            "border-double",
+            "fm-node-accent-",
+            "fm-node-inactive-foo",
+            "-",
+            "x",
+            "fm-nod",
+            "e-",
+        ];
+        let mut state: u64 = 0x243F_6A88_85A3_08D3;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state
+        };
+        let mut scratch = String::new();
+        for _ in 0..200_000 {
+            scratch.clear();
+            let len = (next() >> 60) % 6 + 1;
+            for _ in 0..len {
+                scratch.push_str(ATOMS[usize::try_from(next() >> 33).unwrap_or(0) % ATOMS.len()]);
+            }
+            check(&scratch);
+        }
+    }
+
+    /// Mixed a11y (`A11yConfig::minimal()` = `aria_labels` only) has no raw-fragment shape — it cannot
+    /// express "role but no tabindex" — so it must keep taking the slow `Element` path and keep honouring
+    /// each flag independently. Guards the `uniform_a11y` gate against being widened to `any a11y`.
+    #[test]
+    fn mixed_a11y_edge_falls_back_to_slow_path() {
+        let config = SvgRenderConfig {
+            a11y: A11yConfig::minimal(),
+            ..SvgRenderConfig::default()
+        };
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(800.0, 600.0, &config);
+        let (ir, edge_path) = single_edge_fixture(ArrowType::Arrow);
+        let context = EdgeRenderContext {
+            ir: &ir,
+            offset_x: 1.5,
+            offset_y: -2.0,
+            config: &config,
+            detail,
+            colors: &colors,
+            accessible_node_labels: None,
+        };
+
+        let mut streamed = String::new();
+        render_edge_into(&mut streamed, &edge_path, &context);
+        let mut element_rendered = String::new();
+        render_edge(&edge_path, &context).write_to_string(&mut element_rendered);
+
+        assert_eq!(streamed, element_rendered);
+        // `minimal()` = aria_labels on, keyboard_nav + text_alternatives off: role, but no tabindex and
+        // no <title>, so no `<g>` wrapper either — the role lands on the unwrapped `<path>`.
+        assert!(streamed.contains("role=\"graphics-symbol\""));
+        assert!(!streamed.contains("tabindex="));
+        assert!(!streamed.contains("<title>"));
+    }
+
     use fm_core::{
         ArrowType, DiagramType, IrC4NodeMeta, IrCluster, IrClusterId, IrEdge, IrEndpoint,
         IrGraphCluster, IrGraphNode, IrLabel, IrLabelId, IrLabelSegment, IrLifecycleEvent, IrNode,
@@ -6191,6 +13481,59 @@ mod tests {
         layout_diagram,
     };
     use proptest::prelude::*;
+
+    #[test]
+    fn truncate_label_borrows_when_no_truncation_needed() {
+        let label = "short label";
+        let unchanged = truncate_label(label, Some(32));
+        assert!(matches!(unchanged, Cow::Borrowed(_)));
+        assert_eq!(unchanged.as_ref(), label);
+
+        let unlimited = truncate_label(label, None);
+        assert!(matches!(unlimited, Cow::Borrowed(_)));
+        assert_eq!(unlimited.as_ref(), label);
+    }
+
+    #[test]
+    fn truncate_label_owns_only_truncated_output() {
+        let truncated = truncate_label("abcdef", Some(4));
+        assert!(matches!(truncated, Cow::Owned(_)));
+        assert_eq!(truncated.as_ref(), "abc…");
+    }
+
+    #[test]
+    fn plain_node_label_fast_path_matches_text_builder_output() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let config = SvgRenderConfig::default();
+        let colors = ThemeColors::default();
+
+        let mut expected = TextBuilder::new("Node 42")
+            .x(11.0)
+            .y(22.0)
+            .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+            .font_size(13.0)
+            .line_height(config.line_height)
+            .anchor(TextAnchor::Middle)
+            .fill(&colors.text)
+            .build();
+        expected = maybe_add_class(expected, "fm-node-label", true);
+        expected = expected.attr("style", "font-weight:700");
+
+        let actual = render_node_label_text(
+            &ir,
+            None,
+            "Node 42",
+            11.0,
+            22.0,
+            13.0,
+            &config,
+            &colors,
+            Some("font-weight:700"),
+            true,
+        );
+
+        assert_eq!(actual.render(), expected.render());
+    }
 
     fn create_ir_with_cluster(title: &str) -> MermaidDiagramIr {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
@@ -6268,11 +13611,11 @@ mod tests {
             label: Some(IrLabelId(0)),
             shape: NodeShape::Rect,
             classes: vec!["c4".to_string(), "c4-container".to_string()],
-            c4_meta: Some(IrC4NodeMeta {
+            c4_meta: Some(Box::new(IrC4NodeMeta {
                 element_type: "Container".to_string(),
                 technology: Some("Rust".to_string()),
                 description: Some("Handles payment requests".to_string()),
-            }),
+            })),
             ..IrNode::default()
         });
         ir.nodes.push(IrNode {
@@ -6284,11 +13627,11 @@ mod tests {
                 "c4-person".to_string(),
                 "c4-external".to_string(),
             ],
-            c4_meta: Some(IrC4NodeMeta {
+            c4_meta: Some(Box::new(IrC4NodeMeta {
                 element_type: "Person".to_string(),
                 technology: None,
                 description: Some("External user".to_string()),
-            }),
+            })),
             ..IrNode::default()
         });
         ir
@@ -6504,6 +13847,75 @@ mod tests {
         ir
     }
 
+    fn doc_build_inputs() -> Vec<String> {
+        fn flowchart(node_count: usize) -> String {
+            let mut lines = vec![String::from("flowchart LR")];
+            for index in 0..node_count {
+                lines.push(format!("  N{index}[Node {index}]"));
+            }
+            for index in 0..node_count.saturating_sub(1) {
+                lines.push(format!("  N{index}-->N{}", index + 1));
+            }
+            lines.join("\n")
+        }
+
+        fn sequence(participant_count: usize) -> String {
+            let mut lines = vec![String::from("sequenceDiagram")];
+            for index in 0..participant_count {
+                lines.push(format!("  participant P{index}"));
+            }
+            for index in 0..participant_count.saturating_sub(1) {
+                lines.push(format!("  P{index}->>P{}: request {index}", index + 1));
+                lines.push(format!("  P{}-->>P{index}: response {index}", index + 1));
+            }
+            lines.join("\n")
+        }
+
+        fn class_diagram(class_count: usize) -> String {
+            let mut lines = vec![String::from("classDiagram")];
+            for index in 0..class_count {
+                lines.push(format!("  class C{index} {{"));
+                lines.push(format!("    +int field{index}"));
+                lines.push(format!("    +method{index}() bool"));
+                lines.push(String::from("  }"));
+            }
+            for index in 0..class_count.saturating_sub(1) {
+                lines.push(format!("  C{index} <|-- C{}", index + 1));
+            }
+            lines.join("\n")
+        }
+
+        fn state_diagram(state_count: usize) -> String {
+            let mut lines = vec![
+                String::from("stateDiagram-v2"),
+                String::from("  [*] --> S0"),
+            ];
+            for index in 0..state_count.saturating_sub(1) {
+                lines.push(format!("  S{index} --> S{}: event{index}", index + 1));
+            }
+            lines.push(format!("  S{} --> [*]", state_count.saturating_sub(1)));
+            lines.join("\n")
+        }
+
+        fn er_diagram(entity_count: usize) -> String {
+            let mut lines = vec![String::from("erDiagram")];
+            for index in 0..entity_count.saturating_sub(1) {
+                lines.push(format!("  E{index} ||--o{{ E{} : has", index + 1));
+            }
+            lines.join("\n")
+        }
+
+        let mut inputs = Vec::with_capacity(40);
+        for copy in 0..8 {
+            inputs.push(flowchart(12 + copy % 7));
+            inputs.push(sequence(6 + copy % 5));
+            inputs.push(class_diagram(8 + copy % 4));
+            inputs.push(state_diagram(10 + copy % 6));
+            inputs.push(er_diagram(9 + copy % 3));
+        }
+        inputs
+    }
+
     fn create_scene_with_path_and_text() -> RenderScene {
         let mut root =
             RenderGroup::new(Some(String::from("scene-root"))).with_source(RenderSource::Diagram);
@@ -6637,6 +14049,63 @@ mod tests {
             },
         );
         assert_eq!(default_svg, explicit_legacy);
+    }
+
+    #[test]
+    fn edge_inline_fill_and_stroke_gated_on_embedded_css() {
+        // `.fm-edge { fill: none; stroke: var(--fm-edge-color) }` makes the inline `fill="none"`
+        // and base `stroke=<theme color>` on edge paths redundant when the theme CSS is embedded
+        // (a presentation attribute loses to the stylesheet), so they are dropped there.
+        // Attribute-driven exports (`embed_theme_css = false`, e.g. the PNG raster path which
+        // resvg cannot fully style via CSS) MUST keep both inline fallbacks.
+        let ir = create_ir_with_labeled_edge();
+        let with_css = render_svg_with_config(&ir, &SvgRenderConfig::default());
+        let without_css = render_svg_with_config(
+            &ir,
+            &SvgRenderConfig {
+                embed_theme_css: false,
+                ..Default::default()
+            },
+        );
+        // The edge contributes one inline `fill="none"`; it vanishes from the default
+        // (CSS-embedded) render and remains in the attribute-driven export.
+        let fill_with = with_css.matches("fill=\"none\"").count();
+        let fill_without = without_css.matches("fill=\"none\"").count();
+        assert!(
+            fill_without > fill_with,
+            "attribute-driven export must keep inline edge fill (with={fill_with}, without={fill_without})"
+        );
+        // Both the edge base stroke AND every node-shape base stroke (`.fm-node <shape> { stroke:
+        // var(--fm-node-accent) }` covers them) are gated, so the attribute-driven export carries
+        // strictly more inline `stroke=` attributes than the CSS-embedded render. Marker strokes in
+        // the `<defs>` are unaffected and cancel out.
+        let stroke_with = with_css.matches(" stroke=\"").count();
+        let stroke_without = without_css.matches(" stroke=\"").count();
+        assert!(
+            stroke_without > stroke_with,
+            "attribute-driven export must keep inline edge + node strokes (with={stroke_with}, without={stroke_without})"
+        );
+        // The node-shape base `stroke-width="1.60"` is likewise gated (the unconditional
+        // `.fm-node <shape> { stroke-width: 1.6 }` rule overrides it); edges keep theirs.
+        let sw_with = with_css.matches(" stroke-width=\"").count();
+        let sw_without = without_css.matches(" stroke-width=\"").count();
+        assert!(
+            sw_without > sw_with,
+            "attribute-driven export must keep inline node stroke-width (with={sw_with}, without={sw_without})"
+        );
+        // Node drop-shadow: the inline `filter="url(#drop-shadow)"` (and its now-unreferenced
+        // `<defs>` filter) are gated off with CSS embedded (the CSS `filter: drop-shadow(…)` renders
+        // the shadow); the attribute-driven export keeps them. So `url(#drop-shadow)` references
+        // appear only without CSS.
+        assert_eq!(
+            with_css.matches("url(#drop-shadow)").count(),
+            0,
+            "embedded-CSS render must not reference #drop-shadow (CSS provides the shadow)"
+        );
+        assert!(
+            without_css.contains("url(#drop-shadow)"),
+            "attribute-driven export must keep the inline drop-shadow filter"
+        );
     }
 
     #[test]
@@ -6784,8 +14253,9 @@ mod tests {
 
     #[test]
     fn includes_defs_section() {
-        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
-        let svg = render_svg(&ir);
+        // A diagram with an edge references arrow-end, so the reference-gated marker strip keeps it.
+        let parsed = fm_parser::parse("flowchart LR\n  A --> B\n");
+        let svg = render_svg(&parsed.ir);
         assert!(svg.contains("<defs>"));
         assert!(svg.contains("</defs>"));
         assert!(svg.contains("<marker"));
@@ -6794,12 +14264,31 @@ mod tests {
 
     #[test]
     fn includes_half_arrow_marker_defs() {
-        let ir = MermaidDiagramIr::empty(DiagramType::Sequence);
-        let svg = render_svg(&ir);
-        assert!(svg.contains("id=\"arrow-half-top\""));
-        assert!(svg.contains("id=\"arrow-half-bottom\""));
-        assert!(svg.contains("id=\"arrow-stick-top\""));
-        assert!(svg.contains("id=\"arrow-stick-bottom\""));
+        // Sequence half/stick arrowheads still render through their markers; the reference-gated
+        // strip (see `strip_unused_markers`) must never leave an emitted marker def unreferenced.
+        let parsed = fm_parser::parse(
+            "sequenceDiagram\n\
+             Alice->>Bob: Solid\n\
+             Alice-|\\Bob: HalfTop\n\
+             Bob-|/Alice: HalfBottom\n",
+        );
+        let svg = render_svg(&parsed.ir);
+        assert!(
+            svg.contains("id=\"arrow-end\""),
+            "solid arrow marker missing"
+        );
+        let mut at = 0;
+        while let Some(rel) = svg[at..].find("<marker ") {
+            let s = at + rel;
+            let id_at = svg[s..].find("id=\"").expect("marker id") + s + 4;
+            let id_end = svg[id_at..].find('"').expect("id end") + id_at;
+            let id = svg[id_at..id_end].to_string();
+            assert!(
+                svg.contains(&format!("url(#{id})")),
+                "strip left orphan marker def {id}"
+            );
+            at = id_end;
+        }
     }
 
     #[test]
@@ -7143,6 +14632,27 @@ mod tests {
     }
 
     #[test]
+    fn unstyled_edge_has_no_inline_style() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode {
+            id: "A".to_string(),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "B".to_string(),
+            ..IrNode::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+
+        assert_eq!(resolve_edge_inline_style(&ir, 0), None);
+    }
+
+    #[test]
     fn inline_style_preserves_commas_inside_quoted_values() {
         let style = fm_core::parse_style_string(r#"font-family:"A, B",stroke:#334155"#);
         assert_eq!(style.properties.get("font-family").unwrap(), r#""A, B""#);
@@ -7193,6 +14703,70 @@ mod tests {
         assert!(svg.contains("fm-band-label"));
         assert!(svg.contains("fm-axis-tick"));
         assert!(svg.contains("2026-02-01"));
+    }
+
+    /// The streamed band fragment (`write_layout_band_into`) must be byte-identical to the `Element` the
+    /// slow path builds (`render_layout_band`), across every kind and both labelled and unlabelled bands
+    /// (sequence lifelines are unlabelled `Lane`s; journey sections / xychart columns carry a label).
+    #[test]
+    fn layout_band_streaming_matches_element() {
+        let kinds = [
+            LayoutBandKind::Section,
+            LayoutBandKind::Lane,
+            LayoutBandKind::Column,
+        ];
+        // Cover both the embedded-CSS config (no inline `font-family`) and the attribute-driven config
+        // (font-family present), plus a plain label, an XML-special label (escaping), and a multi-line
+        // label (`TextBuilder` `<tspan>` fallback) so every branch of the streamed label writer is
+        // byte-checked against the `Element` slow path.
+        for embed in [true, false] {
+            let config = SvgRenderConfig {
+                embed_theme_css: embed,
+                ..SvgRenderConfig::default()
+            };
+            for kind in kinds {
+                for label in ["", "Phase <1> & more", "Line 1\nLine 2"] {
+                    let band = LayoutBand {
+                        kind,
+                        label: label.to_string(),
+                        bounds: fm_layout::LayoutRect {
+                            x: 12.5,
+                            y: 24.0,
+                            width: 180.0,
+                            height: 83.5,
+                        },
+                    };
+                    let mut streamed = String::new();
+                    write_layout_band_into(&mut streamed, &band, 3.0, 5.0, &config);
+                    let mut slow = String::new();
+                    render_layout_band(&band, 3.0, 5.0, &config).write_to_string(&mut slow);
+                    assert_eq!(
+                        streamed, slow,
+                        "band kind {kind:?} embed {embed} label {label:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The streamed axis-tick fragment (`write_layout_axis_tick_into`) must be byte-identical to the
+    /// `Element` slow path (`render_layout_axis_tick`) — including an XML-special label and both the
+    /// embedded-CSS (no font-family) and attribute-driven (font-family present) configs.
+    #[test]
+    fn layout_axis_tick_streaming_matches_element() {
+        for embed in [true, false] {
+            let config = SvgRenderConfig {
+                embed_theme_css: embed,
+                ..SvgRenderConfig::default()
+            };
+            for label in ["2026-02-01", "a<b>&c"] {
+                let mut streamed = String::new();
+                write_layout_axis_tick_into(&mut streamed, label, 42.5, 17.0, &config);
+                let mut slow = String::new();
+                render_layout_axis_tick(label, 42.5, 17.0, &config).write_to_string(&mut slow);
+                assert_eq!(streamed, slow, "embed {embed} label {label:?}");
+            }
+        }
     }
 
     #[test]
@@ -7321,12 +14895,550 @@ mod tests {
             shadow_blur: 5.0,
             shadow_opacity: 0.45,
             shadow_color: "#ff3366".to_string(),
+            // The configurable `<filter id="drop-shadow">` (which honours `shadow_color`) is the
+            // shadow source for attribute-driven output; with embedded CSS the shadow comes from
+            // the `.fm-node { filter: drop-shadow(…) }` rule instead, so the def is gated off there.
+            embed_theme_css: false,
             ..Default::default()
         };
         let svg = render_svg_with_config(&ir, &config);
         assert!(svg.contains("id=\"drop-shadow\""));
         assert!(svg.contains("flood-color=\"#ff3366\""));
         assert!(svg.contains("flood-opacity=\"0.45\""));
+    }
+
+    #[test]
+    fn minify_css_is_whitespace_only_and_preserves_semantic_spaces() {
+        // The strip-ALL-whitespace projection of input and output must be identical: this proves
+        // the minifier only added/removed whitespace, never a selector/property/value byte.
+        let strip_ws = |s: &str| -> String { s.chars().filter(|c| !c.is_whitespace()).collect() };
+        let pretty = "\
+:root {
+  --fm-bg: #fff;
+}
+.fm-node rect,
+.fm-node path {
+  fill: var(--fm-node-fill);
+  stroke-width: 1.6;
+  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.10));
+}
+.fm-node .child {
+  background: color-mix(in srgb, var(--fm-accent-1) 4%, transparent);
+}
+";
+        let min = minify_css(pretty);
+        // 1. Whitespace-only invariant.
+        assert_eq!(
+            strip_ws(pretty),
+            strip_ws(&min),
+            "minify_css changed a non-whitespace byte"
+        );
+        // 2. It actually shrank (indentation + newlines removed).
+        assert!(min.len() < pretty.len());
+        assert!(!min.contains('\n'), "newlines should be gone: {min:?}");
+        assert!(!min.contains("  "), "indentation should be gone: {min:?}");
+        // 3. Delimiter-hugging spaces collapse.
+        assert!(min.contains(".fm-node rect,.fm-node path{"));
+        assert!(min.contains("#fff;}"));
+        // 4. SEMANTIC spaces survive — descendant combinator, value-internal, and `prop: value`.
+        assert!(
+            min.contains(".fm-node .child{"),
+            "descendant combinator space dropped: {min:?}"
+        );
+        assert!(
+            min.contains("2px 8px"),
+            "value-internal space dropped: {min:?}"
+        );
+        assert!(
+            min.contains("in srgb"),
+            "function-arg space dropped: {min:?}"
+        );
+        assert!(min.contains("4%, transparent") || min.contains("4%,transparent"));
+        assert!(
+            min.contains("fill: var(--fm-node-fill)"),
+            "`: ` space dropped: {min:?}"
+        );
+    }
+
+    #[test]
+    fn cached_css_post_passes_match_uncached_across_doc_build_matrix() {
+        let mut inputs = doc_build_inputs();
+        inputs.extend([
+            String::from(
+                "flowchart LR\n  A:::hot-.->B\n  classDef hot fill:#f00,stroke:#111\n  style B fill:#0f0",
+            ),
+            String::from("flowchart LR\n  A[/note/]-->B[(store)]\n  subgraph G\n    B-->C\n  end"),
+            String::from("sequenceDiagram\n  A-xB: stop\n  B-->>A: retry"),
+            String::from("pie title Pets\n  \"Dogs\": 3\n  \"Cats\": 2"),
+        ]);
+
+        let mut configs: Vec<SvgRenderConfig> = [
+            ThemePreset::Default,
+            ThemePreset::Dark,
+            ThemePreset::Forest,
+            ThemePreset::Neutral,
+        ]
+        .into_iter()
+        .map(|theme| SvgRenderConfig {
+            theme,
+            ..SvgRenderConfig::default()
+        })
+        .collect();
+        configs.push(SvgRenderConfig {
+            animations_enabled: true,
+            print_optimized: true,
+            glow_enabled: true,
+            ..SvgRenderConfig::default()
+        });
+        configs.push(SvgRenderConfig {
+            backend: SvgBackend::Scene,
+            ..SvgRenderConfig::default()
+        });
+
+        for (config_index, config) in configs.iter().enumerate() {
+            clear_css_post_pass_cache();
+            for (input_index, input) in inputs.iter().enumerate() {
+                let parsed = fm_parser::parse(input);
+                let layout = fm_layout::layout_diagram(&parsed.ir);
+                let expected = render_svg_with_layout_impl(&parsed.ir, &layout, config, false);
+                let first = render_svg_with_layout_impl(&parsed.ir, &layout, config, true);
+                let hit = render_svg_with_layout_impl(&parsed.ir, &layout, config, true);
+                assert_eq!(
+                    first, expected,
+                    "cache miss drifted: config={config_index}, input={input_index}"
+                );
+                assert_eq!(
+                    hit, expected,
+                    "cache hit drifted: config={config_index}, input={input_index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_marker_identity_bypasses_css_post_pass_cache() {
+        let raw = String::from(
+            "<svg><defs>\
+             <marker id=\"arrow-future\"><path/></marker>\
+             </defs><style>\
+.fm-node-inactive { opacity: 0.4; }\n\
+.fm-cluster { fill-opacity: 0.8; }\n\
+marker#arrow-future path { fill: red; }\n\
+</style><path marker-end=\"url(#arrow-future)\"/></svg>",
+        );
+        let mut expected = raw.clone();
+        apply_output_post_passes(&mut expected, false, None);
+        let mut actual = raw;
+        apply_output_post_passes(&mut actual, true, None);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    #[ignore = "release-only, same-binary doc_build_40 performance probe"]
+    fn theme_css_post_pass_cache_doc_build_perf_ab() {
+        use sha2::{Digest, Sha256};
+        use std::{fmt::Write as _, hint::black_box, time::Instant};
+
+        const ROUNDS: usize = 41;
+        const BOOTSTRAP_RESAMPLES: usize = 20_000;
+        const PINNED_INPUT_SHA256: &str =
+            "8badedbf69bc204d952af1ba780c07569b7eb1091ff5d0fdd400dd2e3f6b59d7";
+
+        fn sha256_hex(bytes: &[u8]) -> String {
+            let digest = Sha256::digest(bytes);
+            let mut hex = String::with_capacity(digest.len() * 2);
+            for byte in digest {
+                write!(hex, "{byte:02x}").expect("writing to String cannot fail");
+            }
+            hex
+        }
+
+        fn median(values: &[f64]) -> f64 {
+            let mut sorted = values.to_vec();
+            sorted.sort_by(f64::total_cmp);
+            sorted[sorted.len() / 2]
+        }
+
+        fn bootstrap_median_ci(values: &[f64]) -> (f64, f64) {
+            let mut seed = 0x4d59_5df4_d0f3_3173u64;
+            let mut medians = Vec::with_capacity(BOOTSTRAP_RESAMPLES);
+            let mut sample = vec![0.0; values.len()];
+            for _ in 0..BOOTSTRAP_RESAMPLES {
+                for slot in &mut sample {
+                    seed = seed
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    let index = usize::try_from(seed >> 32).unwrap_or(0) % values.len();
+                    *slot = values[index];
+                }
+                medians.push(median(&sample));
+            }
+            medians.sort_by(f64::total_cmp);
+            (
+                medians[BOOTSTRAP_RESAMPLES / 40],
+                medians[BOOTSTRAP_RESAMPLES * 39 / 40],
+            )
+        }
+
+        fn cv_pct(values: &[f64]) -> f64 {
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            let variance = values
+                .iter()
+                .map(|value| (value - mean).powi(2))
+                .sum::<f64>()
+                / (values.len() - 1) as f64;
+            variance.sqrt() / mean * 100.0
+        }
+
+        fn render_doc_build(inputs: &[String], use_cache: bool) -> Vec<String> {
+            if use_cache {
+                // One cold process rendering one docs page: the cache may warm only from earlier
+                // diagrams in this same 40-document batch.
+                clear_css_post_pass_cache();
+            }
+            let config = SvgRenderConfig::default();
+            inputs
+                .iter()
+                .map(|input| {
+                    let parsed = fm_parser::parse(input);
+                    let layout = fm_layout::layout_diagram(&parsed.ir);
+                    render_svg_with_layout_impl(&parsed.ir, &layout, &config, use_cache)
+                })
+                .collect()
+        }
+
+        fn measure_min_of_three(inputs: &[String], use_cache: bool) -> f64 {
+            let mut best = f64::INFINITY;
+            for _ in 0..3 {
+                let start = Instant::now();
+                let rendered = render_doc_build(inputs, use_cache);
+                black_box(&rendered);
+                best = best.min(start.elapsed().as_nanos() as f64);
+            }
+            best
+        }
+
+        let inputs = doc_build_inputs();
+        let joined = inputs.join("\n%%--revision--%%\n");
+        assert_eq!(
+            sha256_hex(joined.as_bytes()),
+            PINNED_INPUT_SHA256,
+            "Rust doc-build generator drifted from scripts/headtohead/corpus.mjs"
+        );
+
+        let expected = render_doc_build(&inputs, false);
+        let actual = render_doc_build(&inputs, true);
+        assert_eq!(
+            actual, expected,
+            "cached and uncached doc-build SVG bytes differ"
+        );
+
+        let executable = std::env::current_exe().expect("current test executable");
+        let executable_bytes = std::fs::read(&executable).expect("read current test executable");
+        println!(
+            "binary elf_sha256={} elf_bytes={} rounds={} min_of=3",
+            sha256_hex(&executable_bytes),
+            executable_bytes.len(),
+            ROUNDS
+        );
+        println!(
+            "corpus id=doc_build_40 input_sha256={} documents={} parity=exact",
+            PINNED_INPUT_SHA256,
+            inputs.len()
+        );
+
+        // Untimed code/data warmup. Candidate samples still clear the content cache themselves.
+        black_box(render_doc_build(&inputs, false));
+        black_box(render_doc_build(&inputs, true));
+
+        let mut null_ratios = Vec::with_capacity(ROUNDS);
+        let mut ab_ratios = Vec::with_capacity(ROUNDS);
+        let mut baseline_samples = Vec::with_capacity(ROUNDS);
+        let mut candidate_samples = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (null_a, candidate, null_b, baseline) = if round % 2 == 0 {
+                (
+                    measure_min_of_three(&inputs, false),
+                    measure_min_of_three(&inputs, true),
+                    measure_min_of_three(&inputs, false),
+                    measure_min_of_three(&inputs, false),
+                )
+            } else {
+                let baseline = measure_min_of_three(&inputs, false);
+                let null_b = measure_min_of_three(&inputs, false);
+                let candidate = measure_min_of_three(&inputs, true);
+                let null_a = measure_min_of_three(&inputs, false);
+                (null_a, candidate, null_b, baseline)
+            };
+            null_ratios.push(null_a / null_b);
+            ab_ratios.push(baseline / candidate);
+            baseline_samples.push(baseline);
+            candidate_samples.push(candidate);
+        }
+
+        let null_median = median(&null_ratios);
+        let (null_low, null_high) = bootstrap_median_ci(&null_ratios);
+        let ab_median = median(&ab_ratios);
+        let (ab_low, ab_high) = bootstrap_median_ci(&ab_ratios);
+        let null_radius = (1.0 - null_low).abs().max((null_high - 1.0).abs());
+        let required_speedup = 1.03f64.max(1.0 + 2.0 * null_radius);
+        println!("A/A speedup_median={null_median:.6} ci95=[{null_low:.6},{null_high:.6}]");
+        println!(
+            "A/B speedup_median={ab_median:.6} ci95=[{ab_low:.6},{ab_high:.6}] \
+             required_lower_bound={required_speedup:.6}"
+        );
+        println!(
+            "report_only baseline_cv_pct={:.2} candidate_cv_pct={:.2}",
+            cv_pct(&baseline_samples),
+            cv_pct(&candidate_samples)
+        );
+        assert!(
+            ab_low > required_speedup,
+            "REJECT: A/B lower CI {ab_low:.6} does not clear max(1.03, 2x null) \
+             {required_speedup:.6}; CV is report-only"
+        );
+    }
+
+    #[test]
+    fn strip_unused_markers_keeps_only_referenced_defs() {
+        // Hand-built SVG: two marker defs, only one referenced.
+        let mut svg = String::from(
+            "<svg><defs>\
+             <marker id=\"arrow-end\" refX=\"8\"><path d=\"M0 0\"/></marker>\
+             <marker id=\"arrow-cross\" refX=\"8\"><path d=\"M1 1\"/></marker>\
+             </defs>\
+             <path class=\"fm-edge\" marker-end=\"url(#arrow-end)\" d=\"M0 0 L9 9\"/></svg>",
+        );
+        let _ = strip_unused_markers(&mut svg);
+        assert!(
+            svg.contains("id=\"arrow-end\""),
+            "referenced marker must stay"
+        );
+        assert!(
+            !svg.contains("id=\"arrow-cross\""),
+            "unreferenced marker must be removed"
+        );
+        // The referenced edge and its reference are untouched.
+        assert!(svg.contains("marker-end=\"url(#arrow-end)\""));
+        assert!(svg.contains("M0 0 L9 9"));
+    }
+
+    #[test]
+    fn rendered_sequence_emits_only_referenced_markers() {
+        // A sequence diagram emits the full 12-marker set but typically references only arrow-end;
+        // every remaining `<marker id="X">` must have a matching `url(#X)` in the body.
+        let parsed =
+            fm_parser::parse("sequenceDiagram\n    Alice->>Bob: Hello\n    Bob-->>Alice: Hi\n");
+        let svg = render_svg(&parsed.ir);
+        let mut at = 0;
+        let mut checked = 0;
+        while let Some(rel) = svg[at..].find("<marker ") {
+            let s = at + rel;
+            let id_at = svg[s..].find("id=\"").expect("marker id") + s + 4;
+            let id_end = svg[id_at..].find('"').expect("id end") + id_at;
+            let id = &svg[id_at..id_end];
+            assert!(
+                svg.contains(&format!("url(#{id})")),
+                "marker {id} kept but never referenced"
+            );
+            checked += 1;
+            at = id_end;
+        }
+        assert!(checked >= 1, "expected at least the arrow-end marker");
+    }
+
+    #[test]
+    fn default_edge_color_matches_preset() {
+        // The memoized-marker fast path in `marker_defs_body` is keyed on this literal; if the preset
+        // edge color ever changes, the default theme silently falls to the build-fresh path (still
+        // correct, just slower) — this pins the two together so that regression is caught.
+        assert_eq!(
+            Theme::from_preset(ThemePreset::Default).colors.edge,
+            DEFAULT_EDGE_COLOR
+        );
+    }
+
+    #[test]
+    fn marker_defs_body_streams_byte_identical() {
+        use crate::defs::{DefsBuilder, MarkerOrient};
+        // Reproduce the exact per-marker `.marker()` sequence both render backends used, then assert
+        // the streamed `raw_markers(marker_defs_body(..))` <defs> is byte-for-byte identical — for the
+        // default (memoized) color and a custom (build-fresh) color, basic and fancy, and with a
+        // trailing filter + custom element to prove the markers-slot ordering is preserved.
+        for &fancy in &[false, true] {
+            for edge in [DEFAULT_EDGE_COLOR, "#ff0000"] {
+                let mut old =
+                    DefsBuilder::new().marker(ArrowheadMarker::standard("arrow-end", edge));
+                if fancy {
+                    old = old.marker(ArrowheadMarker::filled("arrow-filled", edge));
+                }
+                old = old.marker(ArrowheadMarker::open("arrow-open", edge));
+                if fancy {
+                    old = old
+                        .marker(ArrowheadMarker::half_top("arrow-half-top", edge))
+                        .marker(ArrowheadMarker::half_bottom("arrow-half-bottom", edge))
+                        .marker(ArrowheadMarker::stick_top("arrow-stick-top", edge))
+                        .marker(ArrowheadMarker::stick_bottom("arrow-stick-bottom", edge))
+                        .marker(
+                            ArrowheadMarker::standard("arrow-start", edge)
+                                .with_orient(MarkerOrient::AutoStartReverse),
+                        )
+                        .marker(
+                            ArrowheadMarker::filled("arrow-start-filled", edge)
+                                .with_orient(MarkerOrient::AutoStartReverse),
+                        )
+                        .marker(ArrowheadMarker::circle_marker("arrow-circle", edge))
+                        .marker(ArrowheadMarker::cross_marker("arrow-cross", edge))
+                        .marker(ArrowheadMarker::diamond_marker("arrow-diamond", edge))
+                        .marker(ArrowheadMarker::diamond_open_marker(
+                            "arrow-diamond-open",
+                            edge,
+                        ))
+                        .marker(ArrowheadMarker::triangle_open_marker(
+                            "arrow-triangle-open",
+                            edge,
+                        ))
+                        .marker(
+                            ArrowheadMarker::triangle_open_marker(
+                                "start-arrow-triangle-open",
+                                edge,
+                            )
+                            .with_orient(MarkerOrient::AutoStartReverse),
+                        );
+                }
+                let new = DefsBuilder::new().raw_markers(marker_defs_body(edge, fancy));
+                assert_eq!(
+                    old.to_element().render(),
+                    new.to_element().render(),
+                    "markers-only edge={edge} fancy={fancy}"
+                );
+
+                // Trailing filter + custom: markers must still serialize before them in both.
+                let trailer = |d: DefsBuilder| {
+                    d.filter(crate::defs::Filter::drop_shadow(
+                        "shadow", 2.0, 2.0, 4.0, 0.3,
+                    ))
+                    .custom(crate::element::Element::text())
+                };
+                assert_eq!(
+                    trailer(old).to_element().render(),
+                    trailer(new).to_element().render(),
+                    "markers+trailer edge={edge} fancy={fancy}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_node_gradient_colors_match_preset() {
+        // node_gradient_svg's memo fast path is keyed on these; if the preset colors drift, the default
+        // theme silently falls to build-fresh (still correct, slower) — pin them together.
+        let c = &Theme::from_preset(ThemePreset::Default).colors;
+        assert_eq!(c.node_fill, DEFAULT_NODE_FILL);
+        assert_eq!(c.background, DEFAULT_NODE_BG);
+    }
+
+    #[test]
+    fn node_gradient_svg_streams_byte_identical() {
+        use crate::defs::DefsBuilder;
+        // The streamed raw_gradients(node_gradient_svg(..)) <defs> must equal the old
+        // .gradient(node_gradient_for(..)) render — for the memoized default theme and a custom theme,
+        // and with markers + trailing filter/custom to pin the gradients-slot ordering.
+        let cfg = SvgRenderConfig::default();
+        for preset in [ThemePreset::Default, ThemePreset::Forest] {
+            let theme = Theme::from_preset(preset);
+            let grad = node_gradient_for(&cfg, &theme).expect("gradients on by default");
+            let old = DefsBuilder::new()
+                .raw_markers(marker_defs_body(&theme.colors.edge, true))
+                .gradient(grad)
+                .filter(crate::defs::Filter::drop_shadow(
+                    "shadow", 2.0, 2.0, 4.0, 0.3,
+                ))
+                .custom(crate::element::Element::text());
+            let new = DefsBuilder::new()
+                .raw_markers(marker_defs_body(&theme.colors.edge, true))
+                .raw_gradients(node_gradient_svg(&cfg, &theme).expect("gradients on by default"))
+                .filter(crate::defs::Filter::drop_shadow(
+                    "shadow", 2.0, 2.0, 4.0, 0.3,
+                ))
+                .custom(crate::element::Element::text());
+            assert_eq!(
+                old.to_element().render(),
+                new.to_element().render(),
+                "preset={preset:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn strip_dead_marker_css_prunes_dead_selectors() {
+        // Only arrow-end is defined; the CSS references end/filled/cross/open.
+        let mut svg = String::from(
+            "<svg><defs><marker id=\"arrow-end\"><path/></marker></defs>\
+             <style>\
+marker#arrow-end path,
+marker#arrow-filled path {
+  fill: red;
+}
+marker#arrow-open path {
+  stroke: blue;
+}
+.fm-edge {
+  stroke: black;
+}
+</style>\
+             <path marker-end=\"url(#arrow-end)\"/></svg>",
+        );
+        strip_dead_marker_css(&mut svg);
+        // Live selector kept, dead sibling pruned from the list.
+        assert!(
+            svg.contains("marker#arrow-end path"),
+            "live marker selector dropped"
+        );
+        assert!(
+            !svg.contains("marker#arrow-filled"),
+            "dead sibling not pruned"
+        );
+        // Whole rule with only a dead marker is removed.
+        assert!(
+            !svg.contains("marker#arrow-open"),
+            "fully-dead rule not removed"
+        );
+        // Non-marker rule untouched.
+        assert!(svg.contains(".fm-edge {"), "non-marker rule corrupted");
+        // The live rule still has its body.
+        assert!(svg.contains("fill: red"));
+    }
+
+    #[test]
+    fn edgeless_diagram_drops_all_marker_css() {
+        // A pie chart has no edges -> no markers -> every marker#… rule is dead.
+        let parsed = fm_parser::parse("pie title Pets\n  \"Dogs\": 3\n  \"Cats\": 2\n");
+        let svg = render_svg(&parsed.ir);
+        assert!(
+            !svg.contains("marker#arrow"),
+            "edge-less diagram kept dead marker CSS"
+        );
+        assert!(
+            !svg.contains("<marker "),
+            "edge-less diagram kept marker defs"
+        );
+    }
+
+    #[test]
+    fn rendered_style_block_is_minified() {
+        let ir = create_ir_with_single_node("n", NodeShape::Rect);
+        let svg = render_svg(&ir);
+        let start = svg.find("<style").expect("style open");
+        let gt = svg[start..].find('>').expect("style >") + start + 1;
+        let end = svg[gt..].find("</style>").expect("style close") + gt;
+        let css = &svg[gt..end];
+        // No pretty-print artifacts remain in the embedded stylesheet.
+        assert!(!css.contains('\n'), "embedded CSS still has newlines");
+        assert!(!css.contains("  "), "embedded CSS still has indentation");
+        // But the rules themselves are intact.
+        assert!(css.contains(":root{"));
+        assert!(css.contains(".fm-node "));
     }
 
     #[test]
@@ -7367,7 +15479,9 @@ mod tests {
         };
         let svg = render_svg_with_config(&ir, &config);
         assert!(svg.contains("fm-node-inactive"));
-        assert!(svg.contains(".fm-node-inactive { opacity: 0.35; }"));
+        // The embedded `<style>` is whitespace-minified (see `minify_css`): delimiter-hugging
+        // spaces collapse, but the `: ` after a property is preserved.
+        assert!(svg.contains(".fm-node-inactive{opacity: 0.35;}"));
     }
 
     #[test]
@@ -7379,8 +15493,9 @@ mod tests {
         );
         let svg = render_svg(&ir);
         assert!(svg.contains("fm-node-block-beta"));
+        // Descendant-combinator spaces survive minification; the space before `{` collapses.
         assert!(svg.contains(".fm-node-block-beta rect,"));
-        assert!(svg.contains(".fm-node-block-beta text {"));
+        assert!(svg.contains(".fm-node-block-beta text{"));
     }
 
     #[test]
@@ -7395,7 +15510,7 @@ mod tests {
 
         let svg = render_svg(&ir);
         assert!(svg.contains("fm-node-block-beta-space"));
-        assert!(svg.contains(".fm-node-block-beta-space {"));
+        assert!(svg.contains(".fm-node-block-beta-space{"));
         assert!(!svg.contains("__space_12</text>"));
         assert!(!svg.contains("aria-label=\"__space_12\""));
     }
@@ -7405,9 +15520,9 @@ mod tests {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         ir.nodes.push(IrNode {
             id: "A".to_string(),
-            callback: Some("handleNodeClick".to_string()),
             ..IrNode::default()
         });
+        ir.nodes[0].interaction_mut().callback = Some("handleNodeClick".to_string());
 
         let svg = render_svg(&ir);
         assert!(svg.contains("data-callback=\"handleNodeClick\""));
@@ -7718,7 +15833,7 @@ mod tests {
     fn svg_link_mode_controls_anchor_emission() {
         let mut ir = create_ir_with_single_node("A", NodeShape::Rect);
         if let Some(node) = ir.nodes.first_mut() {
-            node.href = Some("https://example.com".to_string());
+            node.interaction_mut().href = Some("https://example.com".to_string());
         }
 
         let default_svg = render_svg(&ir);
@@ -7745,7 +15860,7 @@ mod tests {
     fn svg_link_mode_skips_unsafe_href_under_strict() {
         let mut ir = create_ir_with_single_node("A", NodeShape::Rect);
         if let Some(node) = ir.nodes.first_mut() {
-            node.href = Some("javascript:alert(1)".to_string());
+            node.interaction_mut().href = Some("javascript:alert(1)".to_string());
         }
         ir.meta.init.config.sanitize_mode = MermaidSanitizeMode::Strict;
 
@@ -8161,7 +16276,7 @@ mod tests {
     #[test]
     fn renders_named_node_icon_with_icon_classes() {
         let mut ir = create_ir_with_single_node("api", NodeShape::Rect);
-        ir.nodes[0].icon = Some("server".to_string());
+        ir.nodes[0].interaction_mut().icon = Some("server".to_string());
 
         let svg = render_svg(&ir);
 
@@ -8172,7 +16287,7 @@ mod tests {
     #[test]
     fn renders_emoji_node_icon_as_text() {
         let mut ir = create_ir_with_single_node("spark", NodeShape::Rounded);
-        ir.nodes[0].icon = Some("🚀".to_string());
+        ir.nodes[0].interaction_mut().icon = Some("🚀".to_string());
 
         let svg = render_svg(&ir);
 
@@ -8183,7 +16298,7 @@ mod tests {
     #[test]
     fn renders_custom_node_icon_from_config() {
         let mut ir = create_ir_with_single_node("chip", NodeShape::Rect);
-        ir.nodes[0].icon = Some("chip-core".to_string());
+        ir.nodes[0].interaction_mut().icon = Some("chip-core".to_string());
         let mut config = SvgRenderConfig::default();
         config.custom_icons.insert(
             "chip-core".to_string(),
@@ -8207,7 +16322,7 @@ mod tests {
     #[test]
     fn renders_left_positioned_node_icons() {
         let mut ir = create_ir_with_single_node("queue", NodeShape::Rect);
-        ir.nodes[0].icon = Some("queue".to_string());
+        ir.nodes[0].interaction_mut().icon = Some("queue".to_string());
         let config = SvgRenderConfig {
             node_icon_position: NodeIconPosition::Left,
             ..SvgRenderConfig::default()
@@ -8884,6 +16999,79 @@ mod tests {
     }
 
     // ─── Incremental layout engine integration test ───
+
+    #[test]
+    fn scan_node_class_keywords_matches_contains_reference() {
+        // Reference: the pre-single-pass logic — OR of case-insensitive substring checks.
+        fn ci_contains(h: &str, n: &str) -> bool {
+            let (hb, nb) = (h.as_bytes(), n.as_bytes());
+            !nb.is_empty()
+                && nb.len() <= hb.len()
+                && hb
+                    .windows(nb.len())
+                    .any(|w| w.iter().zip(nb).all(|(a, b)| a.eq_ignore_ascii_case(b)))
+        }
+        fn reference(class: &str) -> (bool, bool, bool, bool) {
+            let highlighted = ["highlight", "selected", "active", "focus", "important"]
+                .iter()
+                .any(|k| ci_contains(class, k));
+            let inactive = ["inactive", "dim", "muted", "disabled"]
+                .iter()
+                .any(|k| ci_contains(class, k));
+            let dashed = ci_contains(class, "dashed-border") || ci_contains(class, "border-dashed");
+            let double = ci_contains(class, "double-border") || ci_contains(class, "border-double");
+            (highlighted, inactive, dashed, double)
+        }
+        let cases = [
+            "",
+            "a",
+            "highlight",
+            "HIGHLIGHT",
+            "HighLight",
+            "my-highlight-node",
+            "prefixSelectedSuffix",
+            "ACTIVE",
+            "focus",
+            "important",
+            "inactive",
+            "dim",
+            "muted",
+            "disabled",
+            "dashed-border",
+            "border-dashed",
+            "double-border",
+            "BORDER-DOUBLE",
+            "fm-node",
+            "fm-node-accent-8",
+            "fm-node-shape-rect",
+            "serviceNodeStyle",
+            "regionUsEastPrimary",
+            "observabilityDashboard",
+            "c4-external",
+            "block-beta",
+            "block-beta-space",
+            "dimmed-but-active-highlight",
+            "borderish",
+            "highligh",     // one char short of a match
+            "doubleborder", // no hyphen — must NOT match
+            "high-light",   // hyphen splits keyword — must NOT match
+            "muTeDim",      // overlapping starts
+            "DisabledInactiveDim",
+        ];
+        for c in cases {
+            let got = scan_node_class_keywords(c);
+            assert_eq!(
+                (
+                    got.highlighted,
+                    got.inactive,
+                    got.dashed_border,
+                    got.double_border
+                ),
+                reference(c),
+                "single-pass keyword scan diverged from contains-reference for {c:?}"
+            );
+        }
+    }
 
     #[test]
     fn incremental_engine_reuses_layout_on_label_edit() {

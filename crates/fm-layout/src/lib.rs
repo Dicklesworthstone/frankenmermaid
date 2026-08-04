@@ -29,21 +29,27 @@ use std::f32::consts::PI;
 use std::mem::size_of;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+// NOT `std::time::Instant`: on wasm32-unknown-unknown std has no clock and `Instant::now()`
+// panics ("time not implemented on this platform"), which `panic = "abort"` lowers to an
+// `unreachable` trap. `web_time::Instant` is `std::time::Instant` everywhere else and
+// `performance.now()` in the browser (GH#3).
+use web_time::Instant;
 
 use fm_core::{
-    DiagramType, GanttDate, GanttExclude, GanttTaskType, GraphDirection, IrEndpoint, IrGanttMeta,
-    IrNode, IrXyChartMeta, IrXySeriesKind, MermaidComplexity, MermaidConfig, MermaidDecisionWeight,
-    MermaidDiagramIr, MermaidGuardReport, MermaidLayoutDecisionAlternative,
-    MermaidLayoutDecisionExplanation, MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord,
-    MermaidObservabilityIds, MermaidPressureReport, MermaidPressureTier, MermaidSourceMap,
-    MermaidSourceMapEntry, MermaidSourceMapKind, Span, mermaid_cluster_element_id,
-    mermaid_edge_element_id, mermaid_node_element_id, mermaid_node_element_id_with_variant,
+    DiagramType, FxHashMap, FxHashSet, GanttDate, GanttExclude, GanttTaskType, GraphDirection,
+    IrEndpoint, IrGanttMeta, IrNode, IrXyChartMeta, IrXySeriesKind, MermaidComplexity,
+    MermaidConfig, MermaidDecisionWeight, MermaidDiagramIr, MermaidGuardReport,
+    MermaidLayoutDecisionAlternative, MermaidLayoutDecisionExplanation,
+    MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidObservabilityIds,
+    MermaidPressureReport, MermaidPressureTier, MermaidSourceMap, MermaidSourceMapEntry,
+    MermaidSourceMapKind, Span, mermaid_cluster_element_id, mermaid_edge_element_id,
+    mermaid_node_element_id, mermaid_node_element_id_with_variant,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use good_lp::solvers::WithTimeLimit;
 #[cfg(not(target_arch = "wasm32"))]
 use good_lp::{Expression, Solution, SolverModel, constraint, default_solver, variable};
+use smallvec::{SmallVec, smallvec};
 use tracing::{debug, info, trace, warn};
 
 #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
@@ -565,17 +571,26 @@ struct CachedNodeSize {
 
 #[derive(Debug, Clone, PartialEq)]
 struct CachedDependencyGraph {
-    key: u64,
     graph: Arc<LayoutDependencyGraph>,
-    ir: MermaidDiagramIr,
+    // Arc so the engine's per-pass install clone into the thread-local state is two refcount
+    // bumps, not a deep IR copy; the snapshot itself is immutable once stored.
+    ir: Arc<MermaidDiagramIr>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
 struct IncrementalCacheState {
-    graph_metrics_cache: Option<(u64, GraphMetrics)>,
-    node_size_cache: BTreeMap<String, CachedNodeSize>,
+    graph_metrics_cache: Option<(Arc<MermaidDiagramIr>, GraphMetrics)>,
+    // Lookup-only cache: get/insert by `node.id`, never iterated for output order, so an
+    // `FxHashMap` replaces the `BTreeMap<String, _>`'s O(log N) String-memcmp probe per node with
+    // an O(1) hash on the incremental relayout path (`compute_node_sizes` maps over all nodes).
+    // Byte-identical: the map's iteration order never reaches any output.
+    node_size_cache: FxHashMap<String, CachedNodeSize>,
     dependency_graph_cache: Option<CachedDependencyGraph>,
     current_summary: IncrementalLayoutSummary,
+    // One IR snapshot per engine pass, created lazily and shared by every cache store site
+    // (dependency-graph hit/miss stores here, memo store in the engine after `finish()`), so a
+    // pass deep-clones the IR at most once instead of once per store.
+    pass_snapshot: Option<Arc<MermaidDiagramIr>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -601,6 +616,7 @@ pub struct IncrementalTracedLayout {
 impl IncrementalCacheState {
     fn begin_pass(&mut self) {
         self.current_summary = IncrementalLayoutSummary::default();
+        self.pass_snapshot = None;
     }
 
     fn record_query(&mut self, summary: IncrementalQuerySummary) {
@@ -622,6 +638,25 @@ impl IncrementalCacheState {
 thread_local! {
     static ACTIVE_INCREMENTAL_STATE: RefCell<Option<IncrementalCacheState>> = const { RefCell::new(None) };
     static ACTIVE_INCREMENTAL_SESSION: RefCell<Option<SharedIncrementalLayoutSession>> = const { RefCell::new(None) };
+}
+
+// Test-only escape hatch to force the incremental engine down the slow selective relayout path
+// even when the size-stable memo fast path would fire, so a test can prove the two paths produce
+// byte-identical output. Compiles to a `const false` in release, so the fast-path gate collapses
+// to its production form with zero overhead.
+#[cfg(test)]
+thread_local! {
+    static DISABLE_SIZE_STABLE_FAST_PATH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn size_stable_fast_path_disabled() -> bool {
+    DISABLE_SIZE_STABLE_FAST_PATH.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+const fn size_stable_fast_path_disabled() -> bool {
+    false
 }
 
 struct ActiveIncrementalStateGuard;
@@ -839,6 +874,14 @@ pub struct LayoutPoint {
     pub y: f32,
 }
 
+/// Inline storage for a routed edge path. Orthogonal edges — the overwhelming majority —
+/// are 2-4 points, so 4 inline slots keep them heap-free; the rarer 5-point self-loops and
+/// splines spill to the heap transparently. `N=4` is deliberately tight: a larger buffer
+/// bloats every `LayoutEdgePath` and the by-value routing returns with memcpy that outweighs
+/// the single malloc it saves (measured: `N=8` regressed layout +2-4%). Derefs to
+/// `[LayoutPoint]`, so all read sites are unchanged.
+pub type EdgePoints = SmallVec<[LayoutPoint; 4]>;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayoutRect {
     pub x: f32,
@@ -890,7 +933,7 @@ pub enum EdgeRouting {
 pub struct LayoutEdgePath {
     pub edge_index: usize,
     pub span: Span,
-    pub points: Vec<LayoutPoint>,
+    pub points: EdgePoints,
     pub reversed: bool,
     /// True if this is a self-loop edge (source == target).
     pub is_self_loop: bool,
@@ -995,16 +1038,25 @@ impl Default for IncrementalRecomputeTrace {
 #[derive(Debug, Clone, PartialEq)]
 struct CachedTracedLayout {
     key: LayoutMemoKey,
+    // Shares the pass snapshot with `CachedDependencyGraph.ir` when the pass produced one.
+    ir: Arc<MermaidDiagramIr>,
     traced: TracedLayout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LayoutMemoKey {
-    ir_fingerprint: u64,
     algorithm: LayoutAlgorithm,
     cycle_strategy: CycleStrategy,
     collapse_cycle_clusters: bool,
     fnx_enabled: bool,
+    edge_routing: EdgeRouting,
+    constraint_solver: ConstraintSolverMode,
+    constraint_solver_time_limit_ms: u64,
+    node_spacing_bits: u32,
+    rank_spacing_bits: u32,
+    cluster_padding_bits: u32,
+    sequence_participant_gap_extra_bits: u32,
+    sequence_min_message_gap_bits: u32,
     font_size_bits: u32,
     avg_char_width_bits: u32,
     line_height_bits: u32,
@@ -1023,8 +1075,9 @@ struct LayoutMemoKey {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct IncrementalLayoutEngine {
     cached: Option<CachedTracedLayout>,
-    graph_metrics_cache: Option<(u64, GraphMetrics)>,
-    node_size_cache: BTreeMap<String, CachedNodeSize>,
+    graph_metrics_cache: Option<(Arc<MermaidDiagramIr>, GraphMetrics)>,
+    // See `IncrementalCacheState::node_size_cache`: lookup-only, never iterated for output.
+    node_size_cache: FxHashMap<String, CachedNodeSize>,
     dependency_graph_cache: Option<CachedDependencyGraph>,
 }
 
@@ -1172,16 +1225,31 @@ impl GraphMetrics {
 
         let back_edge_count = count_back_edges(node_count, &edges);
 
-        let node_priority = stable_node_priorities(ir);
-        let cycle_detection = detect_cycle_components(node_count, &edges, &node_priority);
-        let scc_count = cycle_detection.cyclic_component_indexes.len();
-        let max_scc_size = cycle_detection
-            .components
-            .iter()
-            .filter(|c| c.len() > 1)
-            .map(Vec::len)
-            .max()
-            .unwrap_or(1);
+        // No back edges ⇒ the graph is acyclic ⇒ every strongly-connected component is a singleton,
+        // so `scc_count == 0` and `max_scc_size == 1`. Skip the O(V+E) Tarjan SCC pass and the node
+        // priority computation that only feeds it — a no-op result for the common DAG case. This
+        // metrics struct is rebuilt for the Auto algorithm-selection posteriors on every layout, so
+        // the saved traversals shave the selection overhead on the (cache-cold) hot path.
+        let (scc_count, max_scc_size) = if back_edge_count == 0 {
+            (0, 1)
+        } else {
+            // `scc_count` + `max_scc_size` are invariant to the SCC visit order (the strongly-connected
+            // decomposition is unique — only the component LIST ORDER depends on the priority, and the
+            // metrics never read the order). So skip `stable_node_priorities`'s O(N log N) node-id
+            // String-memcmp sort (its only purpose is deterministic component order) and pass an identity
+            // priority. Byte-identical `scc_count`/`max_scc_size` ⇒ byte-identical algorithm selection.
+            let identity_priority: Vec<usize> = (0..node_count).collect();
+            let cycle_detection = detect_cycle_components(node_count, &edges, &identity_priority);
+            let scc_count = cycle_detection.cyclic_component_indexes.len();
+            let max_scc_size = cycle_detection
+                .components
+                .iter()
+                .filter(|c| c.len() > 1)
+                .map(Vec::len)
+                .max()
+                .unwrap_or(1);
+            (scc_count, max_scc_size)
+        };
 
         let is_tree_like = node_count > 0
             && back_edge_count == 0
@@ -1212,10 +1280,10 @@ fn try_graph_metrics_cache_hit(ir: &MermaidDiagramIr) -> Option<GraphMetrics> {
     ACTIVE_INCREMENTAL_STATE.with(|slot| {
         let mut state = slot.borrow_mut();
         let state = state.as_mut()?;
-        let topology_key = graph_metrics_cache_key(ir);
-        if let Some((cached_key, cached_metrics)) = state.graph_metrics_cache
-            && cached_key == topology_key
+        if let Some((cached_ir, cached_metrics)) = state.graph_metrics_cache.as_ref()
+            && metrics_topology_equal(cached_ir, ir)
         {
+            let cached_metrics = *cached_metrics;
             let total_nodes = ir.nodes.len();
             let summary = IncrementalQuerySummary {
                 query_type: "graph_metrics",
@@ -1250,9 +1318,18 @@ fn record_graph_metrics_cache_miss(
         let Some(state) = state.as_mut() else {
             return;
         };
-        let topology_key = graph_metrics_cache_key(ir);
         let recompute_duration_us = duration.as_micros().try_into().unwrap_or(u64::MAX);
-        state.graph_metrics_cache = Some((topology_key, metrics));
+        // Reuse the pass snapshot as the comparison anchor when it matches the queried IR (it
+        // always does for the engine's own pass); only exotic callers pay a fresh clone. The
+        // stored snapshot only needs to be metrics-topology-equal to the IR whose metrics were
+        // cached, so reusing an equal snapshot is exact.
+        let snapshot = state
+            .pass_snapshot
+            .as_ref()
+            .filter(|snapshot| metrics_topology_equal(snapshot, ir))
+            .cloned()
+            .unwrap_or_else(|| Arc::new(ir.clone()));
+        state.graph_metrics_cache = Some((snapshot, metrics));
         let summary = IncrementalQuerySummary {
             query_type: "graph_metrics",
             cache_hit: false,
@@ -1267,7 +1344,6 @@ fn record_graph_metrics_cache_miss(
         trace!(
             query_type = summary.query_type,
             dependency = "graph_topology",
-            topology_key,
             "incremental.dependency_update"
         );
         trace!(
@@ -1282,16 +1358,28 @@ fn record_graph_metrics_cache_miss(
     });
 }
 
-fn graph_metrics_cache_key(ir: &MermaidDiagramIr) -> u64 {
-    let edges = resolved_edges(ir);
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    hash_u64(&mut hash, ir.nodes.len() as u64);
-    hash_u64(&mut hash, edges.len() as u64);
-    for edge in edges {
-        hash_u64(&mut hash, edge.source as u64);
-        hash_u64(&mut hash, edge.target as u64);
-    }
-    hash
+/// Metrics-relevant topology equality, covering exactly the inputs of `resolved_edges` (whose
+/// resolved index pairs the former `graph_metrics_cache_key` hashed): node count, raw edge
+/// endpoints, and port→node assignments (port resolution feeds resolved endpoints). No
+/// allocation, short-circuits at the first difference, and cannot false-hit on a hash collision.
+/// Conservative vs the hash: an edit that changes raw endpoints while resolving to identical
+/// index pairs now misses and recomputes the same metrics instead of hitting.
+fn metrics_topology_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> bool {
+    previous.nodes.len() == current.nodes.len()
+        && previous.edges.len() == current.edges.len()
+        && previous.ports.len() == current.ports.len()
+        && previous
+            .edges
+            .iter()
+            .zip(&current.edges)
+            .all(|(previous_edge, current_edge)| {
+                previous_edge.from == current_edge.from && previous_edge.to == current_edge.to
+            })
+        && previous
+            .ports
+            .iter()
+            .zip(&current.ports)
+            .all(|(previous_port, current_port)| previous_port.node == current_port.node)
 }
 
 const INCREMENTAL_DEPENDENCY_GRAPH_BYPASS_NODE_THRESHOLD: usize = 50;
@@ -1322,9 +1410,12 @@ fn track_dependency_graph_query(ir: &MermaidDiagramIr) {
             return;
         }
 
-        let topology_key = dependency_graph_cache_key(ir);
+        let snapshot = state
+            .pass_snapshot
+            .get_or_insert_with(|| Arc::new(ir.clone()))
+            .clone();
         if let Some(cached) = state.dependency_graph_cache.as_mut()
-            && cached.key == topology_key
+            && dependency_topology_equal(&cached.ir, ir)
         {
             let dirty_nodes = dirty_nodes_for_edits(&cached.graph, &cached.graph, &cached.ir, ir);
             let summary = IncrementalQuerySummary {
@@ -1342,7 +1433,7 @@ fn track_dependency_graph_query(ir: &MermaidDiagramIr) {
                 total_regions = cached.graph.regions().len(),
                 "incremental.dependency_update"
             );
-            cached.ir = ir.clone();
+            cached.ir = snapshot;
             state.record_query(summary);
             return;
         }
@@ -1373,9 +1464,8 @@ fn track_dependency_graph_query(ir: &MermaidDiagramIr) {
             "incremental.dependency_update"
         );
         state.dependency_graph_cache = Some(CachedDependencyGraph {
-            key: topology_key,
             graph: Arc::new(graph),
-            ir: ir.clone(),
+            ir: snapshot,
         });
         state.record_query(summary);
     });
@@ -1401,9 +1491,7 @@ fn dirty_node_indexes_for_edits(
         return BTreeSet::new();
     }
 
-    let previous_key = dependency_graph_cache_key(previous_ir);
-    let current_key = dependency_graph_cache_key(current_ir);
-    let same_topology = previous_key == current_key;
+    let same_topology = dependency_topology_equal(previous_ir, current_ir);
     let mut dirty_current = DirtySet::default();
     let mut dirty_previous = DirtySet::default();
 
@@ -1632,36 +1720,103 @@ fn node_label_text(ir: &MermaidDiagramIr, label_id: Option<fm_core::IrLabelId>) 
         .map_or("", |label| label.text.as_str())
 }
 
-fn dependency_graph_cache_key(ir: &MermaidDiagramIr) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    hash_u64(&mut hash, ir.nodes.len() as u64);
-    hash_u64(&mut hash, ir.edges.len() as u64);
-    hash_u64(&mut hash, ir.graph.subgraphs.len() as u64);
-    for (node_index, node) in ir.nodes.iter().enumerate() {
-        hash_str(&mut hash, &node.id);
-        if let Some(graph_node) = ir.graph.nodes.get(node_index) {
-            hash_u64(&mut hash, graph_node.subgraphs.len() as u64);
-            for subgraph in &graph_node.subgraphs {
-                hash_u64(&mut hash, subgraph.0 as u64);
-            }
-        }
-    }
-    for edge in &ir.edges {
-        hash_str(&mut hash, &format!("{:?}", edge.from));
-        hash_str(&mut hash, &format!("{:?}", edge.to));
-    }
-    for subgraph in &ir.graph.subgraphs {
-        hash_u64(&mut hash, subgraph.id.0 as u64);
-        hash_u64(
-            &mut hash,
-            subgraph.parent.map_or(u64::MAX, |parent| parent.0 as u64),
-        );
-        hash_u64(&mut hash, subgraph.members.len() as u64);
-        for node in &subgraph.members {
-            hash_u64(&mut hash, node.0 as u64);
-        }
-    }
-    hash
+/// Exact equality probe between the engine's cached IR snapshot and the incoming IR.
+///
+/// This replaces the former full-IR FNV fingerprint scan (`stable_layout_request_hash`): equality
+/// short-circuits at the first difference and has no collision risk, so a memo hit now means the
+/// inputs are truly identical rather than merely hash-equal. Sections are ordered cheapest-first
+/// and most-frequently-edited-first (interactive edits are overwhelmingly label-text edits), so a
+/// miss usually exits before the O(nodes + edges) tail. Destructuring keeps this in lockstep with
+/// the IR: adding a field to `MermaidDiagramIr` fails compilation here until it is compared.
+fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> bool {
+    let MermaidDiagramIr {
+        diagram_type,
+        direction,
+        nodes,
+        edges,
+        ports,
+        clusters,
+        graph,
+        labels,
+        label_markup,
+        constraints,
+        style_refs,
+        style_defs,
+        meta,
+        sequence_meta,
+        gantt_meta,
+        xy_chart_meta,
+        pie_meta,
+        quadrant_meta,
+        state_notes,
+        diagnostics,
+    } = previous;
+    *diagram_type == current.diagram_type
+        && *direction == current.direction
+        && nodes.len() == current.nodes.len()
+        && edges.len() == current.edges.len()
+        && *labels == current.labels
+        && *label_markup == current.label_markup
+        && *nodes == current.nodes
+        && *edges == current.edges
+        && *ports == current.ports
+        && *clusters == current.clusters
+        && *constraints == current.constraints
+        && *style_refs == current.style_refs
+        && *style_defs == current.style_defs
+        && *graph == current.graph
+        && *meta == current.meta
+        && *sequence_meta == current.sequence_meta
+        && *gantt_meta == current.gantt_meta
+        && *xy_chart_meta == current.xy_chart_meta
+        && *pie_meta == current.pie_meta
+        && *quadrant_meta == current.quadrant_meta
+        && *state_notes == current.state_notes
+        && *diagnostics == current.diagnostics
+}
+
+/// Exact topology equality between two IRs, covering precisely the fields the former
+/// `dependency_graph_cache_key` FNV hash covered: node/edge/subgraph counts, node ids,
+/// per-node subgraph memberships, edge endpoints, and subgraph id/parent/members. Everything
+/// else (labels, spans, styles, meta) is intentionally NOT compared — label-only edits must
+/// keep reusing the cached dependency graph. Short-circuits at the first difference and,
+/// unlike the hash, cannot false-hit on a collision.
+fn dependency_topology_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> bool {
+    previous.nodes.len() == current.nodes.len()
+        && previous.edges.len() == current.edges.len()
+        && previous.graph.subgraphs.len() == current.graph.subgraphs.len()
+        && previous.nodes.iter().zip(&current.nodes).enumerate().all(
+            |(node_index, (previous_node, current_node))| {
+                previous_node.id == current_node.id
+                    && previous
+                        .graph
+                        .nodes
+                        .get(node_index)
+                        .map(|node| &node.subgraphs)
+                        == current
+                            .graph
+                            .nodes
+                            .get(node_index)
+                            .map(|node| &node.subgraphs)
+            },
+        )
+        && previous
+            .edges
+            .iter()
+            .zip(&current.edges)
+            .all(|(previous_edge, current_edge)| {
+                previous_edge.from == current_edge.from && previous_edge.to == current_edge.to
+            })
+        && previous
+            .graph
+            .subgraphs
+            .iter()
+            .zip(&current.graph.subgraphs)
+            .all(|(previous_subgraph, current_subgraph)| {
+                previous_subgraph.id == current_subgraph.id
+                    && previous_subgraph.parent == current_subgraph.parent
+                    && previous_subgraph.members == current_subgraph.members
+            })
 }
 
 fn hash_u64(hash: &mut u64, value: u64) {
@@ -1683,10 +1838,27 @@ fn count_back_edges(node_count: usize, edges: &[OrientedEdge]) -> usize {
     if node_count == 0 {
         return 0;
     }
-    let mut adj = vec![vec![]; node_count];
+    // CSR adjacency (flat targets + per-source offsets) instead of `vec![vec![]; n]` — one heap alloc
+    // per source, i.e. ~one per node on a chain/tree. Count out-degrees, prefix-sum to offsets, fill;
+    // the DFS reads each source's `[adj_start[n], adj_start[n+1])` segment in edge order. Byte-identical
+    // (same neighbors in the same order → same back-edge count). No sort/dedup, so offsets suffice.
+    let mut adj_start = vec![0_usize; node_count + 1];
     for edge in edges {
         if edge.source < node_count && edge.target < node_count {
-            adj[edge.source].push(edge.target);
+            adj_start[edge.source + 1] += 1;
+        }
+    }
+    for i in 1..adj_start.len() {
+        adj_start[i] += adj_start[i - 1];
+    }
+    let mut adj_flat = vec![0_usize; adj_start[node_count]];
+    {
+        let mut cursor = adj_start.clone();
+        for edge in edges {
+            if edge.source < node_count && edge.target < node_count {
+                adj_flat[cursor[edge.source]] = edge.target;
+                cursor[edge.source] += 1;
+            }
         }
     }
     let mut color = vec![0_u8; node_count];
@@ -1699,8 +1871,8 @@ fn count_back_edges(node_count: usize, edges: &[OrientedEdge]) -> usize {
         stack.push((start, 0));
         color[start] = 1;
         while let Some((node, idx)) = stack.last_mut() {
-            if *idx < adj[*node].len() {
-                let neighbor = adj[*node][*idx];
+            if *idx < adj_start[*node + 1] - adj_start[*node] {
+                let neighbor = adj_flat[adj_start[*node] + *idx];
                 *idx += 1;
                 match color[neighbor] {
                     0 => {
@@ -1870,8 +2042,26 @@ pub struct DiagramLayout {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TracedLayout {
-    pub layout: DiagramLayout,
+    /// Shared behind `Arc` so the incremental engine can store a cached copy and return the
+    /// same geometry without a second deep clone: `traced.clone()` bumps a refcount instead of
+    /// memcpying every node/edge/cluster. Consumers read `&DiagramLayout` transparently via
+    /// `Deref`; the ~10 non-traced `layout_diagram*` wrappers extract an owned value with
+    /// `Arc::try_unwrap` (refcount 1 at those call sites ⇒ a move, never a clone).
+    pub layout: Arc<DiagramLayout>,
     pub trace: LayoutTrace,
+}
+
+/// Opaque proof that a leading IR/layout slice is the stable prefix of an LR directed path.
+///
+/// Batch callers keep this beside the layout that produced it. A parser-certified unchanged IR
+/// prefix plus this geometry proof lets [`try_relayout_directed_path_suffix`] replace only the
+/// appended path tail, without rescanning or reallocating the shared prefix.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DirectedPathLayoutPrefix {
+    node_count: usize,
+    edge_count: usize,
+    max_node_height: f32,
+    depth_cursor: f32,
 }
 
 /// Target-agnostic render scene produced from diagram IR + layout geometry.
@@ -2051,6 +2241,13 @@ pub enum MarkerKind {
     Circle,
     Cross,
     Diamond,
+    /// Hollow diamond — UML aggregation, as distinct from `Diamond`'s filled composition marker.
+    DiamondOpen,
+    /// Hollow triangle — UML inheritance/generalization, target slot.
+    TriangleOpen,
+    /// Hollow triangle for the START slot, which needs the reversed-orientation marker def so the
+    /// point faces out of the path rather than into it.
+    TriangleOpenStart,
     Open,
 }
 
@@ -2434,6 +2631,27 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                         marker_start = MarkerKind::Arrow;
                         marker_end = MarkerKind::Arrow;
                     }
+                    // UML aggregation/composition mark the OWNING end: the source for `o--`/`*--`,
+                    // the target for the reversed `--o`/`--*`.
+                    fm_core::ArrowType::Aggregation => {
+                        marker_start = MarkerKind::DiamondOpen;
+                    }
+                    fm_core::ArrowType::AggregationReverse => {
+                        marker_end = MarkerKind::DiamondOpen;
+                    }
+                    fm_core::ArrowType::Composition => {
+                        marker_start = MarkerKind::Diamond;
+                    }
+                    fm_core::ArrowType::CompositionReverse => {
+                        marker_end = MarkerKind::Diamond;
+                    }
+                    // Generalization marks the PARENT end: source for `<|--`, target for `--|>`.
+                    fm_core::ArrowType::Inheritance => {
+                        marker_start = MarkerKind::TriangleOpenStart;
+                    }
+                    fm_core::ArrowType::InheritanceReverse => {
+                        marker_end = MarkerKind::TriangleOpen;
+                    }
                 }
             }
         }
@@ -2634,7 +2852,7 @@ pub fn layout(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> LayoutStats 
 
 #[must_use]
 pub fn layout_diagram(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_traced(ir).layout)
 }
 
 #[must_use]
@@ -2642,12 +2860,14 @@ pub fn layout_diagram_with_cycle_strategy(
     ir: &MermaidDiagramIr,
     cycle_strategy: CycleStrategy,
 ) -> DiagramLayout {
-    layout_diagram_traced_with_cycle_strategy(ir, cycle_strategy).layout
+    Arc::unwrap_or_clone(layout_diagram_traced_with_cycle_strategy(ir, cycle_strategy).layout)
 }
 
 #[must_use]
 pub fn layout_diagram_with_config(ir: &MermaidDiagramIr, config: LayoutConfig) -> DiagramLayout {
-    layout_diagram_traced_with_config(ir, LayoutAlgorithm::Auto, config).layout
+    Arc::unwrap_or_clone(
+        layout_diagram_traced_with_config(ir, LayoutAlgorithm::Auto, config).layout,
+    )
 }
 
 #[must_use]
@@ -2733,7 +2953,7 @@ pub fn layout_diagram_traced_with_config_and_guardrails(
     config: LayoutConfig,
     guardrails: LayoutGuardrails,
 ) -> TracedLayout {
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     let mut traced =
         compute_traced_layout_with_config_and_guardrails(ir, algorithm, config, guardrails);
     let recompute_duration_us = saturating_elapsed_micros(start.elapsed());
@@ -2823,7 +3043,9 @@ fn compute_traced_layout_with_config_and_guardrails(
             edge_count: ir.edges.len(),
         },
     );
-    traced.layout.stats.phase_iterations = traced.trace.snapshots.len();
+    let phase_iterations = traced.trace.snapshots.len();
+    // Freshly built by the dispatch match (refcount 1) ⇒ clone-free `make_mut`.
+    Arc::make_mut(&mut traced.layout).stats.phase_iterations = phase_iterations;
     traced
 }
 
@@ -2836,11 +3058,12 @@ impl IncrementalLayoutEngine {
         config: LayoutConfig,
         guardrails: LayoutGuardrails,
     ) -> TracedLayout {
-        let start = std::time::Instant::now();
-        let key = layout_memo_key(ir, algorithm, &config, guardrails);
+        let start = Instant::now();
+        let key = layout_memo_key(algorithm, &config, guardrails);
 
         if let Some(cached) = &self.cached
             && cached.key == key
+            && memo_ir_equal(&cached.ir, ir)
         {
             let mut traced = cached.traced.clone();
             let recompute_duration_us = saturating_elapsed_micros(start.elapsed());
@@ -2862,31 +3085,37 @@ impl IncrementalLayoutEngine {
             return traced;
         }
 
-        trace!(
-            ir_fingerprint = key.ir_fingerprint,
-            algorithm = algorithm.as_str(),
-            "incremental.cache_miss"
-        );
+        trace!(algorithm = algorithm.as_str(), "incremental.cache_miss");
         let mut incremental_state = IncrementalCacheState {
-            graph_metrics_cache: self.graph_metrics_cache,
-            node_size_cache: self.node_size_cache.clone(),
+            graph_metrics_cache: self.graph_metrics_cache.take(),
+            // Move, don't clone: nothing reads `self.node_size_cache` while the pass runs (all
+            // in-pass access goes through the installed thread-local state), and every exit path
+            // below writes the state's map back onto `self`.
+            node_size_cache: std::mem::take(&mut self.node_size_cache),
             dependency_graph_cache: self.dependency_graph_cache.clone(),
             current_summary: IncrementalLayoutSummary::default(),
+            pass_snapshot: None,
         };
         incremental_state.begin_pass();
         let state_guard = ActiveIncrementalStateGuard::install(incremental_state);
         if let Some(mut traced) =
-            self.try_incremental_subgraph_relayout(ir, algorithm, &config, guardrails)
+            self.try_incremental_subgraph_relayout(ir, algorithm, &config, guardrails, key)
         {
             let selective_recomputed_nodes = traced.trace.incremental.recomputed_nodes.max(1);
-            let incremental_state = state_guard.finish();
+            let mut incremental_state = state_guard.finish();
+            let snapshot = incremental_state
+                .pass_snapshot
+                .take()
+                .unwrap_or_else(|| Arc::new(ir.clone()));
             let recompute_duration_us = saturating_elapsed_micros(start.elapsed());
 
             self.graph_metrics_cache = incremental_state.graph_metrics_cache;
             self.node_size_cache = incremental_state.node_size_cache;
             self.dependency_graph_cache = incremental_state.dependency_graph_cache;
             traced.trace.incremental = IncrementalRecomputeTrace {
-                query_type: "layout_incremental_subgraph_relayout",
+                // Preserve the inner path's query_type: the size-stable fast path reports a
+                // distinct marker so tests and diagnostics can verify it actually fired.
+                query_type: traced.trace.incremental.query_type,
                 cache_hit: false,
                 recomputed_nodes: selective_recomputed_nodes,
                 total_nodes: incremental_state
@@ -2905,6 +3134,7 @@ impl IncrementalLayoutEngine {
             );
             self.cached = Some(CachedTracedLayout {
                 key,
+                ir: snapshot,
                 traced: traced.clone(),
             });
             return traced;
@@ -2912,7 +3142,11 @@ impl IncrementalLayoutEngine {
 
         let mut traced =
             compute_traced_layout_with_config_and_guardrails(ir, algorithm, config, guardrails);
-        let incremental_state = state_guard.finish();
+        let mut incremental_state = state_guard.finish();
+        let snapshot = incremental_state
+            .pass_snapshot
+            .take()
+            .unwrap_or_else(|| Arc::new(ir.clone()));
 
         let recompute_duration_us = saturating_elapsed_micros(start.elapsed());
 
@@ -2947,6 +3181,7 @@ impl IncrementalLayoutEngine {
         );
         self.cached = Some(CachedTracedLayout {
             key,
+            ir: snapshot,
             traced: traced.clone(),
         });
         traced
@@ -2965,6 +3200,7 @@ impl IncrementalLayoutEngine {
         algorithm: LayoutAlgorithm,
         config: &LayoutConfig,
         guardrails: LayoutGuardrails,
+        key: LayoutMemoKey,
     ) -> Option<TracedLayout> {
         let cached_layout = self.cached.as_ref()?;
         let cached_graph = self.dependency_graph_cache.as_ref()?;
@@ -2975,11 +3211,6 @@ impl IncrementalLayoutEngine {
             return None;
         }
 
-        let dispatch = dispatch_layout_algorithm(ir, algorithm);
-        let guard = evaluate_layout_guardrails(ir, dispatch.selected, guardrails);
-        if guard.fallback_applied || guard.selected_algorithm != LayoutAlgorithm::Sugiyama {
-            return None;
-        }
         if ir.nodes.len() != cached_graph.ir.nodes.len() {
             return None;
         }
@@ -2997,18 +3228,164 @@ impl IncrementalLayoutEngine {
             return None;
         }
 
-        track_dependency_graph_query(ir);
-        let incremental_start = std::time::Instant::now();
-
-        // Fast path: for label/style-only edits, reuse the cached dependency graph
-        // (topology unchanged) and derive dirty set directly from edits, avoiding
-        // the expensive dirty_node_indexes_for_edits walk.
+        // Label/style-only edits leave the dependency topology unchanged, so the cached
+        // dependency graph can be reused and the dirty set derived directly from edits.
         let all_node_changes = edits
             .iter()
             .all(|e| matches!(e, LayoutEdit::NodeChanged { .. }));
-        let current_graph = if all_node_changes
-            || dependency_graph_cache_key(&cached_graph.ir) == dependency_graph_cache_key(ir)
-        {
+
+        let metrics = config
+            .font_metrics
+            .clone()
+            .unwrap_or_else(fm_core::FontMetrics::default_metrics);
+
+        // Size-stable memo fast path (Adapton region memoization), checked BEFORE algorithm
+        // dispatch and guardrail evaluation: when the config key is unchanged, the topology is
+        // unchanged (label-text-only node edits), and every dirty node's freshly measured size
+        // is bit-equal to its cached box, every downstream phase — dispatch, guardrail fallback
+        // selection, and the full deterministic layout — is a pure function of inputs that have
+        // not changed, so the cached geometry (and the cached dispatch/guard decisions carried
+        // in its trace) is exactly what recomputing would produce. Serving it keeps size-stable
+        // label edits cheap even on graphs large enough that guardrails re-route the pipeline
+        // off Sugiyama, where the selective region relayout below is unavailable.
+        if all_node_changes && cached_layout.key == key && !size_stable_fast_path_disabled() {
+            let dirty_node_indexes: BTreeSet<usize> = edits
+                .iter()
+                .filter_map(|e| match e {
+                    LayoutEdit::NodeChanged { node_index } => Some(*node_index),
+                    _ => None,
+                })
+                .collect();
+            let label_text_only_and_size_stable = !dirty_node_indexes.is_empty()
+                && dirty_node_indexes.iter().all(|&node_index| {
+                    match (
+                        cached_graph.ir.nodes.get(node_index),
+                        ir.nodes.get(node_index),
+                        cached_layout.traced.layout.nodes.get(node_index),
+                    ) {
+                        (Some(previous), Some(node), Some(node_box)) => {
+                            // NodeChanged also fires for id and subgraph-membership edits,
+                            // which can move the node between regions and clusters; cached
+                            // geometry only stays valid for label-TEXT-only changes.
+                            previous.id == node.id
+                                && cached_graph
+                                    .ir
+                                    .graph
+                                    .nodes
+                                    .get(node_index)
+                                    .map(|graph_node| &graph_node.subgraphs)
+                                    == ir
+                                        .graph
+                                        .nodes
+                                        .get(node_index)
+                                        .map(|graph_node| &graph_node.subgraphs)
+                                && {
+                                    let (width, height) = compute_node_size(ir, node, &metrics);
+                                    width.to_bits() == node_box.bounds.width.to_bits()
+                                        && height.to_bits() == node_box.bounds.height.to_bits()
+                                }
+                        }
+                        _ => false,
+                    }
+                });
+            if label_text_only_and_size_stable {
+                let mut dirty = DirtySet::default();
+                let mut recomputed_node_count = 0usize;
+                for (region_id, region) in cached_graph.graph.regions() {
+                    if !region.node_indexes.is_disjoint(&dirty_node_indexes) {
+                        dirty.insert(*region_id);
+                        recomputed_node_count += region.node_indexes.len();
+                    }
+                }
+                if !dirty.is_empty() {
+                    // Maintains the dependency cache and installs the shared per-pass IR
+                    // snapshot exactly like the slow path, so cache freshness semantics are
+                    // identical whichever path serves the request.
+                    track_dependency_graph_query(ir);
+                    let incremental_start = Instant::now();
+
+                    let mut nodes = cached_layout.traced.layout.nodes.clone();
+                    for (node_index, node_box) in nodes.iter_mut().enumerate() {
+                        node_box.span = ir
+                            .nodes
+                            .get(node_index)
+                            .map_or(Span::default(), |node| node.span_primary);
+                    }
+                    let dirty_regions: Vec<LayoutRect> = dirty
+                        .regions
+                        .iter()
+                        .filter_map(|region_id| {
+                            cached_graph.graph.regions().get(region_id).map(|region| {
+                                layout_bounds_for_members(
+                                    &region.node_indexes.iter().copied().collect::<Vec<_>>(),
+                                    &nodes,
+                                )
+                                .unwrap_or(LayoutRect {
+                                    x: 0.0,
+                                    y: 0.0,
+                                    width: 0.0,
+                                    height: 0.0,
+                                })
+                            })
+                        })
+                        .collect();
+
+                    // The cached trace already carries the dispatch and guard decisions
+                    // computed for this same topology and config; reuse them verbatim.
+                    let mut trace = cached_layout.traced.trace.clone();
+                    // Same retention rule as the slow path below: keep the original
+                    // full-layout phase snapshots plus exactly the latest incremental one.
+                    trace
+                        .snapshots
+                        .retain(|snapshot| snapshot.stage != "incremental_subgraph_relayout");
+                    push_snapshot(
+                        &mut trace,
+                        "incremental_subgraph_relayout",
+                        ir.nodes.len(),
+                        ir.edges.len(),
+                        cached_layout.traced.layout.stats.reversed_edges,
+                        cached_layout.traced.layout.stats.crossing_count,
+                    );
+                    let mut stats = cached_layout.traced.layout.stats;
+                    stats.phase_iterations = trace.snapshots.len();
+
+                    return Some(TracedLayout {
+                        layout: Arc::new(DiagramLayout {
+                            nodes,
+                            clusters: cached_layout.traced.layout.clusters.clone(),
+                            cycle_clusters: cached_layout.traced.layout.cycle_clusters.clone(),
+                            edges: cached_layout.traced.layout.edges.clone(),
+                            bounds: cached_layout.traced.layout.bounds,
+                            stats,
+                            extensions: cached_layout.traced.layout.extensions.clone(),
+                            dirty_regions,
+                        }),
+                        trace: LayoutTrace {
+                            incremental: IncrementalRecomputeTrace {
+                                query_type: "layout_incremental_subgraph_relayout_size_stable",
+                                cache_hit: false,
+                                recomputed_nodes: recomputed_node_count,
+                                total_nodes: ir.nodes.len(),
+                                recompute_duration_us: saturating_elapsed_micros(
+                                    incremental_start.elapsed(),
+                                ),
+                            },
+                            ..trace
+                        },
+                    });
+                }
+            }
+        }
+
+        let dispatch = dispatch_layout_algorithm(ir, algorithm);
+        let guard = evaluate_layout_guardrails(ir, dispatch.selected, guardrails);
+        if guard.fallback_applied || guard.selected_algorithm != LayoutAlgorithm::Sugiyama {
+            return None;
+        }
+
+        track_dependency_graph_query(ir);
+        let incremental_start = Instant::now();
+        let current_graph = if all_node_changes || dependency_topology_equal(&cached_graph.ir, ir) {
             Arc::clone(&cached_graph.graph)
         } else {
             Arc::new(LayoutDependencyGraph::from_ir(ir))
@@ -3040,10 +3417,6 @@ impl IncrementalLayoutEngine {
             return None;
         }
 
-        let metrics = config
-            .font_metrics
-            .clone()
-            .unwrap_or_else(fm_core::FontMetrics::default_metrics);
         let node_sizes = compute_node_sizes(ir, &metrics);
         let spacing = config.spacing;
         let mut nodes = cached_layout.traced.layout.nodes.clone();
@@ -3137,6 +3510,14 @@ impl IncrementalLayoutEngine {
         let mut trace = cached_layout.traced.trace.clone();
         trace.dispatch = dispatch;
         trace.guard = guard;
+        // The cached trace is re-cloned and re-stored on every incremental pass; without this
+        // retain, each pass appends one more "incremental_subgraph_relayout" snapshot FOREVER —
+        // unbounded memory growth in long-lived engines (fm-wasm holds one per app) and an
+        // O(edit-count) clone tax on every subsequent edit. Keep the original full-layout phase
+        // snapshots and exactly the latest incremental one.
+        trace
+            .snapshots
+            .retain(|snapshot| snapshot.stage != "incremental_subgraph_relayout");
         push_snapshot(
             &mut trace,
             "incremental_subgraph_relayout",
@@ -3185,7 +3566,7 @@ impl IncrementalLayoutEngine {
             .collect();
 
         Some(TracedLayout {
-            layout: DiagramLayout {
+            layout: Arc::new(DiagramLayout {
                 nodes,
                 clusters,
                 cycle_clusters,
@@ -3197,7 +3578,7 @@ impl IncrementalLayoutEngine {
                     ..LayoutExtensions::default()
                 },
                 dirty_regions,
-            },
+            }),
             trace: LayoutTrace {
                 incremental: IncrementalRecomputeTrace {
                     query_type: "layout_incremental_subgraph_relayout",
@@ -3213,7 +3594,6 @@ impl IncrementalLayoutEngine {
 }
 
 fn layout_memo_key(
-    ir: &MermaidDiagramIr,
     algorithm: LayoutAlgorithm,
     config: &LayoutConfig,
     guardrails: LayoutGuardrails,
@@ -3223,13 +3603,22 @@ fn layout_memo_key(
         .as_ref()
         .cloned()
         .unwrap_or_else(fm_core::FontMetrics::default_metrics);
-    let ir_fingerprint = stable_layout_request_hash(ir, algorithm, config, guardrails, &metrics);
     LayoutMemoKey {
-        ir_fingerprint,
         algorithm,
         cycle_strategy: config.cycle_strategy,
         collapse_cycle_clusters: config.collapse_cycle_clusters,
         fnx_enabled: config.fnx_enabled,
+        edge_routing: config.edge_routing,
+        constraint_solver: config.constraint_solver,
+        constraint_solver_time_limit_ms: config.constraint_solver_time_limit_ms,
+        node_spacing_bits: config.spacing.node_spacing.to_bits(),
+        rank_spacing_bits: config.spacing.rank_spacing.to_bits(),
+        cluster_padding_bits: config.spacing.cluster_padding.to_bits(),
+        sequence_participant_gap_extra_bits: config
+            .spacing
+            .sequence_participant_gap_extra
+            .to_bits(),
+        sequence_min_message_gap_bits: config.spacing.sequence_min_message_gap.to_bits(),
         font_size_bits: metrics.font_size().to_bits(),
         avg_char_width_bits: metrics.avg_char_width().to_bits(),
         line_height_bits: metrics.line_height_px().to_bits(),
@@ -3237,48 +3626,6 @@ fn layout_memo_key(
         max_layout_iterations: guardrails.max_layout_iterations,
         max_route_ops: guardrails.max_route_ops,
     }
-}
-
-fn stable_layout_request_hash(
-    ir: &MermaidDiagramIr,
-    algorithm: LayoutAlgorithm,
-    config: &LayoutConfig,
-    guardrails: LayoutGuardrails,
-    metrics: &fm_core::FontMetrics,
-) -> u64 {
-    let descriptor = format!(
-        "{ir:?}|{algorithm}|{cycle_strategy}|{collapse_cycle_clusters}|{fnx_enabled}|\
-         {edge_routing}|{node_spacing}|{rank_spacing}|{cluster_padding}|\
-         {sequence_participant_gap_extra}|\
-         {sequence_min_message_gap}|{font_size}|{avg_char_width}|{line_height_px}|\
-         {max_layout_time_ms}|{max_layout_iterations}|{max_route_ops}",
-        algorithm = algorithm.as_str(),
-        cycle_strategy = config.cycle_strategy.as_str(),
-        collapse_cycle_clusters = config.collapse_cycle_clusters,
-        fnx_enabled = config.fnx_enabled,
-        edge_routing = config.edge_routing as u8,
-        node_spacing = config.spacing.node_spacing,
-        rank_spacing = config.spacing.rank_spacing,
-        cluster_padding = config.spacing.cluster_padding,
-        sequence_participant_gap_extra = config.spacing.sequence_participant_gap_extra,
-        sequence_min_message_gap = config.spacing.sequence_min_message_gap,
-        font_size = metrics.font_size(),
-        avg_char_width = metrics.avg_char_width(),
-        line_height_px = metrics.line_height_px(),
-        max_layout_time_ms = guardrails.max_layout_time_ms,
-        max_layout_iterations = guardrails.max_layout_iterations,
-        max_route_ops = guardrails.max_route_ops,
-    );
-    stable_u64_hash(descriptor.as_bytes())
-}
-
-fn stable_u64_hash(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    hash
 }
 
 fn saturating_elapsed_micros(duration: std::time::Duration) -> u64 {
@@ -3744,22 +4091,38 @@ fn estimate_layout_cost(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> La
             }
         }
         LayoutAlgorithm::Tree => LayoutCostEstimate {
-            time_ms: nodes
-                .saturating_mul(4)
-                .saturating_add(edges.saturating_mul(2))
-                .saturating_add(8),
+            // A directed path has a unique tree order. The tree implementation lays it out in
+            // linear passes, so charging the generic four-milliseconds-per-node estimate can
+            // incorrectly push it back through Sugiyama's cycle, rank, crossing, and coordinate
+            // pipeline. Keep the conservative generic estimate for branching trees, but price the
+            // path specialization by its actual linear work.
+            time_ms: if is_directed_path(ir) {
+                nodes
+                    .div_ceil(16)
+                    .saturating_add(edges.div_ceil(16))
+                    .saturating_add(1)
+            } else {
+                nodes
+                    .saturating_mul(4)
+                    .saturating_add(edges.saturating_mul(2))
+                    .saturating_add(8)
+            },
             iterations: nodes.saturating_add(4),
             route_ops: edges.saturating_mul(8).saturating_add(nodes),
         },
+        // Radial is a cheap single-pass tree placement: angle assignment plus
+        // straight-line edges, with no obstacle-aware routing or iterative
+        // refinement. The prior estimate made it pricier than `Tree`, which is
+        // backwards for large mindmaps because `Tree` pays dense obstacle-routing
+        // costs that radial skips. Keeping radial's estimate below tree's keeps
+        // mindmaps on their only correct specialized layout under guardrails.
         LayoutAlgorithm::Radial => LayoutCostEstimate {
             time_ms: nodes
-                .saturating_mul(5)
-                .saturating_add(edges.saturating_mul(2))
-                .saturating_add(12),
-            iterations: nodes.saturating_add(6),
-            route_ops: edges
-                .saturating_mul(8)
-                .saturating_add(nodes.saturating_mul(2)),
+                .saturating_mul(3)
+                .saturating_add(edges)
+                .saturating_add(8),
+            iterations: nodes.saturating_add(4),
+            route_ops: edges.saturating_mul(2).saturating_add(nodes),
         },
         LayoutAlgorithm::Timeline
         | LayoutAlgorithm::Gantt
@@ -3794,6 +4157,56 @@ fn estimate_layout_cost(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> La
             route_ops: 0,
         },
     }
+}
+
+fn is_directed_path(ir: &MermaidDiagramIr) -> bool {
+    directed_path_order(ir).is_some()
+}
+
+fn directed_path_order(ir: &MermaidDiagramIr) -> Option<Vec<usize>> {
+    let node_count = ir.nodes.len();
+    if node_count < 3 {
+        return None;
+    }
+    if ir.edges.len() != node_count - 1 {
+        return None;
+    }
+
+    let mut next = vec![None; node_count];
+    let mut in_degree = vec![0_u8; node_count];
+    for edge in &ir.edges {
+        let (Some(source), Some(target)) = (
+            endpoint_node_index(ir, edge.from),
+            endpoint_node_index(ir, edge.to),
+        ) else {
+            return None;
+        };
+        if next[source].replace(target).is_some() {
+            return None;
+        }
+        in_degree[target] = in_degree[target].saturating_add(1);
+        if in_degree[target] > 1 {
+            return None;
+        }
+    }
+    let mut roots = in_degree
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &degree)| (degree == 0).then_some(index));
+    let mut cursor = roots.next()?;
+    if roots.next().is_some() {
+        return None;
+    }
+    let mut order = Vec::with_capacity(node_count);
+    for visited in 1..=node_count {
+        order.push(cursor);
+        match next[cursor] {
+            Some(successor) if visited < node_count => cursor = successor,
+            None if visited == node_count => return Some(order),
+            _ => return None,
+        }
+    }
+    None
 }
 
 fn fallback_candidates(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> Vec<LayoutAlgorithm> {
@@ -4012,7 +4425,11 @@ fn layout_diagram_sugiyama_traced_with_config(
         .clone()
         .unwrap_or_else(fm_core::FontMetrics::default_metrics);
     let node_sizes = compute_node_sizes(ir, &metrics);
-    let cycle_result = cycle_removal(ir, config.cycle_strategy);
+    // Node id-order priorities are a pure function of `ir` (an O(N log N) String-memcmp sort of node ids).
+    // `cycle_removal`, `rank_assignment`, and `build_cycle_cluster_map` each recomputed it — hoist to ONE
+    // computation and thread it through. Byte-identical (same Vec); removes 1-2 redundant sorts per layout.
+    let node_priority = stable_node_priorities(ir);
+    let cycle_result = cycle_removal(ir, config.cycle_strategy, &node_priority);
     push_snapshot(
         &mut trace,
         "cycle_removal",
@@ -4023,12 +4440,12 @@ fn layout_diagram_sugiyama_traced_with_config(
     );
 
     let collapse_map = if config.collapse_cycle_clusters {
-        Some(build_cycle_cluster_map(ir, &cycle_result))
+        Some(build_cycle_cluster_map(ir, &cycle_result, &node_priority))
     } else {
         None
     };
 
-    let mut ranks = rank_assignment(ir, &cycle_result);
+    let mut ranks = rank_assignment(ir, &cycle_result, &node_priority);
     apply_ir_constraints(ir, &mut ranks);
     push_snapshot(
         &mut trace,
@@ -4128,7 +4545,7 @@ fn layout_diagram_sugiyama_traced_with_config(
     let node_centrality = compute_layout_centrality_tiers(ir, &config);
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters,
             cycle_clusters,
@@ -4141,7 +4558,7 @@ fn layout_diagram_sugiyama_traced_with_config(
                 ..LayoutExtensions::default()
             },
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
@@ -4152,7 +4569,7 @@ fn layout_diagram_sugiyama_traced_with_config(
 /// diagrams, generic graphs with no clear flow direction.
 #[must_use]
 pub fn layout_diagram_force(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_force_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_force_traced(ir).layout)
 }
 
 /// Lay out with force-directed algorithm and return tracing information.
@@ -4166,7 +4583,7 @@ pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     if n == 0 {
         return TracedLayout {
-            layout: DiagramLayout {
+            layout: Arc::new(DiagramLayout {
                 nodes: vec![],
                 clusters: vec![],
                 cycle_clusters: vec![],
@@ -4180,7 +4597,7 @@ pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 stats: LayoutStats::default(),
                 extensions: LayoutExtensions::default(),
                 dirty_regions: Vec::new(),
-            },
+            }),
             trace,
         };
     }
@@ -4270,7 +4687,7 @@ pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     };
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters,
             cycle_clusters: vec![],
@@ -4279,7 +4696,7 @@ pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             stats,
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
@@ -4287,7 +4704,7 @@ pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 /// Lay out a diagram using a deterministic tidy-tree algorithm.
 #[must_use]
 pub fn layout_diagram_tree(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_tree_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_tree_traced(ir).layout)
 }
 
 /// Lay out using the tree algorithm and return tracing information.
@@ -4300,7 +4717,7 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     if node_count == 0 {
         return TracedLayout {
-            layout: DiagramLayout {
+            layout: Arc::new(DiagramLayout {
                 nodes: Vec::new(),
                 clusters: Vec::new(),
                 cycle_clusters: Vec::new(),
@@ -4314,9 +4731,13 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 stats: LayoutStats::default(),
                 extensions: LayoutExtensions::default(),
                 dirty_regions: Vec::new(),
-            },
+            }),
             trace,
         };
+    }
+
+    if let Some(path_order) = directed_path_order(ir) {
+        return layout_directed_path_tree_traced(ir, path_order, node_sizes, spacing, trace);
     }
 
     let tree = build_tree_layout_structure(ir);
@@ -4385,7 +4806,11 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     let order_by_rank = rank_orders_from_key(ir, &tree.depth, &span_centers);
     let nodes = node_boxes_from_centers(ir, &node_sizes, &tree.depth, &order_by_rank, &centers);
-    let edges = build_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default());
+    let edges =
+        build_directed_path_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default())
+            .unwrap_or_else(|| {
+                build_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default())
+            });
     let clusters = build_cluster_boxes(ir, &nodes, spacing);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
@@ -4415,7 +4840,7 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     };
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters,
             cycle_clusters: Vec::new(),
@@ -4424,15 +4849,357 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             stats,
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
+}
+
+fn layout_directed_path_tree_traced(
+    ir: &MermaidDiagramIr,
+    path_order: Vec<usize>,
+    node_sizes: Vec<(f32, f32)>,
+    spacing: LayoutSpacing,
+    mut trace: LayoutTrace,
+) -> TracedLayout {
+    let node_count = ir.nodes.len();
+    let horizontal_depth_axis = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
+    let reverse_depth_axis = matches!(ir.direction, GraphDirection::RL | GraphDirection::BT);
+    let max_depth = node_count.saturating_sub(1);
+
+    push_snapshot(
+        &mut trace,
+        "tree_structure",
+        node_count,
+        ir.edges.len(),
+        0,
+        0,
+    );
+
+    let mut depth = vec![0_usize; node_count];
+    let mut depth_level_sizes = vec![0.0_f32; node_count];
+    let mut subtree_spans = vec![0.0_f32; node_count];
+    let mut running_span = 0.0_f32;
+    for (logical_depth, &node_index) in path_order.iter().enumerate().rev() {
+        depth[node_index] = logical_depth;
+        let (width, height) = node_sizes[node_index];
+        let depth_size = if horizontal_depth_axis { width } else { height };
+        let span_size = if horizontal_depth_axis { height } else { width };
+        depth_level_sizes[logical_depth] = depth_size.max(1.0);
+        running_span = span_size.max(1.0).max(running_span);
+        subtree_spans[node_index] = running_span;
+    }
+
+    // A path has one child at each non-leaf depth. Reproduce the generic tree center recurrence
+    // exactly, but without child adjacency, BFS queues, or per-rank buckets.
+    let mut span_centers = vec![0.0_f32; node_count];
+    let mut span_start = 0.0_f32;
+    for (logical_depth, &node_index) in path_order.iter().enumerate() {
+        let subtree_span = subtree_spans[node_index];
+        span_centers[node_index] = span_start + (subtree_span / 2.0);
+        if let Some(&child) = path_order.get(logical_depth + 1) {
+            let child_span = subtree_spans[child];
+            span_start += (subtree_span - child_span) / 2.0;
+        }
+    }
+
+    let depth_centers = depth_level_centers(&depth_level_sizes, spacing.rank_spacing);
+    let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
+    for node_index in 0..node_count {
+        let logical_depth = depth[node_index];
+        let mapped_depth = if reverse_depth_axis {
+            max_depth.saturating_sub(logical_depth)
+        } else {
+            logical_depth
+        };
+        let depth_center = depth_centers[mapped_depth];
+        let span_center = span_centers[node_index];
+        centers[node_index] = if horizontal_depth_axis {
+            (depth_center, span_center)
+        } else {
+            (span_center, depth_center)
+        };
+    }
+    normalize_center_positions(&mut centers, &node_sizes);
+
+    let order_by_rank = vec![0_usize; node_count];
+    let nodes = node_boxes_from_centers(ir, &node_sizes, &depth, &order_by_rank, &centers);
+    let edges = build_directed_path_edge_paths_unchecked(
+        ir,
+        &nodes,
+        &BTreeSet::new(),
+        EdgeRouting::default(),
+    )
+    .expect("validated directed path endpoints");
+    let clusters = build_cluster_boxes(ir, &nodes, spacing);
+    let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
+    let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
+
+    push_snapshot(
+        &mut trace,
+        "tree_post_processing",
+        node_count,
+        ir.edges.len(),
+        0,
+        0,
+    );
+    let stats = LayoutStats {
+        node_count,
+        edge_count: ir.edges.len(),
+        crossing_count: 0,
+        crossing_count_before_refinement: 0,
+        reversed_edges: 0,
+        cycle_count: 0,
+        cycle_node_count: 0,
+        max_cycle_size: 0,
+        collapsed_clusters: 0,
+        reversed_edge_total_length,
+        total_edge_length,
+        phase_iterations: trace.snapshots.len(),
+    };
+
+    TracedLayout {
+        layout: Arc::new(DiagramLayout {
+            nodes,
+            clusters,
+            cycle_clusters: Vec::new(),
+            edges,
+            bounds,
+            stats,
+            extensions: LayoutExtensions::default(),
+            dirty_regions: Vec::new(),
+        }),
+        trace,
+    }
+}
+
+/// Certify that a parser-provided leading slice has suffix-independent geometry in an LR path.
+///
+/// Certification is intentionally narrow. LR paths grow to the right, so an appended node cannot
+/// move an earlier rank; requiring the suffix node heights not to exceed the prefix maximum also
+/// proves that vertical normalization is unchanged. Other directions and non-sequential path IRs
+/// fall back to the ordinary layout pipeline.
+#[must_use]
+pub fn certify_directed_path_layout_prefix(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    node_count: usize,
+    edge_count: usize,
+) -> Option<DirectedPathLayoutPrefix> {
+    if ir.direction != GraphDirection::LR
+        || node_count == 0
+        || edge_count.checked_add(1) != Some(node_count)
+        || ir.edges.len().checked_add(1) != Some(ir.nodes.len())
+        || layout.nodes.len() != ir.nodes.len()
+        || layout.edges.len() != ir.edges.len()
+        || node_count > layout.nodes.len()
+        || edge_count > layout.edges.len()
+    {
+        return None;
+    }
+
+    let path_order = directed_path_order(ir)?;
+    if !path_order
+        .iter()
+        .enumerate()
+        .all(|(logical_depth, &node_index)| logical_depth == node_index)
+        || !ir.edges.iter().enumerate().all(|(edge_index, edge)| {
+            endpoint_node_index(ir, edge.from) == Some(edge_index)
+                && endpoint_node_index(ir, edge.to) == Some(edge_index + 1)
+        })
+        || !layout.nodes.iter().enumerate().all(|(node_index, node)| {
+            node.node_index == node_index && node.rank == node_index && node.order == 0
+        })
+        || !layout
+            .edges
+            .iter()
+            .enumerate()
+            .all(|(edge_index, edge)| edge.edge_index == edge_index)
+    {
+        return None;
+    }
+
+    let max_node_height = layout.nodes[..node_count]
+        .iter()
+        .map(|node| node.bounds.height)
+        .fold(0.0_f32, f32::max);
+    let rank_spacing = LayoutSpacing::default().rank_spacing;
+    let depth_cursor = layout.nodes[..node_count]
+        .iter()
+        .fold(0.0_f32, |cursor, node| {
+            cursor + (node.bounds.width.max(1.0) + rank_spacing)
+        });
+    if !max_node_height.is_finite()
+        || max_node_height <= 0.0
+        || !depth_cursor.is_finite()
+        || layout.nodes[node_count..]
+            .iter()
+            .any(|node| node.bounds.height > max_node_height)
+    {
+        return None;
+    }
+
+    // A sequential IR path can still have reached us through another layout algorithm. Prove
+    // that this is specifically the tree path specialization before preserving its arithmetic
+    // cursor: suffix transplantation must reproduce the exact floating-point operation order,
+    // not merely an algebraically equivalent geometry.
+    let center_y = (max_node_height / 2.0) + 20.0;
+    let mut cursor = 0.0_f32;
+    for node in &layout.nodes {
+        let width = node.bounds.width;
+        let height = node.bounds.height;
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        let center_x = (cursor + (width.max(1.0) / 2.0)) + 20.0;
+        let expected_x = center_x - (width / 2.0);
+        let expected_y = center_y - (height / 2.0);
+        if expected_x.to_bits() != node.bounds.x.to_bits()
+            || expected_y.to_bits() != node.bounds.y.to_bits()
+        {
+            return None;
+        }
+        cursor += width.max(1.0) + rank_spacing;
+    }
+
+    Some(DirectedPathLayoutPrefix {
+        node_count,
+        edge_count,
+        max_node_height,
+        depth_cursor,
+    })
+}
+
+/// Replace only the appended tail of a previously certified LR directed-path layout.
+///
+/// The caller must pair `prefix` with the exact unchanged IR prefix that produced `layout` (for
+/// example, a pointer-stable parser batch certificate). Every fallible check runs before mutation,
+/// so `false` leaves the supplied layout untouched and the caller can safely use a full fallback.
+pub fn try_relayout_directed_path_suffix(
+    ir: &MermaidDiagramIr,
+    layout: &mut DiagramLayout,
+    prefix: &DirectedPathLayoutPrefix,
+) -> bool {
+    let suffix_node_count = ir.nodes.len().saturating_sub(prefix.node_count);
+    if ir.direction != GraphDirection::LR
+        || prefix.node_count == 0
+        || prefix.edge_count.checked_add(1) != Some(prefix.node_count)
+        || prefix.node_count > ir.nodes.len()
+        || prefix.edge_count > ir.edges.len()
+        || prefix.node_count > layout.nodes.len()
+        || prefix.edge_count > layout.edges.len()
+        || ir.edges.len().checked_add(1) != Some(ir.nodes.len())
+        || ir.edges.len().saturating_sub(prefix.edge_count) != suffix_node_count
+    {
+        return false;
+    }
+
+    for (suffix_offset, edge) in ir.edges[prefix.edge_count..].iter().enumerate() {
+        let target = prefix.node_count + suffix_offset;
+        let source = target.saturating_sub(1);
+        if endpoint_node_index(ir, edge.from) != Some(source)
+            || endpoint_node_index(ir, edge.to) != Some(target)
+        {
+            return false;
+        }
+    }
+
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let suffix_sizes = ir.nodes[prefix.node_count..]
+        .iter()
+        .map(|node| compute_node_size(ir, node, &metrics))
+        .collect::<Vec<_>>();
+    if suffix_sizes
+        .iter()
+        .any(|&(_, height)| height > prefix.max_node_height)
+    {
+        return false;
+    }
+
+    let spacing = LayoutSpacing::default();
+    let center_y = (prefix.max_node_height / 2.0) + 20.0;
+    let mut depth_cursor = prefix.depth_cursor;
+
+    layout.nodes.truncate(prefix.node_count);
+    layout.nodes.reserve(suffix_node_count);
+    for (suffix_offset, (&(width, height), node)) in suffix_sizes
+        .iter()
+        .zip(&ir.nodes[prefix.node_count..])
+        .enumerate()
+    {
+        let node_index = prefix.node_count + suffix_offset;
+        // Preserve the full path layout's exact floating-point operation order. Reconstructing
+        // `x` from the preceding rendered box is algebraically equivalent but can differ by one
+        // hundredth after SVG formatting because it changes rounding associativity.
+        let center_x = depth_cursor + (width.max(1.0) / 2.0) + 20.0;
+        let x = center_x - (width / 2.0);
+        layout.nodes.push(LayoutNodeBox {
+            node_index,
+            node_id: node.id.clone(),
+            rank: node_index,
+            order: 0,
+            span: node.span_primary,
+            bounds: LayoutRect {
+                x,
+                y: center_y - (height / 2.0),
+                width,
+                height,
+            },
+        });
+        depth_cursor += width.max(1.0) + spacing.rank_spacing;
+    }
+
+    layout.edges.truncate(prefix.edge_count);
+    layout.edges.reserve(suffix_node_count);
+    for (edge_index, edge) in ir.edges.iter().enumerate().skip(prefix.edge_count) {
+        let source = edge_index;
+        let target = edge_index + 1;
+        let Some((source_box, target_box)) = layout.nodes.get(source).zip(layout.nodes.get(target))
+        else {
+            return false;
+        };
+        let (source_anchor, target_anchor) = edge_anchors(source_box, target_box, true);
+        let points =
+            route_edge_points_with_obstacle_index(source_anchor, target_anchor, true, &[], None);
+        layout.edges.push(LayoutEdgePath {
+            edge_index,
+            span: edge.span,
+            points,
+            reversed: false,
+            is_self_loop: false,
+            parallel_offset: 0.0,
+            bundle_count: 1,
+            bundled: false,
+        });
+    }
+
+    layout.clusters = build_cluster_boxes(ir, &layout.nodes, spacing);
+    layout.bounds = compute_bounds(&layout.nodes, &layout.clusters, &layout.edges, spacing);
+    let (total_edge_length, reversed_edge_total_length) =
+        compute_edge_length_metrics(&layout.edges);
+    let phase_iterations = layout.stats.phase_iterations;
+    layout.stats = LayoutStats {
+        node_count: ir.nodes.len(),
+        edge_count: ir.edges.len(),
+        crossing_count: 0,
+        crossing_count_before_refinement: 0,
+        reversed_edges: 0,
+        cycle_count: 0,
+        cycle_node_count: 0,
+        max_cycle_size: 0,
+        collapsed_clusters: 0,
+        reversed_edge_total_length,
+        total_edge_length,
+        phase_iterations,
+    };
+    layout.cycle_clusters.clear();
+    layout.dirty_regions.clear();
+    true
 }
 
 /// Lay out a diagram using a deterministic radial tree variant.
 #[must_use]
 pub fn layout_diagram_radial(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_radial_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_radial_traced(ir).layout)
 }
 
 /// Lay out using the radial tree algorithm and return tracing information.
@@ -4445,7 +5212,7 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     if node_count == 0 {
         return TracedLayout {
-            layout: DiagramLayout {
+            layout: Arc::new(DiagramLayout {
                 nodes: Vec::new(),
                 clusters: Vec::new(),
                 cycle_clusters: Vec::new(),
@@ -4459,7 +5226,7 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 stats: LayoutStats::default(),
                 extensions: LayoutExtensions::default(),
                 dirty_regions: Vec::new(),
-            },
+            }),
             trace,
         };
     }
@@ -4579,7 +5346,7 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     };
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters,
             cycle_clusters: Vec::new(),
@@ -4588,14 +5355,14 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             stats,
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
 
 #[must_use]
 pub fn layout_diagram_timeline(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_timeline_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_timeline_traced(ir).layout)
 }
 
 #[must_use]
@@ -4629,8 +5396,13 @@ pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     }
     period_indexes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
 
-    let period_set: BTreeSet<usize> = period_indexes.iter().copied().collect();
-    let mut events_by_period: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    // `period_set` / `events_by_period` are read by membership/key only (never iterated for output
+    // order — the layout order comes from `period_indexes` below), so `FxHash*` replaces the
+    // `BTreeSet`/`BTreeMap`'s O(log N) inserts/lookups + per-node B-tree allocations (the `BTreeMap<usize,
+    // …>::insert` was ~9% of timeline layout) with O(1) hashing. `values_mut()` only sorts each Vec
+    // independently, so iteration order there is irrelevant. Byte-identical output.
+    let period_set: FxHashSet<usize> = period_indexes.iter().copied().collect();
+    let mut events_by_period: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
     for edge in &ir.edges {
         let Some(source) = endpoint_node_index(ir, edge.from) else {
             continue;
@@ -4649,7 +5421,9 @@ pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     let period_gap_x = spacing.rank_spacing + 104.0;
     let event_gap_y = spacing.node_spacing + 22.0;
-    let mut assigned = BTreeSet::new();
+    // Membership set (`.insert` returns the same newly-inserted bool, `.contains` the same result); never
+    // iterated, so `FxHashSet` is byte-identical and skips the BTreeSet's O(log N) inserts + node allocs.
+    let mut assigned: FxHashSet<usize> = FxHashSet::default();
 
     for (period_order, period_index) in period_indexes.iter().enumerate() {
         let x = period_order as f32 * period_gap_x;
@@ -4695,22 +5469,32 @@ pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         trace,
         true,
     );
-    traced.layout.extensions.axis_ticks = period_indexes
+    // Axis tick x-positions via a node_index -> center_x map (was a linear `layout.nodes.iter().find`
+    // PER period_index — and the timeline gives most events a distinct period, so `period_indexes ≈ nodes`,
+    // making this O(N²), ~half of timeline layout). One O(N) pass builds the map; owned `f32` values so the
+    // subsequent `traced.layout.extensions` write doesn't conflict with a borrow of `traced.layout.nodes`.
+    // Byte-identical: same center_x per node_index, same label, same `period_indexes` order (a node_index
+    // absent from the map — i.e. not in `layout.nodes` — is dropped, exactly like the old `find`'s `None`).
+    let center_x_by_index: FxHashMap<usize, f32> = traced
+        .layout
+        .nodes
+        .iter()
+        .map(|node| (node.node_index, node.bounds.center().x))
+        .collect();
+    // Freshly built by `finalize_specialized_layout` (refcount 1), so `make_mut` is a
+    // clone-free borrow that lets us attach the timeline extensions in place.
+    let layout = Arc::make_mut(&mut traced.layout);
+    layout.extensions.axis_ticks = period_indexes
         .into_iter()
         .filter_map(|node_index| {
-            let node = traced
-                .layout
-                .nodes
-                .iter()
-                .find(|node| node.node_index == node_index)?;
+            let position = *center_x_by_index.get(&node_index)?;
             Some(LayoutAxisTick {
                 label: layout_label_text(ir, node_index).to_string(),
-                position: node.bounds.center().x,
+                position,
             })
         })
         .collect();
-    traced.layout.extensions.bands = traced
-        .layout
+    layout.extensions.bands = layout
         .clusters
         .iter()
         .filter_map(|cluster| {
@@ -4738,7 +5522,7 @@ pub fn layout_diagram_timeline_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 /// messages stacked vertically in declaration order.
 #[must_use]
 pub fn layout_diagram_sequence(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_sequence_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_sequence_traced(ir).layout)
 }
 
 #[must_use]
@@ -4757,7 +5541,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     if node_count == 0 {
         return TracedLayout {
-            layout: DiagramLayout {
+            layout: Arc::new(DiagramLayout {
                 nodes: Vec::new(),
                 clusters: Vec::new(),
                 cycle_clusters: Vec::new(),
@@ -4771,7 +5555,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 stats: LayoutStats::default(),
                 extensions: LayoutExtensions::default(),
                 dirty_regions: Vec::new(),
-            },
+            }),
             trace,
         };
     }
@@ -4890,7 +5674,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 // Self-message: draw a loop to the right and back.
                 let loop_width = spacing.sequence_self_loop_width;
                 let loop_height = message_gap * 0.6;
-                vec![
+                smallvec![
                     LayoutPoint { x: source_x, y },
                     LayoutPoint {
                         x: source_x + loop_width,
@@ -4906,7 +5690,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                     },
                 ]
             } else {
-                vec![
+                smallvec![
                     LayoutPoint { x: source_x, y },
                     LayoutPoint { x: target_x, y },
                 ]
@@ -5206,7 +5990,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     };
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters: participant_group_clusters,
             cycle_clusters: Vec::new(),
@@ -5240,7 +6024,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 node_centrality: Vec::new(),
             },
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
@@ -5388,7 +6172,7 @@ fn build_sequence_fragment_geometry(
 
 #[must_use]
 pub fn layout_diagram_gantt(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_gantt_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_gantt_traced(ir).layout)
 }
 
 #[must_use]
@@ -5480,21 +6264,23 @@ fn layout_diagram_gantt_fallback(ir: &MermaidDiagramIr) -> TracedLayout {
         trace,
         true,
     );
-    traced.layout.extensions.axis_ticks = ordered_hints
+    // Freshly built by `finalize_specialized_layout` (refcount 1) ⇒ clone-free `make_mut`.
+    let layout = Arc::make_mut(&mut traced.layout);
+    layout.extensions.axis_ticks = ordered_hints
         .iter()
         .enumerate()
         .filter_map(|(slot, hint)| {
-            let node = traced.layout.nodes.iter().find(|node| node.rank == slot)?;
+            let node = layout.nodes.iter().find(|node| node.rank == slot)?;
             Some(LayoutAxisTick {
                 label: hint.to_string(),
                 position: node.bounds.center().x,
             })
         })
         .collect();
-    traced.layout.extensions.bands = section_to_nodes
+    layout.extensions.bands = section_to_nodes
         .iter()
         .filter_map(|(section, node_indexes)| {
-            let bounds = layout_bounds_for_nodes(&traced.layout, node_indexes, 24.0)?;
+            let bounds = layout_bounds_for_nodes(&*layout, node_indexes, 24.0)?;
             Some(LayoutBand {
                 kind: LayoutBandKind::Section,
                 label: section.clone(),
@@ -5530,7 +6316,14 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
     let mut explicit_starts = vec![None; task_count];
     let mut durations = vec![1_i32; task_count];
     let mut milestones = vec![false; task_count];
-    let mut task_id_to_idx = BTreeMap::new();
+    // Lookup-only (built once below, read via `.get` for dependency resolution; never iterated — the
+    // resolved order comes from the task list). An `FxHashMap` replaces the `BTreeMap<String, _>`'s
+    // O(log N) String-comparison (memcmp) inserts/lookups with O(1) hashing — memcmp was ~25% of gantt
+    // layout on the fixture's `after t{n-1}` dependency chain. Presized to task_count to avoid rehashing.
+    // Keys BORROW from `gantt_meta` (which outlives this call) rather than owning per-task `String`
+    // clones — the clone showed as ~3.5% of gantt layout. Byte-identical output.
+    let mut task_id_to_idx: FxHashMap<&str, usize> =
+        FxHashMap::with_capacity_and_hasher(task_count, Default::default());
     let excluded_dates = expand_gantt_excluded_dates(gantt_meta);
     let skip_weekends = gantt_meta
         .excludes
@@ -5544,7 +6337,7 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         milestones[task_idx] =
             matches!(task.task_type, GanttTaskType::Milestone) || durations[task_idx] == 0;
         if let Some(task_id) = task.task_id.as_ref() {
-            task_id_to_idx.entry(task_id.clone()).or_insert(task_idx);
+            task_id_to_idx.entry(task_id.as_str()).or_insert(task_idx);
         }
     }
 
@@ -5552,6 +6345,21 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
     let section_count = gantt_meta.sections.len().max(1);
     let mut start_days = vec![base_start_day; task_count];
     let mut end_exclusive_days = vec![base_start_day; task_count];
+
+    // Resolve each task's primary-dependency task index ONCE. The fixpoint below is O(task_count)
+    // iterations, and its inner loop previously did a `task_id_to_idx` (BTreeMap<String, _>) lookup per
+    // task per iteration — O(task_count^2 log) string comparisons (memcmp was ~22% of gantt layout on a
+    // dependency chain). `task_id_to_idx` is fully built above and never mutated, so the resolved index
+    // is loop-invariant; hoist it. Byte-identical: `dep_idx_by_task[i]` is `Some` exactly when the old
+    // `.get(after_id)` succeeded, and both the "no dependency" and "unresolved dependency" cases fell
+    // through to `section_end` before.
+    let dep_idx_by_task: Vec<Option<usize>> = gantt_meta
+        .tasks
+        .iter()
+        .map(|task| {
+            gantt_task_primary_dependency(task).and_then(|id| task_id_to_idx.get(id).copied())
+        })
+        .collect();
 
     for _ in 0..=task_count {
         let mut changed = false;
@@ -5561,10 +6369,10 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
             let section_idx = task.section_idx.min(section_count.saturating_sub(1));
             let start = if let Some(explicit) = explicit_starts[task_idx] {
                 explicit
-            } else if let Some(after_task_id) = gantt_task_primary_dependency(task) {
-                task_id_to_idx
-                    .get(after_task_id)
-                    .and_then(|dep_idx| end_exclusive_days.get(*dep_idx).copied())
+            } else if let Some(dep_idx) = dep_idx_by_task[task_idx] {
+                end_exclusive_days
+                    .get(dep_idx)
+                    .copied()
                     .unwrap_or(section_end[section_idx])
             } else {
                 section_end[section_idx]
@@ -5618,10 +6426,10 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         }
 
         let section_idx = task.section_idx.min(section_count.saturating_sub(1));
-        let section_label = gantt_meta
+        let section_label: &str = gantt_meta
             .sections
             .get(section_idx)
-            .map_or_else(|| "Backlog".to_string(), |section| section.name.clone());
+            .map_or("Backlog", |section| section.name.as_str());
 
         while section_to_nodes.len() <= section_idx {
             let idx = section_to_nodes.len();
@@ -5646,10 +6454,18 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         rank_by_node[node_index] =
             usize::try_from((start_days[task_idx] - min_start_day).max(0)).unwrap_or(0);
         order_by_node[node_index] = row_index + section_idx * 128;
-        section_to_nodes
-            .entry(section_label)
-            .or_default()
-            .push(node_index);
+        // The pre-populate loop above already inserted every present section, so `entry` would clone
+        // `section_label` only to drop it on the (common) hit. Borrow-lookup first; allocate a key
+        // just on the rare miss — the empty-sections `"Backlog"` case, exactly as the original did.
+        // Byte-identical map contents.
+        if let Some(nodes) = section_to_nodes.get_mut(section_label) {
+            nodes.push(node_index);
+        } else {
+            section_to_nodes
+                .entry(section_label.to_string())
+                .or_default()
+                .push(node_index);
+        }
         per_section_counts[section_idx] += 1;
 
         let next_is_new_section = gantt_meta
@@ -5672,16 +6488,18 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         true,
     );
 
-    traced.layout.extensions.axis_ticks = (0..=total_span_days)
+    // Freshly built by `finalize_specialized_layout` (refcount 1) ⇒ clone-free `make_mut`.
+    let layout = Arc::make_mut(&mut traced.layout);
+    layout.extensions.axis_ticks = (0..=total_span_days)
         .map(|day_offset| LayoutAxisTick {
             label: format_gantt_axis_tick(min_start_day.saturating_add(day_offset as i32)),
             position: day_offset as f32 * base_col_width,
         })
         .collect();
-    traced.layout.extensions.bands = section_to_nodes
+    layout.extensions.bands = section_to_nodes
         .iter()
         .filter_map(|(section, node_indexes)| {
-            let bounds = layout_bounds_for_nodes(&traced.layout, node_indexes, 24.0)?;
+            let bounds = layout_bounds_for_nodes(&*layout, node_indexes, 24.0)?;
             Some(LayoutBand {
                 kind: LayoutBandKind::Section,
                 label: section.clone(),
@@ -5694,7 +6512,7 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
 
 #[must_use]
 pub fn layout_diagram_xychart(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_xychart_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_xychart_traced(ir).layout)
 }
 
 #[must_use]
@@ -5717,7 +6535,7 @@ pub fn layout_diagram_xychart_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         0,
     );
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes: Vec::new(),
             clusters: Vec::new(),
             cycle_clusters: Vec::new(),
@@ -5744,7 +6562,7 @@ pub fn layout_diagram_xychart_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             },
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
@@ -5853,35 +6671,37 @@ fn layout_diagram_xychart_from_meta(
         }
 
         if matches!(series.kind, IrXySeriesKind::Line | IrXySeriesKind::Area) {
-            for edge_index in ir
-                .edges
+            // Was O(series × edges × nodes): the `series.nodes.iter().any` membership filter AND the two
+            // `nodes.iter().find` endpoint lookups were LINEAR scans PER edge, and a line series has one
+            // edge per point (edges ≈ nodes) ⇒ O(N²). Build a series-membership `FxHashSet` and a
+            // node_index -> center `FxHashMap` once, then O(1) per edge. Byte-identical: `contains` matches
+            // `any`, and the map's center for `node_index` equals the (unique) node the `find` returned;
+            // edges are `sort_by_key`ed by `edge_index` below, so push order is irrelevant anyway.
+            let series_members: FxHashSet<usize> = series.nodes.iter().map(|node| node.0).collect();
+            let center_by_index: FxHashMap<usize, _> = nodes
                 .iter()
-                .enumerate()
-                .filter_map(|(edge_index, edge)| {
-                    let source = endpoint_node_index(ir, edge.from)?;
-                    let target = endpoint_node_index(ir, edge.to)?;
-                    if series.nodes.iter().any(|node| node.0 == source)
-                        && series.nodes.iter().any(|node| node.0 == target)
-                    {
-                        Some((edge_index, source, target, edge.span))
-                    } else {
-                        None
-                    }
-                })
-            {
-                let (edge_index, source, target, span) = edge_index;
-                let Some(source_bounds) = nodes.iter().find(|node| node.node_index == source)
-                else {
+                .map(|node| (node.node_index, node.bounds.center()))
+                .collect();
+            for (edge_index, edge) in ir.edges.iter().enumerate() {
+                let Some(source) = endpoint_node_index(ir, edge.from) else {
                     continue;
                 };
-                let Some(target_bounds) = nodes.iter().find(|node| node.node_index == target)
-                else {
+                let Some(target) = endpoint_node_index(ir, edge.to) else {
+                    continue;
+                };
+                if !series_members.contains(&source) || !series_members.contains(&target) {
+                    continue;
+                }
+                let Some(&source_center) = center_by_index.get(&source) else {
+                    continue;
+                };
+                let Some(&target_center) = center_by_index.get(&target) else {
                     continue;
                 };
                 edges.push(LayoutEdgePath {
                     edge_index,
-                    span,
-                    points: vec![source_bounds.bounds.center(), target_bounds.bounds.center()],
+                    span: edge.span,
+                    points: smallvec![source_center, target_center],
                     reversed: false,
                     is_self_loop: false,
                     parallel_offset: 0.0,
@@ -5905,7 +6725,7 @@ fn layout_diagram_xychart_from_meta(
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters: Vec::new(),
             cycle_clusters: Vec::new(),
@@ -5927,7 +6747,7 @@ fn layout_diagram_xychart_from_meta(
             },
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
@@ -6137,12 +6957,34 @@ fn format_gantt_axis_tick(days_since_epoch: i32) -> String {
     let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
     let year = year + i32::from(month <= 2);
+    // Fast path: write the fixed 10-byte `YYYY-MM-DD` directly instead of `format!`'s
+    // `Formatter`/`pad_integral` zero-pad machinery — this runs once per axis-tick DAY (the entire
+    // timeline span) and was ~30% of gantt layout (format_inner + fmt::write + i32 Display + pad_integral).
+    // Gated so every field is exactly its padded width: year 4 digits (0..10000), month/day 2 digits
+    // (0..100 — always true for the 1..=12 / 1..=31 the civil-date algorithm above yields). Byte-identical
+    // to the `format!` fallback on this range; wider/negative years (unreachable for real gantt dates) keep
+    // `format!`. Mirrors the parser's `normalize_gantt_date_with_format` fast path.
+    if (0..10_000).contains(&year) && (0..100).contains(&month) && (0..100).contains(&day) {
+        let y = year as u32;
+        let m = month as u32;
+        let d = day as u32;
+        let mut b = [b'-'; 10];
+        b[0] = b'0' + (y / 1000) as u8;
+        b[1] = b'0' + (y / 100 % 10) as u8;
+        b[2] = b'0' + (y / 10 % 10) as u8;
+        b[3] = b'0' + (y % 10) as u8;
+        b[5] = b'0' + (m / 10) as u8;
+        b[6] = b'0' + (m % 10) as u8;
+        b[8] = b'0' + (d / 10) as u8;
+        b[9] = b'0' + (d % 10) as u8;
+        return String::from_utf8(b.to_vec()).expect("ascii date digits");
+    }
     format!("{year:04}-{month:02}-{day:02}")
 }
 
 #[must_use]
 pub fn layout_diagram_sankey(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_sankey_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_sankey_traced(ir).layout)
 }
 
 #[must_use]
@@ -6224,12 +7066,14 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         trace,
         true,
     );
-    traced.layout.extensions.bands = nodes_by_rank
+    // Freshly built by `finalize_specialized_layout` (refcount 1) ⇒ clone-free `make_mut`.
+    let layout = Arc::make_mut(&mut traced.layout);
+    layout.extensions.bands = nodes_by_rank
         .keys()
         .copied()
         .filter_map(|rank| {
             layout_band_for_rank(
-                &traced.layout,
+                &*layout,
                 rank,
                 LayoutBandKind::Column,
                 format!("column {}", rank + 1),
@@ -6242,7 +7086,7 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
 #[must_use]
 pub fn layout_diagram_grid(ir: &MermaidDiagramIr) -> DiagramLayout {
-    layout_diagram_grid_traced(ir).layout
+    Arc::unwrap_or_clone(layout_diagram_grid_traced(ir).layout)
 }
 
 #[must_use]
@@ -6393,7 +7237,7 @@ fn layout_diagram_pie_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         let sweep = (value / total) * 2.0 * PI;
         let mid_angle = angle_cursor + sweep / 2.0;
 
-        let (label_w, label_h) = metrics.estimate_dimensions(&display_node_label(ir, node));
+        let (label_w, label_h) = metrics.estimate_dimensions(display_node_label_ref(ir, node));
         let node_w = label_w + 24.0;
         let node_h = label_h + 16.0;
 
@@ -6441,7 +7285,7 @@ fn layout_diagram_pie_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     }
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters: Vec::new(),
             cycle_clusters: Vec::new(),
@@ -6453,7 +7297,7 @@ fn layout_diagram_pie_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             },
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
@@ -6499,7 +7343,7 @@ fn layout_diagram_quadrant_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             .unwrap_or(0.5)
             .clamp(0.0, 1.0);
 
-        let (label_w, label_h) = metrics.estimate_dimensions(&display_node_label(ir, node));
+        let (label_w, label_h) = metrics.estimate_dimensions(display_node_label_ref(ir, node));
         let node_w = (label_w + 20.0).max(12.0);
         let node_h = (label_h + 12.0).max(12.0);
 
@@ -6524,7 +7368,7 @@ fn layout_diagram_quadrant_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let total_h = margin_top + chart_h + 40.0;
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters: Vec::new(),
             cycle_clusters: Vec::new(),
@@ -6541,7 +7385,7 @@ fn layout_diagram_quadrant_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             },
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
@@ -6556,7 +7400,7 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     if node_count == 0 {
         return TracedLayout {
-            layout: DiagramLayout {
+            layout: Arc::new(DiagramLayout {
                 nodes: Vec::new(),
                 clusters: Vec::new(),
                 cycle_clusters: Vec::new(),
@@ -6570,7 +7414,7 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 stats: LayoutStats::default(),
                 extensions: LayoutExtensions::default(),
                 dirty_regions: Vec::new(),
-            },
+            }),
             trace,
         };
     }
@@ -6636,7 +7480,7 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     );
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters,
             cycle_clusters: Vec::new(),
@@ -6649,7 +7493,7 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             },
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
@@ -6673,11 +7517,18 @@ fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     }
 
     let ranks = layered_ranks(ir);
-    let mut nodes_by_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    // Dense rank index: kanban/journey assign ~a distinct rank per row, so ranks run 0..max densely.
+    // A `Vec<Vec>` indexed by rank iterates in the SAME sorted-rank order as the old `BTreeMap<usize,
+    // Vec>` (index order == key order) while dropping the per-node O(log) B-tree insert + node allocs
+    // and the tree-walk iterations below (`nodes_by_rank` insert + keys-scan was ~13% of journey layout).
+    // Byte-identical: a gap (empty) rank produces no `rank_bounds` entry, so the band `filter_map` skips
+    // it exactly as an absent BTreeMap key did; and the centre loop's empty inner loop is a no-op there.
+    let rank_count = ranks.iter().copied().max().map_or(0, |m| m + 1);
+    let mut nodes_by_rank: Vec<Vec<usize>> = vec![Vec::new(); rank_count];
     for (node_index, rank) in ranks.iter().copied().enumerate() {
-        nodes_by_rank.entry(rank).or_default().push(node_index);
+        nodes_by_rank[rank].push(node_index);
     }
-    for nodes in nodes_by_rank.values_mut() {
+    for nodes in nodes_by_rank.iter_mut() {
         nodes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
     }
 
@@ -6688,10 +7539,10 @@ fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     let column_gap = spacing.rank_spacing + 170.0;
     let row_gap = spacing.node_spacing + 22.0;
-    for (rank, nodes) in &nodes_by_rank {
+    for (rank, nodes) in nodes_by_rank.iter().enumerate() {
         for (order_index, node_index) in nodes.iter().enumerate() {
-            centers[*node_index] = (*rank as f32 * column_gap, order_index as f32 * row_gap);
-            rank_by_node[*node_index] = *rank;
+            centers[*node_index] = (rank as f32 * column_gap, order_index as f32 * row_gap);
+            rank_by_node[*node_index] = rank;
             order_by_node[*node_index] = order_index;
         }
     }
@@ -6705,17 +7556,52 @@ fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         trace,
         true,
     );
-    traced.layout.extensions.bands = nodes_by_rank
-        .keys()
-        .copied()
+    // Lane bands: the per-rank `layout_band_for_rank` re-scanned ALL nodes twice per rank (build the
+    // rank's index list + `layout_bounds_for_nodes`' all-nodes membership loop), i.e. O(ranks × nodes) —
+    // the kanban/journey layout assigns a distinct rank per row, so ranks ≈ nodes and this was O(N²)
+    // (60% of journey layout). Accumulate every rank's min/max in ONE pass over the nodes instead.
+    // Byte-identical: same per-rank min/max (over the same nodes, in the same `layout.nodes` order) and
+    // the same `min-padding` / `padding.mul_add(2.0, span)` rect as `layout_bounds_for_nodes(.., 20.0)`;
+    // ranks with no node produce no bounds entry, exactly like that fn's `None`.
+    // Presize to the node count (an upper bound on the distinct-rank count) so the per-node `.entry`
+    // inserts below don't grow+rehash the table as ranks accumulate (`RawTable::reserve_rehash` was ~5%
+    // of journey/kanban layout). Over-reservation is free (never touches the surplus).
+    let mut rank_bounds: FxHashMap<usize, (f32, f32, f32, f32)> =
+        FxHashMap::with_capacity_and_hasher(traced.layout.nodes.len(), Default::default());
+    for node_box in &traced.layout.nodes {
+        let entry = rank_bounds.entry(node_box.rank).or_insert((
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ));
+        entry.0 = entry.0.min(node_box.bounds.x);
+        entry.1 = entry.1.min(node_box.bounds.y);
+        entry.2 = entry.2.max(node_box.bounds.x + node_box.bounds.width);
+        entry.3 = entry.3.max(node_box.bounds.y + node_box.bounds.height);
+    }
+    // Freshly built by `finalize_specialized_layout` (refcount 1) ⇒ clone-free `make_mut`.
+    let layout = Arc::make_mut(&mut traced.layout);
+    layout.extensions.bands = (0..nodes_by_rank.len())
         .filter_map(|rank| {
-            layout_band_for_rank(
-                &traced.layout,
-                rank,
-                LayoutBandKind::Lane,
-                format!("lane {}", rank + 1),
-                20.0,
-            )
+            let (min_x, min_y, max_x, max_y) = *rank_bounds.get(&rank)?;
+            Some(LayoutBand {
+                kind: LayoutBandKind::Lane,
+                // `format!("lane {}", rank + 1)` per lane went through the Formatter (~15% of
+                // journey/kanban layout: format_inner + fmt::write). Build it directly; byte-identical
+                // (`push_usize_decimal` == `usize`'s Display).
+                label: {
+                    let mut label = String::from("lane ");
+                    fm_core::push_usize_decimal(&mut label, rank + 1);
+                    label
+                },
+                bounds: LayoutRect {
+                    x: min_x - 20.0,
+                    y: min_y - 20.0,
+                    width: 20.0_f32.mul_add(2.0, max_x - min_x),
+                    height: 20.0_f32.mul_add(2.0, max_y - min_y),
+                },
+            })
         })
         .collect();
     traced
@@ -6736,13 +7622,19 @@ fn layout_bounds_for_nodes(
     node_indexes: &[usize],
     padding: f32,
 ) -> Option<LayoutRect> {
+    // Membership via a hash set: the old `node_indexes.contains(&idx)` was a LINEAR scan inside the
+    // per-node loop, making this O(nodes × node_indexes) — and it's called once PER SECTION for gantt
+    // bands (`section_to_nodes.iter().filter_map(..)`), so the fallback was O(N²). Byte-identical:
+    // min/max over the same node set is order- and duplicate-independent, so set membership changes
+    // nothing about the result.
+    let wanted: FxHashSet<usize> = node_indexes.iter().copied().collect();
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;
     let mut max_x = f32::NEG_INFINITY;
     let mut max_y = f32::NEG_INFINITY;
 
     for node_box in &layout.nodes {
-        if !node_indexes.contains(&node_box.node_index) {
+        if !wanted.contains(&node_box.node_index) {
             continue;
         }
         min_x = min_x.min(node_box.bounds.x);
@@ -6798,6 +7690,25 @@ fn layered_ranks(ir: &MermaidDiagramIr) -> Vec<usize> {
         return Vec::new();
     }
 
+    // Pre-extract node-id sort keys into a contiguous `Vec<&str>` so the two id-ordered sorts
+    // below compare packed `&str` slices instead of striding through the large `IrNode` struct
+    // array (a cache miss per `ir.nodes[idx].id` deref). Byte-identical (`ids[i]` is exactly
+    // `ir.nodes[i].id`). Same lever as `build_tree_layout_structure`.
+    let ids: Vec<&str> = ir.nodes.iter().map(|node| node.id.as_str()).collect();
+    // Precompute a u64 sort key (first 8 id bytes, big-endian, zero-padded) so each comparison
+    // is an inline integer compare instead of a memcmp that chases the `&str` to the string
+    // bytes. Provably byte-identical: for text ids (no interior NUL) the packed-key order equals
+    // the first-8-byte lexicographic order, and the full `ids` compare stays as a lazy tie-break
+    // (runs only on key ties), so `key.cmp().then(ids.cmp()).then(index)` == the original
+    // `ids.cmp().then(index)`.
+    let id_keys: Vec<u64> = ids.iter().map(|s| pack_id_key(s)).collect();
+    let cmp_by_id = |left: &usize, right: &usize| {
+        id_keys[*left]
+            .cmp(&id_keys[*right])
+            .then_with(|| ids[*left].cmp(ids[*right]))
+            .then_with(|| left.cmp(right))
+    };
+
     let mut outgoing = vec![Vec::<usize>::new(); node_count];
     let mut indegree = vec![0_usize; node_count];
     for edge in &ir.edges {
@@ -6815,12 +7726,12 @@ fn layered_ranks(ir: &MermaidDiagramIr) -> Vec<usize> {
     }
 
     for neighbors in &mut outgoing {
-        neighbors.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+        neighbors.sort_by(&cmp_by_id);
         neighbors.dedup();
     }
 
     let mut sorted_nodes: Vec<usize> = (0..node_count).collect();
-    sorted_nodes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+    sorted_nodes.sort_by(&cmp_by_id);
 
     let mut ranks = vec![0_usize; node_count];
     let mut processed = vec![false; node_count];
@@ -6920,7 +7831,7 @@ fn finalize_specialized_layout(
     };
 
     TracedLayout {
-        layout: DiagramLayout {
+        layout: Arc::new(DiagramLayout {
             nodes,
             clusters,
             cycle_clusters: Vec::new(),
@@ -6929,7 +7840,7 @@ fn finalize_specialized_layout(
             stats,
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
-        },
+        }),
         trace,
     }
 }
@@ -6937,11 +7848,54 @@ fn finalize_specialized_layout(
 #[derive(Debug, Clone)]
 struct TreeLayoutStructure {
     roots: Vec<usize>,
-    children: Vec<Vec<usize>>,
+    children: TreeChildren,
     depth: Vec<usize>,
     max_depth: usize,
     horizontal_depth_axis: bool,
     reverse_depth_axis: bool,
+}
+
+/// CSR (compressed-sparse-row) adjacency for the layout tree's children: one flat `Vec<usize>` holding
+/// every node's children contiguously, plus per-node `start`/`len`, instead of a `Vec<Vec<usize>>` that
+/// heap-allocated a separate inner `Vec` per node (one live allocation per node through the whole
+/// tree-positioning phase). `of(node)` returns the child slice; all consumers only read it as a slice
+/// (`.iter()`/`.len()`/`.is_empty()`/index), so the swap is purely an allocation change. The BFS builds it
+/// in the same order the per-node `Vec`s were filled (children pushed contiguously when a node is
+/// dequeued, then each segment sorted in place by id), so layout output is byte-identical (golden-pinned).
+#[derive(Default, Debug, Clone)]
+struct TreeChildren {
+    flat: Vec<usize>,
+    start: Vec<usize>,
+    len: Vec<usize>,
+}
+
+impl TreeChildren {
+    fn of(&self, node: usize) -> &[usize] {
+        let start = self.start[node];
+        &self.flat[start..start + self.len[node]]
+    }
+
+    fn node_count(&self) -> usize {
+        self.start.len()
+    }
+}
+
+/// Pack the first 8 bytes of an id into a big-endian, zero-padded `u64` so that `u64`
+/// comparison reproduces the byte-lexicographic order of those bytes. Zero-padding is
+/// order-preserving for text ids (which never contain an interior NUL): a shorter string's
+/// implicit trailing zeros sort before any real byte, exactly as a prefix sorts before its
+/// extensions. Used as the fast path for id-ordered node sorts; ties fall back to the full
+/// `&str` compare, so the overall ordering is unchanged.
+#[inline]
+fn pack_id_key(s: &str) -> u64 {
+    let b = s.as_bytes();
+    let mut k = 0u64;
+    let mut i = 0;
+    while i < 8 {
+        k = (k << 8) | u64::from(*b.get(i).unwrap_or(&0));
+        i += 1;
+    }
+    k
 }
 
 fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
@@ -6952,7 +7906,7 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
     if node_count == 0 {
         return TreeLayoutStructure {
             roots: Vec::new(),
-            children: Vec::new(),
+            children: TreeChildren::default(),
             depth: Vec::new(),
             max_depth: 0,
             horizontal_depth_axis,
@@ -6960,29 +7914,87 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
         };
     }
 
-    let mut outgoing = vec![Vec::new(); node_count];
+    // Pre-extract the node-id sort keys into a contiguous `Vec<&str>`. The three sorts below
+    // order by node id (then index); reading `ir.nodes[idx].id` for a random `idx` during a
+    // sort strides through the large `IrNode` struct array (a cache miss per comparison),
+    // whereas a flat `&str` slice is cache-friendly. Byte-identical: `ids[i]` is exactly
+    // `ir.nodes[i].id`, so every comparison and tie-break is unchanged.
+    let ids: Vec<&str> = ir.nodes.iter().map(|node| node.id.as_str()).collect();
+    // Precompute a u64 sort key (first 8 id bytes, big-endian, zero-padded) so each comparison
+    // is an inline integer compare instead of a memcmp that chases the `&str` to the string
+    // bytes. Provably byte-identical: for text ids (no interior NUL) the packed-key order equals
+    // the first-8-byte lexicographic order, and the full `ids` compare stays as a lazy tie-break
+    // (runs only on key ties), so `key.cmp().then(ids.cmp()).then(index)` == the original
+    // `ids.cmp().then(index)`.
+    let id_keys: Vec<u64> = ids.iter().map(|s| pack_id_key(s)).collect();
+    let cmp_by_id = |left: &usize, right: &usize| {
+        id_keys[*left]
+            .cmp(&id_keys[*right])
+            .then_with(|| ids[*left].cmp(ids[*right]))
+            .then_with(|| left.cmp(right))
+    };
+
+    // CSR adjacency: one flat `Vec` of targets + per-source `[out_start[n], out_start[n]+out_len[n])`
+    // ranges, instead of a `Vec<Vec<usize>>` that heap-allocated one inner `Vec` per source (~one per
+    // node on a chain/tree). Two cheap `endpoint_node_index` passes over the edges (a bounds-checked
+    // field read): count raw out-degrees + indegrees, then fill. Each source's segment is sorted and
+    // deduped IN PLACE, its post-dedup length recorded in `out_len`. Byte-identical to the old
+    // push-then-`sort_by`+`dedup`: same targets, same order, same consecutive-duplicate removal, and
+    // `indegree` still counts RAW edges (pre-dedup) exactly as the old push loop did.
     let mut indegree = vec![0_usize; node_count];
-    for edge in &ir.edges {
-        let Some(source) = endpoint_node_index(ir, edge.from) else {
-            continue;
-        };
-        let Some(target) = endpoint_node_index(ir, edge.to) else {
-            continue;
-        };
+    let mut out_start = vec![0_usize; node_count + 1];
+    let resolve = |edge: &fm_core::IrEdge| -> Option<(usize, usize)> {
+        let source = endpoint_node_index(ir, edge.from)?;
+        let target = endpoint_node_index(ir, edge.to)?;
         if source >= node_count || target >= node_count || source == target {
+            return None;
+        }
+        Some((source, target))
+    };
+    for edge in &ir.edges {
+        if let Some((source, target)) = resolve(edge) {
+            out_start[source + 1] += 1;
+            indegree[target] = indegree[target].saturating_add(1);
+        }
+    }
+    for i in 1..out_start.len() {
+        out_start[i] += out_start[i - 1];
+    }
+    let mut out_flat = vec![0_usize; out_start[node_count]];
+    let mut out_len = vec![0_usize; node_count];
+    {
+        let mut cursor = out_start.clone();
+        for edge in &ir.edges {
+            if let Some((source, target)) = resolve(edge) {
+                out_flat[cursor[source]] = target;
+                cursor[source] += 1;
+            }
+        }
+    }
+    for node in 0..node_count {
+        let segment = &mut out_flat[out_start[node]..out_start[node + 1]];
+        // A 0- or 1-element out-edge segment is already sorted and duplicate-free, so skip the `sort_by`
+        // machinery and the dedup scan. Chain/tree flowcharts — the common shape — have out-degree ≤ 1
+        // per node, so `sort_by` was otherwise invoked on a length-≤1 slice once per node (pure call +
+        // driftsort-entry overhead: ~5% of flowchart layout self-time). Byte-identical.
+        if segment.len() <= 1 {
+            out_len[node] = segment.len();
             continue;
         }
-        outgoing[source].push(target);
-        indegree[target] = indegree[target].saturating_add(1);
-    }
-
-    for neighbors in &mut outgoing {
-        neighbors.sort_by(|left, right| compare_node_indices(ir, *left, *right));
-        neighbors.dedup();
+        segment.sort_by(&cmp_by_id);
+        // Compact consecutive duplicates to the front (== `Vec::dedup` on the sorted segment).
+        let mut len = 0_usize;
+        for r in 0..segment.len() {
+            if len == 0 || segment[r] != segment[len - 1] {
+                segment[len] = segment[r];
+                len += 1;
+            }
+        }
+        out_len[node] = len;
     }
 
     let mut sorted_nodes: Vec<usize> = (0..node_count).collect();
-    sorted_nodes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+    sorted_nodes.sort_by(&cmp_by_id);
 
     let mut candidate_roots: Vec<usize> = sorted_nodes
         .iter()
@@ -6997,7 +8009,11 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
 
     let mut visited = vec![false; node_count];
     let mut depth = vec![0_usize; node_count];
-    let mut children = vec![Vec::new(); node_count];
+    let mut children = TreeChildren {
+        flat: Vec::new(),
+        start: vec![0_usize; node_count],
+        len: vec![0_usize; node_count],
+    };
     let mut roots = Vec::new();
 
     for candidate in candidate_roots
@@ -7018,20 +8034,38 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
             queue_index = queue_index.saturating_add(1);
             let child_depth = depth[node].saturating_add(1);
 
-            for &child in &outgoing[node] {
+            // Children are appended contiguously while `node` is being processed, so a single flat `Vec`
+            // + per-node start/len reproduces the old per-node `Vec` exactly (CSR).
+            children.start[node] = children.flat.len();
+            for &child in &out_flat[out_start[node]..out_start[node] + out_len[node]] {
                 if visited[child] {
                     continue;
                 }
                 visited[child] = true;
                 depth[child] = child_depth;
-                children[node].push(child);
+                children.flat.push(child);
                 queue.push(child);
             }
+            children.len[node] = children.flat.len() - children.start[node];
         }
     }
 
-    for node_children in &mut children {
-        node_children.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+    // No per-node child-segment sort: each node's children are appended from its `out_flat` out-edge
+    // segment — which was sorted by `cmp_by_id` above — in order, skipping already-visited nodes. A
+    // subsequence of a sequence sorted by a total order (`cmp_by_id`'s final tiebreak is the node index)
+    // is itself sorted, so the previous `sort_by(&cmp_by_id)` here was re-sorting already-sorted data.
+    // The `debug_assert` guards the invariant (held across all 439 layout tests incl. the random-edit /
+    // equivalence / determinism suites + goldens); it compiles out of release builds.
+    #[cfg(debug_assertions)]
+    for node in 0..node_count {
+        let start = children.start[node];
+        let end = start + children.len[node];
+        debug_assert!(
+            children.flat[start..end]
+                .windows(2)
+                .all(|w| cmp_by_id(&w[0], &w[1]) != std::cmp::Ordering::Greater),
+            "children segment already sorted (appended from sorted out_flat)"
+        );
     }
 
     let max_depth = depth.iter().copied().max().unwrap_or(0);
@@ -7047,12 +8081,12 @@ fn build_tree_layout_structure(ir: &MermaidDiagramIr) -> TreeLayoutStructure {
 
 fn compute_tree_subtree_spans(
     roots: &[usize],
-    children: &[Vec<usize>],
+    children: &TreeChildren,
     node_span_sizes: &[f32],
     spacing: LayoutSpacing,
     memo: &mut [Option<f32>],
 ) {
-    let node_count = children.len();
+    let node_count = children.node_count();
     let mut post_order = Vec::with_capacity(node_count);
 
     let mut state = vec![0_u8; node_count];
@@ -7065,7 +8099,7 @@ fn compute_tree_subtree_spans(
         state[start_node] = 1;
 
         while let Some((node, child_idx)) = stack.pop() {
-            let node_children = &children[node];
+            let node_children = children.of(node);
             if child_idx < node_children.len() {
                 stack.push((node, child_idx + 1));
                 let child = node_children[child_idx];
@@ -7086,14 +8120,15 @@ fn compute_tree_subtree_spans(
         }
 
         let own_span = node_span_sizes[node].max(1.0);
-        let child_span_total = if children[node].is_empty() {
+        let node_children = children.of(node);
+        let child_span_total = if node_children.is_empty() {
             0.0
         } else {
-            let subtree_span_sum: f32 = children[node]
+            let subtree_span_sum: f32 = node_children
                 .iter()
                 .map(|child| memo[*child].unwrap_or(0.0))
                 .sum();
-            let gaps = spacing.node_spacing * (children[node].len().saturating_sub(1) as f32);
+            let gaps = spacing.node_spacing * (node_children.len().saturating_sub(1) as f32);
             subtree_span_sum + gaps
         };
 
@@ -7104,7 +8139,7 @@ fn compute_tree_subtree_spans(
 
 fn compute_all_tree_span_centers(
     roots: &[usize],
-    children: &[Vec<usize>],
+    children: &TreeChildren,
     subtree_spans: &[f32],
     spacing: LayoutSpacing,
     out_centers: &mut [f32],
@@ -7122,20 +8157,21 @@ fn compute_all_tree_span_centers(
         let subtree_span = subtree_spans[node];
         out_centers[node] = span_start + (subtree_span / 2.0);
 
-        if children[node].is_empty() {
+        let node_children = children.of(node);
+        if node_children.is_empty() {
             continue;
         }
 
         let child_total: f32 = spacing.node_spacing.mul_add(
-            children[node].len().saturating_sub(1) as f32,
-            children[node]
+            node_children.len().saturating_sub(1) as f32,
+            node_children
                 .iter()
                 .map(|child| subtree_spans[*child])
                 .sum::<f32>(),
         );
         let mut child_cursor = span_start + ((subtree_span - child_total) / 2.0);
 
-        for &child in &children[node] {
+        for &child in node_children {
             queue.push((child, child_cursor));
             child_cursor += subtree_spans[child] + spacing.node_spacing;
         }
@@ -7194,20 +8230,44 @@ fn rank_orders_from_key(
     rank_by_node: &[usize],
     key_by_node: &[f32],
 ) -> Vec<usize> {
-    let mut by_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for (node_index, rank) in rank_by_node.iter().copied().enumerate() {
-        by_rank.entry(rank).or_default().push(node_index);
+    // Bucket node indices by rank. Ranks here are tree depths — dense small integers (0..height) —
+    // so a flat `Vec`-of-buckets indexed by rank replaces the `BTreeMap`'s O(log R) node-based-tree
+    // inserts and cache-unfriendly traversal with O(1) index pushes. The per-rank `order` assignment
+    // is independent of rank iteration order (each rank numbers its own nodes 0..k), so bucketing by
+    // ascending rank and sorting each bucket by the same key is byte-identical to the BTreeMap form.
+    let Some(&max_rank) = rank_by_node.iter().max() else {
+        return Vec::new(); // no nodes
+    };
+    let n = rank_by_node.len();
+    // CSR bucketing: one flat `Vec` + per-rank offsets replaces the `Vec<Vec<usize>>` — which heap-
+    // allocated one inner `Vec` per rank, i.e. ~one per node on the common deep-chain/tree graph (each
+    // rank holds a single node). Counting-sort node indices into rank-ordered `flat`, then sort and
+    // order-number each rank's contiguous segment exactly as the per-rank `Vec`s were. Byte-identical:
+    // same nodes per rank in the same pre-sort (node-index) order, same (unstable, total-order)
+    // comparator, same `0..k` order assignment.
+    let mut rank_start = vec![0_usize; max_rank + 2];
+    for &rank in rank_by_node {
+        rank_start[rank + 1] += 1;
+    }
+    for i in 1..rank_start.len() {
+        rank_start[i] += rank_start[i - 1];
+    }
+    let mut flat = vec![0_usize; n];
+    let mut cursor = rank_start.clone();
+    for (node_index, &rank) in rank_by_node.iter().enumerate() {
+        flat[cursor[rank]] = node_index;
+        cursor[rank] += 1;
     }
 
-    let mut order_by_node = vec![0_usize; rank_by_node.len()];
-    for (_rank, node_indexes) in by_rank {
-        let mut sorted = node_indexes;
-        sorted.sort_by(|left, right| {
+    let mut order_by_node = vec![0_usize; n];
+    for rank in 0..=max_rank {
+        let segment = &mut flat[rank_start[rank]..rank_start[rank + 1]];
+        segment.sort_by(|left, right| {
             key_by_node[*left]
                 .total_cmp(&key_by_node[*right])
                 .then_with(|| compare_node_indices(ir, *left, *right))
         });
-        for (order, node_index) in sorted.into_iter().enumerate() {
+        for (order, &node_index) in segment.iter().enumerate() {
             order_by_node[node_index] = order;
         }
     }
@@ -7246,17 +8306,18 @@ fn node_boxes_from_centers(
 
 fn radial_leaf_count(
     node_index: usize,
-    children: &[Vec<usize>],
+    children: &TreeChildren,
     memo: &mut [Option<usize>],
 ) -> usize {
     if let Some(cached) = memo[node_index] {
         return cached;
     }
 
-    let count = if children[node_index].is_empty() {
+    let node_children = children.of(node_index);
+    let count = if node_children.is_empty() {
         1
     } else {
-        children[node_index]
+        node_children
             .iter()
             .map(|child| radial_leaf_count(*child, children, memo))
             .sum::<usize>()
@@ -7279,7 +8340,7 @@ fn assign_radial_angles(
     spacing: LayoutSpacing,
     angles: &mut [f32],
 ) {
-    let children = &tree.children[node_index];
+    let children = tree.children.of(node_index);
     if children.is_empty() {
         angles[node_index] = f32::midpoint(start_angle, end_angle);
         return;
@@ -7825,7 +8886,7 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
             Some(LayoutEdgePath {
                 edge_index: ei,
                 span: edge.span,
-                points: vec![from_pt, to_pt],
+                points: smallvec![from_pt, to_pt],
                 reversed: false,
                 is_self_loop: from_idx == to_idx,
                 parallel_offset: 0.0,
@@ -7947,7 +9008,7 @@ fn compute_node_size(
     node: &IrNode,
     metrics: &fm_core::FontMetrics,
 ) -> (f32, f32) {
-    let text = display_node_label(ir, node);
+    let text = display_node_label_ref(ir, node);
 
     match node.shape {
         fm_core::NodeShape::FilledCircle => (20.0, 20.0),
@@ -7955,7 +9016,7 @@ fn compute_node_size(
             if text.is_empty() {
                 (24.0, 24.0)
             } else {
-                let (label_width, label_height) = metrics.estimate_dimensions(&text);
+                let (label_width, label_height) = metrics.estimate_dimensions(text);
                 (
                     (label_width + 52.0).max(42.0),
                     (label_height + 30.0).max(42.0),
@@ -7967,7 +9028,7 @@ fn compute_node_size(
             let text = if text.is_empty() {
                 node.id.as_str()
             } else {
-                &text
+                text
             };
             let (label_width, label_height) = metrics.estimate_dimensions(text);
             let (icon_width, icon_height) = icon_dimensions(node, metrics);
@@ -7976,9 +9037,107 @@ fn compute_node_size(
                 .max(icon_width.mul_add(0.85, label_width))
                 + 72.0;
             let height = label_height + icon_height + 44.0;
-            (width.max(100.0), height.max(52.0))
+            let (width, height) = (width.max(100.0), height.max(52.0));
+            // A class node's box must also hold its compartment stack. The SVG renderer walks the
+            // member rows against the node's own height and `break`s on the first row that would
+            // fall outside it, so a box sized from the label alone SILENTLY DROPS members rather
+            // than overflowing — see `class_compartment_dimensions`.
+            match class_compartment_dimensions(node, metrics) {
+                Some((members_width, members_height)) => {
+                    (width.max(members_width), height.max(members_height))
+                }
+                None => (width, height),
+            }
         }
     }
+}
+
+/// Space a class node needs for its compartment stack (stereotype, name, separators, and one row per
+/// attribute and method). `None` for any node that is not a class node or that declares no members.
+///
+/// This mirrors `fm-render-svg`'s `write_class_compartments_into` cursor advance exactly, because that
+/// renderer drops any member row landing below `y + h - line_h * 0.5` instead of growing the box:
+/// under-sizing here deletes content from the output, so the arithmetic below must stay in step with
+/// the renderer's. Over-sizing is harmless (the extra space renders as padding), so every term is
+/// rounded up rather than fitted tight.
+fn class_compartment_dimensions(
+    node: &IrNode,
+    metrics: &fm_core::FontMetrics,
+) -> Option<(f32, f32)> {
+    let meta = node.class_meta.as_deref()?;
+    if meta.attributes.is_empty() && meta.methods.is_empty() {
+        return None;
+    }
+
+    let line_h = metrics.line_height_px();
+    // Renderer: `member_font_size * config.line_height * 0.9` with `member_font_size = font_size * 0.9`,
+    // i.e. `line_height_px * 0.81`.
+    let row_h = line_h * 0.81;
+
+    // Cursor offsets from the top of the box, in renderer order.
+    let mut height = line_h; // initial `cursor_y = y + line_h` (name baseline)
+    if meta.stereotype.is_some() {
+        height += line_h; // stereotype occupies the first row, name moves down one
+    }
+    height += line_h * 0.5; // name -> separator
+    height += line_h * 0.3; // separator -> first member row
+    height += row_h * meta.attributes.len() as f32;
+    if !meta.attributes.is_empty() && !meta.methods.is_empty() {
+        height += line_h * 0.6; // attribute/method separator (0.3 before + 0.3 after)
+    }
+    height += row_h * meta.methods.len() as f32;
+    // The renderer keeps a row only while `cursor_y <= y + h - line_h * 0.5`, so the box needs that
+    // much slack past the last row's baseline.
+    height += line_h * 0.5;
+    // Mirroring the cursor arithmetic exactly leaves the last row sitting ON the boundary, where f32
+    // rounding — or a render font size that does not match `metrics` — drops it again. Half a row of
+    // margin costs a few pixels of padding and takes the decision off the knife edge.
+    height += row_h * 0.5;
+
+    // Member rows are left-anchored at `x + 8.0`; mirror that padding on the right so the widest row
+    // stays inside the box.
+    let member_width = meta
+        .attributes
+        .iter()
+        .map(|attr| class_member_row_width(attr, false, metrics))
+        .chain(
+            meta.methods
+                .iter()
+                .map(|method| class_member_row_width(method, true, metrics)),
+        )
+        .fold(0.0_f32, f32::max);
+
+    Some((member_width + 16.0, height))
+}
+
+/// Width of one rendered member row. Mirrors the renderer's row text: a visibility symbol, the member
+/// name, a `*`/`$` suffix for abstract/static methods, and a `": {return_type}"` tail.
+fn class_member_row_width(
+    member: &fm_core::IrClassMember,
+    is_method: bool,
+    metrics: &fm_core::FontMetrics,
+) -> f32 {
+    let mut row = String::with_capacity(member.name.len() + 8);
+    row.push(match member.visibility {
+        fm_core::ClassVisibility::Public => '+',
+        fm_core::ClassVisibility::Private => '-',
+        fm_core::ClassVisibility::Protected => '#',
+        fm_core::ClassVisibility::Package => '~',
+    });
+    row.push_str(&member.name);
+    if is_method {
+        if member.is_abstract {
+            row.push('*');
+        } else if member.is_static {
+            row.push('$');
+        }
+    }
+    if let Some(ref return_type) = member.return_type {
+        row.push_str(": ");
+        row.push_str(return_type);
+    }
+    // Rows render at `font_size * 0.9`; `metrics` measures at full size, so scale the estimate down.
+    metrics.estimate_dimensions(&row).0 * 0.9
 }
 
 fn node_size_cache_key(
@@ -7989,21 +9148,31 @@ fn node_size_cache_key(
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     hash_str(&mut hash, &node.id);
     hash_u64(&mut hash, node.shape as u64);
-    hash_str(&mut hash, &display_node_label(ir, node));
-    hash_str(&mut hash, node.icon.as_deref().unwrap_or_default());
+    hash_str(&mut hash, display_node_label_ref(ir, node));
+    hash_str(&mut hash, node.icon().unwrap_or_default());
     hash_u64(&mut hash, u64::from(metrics.font_size().to_bits()));
     hash_u64(&mut hash, u64::from(metrics.avg_char_width().to_bits()));
     hash_u64(&mut hash, u64::from(metrics.line_height_px().to_bits()));
+    // Class members feed `compute_node_size` via `class_compartment_dimensions`, so they belong in the
+    // key: editing a class body without touching its label would otherwise serve the cached size from
+    // before the edit and silently truncate the new members.
+    if let Some(meta) = node.class_meta.as_deref() {
+        hash_u64(&mut hash, meta.attributes.len() as u64);
+        hash_u64(&mut hash, meta.methods.len() as u64);
+        hash_u64(&mut hash, u64::from(meta.stereotype.is_some()));
+        for member in meta.attributes.iter().chain(meta.methods.iter()) {
+            hash_str(&mut hash, &member.name);
+            hash_str(&mut hash, member.return_type.as_deref().unwrap_or_default());
+            hash_u64(&mut hash, member.visibility as u64);
+            hash_u64(&mut hash, u64::from(member.is_static));
+            hash_u64(&mut hash, u64::from(member.is_abstract));
+        }
+    }
     hash
 }
 
 fn icon_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> (f32, f32) {
-    let Some(icon) = node
-        .icon
-        .as_deref()
-        .map(str::trim)
-        .filter(|icon| !icon.is_empty())
-    else {
+    let Some(icon) = node.icon().map(str::trim).filter(|icon| !icon.is_empty()) else {
         return (0.0, 0.0);
     };
 
@@ -8018,15 +9187,23 @@ fn icon_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> (f32, f32) 
 }
 
 fn display_node_label(ir: &MermaidDiagramIr, node: &IrNode) -> String {
+    display_node_label_ref(ir, node).to_string()
+}
+
+/// Borrowing core of [`display_node_label`]: the displayed label text is always either the IR label
+/// text, the node id, or empty — all borrowable from `ir`/`node` — so callers that only READ it (text
+/// measurement, hashing) need not clone. Byte-identical content to `display_node_label`; the owning
+/// version just `.to_string()`s this for callers that store the result.
+fn display_node_label_ref<'a>(ir: &'a MermaidDiagramIr, node: &'a IrNode) -> &'a str {
     let explicit = node
         .label
         .and_then(|label_id| ir.labels.get(label_id.0))
-        .map(|value| value.text.clone());
+        .map(|value| value.text.as_str());
 
     match node.shape {
-        fm_core::NodeShape::FilledCircle | fm_core::NodeShape::HorizontalBar => String::new(),
-        fm_core::NodeShape::DoubleCircle if explicit.is_none() => String::new(),
-        _ => explicit.unwrap_or_else(|| node.id.clone()),
+        fm_core::NodeShape::FilledCircle | fm_core::NodeShape::HorizontalBar => "",
+        fm_core::NodeShape::DoubleCircle if explicit.is_none() => "",
+        _ => explicit.unwrap_or(node.id.as_str()),
     }
 }
 
@@ -8077,7 +9254,11 @@ fn default_cycle_strategy() -> CycleStrategy {
         .unwrap_or_default()
 }
 
-fn cycle_removal(ir: &MermaidDiagramIr, cycle_strategy: CycleStrategy) -> CycleRemovalResult {
+fn cycle_removal(
+    ir: &MermaidDiagramIr,
+    cycle_strategy: CycleStrategy,
+    node_priority: &[usize],
+) -> CycleRemovalResult {
     let node_count = ir.nodes.len();
     if node_count == 0 {
         return CycleRemovalResult {
@@ -8096,15 +9277,24 @@ fn cycle_removal(ir: &MermaidDiagramIr, cycle_strategy: CycleStrategy) -> CycleR
         };
     }
 
-    let node_priority = stable_node_priorities(ir);
-    let cycle_detection = detect_cycle_components(node_count, &edges, &node_priority);
-    let dfs_back_edges = cycle_removal_dfs_back(node_count, &edges, &node_priority);
+    let dfs_back_edges = cycle_removal_dfs_back(node_count, &edges, node_priority);
+    // A directed graph is acyclic iff a DFS finds no back edge. When the graph is
+    // acyclic there are no cyclic components and the cycle summary is empty, so the
+    // (otherwise unconditional) strongly-connected-components pass is pure waste — the
+    // common case for flowcharts. The only fields a full run would additionally populate
+    // (per-node singleton components) feed MFAS-approx, which reverses nothing when there
+    // are no cyclic components, so skipping the pass is output-identical.
+    let cycle_detection = if dfs_back_edges.is_empty() {
+        CycleDetection::default()
+    } else {
+        detect_cycle_components(node_count, &edges, node_priority)
+    };
 
     let reversed_edge_indexes = match cycle_strategy {
-        CycleStrategy::Greedy => cycle_removal_greedy(node_count, &edges, &node_priority),
+        CycleStrategy::Greedy => cycle_removal_greedy(node_count, &edges, node_priority),
         CycleStrategy::DfsBack => dfs_back_edges.clone(),
         CycleStrategy::MfasApprox => {
-            cycle_removal_mfas_approx(node_count, &edges, &node_priority, &cycle_detection)
+            cycle_removal_mfas_approx(node_count, &edges, node_priority, &cycle_detection)
         }
         CycleStrategy::CycleAware => {
             // For CycleAware, we still want to break cycles for the ranking phase
@@ -8512,6 +9702,15 @@ fn cycle_removal_greedy(
 fn apply_ir_constraints(ir: &MermaidDiagramIr, ranks: &mut BTreeMap<usize, usize>) {
     use fm_core::IrConstraint;
 
+    // The overwhelmingly common case (flowchart/block/wide/subgraph — anything without explicit
+    // `SameRank`/`MinLength` directives) has no constraints, and nothing below the `id_to_index` build
+    // mutates `ranks` unless the constraint loop runs. Bail before building the O(N log N)
+    // `BTreeMap<&str, usize>` of every node id (its sorted-collect + per-lookup memcmp was pure waste on
+    // constraint-free graphs). Byte-identical: an empty constraint list leaves `ranks` untouched either way.
+    if ir.constraints.is_empty() {
+        return;
+    }
+
     // Build node-id-to-index lookup.
     let id_to_index: BTreeMap<&str, usize> = ir
         .nodes
@@ -8564,9 +9763,12 @@ fn apply_ir_constraints(ir: &MermaidDiagramIr, ranks: &mut BTreeMap<usize, usize
     }
 }
 
-fn rank_assignment(ir: &MermaidDiagramIr, cycles: &CycleRemovalResult) -> BTreeMap<usize, usize> {
+fn rank_assignment(
+    ir: &MermaidDiagramIr,
+    cycles: &CycleRemovalResult,
+    node_priority: &[usize],
+) -> BTreeMap<usize, usize> {
     let node_count = ir.nodes.len();
-    let node_priority = stable_node_priorities(ir);
     let edges = oriented_edges(ir, &cycles.reversed_edge_indexes);
 
     let mut ranks = vec![0_usize; node_count];
@@ -8582,7 +9784,7 @@ fn rank_assignment(ir: &MermaidDiagramIr, cycles: &CycleRemovalResult) -> BTreeM
     }
 
     for targets in &mut outgoing {
-        targets.sort_by(|left, right| compare_priority(*left, *right, &node_priority));
+        targets.sort_by(|left, right| compare_priority(*left, *right, node_priority));
     }
 
     let mut heap: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
@@ -8753,22 +9955,29 @@ fn weakly_connected_components(node_count: usize, edges: &[OrientedEdge]) -> Vec
 
 fn resolved_edges(ir: &MermaidDiagramIr) -> Vec<OrientedEdge> {
     let node_count = ir.nodes.len();
-    ir.edges
-        .iter()
-        .enumerate()
-        .filter_map(|(edge_index, edge)| {
-            let source = endpoint_node_index(ir, edge.from)?;
-            let target = endpoint_node_index(ir, edge.to)?;
-            if source >= node_count || target >= node_count {
-                return None;
-            }
-            Some(OrientedEdge {
-                source,
-                target,
-                edge_index,
-            })
-        })
-        .collect()
+    // Presize to `ir.edges.len()` (the max; `filter_map` only drops unresolved/out-of-range edges)
+    // so the `Vec` fills without `filter_map().collect()`'s growth reallocs — `filter_map`'s 0 lower
+    // size-hint gives `collect` no capacity. `edges.len()` is O(1); byte-identical (same order).
+    // `resolved_edges` runs per layout (GraphMetrics::from_ir algorithm selection + cycle removal).
+    let mut edges = Vec::with_capacity(ir.edges.len());
+    edges.extend(
+        ir.edges
+            .iter()
+            .enumerate()
+            .filter_map(|(edge_index, edge)| {
+                let source = endpoint_node_index(ir, edge.from)?;
+                let target = endpoint_node_index(ir, edge.to)?;
+                if source >= node_count || target >= node_count {
+                    return None;
+                }
+                Some(OrientedEdge {
+                    source,
+                    target,
+                    edge_index,
+                })
+            }),
+    );
+    edges
 }
 
 fn oriented_edges(
@@ -9155,12 +10364,86 @@ fn crossing_minimization(
     ranks: &BTreeMap<usize, usize>,
     config: &LayoutConfig,
 ) -> (usize, BTreeMap<usize, Vec<usize>>) {
-    let mut ordering_by_rank = nodes_by_rank(ir.nodes.len(), ranks);
+    crossing_minimization_impl::<true, true, true, true>(ir, ranks, config)
+}
+
+/// Compile-time switches keep the certified production path and all live reference arms in one body:
+/// `DENSE_RANK` selects packed node-rank lookup, while `SINGLE_PASS` selects the reusable packed
+/// position/slot frontier and one edge pass per rank reorder. `FLAT_CSR` replaces that full edge pass
+/// with a build-once packed incidence index. `PACKED_CROSSINGS` destructively reuses that index after
+/// the final sweep as normalized adjacency plus a word-packed Fenwick frontier.
+fn crossing_minimization_impl<
+    const DENSE_RANK: bool,
+    const SINGLE_PASS: bool,
+    const FLAT_CSR: bool,
+    const PACKED_CROSSINGS: bool,
+>(
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+    config: &LayoutConfig,
+) -> (usize, BTreeMap<usize, Vec<usize>>) {
+    let ordering_by_rank = nodes_by_rank(ir.nodes.len(), ranks);
     if ordering_by_rank.len() <= 1 {
         return (0, ordering_by_rank);
     }
 
+    // Fast path: if no rank holds two or more nodes, no crossings are possible and the
+    // barycenter sweeps cannot reorder anything within a rank — the ordering is already
+    // final. Skips centrality construction, the four sweep rounds, and the crossing count
+    // for the common linear-flowchart case (every rank one node). Output-identical: the
+    // full path returns this same ordering with zero crossings.
+    if ordering_by_rank.values().all(|nodes| nodes.len() <= 1) {
+        return (0, ordering_by_rank);
+    }
+
     let centrality = build_centrality_assist(ir, config);
+
+    // The rank assignment is bounded by node count in normal layout. Keep an exact fallback for an
+    // externally constructed pathological map whose rank cannot fit the packed word.
+    let dense_node_rank = if DENSE_RANK {
+        let mut dense = Vec::with_capacity(ir.nodes.len());
+        for node_index in 0..ir.nodes.len() {
+            let rank = ranks.get(&node_index).copied().unwrap_or(0);
+            let Ok(rank) = u32::try_from(rank) else {
+                return crossing_minimization_sweeps::<
+                    false,
+                    SINGLE_PASS,
+                    FLAT_CSR,
+                    PACKED_CROSSINGS,
+                >(ir, ranks, &[], ordering_by_rank, centrality);
+            };
+            dense.push(rank);
+        }
+        dense
+    } else {
+        Vec::new()
+    };
+
+    crossing_minimization_sweeps::<DENSE_RANK, SINGLE_PASS, FLAT_CSR, PACKED_CROSSINGS>(
+        ir,
+        ranks,
+        &dense_node_rank,
+        ordering_by_rank,
+        centrality,
+    )
+}
+
+fn crossing_minimization_sweeps<
+    const DENSE_RANK: bool,
+    const SINGLE_PASS: bool,
+    const FLAT_CSR: bool,
+    const PACKED_CROSSINGS: bool,
+>(
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+    dense_node_rank: &[u32],
+    mut ordering_by_rank: BTreeMap<usize, Vec<usize>>,
+    centrality: CentralityAssist,
+) -> (usize, BTreeMap<usize, Vec<usize>>) {
+    // Allocated once per crossing minimization and reused by every sweep call; empty for the
+    // `!SINGLE_PASS` arm, which never reads it. The packed arm falls back to the certified
+    // thresholded implementation if a node index cannot fit in u32.
+    let mut scratch = BarycenterScratch::new::<SINGLE_PASS, FLAT_CSR>(ir);
 
     // Deterministic barycenter sweeps: top-down then bottom-up.
     let rank_keys: Vec<usize> = ordering_by_rank.keys().copied().collect();
@@ -9168,9 +10451,10 @@ fn crossing_minimization(
         for index in 1..rank_keys.len() {
             let rank = rank_keys[index];
             let upper_rank = rank_keys[index - 1];
-            reorder_rank_by_barycenter(
+            reorder_rank_by_barycenter::<DENSE_RANK, SINGLE_PASS, FLAT_CSR>(
                 ir,
-                ranks,
+                (ranks, dense_node_rank),
+                &mut scratch,
                 &mut ordering_by_rank,
                 rank,
                 upper_rank,
@@ -9182,9 +10466,10 @@ fn crossing_minimization(
         for index in (0..rank_keys.len().saturating_sub(1)).rev() {
             let rank = rank_keys[index];
             let lower_rank = rank_keys[index + 1];
-            reorder_rank_by_barycenter(
+            reorder_rank_by_barycenter::<DENSE_RANK, SINGLE_PASS, FLAT_CSR>(
                 ir,
-                ranks,
+                (ranks, dense_node_rank),
+                &mut scratch,
                 &mut ordering_by_rank,
                 rank,
                 lower_rank,
@@ -9194,11 +10479,22 @@ fn crossing_minimization(
         }
     }
 
-    let barycenter_crossing_count = total_crossings(ir, ranks, &ordering_by_rank);
+    let barycenter_crossing_count = if PACKED_CROSSINGS {
+        total_crossings_packed(ir, ranks, &ordering_by_rank, &mut scratch)
+            .unwrap_or_else(|| total_crossings(ir, ranks, &ordering_by_rank))
+    } else {
+        total_crossings(ir, ranks, &ordering_by_rank)
+    };
     let crossing_count = if barycenter_crossing_count == 0 {
         0
     } else {
-        apply_egraph_ordering_pass(ir, ranks, &mut ordering_by_rank, barycenter_crossing_count)
+        apply_egraph_ordering_pass::<PACKED_CROSSINGS>(
+            ir,
+            ranks,
+            &mut ordering_by_rank,
+            barycenter_crossing_count,
+            &mut scratch,
+        )
     };
     debug!(
         crossings_after_barycenter = barycenter_crossing_count,
@@ -9221,6 +10517,24 @@ fn crossing_refinement(
         return (0, ordering_by_rank);
     }
 
+    // A transpose/sift confined to rank `r` changes only the `(r-1, r)` and `(r, r+1)` pair
+    // crossings, so we precompute the adjacent-rank edge buckets once and compare just those
+    // affected pairs per trial — instead of recomputing the whole graph's crossings
+    // (`total_crossings`) tens of thousands of times. Accepting iff the affected pairs strictly
+    // decrease is exactly equivalent to the full-total comparison, so the resulting ordering (and
+    // `best_crossings`) is identical to the naive version, just far cheaper to reach.
+    let pair_edges = build_pair_node_edges(ir, ranks);
+
+    // Both refinement phases perturb ONE rank at a time while its two neighbours stand still:
+    // transpose tries every adjacent swap in the rank, sifting tries every node at every position.
+    // Each trial called `pair_crossings` twice, and each of those rebuilt two node-id-domain-sized
+    // position arrays, re-sorted the pair's edges and ran an allocating recursive merge sort -- so
+    // the neighbour-derived half of that work was recomputed O(n) or O(n^2) times per rank for
+    // orderings that never changed. `RankNeighbourCrossings` bucket the pair's edges against the
+    // fixed neighbour once per rank visit, exactly as `FixedLayerCrossings` does for the e-graph
+    // search, leaving each trial a single allocation-free Fenwick sweep.
+    let mut neighbours = RankNeighbourCrossings::default();
+
     // Phase 1: Transpose — swap adjacent nodes in each rank if it reduces crossings.
     let mut improved = true;
     for _pass in 0..10 {
@@ -9230,30 +10544,28 @@ fn crossing_refinement(
         improved = false;
         let rank_keys: Vec<usize> = ordering_by_rank.keys().copied().collect();
         for &rank in &rank_keys {
-            let n = match ordering_by_rank.get(&rank) {
-                Some(o) => o.len(),
-                _ => 0,
-            };
+            let n = ordering_by_rank.get(&rank).map_or(0, Vec::len);
             if n < 2 {
                 continue;
             }
+            neighbours.rebuild(rank, &ordering_by_rank, &pair_edges);
+            let mut current = neighbours.count(rank, &ordering_by_rank, &pair_edges);
             for i in 0..n - 1 {
                 // Try swapping positions i and i+1 in-place.
                 if let Some(rank_order) = ordering_by_rank.get_mut(&rank) {
                     rank_order.swap(i, i + 1);
                 }
-                let trial_crossings = total_crossings(ir, ranks, &ordering_by_rank);
-                if trial_crossings < best_crossings {
-                    best_crossings = trial_crossings;
+                let trial = neighbours.count(rank, &ordering_by_rank, &pair_edges);
+                if trial < current {
+                    best_crossings = best_crossings.saturating_sub(current - trial);
+                    current = trial;
                     improved = true;
                     if best_crossings == 0 {
                         return (0, ordering_by_rank);
                     }
-                } else {
+                } else if let Some(rank_order) = ordering_by_rank.get_mut(&rank) {
                     // Swap back if not improved.
-                    if let Some(rank_order) = ordering_by_rank.get_mut(&rank) {
-                        rank_order.swap(i, i + 1);
-                    }
+                    rank_order.swap(i, i + 1);
                 }
             }
         }
@@ -9267,6 +10579,8 @@ fn crossing_refinement(
             _ => continue,
         };
         let n = order.len();
+        neighbours.rebuild(rank, &ordering_by_rank, &pair_edges);
+        let mut current = neighbours.count(rank, &ordering_by_rank, &pair_edges);
         for node in order {
             // Find current position of node in the (potentially modified) rank order.
             let mut current_pos = match ordering_by_rank.get(&rank) {
@@ -9288,19 +10602,18 @@ fn crossing_refinement(
                     rank_order.insert(target_pos, element);
                 }
 
-                let trial_crossings = total_crossings(ir, ranks, &ordering_by_rank);
-                if trial_crossings < best_crossings {
-                    best_crossings = trial_crossings;
+                let trial = neighbours.count(rank, &ordering_by_rank, &pair_edges);
+                if trial < current {
+                    best_crossings = best_crossings.saturating_sub(current - trial);
+                    current = trial;
                     current_pos = target_pos;
                     if best_crossings == 0 {
                         return (0, ordering_by_rank);
                     }
-                } else {
+                } else if let Some(rank_order) = ordering_by_rank.get_mut(&rank) {
                     // Move back if not improved.
-                    if let Some(rank_order) = ordering_by_rank.get_mut(&rank) {
-                        let element = rank_order.remove(target_pos);
-                        rank_order.insert(current_pos, element);
-                    }
+                    let element = rank_order.remove(target_pos);
+                    rank_order.insert(current_pos, element);
                 }
             }
         }
@@ -9320,10 +10633,14 @@ fn crossing_refinement(
 
 /// For each node, collect its neighbours in the specified adjacent rank.
 /// Uses pre-built adjacency for O(1) neighbour lookup per node.
+/// Sentinel in [`bk_pos_of`]: node is not present in any rank ordering (so the original per-rank
+/// `pos_map.get(&n)` returned `None`). `usize::MAX` can never be a real position (bounded by rank width).
+const BK_POS_ABSENT: usize = usize::MAX;
+
 fn bk_upper_neighbours(
-    adjacency: &[BTreeSet<usize>],
-    ranks: &BTreeMap<usize, usize>,
-    pos_map: &BTreeMap<usize, usize>,
+    adjacency: &[FxHashSet<usize>],
+    dense_node_rank: &[usize],
+    pos_of: &[usize],
     node_index: usize,
     node_rank: usize,
     upper: bool,
@@ -9340,16 +10657,25 @@ fn bk_upper_neighbours(
     let mut neighbours = Vec::new();
     if let Some(nodes) = adjacency.get(node_index) {
         for &n in nodes {
-            if ranks.get(&n).copied().unwrap_or(0) == adjacent_rank
-                && let Some(&pos) = pos_map.get(&n)
-            {
-                neighbours.push((n, pos));
+            // `dense_node_rank[n]` == the old `ranks.get(&n).copied().unwrap_or(0)`; `pos_of[n]` == the old
+            // `pos_map.get(&n)` for `n`'s rank, or `BK_POS_ABSENT` where that returned `None`. The rank check
+            // plus the sentinel guard reproduce the old `rank == adjacent_rank && Some(pos)` condition exactly
+            // (including the `adjacent_rank == 0` + unranked-node case, where the rank test passed but the
+            // per-rank `pos_map` had no entry).
+            if dense_node_rank.get(n).copied().unwrap_or(0) == adjacent_rank {
+                let pos = pos_of.get(n).copied().unwrap_or(BK_POS_ABSENT);
+                if pos != BK_POS_ABSENT {
+                    neighbours.push((n, pos));
+                }
             }
         }
     }
 
     neighbours.sort_by_key(|&(_, pos)| pos);
-    neighbours.dedup();
+    // No `dedup()`: `neighbours` is collected by iterating `adjacency[node_index]`, a `FxHashSet<usize>`, so each
+    // neighbour index `n` is pushed at most once — no two `(n, pos)` entries can be equal, making `dedup()` an
+    // unconditional no-op (it depends only on set uniqueness, not on the sort). Dropping it removes an O(len)
+    // pass from the hottest BK inner call (per node, per pass). Byte-identical.
     neighbours
 }
 
@@ -9361,11 +10687,12 @@ fn bk_upper_neighbours(
 #[allow(clippy::too_many_arguments)]
 fn bk_vertical_alignment(
     n: usize,
-    adjacency: &[BTreeSet<usize>],
-    rank_pos_maps: &BTreeMap<usize, BTreeMap<usize, usize>>,
-    ranks: &BTreeMap<usize, usize>,
+    adjacency: &[FxHashSet<usize>],
+    dense_node_rank: &[usize],
+    pos_of: &[usize],
     ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
     ordered_ranks: &[usize],
+    rank_exists: &[bool],
     top_to_bottom: bool,
     left_to_right: bool,
 ) -> (Vec<usize>, Vec<usize>) {
@@ -9394,7 +10721,7 @@ fn bk_vertical_alignment(
         };
 
         for v in node_iter {
-            let v_rank = ranks.get(&v).copied().unwrap_or(0);
+            let v_rank = dense_node_rank.get(v).copied().unwrap_or(0);
             let adjacent_rank = if top_to_bottom {
                 if v_rank == 0 {
                     continue;
@@ -9404,12 +10731,15 @@ fn bk_vertical_alignment(
                 v_rank + 1
             };
 
-            let Some(pos_map) = rank_pos_maps.get(&adjacent_rank) else {
+            // Existence guard for `adjacent_rank`. `rank_exists[r]` == `ordering_by_rank.contains_key(&r)` for
+            // in-range `r`, and `.get` reads an out-of-range index as absent — byte-identical to the old B-tree
+            // probe, but an O(1) branchless slice load instead of a per-node pointer-chase.
+            if !rank_exists.get(adjacent_rank).copied().unwrap_or(false) {
                 continue;
-            };
+            }
 
             let neighbours =
-                bk_upper_neighbours(adjacency, ranks, pos_map, v, v_rank, top_to_bottom);
+                bk_upper_neighbours(adjacency, dense_node_rank, pos_of, v, v_rank, top_to_bottom);
 
             if neighbours.is_empty() {
                 continue;
@@ -9458,28 +10788,23 @@ fn bk_vertical_alignment(
 /// Brandes-Köpf horizontal compaction for one alignment.
 ///
 /// Returns secondary-axis coordinates indexed by `node_index`.
+#[allow(clippy::too_many_arguments)]
 fn bk_horizontal_compaction(
     node_count: usize,
     node_sizes: &[(f32, f32)],
     ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
     root: &[usize],
     align: &[usize],
+    // `pred_in_rank` (each node's left neighbour in its rank) depends only on `ordering_by_rank`, which
+    // is identical across all four BK alignment passes — so it's built ONCE by the caller and shared
+    // here instead of being rebuilt per pass.
+    pred_in_rank: &[Option<usize>],
     node_spacing: f32,
     horizontal_ranks: bool,
 ) -> Vec<f32> {
     let mut x = vec![f32::NEG_INFINITY; node_count];
     let mut sink: Vec<usize> = (0..node_count).collect();
     let mut shift = vec![f32::INFINITY; node_count];
-
-    // Build predecessor-in-rank lookup: for each node, its left neighbour in the same rank.
-    let mut pred_in_rank: Vec<Option<usize>> = vec![None; node_count];
-    for nodes in ordering_by_rank.values() {
-        for i in 1..nodes.len() {
-            if nodes[i] < node_count && nodes[i - 1] < node_count {
-                pred_in_rank[nodes[i]] = Some(nodes[i - 1]);
-            }
-        }
-    }
 
     /// Minimum separation between two adjacent nodes in the same rank.
     fn delta(
@@ -9506,12 +10831,13 @@ fn bk_horizontal_compaction(
     // roots are placed before the blocks that depend on them (the original BK
     // algorithm handles this via recursion in `place_block`).
     let mut ordered_roots: Vec<usize> = Vec::new();
-    for rank_key in ordering_by_rank.keys() {
-        if let Some(nodes) = ordering_by_rank.get(rank_key) {
-            for &v in nodes {
-                if v < node_count && root[v] == v {
-                    ordered_roots.push(v);
-                }
+    // Iterate `values()` directly: the old `keys()` + `get(rank_key)` did a redundant per-rank BTreeMap probe
+    // (pointer-chasing, cache-missy) on each of the four BK compaction passes. `values()` yields the same rank
+    // node-lists in the same sorted-key order, so this is byte-identical — it just drops the O(log ranks) lookup.
+    for nodes in ordering_by_rank.values() {
+        for &v in nodes {
+            if v < node_count && root[v] == v {
+                ordered_roots.push(v);
             }
         }
     }
@@ -9587,7 +10913,7 @@ fn bk_horizontal_compaction(
             &mut shift,
             root,
             align,
-            &pred_in_rank,
+            pred_in_rank,
             node_sizes,
             node_spacing,
             horizontal_ranks,
@@ -9628,8 +10954,25 @@ fn brandes_kopf_secondary_coords(
 
     let ordered_ranks: Vec<usize> = ordering_by_rank.keys().copied().collect();
 
-    // Pre-build undirected adjacency for O(1) neighbour lookup.
-    let mut adjacency = vec![BTreeSet::new(); n];
+    // Dense rank-existence table, built ONCE and shared by all four alignment passes, replacing the per-node
+    // `ordering_by_rank.contains_key(&adjacent_rank)` B-tree probe (a pointer-chase per node per pass) in
+    // `bk_vertical_alignment`'s inner loop with an O(1) branchless slice load. `rank_exists[r]` is true iff `r`
+    // is a key of `ordering_by_rank`; an out-of-range `adjacent_rank` (via `.get`) reads as absent, exactly like
+    // `contains_key`. (A `binary_search` on `ordered_ranks` was rejected — branch mispredicts on the small
+    // sorted array; a dense bool table is O(1) and branchless.)
+    let max_rank = ordered_ranks.iter().copied().max().unwrap_or(0);
+    let mut rank_exists = vec![false; max_rank + 1];
+    for &r in &ordered_ranks {
+        rank_exists[r] = true;
+    }
+
+    // Pre-build undirected adjacency for O(1) neighbour lookup. `FxHashSet` (was `BTreeSet<usize>`)
+    // keeps the same set semantics — unique neighbours, membership — but swaps the per-insert O(log deg)
+    // B-tree node allocation for O(1) hashing (the `BTreeSet<usize>` insert + build was ~14% of Sugiyama
+    // layout: `place_block`/`nodes_by_rank`-adjacent). Iteration order is irrelevant: the sole consumer
+    // (`bk_upper_neighbours`) re-sorts the collected neighbours by position, and distinct same-rank nodes
+    // have distinct positions, so the sorted order is fully determined regardless of set iteration order.
+    let mut adjacency: Vec<FxHashSet<usize>> = vec![FxHashSet::default(); n];
     for edge in &ir.edges {
         if let Some(s) = endpoint_node_index(ir, edge.from)
             && let Some(t) = endpoint_node_index(ir, edge.to)
@@ -9642,15 +10985,37 @@ fn brandes_kopf_secondary_coords(
         }
     }
 
-    // Pre-build position maps for each rank.
-    let mut rank_pos_maps: BTreeMap<usize, BTreeMap<usize, usize>> = BTreeMap::new();
-    for (&rank, nodes) in ordering_by_rank {
-        let pos_map: BTreeMap<usize, usize> = nodes
-            .iter()
-            .enumerate()
-            .map(|(pos, &node)| (node, pos))
-            .collect();
-        rank_pos_maps.insert(rank, pos_map);
+    // Dense node-indexed lookups, built ONCE and reused by all four alignment passes, replacing the
+    // per-neighbour `ranks: &BTreeMap` and per-rank `pos_map: &BTreeMap` probes that dominated the BK
+    // vertical-alignment inner loop (measured `BTreeMap<usize,usize>::get` ≈ 3.76% of the `cyclic_scc_100`
+    // pipeline). Same primitive as the certified barycenter dense-rank win. `dense_node_rank[v]` reproduces
+    // `ranks.get(&v).copied().unwrap_or(0)`; `pos_of[v]` reproduces the position `v` had in its rank's
+    // `pos_map`, or `BK_POS_ABSENT` where that map had no entry (node absent from every rank ordering).
+    let mut dense_node_rank = vec![0_usize; n];
+    for (&node, &rank) in ranks {
+        if let Some(slot) = dense_node_rank.get_mut(node) {
+            *slot = rank;
+        }
+    }
+    let mut pos_of = vec![BK_POS_ABSENT; n];
+    for nodes in ordering_by_rank.values() {
+        for (pos, &node) in nodes.iter().enumerate() {
+            if let Some(slot) = pos_of.get_mut(node) {
+                *slot = pos;
+            }
+        }
+    }
+
+    // Each node's left neighbour in its rank — a pure function of `ordering_by_rank`, identical across all
+    // four alignment passes. Build it ONCE here instead of rebuilding it inside each `bk_horizontal_
+    // compaction` call (3 of 4 builds were pure waste). Byte-identical (same values, same order).
+    let mut pred_in_rank: Vec<Option<usize>> = vec![None; n];
+    for nodes in ordering_by_rank.values() {
+        for i in 1..nodes.len() {
+            if nodes[i] < n && nodes[i - 1] < n {
+                pred_in_rank[nodes[i]] = Some(nodes[i - 1]);
+            }
+        }
     }
 
     // Four alignment passes: (top_to_bottom, left_to_right).
@@ -9667,10 +11032,11 @@ fn brandes_kopf_secondary_coords(
         let (root, align) = bk_vertical_alignment(
             n,
             &adjacency,
-            &rank_pos_maps,
-            ranks,
+            &dense_node_rank,
+            &pos_of,
             ordering_by_rank,
             &ordered_ranks,
+            &rank_exists,
             top_to_bottom,
             left_to_right,
         );
@@ -9681,6 +11047,7 @@ fn brandes_kopf_secondary_coords(
             ordering_by_rank,
             &root,
             &align,
+            &pred_in_rank,
             spacing.node_spacing,
             horizontal_ranks,
         );
@@ -10448,21 +11815,41 @@ fn subgraph_secondary_key(
 }
 
 fn nodes_by_rank(node_count: usize, ranks: &BTreeMap<usize, usize>) -> BTreeMap<usize, Vec<usize>> {
+    // Materialise the per-node rank into a dense Vec via ONE ordered walk of `ranks`, instead of a random
+    // `ranks.get(&node_index)` BTreeMap tree-descent per node (O(N) sequential vs O(N log N) cache-missy
+    // probes). Byte-identical: unranked nodes keep rank 0 — the Vec's init value equals the old
+    // `.unwrap_or(0)` default — and the per-rank push order (node_index 0..N) is unchanged.
+    let mut rank_of = vec![0_usize; node_count];
+    for (&node_index, &rank) in ranks {
+        if node_index < node_count {
+            rank_of[node_index] = rank;
+        }
+    }
     let mut nodes_by_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for node_index in 0..node_count {
-        let rank = ranks.get(&node_index).copied().unwrap_or(0);
+    for (node_index, &rank) in rank_of.iter().enumerate() {
         nodes_by_rank.entry(rank).or_default().push(node_index);
     }
     nodes_by_rank
 }
 
-fn layer_edges_between_ranks(
+/// Every adjacent-rank pair's layer edges, bucketed in ONE pass over `ir.edges`.
+///
+/// This replaces a per-rank-pair full scan. `egraph_optimized_order_for_rank` asked for the
+/// `(rank - 1, rank)` and `(rank, rank + 1)` edge lists separately, and each request walked all of
+/// `ir.edges` doing two `endpoint_node_index` resolutions and two `ranks` B-tree probes per edge
+/// before discarding everything outside the one pair it wanted. `apply_egraph_ordering_pass` runs
+/// two passes over every rank, so that is `4 * ranks` full scans — O(ranks · edges) to produce
+/// O(edges) of data. On `docs_site_200` the scan measured 6.86% inclusive / 1.94% self.
+///
+/// Bucketing by `(source_rank, target_rank)` answers every request from one pass, mirroring what
+/// [`build_pair_node_edges`] already does for the refinement path. Byte-identical: the filter is
+/// unchanged, each bucket is pushed in `ir.edges` order and sorted exactly as before, and a pair
+/// with no edges is simply absent from the map — which is what the old empty check produced.
+fn layer_edges_by_rank_pair(
     ir: &MermaidDiagramIr,
     ranks: &BTreeMap<usize, usize>,
-    upper_rank: usize,
-    lower_rank: usize,
-) -> crate::egraph_ordering::LayerEdges {
-    let mut edges = Vec::new();
+) -> FxHashMap<(usize, usize), crate::egraph_ordering::LayerEdges> {
+    let mut by_pair: FxHashMap<(usize, usize), Vec<(usize, usize)>> = FxHashMap::default();
 
     for edge in &ir.edges {
         let Some(mut source) = endpoint_node_index(ir, edge.from) else {
@@ -10485,23 +11872,27 @@ fn layer_edges_between_ranks(
             std::mem::swap(&mut source, &mut target);
             std::mem::swap(&mut source_rank, &mut target_rank);
         }
-        if source_rank != upper_rank || target_rank != lower_rank {
-            continue;
-        }
         if target_rank != source_rank.saturating_add(1) {
             continue;
         }
 
-        edges.push((source, target));
+        by_pair
+            .entry((source_rank, target_rank))
+            .or_default()
+            .push((source, target));
     }
 
-    edges.sort_unstable();
-    crate::egraph_ordering::LayerEdges { edges }
+    by_pair
+        .into_iter()
+        .map(|(pair, mut edges)| {
+            edges.sort_unstable();
+            (pair, crate::egraph_ordering::LayerEdges { edges })
+        })
+        .collect()
 }
 
 fn egraph_optimized_order_for_rank(
-    ir: &MermaidDiagramIr,
-    ranks: &BTreeMap<usize, usize>,
+    layer_edges: &FxHashMap<(usize, usize), crate::egraph_ordering::LayerEdges>,
     ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
     rank: usize,
 ) -> Option<(usize, crate::egraph_ordering::LayerOptimizationResult)> {
@@ -10518,10 +11909,9 @@ fn egraph_optimized_order_for_rank(
             .cloned()
             .map(crate::egraph_ordering::LayerOrdering::new)
     });
-    let upper_edges = rank.checked_sub(1).and_then(|upper_rank| {
-        let edges = layer_edges_between_ranks(ir, ranks, upper_rank, rank);
-        (!edges.edges.is_empty()).then_some(edges)
-    });
+    let upper_edges =
+        rank.checked_sub(1)
+            .and_then(|upper_rank| layer_edges.get(&(upper_rank, rank)));
 
     let lower_ordering = rank.checked_add(1).and_then(|lower_rank| {
         ordering_by_rank
@@ -10529,10 +11919,9 @@ fn egraph_optimized_order_for_rank(
             .cloned()
             .map(crate::egraph_ordering::LayerOrdering::new)
     });
-    let lower_edges = rank.checked_add(1).and_then(|lower_rank| {
-        let edges = layer_edges_between_ranks(ir, ranks, rank, lower_rank);
-        (!edges.edges.is_empty()).then_some(edges)
-    });
+    let lower_edges = rank
+        .checked_add(1)
+        .and_then(|lower_rank| layer_edges.get(&(rank, lower_rank)));
 
     if upper_edges.is_none() && lower_edges.is_none() {
         return None;
@@ -10540,30 +11929,35 @@ fn egraph_optimized_order_for_rank(
 
     let local_crossings_before = crate::egraph_ordering::local_crossing_count(
         &current,
-        upper_ordering.as_ref().zip(upper_edges.as_ref()),
-        lower_ordering.as_ref().zip(lower_edges.as_ref()),
+        upper_ordering.as_ref().zip(upper_edges),
+        lower_ordering.as_ref().zip(lower_edges),
     );
     let result = crate::egraph_ordering::optimize_layer_ordering(
         &current,
-        upper_ordering.as_ref().zip(upper_edges.as_ref()),
-        lower_ordering.as_ref().zip(lower_edges.as_ref()),
+        upper_ordering.as_ref().zip(upper_edges),
+        lower_ordering.as_ref().zip(lower_edges),
     );
 
     (result.crossing_count < local_crossings_before).then_some((local_crossings_before, result))
 }
 
-fn apply_egraph_ordering_pass(
+fn apply_egraph_ordering_pass<const PACKED_CROSSINGS: bool>(
     ir: &MermaidDiagramIr,
     ranks: &BTreeMap<usize, usize>,
     ordering_by_rank: &mut BTreeMap<usize, Vec<usize>>,
     mut best_crossings: usize,
+    scratch: &mut BarycenterScratch,
 ) -> usize {
     let rank_keys: Vec<usize> = ordering_by_rank.keys().copied().collect();
+    // Ranks move within this pass, but an edge's endpoints keep their ranks -- `ranks` is fixed
+    // here, only the within-rank ordering changes -- so the adjacent-pair edge buckets are built
+    // once for the whole pass instead of rescanning `ir.edges` per rank.
+    let layer_edges = layer_edges_by_rank_pair(ir, ranks);
     for _ in 0..2 {
         let mut improved = false;
         for &rank in &rank_keys {
             let Some((local_crossings_before, result)) =
-                egraph_optimized_order_for_rank(ir, ranks, ordering_by_rank, rank)
+                egraph_optimized_order_for_rank(&layer_edges, ordering_by_rank, rank)
             else {
                 continue;
             };
@@ -10574,7 +11968,12 @@ fn apply_egraph_ordering_pass(
             let (estimated_egraph_nodes, estimated_egraph_bytes) =
                 crate::egraph_ordering::estimate_egraph_size(original_order.len());
             ordering_by_rank.insert(rank, result.ordering.order.clone());
-            let total_after = total_crossings(ir, ranks, ordering_by_rank);
+            let total_after = if PACKED_CROSSINGS {
+                total_crossings_packed(ir, ranks, ordering_by_rank, scratch)
+                    .unwrap_or_else(|| total_crossings(ir, ranks, ordering_by_rank))
+            } else {
+                total_crossings(ir, ranks, ordering_by_rank)
+            };
 
             if total_after < best_crossings {
                 improved = true;
@@ -10658,36 +12057,301 @@ fn compute_layout_centrality_tiers(_: &MermaidDiagramIr, _: &LayoutConfig) -> Ve
     Vec::new()
 }
 
-#[allow(unused_variables)] // centrality only used with fnx-integration feature
-fn reorder_rank_by_barycenter(
-    ir: &MermaidDiagramIr,
+#[inline(always)]
+fn barycenter_node_rank<const DENSE_RANK: bool>(
     ranks: &BTreeMap<usize, usize>,
+    dense_node_rank: &[u32],
+    node_index: usize,
+) -> usize {
+    if DENSE_RANK {
+        dense_node_rank
+            .get(node_index)
+            .copied()
+            .and_then(|rank| usize::try_from(rank).ok())
+            .unwrap_or(0)
+    } else {
+        ranks.get(&node_index).copied().unwrap_or(0)
+    }
+}
+
+/// Node-indexed scratch for the `SINGLE_PASS` barycenter arm, allocated once per
+/// `crossing_minimization` and reused by every sweep call.
+///
+/// It replaces the two per-call `BTreeMap`s (`adjacent_position`, and the wide branch's `local_slot`) with
+/// O(1)-indexed `u32` tables. Entries touched by a call are reset in O(rank width) afterwards. The
+/// accumulator grows only to the widest observed rank and then reuses that allocation. The `!SINGLE_PASS`
+/// arm keeps all three vectors empty.
+struct BarycenterScratch {
+    /// Position of a node within the adjacent rank's order, or `ABSENT`.
+    position_of: Vec<u32>,
+    /// Slot of a node within the current rank's order, or `ABSENT`.
+    slot_of: Vec<u32>,
+    /// `(position_sum, neighbor_count)` per slot of the current rank.
+    accumulators: Vec<(usize, usize)>,
+    /// Two packed CSR offset tables in one allocation: incoming first, then outgoing. Outgoing
+    /// offsets are absolute indexes into `incidence_neighbors`, beginning after all incoming entries.
+    incidence_offsets: Vec<u32>,
+    /// Incoming neighbors followed by outgoing neighbors, each per-node slice preserving `ir.edges`
+    /// order and parallel-edge multiplicity.
+    incidence_neighbors: Vec<u32>,
+}
+
+impl BarycenterScratch {
+    /// Sentinel for "not in the rank currently loaded". The packed arm is enabled only when the node
+    /// count fits in `u32`, so `u32::MAX` can never be a valid position or slot.
+    const ABSENT: u32 = u32::MAX;
+
+    fn new<const SINGLE_PASS: bool, const FLAT_CSR: bool>(ir: &MermaidDiagramIr) -> Self {
+        let node_count = ir.nodes.len();
+        if SINGLE_PASS && u32::try_from(node_count).is_ok() {
+            let mut scratch = Self {
+                position_of: vec![Self::ABSENT; node_count],
+                slot_of: vec![Self::ABSENT; node_count],
+                accumulators: Vec::new(),
+                incidence_offsets: Vec::new(),
+                incidence_neighbors: Vec::new(),
+            };
+            if FLAT_CSR {
+                scratch.build_flat_incidence(ir);
+            }
+            scratch
+        } else {
+            Self {
+                position_of: Vec::new(),
+                slot_of: Vec::new(),
+                accumulators: Vec::new(),
+                incidence_offsets: Vec::new(),
+                incidence_neighbors: Vec::new(),
+            }
+        }
+    }
+
+    /// Build incoming and outgoing CSR in two persistent allocations. The already-allocated packed
+    /// frontier tables double as fill cursors, avoiding a third temporary vector. Any graph whose
+    /// incidence offsets do not fit in `u32` leaves the tables empty and uses the exact full-edge fallback.
+    fn build_flat_incidence(&mut self, ir: &MermaidDiagramIr) {
+        let node_count = self.position_of.len();
+        let Some(direction_width) = node_count.checked_add(1) else {
+            return;
+        };
+        let Some(offset_count) = direction_width.checked_mul(2) else {
+            return;
+        };
+        self.incidence_offsets.resize(offset_count, 0);
+
+        for edge in &ir.edges {
+            let Some(source) = endpoint_node_index(ir, edge.from) else {
+                continue;
+            };
+            let Some(target) = endpoint_node_index(ir, edge.to) else {
+                continue;
+            };
+            if source >= node_count || target >= node_count {
+                continue;
+            }
+            let incoming_count = &mut self.incidence_offsets[target + 1];
+            let Some(next_incoming) = incoming_count.checked_add(1) else {
+                self.incidence_offsets.clear();
+                return;
+            };
+            *incoming_count = next_incoming;
+
+            let outgoing_count = &mut self.incidence_offsets[direction_width + source + 1];
+            let Some(next_outgoing) = outgoing_count.checked_add(1) else {
+                self.incidence_offsets.clear();
+                return;
+            };
+            *outgoing_count = next_outgoing;
+        }
+
+        for index in 1..=node_count {
+            let Some(prefix) =
+                self.incidence_offsets[index - 1].checked_add(self.incidence_offsets[index])
+            else {
+                self.incidence_offsets.clear();
+                return;
+            };
+            self.incidence_offsets[index] = prefix;
+        }
+        self.incidence_offsets[direction_width] = self.incidence_offsets[node_count];
+        for node in 0..node_count {
+            let index = direction_width + node + 1;
+            let Some(prefix) =
+                self.incidence_offsets[index - 1].checked_add(self.incidence_offsets[index])
+            else {
+                self.incidence_offsets.clear();
+                return;
+            };
+            self.incidence_offsets[index] = prefix;
+        }
+
+        let total_entries = self.incidence_offsets[direction_width + node_count];
+        let Ok(total_entries) = usize::try_from(total_entries) else {
+            self.incidence_offsets.clear();
+            return;
+        };
+        self.incidence_neighbors.resize(total_entries, Self::ABSENT);
+        for node in 0..node_count {
+            self.position_of[node] = self.incidence_offsets[node];
+            self.slot_of[node] = self.incidence_offsets[direction_width + node];
+        }
+
+        let mut valid = true;
+        for edge in &ir.edges {
+            let Some(source) = endpoint_node_index(ir, edge.from) else {
+                continue;
+            };
+            let Some(target) = endpoint_node_index(ir, edge.to) else {
+                continue;
+            };
+            if source >= node_count || target >= node_count {
+                continue;
+            }
+            let Ok(source_word) = u32::try_from(source) else {
+                valid = false;
+                break;
+            };
+            let Ok(target_word) = u32::try_from(target) else {
+                valid = false;
+                break;
+            };
+
+            let Ok(incoming_cursor) = usize::try_from(self.position_of[target]) else {
+                valid = false;
+                break;
+            };
+            let Some(incoming_neighbor) = self.incidence_neighbors.get_mut(incoming_cursor) else {
+                valid = false;
+                break;
+            };
+            *incoming_neighbor = source_word;
+            self.position_of[target] = self.position_of[target].saturating_add(1);
+
+            let Ok(outgoing_cursor) = usize::try_from(self.slot_of[source]) else {
+                valid = false;
+                break;
+            };
+            let Some(outgoing_neighbor) = self.incidence_neighbors.get_mut(outgoing_cursor) else {
+                valid = false;
+                break;
+            };
+            *outgoing_neighbor = target_word;
+            self.slot_of[source] = self.slot_of[source].saturating_add(1);
+        }
+
+        self.position_of.fill(Self::ABSENT);
+        self.slot_of.fill(Self::ABSENT);
+        if !valid {
+            self.incidence_offsets.clear();
+            self.incidence_neighbors.clear();
+        }
+    }
+}
+
+/// Deterministic barycenter sweep shared by all A/B arms.
+///
+/// - `DENSE_RANK` (certified `bd-9w78`, `f8e6ce3`): index the packed node-rank table instead of probing
+///   `ranks: &BTreeMap` in the innermost edge loop.
+/// - `SINGLE_PASS`: accumulate over `ir.edges` **once per call** instead of once per node of the current
+///   rank, using `scratch` in place of the two per-call `BTreeMap`s. This removes the `rank_size` factor:
+///   the old narrow branch was `O(rank_size · |E|)` per call, and on `cyclic_scc_100` the rank width is ~4.
+/// - `FLAT_CSR`: build packed incoming/outgoing incidence once, then visit only the current rank's incident
+///   neighbors per call instead of rescanning every edge. Two flat arrays replace the rejected `Vec<Vec>` shape.
+///
+/// **`SINGLE_PASS` is output-identical by construction.** The pre-existing code already contained *both*
+/// shapes and selected between them by `SINGLE_PASS_RANK_THRESHOLD`, on the explicit premise (see the old
+/// comment, and the KEPT `single_pass_barycenter.md`) that they *"compute the identical result (integer
+/// position sum divided once by the neighbor count)"*. The threshold existed only because the wide branch's
+/// per-call `BTreeMap` setup dominated at small rank widths — and that setup is exactly what `scratch`
+/// removes. Each CSR node slice is the same stable `ir.edges` subsequence that fed that node's independent
+/// accumulator, so its integer sum/count, resulting `f32` barycenter, and downstream stable sort are bit-for-bit
+/// what they were.
+#[allow(unused_variables)] // centrality only used with fnx-integration feature
+#[allow(clippy::too_many_arguments)] // Keep both A/B arms in one body so ordering logic cannot drift.
+fn reorder_rank_by_barycenter<
+    const DENSE_RANK: bool,
+    const SINGLE_PASS: bool,
+    const FLAT_CSR: bool,
+>(
+    ir: &MermaidDiagramIr,
+    rank_lookup: (&BTreeMap<usize, usize>, &[u32]),
+    scratch: &mut BarycenterScratch,
     ordering_by_rank: &mut BTreeMap<usize, Vec<usize>>,
     rank: usize,
     adjacent_rank: usize,
     use_incoming: bool,
     centrality: &CentralityAssist,
 ) {
-    let Some(current_order) = ordering_by_rank.get(&rank).cloned() else {
+    let (ranks, dense_node_rank) = rank_lookup;
+    // Borrow the rank's order (was `.cloned()`): it is READ-ONLY through `scored_nodes` construction, and the
+    // final `ordering_by_rank.insert(rank, …)` runs after that last read (NLL drops the borrow first), so no
+    // clone is needed. Removes a per-rank-per-sweep `Vec<usize>` allocation+copy from the barycenter hot loop
+    // (`reorder_rank_by_barycenter` ≈ 47% of the cyclic-SCC pipeline). Byte-identical (same values read).
+    let Some(current_order) = ordering_by_rank.get(&rank) else {
         return;
     };
     let Some(adjacent_order) = ordering_by_rank.get(&adjacent_rank) else {
         return;
     };
 
-    let adjacent_position: BTreeMap<usize, usize> = adjacent_order
-        .iter()
-        .enumerate()
-        .map(|(position, node)| (*node, position))
-        .collect();
+    if SINGLE_PASS && !scratch.position_of.is_empty() {
+        for (position, node) in adjacent_order.iter().enumerate() {
+            if let Some(entry) = scratch.position_of.get_mut(*node) {
+                *entry = u32::try_from(position).unwrap_or(BarycenterScratch::ABSENT);
+            }
+        }
+        scratch.accumulators.clear();
+        scratch.accumulators.resize(current_order.len(), (0, 0));
 
-    let mut scored_nodes: Vec<(usize, Option<f32>, usize)> = current_order
-        .iter()
-        .enumerate()
-        .map(|(stable_idx, node_index)| {
-            let mut total_position = 0_usize;
-            let mut neighbor_count = 0_usize;
-
+        if FLAT_CSR && !scratch.incidence_offsets.is_empty() {
+            let direction_width = scratch.position_of.len() + 1;
+            let offset_base = if use_incoming { 0 } else { direction_width };
+            for (slot, node) in current_order.iter().copied().enumerate() {
+                let Some(start_word) = scratch.incidence_offsets.get(offset_base + node) else {
+                    continue;
+                };
+                let Some(end_word) = scratch.incidence_offsets.get(offset_base + node + 1) else {
+                    continue;
+                };
+                let Ok(start) = usize::try_from(*start_word) else {
+                    continue;
+                };
+                let Ok(end) = usize::try_from(*end_word) else {
+                    continue;
+                };
+                let Some(neighbors) = scratch.incidence_neighbors.get(start..end) else {
+                    continue;
+                };
+                for adjacent_word in neighbors {
+                    let Ok(adjacent_node) = usize::try_from(*adjacent_word) else {
+                        continue;
+                    };
+                    if barycenter_node_rank::<DENSE_RANK>(ranks, dense_node_rank, adjacent_node)
+                        != adjacent_rank
+                    {
+                        continue;
+                    }
+                    let Some(&position) = scratch.position_of.get(adjacent_node) else {
+                        continue;
+                    };
+                    if position == BarycenterScratch::ABSENT {
+                        continue;
+                    }
+                    let Ok(position) = usize::try_from(position) else {
+                        continue;
+                    };
+                    if let Some(accumulator) = scratch.accumulators.get_mut(slot) {
+                        accumulator.0 = accumulator.0.saturating_add(position);
+                        accumulator.1 = accumulator.1.saturating_add(1);
+                    }
+                }
+            }
+        } else {
+            for (slot, node) in current_order.iter().enumerate() {
+                if let Some(entry) = scratch.slot_of.get_mut(*node) {
+                    *entry = u32::try_from(slot).unwrap_or(BarycenterScratch::ABSENT);
+                }
+            }
             for edge in &ir.edges {
                 let Some(source) = endpoint_node_index(ir, edge.from) else {
                     continue;
@@ -10695,40 +12359,221 @@ fn reorder_rank_by_barycenter(
                 let Some(target) = endpoint_node_index(ir, edge.to) else {
                     continue;
                 };
-
-                let neighbor = if use_incoming {
-                    if target == *node_index
-                        && ranks.get(&source).copied().unwrap_or(0) == adjacent_rank
-                    {
-                        Some(source)
-                    } else {
-                        None
-                    }
-                } else if source == *node_index
-                    && ranks.get(&target).copied().unwrap_or(0) == adjacent_rank
-                {
-                    Some(target)
+                let (node, adjacent_node) = if use_incoming {
+                    (target, source)
                 } else {
-                    None
+                    (source, target)
                 };
-
-                if let Some(adjacent_node) = neighbor
-                    && let Some(position) = adjacent_position.get(&adjacent_node)
+                let Some(&slot) = scratch.slot_of.get(node) else {
+                    continue;
+                };
+                if slot == BarycenterScratch::ABSENT {
+                    continue;
+                }
+                let Ok(slot) = usize::try_from(slot) else {
+                    continue;
+                };
+                if barycenter_node_rank::<DENSE_RANK>(ranks, dense_node_rank, adjacent_node)
+                    != adjacent_rank
                 {
-                    total_position = total_position.saturating_add(*position);
-                    neighbor_count = neighbor_count.saturating_add(1);
+                    continue;
+                }
+                let Some(&position) = scratch.position_of.get(adjacent_node) else {
+                    continue;
+                };
+                if position == BarycenterScratch::ABSENT {
+                    continue;
+                }
+                let Ok(position) = usize::try_from(position) else {
+                    continue;
+                };
+                if let Some(accumulator) = scratch.accumulators.get_mut(slot) {
+                    accumulator.0 = accumulator.0.saturating_add(position);
+                    accumulator.1 = accumulator.1.saturating_add(1);
                 }
             }
+            for node in current_order {
+                if let Some(entry) = scratch.slot_of.get_mut(*node) {
+                    *entry = BarycenterScratch::ABSENT;
+                }
+            }
+        }
 
-            let barycenter = if neighbor_count == 0 {
-                None
-            } else {
-                Some(total_position as f32 / neighbor_count as f32)
-            };
-            (*node_index, barycenter, stable_idx)
-        })
+        // Reset only the entries this call touched: O(rank width), not O(node count).
+        for node in adjacent_order {
+            if let Some(entry) = scratch.position_of.get_mut(*node) {
+                *entry = BarycenterScratch::ABSENT;
+            }
+        }
+        let mut scored_nodes: Vec<(usize, Option<f32>, usize)> = current_order
+            .iter()
+            .enumerate()
+            .map(|(stable_idx, node_index)| {
+                let (total_position, neighbor_count) = scratch
+                    .accumulators
+                    .get(stable_idx)
+                    .copied()
+                    .unwrap_or((0, 0));
+                let barycenter = if neighbor_count == 0 {
+                    None
+                } else {
+                    #[allow(clippy::cast_precision_loss)]
+                    Some(total_position as f32 / neighbor_count as f32)
+                };
+                (*node_index, barycenter, stable_idx)
+            })
+            .collect();
+
+        sort_scored_nodes(&mut scored_nodes, centrality);
+        ordering_by_rank.insert(
+            rank,
+            scored_nodes
+                .into_iter()
+                .map(|(node_index, _, _)| node_index)
+                .collect(),
+        );
+        return;
+    }
+
+    let adjacent_position: BTreeMap<usize, usize> = adjacent_order
+        .iter()
+        .enumerate()
+        .map(|(position, node)| (*node, position))
         .collect();
 
+    // The barycenter of each node is the mean position of its neighbors in the
+    // adjacent rank. Two implementations compute the *identical* result (integer
+    // position sum divided once by the neighbor count); we pick by rank width:
+    //
+    // - Narrow ranks: the original per-node scan. Cheap, and avoids the single-pass
+    //   setup allocations that would dominate when there are only a handful of nodes.
+    // - Wide ranks: a single pass over the edge list that accumulates contributions
+    //   into per-slot bins, turning the O(rank_size * edge_count) per-node rescan
+    //   into O(edge_count + rank_size) — the cost driver of crossing minimization on
+    //   fan-out graphs (parallel pipelines, ER/state diagrams, org charts).
+    const SINGLE_PASS_RANK_THRESHOLD: usize = 8;
+
+    let mut scored_nodes: Vec<(usize, Option<f32>, usize)> = if current_order.len()
+        < SINGLE_PASS_RANK_THRESHOLD
+    {
+        current_order
+            .iter()
+            .enumerate()
+            .map(|(stable_idx, node_index)| {
+                let mut total_position = 0_usize;
+                let mut neighbor_count = 0_usize;
+
+                for edge in &ir.edges {
+                    let Some(source) = endpoint_node_index(ir, edge.from) else {
+                        continue;
+                    };
+                    let Some(target) = endpoint_node_index(ir, edge.to) else {
+                        continue;
+                    };
+
+                    let neighbor = if use_incoming {
+                        if target == *node_index
+                            && barycenter_node_rank::<DENSE_RANK>(ranks, dense_node_rank, source)
+                                == adjacent_rank
+                        {
+                            Some(source)
+                        } else {
+                            None
+                        }
+                    } else if source == *node_index
+                        && barycenter_node_rank::<DENSE_RANK>(ranks, dense_node_rank, target)
+                            == adjacent_rank
+                    {
+                        Some(target)
+                    } else {
+                        None
+                    };
+
+                    if let Some(adjacent_node) = neighbor
+                        && let Some(position) = adjacent_position.get(&adjacent_node)
+                    {
+                        total_position = total_position.saturating_add(*position);
+                        neighbor_count = neighbor_count.saturating_add(1);
+                    }
+                }
+
+                let barycenter = if neighbor_count == 0 {
+                    None
+                } else {
+                    Some(total_position as f32 / neighbor_count as f32)
+                };
+                (*node_index, barycenter, stable_idx)
+            })
+            .collect()
+    } else {
+        let local_slot: BTreeMap<usize, usize> = current_order
+            .iter()
+            .enumerate()
+            .map(|(slot, node)| (*node, slot))
+            .collect();
+        let mut accumulators: Vec<(usize, usize)> = vec![(0, 0); current_order.len()];
+        for edge in &ir.edges {
+            let Some(source) = endpoint_node_index(ir, edge.from) else {
+                continue;
+            };
+            let Some(target) = endpoint_node_index(ir, edge.to) else {
+                continue;
+            };
+            let (node, adjacent_node) = if use_incoming {
+                (target, source)
+            } else {
+                (source, target)
+            };
+            let Some(&slot) = local_slot.get(&node) else {
+                continue;
+            };
+            if barycenter_node_rank::<DENSE_RANK>(ranks, dense_node_rank, adjacent_node)
+                != adjacent_rank
+            {
+                continue;
+            }
+            if let Some(position) = adjacent_position.get(&adjacent_node)
+                && let Some(accumulator) = accumulators.get_mut(slot)
+            {
+                accumulator.0 = accumulator.0.saturating_add(*position);
+                accumulator.1 = accumulator.1.saturating_add(1);
+            }
+        }
+
+        current_order
+            .iter()
+            .enumerate()
+            .map(|(stable_idx, node_index)| {
+                let (total_position, neighbor_count) =
+                    accumulators.get(stable_idx).copied().unwrap_or((0, 0));
+                let barycenter = if neighbor_count == 0 {
+                    None
+                } else {
+                    Some(total_position as f32 / neighbor_count as f32)
+                };
+                (*node_index, barycenter, stable_idx)
+            })
+            .collect()
+    };
+
+    sort_scored_nodes(&mut scored_nodes, centrality);
+
+    ordering_by_rank.insert(
+        rank,
+        scored_nodes
+            .into_iter()
+            .map(|(node_index, _, _)| node_index)
+            .collect(),
+    );
+}
+
+/// The single, shared ordering comparator for every barycenter arm, so the arms cannot drift apart in the
+/// one place that determines deterministic output.
+#[allow(unused_variables)] // centrality only used with fnx-integration feature
+fn sort_scored_nodes(
+    scored_nodes: &mut [(usize, Option<f32>, usize)],
+    centrality: &CentralityAssist,
+) {
     #[cfg(all(feature = "fnx-integration", not(target_arch = "wasm32")))]
     match centrality {
         CentralityAssist::Enabled(scores) => {
@@ -10751,14 +12596,458 @@ fn reorder_rank_by_barycenter(
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => left.2.cmp(&right.2).then_with(|| left.0.cmp(&right.0)),
     });
+}
 
-    ordering_by_rank.insert(
-        rank,
-        scored_nodes
-            .into_iter()
-            .map(|(node_index, _, _)| node_index)
-            .collect(),
-    );
+/// Bench/test-only access to the two barycenter sweep arms.
+///
+/// An A/B split across two `rch` invocations is invalid. The paired sampler alternates both arms inside
+/// one routine and one binary, so the bench crate needs to reach the reference implementation. Hidden
+/// from docs; not part of the public API contract.
+#[doc(hidden)]
+#[cfg(any(test, feature = "bench-internals"))]
+pub mod bench_internals {
+    use super::{BTreeMap, LayoutConfig, MermaidDiagramIr};
+
+    /// Rank assignment exactly as `layout_diagram_sugiyama_traced_with_config` computes it, so a bench
+    /// feeds `crossing_minimization` the same input production does.
+    #[must_use]
+    pub fn prepare_ranks(ir: &MermaidDiagramIr, config: &LayoutConfig) -> BTreeMap<usize, usize> {
+        let node_priority = super::stable_node_priorities(ir);
+        let cycle_result = super::cycle_removal(ir, config.cycle_strategy, &node_priority);
+        let mut ranks = super::rank_assignment(ir, &cycle_result, &node_priority);
+        super::apply_ir_constraints(ir, &mut ranks);
+        ranks
+    }
+
+    /// ORIG arm: the pre-`bd-9w78` `BTreeMap` sweep.
+    #[must_use]
+    pub fn crossing_minimization_btreemap(
+        ir: &MermaidDiagramIr,
+        ranks: &BTreeMap<usize, usize>,
+        config: &LayoutConfig,
+    ) -> (usize, BTreeMap<usize, Vec<usize>>) {
+        super::crossing_minimization_impl::<false, false, false, false>(ir, ranks, config)
+    }
+
+    /// CAND arm: one packed node-rank table replacing only the hot `BTreeMap` rank probes.
+    #[must_use]
+    pub fn crossing_minimization_dense_rank(
+        ir: &MermaidDiagramIr,
+        ranks: &BTreeMap<usize, usize>,
+        config: &LayoutConfig,
+    ) -> (usize, BTreeMap<usize, Vec<usize>>) {
+        super::crossing_minimization_impl::<true, false, false, false>(ir, ranks, config)
+    }
+
+    /// CAND arm for the follow-up lever: dense rank **plus** one accumulating edge pass per call, using
+    /// reusable packed position/slot scratch instead of the two per-call `BTreeMap`s. Removes the
+    /// `rank_size` factor from the old narrow-rank branch.
+    #[must_use]
+    pub fn crossing_minimization_single_pass(
+        ir: &MermaidDiagramIr,
+        ranks: &BTreeMap<usize, usize>,
+        config: &LayoutConfig,
+    ) -> (usize, BTreeMap<usize, Vec<usize>>) {
+        super::crossing_minimization_impl::<true, true, false, false>(ir, ranks, config)
+    }
+
+    /// CAND arm for flat CSR incidence: build packed incoming/outgoing neighbors once, then make each
+    /// reorder proportional to the current rank's incident edges instead of the whole edge list.
+    #[must_use]
+    pub fn crossing_minimization_flat_csr(
+        ir: &MermaidDiagramIr,
+        ranks: &BTreeMap<usize, usize>,
+        config: &LayoutConfig,
+    ) -> (usize, BTreeMap<usize, Vec<usize>>) {
+        super::crossing_minimization_impl::<true, true, true, false>(ir, ranks, config)
+    }
+
+    /// CAND arm for the packed crossing counter: reuse the flat CSR storage after the last barycenter
+    /// sweep as normalized rank-pair buckets plus an allocation-free `u32` Fenwick frontier.
+    #[must_use]
+    pub fn crossing_minimization_packed_crossings(
+        ir: &MermaidDiagramIr,
+        ranks: &BTreeMap<usize, usize>,
+        config: &LayoutConfig,
+    ) -> (usize, BTreeMap<usize, Vec<usize>>) {
+        super::crossing_minimization_impl::<true, true, true, true>(ir, ranks, config)
+    }
+}
+
+/// Adjacent-rank-pair node edges, precomputed once for incremental crossing counting.
+///
+/// Key `(upper_rank, lower_rank)` (consecutive ranks); value is `(source_node, target_node)`
+/// pairs. Mirrors the edge filtering in [`total_crossings`] but stores node ids (stable across
+/// reordering) instead of positions, so per-pair crossings can be recomputed cheaply after a
+/// single-rank perturbation without rescanning every edge.
+fn build_pair_node_edges(
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+) -> FxHashMap<(usize, usize), Vec<(usize, usize)>> {
+    let mut pair_edges: FxHashMap<(usize, usize), Vec<(usize, usize)>> = FxHashMap::default();
+    for edge in &ir.edges {
+        let Some(mut source) = endpoint_node_index(ir, edge.from) else {
+            continue;
+        };
+        let Some(mut target) = endpoint_node_index(ir, edge.to) else {
+            continue;
+        };
+        let Some(mut source_rank) = ranks.get(&source).copied() else {
+            continue;
+        };
+        let Some(mut target_rank) = ranks.get(&target).copied() else {
+            continue;
+        };
+        if source_rank == target_rank {
+            continue;
+        }
+        if source_rank > target_rank {
+            std::mem::swap(&mut source, &mut target);
+            std::mem::swap(&mut source_rank, &mut target_rank);
+        }
+        if target_rank != source_rank.saturating_add(1) {
+            continue;
+        }
+        pair_edges
+            .entry((source_rank, target_rank))
+            .or_default()
+            .push((source, target));
+    }
+    pair_edges
+}
+
+/// The two adjacent-rank-pair counters a single-rank perturbation can change.
+///
+/// [`crossing_refinement`] perturbs one rank at a time while its neighbours stand still, so the
+/// neighbour-derived half of each trial's work -- position map, edge bucketing, sort order -- is a
+/// loop invariant. Rebuilt once per rank visit and then reused by every trial in that visit.
+/// `None` on a side means that pair has no usable dense domain (or no edges at all) and the trial
+/// falls back to [`pair_crossings`], which computes the same number.
+#[derive(Default)]
+struct RankNeighbourCrossings {
+    upper: Option<crate::egraph_ordering::FixedLayerCrossings>,
+    lower: Option<crate::egraph_ordering::FixedLayerCrossings>,
+}
+
+impl RankNeighbourCrossings {
+    /// Re-bucket both pairs against `rank`'s current neighbours. Must be called whenever a rank
+    /// other than `rank` may have moved.
+    fn rebuild(
+        &mut self,
+        rank: usize,
+        ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
+        pair_edges: &FxHashMap<(usize, usize), Vec<(usize, usize)>>,
+    ) {
+        let moving = ordering_by_rank.get(&rank).map_or(&[][..], Vec::as_slice);
+        self.upper = rank.checked_sub(1).and_then(|upper_rank| {
+            let fixed = ordering_by_rank.get(&upper_rank)?;
+            let edges = pair_edges.get(&(upper_rank, rank))?;
+            crate::egraph_ordering::FixedLayerCrossings::new(fixed, moving, edges, true)
+        });
+        let lower_rank = rank.saturating_add(1);
+        self.lower = ordering_by_rank.get(&lower_rank).and_then(|fixed| {
+            let edges = pair_edges.get(&(rank, lower_rank))?;
+            crate::egraph_ordering::FixedLayerCrossings::new(fixed, moving, edges, false)
+        });
+    }
+
+    /// Crossings on the `(rank - 1, rank)` and `(rank, rank + 1)` pairs — the only two a
+    /// perturbation confined to `rank` can change.
+    fn count(
+        &mut self,
+        rank: usize,
+        ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
+        pair_edges: &FxHashMap<(usize, usize), Vec<(usize, usize)>>,
+    ) -> usize {
+        let moving = ordering_by_rank.get(&rank).map_or(&[][..], Vec::as_slice);
+        let upper = match self.upper.as_mut() {
+            Some(counter) => counter.count(moving),
+            None => rank.checked_sub(1).map_or(0, |upper_rank| {
+                pair_crossings(upper_rank, rank, ordering_by_rank, pair_edges)
+            }),
+        };
+        let lower = match self.lower.as_mut() {
+            Some(counter) => counter.count(moving),
+            None => pair_crossings(
+                rank,
+                rank.saturating_add(1),
+                ordering_by_rank,
+                pair_edges,
+            ),
+        };
+        upper.saturating_add(lower)
+    }
+}
+
+/// Crossings on a single adjacent rank pair for the current ordering — O(pair-edges · log).
+///
+/// The sum of `pair_crossings` over every consecutive `(r, r+1)` pair equals [`total_crossings`];
+/// a perturbation confined to rank `r` only changes the `(r-1, r)` and `(r, r+1)` pairs, so the
+/// refinement compares just those instead of recomputing the whole graph.
+fn pair_crossings(
+    upper_rank: usize,
+    lower_rank: usize,
+    ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
+    pair_edges: &FxHashMap<(usize, usize), Vec<(usize, usize)>>,
+) -> usize {
+    let Some(edges) = pair_edges.get(&(upper_rank, lower_rank)) else {
+        return 0;
+    };
+    if edges.len() < 2 {
+        return 0;
+    }
+    let (Some(upper_order), Some(lower_order)) = (
+        ordering_by_rank.get(&upper_rank),
+        ordering_by_rank.get(&lower_rank),
+    ) else {
+        return 0;
+    };
+    // Position lookup by DENSE ARRAY, not two from-scratch hash maps.
+    //
+    // This runs in the refinement loop -- a perturbation at rank `r` re-counts the `(r-1, r)` and
+    // `(r, r+1)` pairs -- so these maps were rebuilt from empty over and over for orderings that
+    // barely changed. Built with no capacity, each one grew by repeated `reserve_rehash`; on the
+    // ER catalog workload `reserve_rehash` + `insert` + `build_hasher` measured 19% of the whole
+    // job, on top of `crossing_count` itself. The keys are node indices, i.e. already dense, so a
+    // flat `Vec` indexed by node id answers the same question with one memset and no hashing.
+    //
+    // `crossing_count_dense` in `egraph_ordering` makes exactly this trade; the sparsity guard is
+    // copied from it so a pathological node-id domain still falls back to hashing instead of
+    // allocating a huge mostly-empty array. Byte-identical either way: same positions, pushed in
+    // the same edge order, so `edge_positions` and the inversion count are unchanged.
+    const MISSING: usize = usize::MAX;
+    let dense_domain = upper_order
+        .iter()
+        .chain(lower_order.iter())
+        .copied()
+        .max()
+        .and_then(|max_node| max_node.checked_add(1))
+        .filter(|&domain_len| {
+            let useful_slots = upper_order
+                .len()
+                .saturating_add(lower_order.len())
+                .saturating_add(edges.len().saturating_mul(2))
+                .max(64);
+            domain_len <= useful_slots.saturating_mul(8)
+        });
+
+    let mut edge_positions: Vec<(usize, usize)> = Vec::with_capacity(edges.len());
+    if let Some(domain_len) = dense_domain {
+        let mut upper_pos = vec![MISSING; domain_len];
+        for (position, &node) in upper_order.iter().enumerate() {
+            upper_pos[node] = position;
+        }
+        let mut lower_pos = vec![MISSING; domain_len];
+        for (position, &node) in lower_order.iter().enumerate() {
+            lower_pos[node] = position;
+        }
+        // `.get` not indexing: an edge may name a node absent from these two ranks entirely.
+        for &(source, target) in edges {
+            let source_position = upper_pos.get(source).copied().unwrap_or(MISSING);
+            let target_position = lower_pos.get(target).copied().unwrap_or(MISSING);
+            if source_position == MISSING || target_position == MISSING {
+                continue;
+            }
+            edge_positions.push((source_position, target_position));
+        }
+    } else {
+        let mut upper_pos: FxHashMap<usize, usize> = FxHashMap::default();
+        for (position, &node) in upper_order.iter().enumerate() {
+            upper_pos.insert(node, position);
+        }
+        let mut lower_pos: FxHashMap<usize, usize> = FxHashMap::default();
+        for (position, &node) in lower_order.iter().enumerate() {
+            lower_pos.insert(node, position);
+        }
+        for &(source, target) in edges {
+            let (Some(&source_position), Some(&target_position)) =
+                (upper_pos.get(&source), lower_pos.get(&target))
+            else {
+                continue;
+            };
+            edge_positions.push((source_position, target_position));
+        }
+    }
+    edge_positions.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    let mut target_positions: Vec<usize> = edge_positions
+        .into_iter()
+        .map(|(_source_position, target_position)| target_position)
+        .collect();
+    count_inversions(&mut target_positions)
+}
+
+/// Normalize one countable edge to `(upper_node, lower_position)` using the current ordering.
+/// Returning the lower position directly lets the packed counter overwrite the no-longer-needed CSR
+/// neighbor IDs with its Fenwick input without another lookup during the hot count.
+fn packed_crossing_edge(
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+    positions: &[u32],
+    from: IrEndpoint,
+    to: IrEndpoint,
+) -> Option<(usize, u32)> {
+    let mut source = endpoint_node_index(ir, from)?;
+    let mut target = endpoint_node_index(ir, to)?;
+    let mut source_rank = ranks.get(&source).copied()?;
+    let mut target_rank = ranks.get(&target).copied()?;
+
+    if source_rank == target_rank {
+        return None;
+    }
+    if source_rank > target_rank {
+        std::mem::swap(&mut source, &mut target);
+        std::mem::swap(&mut source_rank, &mut target_rank);
+    }
+    if target_rank != source_rank.saturating_add(1) {
+        return None;
+    }
+
+    let source_position = positions.get(source).copied()?;
+    let target_position = positions.get(target).copied()?;
+    if source_position == BarycenterScratch::ABSENT || target_position == BarycenterScratch::ABSENT
+    {
+        return None;
+    }
+    Some((source, target_position))
+}
+
+#[inline]
+fn packed_fenwick_prefix(tree: &[u32], mut index: usize) -> usize {
+    let mut sum = 0_usize;
+    while index > 0 {
+        sum = sum.saturating_add(usize::try_from(tree[index]).unwrap_or(usize::MAX));
+        index &= index - 1;
+    }
+    sum
+}
+
+#[inline]
+fn packed_fenwick_add(tree: &mut [u32], mut index: usize) {
+    while index < tree.len() {
+        tree[index] = tree[index].saturating_add(1);
+        let step = index & index.wrapping_neg();
+        index = index.saturating_add(step);
+    }
+}
+
+/// Allocation-free crossing count for the packed production arm.
+///
+/// Barycenter sweeps are finished before this runs, so their CSR can be destructively repurposed:
+/// the first offset half becomes normalized upper-node buckets, the first neighbor half stores lower
+/// positions, and the second offset half is a word-packed Fenwick frontier. Repeated e-graph probes
+/// rebuild those same buffers in place; no nested map, edge bucket, sort buffer, or merge allocation
+/// is created by the counter.
+fn total_crossings_packed(
+    ir: &MermaidDiagramIr,
+    ranks: &BTreeMap<usize, usize>,
+    ordering_by_rank: &BTreeMap<usize, Vec<usize>>,
+    scratch: &mut BarycenterScratch,
+) -> Option<usize> {
+    let node_count = ir.nodes.len();
+    if scratch.position_of.len() != node_count || scratch.slot_of.len() != node_count {
+        return None;
+    }
+    let direction_width = node_count.checked_add(1)?;
+    let offset_count = direction_width.checked_mul(2)?;
+    if scratch.incidence_offsets.len() < offset_count
+        || !scratch.incidence_neighbors.len().is_multiple_of(2)
+    {
+        return None;
+    }
+    let edge_capacity = scratch.incidence_neighbors.len() / 2;
+
+    // Rebuild the current node-position table. Entries whose ordering rank disagrees with `ranks`
+    // are deliberately absent, matching the old per-rank position-map lookup.
+    scratch.position_of.fill(BarycenterScratch::ABSENT);
+    for (rank, ordered_nodes) in ordering_by_rank {
+        for (position, node) in ordered_nodes.iter().copied().enumerate() {
+            if ranks.get(&node).copied() != Some(*rank) {
+                continue;
+            }
+            let entry = scratch.position_of.get_mut(node)?;
+            *entry = u32::try_from(position).ok()?;
+        }
+    }
+
+    // Count normalized adjacent-rank edges per upper node into the first offset half.
+    let (normalized_offsets, fenwick_storage) =
+        scratch.incidence_offsets.split_at_mut(direction_width);
+    normalized_offsets.fill(0);
+    for edge in &ir.edges {
+        let Some((upper_node, _lower_position)) =
+            packed_crossing_edge(ir, ranks, &scratch.position_of, edge.from, edge.to)
+        else {
+            continue;
+        };
+        let count = normalized_offsets.get_mut(upper_node.checked_add(1)?)?;
+        *count = count.checked_add(1)?;
+    }
+    for index in 1..direction_width {
+        normalized_offsets[index] =
+            normalized_offsets[index - 1].checked_add(normalized_offsets[index])?;
+    }
+    let packed_edge_count = usize::try_from(normalized_offsets[node_count]).ok()?;
+    if packed_edge_count > edge_capacity || fenwick_storage.len() < direction_width {
+        return None;
+    }
+
+    // `slot_of` is now a fill cursor; the original outgoing CSR is dead after the final sweep.
+    scratch.slot_of[..node_count].copy_from_slice(&normalized_offsets[..node_count]);
+    let normalized_positions = scratch.incidence_neighbors.get_mut(..edge_capacity)?;
+    for edge in &ir.edges {
+        let Some((upper_node, lower_position)) =
+            packed_crossing_edge(ir, ranks, &scratch.position_of, edge.from, edge.to)
+        else {
+            continue;
+        };
+        let cursor = usize::try_from(*scratch.slot_of.get(upper_node)?).ok()?;
+        *normalized_positions.get_mut(cursor)? = lower_position;
+        scratch.slot_of[upper_node] = scratch.slot_of[upper_node].checked_add(1)?;
+    }
+
+    // Process one layer pair at a time. Query every edge of a source group before inserting that
+    // group, so edges sharing a source never count as crossings (the old tuple sort's secondary key
+    // provided the same property). Parallel and reversed edges retain their exact multiplicity.
+    let mut total = 0_usize;
+    for (upper_rank, upper_order) in ordering_by_rank {
+        let Some(lower_rank) = upper_rank.checked_add(1) else {
+            continue;
+        };
+        let Some(lower_order) = ordering_by_rank.get(&lower_rank) else {
+            continue;
+        };
+        let fenwick_len = lower_order.len().checked_add(1)?;
+        let fenwick = fenwick_storage.get_mut(..fenwick_len)?;
+        fenwick.fill(0);
+        let mut seen_edges = 0_usize;
+
+        for (source_position, source) in upper_order.iter().copied().enumerate() {
+            if ranks.get(&source).copied() != Some(*upper_rank)
+                || scratch.position_of.get(source).copied() != u32::try_from(source_position).ok()
+            {
+                continue;
+            }
+            let start = usize::try_from(*normalized_offsets.get(source)?).ok()?;
+            let end = usize::try_from(*normalized_offsets.get(source.checked_add(1)?)?).ok()?;
+            let targets = normalized_positions.get(start..end)?;
+
+            for target_position in targets.iter().copied() {
+                let target_position = usize::try_from(target_position).ok()?;
+                if target_position >= lower_order.len() {
+                    return None;
+                }
+                let at_or_before = packed_fenwick_prefix(fenwick, target_position + 1);
+                total = total.saturating_add(seen_edges.saturating_sub(at_or_before));
+            }
+            for target_position in targets.iter().copied() {
+                let target_position = usize::try_from(target_position).ok()?;
+                packed_fenwick_add(fenwick, target_position + 1);
+                seen_edges = seen_edges.saturating_add(1);
+            }
+        }
+    }
+
+    Some(total)
 }
 
 fn total_crossings(
@@ -10887,6 +13176,68 @@ fn build_edge_paths(
     )
 }
 
+/// Route an exact directed path without building or scanning an obstacle set.
+///
+/// Consecutive path nodes occupy consecutive tree depths, with no peer node in either rank. The
+/// open strip between their facing anchors therefore cannot contain a third node. Running the
+/// general router with an empty obstacle slice produces the same points while deleting the
+/// all-nodes scan for every edge.
+fn build_directed_path_edge_paths(
+    ir: &MermaidDiagramIr,
+    nodes: &[LayoutNodeBox],
+    highlighted_edge_indexes: &BTreeSet<usize>,
+    edge_routing: EdgeRouting,
+) -> Option<Vec<LayoutEdgePath>> {
+    if !is_directed_path(ir) {
+        return None;
+    }
+
+    build_directed_path_edge_paths_unchecked(ir, nodes, highlighted_edge_indexes, edge_routing)
+}
+
+fn build_directed_path_edge_paths_unchecked(
+    ir: &MermaidDiagramIr,
+    nodes: &[LayoutNodeBox],
+    highlighted_edge_indexes: &BTreeSet<usize>,
+    edge_routing: EdgeRouting,
+) -> Option<Vec<LayoutEdgePath>> {
+    let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
+    let mut paths = Vec::with_capacity(ir.edges.len());
+    for (edge_index, edge) in ir.edges.iter().enumerate() {
+        let source = endpoint_node_index(ir, edge.from)?;
+        let target = endpoint_node_index(ir, edge.to)?;
+        let (source_anchor, target_anchor) =
+            edge_anchors(nodes.get(source)?, nodes.get(target)?, horizontal_ranks);
+        let points = match edge_routing {
+            EdgeRouting::Orthogonal => route_edge_points_with_obstacle_index(
+                source_anchor,
+                target_anchor,
+                horizontal_ranks,
+                &[],
+                None,
+            ),
+            EdgeRouting::Spline => route_edge_points_spline_with_obstacle_index(
+                source_anchor,
+                target_anchor,
+                horizontal_ranks,
+                &[],
+                None,
+            ),
+        };
+        paths.push(LayoutEdgePath {
+            edge_index,
+            span: edge.span,
+            points,
+            reversed: highlighted_edge_indexes.contains(&edge_index),
+            is_self_loop: false,
+            parallel_offset: 0.0,
+            bundle_count: 1,
+            bundled: false,
+        });
+    }
+    Some(paths)
+}
+
 fn build_edge_paths_with_orientation(
     ir: &MermaidDiagramIr,
     nodes: &[LayoutNodeBox],
@@ -10894,19 +13245,93 @@ fn build_edge_paths_with_orientation(
     horizontal_ranks: bool,
     edge_routing: EdgeRouting,
 ) -> Vec<LayoutEdgePath> {
-    // Track parallel edges: count edges between same (source, target) pair.
-    let mut edge_pair_count: BTreeMap<(usize, usize), usize> = BTreeMap::new();
-    let mut edge_pair_index: Vec<usize> = Vec::with_capacity(ir.edges.len());
+    // Track parallel edges: count edges between same (source, target) pair. The map is
+    // read by key only (never iterated for output order), so an `FxHashMap` is
+    // determinism-safe and turns the O(log n) keyed inserts/lookups — 2 per edge — into
+    // O(1); the common flowchart has no parallel edges, so `any_parallel` lets the hot
+    // per-edge path skip the lookup entirely.
+    // Detect parallel edges (two edges sharing an unordered endpoint pair) with a cheap set pass that
+    // stops at the first duplicate. The per-edge `(total, index)` counts are only READ when parallels
+    // exist (see the routing loop's `if any_parallel`), and the common flowchart has none — so skip
+    // building the count map AND the per-edge index Vec entirely in that case (a `FxHashSet` insert is
+    // cheaper than `entry().or_insert()` + `Vec::push`, and the index Vec's alloc is avoided).
+    let mut seen_pairs: FxHashSet<(usize, usize)> = FxHashSet::default();
+    seen_pairs.reserve(ir.edges.len());
+    let mut any_parallel = false;
     for edge in &ir.edges {
         let source = endpoint_node_index(ir, edge.from).unwrap_or(usize::MAX);
         let target = endpoint_node_index(ir, edge.to).unwrap_or(usize::MAX);
-        let key = (source.min(target), source.max(target));
-        let count = edge_pair_count.entry(key).or_insert(0);
-        edge_pair_index.push(*count);
-        *count += 1;
+        if !seen_pairs.insert((source.min(target), source.max(target))) {
+            any_parallel = true;
+            break;
+        }
     }
+    // Only when parallels exist do we need the per-edge `(pair_total, pair_idx)`. Rebuilt identically
+    // to the original single-pass counts; byte-identical for the routing loop below.
+    let (edge_pair_count, edge_pair_index): (FxHashMap<(usize, usize), usize>, Vec<usize>) =
+        if any_parallel {
+            let mut count = FxHashMap::default();
+            count.reserve(ir.edges.len());
+            let mut index = Vec::with_capacity(ir.edges.len());
+            for edge in &ir.edges {
+                let source = endpoint_node_index(ir, edge.from).unwrap_or(usize::MAX);
+                let target = endpoint_node_index(ir, edge.to).unwrap_or(usize::MAX);
+                let key = (source.min(target), source.max(target));
+                let c = count.entry(key).or_insert(0);
+                index.push(*c);
+                *c += 1;
+            }
+            (count, index)
+        } else {
+            (FxHashMap::default(), Vec::new())
+        };
 
-    ir.edges
+    // Build the obstacle set (all node bounds) **once** and reuse it for every edge,
+    // instead of rebuilding an all-nodes-except-endpoints `Vec` per edge (O(edges*nodes)).
+    // Each edge's own two endpoints are temporarily parked far away below so the
+    // router's AABB check rejects them — equivalent to excluding them, O(1) per edge.
+    let mut obstacle_bounds: Vec<LayoutRect> = nodes.iter().map(|n| n.bounds).collect();
+    // Index the obstacle set for either a sparse/tree-like flowchart (the original
+    // `edges <= 1.5*nodes` case) **or** a *large* dense graph. The density gate alone
+    // kept wide layered graphs on the per-edge linear scan, but a fresh profile shows
+    // `build_edge_paths` dominating layout there (≈1 ms / 960 edges at 16x32): the
+    // mid-segment nudge scans every node obstacle even though each axis-aligned segment
+    // spans only a couple of grid cells, so the index's localized candidate query is a
+    // large win (16x32 −42%, 12x24 −25%). For *small* dense graphs the index's build +
+    // candidate-sort overhead loses to the already-cheap scan (8x16 +5%), so dense
+    // indexing is floored at `DENSE_INDEX_OBSTACLES`. The index query is a conservative
+    // superset of the AABB scan, so routing stays byte-identical either way.
+    // The `DENSE_INDEX_OBSTACLES` floor uses OBSTACLE COUNT as the crossover proxy, but it was calibrated
+    // on the wide layered family where edges ≈ obstacles. The linear scan's real cost is `edges ×
+    // obstacles`, so a graph with FEW obstacles but MANY edges (a dense DAG: 200 nodes / 790 edges) pays a
+    // large O(edges·obstacles) scan yet is excluded by the count-only gate. Measured: `find_obstacle_nudge_x`
+    // is 19.36% of the `dense_dag_200` pipeline, all in the per-edge linear obstacle scan, because 200
+    // obstacles < 256 keeps the index off even though 790×200 ≈ 158k scan tests is the SAME work the already-
+    // indexed 12x24 wide graph (288×552 ≈ 159k, index −25%) pays. So add a third, WORK-based disjunct. It is
+    // purely additive — it can only ENABLE the index for more graphs, never disable it, so no currently-
+    // indexed case can regress — and byte-identical for the same reason the count gate is (the index query is
+    // a conservative superset of the AABB scan). The floor 100k sits above the one measured LOSS (8x16:
+    // 128×224 ≈ 29k, index +5%, stays excluded) and below the measured WINS (12x24/16x32 and dense_dag_200).
+    let sparse_routing = ir.edges.len() <= nodes.len().saturating_mul(3) / 2;
+    let linear_scan_work = ir.edges.len().saturating_mul(obstacle_bounds.len());
+    let index_eligible = sparse_routing
+        || obstacle_bounds.len() >= ObstacleSpatialIndex::DENSE_INDEX_OBSTACLES
+        || linear_scan_work >= ObstacleSpatialIndex::DENSE_INDEX_LINEAR_WORK;
+    let mut obstacle_index =
+        if index_eligible && obstacle_bounds.len() >= ObstacleSpatialIndex::MIN_INDEXED_OBSTACLES {
+            ObstacleSpatialIndex::new(&obstacle_bounds)
+        } else {
+            None
+        };
+
+    // Presize to `ir.edges.len()` (the max; `filter_map` only drops unresolved-endpoint edges) so
+    // the `Vec<LayoutEdgePath>` fills without the log(N) growth reallocs a `filter_map().collect()`
+    // pays — `filter_map`'s 0 lower size-hint gives `collect` no starting capacity, so it doubles and
+    // memcpys the fat `LayoutEdgePath` structs repeatedly. `edges.len()` is O(1) (no scan), so this
+    // is a strict win; byte-identical (same elements, same order).
+    let mut edge_paths = Vec::with_capacity(ir.edges.len());
+    let routed = ir
+        .edges
         .iter()
         .enumerate()
         .filter_map(|(edge_index, edge)| {
@@ -10916,9 +13341,15 @@ fn build_edge_paths_with_orientation(
             let target_box = nodes.get(target)?;
 
             let is_self_loop = source == target;
-            let key = (source.min(target), source.max(target));
-            let pair_total = edge_pair_count.get(&key).copied().unwrap_or(1);
-            let pair_idx = edge_pair_index.get(edge_index).copied().unwrap_or(0);
+            let (pair_total, pair_idx) = if any_parallel {
+                let key = (source.min(target), source.max(target));
+                (
+                    edge_pair_count.get(&key).copied().unwrap_or(1),
+                    edge_pair_index.get(edge_index).copied().unwrap_or(0),
+                )
+            } else {
+                (1, 0)
+            };
             let parallel_offset = if pair_total > 1 {
                 let offset_step = 12.0_f32;
                 (pair_idx as f32 - (pair_total - 1) as f32 / 2.0) * offset_step
@@ -10931,27 +13362,45 @@ fn build_edge_paths_with_orientation(
             } else {
                 let (source_anchor, target_anchor) =
                     edge_anchors(source_box, target_box, horizontal_ranks);
-                // Collect obstacles: all node boxes except source and target.
-                let obstacles: Vec<LayoutRect> = nodes
-                    .iter()
-                    .enumerate()
-                    .filter(|(idx, _)| *idx != source && *idx != target)
-                    .map(|(_, n)| n.bounds)
-                    .collect();
+                // Exclude this edge's own endpoints from the shared obstacle set by
+                // parking them far away (the router's AABB reject drops them), then
+                // restore. Far enough that no realistic segment bbox can overlap.
+                const FAR_AWAY: LayoutRect = LayoutRect {
+                    x: 1.0e30,
+                    y: 1.0e30,
+                    width: 0.0,
+                    height: 0.0,
+                };
+                let saved_source = obstacle_bounds.get(source).copied();
+                let saved_target = obstacle_bounds.get(target).copied();
+                if let Some(slot) = obstacle_bounds.get_mut(source) {
+                    *slot = FAR_AWAY;
+                }
+                if let Some(slot) = obstacle_bounds.get_mut(target) {
+                    *slot = FAR_AWAY;
+                }
                 let mut pts = match edge_routing {
-                    EdgeRouting::Orthogonal => route_edge_points_with_obstacles(
+                    EdgeRouting::Orthogonal => route_edge_points_with_obstacle_index(
                         source_anchor,
                         target_anchor,
                         horizontal_ranks,
-                        &obstacles,
+                        &obstacle_bounds,
+                        obstacle_index.as_mut(),
                     ),
-                    EdgeRouting::Spline => route_edge_points_spline_with_obstacles(
+                    EdgeRouting::Spline => route_edge_points_spline_with_obstacle_index(
                         source_anchor,
                         target_anchor,
                         horizontal_ranks,
-                        &obstacles,
+                        &obstacle_bounds,
+                        obstacle_index.as_mut(),
                     ),
                 };
+                if let (Some(slot), Some(saved)) = (obstacle_bounds.get_mut(source), saved_source) {
+                    *slot = saved;
+                }
+                if let (Some(slot), Some(saved)) = (obstacle_bounds.get_mut(target), saved_target) {
+                    *slot = saved;
+                }
                 if parallel_offset.abs() > 0.01 {
                     apply_parallel_offset(&mut pts, parallel_offset, horizontal_ranks);
                 }
@@ -10960,10 +13409,10 @@ fn build_edge_paths_with_orientation(
 
             Some(LayoutEdgePath {
                 edge_index,
-                span: ir
-                    .edges
-                    .get(edge_index)
-                    .map_or(Span::default(), |edge| edge.span),
+                // The closure already holds `edge` (the `enumerate` index IS its position in
+                // `ir.edges`), so the old `ir.edges.get(edge_index)` re-fetched the same element behind
+                // a bounds check + never-taken `map_or` default. Byte-identical: `edge.span`.
+                span: edge.span,
                 points,
                 reversed: highlighted_edge_indexes.contains(&edge_index),
                 is_self_loop,
@@ -10971,12 +13420,13 @@ fn build_edge_paths_with_orientation(
                 bundle_count: 1,
                 bundled: false,
             })
-        })
-        .collect()
+        });
+    edge_paths.extend(routed);
+    edge_paths
 }
 
 /// Route a self-loop edge: goes out one side and returns on another.
-fn route_self_loop(node_box: &LayoutNodeBox, horizontal_ranks: bool) -> Vec<LayoutPoint> {
+fn route_self_loop(node_box: &LayoutNodeBox, horizontal_ranks: bool) -> EdgePoints {
     let b = &node_box.bounds;
     let loop_size = 24.0_f32;
 
@@ -11002,7 +13452,7 @@ fn route_self_loop(node_box: &LayoutNodeBox, horizontal_ranks: bool) -> Vec<Layo
             x: b.width.mul_add(0.6, b.x),
             y: b.y,
         };
-        vec![start, corner1, corner2, corner3, end]
+        smallvec![start, corner1, corner2, corner3, end]
     } else {
         // Loop goes out the bottom and returns from the right.
         let start = LayoutPoint {
@@ -11025,7 +13475,7 @@ fn route_self_loop(node_box: &LayoutNodeBox, horizontal_ranks: bool) -> Vec<Layo
             x: b.x + b.width,
             y: b.height.mul_add(0.4, b.y),
         };
-        vec![start, corner1, corner2, corner3, end]
+        smallvec![start, corner1, corner2, corner3, end]
     }
 }
 
@@ -11041,6 +13491,298 @@ fn apply_parallel_offset(points: &mut [LayoutPoint], offset: f32, horizontal_ran
         } else {
             pt.x += offset;
         }
+    }
+}
+
+/// A flat CSR (compressed-sparse-row) bucket grid over node-obstacle rects. Replaces the
+/// earlier `FxHashMap<(i32,i32), Vec<usize>>` grid: the build avoids one heap `Vec`
+/// allocation per occupied cell plus per-insert hashing (it counts then scatters into two
+/// flat `Vec`s), and the query indexes the bucket directly instead of hashing each cell.
+/// Byte-identical to the hash grid: the same `cell_of` mapping fills the same cells with the
+/// same obstacle indices, and `query_segment` returns the same deduped candidate set (the two
+/// nudge consumers select the minimum-index intersecting obstacle, so candidate order is
+/// irrelevant — see `find_{vertical,horizontal}_segment_nudge_by_indices`).
+struct ObstacleSpatialIndex {
+    inv_cell_size: f32,
+    min_cx: i32,
+    min_cy: i32,
+    ncols: usize,
+    nrows: usize,
+    /// `offsets[i]..offsets[i+1]` is cell `i`'s slice of `flat` (CSR row pointers).
+    offsets: Vec<u32>,
+    /// Obstacle indices bucketed by cell.
+    flat: Vec<u32>,
+    seen: Vec<u32>,
+    generation: u32,
+    candidates: Vec<usize>,
+}
+
+impl ObstacleSpatialIndex {
+    const CELL_SIZE: f32 = 128.0;
+    const MIN_INDEXED_OBSTACLES: usize = 64;
+    /// Obstacle-count floor above which a *dense* graph (edges > 1.5×nodes) is still
+    /// indexed. Below it the per-edge linear AABB scan beats the index's build +
+    /// candidate-sort overhead; above it the localized query wins decisively. The
+    /// crossover sits between the 8x16 wide graph (128 obstacles, scan faster) and the
+    /// 12x24 wide graph (288 obstacles, index ~25% faster).
+    const DENSE_INDEX_OBSTACLES: usize = 256;
+    /// Linear-scan-work floor (`edges × obstacles`) above which a *dense* graph is indexed regardless of
+    /// obstacle count. Captures the graphs the count-only `DENSE_INDEX_OBSTACLES` gate misses: few obstacles
+    /// but many edges (a dense DAG), whose O(edges·obstacles) linear scan is the actual cost driver. Chosen
+    /// to sit above the one measured index LOSS (8x16: 128×224 ≈ 29k, index +5%) and below the measured WINS
+    /// (12x24: 288×552 ≈ 159k, index −25%; and `dense_dag_200`: 200×790 ≈ 158k). Additive with the count gate,
+    /// so it can only enable indexing for more graphs, never regress a currently-indexed one.
+    const DENSE_INDEX_LINEAR_WORK: usize = 100_000;
+    /// Cap on grid cells per obstacle. A layout so spread out that its cell bbox exceeds
+    /// this is not worth a dense grid — `new` returns `None` and the caller falls back to
+    /// the per-edge linear AABB scan, which is byte-identical (just slower for that rare
+    /// case). Real diagrams pack obstacles tightly, so this never trips for them.
+    const MAX_CELLS_PER_OBSTACLE: usize = 64;
+
+    #[inline]
+    fn cell_of(value: f32, inv: f32) -> i32 {
+        (value * inv).floor() as i32
+    }
+
+    /// Inclusive `(cx0, cx1, cy0, cy1)` cell range a rect spans, or `None` if non-finite.
+    #[inline]
+    fn rect_cells(rect: LayoutRect, inv: f32) -> Option<(i32, i32, i32, i32)> {
+        let min_x = rect.x.min(rect.x + rect.width);
+        let max_x = rect.x.max(rect.x + rect.width);
+        let min_y = rect.y.min(rect.y + rect.height);
+        let max_y = rect.y.max(rect.y + rect.height);
+        if !(min_x.is_finite() && max_x.is_finite() && min_y.is_finite() && max_y.is_finite()) {
+            return None;
+        }
+        Some((
+            Self::cell_of(min_x, inv),
+            Self::cell_of(max_x, inv),
+            Self::cell_of(min_y, inv),
+            Self::cell_of(max_y, inv),
+        ))
+    }
+
+    fn new(obstacles: &[LayoutRect]) -> Option<Self> {
+        // Adaptive cell size. A fixed 128px cell makes the grid's cell count scale with the
+        // layout's WORLD area, so a tall+wide spread-out layout (e.g. a large gantt: ~26k×100k px)
+        // blows past `MAX_CELLS_PER_OBSTACLE` and returns `None` — disabling the index and forcing
+        // the O(N) per-edge linear obstacle scan → O(N²) routing (measured: `find_obstacle_nudge_x`
+        // 72% of a 2000-task gantt layout, ~O(N²) scaling). Instead, size cells so the grid holds
+        // ~one obstacle per cell regardless of aspect ratio: `cell = max(128, sqrt(area / count))`.
+        // DENSE layouts keep exactly 128px (the `max` floor → bit-identical to before); only
+        // spread-out layouts coarsen. Coarser cells return a SUPERSET of candidates that the exact
+        // CGA test filters, so the routing result is byte-identical (same property that makes the
+        // linear-scan fallback byte-identical) — only far faster (index instead of full scan).
+        let mut wmin_x = f32::INFINITY;
+        let mut wmax_x = f32::NEG_INFINITY;
+        let mut wmin_y = f32::INFINITY;
+        let mut wmax_y = f32::NEG_INFINITY;
+        let mut finite = 0usize;
+        for rect in obstacles {
+            let lo_x = rect.x.min(rect.x + rect.width);
+            let hi_x = rect.x.max(rect.x + rect.width);
+            let lo_y = rect.y.min(rect.y + rect.height);
+            let hi_y = rect.y.max(rect.y + rect.height);
+            if lo_x.is_finite() && hi_x.is_finite() && lo_y.is_finite() && hi_y.is_finite() {
+                wmin_x = wmin_x.min(lo_x);
+                wmax_x = wmax_x.max(hi_x);
+                wmin_y = wmin_y.min(lo_y);
+                wmax_y = wmax_y.max(hi_y);
+                finite += 1;
+            }
+        }
+        if finite == 0 {
+            return None; // no finite obstacles -> nothing to index
+        }
+        let span_x = (wmax_x - wmin_x).max(1.0);
+        let span_y = (wmax_y - wmin_y).max(1.0);
+        let target_cells = obstacles.len().max(1) as f32;
+        let cell_size = (span_x * span_y / target_cells).sqrt().max(Self::CELL_SIZE);
+        let inv = 1.0 / cell_size;
+        let mut min_cx = i32::MAX;
+        let mut min_cy = i32::MAX;
+        let mut max_cx = i32::MIN;
+        let mut max_cy = i32::MIN;
+        // Compute each obstacle's cell range ONCE and cache it — the bbox, count, and scatter
+        // passes below all need the identical `(cx0, cx1, cy0, cy1)`, so recomputing `rect_cells`
+        // (4 min/max + 4 finite checks + 4 float floor-casts) per pass was 3× the work. Byte-
+        // identical: the cached tuples equal what each pass would recompute, iterated in the same
+        // obstacle order.
+        let mut cells: Vec<Option<(i32, i32, i32, i32)>> = Vec::with_capacity(obstacles.len());
+        for rect in obstacles {
+            let rc = Self::rect_cells(*rect, inv);
+            if let Some((cx0, cx1, cy0, cy1)) = rc {
+                min_cx = min_cx.min(cx0);
+                max_cx = max_cx.max(cx1);
+                min_cy = min_cy.min(cy0);
+                max_cy = max_cy.max(cy1);
+            }
+            cells.push(rc);
+        }
+        if min_cx > max_cx || min_cy > max_cy {
+            return None; // no finite obstacles -> nothing to index
+        }
+        let ncols = (i64::from(max_cx) - i64::from(min_cx) + 1) as usize;
+        let nrows = (i64::from(max_cy) - i64::from(min_cy) + 1) as usize;
+        let cell_count = ncols.checked_mul(nrows)?;
+        if cell_count
+            > obstacles
+                .len()
+                .saturating_mul(Self::MAX_CELLS_PER_OBSTACLE)
+                .max(4096)
+        {
+            return None; // too spread out; the caller uses the linear scan instead
+        }
+
+        let lin =
+            |cx: i32, cy: i32| -> usize { (cy - min_cy) as usize * ncols + (cx - min_cx) as usize };
+
+        // Pass 1: count obstacles per cell into offsets[i+1]. The `cx0..=cx1`/`cy0..=cy1` cell walk
+        // uses plain loops instead of `RangeInclusive` iterators — the latter's per-step
+        // exhaustion tracking showed as ~2.7% self here (profiled). `rect_cells` guarantees
+        // `cx0 <= cx1` & `cy0 <= cy1`, and break-before-increment avoids the `hi + 1` overflow when
+        // `hi == i32::MAX` (a finite-but-huge coordinate). Byte-identical to the inclusive ranges.
+        let mut offsets = vec![0u32; cell_count + 1];
+        for &rc in &cells {
+            if let Some((cx0, cx1, cy0, cy1)) = rc {
+                let mut cx = cx0;
+                loop {
+                    let mut cy = cy0;
+                    loop {
+                        offsets[lin(cx, cy) + 1] += 1;
+                        if cy == cy1 {
+                            break;
+                        }
+                        cy += 1;
+                    }
+                    if cx == cx1 {
+                        break;
+                    }
+                    cx += 1;
+                }
+            }
+        }
+        // Prefix sum: offsets[i] becomes the start of cell i's bucket.
+        for i in 1..offsets.len() {
+            offsets[i] += offsets[i - 1];
+        }
+        let mut flat = vec![0u32; offsets[cell_count] as usize];
+        let mut cursor = offsets.clone();
+        // Pass 2: scatter each obstacle index into its cells (same plain-loop cell walk as pass 1).
+        for (idx, &rc) in cells.iter().enumerate() {
+            if let Some((cx0, cx1, cy0, cy1)) = rc {
+                let mut cx = cx0;
+                loop {
+                    let mut cy = cy0;
+                    loop {
+                        let ci = lin(cx, cy);
+                        flat[cursor[ci] as usize] = idx as u32;
+                        cursor[ci] += 1;
+                        if cy == cy1 {
+                            break;
+                        }
+                        cy += 1;
+                    }
+                    if cx == cx1 {
+                        break;
+                    }
+                    cx += 1;
+                }
+            }
+        }
+
+        Some(Self {
+            inv_cell_size: inv,
+            min_cx,
+            min_cy,
+            ncols,
+            nrows,
+            offsets,
+            flat,
+            seen: vec![0; obstacles.len()],
+            generation: 0,
+            candidates: Vec::new(),
+        })
+    }
+
+    fn query_segment(&mut self, segment: (LayoutPoint, LayoutPoint), margin: f32) -> &[usize] {
+        self.candidates.clear();
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.seen.fill(0);
+            self.generation = 1;
+        }
+
+        let min_x = segment.0.x.min(segment.1.x) - margin;
+        let max_x = segment.0.x.max(segment.1.x) + margin;
+        let min_y = segment.0.y.min(segment.1.y) - margin;
+        let max_y = segment.0.y.max(segment.1.y) + margin;
+        if !(min_x.is_finite() && max_x.is_finite() && min_y.is_finite() && max_y.is_finite()) {
+            return &self.candidates;
+        }
+
+        // Clamp the query cell range to the grid; cells outside it hold no obstacles, exactly
+        // as the hash grid's missing entries did.
+        let grid_max_cx = self.min_cx + self.ncols as i32 - 1;
+        let grid_max_cy = self.min_cy + self.nrows as i32 - 1;
+        let qx0 = Self::cell_of(min_x, self.inv_cell_size).max(self.min_cx);
+        let qx1 = Self::cell_of(max_x, self.inv_cell_size).min(grid_max_cx);
+        let qy0 = Self::cell_of(min_y, self.inv_cell_size).max(self.min_cy);
+        let qy1 = Self::cell_of(max_y, self.inv_cell_size).min(grid_max_cy);
+
+        // Plain-loop cell walk over `qx0..=qx1` × `qy0..=qy1` (see `new`): avoids `RangeInclusive`'s
+        // per-step overhead on this per-edge-segment query. The query range CAN be empty (a segment
+        // outside the grid clamps to qx0 > qx1), so guard it; break-before-increment is overflow-safe
+        // when a clamped `qx1`/`qy1` reaches `i32::MAX`. Byte-identical to the inclusive ranges.
+        if qx0 <= qx1 && qy0 <= qy1 {
+            // Bind the loop-invariant `self` fields to locals ONCE. `candidates.push` below takes
+            // `&mut self.candidates`, which forces LLVM to conservatively RELOAD `self.flat`/`self.seen`/
+            // `self.offsets` (base+len) and `self.generation` through the `self` pointer every inner
+            // iteration (measured: ~8% of `query_segment` self-time in reload movs). These four fields are
+            // disjoint from `candidates`, so binding shared/`&mut` slices to them keeps their base pointers
+            // in registers across the push. Byte-identical: same reads/writes in the same order.
+            let (min_cx, min_cy, ncols) = (self.min_cx, self.min_cy, self.ncols);
+            let generation = self.generation;
+            let offsets = self.offsets.as_slice();
+            let flat = self.flat.as_slice();
+            let seen = self.seen.as_mut_slice();
+            let candidates = &mut self.candidates;
+            let mut cx = qx0;
+            loop {
+                let mut cy = qy0;
+                loop {
+                    let ci = (cy - min_cy) as usize * ncols + (cx - min_cx) as usize;
+                    let start = offsets[ci] as usize;
+                    let end = offsets[ci + 1] as usize;
+                    // Index `flat[k]` directly rather than iterating `&flat[start..end]`: cells hold ~1
+                    // obstacle each, so the sub-slice's per-cell bounds check costs more than the
+                    // per-element bounds check it would elide (measured +0.15% layout instrs for the
+                    // slice form vs −0.52% for this one).
+                    #[allow(clippy::needless_range_loop)]
+                    for k in start..end {
+                        let idx = flat[k] as usize;
+                        if seen[idx] != generation {
+                            seen[idx] = generation;
+                            candidates.push(idx);
+                        }
+                    }
+                    if cy == qy1 {
+                        break;
+                    }
+                    cy += 1;
+                }
+                if cx == qx1 {
+                    break;
+                }
+                cx += 1;
+            }
+        }
+
+        // No sort: the two consumers (`find_{vertical,horizontal}_segment_nudge_by_indices`)
+        // select the minimum-index intersecting obstacle directly, which is order-independent.
+        // Sorting the candidate set here was ~40% of layout self-time on obstacle-dense graphs
+        // (e.g. large mindmaps forced to the tree router), and every query paid O(K log K).
+        &self.candidates
     }
 }
 
@@ -11104,7 +13846,7 @@ fn route_edge_points(
     source: LayoutPoint,
     target: LayoutPoint,
     horizontal_ranks: bool,
-) -> Vec<LayoutPoint> {
+) -> EdgePoints {
     route_edge_points_with_obstacles(source, target, horizontal_ranks, &[])
 }
 
@@ -11112,12 +13854,23 @@ fn route_edge_points(
 ///
 /// When `obstacles` is non-empty, the router checks if the midpoint segment
 /// intersects any obstacle and reroutes around it if needed.
+#[cfg(test)]
 fn route_edge_points_with_obstacles(
     source: LayoutPoint,
     target: LayoutPoint,
     horizontal_ranks: bool,
     obstacles: &[LayoutRect],
-) -> Vec<LayoutPoint> {
+) -> EdgePoints {
+    route_edge_points_with_obstacle_index(source, target, horizontal_ranks, obstacles, None)
+}
+
+fn route_edge_points_with_obstacle_index(
+    source: LayoutPoint,
+    target: LayoutPoint,
+    horizontal_ranks: bool,
+    obstacles: &[LayoutRect],
+    mut obstacle_index: Option<&mut ObstacleSpatialIndex>,
+) -> EdgePoints {
     let epsilon = 0.001_f32;
 
     let points = if horizontal_ranks {
@@ -11132,8 +13885,10 @@ fn route_edge_points_with_obstacles(
                     y: target.y,
                 },
             );
-            if let Some(nudge) = find_obstacle_nudge_y(segment, source.y, obstacles) {
-                vec![
+            if let Some(nudge) =
+                find_obstacle_nudge_y(segment, source.y, obstacles, obstacle_index.as_deref_mut())
+            {
+                smallvec![
                     source,
                     LayoutPoint {
                         x: source.x,
@@ -11146,7 +13901,7 @@ fn route_edge_points_with_obstacles(
                     target,
                 ]
             } else {
-                vec![source, target]
+                smallvec![source, target]
             }
         } else {
             let mid_x = f32::midpoint(source.x, target.x);
@@ -11161,9 +13916,11 @@ fn route_edge_points_with_obstacles(
                 },
             );
             // Check if the vertical mid-segment clips through any obstacle.
-            if let Some(nudge) = find_obstacle_nudge_x(mid_segment, mid_x, obstacles) {
+            if let Some(nudge) =
+                find_obstacle_nudge_x(mid_segment, mid_x, obstacles, obstacle_index.as_deref_mut())
+            {
                 // Route around: two vertical segments flanking the obstacle.
-                vec![
+                smallvec![
                     source,
                     LayoutPoint {
                         x: nudge,
@@ -11176,7 +13933,7 @@ fn route_edge_points_with_obstacles(
                     target,
                 ]
             } else {
-                vec![
+                smallvec![
                     source,
                     LayoutPoint {
                         x: mid_x,
@@ -11201,8 +13958,10 @@ fn route_edge_points_with_obstacles(
                 y: source.y.max(target.y),
             },
         );
-        if let Some(nudge) = find_obstacle_nudge_x(segment, source.x, obstacles) {
-            vec![
+        if let Some(nudge) =
+            find_obstacle_nudge_x(segment, source.x, obstacles, obstacle_index.as_deref_mut())
+        {
+            smallvec![
                 source,
                 LayoutPoint {
                     x: nudge,
@@ -11215,7 +13974,7 @@ fn route_edge_points_with_obstacles(
                 target,
             ]
         } else {
-            vec![source, target]
+            smallvec![source, target]
         }
     } else {
         let mid_y = f32::midpoint(source.y, target.y);
@@ -11229,8 +13988,8 @@ fn route_edge_points_with_obstacles(
                 y: mid_y,
             },
         );
-        if let Some(nudge) = find_obstacle_nudge_y(mid_segment, mid_y, obstacles) {
-            vec![
+        if let Some(nudge) = find_obstacle_nudge_y(mid_segment, mid_y, obstacles, obstacle_index) {
+            smallvec![
                 source,
                 LayoutPoint {
                     x: source.x,
@@ -11243,7 +14002,7 @@ fn route_edge_points_with_obstacles(
                 target,
             ]
         } else {
-            vec![
+            smallvec![
                 source,
                 LayoutPoint {
                     x: source.x,
@@ -11266,18 +14025,35 @@ fn route_edge_points_with_obstacles(
 /// The SVG backend already smooths edge waypoints with Catmull-Rom interpolation,
 /// so this router emits a smaller set of bend and midpoint anchors instead of the
 /// hard orthogonal staircase used by the default path router.
+#[allow(dead_code)]
 fn route_edge_points_spline_with_obstacles(
     source: LayoutPoint,
     target: LayoutPoint,
     horizontal_ranks: bool,
     obstacles: &[LayoutRect],
-) -> Vec<LayoutPoint> {
-    let orthogonal = route_edge_points_with_obstacles(source, target, horizontal_ranks, obstacles);
+) -> EdgePoints {
+    route_edge_points_spline_with_obstacle_index(source, target, horizontal_ranks, obstacles, None)
+}
+
+fn route_edge_points_spline_with_obstacle_index(
+    source: LayoutPoint,
+    target: LayoutPoint,
+    horizontal_ranks: bool,
+    obstacles: &[LayoutRect],
+    obstacle_index: Option<&mut ObstacleSpatialIndex>,
+) -> EdgePoints {
+    let orthogonal = route_edge_points_with_obstacle_index(
+        source,
+        target,
+        horizontal_ranks,
+        obstacles,
+        obstacle_index,
+    );
     if orthogonal.len() <= 2 {
         return orthogonal;
     }
 
-    let mut spline_points = Vec::with_capacity(orthogonal.len() + 1);
+    let mut spline_points: EdgePoints = SmallVec::with_capacity(orthogonal.len() + 1);
     spline_points.push(source);
     for window in orthogonal.windows(2) {
         let start = window[0];
@@ -11302,9 +14078,17 @@ fn find_obstacle_nudge_x(
     segment: (LayoutPoint, LayoutPoint),
     _mid_x: f32,
     obstacles: &[LayoutRect],
+    obstacle_index: Option<&mut ObstacleSpatialIndex>,
 ) -> Option<f32> {
     const MARGIN: f32 = 8.0;
-    cga_routing::find_vertical_segment_nudge(segment.0, segment.1, obstacles, MARGIN)
+    if let Some(index) = obstacle_index {
+        let candidates = index.query_segment(segment, MARGIN);
+        cga_routing::find_vertical_segment_nudge_by_indices(
+            segment.0, segment.1, obstacles, candidates, MARGIN,
+        )
+    } else {
+        cga_routing::find_vertical_segment_nudge(segment.0, segment.1, obstacles, MARGIN)
+    }
 }
 
 /// Check if a horizontal segment at y-coordinate `mid_y` intersects any obstacle.
@@ -11315,36 +14099,54 @@ fn find_obstacle_nudge_y(
     segment: (LayoutPoint, LayoutPoint),
     _mid_y: f32,
     obstacles: &[LayoutRect],
+    obstacle_index: Option<&mut ObstacleSpatialIndex>,
 ) -> Option<f32> {
     const MARGIN: f32 = 8.0;
-    cga_routing::find_horizontal_segment_nudge(segment.0, segment.1, obstacles, MARGIN)
+    if let Some(index) = obstacle_index {
+        let candidates = index.query_segment(segment, MARGIN);
+        cga_routing::find_horizontal_segment_nudge_by_indices(
+            segment.0, segment.1, obstacles, candidates, MARGIN,
+        )
+    } else {
+        cga_routing::find_horizontal_segment_nudge(segment.0, segment.1, obstacles, MARGIN)
+    }
 }
 
-fn simplify_polyline(points: Vec<LayoutPoint>) -> Vec<LayoutPoint> {
+fn simplify_polyline(mut points: EdgePoints) -> EdgePoints {
     if points.len() <= 2 {
         return points;
     }
 
-    let mut simplified = Vec::with_capacity(points.len());
-    for point in points {
-        if simplified.last() == Some(&point) {
+    // Compact in place with a write cursor `w` instead of allocating a second `Vec` — every multi-point
+    // edge previously paid an extra heap allocation for the simplified copy (the routed input was then
+    // dropped). `LayoutPoint` is `Copy`, and `w <= r` always, so reading `points[r]` after writing the
+    // compacted prefix `points[..w]` never aliases. Byte-identical to the push-into-new-Vec version:
+    // same consecutive-duplicate skip and same axis-aligned-collinear middle removal, in the same order.
+    let mut w = 0usize;
+    for r in 0..points.len() {
+        let point = points[r];
+        if w > 0 && points[w - 1] == point {
             continue;
         }
-        simplified.push(point);
+        points[w] = point;
+        w += 1;
 
-        while simplified.len() >= 3 {
-            let c = simplified[simplified.len() - 1];
-            let b = simplified[simplified.len() - 2];
-            let a = simplified[simplified.len() - 3];
+        while w >= 3 {
+            let c = points[w - 1];
+            let b = points[w - 2];
+            let a = points[w - 3];
             if is_axis_aligned_collinear(a, b, c) {
-                simplified.remove(simplified.len() - 2);
+                // Drop the middle point `b`: overwrite its slot with `c` and shrink the prefix.
+                points[w - 2] = c;
+                w -= 1;
             } else {
                 break;
             }
         }
     }
 
-    simplified
+    points.truncate(w);
+    points
 }
 
 fn is_axis_aligned_collinear(a: LayoutPoint, b: LayoutPoint, c: LayoutPoint) -> bool {
@@ -11550,7 +14352,7 @@ fn bundle_parallel_edges(ir: &MermaidDiagramIr, edges: &mut [LayoutEdgePath]) {
         let Some(target) = endpoint_node_index(ir, edge.to) else {
             continue;
         };
-        let key = (source.min(target), source.max(target), edge.arrow.as_str());
+        let key = (source, target, edge.arrow.as_str());
         groups.entry(key).or_default().push(path_idx);
     }
 
@@ -11590,7 +14392,18 @@ fn polyline_length(points: &[LayoutPoint]) -> f32 {
         .map(|pair| {
             let dx = pair[1].x - pair[0].x;
             let dy = pair[1].y - pair[0].y;
-            dx.hypot(dy)
+            // `hypot(x, 0) == |x|` and `hypot(0, y) == |y|` exactly (IEEE-754), so axis-aligned
+            // segments skip the expensive libm `hypotf` and return a byte-identical result. Every
+            // sequence-diagram segment is axis-aligned (horizontal messages + rectangular
+            // self-loops), and orthogonal routing makes most segments of other diagrams axis-aligned
+            // too; genuinely diagonal segments still fall through to `hypot`.
+            if dy == 0.0 {
+                dx.abs()
+            } else if dx == 0.0 {
+                dy.abs()
+            } else {
+                dx.hypot(dy)
+            }
         })
         .sum()
 }
@@ -11598,11 +14411,11 @@ fn polyline_length(points: &[LayoutPoint]) -> f32 {
 fn build_cycle_cluster_map(
     ir: &MermaidDiagramIr,
     cycle_result: &CycleRemovalResult,
+    node_priority: &[usize],
 ) -> CycleClusterMap {
     let node_count = ir.nodes.len();
     let edges = resolved_edges(ir);
-    let node_priority = stable_node_priorities(ir);
-    let detection = detect_cycle_components(node_count, &edges, &node_priority);
+    let detection = detect_cycle_components(node_count, &edges, node_priority);
 
     let mut node_representative = (0..node_count).collect::<Vec<_>>();
     let mut cluster_heads = BTreeSet::new();
@@ -11620,12 +14433,12 @@ fn build_cycle_cluster_map(
         // Choose the lowest-priority node as the representative (cluster head).
         let head = *component_nodes
             .iter()
-            .min_by(|a, b| compare_priority(**a, **b, &node_priority))
+            .min_by(|a, b| compare_priority(**a, **b, node_priority))
             .unwrap_or(&component_nodes[0]);
 
         cluster_heads.insert(head);
         let mut members = component_nodes.clone();
-        members.sort_by(|a, b| compare_priority(*a, *b, &node_priority));
+        members.sort_by(|a, b| compare_priority(*a, *b, node_priority));
         for &member in &members {
             node_representative[member] = head;
         }
@@ -12085,6 +14898,321 @@ fn layout_decision_confidence_permille(
 }
 
 #[cfg(test)]
+mod barycenter_arms_tests {
+    use std::collections::BTreeMap;
+
+    use super::{
+        BarycenterScratch, LayoutConfig, bench_internals, total_crossings, total_crossings_packed,
+    };
+    use fm_core::{ArrowType, DiagramType, IrEdge, IrEndpoint, IrNode, IrNodeId, MermaidDiagramIr};
+
+    /// Build a layered graph with `layers * width` nodes, forward edges (including skips), and
+    /// `back_edges` back-edges so the SCC detector produces cycles — the shape that routes to Sugiyama
+    /// and therefore actually executes the barycenter sweep.
+    fn layered_cyclic_ir(
+        layers: usize,
+        width: usize,
+        back_edges: usize,
+        seed: u64,
+    ) -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for index in 0..layers * width {
+            ir.nodes.push(IrNode {
+                id: format!("N{index}"),
+                ..IrNode::default()
+            });
+        }
+        let mut state = seed | 1;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let edge = |ir: &mut MermaidDiagramIr, from: usize, to: usize| {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        };
+        for layer in 0..layers.saturating_sub(1) {
+            for slot in 0..width {
+                let from = layer * width + slot;
+                // one straight edge plus a pseudo-random skip, to make barycenters non-trivial
+                edge(&mut ir, from, (layer + 1) * width + slot);
+                let target_slot = usize::try_from(next() % (width as u64)).unwrap_or(0);
+                edge(&mut ir, from, (layer + 1) * width + target_slot);
+            }
+        }
+        for k in 0..back_edges {
+            let from = (layers - 1) * width + (k % width);
+            let to = (k * 7) % width;
+            edge(&mut ir, from, to);
+        }
+        ir
+    }
+
+    /// The dense sweep must produce **exactly** the ordering (and crossing count) the `BTreeMap` sweep
+    /// produced. Layout output is a determinism gate for this project, so anything less than equality on
+    /// every rank is a hard failure. Covers narrow ranks (below the old `SINGLE_PASS_RANK_THRESHOLD = 8`,
+    /// which took the per-node rescan branch) and wide ranks (which took the single-pass branch).
+    #[test]
+    fn dense_barycenter_sweep_matches_btreemap_sweep() {
+        let config = LayoutConfig::default();
+        for (layers, width, back_edges) in [
+            (25, 4, 20), // narrow ranks: the old per-node full-edge rescan branch
+            (12, 3, 8),  // narrower still
+            (6, 16, 12), // wide ranks: the old single-pass branch
+            (10, 8, 0),  // exactly at the old threshold, acyclic
+            (3, 1, 0),   // degenerate: one node per rank (fast-path)
+            (18, 6, 30), // heavily cyclic
+        ] {
+            for seed in [0x2545_F491_4F6C_DD1D_u64, 0x9E37_79B9_7F4A_7C15] {
+                let ir = layered_cyclic_ir(layers, width, back_edges, seed);
+                let ranks = bench_internals::prepare_ranks(&ir, &config);
+                let orig = bench_internals::crossing_minimization_btreemap(&ir, &ranks, &config);
+                let dense = bench_internals::crossing_minimization_dense_rank(&ir, &ranks, &config);
+                let single =
+                    bench_internals::crossing_minimization_single_pass(&ir, &ranks, &config);
+                let flat_csr =
+                    bench_internals::crossing_minimization_flat_csr(&ir, &ranks, &config);
+                let packed_crossings =
+                    bench_internals::crossing_minimization_packed_crossings(&ir, &ranks, &config);
+                assert_eq!(
+                    flat_csr, packed_crossings,
+                    "packed crossing count diverged from the flat-CSR sweep \
+                     (layers={layers} width={width} back_edges={back_edges} seed={seed:#x})"
+                );
+                assert_eq!(
+                    single, flat_csr,
+                    "flat-CSR sweep diverged from the single-pass sweep \
+                     (layers={layers} width={width} back_edges={back_edges} seed={seed:#x})"
+                );
+                assert_eq!(
+                    dense, single,
+                    "single-pass sweep diverged from the dense-rank sweep \
+                     (layers={layers} width={width} back_edges={back_edges} seed={seed:#x})"
+                );
+                assert_eq!(
+                    orig, dense,
+                    "dense barycenter sweep diverged from the BTreeMap sweep \
+                     (layers={layers} width={width} back_edges={back_edges} seed={seed:#x})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn flat_csr_preserves_per_node_edge_order_and_multiplicity() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for index in 0..4 {
+            ir.nodes.push(IrNode {
+                id: format!("N{index}"),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [
+            (0, 2),
+            (1, 2),
+            (0, 3),
+            (0, 2), // parallel edge: multiplicity must survive
+            (2, 2), // self edge appears in both directions
+            (99, 0),
+            (0, 99),
+        ] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let scratch = BarycenterScratch::new::<true, true>(&ir);
+        let direction_width = ir.nodes.len() + 1;
+        let neighbors = |node: usize, incoming: bool| {
+            let base = if incoming { 0 } else { direction_width };
+            let start = usize::try_from(scratch.incidence_offsets[base + node]).unwrap_or(0);
+            let end = usize::try_from(scratch.incidence_offsets[base + node + 1]).unwrap_or(0);
+            scratch.incidence_neighbors[start..end].to_vec()
+        };
+
+        assert_eq!(neighbors(2, true), vec![0, 1, 0, 2]);
+        assert_eq!(neighbors(3, true), vec![0]);
+        assert_eq!(neighbors(0, false), vec![2, 3, 2]);
+        assert_eq!(neighbors(1, false), vec![2]);
+        assert_eq!(neighbors(2, false), vec![2]);
+    }
+
+    #[test]
+    fn packed_total_crossings_matches_maps_across_repeated_reorders() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for index in 0..7 {
+            ir.nodes.push(IrNode {
+                id: format!("N{index}"),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [
+            (0, 3),
+            (1, 4),
+            (2, 5),
+            (4, 0), // reversed adjacent-rank edge
+            (0, 5),
+            (0, 5), // parallel edge: multiplicity must survive
+            (1, 0), // same-rank edge: ignored
+            (2, 6), // long edge: ignored
+            (5, 6),
+            (99, 0),
+            (0, 99),
+        ] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let ranks = BTreeMap::from([(0, 0), (1, 0), (2, 0), (3, 1), (4, 1), (5, 1), (6, 2)]);
+        let mut ordering = BTreeMap::from([(0, vec![2, 0, 1]), (1, vec![4, 3, 5]), (2, vec![6])]);
+        let mut scratch = BarycenterScratch::new::<true, true>(&ir);
+        let offset_ptr = scratch.incidence_offsets.as_ptr();
+        let neighbor_ptr = scratch.incidence_neighbors.as_ptr();
+        let offset_capacity = scratch.incidence_offsets.capacity();
+        let neighbor_capacity = scratch.incidence_neighbors.capacity();
+
+        for _ in 0..3 {
+            let expected = total_crossings(&ir, &ranks, &ordering);
+            let actual = total_crossings_packed(&ir, &ranks, &ordering, &mut scratch)
+                .expect("packed scratch should represent this graph");
+            assert_eq!(expected, actual);
+            assert_eq!(scratch.incidence_offsets.as_ptr(), offset_ptr);
+            assert_eq!(scratch.incidence_neighbors.as_ptr(), neighbor_ptr);
+            assert_eq!(scratch.incidence_offsets.capacity(), offset_capacity);
+            assert_eq!(scratch.incidence_neighbors.capacity(), neighbor_capacity);
+            ordering.get_mut(&1).expect("rank exists").rotate_left(1);
+        }
+    }
+
+    #[test]
+    fn packed_total_crossings_preserves_exact_edge_semantics() {
+        let check = |node_count: usize,
+                     rank_entries: &[(usize, usize)],
+                     ordering: BTreeMap<usize, Vec<usize>>,
+                     edges: &[(usize, usize)],
+                     expected: usize| {
+            let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+            for index in 0..node_count {
+                ir.nodes.push(IrNode {
+                    id: format!("N{index}"),
+                    ..IrNode::default()
+                });
+            }
+            for &(from, to) in edges {
+                ir.edges.push(IrEdge {
+                    from: IrEndpoint::Node(IrNodeId(from)),
+                    to: IrEndpoint::Node(IrNodeId(to)),
+                    arrow: ArrowType::Arrow,
+                    ..IrEdge::default()
+                });
+            }
+            let ranks: BTreeMap<usize, usize> = rank_entries.iter().copied().collect();
+            let reference = total_crossings(&ir, &ranks, &ordering);
+            assert_eq!(reference, expected, "reference case is malformed");
+            let mut scratch = BarycenterScratch::new::<true, true>(&ir);
+            assert_eq!(
+                total_crossings_packed(&ir, &ranks, &ordering, &mut scratch),
+                Some(expected)
+            );
+        };
+
+        // Target order within one source is irrelevant: same-source edges never cross.
+        check(
+            3,
+            &[(0, 0), (1, 1), (2, 1)],
+            BTreeMap::from([(0, vec![0]), (1, vec![1, 2])]),
+            &[(0, 2), (0, 1)],
+            0,
+        );
+        // Every edge in the 2-wide upper-left bundle crosses every edge in the 3-wide
+        // upper-right bundle; multiplicity is exact.
+        check(
+            4,
+            &[(0, 0), (1, 0), (2, 1), (3, 1)],
+            BTreeMap::from([(0, vec![0, 1]), (1, vec![2, 3])]),
+            &[(0, 3), (0, 3), (1, 2), (1, 2), (1, 2)],
+            6,
+        );
+        // Equal-target parallel bundles do not cross.
+        check(
+            3,
+            &[(0, 0), (1, 0), (2, 1)],
+            BTreeMap::from([(0, vec![0, 1]), (1, vec![2])]),
+            &[(0, 2), (0, 2), (1, 2), (1, 2), (1, 2)],
+            0,
+        );
+        // One edge is stored lower-to-upper in the IR but participates after rank normalization.
+        check(
+            4,
+            &[(0, 0), (1, 0), (2, 1), (3, 1)],
+            BTreeMap::from([(0, vec![0, 1]), (1, vec![2, 3])]),
+            &[(3, 0), (1, 2)],
+            1,
+        );
+        // Adjacent rank pairs are independent sums, never one flattened inversion stream.
+        check(
+            6,
+            &[(0, 0), (1, 0), (2, 1), (3, 1), (4, 2), (5, 2)],
+            BTreeMap::from([(0, vec![0, 1]), (1, vec![2, 3]), (2, vec![4, 5])]),
+            &[(0, 3), (1, 2), (2, 5), (3, 4)],
+            2,
+        );
+        // Sparse ranks at the integer boundary preserve saturating-adjacency semantics.
+        check(
+            4,
+            &[
+                (0, usize::MAX - 1),
+                (1, usize::MAX - 1),
+                (2, usize::MAX),
+                (3, usize::MAX),
+            ],
+            BTreeMap::from([(usize::MAX - 1, vec![0, 1]), (usize::MAX, vec![2, 3])]),
+            &[(0, 3), (1, 2)],
+            1,
+        );
+
+        // Wrong-rank occurrences are ignored, duplicate nodes use their last position, omitted nodes
+        // stay absent, and invalid endpoints follow the reference counter's filters.
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        for index in 0..5 {
+            ir.nodes.push(IrNode {
+                id: format!("N{index}"),
+                ..IrNode::default()
+            });
+        }
+        for (from, to) in [(0, 3), (1, 2), (4, 2), (99, 0), (0, 99)] {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+        let ranks = BTreeMap::from([(0, 0), (1, 0), (2, 1), (3, 1), (4, 0)]);
+        let ordering = BTreeMap::from([(0, vec![2, 0, 1, 0]), (1, vec![2, 3])]);
+        let expected = total_crossings(&ir, &ranks, &ordering);
+        let mut scratch = BarycenterScratch::new::<true, true>(&ir);
+        assert_eq!(
+            total_crossings_packed(&ir, &ranks, &ordering, &mut scratch),
+            Some(expected)
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     #![allow(
         clippy::float_cmp,
@@ -12093,13 +15221,17 @@ mod tests {
     )]
     use super::{
         CachedNodeSize, ConstraintSolverMode, CycleStrategy, DependencyGraph, DiagramLayout,
-        DirtySet, GraphMetrics, IncrementalLayoutEngine, IncrementalLayoutSession, LayoutAlgorithm,
-        LayoutConfig, LayoutDependencyGraph, LayoutEdit, LayoutGuardrails, LayoutNodeBox,
-        LayoutPoint, LayoutRect, LayoutSequenceLifecycleMarkerKind, RegionInput,
-        RegionMemoryBudget, RenderClip, RenderItem, RenderSource, SubgraphRegion, SubgraphRegionId,
-        SubgraphRegionKind, build_layout_decision_ledger, build_layout_guard_report,
-        build_render_scene, dispatch_layout_algorithm, incremental_overlap_alignment, layout,
-        layout_diagram, layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
+        DirtySet, EdgeRouting, GraphMetrics, IncrementalLayoutEngine, IncrementalLayoutSession,
+        LayoutAlgorithm, LayoutConfig, LayoutDependencyGraph, LayoutEdit, LayoutGuardrails,
+        LayoutNodeBox, LayoutPoint, LayoutRect, LayoutSequenceLifecycleMarkerKind, LayoutSpacing,
+        ObstacleSpatialIndex, RegionInput, RegionMemoryBudget, RenderClip, RenderItem,
+        RenderSource, SubgraphRegion, SubgraphRegionId, SubgraphRegionKind, TracedLayout,
+        build_directed_path_edge_paths, build_edge_paths, build_layout_decision_ledger,
+        build_layout_guard_report, build_render_scene, certify_directed_path_layout_prefix,
+        compute_node_size, dispatch_layout_algorithm, estimate_layout_cost,
+        evaluate_layout_guardrails, find_obstacle_nudge_x, find_obstacle_nudge_y,
+        incremental_overlap_alignment, is_directed_path, layout, layout_diagram,
+        layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
         layout_diagram_grid, layout_diagram_incremental_traced_with_config_and_guardrails,
         layout_diagram_radial, layout_diagram_sankey, layout_diagram_sequence,
         layout_diagram_sequence_traced, layout_diagram_timeline, layout_diagram_traced,
@@ -12107,6 +15239,7 @@ mod tests {
         layout_diagram_traced_with_config_and_guardrails, layout_diagram_tree,
         layout_diagram_with_config, layout_diagram_with_cycle_strategy, layout_diagram_xychart,
         layout_source_map, route_edge_points, route_edge_points_with_obstacles,
+        try_relayout_directed_path_suffix,
     };
     use fm_core::{
         ArrowType, DiagramType, GanttDate, GanttExclude, GraphDirection, IrCluster, IrClusterId,
@@ -12194,6 +15327,25 @@ mod tests {
             ..IrEdge::default()
         });
         ir
+    }
+
+    #[test]
+    fn reciprocal_edges_are_not_bundled_as_parallel_duplicates() {
+        let ir = graph_ir(DiagramType::Flowchart, 2, &[(0, 1), (1, 0), (0, 1)]);
+        let layout = layout_diagram(&ir);
+        let edge = |edge_index| {
+            layout
+                .edges
+                .iter()
+                .find(|path| path.edge_index == edge_index)
+                .expect("every IR edge should retain a layout path")
+        };
+
+        assert_eq!(edge(0).bundle_count, 2);
+        assert!(!edge(0).bundled);
+        assert_eq!(edge(1).bundle_count, 1);
+        assert!(!edge(1).bundled);
+        assert!(edge(2).bundled);
     }
 
     fn labeled_graph_ir(node_count: usize, edges: &[(usize, usize)]) -> MermaidDiagramIr {
@@ -12348,14 +15500,19 @@ mod tests {
     }
 
     fn large_subgraph_dependency_ir() -> MermaidDiagramIr {
+        sized_subgraph_dependency_ir(32)
+    }
+
+    fn sized_subgraph_dependency_ir(nodes_per_subgraph: usize) -> MermaidDiagramIr {
+        let total = nodes_per_subgraph * 2;
         let mut edges = Vec::new();
-        for node_index in 0..31 {
+        for node_index in 0..nodes_per_subgraph - 1 {
             edges.push((node_index, node_index + 1));
         }
-        for node_index in 32..63 {
+        for node_index in nodes_per_subgraph..total - 1 {
             edges.push((node_index, node_index + 1));
         }
-        let mut ir = labeled_graph_ir(64, &edges);
+        let mut ir = labeled_graph_ir(total, &edges);
         ir.graph.nodes = (0..ir.nodes.len())
             .map(|node_index| IrGraphNode {
                 node_id: IrNodeId(node_index),
@@ -12382,7 +15539,7 @@ mod tests {
             title: None,
             parent: None,
             children: Vec::new(),
-            members: (0..32).map(IrNodeId).collect(),
+            members: (0..nodes_per_subgraph).map(IrNodeId).collect(),
             cluster: None,
             grid_span: 1,
             span: Span::at_line(1, 1),
@@ -12394,16 +15551,16 @@ mod tests {
             title: None,
             parent: None,
             children: Vec::new(),
-            members: (32..64).map(IrNodeId).collect(),
+            members: (nodes_per_subgraph..total).map(IrNodeId).collect(),
             cluster: None,
             grid_span: 1,
             span: Span::at_line(2, 1),
             direction: None,
         });
-        for node_index in 0..32 {
+        for node_index in 0..nodes_per_subgraph {
             ir.graph.nodes[node_index].subgraphs.push(IrSubgraphId(0));
         }
-        for node_index in 32..64 {
+        for node_index in nodes_per_subgraph..total {
             ir.graph.nodes[node_index].subgraphs.push(IrSubgraphId(1));
         }
         ir
@@ -12759,6 +15916,104 @@ mod tests {
                 "clean region drifted for node {node_index}"
             );
         }
+    }
+
+    /// Drive `warm -> "Edited v0" -> "Edited v1"` and return the final traced layout. The two
+    /// edits share a digit-only tail, so both spell the same width class: the first widens the
+    /// label (refreshing the cached geometry for that width) and the second is size-stable.
+    fn size_stable_edit_sequence_final(nodes_per_subgraph: usize) -> TracedLayout {
+        let mut engine = IncrementalLayoutEngine::default();
+        let baseline = sized_subgraph_dependency_ir(nodes_per_subgraph);
+        let config = super::LayoutConfig::default();
+        let guardrails = LayoutGuardrails::default();
+
+        let _ = engine.layout_diagram_traced_with_config_and_guardrails(
+            &baseline,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+
+        let mut edited = baseline;
+        let label_index = edited.nodes[5]
+            .label
+            .expect("labeled graph should assign every node a label")
+            .0;
+        edited.labels[label_index].text = "Edited v0".to_string();
+        let _ = engine.layout_diagram_traced_with_config_and_guardrails(
+            &edited,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+
+        edited.labels[label_index].text = "Edited v1".to_string();
+        engine.layout_diagram_traced_with_config_and_guardrails(
+            &edited,
+            LayoutAlgorithm::Auto,
+            config,
+            guardrails,
+        )
+    }
+
+    /// Faithful-memoization proof: the size-stable memo fast path must produce byte-identical
+    /// output to the slow selective relayout it stands in for (NOT to a from-scratch full
+    /// recompute — the selective path is a stability-preserving approximation that legitimately
+    /// differs from full recompute for the dirty region). Compare the two by running the same
+    /// edit sequence with the fast path enabled and with it forced off via the test escape hatch.
+    fn assert_size_stable_fast_path_matches_slow_path(nodes_per_subgraph: usize) {
+        let fast = size_stable_edit_sequence_final(nodes_per_subgraph);
+        assert_eq!(
+            fast.trace.incremental.query_type, "layout_incremental_subgraph_relayout_size_stable",
+            "size-stable fast path did not fire at {nodes_per_subgraph} nodes/subgraph"
+        );
+
+        super::DISABLE_SIZE_STABLE_FAST_PATH.with(|flag| flag.set(true));
+        let slow = size_stable_edit_sequence_final(nodes_per_subgraph);
+        super::DISABLE_SIZE_STABLE_FAST_PATH.with(|flag| flag.set(false));
+
+        assert_ne!(
+            slow.trace.incremental.query_type, "layout_incremental_subgraph_relayout_size_stable",
+            "fast path leaked past the disable flag at {nodes_per_subgraph} nodes/subgraph"
+        );
+        // User-visible geometry must be byte-identical to the slow path. `dirty_regions` is an
+        // incremental redraw hint, not geometry — the fast path is entitled to populate it even
+        // where the slow-path fallback (a guardrail-forced full recompute at large sizes) leaves
+        // it empty, so it is intentionally excluded from this equality.
+        assert_eq!(
+            fast.layout.nodes, slow.layout.nodes,
+            "node geometry diverged from slow path at {nodes_per_subgraph} nodes/subgraph"
+        );
+        assert_eq!(
+            fast.layout.edges, slow.layout.edges,
+            "edge geometry diverged from slow path at {nodes_per_subgraph} nodes/subgraph"
+        );
+        assert_eq!(
+            fast.layout.clusters, slow.layout.clusters,
+            "cluster geometry diverged from slow path at {nodes_per_subgraph} nodes/subgraph"
+        );
+        assert_eq!(
+            fast.layout.cycle_clusters, slow.layout.cycle_clusters,
+            "cycle-cluster geometry diverged from slow path at {nodes_per_subgraph} nodes/subgraph"
+        );
+        assert_eq!(
+            fast.layout.bounds, slow.layout.bounds,
+            "bounds diverged from slow path at {nodes_per_subgraph} nodes/subgraph"
+        );
+        assert_eq!(
+            fast.layout.extensions, slow.layout.extensions,
+            "extensions diverged from slow path at {nodes_per_subgraph} nodes/subgraph"
+        );
+    }
+
+    #[test]
+    fn incremental_layout_engine_serves_size_stable_label_edits_from_region_memo() {
+        // 32/subgraph (64 total): selective region relayout is the slow-path baseline.
+        assert_size_stable_fast_path_matches_slow_path(32);
+        // 500/subgraph (1000 total): matches the incremental bench primary row, large enough
+        // that guardrails re-route off Sugiyama — proving the fast path fires ahead of dispatch
+        // and still matches the (full-recompute) slow-path fallback there.
+        assert_size_stable_fast_path_matches_slow_path(500);
     }
 
     #[test]
@@ -14694,6 +17949,137 @@ mod tests {
     }
 
     #[test]
+    fn obstacle_index_preserves_first_intersecting_obstacle_order() {
+        let obstacles = vec![
+            LayoutRect {
+                x: 70.0,
+                y: 10.0,
+                width: 10.0,
+                height: 20.0,
+            },
+            LayoutRect {
+                x: 20.0,
+                y: 0.0,
+                width: 10.0,
+                height: 20.0,
+            },
+        ];
+        let segment = (
+            LayoutPoint { x: 0.0, y: 15.0 },
+            LayoutPoint { x: 100.0, y: 15.0 },
+        );
+        let full_scan = find_obstacle_nudge_y(segment, 15.0, &obstacles, None);
+        let mut index = ObstacleSpatialIndex::new(&obstacles).expect("compact obstacles index");
+        let indexed = find_obstacle_nudge_y(segment, 15.0, &obstacles, Some(&mut index));
+        assert_eq!(indexed, full_scan);
+    }
+
+    /// The `DENSE_INDEX_LINEAR_WORK` disjunct must reproduce every *measured* index decision and only ADD
+    /// the dense-DAG case. Guards the calibration boundary so a future edit cannot silently pull the 8x16
+    /// loss-case into indexing or drop the dense_dag_200 win-case out.
+    #[test]
+    fn dense_index_work_gate_matches_measured_crossover() {
+        let eligible = |edges: usize, nodes: usize, obstacles: usize| -> bool {
+            let sparse = edges <= nodes.saturating_mul(3) / 2;
+            sparse
+                || obstacles >= ObstacleSpatialIndex::DENSE_INDEX_OBSTACLES
+                || edges.saturating_mul(obstacles) >= ObstacleSpatialIndex::DENSE_INDEX_LINEAR_WORK
+        };
+        // 8x16 wide: 128 obstacles / 224 edges = 28,672 work -> index measured +5% -> stays EXCLUDED.
+        assert!(
+            !eligible(224, 128, 128),
+            "8x16 must stay on the linear scan (index loses)"
+        );
+        // 12x24 wide: 288 obstacles >= 256 -> already indexed (count gate), unchanged.
+        assert!(eligible(552, 288, 288), "12x24 stays indexed");
+        // dense_dag_200: 200 obstacles < 256 but 790*200 = 158,000 work -> NEWLY indexed (the win).
+        assert!(
+            eligible(790, 200, 200),
+            "dense_dag_200 must now be indexed via the work gate"
+        );
+        // A tiny dense graph stays excluded (below both floors).
+        assert!(
+            !eligible(30, 10, 10),
+            "tiny dense graph stays on the linear scan"
+        );
+    }
+
+    /// The work-gate lever is byte-identical because the indexed route equals the linear-scan route on a
+    /// DENSE obstacle field — the exact property the change relies on (dense_dag_200 flips from linear to
+    /// indexed). Existing tests only cover a 2-obstacle field; this covers a dense grid where the index
+    /// returns a real candidate subset, for both axes and several segments.
+    #[test]
+    fn dense_obstacle_field_index_matches_linear_scan() {
+        // 10x10 grid of obstacles = 100 dense obstacles.
+        let mut obstacles = Vec::new();
+        for row in 0..10 {
+            for col in 0..10 {
+                obstacles.push(LayoutRect {
+                    x: (col * 30) as f32,
+                    y: (row * 30) as f32,
+                    width: 16.0,
+                    height: 16.0,
+                });
+            }
+        }
+        let mut index = ObstacleSpatialIndex::new(&obstacles).expect("dense grid index");
+        // Vertical and horizontal segments threading the grid at several offsets.
+        for k in 0..12 {
+            let off = (k * 23) as f32;
+            let vseg = (
+                LayoutPoint { x: off, y: 0.0 },
+                LayoutPoint { x: off, y: 290.0 },
+            );
+            assert_eq!(
+                find_obstacle_nudge_x(vseg, off, &obstacles, None),
+                find_obstacle_nudge_x(vseg, off, &obstacles, Some(&mut index)),
+                "vertical nudge index != linear scan at x={off}"
+            );
+            let hseg = (
+                LayoutPoint { x: 0.0, y: off },
+                LayoutPoint { x: 290.0, y: off },
+            );
+            assert_eq!(
+                find_obstacle_nudge_y(hseg, off, &obstacles, None),
+                find_obstacle_nudge_y(hseg, off, &obstacles, Some(&mut index)),
+                "horizontal nudge index != linear scan at y={off}"
+            );
+        }
+    }
+
+    #[test]
+    fn obstacle_index_reads_current_parked_endpoint_bounds() {
+        let mut obstacles = vec![
+            LayoutRect {
+                x: 40.0,
+                y: 20.0,
+                width: 20.0,
+                height: 20.0,
+            },
+            LayoutRect {
+                x: 45.0,
+                y: 70.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        ];
+        let mut index = ObstacleSpatialIndex::new(&obstacles).expect("compact obstacles index");
+        obstacles[0] = LayoutRect {
+            x: 1.0e30,
+            y: 1.0e30,
+            width: 0.0,
+            height: 0.0,
+        };
+        let segment = (
+            LayoutPoint { x: 50.0, y: 0.0 },
+            LayoutPoint { x: 50.0, y: 100.0 },
+        );
+        let full_scan = find_obstacle_nudge_x(segment, 50.0, &obstacles, None);
+        let indexed = find_obstacle_nudge_x(segment, 50.0, &obstacles, Some(&mut index));
+        assert_eq!(indexed, full_scan);
+    }
+
+    #[test]
     fn obstacle_routing_clears_obstacle_on_horizontal_layout() {
         let obstacle = LayoutRect {
             x: 60.0,
@@ -15442,6 +18828,21 @@ mod tests {
     }
 
     #[test]
+    fn large_mindmap_guardrail_keeps_radial_as_lowest_cost_fallback() {
+        let edges: Vec<(usize, usize)> = (1..800).map(|node| (0, node)).collect();
+        let ir = graph_ir(DiagramType::Mindmap, 800, &edges);
+        let guard =
+            evaluate_layout_guardrails(&ir, LayoutAlgorithm::Radial, LayoutGuardrails::default());
+
+        assert_eq!(guard.initial_algorithm, LayoutAlgorithm::Radial);
+        assert_eq!(guard.selected_algorithm, LayoutAlgorithm::Radial);
+        assert!(!guard.fallback_applied);
+        assert!(guard.time_budget_exceeded);
+        assert!(guard.iteration_budget_exceeded);
+        assert_eq!(guard.reason, "guardrail_forced_multi_budget");
+    }
+
+    #[test]
     fn tight_force_guardrails_fall_back_deterministically() {
         let ir = sample_er_ir();
         let traced = layout_diagram_traced_with_algorithm_and_guardrails(
@@ -15957,9 +19358,11 @@ mod tests {
         ordering_by_rank.insert(2, vec![4]);
 
         let centrality = super::build_centrality_assist(&ir, &LayoutConfig::default());
-        super::reorder_rank_by_barycenter(
+        let mut scratch = super::BarycenterScratch::new::<false, false>(&ir);
+        super::reorder_rank_by_barycenter::<false, false, false>(
             &ir,
-            &ranks,
+            (&ranks, &[]),
+            &mut scratch,
             &mut ordering_by_rank,
             0,
             1,
@@ -16080,8 +19483,9 @@ mod tests {
 
         let mut ordering_by_rank =
             BTreeMap::from([(0, vec![0, 1, 2]), (1, vec![4, 3, 5]), (2, vec![6, 7, 8])]);
+        let layer_edges = super::layer_edges_by_rank_pair(&ir, &ranks);
         let (local_crossings_before, result) =
-            super::egraph_optimized_order_for_rank(&ir, &ranks, &ordering_by_rank, 1)
+            super::egraph_optimized_order_for_rank(&layer_edges, &ordering_by_rank, 1)
                 .expect("middle rank should have an improving e-graph rewrite");
 
         assert_eq!(local_crossings_before, 1);
@@ -17549,6 +20953,183 @@ mod tests {
     }
 
     #[test]
+    fn directed_path_specialization_is_exact_and_keeps_large_paths_on_tree_layout() {
+        let chain_edges = (0..59).map(|index| (index, index + 1)).collect::<Vec<_>>();
+        let mut chain = graph_ir(DiagramType::Flowchart, 60, &chain_edges);
+        for index in 0..chain.nodes.len() {
+            let label_index = chain.labels.len();
+            chain.labels.push(IrLabel {
+                text: if index % 2 == 0 {
+                    format!("short {index}")
+                } else {
+                    format!("a deliberately wider path node label {index}")
+                },
+                ..IrLabel::default()
+            });
+            chain.nodes[index].label = Some(IrLabelId(label_index));
+        }
+        assert!(is_directed_path(&chain));
+        assert!(estimate_layout_cost(&chain, LayoutAlgorithm::Tree).time_ms < 16);
+
+        let dispatch = dispatch_layout_algorithm(&chain, LayoutAlgorithm::Auto);
+        assert_eq!(dispatch.selected, LayoutAlgorithm::Tree);
+        let guard =
+            evaluate_layout_guardrails(&chain, dispatch.selected, LayoutGuardrails::default());
+        assert_eq!(guard.selected_algorithm, LayoutAlgorithm::Tree);
+        assert!(!guard.fallback_applied);
+
+        for direction in [
+            GraphDirection::TB,
+            GraphDirection::LR,
+            GraphDirection::RL,
+            GraphDirection::BT,
+        ] {
+            chain.direction = direction;
+            let layout = layout_diagram_tree(&chain);
+            let specialized = build_directed_path_edge_paths(
+                &chain,
+                &layout.nodes,
+                &BTreeSet::new(),
+                EdgeRouting::default(),
+            )
+            .expect("directed path should take the obstacle-free router");
+            let generic = build_edge_paths(
+                &chain,
+                &layout.nodes,
+                &BTreeSet::new(),
+                EdgeRouting::default(),
+            );
+            assert_eq!(specialized, generic, "direction={direction:?}");
+        }
+
+        let branch = graph_ir(DiagramType::Flowchart, 5, &[(0, 1), (1, 2), (1, 3), (3, 4)]);
+        let cycle = graph_ir(DiagramType::Flowchart, 3, &[(0, 1), (1, 2), (2, 0)]);
+        assert!(!is_directed_path(&branch));
+        assert!(!is_directed_path(&cycle));
+    }
+
+    #[test]
+    fn certified_lr_path_prefix_relayout_matches_full_pipeline() {
+        const LABELS: [&str; 59] = [
+            "User",
+            "Object Store",
+            "Database 2",
+            "Café latency 3",
+            "Message Queue",
+            "Retry & backoff 5",
+            "Validate input",
+            "Überprüfung",
+            "Résumé job",
+            "API Gateway",
+            "Résumé job 10",
+            "Load Balancer",
+            "Message Queue",
+            "Validate input",
+            "API Gateway",
+            "API Gateway 15",
+            "Ingestion",
+            "Session Store 17",
+            "Read Replica",
+            "Database",
+            "Validate input 20",
+            "Diff & merge",
+            "Check permissions",
+            "Check permissions 23",
+            "Load Balancer 24",
+            "User's session",
+            "Persist record",
+            "Überprüfung",
+            "Cache",
+            "Scheduler",
+            "Database",
+            "Read Replica",
+            "Parse <config> 32",
+            "Aggregate results",
+            "Validate input",
+            "naïve retry 35",
+            "Message Queue 36",
+            "User",
+            "Read Replica",
+            "Parse <config>",
+            "CDN",
+            "Fan out",
+            "Fan out 42",
+            "Emit audit event 43",
+            "Cache",
+            "User",
+            "Aggregate results 46",
+            "Session Store",
+            "Scheduler",
+            "Rollback on failure 545",
+            "Scheduler",
+            "Message Queue",
+            "Read Replica",
+            "Normalize payload",
+            "Client",
+            "Scheduler",
+            "Parse <config> 552",
+            "Normalize payload 553",
+            "Session Store",
+        ];
+        let make_path = |node_count: usize| {
+            let edges = (0..node_count.saturating_sub(1))
+                .map(|index| (index, index + 1))
+                .collect::<Vec<_>>();
+            let mut ir = graph_ir(DiagramType::Flowchart, node_count, &edges);
+            ir.direction = GraphDirection::LR;
+            for (node_index, label) in LABELS.iter().take(node_count).enumerate() {
+                let label_index = ir.labels.len();
+                ir.labels.push(IrLabel {
+                    text: (*label).to_owned(),
+                    ..IrLabel::default()
+                });
+                ir.nodes[node_index].label = Some(IrLabelId(label_index));
+            }
+            ir
+        };
+
+        let base = make_path(55);
+        let mut cached = Arc::unwrap_or_clone(layout_diagram_traced(&base).layout);
+        let prefix = certify_directed_path_layout_prefix(&base, &cached, 48, 47)
+            .expect("sequential LR prefix should certify");
+
+        let next = make_path(59);
+        assert!(try_relayout_directed_path_suffix(
+            &next,
+            &mut cached,
+            &prefix
+        ));
+        let expected = layout_diagram_traced(&next).layout;
+        assert_eq!(cached, *expected);
+
+        // Algebraically rebuilding each suffix position from the previous rendered box changes
+        // floating-point associativity. This fixture is long and width-varied enough to prove the
+        // tempting shortcut diverges, so the cursor-preserving implementation cannot regress.
+        let spacing = LayoutSpacing::default();
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let mut right = expected.nodes[47].bounds.x + expected.nodes[47].bounds.width;
+        let mut rounded_differently = false;
+        for (node, expected_node) in next.nodes[48..].iter().zip(&expected.nodes[48..]) {
+            let (width, _) = compute_node_size(&next, node, &metrics);
+            let reconstructed_x = right + spacing.rank_spacing;
+            rounded_differently |= reconstructed_x.to_bits() != expected_node.bounds.x.to_bits();
+            right = reconstructed_x + width;
+        }
+        assert!(rounded_differently, "fixture must exercise cursor rounding");
+
+        let before_fallback = cached.clone();
+        let mut branch = next;
+        branch.edges[52].from = IrEndpoint::Node(IrNodeId(51));
+        branch.direction = GraphDirection::LR;
+        assert!(!try_relayout_directed_path_suffix(
+            &branch,
+            &mut cached,
+            &prefix
+        ));
+        assert_eq!(cached, before_fallback, "failed reuse must not mutate");
+    }
+
+    #[test]
     fn graph_metrics_cycle_detection() {
         let ir = graph_ir(DiagramType::Flowchart, 3, &[(0, 1), (1, 2), (2, 0)]);
         let metrics = GraphMetrics::from_ir(&ir);
@@ -18075,7 +21656,7 @@ mod tests {
     }
 
     fn measure_layout_ns(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> u128 {
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         let _traced = layout_diagram_traced_with_algorithm(ir, algorithm);
         start.elapsed().as_nanos()
     }
@@ -18754,6 +22335,36 @@ mod tests {
     }
 
     #[test]
+    fn dependency_topology_equal_tracks_topology_not_label_text() {
+        let baseline = labeled_graph_ir(4, &[(0, 1), (1, 2), (2, 3)]);
+
+        let mut relabeled = baseline.clone();
+        let label_index = relabeled.labels.len();
+        relabeled.labels.push(IrLabel {
+            text: "Renamed without topology change".to_string(),
+            span: Span::default(),
+        });
+        assert!(relabeled.nodes.get_mut(1).is_some());
+        if let Some(node) = relabeled.nodes.get_mut(1) {
+            node.label = Some(IrLabelId(label_index));
+        }
+        assert!(crate::dependency_topology_equal(&baseline, &relabeled));
+
+        let mut rewired = baseline.clone();
+        assert!(rewired.edges.get_mut(1).is_some());
+        if let Some(edge) = rewired.edges.get_mut(1) {
+            edge.to = IrEndpoint::Node(IrNodeId(3));
+        }
+        assert!(!crate::dependency_topology_equal(&baseline, &rewired));
+
+        let mut renamed_node = baseline.clone();
+        if let Some(node) = renamed_node.nodes.get_mut(1) {
+            node.id = "renamed_node_id".to_string();
+        }
+        assert!(!crate::dependency_topology_equal(&baseline, &renamed_node));
+    }
+
+    #[test]
     fn incremental_recompute_events_report_cache_hit_and_required_fields() {
         let ir = labeled_graph_ir(4, &[(0, 1), (1, 2), (2, 3)]);
 
@@ -18790,7 +22401,7 @@ mod tests {
         let edges: Vec<(usize, usize)> = (0..node_count - 1).map(|i| (i, i + 1)).collect();
         let ir = graph_ir(DiagramType::Flowchart, node_count, &edges);
 
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         let traced = layout_diagram_traced_with_config_and_guardrails(
             &ir,
             LayoutAlgorithm::Auto,
@@ -18821,8 +22432,11 @@ mod tests {
             guardrails,
         );
         if let Some(cached) = engine.cached.as_mut() {
-            cached.traced.layout.nodes[0].bounds.x = 9_999.0;
-            cached.traced.layout.nodes[0].bounds.y = -9_999.0;
+            // Poison the cached geometry in place; `make_mut` gives the cache its own copy to
+            // corrupt (the warm result still holds the pristine `Arc`).
+            let layout = Arc::make_mut(&mut cached.traced.layout);
+            layout.nodes[0].bounds.x = 9_999.0;
+            layout.nodes[0].bounds.y = -9_999.0;
         }
 
         let mut edited = baseline.clone();
@@ -18868,7 +22482,7 @@ mod tests {
         );
 
         engine.graph_metrics_cache = Some((
-            u64::MAX,
+            Arc::new(MermaidDiagramIr::empty(DiagramType::Flowchart)),
             GraphMetrics {
                 node_count: 999,
                 edge_count: 999,
@@ -18890,7 +22504,9 @@ mod tests {
             },
         );
         if let Some(cached) = engine.cached.as_mut() {
-            cached.traced.layout.nodes[0].bounds.width = 42_000.0;
+            Arc::make_mut(&mut cached.traced.layout).nodes[0]
+                .bounds
+                .width = 42_000.0;
         }
 
         engine.clear();
@@ -19442,12 +23058,13 @@ mod tests {
             label: Some(IrLabelId(0)),
             ..IrNode::default()
         });
-        ir.nodes.push(IrNode {
+        let icon_node = IrNode {
             id: "icon".to_string(),
             label: Some(IrLabelId(1)),
-            icon: Some("server".to_string()),
             ..IrNode::default()
-        });
+        };
+        ir.nodes.push(icon_node);
+        ir.nodes.last_mut().unwrap().interaction_mut().icon = Some("server".to_string());
         ir.labels.push(IrLabel {
             text: "Service".to_string(),
             span: Span::default(),

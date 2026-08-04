@@ -2,12 +2,16 @@
 //!
 //! Provides a flexible way to manage SVG attributes with proper escaping.
 
-use std::fmt::{self, Write};
+use std::borrow::Cow;
+use std::fmt;
 
 /// A single SVG attribute.
 #[derive(Debug, Clone)]
 pub struct Attribute {
-    pub name: String,
+    /// Attribute name. Borrowed for the overwhelmingly common static-literal case
+    /// (`"x"`, `"width"`, `"stroke-width"`, …) so building an element does not heap
+    /// allocate per attribute; owned only for dynamic names (e.g. `data-*`).
+    pub name: Cow<'static, str>,
     pub value: AttributeValue,
 }
 
@@ -19,26 +23,50 @@ pub enum AttributeValue {
     Integer(i32),
 }
 
+impl AttributeValue {
+    /// Write the value directly into `out`, bypassing the `fmt::Formatter` indirection on
+    /// the hot per-attribute serialization path. [`Display`](fmt::Display) delegates here.
+    pub(crate) fn write_value<W: fmt::Write>(&self, out: &mut W) -> fmt::Result {
+        match self {
+            Self::String(s) => write_escaped_attr(out, s),
+            Self::Number(n) => write_number_into(out, *n),
+            Self::Integer(i) => write_int_into(out, *i),
+        }
+    }
+}
+
+/// Write `n` as an SVG attribute number — whole values in `i32` range as integers, everything else to
+/// two decimals — the [`AttributeValue::Number`] formatting *without* materializing the enum.
+///
+/// Whole numbers in `i32` range serialize as integers; everything else to 2 decimals. `n as i32` is a
+/// saturating cast, so the round-trip compare `i as f32 == n` is *exactly* the old
+/// `n.fract() == 0.0 && n.is_finite() && n in i32 range` test: a fractional value truncates and fails the
+/// compare; a whole in-range value round-trips; NaN/±inf and out-of-range wholes fail the compare and
+/// fall to [`write_fixed2`] (which itself routes non-finite to the std formatter) — identical bytes in
+/// every case, and no `f32::fract` → `truncf` libm call.
+///
+/// The streamed node/edge fragment writers call this directly instead of
+/// `AttributeValue::Number(n).write_value(f)`: constructing the `AttributeValue` enum (≈24 bytes, sized
+/// by its `String` variant) to pass `&self` to the out-of-line `write_value` forced a stack store+load
+/// per coordinate — pure overhead on the coordinate-heavy render path. Byte-identical.
+///
+/// `#[inline(never)]`: this is called from ~110 coordinate sites; inlining the int-vs-2dp check +
+/// branch at each one bloats code and drops IPC (measured cycles +4.6% at 113 inlined sites even though
+/// instruction count fell −3.8%). Kept as ONE out-of-line copy, callers pass `n` in a register — the
+/// enum-elision saving without the i-cache cost.
+#[inline(never)]
+pub(crate) fn write_number_into<W: fmt::Write>(f: &mut W, n: f32) -> fmt::Result {
+    let i = n as i32;
+    if i as f32 == n {
+        write_int_into(f, i)
+    } else {
+        write_fixed2(f, n)
+    }
+}
+
 impl fmt::Display for AttributeValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::String(s) => write!(f, "{}", escape_xml_attr(s)),
-            Self::Number(n) => {
-                // Format with reasonable precision, trim trailing zeros.
-                // Use integer formatting only for values that fit in i32 range
-                // to avoid truncation overflow on extreme coordinates.
-                if n.fract() == 0.0
-                    && n.is_finite()
-                    && *n >= i32::MIN as f32
-                    && *n <= i32::MAX as f32
-                {
-                    write!(f, "{}", *n as i32)
-                } else {
-                    write!(f, "{n:.2}")
-                }
-            }
-            Self::Integer(i) => write!(f, "{i}"),
-        }
+        self.write_value(f)
     }
 }
 
@@ -74,17 +102,37 @@ pub struct Attributes {
 
 impl Attributes {
     /// Create a new empty attribute collection.
+    ///
+    /// Lazily allocated (empty `Vec`): attribute-LESS elements — notably every node's `<title>`, plus
+    /// other wrapper/leaf elements — never push, so they must not pay for a heap `Vec` at all. The first
+    /// push reserves the typical 8–12 slots ([`push_attr`]), so attribute-carrying elements keep the
+    /// realloc-free build the old eager `with_capacity(12)` gave. Element construction dominates SVG
+    /// render time, and ~3 attribute-less elements per node were each paying a wasted 12-slot allocation.
     #[must_use]
     pub fn new() -> Self {
         Self { attrs: Vec::new() }
     }
 
+    /// Push an attribute, reserving the typical element capacity on the first push. Centralises the
+    /// lazy-allocation policy so an empty element never allocates while a populated one never reallocs.
+    #[inline]
+    fn push_attr(&mut self, attr: Attribute) {
+        if self.attrs.capacity() == 0 {
+            self.attrs.reserve(12);
+        }
+        self.attrs.push(attr);
+    }
+
     /// Add an attribute.
     #[must_use]
-    pub fn set<K: Into<String>, V: Into<AttributeValue>>(mut self, name: K, value: V) -> Self {
+    pub fn set<K: Into<Cow<'static, str>>, V: Into<AttributeValue>>(
+        mut self,
+        name: K,
+        value: V,
+    ) -> Self {
         let name = name.into();
         self.attrs.retain(|attr| attr.name != name);
-        self.attrs.push(Attribute {
+        self.push_attr(Attribute {
             name,
             value: value.into(),
         });
@@ -93,26 +141,30 @@ impl Attributes {
 
     /// Add a string attribute.
     #[must_use]
-    pub fn str<K: Into<String>>(self, name: K, value: &str) -> Self {
+    pub fn str<K: Into<Cow<'static, str>>>(self, name: K, value: &str) -> Self {
         self.set(name, value)
     }
 
     /// Add a numeric attribute.
     #[must_use]
-    pub fn num<K: Into<String>>(self, name: K, value: f32) -> Self {
+    pub fn num<K: Into<Cow<'static, str>>>(self, name: K, value: f32) -> Self {
         self.set(name, value)
     }
 
     /// Add an integer attribute.
     #[must_use]
-    pub fn int<K: Into<String>>(self, name: K, value: i32) -> Self {
+    pub fn int<K: Into<Cow<'static, str>>>(self, name: K, value: i32) -> Self {
         self.set(name, value)
     }
 
     /// Add a data-* attribute.
     #[must_use]
     pub fn data(self, name: &str, value: &str) -> Self {
-        self.set(format!("data-{name}"), value)
+        if let Some(static_name) = static_data_attr_name(name) {
+            self.set(static_name, value)
+        } else {
+            self.set(format!("data-{name}"), value)
+        }
     }
 
     /// Add a class attribute (will be merged if multiple).
@@ -120,7 +172,7 @@ impl Attributes {
     pub fn class(mut self, class: &str) -> Self {
         // Look for existing class attribute and append
         for attr in &mut self.attrs {
-            if attr.name == "class"
+            if attr.name.as_ref() == "class"
                 && let AttributeValue::String(ref mut s) = attr.value
             {
                 s.push(' ');
@@ -129,6 +181,85 @@ impl Attributes {
             }
         }
         self.set("class", class)
+    }
+
+    /// Add a CSS class made from two string pieces without allocating a temporary
+    /// formatted class name when a class attribute already exists.
+    #[must_use]
+    pub fn class_prefixed(mut self, prefix: &str, suffix: &str) -> Self {
+        for attr in &mut self.attrs {
+            if attr.name.as_ref() == "class"
+                && let AttributeValue::String(ref mut s) = attr.value
+            {
+                s.push(' ');
+                s.push_str(prefix);
+                s.push_str(suffix);
+                return self;
+            }
+        }
+
+        let mut class = String::with_capacity(prefix.len() + suffix.len());
+        class.push_str(prefix);
+        class.push_str(suffix);
+        self.push_attr(Attribute {
+            name: Cow::Borrowed("class"),
+            value: AttributeValue::String(class),
+        });
+        self
+    }
+
+    /// Add a CSS class made from a prefix plus a caller-written suffix.
+    #[must_use]
+    pub(crate) fn class_prefixed_by(
+        mut self,
+        prefix: &str,
+        suffix_capacity: usize,
+        write_suffix: impl FnOnce(&mut String),
+    ) -> Self {
+        for attr in &mut self.attrs {
+            if attr.name.as_ref() == "class"
+                && let AttributeValue::String(ref mut s) = attr.value
+            {
+                s.push(' ');
+                s.push_str(prefix);
+                write_suffix(s);
+                return self;
+            }
+        }
+
+        let mut class = String::with_capacity(prefix.len().saturating_add(suffix_capacity));
+        class.push_str(prefix);
+        write_suffix(&mut class);
+        self.push_attr(Attribute {
+            name: Cow::Borrowed("class"),
+            value: AttributeValue::String(class),
+        });
+        self
+    }
+
+    /// Add a CSS class made from a string prefix and integer suffix without a
+    /// temporary `format!` allocation on the hot node-rendering path.
+    #[must_use]
+    pub fn class_prefixed_usize(mut self, prefix: &str, value: usize) -> Self {
+        for attr in &mut self.attrs {
+            if attr.name.as_ref() == "class"
+                && let AttributeValue::String(ref mut s) = attr.value
+            {
+                s.push(' ');
+                s.push_str(prefix);
+                push_usize(s, value);
+                return self;
+            }
+        }
+
+        let mut class = String::with_capacity(prefix.len() + decimal_digits(value));
+        class.push_str(prefix);
+        push_usize(&mut class, value);
+        self.push_attr(Attribute {
+            name: Cow::Borrowed("class"),
+            value: AttributeValue::String(class),
+        });
+        self
     }
 
     /// Add an id attribute.
@@ -140,22 +271,39 @@ impl Attributes {
     /// Check if a specific attribute is set.
     #[must_use]
     pub fn has(&self, name: &str) -> bool {
-        self.attrs.iter().any(|a| a.name == name)
+        self.attrs.iter().any(|a| a.name.as_ref() == name)
     }
 
     /// Get the value of an attribute.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&AttributeValue> {
-        self.attrs.iter().find(|a| a.name == name).map(|a| &a.value)
+        self.attrs
+            .iter()
+            .find(|a| a.name.as_ref() == name)
+            .map(|a| &a.value)
+    }
+
+    /// Write the attributes directly into `out`, avoiding the intermediate `String`
+    /// that [`render`](Self::render) allocates per element on the hot serialization path.
+    pub fn write_into<W: fmt::Write>(&self, out: &mut W) {
+        // Write the constant pieces and the attribute name directly instead of through
+        // `write!`/`format_args!`, which routes every piece and both `Display` args through
+        // the `fmt::Formatter` machinery. Byte-identical to ` {name}="{value}"`; this is
+        // the per-attribute hot path (~thousands of attributes per diagram).
+        for attr in &self.attrs {
+            let _ = out.write_char(' ');
+            let _ = out.write_str(&attr.name);
+            let _ = out.write_str("=\"");
+            let _ = attr.value.write_value(out);
+            let _ = out.write_char('"');
+        }
     }
 
     /// Render attributes to a string.
     #[must_use]
     pub fn render(&self) -> String {
         let mut result = String::new();
-        for attr in &self.attrs {
-            let _ = write!(result, " {}=\"{}\"", attr.name, attr.value);
-        }
+        self.write_into(&mut result);
         result
     }
 
@@ -175,59 +323,665 @@ impl Attributes {
     #[must_use]
     pub fn merge(mut self, other: Self) -> Self {
         for attr in other.attrs {
-            if attr.name == "class" {
+            if attr.name.as_ref() == "class" {
                 // Merge classes
                 if let AttributeValue::String(class) = &attr.value {
                     self = self.class(class);
                 }
             } else {
-                self.attrs.push(attr);
+                self.push_attr(attr);
             }
         }
         self
     }
 }
 
-/// Escape special characters in XML attribute values.
-fn escape_xml_attr(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => result.push_str("&amp;"),
-            '<' => result.push_str("&lt;"),
-            '>' => result.push_str("&gt;"),
-            '"' => result.push_str("&quot;"),
-            '\'' => result.push_str("&#39;"),
-            _ => result.push(c),
-        }
+fn static_data_attr_name(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "fm-edge-id" => "data-fm-edge-id",
+        "fm-node-id" => "data-fm-node-id",
+        "id" => "data-id",
+        _ => return None,
+    })
+}
+
+fn push_usize(out: &mut String, value: usize) {
+    if value >= 10 {
+        push_usize(out, value / 10);
     }
-    result
+    out.push(match value % 10 {
+        0 => '0',
+        1 => '1',
+        2 => '2',
+        3 => '3',
+        4 => '4',
+        5 => '5',
+        6 => '6',
+        7 => '7',
+        8 => '8',
+        _ => '9',
+    });
+}
+
+const fn decimal_digits(mut value: usize) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+/// Two-digit decimal strings `"00".."99"`, indexed by value: [`PAIRS2`]`[d]` is the 2-digit group
+/// for `d` in `0..100`, and [`DIGITS1`]`[d]` is the single low digit for `d` in `0..10`.
+///
+/// This replaces the earlier single concatenated `&str` sliced at runtime as `&DIGIT_PAIRS[d*2..d*2+2]`.
+/// Slicing a `&str` by a runtime `Range` goes through `str`'s `check_range`, which re-validates UTF-8
+/// char boundaries on every call — pure waste for known-ASCII digits, and measured at ~7% of
+/// coordinate-heavy render (`write_fixed2`/`write_uint_into` dominate). Indexing an array of
+/// already-built `&'static str` does only a bounds check (which the compiler elides where the index is
+/// provably `< 100`/`< 10`), no boundary re-validation — byte-identical output, still no `unsafe`
+/// (`#![forbid(unsafe_code)]`).
+const PAIRS2: [&str; 100] = [
+    "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15",
+    "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31",
+    "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47",
+    "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62", "63",
+    "64", "65", "66", "67", "68", "69", "70", "71", "72", "73", "74", "75", "76", "77", "78", "79",
+    "80", "81", "82", "83", "84", "85", "86", "87", "88", "89", "90", "91", "92", "93", "94", "95",
+    "96", "97", "98", "99",
+];
+
+/// Single decimal digit strings `"0".."9"` — see [`PAIRS2`].
+const DIGITS1: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+
+/// Dot-prefixed two-digit fractions `".00"..".99"`, indexed by the fractional value. Lets
+/// [`write_fixed2`] emit the decimal point and both fraction digits in a *single* `write_str`
+/// instead of `write_str(".")` + `write_str(PAIRS2[frac])` — halving the tiny append calls (each
+/// a `fmt::Write` dispatch + capacity check + memcpy) on the hot 2-decimal coordinate path.
+/// `DOTPAIRS3[f]` is byte-identical to `"." + PAIRS2[f]`.
+const DOTPAIRS3: [&str; 100] = [
+    ".00", ".01", ".02", ".03", ".04", ".05", ".06", ".07", ".08", ".09", ".10", ".11", ".12",
+    ".13", ".14", ".15", ".16", ".17", ".18", ".19", ".20", ".21", ".22", ".23", ".24", ".25",
+    ".26", ".27", ".28", ".29", ".30", ".31", ".32", ".33", ".34", ".35", ".36", ".37", ".38",
+    ".39", ".40", ".41", ".42", ".43", ".44", ".45", ".46", ".47", ".48", ".49", ".50", ".51",
+    ".52", ".53", ".54", ".55", ".56", ".57", ".58", ".59", ".60", ".61", ".62", ".63", ".64",
+    ".65", ".66", ".67", ".68", ".69", ".70", ".71", ".72", ".73", ".74", ".75", ".76", ".77",
+    ".78", ".79", ".80", ".81", ".82", ".83", ".84", ".85", ".86", ".87", ".88", ".89", ".90",
+    ".91", ".92", ".93", ".94", ".95", ".96", ".97", ".98", ".99",
+];
+
+/// Append `n` in decimal (no leading zeros) to `f`, two digits at a time via [`PAIRS2`]/[`DIGITS1`].
+///
+/// The 1-4 digit cases (every realistic SVG coordinate / dimension) are handled without any
+/// recursive call: the old `n >= 100 { write_uint_into(f, n / 100); … }` recursion is NOT
+/// tail-recursive (a `write_str` follows the call), so on the shipped `opt-level="z"` build —
+/// where the self-call is not inlined — each multi-digit number paid a real function call.
+/// Emitting the high 1-2 digits then the low pair inline removes that call for the common
+/// range. Byte-identical: the high group is `DIGITS1`/`PAIRS2` exactly as the recursion would
+/// have chosen, followed by `PAIRS2[n % 100]`. Values ≥ 10000 keep the recursive tail.
+pub(crate) fn write_uint_into<W: fmt::Write>(f: &mut W, n: u64) -> fmt::Result {
+    if n < 10 {
+        f.write_str(DIGITS1[n as usize])
+    } else if n < 100 {
+        f.write_str(PAIRS2[n as usize])
+    } else if n < 10_000 {
+        let hi = (n / 100) as usize;
+        let lo = (n % 100) as usize;
+        if hi < 10 {
+            f.write_str(DIGITS1[hi])?;
+        } else {
+            f.write_str(PAIRS2[hi])?;
+        }
+        f.write_str(PAIRS2[lo])
+    } else {
+        write_uint_into(f, n / 100)?;
+        f.write_str(PAIRS2[(n % 100) as usize])
+    }
+}
+
+/// Append signed integer `i` in decimal to `f` via the fast [`PAIRS2`] path — byte-identical
+/// to `write!(f, "{i}")` but without the `fmt::Formatter`/`pad_integral` machinery, which shows up
+/// as ~8% of coordinate-heavy render (most SVG coordinates land on whole pixels and take the integer
+/// branch of [`AttributeValue::write_value`]). `i64::from(i).unsigned_abs()` handles `i32::MIN`.
+pub(crate) fn write_int_into<W: fmt::Write>(f: &mut W, i: i32) -> fmt::Result {
+    if i < 0 {
+        f.write_str("-")?;
+    }
+    write_uint_into(f, i64::from(i).unsigned_abs())
+}
+
+/// Write `value` to exactly two decimal places, byte-for-byte identical to
+/// `write!(f, "{value:.2}")`, but without the general float-to-decimal formatting
+/// machinery — which dominates SVG serialization on coordinate-heavy diagrams.
+///
+/// Promoting to `f64` is lossless for an `f32`, so scaling by 100 and rounding
+/// (ties to even, matching `{:.2}`) reproduces the exact decimal rounding of the
+/// underlying `f32`. Values too large to scale into `i64`, and any non-finite input,
+/// fall back to the standard formatter so output stays identical in every case.
+/// The integer part and the always-2-digit fraction are streamed straight into `f` as
+/// borrowed [`PAIRS2`] entries (no stack buffer, no `from_utf8`, no `str` range revalidation).
+/// Verified byte-identical against `{:.2}` over a dense value sweep in the tests.
+pub(crate) fn write_fixed2<W: fmt::Write>(f: &mut W, value: f32) -> fmt::Result {
+    if !value.is_finite() || value.abs() >= 9.0e15 {
+        // Non-finite, or large enough that `* 100` could overflow `i64`.
+        return write!(f, "{value:.2}");
+    }
+    let scaled = (f64::from(value) * 100.0).round_ties_even();
+    let magnitude = (scaled as i64).unsigned_abs();
+    let int_part = magnitude / 100;
+    let frac_part = (magnitude % 100) as usize;
+
+    // `[-]int_part.frac_part`, frac always 2 digits, in the same order the old right-to-left
+    // stack-buffer build produced — byte-identical, just streamed instead of buffered+revalidated.
+    if value.is_sign_negative() {
+        f.write_str("-")?;
+    }
+    write_uint_into(f, int_part)?;
+    // `".00".."99"` in one append instead of `write_str(".")` + `write_str(PAIRS2[frac])`.
+    f.write_str(DOTPAIRS3[frac_part])
+}
+
+/// Write `s` into `f` with XML attribute-value escaping (`& < > " '`), copying
+/// unescaped runs in bulk instead of character-by-character. Every escaped
+/// character is ASCII, so scanning bytes never splits a multi-byte UTF-8 sequence
+/// — the output is byte-for-byte identical to escaping each `char` individually,
+/// with no intermediate allocation. This is the hot SVG-serialization path.
+pub(crate) fn write_escaped_attr<W: fmt::Write>(f: &mut W, s: &str) -> fmt::Result {
+    let bytes = s.as_bytes();
+    // Fast path: a single scan checking whether ANY byte needs escaping. This is a simple
+    // "byte ∈ small set" reduction the auto-vectorizer can lower to SIMD, and the common
+    // attribute values on the hot render path — path `d` geometry, numeric coords, class/id
+    // tokens — contain no special byte, so we bulk-copy the whole string with one `write_str`.
+    // Byte-identical: when no byte is special the slow loop below would also emit `s` verbatim.
+    if !bytes
+        .iter()
+        .any(|&b| matches!(b, b'&' | b'<' | b'>' | b'"' | b'\''))
+    {
+        return f.write_str(s);
+    }
+    let mut start = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        let replacement = match b {
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            b'>' => "&gt;",
+            b'"' => "&quot;",
+            b'\'' => "&#39;",
+            _ => continue,
+        };
+        f.write_str(&s[start..i])?;
+        f.write_str(replacement)?;
+        start = i + 1;
+    }
+    f.write_str(&s[start..])
+}
+
+/// Write `s` into `f` with XML text-content escaping. Like [`write_escaped_attr`]
+/// but only escapes `>` when it closes a `]]>` sequence (so CSS child combinators
+/// such as `div > p` survive inline `<style>`), matching the prior behaviour
+/// exactly. `]` is ASCII, so the byte look-back matches a `char` look-back.
+pub(crate) fn write_escaped_text<W: fmt::Write>(f: &mut W, s: &str) -> fmt::Result {
+    let bytes = s.as_bytes();
+    // Fast path for LONG text (the ~5 KB embedded `<style>` CSS is written through here on every
+    // diagram — ~6% of small-diagram render). Without a `]]>` CDATA-end, ONLY `&`/`<` need escaping
+    // (a `>` escapes only inside `]]>`), so locate them with memchr2 (SIMD) and bulk-copy the runs
+    // between — no per-byte loop and no `]]>` look-back on every `>` (CSS is full of `>` combinators).
+    // The CSS contains an `&` (color-mix), so the previous whole-copy fast path fell through to the
+    // per-byte loop over all ~5 KB; this handles it in a couple of `write_str`s. Length-gated so the
+    // numerous SHORT labels — where memchr's setup loses — keep the loop below. Byte-identical: for a
+    // string with no `]]>`, the loop escapes exactly `&`/`<`, same as here.
+    if bytes.len() >= 256 && !s.contains("]]>") {
+        let mut start = 0;
+        let mut from = 0;
+        while let Some(rel) = memchr::memchr2(b'&', b'<', &bytes[from..]) {
+            let i = from + rel;
+            let replacement = if bytes[i] == b'&' { "&amp;" } else { "&lt;" };
+            f.write_str(&s[start..i])?;
+            f.write_str(replacement)?;
+            start = i + 1;
+            from = i + 1;
+        }
+        return f.write_str(&s[start..]);
+    }
+    // Clean fast path for the SHORT strings this handles below (node/edge labels + `<title>` text): a
+    // single vectorizable "byte ∈ {& < >}" scan, so the common label with no special byte bulk-copies in
+    // one `write_str` instead of the per-byte match loop (measured: that loop dominates this function's
+    // self-time). Byte-identical: with no `&`/`<`/`>` the loop below would emit `s` verbatim (a `>`
+    // escapes only inside `]]>`, which necessarily contains a `>`, so any `]]>` fails this check and falls
+    // through). Placed AFTER the length-gated CSS path so the ~5 KB `<style>` never pays this extra scan.
+    if !bytes.iter().any(|&b| matches!(b, b'&' | b'<' | b'>')) {
+        return f.write_str(s);
+    }
+    let mut start = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        let replacement = match b {
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            b'>' if i >= 2 && bytes[i - 1] == b']' && bytes[i - 2] == b']' => "&gt;",
+            _ => continue,
+        };
+        f.write_str(&s[start..i])?;
+        f.write_str(replacement)?;
+        start = i + 1;
+    }
+    f.write_str(&s[start..])
 }
 
 /// Escape special characters in XML text content.
-pub fn escape_xml_text(s: &str) -> String {
+#[cfg(test)]
+#[must_use]
+fn escape_xml_text(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
-    let mut prev1 = '\0';
-    let mut prev2 = '\0';
-    for c in s.chars() {
-        match c {
-            '&' => result.push_str("&amp;"),
-            '<' => result.push_str("&lt;"),
-            // We intentionally do not escape '>' to '&gt;' here because it breaks
-            // CSS child combinators (e.g. `div > p`) when the SVG is embedded inline in HTML5.
-            // In standard XML, '>' only needs to be escaped if it is part of `]]>`.
-            '>' if prev1 == ']' && prev2 == ']' => result.push_str("&gt;"),
-            _ => result.push(c),
-        }
-        prev2 = prev1;
-        prev1 = c;
-    }
+    let _ = write_escaped_text(&mut result, s);
     result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bulk_escape_byte_identical_to_charwise() {
+        // Reference: the original character-by-character implementations.
+        fn ref_attr(s: &str) -> String {
+            let mut r = String::new();
+            for c in s.chars() {
+                match c {
+                    '&' => r.push_str("&amp;"),
+                    '<' => r.push_str("&lt;"),
+                    '>' => r.push_str("&gt;"),
+                    '"' => r.push_str("&quot;"),
+                    '\'' => r.push_str("&#39;"),
+                    _ => r.push(c),
+                }
+            }
+            r
+        }
+        fn ref_text(s: &str) -> String {
+            let mut r = String::new();
+            let (mut p1, mut p2) = ('\0', '\0');
+            for c in s.chars() {
+                match c {
+                    '&' => r.push_str("&amp;"),
+                    '<' => r.push_str("&lt;"),
+                    '>' if p1 == ']' && p2 == ']' => r.push_str("&gt;"),
+                    _ => r.push(c),
+                }
+                p2 = p1;
+                p1 = c;
+            }
+            r
+        }
+        let cases = [
+            "",
+            "abc",
+            "a&b",
+            "<x>",
+            "\"q\"",
+            "'s'",
+            "]]>",
+            "a]]>b",
+            "]>",
+            "]]",
+            "café ☕",
+            "<&>\"'",
+            "node A & B",
+            "x]]>y]]>z",
+            "<<<",
+            "&amp;already",
+            "a > b",
+            "div > p",
+            "]] >",
+            "] ] >",
+            "résumé < β & δ > \"τ\"",
+            "🚀]]>🚀",
+            "tail]]",
+            "lead]]>",
+        ];
+        for s in cases {
+            let mut got_attr = String::new();
+            write_escaped_attr(&mut got_attr, s).unwrap();
+            assert_eq!(got_attr, ref_attr(s), "attr mismatch for {s:?}");
+
+            let mut got_text = String::new();
+            write_escaped_text(&mut got_text, s).unwrap();
+            assert_eq!(got_text, ref_text(s), "text mismatch for {s:?}");
+            assert_eq!(
+                escape_xml_text(s),
+                ref_text(s),
+                "escape_xml_text mismatch for {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "foreground release-only performance probe"]
+    fn write_escaped_text_short_clean_perf_ab() {
+        use sha2::{Digest, Sha256};
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ROUNDS: usize = 41;
+        const MIN_OF: u32 = 3;
+        const MIN_SAMPLE_NS: u64 = 2_000_000;
+        const LABELS: &[&str] = &[
+            "Gateway",
+            "API Service",
+            "Event Router",
+            "Primary Database",
+            "Read Replica",
+            "Authorization",
+            "Background Worker",
+            "Metrics Collector",
+            "Notification Queue",
+            "Object Storage",
+            "Search Index",
+            "Audit Log",
+            "Regional Cache",
+            "Build Pipeline",
+            "Deployment Target",
+            "Health Monitor",
+        ];
+
+        #[derive(Clone, Copy)]
+        enum Arm {
+            ScalarReference,
+            CleanFastPath,
+        }
+
+        struct Stats {
+            a_p50_ns: f64,
+            b_p50_ns: f64,
+            ratio_p50: f64,
+            ratio_ci: (f64, f64),
+            cv_pct: f64,
+            mad_pct: f64,
+            checksum: u64,
+        }
+
+        /// Exact pre-`bdbff236` implementation: retain the long-text path but omit only the
+        /// short-clean pre-scan that this resurrection reruns.
+        fn scalar_reference<W: std::fmt::Write>(f: &mut W, s: &str) -> std::fmt::Result {
+            let bytes = s.as_bytes();
+            if bytes.len() >= 256 && !s.contains("]]>") {
+                let mut start = 0;
+                let mut from = 0;
+                while let Some(relative) = memchr::memchr2(b'&', b'<', &bytes[from..]) {
+                    let index = from + relative;
+                    let replacement = if bytes[index] == b'&' {
+                        "&amp;"
+                    } else {
+                        "&lt;"
+                    };
+                    f.write_str(&s[start..index])?;
+                    f.write_str(replacement)?;
+                    start = index + 1;
+                    from = index + 1;
+                }
+                return f.write_str(&s[start..]);
+            }
+            let mut start = 0;
+            for (index, &byte) in bytes.iter().enumerate() {
+                let replacement = match byte {
+                    b'&' => "&amp;",
+                    b'<' => "&lt;",
+                    b'>' if index >= 2 && bytes[index - 1] == b']' && bytes[index - 2] == b']' => {
+                        "&gt;"
+                    }
+                    _ => continue,
+                };
+                f.write_str(&s[start..index])?;
+                f.write_str(replacement)?;
+                start = index + 1;
+            }
+            f.write_str(&s[start..])
+        }
+
+        fn self_identity() -> String {
+            use std::fmt::Write as _;
+
+            let Ok(path) = std::env::current_exe() else {
+                return "unavailable".to_owned();
+            };
+            let Ok(bytes) = std::fs::read(&path) else {
+                return "unavailable".to_owned();
+            };
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let digest = hasher.finalize();
+            let mut sha256 = String::with_capacity(digest.len() * 2);
+            for byte in digest {
+                write!(sha256, "{byte:02x}").expect("writing to String cannot fail");
+            }
+            format!("{} ({} bytes) {}", sha256, bytes.len(), path.display())
+        }
+
+        fn median(values: &mut [f64]) -> f64 {
+            values.sort_by(f64::total_cmp);
+            let middle = values.len() / 2;
+            if values.len().is_multiple_of(2) {
+                f64::midpoint(values[middle - 1], values[middle])
+            } else {
+                values[middle]
+            }
+        }
+
+        fn bootstrap_median_ci(ratios: &[f64]) -> (f64, f64) {
+            const RESAMPLES: usize = 2_000;
+            let mut state = 0x2545_F491_4F6C_DD1D_u64;
+            let mut medians = Vec::with_capacity(RESAMPLES);
+            let mut sample = vec![0.0_f64; ratios.len()];
+            for _ in 0..RESAMPLES {
+                for slot in &mut sample {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    let index = usize::try_from(state >> 33).unwrap_or(0) % ratios.len();
+                    *slot = ratios[index];
+                }
+                medians.push(median(&mut sample));
+            }
+            medians.sort_by(f64::total_cmp);
+            (
+                medians[RESAMPLES / 40],
+                medians[RESAMPLES - 1 - RESAMPLES / 40],
+            )
+        }
+
+        fn time_arm(arm: Arm, batch: u32) -> (u64, u64) {
+            let mut output = String::with_capacity(64);
+            let mut checksum = 0_u64;
+            let start = Instant::now();
+            for _ in 0..batch.max(1) {
+                for &label in LABELS {
+                    output.clear();
+                    let label = black_box(label);
+                    match arm {
+                        Arm::ScalarReference => scalar_reference(&mut output, label).unwrap(),
+                        Arm::CleanFastPath => write_escaped_text(&mut output, label).unwrap(),
+                    }
+                    let bytes = black_box(output.as_bytes());
+                    checksum = checksum
+                        .rotate_left(7)
+                        .wrapping_add(bytes.len() as u64)
+                        .wrapping_add(u64::from(bytes.first().copied().unwrap_or_default()));
+                }
+            }
+            (
+                u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                black_box(checksum),
+            )
+        }
+
+        fn time_min(arm: Arm, batch: u32) -> (u64, u64) {
+            let mut best = u64::MAX;
+            let mut checksum = 0_u64;
+            for _ in 0..MIN_OF {
+                let (elapsed, digest) = time_arm(arm, batch);
+                best = best.min(elapsed);
+                checksum = checksum.wrapping_add(digest);
+            }
+            (best, checksum)
+        }
+
+        fn paired(arm_a: Arm, arm_b: Arm, batch: u32) -> Stats {
+            let mut a_samples = Vec::with_capacity(ROUNDS);
+            let mut b_samples = Vec::with_capacity(ROUNDS);
+            let mut ratios = Vec::with_capacity(ROUNDS);
+            let mut checksum = 0_u64;
+            for round in 0..ROUNDS {
+                let (a_ns, b_ns, a_digest, b_digest) = if round.is_multiple_of(2) {
+                    let (a_ns, a_digest) = time_min(arm_a, batch);
+                    let (b_ns, b_digest) = time_min(arm_b, batch);
+                    (a_ns, b_ns, a_digest, b_digest)
+                } else {
+                    let (b_ns, b_digest) = time_min(arm_b, batch);
+                    let (a_ns, a_digest) = time_min(arm_a, batch);
+                    (a_ns, b_ns, a_digest, b_digest)
+                };
+                checksum = checksum.wrapping_add(a_digest).wrapping_add(b_digest);
+                a_samples.push(a_ns as f64);
+                b_samples.push(b_ns as f64);
+                ratios.push(a_ns as f64 / b_ns.max(1) as f64);
+            }
+            let a_p50_ns = median(&mut a_samples);
+            let b_p50_ns = median(&mut b_samples);
+            let ratio_p50 = median(&mut ratios.clone());
+            let ratio_ci = bootstrap_median_ci(&ratios);
+            let mean = ratios.iter().sum::<f64>() / ratios.len() as f64;
+            let variance = ratios
+                .iter()
+                .map(|ratio| (ratio - mean).powi(2))
+                .sum::<f64>()
+                / ratios.len() as f64;
+            let mut deviations = ratios
+                .iter()
+                .map(|ratio| (ratio - ratio_p50).abs())
+                .collect::<Vec<_>>();
+            Stats {
+                a_p50_ns,
+                b_p50_ns,
+                ratio_p50,
+                ratio_ci,
+                cv_pct: variance.sqrt() / mean * 100.0,
+                mad_pct: median(&mut deviations) / ratio_p50 * 100.0,
+                checksum,
+            }
+        }
+
+        println!("bench_elf_sha256={}", self_identity());
+
+        for input in [
+            "",
+            "Gateway",
+            "A & B",
+            "<service>",
+            "a]]>b",
+            "café ☕",
+            "div > p",
+        ] {
+            let mut reference = String::new();
+            let mut candidate = String::new();
+            scalar_reference(&mut reference, input).unwrap();
+            write_escaped_text(&mut candidate, input).unwrap();
+            assert_eq!(candidate, reference, "{input:?}");
+        }
+        let long = format!("{}&<tail", "x".repeat(300));
+        let mut reference = String::new();
+        let mut candidate = String::new();
+        scalar_reference(&mut reference, &long).unwrap();
+        write_escaped_text(&mut candidate, &long).unwrap();
+        assert_eq!(candidate, reference, "long-path parity");
+
+        let (candidate_ns, _) = time_arm(Arm::CleanFastPath, 1);
+        let batch = u32::try_from(MIN_SAMPLE_NS.div_ceil(candidate_ns.max(1)))
+            .unwrap_or(1)
+            .max(1);
+        let null = paired(Arm::ScalarReference, Arm::ScalarReference, batch);
+        let real = paired(Arm::ScalarReference, Arm::CleanFastPath, batch);
+        let null_half_width = (null.ratio_ci.0 - 1.0)
+            .abs()
+            .max((null.ratio_ci.1 - 1.0).abs());
+        let ci_margin = if null_half_width > 0.0 {
+            (real.ratio_p50 - 1.0).abs() / null_half_width
+        } else {
+            f64::INFINITY
+        };
+        let decidable = ci_margin >= 2.0;
+        let verdict = if !decidable {
+            "INDETERMINATE"
+        } else if real.ratio_p50 > 1.0 {
+            "CAND_FASTER"
+        } else {
+            "CAND_SLOWER"
+        };
+        println!(
+            "PERF write_escaped_text_short_clean null_ratio={:.6} \
+             null_ci95=[{:.6},{:.6}] ab_ratio={:.6} ab_ci95=[{:.6},{:.6}] \
+             ci_margin={ci_margin:.2}x verdict={verdict} baseline_p50_ns={:.0} \
+             candidate_p50_ns={:.0} null_cv={:.2}% null_mad={:.2}% ab_cv={:.2}% \
+             ab_mad={:.2}% parity=exact checksum={} batch={batch} min_of={MIN_OF} \
+             rounds={ROUNDS}",
+            null.ratio_p50,
+            null.ratio_ci.0,
+            null.ratio_ci.1,
+            real.ratio_p50,
+            real.ratio_ci.0,
+            real.ratio_ci.1,
+            real.a_p50_ns,
+            real.b_p50_ns,
+            null.cv_pct,
+            null.mad_pct,
+            real.cv_pct,
+            real.mad_pct,
+            null.checksum.wrapping_add(real.checksum),
+        );
+    }
+
+    #[test]
+    fn write_fixed2_byte_identical_to_std_format() {
+        let check = |v: f32| {
+            let mut got = String::new();
+            write_fixed2(&mut got, v).unwrap();
+            assert_eq!(
+                got,
+                format!("{v:.2}"),
+                "mismatch for {v} (bits {:#010x})",
+                v.to_bits()
+            );
+        };
+        // Dense sweep across the realistic coordinate range (fine step, both signs).
+        let mut i: i32 = -3_000_000;
+        while i <= 3_000_000 {
+            check(i as f32 / 1000.0);
+            i += 1;
+        }
+        // Half-way / rounding-tie cases and larger magnitudes.
+        for &v in &[
+            0.005f32,
+            -0.005,
+            0.015,
+            0.025,
+            0.045,
+            0.125,
+            0.135,
+            1.005,
+            2.675,
+            2.685,
+            -2.675,
+            -0.001,
+            0.001,
+            12345.67,
+            -88888.88,
+            99999.99,
+            131071.99,
+            262143.5,
+            1.0e7 + 0.5,
+        ] {
+            check(v);
+        }
+    }
 
     #[test]
     fn renders_attributes() {
@@ -267,9 +1021,51 @@ mod tests {
     }
 
     #[test]
+    fn appends_prefixed_classes_without_changing_serialization() {
+        let attrs = Attributes::new()
+            .class("fm-node")
+            .class_prefixed_usize("fm-node-accent-", 7)
+            .class("fm-node-shape-rect")
+            .class_prefixed("fm-node-user-", "selected");
+        assert_eq!(
+            attrs.render(),
+            " class=\"fm-node fm-node-accent-7 fm-node-shape-rect fm-node-user-selected\""
+        );
+    }
+
+    #[test]
+    fn appends_prefixed_class_from_writer_without_changing_serialization() {
+        let attrs = Attributes::new().class("fm-node").class_prefixed_by(
+            "fm-node-user-",
+            "hot-class".len(),
+            |buf| {
+                buf.push_str("hot-class");
+            },
+        );
+        assert_eq!(attrs.render(), " class=\"fm-node fm-node-user-hot-class\"");
+    }
+
+    #[test]
+    fn starts_class_attribute_from_prefixed_class() {
+        let attrs = Attributes::new()
+            .class_prefixed("fm-node-icon-", "server")
+            .class_prefixed_usize("fm-node-accent-", 12);
+        assert_eq!(
+            attrs.render(),
+            " class=\"fm-node-icon-server fm-node-accent-12\""
+        );
+    }
+
+    #[test]
     fn adds_data_attributes() {
-        let attrs = Attributes::new().data("test", "value").data("count", "5");
+        let attrs = Attributes::new()
+            .data("id", "node-a")
+            .data("fm-node-id", "node-a")
+            .data("test", "value")
+            .data("count", "5");
         let rendered = attrs.render();
+        assert!(rendered.contains("data-id=\"node-a\""));
+        assert!(rendered.contains("data-fm-node-id=\"node-a\""));
         assert!(rendered.contains("data-test=\"value\""));
         assert!(rendered.contains("data-count=\"5\""));
     }

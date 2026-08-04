@@ -2,7 +2,7 @@
 //!
 //! Provides preset themes, CSS custom property generation, and color palette utilities.
 
-use std::str::FromStr;
+use std::{fmt::Write as _, str::FromStr};
 
 /// Theme preset identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -375,22 +375,27 @@ impl ThemeColors {
     #[must_use]
     pub fn to_css_vars(&self) -> String {
         let mut css = String::with_capacity(512);
+        self.write_css_vars(&mut css);
+        css
+    }
+
+    /// Write the `:root` custom-property block directly into `css`. Byte-identical to
+    /// [`Self::to_css_vars`] but writes straight into the caller's buffer, avoiding a temp `String`
+    /// per declaration (the `push_str(&format!(..))` anti-pattern) plus the intermediate `String`
+    /// and its copy when the render funnel composes the full stylesheet.
+    pub(crate) fn write_css_vars(&self, css: &mut String) {
         css.push_str(":root {\n");
-        css.push_str(&format!("  --fm-bg: {};\n", self.background));
-        css.push_str(&format!("  --fm-text-color: {};\n", self.text));
-        css.push_str(&format!("  --fm-node-fill: {};\n", self.node_fill));
-        css.push_str(&format!("  --fm-node-stroke: {};\n", self.node_stroke));
-        css.push_str(&format!("  --fm-edge-color: {};\n", self.edge));
-        css.push_str(&format!("  --fm-cluster-fill: {};\n", self.cluster_fill));
-        css.push_str(&format!(
-            "  --fm-cluster-stroke: {};\n",
-            self.cluster_stroke
-        ));
+        let _ = writeln!(css, "  --fm-bg: {};", self.background);
+        let _ = writeln!(css, "  --fm-text-color: {};", self.text);
+        let _ = writeln!(css, "  --fm-node-fill: {};", self.node_fill);
+        let _ = writeln!(css, "  --fm-node-stroke: {};", self.node_stroke);
+        let _ = writeln!(css, "  --fm-edge-color: {};", self.edge);
+        let _ = writeln!(css, "  --fm-cluster-fill: {};", self.cluster_fill);
+        let _ = writeln!(css, "  --fm-cluster-stroke: {};", self.cluster_stroke);
         for (i, accent) in self.accents.iter().enumerate() {
-            css.push_str(&format!("  --fm-accent-{}: {};\n", i + 1, accent));
+            let _ = writeln!(css, "  --fm-accent-{}: {};", i + 1, accent);
         }
         css.push_str("}\n");
-        css
     }
 }
 
@@ -424,23 +429,29 @@ impl FontConfig {
     #[must_use]
     pub fn to_css(&self) -> String {
         let mut css = String::with_capacity(256);
+        self.write_css(&mut css);
+        css
+    }
 
+    /// Write the `.fm-text` font block (and optional `@import`) directly into `css`. Byte-identical
+    /// to [`Self::to_css`]; writes straight into the caller's buffer to avoid the temp `String` per
+    /// declaration and the intermediate `String` + copy on the render path.
+    pub(crate) fn write_css(&self, css: &mut String) {
         // Embed web font if provided
         if let Some(url) = &self.web_font_url {
-            let sanitized: String = url
-                .chars()
-                .filter(|&c| c != '\'' && c != ')' && c != '\\' && c != '"')
-                .collect();
-            css.push_str(&format!("@import url('{sanitized}');\n"));
+            css.push_str("@import url('");
+            css.extend(
+                url.chars()
+                    .filter(|&c| c != '\'' && c != ')' && c != '\\' && c != '"'),
+            );
+            css.push_str("');\n");
         }
 
         css.push_str(".fm-text {\n");
-        css.push_str(&format!("  font-family: {};\n", self.family));
-        css.push_str(&format!("  font-size: {}px;\n", self.size));
-        css.push_str(&format!("  font-weight: {};\n", self.weight));
+        let _ = writeln!(css, "  font-family: {};", self.family);
+        let _ = writeln!(css, "  font-size: {}px;", self.size);
+        let _ = writeln!(css, "  font-weight: {};", self.weight);
         css.push_str("}\n");
-
-        css
     }
 }
 
@@ -465,10 +476,10 @@ impl Theme {
 
     /// Generate the complete CSS style block for embedding in SVG.
     #[must_use]
-    pub fn to_svg_style(&self, shadows: bool) -> String {
+    pub fn to_svg_style(&self, shadows: bool, has_edge_labels: bool) -> String {
         let mut css = String::with_capacity(4096);
-        css.push_str(&self.colors.to_css_vars());
-        css.push_str(&self.font.to_css());
+        self.colors.write_css_vars(&mut css);
+        self.font.write_css(&mut css);
 
         let shadow_filter = if shadows {
             "filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.10)) drop-shadow(0 1px 3px rgba(0, 0, 0, 0.06));"
@@ -483,8 +494,9 @@ impl Theme {
         };
 
         // Add utility classes
-        css.push_str(
-            &format!(r#"
+        let _ = write!(
+            css,
+            r#"
 :root {{
   --fm-edge-muted: var(--fm-cluster-stroke);
   --fm-edge-label-bg: var(--fm-bg);
@@ -633,27 +645,6 @@ svg {{
   opacity: 0.8;
   stroke-dasharray: 4 4;
 }}
-.fm-edge-labeled > rect {{
-  fill: var(--fm-edge-label-bg);
-  stroke: var(--fm-edge-label-border);
-  stroke-width: 0.75;
-  rx: 6px;
-  ry: 6px;
-}}
-/* Add a backdrop filter for modern glassmorphism effect on the rect */
-@supports (backdrop-filter: blur(4px)) {{
-  .fm-edge-labeled > rect {{
-    fill: color-mix(in srgb, var(--fm-edge-label-bg) 85%, transparent);
-    backdrop-filter: blur(8px);
-  }}
-}}
-.edge-label {{
-  fill: var(--fm-edge-label-text);
-  font-weight: 600;
-  font-size: 0.88em;
-  letter-spacing: -0.01em;
-  text-rendering: optimizeLegibility;
-}}
 marker#arrow-end path,
 marker#arrow-filled path,
 marker#arrow-circle path,
@@ -722,8 +713,38 @@ marker#arrow-cross path {{
   outline: 2px solid var(--fm-accent-1);
   outline-offset: 3px;
 }}
-"#)
+"#
         );
+
+        // Edge-label rules apply only to `.fm-edge-labeled`/`.edge-label` elements, emitted only
+        // when an edge actually carries a label. Appending them conditionally keeps otherwise-dead
+        // CSS out of the common unlabeled-edge SVG. Order is irrelevant (distinct selectors).
+        if has_edge_labels {
+            css.push_str(
+                r"
+.fm-edge-labeled > rect {
+  fill: var(--fm-edge-label-bg);
+  stroke: var(--fm-edge-label-border);
+  stroke-width: 0.75;
+  rx: 6px;
+  ry: 6px;
+}
+@supports (backdrop-filter: blur(4px)) {
+  .fm-edge-labeled > rect {
+    fill: color-mix(in srgb, var(--fm-edge-label-bg) 85%, transparent);
+    backdrop-filter: blur(8px);
+  }
+}
+.edge-label {
+  fill: var(--fm-edge-label-text);
+  font-weight: 600;
+  font-size: 0.88em;
+  letter-spacing: -0.01em;
+  text-rendering: optimizeLegibility;
+}
+",
+            );
+        }
 
         css
     }
@@ -911,7 +932,7 @@ mod tests {
     #[test]
     fn theme_generates_complete_style() {
         let theme = Theme::from_preset(ThemePreset::Default);
-        let style = theme.to_svg_style(true);
+        let style = theme.to_svg_style(true, true);
         assert!(style.contains(":root {"));
         assert!(style.contains(".fm-node"));
         assert!(style.contains(".fm-edge"));

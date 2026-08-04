@@ -6,7 +6,7 @@
 use crate::{TermRenderConfig, render_diagram_with_config};
 use fm_core::{ArrowType, IrEndpoint, IrNode, MermaidDiagramIr, NodeShape};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, VecDeque};
 
 /// Status of a diff element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -182,7 +182,8 @@ fn diff_nodes(
         .map(|(i, n)| (n.id.as_str(), (i, n)))
         .collect();
 
-    let all_ids: BTreeSet<&str> = old_by_id.keys().chain(new_by_id.keys()).copied().collect();
+    let mut old_by_id = old_by_id.into_iter().peekable();
+    let mut new_by_id = new_by_id.into_iter().peekable();
 
     let mut results = Vec::new();
     let mut added = 0_usize;
@@ -190,11 +191,28 @@ fn diff_nodes(
     let mut changed = 0_usize;
     let mut unchanged = 0_usize;
 
-    for id in all_ids {
-        match (old_by_id.get(id), new_by_id.get(id)) {
+    loop {
+        let next_id = match (
+            old_by_id.peek().map(|(id, _)| *id),
+            new_by_id.peek().map(|(id, _)| *id),
+        ) {
+            (Some(old_id), Some(new_id)) => old_id.min(new_id),
+            (Some(old_id), None) => old_id,
+            (None, Some(new_id)) => new_id,
+            (None, None) => break,
+        };
+
+        let old_entry = old_by_id
+            .next_if(|(id, _)| *id == next_id)
+            .map(|(_, entry)| entry);
+        let new_entry = new_by_id
+            .next_if(|(id, _)| *id == next_id)
+            .map(|(_, entry)| entry);
+
+        match (old_entry, new_entry) {
             (None, Some((_idx, new_node))) => {
                 results.push(DiffNode {
-                    id: id.to_string(),
+                    id: next_id.to_string(),
                     status: DiffStatus::Added,
                     node: (*new_node).clone(),
                     changes: Vec::new(),
@@ -203,7 +221,7 @@ fn diff_nodes(
             }
             (Some((_idx, old_node)), None) => {
                 results.push(DiffNode {
-                    id: id.to_string(),
+                    id: next_id.to_string(),
                     status: DiffStatus::Removed,
                     node: (*old_node).clone(),
                     changes: Vec::new(),
@@ -211,10 +229,10 @@ fn diff_nodes(
                 removed += 1;
             }
             (Some((old_idx, old_node)), Some((_new_idx, new_node))) => {
-                let changes = compare_nodes(old, old_node, *old_idx, new, new_node);
+                let changes = compare_nodes(old, old_node, old_idx, new, new_node);
                 if changes.is_empty() {
                     results.push(DiffNode {
-                        id: id.to_string(),
+                        id: next_id.to_string(),
                         status: DiffStatus::Unchanged,
                         node: (*new_node).clone(),
                         changes: Vec::new(),
@@ -222,7 +240,7 @@ fn diff_nodes(
                     unchanged += 1;
                 } else {
                     results.push(DiffNode {
-                        id: id.to_string(),
+                        id: next_id.to_string(),
                         status: DiffStatus::Changed,
                         node: (*new_node).clone(),
                         changes,
@@ -254,23 +272,26 @@ fn compare_nodes(
         });
     }
 
-    // Compare labels.
+    // Compare labels. Borrow each label's text and only clone when they
+    // differ, so unchanged nodes (the common diff case) allocate nothing —
+    // the node's `label` is a `LabelId` index, so the text lives outside the
+    // per-node clone and would otherwise be duplicated here for free.
     let old_label = old_node
         .label
         .and_then(|lid| old_ir.labels.get(lid.0))
-        .map(|l| l.text.clone())
-        .unwrap_or_default();
+        .map(|l| l.text.as_str())
+        .unwrap_or("");
 
     let new_label = new_node
         .label
         .and_then(|lid| new_ir.labels.get(lid.0))
-        .map(|l| l.text.clone())
-        .unwrap_or_default();
+        .map(|l| l.text.as_str())
+        .unwrap_or("");
 
     if old_label != new_label {
         changes.push(NodeChange::LabelChanged {
-            old: old_label,
-            new: new_label,
+            old: old_label.to_string(),
+            new: new_label.to_string(),
         });
     }
 
@@ -282,26 +303,28 @@ fn compare_nodes(
         });
     }
 
-    let old_members = node_member_strings(old_node);
-    let new_members = node_member_strings(new_node);
-    if old_members != new_members {
-        changes.push(NodeChange::MembersChanged {
-            old: old_members,
-            new: new_members,
-        });
+    if old_node.members != new_node.members {
+        let old_members = node_member_strings(old_node);
+        let new_members = node_member_strings(new_node);
+        if old_members != new_members {
+            changes.push(NodeChange::MembersChanged {
+                old: old_members,
+                new: new_members,
+            });
+        }
     }
 
-    if old_node.href != new_node.href {
+    if old_node.href() != new_node.href() {
         changes.push(NodeChange::HrefChanged {
-            old: old_node.href.clone(),
-            new: new_node.href.clone(),
+            old: old_node.href().map(String::from),
+            new: new_node.href().map(String::from),
         });
     }
 
-    if old_node.tooltip != new_node.tooltip {
+    if old_node.tooltip() != new_node.tooltip() {
         changes.push(NodeChange::TooltipChanged {
-            old: old_node.tooltip.clone(),
-            new: new_node.tooltip.clone(),
+            old: old_node.tooltip().map(String::from),
+            new: new_node.tooltip().map(String::from),
         });
     }
 
@@ -320,25 +343,22 @@ fn diff_edges(
     new: &MermaidDiagramIr,
 ) -> (Vec<DiffEdge>, (usize, usize, usize, usize)) {
     // Group edges by their endpoint pair (from_id, to_id).
-    let mut old_groups: BTreeMap<(String, String), Vec<&fm_core::IrEdge>> = BTreeMap::new();
+    let mut old_groups: BTreeMap<(&str, &str), VecDeque<&fm_core::IrEdge>> = BTreeMap::new();
     for e in &old.edges {
         if let (Some(f), Some(t)) = (endpoint_id(old, e.from), endpoint_id(old, e.to)) {
-            old_groups.entry((f, t)).or_default().push(e);
+            old_groups.entry((f, t)).or_default().push_back(e);
         }
     }
 
-    let mut new_groups: BTreeMap<(String, String), Vec<&fm_core::IrEdge>> = BTreeMap::new();
+    let mut new_groups: BTreeMap<(&str, &str), VecDeque<&fm_core::IrEdge>> = BTreeMap::new();
     for e in &new.edges {
         if let (Some(f), Some(t)) = (endpoint_id(new, e.from), endpoint_id(new, e.to)) {
-            new_groups.entry((f, t)).or_default().push(e);
+            new_groups.entry((f, t)).or_default().push_back(e);
         }
     }
 
-    let all_pairs: BTreeSet<(String, String)> = old_groups
-        .keys()
-        .cloned()
-        .chain(new_groups.keys().cloned())
-        .collect();
+    let mut old_groups = old_groups.into_iter().peekable();
+    let mut new_groups = new_groups.into_iter().peekable();
 
     let mut results = Vec::new();
     let mut added = 0_usize;
@@ -346,13 +366,26 @@ fn diff_edges(
     let mut changed = 0_usize;
     let mut unchanged = 0_usize;
 
-    for (from_id, to_id) in all_pairs {
+    loop {
+        let next_pair = match (
+            old_groups.peek().map(|(pair, _)| *pair),
+            new_groups.peek().map(|(pair, _)| *pair),
+        ) {
+            (Some(old_pair), Some(new_pair)) => old_pair.min(new_pair),
+            (Some(old_pair), None) => old_pair,
+            (None, Some(new_pair)) => new_pair,
+            (None, None) => break,
+        };
+
         let mut old_list = old_groups
-            .remove(&(from_id.clone(), to_id.clone()))
+            .next_if(|(pair, _)| *pair == next_pair)
+            .map(|(_, edges)| edges)
             .unwrap_or_default();
         let mut new_list = new_groups
-            .remove(&(from_id.clone(), to_id.clone()))
+            .next_if(|(pair, _)| *pair == next_pair)
+            .map(|(_, edges)| edges)
             .unwrap_or_default();
+        let (from_id, to_id) = next_pair;
 
         // 1. Match identical edges first (Unchanged)
         let mut i = 0;
@@ -363,15 +396,15 @@ fn diff_edges(
                 let new_e = new_list[j];
                 if compare_edges(old, old_e, new, new_e).is_empty() {
                     results.push(DiffEdge {
-                        from_id: from_id.clone(),
-                        to_id: to_id.clone(),
+                        from_id: from_id.to_owned(),
+                        to_id: to_id.to_owned(),
                         status: DiffStatus::Unchanged,
                         arrow: new_e.arrow,
                         changes: Vec::new(),
                     });
                     unchanged += 1;
-                    old_list.remove(i);
-                    new_list.remove(j);
+                    let _ = old_list.remove(i);
+                    let _ = new_list.remove(j);
                     matched = true;
                     break;
                 }
@@ -383,12 +416,14 @@ fn diff_edges(
 
         // 2. Match remaining edges as Changed (greedy)
         while !old_list.is_empty() && !new_list.is_empty() {
-            let old_e = old_list.remove(0);
-            let new_e = new_list.remove(0);
+            let old_e = old_list[0];
+            let new_e = new_list[0];
+            let _ = old_list.pop_front();
+            let _ = new_list.pop_front();
             let changes = compare_edges(old, old_e, new, new_e);
             results.push(DiffEdge {
-                from_id: from_id.clone(),
-                to_id: to_id.clone(),
+                from_id: from_id.to_owned(),
+                to_id: to_id.to_owned(),
                 status: DiffStatus::Changed,
                 arrow: new_e.arrow,
                 changes,
@@ -399,8 +434,8 @@ fn diff_edges(
         // 3. Any leftover old edges are Removed
         for old_e in old_list {
             results.push(DiffEdge {
-                from_id: from_id.clone(),
-                to_id: to_id.clone(),
+                from_id: from_id.to_owned(),
+                to_id: to_id.to_owned(),
                 status: DiffStatus::Removed,
                 arrow: old_e.arrow,
                 changes: Vec::new(),
@@ -411,8 +446,8 @@ fn diff_edges(
         // 4. Any leftover new edges are Added
         for new_e in new_list {
             results.push(DiffEdge {
-                from_id: from_id.clone(),
-                to_id: to_id.clone(),
+                from_id: from_id.to_owned(),
+                to_id: to_id.to_owned(),
                 status: DiffStatus::Added,
                 arrow: new_e.arrow,
                 changes: Vec::new(),
@@ -460,20 +495,20 @@ fn compare_edges(
         });
     }
 
-    if old_edge.er_notation != new_edge.er_notation {
+    if old_edge.er_notation() != new_edge.er_notation() {
         changes.push(EdgeChange::ErNotationChanged {
-            old: old_edge.er_notation.clone(),
-            new: new_edge.er_notation.clone(),
+            old: old_edge.er_notation().map(String::from),
+            new: new_edge.er_notation().map(String::from),
         });
     }
 
     changes
 }
 
-fn endpoint_id(ir: &MermaidDiagramIr, endpoint: IrEndpoint) -> Option<String> {
+fn endpoint_id(ir: &MermaidDiagramIr, endpoint: IrEndpoint) -> Option<&str> {
     ir.resolve_endpoint_node(endpoint)
         .and_then(|id| ir.node(id))
-        .map(|n| n.id.clone())
+        .map(|n| n.id.as_str())
 }
 
 fn node_member_strings(node: &IrNode) -> Vec<String> {
@@ -747,18 +782,11 @@ fn colorize_marker(marker: char, status: DiffStatus, use_colors: bool) -> String
 }
 
 fn display_width(value: &str) -> usize {
-    strip_ansi(value)
-        .chars()
-        .map(|c| if fm_core::is_east_asian_wide(c) { 2 } else { 1 })
-        .sum()
-}
-
-fn strip_ansi(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
+    let mut width = 0;
     let mut in_escape = false;
     let mut in_bracket = false;
 
-    for c in input.chars() {
+    for c in value.chars() {
         if in_escape {
             if c == '[' {
                 in_bracket = true;
@@ -773,10 +801,11 @@ fn strip_ansi(input: &str) -> String {
         } else if c == '\x1b' {
             in_escape = true;
         } else {
-            result.push(c);
+            width += if fm_core::is_east_asian_wide(c) { 2 } else { 1 };
         }
     }
-    result
+
+    width
 }
 
 fn truncate_display(value: &str, max_width: usize) -> String {
@@ -904,27 +933,47 @@ fn align_changed_block(old_lines: &[&str], new_lines: &[&str]) -> Vec<AlignedDif
 }
 
 fn lcs_pairs(old_lines: &[&str], new_lines: &[&str]) -> Vec<(usize, usize)> {
-    let mut dp = vec![vec![0_usize; new_lines.len() + 1]; old_lines.len() + 1];
+    let common_prefix = old_lines
+        .iter()
+        .zip(new_lines)
+        .take_while(|(old_line, new_line)| old_line == new_line)
+        .count();
+    lcs_pairs_after_common_prefix(old_lines, new_lines, common_prefix)
+}
+
+fn lcs_pairs_after_common_prefix(
+    old_lines: &[&str],
+    new_lines: &[&str],
+    common_prefix: usize,
+) -> Vec<(usize, usize)> {
+    let old_lines = &old_lines[common_prefix..];
+    let new_lines = &new_lines[common_prefix..];
+    let row_len = new_lines.len() + 1;
+    let mut dp = vec![0_usize; (old_lines.len() + 1) * row_len];
 
     for old_index in (0..old_lines.len()).rev() {
+        let row_start = old_index * row_len;
+        let next_row_start = row_start + row_len;
         for new_index in (0..new_lines.len()).rev() {
-            dp[old_index][new_index] = if old_lines[old_index] == new_lines[new_index] {
-                dp[old_index + 1][new_index + 1] + 1
+            dp[row_start + new_index] = if old_lines[old_index] == new_lines[new_index] {
+                dp[next_row_start + new_index + 1] + 1
             } else {
-                dp[old_index + 1][new_index].max(dp[old_index][new_index + 1])
+                dp[next_row_start + new_index].max(dp[row_start + new_index + 1])
             };
         }
     }
 
     let mut old_index = 0;
     let mut new_index = 0;
-    let mut pairs = Vec::new();
+    let mut pairs: Vec<(usize, usize)> = (0..common_prefix).map(|index| (index, index)).collect();
     while old_index < old_lines.len() && new_index < new_lines.len() {
         if old_lines[old_index] == new_lines[new_index] {
-            pairs.push((old_index, new_index));
+            pairs.push((old_index + common_prefix, new_index + common_prefix));
             old_index += 1;
             new_index += 1;
-        } else if dp[old_index + 1][new_index] >= dp[old_index][new_index + 1] {
+        } else if dp[(old_index + 1) * row_len + new_index]
+            >= dp[old_index * row_len + new_index + 1]
+        {
             old_index += 1;
         } else {
             new_index += 1;
@@ -957,6 +1006,59 @@ mod tests {
             });
         }
         ir
+    }
+
+    #[test]
+    fn flat_lcs_preserves_indices_and_tie_breaking() {
+        let old = ["header", "node A", "node B", "footer"];
+        let new = ["header", "inserted", "node A", "node B", "footer"];
+        assert_eq!(lcs_pairs(&old, &new), vec![(0, 0), (1, 2), (2, 3), (3, 4)]);
+
+        // The reconstruction deliberately advances the old side when both
+        // successor cells have equal scores. Flat indexing must retain that
+        // observable tie-break from the former row-vector table.
+        assert_eq!(lcs_pairs(&["a", "b"], &["b", "a"]), vec![(1, 0)]);
+        assert!(lcs_pairs(&[], &["new"]).is_empty());
+        assert!(lcs_pairs(&["old"], &[]).is_empty());
+    }
+
+    #[test]
+    fn common_prefix_lcs_matches_full_table() {
+        let old = ["header", "shared", "a", "b", "a", "footer"];
+        let new = ["header", "shared", "b", "a", "b", "footer"];
+        assert_eq!(
+            lcs_pairs(&old, &new),
+            lcs_pairs_after_common_prefix(&old, &new, 0)
+        );
+
+        let identical = ["header", "repeated", "repeated", "footer"];
+        assert_eq!(
+            lcs_pairs(&identical, &identical),
+            lcs_pairs_after_common_prefix(&identical, &identical, 0)
+        );
+    }
+
+    #[test]
+    fn node_pair_merge_preserves_sorted_union_order() {
+        let old = make_ir_with_nodes(&["A", "C"]);
+        let new = make_ir_with_nodes(&["B", "C", "D"]);
+
+        let diff = diff_diagrams(&old, &new);
+        let ordered_nodes: Vec<(&str, DiffStatus)> = diff
+            .nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node.status))
+            .collect();
+
+        assert_eq!(
+            ordered_nodes,
+            vec![
+                ("A", DiffStatus::Removed),
+                ("B", DiffStatus::Added),
+                ("C", DiffStatus::Unchanged),
+                ("D", DiffStatus::Added),
+            ]
+        );
     }
 
     #[test]
@@ -1023,6 +1125,40 @@ mod tests {
     }
 
     #[test]
+    fn identical_node_members_stay_unchanged() {
+        let member = IrEntityAttribute {
+            data_type: "varchar(255)".to_string(),
+            name: "account_name".to_string(),
+            key: IrAttributeKey::Uk,
+            comment: Some("stable member comment".to_string()),
+        };
+        let mut old = make_ir_with_nodes(&["A"]);
+        let mut new = make_ir_with_nodes(&["A"]);
+        old.nodes[0].members.push(member.clone());
+        new.nodes[0].members.push(member);
+
+        let diff = diff_diagrams(&old, &new);
+        assert_eq!(diff.changed_nodes, 0);
+        assert_eq!(diff.unchanged_nodes, 1);
+        assert!(diff.nodes[0].changes.is_empty());
+    }
+
+    #[test]
+    fn identical_node_labels_stay_unchanged() {
+        // Two independently-owned IRs whose matched node carries identical label
+        // text must diff to Unchanged with no borrowed-text clone leaking into a
+        // change payload.
+        let old = make_ir_with_nodes(&["A"]);
+        let new = make_ir_with_nodes(&["A"]);
+        assert_eq!(old.labels[0].text, new.labels[0].text);
+
+        let diff = diff_diagrams(&old, &new);
+        assert_eq!(diff.changed_nodes, 0);
+        assert_eq!(diff.unchanged_nodes, 1);
+        assert!(diff.nodes[0].changes.is_empty());
+    }
+
+    #[test]
     fn detects_added_edges() {
         let old = make_ir_with_nodes(&["A", "B"]);
         let mut new = make_ir_with_nodes(&["A", "B"]);
@@ -1037,6 +1173,8 @@ mod tests {
         let diff = diff_diagrams(&old, &new);
         assert!(diff.has_changes());
         assert_eq!(diff.added_edges, 1);
+        assert_eq!(diff.edges[0].from_id, "A");
+        assert_eq!(diff.edges[0].to_id, "B");
     }
 
     #[test]
@@ -1102,6 +1240,54 @@ mod tests {
     }
 
     #[test]
+    fn parallel_edge_matching_preserves_greedy_order() {
+        fn edge(arrow: ArrowType) -> IrEdge {
+            IrEdge {
+                from: IrEndpoint::Node(IrNodeId(0)),
+                to: IrEndpoint::Node(IrNodeId(1)),
+                arrow,
+                ..Default::default()
+            }
+        }
+
+        let mut old = make_ir_with_nodes(&["A", "B"]);
+        old.edges.extend([
+            edge(ArrowType::Arrow),
+            edge(ArrowType::Line),
+            edge(ArrowType::OpenArrow),
+        ]);
+
+        let mut new = make_ir_with_nodes(&["A", "B"]);
+        new.edges.extend([
+            edge(ArrowType::Line),
+            edge(ArrowType::Arrow),
+            edge(ArrowType::Cross),
+        ]);
+
+        let diff = diff_diagrams(&old, &new);
+        let status_and_arrow: Vec<(DiffStatus, ArrowType)> = diff
+            .edges
+            .iter()
+            .map(|edge| (edge.status, edge.arrow))
+            .collect();
+        assert_eq!(
+            status_and_arrow,
+            vec![
+                (DiffStatus::Unchanged, ArrowType::Arrow),
+                (DiffStatus::Unchanged, ArrowType::Line),
+                (DiffStatus::Changed, ArrowType::Cross),
+            ]
+        );
+        assert_eq!(
+            diff.edges[2].changes,
+            vec![EdgeChange::ArrowChanged {
+                old: ArrowType::OpenArrow,
+                new: ArrowType::Cross,
+            }]
+        );
+    }
+
+    #[test]
     fn edge_replacement_reporting() {
         let mut old_ir = make_ir_with_nodes(&["A", "B"]);
         old_ir.edges.push(fm_core::IrEdge {
@@ -1128,10 +1314,49 @@ mod tests {
     }
 
     #[test]
+    fn edge_pair_merge_preserves_sorted_union_order() {
+        fn edge(from: usize, to: usize) -> IrEdge {
+            IrEdge {
+                from: IrEndpoint::Node(IrNodeId(from)),
+                to: IrEndpoint::Node(IrNodeId(to)),
+                arrow: ArrowType::Arrow,
+                ..Default::default()
+            }
+        }
+
+        let mut old = make_ir_with_nodes(&["A", "B", "C", "D"]);
+        old.edges.extend([edge(0, 2), edge(1, 0)]);
+
+        let mut new = make_ir_with_nodes(&["A", "B", "C", "D"]);
+        new.edges.extend([edge(0, 1), edge(0, 2), edge(2, 3)]);
+
+        let diff = diff_diagrams(&old, &new);
+        let ordered_pairs: Vec<(&str, &str, DiffStatus)> = diff
+            .edges
+            .iter()
+            .map(|edge| (edge.from_id.as_str(), edge.to_id.as_str(), edge.status))
+            .collect();
+
+        assert_eq!(
+            ordered_pairs,
+            vec![
+                ("A", "B", DiffStatus::Added),
+                ("A", "C", DiffStatus::Unchanged),
+                ("B", "A", DiffStatus::Removed),
+                ("C", "D", DiffStatus::Added),
+            ]
+        );
+    }
+
+    #[test]
     fn display_width_ignores_ansi_codes() {
         let colored = format!("{}Added{}", colors::ADDED, colors::RESET);
         assert_eq!(display_width(&colored), 5);
         assert_eq!(display_width("Plain"), 5);
+        assert_eq!(display_width("界"), 2);
+        assert_eq!(display_width("\x1b[31m界\x1b[0m"), 2);
+        assert_eq!(display_width("dangling \x1b"), 9);
+        assert_eq!(display_width("non-CSI \x1bXvisible"), 15);
     }
 
     // ─── End-to-end diff tests using parsed Mermaid input ───
