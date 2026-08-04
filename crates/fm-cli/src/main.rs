@@ -9737,18 +9737,47 @@ fn cmd_serve(host: &str, port: u16, open: bool, options: RenderCommandOptions<'_
     }
 
     for mut request in server.incoming_requests() {
-        let url_path = request.url();
-
-        let response = match url_path {
-            "/" => serve_playground_html(),
-            "/render" => handle_render_request(&mut request, &options),
-            _ => Response::from_string("Not Found").with_status_code(404),
+        let response = match serve_route(request.url(), request.method()) {
+            ServeRoute::Playground => serve_playground_html(),
+            ServeRoute::Render => handle_render_request(&mut request, &options),
+            ServeRoute::MethodNotAllowed => serve_method_not_allowed(),
+            ServeRoute::NotFound => Response::from_string("Not Found").with_status_code(404),
         };
 
         let _ = request.respond(response);
     }
 
     Ok(())
+}
+
+#[cfg(feature = "serve")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServeRoute {
+    Playground,
+    Render,
+    MethodNotAllowed,
+    NotFound,
+}
+
+#[cfg(feature = "serve")]
+fn serve_route(path: &str, method: &tiny_http::Method) -> ServeRoute {
+    match (path, method) {
+        ("/", _) => ServeRoute::Playground,
+        ("/render", tiny_http::Method::Post) => ServeRoute::Render,
+        ("/render", _) => ServeRoute::MethodNotAllowed,
+        _ => ServeRoute::NotFound,
+    }
+}
+
+#[cfg(feature = "serve")]
+fn serve_method_not_allowed() -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    use tiny_http::{Header, Response};
+
+    let mut response = Response::from_string("Method Not Allowed").with_status_code(405);
+    if let Ok(header) = Header::from_bytes(&b"Allow"[..], &b"POST"[..]) {
+        response = response.with_header(header);
+    }
+    response
 }
 
 #[cfg(feature = "serve")]
@@ -9899,6 +9928,23 @@ fn open_browser(url: &str) -> Result<()> {
         .status()?;
 
     Ok(())
+}
+
+#[cfg(all(test, feature = "serve"))]
+mod serve_tests {
+    use super::{ServeRoute, serve_route};
+    use tiny_http::Method;
+
+    #[test]
+    fn preview_server_only_accepts_post_for_rendering() {
+        assert_eq!(serve_route("/", &Method::Get), ServeRoute::Playground);
+        assert_eq!(serve_route("/render", &Method::Post), ServeRoute::Render);
+        assert_eq!(
+            serve_route("/render", &Method::Get),
+            ServeRoute::MethodNotAllowed
+        );
+        assert_eq!(serve_route("/missing", &Method::Get), ServeRoute::NotFound);
+    }
 }
 
 /// Lowercase hex encoding for digest output.
