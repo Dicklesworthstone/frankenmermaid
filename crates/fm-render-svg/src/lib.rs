@@ -972,7 +972,55 @@ fn strip_dead_marker_css(svg: &mut String) {
         return;
     };
     let ce = cs + er;
-    let css = &svg[cs..ce];
+    if let Some(out) = prune_marker_selectors(&svg[cs..ce], &|id| live.contains(id)) {
+        svg.replace_range(cs..ce, &out);
+    }
+}
+
+/// Bit for the `marker#arrow-*` id as it appears in a theme CSS selector, or `None` for an id the
+/// stylesheet never names. Only the six ids the theme actually styles need an entry; an unknown id
+/// is treated as NOT prunable by the caller, so a stylesheet edit that introduces a new selector
+/// degrades to "keep it", never to a wrongly-dropped live rule.
+const fn theme_marker_bit(id: &str) -> Option<u16> {
+    Some(match id.as_bytes() {
+        b"arrow-end" => MARKER_END,
+        b"arrow-filled" => MARKER_FILLED,
+        b"arrow-open" => MARKER_OPEN,
+        b"arrow-circle" => MARKER_CIRCLE,
+        b"arrow-cross" => MARKER_CROSS,
+        b"arrow-diamond" => MARKER_DIAMOND,
+        _ => return None,
+    })
+}
+
+/// Mask-driven twin of [`strip_dead_marker_css`] for the direct-minified flowchart path.
+///
+/// That path builds the stylesheet BEFORE the body exists and minifies it at construction, so it can
+/// neither scan the emitted `<marker>` defs for liveness nor be pruned afterwards: every stripper
+/// needle is written against the PRETTY form (`.fm-node-accent-1 {`, `  --fm-accent-1:`), so once the
+/// CSS is minified they all match nothing. Both facts together are why the marker rules stopped being
+/// pruned on flowcharts. Here the live-marker mask is already known, so prune while the CSS is still
+/// pretty and before it is minified/cached — strictly less work than emitting the dead rules and then
+/// stripping them, and the pruned text becomes the cache key so two diagrams with different live
+/// markers cannot share a stylesheet.
+///
+/// An id the theme does not name keeps its selector (see [`theme_marker_bit`]).
+fn strip_dead_marker_css_for_mask(css: &mut String, live_mask: u16) {
+    if memchr::memmem::find(css.as_bytes(), b"marker#arrow-").is_none() {
+        return;
+    }
+    if let Some(out) = prune_marker_selectors(css, &|id| {
+        theme_marker_bit(id).is_none_or(|bit| live_mask & bit != 0)
+    }) {
+        *css = out;
+    }
+}
+
+/// Shared selector filter behind [`strip_dead_marker_css`] and [`strip_dead_marker_css_for_mask`]:
+/// keep a selector iff it names no dead marker, and drop a rule whose selectors were all pruned.
+/// Returns `None` when nothing was removed, so the caller can skip the write back. Brace-depth
+/// tracking emits nested at-rule (`@media`) bodies verbatim.
+fn prune_marker_selectors(css: &str, is_live: &dyn Fn(&str) -> bool) -> Option<String> {
     let bytes = css.as_bytes();
     let marker_hash_finder = memchr::memmem::Finder::new(b"marker#");
     let mut out = String::with_capacity(css.len());
@@ -1002,7 +1050,7 @@ fn strip_dead_marker_css(svg: &mut String) {
                             let end = rest
                                 .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
                                 .unwrap_or(rest.len());
-                            live.contains(&rest[..end])
+                            is_live(&rest[..end])
                         }
                         None => true,
                     })
@@ -1022,9 +1070,7 @@ fn strip_dead_marker_css(svg: &mut String) {
         }
     }
     out.push_str(&css[seg_start..]);
-    if out.len() < css.len() {
-        svg.replace_range(cs..ce, &out);
-    }
+    (out.len() < css.len()).then_some(out)
 }
 
 /// Final render post-pass: minify the embedded `<style>` CSS. Mermaid ships minified CSS;
@@ -3571,6 +3617,14 @@ fn render_layout_to_svg(
             css.push_str(&classdef_css);
         }
         if direct_minified_css {
+            // Prune dead `marker#arrow-*` rules while the stylesheet is still pretty. This path
+            // returns before `apply_output_post_passes`, and it minifies here, so a later strip
+            // could not run and would not match anyway (the strippers' needles are pretty-form).
+            // Pruning before the cache also keeps the cache key honest: the text differs per live
+            // marker set, so diagrams with different arrowheads cannot share a stylesheet.
+            if let Some(live_mask) = known_live_marker_mask {
+                strip_dead_marker_css_for_mask(&mut css, live_mask);
+            }
             css = if cache_direct_minified_css {
                 cached_minified_full_css(css)
             } else {
@@ -15408,6 +15462,66 @@ marker#arrow-open path {
         assert!(svg.contains(".fm-edge {"), "non-marker rule corrupted");
         // The live rule still has its body.
         assert!(svg.contains("fill: red"));
+    }
+
+    #[test]
+    fn strip_dead_marker_css_for_mask_matches_the_defs_scanning_twin() {
+        let pretty = "\
+marker#arrow-end path,
+marker#arrow-filled path {
+  fill: red;
+}
+marker#arrow-open path {
+  stroke: blue;
+}
+.fm-edge {
+  stroke: black;
+}
+";
+        let mut by_mask = String::from(pretty);
+        strip_dead_marker_css_for_mask(&mut by_mask, MARKER_END);
+
+        // Same input pruned by the defs-scanning twin, with only arrow-end defined.
+        let mut svg = format!(
+            "<svg><defs><marker id=\"arrow-end\"><path/></marker></defs><style>{pretty}</style>\
+             <path marker-end=\"url(#arrow-end)\"/></svg>"
+        );
+        strip_dead_marker_css(&mut svg);
+        let start = svg.find("<style>").expect("style open") + "<style>".len();
+        let end = svg.find("</style>").expect("style close");
+        assert_eq!(
+            by_mask,
+            &svg[start..end],
+            "mask-driven prune diverged from the defs-scanning prune"
+        );
+
+        // Negative case: a mask claiming every marker is live must change nothing, so a bug that
+        // pruned unconditionally (or inverted the test) fails here.
+        let mut all_live = String::from(pretty);
+        strip_dead_marker_css_for_mask(&mut all_live, u16::MAX);
+        assert_eq!(all_live, pretty, "live markers must not be pruned");
+    }
+
+    #[test]
+    fn flowchart_direct_css_path_prunes_dead_marker_rules() {
+        // A plain `-->` flowchart uses only arrow-end. This goes through the direct-minified
+        // flowchart CSS path, which returns before the output post-passes -- so if the prune is
+        // not applied at construction, every dead marker rule survives into the output.
+        let parsed = fm_parser::parse("flowchart TD\n  A --> B\n  B --> C\n");
+        let svg = render_svg(&parsed.ir);
+        assert!(
+            svg.contains("marker#arrow-end"),
+            "live arrow-end CSS was dropped"
+        );
+        for dead in [
+            "marker#arrow-filled",
+            "marker#arrow-open",
+            "marker#arrow-circle",
+            "marker#arrow-cross",
+            "marker#arrow-diamond",
+        ] {
+            assert!(!svg.contains(dead), "dead {dead} CSS survived");
+        }
     }
 
     #[test]
