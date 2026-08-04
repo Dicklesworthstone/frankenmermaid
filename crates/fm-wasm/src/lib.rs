@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::sync::{LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 // NOT `std::time::Instant`: wasm32-unknown-unknown std has no clock, so `Instant::now()`
 // panics and `panic = "abort"` turns that into an `unreachable` trap — which is exactly what
 // made every browser `renderSvg`/`Diagram::render` call fail with `RuntimeError: unreachable`
@@ -12,6 +12,7 @@ use web_time::Instant;
 use fm_core::MermaidGuardReport;
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use fm_core::capability_matrix;
+use fm_core::cga::{CgaPoint, CgaRectangle};
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use fm_core::mermaid_layout_guard_observability;
 use fm_core::{
@@ -790,6 +791,25 @@ fn compute_wasm_degradation_plan(
     })
 }
 
+fn hit_test_layout_node(layout: &fm_layout::DiagramLayout, x: f64, y: f64) -> Option<&str> {
+    if !(x.is_finite() && y.is_finite()) {
+        return None;
+    }
+
+    let point = CgaPoint::new(x, y);
+    layout.nodes.iter().find_map(|node| {
+        let bounds = node.bounds;
+        CgaRectangle::new(
+            f64::from(bounds.x),
+            f64::from(bounds.y),
+            f64::from(bounds.width),
+            f64::from(bounds.height),
+        )
+        .contains(&point)
+        .then_some(node.node_id.as_str())
+    })
+}
+
 #[must_use]
 #[cfg(any(not(target_arch = "wasm32"), test))]
 pub fn render(input: &str) -> WasmRenderOutput {
@@ -1266,6 +1286,7 @@ pub struct Diagram {
     canvas_config: CanvasRenderConfig,
     pressure_config: MermaidWasmPressureSignals,
     layout_engine: fm_layout::IncrementalLayoutEngine,
+    last_layout: Option<Arc<fm_layout::DiagramLayout>>,
     destroyed: bool,
 }
 
@@ -1310,6 +1331,7 @@ impl Diagram {
             canvas_config,
             pressure_config,
             layout_engine: fm_layout::IncrementalLayoutEngine::default(),
+            last_layout: None,
             destroyed: false,
         })
     }
@@ -1458,6 +1480,7 @@ impl Diagram {
         self.svg_config = next_svg;
         self.canvas_config = next_canvas;
         self.pressure_config = next_pressure;
+        self.last_layout = Some(Arc::clone(&traced_layout.layout));
 
         let output = DiagramRenderOutput::new(
             &traced_layout,
@@ -1468,6 +1491,21 @@ impl Diagram {
             &canvas_result,
         );
         to_js_value(&output)
+    }
+
+    /// Return the laid-out node below a canvas-space pointer, if any.
+    ///
+    /// The query uses CGA rectangle containment against the latest render's layout, so it never
+    /// reparses or relayouts the diagram. Non-finite coordinates and calls before the first render
+    /// return `None`.
+    #[wasm_bindgen(js_name = hitTestNode)]
+    pub fn hit_test_node(&self, x: f64, y: f64) -> Result<Option<String>, JsValue> {
+        self.ensure_alive()?;
+        Ok(self
+            .last_layout
+            .as_deref()
+            .and_then(|layout| hit_test_layout_node(layout, x, y))
+            .map(str::to_owned))
     }
 
     #[wasm_bindgen(js_name = setTheme)]
@@ -1506,6 +1544,7 @@ impl Diagram {
             f64::from(self.canvas_width),
             f64::from(self.canvas_height),
         );
+        self.last_layout = None;
         self.destroyed = true;
     }
 }
@@ -1521,6 +1560,10 @@ impl Diagram {
     }
 
     pub fn render(&mut self, _input: &str, _config: Option<JsValue>) -> Result<JsValue, JsValue> {
+        Err(js_error("Diagram is only available on wasm32 targets"))
+    }
+
+    pub fn hit_test_node(&self, _x: f64, _y: f64) -> Result<Option<String>, JsValue> {
         Err(js_error("Diagram is only available on wasm32 targets"))
     }
 
@@ -1542,9 +1585,10 @@ mod tests {
         RuntimeInitConfig, SvgConfigOverrides, ThemePreset, WebRendererKind, WorkerRenderAction,
         WorkerRenderCoordinator, WorkerRenderMessage, WorkerRenderRequest,
         align_canvas_typography_with_svg, apply_budget_svg_simplifications,
-        apply_canvas_theme_preset, canvas_font_size_px, collect_source_spans, merge_canvas_config,
-        merge_pressure_config, merge_renderer_kind, merge_svg_config, read_runtime_config, render,
-        render_svg_js, requested_theme_preset, resolve_renderer, write_runtime_config,
+        apply_canvas_theme_preset, canvas_font_size_px, collect_source_spans, hit_test_layout_node,
+        merge_canvas_config, merge_pressure_config, merge_renderer_kind, merge_svg_config,
+        read_runtime_config, render, render_svg_js, requested_theme_preset, resolve_renderer,
+        write_runtime_config,
     };
     use fm_core::{
         MermaidBudgetLedger, MermaidGuardReport, MermaidLensBinding, MermaidLensEdit,
@@ -1640,6 +1684,28 @@ mod tests {
         assert_eq!(output.layout.edge_count, 1);
         assert!(output.source_spans.iter().any(|span| span.kind == "node"));
         assert!(output.source_spans.iter().any(|span| span.kind == "edge"));
+    }
+
+    #[test]
+    fn cga_hit_testing_uses_rendered_node_bounds_and_rejects_invalid_coordinates() {
+        let parsed = parse("flowchart LR\nA-->B");
+        let traced = layout_diagram_traced(&parsed.ir);
+        let hit = traced
+            .layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "A")
+            .and_then(|node| {
+                let center = node.bounds.center();
+                hit_test_layout_node(&traced.layout, f64::from(center.x), f64::from(center.y))
+            });
+
+        assert_eq!(hit, Some("A"));
+        assert_eq!(hit_test_layout_node(&traced.layout, f64::NAN, 0.0), None);
+        assert_eq!(
+            hit_test_layout_node(&traced.layout, -10_000.0, -10_000.0),
+            None
+        );
     }
 
     #[test]
