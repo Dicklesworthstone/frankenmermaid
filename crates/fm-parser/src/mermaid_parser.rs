@@ -14570,8 +14570,14 @@ Rel_Back(db, app, "Responds")"#,
 
         // Flattening must preserve content: an implementation that simply skipped the
         // over-deep block would lose the innermost edge entirely.
-        assert!(parsed.ir.find_node_index("X").is_some(), "node X was dropped");
-        assert!(parsed.ir.find_node_index("Y").is_some(), "node Y was dropped");
+        assert!(
+            parsed.ir.find_node_index("X").is_some(),
+            "node X was dropped"
+        );
+        assert!(
+            parsed.ir.find_node_index("Y").is_some(),
+            "node Y was dropped"
+        );
         assert_eq!(parsed.ir.edges.len(), 1);
 
         // Every `end` is balanced. An implementation that let a flattened block's `end`

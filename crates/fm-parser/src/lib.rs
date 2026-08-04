@@ -456,6 +456,27 @@ pub struct ParseLensSnapshot {
     pub parsed: ParseResult,
     pub source_map: MermaidSourceMap,
     pub bindings: Vec<MermaidLensBinding>,
+    #[serde(skip)]
+    source: String,
+}
+
+impl ParseLensSnapshot {
+    /// Returns the exact source that produced this snapshot's spans and bindings.
+    #[must_use]
+    pub fn original_source(&self) -> &str {
+        &self.source
+    }
+
+    /// Applies an edit against the source map captured by this snapshot.
+    ///
+    /// Keeping the source and map together prevents applying byte ranges from one
+    /// parse to unrelated caller-provided text.
+    pub fn apply_edit(
+        &self,
+        edit: &MermaidLensEdit,
+    ) -> Result<MermaidLensEditResult, MermaidLensError> {
+        apply_lens_edit(&self.source, &self.source_map, edit)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -913,6 +934,7 @@ pub fn build_parse_lens(input: &str) -> ParseLensSnapshot {
         parsed,
         source_map,
         bindings,
+        source: input.to_owned(),
     }
 }
 
@@ -921,7 +943,7 @@ pub fn apply_parse_lens_edit(
     edit: &MermaidLensEdit,
 ) -> Result<ParseLensEditResponse, MermaidLensError> {
     let snapshot = build_parse_lens(input);
-    let result = apply_lens_edit(input, &snapshot.source_map, edit)?;
+    let result = snapshot.apply_edit(edit)?;
     let updated_snapshot = build_parse_lens(&result.updated_source);
     Ok(ParseLensEditResponse {
         result,
@@ -1879,6 +1901,7 @@ mod tests {
         let input = "%% comment\nflowchart LR\nA[Alpha] --> B[Beta]\n";
         let lens = build_parse_lens(input);
 
+        assert_eq!(lens.original_source(), input);
         assert_eq!(lens.parsed.format_complement.comments.len(), 1);
         assert_eq!(lens.source_map.entries.len(), 3);
         assert!(
@@ -1908,6 +1931,25 @@ mod tests {
                 .bindings
                 .iter()
                 .any(|binding| binding.snippet.as_deref() == Some("A[Alpha] -.-> B[Beta]"))
+        );
+    }
+
+    #[test]
+    fn parse_lens_snapshot_applies_edits_to_its_preserved_crlf_source() {
+        let input = "%% comment\r\nflowchart LR\r\nA[Alpha] --> B[Beta]\r\n";
+        let lens = build_parse_lens(input);
+
+        let result = lens
+            .apply_edit(&MermaidLensEdit {
+                element_id: "fm-edge-0".to_string(),
+                replacement: "A[Alpha] -.-> B[Beta]".to_string(),
+            })
+            .expect("snapshot-bound lens edit should succeed");
+
+        assert_eq!(lens.original_source(), input);
+        assert_eq!(
+            result.updated_source,
+            "%% comment\r\nflowchart LR\r\nA[Alpha] -.-> B[Beta]\r\n"
         );
     }
 
