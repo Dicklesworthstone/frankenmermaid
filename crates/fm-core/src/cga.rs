@@ -873,6 +873,10 @@ impl CgaPoint {
         Self { x: 0.0, y: 0.0 }
     }
 
+    fn is_finite(self) -> bool {
+        self.x.is_finite() && self.y.is_finite()
+    }
+
     /// Squared distance to another point.
     ///
     /// Uses the conformal inner product: d²(P, Q) = -2 * P·Q
@@ -998,16 +1002,24 @@ impl CgaCircle {
         Self { center, radius }
     }
 
+    fn is_valid(self) -> bool {
+        self.center.is_finite() && self.radius.is_finite() && self.radius >= 0.0
+    }
+
     /// Check if a point is inside the circle.
     #[must_use]
     pub fn contains(&self, point: &CgaPoint) -> bool {
-        point.distance_squared(&self.center) <= self.radius * self.radius
+        self.is_valid()
+            && point.is_finite()
+            && point.distance_squared(&self.center) <= self.radius * self.radius
     }
 
     /// Check if a point is strictly inside the circle (not on boundary).
     #[must_use]
     pub fn contains_strict(&self, point: &CgaPoint) -> bool {
-        point.distance_squared(&self.center) < self.radius * self.radius
+        self.is_valid()
+            && point.is_finite()
+            && point.distance_squared(&self.center) < self.radius * self.radius
     }
 
     /// Find intersection points with a line segment.
@@ -1015,6 +1027,10 @@ impl CgaCircle {
     /// Returns 0, 1, or 2 intersection points.
     #[must_use]
     pub fn intersect_segment(&self, segment: &CgaLineSegment) -> Vec<CgaPoint> {
+        if !self.is_valid() || !segment.start.is_finite() || !segment.end.is_finite() {
+            return Vec::new();
+        }
+
         // Line parametric: P = start + t * (end - start)
         // Circle: |P - center|² = r²
         // Substitute and solve quadratic
@@ -1062,6 +1078,57 @@ impl CgaCircle {
         }
 
         points
+    }
+
+    /// Find intersection points with another circle.
+    ///
+    /// Returns zero points for separate, nested, coincident, or invalid
+    /// circles; one point for tangency; and two points for a proper crossing.
+    /// The returned order is stable for a fixed pair of input circles.
+    #[must_use]
+    pub fn intersect_circle(&self, other: &Self) -> Vec<CgaPoint> {
+        if !self.is_valid() || !other.is_valid() {
+            return Vec::new();
+        }
+
+        let dx = other.center.x - self.center.x;
+        let dy = other.center.y - self.center.y;
+        let center_distance = dx.hypot(dy);
+        if center_distance == 0.0
+            || center_distance > self.radius + other.radius
+            || center_distance < (self.radius - other.radius).abs()
+        {
+            return Vec::new();
+        }
+
+        let self_radius_squared = self.radius * self.radius;
+        let other_radius_squared = other.radius * other.radius;
+        let distance_squared = center_distance * center_distance;
+        let along_centers = (self_radius_squared - other_radius_squared + distance_squared)
+            / (2.0 * center_distance);
+        let height_squared = self_radius_squared - along_centers * along_centers;
+        let tolerance = f64::EPSILON
+            * (self_radius_squared + along_centers * along_centers + distance_squared).max(1.0)
+            * 8.0;
+        if height_squared < -tolerance {
+            return Vec::new();
+        }
+        let height = height_squared.max(0.0).sqrt();
+
+        let midpoint = CgaPoint::new(
+            self.center.x + along_centers * dx / center_distance,
+            self.center.y + along_centers * dy / center_distance,
+        );
+        if height == 0.0 {
+            return vec![midpoint];
+        }
+
+        let offset_x = -dy * height / center_distance;
+        let offset_y = dx * height / center_distance;
+        vec![
+            CgaPoint::new(midpoint.x + offset_x, midpoint.y + offset_y),
+            CgaPoint::new(midpoint.x - offset_x, midpoint.y - offset_y),
+        ]
     }
 }
 
@@ -1542,6 +1609,37 @@ mod geometry_tests {
         let seg = CgaLineSegment::new(CgaPoint::new(-2.0, 2.0), CgaPoint::new(2.0, 2.0));
         let points = circle.intersect_segment(&seg);
         assert!(points.is_empty());
+    }
+
+    #[test]
+    fn circle_intersect_circle_reports_crossings_and_tangency() {
+        let unit_at_origin = CgaCircle::new(CgaPoint::origin(), 1.0);
+        let overlapping = CgaCircle::new(CgaPoint::new(1.0, 0.0), 1.0);
+        let crossings = unit_at_origin.intersect_circle(&overlapping);
+        assert_eq!(crossings.len(), 2);
+        for point in crossings {
+            assert!((point.x - 0.5).abs() < 1e-12);
+            assert!((point.y.abs() - 3.0_f64.sqrt() / 2.0).abs() < 1e-12);
+        }
+
+        let tangent = CgaCircle::new(CgaPoint::new(2.0, 0.0), 1.0);
+        assert_eq!(
+            unit_at_origin.intersect_circle(&tangent),
+            [CgaPoint::new(1.0, 0.0)]
+        );
+    }
+
+    #[test]
+    fn circle_intersect_circle_rejects_non_unique_and_invalid_inputs() {
+        let unit_at_origin = CgaCircle::new(CgaPoint::origin(), 1.0);
+        assert!(unit_at_origin.intersect_circle(&unit_at_origin).is_empty());
+        assert!(unit_at_origin
+            .intersect_circle(&CgaCircle::new(CgaPoint::new(3.0, 0.0), 1.0))
+            .is_empty());
+        assert!(unit_at_origin
+            .intersect_circle(&CgaCircle::new(CgaPoint::new(0.0, 0.0), -1.0))
+            .is_empty());
+        assert!(!CgaCircle::new(CgaPoint::origin(), -1.0).contains(&CgaPoint::origin()));
     }
 
     #[test]
