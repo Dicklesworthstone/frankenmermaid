@@ -1418,6 +1418,7 @@ fn parse_flowchart_document<'a>(
         &mut warnings,
         &mut header_direction,
         config,
+        0,
     );
     if unclosed_subgraphs > 0 {
         warnings.push(format!(
@@ -1505,6 +1506,7 @@ fn parse_flowchart_document_items<'a>(
     warnings: &mut Vec<String>,
     header_direction: &mut Option<GraphDirection>,
     config: &ParserConfig,
+    depth: usize,
 ) -> (Vec<FlowDocumentItem<'a>>, usize) {
     // Pre-size to the number of remaining lines: each source line yields at most a small
     // constant number of document items (usually exactly one node/edge), so this is a tight
@@ -1514,6 +1516,11 @@ fn parse_flowchart_document_items<'a>(
     // is never written, so its pages never fault — it costs address space, not RSS or time.
     let mut items = Vec::with_capacity(lines.len().saturating_sub(*next_index));
     let mut unclosed_subgraphs = 0;
+    // `subgraph` opens seen at the depth cap and flattened into THIS level instead of
+    // recursing. Their `end`s must still be swallowed here, or the first one would close
+    // the enclosing block early and desynchronize the whole document.
+    let mut flattened_opens = 0_usize;
+    let mut depth_warned = false;
 
     while let Some((line_number, line)) = lines.get(*next_index).copied() {
         *next_index += 1;
@@ -1577,6 +1584,24 @@ fn parse_flowchart_document_items<'a>(
             if let Some((cluster_key, cluster_title)) =
                 parse_subgraph_statement(normalized_statement, config)
             {
+                // Nesting depth is stack depth here (recursive descent, a recursively
+                // nested item tree, and a recursive `Drop` for it), and input SIZE does not
+                // bound it: an unindented `subgraph S\n…\nend\n` pair costs a constant
+                // handful of bytes per level. Past the cap, flatten the block into this
+                // level rather than recursing: its nodes and edges still land in `items`,
+                // only the surplus grouping is lost.
+                if depth >= config.max_nesting_depth {
+                    if !depth_warned {
+                        depth_warned = true;
+                        warnings.push(format!(
+                            "Line {line_number}: subgraph nesting deeper than {} is flattened",
+                            config.max_nesting_depth
+                        ));
+                    }
+                    flattened_opens += 1;
+                    parsed_line = true;
+                    continue;
+                }
                 let (body, child_unclosed) = parse_flowchart_document_items(
                     lines,
                     next_index,
@@ -1584,6 +1609,7 @@ fn parse_flowchart_document_items<'a>(
                     warnings,
                     header_direction,
                     config,
+                    depth + 1,
                 );
                 unclosed_subgraphs += child_unclosed;
                 items.push(FlowDocumentItem::Subgraph {
@@ -1598,6 +1624,13 @@ fn parse_flowchart_document_items<'a>(
             }
 
             if normalized_statement == "end" {
+                // Close a flattened open before this level's own `end`: those blocks were
+                // absorbed here, so their terminators belong to this frame.
+                if flattened_opens > 0 {
+                    flattened_opens -= 1;
+                    parsed_line = true;
+                    continue;
+                }
                 if !is_root {
                     return (items, unclosed_subgraphs);
                 }
@@ -1663,6 +1696,9 @@ fn parse_flowchart_document_items<'a>(
         }
     }
 
+    // Reaching end-of-input with flattened opens outstanding means those blocks never got
+    // an `end`; report them like any other unclosed subgraph.
+    unclosed_subgraphs += flattened_opens;
     if !is_root {
         unclosed_subgraphs += 1;
     }
@@ -6591,7 +6627,7 @@ fn parse_block_beta_document(input: &str, config: &ParserConfig) -> BlockBetaDoc
     let mut next_index = 0;
     let mut warnings = Vec::new();
     let (items, unclosed_groups) =
-        parse_block_beta_document_items(&lines, &mut next_index, false, &mut warnings, config);
+        parse_block_beta_document_items(&lines, &mut next_index, false, &mut warnings, config, 0);
     if unclosed_groups > 0 {
         warnings.push(format!(
             "Block-beta diagram ended with {unclosed_groups} unclosed block group(s)"
@@ -6606,9 +6642,14 @@ fn parse_block_beta_document_items(
     stop_on_end: bool,
     warnings: &mut Vec<String>,
     config: &ParserConfig,
+    depth: usize,
 ) -> (Vec<BlockBetaDocumentItem>, usize) {
     let mut items = Vec::new();
     let mut unclosed_groups = 0;
+    // `block:` opens absorbed at the depth cap; see the matching comment in
+    // `parse_flowchart_document_items`.
+    let mut flattened_opens = 0_usize;
+    let mut depth_warned = false;
 
     while let Some((line_number, line)) = lines.get(*next_index).copied() {
         *next_index += 1;
@@ -6625,6 +6666,10 @@ fn parse_block_beta_document_items(
         }
 
         if trimmed.eq_ignore_ascii_case("end") {
+            if flattened_opens > 0 {
+                flattened_opens -= 1;
+                continue;
+            }
             if stop_on_end {
                 return (items, unclosed_groups);
             }
@@ -6635,8 +6680,25 @@ fn parse_block_beta_document_items(
         }
 
         if let Some((group_key, span_cols)) = parse_block_beta_group_start(trimmed) {
-            let (body, child_unclosed) =
-                parse_block_beta_document_items(lines, next_index, true, warnings, config);
+            if depth >= config.max_nesting_depth {
+                if !depth_warned {
+                    depth_warned = true;
+                    warnings.push(format!(
+                        "Line {line_number}: block nesting deeper than {} is flattened",
+                        config.max_nesting_depth
+                    ));
+                }
+                flattened_opens += 1;
+                continue;
+            }
+            let (body, child_unclosed) = parse_block_beta_document_items(
+                lines,
+                next_index,
+                true,
+                warnings,
+                config,
+                depth + 1,
+            );
             unclosed_groups += child_unclosed;
             items.push(BlockBetaDocumentItem::Group {
                 id: group_key,
@@ -6688,6 +6750,7 @@ fn parse_block_beta_document_items(
         ));
     }
 
+    unclosed_groups += flattened_opens;
     if stop_on_end {
         unclosed_groups += 1;
     }
@@ -14138,6 +14201,138 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid(&input);
         // Should parse without panicking.
         assert_eq!(parsed.ir.diagram_type, DiagramType::Flowchart);
+        // Ordinary nesting stays below the cap and keeps every level.
+        assert_eq!(parsed.ir.graph.subgraphs.len(), 20);
+    }
+
+    /// Build `nesting` nested `subgraph` blocks around a single `X --> Y` edge, with no
+    /// indentation — so input SIZE stays linear in nesting depth rather than quadratic.
+    /// This is the shape that makes deep nesting reachable inside any byte budget.
+    fn nested_subgraph_source(nesting: usize) -> String {
+        let mut input = String::from("flowchart TB\n");
+        for i in 0..nesting {
+            writeln!(input, "subgraph sg{i}").unwrap();
+        }
+        input.push_str("X --> Y\n");
+        for _ in 0..nesting {
+            input.push_str("end\n");
+        }
+        input
+    }
+
+    /// Run `body` on a thread with the stack size Rust gives a normal spawned worker
+    /// (2 MiB), so unbounded parser recursion shows up as a failure here instead of
+    /// surviving on the main thread's much larger stack.
+    fn on_worker_sized_stack<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(body)
+            .expect("spawn parser thread")
+            .join()
+            .expect("parser thread should not overflow its stack")
+    }
+
+    #[test]
+    fn subgraph_nesting_past_the_cap_is_flattened_not_recursed() {
+        let cap = ParserConfig::default().max_nesting_depth;
+        let nesting = cap * 4;
+        // ~14 bytes per level: deep nesting is cheap in bytes, so an input-size limit
+        // cannot bound it.
+        let input = nested_subgraph_source(nesting);
+        assert!(
+            input.len() < 1024 * 1024,
+            "{nesting} levels should fit well under 1 MiB, got {} bytes",
+            input.len()
+        );
+
+        let parsed = on_worker_sized_stack(move || parse_mermaid(&input));
+
+        // The cap is enforced: surplus levels are dropped rather than nested.
+        assert_eq!(parsed.ir.graph.subgraphs.len(), cap);
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("nesting deeper than")),
+            "expected a flattening diagnostic, got {:?}",
+            parsed.warnings
+        );
+
+        // Flattening must preserve content: an implementation that simply skipped the
+        // over-deep block would lose the innermost edge entirely.
+        assert!(parsed.ir.find_node_index("X").is_some(), "node X was dropped");
+        assert!(parsed.ir.find_node_index("Y").is_some(), "node Y was dropped");
+        assert_eq!(parsed.ir.edges.len(), 1);
+
+        // Every `end` is balanced. An implementation that let a flattened block's `end`
+        // close its enclosing block would desynchronize the document and report bogus
+        // unclosed blocks here.
+        assert!(
+            !parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unclosed subgraph")),
+            "flattened blocks must stay balanced, got {:?}",
+            parsed.warnings
+        );
+    }
+
+    #[test]
+    fn subgraph_nesting_exactly_at_the_cap_is_fully_preserved() {
+        let cap = ParserConfig::default().max_nesting_depth;
+        let input = nested_subgraph_source(cap);
+
+        let parsed = on_worker_sized_stack(move || parse_mermaid(&input));
+
+        // Boundary: the cap-th level is accepted, so an off-by-one that flattened it
+        // would show up as `cap - 1` here.
+        assert_eq!(parsed.ir.graph.subgraphs.len(), cap);
+        assert!(
+            !parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("nesting deeper than")),
+            "nesting at the cap must not warn, got {:?}",
+            parsed.warnings
+        );
+    }
+
+    #[test]
+    fn block_beta_nesting_past_the_cap_is_flattened_not_recursed() {
+        let cap = ParserConfig::default().max_nesting_depth;
+        let nesting = cap * 4;
+        let mut input = String::from("block-beta\n");
+        for i in 0..nesting {
+            writeln!(input, "block:grp{i}").unwrap();
+        }
+        input.push_str("leaf[Leaf]\n");
+        for _ in 0..nesting {
+            input.push_str("end\n");
+        }
+
+        let parsed = on_worker_sized_stack(move || parse_mermaid(&input));
+
+        assert_eq!(parsed.ir.graph.subgraphs.len(), cap);
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("nesting deeper than")),
+            "expected a flattening diagnostic, got {:?}",
+            parsed.warnings
+        );
+        assert!(
+            parsed.ir.find_node_index("leaf").is_some(),
+            "innermost block content was dropped"
+        );
+        assert!(
+            !parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unclosed block group")),
+            "flattened groups must stay balanced, got {:?}",
+            parsed.warnings
+        );
     }
 
     // --- Flowchart arrow type tests ---

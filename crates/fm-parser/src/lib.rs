@@ -471,6 +471,20 @@ pub struct ParserConfig {
     pub fuzzy_keyword_distance: usize,
     pub auto_close_delimiters: bool,
     pub create_placeholder_nodes: bool,
+    /// Maximum nesting depth for block-structured containers (`subgraph … end`,
+    /// `block:… end`).
+    ///
+    /// These are parsed by recursive descent into a recursively-nested document-item
+    /// tree, so nesting depth is stack depth — for the parse itself, for the lowering
+    /// walk over the tree, and for the tree's own `Drop`. Input nesting is *not* bounded
+    /// by input size: `subgraph S\n` … `end\n` costs a constant ~14 bytes per level with
+    /// no indentation, so under 1 MB of input can request tens of thousands of levels and
+    /// overflow the stack, which aborts the process and cannot be caught by any caller.
+    ///
+    /// Containers nested deeper than this are flattened into the deepest accepted
+    /// container with a warning diagnostic. Their nodes and edges are preserved; only the
+    /// surplus grouping is dropped.
+    pub max_nesting_depth: usize,
 }
 
 impl Default for ParserConfig {
@@ -480,6 +494,11 @@ impl Default for ParserConfig {
             fuzzy_keyword_distance: 2,
             auto_close_delimiters: true,
             create_placeholder_nodes: true,
+            // Real diagrams nest a handful of levels; 256 is far above any legible
+            // diagram while staying safe on a small (1 MiB) spawned-thread stack even in
+            // an unoptimized build, where a `parse_flowchart_document_items` frame
+            // measures ~2.7 KB.
+            max_nesting_depth: 256,
         }
     }
 }
