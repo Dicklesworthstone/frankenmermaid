@@ -589,6 +589,7 @@ struct FrankenmermaidRenderConfig {
 struct FrankenmermaidSvgConfig {
     theme: Option<String>,
     rounded_corners: Option<f32>,
+    padding: Option<f32>,
     shadows: Option<bool>,
     gradients: Option<bool>,
     accessibility: Option<bool>,
@@ -1473,6 +1474,9 @@ fn build_base_svg_render_config(config_file: &FrankenmermaidConfigFile) -> Resul
     }
     if let Some(rounded_corners) = config_file.svg.rounded_corners {
         config.rounded_corners = validate_non_negative_f32(rounded_corners, "svg.rounded_corners")?;
+    }
+    if let Some(padding) = config_file.svg.padding {
+        config.padding = validate_non_negative_f32(padding, "svg.padding")?;
     }
     if let Some(shadows) = config_file.svg.shadows {
         config.shadows = shadows;
@@ -4031,6 +4035,7 @@ mod config_tests {
                 [svg]
                 theme = "forest"
                 rounded_corners = 6.0
+                padding = 24.0
                 shadows = false
                 gradients = false
                 accessibility = false
@@ -4047,6 +4052,7 @@ mod config_tests {
         assert_eq!(config.layout.algorithm.as_deref(), Some("tree"));
         assert_eq!(config.render.default_format.as_deref(), Some("term"));
         assert_eq!(config.svg.theme.as_deref(), Some("forest"));
+        assert_eq!(config.svg.padding, Some(24.0));
         assert_eq!(config.term.tier.as_deref(), Some("compact"));
     }
 
@@ -4098,6 +4104,7 @@ mod config_tests {
 
                 [svg]
                 theme = "dark"
+                padding = 24.0
                 shadows = false
                 gradients = false
             "#,
@@ -4112,9 +4119,28 @@ mod config_tests {
 
         let svg = build_base_svg_render_config(&config).expect("build svg config");
         assert_eq!(svg.theme, ThemePreset::Dark);
+        assert_eq!(svg.padding, 24.0);
         assert!(!svg.shadows);
         assert!(!svg.node_gradients);
         assert!(svg.animations_enabled);
+    }
+
+    #[test]
+    fn svg_padding_rejects_negative_values() {
+        let config: FrankenmermaidConfigFile = toml::from_str(
+            r#"
+                [svg]
+                padding = -1.0
+            "#,
+        )
+        .expect("parse config");
+
+        let error = build_base_svg_render_config(&config)
+            .expect_err("negative svg padding should be rejected");
+        assert!(
+            error.to_string().contains("svg.padding"),
+            "error should name the invalid field: {error}"
+        );
     }
 
     #[test]

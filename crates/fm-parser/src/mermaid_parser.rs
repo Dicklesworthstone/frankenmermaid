@@ -1418,10 +1418,9 @@ fn parse_sequence_note(line: &str) -> Option<SequenceStatement> {
         (fm_core::NotePosition::LeftOf, r)
     } else if let Some(r) = rest.strip_prefix("right of ") {
         (fm_core::NotePosition::RightOf, r)
-    } else if let Some(r) = rest.strip_prefix("over ") {
-        (fm_core::NotePosition::Over, r)
     } else {
-        return None;
+        let r = rest.strip_prefix("over ")?;
+        (fm_core::NotePosition::Over, r)
     };
 
     // Split at colon to get participants and text
@@ -1799,10 +1798,9 @@ fn parse_sequence_fragment_start(line: &str) -> Option<SequenceStatement> {
         (fm_core::FragmentKind::Critical, r)
     } else if let Some(r) = line.strip_prefix("break") {
         (fm_core::FragmentKind::Break, r)
-    } else if let Some(r) = line.strip_prefix("rect") {
-        (fm_core::FragmentKind::Rect, r)
     } else {
-        return None;
+        let r = line.strip_prefix("rect")?;
+        (fm_core::FragmentKind::Rect, r)
     };
 
     // Ensure keyword boundary (not a prefix of a longer word)
@@ -2444,10 +2442,9 @@ fn parse_state_note(line: &str) -> Option<StateStatement> {
     let rest = line.strip_prefix("note ")?;
     let (position, after_pos) = if let Some(r) = rest.strip_prefix("right of ") {
         ("right".to_string(), r)
-    } else if let Some(r) = rest.strip_prefix("left of ") {
-        ("left".to_string(), r)
     } else {
-        return None;
+        let r = rest.strip_prefix("left of ")?;
+        ("left".to_string(), r)
     };
 
     let (target, text) = after_pos.split_once(':')?;

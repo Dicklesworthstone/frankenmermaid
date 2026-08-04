@@ -542,12 +542,13 @@ edge_routing  = "orthogonal"    # orthogonal | spline
 [render]
 default_format    = "svg"
 show_back_edges   = true
-reduced_motion    = "auto"      # auto | reduce | no-preference
+reduced_motion    = "auto"      # auto | always | never
 
 # SVG visual system
 [svg]
 theme           = "corporate"
 rounded_corners = 8
+padding         = 40            # Outer SVG viewport padding in pixels
 shadows         = true
 gradients       = true
 accessibility   = true          # ARIA labels, semantic markup, source-span attributes
