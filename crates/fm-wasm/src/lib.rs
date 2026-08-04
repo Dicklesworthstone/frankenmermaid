@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{LazyLock, RwLock};
+// `Diagram::last_layout` is the only `Arc` user and lives behind `#[cfg(target_arch = "wasm32")]`,
+// so an ungated import is an `unused_imports` warning — and a `-D warnings` failure — on the host.
+#[cfg(target_arch = "wasm32")]
+use std::sync::Arc;
 // NOT `std::time::Instant`: wasm32-unknown-unknown std has no clock, so `Instant::now()`
 // panics and `panic = "abort"` turns that into an `unreachable` trap — which is exactly what
 // made every browser `renderSvg`/`Diagram::render` call fail with `RuntimeError: unreachable`
@@ -12,7 +16,10 @@ use web_time::Instant;
 use fm_core::MermaidGuardReport;
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use fm_core::capability_matrix;
-use fm_core::cga::{CgaLineSegment, CgaPoint, CgaRectangle};
+// The CGA hit-test helpers below are reachable only from the wasm32 `Diagram` bindings and from
+// tests, so both they and this import are dead on a host non-test build.
+#[cfg(any(target_arch = "wasm32", test))]
+use fm_core::cga::{CgaLineSegment, CgaPoint, CgaRect};
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use fm_core::mermaid_layout_guard_observability;
 use fm_core::{
@@ -791,6 +798,7 @@ fn compute_wasm_degradation_plan(
     })
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
 fn hit_test_layout_node(layout: &fm_layout::DiagramLayout, x: f64, y: f64) -> Option<&str> {
     if !(x.is_finite() && y.is_finite()) {
         return None;
@@ -799,7 +807,7 @@ fn hit_test_layout_node(layout: &fm_layout::DiagramLayout, x: f64, y: f64) -> Op
     let point = CgaPoint::new(x, y);
     layout.nodes.iter().find_map(|node| {
         let bounds = node.bounds;
-        CgaRectangle::new(
+        CgaRect::new(
             f64::from(bounds.x),
             f64::from(bounds.y),
             f64::from(bounds.width),
@@ -810,6 +818,7 @@ fn hit_test_layout_node(layout: &fm_layout::DiagramLayout, x: f64, y: f64) -> Op
     })
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
 fn hit_test_layout_edge(
     layout: &fm_layout::DiagramLayout,
     x: f64,
@@ -1812,17 +1821,25 @@ mod tests {
     fn cga_edge_hit_testing_breaks_equal_distance_ties_by_edge_index() -> Result<(), &'static str> {
         let parsed = parse("flowchart LR\nA-->B");
         let traced = layout_diagram_traced(&parsed.ir);
-        let mut layout = traced.layout;
+        // `TracedLayout::layout` is an `Arc<DiagramLayout>`, so take an owned copy to mutate.
+        let mut layout = (*traced.layout).clone();
         let first_edge = layout
             .edges
             .first()
             .cloned()
             .ok_or("single-edge flowchart must produce a rendered path")?;
-        let (start, end) = first_edge
-            .points
-            .first()
-            .zip(first_edge.points.get(1))
-            .ok_or("rendered path must contain a segment")?;
+        // Read the segment before `first_edge` is moved into `duplicate`.
+        let midpoint = {
+            let (start, end) = first_edge
+                .points
+                .first()
+                .zip(first_edge.points.get(1))
+                .ok_or("rendered path must contain a segment")?;
+            (
+                (f64::from(start.x) + f64::from(end.x)) / 2.0,
+                (f64::from(start.y) + f64::from(end.y)) / 2.0,
+            )
+        };
         let expected_edge_index = first_edge.edge_index;
 
         let mut duplicate = first_edge;
@@ -1830,10 +1847,6 @@ mod tests {
         layout.edges.push(duplicate);
         layout.edges.reverse();
 
-        let midpoint = (
-            (f64::from(start.x) + f64::from(end.x)) / 2.0,
-            (f64::from(start.y) + f64::from(end.y)) / 2.0,
-        );
         assert_eq!(
             hit_test_layout_edge(&layout, midpoint.0, midpoint.1, 0.01),
             Some(expected_edge_index)

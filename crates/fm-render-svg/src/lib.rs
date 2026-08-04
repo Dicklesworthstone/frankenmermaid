@@ -6238,7 +6238,7 @@ fn render_xychart_svg(
             let estimated_text_width = name.chars().count() as f32 * legend_font_size * 0.56;
             let legend_text = if estimated_text_width > legend_text_width {
                 legend_text
-                    .attr("textLength", legend_text_width)
+                    .attr_num("textLength", legend_text_width)
                     .attr("lengthAdjust", "spacingAndGlyphs")
             } else {
                 legend_text
@@ -15238,6 +15238,25 @@ mod tests {
         assert!(
             svg.contains("textLength=\"88\"") && svg.contains("lengthAdjust=\"spacingAndGlyphs\""),
             "overlong legend labels must remain inside the reserved 120px legend column"
+        );
+    }
+
+    #[test]
+    fn named_xychart_legend_leaves_short_series_labels_unconstrained() {
+        // Negative case for `named_xychart_legend_constrains_overlong_series_labels`: the
+        // constraint is conditional on the estimated label overflowing the reserved column, so a
+        // label that fits must keep its natural glyph advances. An implementation that always
+        // emitted `textLength` would satisfy the overlong test and fail this one.
+        let ir = create_xychart_ir();
+        let meta = ir.xy_chart_meta.as_ref().expect("xy chart metadata");
+        assert_eq!(meta.series[0].name.as_deref(), Some("Revenue"));
+
+        let svg = render_svg_with_config(&ir, &SvgRenderConfig::default());
+
+        assert!(svg.contains("class=\"fm-xychart-legend-entry\""));
+        assert!(
+            !svg.contains("textLength=") && !svg.contains("lengthAdjust="),
+            "legend labels that fit the reserved column must not be squeezed"
         );
     }
 
