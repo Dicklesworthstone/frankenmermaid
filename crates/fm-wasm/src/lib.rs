@@ -12,7 +12,7 @@ use web_time::Instant;
 use fm_core::MermaidGuardReport;
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use fm_core::capability_matrix;
-use fm_core::cga::{CgaPoint, CgaRectangle};
+use fm_core::cga::{CgaLineSegment, CgaPoint, CgaRectangle};
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use fm_core::mermaid_layout_guard_observability;
 use fm_core::{
@@ -810,6 +810,43 @@ fn hit_test_layout_node(layout: &fm_layout::DiagramLayout, x: f64, y: f64) -> Op
     })
 }
 
+fn hit_test_layout_edge(
+    layout: &fm_layout::DiagramLayout,
+    x: f64,
+    y: f64,
+    max_distance: f64,
+) -> Option<usize> {
+    if !(x.is_finite() && y.is_finite() && max_distance.is_finite() && max_distance >= 0.0) {
+        return None;
+    }
+
+    let point = CgaPoint::new(x, y);
+    let mut closest = None;
+    for edge in &layout.edges {
+        if edge.bundled {
+            continue;
+        }
+        for points in edge.points.windows(2) {
+            let [start, end] = points else {
+                continue;
+            };
+            let segment = CgaLineSegment::new(
+                CgaPoint::new(f64::from(start.x), f64::from(start.y)),
+                CgaPoint::new(f64::from(end.x), f64::from(end.y)),
+            );
+            let distance = segment.distance_to_point(&point);
+            let is_closer = match closest {
+                None => true,
+                Some((_, best_distance)) => distance < best_distance,
+            };
+            if distance.is_finite() && distance <= max_distance && is_closer {
+                closest = Some((edge.edge_index, distance));
+            }
+        }
+    }
+    closest.map(|(edge_index, _)| edge_index)
+}
+
 #[must_use]
 #[cfg(any(not(target_arch = "wasm32"), test))]
 pub fn render(input: &str) -> WasmRenderOutput {
@@ -1508,6 +1545,24 @@ impl Diagram {
             .map(str::to_owned))
     }
 
+    /// Return the nearest rendered edge index within a canvas-space tolerance.
+    ///
+    /// The query uses CGA point-to-segment distance over the latest render's edge paths, excludes
+    /// bundled non-rendered paths, and returns `None` for invalid coordinates or tolerance.
+    #[wasm_bindgen(js_name = hitTestEdge)]
+    pub fn hit_test_edge(
+        &self,
+        x: f64,
+        y: f64,
+        max_distance: f64,
+    ) -> Result<Option<usize>, JsValue> {
+        self.ensure_alive()?;
+        Ok(self
+            .last_layout
+            .as_deref()
+            .and_then(|layout| hit_test_layout_edge(layout, x, y, max_distance)))
+    }
+
     #[wasm_bindgen(js_name = setTheme)]
     pub fn set_theme(&mut self, theme: &str) -> Result<(), JsValue> {
         self.ensure_alive()?;
@@ -1567,6 +1622,15 @@ impl Diagram {
         Err(js_error("Diagram is only available on wasm32 targets"))
     }
 
+    pub fn hit_test_edge(
+        &self,
+        _x: f64,
+        _y: f64,
+        _max_distance: f64,
+    ) -> Result<Option<usize>, JsValue> {
+        Err(js_error("Diagram is only available on wasm32 targets"))
+    }
+
     pub fn set_theme(&mut self, _theme: &str) -> Result<(), JsValue> {
         Err(js_error("Diagram is only available on wasm32 targets"))
     }
@@ -1585,10 +1649,10 @@ mod tests {
         RuntimeInitConfig, SvgConfigOverrides, ThemePreset, WebRendererKind, WorkerRenderAction,
         WorkerRenderCoordinator, WorkerRenderMessage, WorkerRenderRequest,
         align_canvas_typography_with_svg, apply_budget_svg_simplifications,
-        apply_canvas_theme_preset, canvas_font_size_px, collect_source_spans, hit_test_layout_node,
-        merge_canvas_config, merge_pressure_config, merge_renderer_kind, merge_svg_config,
-        read_runtime_config, render, render_svg_js, requested_theme_preset, resolve_renderer,
-        write_runtime_config,
+        apply_canvas_theme_preset, canvas_font_size_px, collect_source_spans, hit_test_layout_edge,
+        hit_test_layout_node, merge_canvas_config, merge_pressure_config, merge_renderer_kind,
+        merge_svg_config, read_runtime_config, render, render_svg_js, requested_theme_preset,
+        resolve_renderer, write_runtime_config,
     };
     use fm_core::{
         MermaidBudgetLedger, MermaidGuardReport, MermaidLensBinding, MermaidLensEdit,
@@ -1706,6 +1770,39 @@ mod tests {
             hit_test_layout_node(&traced.layout, -10_000.0, -10_000.0),
             None
         );
+    }
+
+    #[test]
+    fn cga_edge_hit_testing_selects_rendered_segments_and_rejects_invalid_tolerance() {
+        let parsed = parse("flowchart LR\nA-->B");
+        let traced = layout_diagram_traced(&parsed.ir);
+        let expected_hit = traced.layout.edges.iter().find_map(|edge| {
+            (!edge.bundled)
+                .then(|| edge.points.first().zip(edge.points.get(1)))
+                .flatten()
+                .map(|(start, end)| {
+                    (
+                        edge.edge_index,
+                        (
+                            (f64::from(start.x) + f64::from(end.x)) / 2.0,
+                            (f64::from(start.y) + f64::from(end.y)) / 2.0,
+                        ),
+                    )
+                })
+        });
+
+        assert!(expected_hit.is_some());
+        assert_eq!(
+            expected_hit.and_then(|(edge_index, (x, y))| {
+                hit_test_layout_edge(&traced.layout, x, y, 0.01).map(|hit| (edge_index, hit))
+            }),
+            expected_hit.map(|(edge_index, _)| (edge_index, edge_index))
+        );
+        assert_eq!(
+            hit_test_layout_edge(&traced.layout, f64::NAN, 0.0, 1.0),
+            None
+        );
+        assert_eq!(hit_test_layout_edge(&traced.layout, 0.0, 0.0, -1.0), None);
     }
 
     #[test]
