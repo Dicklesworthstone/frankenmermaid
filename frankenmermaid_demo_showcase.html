@@ -2372,19 +2372,19 @@
         code: `requirementDiagram
     requirement deterministic_layout {
       id: 1
-      text: Layout output must be byte-identical across runs
+      text: "Layout output must be byte-identical across runs"
       risk: high
       verifymethod: test
     }
     functionalRequirement svg_export {
       id: 2
-      text: The engine must export standalone SVG
+      text: "The engine must export standalone SVG"
       risk: medium
       verifymethod: demonstration
     }
     performanceRequirement browser_budget {
       id: 3
-      text: Browser bundle stays under the gzip budget
+      text: "Browser bundle stays under the gzip budget"
       risk: low
       verifymethod: analysis
     }
@@ -2946,6 +2946,27 @@
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;");
+    }
+
+    // Legible, actionable render-failure card (GH#5). The stage surfaces are light
+    // (white -> slate-50 gradients), so this must use DARK text on a light warning
+    // background — the old amber-100-on-amber-300/10 combination was unreadable there.
+    // It also names the diagram and quotes the underlying parser error instead of a
+    // bare "could not be rendered", so failures are diagnosable straight from the page.
+    function diagramErrorMarkup(sample, error, shapeClasses) {
+      const detail = String(error?.message ?? error ?? "unknown error")
+        .split("\n")
+        .slice(0, 4)
+        .join("\n")
+        .trim();
+      const label = sample?.label ? `${sample.category} · ${sample.label}` : (sample?.category || "diagram");
+      return `
+        <div class="${shapeClasses} border border-amber-500/60 bg-amber-50 text-sm leading-6 text-amber-950">
+          <div class="font-semibold">Diagram could not be rendered</div>
+          <div class="mt-1 text-xs uppercase tracking-[0.18em] text-amber-800">${escapeHtml(label)}</div>
+          <pre class="mt-3 overflow-auto whitespace-pre-wrap rounded-xl bg-amber-100 p-3 font-mono text-xs leading-5 text-amber-900">${escapeHtml(detail)}</pre>
+        </div>
+      `;
     }
 
     function highlightDiagramSource(source) {
@@ -4707,12 +4728,8 @@
         const mId = makeUniqueId("mspot");
         const { svg } = await mermaid.render(mId, sample.code);
         els.spotlightStage.innerHTML = svg;
-      } catch (_err) {
-        els.spotlightStage.innerHTML = `
-          <div class="rounded-3xl border border-amber-300/20 bg-amber-300/10 p-5 text-sm leading-6 text-amber-100">
-            Diagram could not be rendered.
-          </div>
-        `;
+      } catch (err) {
+        els.spotlightStage.innerHTML = diagramErrorMarkup(sample, err, "rounded-3xl p-5");
       }
     }
 
@@ -4763,12 +4780,8 @@
         const mId = makeUniqueId("mstage");
         const { svg } = await mermaid.render(mId, sample.code);
         target.innerHTML = svg;
-      } catch (_err) {
-        target.innerHTML = `
-          <div class="rounded-2xl border border-amber-300/20 bg-amber-300/10 p-4 text-sm leading-6 text-amber-100">
-            Diagram could not be rendered.
-          </div>
-        `;
+      } catch (err) {
+        target.innerHTML = diagramErrorMarkup(sample, err, "rounded-2xl p-4");
       }
 
       target.dataset.rendered = "true";

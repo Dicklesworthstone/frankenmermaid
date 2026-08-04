@@ -1,0 +1,10 @@
+{
+  "name": "frankenmermaid-scripts",
+  "private": true,
+  "description": "Dev dependencies for repo verification scripts (verify_demo_samples.mjs baseline check). Run `bun install` (or `npm install`) in this directory before `node verify_demo_samples.mjs`.",
+  "type": "module",
+  "devDependencies": {
+    "jsdom": "^26.1.0",
+    "mermaid": "^11.12.2"
+  }
+}
