@@ -697,34 +697,7 @@ fn strip_unused_state_css(svg: &mut String) {
         svg.replace_range(start..after, "");
     }
 
-    // The 8 accent palettes (`.fm-node-accent-1..8`) are assigned per node, so a diagram with few
-    // nodes uses only some. Drop each `.fm-node-accent-N` rule whose class is absent from the body.
-    // Body-based + exact-selector; no-op if the class is used or the rule is missing.
-    for (n, &is_used) in accent_used.iter().enumerate().skip(1) {
-        if !is_used {
-            let selector = format!(".fm-node-accent-{n} {{");
-            if let Some(start) = memchr::memmem::find(svg.as_bytes(), selector.as_bytes())
-                && let Some(rel_end) = memchr::memmem::find(&svg.as_bytes()[start..], b"}\n")
-            {
-                svg.replace_range(start..start + rel_end + 2, "");
-            }
-        }
-    }
-
-    // Drop each `:root` accent custom property `--fm-accent-N` that is no longer referenced anywhere
-    // (its accent rule was stripped above and no node-shape/gradient uses it). Reference-counted, so
-    // it is a no-op while ANY `var(--fm-accent-N)` remains — safe.
-    let var_used = scan_accent_var_refs(svg);
-    for (n, &is_used) in var_used.iter().enumerate().skip(1) {
-        if !is_used {
-            let decl = format!("  --fm-accent-{n}:");
-            if let Some(start) = memchr::memmem::find(svg.as_bytes(), decl.as_bytes())
-                && let Some(rel_end) = memchr::memmem::find(&svg.as_bytes()[start..], b";\n")
-            {
-                svg.replace_range(start..start + rel_end + 2, "");
-            }
-        }
-    }
+    strip_unused_accent_css(svg, &accent_used, false);
 }
 
 /// Which of [`strip_unused_state_css`]'s 13 `fm-node-*` needles occur in the rendered body: the 5
@@ -796,6 +769,88 @@ fn scan_accent_var_refs(svg: &str) -> [bool; 9] {
         }
     }
     used
+}
+
+/// Remove palette rules that cannot match a node in the current diagram, then remove any now-dead
+/// `:root` palette variables. This operates on the pretty stylesheet, before the direct flowchart
+/// path minifies it; the normal output post-pass calls the same helper after observing the body.
+///
+/// Inline `style` attributes are outside the stylesheet. When one could reference an accent value,
+/// callers keep every root declaration: omitting a declaration would change the meaning of a valid
+/// user-supplied inline style, while retaining it is only a size cost.
+fn strip_unused_accent_css(
+    css: &mut String,
+    accent_used: &[bool; 9],
+    preserve_root_variables: bool,
+) {
+    // The 8 accent palettes (`.fm-node-accent-1..8`) are assigned per node, so a diagram with few
+    // nodes uses only some. Drop each `.fm-node-accent-N` rule whose class is absent from the body.
+    // Exact-selector matching makes CSS drift a safe no-op.
+    for (n, &is_used) in accent_used.iter().enumerate().skip(1) {
+        if !is_used {
+            let selector = format!(".fm-node-accent-{n} {{");
+            if let Some(start) = memchr::memmem::find(css.as_bytes(), selector.as_bytes())
+                && let Some(rel_end) = memchr::memmem::find(&css.as_bytes()[start..], b"}\n")
+            {
+                css.replace_range(start..start + rel_end + 2, "");
+            }
+        }
+    }
+
+    if preserve_root_variables {
+        return;
+    }
+
+    // Drop each `:root` accent custom property `--fm-accent-N` that is no longer referenced after
+    // the class-rule pruning above. The stylesheet may include classDef/effect rules, so scan the
+    // completed CSS rather than assume where each reference originates.
+    let var_used = scan_accent_var_refs(css);
+    for (n, &is_used) in var_used.iter().enumerate().skip(1) {
+        if !is_used {
+            let decl = format!("  --fm-accent-{n}:");
+            if let Some(start) = memchr::memmem::find(css.as_bytes(), decl.as_bytes())
+                && let Some(rel_end) = memchr::memmem::find(&css.as_bytes()[start..], b";\n")
+            {
+                css.replace_range(start..start + rel_end + 2, "");
+            }
+        }
+    }
+}
+
+/// Accent classes emitted by the flowchart renderers are a deterministic function of `IrNode.id`.
+/// This lets the direct CSS path prune the same unused palette rules as the normal body-based pass
+/// without building or rescanning the SVG body.
+fn flowchart_accent_mask(ir: &MermaidDiagramIr) -> [bool; 9] {
+    let mut used = [false; 9];
+    for node in &ir.nodes {
+        used[stable_accent_index(&node.id)] = true;
+    }
+    used
+}
+
+/// Inline node/edge styles and raw style directives render into the SVG body. Keep root palette
+/// variables when any of them can reference an accent, because that reference is not visible while
+/// the direct path is constructing its stylesheet.
+fn ir_inline_styles_reference_accent(ir: &MermaidDiagramIr) -> bool {
+    const ACCENT_REF: &str = "var(--fm-accent-";
+    ir.nodes.iter().any(|node| {
+        node.inline_style.as_ref().is_some_and(|style| {
+            style
+                .properties
+                .values()
+                .any(|value| value.contains(ACCENT_REF))
+        })
+    }) || ir.edges.iter().any(|edge| {
+        edge.inline_style.as_ref().is_some_and(|style| {
+            style
+                .properties
+                .values()
+                .any(|value| value.contains(ACCENT_REF))
+        })
+    }) || ir
+        .style_refs
+        .iter()
+        .any(|style_ref| style_ref.style.contains(ACCENT_REF))
 }
 
 /// Render post-pass: drop `<marker>` arrowhead defs that the rendered body never references.
@@ -3617,11 +3672,16 @@ fn render_layout_to_svg(
             css.push_str(&classdef_css);
         }
         if direct_minified_css {
-            // Prune dead `marker#arrow-*` rules while the stylesheet is still pretty. This path
-            // returns before `apply_output_post_passes`, and it minifies here, so a later strip
-            // could not run and would not match anyway (the strippers' needles are pretty-form).
-            // Pruning before the cache also keeps the cache key honest: the text differs per live
-            // marker set, so diagrams with different arrowheads cannot share a stylesheet.
+            // The direct flowchart path returns before `apply_output_post_passes`, and it minifies
+            // here, so prune while the stylesheet is still pretty. Pruning before the cache also
+            // keeps its key honest: the text differs per live marker/accent set, so diagrams with
+            // different arrowheads or node ids cannot share a stale stylesheet.
+            let accent_mask = flowchart_accent_mask(ir);
+            strip_unused_accent_css(
+                &mut css,
+                &accent_mask,
+                ir_inline_styles_reference_accent(ir),
+            );
             if let Some(live_mask) = known_live_marker_mask {
                 strip_dead_marker_css_for_mask(&mut css, live_mask);
             }
@@ -7830,6 +7890,12 @@ fn render_node_into(
     };
     let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
     let node_font_size = detail.node_font_size;
+    let label_may_overflow = label_text.lines().any(|line| {
+        line.chars().count() as f32
+            * config.avg_char_width
+            * (node_font_size / config.font_size.max(1.0))
+            > (w - 16.0).max(node_font_size)
+    });
     let node_icon = ir_node
         .and_then(|node| node.icon())
         .map(str::trim)
@@ -7856,6 +7922,7 @@ fn render_node_into(
         && node_icon.is_none()
         && !placeholder_space_node
         && !label_has_line_break(&label_text)
+        && !label_may_overflow
         && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
         && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
         && node.class_meta.is_none()
@@ -7901,6 +7968,7 @@ fn render_node_into(
         && node_icon.is_none()
         && !placeholder_space_node
         && !label_has_line_break(&label_text)
+        && !label_may_overflow
         && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
         && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
         && node.class_meta.is_none()
@@ -8206,6 +8274,7 @@ fn render_node_into(
         && node_icon.is_none()
         && !placeholder_space_node
         && !label_has_line_break(&label_text)
+        && !label_may_overflow
         && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
         && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
         && let Some(node) = ir_node
@@ -8267,6 +8336,7 @@ fn render_node_into(
         && node_icon.is_none()
         && !placeholder_space_node
         && !label_has_line_break(&label_text)
+        && !label_may_overflow
         && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
         && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
         && let Some(node) = ir_node
@@ -8374,6 +8444,12 @@ fn render_node(
     };
     let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
     let node_font_size = detail.node_font_size;
+    let label_may_overflow = label_text.lines().any(|line| {
+        line.chars().count() as f32
+            * config.avg_char_width
+            * (node_font_size / config.font_size.max(1.0))
+            > (w - 16.0).max(node_font_size)
+    });
     let node_icon = ir_node
         .and_then(|node| node.icon())
         .map(str::trim)
@@ -8431,6 +8507,7 @@ fn render_node(
         && node_icon.is_none()
         && !placeholder_space_node
         && !label_has_line_break(&label_text)
+        && !label_may_overflow
         && lookup_centrality_tier(centrality_map, node_box.node_index).is_none()
         && label_id.is_none_or(|id| ir.label_markup.get(&id).is_none_or(|s| s.is_empty()))
         && let Some(node) = ir_node
@@ -8784,6 +8861,8 @@ fn render_node(
                     cx,
                     cy + node_font_size / 3.0,
                     node_font_size,
+                    (w - 16.0).max(node_font_size),
+                    (h - 16.0).max(node_font_size),
                     config,
                     colors,
                     text_style.as_deref(),
@@ -9024,6 +9103,8 @@ fn render_node(
                     cx,
                     cy + node_font_size / 3.0,
                     node_font_size,
+                    (w * 0.8).max(node_font_size),
+                    (h * 0.8).max(node_font_size),
                     config,
                     colors,
                     text_style.as_deref(),
@@ -9210,6 +9291,8 @@ fn render_node(
                 cx,
                 text_y,
                 node_font_size,
+                (w - 20.0).max(node_font_size),
+                (h - 20.0).max(node_font_size),
                 config,
                 colors,
                 text_style.as_deref(),
@@ -9399,6 +9482,8 @@ fn render_node(
                 content_left + (content_width / 2.0),
                 start_y,
                 node_font_size,
+                (content_width - 16.0).max(node_font_size),
+                (content_height - 16.0).max(node_font_size),
                 config,
                 colors,
                 text_style.as_deref(),
@@ -10453,6 +10538,148 @@ fn wrap_text_to_lines(text: &str, max_width: f32, avg_char_width: f32) -> Vec<St
     lines
 }
 
+#[derive(Debug)]
+struct FittedNodeLabel<'a> {
+    text: Cow<'a, str>,
+    font_size: f32,
+    changed: bool,
+}
+
+/// Fit a node label into its usable rectangle using the configured font metric calibration.
+///
+/// Ordinary labels return a borrowed string and preserve the existing fast path. Overflowing labels
+/// first use word-boundary wrapping, then reduce their size no lower than 10px (or a stricter
+/// configured minimum), and finally ellipsize the final visible line. This keeps SVG labels readable
+/// without allowing a long identifier to draw outside its node.
+fn fit_node_label_text<'a>(
+    label: &'a str,
+    max_width: f32,
+    max_height: f32,
+    font_size: f32,
+    config: &SvgRenderConfig,
+) -> FittedNodeLabel<'a> {
+    if label.is_empty()
+        || !max_width.is_finite()
+        || !max_height.is_finite()
+        || max_width <= 0.0
+        || max_height <= 0.0
+        || font_size <= 0.0
+    {
+        return FittedNodeLabel {
+            text: Cow::Borrowed(label),
+            font_size,
+            changed: false,
+        };
+    }
+
+    let metrics = config.font_metrics();
+    let reference_size = config.font_size.max(1.0);
+    let calibrated_width = |text: &str, size: f32| {
+        text.lines()
+            .map(|line| {
+                metrics.estimate_width(line)
+                    * (size / reference_size)
+                    * (config.avg_char_width / metrics.avg_char_width())
+            })
+            .fold(0.0_f32, f32::max)
+    };
+    if calibrated_width(label, font_size) <= max_width {
+        return FittedNodeLabel {
+            text: Cow::Borrowed(label),
+            font_size,
+            changed: false,
+        };
+    }
+
+    let min_size = config.min_font_size.max(10.0).min(font_size);
+    let reduced_size =
+        (font_size * max_width / calibrated_width(label, font_size)).clamp(min_size, font_size);
+    let mut fitted_size = reduced_size;
+    let max_lines =
+        |size: f32| ((max_height / (size * config.line_height.max(1.0))).floor() as usize).max(1);
+    let mut lines = wrap_node_label_lines(label, max_width, fitted_size, &calibrated_width);
+
+    if lines.len() > max_lines(fitted_size) && fitted_size > min_size {
+        fitted_size = min_size;
+        lines = wrap_node_label_lines(label, max_width, fitted_size, &calibrated_width);
+    }
+
+    let visible_lines = max_lines(fitted_size);
+    let was_truncated = lines.len() > visible_lines
+        || lines
+            .iter()
+            .any(|line| calibrated_width(line, fitted_size) > max_width);
+    if was_truncated {
+        lines.truncate(visible_lines);
+        if let Some(last) = lines.last_mut() {
+            *last = ellipsize_label_line(last, max_width, fitted_size, &calibrated_width);
+        }
+    }
+
+    let fitted_text = lines.join("\n");
+    let changed = fitted_text != label || fitted_size != font_size;
+    FittedNodeLabel {
+        text: if changed {
+            Cow::Owned(fitted_text)
+        } else {
+            Cow::Borrowed(label)
+        },
+        font_size: fitted_size,
+        changed,
+    }
+}
+
+fn wrap_node_label_lines(
+    label: &str,
+    max_width: f32,
+    font_size: f32,
+    width: &impl Fn(&str, f32) -> f32,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for source_line in label.split('\n') {
+        let mut current = String::new();
+        for word in source_line.split_whitespace() {
+            if current.is_empty() {
+                current.push_str(word);
+                continue;
+            }
+
+            let previous_len = current.len();
+            current.push(' ');
+            current.push_str(word);
+            if width(&current, font_size) > max_width {
+                current.truncate(previous_len);
+                lines.push(current);
+                current = word.to_string();
+            }
+        }
+        lines.push(current);
+    }
+    lines
+}
+
+fn ellipsize_label_line(
+    line: &str,
+    max_width: f32,
+    font_size: f32,
+    width: &impl Fn(&str, f32) -> f32,
+) -> String {
+    const ELLIPSIS: char = '…';
+    let mut result = String::new();
+    for character in line.chars() {
+        result.push(character);
+        result.push(ELLIPSIS);
+        if width(&result, font_size) > max_width {
+            let _ = result.pop();
+            let _ = result.pop();
+            break;
+        }
+        let _ = result.pop();
+    }
+    result.push(ELLIPSIS);
+    result
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_node_label_text(
     ir: &MermaidDiagramIr,
@@ -10461,12 +10688,18 @@ fn render_node_label_text(
     x: f32,
     y: f32,
     font_size: f32,
+    max_width: f32,
+    max_height: f32,
     config: &SvgRenderConfig,
     colors: &ThemeColors,
     label_style: Option<&str>,
     emit_classdef_classes: bool,
 ) -> Element {
-    if let Some(label_id) = label_id
+    let fitted = fit_node_label_text(label_text, max_width, max_height, font_size, config);
+    let label_text = fitted.text.as_ref();
+    let font_size = fitted.font_size;
+    if !fitted.changed
+        && let Some(label_id) = label_id
         && let Some(segments) = ir.label_markup.get(&label_id)
         && !segments.is_empty()
     {
@@ -13580,6 +13813,8 @@ mod tests {
             11.0,
             22.0,
             13.0,
+            200.0,
+            80.0,
             &config,
             &colors,
             Some("font-weight:700"),
@@ -13587,6 +13822,72 @@ mod tests {
         );
 
         assert_eq!(actual.render(), expected.render());
+    }
+
+    #[test]
+    fn node_label_fitting_preserves_labels_that_already_fit() {
+        let config = SvgRenderConfig::default();
+        let fitted = fit_node_label_text("Short label", 240.0, 48.0, 15.0, &config);
+
+        assert!(!fitted.changed);
+        assert!(matches!(fitted.text, Cow::Borrowed("Short label")));
+        assert_eq!(fitted.font_size, 15.0);
+    }
+
+    #[test]
+    fn node_label_fitting_wraps_on_word_boundaries_before_ellipsis() {
+        let config = SvgRenderConfig::default();
+        let fitted = fit_node_label_text("one two three four", 48.0, 52.0, 15.0, &config);
+
+        assert!(fitted.changed);
+        assert!(fitted.text.contains('\n'));
+        assert!(!fitted.text.ends_with('…'));
+        assert!(fitted.font_size >= 10.0);
+    }
+
+    #[test]
+    fn node_label_fitting_ellipsizes_when_minimum_size_still_overflows() {
+        let config = SvgRenderConfig::default();
+        let fitted = fit_node_label_text(
+            "extraordinarily-long-unbreakable-identifier",
+            48.0,
+            16.0,
+            15.0,
+            &config,
+        );
+
+        assert!(fitted.changed);
+        assert_eq!(fitted.font_size, 10.0);
+        assert!(fitted.text.ends_with('…'));
+        assert_ne!(
+            fitted.text.as_ref(),
+            "extraordinarily-long-unbreakable-identifier"
+        );
+    }
+
+    #[test]
+    fn rendered_node_label_uses_the_fitted_font_and_ellipsis() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let config = SvgRenderConfig::default();
+        let svg = render_node_label_text(
+            &ir,
+            None,
+            "extraordinarily-long-unbreakable-identifier",
+            24.0,
+            24.0,
+            15.0,
+            48.0,
+            16.0,
+            &config,
+            &ThemeColors::default(),
+            None,
+            false,
+        )
+        .render();
+
+        assert!(svg.contains("font-size=\"10\""));
+        assert!(svg.contains('…'));
+        assert!(!svg.contains("extraordinarily-long-unbreakable-identifier"));
     }
 
     fn create_ir_with_cluster(title: &str) -> MermaidDiagramIr {
@@ -15522,6 +15823,59 @@ marker#arrow-open path {
         ] {
             assert!(!svg.contains(dead), "dead {dead} CSS survived");
         }
+    }
+
+    #[test]
+    fn flowchart_direct_css_path_prunes_unused_accent_palettes() {
+        // `N0` has the stable palette index 4. The direct-minified flowchart path returns before
+        // the body post-pass, so this verifies construction-time pruning keeps its one live rule
+        // and removes palette rules/variables that no surviving CSS can reference.
+        let ir = create_ir_with_single_node("N0", NodeShape::Rect);
+        assert_eq!(
+            flowchart_accent_mask(&ir),
+            [false, false, false, false, true, false, false, false, false]
+        );
+        let svg = render_svg(&ir);
+        let start = svg.find("<style>").expect("style open") + "<style>".len();
+        let end = svg.find("</style>").expect("style close");
+        let css = &svg[start..end];
+
+        assert!(
+            css.contains(".fm-node-accent-4{"),
+            "live palette rule missing"
+        );
+        assert!(
+            css.contains("--fm-accent-4:"),
+            "live palette variable missing"
+        );
+        for unused in [3, 5, 6, 7, 8] {
+            assert!(
+                !css.contains(&format!(".fm-node-accent-{unused}{{")),
+                "unused palette rule {unused} survived"
+            );
+            assert!(
+                !css.contains(&format!("--fm-accent-{unused}:")),
+                "unused palette variable {unused} survived"
+            );
+        }
+    }
+
+    #[test]
+    fn flowchart_direct_css_preserves_roots_for_inline_accent_styles() {
+        let mut ir = create_ir_with_single_node("N0", NodeShape::Rect);
+        ir.nodes[0].inline_style = Some(Box::new(fm_core::IrInlineStyle::from_pairs([(
+            String::from("fill"),
+            String::from("var(--fm-accent-7)"),
+        )])));
+
+        let svg = render_svg(&ir);
+        let start = svg.find("<style>").expect("style open") + "<style>".len();
+        let end = svg.find("</style>").expect("style close");
+        let css = &svg[start..end];
+        assert!(
+            css.contains("--fm-accent-7:"),
+            "inline body styles must retain their referenced root palette variable"
+        );
     }
 
     #[test]

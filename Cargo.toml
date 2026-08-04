@@ -22,13 +22,13 @@ repository = "https://github.com/Dicklesworthstone/frankenmermaid"
 homepage = "https://github.com/Dicklesworthstone/frankenmermaid"
 
 [workspace.dependencies]
-fm-core = { path = "crates/fm-core", version = "0.2.0" }
-fm-parser = { path = "crates/fm-parser", version = "0.2.0" }
-fm-layout = { path = "crates/fm-layout", version = "0.2.0" }
-fm-render-svg = { path = "crates/fm-render-svg", version = "0.2.0" }
-fm-render-canvas = { path = "crates/fm-render-canvas", version = "0.2.0" }
-fm-render-term = { path = "crates/fm-render-term", version = "0.2.0" }
-fm-wasm = { path = "crates/fm-wasm", version = "0.2.0" }
+fm-core = { path = "crates/fm-core" }
+fm-parser = { path = "crates/fm-parser" }
+fm-layout = { path = "crates/fm-layout" }
+fm-render-svg = { path = "crates/fm-render-svg" }
+fm-render-canvas = { path = "crates/fm-render-canvas" }
+fm-render-term = { path = "crates/fm-render-term" }
+fm-wasm = { path = "crates/fm-wasm" }
 franken-kernel = "0.3.4"
 fnx-runtime = { git = "https://github.com/Dicklesworthstone/franken_networkx.git", rev = "cb8bdb590573b9de5ddbc26b948279057ac4049e", default-features = false }
 fnx-classes = { git = "https://github.com/Dicklesworthstone/franken_networkx.git", rev = "cb8bdb590573b9de5ddbc26b948279057ac4049e", default-features = false }
