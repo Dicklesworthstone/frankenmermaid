@@ -2170,6 +2170,9 @@ mod geometry_tests {
     /// (non-finite, negative extent, or overflowing far edge) or a non-finite query point yields
     /// the origin. Without this guard the reference silently computed a boundary point for
     /// geometry the real function rejects, so the two disagreed on every negative-extent rect.
+    ///
+    /// The guard is kept load-bearing by `rejected_cases`, which runs BOTH implementations over
+    /// the fail-closed domain. Dropping the `is_valid` clause here must turn the test red.
     #[inline(never)]
     fn closest_boundary_reference(rect: &CgaRect, point: &CgaPoint) -> CgaPoint {
         if !rect.is_valid() || !point.is_finite() {
@@ -2229,6 +2232,13 @@ mod geometry_tests {
         for (rect, point) in rejected_cases {
             assert!(!rect.is_valid() || !point.is_finite());
             assert_point_bits_eq(rect.closest_boundary_point(&point), CgaPoint::origin());
+            // ...and the reference must reach the same verdict by its own route, so the guard in
+            // `closest_boundary_reference` stays exercised. This is the assertion that was missing
+            // originally: the unguarded reference returned a real boundary point here.
+            assert_point_bits_eq(
+                closest_boundary_reference(&rect, &point),
+                CgaPoint::origin(),
+            );
         }
 
         // Negative control for the guard: a VALID rect far out in the representable range must
@@ -2247,7 +2257,7 @@ mod geometry_tests {
         // long enough that its SQUARED length overflows, `CgaLineSegment::closest_point` fails
         // closed, so the rect degrades to the origin even though `is_valid` still accepts it.
         // `is_valid` checks `x + width` for overflow but not `width * width`, so the two
-        // disagree on this band. Tracked separately; asserted here so a change is not silent.
+        // disagree on this band. Tracked as bd-34yo; asserted here so a change is not silent.
         let overflowing_extent = CgaRect::new(0.0, 0.0, f64::MAX, f64::MAX);
         assert!(overflowing_extent.is_valid());
         assert_point_bits_eq(
