@@ -1120,8 +1120,12 @@ impl CgaCircle {
 
         let a = dx * dx + dy * dy;
         if a < f64::EPSILON {
-            // Degenerate segment (point)
-            if self.contains(&segment.start) {
+            // A degenerate segment intersects the circle only when its lone point
+            // lies on the boundary; an interior point has no boundary crossing.
+            let radius_squared = self.radius * self.radius;
+            let distance_squared = segment.start.distance_squared(&self.center);
+            let tolerance = f64::EPSILON * radius_squared.max(1.0) * 8.0;
+            if (distance_squared - radius_squared).abs() <= tolerance {
                 return vec![segment.start];
             }
             return Vec::new();
@@ -1755,6 +1759,16 @@ mod geometry_tests {
         let seg = CgaLineSegment::new(CgaPoint::new(-2.0, 2.0), CgaPoint::new(2.0, 2.0));
         let points = circle.intersect_segment(&seg);
         assert!(points.is_empty());
+    }
+
+    #[test]
+    fn circle_intersect_segment_degenerate_point_must_be_on_boundary() {
+        let circle = CgaCircle::new(CgaPoint::origin(), 2.0);
+        let interior = CgaLineSegment::new(CgaPoint::new(1.0, 0.0), CgaPoint::new(1.0, 0.0));
+        let boundary = CgaLineSegment::new(CgaPoint::new(2.0, 0.0), CgaPoint::new(2.0, 0.0));
+
+        assert!(circle.intersect_segment(&interior).is_empty());
+        assert_eq!(circle.intersect_segment(&boundary), [CgaPoint::new(2.0, 0.0)]);
     }
 
     #[test]
