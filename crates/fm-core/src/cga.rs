@@ -999,6 +999,14 @@ impl CgaLineSegment {
     /// Uses parametric line-line intersection.
     #[must_use]
     pub fn intersect(&self, other: &CgaLineSegment) -> Option<CgaPoint> {
+        if !self.start.is_finite()
+            || !self.end.is_finite()
+            || !other.start.is_finite()
+            || !other.end.is_finite()
+        {
+            return None;
+        }
+
         // Parametric form: P = start + t*(end - start)
         // Solve for t1, t2 where the lines cross
         let d1x = self.end.x - self.start.x;
@@ -1633,6 +1641,17 @@ mod geometry_tests {
         let seg1 = CgaLineSegment::new(CgaPoint::new(0.0, 0.0), CgaPoint::new(1.0, 1.0));
         let seg2 = CgaLineSegment::new(CgaPoint::new(2.0, 0.0), CgaPoint::new(3.0, 1.0));
         assert!(seg1.intersect(&seg2).is_none());
+    }
+
+    #[test]
+    fn line_segment_intersection_rejects_non_finite_endpoints() {
+        let finite = CgaLineSegment::new(CgaPoint::origin(), CgaPoint::new(1.0, 1.0));
+        let with_nan = CgaLineSegment::new(CgaPoint::new(f64::NAN, 0.0), CgaPoint::new(1.0, 0.0));
+        let with_infinity =
+            CgaLineSegment::new(CgaPoint::new(0.0, 1.0), CgaPoint::new(f64::INFINITY, 0.0));
+
+        assert!(finite.intersect(&with_nan).is_none());
+        assert!(with_infinity.intersect(&finite).is_none());
     }
 
     #[test]
