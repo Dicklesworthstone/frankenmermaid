@@ -1183,44 +1183,85 @@ impl CgaLineSegment {
         }
     }
 
+    /// Project `point` onto the segment `start`..`end`.
+    ///
+    /// Returns `None` when the arithmetic leaves the representable range, which happens for a
+    /// segment whose squared length overflows, and also for a finite segment queried from the
+    /// opposite end of the range: `point.x - start.x` can overflow to infinity while `dx` is
+    /// exactly `0.0`, and `inf * 0.0` is NaN.
+    fn project(start: CgaPoint, end: CgaPoint, point: CgaPoint) -> Option<CgaPoint> {
+        let dx = end.x - start.x;
+        let dy = end.y - start.y;
+        let len_sq = dx * dx + dy * dy;
+
+        if !len_sq.is_finite() {
+            return None;
+        }
+
+        if len_sq < f64::EPSILON {
+            return Some(start);
+        }
+
+        let t = ((point.x - start.x) * dx + (point.y - start.y) * dy) / len_sq;
+        let t = t.clamp(0.0, 1.0);
+
+        let projected = CgaPoint::new(start.x + t * dx, start.y + t * dy);
+        projected.is_finite().then_some(projected)
+    }
+
+    /// Largest power of two not exceeding the biggest coordinate magnitude involved.
+    ///
+    /// Dividing by a power of two only shifts exponents, so the scaled retry introduces no
+    /// rounding of its own.
+    fn retry_scale(points: [CgaPoint; 3]) -> f64 {
+        let max_magnitude = points
+            .iter()
+            .flat_map(|p| [p.x.abs(), p.y.abs()])
+            .fold(0.0_f64, f64::max);
+
+        let biased_exponent = (max_magnitude.to_bits() >> 52) & 0x7ff;
+        if biased_exponent == 0 {
+            // Zero or subnormal: already as small as it gets, and there is nothing to scale.
+            return 1.0;
+        }
+        f64::from_bits(biased_exponent << 52)
+    }
+
     /// Find closest point on the segment to a given point.
     ///
-    /// Returns the origin when finite endpoint subtraction overflows, so callers
-    /// never receive a non-finite projected point.
+    /// Every finite input yields a finite point within the segment's bounding box. When the
+    /// direct computation overflows, the projection is retried in an exactly-scaled frame, so
+    /// long segments and far-apart queries get a real answer instead of a sentinel. Precision
+    /// degrades gracefully: if the segment is so much shorter than the coordinates that its
+    /// scaled length underflows, the result is `start`, matching the degenerate-segment case.
+    /// Only non-finite input still fails closed to the origin.
     #[must_use]
     pub fn closest_point(&self, point: &CgaPoint) -> CgaPoint {
         if !self.start.is_finite() || !self.end.is_finite() || !point.is_finite() {
             return CgaPoint::origin();
         }
 
-        let dx = self.end.x - self.start.x;
-        let dy = self.end.y - self.start.y;
-        let len_sq = dx * dx + dy * dy;
-
-        if !len_sq.is_finite() {
-            return CgaPoint::origin();
+        if let Some(projected) = Self::project(self.start, self.end, *point) {
+            return projected;
         }
 
-        if len_sq < f64::EPSILON {
-            return self.start;
-        }
+        let scale = Self::retry_scale([self.start, self.end, *point]);
+        let start = CgaPoint::new(self.start.x / scale, self.start.y / scale);
+        let end = CgaPoint::new(self.end.x / scale, self.end.y / scale);
+        let query = CgaPoint::new(point.x / scale, point.y / scale);
 
-        let t = ((point.x - self.start.x) * dx + (point.y - self.start.y) * dy) / len_sq;
-        let t = t.clamp(0.0, 1.0);
-
-        CgaPoint::new(self.start.x + t * dx, self.start.y + t * dy)
+        Self::project(start, end, query).map_or_else(CgaPoint::origin, |projected| {
+            CgaPoint::new(projected.x * scale, projected.y * scale)
+        })
     }
 
     /// Distance from a point to this line segment.
+    ///
+    /// May be infinite when the two are genuinely further apart than `f64` can express, but
+    /// no longer reports infinity merely because the segment is long.
     #[must_use]
     pub fn distance_to_point(&self, point: &CgaPoint) -> f64 {
         if !self.start.is_finite() || !self.end.is_finite() || !point.is_finite() {
-            return f64::INFINITY;
-        }
-
-        let dx = self.end.x - self.start.x;
-        let dy = self.end.y - self.start.y;
-        if !(dx * dx + dy * dy).is_finite() {
             return f64::INFINITY;
         }
 
@@ -1977,16 +2018,40 @@ mod geometry_tests {
         );
         assert!(invalid.distance_to_point(&CgaPoint::origin()).is_infinite());
 
+        // A segment long enough to overflow a squared length is NOT a non-finite input, and it
+        // is no longer treated as one (bd-34yo). Both endpoints and the query are finite, and
+        // the query lies exactly ON this segment, so the honest answers are the point itself
+        // and a distance of zero. Reporting the origin sentinel and an infinite distance --
+        // the same values this test demands for genuinely malformed input above -- made a
+        // correct answer indistinguishable from a rejection.
         let overflowing =
             CgaLineSegment::new(CgaPoint::new(-f64::MAX, 0.0), CgaPoint::new(f64::MAX, 0.0));
+        assert!(overflowing.start.is_finite() && overflowing.end.is_finite());
         assert_eq!(
             overflowing.closest_point(&CgaPoint::new(0.0, 0.0)),
             CgaPoint::origin()
         );
+        assert_eq!(overflowing.distance_to_point(&CgaPoint::new(0.0, 0.0)), 0.0);
+
+        // ...and an off-segment query against the same long segment projects onto it rather
+        // than collapsing, which is what distinguishes a real projection from the sentinel.
+        //
+        // The answer is BOUNDED, not pinned, and deliberately so: the exact projection of
+        // (1.0, 7.0) is (1.0, 0.0) at distance 7.0, but one ULP at ±f64::MAX is about 2e292,
+        // so an offset of 1.0 along a segment of length 3.6e308 is far below the resolution of
+        // its own endpoints. The projection lands on (0.0, 0.0) and the distance comes back as
+        // sqrt(50). That is the representable limit of the input, not slack in the algorithm —
+        // demanding 7.0 here would be demanding precision f64 cannot carry. What must hold is
+        // that the result is finite, lies on the segment, and is close to the true distance
+        // instead of the infinity this case used to report.
+        let query = CgaPoint::new(1.0, 7.0);
+        let off_segment = overflowing.closest_point(&query);
+        assert!(off_segment.is_finite());
+        assert!((off_segment.y - 0.0).abs() < 1e-10);
+        let off_distance = overflowing.distance_to_point(&query);
         assert!(
-            overflowing
-                .distance_to_point(&CgaPoint::new(0.0, 0.0))
-                .is_infinite()
+            off_distance.is_finite() && (7.0..8.0).contains(&off_distance),
+            "expected a real distance near 7.0, got {off_distance}"
         );
     }
 
@@ -2253,16 +2318,22 @@ mod geometry_tests {
             "a valid extreme rect must still return a real boundary point, got {extreme_hit:?}"
         );
 
-        // Documented boundary of that guarantee, pinned rather than left silent: once an edge is
-        // long enough that its SQUARED length overflows, `CgaLineSegment::closest_point` fails
-        // closed, so the rect degrades to the origin even though `is_valid` still accepts it.
-        // `is_valid` checks `x + width` for overflow but not `width * width`, so the two
-        // disagree on this band. Tracked as bd-34yo; asserted here so a change is not silent.
+        // bd-34yo, RESOLVED: a rect whose edges are long enough to overflow a squared length
+        // used to degrade to the origin sentinel even though `is_valid` accepted it, so callers
+        // could not tell "no answer" from "the answer is (0,0)". `closest_point` now retries the
+        // projection in an exactly-scaled frame, so the whole is_valid-accepted domain returns a
+        // real boundary point. This assertion previously pinned the origin; it is flipped
+        // deliberately because the guarded behaviour was the defect, not the contract.
         let overflowing_extent = CgaRect::new(0.0, 0.0, f64::MAX, f64::MAX);
         assert!(overflowing_extent.is_valid());
-        assert_point_bits_eq(
-            overflowing_extent.closest_boundary_point(&CgaPoint::new(1.0, 2.0)),
-            CgaPoint::origin(),
+        let overflowing_hit = overflowing_extent.closest_boundary_point(&CgaPoint::new(1.0, 2.0));
+        assert!(
+            overflowing_hit.is_finite()
+                && overflowing_hit.x >= 0.0
+                && overflowing_hit.x <= f64::MAX
+                && overflowing_hit.y >= 0.0
+                && overflowing_hit.y <= f64::MAX,
+            "an is_valid rect must yield a real boundary point, got {overflowing_hit:?}"
         );
 
         // Degenerate but VALID: -0.0 extents satisfy `>= 0.0`, so this takes the real path.
@@ -2299,6 +2370,67 @@ mod geometry_tests {
             assert_point_bits_eq(
                 rect.closest_boundary_point(&point),
                 closest_boundary_reference(&rect, &point),
+            );
+        }
+    }
+
+    /// `CgaLineSegment::closest_point` documents that callers never receive a non-finite
+    /// projected point. Finite inputs must therefore always yield a finite result — the
+    /// projection may be inexact at the edge of the representable range, but it may never be
+    /// NaN or infinite, and it must lie on the segment's own bounding box.
+    #[test]
+    fn segment_closest_point_is_finite_for_all_finite_inputs() {
+        let cases = [
+            // Short vertical segment at the far negative edge, queried from the far positive
+            // edge: `point.x - start.x` overflows to +inf while dx is exactly 0.0, so the
+            // numerator forms inf * 0.0 = NaN.
+            (
+                CgaLineSegment::new(
+                    CgaPoint::new(-f64::MAX, 0.0),
+                    CgaPoint::new(-f64::MAX, 1.0),
+                ),
+                CgaPoint::new(f64::MAX, 0.5),
+            ),
+            // Same shape with the axes swapped: dy is 0.0 and the y difference overflows.
+            (
+                CgaLineSegment::new(
+                    CgaPoint::new(0.0, -f64::MAX),
+                    CgaPoint::new(1.0, -f64::MAX),
+                ),
+                CgaPoint::new(0.5, f64::MAX),
+            ),
+            // Segment whose squared length overflows even though every endpoint is finite.
+            (
+                CgaLineSegment::new(CgaPoint::new(0.0, 0.0), CgaPoint::new(f64::MAX, f64::MAX)),
+                CgaPoint::new(1.0, 2.0),
+            ),
+            // Endpoint difference itself overflows.
+            (
+                CgaLineSegment::new(CgaPoint::new(-f64::MAX, 0.0), CgaPoint::new(f64::MAX, 0.0)),
+                CgaPoint::new(0.0, 1.0),
+            ),
+        ];
+
+        for (segment, point) in cases {
+            assert!(segment.start.is_finite() && segment.end.is_finite() && point.is_finite());
+            let got = segment.closest_point(&point);
+            assert!(
+                got.is_finite(),
+                "closest_point({segment:?}, {point:?}) returned non-finite {got:?}"
+            );
+            // A projection must land within the segment's bounding box, which also rules out
+            // the origin sentinel being returned for a perfectly well-formed segment.
+            let (lo_x, hi_x) = (
+                segment.start.x.min(segment.end.x),
+                segment.start.x.max(segment.end.x),
+            );
+            let (lo_y, hi_y) = (
+                segment.start.y.min(segment.end.y),
+                segment.start.y.max(segment.end.y),
+            );
+            assert!(
+                got.x >= lo_x && got.x <= hi_x && got.y >= lo_y && got.y <= hi_y,
+                "closest_point({segment:?}, {point:?}) returned {got:?}, outside the segment box"
             );
         }
     }
