@@ -3887,8 +3887,15 @@ itself.
   and the total barely moves. Two proofs it measures nothing here: re-running those arms gave
   `−0.054%` by that metric while per-iteration wall differed by 2.4–4.3%; and the same command on
   the same code produced totals of ~331M and ~3,038M on two occasions — a 9× swing driven by
-  machine conditions. Any repo result evidenced as "callgrind total Ir under `--profile-time`" is
-  suspect for the same reason.
+  machine conditions.
+- **Blast radius audited, and it is one claim: this one.** Grepping both ledgers for `callgrind`
+  finds only this row plus two NEGATIVE_EVIDENCE lines that merely *suggest* callgrind as a future
+  tool; no other repo result is derived from it. The five other `--profile-time` uses in
+  NEGATIVE_EVIDENCE are perf SAMPLING for attribution — self-time percentages and sample counts —
+  which is a legitimate use, because relative self-time does not depend on how many iterations ran.
+  The defect is specific to comparing callgrind TOTAL Ir across arms. An earlier note of mine
+  warned that "any repo result" evidenced this way was suspect; that was over-broad and is
+  corrected here, since a warning that makes lanes re-derive sound results has its own cost.
 - **Wall is larger than instructions, and that is expected.** Criterion per-iteration, two
   counterbalanced passes: `149.18 → 145.63 µs` (−2.38%) and `151.83 → 145.31 µs` (−4.29%, CIs
   disjoint). The removed walk is `memcmp` over node-id and membership strings, so deleting it buys
