@@ -69,6 +69,13 @@ harness = false
 name = "crossing_minimization"
 harness = false
 
+# Settles bd-9mqa / bd-2q3f.4 with a number: CGA rotor composition versus direct 2D affine
+# matrices. Benches fm-core's `cga` module from here because fm-core has no bench harness, and
+# adding one would fork this crate's ELF self-report helper.
+[[bench]]
+name = "cga_transforms"
+harness = false
+
 # Same-binary A/B for the barycenter sweep (bd-9w78). The hand-rolled paired sampler alternates
 # both arms within each sample; sequential Criterion group members would not cancel drift.
 # A/A null-control calibration sweep. Separate file, separate owner (cc_fm) from barycenter_sweep.
