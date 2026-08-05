@@ -3845,3 +3845,61 @@ while exact content matching remains a collision-free fallback.
   fallback, cache capacity/eviction, input reconstruction, shared-output ownership, 64-diagram
   fixture, pinned incumbent, executing ELF, integration floor, affinity, structural-equivalence
   certificate, or median-CI gate changes.
+
+## MAINTENANCE SELF-SPEEDUP (KEEP): fuse the topology verdict into the edit walk — `single_node_label_edit/incremental/1000` −0.610% instructions/edit (2026-08-05)
+
+**Bead:** `bd-9rq7`. **Lane:** cc (`PeachGorge`). **Commit:** `83a94342`.
+**Campaign result class:** maintenance-self-speedup
+
+⚠️ **INTRA-REPO INSTRUCTION COUNT. NOT a head-to-head against mermaid-js.** This compares two
+frankenmermaid builds of the same bench and says nothing about the incumbent. It may justify
+keeping the change; it must never be quoted as a competitive ratio.
+
+- **The lever.** `dirty_node_indexes_for_edits` called `derive_layout_edits` and then
+  `dependency_topology_equal` back to back over the SAME IR pair (`lib.rs:1496/1501`). The second
+  walk re-compared the very node ids and `Vec<String>` subgraph membership the first had just
+  compared, plus edge endpoints and subgraph id/parent/members — a full second pass of string
+  equality for a verdict that is a strict subset of what the edit walk already decides. Topology
+  ignores labels, titles, arrows, directions and spans; those are the only fields the edit walk
+  reads that topology does not. `derive_layout_diff` now returns both from one walk.
+
+**Counted mechanism:** instructions, callgrind, fixed-iteration harness (`FM_FIXED_ITERS=200`,
+`bd-3m9p`), per-edit = total Ir / N with N pinned by the caller and printed by the process.
+baseline `15,422,061.6` Ir/edit; candidate `15,328,041.3` Ir/edit; ratio `0.993904`;
+**−0.610%**, `94,020.2` instructions removed per edit.
+
+**A/A null control (same invocation):** harness determinism check — the same ELF measured twice
+returns byte-identical Ir. baseline `3,084,412,314` twice, candidate `3,065,608,265` twice; both
+null ratios exactly `1.000000000`. Callgrind is simulated, so this is an exact identity check
+rather than a statistical one; a non-exact result would mean the harness is nondeterministic and
+these numbers void.
+
+**Executing ELF SHA-256 (self-reported by process):**
+baseline `95f5e41bdbc41fd57f2ec833c43859b91dac622da63e17b6b9c81214bd697bdc`;
+candidate `fa08389b6ad32621b71d41d4be110da729edecbdb9a8be624a00c299ee3572f9`.
+Read from each bench's own `bench_elf_sha256=` line (`bd-x3zl`), i.e. computed by the measured
+process from `/proc/self/exe`. The two digests differ, so this is not a build compared against
+itself.
+
+- **Corrected figure.** An earlier claim of **−4.074%** for this same lever is **RETRACTED**. It was
+  callgrind TOTAL Ir under `criterion --profile-time 1`, which runs a fixed WALL window; under
+  callgrind, wall time is dominated by simulation cost, so a cheaper arm completes more iterations
+  and the total barely moves. Two proofs it measures nothing here: re-running those arms gave
+  `−0.054%` by that metric while per-iteration wall differed by 2.4–4.3%; and the same command on
+  the same code produced totals of ~331M and ~3,038M on two occasions — a 9× swing driven by
+  machine conditions. Any repo result evidenced as "callgrind total Ir under `--profile-time`" is
+  suspect for the same reason.
+- **Wall is larger than instructions, and that is expected.** Criterion per-iteration, two
+  counterbalanced passes: `149.18 → 145.63 µs` (−2.38%) and `151.83 → 145.31 µs` (−4.29%, CIs
+  disjoint). The removed walk is `memcmp` over node-id and membership strings, so deleting it buys
+  more in memory traffic than in instruction count. Instructions are blind to cache; both numbers
+  are reported rather than the flattering one.
+- **Correctness.** Byte-identical edit output. `fused_topology_flag_matches_standalone_dependency_topology_equal`
+  runs six shapes through BOTH implementations and asserts they agree, then pins the direction of
+  the label-only case — an edit with UNCHANGED topology, which is what a naive "topology changed
+  iff edits exist" version gets wrong.
+
+**Retry predicate:** re-measure if `derive_layout_diff`, `dependency_topology_equal`, or
+`dirty_node_indexes_for_edits` changes; if the incremental fast paths ahead of them change which
+walk runs; or if the fixed-iteration harness or its A/A identity check changes. A retry is
+admissible only with the harness A/A at exactly 1.000000000 and distinct self-reported ELFs.
