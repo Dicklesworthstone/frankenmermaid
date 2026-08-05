@@ -99,9 +99,17 @@ impl Viewport {
     /// Get the transform matrix for this viewport.
     #[must_use]
     pub fn transform(&self) -> ViewportTransform {
+        // Translation FIRST. `push_rotor` composes as `composed = composed * rotor`, so the first
+        // push ends up leftmost, and `Rotor::to_affine_matrix` decomposes the canonical
+        // `M = T * S * R` — the same order the `TransformStack` doc example pushes in.
+        //
+        // Pushing scale first instead built `S * T`, which that decomposition cannot read back:
+        // it recovered the offset without the zoom, so `transform()` mapped (25, 40) to
+        // (100, 105) where `diagram_to_canvas` gives (150, 130). This is the diagram-to-canvas
+        // mapping, `zoom * p + offset`, so the offset must be applied AFTER the zoom.
         let mut transforms = TransformStack::new();
-        transforms.push_scale(self.zoom);
         transforms.push_translation(self.offset_x, self.offset_y);
+        transforms.push_scale(self.zoom);
         let affine = transforms.to_affine_matrix();
         ViewportTransform {
             a: affine.a,
@@ -278,7 +286,21 @@ mod tests {
 
         let via_viewport = vp.diagram_to_canvas(25.0, 40.0);
         let via_transform = vp.transform().apply(25.0, 40.0);
-        assert_eq!(via_transform, via_viewport);
+
+        // Compared within a tolerance rather than bit-for-bit. `transform()` composes rotors and
+        // recovers a matrix through a 16-component geometric product, so it cannot reproduce
+        // `diagram_to_canvas`'s two multiply-adds exactly — the residual here is a few ULP
+        // (149.99999999999997 against 150.0). Demanding `assert_eq!` specified something the
+        // rotor path cannot deliver; see the measured contract on bd-9mqa.
+        //
+        // 1e-9 is still four orders of magnitude tighter than any pixel could care about, and it
+        // does NOT blunt this test: the ordering defect it caught (bd-qift) was off by 50.0 and
+        // 20.0, so it would fail here by ten orders of magnitude.
+        assert!(
+            (via_transform.0 - via_viewport.0).abs() < 1e-9
+                && (via_transform.1 - via_viewport.1).abs() < 1e-9,
+            "rotor transform {via_transform:?} disagrees with direct mapping {via_viewport:?}"
+        );
     }
 
     #[test]
