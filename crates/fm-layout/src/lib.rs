@@ -8991,9 +8991,24 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
             let from_center = nodes[from_idx].bounds.center();
             let to_center = nodes[to_idx].bounds.center();
 
-            // Clip to node boundaries.
-            let from_pt = clip_to_rect_border(from_center, to_center, &nodes[from_idx].bounds);
-            let to_pt = clip_to_rect_border(to_center, from_center, &nodes[to_idx].bounds);
+            // Clip to the DRAWN outline, not the bounding box: a diagonal approach to a circle or
+            // diamond otherwise stops short of the shape and the arrowhead floats.
+            let from_shape = ir
+                .nodes
+                .get(from_idx)
+                .map_or(fm_core::NodeShape::Rect, |node| node.shape);
+            let to_shape = ir
+                .nodes
+                .get(to_idx)
+                .map_or(fm_core::NodeShape::Rect, |node| node.shape);
+            let from_pt = clip_to_shape_border(
+                from_center,
+                to_center,
+                &nodes[from_idx].bounds,
+                from_shape,
+            );
+            let to_pt =
+                clip_to_shape_border(to_center, from_center, &nodes[to_idx].bounds, to_shape);
 
             Some(LayoutEdgePath {
                 edge_index: ei,
@@ -9010,7 +9025,23 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
 }
 
 /// Clip a line from `from` toward `to` to the border of `rect`.
-fn clip_to_rect_border(from: LayoutPoint, to: LayoutPoint, rect: &LayoutRect) -> LayoutPoint {
+/// Clip a ray from a node's centre to the node's DRAWN outline.
+///
+/// The bounding box is only the right answer for box-like shapes. A circle or diamond is
+/// inscribed in its bounds and touches them at just the four side midpoints, so clipping a
+/// diagonal approach to the rectangle leaves the endpoint floating outside the drawn shape — by up
+/// to a factor of sqrt(2) for a circle, which reads as an arrowhead detached from its node.
+///
+/// Only the force-directed path needs this. `edge_anchors`, used by the Sugiyama route, attaches
+/// at side midpoints, which is exactly where an inscribed circle or diamond meets its box.
+fn clip_to_shape_border(
+    from: LayoutPoint,
+    to: LayoutPoint,
+    rect: &LayoutRect,
+    shape: fm_core::NodeShape,
+) -> LayoutPoint {
+    use fm_core::NodeShape;
+
     let cx = rect.x + rect.width / 2.0;
     let cy = rect.y + rect.height / 2.0;
     let dx = to.x - from.x;
@@ -9023,18 +9054,44 @@ fn clip_to_rect_border(from: LayoutPoint, to: LayoutPoint, rect: &LayoutRect) ->
     let half_w = rect.width / 2.0;
     let half_h = rect.height / 2.0;
 
-    // Find intersection with rect border along direction (dx, dy) from center.
-    let tx = if dx.abs() > f32::EPSILON {
-        half_w / dx.abs()
-    } else {
-        f32::MAX
+    // Parameter along (dx, dy) at which the ray leaves the shape, measured from the centre.
+    let t = match shape {
+        // Inscribed ellipse: |(t*dx/half_w, t*dy/half_h)| = 1.
+        NodeShape::Circle | NodeShape::FilledCircle | NodeShape::DoubleCircle => {
+            let nx = dx / half_w.max(f32::EPSILON);
+            let ny = dy / half_h.max(f32::EPSILON);
+            let norm = nx.hypot(ny);
+            if norm < f32::EPSILON {
+                return from;
+            }
+            1.0 / norm
+        }
+        // Inscribed rhombus: |x|/half_w + |y|/half_h = 1.
+        NodeShape::Diamond => {
+            let denominator =
+                dx.abs() / half_w.max(f32::EPSILON) + dy.abs() / half_h.max(f32::EPSILON);
+            if denominator < f32::EPSILON {
+                return from;
+            }
+            1.0 / denominator
+        }
+        // Everything else keeps the box clip. Stadium/hexagon/trapezoid and friends differ from
+        // their box only near the corners, and guessing an outline per shape would risk moving
+        // endpoints for shapes nobody has reported wrong.
+        _ => {
+            let tx = if dx.abs() > f32::EPSILON {
+                half_w / dx.abs()
+            } else {
+                f32::MAX
+            };
+            let ty = if dy.abs() > f32::EPSILON {
+                half_h / dy.abs()
+            } else {
+                f32::MAX
+            };
+            tx.min(ty)
+        }
     };
-    let ty = if dy.abs() > f32::EPSILON {
-        half_h / dy.abs()
-    } else {
-        f32::MAX
-    };
-    let t = tx.min(ty);
 
     LayoutPoint {
         x: dx.mul_add(t, cx),
@@ -15465,6 +15522,72 @@ mod tests {
             ir.nodes[index].label = Some(IrLabelId(index));
         }
         ir
+    }
+
+    /// Force-directed edges must stop on the node's drawn OUTLINE, not on its bounding box.
+    ///
+    /// A circle is inscribed in its bounds and touches them only at the four side midpoints, so a
+    /// diagonally-arriving edge clipped to the rectangle lands as much as (sqrt(2)-1) of the
+    /// radius outside the drawn shape — a visible gap between arrowhead and node. The main
+    /// Sugiyama path is immune because `edge_anchors` attaches at side midpoints, which is exactly
+    /// where an inscribed circle or diamond meets its box; the force path clips along an arbitrary
+    /// direction and has no such guarantee.
+    ///
+    /// Asserted as a distance from the node centre rather than as fixed coordinates, so the test
+    /// states the geometric property instead of pinning whatever the current formula emits.
+    #[test]
+    fn force_edges_stop_on_round_node_outlines_not_the_bounding_box() {
+        let bounds = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            width: 80.0,
+            height: 80.0,
+        };
+        let centre = bounds.center();
+
+        // A DIAGONAL approach is the whole point. An end-to-end force layout of two nodes settles
+        // them roughly axis-aligned, where clipping to the box happens to land on a side midpoint
+        // and the bug cannot appear — a test built that way passes without exercising anything.
+        let approach = LayoutPoint {
+            x: centre.x + 100.0,
+            y: centre.y + 100.0,
+        };
+
+        let endpoint =
+            crate::clip_to_shape_border(centre, approach, &bounds, fm_core::NodeShape::Circle);
+
+        let half_w = bounds.width / 2.0;
+        let half_h = bounds.height / 2.0;
+        let normalised =
+            ((endpoint.x - centre.x) / half_w).hypot((endpoint.y - centre.y) / half_h);
+        assert!(
+            (normalised - 1.0).abs() < 1e-3,
+            "edge endpoint {endpoint:?} sits at {normalised:.4}x the inscribed radius; 1.0 is the \
+             drawn outline, and clipping to the bounding box gives sqrt(2) here"
+        );
+
+        // Negative control: the RECT shape must still clip to the box, so this test cannot be
+        // satisfied by making every shape round.
+        let rect_endpoint =
+            crate::clip_to_shape_border(centre, approach, &bounds, fm_core::NodeShape::Rect);
+        assert!(
+            (rect_endpoint.x - (bounds.x + bounds.width)).abs() < 1e-3
+                && (rect_endpoint.y - (bounds.y + bounds.height)).abs() < 1e-3,
+            "a rectangle must still clip to its corner, got {rect_endpoint:?}"
+        );
+
+        // Axis-aligned approaches agree for both shapes — this is why the Sugiyama path, which
+        // anchors at side midpoints, was never affected.
+        let side_on = LayoutPoint {
+            x: centre.x + 100.0,
+            y: centre.y,
+        };
+        let round_side =
+            crate::clip_to_shape_border(centre, side_on, &bounds, fm_core::NodeShape::Circle);
+        let rect_side =
+            crate::clip_to_shape_border(centre, side_on, &bounds, fm_core::NodeShape::Rect);
+        assert!((round_side.x - rect_side.x).abs() < 1e-3);
+        assert!((round_side.y - rect_side.y).abs() < 1e-3);
     }
 
     fn toggle_edge(ir: &mut MermaidDiagramIr, from: usize, to: usize) {
