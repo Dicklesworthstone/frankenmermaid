@@ -11,6 +11,11 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// Shared with `harness_calibration`; benches are separate binaries with no common crate module,
+// so the helper is included by path rather than copied into each one.
+#[path = "bench_identity.rs"]
+mod bench_identity;
+
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fm_core::{
     ArrowType, DiagramType, GraphDirection, IrEdge, IrEndpoint, IrGraphEdge, IrGraphNode, IrLabel,
@@ -115,6 +120,7 @@ fn bench_ir(nodes_per_subgraph: usize) -> MermaidDiagramIr {
 }
 
 fn bench_single_node_label_edit(c: &mut Criterion) {
+    bench_identity::report_self_identity();
     let mut group = c.benchmark_group("single_node_label_edit");
 
     for nodes_per_subgraph in [50, 100, 250, 500] {
@@ -182,6 +188,7 @@ fn bench_single_node_label_edit(c: &mut Criterion) {
 }
 
 fn bench_five_node_cluster_edit(c: &mut Criterion) {
+    bench_identity::report_self_identity();
     let mut group = c.benchmark_group("five_node_cluster_edit");
 
     for nodes_per_subgraph in [50, 100, 250, 500] {
@@ -252,6 +259,7 @@ fn bench_five_node_cluster_edit(c: &mut Criterion) {
 }
 
 fn bench_bypass_small_graph(c: &mut Criterion) {
+    bench_identity::report_self_identity();
     let mut group = c.benchmark_group("small_graph_bypass");
 
     // Small graphs (< 50 nodes) should bypass incremental and use full recompute.

@@ -47,33 +47,16 @@
 //! 2 ms and hurt at 10/40 ms, which is incoherent as a configuration effect.) Each round measures **every**
 //! configuration once, with a rotating start.
 
+// Shared with `incremental_layout`; benches are separate binaries with no common crate module,
+// so the helper is included by path rather than copied into each one.
+#[path = "bench_identity.rs"]
+mod bench_identity;
+
 use fm_core::{ArrowType, DiagramType, IrEdge, IrEndpoint, IrNode, IrNodeId, MermaidDiagramIr};
 use fm_layout::{LayoutConfig, bench_internals};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
-
-/// SHA-256 of this executable, reported from inside the measured process. A hash computed by a shell step
-/// next to the run proves nothing about which ELF actually executed.
-fn self_identity() -> String {
-    use std::fmt::Write as _;
-
-    let Ok(path) = std::env::current_exe() else {
-        return "unavailable".to_string();
-    };
-    let Ok(bytes) = std::fs::read(&path) else {
-        return "unavailable".to_string();
-    };
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    let digest = hasher.finalize();
-    let mut sha256 = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        write!(sha256, "{byte:02x}").expect("writing to String cannot fail");
-    }
-    format!("{sha256} ({} bytes)", bytes.len())
-}
 
 /// Exact port of `scripts/headtohead/corpus.mjs::cyclic`: rings of `ring` nodes, each fully cyclic, with
 /// forward links to the next ring. 100 nodes / 195 edges, and it routes to Sugiyama.
@@ -246,7 +229,7 @@ fn main() {
     const MIN_SAMPLES_MS: [u64; 3] = [2, 10, 40];
     const MIN_OFS: [u32; 2] = [1, 3];
 
-    println!("bench_elf_sha256={}", self_identity());
+    bench_identity::report_self_identity();
     println!("workload=cyclic_scc_100 (100 nodes / 195 edges, Sugiyama)");
     println!(
         "A/A NULL CONTROL: the same arm on both sides, so every deviation is the harness, not a lever."
