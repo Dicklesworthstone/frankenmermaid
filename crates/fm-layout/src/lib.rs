@@ -5231,7 +5231,13 @@ pub fn try_relayout_directed_path_suffix(
         else {
             return false;
         };
-        let (source_anchor, target_anchor) = edge_anchors(source_box, target_box, true);
+        let (source_anchor, target_anchor) = edge_anchors(
+            source_box,
+            target_box,
+            true,
+            node_shape_at(ir, source_box),
+            node_shape_at(ir, target_box),
+        );
         let points =
             route_edge_points_with_obstacle_index(source_anchor, target_anchor, true, &[], None);
         layout.edges.push(LayoutEdgePath {
@@ -13370,8 +13376,14 @@ fn build_directed_path_edge_paths_unchecked(
     for (edge_index, edge) in ir.edges.iter().enumerate() {
         let source = endpoint_node_index(ir, edge.from)?;
         let target = endpoint_node_index(ir, edge.to)?;
-        let (source_anchor, target_anchor) =
-            edge_anchors(nodes.get(source)?, nodes.get(target)?, horizontal_ranks);
+        let (source_box, target_box) = (nodes.get(source)?, nodes.get(target)?);
+        let (source_anchor, target_anchor) = edge_anchors(
+            source_box,
+            target_box,
+            horizontal_ranks,
+            node_shape_at(ir, source_box),
+            node_shape_at(ir, target_box),
+        );
         let points = match edge_routing {
             EdgeRouting::Orthogonal => route_edge_points_with_obstacle_index(
                 source_anchor,
@@ -13524,8 +13536,13 @@ fn build_edge_paths_with_orientation(
             let points = if is_self_loop {
                 route_self_loop(source_box, horizontal_ranks)
             } else {
-                let (source_anchor, target_anchor) =
-                    edge_anchors(source_box, target_box, horizontal_ranks);
+                let (source_anchor, target_anchor) = edge_anchors(
+                    source_box,
+                    target_box,
+                    horizontal_ranks,
+                    node_shape_at(ir, source_box),
+                    node_shape_at(ir, target_box),
+                );
                 // Exclude this edge's own endpoints from the shared obstacle set by
                 // parking them far away (the router's AABB reject drops them), then
                 // restore. Far enough that no realistic segment bbox can overlap.
@@ -13950,24 +13967,42 @@ impl ObstacleSpatialIndex {
     }
 }
 
+/// Shape of the IR node a laid-out box came from, defaulting to a rectangle when the box has no
+/// matching IR node (synthetic boxes exist for routing).
+fn node_shape_at(ir: &MermaidDiagramIr, node_box: &LayoutNodeBox) -> fm_core::NodeShape {
+    ir.nodes
+        .get(node_box.node_index)
+        .map_or(fm_core::NodeShape::Rect, |node| node.shape)
+}
+
 fn edge_anchors(
     source_box: &LayoutNodeBox,
     target_box: &LayoutNodeBox,
     horizontal_ranks: bool,
+    source_shape: fm_core::NodeShape,
+    target_shape: fm_core::NodeShape,
 ) -> (LayoutPoint, LayoutPoint) {
     let source_center = source_box.bounds.center();
     let target_center = target_box.bounds.center();
 
     if horizontal_ranks {
+        // Slanted shapes pull away from their box between the horizontal edges, so the side
+        // midpoint is not on the drawn outline. Anchoring at the box there leaves the arrowhead
+        // floating beside the node — a triangle is a quarter of its own width adrift.
+        let source_inset =
+            source_box.bounds.width * source_shape.horizontal_outline_inset_ratio();
+        let target_inset =
+            target_box.bounds.width * target_shape.horizontal_outline_inset_ratio();
+
         let (source_x, target_x) = if target_center.x >= source_center.x {
             (
-                source_box.bounds.x + source_box.bounds.width,
-                target_box.bounds.x,
+                source_box.bounds.x + source_box.bounds.width - source_inset,
+                target_box.bounds.x + target_inset,
             )
         } else {
             (
-                source_box.bounds.x,
-                target_box.bounds.x + target_box.bounds.width,
+                source_box.bounds.x + source_inset,
+                target_box.bounds.x + target_box.bounds.width - target_inset,
             )
         };
         (
@@ -15535,6 +15570,92 @@ mod tests {
     ///
     /// Asserted as a distance from the node centre rather than as fixed coordinates, so the test
     /// states the geometric property instead of pinning whatever the current formula emits.
+    /// Horizontal edge anchors must sit on the DRAWN outline, which for slanted shapes is inside
+    /// the bounding box (bd-7c9c).
+    ///
+    /// A triangle is drawn apex-top over a full-width base, so at mid-height it spans only the
+    /// middle half of its box: anchoring at the box side leaves the arrowhead a quarter of the
+    /// node's width out in empty space. Trapezoids and parallelograms slant by
+    /// SLANTED_SHAPE_INSET_RATIO across their full height, so half of that is gone by mid-height.
+    #[test]
+    fn horizontal_anchors_follow_slanted_shape_outlines() {
+        fn boxes() -> (LayoutNodeBox, LayoutNodeBox) {
+            let make = |index: usize, x: f32| LayoutNodeBox {
+                node_index: index,
+                node_id: format!("N{index}"),
+                rank: 0,
+                order: index,
+                span: Span::default(),
+                bounds: LayoutRect {
+                    x,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 60.0,
+                },
+            };
+            (make(0, 0.0), make(1, 400.0))
+        }
+
+        let (source, target) = boxes();
+
+        // Triangle: a quarter of the width in on each side.
+        let (from, to) = crate::edge_anchors(
+            &source,
+            &target,
+            true,
+            fm_core::NodeShape::Triangle,
+            fm_core::NodeShape::Triangle,
+        );
+        assert!(
+            (from.x - 75.0).abs() < 1e-3,
+            "triangle source anchor should be at 75.0 (box right 100.0 minus a quarter width), got {from:?}"
+        );
+        assert!(
+            (to.x - 425.0).abs() < 1e-3,
+            "triangle target anchor should be at 425.0 (box left 400.0 plus a quarter width), got {to:?}"
+        );
+
+        // Parallelogram: half the 0.15 slant, so 7.5 units on a 100-wide node.
+        let (from, to) = crate::edge_anchors(
+            &source,
+            &target,
+            true,
+            fm_core::NodeShape::Parallelogram,
+            fm_core::NodeShape::Trapezoid,
+        );
+        assert!((from.x - 92.5).abs() < 1e-3, "got {from:?}");
+        assert!((to.x - 407.5).abs() < 1e-3, "got {to:?}");
+
+        // NEGATIVE CONTROLS. These shapes already touched their box at the side midpoints, so this
+        // change must not move them at all — that is what makes it targeted rather than a global
+        // shift, and a wrong inset table would break these first.
+        for shape in [
+            fm_core::NodeShape::Rect,
+            fm_core::NodeShape::Rounded,
+            fm_core::NodeShape::Circle,
+            fm_core::NodeShape::Diamond,
+            fm_core::NodeShape::Hexagon,
+            fm_core::NodeShape::Stadium,
+        ] {
+            let (from, to) = crate::edge_anchors(&source, &target, true, shape, shape);
+            assert!(
+                (from.x - 100.0).abs() < 1e-3 && (to.x - 400.0).abs() < 1e-3,
+                "{shape:?} must still anchor on the box, got {from:?} -> {to:?}"
+            );
+        }
+
+        // Vertical anchors are unchanged for every shape: a triangle's apex is at top-centre and
+        // its base spans the full width, so top/bottom midpoints were always on the outline.
+        let (from, to) = crate::edge_anchors(
+            &source,
+            &target,
+            false,
+            fm_core::NodeShape::Triangle,
+            fm_core::NodeShape::Triangle,
+        );
+        assert!((from.y - 60.0).abs() < 1e-3 && (to.y - 0.0).abs() < 1e-3, "got {from:?} -> {to:?}");
+    }
+
     #[test]
     fn force_edges_stop_on_round_node_outlines_not_the_bounding_box() {
         let bounds = LayoutRect {

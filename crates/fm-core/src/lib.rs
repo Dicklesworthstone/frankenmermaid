@@ -1065,6 +1065,42 @@ pub enum NodeShape {
     CrossedCircle,
 }
 
+/// Fraction of a node's width that slanted shapes inset their horizontal edges by.
+///
+/// The renderers draw trapezoids and parallelograms with this slant. It lives here, next to
+/// [`NodeShape`], because layout must agree with what is actually drawn — an edge anchored to
+/// geometry the renderer does not use is an edge that misses its node.
+pub const SLANTED_SHAPE_INSET_RATIO: f32 = 0.15;
+
+impl NodeShape {
+    /// How far in from the bounding box's left and right sides the DRAWN outline sits at
+    /// mid-height, as a fraction of the node's width.
+    ///
+    /// Zero means the outline reaches the box there, which is the case for every box-like shape
+    /// and also for circles, diamonds and hexagons — all of which touch their bounds at the side
+    /// midpoints. It is NOT zero for shapes whose sides slant away from the box, and anchoring an
+    /// edge at the box side for those leaves the arrowhead floating in empty space.
+    ///
+    /// Only the horizontal direction is reported. The vertical midpoints are on the outline for
+    /// all of these shapes — a triangle's apex is at top-centre and its base spans the full
+    /// width — so top/bottom anchors need no adjustment.
+    #[must_use]
+    pub fn horizontal_outline_inset_ratio(self) -> f32 {
+        match self {
+            // Apex at top-centre over a full-width base: at mid-height the triangle spans only
+            // the middle half of its box, so each side is a quarter of the width in.
+            Self::Triangle => 0.25,
+            // One horizontal edge is inset by `SLANTED_SHAPE_INSET_RATIO` and the other is not,
+            // so the slanted side has travelled half that distance by mid-height.
+            Self::Trapezoid
+            | Self::InvTrapezoid
+            | Self::Parallelogram
+            | Self::InvParallelogram => SLANTED_SHAPE_INSET_RATIO / 2.0,
+            _ => 0.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub enum ArrowType {
     #[default]
