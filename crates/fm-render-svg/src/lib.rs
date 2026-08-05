@@ -7557,7 +7557,7 @@ fn write_common_node_fragment_into<const A11Y: bool>(
             write_cylinder_shape_into(f, x, y, w, h, special_fill);
         }
         fm_core::NodeShape::Trapezoid => {
-            let inset = w * 0.15;
+            let inset = w * fm_core::SLANTED_SHAPE_INSET_RATIO;
             write_polygon_shape_into(
                 f,
                 &[
@@ -7570,7 +7570,7 @@ fn write_common_node_fragment_into<const A11Y: bool>(
             );
         }
         fm_core::NodeShape::InvTrapezoid => {
-            let inset = w * 0.15;
+            let inset = w * fm_core::SLANTED_SHAPE_INSET_RATIO;
             write_polygon_shape_into(
                 f,
                 &[
@@ -7583,7 +7583,7 @@ fn write_common_node_fragment_into<const A11Y: bool>(
             );
         }
         fm_core::NodeShape::Parallelogram => {
-            let inset = w * 0.15;
+            let inset = w * fm_core::SLANTED_SHAPE_INSET_RATIO;
             write_polygon_shape_into(
                 f,
                 &[
@@ -7596,7 +7596,7 @@ fn write_common_node_fragment_into<const A11Y: bool>(
             );
         }
         fm_core::NodeShape::InvParallelogram => {
-            let inset = w * 0.15;
+            let inset = w * fm_core::SLANTED_SHAPE_INSET_RATIO;
             write_polygon_shape_into(
                 f,
                 &[
@@ -8779,6 +8779,8 @@ fn render_node(
         }
 
         NodeShape::Hexagon => {
+            // Same 0.15, different role: this shortens the top and bottom edges, it is not the
+            // trapezoid slant, and it must not follow SLANTED_SHAPE_INSET_RATIO if that changes.
             let inset = w * 0.15;
             let path = PathBuilder::new()
                 .move_to(x + inset, y)
@@ -8846,7 +8848,7 @@ fn render_node(
         }
 
         NodeShape::Trapezoid => {
-            let inset = w * 0.15;
+            let inset = w * fm_core::SLANTED_SHAPE_INSET_RATIO;
             let path = PathBuilder::new()
                 .move_to(x + inset, y)
                 .line_to(x + w - inset, y)
@@ -8958,7 +8960,7 @@ fn render_node(
 
         // Extended shapes for FrankenMermaid
         NodeShape::InvTrapezoid => {
-            let inset = w * 0.15;
+            let inset = w * fm_core::SLANTED_SHAPE_INSET_RATIO;
             let path = PathBuilder::new()
                 .move_to(x, y)
                 .line_to(x + w, y)
@@ -8974,7 +8976,7 @@ fn render_node(
         }
 
         NodeShape::Parallelogram => {
-            let inset = w * 0.15;
+            let inset = w * fm_core::SLANTED_SHAPE_INSET_RATIO;
             let path = PathBuilder::new()
                 .move_to(x + inset, y)
                 .line_to(x + w, y)
@@ -8990,7 +8992,7 @@ fn render_node(
         }
 
         NodeShape::InvParallelogram => {
-            let inset = w * 0.15;
+            let inset = w * fm_core::SLANTED_SHAPE_INSET_RATIO;
             let path = PathBuilder::new()
                 .move_to(x, y)
                 .line_to(x + w - inset, y)

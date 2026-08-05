@@ -1067,10 +1067,23 @@ pub enum NodeShape {
 
 /// Fraction of a node's width that slanted shapes inset their horizontal edges by.
 ///
-/// The renderers draw trapezoids and parallelograms with this slant. It lives here, next to
-/// [`NodeShape`], because layout must agree with what is actually drawn — an edge anchored to
-/// geometry the renderer does not use is an edge that misses its node.
+/// Trapezoids and parallelograms are drawn with this slant. It lives here, next to [`NodeShape`],
+/// because layout must agree with what is actually drawn — an edge anchored to geometry the
+/// renderer does not use is an edge that misses its node.
+///
+/// This ratio describes the SLANT specifically. Hexagons shorten their top and bottom edges by the
+/// same 0.15, and the asymmetric flag notches by it too, but those are different geometric roles
+/// that merely share a number today; they intentionally do not use this constant, so that changing
+/// the slant cannot silently reshape them.
 pub const SLANTED_SHAPE_INSET_RATIO: f32 = 0.15;
+
+/// [`SLANTED_SHAPE_INSET_RATIO`] for the `f64` renderers.
+///
+/// Deliberately a second literal rather than a cast: `f64::from(0.15_f32)` is
+/// 0.15000000596…, not 0.15, so converting would shift every `f64`-drawn trapezoid and
+/// parallelogram off the geometry it has today. Both constants are the same decimal written at the
+/// precision its callers use, which is what keeps the substitution byte-identical.
+pub const SLANTED_SHAPE_INSET_RATIO_F64: f64 = 0.15;
 
 impl NodeShape {
     /// How far in from the bounding box's left and right sides the DRAWN outline sits at
@@ -5402,6 +5415,43 @@ mod schema_version_semver {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    /// The two slant constants must stay separate literals, and must keep the exact values the
+    /// renderers had before adopting them.
+    ///
+    /// The `f64` one exists because `f64::from(0.15_f32)` is 0.15000000596…, not 0.15. Collapsing
+    /// them into one constant plus a cast is the obvious "cleanup", and it would silently move
+    /// every `f64`-drawn trapezoid and parallelogram off its current geometry. This test is here
+    /// to make that cleanup fail loudly.
+    #[test]
+    fn slant_constants_match_the_literals_the_renderers_used() {
+        assert_eq!(super::SLANTED_SHAPE_INSET_RATIO, 0.15_f32);
+        assert_eq!(super::SLANTED_SHAPE_INSET_RATIO_F64, 0.15_f64);
+
+        // The whole reason there are two: the cast is NOT the f64 literal.
+        assert_ne!(
+            f64::from(super::SLANTED_SHAPE_INSET_RATIO),
+            super::SLANTED_SHAPE_INSET_RATIO_F64,
+            "if these ever compare equal the cast is safe and this pair can be collapsed"
+        );
+
+        // Layout's derived inset is exactly half the slant, in f32.
+        assert_eq!(
+            super::NodeShape::Trapezoid.horizontal_outline_inset_ratio(),
+            0.075_f32
+        );
+        assert_eq!(super::NodeShape::Triangle.horizontal_outline_inset_ratio(), 0.25_f32);
+        // Shapes that touch their box at the side midpoints must report no inset.
+        for shape in [
+            super::NodeShape::Rect,
+            super::NodeShape::Circle,
+            super::NodeShape::Diamond,
+            super::NodeShape::Hexagon,
+            super::NodeShape::Stadium,
+        ] {
+            assert_eq!(shape.horizontal_outline_inset_ratio(), 0.0, "{shape:?}");
+        }
+    }
 
     fn stable_u128_hash_two_pass_reference(domain: &str, parts: &[&str]) -> u128 {
         fn hash_half(salt: &str, domain: &str, parts: &[&str]) -> u64 {

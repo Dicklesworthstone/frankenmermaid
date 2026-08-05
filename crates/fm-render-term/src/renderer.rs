@@ -989,7 +989,7 @@ impl TermRenderer {
                 canvas.draw_line(left, mid_y, mid_x, top);
             }
             NodeShape::Parallelogram => {
-                let inset = (w as f32 * 0.15) as isize;
+                let inset = (w as f32 * fm_core::SLANTED_SHAPE_INSET_RATIO) as isize;
                 let top = y as isize;
                 let bottom = (y + h) as isize;
                 let left = x as isize;
@@ -1000,7 +1000,7 @@ impl TermRenderer {
                 canvas.draw_line(left, bottom, left + inset, top);
             }
             NodeShape::InvParallelogram => {
-                let inset = (w as f32 * 0.15) as isize;
+                let inset = (w as f32 * fm_core::SLANTED_SHAPE_INSET_RATIO) as isize;
                 let top = y as isize;
                 let bottom = (y + h) as isize;
                 let left = x as isize;
@@ -1011,7 +1011,7 @@ impl TermRenderer {
                 canvas.draw_line(left + inset, bottom, left, top);
             }
             NodeShape::Trapezoid => {
-                let inset = (w as f32 * 0.15) as isize;
+                let inset = (w as f32 * fm_core::SLANTED_SHAPE_INSET_RATIO) as isize;
                 let top = y as isize;
                 let bottom = (y + h) as isize;
                 let left = x as isize;
@@ -1022,7 +1022,7 @@ impl TermRenderer {
                 canvas.draw_line(left, bottom, left + inset, top);
             }
             NodeShape::InvTrapezoid => {
-                let inset = (w as f32 * 0.15) as isize;
+                let inset = (w as f32 * fm_core::SLANTED_SHAPE_INSET_RATIO) as isize;
                 let top = y as isize;
                 let bottom = (y + h) as isize;
                 let left = x as isize;

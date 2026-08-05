@@ -199,7 +199,7 @@ fn draw_cylinder<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64
 
 /// Draw a trapezoid shape.
 fn draw_trapezoid<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
-    let inset = w * 0.15;
+    let inset = w * fm_core::SLANTED_SHAPE_INSET_RATIO_F64;
 
     ctx.begin_path();
     ctx.move_to(x + inset, y);
@@ -275,7 +275,7 @@ fn draw_note<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
 
 /// Draw an inverted trapezoid shape.
 fn draw_inv_trapezoid<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
-    let inset = w * 0.15;
+    let inset = w * fm_core::SLANTED_SHAPE_INSET_RATIO_F64;
 
     ctx.begin_path();
     ctx.move_to(x, y);
@@ -289,7 +289,7 @@ fn draw_inv_trapezoid<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h
 
 /// Draw a parallelogram shape.
 fn draw_parallelogram<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
-    let inset = w * 0.15;
+    let inset = w * fm_core::SLANTED_SHAPE_INSET_RATIO_F64;
 
     ctx.begin_path();
     ctx.move_to(x + inset, y);
@@ -303,7 +303,7 @@ fn draw_parallelogram<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h
 
 /// Draw an inverted parallelogram shape.
 fn draw_inv_parallelogram<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
-    let inset = w * 0.15;
+    let inset = w * fm_core::SLANTED_SHAPE_INSET_RATIO_F64;
 
     ctx.begin_path();
     ctx.move_to(x, y);
