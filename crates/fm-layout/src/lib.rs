@@ -1493,12 +1493,13 @@ fn dirty_node_indexes_for_edits(
     previous_ir: &MermaidDiagramIr,
     current_ir: &MermaidDiagramIr,
 ) -> BTreeSet<usize> {
-    let edits = derive_layout_edits(previous_ir, current_ir);
+    let LayoutDiff {
+        edits,
+        topology_equal: same_topology,
+    } = derive_layout_diff(previous_ir, current_ir);
     if edits.is_empty() {
         return BTreeSet::new();
     }
-
-    let same_topology = dependency_topology_equal(previous_ir, current_ir);
     let mut dirty_current = DirtySet::default();
     let mut dirty_previous = DirtySet::default();
 
@@ -1642,9 +1643,30 @@ fn smooth_boundary_edges(
     }
 }
 
-fn derive_layout_edits(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> Vec<LayoutEdit> {
+/// The edit list between two IRs, plus whether they share a dependency topology.
+struct LayoutDiff {
+    edits: Vec<LayoutEdit>,
+    /// Equivalent to [`dependency_topology_equal`], but derived during the same walk that
+    /// produces `edits`.
+    ///
+    /// The two used to run back to back over the same IR pair in
+    /// `dirty_node_indexes_for_edits`, and `dependency_topology_equal` re-compared the very
+    /// node ids and subgraph membership vectors the edit derivation had just compared — a
+    /// second full pass of string and `Vec<String>` equality over every node, edge and
+    /// subgraph. Topology ignores labels, titles, arrows, directions and spans, so it is a
+    /// strict subset of what the edit walk already decides.
+    topology_equal: bool,
+}
+
+fn derive_layout_diff(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> LayoutDiff {
     let mut edits = Vec::new();
     let shared_nodes = previous.nodes.len().min(current.nodes.len());
+
+    // A length change is itself a topology change, and it also means the trailing
+    // added/removed loops below will fire.
+    let mut topology_equal = previous.nodes.len() == current.nodes.len()
+        && previous.edges.len() == current.edges.len()
+        && previous.graph.subgraphs.len() == current.graph.subgraphs.len();
 
     // Walk the two node arrays in lockstep. `zip` already stops at the shorter side, which is
     // exactly `shared_nodes`, and it drops the per-iteration bounds checks that indexing both
@@ -1652,13 +1674,22 @@ fn derive_layout_edits(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) 
     let previous_graph_nodes = previous.graph.nodes.as_slice();
     let current_graph_nodes = current.graph.nodes.as_slice();
     for (node_index, (left, right)) in previous.nodes.iter().zip(current.nodes.iter()).enumerate() {
-        if left.id != right.id
-            || node_labels_differ(previous, left.label, current, right.label)
+        // Topology-bearing fields first, so that establishing a node changed ALSO settles its
+        // contribution to `topology_equal` without a second comparison. Label text is checked
+        // last because it is the one field that can change without changing topology.
+        let changed = if left.id != right.id
             || previous_graph_nodes
                 .get(node_index)
                 .map(|node| &node.subgraphs)
                 != current_graph_nodes.get(node_index).map(|node| &node.subgraphs)
         {
+            topology_equal = false;
+            true
+        } else {
+            node_labels_differ(previous, left.label, current, right.label)
+        };
+
+        if changed {
             edits.push(LayoutEdit::NodeChanged { node_index });
         }
     }
@@ -1671,8 +1702,13 @@ fn derive_layout_edits(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) 
 
     let shared_edges = previous.edges.len().min(current.edges.len());
     for (edge_index, (left, right)) in previous.edges.iter().zip(current.edges.iter()).enumerate() {
-        if left.from != right.from
-            || left.to != right.to
+        // Endpoints are the topology-bearing half of an edge; arrow, label and span are not.
+        let endpoints_differ = left.from != right.from || left.to != right.to;
+        if endpoints_differ {
+            topology_equal = false;
+        }
+
+        if endpoints_differ
             || left.arrow != right.arrow
             || left.label != right.label
             || left.span != right.span
@@ -1700,11 +1736,16 @@ fn derive_layout_edits(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) 
         .zip(current.graph.subgraphs.iter())
         .enumerate()
     {
-        if left.id != right.id
+        // Id, parent and members carry topology; title, direction and span do not.
+        let topology_differs =
+            left.id != right.id || left.parent != right.parent || left.members != right.members;
+        if topology_differs {
+            topology_equal = false;
+        }
+
+        if topology_differs
             || left.title != right.title
-            || left.parent != right.parent
             || left.direction != right.direction
-            || left.members != right.members
             || left.span != right.span
         {
             edits.push(LayoutEdit::SubgraphChanged { subgraph_index });
@@ -1717,7 +1758,10 @@ fn derive_layout_edits(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) 
         edits.push(LayoutEdit::SubgraphChanged { subgraph_index });
     }
 
-    edits
+    LayoutDiff {
+        edits,
+        topology_equal,
+    }
 }
 
 /// Whether two nodes' labels differ, by id first and only then by resolved text.
@@ -3245,7 +3289,7 @@ impl IncrementalLayoutEngine {
             return None;
         }
 
-        let edits = derive_layout_edits(&cached_graph.ir, ir);
+        let edits = derive_layout_diff(&cached_graph.ir, ir).edits;
         if edits.is_empty() {
             return None;
         }
@@ -22481,6 +22525,74 @@ mod tests {
             node.id = "renamed_node_id".to_string();
         }
         assert!(!crate::dependency_topology_equal(&baseline, &renamed_node));
+    }
+
+    /// `derive_layout_diff` now decides topology equality during the edit walk, so it must agree
+    /// with the standalone `dependency_topology_equal` — which is still the sole authority at its
+    /// other two call sites — on every shape, not just the easy ones.
+    ///
+    /// The two are computed independently, so this is a real differential check rather than a
+    /// restatement: the fused flag is a by-product of comparisons made for a different purpose,
+    /// and it deliberately ignores label/title/arrow/direction/span, which the edit list does not.
+    #[test]
+    fn fused_topology_flag_matches_standalone_dependency_topology_equal() {
+        let baseline = labeled_graph_ir(4, &[(0, 1), (1, 2), (2, 3)]);
+
+        // Label-only edit: an EDIT, but topology is unchanged. This is the case that would break
+        // if the fused flag were simply "were there any edits".
+        let mut relabeled = baseline.clone();
+        let label_index = relabeled.labels.len();
+        relabeled.labels.push(IrLabel {
+            text: "Renamed without topology change".to_string(),
+            span: Span::default(),
+        });
+        if let Some(node) = relabeled.nodes.get_mut(1) {
+            node.label = Some(IrLabelId(label_index));
+        }
+
+        // Endpoint rewire: topology changes.
+        let mut rewired = baseline.clone();
+        if let Some(edge) = rewired.edges.get_mut(1) {
+            edge.to = IrEndpoint::Node(IrNodeId(3));
+        }
+
+        // Node id rename: topology changes.
+        let mut renamed_node = baseline.clone();
+        if let Some(node) = renamed_node.nodes.get_mut(1) {
+            node.id = "renamed_node_id".to_string();
+        }
+
+        // Node count change: topology changes, and exercises the trailing added/removed loops.
+        let grown = labeled_graph_ir(5, &[(0, 1), (1, 2), (2, 3)]);
+
+        // Edge count change with identical nodes.
+        let extra_edge = labeled_graph_ir(4, &[(0, 1), (1, 2), (2, 3), (0, 3)]);
+
+        let cases: [(&str, &MermaidDiagramIr, &MermaidDiagramIr); 6] = [
+            ("identical", &baseline, &baseline),
+            ("label only", &baseline, &relabeled),
+            ("rewired edge", &baseline, &rewired),
+            ("renamed node", &baseline, &renamed_node),
+            ("node added", &baseline, &grown),
+            ("edge added", &baseline, &extra_edge),
+        ];
+
+        for (name, previous, current) in cases {
+            let fused = crate::derive_layout_diff(previous, current).topology_equal;
+            let standalone = crate::dependency_topology_equal(previous, current);
+            assert_eq!(fused, standalone, "topology verdict disagreed for {name}");
+        }
+
+        // Pin the direction of two of them, so a mutation making BOTH sides wrong in the same
+        // way still fails rather than passing on mutual agreement.
+        assert!(crate::derive_layout_diff(&baseline, &relabeled).topology_equal);
+        assert!(!crate::derive_layout_diff(&baseline, &rewired).topology_equal);
+        assert!(
+            !crate::derive_layout_diff(&baseline, &relabeled)
+                .edits
+                .is_empty(),
+            "a label edit must still produce an edit even though topology is unchanged"
+        );
     }
 
     #[test]
