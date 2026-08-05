@@ -1840,7 +1840,7 @@ fn render_scene_document_with_ir(
         css.push_str(accessibility_css());
     }
     if config.print_optimized {
-        css.push_str(&print_css(config.min_font_size));
+        css.push_str(&print_css(config.min_font_size, config.node_gradients));
     }
     if !classdef_css.is_empty() {
         css.push_str(&classdef_css);
@@ -3086,7 +3086,28 @@ fn animation_css(config: &SvgRenderConfig) -> String {
     )
 }
 
-fn print_css(min_font_size: f32) -> String {
+fn print_css(min_font_size: f32, node_gradients: bool) -> String {
+    // Flatten the node gradient for print by neutralising its STOPS, not by overriding node fill.
+    //
+    // The gradient reaches nodes as an inline `fill="url(#fm-node-gradient)"` presentation
+    // attribute, so any CSS `fill` rule would beat it — but such a rule would also beat classDef
+    // fills and solid shapes like FilledCircle, flattening colour the author chose deliberately.
+    // Restyling the gradient's own stops changes exactly the one thing that is wrong here and
+    // nothing else: every node still resolves `url(#fm-node-gradient)`, and that paint is now flat
+    // white on paper. Clusters already print `fill: #fff`, so nodes now match them.
+    //
+    // Emitted only when gradients are on. When they are off there is no gradient to neutralise, the
+    // rule would match nothing, and omitting it keeps the print block byte-identical for every
+    // diagram that never had a gradient — which is what keeps the golden corpus still.
+    let gradient_reset = if node_gradients {
+        "
+  #fm-node-gradient stop {
+    stop-color: #fff !important;
+    stop-opacity: 1 !important;
+  }"
+    } else {
+        ""
+    };
     format!(
         "@media print {{
   .fm-node text, .fm-edge-labeled text, .fm-cluster-label {{
@@ -3099,7 +3120,7 @@ fn print_css(min_font_size: f32) -> String {
   .fm-cluster {{
     fill: #fff !important;
     stroke: #666 !important;
-  }}
+  }}{gradient_reset}
 }}"
     )
 }
@@ -3690,7 +3711,7 @@ fn render_layout_to_svg(
             css.push_str(accessibility_css());
         }
         if config.print_optimized {
-            css.push_str(&print_css(config.min_font_size));
+            css.push_str(&print_css(config.min_font_size, config.node_gradients));
         }
         if !classdef_css.is_empty() {
             css.push_str(&classdef_css);
@@ -3730,7 +3751,7 @@ fn render_layout_to_svg(
             css.push_str(accessibility_css());
         }
         if config.print_optimized {
-            css.push_str(&print_css(config.min_font_size));
+            css.push_str(&print_css(config.min_font_size, config.node_gradients));
         }
         if !classdef_css.is_empty() {
             css.push_str(&classdef_css);
@@ -15362,6 +15383,71 @@ mod tests {
         let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         let svg = render_svg(&ir);
         assert!(svg.contains("@media print"));
+    }
+
+    /// Printing must not reproduce the node gradient (bd-ccni).
+    ///
+    /// The gradient reaches nodes as an inline `fill="url(#fm-node-gradient)"` attribute, which no
+    /// rule in the print block used to touch: text fill and shape stroke were flattened and
+    /// clusters were forced to `#fff`, but nodes still printed their gradient. Neutralising the
+    /// gradient's own stops fixes that without disturbing classDef fills or solid shapes.
+    #[test]
+    fn print_css_neutralizes_the_node_gradient() {
+        // Read the print block BOUNDED at its closing braces. Substring-searching the whole SVG is
+        // a trap: the document also carries a `<filter id="node-glow">` def and the
+        // `<linearGradient>` itself, so a naive `svg.contains(..)` reports properties that are
+        // nowhere near the print block. That mistake produced a false reading while diagnosing this.
+        fn print_block(svg: &str) -> String {
+            let start = svg.find("@media print").expect("print block present");
+            let rest = &svg[start..];
+            let end = rest.find("}\n}").map_or(rest.len(), |i| i + 3);
+            rest[..end].to_string()
+        }
+
+        let ir = create_ir_with_single_node("printed", NodeShape::Rect);
+
+        let with_gradient = render_svg_with_config(
+            &ir,
+            &SvgRenderConfig {
+                print_optimized: true,
+                node_gradients: true,
+                ..SvgRenderConfig::default()
+            },
+        );
+        assert!(
+            with_gradient.contains("fill=\"url(#fm-node-gradient)\""),
+            "precondition: nodes must actually carry the gradient, or this test proves nothing"
+        );
+        let printed = print_block(&with_gradient);
+        assert!(
+            printed.contains("#fm-node-gradient stop") && printed.contains("stop-color: #fff"),
+            "print block must flatten the gradient stops, got:\n{printed}"
+        );
+
+        // NEGATIVE CONTROL 1: with gradients off there is nothing to neutralise, and the print
+        // block must be exactly what it always was. This is what keeps the golden corpus still —
+        // the fixtures pin `node_gradients: false`.
+        let without_gradient = render_svg_with_config(
+            &ir,
+            &SvgRenderConfig {
+                print_optimized: true,
+                node_gradients: false,
+                ..SvgRenderConfig::default()
+            },
+        );
+        let printed_plain = print_block(&without_gradient);
+        assert!(
+            !printed_plain.contains("fm-node-gradient"),
+            "gradients-off print block must not gain the reset rule, got:\n{printed_plain}"
+        );
+
+        // NEGATIVE CONTROL 2: the fix must not reach for node `fill`. A `fill` rule here would
+        // beat classDef colours and solid shapes as well as the gradient, which is exactly the
+        // collateral this approach avoids.
+        assert!(
+            !printed.contains(".fm-node rect {\n    fill:") && !printed.contains("fill: #fff !important;\n  }\n  #fm-node-gradient"),
+            "print block must neutralise the gradient via its stops, not by overriding node fill"
+        );
     }
 
     #[test]
