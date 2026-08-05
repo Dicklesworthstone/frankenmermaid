@@ -17,6 +17,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod bench_identity;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use fm_core::{
     ArrowType, DiagramType, GraphDirection, IrEdge, IrEndpoint, IrGraphEdge, IrGraphNode, IrLabel,
     IrLabelId, IrNode, IrNodeId, IrSubgraph, IrSubgraphId, MermaidDiagramIr, Span,
@@ -119,8 +120,78 @@ fn bench_ir(nodes_per_subgraph: usize) -> MermaidDiagramIr {
     ir
 }
 
+/// Run EXACTLY `iterations` single-node label edits and exit, when `FM_FIXED_ITERS` is set.
+///
+/// Exists because callgrind totals taken under `criterion --profile-time` are not comparable
+/// across arms: profile-time runs for a fixed WALL window, and under callgrind wall time is
+/// dominated by simulation cost, which is proportional to instructions executed. A cheaper arm
+/// simply completes MORE iterations in the same window, so the total barely moves — it answers
+/// "how much work fits in a second", not "what does one edit cost". Measured proof: two arms whose
+/// per-iteration wall differs by 2.4-4.3% produced totals differing by 0.054%, and the same
+/// command on the same code produced a 9x different total on two occasions (bd-9rq7 retraction).
+///
+/// With the count pinned by the caller and no wall clock anywhere in the loop, `total Ir /
+/// iterations` is a per-edit instruction count that is comparable across arms, deterministic, and
+/// load-independent — which is what the ledger's counted-mechanism marker is supposed to assert.
+///
+/// The divisor is PRINTED rather than assumed, so an artifact carries the number it was divided by.
+fn run_fixed_iterations(iterations: u64) {
+    // Mirrors `single_node_label_edit/incremental/1000` exactly: same 2x500 IR, same warm cache,
+    // same per-iteration label edit. Any drift here silently measures a different workload.
+    let mut engine = IncrementalLayoutEngine::default();
+    let mut ir = bench_ir(500);
+    let config = fm_layout::LayoutConfig::default();
+    let guardrails = LayoutGuardrails::default();
+
+    engine.layout_diagram_traced_with_config_and_guardrails(
+        &ir,
+        LayoutAlgorithm::Auto,
+        config.clone(),
+        guardrails,
+    );
+
+    let mut variant = 0_u32;
+    let mut sink = 0_usize;
+    for _ in 0..iterations {
+        let label_index = ir.nodes[5].label.unwrap().0;
+        ir.labels[label_index].text = format!("Edited v{variant}");
+        variant = variant.wrapping_add(1);
+        let traced = engine.layout_diagram_traced_with_config_and_guardrails(
+            black_box(&ir),
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        // Consume the result so the call cannot be optimised away. A harness that measures
+        // nothing is worse than no harness, because it looks like evidence.
+        sink = sink.wrapping_add(black_box(&traced).layout.nodes.len());
+    }
+
+    println!("fixed_iterations={iterations}");
+    println!("fixed_iterations_sink={}", black_box(sink));
+}
+
+/// `FM_FIXED_ITERS`, when set to a positive integer.
+fn fixed_iteration_request() -> Option<u64> {
+    std::env::var("FM_FIXED_ITERS")
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|n| *n > 0)
+}
+
 fn bench_single_node_label_edit(c: &mut Criterion) {
     bench_identity::report_self_identity();
+
+    // Checked here rather than in main: criterion owns main via `criterion_main!`, and this is the
+    // first group it runs. Exits the process so no criterion machinery contributes instructions to
+    // the count.
+    if let Some(iterations) = fixed_iteration_request() {
+        run_fixed_iterations(iterations);
+        std::process::exit(0);
+    }
+
     let mut group = c.benchmark_group("single_node_label_edit");
 
     for nodes_per_subgraph in [50, 100, 250, 500] {
