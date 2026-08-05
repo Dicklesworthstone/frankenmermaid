@@ -1645,22 +1645,19 @@ fn smooth_boundary_edges(
 fn derive_layout_edits(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> Vec<LayoutEdit> {
     let mut edits = Vec::new();
     let shared_nodes = previous.nodes.len().min(current.nodes.len());
-    for node_index in 0..shared_nodes {
-        let left = &previous.nodes[node_index];
-        let right = &current.nodes[node_index];
+
+    // Walk the two node arrays in lockstep. `zip` already stops at the shorter side, which is
+    // exactly `shared_nodes`, and it drops the per-iteration bounds checks that indexing both
+    // arrays by a loop counter forced on every node of every pass.
+    let previous_graph_nodes = previous.graph.nodes.as_slice();
+    let current_graph_nodes = current.graph.nodes.as_slice();
+    for (node_index, (left, right)) in previous.nodes.iter().zip(current.nodes.iter()).enumerate() {
         if left.id != right.id
-            || left.label != right.label
-            || previous
-                .graph
-                .nodes
+            || node_labels_differ(previous, left.label, current, right.label)
+            || previous_graph_nodes
                 .get(node_index)
                 .map(|node| &node.subgraphs)
-                != current
-                    .graph
-                    .nodes
-                    .get(node_index)
-                    .map(|node| &node.subgraphs)
-            || node_label_text(previous, left.label) != node_label_text(current, right.label)
+                != current_graph_nodes.get(node_index).map(|node| &node.subgraphs)
         {
             edits.push(LayoutEdit::NodeChanged { node_index });
         }
@@ -1673,9 +1670,7 @@ fn derive_layout_edits(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) 
     }
 
     let shared_edges = previous.edges.len().min(current.edges.len());
-    for edge_index in 0..shared_edges {
-        let left = &previous.edges[edge_index];
-        let right = &current.edges[edge_index];
+    for (edge_index, (left, right)) in previous.edges.iter().zip(current.edges.iter()).enumerate() {
         if left.from != right.from
             || left.to != right.to
             || left.arrow != right.arrow
@@ -1698,9 +1693,13 @@ fn derive_layout_edits(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) 
         .subgraphs
         .len()
         .min(current.graph.subgraphs.len());
-    for subgraph_index in 0..shared_subgraphs {
-        let left = &previous.graph.subgraphs[subgraph_index];
-        let right = &current.graph.subgraphs[subgraph_index];
+    for (subgraph_index, (left, right)) in previous
+        .graph
+        .subgraphs
+        .iter()
+        .zip(current.graph.subgraphs.iter())
+        .enumerate()
+    {
         if left.id != right.id
             || left.title != right.title
             || left.parent != right.parent
@@ -1721,9 +1720,33 @@ fn derive_layout_edits(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) 
     edits
 }
 
-fn node_label_text(ir: &MermaidDiagramIr, label_id: Option<fm_core::IrLabelId>) -> &str {
-    label_id
-        .and_then(|label| ir.labels.get(label.0))
+/// Whether two nodes' labels differ, by id first and only then by resolved text.
+///
+/// Folds what used to be two separate clauses — an id comparison and a pair of
+/// `Option`-unwrapping text lookups — into one self-contained decision. Two ids that differ are
+/// already a change, so the text never has to be resolved; two absent labels are both empty and
+/// cannot differ; and equal ids need only ONE id resolved against each arena instead of
+/// unwrapping an `Option` per side. Keeping it in one function means the cheap-first ordering is
+/// a property of this function rather than a hidden dependency on clause order at the call site.
+fn node_labels_differ(
+    previous: &MermaidDiagramIr,
+    previous_label: Option<fm_core::IrLabelId>,
+    current: &MermaidDiagramIr,
+    current_label: Option<fm_core::IrLabelId>,
+) -> bool {
+    match (previous_label, current_label) {
+        (None, None) => false,
+        (Some(previous_id), Some(current_id)) if previous_id == current_id => {
+            label_text_by_id(previous, previous_id) != label_text_by_id(current, current_id)
+        }
+        _ => true,
+    }
+}
+
+/// Resolve a label id to its text, or `""` when the arena does not hold it.
+fn label_text_by_id(ir: &MermaidDiagramIr, label_id: fm_core::IrLabelId) -> &str {
+    ir.labels
+        .get(label_id.0)
         .map_or("", |label| label.text.as_str())
 }
 
