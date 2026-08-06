@@ -2327,6 +2327,26 @@ fn scan_node_class_keywords(class: &str) -> NodeClassKeywords {
     scan_class_keywords_and_clean(class).0
 }
 
+/// True if this IR is rendered by one of the dedicated chart renderers, which each `return` before
+/// the generic node path is ever reached.
+///
+/// SINGLE SOURCE OF TRUTH for that dispatch, deliberately: the four call sites below consume this
+/// and so does the `<defs>` gate for `fm-node-gradient`, whose only referrers (`fill="url(#…)"` on
+/// node shapes) live exclusively on the generic path. Restating the conditions in five places is how
+/// a def and its reference drift apart — see bd-a6uk and bd-678053a for both directions of that
+/// mistake. Reads only `ir`, so it is answerable at defs-build time, before dispatch.
+fn takes_dedicated_chart_renderer(ir: &MermaidDiagramIr) -> bool {
+    ir.xy_chart_meta
+        .as_ref()
+        .is_some_and(|meta| !meta.series.is_empty())
+        || ir
+            .pie_meta
+            .as_ref()
+            .is_some_and(|meta| !meta.slices.is_empty())
+        || ir.quadrant_meta.is_some()
+        || (ir.diagram_type == fm_core::DiagramType::Gantt && ir.gantt_meta.is_some())
+}
+
 /// True if any node carries a class the node renderer reads as `highlight`.
 ///
 /// Mirrors the per-node `is_highlighted` computation in the node renderer exactly — same
@@ -3104,7 +3124,10 @@ fn animation_css(config: &SvgRenderConfig) -> String {
     )
 }
 
-fn print_css(min_font_size: f32, node_gradients: bool) -> String {
+/// `gradient_def_emitted` must be "does this document actually contain the `fm-node-gradient` def",
+/// not merely `config.node_gradients`: the dedicated chart renderers have the flag on yet never emit
+/// the def, and a neutralisation rule for an absent id is 79 dead bytes (bd-w5f7).
+fn print_css(min_font_size: f32, gradient_def_emitted: bool) -> String {
     // Flatten the node gradient for print by neutralising its STOPS, not by overriding node fill.
     //
     // The gradient reaches nodes as an inline `fill="url(#fm-node-gradient)"` presentation
@@ -3114,10 +3137,10 @@ fn print_css(min_font_size: f32, node_gradients: bool) -> String {
     // nothing else: every node still resolves `url(#fm-node-gradient)`, and that paint is now flat
     // white on paper. Clusters already print `fill: #fff`, so nodes now match them.
     //
-    // Emitted only when gradients are on. When they are off there is no gradient to neutralise, the
-    // rule would match nothing, and omitting it keeps the print block byte-identical for every
-    // diagram that never had a gradient — which is what keeps the golden corpus still.
-    let gradient_reset = if node_gradients {
+    // Emitted only when the def is actually in the document. Without one there is no gradient to
+    // neutralise, the rule would match nothing, and omitting it keeps the print block byte-identical
+    // for every diagram that never had a gradient — which is what keeps the golden corpus still.
+    let gradient_reset = if gradient_def_emitted {
         "
   #fm-node-gradient stop {
     stop-color: #fff !important;
@@ -3716,7 +3739,20 @@ fn render_layout_to_svg(
     }
     // Memoized node-gradient `<defs>` (default theme + style built once; ~1.1 µs build skipped per
     // render), streamed in the gradients slot — byte-identical to `defs.gradient(node_gradient_for(..))`.
-    if let Some(grad_svg) = node_gradient_svg(config, &theme) {
+    //
+    // Skipped entirely for the dedicated chart renderers. Every `url(#fm-node-gradient)` referrer is
+    // a node-shape fill on the generic path, and those renderers `return` before reaching it, so the
+    // def has no reachable consumer there — 283 bytes, 4-5% of a gantt/pie/quadrant/xychart document.
+    // Same rule as the markers and the `drop-shadow`/`node-glow` filters above: never emit a def
+    // nothing can use. Shares `takes_dedicated_chart_renderer` with the dispatch itself so the two
+    // cannot disagree.
+    //
+    // `gradient_def_emitted` is the single truth the print block also reads: bd-ccni's
+    // `#fm-node-gradient stop { … }` print rule exists to neutralise this def, so suppressing the def
+    // while still emitting the rule leaves 79 bytes of CSS selecting an id that is not in the
+    // document.
+    let gradient_def_emitted = !takes_dedicated_chart_renderer(ir) && config.node_gradients;
+    if gradient_def_emitted && let Some(grad_svg) = node_gradient_svg(config, &theme) {
         defs = defs.raw_gradients(grad_svg);
     }
 
@@ -3741,7 +3777,7 @@ fn render_layout_to_svg(
             css.push_str(accessibility_css());
         }
         if config.print_optimized {
-            css.push_str(&print_css(config.min_font_size, config.node_gradients));
+            css.push_str(&print_css(config.min_font_size, gradient_def_emitted));
         }
         if !classdef_css.is_empty() {
             css.push_str(&classdef_css);
@@ -3781,7 +3817,7 @@ fn render_layout_to_svg(
             css.push_str(accessibility_css());
         }
         if config.print_optimized {
-            css.push_str(&print_css(config.min_font_size, config.node_gradients));
+            css.push_str(&print_css(config.min_font_size, gradient_def_emitted));
         }
         if !classdef_css.is_empty() {
             css.push_str(&classdef_css);
@@ -16269,50 +16305,149 @@ marker#arrow-open path {
         assert!(highlighted.contains("filter=\"url(#node-glow)\""));
     }
 
-    /// No `<defs>` entry may be defined and then left unreferenced, for ANY id, at default config.
-    ///
-    /// The specific instance this was written for is bd-a6uk's glow filter, but the invariant is
-    /// the file's stated doctrine for markers ("never emits unused markers") and for the
-    /// `drop-shadow` filter, so it is asserted generically: every `id="…"` declared inside `<defs>`
-    /// must appear again as a `url(#…)` somewhere in the document. That makes the next dead def a
-    /// test failure rather than something a byte golden blesses.
-    #[test]
-    fn no_defs_entry_is_declared_without_a_reference() {
-        let ir = create_ir_with_single_node("solo", NodeShape::Rect);
-        let svg = render_svg_with_config(&ir, &SvgRenderConfig::default());
+    /// One IR per render path that `<defs>` hygiene must hold on, built by PARSING real Mermaid
+    /// rather than hand-assembling metadata — a hand-built IR can silently miss the condition a
+    /// dispatch branch actually tests (`pie_meta` with non-empty slices, `xy_chart_meta` with
+    /// non-empty series), which is exactly the gate under test here.
+    fn defs_hygiene_cases() -> Vec<(&'static str, MermaidDiagramIr)> {
+        [
+            ("flowchart", "flowchart LR\n  A-->B"),
+            ("sequence", "sequenceDiagram\n  Alice->>Bob: hi"),
+            ("class", "classDiagram\n  Animal <|-- Dog"),
+            ("state", "stateDiagram-v2\n  [*] --> S1"),
+            ("er", "erDiagram\n  A ||--o{ B : has"),
+            ("journey", "journey\n  title J\n  section S\n    Task: 5: Me"),
+            ("mindmap", "mindmap\n  root\n    a\n    b"),
+            ("gitgraph", "gitGraph\n  commit\n  branch dev\n  commit"),
+            ("timeline", "timeline\n  title T\n  2024 : x"),
+            ("gantt", "gantt\n  title T\n  section S\n  t1 :a1, 2024-01-01, 3d"),
+            ("pie", "pie title P\n  \"a\" : 30\n  \"b\" : 70"),
+            ("quadrant", "quadrantChart\n  title Q\n  a: [0.3, 0.6]"),
+            (
+                "xychart",
+                "xychart-beta\n  title \"T\"\n  x-axis [a, b]\n  y-axis \"y\" 0 --> 10\n  bar [3, 7]",
+            ),
+        ]
+        .into_iter()
+        .map(|(label, src)| (label, fm_parser::parse(src).ir))
+        .collect()
+    }
 
-        let defs_start = svg
-            .find("<defs>")
-            .expect("document should have a defs block");
+    /// Split a rendered document into its `<defs>` block and the body that follows it.
+    fn split_defs_and_body(svg: &str) -> (&str, &str) {
+        let Some(defs_start) = svg.find("<defs>") else {
+            return ("", svg);
+        };
         let defs_end = svg[defs_start..]
             .find("</defs>")
             .expect("defs block should close")
             + defs_start;
-        let defs = &svg[defs_start..defs_end];
+        (&svg[defs_start..defs_end], &svg[defs_end..])
+    }
 
-        let mut declared: Vec<&str> = Vec::new();
+    /// `<defs>` ids declared inside `defs` that no `url(#…)` in `defs` or `body` points at.
+    fn unreferenced_defs_ids<'a>(defs: &'a str, body: &str) -> Vec<&'a str> {
+        let mut dead = Vec::new();
         for chunk in defs.split("id=\"").skip(1) {
             let Some(end) = chunk.find('"') else { continue };
-            declared.push(&chunk[..end]);
+            let id = &chunk[..end];
+            let reference = format!("url(#{id})");
+            if !body.contains(&reference) && !defs.contains(&reference) {
+                dead.push(id);
+            }
         }
-        assert!(
-            !declared.is_empty(),
-            "expected some defs ids to check; the probe has stopped probing"
-        );
+        dead
+    }
 
-        let body = &svg[defs_end..];
-        let unreferenced: Vec<&str> = declared
-            .iter()
-            .filter(|id| {
-                let reference = format!("url(#{id})");
-                !body.contains(&reference) && !defs.contains(&reference)
-            })
-            .copied()
-            .collect();
-        assert!(
-            unreferenced.is_empty(),
-            "defs declared but never referenced: {unreferenced:?}"
-        );
+    /// `url(#…)` references in `body` whose target is not declared in `defs`.
+    fn dangling_url_references<'a>(defs: &str, body: &'a str) -> Vec<&'a str> {
+        let mut dangling = Vec::new();
+        for chunk in body.split("url(#").skip(1) {
+            let Some(end) = chunk.find(')') else { continue };
+            let id = &chunk[..end];
+            if !defs.contains(&format!("id=\"{id}\"")) {
+                dangling.push(id);
+            }
+        }
+        dangling
+    }
+
+    /// `<defs>` hygiene, both directions, across every diagram-render path (bd-a6uk, bd-w5f7).
+    ///
+    /// Declared-but-unreferenced is the wasteful direction and the one that found both beads: a byte
+    /// golden blesses dead output happily, because it is stable — just useless. This is the file's
+    /// own stated doctrine for markers ("never emits unused markers") and for the `drop-shadow` and
+    /// `node-glow` filters, asserted generically so instance three is a test failure instead of a
+    /// discovery.
+    ///
+    /// Referenced-but-undeclared is the DANGEROUS direction, and it is the reason the gates that
+    /// suppress defs must mirror their consumers instead of approximating them: a `url(#…)` pointing
+    /// at nothing is invalid SVG and an unpainted shape. Suppressing a def is only safe while this
+    /// half holds, so both halves are asserted on every case.
+    ///
+    /// Swept across types deliberately: bd-a6uk's version ran on a lone flowchart node and passed,
+    /// while gantt/pie/quadrant/xychart were each shipping a 283-byte dead gradient. One
+    /// configuration is not a sweep.
+    #[test]
+    fn defs_and_url_references_agree_across_diagram_types() {
+        let mut checked = 0_usize;
+        for (label, ir) in defs_hygiene_cases() {
+            let svg = render_svg_with_config(&ir, &SvgRenderConfig::default());
+            let (defs, body) = split_defs_and_body(&svg);
+
+            assert!(
+                unreferenced_defs_ids(defs, body).is_empty(),
+                "{label}: defs declared but never referenced: {:?}",
+                unreferenced_defs_ids(defs, body)
+            );
+            assert!(
+                dangling_url_references(defs, body).is_empty(),
+                "{label}: url(#…) references with no matching def: {:?}",
+                dangling_url_references(defs, body)
+            );
+            // A CSS rule selecting a def by id is dead the same way a def is: bd-ccni's print block
+            // neutralises `#fm-node-gradient stop`, which selects nothing once the def is gated off.
+            assert_eq!(
+                svg.contains("#fm-node-gradient stop"),
+                svg.contains("id=\"fm-node-gradient\""),
+                "{label}: the print block styles #fm-node-gradient but no such def exists"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 6, "expected a real sweep, checked {checked}");
+    }
+
+    /// `takes_dedicated_chart_renderer` must agree with what the renderer actually does (bd-w5f7).
+    ///
+    /// The predicate gates the `fm-node-gradient` def while four separate dispatch branches decide
+    /// the matching early return, and those branches keep their own `meta` bindings so they cannot
+    /// literally call it. This ties the two together empirically instead: the predicate is true
+    /// exactly when the output contains no `url(#fm-node-gradient)` referrer. Change a dispatch
+    /// condition without the predicate and this fails.
+    #[test]
+    fn dedicated_chart_predicate_matches_gradient_referrer_presence() {
+        let config = SvgRenderConfig {
+            node_gradients: true,
+            ..Default::default()
+        };
+        for (label, ir) in defs_hygiene_cases() {
+            let svg = render_svg_with_config(&ir, &config);
+            let has_referrer = svg.contains("url(#fm-node-gradient)");
+            let dedicated = takes_dedicated_chart_renderer(&ir);
+            assert_ne!(
+                dedicated,
+                has_referrer,
+                "{label}: takes_dedicated_chart_renderer={dedicated} but a gradient referrer \
+                 is {}present — the defs gate and the dispatch disagree",
+                if has_referrer { "" } else { "not " }
+            );
+            // And the def follows the referrer, never the other way round.
+            assert_eq!(
+                svg.contains("id=\"fm-node-gradient\""),
+                has_referrer,
+                "{label}: gradient def and its referrer must appear together"
+            );
+        }
     }
 
     #[test]
