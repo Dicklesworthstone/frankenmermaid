@@ -4523,6 +4523,30 @@ pub struct IrPieMeta {
     pub slices: Vec<IrPieSlice>,
 }
 
+/// Git-graph-specific metadata that extends the generic IR.
+///
+/// Branch membership also reaches the renderer as a `git-branch-N` CSS class, but that index is
+/// taken modulo the eight-colour palette, so it cannot be used to place commits: two branches nine
+/// apart would land in the same lane. This carries the unwrapped lane index that layout needs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct IrGitGraphMeta {
+    /// Branch names in first-seen order; a name's position is its lane index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<String>,
+    /// Lane index per commit node, keyed by the node's index in [`MermaidDiagramIr::nodes`].
+    /// Commits absent from the map belong to lane 0.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub commit_lanes: BTreeMap<usize, usize>,
+}
+
+impl IrGitGraphMeta {
+    /// Lane index for the commit stored at `node_index`.
+    #[must_use]
+    pub fn lane_of(&self, node_index: usize) -> usize {
+        self.commit_lanes.get(&node_index).copied().unwrap_or(0)
+    }
+}
+
 /// Requirement-diagram-specific metadata for a node.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct IrRequirementNodeMeta {
@@ -4617,6 +4641,8 @@ pub struct MermaidDiagramIr {
     pub pie_meta: Option<IrPieMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quadrant_meta: Option<IrQuadrantMeta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_graph_meta: Option<IrGitGraphMeta>,
     /// Notes attached to state diagram nodes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub state_notes: Vec<IrStateNote>,
@@ -4658,6 +4684,7 @@ impl MermaidDiagramIr {
             xy_chart_meta: None,
             pie_meta: None,
             quadrant_meta: None,
+            git_graph_meta: None,
             state_notes: Vec::new(),
             diagnostics: Vec::new(),
         }

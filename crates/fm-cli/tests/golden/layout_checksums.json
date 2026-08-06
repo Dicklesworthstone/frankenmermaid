@@ -124,9 +124,9 @@
     "gitgraph_basic": {
       "edge_count": 6,
       "layout_algorithm": "auto",
-      "layout_checksum": "662aa82186f10230",
+      "layout_checksum": "54c46ccb6594a0e9",
       "layout_height": 863.0,
-      "layout_width": 272.525024,
+      "layout_width": 503.3125,
       "node_count": 6
     },
     "malformed_recovery": {

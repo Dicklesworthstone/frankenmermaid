@@ -1822,6 +1822,7 @@ fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> boo
         xy_chart_meta,
         pie_meta,
         quadrant_meta,
+        git_graph_meta,
         state_notes,
         diagnostics,
     } = previous;
@@ -1845,6 +1846,7 @@ fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> boo
         && *xy_chart_meta == current.xy_chart_meta
         && *pie_meta == current.pie_meta
         && *quadrant_meta == current.quadrant_meta
+        && *git_graph_meta == current.git_graph_meta
         && *state_notes == current.state_notes
         && *diagnostics == current.diagnostics
 }
@@ -7522,23 +7524,41 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let mut next_lane = 0_usize;
     let mut nodes = Vec::with_capacity(node_count);
     for (i, node) in ir.nodes.iter().enumerate() {
-        let cluster_id = ir
-            .clusters
-            .iter()
-            .enumerate()
-            .find(|(_, c)| c.members.contains(&fm_core::IrNodeId(i)))
-            .map_or(usize::MAX, |(ci, _)| ci);
-        let lane = *lane_map.entry(cluster_id).or_insert_with(|| {
-            let l = next_lane;
-            next_lane += 1;
-            l
-        });
+        // Branch membership is the lane: distinct lanes are the visual grammar of a gitGraph, and a
+        // merge is only legible because it joins two of them. The parser records the branch lane per
+        // commit; fall back to cluster membership for git-graph-shaped input that arrives without it.
+        let lane = if let Some(meta) = ir.git_graph_meta.as_ref() {
+            meta.lane_of(i)
+        } else {
+            let cluster_id = ir
+                .clusters
+                .iter()
+                .enumerate()
+                .find(|(_, c)| c.members.contains(&fm_core::IrNodeId(i)))
+                .map_or(usize::MAX, |(ci, _)| ci);
+            *lane_map.entry(cluster_id).or_insert_with(|| {
+                let l = next_lane;
+                next_lane += 1;
+                l
+            })
+        };
         let (w, h) = node_sizes[i];
 
+        // Centre each commit across its lane rather than left-aligning it. Commit boxes are as wide
+        // as their labels, so a shared left edge would still put a `merge develop` circle at a
+        // different centre from a bare `commit` on the same branch — the lane would be a
+        // bookkeeping fact, not a readable column.
+        let lane_origin = lane as f32 * lane_width;
         let (x, y) = if horizontal {
-            (i as f32 * row_height, lane as f32 * lane_width)
+            (
+                i as f32 * row_height,
+                lane_origin + (lane_width - h) * 0.5_f32,
+            )
         } else {
-            (lane as f32 * lane_width, i as f32 * row_height)
+            (
+                lane_origin + (lane_width - w) * 0.5_f32,
+                i as f32 * row_height,
+            )
         };
 
         nodes.push(LayoutNodeBox {
@@ -15545,6 +15565,70 @@ mod tests {
         assert_eq!(edge(1).bundle_count, 1);
         assert!(!edge(1).bundled);
         assert!(edge(2).bundled);
+    }
+
+    /// gitGraph commits must be placed by BRANCH, not stacked into a single column (bd-5wbp).
+    ///
+    /// The property, not the numbers: same branch → same centre; different branch → centres at least
+    /// a commit diameter apart; and the down-the-chain order is untouched. Labels are deliberately
+    /// uneven in width because commit boxes are label-sized — left-aligning them within a lane put a
+    /// wide merge commit at a different centre from a bare commit on the same branch.
+    #[test]
+    fn gitgraph_commits_are_placed_in_their_branch_lane() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::GitGraph);
+        // main, develop, develop, "merge develop" back on main.
+        let lanes = [0_usize, 1, 1, 0];
+        for (index, text) in ["c1", "on develop", "d2", "merge develop"]
+            .iter()
+            .enumerate()
+        {
+            ir.labels.push(IrLabel {
+                text: (*text).to_string(),
+                span: Span::default(),
+            });
+            ir.nodes.push(IrNode {
+                id: format!("commit_{index}"),
+                label: Some(IrLabelId(index)),
+                shape: NodeShape::Circle,
+                ..IrNode::default()
+            });
+        }
+        ir.git_graph_meta = Some(fm_core::IrGitGraphMeta {
+            branches: vec!["main".to_string(), "develop".to_string()],
+            commit_lanes: lanes.iter().copied().enumerate().collect(),
+        });
+
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.nodes.len(), 4);
+        let centre_x = |i: usize| {
+            let bounds = layout.nodes[i].bounds;
+            bounds.x + bounds.width * 0.5
+        };
+        let diameter = layout.nodes[0]
+            .bounds
+            .width
+            .min(layout.nodes[0].bounds.height);
+
+        assert_eq!(centre_x(0), centre_x(3), "main commits must share a lane");
+        assert_eq!(
+            centre_x(1),
+            centre_x(2),
+            "develop commits must share a lane"
+        );
+        assert!(
+            (centre_x(0) - centre_x(1)).abs() >= diameter,
+            "lanes {} and {} are closer than one commit diameter ({diameter})",
+            centre_x(0),
+            centre_x(1)
+        );
+
+        // Separation must not have been bought by reordering the chain.
+        for pair in layout.nodes.windows(2) {
+            assert!(
+                pair[1].bounds.y > pair[0].bounds.y,
+                "commit order along the chain changed"
+            );
+        }
     }
 
     fn labeled_graph_ir(node_count: usize, edges: &[(usize, usize)]) -> MermaidDiagramIr {

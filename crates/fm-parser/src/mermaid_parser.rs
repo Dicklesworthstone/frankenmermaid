@@ -6646,8 +6646,11 @@ struct GitGraphState {
     current_branch: String,
     /// Auto-generated commit counter for unnamed commits
     commit_counter: usize,
-    /// Ordered list of branch names for color indexing.
+    /// Ordered list of branch names; a name's position is both its colour index and its lane.
     branch_order: Vec<String>,
+    /// Lane index per commit node, keyed by node index. Handed to the IR so layout can turn branch
+    /// membership into a position instead of drawing every branch in one column.
+    commit_lanes: BTreeMap<usize, usize>,
 }
 
 impl GitGraphState {
@@ -6657,6 +6660,7 @@ impl GitGraphState {
             current_branch: "main".to_string(),
             commit_counter: 0,
             branch_order: vec!["main".to_string()],
+            commit_lanes: BTreeMap::new(),
         }
     }
 
@@ -6666,6 +6670,15 @@ impl GitGraphState {
             .iter()
             .position(|b| b == branch)
             .unwrap_or(0)
+    }
+
+    /// Register `branch` in the lane/colour ordering if it is new, returning its index.
+    fn intern_branch(&mut self, branch: &str) -> usize {
+        if let Some(index) = self.branch_order.iter().position(|b| b == branch) {
+            return index;
+        }
+        self.branch_order.push(branch.to_string());
+        self.branch_order.len() - 1
     }
 
     fn next_commit_id(&mut self) -> String {
@@ -7183,6 +7196,11 @@ fn parse_gitgraph(input: &str, builder: &mut IrBuilder) {
             "Line {line_number}: unsupported gitGraph syntax: {trimmed}"
         ));
     }
+
+    builder.set_git_graph_meta(fm_core::IrGitGraphMeta {
+        branches: state.branch_order,
+        commit_lanes: state.commit_lanes,
+    });
 }
 
 fn parse_gitgraph_command(line: &str) -> Option<Result<GitGraphCommand, String>> {
@@ -7336,9 +7354,32 @@ fn parse_git_commit(
         );
     }
 
-    // Apply branch color class. `branch_index` borrows `&self`, so no per-commit clone of the branch
-    // name is needed; and the class is one of 8 fixed strings, so index a static table instead of a
-    // per-commit `format!` heap allocation. Byte-identical.
+    tag_git_commit_branch(&commit_id, node_id, span, state, builder);
+
+    // Link from current branch head if it exists
+    if let Some(parent_id) = state.current_head() {
+        builder.push_edge(parent_id, node_id, ArrowType::Line, None, span);
+    }
+
+    // Update current branch head
+    state.set_head(&state.current_branch.clone(), node_id);
+}
+
+/// Record a freshly created commit's branch membership.
+///
+/// Two consumers, one source of truth. The renderer gets the `git-branch-N` palette class (one of
+/// 8 fixed strings, so a static table replaces a per-commit `format!`); layout gets the unwrapped
+/// lane index, which the class cannot supply because it is taken modulo the palette size.
+///
+/// Merge and cherry-pick commits go through here too: they land on the branch that is checked out,
+/// exactly like a plain `commit`, and were previously left with no branch attribution at all.
+fn tag_git_commit_branch(
+    commit_id: &str,
+    node_id: IrNodeId,
+    span: Span,
+    state: &mut GitGraphState,
+    builder: &mut IrBuilder,
+) {
     const GIT_BRANCH_CLASSES: [&str; 8] = [
         "git-branch-0",
         "git-branch-1",
@@ -7349,16 +7390,10 @@ fn parse_git_commit(
         "git-branch-6",
         "git-branch-7",
     ];
-    let branch_index = state.branch_index(&state.current_branch);
-    builder.add_class_to_node(&commit_id, GIT_BRANCH_CLASSES[branch_index % 8], span);
-
-    // Link from current branch head if it exists
-    if let Some(parent_id) = state.current_head() {
-        builder.push_edge(parent_id, node_id, ArrowType::Line, None, span);
-    }
-
-    // Update current branch head
-    state.set_head(&state.current_branch.clone(), node_id);
+    // `branch_index` borrows `&self`, so no per-commit clone of the branch name is needed.
+    let lane = state.branch_index(&state.current_branch);
+    builder.add_class_to_node(commit_id, GIT_BRANCH_CLASSES[lane % 8], span);
+    state.commit_lanes.insert(node_id.0, lane);
 }
 
 /// Parsed git commit options.
@@ -7502,10 +7537,8 @@ fn parse_git_branch(
         return;
     }
 
-    // Track branch ordering for color assignment.
-    if !state.branch_order.contains(&normalized) {
-        state.branch_order.push(normalized.clone());
-    }
+    // Track branch ordering for colour and lane assignment.
+    state.intern_branch(&normalized);
 
     // When creating a branch, it inherits the current head
     if let Some(current_head) = state.current_head() {
@@ -7527,7 +7560,10 @@ fn parse_git_checkout(
         return;
     }
 
-    // Allow checking out branches that don't exist yet (they'll be created on first commit)
+    // Allow checking out branches that don't exist yet (they'll be created on first commit). Such a
+    // branch still needs its own lane and colour: falling back to index 0 would alias it onto `main`
+    // and draw its commits in main's column.
+    state.intern_branch(&normalized);
     state.current_branch = normalized;
 }
 
@@ -7562,6 +7598,9 @@ fn parse_git_merge(
     else {
         return;
     };
+
+    // A merge commit belongs to the branch it was merged INTO, i.e. the checked-out one.
+    tag_git_commit_branch(&merge_id, merge_node, span, state, builder);
 
     // Create edge from merge source to merge commit
     builder.push_edge(
@@ -7639,6 +7678,9 @@ fn parse_git_cherry_pick(
     else {
         return;
     };
+
+    // A cherry-pick lands on the checked-out branch, so it shares that branch's lane and colour.
+    tag_git_commit_branch(&new_commit_id, new_node, span, state, builder);
 
     // Link from current head
     if let Some(current_head) = state.current_head() {
@@ -15764,6 +15806,100 @@ Rel_Back(db, app, "Responds")"#,
         assert!(
             dev_commit.classes.iter().any(|c| c == "git-branch-1"),
             "dev commits should have git-branch-1"
+        );
+    }
+
+    /// Every commit node carries a lane, and the lane matches the branch it was committed on
+    /// (bd-5wbp). Layout turns these into columns; a missing entry silently means lane 0, which is
+    /// how merge commits used to end up drawn in main's column with no branch attribution at all.
+    #[test]
+    fn gitgraph_meta_assigns_a_lane_to_every_commit_including_merges() {
+        let parsed = parse_mermaid(
+            "gitGraph\n  commit\n  branch dev\n  checkout dev\n  commit\n  checkout main\n  \
+             merge dev\n  cherry-pick id: \"commit_2\"",
+        );
+        let meta = parsed
+            .ir
+            .git_graph_meta
+            .as_ref()
+            .expect("gitGraph should publish lane metadata");
+
+        assert_eq!(meta.branches, vec!["main".to_string(), "dev".to_string()]);
+        assert_eq!(
+            meta.commit_lanes.len(),
+            parsed.ir.nodes.len(),
+            "every commit needs a lane, got {:?} for {} nodes",
+            meta.commit_lanes,
+            parsed.ir.nodes.len()
+        );
+
+        // Lane per node, cross-checked against the palette class so the two channels cannot drift.
+        for (index, node) in parsed.ir.nodes.iter().enumerate() {
+            let lane = meta.lane_of(index);
+            let expected_class = format!("git-branch-{}", lane % 8);
+            assert!(
+                node.classes.contains(&expected_class),
+                "node {} (lane {lane}) lacks {expected_class}; classes = {:?}",
+                node.id,
+                node.classes
+            );
+        }
+
+        // main, dev, merge-into-main, cherry-pick-onto-main
+        let lanes: Vec<usize> = (0..parsed.ir.nodes.len())
+            .map(|i| meta.lane_of(i))
+            .collect();
+        assert_eq!(lanes, vec![0, 1, 0, 0]);
+    }
+
+    /// A branch reached only by `checkout` gets its own lane instead of aliasing onto `main`
+    /// (bd-5wbp). The old `unwrap_or(0)` fallback made such a branch collinear with main.
+    #[test]
+    fn gitgraph_checkout_of_undeclared_branch_gets_its_own_lane() {
+        let parsed = parse_mermaid("gitGraph\n  commit\n  checkout feature\n  commit");
+        let meta = parsed
+            .ir
+            .git_graph_meta
+            .as_ref()
+            .expect("gitGraph should publish lane metadata");
+
+        assert_eq!(
+            meta.branches,
+            vec!["main".to_string(), "feature".to_string()]
+        );
+        assert_ne!(
+            meta.lane_of(0),
+            meta.lane_of(1),
+            "a checked-out branch must not share main's lane"
+        );
+    }
+
+    /// Lanes must stay distinct past the eight-colour palette (bd-5wbp). The `git-branch-N` class
+    /// wraps at 8, so a lane derived from that class would draw branch 8 on top of branch 0.
+    #[test]
+    fn gitgraph_lanes_stay_distinct_beyond_the_eight_colour_palette() {
+        let mut input = String::from("gitGraph\n  commit\n");
+        for i in 1..=9 {
+            input.push_str(&format!("  branch b{i}\n  checkout b{i}\n  commit\n"));
+        }
+        let parsed = parse_mermaid(&input);
+        let meta = parsed
+            .ir
+            .git_graph_meta
+            .as_ref()
+            .expect("gitGraph should publish lane metadata");
+
+        let lanes: Vec<usize> = (0..parsed.ir.nodes.len())
+            .map(|i| meta.lane_of(i))
+            .collect();
+        assert_eq!(lanes, (0..=9).collect::<Vec<usize>>());
+
+        // The palette class DOES wrap — that is why it cannot be the lane.
+        let ninth = &parsed.ir.nodes[9];
+        assert!(
+            ninth.classes.iter().any(|c| c == "git-branch-1"),
+            "branch 9 reuses palette slot 1; classes = {:?}",
+            ninth.classes
         );
     }
 

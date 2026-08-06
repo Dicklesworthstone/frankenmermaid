@@ -558,18 +558,15 @@ fn xychart_bar_heights_are_proportional_and_axis_anchored() {
     }
 }
 
-/// gitGraph branches must occupy distinct, visually separable lanes (bd-iicc).
+/// gitGraph branches must occupy distinct, visually separable lanes (bd-iicc, fixed by bd-5wbp).
 ///
-/// IGNORED because it FAILS against a real defect, filed as bd-5wbp: every commit renders at the
-/// same x regardless of branch, so main and develop are drawn collinear. Branch membership is
-/// present in the class attribute but invisible in the picture, and distinct lanes are the whole
-/// visual grammar of a gitGraph — a merge is legible precisely because it joins two lanes.
-///
-/// Committed rather than withheld so the specification is reviewable now and executable later:
-/// removing the `#[ignore]` is bd-5wbp's acceptance gate. Do not relax the separation distance to
-/// whatever a fix happens to produce.
+/// This was written `#[ignore]`d against a real defect: every commit rendered at the same x
+/// regardless of branch, so main and develop were drawn collinear. Branch membership was present in
+/// the class attribute but invisible in the picture, and distinct lanes are the whole visual grammar
+/// of a gitGraph — a merge is legible precisely because it joins two lanes. Un-ignoring it was
+/// bd-5wbp's acceptance gate. Do not relax the separation distance to whatever a fix happens to
+/// produce.
 #[test]
-#[ignore = "fails against the bd-5wbp defect: gitGraph branches render collinear"]
 fn gitgraph_branches_occupy_distinct_lanes() {
     let input_path = golden_dir().join("gitgraph_basic.mmd");
     let input = fs::read_to_string(&input_path)
