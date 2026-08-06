@@ -11485,6 +11485,42 @@ fn write_labeled_edge_fragment_into<const A11Y: bool>(
     }
 }
 
+/// Ribbon width for a sankey flow, proportional to its value (bd-e69x).
+///
+/// Proportional width IS the sankey diagram — it is the only thing carrying the quantity. Drawing
+/// every flow at the generic edge width leaves a stable, tidy picture that conveys nothing, which
+/// is why a byte golden pinned it for months without complaint.
+///
+/// Returns `None` for anything that is not a numeric sankey flow, so every other diagram type and
+/// any malformed row keeps the arrow-derived width exactly as before.
+fn sankey_flow_stroke_width(ir: &MermaidDiagramIr, edge: Option<&fm_core::IrEdge>) -> Option<f32> {
+    /// Keeps the smallest flow visible instead of collapsing it to a hairline.
+    const MIN_WIDTH: f32 = 1.5;
+    /// Width of the largest flow; every other flow is scaled against it.
+    const MAX_WIDTH: f32 = 24.0;
+
+    if ir.diagram_type != DiagramType::Sankey {
+        return None;
+    }
+
+    // `parse_sankey` stores the flow amount as the edge LABEL, so that is where the quantity is.
+    let value_of = |candidate: &fm_core::IrEdge| -> Option<f32> {
+        let text = ir.labels.get(candidate.label?.0)?.text.trim();
+        let value = text.parse::<f32>().ok()?;
+        (value.is_finite() && value > 0.0).then_some(value)
+    };
+
+    let value = value_of(edge?)?;
+    // Normalise against the widest flow so the ratio between two ribbons equals the ratio between
+    // their values — the property a reader actually reads off the picture.
+    let widest = ir.edges.iter().filter_map(value_of).fold(0.0_f32, f32::max);
+    if widest <= 0.0 {
+        return None;
+    }
+
+    Some(((value / widest) * MAX_WIDTH).max(MIN_WIDTH))
+}
+
 fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> Element {
     use fm_core::ArrowType;
 
@@ -11641,10 +11677,10 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         }
     };
 
-    let stroke_width = match arrow {
+    let stroke_width = sankey_flow_stroke_width(ir, ir_edge).unwrap_or(match arrow {
         ArrowType::ThickArrow | ArrowType::DoubleThickArrow | ArrowType::ThickLine => 2.5,
         _ => 1.8,
-    };
+    });
 
     // Determine edge style class
     let style_class = if is_back_edge {
@@ -12040,6 +12076,10 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
             compute_edge_label(ir, edge_path, edge_index, detail, offset_x, offset_y)
     {
         let label_str = label_text.as_ref();
+        // A sankey flow's WIDTH is its value (bd-e69x). This labeled-edge fast path is the one
+        // sankey actually takes — its edges always carry a label, because the parser stores the
+        // flow amount there — so the width must be resolved here, not only after the arrow match.
+        let labeled_stroke_width = sankey_flow_stroke_width(ir, ir_edge).unwrap_or(1.8);
         if !label_str.contains('\n') && resolve_edge_inline_style(ir, edge_index).is_none() {
             let path_str = smooth_layout_edge_path(edge_path, offset_x, offset_y);
             if a11y {
@@ -12049,7 +12089,7 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
                     out,
                     edge_index,
                     &path_str,
-                    1.8,
+                    labeled_stroke_width,
                     "fm-edge-solid",
                     "url(#arrow-end)",
                     label_str,
@@ -12068,7 +12108,7 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
                     out,
                     edge_index,
                     &path_str,
-                    1.8,
+                    labeled_stroke_width,
                     "fm-edge-solid",
                     "url(#arrow-end)",
                     label_str,
@@ -12378,6 +12418,11 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
             " inherits ",
         ),
     };
+    // A sankey flow's WIDTH is its value — the arrow-derived width above carries no quantity, so
+    // every flow drew identically and the diagram conveyed nothing (bd-e69x). Applied here, after
+    // the arrow match, so it overrides whichever arm ran and leaves every other diagram type on
+    // exactly the width it had before.
+    let stroke_width = sankey_flow_stroke_width(ir, ir_edge).unwrap_or(stroke_width);
     // Was `text_alternatives && aria_labels && keyboard_nav`. The fragment writer now has a lean
     // (a11y-off) shape too, so the gate accepts a11y that is uniformly on OR uniformly off and dispatches
     // to the matching monomorphization. Mixed combinations (e.g. `A11yConfig::minimal()`) still take the

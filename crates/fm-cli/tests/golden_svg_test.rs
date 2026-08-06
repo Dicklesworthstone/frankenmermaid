@@ -421,15 +421,10 @@ fn pie_basic_slice_angles_are_proportional_to_values() {
 
 /// Sankey flow widths must be proportional to flow values (bd-iicc).
 ///
-/// IGNORED because it currently FAILS against a real defect, filed as bd-e69x: every flow in
-/// sankey_basic renders at stroke-width 1.80 although the values span 4.8x (100/50/75/25/120/
-/// 55/50/25). Proportional ribbon width IS the sankey diagram — uniform width makes it a generic
-/// directed graph — so this is a wrong picture that the byte golden pins as happily as a right one.
-///
-/// It is committed rather than withheld so the specification is reviewable now and executable
-/// later: removing the `#[ignore]` is bd-e69x's acceptance gate. Do not weaken it to make it pass.
+/// Was ignored while bd-e69x was open: every flow rendered at stroke-width 1.80 although the
+/// values span 4.8x. Widths are now proportional, so this is live — it is the acceptance gate for
+/// that fix and must stay green.
 #[test]
-#[ignore = "fails against the bd-e69x defect: sankey flows render at uniform width"]
 fn sankey_basic_flow_widths_are_proportional_to_values() {
     let input_path = golden_dir().join("sankey_basic.mmd");
     let input = fs::read_to_string(&input_path)
@@ -449,10 +444,14 @@ fn sankey_basic_flow_widths_are_proportional_to_values() {
     let widths: Vec<f64> = rendered
         .split("<path")
         .skip(1)
-        .filter(|segment| segment.contains("fm-edge"))
-        .filter_map(|segment| {
-            let at = segment.find("stroke-width=\"")? + "stroke-width=\"".len();
-            let rest = &segment[at..];
+        // Bound each segment at its OWN closing '>' before inspecting it. Without this the
+        // arrowhead <marker>'s inner <path> swallows the rest of the document and matches a
+        // data-fm-edge-id and stroke-width belonging to elements far below it.
+        .filter_map(|segment| segment.split_once('>').map(|(tag, _)| tag))
+        .filter(|tag| tag.contains("data-fm-edge-id"))
+        .filter_map(|tag| {
+            let at = tag.find("stroke-width=\"")? + "stroke-width=\"".len();
+            let rest = &tag[at..];
             rest[..rest.find('"')?].parse().ok()
         })
         .collect();
