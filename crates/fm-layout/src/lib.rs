@@ -2037,6 +2037,9 @@ pub struct LayoutExtensions {
     pub sequence_mirror_headers: Vec<LayoutNodeBox>,
     /// Node centrality data for semantic styling (populated when FNX is enabled).
     pub node_centrality: Vec<NodeCentrality>,
+    /// Gantt task-name placements. Empty for every other diagram type; when empty the renderer keeps
+    /// its previous behaviour of centring the label on the bar.
+    pub gantt_task_labels: Vec<LayoutGanttTaskLabel>,
 }
 
 /// A sequence diagram note positioned near a participant's lifeline.
@@ -2099,6 +2102,40 @@ pub enum LayoutBandKind {
 pub struct LayoutAxisTick {
     pub label: String,
     pub position: f32,
+}
+
+/// Where a gantt task's name is drawn relative to its bar.
+///
+/// Reproduces pinned mermaid-js 11.15.0's settled behaviour rather than inventing a policy: its gantt
+/// renderer picks between the CSS classes `taskText` (inside), `taskTextOutsideRight` and
+/// `taskTextOutsideLeft` with, deminified from the pinned bundle,
+/// `textWidth > barWidth ? (barX + textWidth + 1.5*leftPadding > chartWidth ? OutsideLeft
+/// : OutsideRight) : Inside`. The text is never truncated in any branch (bd-h9gx).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GanttLabelPlacement {
+    /// Fits within the bar: centred on it.
+    Inside,
+    /// Too wide for the bar: starts just past the bar's right edge.
+    OutsideRight,
+    /// Too wide, and there is no room to the right: ends just before the bar's left edge.
+    OutsideLeft,
+}
+
+/// Placement for one gantt task's name label.
+///
+/// Carried through [`LayoutExtensions`] for the same reason section bands and axis ticks are: it is
+/// geometry the renderer must not re-derive, and it has to be known to layout so the diagram bounds
+/// can include a label that sits outside its bar. Sizing the BAR to fit the label instead — which is
+/// what this replaced — made bar length a function of the task name (bd-h9gx).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutGanttTaskLabel {
+    /// Index into [`DiagramLayout::nodes`] / `ir.nodes` for the task this labels.
+    pub node_index: usize,
+    /// Anchor x for the label text, already resolved for `placement`.
+    pub x: f32,
+    /// Estimated rendered width, so callers can reason about extent without re-measuring.
+    pub width: f32,
+    pub placement: GanttLabelPlacement,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -6116,6 +6153,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 sequence_lifecycle_markers: lifecycle_markers,
                 sequence_mirror_headers,
                 node_centrality: Vec::new(),
+                gantt_task_labels: Vec::new(),
             },
             dirty_regions: Vec::new(),
         }),
@@ -6382,6 +6420,12 @@ fn layout_diagram_gantt_fallback(ir: &MermaidDiagramIr) -> TracedLayout {
             })
         })
         .collect();
+    let gantt_metrics = fm_core::FontMetrics::default_metrics();
+    layout.extensions.gantt_task_labels = gantt_task_label_placements(ir, layout, &gantt_metrics);
+    // A label placed outside its bar sits outside the node boxes `compute_bounds` measured, so the
+    // canvas has to grow to hold it or it is clipped at the viewBox edge — which is exactly what made
+    // the first attempt at this unshippable.
+    extend_bounds_for_gantt_labels(layout);
     traced
 }
 
@@ -6537,12 +6581,37 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         let row_index = per_section_counts[section_idx];
         let start_offset_days = (start_days[task_idx] - min_start_day).max(0) as f32;
         let duration_days = durations[task_idx].max(1) as f32;
-        node_sizes[node_index].0 = node_sizes[node_index]
-            .0
-            .max(duration_days * base_col_width)
-            .max(if milestones[task_idx] { 72.0 } else { 156.0 });
+        // A gantt bar's position and length ARE the data: where it starts is its start date and how
+        // long it is is its duration. Both were wrong (bd-h9gx).
+        //
+        // The width used to be `max(label_width, duration * col, 156)`, so a long task NAME lengthened
+        // the bar — a 1-day task with a 68-character name measured 524.10px against a 10-day task's
+        // 480.00px, inverting the one comparison a gantt chart exists to support. Width is now purely
+        // temporal, and the 156px floor goes with it: `durations` is clamped to >= 1 above, so the
+        // narrowest task bar is one column (48px), visible without lying about length.
+        //
+        // The centre used to be `start_offset_days * col`, and `node_boxes_from_centers` derives
+        // `bounds.x = center_x - width / 2`, so every bar straddled its start date, beginning half a
+        // bar-width BEFORE the day it starts on. Offsetting the centre by half the width puts the LEFT
+        // EDGE on the start day, which is what a reader measures from.
+        //
+        // A milestone is an instant, not a span, so it keeps a fixed marker width and stays centred ON
+        // its day — correct geometry for a point event, not an exception.
+        //
+        // The task name no longer sizes the bar; it is placed by `gantt_task_label_placements` below,
+        // mirroring mermaid-js.
+        let (bar_width, bar_center_x) = if milestones[task_idx] {
+            (72.0, start_offset_days * base_col_width)
+        } else {
+            let width = duration_days * base_col_width;
+            (
+                width,
+                start_offset_days.mul_add(base_col_width, width / 2.0),
+            )
+        };
+        node_sizes[node_index].0 = bar_width;
 
-        let x = start_offset_days * base_col_width;
+        let x = bar_center_x;
         let y = (row_index as f32).mul_add(row_gap, section_base_y);
         centers[node_index] = (x, y);
         rank_by_node[node_index] =
@@ -6601,7 +6670,105 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
             })
         })
         .collect();
+    let gantt_metrics = fm_core::FontMetrics::default_metrics();
+    layout.extensions.gantt_task_labels = gantt_task_label_placements(ir, layout, &gantt_metrics);
+    // A label placed outside its bar sits outside the node boxes `compute_bounds` measured, so the
+    // canvas has to grow to hold it or it is clipped at the viewBox edge — which is exactly what made
+    // the first attempt at this unshippable.
+    extend_bounds_for_gantt_labels(layout);
     traced
+}
+
+/// Estimated rendered width of a gantt task name.
+///
+/// The renderer draws it at `config.font_size * 0.8`, so the estimate is scaled by the same factor;
+/// `metrics` measures at its own base size.
+fn gantt_label_width(text: &str, metrics: &fm_core::FontMetrics) -> f32 {
+    metrics.estimate_dimensions(text).0 * 0.8
+}
+
+/// Decide where each gantt task's name is drawn, reproducing pinned mermaid-js 11.15.0's policy.
+///
+/// mermaid picks `taskText` (inside the bar), `taskTextOutsideRight` or `taskTextOutsideLeft`, and
+/// never truncates in any branch. Its right/left choice exists because its canvas is a fixed width: it
+/// goes left only when going right would run off the chart. We keep that preference order, measuring
+/// "off the chart" against the extent of the bars, then grow the canvas for whichever side was chosen —
+/// so the text is always fully rendered, which truncating it to the bar would not be.
+fn gantt_task_label_placements(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    metrics: &fm_core::FontMetrics,
+) -> Vec<LayoutGanttTaskLabel> {
+    /// Gap between a bar edge and a label placed outside it.
+    const GAP: f32 = 8.0;
+    /// Slack demanded inside the bar before a label counts as fitting.
+    const INSIDE_PAD: f32 = 8.0;
+
+    let chart_left = layout
+        .nodes
+        .iter()
+        .map(|node| node.bounds.x)
+        .fold(f32::INFINITY, f32::min);
+    let chart_right = layout
+        .nodes
+        .iter()
+        .map(|node| node.bounds.x + node.bounds.width)
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    layout
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            let text = layout_label_text(ir, node.node_index);
+            if text.trim().is_empty() {
+                return None;
+            }
+            let width = gantt_label_width(text, metrics);
+            let bar_left = node.bounds.x;
+            let bar_right = node.bounds.x + node.bounds.width;
+
+            let placement = if width + INSIDE_PAD <= node.bounds.width {
+                GanttLabelPlacement::Inside
+            } else if bar_right + GAP + width <= chart_right || bar_left - GAP - width < chart_left
+            {
+                // Prefer the right, as mermaid does; fall back to it when the left has no room either,
+                // since growing the canvas rightwards is the harmless direction.
+                GanttLabelPlacement::OutsideRight
+            } else {
+                GanttLabelPlacement::OutsideLeft
+            };
+
+            let x = match placement {
+                GanttLabelPlacement::Inside => bar_left + node.bounds.width / 2.0,
+                GanttLabelPlacement::OutsideRight => bar_right + GAP,
+                GanttLabelPlacement::OutsideLeft => bar_left - GAP,
+            };
+
+            Some(LayoutGanttTaskLabel {
+                node_index: node.node_index,
+                x,
+                width,
+                placement,
+            })
+        })
+        .collect()
+}
+
+/// Grow `layout.bounds` so every outside-placed gantt label is inside the canvas.
+fn extend_bounds_for_gantt_labels(layout: &mut DiagramLayout) {
+    let mut min_x = layout.bounds.x;
+    let mut max_x = layout.bounds.x + layout.bounds.width;
+    for label in &layout.extensions.gantt_task_labels {
+        let (left, right) = match label.placement {
+            GanttLabelPlacement::Inside => continue,
+            GanttLabelPlacement::OutsideRight => (label.x, label.x + label.width),
+            GanttLabelPlacement::OutsideLeft => (label.x - label.width, label.x),
+        };
+        min_x = min_x.min(left);
+        max_x = max_x.max(right);
+    }
+    layout.bounds.x = min_x;
+    layout.bounds.width = max_x - min_x;
 }
 
 #[must_use]
@@ -18113,7 +18280,17 @@ mod tests {
         let task_2 = nodes.get("task_2").expect("task_2");
         let task_3 = nodes.get("task_3").expect("task_3");
 
-        assert!(task_1.bounds.width >= 156.0);
+        // GOLDEN-CHANGE of an ASSERTION, not a relaxation (bd-h9gx). This used to read
+        // `assert!(task_1.bounds.width >= 156.0)`, which pinned the 156px minimum-bar-width floor —
+        // and that floor was part of the defect: it made every task under 3.25 days over-long, and it
+        // sat alongside a `max(label_width, ..)` term that let a rename change bar length. Bar width is
+        // now purely temporal, so the correct assertion is the one the floor was hiding: task_1
+        // declares DurationDays(2), so its bar is exactly two 48px columns. This is strictly stronger
+        // than the old bound — it pins an exact value where the old one allowed anything above 156.
+        assert_eq!(
+            task_1.bounds.width, 96.0,
+            "a 2-day task must be exactly 2 columns wide (2 * 48), independent of its label"
+        );
         assert!(task_1.bounds.center().x < task_2.bounds.center().x);
         assert!(task_1.bounds.center().x < task_3.bounds.center().x);
         assert!(task_3.bounds.center().y > task_1.bounds.center().y);

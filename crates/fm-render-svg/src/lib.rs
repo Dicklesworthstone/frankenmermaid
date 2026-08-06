@@ -5480,13 +5480,16 @@ fn write_gantt_label_into(
     embed: bool,
     fill: &str,
     label: &str,
+    anchor: &str,
 ) {
     use crate::attributes::{write_escaped_attr, write_escaped_text};
     f.push_str("<text x=\"");
     let _ = crate::attributes::write_number_into(f, x);
     f.push_str("\" y=\"");
     let _ = crate::attributes::write_number_into(f, y);
-    f.push_str("\" text-anchor=\"middle\" dominant-baseline=\"central\" font-size=\"");
+    f.push_str("\" text-anchor=\"");
+    f.push_str(anchor);
+    f.push_str("\" dominant-baseline=\"central\" font-size=\"");
     let _ = crate::attributes::write_number_into(f, font_size);
     f.push('"');
     if !embed {
@@ -5669,15 +5672,38 @@ fn render_gantt_svg(
                 .or_else(|| ir.nodes.get(node_box.node_index).map(|n| n.id.as_str()))
                 .unwrap_or("");
             if !label_text.is_empty() {
+                // Layout decides placement, mirroring pinned mermaid-js: inside the bar when the name
+                // fits, otherwise just outside it, never truncated (bd-h9gx). It has to be layout's
+                // call because only layout can grow the diagram bounds to hold an outside label — a
+                // renderer-side decision would put the text off the canvas. Absent an entry (any
+                // non-gantt path, or a task with no name) the previous centred behaviour stands.
+                let placement = layout
+                    .extensions
+                    .gantt_task_labels
+                    .iter()
+                    .find(|entry| entry.node_index == node_box.node_index);
+                let (label_x, anchor) = match placement.map(|entry| (entry.x, entry.placement)) {
+                    Some((label_x, fm_layout::GanttLabelPlacement::OutsideRight)) => {
+                        (label_x + offset_x, "start")
+                    }
+                    Some((label_x, fm_layout::GanttLabelPlacement::OutsideLeft)) => {
+                        (label_x + offset_x, "end")
+                    }
+                    Some((label_x, fm_layout::GanttLabelPlacement::Inside)) => {
+                        (label_x + offset_x, "middle")
+                    }
+                    None => (x + w / 2.0, "middle"),
+                };
                 write_gantt_label_into(
                     &mut task_svg,
-                    x + w / 2.0,
+                    label_x,
                     y + h / 2.0 + config.font_size * 0.3,
                     config.font_size * 0.8,
                     &config.font_family,
                     config.embed_theme_css,
                     &theme.colors.text,
                     label_text,
+                    anchor,
                 );
             }
         }
@@ -16447,6 +16473,156 @@ marker#arrow-open path {
                 rows += 1;
             }
             assert_eq!(rows, count, "{count}: not every attribute row was emitted");
+        }
+    }
+
+    /// A gantt task name must render IN FULL, and must never change the bar geometry (bd-h9gx).
+    ///
+    /// Bar length and position are a gantt chart's entire payload. They used to be
+    /// `max(LABEL_width, duration*48, 156)` centred on the start day, so a 1-day task with a long name
+    /// drew a 524.10px bar against a 10-day task's 480.00px — the duration ordering inverted by a
+    /// rename. Bars are now purely temporal and the name is placed by layout, reproducing pinned
+    /// mermaid-js 11.15.0: inside the bar when it fits, otherwise just outside it, never truncated.
+    ///
+    /// The two halves are asserted together because fixing only the geometry clips the text and fixing
+    /// only the text leaves the bars lying.
+    #[test]
+    fn gantt_task_name_renders_in_full_without_changing_bar_geometry() {
+        /// One rendered gantt label: anchor x, `text-anchor`, and the text as emitted.
+        struct RenderedLabel {
+            x: f32,
+            anchor: String,
+            text: String,
+        }
+        /// Bars as (x, width), labels, and the canvas width.
+        struct RenderedGantt {
+            bars: Vec<(f32, f32)>,
+            labels: Vec<RenderedLabel>,
+            view_width: f32,
+        }
+
+        let render = |name: &str, days: u32| -> RenderedGantt {
+            let src = format!(
+                "gantt\n  dateFormat YYYY-MM-DD\n  section P\n  {name} :a1, 2024-01-01, {days}d\n  \
+                 T2 :a2, 2024-01-02, 10d"
+            );
+            let parsed = fm_parser::parse(&src);
+            let svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+            let num = |chunk: &str, key: &str| -> f32 {
+                chunk.find(&format!("{key}=\"")).map_or(f32::NAN, |at| {
+                    let rest = &chunk[at + key.len() + 2..];
+                    rest[..rest.find('"').unwrap_or(0)]
+                        .parse()
+                        .unwrap_or(f32::NAN)
+                })
+            };
+            let view_width = svg.find("viewBox=\"").map_or(f32::NAN, |at| {
+                let rest = &svg[at + 9..];
+                rest[..rest.find('"').unwrap_or(0)]
+                    .split_whitespace()
+                    .nth(2)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(f32::NAN)
+            });
+            let mut bars = Vec::new();
+            for chunk in svg.split("<rect ").skip(1) {
+                if !chunk.contains("class=\"fm-gantt-task") {
+                    continue;
+                }
+                bars.push((num(chunk, "x"), num(chunk, "width")));
+            }
+            let mut labels = Vec::new();
+            for chunk in svg.split("<text ").skip(1) {
+                if !chunk.contains("class=\"fm-gantt-task-label\"") {
+                    continue;
+                }
+                let head = chunk.split('>').next().unwrap_or_default();
+                let anchor = head
+                    .find("text-anchor=\"")
+                    .map(|at| {
+                        let rest = &head[at + 13..];
+                        rest[..rest.find('"').unwrap_or(0)].to_string()
+                    })
+                    .unwrap_or_default();
+                let body = chunk
+                    .split_once('>')
+                    .and_then(|(_, rest)| rest.split_once("</text>"))
+                    .map(|(text, _)| text.to_string())
+                    .unwrap_or_default();
+                labels.push(RenderedLabel {
+                    x: num(chunk, "x"),
+                    anchor,
+                    text: body,
+                });
+            }
+            RenderedGantt {
+                bars,
+                labels,
+                view_width,
+            }
+        };
+
+        let long_name = "A deliberately long gantt task name that far exceeds its bar";
+
+        // BAR GEOMETRY IS INDEPENDENT OF THE NAME. Same durations, wildly different name lengths.
+        for days in [1_u32, 4, 10] {
+            let short_bars = render("T1", days).bars;
+            let long_bars = render(long_name, days).bars;
+            assert_eq!(
+                short_bars, long_bars,
+                "{days}d: renaming the task changed the bar geometry"
+            );
+            // And the bar is exactly its duration in columns: the 1-day bar must never out-measure the
+            // 10-day one, which is what the defect did.
+            let first = short_bars.first().copied().unwrap_or((f32::NAN, f32::NAN));
+            let second = short_bars.get(1).copied().unwrap_or((f32::NAN, f32::NAN));
+            assert!(
+                (first.1 - second.1 * (days as f32 / 10.0)).abs() < 0.01,
+                "{days}d bar width {} is not proportional to the 10d bar {}",
+                first.1,
+                second.1
+            );
+        }
+
+        // THE NAME RENDERS IN FULL, at every duration — including 1 day, where it cannot fit inside a
+        // 48px bar and must therefore be placed outside it rather than truncated.
+        for days in [1_u32, 4, 10] {
+            let rendered = render(long_name, days);
+            let entry = rendered
+                .labels
+                .iter()
+                .find(|label| label.text.len() >= long_name.len());
+            assert!(
+                entry.is_some(),
+                "{days}d: the task name was not rendered in full; got {:?}",
+                rendered
+                    .labels
+                    .iter()
+                    .map(|label| &label.text)
+                    .collect::<Vec<_>>()
+            );
+            let label = entry.expect("checked");
+            assert_eq!(label.text, long_name, "{days}d: task name altered");
+            assert!(
+                !label.text.contains('\u{2026}'),
+                "{days}d: task name ellipsized"
+            );
+
+            // Wherever it was placed, it is on the canvas. `anchor=start` extends right from x,
+            // `end` extends left, `middle` splits the difference.
+            let bar_width = rendered.bars.first().map_or(f32::NAN, |b| b.1);
+            assert!(
+                label.x >= 0.0 && label.x <= rendered.view_width,
+                "{days}d: label anchor {} is off a canvas of width {}",
+                label.x,
+                rendered.view_width
+            );
+            if bar_width < 100.0 {
+                assert_ne!(
+                    label.anchor, "middle",
+                    "{days}d: a name too wide for a {bar_width}px bar must be placed outside it"
+                );
+            }
         }
     }
 

@@ -116,9 +116,9 @@
     "gantt_basic": {
       "edge_count": 1,
       "layout_algorithm": "auto",
-      "layout_checksum": "2d689bdfe5562db7",
+      "layout_checksum": "2608110539bb2455",
       "layout_height": 252.100006,
-      "layout_width": 422.0,
+      "layout_width": 440.0,
       "node_count": 2
     },
     "gitgraph_basic": {
