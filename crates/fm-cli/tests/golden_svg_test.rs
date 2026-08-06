@@ -1737,28 +1737,40 @@ fn node_boxes_by_declared_id(svg: &str) -> Vec<NodeBox> {
         let Some(id) = attr("data-id", head) else {
             unreadable.push(format!(
                 "fm-node-{group_id} carries no data-id, so this guard cannot tell which declared \
-                 requirement it is"
+                 element it is"
             ));
             continue;
         };
 
-        let Some(rect_at) = body.find("<rect ") else {
-            unreadable.push(format!(
-                "fm-node-{group_id} (data-id {id:?}) has no <rect>; a requirement node is a box and \
-                 this guard must not judge one it cannot locate"
-            ));
-            continue;
+        // Rect OR circle. A stateDiagram's `[*]` pseudo-states render as circles, and the first
+        // version of this reader took only `<rect>` — so it refused to judge state_basic at all
+        // rather than reporting "__state_start not rendered". Refusing was correct; narrowing the
+        // guard would not have been. A circle is reported as its bounding box, which is exact for a
+        // circle (unlike the path case, see `path_extent`). Extend this list when a new shape
+        // appears; do not narrow it.
+        let geometry = if let Some(at) = body.find("<rect ") {
+            let r = &body[at..];
+            match (num("x", r), num("y", r), num("width", r), num("height", r)) {
+                (Some(x), Some(y), Some(w), Some(h)) => Some((x, y, w, h)),
+                _ => None,
+            }
+        } else if let Some(at) = body.find("<circle ") {
+            let c = &body[at..];
+            match (num("cx", c), num("cy", c), num("r", c)) {
+                (Some(cx), Some(cy), Some(r)) => Some((cx - r, cy - r, r * 2.0, r * 2.0)),
+                _ => None,
+            }
+        } else {
+            None
         };
-        let rect = &body[rect_at..];
-        let (Some(x), Some(y), Some(width), Some(height)) = (
-            num("x", rect),
-            num("y", rect),
-            num("width", rect),
-            num("height", rect),
-        ) else {
+        let Some((x, y, width, height)) = geometry else {
+            let tags: Vec<&str> = ["rect", "circle", "ellipse", "polygon", "path", "line"]
+                .into_iter()
+                .filter(|t| body.contains(&format!("<{t} ")))
+                .collect();
             unreadable.push(format!(
-                "fm-node-{group_id} (data-id {id:?}) has a <rect> whose x/y/width/height this guard \
-                 could not read"
+                "fm-node-{group_id} (data-id {id:?}) has no shape this guard can turn into a box; \
+                 it contains tag(s) {tags:?}"
             ));
             continue;
         };
@@ -2671,5 +2683,409 @@ fn c4_external_marker_survives_the_config_the_goldens_pin() {
          with:\n  {}",
         invisible.len(),
         invisible.join("\n  ")
+    );
+}
+
+// ── Round 7: stateDiagram (bd-iicc) ─────────────────────────────────────────────────────────
+//
+// state_basic is clean and is guarded live below. state_composite is not, and the two defects it
+// carries were separated by a CONTROLLED EXPERIMENT rather than by inspection: rendering a composite
+// that declares no inner `[*]` produces a correct, tight cluster, which proves the cluster swell in
+// state_composite is CAUSED by the pseudo-state merge rather than merely co-occurring with it. That
+// is why both symptoms cite one bead (bd-w5j5) instead of two.
+
+/// One rendered cluster (a composite state's container): its label and its box.
+///
+/// Hard-errors on a cluster rect whose geometry cannot be read, and on a cluster with no label —
+/// an unlabelled container cannot be matched to the composite state that declared it, and a guard
+/// that skipped it would judge fewer composites than the diagram declares.
+#[derive(Debug)]
+struct ClusterBox {
+    label: String,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+fn cluster_boxes(svg: &str) -> Vec<ClusterBox> {
+    let mut out = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
+    let labels: Vec<String> = svg
+        .split("class=\"fm-cluster-label\"")
+        .skip(1)
+        .filter_map(|chunk| chunk.split_once('>'))
+        .filter_map(|(_, rest)| rest.split_once("</text>"))
+        .map(|(content, _)| strip_inner_tags(content))
+        .collect();
+
+    for (index, chunk) in svg.split("<rect id=\"fm-cluster-").skip(1).enumerate() {
+        let tag = chunk.split_once('>').map_or(chunk, |(t, _)| t);
+        let cluster_id: String = tag.chars().take_while(|c| *c != '"').collect();
+        let num = |key: &str| -> Option<f32> {
+            let at = tag.find(&format!("{key}=\""))?;
+            let rest = &tag[at + key.len() + 2..];
+            rest[..rest.find('"')?].parse().ok()
+        };
+        let (Some(x), Some(y), Some(width), Some(height)) =
+            (num("x"), num("y"), num("width"), num("height"))
+        else {
+            unreadable.push(format!(
+                "fm-cluster-{cluster_id} has a rect whose x/y/width/height this guard could not read"
+            ));
+            continue;
+        };
+        let Some(label) = labels.get(index) else {
+            unreadable.push(format!(
+                "fm-cluster-{cluster_id} has no readable label, so it cannot be matched to the \
+                 composite state that declared it"
+            ));
+            continue;
+        };
+        out.push(ClusterBox {
+            label: label.clone(),
+            x,
+            y,
+            width,
+            height,
+        });
+    }
+    assert!(
+        unreadable.is_empty(),
+        "cluster_boxes cannot read {} cluster(s), so any containment verdict would be \
+         meaningless:\n  {}",
+        unreadable.len(),
+        unreadable.join("\n  ")
+    );
+    out
+}
+
+/// What a stateDiagram fixture declares: the composite blocks and their members, and every
+/// `[*]` transition tagged with the scope it was declared in.
+///
+/// `scope` is the enclosing composite's name, or `None` for the top level. That distinction is the
+/// whole point: `[*] --> Validating` written inside `state Processing { … }` is Processing's initial
+/// transition, NOT the machine's, and conflating the two invents a transition nobody declared.
+#[derive(Debug, Default)]
+struct StateDeclarations {
+    /// `composite name -> states declared inside its block`.
+    composites: Vec<(String, Vec<String>)>,
+    /// `(scope, target)` for each `[*] --> target`.
+    starts: Vec<(Option<String>, String)>,
+    /// `(scope, source)` for each `source --> [*]`.
+    ends: Vec<(Option<String>, String)>,
+}
+
+fn state_declarations(fixture: &str) -> StateDeclarations {
+    let read = fs::read_to_string(golden_dir().join(format!("{fixture}.mmd")));
+    assert!(read.is_ok(), "read {fixture} fixture: {:?}", read.err());
+    let source = read.unwrap_or_default();
+
+    let mut out = StateDeclarations::default();
+    let mut scope: Option<String> = None;
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "}" {
+            scope = None;
+            continue;
+        }
+        // `state Name {` opens a composite. `state name <<fork>>` does not.
+        if let Some(rest) = line.strip_prefix("state ")
+            && let Some(name) = rest.strip_suffix('{')
+        {
+            let name = name.trim().to_string();
+            out.composites.push((name.clone(), Vec::new()));
+            scope = Some(name);
+            continue;
+        }
+        let Some((left, right)) = line.split_once("-->") else {
+            continue;
+        };
+        // Strip a `: label` suffix from the target side.
+        let right = right.split(':').next().unwrap_or(right).trim().to_string();
+        let left = left.trim().to_string();
+
+        if left == "[*]" {
+            out.starts.push((scope.clone(), right.clone()));
+        } else if right == "[*]" {
+            out.ends.push((scope.clone(), left.clone()));
+        }
+        // Record membership: any state NAMED inside a composite block belongs to it.
+        if let Some(current) = &scope
+            && let Some((_, members)) = out.composites.iter_mut().find(|(n, _)| n == current)
+        {
+            for name in [&left, &right] {
+                if name != "[*]" && !name.is_empty() && !members.contains(name) {
+                    members.push(name.clone());
+                }
+            }
+        }
+    }
+    assert!(
+        !out.starts.is_empty(),
+        "{fixture} declares no `[*] -->` transition; these guards would pass by checking nothing"
+    );
+    out
+}
+
+/// Every declared state transition must run from its source to its target and carry its label
+/// (bd-iicc). PASSES on state_basic, which has no composite states.
+///
+/// A state machine IS its transitions; an arrow drawn backwards asserts the opposite machine, and
+/// reversing one changes no element and no attribute name — only which coordinate is first — so the
+/// byte golden pins it happily. This is the same directed assertion as the requirement and C4
+/// guards, applied to the type where direction carries the most meaning.
+#[test]
+fn state_transitions_run_from_source_to_target_with_their_labels() {
+    let svg = render_fixture("state_basic");
+    assert!(
+        !svg.contains("transform="),
+        "a transform would make these coordinates non-final"
+    );
+    let boxes = node_boxes_by_declared_id(&svg);
+    let edges = labelled_edges(&svg);
+
+    // `Idle --> Running : start` and `Running --> Idle : stop` — a PAIR of opposite transitions
+    // between the same two states, which is exactly the shape that a direction-blind implementation
+    // renders identically in both directions.
+    let declared = [("Idle", "Running", "start"), ("Running", "Idle", "stop")];
+    let box_of = |name: &str| -> &NodeBox {
+        let found = boxes.iter().find(|b| b.id == name);
+        assert!(
+            found.is_some(),
+            "state {name:?} was not rendered; read {:?}",
+            boxes.iter().map(|b| &b.id).collect::<Vec<_>>()
+        );
+        found.unwrap_or_else(|| unreachable!("asserted present"))
+    };
+
+    for (src, dst, label) in declared {
+        let matching: Vec<_> = edges.iter().filter(|(l, ..)| l == label).collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "transition {src} --> {dst} : {label} should render exactly one edge with that label, \
+             found {} among {:?}",
+            matching.len(),
+            edges.iter().map(|(l, ..)| l).collect::<Vec<_>>()
+        );
+        let (_, start, end) = matching[0];
+        assert!(
+            point_on_box_boundary(box_of(src), *start),
+            "{src} --> {dst} : {label} starts at {start:?}, which is not on {src}'s box"
+        );
+        assert!(
+            point_on_box_boundary(box_of(dst), *end),
+            "{src} --> {dst} : {label} ends at {end:?}, which is not on {dst}'s box"
+        );
+        assert!(
+            !point_on_box_boundary(box_of(dst), *start),
+            "{src} --> {dst} : {label} starts on {dst}'s box, so the arrow is drawn backwards"
+        );
+    }
+}
+
+/// A composite state's `[*]` must be ITS initial state, not the machine's (bd-iicc).
+///
+/// IGNORED because it FAILS against a real defect, filed as bd-w5j5. state_composite declares
+/// `[*] --> Idle` at the top level and `[*] --> Validating` inside `state Processing { … }`. Those
+/// are two different pseudo-states in two different scopes. The render collapses them into ONE node
+/// (`__state_start`, a single group), which then emits BOTH `__state_start points to Idle` and
+/// `__state_start points to Validating`.
+///
+/// That is not a cosmetic merge — it asserts a transition the source never declared: that the machine
+/// can begin directly in `Validating`, bypassing `Idle` and the whole `Processing` entry. Reachability
+/// is the one thing a state diagram exists to communicate. The same collapse happens at the terminal:
+/// one `__state_end` receives `Formatting` (inner), `Error` and `Complete` (outer).
+///
+/// The assertion is derived from the fixture's own scoping, not from a count pinned here: no rendered
+/// node may be the source of a top-level `[*]` transition AND of a composite-scoped one. Un-ignoring
+/// this is part of bd-w5j5's acceptance gate.
+#[test]
+#[ignore = "specifies bd-w5j5: a composite's inner [*] is merged with the top-level [*], inventing transitions"]
+fn state_pseudo_states_are_scoped_to_their_composite() {
+    let svg = render_fixture("state_composite");
+    let declared = state_declarations("state_composite");
+
+    let top_level_start_targets: Vec<&String> = declared
+        .starts
+        .iter()
+        .filter(|(scope, _)| scope.is_none())
+        .map(|(_, target)| target)
+        .collect();
+    let scoped_start_targets: Vec<&String> = declared
+        .starts
+        .iter()
+        .filter(|(scope, _)| scope.is_some())
+        .map(|(_, target)| target)
+        .collect();
+    assert!(
+        !top_level_start_targets.is_empty() && !scoped_start_targets.is_empty(),
+        "state_composite must declare BOTH a top-level `[*] -->` and one inside a composite for \
+         this guard to mean anything; read top-level {top_level_start_targets:?} and scoped \
+         {scoped_start_targets:?}"
+    );
+
+    // Which states each rendered pseudo-state node points at, taken from the edge titles the
+    // renderer writes about itself.
+    let mut merged: Vec<String> = Vec::new();
+    for chunk in svg.split("<g id=\"fm-edge-").skip(1) {
+        let body = chunk.split("<g id=\"fm-").next().unwrap_or(chunk);
+        let Some(title) = body
+            .find("<title>")
+            .map(|at| &body[at + "<title>".len()..])
+            .and_then(|rest| rest.find("</title>").map(|end| &rest[..end]))
+        else {
+            continue;
+        };
+        let Some((source, rest)) = title.split_once(" points to ") else {
+            continue;
+        };
+        let target = rest.split(" with label").next().unwrap_or(rest).trim();
+        if !source.contains("state_start") {
+            continue;
+        }
+        if scoped_start_targets.iter().any(|t| t.as_str() == target) {
+            merged.push(format!(
+                "{source} points to {target}, which is declared as the initial state of a COMPOSITE"
+            ));
+        }
+    }
+
+    assert!(
+        merged.is_empty(),
+        "the machine's own start pseudo-state also serves as a composite's start, so the picture \
+         asserts {} transition(s) the source never declared:\n  {}\n(top-level starts: {:?})",
+        merged.len(),
+        merged.join("\n  "),
+        top_level_start_targets
+    );
+}
+
+/// A composite state's container must hold ITS members and nothing else (bd-iicc).
+///
+/// IGNORED because it FAILS against the same defect as its sibling above, filed as bd-w5j5. The
+/// `Processing` cluster is rendered at x 136.62..890.21, y 92..1242 — a box that geometrically
+/// contains `Idle`, `Error`, `Complete`, `fork_state`, `join_state` and both pseudo-states, none of
+/// which is declared inside `state Processing { … }`. A reader sees a composite state that swallows
+/// almost the entire machine.
+///
+/// WHY THIS CITES THE SAME BEAD rather than a new one, and it was established by experiment rather
+/// than assumed: rendering a composite that declares NO inner `[*]` produces a correct, tight cluster
+/// with every non-member outside it. The swell is therefore caused by the pseudo-state merge pulling
+/// shared start/end nodes — and the outer states positioned near them — into the composite's member
+/// set. Fixing bd-w5j5 should fix this; if it does not, this guard is what says so.
+///
+/// Membership is read FROM THE FIXTURE's block structure, so the assertion cannot be satisfied by
+/// re-blessing. Un-ignoring this is part of bd-w5j5's acceptance gate.
+#[test]
+#[ignore = "specifies bd-w5j5: the composite's cluster box engulfs states declared outside it"]
+fn composite_state_cluster_contains_only_its_declared_members() {
+    let svg = render_fixture("state_composite");
+    let declared = state_declarations("state_composite");
+    let clusters = cluster_boxes(&svg);
+    let boxes = node_boxes_by_declared_id(&svg);
+
+    assert!(
+        !declared.composites.is_empty(),
+        "state_composite declares no composite state; this guard would pass by checking nothing"
+    );
+
+    let mut intruders: Vec<String> = Vec::new();
+    for (composite, members) in &declared.composites {
+        let Some(cluster) = clusters.iter().find(|c| &c.label == composite) else {
+            intruders.push(format!(
+                "composite {composite:?} has no cluster labelled for it; read {:?}",
+                clusters.iter().map(|c| &c.label).collect::<Vec<_>>()
+            ));
+            continue;
+        };
+        assert!(
+            !members.is_empty(),
+            "composite {composite:?} parsed with no members, so this guard cannot tell an intruder \
+             from a member"
+        );
+        for node in &boxes {
+            // The composite's own node is excluded here: that it is drawn at all is a separate
+            // defect (bd-9w54) with its own guard, and folding it in would make this one fail for
+            // two reasons at once.
+            if members.contains(&node.id) || &node.id == composite {
+                continue;
+            }
+            let inside = node.x >= cluster.x
+                && node.x + node.width <= cluster.x + cluster.width
+                && node.y >= cluster.y
+                && node.y + node.height <= cluster.y + cluster.height;
+            if inside {
+                intruders.push(format!(
+                    "{} (x {:.2}..{:.2}, y {:.2}..{:.2}) is NOT declared inside {composite:?} yet \
+                     sits entirely within its cluster (x {:.2}..{:.2}, y {:.2}..{:.2})",
+                    node.id,
+                    node.x,
+                    node.x + node.width,
+                    node.y,
+                    node.y + node.height,
+                    cluster.x,
+                    cluster.x + cluster.width,
+                    cluster.y,
+                    cluster.y + cluster.height
+                ));
+            }
+        }
+    }
+
+    assert!(
+        intruders.is_empty(),
+        "{} state(s) are drawn inside a composite that does not declare them:\n  {}",
+        intruders.len(),
+        intruders.join("\n  ")
+    );
+}
+
+/// A composite state must be drawn ONCE (bd-iicc).
+///
+/// IGNORED because it FAILS against a real defect, filed as bd-9w54. `state Processing { … }` renders
+/// as a cluster container labelled "Processing" AND, separately, as a plain rounded node box also
+/// labelled "Processing". The same state appears twice in one picture — in state_composite the extra
+/// box sits inside its own container, which reads as "Processing contains a state called Processing".
+///
+/// It is not merely cosmetic duplication: `Idle --> Processing : start` attaches to the plain box, so
+/// the container that actually holds the sub-states has no incoming transition and the composite's
+/// entry point is drawn pointing at a decoy.
+///
+/// This is checked on BOTH state fixtures' composite declarations rather than on a pinned name, and
+/// it is independent of bd-w5j5 — it reproduces in a composite with no inner `[*]`, where the cluster
+/// is otherwise correct. Un-ignoring this is bd-9w54's acceptance gate.
+#[test]
+#[ignore = "specifies bd-9w54: a composite state is drawn twice, as its cluster and as a plain node"]
+fn a_composite_state_is_not_also_drawn_as_a_plain_node() {
+    let svg = render_fixture("state_composite");
+    let declared = state_declarations("state_composite");
+    let clusters = cluster_boxes(&svg);
+    let boxes = node_boxes_by_declared_id(&svg);
+
+    let mut duplicated: Vec<String> = Vec::new();
+    for (composite, _) in &declared.composites {
+        let has_cluster = clusters.iter().any(|c| &c.label == composite);
+        assert!(
+            has_cluster,
+            "composite {composite:?} rendered no cluster container at all, so this guard cannot \
+             tell duplication from a missing container; clusters read {:?}",
+            clusters.iter().map(|c| &c.label).collect::<Vec<_>>()
+        );
+        if let Some(node) = boxes.iter().find(|b| &b.id == composite) {
+            duplicated.push(format!(
+                "{composite:?} is drawn as its cluster container AND as a plain node box at \
+                 (x {:.2}, y {:.2}, {:.2}x{:.2}) carrying the same label",
+                node.x, node.y, node.width, node.height
+            ));
+        }
+    }
+
+    assert!(
+        duplicated.is_empty(),
+        "{} composite state(s) are drawn twice:\n  {}",
+        duplicated.len(),
+        duplicated.join("\n  ")
     );
 }
