@@ -644,6 +644,70 @@ fn gitgraph_branches_occupy_distinct_lanes() {
     }
 }
 
+/// ER cardinality labels must match the crow's-foot symbols the fixture declares (bd-iicc).
+///
+/// Passes today — the mapping is already right. It is worth pinning because cardinality is the
+/// entire semantic payload of an ER relationship: swapping `0..*` for `1..*` turns an optional
+/// association into a mandatory one, which is a data-model error that renders as a tidy,
+/// plausible-looking diagram and that a byte golden would bless without complaint.
+#[test]
+fn er_cardinality_labels_match_declared_relationships() {
+    let input_path = golden_dir().join("er_basic.mmd");
+    let input = fs::read_to_string(&input_path)
+        .map_err(|err| format!("failed reading {}: {err}", input_path.display()))
+        .expect("read er fixture");
+    let parsed = parse(&input);
+    let rendered = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+
+    // Derive the expectation from the FIXTURE's crow's-foot symbols rather than restating the
+    // renderer's output, so this cannot be satisfied by re-blessing.
+    //   ||  exactly one      o{  zero or many      |{  one or many
+    let mut expected: Vec<&str> = Vec::new();
+    for line in input.lines() {
+        let Some((left, _)) = line.split_once(" : ") else {
+            continue;
+        };
+        let Some(symbols) = left.split_whitespace().nth(1) else {
+            continue;
+        };
+        let Some((near, far)) = symbols.split_once("--") else {
+            continue;
+        };
+        expected.push(match near {
+            "||" => "1",
+            "}o" | "o" => "0..*",
+            "}|" => "1..*",
+            other => panic!("unhandled near symbol {other}"),
+        });
+        expected.push(match far {
+            "||" => "1",
+            "o{" => "0..*",
+            "|{" => "1..*",
+            other => panic!("unhandled far symbol {other}"),
+        });
+    }
+    assert_eq!(
+        expected,
+        ["1", "0..*", "1", "1..*"],
+        "fixture parse produced unexpected cardinalities"
+    );
+
+    let rendered_labels: Vec<String> = rendered
+        .split("fm-er-cardinality")
+        .skip(1)
+        .filter_map(|segment| {
+            let at = segment.find('>')? + 1;
+            let rest = &segment[at..];
+            Some(rest[..rest.find("</text>")?].to_string())
+        })
+        .collect();
+
+    assert_eq!(
+        rendered_labels, expected,
+        "rendered cardinality labels must match the declared crow's-foot symbols, in order"
+    );
+}
+
 #[test]
 fn resilience_suite_manifest_matches_checked_in_fixtures() {
     let manifest = load_resilience_suite();
