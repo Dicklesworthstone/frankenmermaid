@@ -2327,6 +2327,24 @@ fn scan_node_class_keywords(class: &str) -> NodeClassKeywords {
     scan_class_keywords_and_clean(class).0
 }
 
+/// True if any node carries a class the node renderer reads as `highlight`.
+///
+/// Mirrors the per-node `is_highlighted` computation in the node renderer exactly — same
+/// `scan_node_class_keywords` over the same `node.classes` — so the `<filter id="node-glow">` def
+/// and the `filter="url(#node-glow)"` reference can never disagree about whether glow is in play.
+/// The mirror is exact rather than conservative because the node path resolves its node as
+/// `ir.nodes.get(node_box.node_index)`, so a highlighted node is always an element of `ir.nodes`,
+/// and `is_highlighted` stays false whenever that lookup misses.
+///
+/// Free on the common diagram: `node.classes` is empty, so the inner `any` never runs a scan.
+fn any_node_is_highlighted(ir: &MermaidDiagramIr) -> bool {
+    ir.nodes.iter().any(|node| {
+        node.classes
+            .iter()
+            .any(|class| scan_node_class_keywords(class).highlighted)
+    })
+}
+
 /// One pass over `class` that both detects the state keywords (as [`scan_node_class_keywords`]) AND
 /// reports whether the class is an already-valid lowercase CSS token (the `all(clean)` fast-path check
 /// [`write_sanitized_css_token_into`] does). The node-class fast paths call this once and reuse both
@@ -3674,7 +3692,19 @@ fn render_layout_to_svg(
             ));
         }
     }
-    if config.glow_enabled {
+    // Add the `<filter id="node-glow">` def only when a node can actually reference it. Its sole
+    // referrer is the inline `filter="url(#node-glow)"` emitted under `is_highlighted &&
+    // config.glow_enabled`, and `is_highlighted` comes only from a node class matching the
+    // `highlight` keyword — which almost no diagram carries. Gating on `glow_enabled` alone (it
+    // defaults on) therefore shipped 168 bytes of unreferenced def on nearly every render. Same
+    // rule as the `drop-shadow` gate above and the marker gating below: never emit a def that
+    // nothing can use.
+    //
+    // The predicate MIRRORS the consumer instead of approximating it, through the same
+    // `scan_node_class_keywords`. Suppressing the def while a node still emits the reference would
+    // leave a dangling `url(#…)` — invalid, and a silently unstyled node — which is strictly worse
+    // than the wasted bytes.
+    if config.glow_enabled && any_node_is_highlighted(ir) {
         defs = defs.filter(Filter::drop_shadow_with_color(
             "node-glow",
             0.0,
@@ -16189,6 +16219,100 @@ marker#arrow-open path {
         assert!(svg.contains("class=\"fm-node fm-node-accent-"));
         assert!(svg.contains("fm-node-highlighted"));
         assert!(svg.contains("filter=\"url(#node-glow)\""));
+    }
+
+    /// The `<filter id="node-glow">` def must not ship when nothing can reference it (bd-a6uk).
+    ///
+    /// `glow_enabled` defaults ON while the reference needs a `highlight` class almost no diagram
+    /// carries, so the def was 168 bytes of dead output on nearly every render. Asserted as a pair
+    /// with `highlighted_node_uses_glow_filter` above, and both directions are checked here too:
+    /// the dangerous failure is not the wasted bytes but suppressing the def while a node still
+    /// emits `url(#node-glow)`, which would leave a dangling reference and an unstyled node.
+    #[test]
+    fn glow_filter_def_is_omitted_when_no_node_is_highlighted() {
+        let config = SvgRenderConfig {
+            glow_enabled: true,
+            ..Default::default()
+        };
+
+        // No highlight class anywhere: neither the def nor a reference may appear.
+        let plain = render_svg_with_config(
+            &create_ir_with_single_node("plain-node", NodeShape::Rect),
+            &config,
+        );
+        assert!(
+            !plain.contains("node-glow"),
+            "unreferenced glow filter shipped: {}",
+            plain
+                .split("<filter")
+                .find(|chunk| chunk.contains("node-glow"))
+                .unwrap_or("<not found>")
+        );
+
+        // A class carrying a non-highlight state keyword still gets no glow def. `muted` and not
+        // `inactive`: the keyword scan is SUBSTRING-based, so `inactive` contains `active` and the
+        // renderer really does treat it as highlighted — the def is correctly emitted there, and
+        // this gate mirrors that rather than second-guessing it.
+        let unrelated = render_svg_with_config(
+            &create_ir_with_single_node_classes("dim-node", NodeShape::Rect, &["muted"]),
+            &config,
+        );
+        assert!(!unrelated.contains("node-glow"));
+
+        // Control: with a highlighted node the def comes back AND is referenced, so this test
+        // cannot be satisfied by never emitting the filter at all.
+        let highlighted = render_svg_with_config(
+            &create_ir_with_single_node_classes("hot-node", NodeShape::Rect, &["highlight"]),
+            &config,
+        );
+        assert!(highlighted.contains("id=\"node-glow\""));
+        assert!(highlighted.contains("filter=\"url(#node-glow)\""));
+    }
+
+    /// No `<defs>` entry may be defined and then left unreferenced, for ANY id, at default config.
+    ///
+    /// The specific instance this was written for is bd-a6uk's glow filter, but the invariant is
+    /// the file's stated doctrine for markers ("never emits unused markers") and for the
+    /// `drop-shadow` filter, so it is asserted generically: every `id="…"` declared inside `<defs>`
+    /// must appear again as a `url(#…)` somewhere in the document. That makes the next dead def a
+    /// test failure rather than something a byte golden blesses.
+    #[test]
+    fn no_defs_entry_is_declared_without_a_reference() {
+        let ir = create_ir_with_single_node("solo", NodeShape::Rect);
+        let svg = render_svg_with_config(&ir, &SvgRenderConfig::default());
+
+        let defs_start = svg
+            .find("<defs>")
+            .expect("document should have a defs block");
+        let defs_end = svg[defs_start..]
+            .find("</defs>")
+            .expect("defs block should close")
+            + defs_start;
+        let defs = &svg[defs_start..defs_end];
+
+        let mut declared: Vec<&str> = Vec::new();
+        for chunk in defs.split("id=\"").skip(1) {
+            let Some(end) = chunk.find('"') else { continue };
+            declared.push(&chunk[..end]);
+        }
+        assert!(
+            !declared.is_empty(),
+            "expected some defs ids to check; the probe has stopped probing"
+        );
+
+        let body = &svg[defs_end..];
+        let unreferenced: Vec<&str> = declared
+            .iter()
+            .filter(|id| {
+                let reference = format!("url(#{id})");
+                !body.contains(&reference) && !defs.contains(&reference)
+            })
+            .copied()
+            .collect();
+        assert!(
+            unreferenced.is_empty(),
+            "defs declared but never referenced: {unreferenced:?}"
+        );
     }
 
     #[test]
