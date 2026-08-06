@@ -122,6 +122,24 @@ fn fnv_hex(value: &str) -> String {
     format!("{:016x}", fnv1a_64(value.as_bytes()))
 }
 
+/// The config every byte golden in this file is rendered and pinned with.
+///
+/// Keeps golden fixtures focused on structural rendering stability: visual-effect defaults evolve
+/// frequently and pinning them avoids noisy churn. Extracted so a guard can render through the
+/// SAME config the goldens are pinned with and thereby make a checkable claim about what the byte
+/// corpus does and does not cover — see `c4_external_marker_survives_the_config_the_goldens_pin`.
+fn golden_render_config() -> SvgRenderConfig {
+    SvgRenderConfig {
+        node_gradients: false,
+        glow_enabled: false,
+        cluster_fill_opacity: 1.0,
+        inactive_opacity: 1.0,
+        shadow_blur: 3.0,
+        shadow_color: String::new(),
+        ..Default::default()
+    }
+}
+
 fn run_case(case_id: &str, bless: bool) {
     let base = golden_dir();
     let input_path = base.join(format!("{case_id}.mmd"));
@@ -139,17 +157,7 @@ fn run_case(case_id: &str, bless: bool) {
     let layout = layout_diagram(&parsed.ir);
     let layout_ms = layout_start.elapsed().as_millis();
 
-    // Keep golden fixtures focused on structural rendering stability.
-    // Visual-effect defaults evolve frequently; pinning these values avoids noisy churn.
-    let config = SvgRenderConfig {
-        node_gradients: false,
-        glow_enabled: false,
-        cluster_fill_opacity: 1.0,
-        inactive_opacity: 1.0,
-        shadow_blur: 3.0,
-        shadow_color: String::new(),
-        ..Default::default()
-    };
+    let config = golden_render_config();
     let config_hash = fnv_hex(&format!("{config:?}"));
     let input_hash = fnv_hex(&input);
 
@@ -1682,32 +1690,37 @@ fn path_extent_parses_absolute_commands_and_refuses_the_rest() {
 // what else the requirement renderer draws inside the same box, and nothing had checked that the
 // relationship arrows point where the fixture declares. Both turned out to matter.
 
-/// One rendered requirement node: its DECLARED id, its box, and every text run drawn inside it.
+/// One rendered node keyed by its DECLARED id: its box, its group's classes, and every text run
+/// drawn inside it.
 ///
 /// `node_centres` cannot serve these guards, and the reason is the trap this file keeps hitting. It
 /// keys a node on its first non-empty text run, and a requirement node's first run is the type header
 /// `«requirement»`, not the name — so looking up "AuthReq" through it would report
 /// "AuthReq not rendered". That is absence standing in for a key mismatch, it reads exactly like a
-/// layout defect, and it is not one. Requirement groups carry `data-id="AuthReq"`, the name AS
-/// DECLARED, so key on that instead.
+/// layout defect, and it is not one. Node groups carry `data-id="AuthReq"` / `data-id="user"`, the
+/// name AS DECLARED IN THE SOURCE, so key on that instead. C4 uses the same reader for the same
+/// reason: a C4 node's first run is `<<Person>>`, not its alias.
 ///
 /// Everything this cannot read is a hard error naming the group: a group with no `data-id`, no
 /// `<rect>`, or a `<text>` whose content or `font-size` cannot be extracted. A guard that silently
 /// judged fewer nodes than the diagram declares would produce a verdict without having looked.
 #[derive(Debug)]
-struct RequirementBox {
+struct NodeBox {
     /// The `data-id`, i.e. the name the fixture declared.
     id: String,
     x: f32,
     y: f32,
     width: f32,
     height: f32,
+    /// The group's `class` attribute verbatim — how a diagram encodes an element's KIND (C4
+    /// external-ness, requirement risk) when the encoding is styling rather than geometry.
+    classes: String,
     /// Every `<text>` drawn inside the box, as `(content, font_size)`, in document order.
     texts: Vec<(String, f32)>,
 }
 
-fn requirement_boxes(svg: &str) -> Vec<RequirementBox> {
-    let mut out: Vec<RequirementBox> = Vec::new();
+fn node_boxes_by_declared_id(svg: &str) -> Vec<NodeBox> {
+    let mut out: Vec<NodeBox> = Vec::new();
     let mut unreadable: Vec<String> = Vec::new();
     for chunk in svg.split("<g id=\"fm-node-").skip(1) {
         let body = chunk.split("<g id=\"fm-node-").next().unwrap_or(chunk);
@@ -1777,19 +1790,20 @@ fn requirement_boxes(svg: &str) -> Vec<RequirementBox> {
             }
         }
 
-        out.push(RequirementBox {
+        out.push(NodeBox {
             id,
             x,
             y,
             width,
             height,
+            classes: attr("class", head).unwrap_or_default(),
             texts,
         });
     }
     assert!(
         unreadable.is_empty(),
-        "requirement_boxes cannot read {} node(s), so any verdict it produced would be meaningless \
-         — fix the reader rather than narrowing the assertion:\n  {}",
+        "node_boxes_by_declared_id cannot read {} node(s), so any verdict it produced would be \
+         meaningless — fix the reader rather than narrowing the assertion:\n  {}",
         unreadable.len(),
         unreadable.join("\n  ")
     );
@@ -1899,7 +1913,7 @@ fn requirement_relationships_run_from_source_to_target() {
         "a transform would make these coordinates non-final"
     );
 
-    let boxes = requirement_boxes(&svg);
+    let boxes = node_boxes_by_declared_id(&svg);
     let declared = declared_requirement_relationships("requirement_basic");
     let edges = labelled_edges(&svg);
 
@@ -1913,7 +1927,7 @@ fn requirement_relationships_run_from_source_to_target() {
 
     // Every declared endpoint must exist as a box before any connectivity claim is made, so a
     // missing edge is never blamed on a node that was simply never drawn.
-    let box_of = |name: &str| -> &RequirementBox {
+    let box_of = |name: &str| -> &NodeBox {
         let found = boxes.iter().find(|b| b.id == name);
         assert!(
             found.is_some(),
@@ -1922,16 +1936,7 @@ fn requirement_relationships_run_from_source_to_target() {
         );
         found.unwrap_or_else(|| unreachable!("asserted present"))
     };
-    // A point sits on a box's boundary when it is within its horizontal span and within a hair of
-    // one of its edges. Edge routing leaves from a box side, so the tolerance covers the stroke,
-    // not a whole node.
-    let on_boundary = |b: &RequirementBox, (px, py): (f32, f32)| -> bool {
-        let pad = 2.0_f32;
-        px >= b.x - pad
-            && px <= b.x + b.width + pad
-            && py >= b.y - pad
-            && py <= b.y + b.height + pad
-    };
+    let on_boundary = point_on_box_boundary;
 
     for (src, kind, dst) in &declared {
         let matching: Vec<_> = edges.iter().filter(|(label, ..)| label == kind).collect();
@@ -2027,7 +2032,7 @@ fn rendered_text_width(text: &str, font_size: f32) -> f32 {
 #[ignore = "specifies bd-jnc1: requirement node boxes are sized from the label alone, so the type header and metadata row overflow"]
 fn requirement_rows_stay_inside_their_node_box() {
     let svg = render_fixture("requirement_basic");
-    let boxes = requirement_boxes(&svg);
+    let boxes = node_boxes_by_declared_id(&svg);
     assert!(
         !boxes.is_empty(),
         "requirement_basic rendered no requirement nodes"
@@ -2140,7 +2145,7 @@ fn requirement_id_and_text_reach_the_output() {
     );
 
     let svg = render_fixture("requirement_basic");
-    let boxes = requirement_boxes(&svg);
+    let boxes = node_boxes_by_declared_id(&svg);
 
     let mut missing: Vec<String> = Vec::new();
     for (block, field, value) in &declared {
@@ -2173,5 +2178,498 @@ fn requirement_id_and_text_reach_the_output() {
         "{} declared requirement field(s) never reach the picture:\n  {}",
         missing.len(),
         missing.join("\n  ")
+    );
+}
+
+// ── Round 6: C4 (bd-iicc) ───────────────────────────────────────────────────────────────────
+//
+// A METHOD CORRECTION THAT SHAPED THIS ROUND, recorded because it nearly cost a false bug report.
+// The committed `.svg` goldens are rendered with visual effects deliberately OFF — `run_case` pins
+// `node_gradients: false, inactive_opacity: 1.0, cluster_fill_opacity: 1.0` to keep the byte goldens
+// focused on structure — while `render_fixture` (and every real caller) uses `SvgRenderConfig`'s
+// DEFAULTS, where effects are on. So the golden file and the shipping render are different documents.
+// Probing the golden bytes for a STYLING question therefore answers about a configuration nobody
+// ships: the C4 external marker's CSS rule is absent from c4_basic.svg and present under the default
+// config. Guards in this file render through `render_fixture`, i.e. the shipping config; probes must
+// do the same.
+
+/// Does `css` define `token` as a class selector, rather than merely mentioning it?
+///
+/// Requires the `.token` to be followed by a selector separator, so `.fm-node-border-double` cannot
+/// satisfy a query for `fm-node-border-d` and `.fm-node-border-dashed` cannot be confused with it —
+/// the substring trap that has produced wrong verdicts in this codebase before.
+fn css_defines_class(css: &str, token: &str) -> bool {
+    let needle = format!(".{token}");
+    let mut from = 0usize;
+    while let Some(at) = css[from..].find(&needle) {
+        let end = from + at + needle.len();
+        match css[end..].chars().next() {
+            Some(c) if c.is_alphanumeric() || c == '-' || c == '_' => {}
+            _ => return true,
+        }
+        from = end;
+    }
+    false
+}
+
+/// The emitted `<style>` block. A hard error when absent: a guard about styling must never pass by
+/// finding no stylesheet to check.
+fn style_block(svg: &str) -> String {
+    let block = svg
+        .find("<style>")
+        .map(|at| at + "<style>".len())
+        .and_then(|start| {
+            svg[start..]
+                .find("</style>")
+                .map(|end| &svg[start..start + end])
+        });
+    assert!(
+        block.is_some(),
+        "the render has no <style> block, so any claim about whether a class is styled would be \
+         unfounded"
+    );
+    block.unwrap_or_default().to_string()
+}
+
+/// Is `p` on `b`'s boundary? Edge routing leaves from a box side, so the tolerance covers the stroke,
+/// not a whole node.
+fn point_on_box_boundary(b: &NodeBox, (px, py): Point) -> bool {
+    let pad = 2.0_f32;
+    px >= b.x - pad && px <= b.x + b.width + pad && py >= b.y - pad && py <= b.y + b.height + pad
+}
+
+/// One `KEYWORD(alias, "Label", "Description")` declaration from a C4 fixture.
+#[derive(Debug)]
+struct C4Element {
+    keyword: String,
+    alias: String,
+    label: String,
+    description: Option<String>,
+}
+
+/// Split a C4 argument list on commas that sit OUTSIDE quotes, so a description containing a comma
+/// cannot silently split into two arguments and shift every later field.
+fn split_c4_args(args: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for ch in args.chars() {
+        match ch {
+            '"' => {
+                in_quotes = !in_quotes;
+                current.push(ch);
+            }
+            ',' if !in_quotes => {
+                out.push(current.trim().trim_matches('"').to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        out.push(current.trim().trim_matches('"').to_string());
+    }
+    out
+}
+
+/// The elements and relationships a C4 fixture declares, read from the `.mmd`.
+///
+/// Read from the source rather than restated here, so these guards describe themselves from the
+/// fixture and survive an edit to it. A fixture declaring no element, or no relationship, is a hard
+/// error — a guard that passed by finding nothing to check would be worse than absent.
+fn c4_declarations(fixture: &str) -> (Vec<C4Element>, Vec<(String, String, String)>) {
+    let read = fs::read_to_string(golden_dir().join(format!("{fixture}.mmd")));
+    assert!(read.is_ok(), "read {fixture} fixture: {:?}", read.err());
+    let source = read.unwrap_or_default();
+
+    let mut elements = Vec::new();
+    let mut relationships = Vec::new();
+    for line in source.lines() {
+        let line = line.trim();
+        let Some((keyword, rest)) = line.split_once('(') else {
+            continue;
+        };
+        let Some(args) = rest.strip_suffix(')') else {
+            continue;
+        };
+        let keyword = keyword.trim();
+        if keyword.is_empty() {
+            continue;
+        }
+        let parts = split_c4_args(args);
+        // `Rel(src, dst, "label")` and its directional variants are relationships; everything else
+        // with this shape is an element declaration.
+        if keyword.starts_with("Rel") || keyword.starts_with("BiRel") {
+            if parts.len() >= 3 {
+                relationships.push((parts[0].clone(), parts[1].clone(), parts[2].clone()));
+            }
+            continue;
+        }
+        if parts.len() >= 2 {
+            elements.push(C4Element {
+                keyword: keyword.to_string(),
+                alias: parts[0].clone(),
+                label: parts[1].clone(),
+                description: parts.get(2).cloned().filter(|d| !d.is_empty()),
+            });
+        }
+    }
+    assert!(
+        !elements.is_empty(),
+        "{fixture} declares no C4 element; this guard would otherwise pass by checking nothing"
+    );
+    assert!(
+        !relationships.is_empty(),
+        "{fixture} declares no C4 relationship; this guard would otherwise pass by checking nothing"
+    );
+    (elements, relationships)
+}
+
+/// Every C4 element must render the LABEL and the DESCRIPTION it declares (bd-iicc).
+///
+/// PASSES. This is the exact assertion that caught bd-f3tc one round earlier in requirement, where
+/// `text:` was parsed into the IR and rendered by nobody. C4's description is the third positional
+/// argument of `Person(alias, "Label", "Description")` — structurally the same kind of payload, in a
+/// diagram type whose descriptions have already been mishandled once (bd-9xjy, where a long
+/// description drew up to 220px below its own box). A byte golden is blind to a field that simply
+/// never appears: nothing is misplaced, nothing is malformed, and a hash cannot miss what was never
+/// there to change.
+///
+/// The declared strings are READ FROM THE FIXTURE, and both the label and the description are checked
+/// against the node's OWN rendered rows rather than against the document as a whole — so a
+/// description that leaked into the wrong node's box would fail rather than pass on a global search.
+#[test]
+fn c4_elements_render_their_declared_label_and_description() {
+    let svg = render_fixture("c4_basic");
+    let (elements, _) = c4_declarations("c4_basic");
+    let boxes = node_boxes_by_declared_id(&svg);
+
+    let mut missing: Vec<String> = Vec::new();
+    let mut checked_descriptions = 0usize;
+    for element in &elements {
+        let Some(node) = boxes.iter().find(|b| b.id == element.alias) else {
+            missing.push(format!(
+                "{}({}) declared but no node with data-id {:?} was rendered; read {:?}",
+                element.keyword,
+                element.alias,
+                element.alias,
+                boxes.iter().map(|b| &b.id).collect::<Vec<_>>()
+            ));
+            continue;
+        };
+        let drawn = node
+            .texts
+            .iter()
+            .map(|(content, _)| content.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !drawn.contains(element.label.as_str()) {
+            missing.push(format!(
+                "{} declares label {:?}, which appears in none of its rendered rows {:?}",
+                element.alias, element.label, node.texts
+            ));
+        }
+        if let Some(description) = &element.description {
+            checked_descriptions += 1;
+            if !drawn.contains(description.as_str()) {
+                missing.push(format!(
+                    "{} declares description {:?}, which appears in none of its rendered rows {:?}",
+                    element.alias, description, node.texts
+                ));
+            }
+        }
+    }
+
+    assert!(
+        checked_descriptions >= 2,
+        "c4_basic must declare a description on at least two elements for this guard to mean \
+         anything; checked {checked_descriptions}"
+    );
+    assert!(
+        missing.is_empty(),
+        "{} declared C4 field(s) never reach the picture:\n  {}",
+        missing.len(),
+        missing.join("\n  ")
+    );
+}
+
+/// An EXTERNAL C4 system must be visually distinguishable from an internal one (bd-iicc).
+///
+/// PASSES. `System_Ext` vs `System` is the single most load-bearing distinction in a C4 context
+/// diagram: it is what separates the system you own from the ones you merely talk to. Collapsing it
+/// is a silent regression of exactly the shape as bd-5wbp (gitGraph branches drawn collinear) — the
+/// information survives in a class attribute while disappearing from the picture — and a byte golden
+/// pins the collapsed version as contentedly as the correct one.
+///
+/// TWO ASSERTIONS, and the second is the one worth having. First, the external node must carry a
+/// class no internal node carries. Second, that class must be DEFINED AS A CSS SELECTOR in the
+/// emitted stylesheet: a marker class with no rule behind it is invisible, which is indistinguishable
+/// from having no marker at all. That is not hypothetical here — `strip_unused_state_css` deletes a
+/// whole byte range of the effects stylesheet when its needle scan finds no live state class, and
+/// `fm-node-border-dashed` sits inside that range. This guard is what makes that optimization's
+/// boundary a checked one.
+///
+/// WHY ACCENT CLASSES ARE EXCLUDED, and why that exclusion is verified rather than assumed: the
+/// external node also carries a different `fm-node-accent-N` than the internals, and accent IS
+/// defined in CSS, so accent alone would satisfy a naive version of this guard while encoding nothing
+/// about externality. The test therefore first PROVES accent is per-node decoration — the two
+/// INTERNAL nodes must themselves carry different accents — and only then excludes the family. If
+/// accents ever became semantic, that proof fails loudly instead of silently weakening the guard.
+#[test]
+fn c4_external_systems_are_visually_distinct_from_internal_ones() {
+    let svg = render_fixture("c4_basic");
+    let (elements, _) = c4_declarations("c4_basic");
+    let boxes = node_boxes_by_declared_id(&svg);
+    let css = style_block(&svg);
+
+    let classes_of = |alias: &str| -> Vec<String> {
+        let found = boxes.iter().find(|b| b.id == alias);
+        assert!(found.is_some(), "C4 element {alias:?} was not rendered");
+        found.map_or_else(Vec::new, |b| {
+            b.classes.split_whitespace().map(str::to_string).collect()
+        })
+    };
+
+    let externals: Vec<&C4Element> = elements
+        .iter()
+        .filter(|e| e.keyword.ends_with("_Ext"))
+        .collect();
+    let internals: Vec<&C4Element> = elements
+        .iter()
+        .filter(|e| !e.keyword.ends_with("_Ext"))
+        .collect();
+    assert!(
+        !externals.is_empty() && internals.len() >= 2,
+        "c4_basic must declare at least one _Ext element and two internal ones for this guard to \
+         mean anything; found {} external and {} internal",
+        externals.len(),
+        internals.len()
+    );
+
+    // Accent is per-node decoration, not semantics — PROVEN here rather than assumed, so the
+    // exclusion below cannot silently become a hole.
+    let accent_of = |alias: &str| -> Option<String> {
+        classes_of(alias)
+            .into_iter()
+            .find(|c| c.starts_with("fm-node-accent-"))
+    };
+    let first_internal_accent = accent_of(&internals[0].alias);
+    let second_internal_accent = accent_of(&internals[1].alias);
+    assert!(
+        first_internal_accent.is_some() && first_internal_accent != second_internal_accent,
+        "two INTERNAL C4 elements carry the same accent ({first_internal_accent:?}), so accent can \
+         no longer be shown to be per-node decoration and this guard must not exclude it from the \
+         externality check"
+    );
+
+    let internal_classes: Vec<String> = internals
+        .iter()
+        .flat_map(|e| classes_of(&e.alias))
+        .collect();
+    for external in &externals {
+        let distinguishing: Vec<String> = classes_of(&external.alias)
+            .into_iter()
+            .filter(|c| !internal_classes.contains(c))
+            .filter(|c| !c.starts_with("fm-node-accent-"))
+            .collect();
+        assert!(
+            !distinguishing.is_empty(),
+            "{}({}) is declared external but carries no class that an internal element lacks, so \
+             external and internal render identically",
+            external.keyword,
+            external.alias
+        );
+        let styled: Vec<&String> = distinguishing
+            .iter()
+            .filter(|c| css_defines_class(&css, c))
+            .collect();
+        assert!(
+            !styled.is_empty(),
+            "{}({}) is marked external only by class(es) {distinguishing:?}, and NONE of them is \
+             defined as a selector in the emitted stylesheet — the marker is invisible, which is \
+             indistinguishable from having no marker at all",
+            external.keyword,
+            external.alias
+        );
+    }
+}
+
+/// A C4 relationship must run FROM its declared source TO its declared target (bd-iicc).
+///
+/// PASSES. `Rel(user, web, "Uses")` is a directed claim about who calls whom, and reversing it
+/// changes no element and no attribute name — only which coordinate is first — so a byte golden pins
+/// a backwards arrow happily. Same assertion, and the same anti-tautology control, as the requirement
+/// relationship guard: an implementation that swapped source and target would still draw the right
+/// number of labelled edges between the right pair of boxes and fails only this.
+#[test]
+fn c4_relationships_run_from_source_to_target() {
+    let svg = render_fixture("c4_basic");
+    assert!(
+        !svg.contains("transform="),
+        "a transform would make these coordinates non-final"
+    );
+    let (_, relationships) = c4_declarations("c4_basic");
+    let boxes = node_boxes_by_declared_id(&svg);
+    let edges = labelled_edges(&svg);
+
+    assert_eq!(
+        edges.len(),
+        relationships.len(),
+        "the fixture declares {} relationship(s) but {} edge(s) were rendered",
+        relationships.len(),
+        edges.len()
+    );
+
+    let box_of = |alias: &str| -> &NodeBox {
+        let found = boxes.iter().find(|b| b.id == alias);
+        assert!(
+            found.is_some(),
+            "C4 element {alias:?} was not rendered; read {:?}",
+            boxes.iter().map(|b| &b.id).collect::<Vec<_>>()
+        );
+        found.unwrap_or_else(|| unreachable!("asserted present"))
+    };
+
+    for (src, dst, label) in &relationships {
+        let matching: Vec<_> = edges.iter().filter(|(l, ..)| l == label).collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "Rel({src}, {dst}, {label:?}) should render exactly one edge with that label, found {} \
+             among {:?}",
+            matching.len(),
+            edges.iter().map(|(l, ..)| l).collect::<Vec<_>>()
+        );
+        let (_, start, end) = matching[0];
+        let source_box = box_of(src);
+        let target_box = box_of(dst);
+        assert!(
+            point_on_box_boundary(source_box, *start),
+            "Rel({src}, {dst}, {label:?}) starts at {start:?}, which is not on {src}'s box \
+             (x {}..{}, y {}..{})",
+            source_box.x,
+            source_box.x + source_box.width,
+            source_box.y,
+            source_box.y + source_box.height
+        );
+        assert!(
+            point_on_box_boundary(target_box, *end),
+            "Rel({src}, {dst}, {label:?}) ends at {end:?}, which is not on {dst}'s box \
+             (x {}..{}, y {}..{})",
+            target_box.x,
+            target_box.x + target_box.width,
+            target_box.y,
+            target_box.y + target_box.height
+        );
+        assert!(
+            !point_on_box_boundary(target_box, *start),
+            "Rel({src}, {dst}, {label:?}) starts on {dst}'s box, so the arrow is drawn backwards"
+        );
+    }
+}
+
+/// `css_defines_class` must not be fooled by a class name that PREFIXES another (bd-iicc).
+///
+/// Guard infrastructure self-test. The substring trap is live in this codebase — a keyword scan once
+/// read class `inactive` as `active` — and the C4 externality guard's whole value rests on
+/// distinguishing "this marker has a rule" from "some longer class name contains it".
+#[test]
+fn css_defines_class_requires_a_selector_boundary() {
+    let css = ".fm-node-border-double rect { stroke-width: 3; }\n.fm-node-accent-8{--a:1;}\n\
+               .fm-node-highlighted text, .fm-node-inactive { opacity: 0.4; }";
+    // Defined, in each of the three separator positions that occur: space, `{`, and `,`.
+    assert!(css_defines_class(css, "fm-node-border-double"));
+    assert!(css_defines_class(css, "fm-node-accent-8"));
+    assert!(css_defines_class(css, "fm-node-highlighted"));
+    assert!(css_defines_class(css, "fm-node-inactive"));
+    // NOT defined: a strict prefix of a class that IS defined must not count. This is the exact
+    // failure that would let a dead `fm-node-border-dashed` marker pass by borrowing
+    // `fm-node-border-double`'s rule.
+    assert!(!css_defines_class(css, "fm-node-border-dashed"));
+    assert!(!css_defines_class(css, "fm-node-border"));
+    assert!(!css_defines_class(css, "fm-node-accent"));
+    assert!(!css_defines_class(css, "fm-node-highlight"));
+}
+
+/// The C4 external marker must survive the config the BYTE GOLDENS are pinned with (bd-iicc).
+///
+/// IGNORED because it FAILS, and what it specifies is a gap in the golden corpus itself rather than a
+/// defect in the shipping render. Filed as bd-w0f0.
+///
+/// `render_svg_with_config` gates the whole `effects_css` stylesheet on
+///     effects_enabled = node_gradients || glow_enabled
+///                    || inactive_opacity < 0.999 || cluster_fill_opacity < 0.999
+/// — four COSMETIC knobs. Inside that stylesheet sit rules that are not cosmetic at all:
+/// `.fm-node-border-dashed` (how a C4 `System_Ext` is shown to be external), `.fm-node-highlighted`,
+/// the `.fm-node-block-beta` fills, and `.fm-node-block-beta-space { opacity: 0 }` which is the only
+/// thing making a block-beta `space` cell invisible. Turning off gradients and setting both opacities
+/// to 1.0 therefore removes SEMANTIC encoding, not just polish.
+///
+/// WHY THIS MATTERS TO THIS BEAD SPECIFICALLY, which is the reason it is worth a guard rather than a
+/// shrug: `golden_render_config` — the config all 37 byte goldens are rendered with — sets exactly
+/// those four knobs to the effects-off values. So every committed C4 golden pins a picture in which
+/// an external system is INDISTINGUISHABLE from an internal one, and every block-beta golden pins one
+/// where `space` cells are not invisible. The byte corpus is structurally incapable of catching a
+/// regression in these markers, because it never renders them. That is this bead's thesis in its
+/// purest form: the goldens are stable and blind at the same time.
+///
+/// Un-ignoring this is bd-w0f0's acceptance gate. The live sibling
+/// `c4_external_systems_are_visually_distinct_from_internal_ones` covers the shipping default config
+/// and must stay green regardless.
+#[test]
+#[ignore = "specifies bd-w0f0: effects_css is gated on cosmetic knobs, so the config the byte goldens pin drops the C4 external marker"]
+fn c4_external_marker_survives_the_config_the_goldens_pin() {
+    let read = fs::read_to_string(golden_dir().join("c4_basic.mmd"));
+    assert!(read.is_ok(), "read c4_basic fixture: {:?}", read.err());
+    let input = read.unwrap_or_default();
+    let svg = render_svg_with_config(&parse(&input).ir, &golden_render_config());
+
+    let (elements, _) = c4_declarations("c4_basic");
+    let boxes = node_boxes_by_declared_id(&svg);
+    let css = style_block(&svg);
+
+    let externals: Vec<&C4Element> = elements
+        .iter()
+        .filter(|e| e.keyword.ends_with("_Ext"))
+        .collect();
+    assert!(
+        !externals.is_empty(),
+        "c4_basic declares no _Ext element, so this guard would pass by checking nothing"
+    );
+
+    let mut invisible: Vec<String> = Vec::new();
+    for external in &externals {
+        let Some(node) = boxes.iter().find(|b| b.id == external.alias) else {
+            invisible.push(format!("{} was not rendered at all", external.alias));
+            continue;
+        };
+        let marker_classes: Vec<&str> = node
+            .classes
+            .split_whitespace()
+            .filter(|c| c.contains("external") || c.contains("border-"))
+            .collect();
+        assert!(
+            !marker_classes.is_empty(),
+            "{} carries no external/border marker class at all under the golden config, so this \
+             guard cannot tell whether the marker is merely unstyled or absent entirely; classes \
+             were {:?}",
+            external.alias,
+            node.classes
+        );
+        if !marker_classes.iter().any(|c| css_defines_class(&css, c)) {
+            invisible.push(format!(
+                "{} is marked external by {marker_classes:?}, none of which is defined in the \
+                 stylesheet this config emits, so it renders identically to an internal system",
+                external.alias
+            ));
+        }
+    }
+
+    assert!(
+        invisible.is_empty(),
+        "{} external C4 element(s) are invisible under the config the byte goldens are pinned \
+         with:\n  {}",
+        invisible.len(),
+        invisible.join("\n  ")
     );
 }
