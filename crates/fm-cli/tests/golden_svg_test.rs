@@ -777,11 +777,33 @@ fn node_centres(svg: &str) -> Vec<(String, f32, f32, f32)> {
             let rest = &from[at + key.len() + 2..];
             rest[..rest.find('"')?].parse().ok()
         };
-        let label = body
+        // A multi-line label (packet-beta emits "Source Port\n[0-15]") renders as <tspan> children, so
+        // the raw span between > and </text> is MARKUP, not text. Reading it unstripped made this
+        // return the markup string and the guard downstream report "Source Port not rendered" — the
+        // absence-instead-of-unreadable failure again, one layer in. Strip inner tags and collapse
+        // whitespace so a multi-line label reads as its joined text.
+        let strip_tags = |raw: &str| -> String {
+            let mut out = String::with_capacity(raw.len());
+            let mut depth = 0usize;
+            for ch in raw.chars() {
+                match ch {
+                    '<' => depth += 1,
+                    '>' => depth = depth.saturating_sub(1),
+                    c if depth == 0 => out.push(c),
+                    _ => {}
+                }
+            }
+            out.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        let text_elements: Vec<String> = body
             .split("<text")
             .skip(1)
             .filter_map(|t| t.split_once('>').and_then(|(_, r)| r.split_once("</text>")))
-            .map(|(text, _)| text.trim().to_string())
+            .map(|(raw, _)| strip_tags(raw))
+            .collect();
+        let has_text_element = !text_elements.is_empty();
+        let label = text_elements
+            .into_iter()
             .find(|t| !t.is_empty())
             .unwrap_or_default();
 
@@ -811,7 +833,14 @@ fn node_centres(svg: &str) -> Vec<(String, f32, f32, f32)> {
 
         match geometry {
             Some((cx, cy, w)) => {
-                if !label.is_empty() {
+                if label.is_empty() && has_text_element {
+                    // The node HAS a <text> element and this reader still got nothing out of it, so
+                    // it is unreadable, not unlabelled. Reporting absence here would be a lie.
+                    unreadable.push(format!(
+                        "fm-node-{group_id} has a <text> element whose content this guard could not \
+                         extract"
+                    ));
+                } else if !label.is_empty() {
                     out.push((label, cx, cy, w));
                 }
             }
@@ -1068,6 +1097,291 @@ fn kanban_cards_occupy_their_lane_column() {
             cx(pair.0),
             pair.1,
             cx(pair.1)
+        );
+    }
+}
+
+// ── Round 3: guards for types already measured but not yet specified (bd-iicc) ─────────────
+//
+// Coverage is published as a ratio on bd-iicc so it never reads as complete. These three close a gap
+// in my own earlier work: I measured quadrant, journey and packet-beta and reported the results, but
+// only packet-beta got a bead and none of them got an executable guard. A filed defect without a
+// guard is a claim; a guard is a specification.
+
+/// Quadrant points paired with their labels, `(label, cx, cy)`.
+///
+/// Points are `<circle class="fm-quadrant-point">` and live OUTSIDE any `fm-node` group, so
+/// `node_centres` cannot see them — a guard that reused it would report every point as absent. Pairing
+/// is by vertical proximity (the label baseline sits `cy + 4`), NOT by document order, because
+/// order-based pairing silently mislabels geometry and I have made that mistake in this file before.
+/// An unpaired point or label is a hard error, not a skip.
+fn quadrant_points(svg: &str) -> Vec<(String, f32, f32)> {
+    let attr = |chunk: &str, key: &str| -> Option<f32> {
+        let at = chunk.find(&format!("{key}=\""))?;
+        let rest = &chunk[at + key.len() + 2..];
+        rest[..rest.find('"')?].parse().ok()
+    };
+    let mut circles: Vec<(f32, f32)> = Vec::new();
+    for chunk in svg.split("<circle ").skip(1) {
+        let head = chunk.split("/>").next().unwrap_or_default();
+        if !head.contains("class=\"fm-quadrant-point\"") {
+            continue;
+        }
+        let (cx, cy) = (attr(head, "cx"), attr(head, "cy"));
+        assert!(
+            cx.is_some() && cy.is_some(),
+            "a fm-quadrant-point has no readable cx/cy: {head}"
+        );
+        circles.push((cx.unwrap_or(f32::NAN), cy.unwrap_or(f32::NAN)));
+    }
+    let mut labels: Vec<(String, f32)> = Vec::new();
+    for chunk in svg.split("<text ").skip(1) {
+        let head = chunk.split('>').next().unwrap_or_default();
+        if !head.contains("class=\"fm-quadrant-point-label\"") {
+            continue;
+        }
+        let text = chunk
+            .split_once('>')
+            .and_then(|(_, r)| r.split_once("</text>"))
+            .map(|(t, _)| t.trim().to_string())
+            .unwrap_or_default();
+        let y = attr(head, "y");
+        assert!(
+            y.is_some(),
+            "a fm-quadrant-point-label has no readable y: {head}"
+        );
+        labels.push((text, y.unwrap_or(f32::NAN)));
+    }
+    assert_eq!(
+        circles.len(),
+        labels.len(),
+        "quadrant has {} points but {} point labels; this guard cannot pair them and any verdict \
+         would be meaningless",
+        circles.len(),
+        labels.len()
+    );
+
+    let mut out = Vec::new();
+    for (cx, cy) in circles {
+        let paired = labels
+            .iter()
+            .find(|(_, ly)| (ly - (cy + 4.0)).abs() < 1.5)
+            .or_else(|| labels.iter().find(|(_, ly)| (ly - cy).abs() < 12.0));
+        assert!(
+            paired.is_some(),
+            "no label found near the quadrant point at ({cx}, {cy}); labels: {labels:?}"
+        );
+        let label = paired.map_or_else(String::new, |(l, _)| l.clone());
+        out.push((label, cx, cy));
+    }
+    out
+}
+
+/// A quadrant chart plots each point at its declared `[x, y]` (bd-iicc).
+///
+/// PASSES: quadrant dispatches to a dedicated algorithm and both axes are honoured, including the y
+/// inversion (a higher declared value sits HIGHER on screen, i.e. at a smaller SVG y). Asserted as
+/// orderings derived from the fixture rather than as pinned coordinates, so re-blessing cannot satisfy
+/// it and a rescaled-but-correct chart still passes.
+#[test]
+fn quadrant_points_plot_at_their_declared_coordinates() {
+    let svg = render_fixture("quadrant_basic");
+    assert!(
+        !svg.contains("transform="),
+        "a transform would make these coordinates non-final"
+    );
+    let points = quadrant_points(&svg);
+    let at = |label: &str| -> (f32, f32) {
+        let found = points.iter().find(|(l, ..)| l == label);
+        assert!(found.is_some(), "{label} not plotted");
+        found.map_or((f32::NAN, f32::NAN), |(_, cx, cy)| (*cx, *cy))
+    };
+
+    // Fixture declares A[0.8, 0.9], B[0.3, 0.7], C[0.6, 0.2].
+    // x ascends left to right: B(0.3) < C(0.6) < A(0.8).
+    assert!(
+        at("Feature B").0 < at("Feature C").0 && at("Feature C").0 < at("Feature A").0,
+        "x order wrong: B={} C={} A={}",
+        at("Feature B").0,
+        at("Feature C").0,
+        at("Feature A").0
+    );
+    // y ascends UP the page, so a larger declared y is a SMALLER svg y: A(0.9) < B(0.7) < C(0.2).
+    assert!(
+        at("Feature A").1 < at("Feature B").1 && at("Feature B").1 < at("Feature C").1,
+        "y order wrong (should be inverted): A={} B={} C={}",
+        at("Feature A").1,
+        at("Feature B").1,
+        at("Feature C").1
+    );
+}
+
+/// A journey task's satisfaction score must be distinguishable in the output (bd-iicc).
+///
+/// PASSES, and it pins a DELIBERATE divergence from mermaid-js so nobody "fixes" it by accident:
+/// mermaid encodes the score as one of 12 face icons, we encode it as the task fill colour. Both keep
+/// the information; the encodings simply differ. mermaid also lays journey tasks out in a row, so our
+/// uniform task y is correct too and is asserted here.
+///
+/// What this guard forbids is the score becoming INVISIBLE — distinct scores collapsing to one fill,
+/// which a byte golden would pin without complaint.
+#[test]
+fn journey_task_scores_are_distinguishable_in_the_output() {
+    let svg = render_fixture("journey_basic");
+    let scores: [(&str, u32); 7] = [
+        ("Visit homepage", 5),
+        ("Search products", 4),
+        ("View product", 5),
+        ("Add to cart", 4),
+        ("Checkout", 3),
+        ("Payment", 2),
+        ("Confirmation", 5),
+    ];
+
+    let mut fill_by_score: Vec<(u32, String)> = Vec::new();
+    let mut rows: Vec<f32> = Vec::new();
+    for chunk in svg.split("<g id=\"fm-node-").skip(1) {
+        let body = chunk.split("<g id=\"fm-node-").next().unwrap_or(chunk);
+        let label = body
+            .split("<text")
+            .skip(1)
+            .filter_map(|t| t.split_once('>').and_then(|(_, r)| r.split_once("</text>")))
+            .map(|(t, _)| t.trim().to_string())
+            .find(|t| !t.is_empty())
+            .unwrap_or_default();
+        let Some((_, score)) = scores.iter().find(|(name, _)| *name == label) else {
+            continue;
+        };
+        // The score reaches the output as an inline fill on the task shape. If that ever moves to a
+        // class or an icon, this must fail loudly rather than silently find nothing.
+        let at = body.find("style=\"fill: ");
+        assert!(
+            at.is_some(),
+            "journey task {label:?} has no inline fill; the score encoding moved and this guard can \
+             no longer read it — update the guard rather than deleting the assertion"
+        );
+        let rest = &body[at.unwrap_or(0) + 13..];
+        let fill = rest[..rest.find('"').unwrap_or(0)].to_string();
+        fill_by_score.push((*score, fill));
+        if let Some(y_at) = body.find("<rect ") {
+            let r = &body[y_at..];
+            if let Some(y_key) = r.find("y=\"") {
+                let tail = &r[y_key + 3..];
+                if let Ok(y) = tail[..tail.find('"').unwrap_or(0)].parse::<f32>() {
+                    rows.push(y);
+                }
+            }
+        }
+    }
+    assert_eq!(
+        fill_by_score.len(),
+        scores.len(),
+        "expected a fill for all {} tasks, read {}",
+        scores.len(),
+        fill_by_score.len()
+    );
+
+    // Equal scores must share a fill, and different scores must not.
+    for (score_a, fill_a) in &fill_by_score {
+        for (score_b, fill_b) in &fill_by_score {
+            if score_a == score_b {
+                assert_eq!(
+                    fill_a, fill_b,
+                    "score {score_a} rendered two different fills, so the encoding is not a function \
+                     of the score"
+                );
+            } else {
+                assert_ne!(
+                    fill_a, fill_b,
+                    "scores {score_a} and {score_b} share fill {fill_a}, so the score is invisible"
+                );
+            }
+        }
+    }
+    // mermaid rows journey tasks too, so uniform y is correct — pinned so a later change is deliberate.
+    assert!(
+        rows.windows(2).all(|w| (w[0] - w[1]).abs() < 0.01),
+        "journey tasks are no longer on one row: {rows:?}"
+    );
+}
+
+/// packet-beta field widths must be proportional to their bit ranges (bd-iicc).
+///
+/// IGNORED because it FAILS against a real defect, filed as bd-51tz: widths track LABEL TEXT instead
+/// of bit count. The fixture's three 16-bit fields render 148.72 / 176.77 / 154.50 when they must be
+/// identical, the 4-bit field (145.43) is WIDER than the 6-bit field (139.65), and the 32-bit fields
+/// are 1.28x the 16-bit ones instead of 2x. Pinned mermaid renders a bit ruler
+/// (`bitWidth: 32, bitsPerRow: 32`), so width is strictly `bits * bitWidth`.
+///
+/// The expected bit count is PARSED FROM THE RENDERED LABEL (`"Source Port[0-15]"`), not restated from
+/// a table here, so the guard describes itself from the output and survives fixture edits. A label
+/// whose range cannot be parsed is a hard error — this guard must never silently judge fewer fields
+/// than the diagram has.
+///
+/// Un-ignoring this is bd-51tz's acceptance gate. The equal-bit-count assertion is the sharpest and is
+/// checked first; do not weaken it to a tolerance the current output happens to satisfy.
+#[test]
+#[ignore = "fails against bd-51tz: packet-beta field widths track label text, not bit ranges"]
+fn packet_field_widths_are_proportional_to_bit_ranges() {
+    let svg = render_fixture("packet_basic");
+    let centres = node_centres(&svg);
+
+    // (label, bits, width), with bits derived from the trailing "[start-end]" in the label.
+    let mut fields: Vec<(String, f32, f32)> = Vec::new();
+    for (label, _, _, width) in &centres {
+        let open = label.rfind('[');
+        assert!(
+            open.is_some(),
+            "packet field {label:?} has no [start-end] range in its rendered label"
+        );
+        let open = open.unwrap_or(0);
+        let range = &label[open + 1..label.len().saturating_sub(1)];
+        let split = range.split_once('-');
+        assert!(
+            split.is_some(),
+            "packet field {label:?} range {range:?} is not start-end"
+        );
+        let (lo, hi) = split.unwrap_or(("0", "0"));
+        let (lo, hi) = (lo.trim().parse::<i64>(), hi.trim().parse::<i64>());
+        assert!(
+            lo.is_ok() && hi.is_ok(),
+            "packet field {label:?} range {range:?} is not numeric"
+        );
+        let bits = (hi.unwrap_or(0) - lo.unwrap_or(0) + 1) as f32;
+        fields.push((label.clone(), bits, *width));
+    }
+    assert!(
+        fields.len() >= 8,
+        "expected the fixture's 8 packet fields, read {} — the guard is judging fewer fields than \
+         the diagram declares",
+        fields.len()
+    );
+
+    // Equal bit counts => equal widths. Decisive on its own, and needs no scale factor.
+    for (name_a, bits_a, width_a) in &fields {
+        for (name_b, bits_b, width_b) in &fields {
+            if (bits_a - bits_b).abs() < 0.01 {
+                assert!(
+                    (width_a - width_b).abs() < 0.5,
+                    "{name_a} and {name_b} both span {bits_a} bits but render {width_a} and \
+                     {width_b} wide"
+                );
+            }
+        }
+    }
+    // And width scales with bit count, measured against the narrowest field so no constant is assumed.
+    let (unit_name, unit_bits, unit_width) = fields
+        .iter()
+        .min_by(|a, b| a.1.partial_cmp(&b.1).expect("finite"))
+        .cloned()
+        .unwrap_or_default();
+    let per_bit = unit_width / unit_bits;
+    for (name, bits, width) in &fields {
+        assert!(
+            (width - bits * per_bit).abs() < 0.5,
+            "{name} spans {bits} bits so at {per_bit}/bit (from {unit_name}) it should be {} wide, \
+             but renders {width}",
+            bits * per_bit
         );
     }
 }
