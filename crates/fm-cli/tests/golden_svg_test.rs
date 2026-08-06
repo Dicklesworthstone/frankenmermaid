@@ -559,6 +559,91 @@ fn xychart_bar_heights_are_proportional_and_axis_anchored() {
     }
 }
 
+/// gitGraph branches must occupy distinct, visually separable lanes (bd-iicc).
+///
+/// IGNORED because it FAILS against a real defect, filed as bd-5wbp: every commit renders at the
+/// same x regardless of branch, so main and develop are drawn collinear. Branch membership is
+/// present in the class attribute but invisible in the picture, and distinct lanes are the whole
+/// visual grammar of a gitGraph — a merge is legible precisely because it joins two lanes.
+///
+/// Committed rather than withheld so the specification is reviewable now and executable later:
+/// removing the `#[ignore]` is bd-5wbp's acceptance gate. Do not relax the separation distance to
+/// whatever a fix happens to produce.
+#[test]
+#[ignore = "fails against the bd-5wbp defect: gitGraph branches render collinear"]
+fn gitgraph_branches_occupy_distinct_lanes() {
+    let input_path = golden_dir().join("gitgraph_basic.mmd");
+    let input = fs::read_to_string(&input_path)
+        .map_err(|err| format!("failed reading {}: {err}", input_path.display()))
+        .expect("read gitgraph fixture");
+    let parsed = parse(&input);
+    let rendered = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+
+    // Lane coordinate per branch, taken from the rendered commit circles. Grouped by the branch
+    // tag the renderer itself emits, so this asserts the picture agrees with the classification
+    // rather than assuming either one.
+    let mut lanes: Vec<(u32, f64, f64)> = Vec::new();
+    for segment in rendered.split("<g ").skip(1) {
+        let Some(tag_at) = segment.find("git-branch-") else {
+            continue;
+        };
+        let rest = &segment[tag_at + "git-branch-".len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        let Ok(branch) = digits.parse::<u32>() else {
+            continue;
+        };
+        let Some(cx_at) = segment.find("cx=\"") else {
+            continue;
+        };
+        let after_cx = &segment[cx_at + 4..];
+        let Some(cx_end) = after_cx.find('"') else {
+            continue;
+        };
+        let Ok(cx) = after_cx[..cx_end].parse::<f64>() else {
+            continue;
+        };
+        let radius = segment
+            .find("r=\"")
+            .and_then(|at| {
+                let rest = &segment[at + 3..];
+                rest[..rest.find('"')?].parse::<f64>().ok()
+            })
+            .unwrap_or(6.0);
+        lanes.push((branch, cx, radius));
+    }
+
+    assert!(
+        lanes.len() >= 4,
+        "fixture has commits on two branches; found {} tagged commits",
+        lanes.len()
+    );
+
+    // Commits on the SAME branch share a lane.
+    for (branch, cx, _) in &lanes {
+        let peer = lanes.iter().find(|(b, _, _)| b == branch).expect("self");
+        assert!(
+            (cx - peer.1).abs() < 0.5,
+            "commits on branch {branch} disagree on their lane: {cx} vs {}",
+            peer.1
+        );
+    }
+
+    // DIFFERENT branches occupy DIFFERENT lanes, separated enough to read as distinct columns.
+    // A tolerance-sized difference would satisfy "not equal" while still drawing one column.
+    let radius = lanes[0].2;
+    for (branch_a, cx_a, _) in &lanes {
+        for (branch_b, cx_b, _) in &lanes {
+            if branch_a != branch_b {
+                assert!(
+                    (cx_a - cx_b).abs() >= radius * 2.0,
+                    "branches {branch_a} and {branch_b} share lane {cx_a}; they must be at least \
+                     one commit diameter apart to be visually separable"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn resilience_suite_manifest_matches_checked_in_fixtures() {
     let manifest = load_resilience_suite();
