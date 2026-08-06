@@ -180,10 +180,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Check fm-cli png feature
-        run: cargo check -p fm-cli --features png
+        run: cargo check -p frankenmermaid-cli --features png
 
       - name: Run png smoke tests
-        run: cargo test -p fm-cli --features png png_ -- --nocapture
+        run: cargo test -p frankenmermaid-cli --features png png_ -- --nocapture
 
   ledger-integrity-guard:
     name: Ledger Integrity Guard
@@ -231,10 +231,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: SVG golden guard
-        run: cargo test -p fm-cli --test golden_svg_test -- --nocapture
+        run: cargo test -p frankenmermaid-cli --test golden_svg_test -- --nocapture
 
       - name: Layout golden guard
-        run: cargo test -p fm-cli --test golden_layout_test -- --nocapture
+        run: cargo test -p frankenmermaid-cli --test golden_layout_test -- --nocapture
 
   property-test-guard:
     name: Property Test Guard
@@ -274,6 +274,9 @@ jobs:
       - name: Run invariant proof harness
         shell: bash
         run: |
+          # pipefail is load-bearing: without it this step reports `tee`'s status, so a failing
+          # harness passed the gate (bd-7l56).
+          set -euo pipefail
           mkdir -p artifacts/evidence/slo
           ${{ needs.quality-gate-config.outputs.invariant_command }} \
             | tee artifacts/evidence/slo/invariant-proof.log
@@ -304,7 +307,7 @@ jobs:
         run: ${{ needs.quality-gate-config.outputs.determinism_command }}
 
       - name: Run pipeline determinism smoke
-        run: cargo test -p fm-cli --test integration_test e2e_pipeline_determinism_all_types -- --nocapture
+        run: cargo test -p frankenmermaid-cli --test integration_test e2e_pipeline_determinism_all_types -- --nocapture
 
   cross-platform-determinism-native:
     name: Cross-Platform Determinism (Native ${{ matrix.label }})
@@ -330,7 +333,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Emit determinism manifest
-        run: cargo run -p fm-cli -- determinism-manifest > determinism-manifest-${{ matrix.label }}.json
+        run: cargo run -p frankenmermaid-cli -- determinism-manifest > determinism-manifest-${{ matrix.label }}.json
 
       - name: Upload determinism manifest
         uses: actions/upload-artifact@v4
@@ -359,7 +362,7 @@ jobs:
         uses: bytecodealliance/actions/wasmtime/setup@v1
 
       - name: Build fm-cli for wasm32-wasip1
-        run: cargo build -p fm-cli --target wasm32-wasip1
+        run: cargo build -p frankenmermaid-cli --target wasm32-wasip1
 
       - name: Emit WASI determinism manifest
         run: wasmtime run target/wasm32-wasip1/debug/fm-cli.wasm determinism-manifest > determinism-manifest-wasm32-wasip1.json
@@ -488,7 +491,7 @@ jobs:
       - name: Summarize statistical benchmark evidence
         shell: bash
         run: |
-          cargo run -p fm-cli --bin evidence -- --root . perf-report \
+          cargo run -p frankenmermaid-cli --bin evidence -- --root . perf-report \
             --input artifacts/evidence/perf/layout-benchmark.log \
             --out-dir artifacts/evidence/perf \
             --baseline "${{ needs.quality-gate-config.outputs.benchmark_baseline_path }}" \
@@ -521,6 +524,8 @@ jobs:
       - name: Run degradation SLO harness
         shell: bash
         run: |
+          # See the invariant proof step: without pipefail the gate reports `tee`'s status (bd-7l56).
+          set -euo pipefail
           mkdir -p artifacts/evidence/slo
           ${{ needs.quality-gate-config.outputs.degradation_command }} \
             | tee artifacts/evidence/slo/degradation.log
@@ -565,26 +570,31 @@ jobs:
       - name: Capture SVG golden evidence log
         shell: bash
         run: |
+          # "Capture … log" still gates: without pipefail a failing golden reports `tee`'s status and
+          # the evidence log records the failure while the step goes green (bd-7l56).
+          set -euo pipefail
           mkdir -p artifacts/evidence/logs artifacts/evidence/proofs
-          cargo test -p fm-cli --test golden_svg_test svg_golden_snapshots_are_stable -- --nocapture \
+          cargo test -p frankenmermaid-cli --test golden_svg_test svg_golden_snapshots_are_stable -- --nocapture \
             | tee artifacts/evidence/logs/svg-golden.log
 
       - name: Capture layout golden evidence log
         shell: bash
         run: |
-          cargo test -p fm-cli --test golden_layout_test -- --nocapture \
+          set -euo pipefail
+          cargo test -p frankenmermaid-cli --test golden_layout_test -- --nocapture \
             | tee artifacts/evidence/logs/layout-golden.log
 
       - name: Capture determinism evidence log
         shell: bash
         run: |
+          set -euo pipefail
           ${{ needs.quality-gate-config.outputs.determinism_command }} \
             | tee artifacts/evidence/logs/determinism.log
 
       - name: Emit x86_64 determinism manifest
         shell: bash
         run: |
-          cargo run -p fm-cli -- determinism-manifest \
+          cargo run -p frankenmermaid-cli -- determinism-manifest \
             > artifacts/evidence/proofs/determinism-manifest-x86_64.json
 
       - name: Download demo evidence artifacts
@@ -597,16 +607,16 @@ jobs:
       - name: Refresh ledger report with bead coverage
         shell: bash
         run: |
-          cargo run -p fm-cli --bin evidence -- --root . report --check-beads --fail-on-missing-beads
+          cargo run -p frankenmermaid-cli --bin evidence -- --root . report --check-beads --fail-on-missing-beads
 
       - name: Generate release signoff checklist and validation matrix
         if: needs.quality-gate-config.outputs.release_signoff_enabled == 'true'
         shell: bash
         run: |
           mkdir -p artifacts/evidence/signoff artifacts/evidence/policies
-          cargo run -p fm-cli --bin evidence -- --root . verify-overrides \
+          cargo run -p frankenmermaid-cli --bin evidence -- --root . verify-overrides \
             > artifacts/evidence/policies/release-gate-override-summary.json
-          cargo run -p fm-cli --bin evidence -- --root . release-signoff \
+          cargo run -p frankenmermaid-cli --bin evidence -- --root . release-signoff \
             --spec-path "${{ needs.quality-gate-config.outputs.release_signoff_spec_path }}" \
             --override-summary artifacts/evidence/policies/release-gate-override-summary.json \
             --demo-evidence-summary artifacts/evidence/demo/demo-evidence-summary.json \
@@ -630,7 +640,7 @@ jobs:
         shell: bash
         run: |
           bundle_dir="$(
-            cargo run -p fm-cli --bin evidence -- --root . bundle \
+            cargo run -p frankenmermaid-cli --bin evidence -- --root . bundle \
               --out-dir artifacts/release-evidence \
               --release-ref "${GITHUB_REF_NAME:-${GITHUB_SHA}}" \
               --retention-days 90 \
@@ -655,7 +665,7 @@ jobs:
       - name: Verify release evidence bundle integrity
         shell: bash
         run: |
-          cargo run -p fm-cli --bin evidence -- --root . verify-bundle \
+          cargo run -p frankenmermaid-cli --bin evidence -- --root . verify-bundle \
             --manifest "${bundle_dir}/manifest.json" \
             --require-kind ledger-report \
             --require-kind ledger-entry \
@@ -714,7 +724,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p artifacts/evidence/policies
-          cargo run -p fm-cli --bin evidence -- --root . verify-overrides \
+          cargo run -p frankenmermaid-cli --bin evidence -- --root . verify-overrides \
             > artifacts/evidence/policies/release-gate-override-summary.json
 
       - name: Upload override summary artifact

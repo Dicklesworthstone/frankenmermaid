@@ -9,6 +9,11 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
+# This package ships three binaries, so a bare `cargo run -p frankenmermaid-cli` cannot pick one and
+# errors out. CI relies on exactly that form (`cargo run -p … -- determinism-manifest`), so name the
+# canonical binary here rather than adding `--bin` at every call site (bd-7l56). `frankenmermaid`, not
+# the transitional `fm-cli` alias below.
+default-run = "frankenmermaid"
 
 [[bin]]
 name = "frankenmermaid"
