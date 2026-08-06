@@ -489,6 +489,76 @@ fn sankey_basic_flow_widths_are_proportional_to_values() {
     );
 }
 
+/// XyChart bar heights must be proportional to their values, and anchored to the axis (bd-iicc).
+///
+/// Unlike the sankey guard next door, this one passes today — the geometry is already correct, and
+/// the point is to keep it that way. A byte golden would let a rescale or a baseline drift through
+/// as "output changed, bless it"; this states what the picture MEANS, so a wrong rescale fails
+/// even after a bless.
+#[test]
+fn xychart_bar_heights_are_proportional_and_axis_anchored() {
+    let input_path = golden_dir().join("xychart_comprehensive.mmd");
+    let input = fs::read_to_string(&input_path)
+        .map_err(|err| format!("failed reading {}: {err}", input_path.display()))
+        .expect("read xychart fixture");
+    let parsed = parse(&input);
+    let rendered = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+
+    // Declared bar series, in document order: Sales then Expenses, interleaved per category by the
+    // renderer. Taken from the FIXTURE so re-blessing cannot satisfy this.
+    let declared: Vec<f64> = vec![30.0, 20.0, 60.0, 40.0, 95.0, 55.0, 45.0, 35.0];
+
+    let mut bars: Vec<(f64, f64, f64)> = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for segment in rendered.split("<rect").skip(1) {
+        let Some(end) = segment.find('>') else { continue };
+        let tag = &segment[..end];
+        if !tag.contains("fm-xychart-bar") || seen.contains(&tag) {
+            continue;
+        }
+        seen.push(tag);
+        let attr = |name: &str| -> Option<f64> {
+            let at = tag.find(&format!("{name}=\""))? + name.len() + 2;
+            let rest = &tag[at..];
+            rest[..rest.find('"')?].parse().ok()
+        };
+        if let (Some(x), Some(y), Some(h)) = (attr("x"), attr("y"), attr("height")) {
+            bars.push((x, y, h));
+        }
+    }
+    bars.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    assert_eq!(
+        bars.len(),
+        declared.len(),
+        "fixture declares {} bar values", declared.len()
+    );
+
+    // ONE scale for every bar. Deriving it from the first and checking the rest catches a
+    // per-series or per-category rescale, which would still look tidy on screen while making two
+    // series incomparable — the whole reason to draw them on shared axes.
+    let scale = bars[0].2 / declared[0];
+    assert!(scale > 0.0, "bar scale must be positive");
+    for ((_, _, height), value) in bars.iter().zip(&declared) {
+        let expected = value * scale;
+        assert!(
+            (height - expected).abs() < 0.05,
+            "bar for value {value} has height {height:.3}, expected {expected:.3} at the shared scale"
+        );
+    }
+
+    // Every bar sits ON the axis. A bar that encodes its value correctly but floats off the
+    // baseline is a wrong picture that per-bar height checks alone would pass.
+    let baseline = bars[0].1 + bars[0].2;
+    for (x, y, height) in &bars {
+        assert!(
+            ((y + height) - baseline).abs() < 0.05,
+            "bar at x={x} ends at {:.3}, not on the shared baseline {baseline:.3}",
+            y + height
+        );
+    }
+}
+
 #[test]
 fn resilience_suite_manifest_matches_checked_in_fixtures() {
     let manifest = load_resilience_suite();
