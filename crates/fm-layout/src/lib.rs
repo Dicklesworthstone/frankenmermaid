@@ -3576,7 +3576,7 @@ impl IncrementalLayoutEngine {
             build_edge_paths(ir, &nodes, &highlighted_edge_indexes, config.edge_routing);
         smooth_boundary_edges(ir, &mut edges, &dirty_node_indexes);
         bundle_parallel_edges(ir, &mut edges);
-        let clusters = build_cluster_boxes(ir, &nodes, spacing);
+        let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
         let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
         let cycle_clusters = cached_layout.traced.layout.cycle_clusters.clone();
         let collapsed_count = cycle_clusters.len();
@@ -4564,7 +4564,7 @@ fn layout_diagram_sugiyama_traced_with_config(
         config.edge_routing,
     );
     bundle_parallel_edges(ir, &mut edges);
-    let mut clusters = build_cluster_boxes(ir, &nodes, spacing);
+    let mut clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
     let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
     let mut cycle_clusters = Vec::new();
 
@@ -4740,7 +4740,7 @@ pub fn layout_diagram_force_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     // Build layout output.
     let nodes = force_build_node_boxes(ir, &positions, &node_sizes);
     let edges = force_build_edge_paths(ir, &nodes);
-    let clusters = build_cluster_boxes(ir, &nodes, spacing);
+    let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
 
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
@@ -4887,7 +4887,11 @@ pub fn layout_diagram_tree_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             .unwrap_or_else(|| {
                 build_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default())
             });
-    let clusters = build_cluster_boxes(ir, &nodes, spacing);
+    // Same metrics this function's node sizes were computed with: every caller on these
+    // specialized paths uses `FontMetrics::default_metrics()` (verified at lib.rs:4791, 5453,
+    // 6271, 6378), so binding it here introduces no layout/render measurement mismatch.
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
 
@@ -5006,7 +5010,11 @@ fn layout_directed_path_tree_traced(
         EdgeRouting::default(),
     )
     .expect("validated directed path endpoints");
-    let clusters = build_cluster_boxes(ir, &nodes, spacing);
+    // Same metrics this function's node sizes were computed with: every caller on these
+    // specialized paths uses `FontMetrics::default_metrics()` (verified at lib.rs:4791, 5453,
+    // 6271, 6378), so binding it here introduces no layout/render measurement mismatch.
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
 
@@ -5254,7 +5262,7 @@ pub fn try_relayout_directed_path_suffix(
         });
     }
 
-    layout.clusters = build_cluster_boxes(ir, &layout.nodes, spacing);
+    layout.clusters = build_cluster_boxes(ir, &layout.nodes, spacing, &metrics);
     layout.bounds = compute_bounds(&layout.nodes, &layout.clusters, &layout.edges, spacing);
     let (total_edge_length, reversed_edge_total_length) =
         compute_edge_length_metrics(&layout.edges);
@@ -5399,7 +5407,11 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let order_by_rank = rank_orders_from_key(ir, &tree.depth, &angles);
     let nodes = node_boxes_from_centers(ir, &node_sizes, &tree.depth, &order_by_rank, &centers);
     let edges = force_build_edge_paths(ir, &nodes);
-    let clusters = build_cluster_boxes(ir, &nodes, spacing);
+    // Same metrics this function's node sizes were computed with: every caller on these
+    // specialized paths uses `FontMetrics::default_metrics()` (verified at lib.rs:4791, 5453,
+    // 6271, 6378), so binding it here introduces no layout/render measurement mismatch.
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
 
@@ -7577,7 +7589,7 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     }
 
     let edges = build_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default());
-    let clusters = build_cluster_boxes(ir, &nodes, spacing);
+    let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
 
     push_snapshot(
@@ -7912,7 +7924,11 @@ fn finalize_specialized_layout(
         horizontal_edges,
         EdgeRouting::default(),
     );
-    let clusters = build_cluster_boxes(ir, &nodes, spacing);
+    // Same metrics this function's node sizes were computed with: every caller on these
+    // specialized paths uses `FontMetrics::default_metrics()` (verified at lib.rs:4791, 5453,
+    // 6271, 6378), so binding it here introduces no layout/render measurement mismatch.
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
     let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
 
@@ -14584,6 +14600,7 @@ fn build_cluster_boxes(
     ir: &MermaidDiagramIr,
     nodes: &[LayoutNodeBox],
     spacing: LayoutSpacing,
+    metrics: &fm_core::FontMetrics,
 ) -> Vec<LayoutClusterBox> {
     ir.clusters
         .iter()
@@ -14604,6 +14621,21 @@ fn build_cluster_boxes(
                 max_y = max_y.max(node_box.bounds.y + node_box.bounds.height);
             }
 
+            let title = cluster
+                .title
+                .and_then(|label_id| ir.labels.get(label_id.0))
+                .map(|label| label.text.clone());
+
+            // The box must be wide enough for its TITLE as well as its contents. The renderer draws
+            // the title unclamped at `bounds.x + 8.0` with no wrapping or truncation, so a title
+            // wider than the member nodes spilled outside the box it labels — up to 320px on an
+            // 80-character title (bd-tm5p). Height needs no equivalent: `cluster_padding` (52) leaves
+            // the label's ~13px row comfortably above the first row of nodes.
+            let contents_width = 2.0f32.mul_add(spacing.cluster_padding, max_x - min_x);
+            let title_width = title
+                .as_deref()
+                .map_or(0.0, |text| cluster_title_width(text, metrics));
+
             (min_x.is_finite() && min_y.is_finite() && max_x.is_finite() && max_y.is_finite())
                 .then_some(LayoutClusterBox {
                     cluster_index,
@@ -14611,21 +14643,42 @@ fn build_cluster_boxes(
                         .clusters
                         .get(cluster_index)
                         .map_or(Span::default(), |cluster| cluster.span),
-                    title: cluster
-                        .title
-                        .and_then(|label_id| ir.labels.get(label_id.0))
-                        .map(|label| label.text.clone()),
+                    title,
                     color: None,
                     bounds: LayoutRect {
                         x: min_x - spacing.cluster_padding,
                         y: min_y - spacing.cluster_padding,
-                        width: 2.0f32.mul_add(spacing.cluster_padding, max_x - min_x),
+                        width: contents_width.max(title_width),
                         height: 2.0f32.mul_add(spacing.cluster_padding, max_y - min_y),
                     },
                 })
         })
         .collect()
 }
+
+/// Width a cluster box needs so its title fits inside it (bd-tm5p).
+///
+/// Mirrors `fm-render-svg`'s cluster-label geometry: the text starts at `bounds.x + 8.0`, so the same
+/// 8px is mirrored on the right. The label renders at `detail.cluster_font_size`, which is
+/// `config.font_size * 0.9` at full detail and `* 0.86` at reduced detail — NOT the node font size —
+/// so the estimate is scaled to the larger of those, because under-sizing is what lets the title
+/// escape while over-sizing only adds padding.
+fn cluster_title_width(title: &str, metrics: &fm_core::FontMetrics) -> f32 {
+    if title.trim().is_empty() {
+        return 0.0;
+    }
+    // Swimlane/section clusters render with their prefix stripped, so measure the displayed text.
+    let displayed = title
+        .strip_prefix("swimlane:")
+        .or_else(|| title.strip_prefix("section "))
+        .unwrap_or(title);
+    let text_width = metrics.estimate_dimensions(displayed).0 * CLUSTER_FONT_SCALE;
+    16.0 + text_width
+}
+
+/// The larger of the renderer's two `cluster_font_size` factors (`0.9` full detail, `0.86` reduced).
+/// Sizing to the larger one is the direction that over-sizes rather than lets the title spill.
+const CLUSTER_FONT_SCALE: f32 = 0.9;
 
 fn build_state_cluster_dividers(
     ir: &MermaidDiagramIr,

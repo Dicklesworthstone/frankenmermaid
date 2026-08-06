@@ -16450,6 +16450,68 @@ marker#arrow-open path {
         }
     }
 
+    /// A cluster box must widen to hold its subgraph title (bd-tm5p).
+    ///
+    /// `build_cluster_boxes` sized the rect purely from its member nodes' bounding box plus padding
+    /// and ignored the title entirely, while the renderer draws that title unclamped at
+    /// `bounds.x + 8.0` with no wrapping or truncation — so an 80-character title on a one-node
+    /// subgraph rendered ~320px outside the box it labels.
+    ///
+    /// Asserted WITHOUT re-using the layout's own width estimator, so this cannot pass by agreeing
+    /// with the code under test: the property is that the box RESPONDS to the title at all —
+    /// monotonically non-decreasing as the title grows, and strictly wider once the title outgrows
+    /// the contents. Pre-fix the width is constant across every title length, which is what the
+    /// negative control shows.
+    #[test]
+    fn cluster_box_widens_for_a_title_wider_than_its_contents() {
+        let cluster_width = |title: &str, child: &str| -> f32 {
+            let src = format!("flowchart TB\n  subgraph G0[{title}]\n    N0[{child}]\n  end");
+            let parsed = fm_parser::parse(&src);
+            let svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+            let rect = svg
+                .split("<rect ")
+                .find(|chunk| chunk.contains("class=\"fm-cluster\"") || chunk.contains("rx="))
+                .unwrap_or_default();
+            let at = rect.find("width=\"").map_or("", |i| &rect[i + 7..]);
+            at[..at.find('"').unwrap_or(0)].parse().unwrap_or(f32::NAN)
+        };
+
+        // Same tiny child throughout, so every change comes from the title.
+        let titles = [
+            "G",
+            "Group zero",
+            "Group zero ingestion",
+            "Group zero ingestion and normalization",
+            "Group zero ingestion and normalization and delivery stage",
+            "A deliberately long subgraph title that is much wider than its single child node",
+        ];
+        let mut widths = Vec::new();
+        for title in titles {
+            let w = cluster_width(title, "x");
+            assert!(w.is_finite(), "no cluster width for title {title:?}");
+            widths.push(w);
+        }
+        for pair in widths.windows(2) {
+            assert!(
+                pair[1] >= pair[0],
+                "cluster width must not shrink as the title grows: {widths:?}"
+            );
+        }
+        assert!(
+            widths[widths.len() - 1] > widths[0] * 1.5,
+            "an 80-character title must widen the box well past a 1-character one: {widths:?}"
+        );
+
+        // Contents already wider than the title: the title must not shrink or inflate the box, so
+        // existing diagrams and the head-to-head shared-subgraph item do not move.
+        let wide_short = cluster_width("Shared", "A fairly wide child node label here");
+        let wide_shorter = cluster_width("S", "A fairly wide child node label here");
+        assert_eq!(
+            wide_short, wide_shorter,
+            "a title narrower than the contents must not affect the box width"
+        );
+    }
+
     /// Every line of a wrapped C4 description must land inside its node box (bd-9xjy).
     ///
     /// The trap this test exists to close: the description is ONE `<text>` whose `y` IS inside the
