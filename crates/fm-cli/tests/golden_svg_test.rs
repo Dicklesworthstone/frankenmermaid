@@ -338,6 +338,87 @@ fn gantt_basic_fixture_preserves_task_and_dependency_semantics() {
     assert!(rendered.contains("fm-gantt-dependency"));
 }
 
+/// Pie slice ANGLES must be proportional to their values (bd-5k51 item 5).
+///
+/// The byte goldens next door prove the output has not CHANGED; they cannot prove it is RIGHT. A
+/// pie rendered with equal slices for 40/30/30, or with a slice sweeping the wrong way, would be
+/// blessed and pinned exactly as happily as a correct one — which is how bd-bg07's regression
+/// nearly got baked into the fixtures. This asserts the geometry the golden is blind to.
+///
+/// Reads the rendered arc endpoints and recovers each sweep from them, rather than trusting any
+/// number the renderer reports about itself.
+#[test]
+fn pie_basic_slice_angles_are_proportional_to_values() {
+    let input_path = golden_dir().join("pie_basic.mmd");
+    let input = fs::read_to_string(&input_path)
+        .map_err(|err| format!("failed reading {}: {err}", input_path.display()))
+        .expect("read pie fixture");
+    let parsed = parse(&input);
+    let rendered = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+
+    // "M cx cy L x1 y1 A r r 0 <large-arc> 1 x2 y2 Z" — recover the sweep from the two radii.
+    let mut sweeps: Vec<(f64, bool)> = Vec::new();
+    for segment in rendered.split("<path").skip(1) {
+        let Some(d_start) = segment.find(" d=\"") else {
+            continue;
+        };
+        let rest = &segment[d_start + 4..];
+        let Some(d_end) = rest.find('"') else { continue };
+        let d = &rest[..d_end];
+        if !d.contains(" A ") {
+            continue;
+        }
+        let nums: Vec<f64> = d
+            .split_whitespace()
+            .filter_map(|token| token.parse::<f64>().ok())
+            .collect();
+        // cx cy x1 y1 r r 0 large sweep x2 y2
+        if nums.len() < 11 {
+            continue;
+        }
+        let (cx, cy, x1, y1) = (nums[0], nums[1], nums[2], nums[3]);
+        let large_arc = nums[7] != 0.0;
+        let (x2, y2) = (nums[9], nums[10]);
+        let start = (y1 - cy).atan2(x1 - cx);
+        let end = (y2 - cy).atan2(x2 - cx);
+        let sweep = (end - start).rem_euclid(std::f64::consts::TAU).to_degrees();
+        sweeps.push((sweep, large_arc));
+    }
+
+    assert_eq!(
+        sweeps.len(),
+        3,
+        "fixture declares three slices; found {} arc paths",
+        sweeps.len()
+    );
+
+    // Apples 40, Bananas 30, Berries 30 of 100 -> 144, 108, 108 degrees.
+    for (actual, expected) in sweeps.iter().zip([144.0_f64, 108.0, 108.0]) {
+        assert!(
+            (actual.0 - expected).abs() < 0.05,
+            "slice sweep {:.3}deg should be {expected:.3}deg for its share of the total",
+            actual.0
+        );
+    }
+
+    let total: f64 = sweeps.iter().map(|(sweep, _)| sweep).sum();
+    assert!(
+        (total - 360.0).abs() < 0.05,
+        "slices must tile the full circle exactly once, got {total:.3}deg"
+    );
+
+    // A slice at or under a half-turn must NOT set the large-arc flag. Getting this backwards
+    // draws the complement — a 144deg slice rendered as 216deg — which is a wrong PICTURE that
+    // leaves every coordinate in the file looking plausible.
+    for (sweep, large_arc) in &sweeps {
+        assert_eq!(
+            *large_arc,
+            *sweep > 180.0,
+            "large-arc flag {large_arc} disagrees with a {sweep:.3}deg sweep"
+        );
+    }
+}
+
 #[test]
 fn resilience_suite_manifest_matches_checked_in_fixtures() {
     let manifest = load_resilience_suite();
