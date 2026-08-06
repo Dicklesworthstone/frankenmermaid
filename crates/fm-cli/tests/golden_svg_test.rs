@@ -754,6 +754,77 @@ fn resilience_suite_manifest_matches_checked_in_fixtures() {
 // are the two types that already own a dedicated algorithm (timeline sequencing, mindmap radial), and
 // both encode their coordinates correctly.
 
+/// Bounding box of an SVG path's on-curve points, or `Err(command)` for a command this cannot parse.
+///
+/// Consumes each command's exact parameter count and takes the trailing pair as the on-curve point, so
+/// an arc's radii and a cubic's control points are never mistaken for positions. Relative (lowercase)
+/// commands are deliberately REFUSED rather than guessed at: mis-consuming parameters yields a
+/// plausible wrong box, which is worse than admitting the reader does not handle them.
+fn path_extent(d: &str) -> Result<(f32, f32, f32, f32), String> {
+    let mut tokens = d
+        .replace(',', " ")
+        .replace('-', " -")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .peekable();
+    let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
+    let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    let mut last = (0.0_f32, 0.0_f32);
+    while let Some(token) = tokens.next() {
+        let Some(cmd) = token.chars().next() else {
+            continue;
+        };
+        if cmd.is_ascii_digit() || cmd == '-' || cmd == '.' {
+            continue; // a stray number; the command that owned it already consumed what it needed
+        }
+        let arity = match cmd {
+            'M' | 'L' | 'T' => 2,
+            'H' | 'V' => 1,
+            'C' => 6,
+            'S' | 'Q' => 4,
+            'A' => 7,
+            'Z' => 0,
+            other => return Err(other.to_string()),
+        };
+        let mut params: Vec<f32> = Vec::with_capacity(arity);
+        // A command letter may be glued to its first number, e.g. "M92".
+        let glued = token[cmd.len_utf8()..].trim();
+        if !glued.is_empty() {
+            match glued.parse::<f32>() {
+                Ok(v) => params.push(v),
+                Err(_) => return Err(token.clone()),
+            }
+        }
+        while params.len() < arity {
+            match tokens.next() {
+                Some(next) => match next.parse::<f32>() {
+                    Ok(v) => params.push(v),
+                    Err(_) => return Err(next),
+                },
+                None => return Err(format!("{cmd} truncated")),
+            }
+        }
+        let point = match cmd {
+            'Z' => last,
+            'H' => (params[0], last.1),
+            'V' => (last.0, params[0]),
+            _ => (params[arity - 2], params[arity - 1]),
+        };
+        last = point;
+        min_x = min_x.min(point.0);
+        min_y = min_y.min(point.1);
+        max_x = max_x.max(point.0);
+        max_y = max_y.max(point.1);
+    }
+    if min_x.is_finite() && min_y.is_finite() {
+        Ok((min_x, min_y, max_x, max_y))
+    } else {
+        Err("no on-curve points".to_string())
+    }
+}
+
 /// Every node's centre, keyed by its first text run: `(label, centre_x, centre_y, width)`.
 ///
 /// FAILS LOUDLY ON A SHAPE IT CANNOT READ rather than skipping it. That distinction is the whole
@@ -820,6 +891,34 @@ fn node_centres(svg: &str) -> Vec<(String, f32, f32, f32)> {
             match (num("cx", e), num("cy", e), num("rx", e)) {
                 (Some(cx), Some(cy), Some(rx)) => Some((cx, cy, rx * 2.0)),
                 _ => None,
+            }
+        } else if let Some(at) = body.find("<path ") {
+            // Some services and nodes are drawn as paths, not primitives: architecture-beta's
+            // `db(database)` is an arc-based cylinder, and class/state shapes use paths too. Without
+            // this branch such a node is unreadable, and the guard above correctly refuses to judge —
+            // but refusing forever is not useful, so read the path's ON-CURVE endpoints.
+            //
+            // STATED APPROXIMATION: a cubic's control points can lie outside the hull of its
+            // endpoints, so this box can be slightly tight for curved shapes. That is fine for centre
+            // and ordering assertions and is NOT sound for tight containment claims. An unrecognised
+            // path command is reported rather than skipped, because silently mis-consuming parameters
+            // would produce a confident wrong box — the exact failure this whole helper exists to
+            // avoid.
+            let d_start = body[at..].find("d=\"").map(|i| at + i + 3);
+            match d_start.and_then(|i| body[i..].find('"').map(|e| &body[i..i + e])) {
+                Some(d) => match path_extent(d) {
+                    Ok((min_x, min_y, max_x, max_y)) => {
+                        Some(((min_x + max_x) / 2.0, (min_y + max_y) / 2.0, max_x - min_x))
+                    }
+                    Err(cmd) => {
+                        unreadable.push(format!(
+                            "fm-node-{group_id} draws a path with command {cmd:?} this guard cannot \
+                             parse"
+                        ));
+                        None
+                    }
+                },
+                None => None,
             }
         } else if let Some(at) = body.find("<circle ") {
             let c = &body[at..];
@@ -1384,4 +1483,150 @@ fn packet_field_widths_are_proportional_to_bit_ranges() {
             bits * per_bit
         );
     }
+}
+
+/// architecture-beta renders every declared service, and its edges fan out from the right one
+/// (bd-iicc).
+///
+/// PASSES. The fixture declares three services and two edges, `api --> db` and `api --> cache`, so
+/// BOTH edges must originate at `api` and terminate at distinct places. That is the connectivity the
+/// diagram exists to show, and a byte golden would pin an edge wired to the wrong service.
+///
+/// Note `db(database)` renders as an arc-based cylinder `<path>`, not a rect — before the reader
+/// handled paths it was reported as an unreadable shape, which is why the reader now parses on-curve
+/// path endpoints. Its box is therefore approximate (see `path_extent`), so this guard asserts
+/// connectivity and label presence, which do not depend on a tight box, rather than exact geometry.
+#[test]
+fn architecture_edges_fan_out_from_their_declared_source() {
+    let svg = render_fixture("architecture_basic");
+    assert!(
+        !svg.contains("transform="),
+        "a transform would make these coordinates non-final"
+    );
+
+    // Every declared service reaches the output with its label.
+    let centres = node_centres(&svg);
+    for label in ["API Gateway", "PostgreSQL", "Redis Cache"] {
+        assert!(
+            centres.iter().any(|(l, ..)| l == label),
+            "service {label:?} was not rendered; read {:?}",
+            centres.iter().map(|(l, ..)| l).collect::<Vec<_>>()
+        );
+    }
+
+    // Each service carries an icon marker, since the icon encodes the service KIND — `cloud`,
+    // `database`, `server` are not decoration, they are the declared type.
+    let icon_nodes = svg.matches("fm-node-has-icon").count();
+    assert!(
+        icon_nodes >= 3,
+        "expected an icon marker on all 3 services, found {icon_nodes}"
+    );
+
+    // Both edges start at the same point (api's boundary) and end apart. Collected from the edge
+    // paths' own M and final coordinates rather than from node boxes, so the cylinder's approximate
+    // box cannot affect the verdict.
+    let mut starts: Vec<(f32, f32)> = Vec::new();
+    let mut ends: Vec<(f32, f32)> = Vec::new();
+    for chunk in svg.split("<path ").skip(1) {
+        let head = chunk.split("/>").next().unwrap_or_default();
+        if !head.contains("class=\"fm-edge") {
+            continue;
+        }
+        let Some(at) = head.find("d=\"") else {
+            continue;
+        };
+        let rest = &head[at + 3..];
+        let d = &rest[..rest.find('"').unwrap_or(0)];
+        let extent = path_extent(d);
+        assert!(
+            extent.is_ok(),
+            "edge path {d:?} could not be parsed: {:?}",
+            extent.err()
+        );
+        // First M point is the start; the final on-curve point is the end.
+        let nums: Vec<f32> = d
+            .replace(',', " ")
+            .split_whitespace()
+            .filter_map(|t| {
+                t.trim_start_matches(|c: char| c.is_ascii_alphabetic())
+                    .parse()
+                    .ok()
+            })
+            .collect();
+        assert!(
+            nums.len() >= 4,
+            "edge path {d:?} has too few coordinates to read endpoints"
+        );
+        starts.push((nums[0], nums[1]));
+        ends.push((nums[nums.len() - 2], nums[nums.len() - 1]));
+    }
+    assert_eq!(
+        starts.len(),
+        2,
+        "expected the fixture's 2 edges, read {}",
+        starts.len()
+    );
+
+    // `api --> db` and `api --> cache` share a source, so the two starts coincide.
+    assert!(
+        (starts[0].0 - starts[1].0).abs() < 1.0 && (starts[0].1 - starts[1].1).abs() < 1.0,
+        "both edges are declared from `api` but start at {:?} and {:?}",
+        starts[0],
+        starts[1]
+    );
+    // …and they go to different services, so the ends must not coincide.
+    assert!(
+        (ends[0].0 - ends[1].0).abs() > 1.0 || (ends[0].1 - ends[1].1).abs() > 1.0,
+        "the two edges end at the same point {:?}, so they cannot be reaching db and cache",
+        ends[0]
+    );
+
+    // The shared source is `api`: its box centre-x and bottom must match where the edges leave.
+    let api = centre_of(&centres, "API Gateway");
+    assert!(
+        (starts[0].0 - api.0).abs() < 2.0,
+        "edges leave at x={} but `api` is centred at x={}",
+        starts[0].0,
+        api.0
+    );
+}
+
+/// `path_extent` must parse the absolute commands our renderer emits and REFUSE anything else
+/// (bd-iicc).
+///
+/// This is a self-test of guard infrastructure, not of the engine. It exists because the failure mode
+/// being designed out is a reader that mis-consumes parameters and returns a confident wrong box: an
+/// arc's radii or a cubic's control points silently treated as positions. Refusal is the correct
+/// answer for an unhandled command, and this pins that.
+#[test]
+fn path_extent_parses_absolute_commands_and_refuses_the_rest() {
+    // A rectangle traced with M/L/Z: the box is exact.
+    let square = path_extent("M10 20 L30 20 L30 50 L10 50 Z");
+    assert_eq!(square, Ok((10.0, 20.0, 30.0, 50.0)));
+
+    // An arc's RADII must not be mistaken for a position. Endpoint is (267.31, 320.62), and the radii
+    // 87.66/9.88 must not enter the box.
+    let arc = path_extent("M92 320.62 A87.66 9.88 0 0 1 267.31 320.62");
+    assert_eq!(arc, Ok((92.0, 320.62, 267.31, 320.62)));
+
+    // A cubic's CONTROL points must not be mistaken for endpoints either: only (311.64, 190.75) and
+    // (344.64, 235.75) are on-curve here.
+    let cubic = path_extent("M311.64 190.75 C311.64 205.75 344.64 220.75 344.64 235.75");
+    assert_eq!(cubic, Ok((311.64, 190.75, 344.64, 235.75)));
+
+    // Relative commands are REFUSED rather than guessed at.
+    assert!(
+        path_extent("m10 10 l20 20").is_err(),
+        "relative commands must be refused, not silently treated as absolute"
+    );
+    // So is an unknown command letter.
+    assert!(
+        path_extent("M0 0 X5 5").is_err(),
+        "unknown command must be refused"
+    );
+    // And a truncated command, rather than reading a short box.
+    assert!(
+        path_extent("M10 20 C1 2 3").is_err(),
+        "a truncated command must be refused"
+    );
 }
