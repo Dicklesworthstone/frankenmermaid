@@ -419,6 +419,76 @@ fn pie_basic_slice_angles_are_proportional_to_values() {
     }
 }
 
+/// Sankey flow widths must be proportional to flow values (bd-iicc).
+///
+/// IGNORED because it currently FAILS against a real defect, filed as bd-e69x: every flow in
+/// sankey_basic renders at stroke-width 1.80 although the values span 4.8x (100/50/75/25/120/
+/// 55/50/25). Proportional ribbon width IS the sankey diagram — uniform width makes it a generic
+/// directed graph — so this is a wrong picture that the byte golden pins as happily as a right one.
+///
+/// It is committed rather than withheld so the specification is reviewable now and executable
+/// later: removing the `#[ignore]` is bd-e69x's acceptance gate. Do not weaken it to make it pass.
+#[test]
+#[ignore = "fails against the bd-e69x defect: sankey flows render at uniform width"]
+fn sankey_basic_flow_widths_are_proportional_to_values() {
+    let input_path = golden_dir().join("sankey_basic.mmd");
+    let input = fs::read_to_string(&input_path)
+        .map_err(|err| format!("failed reading {}: {err}", input_path.display()))
+        .expect("read sankey fixture");
+    let parsed = parse(&input);
+    let rendered = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+
+    // Pair each rendered flow with the value the FIXTURE declares for it, in document order, so
+    // the assertion is anchored to the input rather than to whatever the golden happens to hold.
+    let declared: Vec<f64> = input
+        .lines()
+        .filter_map(|line| line.rsplit_once(',').and_then(|(_, v)| v.trim().parse().ok()))
+        .collect();
+    assert_eq!(declared.len(), 8, "fixture declares eight flows");
+
+    let widths: Vec<f64> = rendered
+        .split("<path")
+        .skip(1)
+        .filter(|segment| segment.contains("fm-edge"))
+        .filter_map(|segment| {
+            let at = segment.find("stroke-width=\"")? + "stroke-width=\"".len();
+            let rest = &segment[at..];
+            rest[..rest.find('"')?].parse().ok()
+        })
+        .collect();
+    assert_eq!(
+        widths.len(),
+        declared.len(),
+        "every declared flow must render as an edge"
+    );
+
+    // Equal values must render equal widths. A scale keyed on edge index rather than value would
+    // satisfy monotonicity by accident but fails here, because the two 50s and the two 25s sit at
+    // different indices.
+    for (i, (vi, wi)) in declared.iter().zip(&widths).enumerate() {
+        for (vj, wj) in declared.iter().zip(&widths).skip(i + 1) {
+            if (vi - vj).abs() < f64::EPSILON {
+                assert!(
+                    (wi - wj).abs() < 1e-6,
+                    "equal flows {vi} rendered at different widths {wi} and {wj}"
+                );
+            } else if vi > vj {
+                assert!(
+                    wi > wj,
+                    "flow {vi} must render wider than flow {vj}, got {wi} vs {wj}"
+                );
+            }
+        }
+    }
+
+    // The smallest flow must stay visible rather than collapsing to a hairline.
+    let min_width = widths.iter().copied().fold(f64::INFINITY, f64::min);
+    assert!(
+        min_width >= 0.5,
+        "smallest flow must remain visible, got width {min_width}"
+    );
+}
+
 #[test]
 fn resilience_suite_manifest_matches_checked_in_fixtures() {
     let manifest = load_resilience_suite();
