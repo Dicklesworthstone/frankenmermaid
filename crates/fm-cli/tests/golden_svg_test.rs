@@ -754,44 +754,28 @@ fn resilience_suite_manifest_matches_checked_in_fixtures() {
 // are the two types that already own a dedicated algorithm (timeline sequencing, mindmap radial), and
 // both encode their coordinates correctly.
 
-/// Every node's centre, keyed by its first text run.
+/// Every node's centre, keyed by its first text run: `(label, centre_x, centre_y, width)`.
+///
+/// FAILS LOUDLY ON A SHAPE IT CANNOT READ rather than skipping it. That distinction is the whole
+/// point of this helper's design: an earlier version read only `<rect>`, so a mindmap `root((..))` —
+/// which renders as a circle — was silently dropped, and the guard downstream reported
+/// "Central Topic not rendered". That reads as a layout defect and is not one. A check that quietly
+/// skips what it cannot parse produces a verdict without having looked at the thing it is judging,
+/// which is worse than no check at all.
+///
+/// So an unreadable node group is a HARD ERROR naming the group and the tags it does contain, and a
+/// node that is genuinely absent is a separate, differently-worded failure at the lookup site.
+/// Extend the shape list when a new shape appears; do not narrow it.
 fn node_centres(svg: &str) -> Vec<(String, f32, f32, f32)> {
     let mut out = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
     for chunk in svg.split("<g id=\"fm-node-").skip(1) {
         let body = chunk.split("<g id=\"fm-node-").next().unwrap_or(chunk);
+        let group_id: String = body.chars().take_while(|c| *c != '"').collect();
         let num = |key: &str, from: &str| -> Option<f32> {
             let at = from.find(&format!("{key}=\""))?;
             let rest = &from[at + key.len() + 2..];
             rest[..rest.find('"')?].parse().ok()
-        };
-        // Shapes vary by diagram type: a mindmap root is `root((..))` and renders as a circle or
-        // ellipse, not a rect. Reading only `<rect>` made this helper report the root as "not
-        // rendered", which looks exactly like a layout defect and is not one.
-        let (cx, cy, w) = if let Some(at) = body.find("<rect ") {
-            let rect = &body[at..];
-            let (Some(x), Some(y), Some(w), Some(h)) = (
-                num("x", rect),
-                num("y", rect),
-                num("width", rect),
-                num("height", rect),
-            ) else {
-                continue;
-            };
-            (x + w / 2.0, y + h / 2.0, w)
-        } else if let Some(at) = body.find("<ellipse ") {
-            let e = &body[at..];
-            let (Some(cx), Some(cy), Some(rx)) = (num("cx", e), num("cy", e), num("rx", e)) else {
-                continue;
-            };
-            (cx, cy, rx * 2.0)
-        } else if let Some(at) = body.find("<circle ") {
-            let c = &body[at..];
-            let (Some(cx), Some(cy), Some(r)) = (num("cx", c), num("cy", c), num("r", c)) else {
-                continue;
-            };
-            (cx, cy, r * 2.0)
-        } else {
-            continue;
         };
         let label = body
             .split("<text")
@@ -800,10 +784,60 @@ fn node_centres(svg: &str) -> Vec<(String, f32, f32, f32)> {
             .map(|(text, _)| text.trim().to_string())
             .find(|t| !t.is_empty())
             .unwrap_or_default();
-        if !label.is_empty() {
-            out.push((label, cx, cy, w));
+
+        // Shapes vary by diagram type: rect for most nodes, circle/ellipse for a mindmap root or a
+        // gitGraph commit, polygon/path for diamonds and slanted shapes.
+        let geometry = if let Some(at) = body.find("<rect ") {
+            let r = &body[at..];
+            match (num("x", r), num("y", r), num("width", r), num("height", r)) {
+                (Some(x), Some(y), Some(w), Some(h)) => Some((x + w / 2.0, y + h / 2.0, w)),
+                _ => None,
+            }
+        } else if let Some(at) = body.find("<ellipse ") {
+            let e = &body[at..];
+            match (num("cx", e), num("cy", e), num("rx", e)) {
+                (Some(cx), Some(cy), Some(rx)) => Some((cx, cy, rx * 2.0)),
+                _ => None,
+            }
+        } else if let Some(at) = body.find("<circle ") {
+            let c = &body[at..];
+            match (num("cx", c), num("cy", c), num("r", c)) {
+                (Some(cx), Some(cy), Some(r)) => Some((cx, cy, r * 2.0)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        match geometry {
+            Some((cx, cy, w)) => {
+                if !label.is_empty() {
+                    out.push((label, cx, cy, w));
+                }
+            }
+            // A group with no readable shape is reported, not skipped — UNLESS it carries no shape
+            // element at all, which is how deliberately invisible nodes (block-beta `space`) render.
+            None => {
+                let tags: Vec<&str> = ["rect", "ellipse", "circle", "polygon", "path", "line"]
+                    .into_iter()
+                    .filter(|t| body.contains(&format!("<{t} ")))
+                    .collect();
+                if !tags.is_empty() {
+                    unreadable.push(format!(
+                        "fm-node-{group_id} (label {label:?}) has shape tag(s) {tags:?} this guard \
+                         cannot read"
+                    ));
+                }
+            }
         }
     }
+    assert!(
+        unreadable.is_empty(),
+        "node_centres cannot read {} node shape(s), so any absence it reports would be meaningless \
+         — extend the shape list rather than narrowing the assertion:\n  {}",
+        unreadable.len(),
+        unreadable.join("\n  ")
+    );
     out
 }
 
@@ -922,28 +956,71 @@ fn mindmap_depth_maps_to_radial_distance_from_root() {
     }
 }
 
-/// A block-beta block spanning N columns must be about N columns wide (bd-iicc).
+/// block-beta must honour a CONTAINER's column span, and must place `space` where it was declared
+/// (bd-iicc).
 ///
-/// IGNORED because it FAILS against a real defect, filed as bd-7ute: column span is not encoded at
-/// all. Measured on a controlled input, a `block:wide:3` containing a one-character label renders its
-/// content 100px wide while a SINGLE-column block carrying a long label renders 367.35px — so the
-/// 3-span block is 3.7x NARROWER than the 1-span one, and width tracks label text instead of the
-/// declared grid. Un-ignoring this is bd-7ute's acceptance gate. Do not relax the ratio to whatever a
-/// fix happens to produce.
+/// IGNORED because it FAILS against two real defects, filed as bd-7ute. Note what is NOT broken: the
+/// Grid algorithm reads the declared column count and NODE-level spans work — `A["a"]:3` correctly
+/// renders 460px across a 180px column pitch. The defects are narrower:
+///
+/// 1. A span on a CONTAINER (`block:name:N`) is dropped. The parser attaches the span as a class on a
+///    NODE, so a container's span reaches nothing with a width: `block:wide:3` containing a
+///    one-character label renders 100px while a SINGLE-column block with a long label renders
+///    367.35px. That is why the committed block_basic fixture is wrong — it uses the container form.
+/// 2. `space` is ordered LAST rather than at its declared grid position, so every later cell shifts
+///    one place earlier and the requested gap never appears.
+///
+/// Un-ignoring this is bd-7ute's acceptance gate. Do not relax either assertion to whatever a fix
+/// happens to produce.
 #[test]
-#[ignore = "fails against the bd-7ute defect: block-beta column span is not encoded"]
+#[ignore = "fails against bd-7ute: block-beta drops container spans and mis-orders `space`"]
 fn block_beta_span_width_is_proportional_to_declared_columns() {
     let src = "block-beta\n  columns 3\n  block:wide:3\n    W[\"x\"]\n  end\n  \
                N[\"a single column with a very long label indeed\"]\n  space\n  M[\"y\"]";
     let svg = render_svg_with_config(&parse(src).ir, &SvgRenderConfig::default());
     let centres = node_centres(&svg);
     let width = |label: &str| -> f32 { centre_of(&centres, label).2 };
-    // The 3-column span must dominate a 1-column cell regardless of label length.
+    // DEFECT 1: the 3-column span must dominate a 1-column cell regardless of label length.
     assert!(
         width("x") > width("a single column with a very long label indeed") * 1.5,
         "a 3-column span ({}) must be much wider than a 1-column cell ({}), independent of labels",
         width("x"),
         width("a single column with a very long label indeed")
+    );
+
+    // DEFECT 2: `space` must hold its declared cell, so the cells after it keep their positions.
+    // Declared A, space, C, D, E, F over 3 columns puts A and C in row 1 with a GAP between them;
+    // today `space` is emitted last, so A and C end up adjacent and every later cell shifts.
+    let grid = "block-beta\n  columns 3\n  A[\"a\"]\n  space\n  C[\"c\"]\n  D[\"d\"]\n  \
+                E[\"e\"]\n  F[\"f\"]";
+    let grid_svg = render_svg_with_config(&parse(grid).ir, &SvgRenderConfig::default());
+    let cells = node_centres(&grid_svg);
+    let cell = |label: &str| -> (f32, f32) {
+        let (cx, cy, _) = centre_of(&cells, label);
+        (cx, cy)
+    };
+    // Column pitch = the smallest positive gap between distinct node columns. Derived rather than
+    // assumed, and NOT as `E.x - A.x`: E sits in the same column as A one row down, so that
+    // difference is zero and would make the assertion below vacuous. `space` is invisible and
+    // carries no text, so `node_centres` already excludes it and cannot skew this.
+    let mut xs: Vec<f32> = cells.iter().map(|(_, cx, ..)| *cx).collect();
+    xs.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+    let pitch = xs
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .filter(|gap| *gap > 1.0)
+        .fold(f32::INFINITY, f32::min);
+    assert!(
+        pitch.is_finite(),
+        "could not derive a column pitch from {xs:?}"
+    );
+    assert!(
+        cell("a").1 == cell("c").1 && (cell("c").0 - cell("a").0).abs() > pitch * 1.5,
+        "`space` did not hold its cell: A at {:?} and C at {:?} are {} apart against a pitch of \
+         {pitch}, so the declared gap is missing",
+        cell("a"),
+        cell("c"),
+        (cell("c").0 - cell("a").0).abs()
     );
 }
 
