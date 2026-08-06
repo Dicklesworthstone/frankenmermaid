@@ -16450,6 +16450,117 @@ marker#arrow-open path {
         }
     }
 
+    /// Every line of a wrapped C4 description must land inside its node box (bd-9xjy).
+    ///
+    /// The trap this test exists to close: the description is ONE `<text>` whose `y` IS inside the
+    /// box, and its lines are `<tspan dy="…">` children stacking downward from there. A guard that
+    /// reads only the text element's `y` sees no overflow — which is how a 17-line description drew
+    /// 220px below its own rectangle while looking fine to a naive check. So the position asserted
+    /// here is the ACCUMULATED dy, per line.
+    ///
+    /// Also pins that a single-line description does not grow the box: the renderer's own baseline
+    /// clamp already contains that case, and growing it would move committed goldens for nothing.
+    #[test]
+    fn c4_description_lines_render_inside_the_node_box() {
+        let words = [
+            "This",
+            "description",
+            "grows",
+            "one",
+            "word",
+            "at",
+            "a",
+            "time",
+            "until",
+            "it",
+            "must",
+            "wrap",
+            "across",
+            "a",
+            "great",
+            "many",
+            "rendered",
+            "lines",
+            "inside",
+            "its",
+            "box",
+        ];
+
+        let mut single_line_height: Option<f32> = None;
+        for take in 1..=words.len() {
+            let description = words[..take].join(" ");
+            let src =
+                format!("C4Context\n  title System\n  Person(user, \"Nm\", \"{description}\")");
+            let parsed = fm_parser::parse(&src);
+            let svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+            assert!(
+                !svg.contains("transform="),
+                "{take}: a transform would make these coordinates non-final"
+            );
+
+            let number = |chunk: &str, name: &str| -> f32 {
+                let Some(at) = chunk.find(&format!("{name}=\"")) else {
+                    return f32::NAN;
+                };
+                let rest = &chunk[at + name.len() + 2..];
+                let Some(end) = rest.find('"') else {
+                    return f32::NAN;
+                };
+                rest[..end].parse().unwrap_or(f32::NAN)
+            };
+
+            let rect = svg.split("<rect ").nth(1).unwrap_or_default();
+            let top = number(rect, "y");
+            let bottom = top + number(rect, "height");
+            assert!(
+                top.is_finite() && bottom.is_finite(),
+                "{take}: node box is missing y/height"
+            );
+
+            let Some(after) = svg.split("class=\"fm-c4-description\"").nth(1) else {
+                continue;
+            };
+            let element = svg
+                .split("<text ")
+                .find(|chunk| chunk.contains("class=\"fm-c4-description\""))
+                .unwrap_or_default();
+            let first = number(element, "y");
+            let font = number(element, "font-size");
+            assert!(
+                first.is_finite() && font.is_finite(),
+                "{take}: description is missing y/font-size"
+            );
+
+            // Walk the tspan stack, accumulating dy exactly as a renderer would.
+            let body = after.split("</text>").next().unwrap_or_default();
+            let mut baseline = first;
+            let mut lines = 1_usize;
+            for tspan in body.split("<tspan ").skip(1) {
+                let dy = number(tspan, "dy");
+                if !dy.is_finite() {
+                    continue;
+                }
+                baseline += dy;
+                lines += 1;
+                assert!(
+                    baseline + font * 0.5 <= bottom && baseline - font * 0.5 >= top,
+                    "{take} words / {lines} lines: description line at {baseline} escapes the node \
+                     box {top}..{bottom}"
+                );
+            }
+
+            // The first `<tspan dy="0">` counts as line one, so a single-line description reports 2.
+            if lines <= 2 {
+                let height = bottom - top;
+                let previous = *single_line_height.get_or_insert(height);
+                assert_eq!(
+                    height, previous,
+                    "{take}: a description that fits on one line must not grow the box"
+                );
+            }
+        }
+    }
+
     /// `<defs>` hygiene, both directions, across every diagram-render path (bd-a6uk, bd-w5f7).
     ///
     /// Declared-but-unreferenced is the wasteful direction and the one that found both beads: a byte

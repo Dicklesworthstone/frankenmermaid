@@ -9246,12 +9246,112 @@ fn compute_node_size(
             // An ER entity's box must likewise hold its attribute rows. Unlike the class renderer,
             // the ER renderer does not stop at the box edge — it keeps emitting rows — so a box
             // sized from the entity name alone spills attributes outside it (bd-090g).
-            match er_compartment_dimensions(node, metrics) {
+            let (width, height) = match er_compartment_dimensions(node, metrics) {
                 Some((rows_width, rows_height)) => (width.max(rows_width), height.max(rows_height)),
+                None => (width, height),
+            };
+            // A C4 node's box must hold its WRAPPED description. The renderer clamps the
+            // description's first baseline into the box but the `<tspan>` stack then descends from
+            // there, so clamping the anchor does not bound the block — a 16-line description drew
+            // 220px below its own rectangle (bd-9xjy).
+            match c4_description_height(node, metrics, width) {
+                Some(description_height) => (width, height.max(description_height)),
                 None => (width, height),
             }
         }
     }
+}
+
+/// Height a C4 node needs so its wrapped description stays inside the box. `None` when the node has
+/// no C4 description, or when the description fits on one line — the single-line case is already
+/// contained by the renderer's own baseline clamp, so growing it would move committed goldens for no
+/// correctness gain.
+///
+/// Mirrors `fm-render-svg`'s `write_c4_node_into` cursor advance: a type-label row at
+/// `small_font * 1.25`, a name row `line_h * 0.95` below it, then `line_h * 0.9` to the description,
+/// whose first baseline is pushed down a further `min(block_height, h * 0.35)` and whose lines then
+/// stack one `description_font * line_height` apart.
+///
+/// The `min(block_height, h * 0.35)` shift depends on `h`, which is what we are solving for. Rather
+/// than iterate to a fixed point, this uses `block_height` as the bound — always valid because
+/// `min(a, b) <= a` — so the result is an over-estimate for tall boxes. Over-sizing renders as
+/// padding, and it keeps the arithmetic auditable.
+fn c4_description_height(node: &IrNode, metrics: &fm_core::FontMetrics, width: f32) -> Option<f32> {
+    let description = node.c4_meta.as_deref()?.description.as_deref()?;
+    if description.trim().is_empty() {
+        return None;
+    }
+
+    let font_size = metrics.font_size();
+    let line_h = metrics.line_height_px();
+    let small_font = (font_size * 0.78).max(C4_FONT_FLOOR);
+    let description_font = (font_size * 0.72).max(C4_FONT_FLOOR);
+
+    // Renderer: `available_width = (w - 20.0).max(32.0)` wrapped at `config.avg_char_width * 0.92`.
+    // The 0.92 is mirrored rather than dropped. Assuming a wider character would over-count lines,
+    // which is the safe direction for containment but grows boxes for descriptions that actually fit
+    // on one line — `c4_basic`'s "A customer" counted as two, moving a golden for no correctness
+    // gain. Matching the renderer keeps the counts equal whenever layout's metrics and the render
+    // config agree, and the disagreement case is absorbed by a line of margin below instead.
+    let available_width = (width - 20.0).max(32.0);
+    let lines = wrapped_line_count(
+        description,
+        available_width,
+        metrics.avg_char_width() * 0.92,
+    );
+    if lines <= 1 {
+        return None;
+    }
+
+    // `description_height` in the renderer: the stack's total descent below its first baseline. One
+    // extra line of margin covers layout's metrics disagreeing with the render config's
+    // `avg_char_width` by enough to add a wrap — under-counting is what spills rows.
+    let per_line = description_font * (line_h / font_size).max(1.0);
+    let block_height = lines as f32 * per_line;
+    let header = small_font.mul_add(1.25, line_h * 0.95) + line_h * 0.9;
+    // header + shift(<= block) + stack + half a glyph below the last baseline.
+    Some(header + block_height * 2.0 + description_font * 0.5)
+}
+
+/// Lower bound on the renderer's clamped C4 font sizes — `SvgRenderConfig::min_font_size`'s default.
+/// The clamp only raises a size, and a raised size means a taller block, so assuming the floor
+/// applies errs toward over-sizing.
+const C4_FONT_FLOOR: f32 = 8.0;
+
+/// Number of lines `text` wraps to, mirroring `fm-render-svg`'s `wrap_text_to_lines` without
+/// building the lines: greedy whitespace wrapping at `floor(max_width / avg_char_width).max(8)`
+/// characters, counting a word longer than the limit as occupying its own single line exactly as
+/// that function does.
+fn wrapped_line_count(text: &str, max_width: f32, avg_char_width: f32) -> usize {
+    if text.trim().is_empty() {
+        return 0;
+    }
+    let max_chars = if avg_char_width > 0.0 {
+        ((max_width / avg_char_width).floor() as usize).max(8)
+    } else {
+        8
+    };
+
+    let mut lines = 0_usize;
+    let mut current = 0_usize;
+    for word in text.split_whitespace() {
+        let word_chars = word.chars().count();
+        let next = if current == 0 {
+            word_chars
+        } else {
+            current + 1 + word_chars
+        };
+        if next > max_chars && current > 0 {
+            lines += 1;
+            current = word_chars;
+        } else {
+            current = next;
+        }
+    }
+    if current > 0 {
+        lines += 1;
+    }
+    lines
 }
 
 /// Space a class node needs for its compartment stack (stereotype, name, separators, and one row per
@@ -9462,6 +9562,12 @@ fn node_size_cache_key(
         hash_str(&mut hash, &attr.data_type);
         hash_str(&mut hash, &attr.name);
         hash_u64(&mut hash, attr.key as u64);
+    }
+    // A C4 description feeds `compute_node_size` through `c4_description_height`, so editing it
+    // without touching the node's label must not serve the pre-edit size (bd-9xjy) — the same
+    // coupling `class_meta` and `node.members` above have, for the same reason.
+    if let Some(meta) = node.c4_meta.as_deref() {
+        hash_str(&mut hash, meta.description.as_deref().unwrap_or_default());
     }
     hash
 }
@@ -23634,6 +23740,67 @@ mod tests {
             "entity box must grow when attributes are added: {} > {before}",
             many.layout.nodes[0].bounds.height
         );
+    }
+
+    /// A C4 description edit must not be served from the node-size cache (bd-9xjy).
+    ///
+    /// The third member of this family after the label and ER-attribute fault tests. Edits ONLY the
+    /// description, so a description-blind cache key cannot be rescued by the label term.
+    #[test]
+    fn fault_node_size_cache_reflects_c4_description_edits() {
+        let mut engine = IncrementalLayoutEngine::default();
+        let mut ir = c4_person_ir("Short");
+        let config = super::LayoutConfig::default();
+        let guardrails = LayoutGuardrails::default();
+
+        let brief = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        let before = brief.layout.nodes[0].bounds.height;
+
+        if let Some(meta) = ir.nodes[0].c4_meta.as_deref_mut() {
+            meta.description = Some(
+                "This description is considerably longer and must wrap across a great many \
+                 rendered lines inside the node box"
+                    .to_string(),
+            );
+        }
+
+        let verbose = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config,
+            guardrails,
+        );
+        assert!(
+            verbose.layout.nodes[0].bounds.height > before,
+            "C4 box must grow when the description wraps: {} > {before}",
+            verbose.layout.nodes[0].bounds.height
+        );
+    }
+
+    /// One C4 person node carrying `description`.
+    fn c4_person_ir(description: &str) -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::C4Context);
+        ir.labels.push(IrLabel {
+            text: "Nm".to_string(),
+            span: Span::default(),
+        });
+        ir.nodes.push(IrNode {
+            id: "user".to_string(),
+            label: Some(IrLabelId(0)),
+            shape: NodeShape::Rounded,
+            c4_meta: Some(Box::new(fm_core::IrC4NodeMeta {
+                element_type: "Person".to_string(),
+                technology: None,
+                description: Some(description.to_string()),
+            })),
+            ..IrNode::default()
+        });
+        ir
     }
 
     /// An ER entity carrying `members` must be sized to hold every attribute row (bd-090g).
