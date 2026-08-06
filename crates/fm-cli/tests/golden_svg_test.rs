@@ -754,13 +754,18 @@ fn resilience_suite_manifest_matches_checked_in_fixtures() {
 // are the two types that already own a dedicated algorithm (timeline sequencing, mindmap radial), and
 // both encode their coordinates correctly.
 
-/// Bounding box of an SVG path's on-curve points, or `Err(command)` for a command this cannot parse.
+/// Every ON-CURVE point of an SVG path in order, or `Err(command)` for a command this cannot parse.
 ///
 /// Consumes each command's exact parameter count and takes the trailing pair as the on-curve point, so
 /// an arc's radii and a cubic's control points are never mistaken for positions. Relative (lowercase)
 /// commands are deliberately REFUSED rather than guessed at: mis-consuming parameters yields a
-/// plausible wrong box, which is worse than admitting the reader does not handle them.
-fn path_extent(d: &str) -> Result<(f32, f32, f32, f32), String> {
+/// plausible wrong result, which is worse than admitting the reader does not handle them.
+///
+/// Both `path_extent` (bounding box) and `path_endpoints` (start/end) derive from this, so an edge's
+/// endpoints are read with the same arity walk as a shape's box rather than by scanning for the last
+/// two numbers in the string — a scan that happens to work for the cubics our edge router emits and
+/// would silently return an arc's radii the day one appears.
+fn path_on_curve_points(d: &str) -> Result<Vec<(f32, f32)>, String> {
     let mut tokens = d
         .replace(',', " ")
         .replace('-', " -")
@@ -769,8 +774,7 @@ fn path_extent(d: &str) -> Result<(f32, f32, f32, f32), String> {
         .collect::<Vec<_>>()
         .into_iter()
         .peekable();
-    let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
-    let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    let mut points: Vec<(f32, f32)> = Vec::new();
     let mut last = (0.0_f32, 0.0_f32);
     while let Some(token) = tokens.next() {
         let Some(cmd) = token.chars().next() else {
@@ -813,16 +817,59 @@ fn path_extent(d: &str) -> Result<(f32, f32, f32, f32), String> {
             _ => (params[arity - 2], params[arity - 1]),
         };
         last = point;
-        min_x = min_x.min(point.0);
-        min_y = min_y.min(point.1);
-        max_x = max_x.max(point.0);
-        max_y = max_y.max(point.1);
+        points.push(point);
     }
-    if min_x.is_finite() && min_y.is_finite() {
-        Ok((min_x, min_y, max_x, max_y))
-    } else {
+    if points.is_empty() {
         Err("no on-curve points".to_string())
+    } else {
+        Ok(points)
     }
+}
+
+/// Bounding box of an SVG path's on-curve points, or `Err(command)` for a command this cannot parse.
+fn path_extent(d: &str) -> Result<(f32, f32, f32, f32), String> {
+    let points = path_on_curve_points(d)?;
+    let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
+    let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for (x, y) in points {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    Ok((min_x, min_y, max_x, max_y))
+}
+
+/// A point in the rendered SVG's final coordinate space.
+type Point = (f32, f32);
+
+/// First and last on-curve points of an SVG path: where an edge STARTS and where it ENDS.
+fn path_endpoints(d: &str) -> Result<(Point, Point), String> {
+    let points = path_on_curve_points(d)?;
+    match (points.first(), points.last()) {
+        (Some(first), Some(last)) => Ok((*first, *last)),
+        _ => Err("no on-curve points".to_string()),
+    }
+}
+
+/// Text content of an SVG element body with any inner markup removed and whitespace collapsed.
+///
+/// A multi-line label (packet-beta emits "Source Port\n[0-15]") renders as `<tspan>` children, so the
+/// raw span between `>` and `</text>` is MARKUP, not text. Reading it unstripped made `node_centres`
+/// return the markup string and the guard downstream report "Source Port not rendered" — absence
+/// standing in for unreadability, which is the failure mode this file keeps designing out.
+fn strip_inner_tags(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut depth = 0usize;
+    for ch in raw.chars() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            c if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Every node's centre, keyed by its first text run: `(label, centre_x, centre_y, width)`.
@@ -848,29 +895,13 @@ fn node_centres(svg: &str) -> Vec<(String, f32, f32, f32)> {
             let rest = &from[at + key.len() + 2..];
             rest[..rest.find('"')?].parse().ok()
         };
-        // A multi-line label (packet-beta emits "Source Port\n[0-15]") renders as <tspan> children, so
-        // the raw span between > and </text> is MARKUP, not text. Reading it unstripped made this
-        // return the markup string and the guard downstream report "Source Port not rendered" — the
-        // absence-instead-of-unreadable failure again, one layer in. Strip inner tags and collapse
-        // whitespace so a multi-line label reads as its joined text.
-        let strip_tags = |raw: &str| -> String {
-            let mut out = String::with_capacity(raw.len());
-            let mut depth = 0usize;
-            for ch in raw.chars() {
-                match ch {
-                    '<' => depth += 1,
-                    '>' => depth = depth.saturating_sub(1),
-                    c if depth == 0 => out.push(c),
-                    _ => {}
-                }
-            }
-            out.split_whitespace().collect::<Vec<_>>().join(" ")
-        };
+        // Inner markup is stripped so a multi-line label reads as its joined text; see
+        // `strip_inner_tags` for why reading it raw produced a false "not rendered".
         let text_elements: Vec<String> = body
             .split("<text")
             .skip(1)
             .filter_map(|t| t.split_once('>').and_then(|(_, r)| r.split_once("</text>")))
-            .map(|(raw, _)| strip_tags(raw))
+            .map(|(raw, _)| strip_inner_tags(raw))
             .collect();
         let has_text_element = !text_elements.is_empty();
         let label = text_elements
@@ -1628,5 +1659,519 @@ fn path_extent_parses_absolute_commands_and_refuses_the_rest() {
     assert!(
         path_extent("M10 20 C1 2 3").is_err(),
         "a truncated command must be refused"
+    );
+
+    // `path_endpoints` shares the same arity walk, so an arc's RADII are not mistaken for the start
+    // or the end. A "take the last two numbers in the string" reader would return (0, 1) here — the
+    // arc's sweep flags — and call it the endpoint.
+    assert_eq!(
+        path_endpoints("M92 320.62 A87.66 9.88 0 0 1 267.31 320.62"),
+        Ok(((92.0, 320.62), (267.31, 320.62)))
+    );
+    // Direction is preserved: start is the first on-curve point, end is the last, never sorted.
+    assert_eq!(
+        path_endpoints("M300 400 L100 200"),
+        Ok(((300.0, 400.0), (100.0, 200.0)))
+    );
+}
+
+// ── Round 5: the requirement diagram (bd-iicc) ──────────────────────────────────────────────
+//
+// requirement_basic was one of the last unguarded types. Its row containment was measured clean in an
+// earlier round, but that measurement looked at the node's NAME row only; nothing had ever checked
+// what else the requirement renderer draws inside the same box, and nothing had checked that the
+// relationship arrows point where the fixture declares. Both turned out to matter.
+
+/// One rendered requirement node: its DECLARED id, its box, and every text run drawn inside it.
+///
+/// `node_centres` cannot serve these guards, and the reason is the trap this file keeps hitting. It
+/// keys a node on its first non-empty text run, and a requirement node's first run is the type header
+/// `«requirement»`, not the name — so looking up "AuthReq" through it would report
+/// "AuthReq not rendered". That is absence standing in for a key mismatch, it reads exactly like a
+/// layout defect, and it is not one. Requirement groups carry `data-id="AuthReq"`, the name AS
+/// DECLARED, so key on that instead.
+///
+/// Everything this cannot read is a hard error naming the group: a group with no `data-id`, no
+/// `<rect>`, or a `<text>` whose content or `font-size` cannot be extracted. A guard that silently
+/// judged fewer nodes than the diagram declares would produce a verdict without having looked.
+#[derive(Debug)]
+struct RequirementBox {
+    /// The `data-id`, i.e. the name the fixture declared.
+    id: String,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    /// Every `<text>` drawn inside the box, as `(content, font_size)`, in document order.
+    texts: Vec<(String, f32)>,
+}
+
+fn requirement_boxes(svg: &str) -> Vec<RequirementBox> {
+    let mut out: Vec<RequirementBox> = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
+    for chunk in svg.split("<g id=\"fm-node-").skip(1) {
+        let body = chunk.split("<g id=\"fm-node-").next().unwrap_or(chunk);
+        let group_id: String = body.chars().take_while(|c| *c != '"').collect();
+        let head = body.split_once('>').map_or(body, |(h, _)| h);
+
+        let attr = |key: &str, from: &str| -> Option<String> {
+            let at = from.find(&format!("{key}=\""))?;
+            let rest = &from[at + key.len() + 2..];
+            Some(rest[..rest.find('"')?].to_string())
+        };
+        let num = |key: &str, from: &str| -> Option<f32> { attr(key, from)?.parse().ok() };
+
+        let Some(id) = attr("data-id", head) else {
+            unreadable.push(format!(
+                "fm-node-{group_id} carries no data-id, so this guard cannot tell which declared \
+                 requirement it is"
+            ));
+            continue;
+        };
+
+        let Some(rect_at) = body.find("<rect ") else {
+            unreadable.push(format!(
+                "fm-node-{group_id} (data-id {id:?}) has no <rect>; a requirement node is a box and \
+                 this guard must not judge one it cannot locate"
+            ));
+            continue;
+        };
+        let rect = &body[rect_at..];
+        let (Some(x), Some(y), Some(width), Some(height)) = (
+            num("x", rect),
+            num("y", rect),
+            num("width", rect),
+            num("height", rect),
+        ) else {
+            unreadable.push(format!(
+                "fm-node-{group_id} (data-id {id:?}) has a <rect> whose x/y/width/height this guard \
+                 could not read"
+            ));
+            continue;
+        };
+
+        // Every text run WITH its own font-size. The requirement renderer draws the type header and
+        // the metadata row at 0.75x the node font size, so a single assumed size would measure two of
+        // the three rows wrongly — and measuring wrongly is how a containment guard invents a defect.
+        let mut texts: Vec<(String, f32)> = Vec::new();
+        for raw in body.split("<text").skip(1) {
+            let Some((tag, rest)) = raw.split_once('>') else {
+                continue;
+            };
+            let Some((content, _)) = rest.split_once("</text>") else {
+                unreadable.push(format!(
+                    "fm-node-{group_id} (data-id {id:?}) has an unterminated <text> element"
+                ));
+                continue;
+            };
+            let content = strip_inner_tags(content);
+            if content.is_empty() {
+                continue;
+            }
+            match num("font-size", tag) {
+                Some(size) => texts.push((content, size)),
+                None => unreadable.push(format!(
+                    "fm-node-{group_id} (data-id {id:?}) draws {content:?} with no readable \
+                     font-size, so this guard cannot measure it"
+                )),
+            }
+        }
+
+        out.push(RequirementBox {
+            id,
+            x,
+            y,
+            width,
+            height,
+            texts,
+        });
+    }
+    assert!(
+        unreadable.is_empty(),
+        "requirement_boxes cannot read {} node(s), so any verdict it produced would be meaningless \
+         — fix the reader rather than narrowing the assertion:\n  {}",
+        unreadable.len(),
+        unreadable.join("\n  ")
+    );
+    out
+}
+
+/// Every `SRC - type -> DST` relationship the fixture declares, in declaration order.
+///
+/// Read from the `.mmd` rather than restated in a table here, so these guards describe themselves
+/// from the fixture and survive an edit to it. A fixture that declares no relationship at all is a
+/// hard error: this guard must never pass by finding nothing to check.
+fn declared_requirement_relationships(fixture: &str) -> Vec<(String, String, String)> {
+    let read = fs::read_to_string(golden_dir().join(format!("{fixture}.mmd")));
+    assert!(read.is_ok(), "read {fixture} fixture: {:?}", read.err());
+    let source = read.unwrap_or_default();
+    let mut out = Vec::new();
+    for line in source.lines() {
+        let line = line.trim();
+        let Some((left, dst)) = line.split_once("->") else {
+            continue;
+        };
+        let Some((src, kind)) = left.split_once('-') else {
+            continue;
+        };
+        let (src, kind, dst) = (src.trim(), kind.trim(), dst.trim());
+        if src.is_empty() || kind.is_empty() || dst.is_empty() {
+            continue;
+        }
+        out.push((src.to_string(), kind.to_string(), dst.to_string()));
+    }
+    assert!(
+        !out.is_empty(),
+        "{fixture} declares no `SRC - type -> DST` relationship; this guard would otherwise pass by \
+         checking nothing"
+    );
+    out
+}
+
+/// An edge's label and the two ends of its rendered path.
+type LabelledEdge = (String, Point, Point);
+
+/// Every labelled edge in the output as `(label, start, end)`, read from the edge's own path.
+fn labelled_edges(svg: &str) -> Vec<LabelledEdge> {
+    let mut out = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
+    for chunk in svg.split("<g id=\"fm-edge-").skip(1) {
+        let body = chunk.split("<g id=\"fm-").next().unwrap_or(chunk);
+        let edge_id: String = body.chars().take_while(|c| *c != '"').collect();
+
+        let label = body
+            .split("<text")
+            .skip(1)
+            .filter_map(|raw| raw.split_once('>'))
+            .filter_map(|(_, rest)| rest.split_once("</text>"))
+            .map(|(content, _)| strip_inner_tags(content))
+            .find(|content| !content.is_empty())
+            .unwrap_or_default();
+
+        // Scope the `d` lookup to the <path> TAG. Searching the whole group for `d="` matches inside
+        // `data-fm-edge-id="0"` — the reader then parsed "0" as path data and every edge came back
+        // "no on-curve points", which the hard error below correctly refused to call a missing
+        // connection. Anchor on the leading space so an attribute merely ENDING in `d` cannot match.
+        let d = body
+            .find("<path")
+            .map(|at| &body[at..])
+            .and_then(|tag| tag.find('>').map(|end| &tag[..end]))
+            .and_then(|tag| tag.find(" d=\"").map(|at| &tag[at + 4..]))
+            .and_then(|rest| rest.find('"').map(|end| &rest[..end]));
+        let Some(d) = d else {
+            unreadable.push(format!("fm-edge-{edge_id} has no readable <path d=…>"));
+            continue;
+        };
+        match path_endpoints(d) {
+            Ok((start, end)) => out.push((label, start, end)),
+            Err(err) => unreadable.push(format!(
+                "fm-edge-{edge_id} path {d:?} could not be read: {err}"
+            )),
+        }
+    }
+    assert!(
+        unreadable.is_empty(),
+        "labelled_edges cannot read {} edge(s), so a missing-connection verdict would be \
+         meaningless:\n  {}",
+        unreadable.len(),
+        unreadable.join("\n  ")
+    );
+    out
+}
+
+/// A requirement relationship must run FROM its declared source TO its declared target (bd-iicc).
+///
+/// PASSES. This is the connectivity a requirement diagram exists to record: `LoginModule - satisfies
+/// -> LoginReq` is a traceability claim, and an arrow drawn the other way asserts the opposite one.
+/// A byte golden pins a reversed arrow as contentedly as a correct one, because reversing it changes
+/// no element and no attribute name — only which coordinate is first.
+///
+/// The sharp assertion is therefore the DIRECTED one: each edge's start must lie on the source box's
+/// boundary and its end on the target's. An implementation that swapped source and target would still
+/// draw two labelled edges between the right pair of boxes and would still satisfy any
+/// "the diagram has 2 edges" check; it fails here. The arrowhead marker is asserted too, since
+/// direction that is only in the coordinate order and not in the picture is not legible.
+#[test]
+fn requirement_relationships_run_from_source_to_target() {
+    let svg = render_fixture("requirement_basic");
+    assert!(
+        !svg.contains("transform="),
+        "a transform would make these coordinates non-final"
+    );
+
+    let boxes = requirement_boxes(&svg);
+    let declared = declared_requirement_relationships("requirement_basic");
+    let edges = labelled_edges(&svg);
+
+    assert_eq!(
+        edges.len(),
+        declared.len(),
+        "the fixture declares {} relationship(s) but {} edge(s) were rendered",
+        declared.len(),
+        edges.len()
+    );
+
+    // Every declared endpoint must exist as a box before any connectivity claim is made, so a
+    // missing edge is never blamed on a node that was simply never drawn.
+    let box_of = |name: &str| -> &RequirementBox {
+        let found = boxes.iter().find(|b| b.id == name);
+        assert!(
+            found.is_some(),
+            "declared requirement {name:?} was not rendered; read {:?}",
+            boxes.iter().map(|b| &b.id).collect::<Vec<_>>()
+        );
+        found.unwrap_or_else(|| unreachable!("asserted present"))
+    };
+    // A point sits on a box's boundary when it is within its horizontal span and within a hair of
+    // one of its edges. Edge routing leaves from a box side, so the tolerance covers the stroke,
+    // not a whole node.
+    let on_boundary = |b: &RequirementBox, (px, py): (f32, f32)| -> bool {
+        let pad = 2.0_f32;
+        px >= b.x - pad
+            && px <= b.x + b.width + pad
+            && py >= b.y - pad
+            && py <= b.y + b.height + pad
+    };
+
+    for (src, kind, dst) in &declared {
+        let matching: Vec<_> = edges.iter().filter(|(label, ..)| label == kind).collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "relationship {src} - {kind} -> {dst} should render exactly one edge labelled {kind:?}, \
+             found {} among {:?}",
+            matching.len(),
+            edges.iter().map(|(l, ..)| l).collect::<Vec<_>>()
+        );
+        let (_, start, end) = matching[0];
+        let source_box = box_of(src);
+        let target_box = box_of(dst);
+        assert!(
+            on_boundary(source_box, *start),
+            "{src} - {kind} -> {dst} starts at {start:?}, which is not on {src}'s box \
+             (x {}..{}, y {}..{}) — an edge that does not leave its declared source asserts a \
+             different traceability claim than the one written down",
+            source_box.x,
+            source_box.x + source_box.width,
+            source_box.y,
+            source_box.y + source_box.height
+        );
+        assert!(
+            on_boundary(target_box, *end),
+            "{src} - {kind} -> {dst} ends at {end:?}, which is not on {dst}'s box \
+             (x {}..{}, y {}..{})",
+            target_box.x,
+            target_box.x + target_box.width,
+            target_box.y,
+            target_box.y + target_box.height
+        );
+        // The two boxes are distinct, so start and end must be too: this is what fails if source
+        // and target were swapped or collapsed.
+        assert!(
+            !on_boundary(target_box, *start),
+            "{src} - {kind} -> {dst} starts on {dst}'s box, so the arrow is drawn backwards"
+        );
+    }
+
+    // Direction must be visible, not merely implied by coordinate order.
+    let arrowheads = svg.matches("marker-end=").count();
+    assert!(
+        arrowheads >= declared.len(),
+        "expected an arrowhead on each of the {} relationships, found {arrowheads}",
+        declared.len()
+    );
+}
+
+/// Text width as the engine's own font model measures it, at the size the SVG says it was drawn.
+///
+/// Uses `fm_core::FontMetrics` with the preset derived from the rendered font family, i.e. the same
+/// estimator the layout uses to size boxes. That matters: a containment guard measuring with a
+/// DIFFERENT model than the engine sizes with would report disagreement between two estimators as a
+/// rendering defect.
+fn rendered_text_width(text: &str, font_size: f32) -> f32 {
+    let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+        preset: fm_core::FontPreset::from_family(&SvgRenderConfig::default().font_family),
+        font_size,
+        ..fm_core::FontMetricsConfig::default()
+    });
+    metrics.estimate_width(text)
+}
+
+/// Every row the requirement renderer draws inside a node box must FIT inside that box (bd-iicc).
+///
+/// IGNORED because it FAILS against a real defect, filed as bd-jnc1. `compute_node_size` sizes a node
+/// from its label, then adds an explicit widening pass for each other kind of content the renderers
+/// draw inside the box — class compartments, ER attribute rows (bd-090g), C4 descriptions (bd-9xjy).
+/// There is no such pass for requirement metadata, so the type header and the `Risk: … | Verify: …`
+/// row are drawn into a box sized for the node's NAME. This is the same defect class as bd-090g and
+/// bd-9xjy, in the fourth and last member of it.
+///
+/// WHAT IT ACTUALLY MEASURES, rather than the tidier version: exactly ONE row in this fixture
+/// overflows — LoginReq's `"Risk: Medium | Verify: Demonstration"` is 163.37 wide in a 133.05 box,
+/// spilling 15.16 past each side. AuthReq's shorter `"Risk: High | Verify: Test"` fits, and both type
+/// headers fit. That is the point rather than a weakness in the finding: whether a row escapes its
+/// box depends on how long the declared risk and verify strings happen to be, because nothing sizes
+/// the box for them at all. A fixture with a longer `verifymethod:` would overflow further; this one
+/// merely shows the mechanism with the smallest margin that proves it.
+///
+/// THE CONTROL COMES FIRST, and it is what makes a failure here mean something. The node's own NAME
+/// row is measured before anything else: the box is sized from that string, so if the estimator
+/// cannot fit even the name, the estimator is wrong and the guard says so instead of reporting a
+/// rendering defect. Only once the control passes is the overflow of the other rows a claim about the
+/// renderer.
+///
+/// The assertion is the weakest containment claim available — text width must not EXCEED the box, no
+/// padding demanded — so it cannot be satisfied by re-blessing and cannot fire on a near-miss.
+/// Un-ignoring it is bd-jnc1's acceptance gate.
+#[test]
+#[ignore = "specifies bd-jnc1: requirement node boxes are sized from the label alone, so the type header and metadata row overflow"]
+fn requirement_rows_stay_inside_their_node_box() {
+    let svg = render_fixture("requirement_basic");
+    let boxes = requirement_boxes(&svg);
+    assert!(
+        !boxes.is_empty(),
+        "requirement_basic rendered no requirement nodes"
+    );
+
+    let mut overflows: Vec<String> = Vec::new();
+    for node in &boxes {
+        // CONTROL: the name row is the string the box was sized from. If it does not fit, the
+        // estimator disagrees with the engine and nothing below this line means anything.
+        let name_row = node.texts.iter().find(|(content, _)| *content == node.id);
+        assert!(
+            name_row.is_some(),
+            "{} draws no text run equal to its declared name, so the control for this guard is \
+             missing and its verdict would be unfounded; runs were {:?}",
+            node.id,
+            node.texts
+        );
+        if let Some((content, size)) = name_row {
+            let width = rendered_text_width(content, *size);
+            assert!(
+                width <= node.width,
+                "CONTROL FAILED: {}'s own name row measures {width:.2} in a {:.2} box, so this \
+                 guard's width model disagrees with the engine's and it must not be used to judge \
+                 the other rows",
+                node.id,
+                node.width
+            );
+        }
+
+        for (content, size) in &node.texts {
+            let width = rendered_text_width(content, *size);
+            if width > node.width {
+                overflows.push(format!(
+                    "{}: {content:?} at font-size {size} measures {width:.2} but its box is only \
+                     {:.2} wide (x {:.2}..{:.2}), so it spills {:.2} past each side",
+                    node.id,
+                    node.width,
+                    node.x,
+                    node.x + node.width,
+                    (width - node.width) / 2.0
+                ));
+            }
+        }
+    }
+
+    assert!(
+        overflows.is_empty(),
+        "{} requirement row(s) are drawn outside the box that contains them:\n  {}",
+        overflows.len(),
+        overflows.join("\n  ")
+    );
+}
+
+/// A requirement's declared `id:` and `text:` must reach the rendered picture (bd-iicc).
+///
+/// IGNORED because it FAILS against a real defect, filed as bd-f3tc. The parser stores both fields on
+/// `IrRequirementNodeMeta` (`req_id`, `text`) and NO renderer ever reads them: the SVG requirement
+/// path emits the type header, the name, and a `Risk … | Verify …` row, and stops. So
+/// `text: Users must authenticate` — the sentence the requirement actually IS — appears nowhere in
+/// the output, and `id: REQ-001`, the traceability key the whole diagram type exists to carry, goes
+/// with it. The information is parsed, held in the IR, and dropped on the floor.
+///
+/// This is the defect class a byte golden is blindest to. Nothing is misplaced and nothing is
+/// malformed; content simply never appears, and a hash of the output cannot miss what was never
+/// there to change.
+///
+/// The expected values are READ FROM THE FIXTURE, not restated here, so the guard describes itself
+/// from what the diagram declares and cannot drift from it. A fixture declaring no `id:`/`text:` at
+/// all is a hard error rather than a quiet pass. Un-ignoring this is bd-f3tc's acceptance gate.
+#[test]
+#[ignore = "specifies bd-f3tc: requirement id: and text: are parsed into the IR and never rendered"]
+fn requirement_id_and_text_reach_the_output() {
+    let read = fs::read_to_string(golden_dir().join("requirement_basic.mmd"));
+    assert!(
+        read.is_ok(),
+        "read requirement_basic fixture: {:?}",
+        read.err()
+    );
+    let source = read.unwrap_or_default();
+
+    // Declared `id:`/`text:` values, paired with the block they were declared in.
+    let mut declared: Vec<(String, &'static str, String)> = Vec::new();
+    let mut current_block = String::new();
+    for line in source.lines() {
+        let line = line.trim();
+        if let Some((keyword, rest)) = line.split_once(char::is_whitespace)
+            && rest.trim_end().ends_with('{')
+            && !keyword.is_empty()
+        {
+            current_block = rest.trim_end().trim_end_matches('{').trim().to_string();
+            continue;
+        }
+        for field in ["id", "text"] {
+            if let Some(value) = line.strip_prefix(&format!("{field}:")) {
+                let value = value.trim().trim_matches('"').to_string();
+                if !value.is_empty() && !current_block.is_empty() {
+                    declared.push((
+                        current_block.clone(),
+                        if field == "id" { "id" } else { "text" },
+                        value,
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        declared.len() >= 4,
+        "requirement_basic must declare an id: and a text: on at least two requirements for this \
+         guard to mean anything; found {declared:?}"
+    );
+
+    let svg = render_fixture("requirement_basic");
+    let boxes = requirement_boxes(&svg);
+
+    let mut missing: Vec<String> = Vec::new();
+    for (block, field, value) in &declared {
+        let Some(node) = boxes.iter().find(|b| &b.id == block) else {
+            missing.push(format!(
+                "{block} declares {field}: {value:?} but no node with that id was rendered"
+            ));
+            continue;
+        };
+        let drawn = node
+            .texts
+            .iter()
+            .map(|(content, _)| content.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !drawn.contains(value.as_str()) {
+            missing.push(format!(
+                "{block} declares {field}: {value:?}, which appears in none of its rendered rows \
+                 {:?}",
+                node.texts
+                    .iter()
+                    .map(|(content, _)| content)
+                    .collect::<Vec<_>>()
+            ));
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "{} declared requirement field(s) never reach the picture:\n  {}",
+        missing.len(),
+        missing.join("\n  ")
     );
 }
