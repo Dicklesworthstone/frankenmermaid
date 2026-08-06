@@ -22676,6 +22676,24 @@ mod tests {
         }
     }
 
+    /// Commit whatever is still buffered when the writer goes away.
+    ///
+    /// `with_writer` builds a NEW `CaptureWriter` per event, so each instance is dropped as soon as
+    /// its event is written. Without this, an event whose bytes arrive with no terminating newline
+    /// — and on which `flush` is never called — is silently discarded, and the capture reports
+    /// "that event never happened" when it did. That is exactly the shape of the intermittent
+    /// failure in bd-ryxg: other events present, one specific event missing.
+    ///
+    /// Strictly additive: it can only surface a line that was already written and lost. It cannot
+    /// drop or duplicate a line that the newline path already committed, because `flush` takes the
+    /// buffer and leaves it empty.
+    impl Drop for CaptureWriter {
+        fn drop(&mut self) {
+            use std::io::Write as _;
+            let _ = self.flush();
+        }
+    }
+
     // ── Observability output format tests (bd-gy4.8) ──────────────────
 
     #[test]
