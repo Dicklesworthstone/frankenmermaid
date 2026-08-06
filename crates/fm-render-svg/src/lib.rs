@@ -16372,6 +16372,84 @@ marker#arrow-open path {
         dangling
     }
 
+    /// Every rendered ER attribute row must land inside its own entity rectangle (bd-090g).
+    ///
+    /// The end-to-end half of the fix: `fm-layout` sizes the box, `write_er_entity_into` places the
+    /// rows, and that writer does NOT stop at the box edge — it keeps emitting rows at a fixed pitch.
+    /// So a box sized from the entity name alone left attributes floating outside it from the fourth
+    /// attribute on, which is invisible in a 2-3 attribute fixture and stable enough for a byte golden
+    /// to bless. Asserted on the real parse -> layout -> render pipeline, as a containment property
+    /// rather than against pinned coordinates, and swept over counts because the defect only appears
+    /// past the label-derived minimum height.
+    #[test]
+    fn er_attribute_rows_render_inside_their_entity_box() {
+        for count in 1_usize..=24 {
+            let attributes = (0..count)
+                .map(|index| format!("    string field_number_{index}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let src = format!("erDiagram\n  CUSTOMER {{\n{attributes}\n  }}");
+            let parsed = fm_parser::parse(&src);
+            let svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+
+            assert!(
+                !svg.contains("transform="),
+                "{count}: a transform would make these coordinates non-final"
+            );
+
+            let group = svg
+                .split("<g ")
+                .find(|chunk| chunk.contains("fm-er-entity-name"));
+            assert!(group.is_some(), "{count}: no ER entity group rendered");
+            let group = group.unwrap_or_default();
+
+            let rect = group.split("<rect ").nth(1);
+            assert!(rect.is_some(), "{count}: entity has no box");
+            let rect = rect.unwrap_or_default();
+
+            // NaN for a missing/unparseable attribute, asserted finite at the call site, so a
+            // malformed document fails loudly without this probe panicking its way there.
+            let attr = |chunk: &str, name: &str| -> f32 {
+                let Some(at) = chunk.find(&format!("{name}=\"")) else {
+                    return f32::NAN;
+                };
+                let rest = &chunk[at + name.len() + 2..];
+                let Some(end) = rest.find('"') else {
+                    return f32::NAN;
+                };
+                rest[..end].parse().unwrap_or(f32::NAN)
+            };
+            let top = attr(rect, "y");
+            let bottom = top + attr(rect, "height");
+            assert!(
+                top.is_finite() && bottom.is_finite(),
+                "{count}: entity box is missing y/height"
+            );
+
+            let mut rows = 0_usize;
+            for chunk in group.split("<text ").skip(1) {
+                if !chunk.contains("class=\"fm-er-attribute\"") {
+                    continue;
+                }
+                let baseline = attr(chunk, "y");
+                // Rows carry `dominant-baseline="central"`, so `y` is the glyph's VERTICAL CENTRE and
+                // roughly half a font size hangs below it. Requiring the baseline alone to be inside
+                // the box would pass while the bottom half of the last row's glyphs was clipped —
+                // which is exactly the state the 3-attribute fixture was in (2px of slack at a 12px
+                // row). Assert the glyph box fits, not just its centre line.
+                let half_glyph = attr(chunk, "font-size") * 0.5;
+                assert!(
+                    baseline - half_glyph >= top && baseline + half_glyph <= bottom,
+                    "{count} attributes: row glyph box {}..{} escapes the entity box {top}..{bottom}",
+                    baseline - half_glyph,
+                    baseline + half_glyph
+                );
+                rows += 1;
+            }
+            assert_eq!(rows, count, "{count}: not every attribute row was emitted");
+        }
+    }
+
     /// `<defs>` hygiene, both directions, across every diagram-render path (bd-a6uk, bd-w5f7).
     ///
     /// Declared-but-unreferenced is the wasteful direction and the one that found both beads: a byte

@@ -9237,10 +9237,17 @@ fn compute_node_size(
             // member rows against the node's own height and `break`s on the first row that would
             // fall outside it, so a box sized from the label alone SILENTLY DROPS members rather
             // than overflowing — see `class_compartment_dimensions`.
-            match class_compartment_dimensions(node, metrics) {
+            let (width, height) = match class_compartment_dimensions(node, metrics) {
                 Some((members_width, members_height)) => {
                     (width.max(members_width), height.max(members_height))
                 }
+                None => (width, height),
+            };
+            // An ER entity's box must likewise hold its attribute rows. Unlike the class renderer,
+            // the ER renderer does not stop at the box edge — it keeps emitting rows — so a box
+            // sized from the entity name alone spills attributes outside it (bd-090g).
+            match er_compartment_dimensions(node, metrics) {
+                Some((rows_width, rows_height)) => (width.max(rows_width), height.max(rows_height)),
                 None => (width, height),
             }
         }
@@ -9305,6 +9312,89 @@ fn class_compartment_dimensions(
     Some((member_width + 16.0, height))
 }
 
+/// Space an ER entity needs for its attribute rows. `None` for any node that declares no `members`.
+///
+/// The ER sibling of [`class_compartment_dimensions`], and it was missing: entity boxes were sized
+/// from the entity name alone, so the box stayed a constant height however many attributes were
+/// declared and rows from the fourth onward rendered OUTSIDE their own rectangle (bd-090g).
+///
+/// This mirrors `fm-render-svg`'s `write_er_entity_into` cursor advance, with one important
+/// difference from the class case: that renderer DROPS a row falling outside the box, whereas the ER
+/// renderer keeps emitting rows at a fixed pitch. So under-sizing here does not delete content, it
+/// spills attributes into the diagram — and past enough rows, into whatever is laid out below.
+/// Over-sizing renders as padding, so every term is rounded up.
+fn er_compartment_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> Option<(f32, f32)> {
+    if node.members.is_empty() {
+        return None;
+    }
+
+    // Renderer: `node_font_size = detail.node_font_size` and
+    // `attr_font_size = clamp_font_size(node_font_size * 0.8, config.min_font_size)`.
+    //
+    // `metrics.font_size()` is layout's stand-in for `node_font_size`. Two ways the renderer's row
+    // pitch can come out LARGER than a naive `font_size * 0.8` here, and under-sizing spills rows:
+    //   * `min_font_size` (default 8.0) clamps `attr_font_size` UP whenever `node_font_size < 10`;
+    //   * layout's metrics and the render config's `font_size` need not agree at all.
+    // So take the clamp floor into account rather than assuming the nominal factor wins.
+    let node_font_size = metrics.font_size();
+    let attr_font_size = (node_font_size * 0.8).max(ER_ATTR_FONT_FLOOR);
+    let header_height = node_font_size * 1.5;
+    let row_pitch = attr_font_size * 1.3;
+
+    // Cursor offsets from the top of the box, in renderer order: header, then the first row's
+    // baseline at `header_height + attr_font_size * 0.9`, then one pitch per subsequent row.
+    let rows = node.members.len() as f32;
+    let mut height = header_height + attr_font_size * 0.9 + row_pitch * (rows - 1.0);
+    // Past the LAST baseline the glyph still descends, and the box must not end on that baseline.
+    // Half a row of slack keeps the decision off the knife edge when the render font size does not
+    // match `metrics` — the same margin `class_compartment_dimensions` takes, for the same reason.
+    height += row_pitch;
+
+    // Rows are left-anchored at `x + 8.0`; mirror that padding on the right so the widest row stays
+    // inside the box.
+    let row_width = node
+        .members
+        .iter()
+        .map(|attr| er_attribute_row_width(attr, attr_font_size, node_font_size, metrics))
+        .fold(0.0_f32, f32::max);
+
+    Some((row_width + 16.0, height))
+}
+
+/// Lower bound on the renderer's ER attribute font size — `SvgRenderConfig::min_font_size`'s default.
+/// Layout cannot see the render config, and the clamp only ever raises the size (raising the row
+/// pitch), so assuming the floor applies is the direction that over-sizes rather than spills.
+const ER_ATTR_FONT_FLOOR: f32 = 8.0;
+
+/// Width of one rendered ER attribute row. Mirrors the renderer's row text:
+/// `{key_prefix}{data_type} {name}` where the prefix is `"PK "`/`"FK "`/`"UK "` or empty.
+fn er_attribute_row_width(
+    attr: &fm_core::IrEntityAttribute,
+    attr_font_size: f32,
+    node_font_size: f32,
+    metrics: &fm_core::FontMetrics,
+) -> f32 {
+    let prefix = match attr.key {
+        fm_core::IrAttributeKey::Pk => "PK ",
+        fm_core::IrAttributeKey::Fk => "FK ",
+        fm_core::IrAttributeKey::Uk => "UK ",
+        fm_core::IrAttributeKey::None => "",
+    };
+    let mut row = String::with_capacity(prefix.len() + attr.data_type.len() + attr.name.len() + 1);
+    row.push_str(prefix);
+    row.push_str(&attr.data_type);
+    row.push(' ');
+    row.push_str(&attr.name);
+    // `metrics` measures at its own font size; rows render at `attr_font_size`. Scale the estimate by
+    // the ratio rather than assuming the nominal 0.8, so the clamp floor is honoured here too.
+    let scale = if node_font_size > 0.0 {
+        attr_font_size / node_font_size
+    } else {
+        1.0
+    };
+    metrics.estimate_dimensions(&row).0 * scale
+}
+
 /// Width of one rendered member row. Mirrors the renderer's row text: a visibility symbol, the member
 /// name, a `*`/`$` suffix for abstract/static methods, and a `": {return_type}"` tail.
 fn class_member_row_width(
@@ -9362,6 +9452,16 @@ fn node_size_cache_key(
             hash_u64(&mut hash, u64::from(member.is_static));
             hash_u64(&mut hash, u64::from(member.is_abstract));
         }
+    }
+    // ER attributes feed `compute_node_size` via `er_compartment_dimensions` for exactly the same
+    // reason class members do, so they belong in the key too: adding an attribute without touching
+    // the entity name would otherwise serve the size from before the edit, and the new rows would
+    // render outside the stale box (bd-090g).
+    hash_u64(&mut hash, node.members.len() as u64);
+    for attr in &node.members {
+        hash_str(&mut hash, &attr.data_type);
+        hash_str(&mut hash, &attr.name);
+        hash_u64(&mut hash, attr.key as u64);
     }
     hash
 }
@@ -15447,10 +15547,10 @@ mod tests {
         RenderSource, SubgraphRegion, SubgraphRegionId, SubgraphRegionKind, TracedLayout,
         build_directed_path_edge_paths, build_edge_paths, build_layout_decision_ledger,
         build_layout_guard_report, build_render_scene, certify_directed_path_layout_prefix,
-        compute_node_size, dispatch_layout_algorithm, estimate_layout_cost,
-        evaluate_layout_guardrails, find_obstacle_nudge_x, find_obstacle_nudge_y,
-        incremental_overlap_alignment, is_directed_path, layout, layout_diagram,
-        layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
+        compute_node_size, dispatch_layout_algorithm, er_compartment_dimensions,
+        estimate_layout_cost, evaluate_layout_guardrails, find_obstacle_nudge_x,
+        find_obstacle_nudge_y, incremental_overlap_alignment, is_directed_path, layout,
+        layout_diagram, layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
         layout_diagram_grid, layout_diagram_incremental_traced_with_config_and_guardrails,
         layout_diagram_radial, layout_diagram_sankey, layout_diagram_sequence,
         layout_diagram_sequence_traced, layout_diagram_timeline, layout_diagram_traced,
@@ -23490,6 +23590,118 @@ mod tests {
             long_label.layout.nodes[5].bounds.width,
             short_label.layout.nodes[5].bounds.width,
         );
+    }
+
+    /// An ER attribute edit must not be served from the node-size cache (bd-090g).
+    ///
+    /// The ER sibling of `fault_node_size_cache_remains_consistent_across_label_changes`. Attributes
+    /// live in `node.members`, which `node_size_cache_key` did not hash — so adding attributes
+    /// without touching the entity name returned the pre-edit size, and the new rows rendered outside
+    /// the stale box. Edits the members ONLY, deliberately: touching the label too would let the
+    /// label term carry the assertion and hide a members-blind key.
+    #[test]
+    fn fault_node_size_cache_reflects_er_attribute_edits() {
+        let mut engine = IncrementalLayoutEngine::default();
+        let mut ir = er_entity_ir(2);
+        let config = super::LayoutConfig::default();
+        let guardrails = LayoutGuardrails::default();
+
+        let few = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        let before = few.layout.nodes[0].bounds.height;
+
+        for index in 2..12 {
+            ir.nodes[0].members.push(fm_core::IrEntityAttribute {
+                data_type: "string".to_string(),
+                name: format!("field_{index}"),
+                key: fm_core::IrAttributeKey::None,
+                comment: None,
+            });
+        }
+
+        let many = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            config,
+            guardrails,
+        );
+        assert!(
+            many.layout.nodes[0].bounds.height > before,
+            "entity box must grow when attributes are added: {} > {before}",
+            many.layout.nodes[0].bounds.height
+        );
+    }
+
+    /// An ER entity carrying `members` must be sized to hold every attribute row (bd-090g).
+    ///
+    /// Asserted against the renderer's own cursor arithmetic rather than pinned numbers: the first
+    /// row sits at `header + attr_font * 0.9` below the top and each later row one `attr_font * 1.3`
+    /// further down, and `write_er_entity_into` does NOT stop at the box edge, so every one of those
+    /// baselines has to be inside the box or it renders outside the entity.
+    #[test]
+    fn er_entity_box_holds_every_attribute_row() {
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let node_font = metrics.font_size();
+        let attr_font = (node_font * 0.8).max(8.0);
+
+        let mut previous_height = 0.0_f32;
+        for count in 1_usize..=24 {
+            let ir = er_entity_ir(count);
+            let (_, height) = compute_node_size(&ir, &ir.nodes[0], &metrics);
+
+            let last_baseline =
+                node_font * 1.5 + attr_font * 0.9 + attr_font * 1.3 * (count - 1) as f32;
+            assert!(
+                height > last_baseline,
+                "{count} attributes: box height {height} does not reach the last row baseline \
+                 {last_baseline}, so that row renders outside the entity"
+            );
+            assert!(
+                height >= previous_height,
+                "box height must not shrink as attributes are added ({count} rows)"
+            );
+            previous_height = height;
+        }
+
+        // An attribute-less entity is untouched, so nothing outside ER moves. Compared against a
+        // flowchart node carrying the SAME id and shape, since the id is what a label-less node
+        // measures — a differently-named node would differ for reasons unrelated to this change.
+        let bare = er_entity_ir(0);
+        let mut plain = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        plain.nodes.push(IrNode {
+            id: "CUSTOMER".to_string(),
+            shape: NodeShape::Rect,
+            ..IrNode::default()
+        });
+        assert_eq!(
+            compute_node_size(&bare, &bare.nodes[0], &metrics),
+            compute_node_size(&plain, &plain.nodes[0], &metrics),
+            "an entity with no attributes must size exactly like the same node without members"
+        );
+        assert!(er_compartment_dimensions(&bare.nodes[0], &metrics).is_none());
+    }
+
+    /// One ER entity named `CUSTOMER` carrying `count` attributes.
+    fn er_entity_ir(count: usize) -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
+        ir.nodes.push(IrNode {
+            id: "CUSTOMER".to_string(),
+            shape: NodeShape::Rect,
+            members: (0..count)
+                .map(|index| fm_core::IrEntityAttribute {
+                    data_type: "string".to_string(),
+                    name: format!("field_{index}"),
+                    key: fm_core::IrAttributeKey::None,
+                    comment: None,
+                })
+                .collect(),
+            ..IrNode::default()
+        });
+        ir
     }
 
     #[test]
