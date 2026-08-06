@@ -743,3 +743,254 @@ fn resilience_suite_manifest_matches_checked_in_fixtures() {
         }
     }
 }
+
+// ── Semantic guards for grid- and sequence-structured diagram types (bd-iicc) ──────────────
+//
+// These four were written as one hypothesis-driven round. The pattern behind every wrong-picture
+// defect found so far is a diagram type with its OWN coordinate system reusing generic node layout,
+// so the round targeted the four unguarded types that have one. It came out 2 hits / 2 nulls, and the
+// split refines the hypothesis: the HITS are the two GRID-structured types (block-beta columns,
+// kanban lanes), which have no grid layout algorithm and fall back to generic placement. The NULLS
+// are the two types that already own a dedicated algorithm (timeline sequencing, mindmap radial), and
+// both encode their coordinates correctly.
+
+/// Every node's centre, keyed by its first text run.
+fn node_centres(svg: &str) -> Vec<(String, f32, f32, f32)> {
+    let mut out = Vec::new();
+    for chunk in svg.split("<g id=\"fm-node-").skip(1) {
+        let body = chunk.split("<g id=\"fm-node-").next().unwrap_or(chunk);
+        let num = |key: &str, from: &str| -> Option<f32> {
+            let at = from.find(&format!("{key}=\""))?;
+            let rest = &from[at + key.len() + 2..];
+            rest[..rest.find('"')?].parse().ok()
+        };
+        // Shapes vary by diagram type: a mindmap root is `root((..))` and renders as a circle or
+        // ellipse, not a rect. Reading only `<rect>` made this helper report the root as "not
+        // rendered", which looks exactly like a layout defect and is not one.
+        let (cx, cy, w) = if let Some(at) = body.find("<rect ") {
+            let rect = &body[at..];
+            let (Some(x), Some(y), Some(w), Some(h)) = (
+                num("x", rect),
+                num("y", rect),
+                num("width", rect),
+                num("height", rect),
+            ) else {
+                continue;
+            };
+            (x + w / 2.0, y + h / 2.0, w)
+        } else if let Some(at) = body.find("<ellipse ") {
+            let e = &body[at..];
+            let (Some(cx), Some(cy), Some(rx)) = (num("cx", e), num("cy", e), num("rx", e)) else {
+                continue;
+            };
+            (cx, cy, rx * 2.0)
+        } else if let Some(at) = body.find("<circle ") {
+            let c = &body[at..];
+            let (Some(cx), Some(cy), Some(r)) = (num("cx", c), num("cy", c), num("r", c)) else {
+                continue;
+            };
+            (cx, cy, r * 2.0)
+        } else {
+            continue;
+        };
+        let label = body
+            .split("<text")
+            .skip(1)
+            .filter_map(|t| t.split_once('>').and_then(|(_, r)| r.split_once("</text>")))
+            .map(|(text, _)| text.trim().to_string())
+            .find(|t| !t.is_empty())
+            .unwrap_or_default();
+        if !label.is_empty() {
+            out.push((label, cx, cy, w));
+        }
+    }
+    out
+}
+
+fn render_fixture(name: &str) -> String {
+    let read = fs::read_to_string(golden_dir().join(format!("{name}.mmd")));
+    assert!(read.is_ok(), "read {name} fixture: {:?}", read.err());
+    let input = read.unwrap_or_default();
+    render_svg_with_config(&parse(&input).ir, &SvgRenderConfig::default())
+}
+
+/// Look up one rendered node by label, failing the test rather than panicking from a closure.
+fn centre_of(centres: &[(String, f32, f32, f32)], label: &str) -> (f32, f32, f32) {
+    let found = centres.iter().find(|(l, ..)| l == label);
+    assert!(found.is_some(), "{label} not rendered");
+    found.map_or((f32::NAN, f32::NAN, f32::NAN), |(_, cx, cy, w)| {
+        (*cx, *cy, *w)
+    })
+}
+
+/// A timeline's periods run left to right in declaration order, and every event sits in its own
+/// period's column (bd-iicc). PASSES: timeline has a dedicated layout algorithm and uses it.
+#[test]
+fn timeline_periods_order_left_to_right_with_events_in_their_column() {
+    let svg = render_fixture("timeline_basic");
+    assert!(
+        !svg.contains("transform="),
+        "a transform would make these coordinates non-final"
+    );
+    let centres = node_centres(&svg);
+    let at = |label: &str| -> f32 { centre_of(&centres, label).0 };
+
+    // Periods strictly increase in x, in declaration order.
+    assert!(
+        at("2020") < at("2021") && at("2021") < at("2022"),
+        "periods out of order: 2020={} 2021={} 2022={}",
+        at("2020"),
+        at("2021"),
+        at("2022")
+    );
+
+    // Each event shares its period's column. 2021 declares TWO events, and both must sit under it —
+    // that is the case a byte golden would happily pin with one of them misplaced.
+    let period_width = at("2021") - at("2020");
+    for (event, period) in [
+        ("Event A", "2020"),
+        ("Event B", "2021"),
+        ("Event C", "2021"),
+        ("Event D", "2022"),
+    ] {
+        let offset = (at(event) - at(period)).abs();
+        assert!(
+            offset < period_width / 2.0,
+            "{event} at {} is not in {period}'s column at {} (period pitch {period_width})",
+            at(event),
+            at(period)
+        );
+    }
+
+    // The two events of 2021 are distinct rows, not drawn on top of each other.
+    let row_of = |label: &str| -> f32 {
+        centres
+            .iter()
+            .find(|(l, ..)| l == label)
+            .map(|(_, _, cy, _)| *cy)
+            .unwrap_or(f32::NAN)
+    };
+    assert!(
+        (row_of("Event B") - row_of("Event C")).abs() > 1.0,
+        "the two 2021 events are stacked at the same y"
+    );
+}
+
+/// A mindmap encodes tree depth as radial distance from the root (bd-iicc). PASSES: mindmap
+/// dispatches to the radial layout, and both depth and the angular fan are correct.
+#[test]
+fn mindmap_depth_maps_to_radial_distance_from_root() {
+    let svg = render_fixture("mindmap_basic");
+    let centres = node_centres(&svg);
+    let pos = |label: &str| -> (f32, f32) {
+        let (cx, cy, _) = centre_of(&centres, label);
+        (cx, cy)
+    };
+    let root = pos("Central Topic");
+    let radius = |label: &str| -> f32 {
+        let (x, y) = pos(label);
+        ((x - root.0).powi(2) + (y - root.1).powi(2)).sqrt()
+    };
+
+    // Same depth => same radius. Asserted as a property so it cannot be satisfied by pinning numbers.
+    assert!(
+        (radius("Branch A") - radius("Branch B")).abs() < 1.0,
+        "siblings at depth 1 disagree on radius: {} vs {}",
+        radius("Branch A"),
+        radius("Branch B")
+    );
+    for pair in [("Leaf 1", "Leaf 2"), ("Leaf 2", "Leaf 3")] {
+        assert!(
+            (radius(pair.0) - radius(pair.1)).abs() < 1.0,
+            "depth-2 nodes {} and {} disagree on radius",
+            pair.0,
+            pair.1
+        );
+    }
+    // And depth increases outward: a child is strictly farther out than its parent.
+    for (leaf, parent) in [
+        ("Leaf 1", "Branch A"),
+        ("Leaf 2", "Branch A"),
+        ("Leaf 3", "Branch B"),
+    ] {
+        assert!(
+            radius(leaf) > radius(parent),
+            "{leaf} (r={}) is not farther from the root than {parent} (r={})",
+            radius(leaf),
+            radius(parent)
+        );
+    }
+}
+
+/// A block-beta block spanning N columns must be about N columns wide (bd-iicc).
+///
+/// IGNORED because it FAILS against a real defect, filed as bd-7ute: column span is not encoded at
+/// all. Measured on a controlled input, a `block:wide:3` containing a one-character label renders its
+/// content 100px wide while a SINGLE-column block carrying a long label renders 367.35px — so the
+/// 3-span block is 3.7x NARROWER than the 1-span one, and width tracks label text instead of the
+/// declared grid. Un-ignoring this is bd-7ute's acceptance gate. Do not relax the ratio to whatever a
+/// fix happens to produce.
+#[test]
+#[ignore = "fails against the bd-7ute defect: block-beta column span is not encoded"]
+fn block_beta_span_width_is_proportional_to_declared_columns() {
+    let src = "block-beta\n  columns 3\n  block:wide:3\n    W[\"x\"]\n  end\n  \
+               N[\"a single column with a very long label indeed\"]\n  space\n  M[\"y\"]";
+    let svg = render_svg_with_config(&parse(src).ir, &SvgRenderConfig::default());
+    let centres = node_centres(&svg);
+    let width = |label: &str| -> f32 { centre_of(&centres, label).2 };
+    // The 3-column span must dominate a 1-column cell regardless of label length.
+    assert!(
+        width("x") > width("a single column with a very long label indeed") * 1.5,
+        "a 3-column span ({}) must be much wider than a 1-column cell ({}), independent of labels",
+        width("x"),
+        width("a single column with a very long label indeed")
+    );
+}
+
+/// Kanban cards must sit in their own lane's column (bd-iicc).
+///
+/// IGNORED because it FAILS against a real defect, filed as bd-eg44: every card in every lane renders
+/// at x=144.0, because the swimlanes are laid out as horizontal bands stacked down the page instead of
+/// side-by-side columns. A kanban board's columns ARE its grammar — which lane a card is in is the
+/// only thing the diagram exists to show. Same class as bd-5wbp (gitGraph branches drawn collinear).
+/// Un-ignoring this is bd-eg44's acceptance gate.
+#[test]
+#[ignore = "fails against the bd-eg44 defect: kanban lanes are horizontal bands, not columns"]
+fn kanban_cards_occupy_their_lane_column() {
+    let svg = render_fixture("kanban_basic");
+    let centres = node_centres(&svg);
+    let cx = |label: &str| -> f32 { centre_of(&centres, label).0 };
+    // Cards within one lane share a column.
+    for pair in [
+        ("Task A", "Task B"),
+        ("Task C", "Task D"),
+        ("Task F", "Task G"),
+    ] {
+        assert!(
+            (cx(pair.0) - cx(pair.1)).abs() < 1.0,
+            "{} and {} are in the same lane but different columns",
+            pair.0,
+            pair.1
+        );
+    }
+    // DIFFERENT lanes occupy DIFFERENT columns, separated enough to read as columns.
+    let card_width = centres
+        .iter()
+        .find(|(l, ..)| l == "Task A")
+        .map(|(_, _, _, w)| *w)
+        .unwrap_or(100.0);
+    for pair in [
+        ("Task A", "Task C"),
+        ("Task C", "Task F"),
+        ("Task A", "Task F"),
+    ] {
+        assert!(
+            (cx(pair.0) - cx(pair.1)).abs() >= card_width,
+            "lanes of {} ({}) and {} ({}) overlap; a kanban board's columns are its grammar",
+            pair.0,
+            cx(pair.0),
+            pair.1,
+            cx(pair.1)
+        );
+    }
+}
