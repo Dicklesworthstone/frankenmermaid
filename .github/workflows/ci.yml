@@ -185,6 +185,34 @@ jobs:
       - name: Run png smoke tests
         run: cargo test -p frankenmermaid-cli --features png png_ -- --nocapture
 
+  optional-feature-smoke:
+    name: Optional Feature Smoke
+    # `serve` and `watch` are the two declared fm-cli features CI never built. That gap is not
+    # hypothetical: `serve` did not COMPILE from 211ab872 (2026-08-04) to b9ac701d (2026-08-08) —
+    # a test referenced `Response::into_data()`, which tiny_http 0.12 does not have — and the bead
+    # comment that landed it cited a passing `--features serve` test as its evidence. Nothing could
+    # catch that, because `cargo test --workspace` builds neither feature. Same shape as `png`
+    # above, which has had its own job for exactly this reason.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Cargo Artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check fm-cli serve feature
+        run: cargo check -p frankenmermaid-cli --all-targets --features serve
+
+      - name: Run serve tests
+        run: cargo test -p frankenmermaid-cli --features serve preview_ -- --nocapture
+
+      - name: Check fm-cli watch feature
+        run: cargo check -p frankenmermaid-cli --all-targets --features watch
+
   ledger-integrity-guard:
     name: Ledger Integrity Guard
     runs-on: ubuntu-latest
