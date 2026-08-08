@@ -2935,6 +2935,44 @@ fn css_defines_class_requires_a_selector_boundary() {
     assert!(!css_defines_class(css, "fm-node-highlight"));
 }
 
+/// A marker class must have a rule behind it on the DIRECT flowchart path too (bd-w0f0).
+///
+/// `c4_external_marker_survives_the_config_the_goldens_pin` covers the general render path. Flowcharts
+/// with embedded theme CSS take a separate `direct_minified_css` path that returns BEFORE
+/// `strip_unused_state_css` runs, so it decides from the IR instead — and that decision is the one
+/// that can silently under-report and put the defect straight back.
+///
+/// Both halves are asserted: a flowchart whose class raises a state keyword gets the rule, and a
+/// flowchart with no such class does NOT carry the region as dead weight. Rendered with the same
+/// effects-off config the 37 byte goldens are pinned with, which is where the defect lived.
+#[test]
+fn flowchart_state_marker_has_a_rule_under_the_golden_config() {
+    let marked =
+        "flowchart LR\n  A[Start] --> B[End]\n  classDef important fill:#f9f\n  class A important";
+    let svg = render_svg_with_config(&parse(marked).ir, &golden_render_config());
+    assert!(
+        svg.contains("fm-node-highlighted"),
+        "the fixture must actually mark a node, or this guard is vacuous"
+    );
+    assert!(
+        svg.contains(".fm-node-highlighted"),
+        "`fm-node-highlighted` is on a node but no rule defines it — a marker class with no rule is \
+         indistinguishable from no marker at all"
+    );
+
+    // NEGATIVE HALF: an unmarked flowchart must not pay for the region it cannot use.
+    let plain = "flowchart LR\n  A[Start] --> B[End]";
+    let plain_svg = render_svg_with_config(&parse(plain).ir, &golden_render_config());
+    assert!(
+        !plain_svg.contains("fm-node-highlighted"),
+        "the control fixture was supposed to carry no state class"
+    );
+    assert!(
+        !plain_svg.contains(".fm-node-highlighted"),
+        "an unmarked flowchart carries the state rules as dead weight"
+    );
+}
+
 /// The C4 external marker must survive the config the BYTE GOLDENS are pinned with (bd-iicc).
 ///
 /// IGNORED because it FAILS, and what it specifies is a gap in the golden corpus itself rather than a
@@ -2961,7 +2999,6 @@ fn css_defines_class_requires_a_selector_boundary() {
 /// `c4_external_systems_are_visually_distinct_from_internal_ones` covers the shipping default config
 /// and must stay green regardless.
 #[test]
-#[ignore = "specifies bd-w0f0: effects_css is gated on cosmetic knobs, so the config the byte goldens pin drops the C4 external marker"]
 fn c4_external_marker_survives_the_config_the_goldens_pin() {
     let read = fs::read_to_string(golden_dir().join("c4_basic.mmd"));
     assert!(read.is_ok(), "read c4_basic fixture: {:?}", read.err());

@@ -688,10 +688,19 @@ fn strip_unused_state_css(svg: &mut String) {
     if state_used {
         return;
     }
-    if let (Some(start), Some(after)) = (
-        memchr::memmem::find(svg.as_bytes(), b".fm-node-inactive { opacity:"),
-        memchr::memmem::find(svg.as_bytes(), b".fm-cluster { fill-opacity:"),
-    ) && after > start
+    // Region bounds. The two opacity rules bracket the block when the cosmetic knobs asked for them;
+    // when they did not, the semantic markers are emitted alone (bd-w0f0) and the region runs from
+    // the first of them to the end of the last. Both ends fall back independently, so a config that
+    // emits only one of the two opacity rules still bounds correctly.
+    let start = memchr::memmem::find(svg.as_bytes(), b".fm-node-inactive { opacity:")
+        .or_else(|| memchr::memmem::find(svg.as_bytes(), b".fm-node-block-beta rect,"));
+    let after = memchr::memmem::find(svg.as_bytes(), b".fm-cluster { fill-opacity:").or_else(|| {
+        // End of the last semantic rule: its closing brace plus the newline after it.
+        let at = memchr::memmem::find(svg.as_bytes(), b".fm-node-border-double rect,")?;
+        memchr::memmem::find(&svg.as_bytes()[at..], b"}\n").map(|end| at + end + 2)
+    });
+    if let (Some(start), Some(after)) = (start, after)
+        && after > start
         && after - start < 1500
     {
         svg.replace_range(start..after, "");
@@ -1830,9 +1839,7 @@ fn render_scene_document_with_ir(
         strip_unused_theme_css(&mut theme_css, ir);
         css.push_str(&theme_css);
     }
-    if effects_enabled {
-        css.push_str(&effects_css(config));
-    }
+    push_state_css(&mut css, config, effects_enabled, true);
     if config.animations_enabled {
         css.push_str(&animation_css(config));
     }
@@ -3016,50 +3023,126 @@ fn node_gradient_svg(config: &SvgRenderConfig, theme: &Theme) -> Option<Cow<'sta
     ))
 }
 
-fn effects_css(config: &SvgRenderConfig) -> String {
+/// `.fm-node-inactive`'s opacity — genuinely a cosmetic knob, so it stays gated on one.
+fn inactive_opacity_css(config: &SvgRenderConfig) -> String {
     let inactive_opacity = clamp_unit_interval(config.inactive_opacity);
+    format!(".fm-node-inactive {{ opacity: {inactive_opacity:.2}; }}\n")
+}
+
+/// `.fm-cluster`'s fill opacity — likewise a cosmetic knob, likewise gated.
+fn cluster_fill_opacity_css(config: &SvgRenderConfig) -> String {
     let cluster_fill_opacity = clamp_unit_interval(config.cluster_fill_opacity);
-    format!(
-        ".fm-node-inactive {{ opacity: {inactive_opacity:.2}; }}\n\
-.fm-node-block-beta rect,\n\
-.fm-node-block-beta path,\n\
-.fm-node-block-beta circle,\n\
-.fm-node-block-beta ellipse,\n\
-.fm-node-block-beta polygon {{\n\
-  fill: #546e7a;\n\
-  stroke: #455a64;\n\
-}}\n\
-.fm-node-block-beta text {{\n\
-  fill: #f8fafc;\n\
-}}\n\
-.fm-node-block-beta-space {{\n\
-  opacity: 0;\n\
-  pointer-events: none;\n\
-}}\n\
-.fm-node-highlighted rect,\n\
-.fm-node-highlighted path,\n\
-.fm-node-highlighted circle,\n\
-.fm-node-highlighted ellipse,\n\
-.fm-node-highlighted polygon {{\n\
-  stroke-width: 2.4;\n\
-}}\n\
-.fm-node-highlighted text {{ font-weight: 600; }}\n\
-.fm-node-border-dashed rect,\n\
-.fm-node-border-dashed path,\n\
-.fm-node-border-dashed circle,\n\
-.fm-node-border-dashed ellipse,\n\
-.fm-node-border-dashed polygon {{\n\
-  stroke-dasharray: 6 4;\n\
-}}\n\
-.fm-node-border-double rect,\n\
-.fm-node-border-double path,\n\
-.fm-node-border-double circle,\n\
-.fm-node-border-double ellipse,\n\
-.fm-node-border-double polygon {{\n\
-  stroke-width: 2.9;\n\
-}}\n\
-.fm-cluster {{ fill-opacity: {cluster_fill_opacity:.2}; }}\n"
-    )
+    format!(".fm-cluster {{ fill-opacity: {cluster_fill_opacity:.2}; }}\n")
+}
+
+/// Rules that are SEMANTIC ENCODING, not polish, and are therefore emitted regardless of the
+/// cosmetic knobs (bd-w0f0).
+///
+/// These four markers each carry meaning that exists nowhere else in the output:
+/// * `.fm-node-border-dashed` is the ONLY thing that shows a C4 `System_Ext` is external;
+/// * `.fm-node-block-beta-space` is the ONLY thing that makes a block-beta `space` cell invisible;
+/// * `.fm-node-block-beta` fills are how a block reads as a block;
+/// * `.fm-node-highlighted` / `.fm-node-border-double` are node emphasis.
+///
+/// They used to sit inside `effects_css`, gated on `node_gradients || glow_enabled ||
+/// inactive_opacity < 0.999 || cluster_fill_opacity < 0.999`. Turning gradients off and both
+/// opacities to 1.0 therefore REMOVED semantic encoding: the element still carried
+/// `class="… fm-node-user-c4-external fm-node-border-dashed"`, but no rule stood behind it, and a
+/// marker class with no rule is indistinguishable from no marker at all. That is also the exact
+/// config `golden_render_config()` pins all 37 byte goldens with, so the corpus was structurally
+/// incapable of catching a regression in any of them.
+///
+/// Emitting these unconditionally costs nothing on diagrams that do not use them:
+/// `strip_unused_state_css` drops the whole region when the rendered BODY carries none of the five
+/// state classes, which is a stronger test than the config knobs ever were.
+const SEMANTIC_MARKER_CSS: &str = concat!(
+    ".fm-node-block-beta rect,\n",
+    ".fm-node-block-beta path,\n",
+    ".fm-node-block-beta circle,\n",
+    ".fm-node-block-beta ellipse,\n",
+    ".fm-node-block-beta polygon {\n",
+    "  fill: #546e7a;\n",
+    "  stroke: #455a64;\n",
+    "}\n",
+    ".fm-node-block-beta text {\n",
+    "  fill: #f8fafc;\n",
+    "}\n",
+    ".fm-node-block-beta-space {\n",
+    "  opacity: 0;\n",
+    "  pointer-events: none;\n",
+    "}\n",
+    ".fm-node-highlighted rect,\n",
+    ".fm-node-highlighted path,\n",
+    ".fm-node-highlighted circle,\n",
+    ".fm-node-highlighted ellipse,\n",
+    ".fm-node-highlighted polygon {\n",
+    "  stroke-width: 2.4;\n",
+    "}\n",
+    ".fm-node-highlighted text { font-weight: 600; }\n",
+    ".fm-node-border-dashed rect,\n",
+    ".fm-node-border-dashed path,\n",
+    ".fm-node-border-dashed circle,\n",
+    ".fm-node-border-dashed ellipse,\n",
+    ".fm-node-border-dashed polygon {\n",
+    "  stroke-dasharray: 6 4;\n",
+    "}\n",
+    ".fm-node-border-double rect,\n",
+    ".fm-node-border-double path,\n",
+    ".fm-node-border-double circle,\n",
+    ".fm-node-border-double ellipse,\n",
+    ".fm-node-border-double polygon {\n",
+    "  stroke-width: 2.9;\n",
+    "}\n",
+);
+
+/// Append the node-state rule region: the cosmetic opacity rules only when their knobs ask for
+/// them, the semantic markers whenever the diagram could carry one. Order is unchanged from the
+/// single `effects_css` block this replaces, so an effects-enabled render is byte-identical.
+///
+/// `semantic_markers` is `true` on every path whose output later goes through
+/// `strip_unused_state_css`, which drops the region exactly when the rendered BODY uses none of the
+/// five state classes. The direct minified flowchart path returns before that pass runs, so it
+/// passes a conservative IR-side answer instead — see `ir_may_emit_state_classes`.
+fn push_state_css(
+    css: &mut String,
+    config: &SvgRenderConfig,
+    effects_enabled: bool,
+    semantic_markers: bool,
+) {
+    if effects_enabled {
+        css.push_str(&inactive_opacity_css(config));
+    }
+    if semantic_markers {
+        css.push_str(SEMANTIC_MARKER_CSS);
+    }
+    if effects_enabled {
+        css.push_str(&cluster_fill_opacity_css(config));
+    }
+}
+
+/// Whether this diagram can emit any of the five node-STATE classes.
+///
+/// Every one of them — highlighted / inactive / border-dashed / border-double / block-beta[-space] —
+/// is raised from a node's own `classes`, by exactly the predicates used here: `scan_node_class_
+/// keywords` plus the `c4-external` / `block-beta` / `block-beta-space` exact matches. Sharing that
+/// scan rather than restating it is the point — a private copy is how a rule and its marker drift
+/// apart, which is bd-w0f0's whole failure mode.
+///
+/// `is_inactive` is included even though `.fm-node-inactive`'s rule stays gated on its own knob: the
+/// answer is about the region, and the region's cheapest correct bound is "any state class at all".
+fn ir_may_emit_state_classes(ir: &MermaidDiagramIr) -> bool {
+    ir.nodes.iter().any(|node| {
+        node.classes.iter().any(|class| {
+            let kw = scan_node_class_keywords(class);
+            kw.highlighted
+                || kw.inactive
+                || kw.dashed_border
+                || kw.double_border
+                || class.eq_ignore_ascii_case("c4-external")
+                || class.eq_ignore_ascii_case("block-beta")
+                || class.eq_ignore_ascii_case("block-beta-space")
+        })
+    })
 }
 
 fn animation_css(config: &SvgRenderConfig) -> String {
@@ -3765,9 +3848,12 @@ fn render_layout_to_svg(
             ir.edges.iter().any(|edge| edge.label.is_some()),
         );
         strip_unused_theme_css(&mut css, Some(ir));
-        if effects_enabled {
-            css.push_str(&effects_css(config));
-        }
+        push_state_css(
+            &mut css,
+            config,
+            effects_enabled,
+            !direct_minified_css || ir_may_emit_state_classes(ir),
+        );
         if config.animations_enabled {
             css.push_str(&animation_css(config));
         }
@@ -3807,9 +3893,12 @@ fn render_layout_to_svg(
     } else {
         // Only add supplemental CSS (accessibility and/or print optimization).
         let mut css = String::new();
-        if effects_enabled {
-            css.push_str(&effects_css(config));
-        }
+        push_state_css(
+            &mut css,
+            config,
+            effects_enabled,
+            !direct_minified_css || ir_may_emit_state_classes(ir),
+        );
         if config.animations_enabled {
             css.push_str(&animation_css(config));
         }
