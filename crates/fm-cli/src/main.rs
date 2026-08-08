@@ -13,6 +13,7 @@
 //! - `parse`: Output diagram IR as JSON for tooling/debugging
 //! - `detect`: Show detected diagram type and confidence
 //! - `validate`: Check input for errors and report diagnostics
+//! - `minimize`: Shrink a failing input to the smallest one that still reproduces the failure
 //! - `watch`: Re-render on file change (requires `watch` feature)
 //! - `serve`: Start local HTTP server with live-reload playground (requires `serve` feature)
 
@@ -25,6 +26,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+mod minimize;
 
 #[cfg(feature = "png")]
 use std::collections::BTreeMap;
@@ -504,6 +507,41 @@ enum Command {
     #[command(hide = true)]
     DeterminismManifest,
 
+    /// Shrink a failing input to the smallest one that still reproduces the failure.
+    Minimize {
+        /// Input file path or "-" for stdin.
+        #[arg(default_value = "-")]
+        input: String,
+
+        /// Failure signature the reduction must preserve.
+        #[arg(long, value_enum, default_value = "any-error")]
+        signature: MinimizeSignatureArg,
+
+        /// Needle for `--signature output-contains` / `output-missing`.
+        #[arg(long)]
+        needle: Option<String>,
+
+        /// Threshold in milliseconds for `--signature timeout`.
+        #[arg(long, default_value = "1000")]
+        timeout_ms: u64,
+
+        /// Pipeline stage the failure probe runs before checking the signature.
+        #[arg(long, value_enum, default_value = "parse")]
+        stage: MinimizeStageArg,
+
+        /// Probe iteration budget; exhausting it truncates the reduction and says so.
+        #[arg(long, default_value = "10000")]
+        max_iterations: usize,
+
+        /// Path for the minimized input. If omitted, writes to stdout.
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// Path for the JSON reduction report (repro artifact). Suppressed when omitted.
+        #[arg(long)]
+        report: Option<String>,
+    },
+
     /// Launch an interactive split-pane terminal editor with live diagram preview.
     Interactive {
         /// Input file path or "-" for stdin.
@@ -617,6 +655,41 @@ impl ParseModeArg {
             Self::Strict => MermaidParseMode::Strict,
             Self::Compat => MermaidParseMode::Compat,
             Self::Recover => MermaidParseMode::Recover,
+        }
+    }
+}
+
+/// Failure signature selector for `minimize`.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum MinimizeSignatureArg {
+    /// The pipeline panics (unwinding builds only).
+    Panic,
+    /// The pipeline exceeds `--timeout-ms`.
+    Timeout,
+    /// The stage output contains `--needle`.
+    OutputContains,
+    /// The stage output does not contain `--needle`.
+    OutputMissing,
+    /// Two runs of the stage disagree.
+    NonDeterministic,
+    /// Parsing emits any error-severity diagnostic.
+    AnyError,
+}
+
+/// Pipeline stage the `minimize` failure probe exercises.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum MinimizeStageArg {
+    Parse,
+    Layout,
+    Render,
+}
+
+impl MinimizeStageArg {
+    const fn to_stage(self) -> minimize::Stage {
+        match self {
+            Self::Parse => minimize::Stage::Parse,
+            Self::Layout => minimize::Stage::Layout,
+            Self::Render => minimize::Stage::Render,
         }
     }
 }
@@ -3231,6 +3304,27 @@ fn main() -> Result<()> {
 
         Command::DeterminismManifest => cmd_determinism_manifest(),
 
+        Command::Minimize {
+            input,
+            signature,
+            needle,
+            timeout_ms,
+            stage,
+            max_iterations,
+            output,
+            report,
+        } => cmd_minimize(MinimizeRequest {
+            input: &input,
+            signature,
+            needle: needle.as_deref(),
+            timeout_ms,
+            stage,
+            max_iterations,
+            output: output.as_deref(),
+            report: report.as_deref(),
+            max_input_bytes,
+        }),
+
         Command::Interactive {
             input,
             parse_mode,
@@ -3955,6 +4049,142 @@ fn cmd_determinism_manifest() -> Result<()> {
     write_output(None, &json)?;
     io::stdout().write_all(b"\n")?;
     Ok(())
+}
+
+/// Everything `minimize` needs, bundled so the entry point stays one argument wide.
+struct MinimizeRequest<'a> {
+    input: &'a str,
+    signature: MinimizeSignatureArg,
+    needle: Option<&'a str>,
+    timeout_ms: u64,
+    stage: MinimizeStageArg,
+    max_iterations: usize,
+    output: Option<&'a str>,
+    report: Option<&'a str>,
+    max_input_bytes: usize,
+}
+
+/// The JSON repro artifact a reduction leaves behind, so a triage handoff carries the shrunken
+/// input together with the probe that selected it.
+#[derive(Debug, Serialize)]
+struct MinimizeReport<'a> {
+    signature: &'a str,
+    stage: &'a str,
+    needle: Option<&'a str>,
+    timeout_ms: Option<u64>,
+    reproduced: bool,
+    original_lines: usize,
+    minimized_lines: usize,
+    original_bytes: usize,
+    minimized_bytes: usize,
+    iterations: usize,
+    max_iterations: usize,
+    hit_iteration_cap: bool,
+    elapsed_ms: u128,
+    panic_capture_available: bool,
+    minimized_input: &'a str,
+}
+
+fn cmd_minimize(request: MinimizeRequest<'_>) -> Result<()> {
+    let signature = match request.signature {
+        MinimizeSignatureArg::Panic => {
+            anyhow::ensure!(
+                minimize::panic_capture_available(),
+                "this build aborts on panic, so `--signature panic` can never observe one; \
+                 rebuild with an unwinding profile (for example `cargo run --profile dev`) or \
+                 pick a signature that inspects output"
+            );
+            minimize::FailureSignature::Panic
+        }
+        MinimizeSignatureArg::Timeout => minimize::FailureSignature::Timeout(
+            std::time::Duration::from_millis(request.timeout_ms),
+        ),
+        MinimizeSignatureArg::OutputContains => minimize::FailureSignature::OutputContains(
+            require_minimize_needle(request.needle, "output-contains")?,
+        ),
+        MinimizeSignatureArg::OutputMissing => minimize::FailureSignature::OutputMissing(
+            require_minimize_needle(request.needle, "output-missing")?,
+        ),
+        MinimizeSignatureArg::NonDeterministic => minimize::FailureSignature::NonDeterministic,
+        MinimizeSignatureArg::AnyError => minimize::FailureSignature::AnyError,
+    };
+
+    let content = load_input(request.input, request.max_input_bytes)?;
+    let stage = request.stage.to_stage();
+    let result = minimize::minimize(
+        &content,
+        &signature,
+        minimize::MinimizeOptions {
+            stage,
+            max_iterations: request.max_iterations,
+        },
+    );
+
+    let report = MinimizeReport {
+        signature: result.signature,
+        stage: stage.as_str(),
+        needle: request.needle,
+        timeout_ms: match request.signature {
+            MinimizeSignatureArg::Timeout => Some(request.timeout_ms),
+            _ => None,
+        },
+        reproduced: result.reproduced,
+        original_lines: result.original_lines,
+        minimized_lines: result.minimized_lines,
+        original_bytes: result.original_bytes,
+        minimized_bytes: result.minimized_bytes,
+        iterations: result.iterations,
+        max_iterations: request.max_iterations,
+        hit_iteration_cap: result.hit_iteration_cap,
+        elapsed_ms: result.elapsed.as_millis(),
+        panic_capture_available: minimize::panic_capture_available(),
+        minimized_input: &result.minimized_input,
+    };
+    if let Some(path) = request.report {
+        write_output(Some(path), &serde_json::to_string_pretty(&report)?)?;
+    }
+
+    // A signature that never fired is the most common triage mistake and must not look like a
+    // successful zero-step reduction, so it fails loudly and names every knob that could be wrong.
+    anyhow::ensure!(
+        result.reproduced,
+        "the original input does not reproduce `{}` at stage `{}`; nothing was reduced. Check the \
+         signature, the stage (a render defect is invisible to a parse probe), and the needle.",
+        result.signature,
+        stage.as_str()
+    );
+
+    if result.hit_iteration_cap {
+        warn!(
+            iterations = result.iterations,
+            max_iterations = request.max_iterations,
+            "reduction stopped at the iteration budget; the result may still be reducible \
+             (raise --max-iterations)"
+        );
+    }
+    info!(
+        signature = result.signature,
+        stage = stage.as_str(),
+        lines = format!("{} -> {}", result.original_lines, result.minimized_lines),
+        bytes = format!("{} -> {}", result.original_bytes, result.minimized_bytes),
+        iterations = result.iterations,
+        "minimized failing input"
+    );
+
+    write_output(request.output, &result.minimized_input)?;
+    if request.output.is_none() && !result.minimized_input.ends_with('\n') {
+        io::stdout().write_all(b"\n")?;
+    }
+    Ok(())
+}
+
+fn require_minimize_needle(needle: Option<&str>, signature: &str) -> Result<String> {
+    let needle = needle.unwrap_or_default();
+    anyhow::ensure!(
+        !needle.is_empty(),
+        "`--signature {signature}` needs a non-empty `--needle <text>` to look for in the stage output"
+    );
+    Ok(needle.to_string())
 }
 
 fn build_determinism_manifest() -> DeterminismManifest {
