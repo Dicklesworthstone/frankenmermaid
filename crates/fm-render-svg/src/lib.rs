@@ -3988,6 +3988,25 @@ fn render_layout_to_svg(
         }
         doc = doc.child(Element::raw_svg(bands_svg));
     }
+    // Continuation boxes for packet-beta fields that cross a 32-bit row boundary (bd-8vr0). Empty
+    // for every other diagram and for any packet whose fields are row-aligned, so this costs
+    // nothing elsewhere.
+    if !layout.extensions.packet_field_continuations.is_empty() {
+        let mut continuations_svg = String::new();
+        for continuation in &layout.extensions.packet_field_continuations {
+            write_packet_field_continuation_into(
+                &mut continuations_svg,
+                continuation,
+                ir,
+                offset_x,
+                offset_y,
+                detail,
+                config,
+                &theme.colors,
+            );
+        }
+        doc = doc.child(Element::raw_svg(continuations_svg));
+    }
     // Stream all axis ticks (gantt date labels / xychart axis labels) into ONE raw fragment instead of N
     // group+line+text element trees as separate `doc.child`ren — the same win as the bands loop above.
     // Byte-identical: `write_layout_axis_tick_into` emits the same bytes as
@@ -9921,6 +9940,79 @@ fn render_node(
 /// pair — state diagram, cluster title equal to the node id. Restating the condition in two crates is
 /// how a node stops being drawn while its container never appears, so both sides read the same two
 /// facts off the IR.
+/// Draw one continuation box for a packet field that crosses a 32-bit row boundary (bd-8vr0).
+///
+/// The field's first row segment is an ordinary node; this draws rows 2..n, which cannot be node
+/// boxes because a `LayoutNodeBox` is 1:1 with a node and element ids derive from `node_index`.
+/// Carries the field's own label, as the incumbent's split does, and is `aria-hidden` so a screen
+/// reader is told about the field once rather than once per row it happens to wrap across.
+#[allow(clippy::too_many_arguments)]
+fn write_packet_field_continuation_into(
+    out: &mut String,
+    continuation: &fm_layout::LayoutPacketFieldContinuation,
+    ir: &MermaidDiagramIr,
+    offset_x: f32,
+    offset_y: f32,
+    detail: RenderDetailProfile,
+    config: &SvgRenderConfig,
+    colors: &ThemeColors,
+) {
+    use crate::attributes::{write_escaped_text, write_number_into};
+
+    let label = ir
+        .nodes
+        .get(continuation.node_index)
+        .map(|node| {
+            node.label
+                .and_then(|label_id| ir.labels.get(label_id.0))
+                .map_or(node.id.as_str(), |label| label.text.as_str())
+        })
+        .unwrap_or_default();
+
+    let x = continuation.bounds.x + offset_x;
+    let y = continuation.bounds.y + offset_y;
+    let (w, h) = (continuation.bounds.width, continuation.bounds.height);
+
+    out.push_str("<g id=\"fm-packet-continuation-");
+    let _ = crate::attributes::write_uint_into(out, continuation.node_index as u64);
+    out.push('-');
+    let _ = crate::attributes::write_uint_into(out, continuation.segment as u64);
+    out.push_str(
+        "\" class=\"fm-node fm-node-shape-rect fm-packet-continuation\" aria-hidden=\"true\"><rect x=\"",
+    );
+    let _ = write_number_into(out, x);
+    out.push_str("\" y=\"");
+    let _ = write_number_into(out, y);
+    out.push_str("\" width=\"");
+    let _ = write_number_into(out, w);
+    out.push_str("\" height=\"");
+    let _ = write_number_into(out, h);
+    out.push_str("\" fill=\"");
+    out.push_str(colors.node_fill.as_str());
+    out.push_str("\" rx=\"");
+    let _ = write_number_into(out, config.rounded_corners * 0.55);
+    out.push_str("\"/>");
+
+    if detail.show_node_labels && !label.is_empty() {
+        let font_size = detail.node_font_size;
+        out.push_str("<text x=\"");
+        let _ = write_number_into(out, w.mul_add(0.5, x));
+        out.push_str("\" y=\"");
+        let _ = write_number_into(out, h.mul_add(0.5, y) + font_size / 3.0);
+        out.push_str("\" text-anchor=\"middle\" font-size=\"");
+        let _ = write_number_into(out, font_size);
+        out.push_str("\" fill=\"");
+        out.push_str(colors.text.as_str());
+        out.push_str("\">");
+        // A field label can carry a newline (`"Source Port\n[0-15]"`); the continuation draws the
+        // first line only, so a wrapped range suffix is not repeated on every row.
+        let first_line = label.split('\n').next().unwrap_or(label);
+        let _ = write_escaped_text(out, first_line);
+        out.push_str("</text>");
+    }
+    out.push_str("</g>");
+}
+
 fn is_composite_state_node(ir: &MermaidDiagramIr, node_box: &LayoutNodeBox) -> bool {
     if ir.diagram_type != DiagramType::State {
         return false;

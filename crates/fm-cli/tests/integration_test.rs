@@ -4524,3 +4524,51 @@ fn block_beta_space_holds_its_declared_cell() {
         at("F")
     );
 }
+
+/// A packet field crossing a 32-bit row boundary reaches the OUTPUT as one box per row (bd-8vr0).
+///
+/// The layout-level split is asserted in fm-layout; this is the half that proves it survives to the
+/// picture, because a `LayoutNodeBox` is 1:1 with a node and the continuation rows therefore travel
+/// through `LayoutExtensions` rather than as node boxes. If the renderer ignored that extension the
+/// second row would simply not be drawn — a silent loss a byte golden could not report, since
+/// packet_basic declares no straddling field.
+#[test]
+fn packet_row_straddling_field_renders_one_box_per_row() {
+    let src = "packet-beta\n0-15: \"Aligned\"\n16-47: \"Straddles\"\n";
+    let parsed = parse(src);
+    let layout = layout_diagram(&parsed.ir);
+    assert_eq!(
+        layout.extensions.packet_field_continuations.len(),
+        1,
+        "bits 16-47 cross one row boundary, so layout must emit one continuation"
+    );
+
+    let svg = render_svg_with_layout(&parsed.ir, &layout, &SvgRenderConfig::default());
+    let continuations = svg.matches("fm-packet-continuation").count();
+    assert!(
+        continuations >= 1,
+        "the continuation row never reached the SVG; the second half of the field is missing"
+    );
+
+    // Both rows carry the field's label, as the incumbent's split does.
+    assert!(
+        svg.matches("Straddles").count() >= 2,
+        "the split field must be labelled on every row it occupies, got {} occurrence(s)",
+        svg.matches("Straddles").count()
+    );
+
+    // NEGATIVE CASE: a row-aligned packet emits no continuation markup at all, so this cannot be
+    // satisfied by always drawing an extra box.
+    let aligned = parse("packet-beta\n0-15: \"A\"\n16-31: \"B\"\n");
+    let aligned_layout = layout_diagram(&aligned.ir);
+    let aligned_svg =
+        render_svg_with_layout(&aligned.ir, &aligned_layout, &SvgRenderConfig::default());
+    assert!(
+        aligned_layout
+            .extensions
+            .packet_field_continuations
+            .is_empty()
+            && !aligned_svg.contains("fm-packet-continuation"),
+        "row-aligned fields must not be split"
+    );
+}

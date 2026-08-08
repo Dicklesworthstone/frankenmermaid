@@ -2042,6 +2042,31 @@ pub struct LayoutExtensions {
     /// Gantt task-name placements. Empty for every other diagram type; when empty the renderer keeps
     /// its previous behaviour of centring the label on the bar.
     pub gantt_task_labels: Vec<LayoutGanttTaskLabel>,
+    /// CONTINUATION boxes for packet-beta fields that cross a 32-bit row boundary. Empty for every
+    /// other diagram type and for any packet whose fields are row-aligned; when empty the renderer
+    /// draws each field as the single box its `LayoutNodeBox` describes.
+    pub packet_field_continuations: Vec<LayoutPacketFieldContinuation>,
+}
+
+/// One extra box for a packet-beta field that does not fit in the row its start bit belongs to.
+///
+/// A `LayoutNodeBox` is 1:1 with a node — `fm-render-svg` indexes layout nodes by `node_index` and
+/// derives element ids from it — so a field spanning two rows cannot be expressed as two node
+/// boxes. It is carried here instead, the same shape bd-h9gx used for gantt labels: geometry the
+/// renderer must not re-derive, decided in layout because only layout can grow the diagram bounds
+/// to hold it.
+///
+/// The field's FIRST row segment stays in `DiagramLayout::nodes`; this covers rows 2..n. The
+/// incumbent does the same split — mermaid-js 11.15.0's `getNextFittingBlock` cuts a block at
+/// `n * bitsPerRow` and carries the remainder to the next word, with both halves keeping the
+/// original label (bd-8vr0).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutPacketFieldContinuation {
+    /// Index into [`DiagramLayout::nodes`] / `ir.nodes` for the field this continues.
+    pub node_index: usize,
+    /// Which row of the field this is; 1 for the first continuation.
+    pub segment: usize,
+    pub bounds: LayoutRect,
 }
 
 /// A sequence diagram note positioned near a participant's lifeline.
@@ -6163,6 +6188,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 sequence_mirror_headers,
                 node_centrality: Vec::new(),
                 gantt_task_labels: Vec::new(),
+                packet_field_continuations: Vec::new(),
             },
             dirty_regions: Vec::new(),
         }),
@@ -7548,6 +7574,7 @@ fn layout_diagram_packet_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     // Bit-derived box per declared field, indexed by node so a node interned twice (or a node the
     // fallback parse produced) is handled exactly once below.
     let mut boxes: Vec<Option<LayoutRect>> = vec![None; node_count];
+    let mut continuations: Vec<LayoutPacketFieldContinuation> = Vec::new();
     let mut max_row = 0_u32;
     for field in &packet.fields {
         let Some(slot) = boxes.get_mut(field.node.0) else {
@@ -7556,14 +7583,38 @@ fn layout_diagram_packet_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         if slot.is_some() {
             continue;
         }
-        let row = field.start_bit / PACKET_BITS_PER_ROW;
-        max_row = max_row.max(row);
-        *slot = Some(LayoutRect {
-            x: (field.start_bit % PACKET_BITS_PER_ROW) as f32 * PACKET_BIT_WIDTH,
-            y: row as f32 * row_pitch,
-            width: field.bit_count() as f32 * PACKET_BIT_WIDTH,
-            height: row_height,
-        });
+        // A field that crosses a row boundary is CUT at it, and the remainder carried to the next
+        // row — the same split mermaid-js 11.15.0's `getNextFittingBlock` performs, with every
+        // piece keeping the field's label (bd-8vr0). Each piece is `bits * PACKET_BIT_WIDTH` wide,
+        // so the pieces still sum to the field's exact bit-proportional width and no piece ever
+        // extends past its row.
+        let mut cursor = field.start_bit;
+        let mut segment = 0_usize;
+        while cursor <= field.end_bit {
+            let row = cursor / PACKET_BITS_PER_ROW;
+            let row_last_bit = (row + 1) * PACKET_BITS_PER_ROW - 1;
+            let piece_end = field.end_bit.min(row_last_bit);
+            max_row = max_row.max(row);
+            let rect = LayoutRect {
+                x: (cursor % PACKET_BITS_PER_ROW) as f32 * PACKET_BIT_WIDTH,
+                y: row as f32 * row_pitch,
+                width: (piece_end - cursor + 1) as f32 * PACKET_BIT_WIDTH,
+                height: row_height,
+            };
+            if segment == 0 {
+                // The first row's piece is the field's own node box; the rest are extensions,
+                // because a LayoutNodeBox is 1:1 with a node.
+                *slot = Some(rect);
+            } else {
+                continuations.push(LayoutPacketFieldContinuation {
+                    node_index: field.node.0,
+                    segment,
+                    bounds: rect,
+                });
+            }
+            segment += 1;
+            cursor = piece_end + 1;
+        }
     }
 
     // Anything the packet grammar did not place (a stray node from the fallback edge/node parse)
@@ -7602,7 +7653,14 @@ fn layout_diagram_packet_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         0,
     );
 
-    let bounds = compute_bounds(&nodes, &[], &[], LayoutSpacing::default());
+    // Bounds must contain the continuations too, or a split field's second half is clipped.
+    let mut bounds = compute_bounds(&nodes, &[], &[], LayoutSpacing::default());
+    for continuation in &continuations {
+        let right = continuation.bounds.x + continuation.bounds.width;
+        let bottom = continuation.bounds.y + continuation.bounds.height;
+        bounds.width = bounds.width.max(right - bounds.x);
+        bounds.height = bounds.height.max(bottom - bounds.y);
+    }
 
     TracedLayout {
         layout: Arc::new(DiagramLayout {
@@ -7618,7 +7676,10 @@ fn layout_diagram_packet_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 node_count,
                 ..LayoutStats::default()
             },
-            extensions: LayoutExtensions::default(),
+            extensions: LayoutExtensions {
+                packet_field_continuations: continuations,
+                ..LayoutExtensions::default()
+            },
             dirty_regions: Vec::new(),
         }),
         trace,
@@ -18972,37 +19033,120 @@ mod tests {
         );
     }
 
-    /// KNOWN DIVERGENCE, pinned so it is a decision rather than a surprise (bd-8vr0): mermaid
-    /// splits a block that crosses a row boundary into one box per row; we draw one box at the
-    /// start bit, which overflows its row to the right. Width stays exactly proportional either
-    /// way, and the diagram bounds grow to contain the overflow rather than clipping it.
+    /// A field crossing a 32-bit row boundary is CUT at it, and the remainder carried to the next
+    /// row — the split mermaid-js 11.15.0's `getNextFittingBlock` performs (bd-8vr0). This replaces
+    /// the test that pinned the previous one-overflowing-box divergence.
+    ///
+    /// All four of bd-8vr0's acceptance criteria are asserted here.
     #[test]
-    fn packet_layout_draws_a_row_straddling_field_as_one_overflowing_box() {
+    fn packet_layout_splits_a_row_straddling_field_across_its_rows() {
         let ir = packet_ir(&[("aligned", 0, 15), ("straddles", 16, 47)]);
-        let layout = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Packet).layout;
+        let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Packet);
+        let layout = traced.layout;
         let boxes: BTreeMap<&str, LayoutRect> = layout
             .nodes
             .iter()
             .map(|n| (n.node_id.as_str(), n.bounds))
             .collect();
         let aligned = boxes["aligned"];
-        let straddling = boxes["straddles"];
+        let head = boxes["straddles"];
+        let continuations = &layout.extensions.packet_field_continuations;
 
+        // (1) Two boxes: the head on row 0 and one continuation on row 1.
+        assert_eq!(
+            continuations.len(),
+            1,
+            "bits 16-47 cross one row boundary, so it needs exactly one continuation: \
+             {continuations:?}"
+        );
+        let tail = continuations[0].bounds;
         assert!(
-            (straddling.width - aligned.width * 2.0).abs() < 0.001,
-            "a 32-bit field is twice a 16-bit one even when it straddles: {} vs {}",
-            straddling.width,
-            aligned.width
+            tail.y > head.y,
+            "the continuation belongs to the NEXT row: head {head:?}, tail {tail:?}"
         );
         assert!(
-            (straddling.y - aligned.y).abs() < 0.001,
-            "it is placed on the row its START bit belongs to"
+            (tail.x - aligned.x).abs() < 0.001,
+            "the continuation starts at the row's left edge: {} vs {}",
+            tail.x,
+            aligned.x
         );
-        let right = straddling.x + straddling.width;
+
+        // (2) Neither piece extends past the 32-bit row width.
+        let row_width = 32.0 * (aligned.width / 16.0);
+        for (name, piece) in [("head", head), ("tail", tail)] {
+            assert!(
+                piece.x + piece.width <= aligned.x + row_width + 0.001,
+                "{name} runs past the row's right edge: {} vs {}",
+                piece.x + piece.width,
+                aligned.x + row_width
+            );
+        }
         assert!(
-            layout.bounds.x + layout.bounds.width >= right,
-            "the overflow must be inside the diagram bounds, not clipped: bounds end {} < {right}",
-            layout.bounds.x + layout.bounds.width
+            (head.x + head.width - (aligned.x + row_width)).abs() < 0.001,
+            "the head fills the row it starts in, ending exactly at the row edge: {head:?}"
+        );
+
+        // (3) The pieces still sum to the field's exact bit-proportional width.
+        assert!(
+            (head.width + tail.width - aligned.width * 2.0).abs() < 0.001,
+            "32 bits split across rows must still total twice a 16-bit field: {} + {} vs {}",
+            head.width,
+            tail.width,
+            aligned.width * 2.0
+        );
+
+        // (4) A field that does NOT straddle is still exactly one box.
+        let plain = layout_diagram_traced_with_algorithm(
+            &packet_ir(&[("a", 0, 15), ("b", 16, 31)]),
+            LayoutAlgorithm::Packet,
+        )
+        .layout;
+        assert!(
+            plain.extensions.packet_field_continuations.is_empty(),
+            "row-aligned fields must not be split: {:?}",
+            plain.extensions.packet_field_continuations
+        );
+
+        // And the continuation is inside the diagram bounds, not clipped.
+        assert!(
+            layout.bounds.x + layout.bounds.width >= tail.x + tail.width,
+            "the continuation must be inside the bounds: bounds end {} < {}",
+            layout.bounds.x + layout.bounds.width,
+            tail.x + tail.width
+        );
+    }
+
+    /// A field spanning several whole rows produces one piece per row (bd-8vr0).
+    #[test]
+    fn packet_layout_splits_a_field_spanning_many_rows() {
+        let ir = packet_ir(&[("wide", 16, 111)]);
+        let layout = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Packet).layout;
+        let head = layout.nodes[0].bounds;
+        let continuations = &layout.extensions.packet_field_continuations;
+
+        // bits 16..111 = 96 bits from mid-row 0 to mid-row 3 => head + 3 continuations.
+        assert_eq!(
+            continuations.len(),
+            3,
+            "expected one piece per row after the first: {continuations:?}"
+        );
+        assert_eq!(
+            continuations.iter().map(|c| c.segment).collect::<Vec<_>>(),
+            [1, 2, 3],
+            "segments are numbered in row order"
+        );
+        let total: f32 = head.width + continuations.iter().map(|c| c.bounds.width).sum::<f32>();
+        let per_bit = head.width / 16.0; // bits 16..31 is the head
+        assert!(
+            (total - 96.0 * per_bit).abs() < 0.001,
+            "the pieces must total the field's 96 bits: {total} vs {}",
+            96.0 * per_bit
+        );
+        assert!(
+            continuations
+                .windows(2)
+                .all(|w| w[1].bounds.y > w[0].bounds.y),
+            "each continuation is on a lower row than the last: {continuations:?}"
         );
     }
 
