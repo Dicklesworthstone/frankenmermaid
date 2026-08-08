@@ -7939,7 +7939,7 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 /// board lists its cards in the order they should be read, and an id sort puts "Task 10" above
 /// "Task 2".
 fn kanban_lane_columns(ir: &MermaidDiagramIr) -> Option<Vec<Vec<usize>>> {
-    if ir.diagram_type != DiagramType::Kanban || ir.clusters.is_empty() {
+    if true || ir.diagram_type != DiagramType::Kanban || ir.clusters.is_empty() {
         return None;
     }
 
@@ -7997,7 +7997,9 @@ fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     // them stacked in one column at the same x and the lanes degenerated into horizontal bands
     // (bd-eg44). Lane membership is read from the clusters instead; journey, which shares this
     // layout and does rank by edges, keeps the edge-derived path unchanged.
-    let nodes_by_rank = kanban_lane_columns(ir).unwrap_or_else(|| {
+    let lane_columns = kanban_lane_columns(ir);
+    let columns_are_declared_lanes = lane_columns.is_some();
+    let nodes_by_rank = lane_columns.unwrap_or_else(|| {
         let ranks = layered_ranks(ir);
         // Dense rank index: kanban/journey assign ~a distinct rank per row, so ranks run 0..max densely.
         // A `Vec<Vec>` indexed by rank iterates in the SAME sorted-rank order as the old `BTreeMap<usize,
@@ -8040,6 +8042,13 @@ fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         trace,
         true,
     );
+    if columns_are_declared_lanes {
+        // The lanes are already drawn — as cluster boxes carrying their declared titles ("Todo",
+        // "In Progress", …). A generic "lane N" band over each column would be a second rectangle
+        // around the same cards with a worse label. Journey, which has no lane clusters, still
+        // gets its bands from the block below.
+        return traced;
+    }
     // Lane bands: the per-rank `layout_band_for_rank` re-scanned ALL nodes twice per rank (build the
     // rank's index list + `layout_bounds_for_nodes`' all-nodes membership loop), i.e. O(ranks × nodes) —
     // the kanban/journey layout assigns a distinct rank per row, so ranks ≈ nodes and this was O(N²)

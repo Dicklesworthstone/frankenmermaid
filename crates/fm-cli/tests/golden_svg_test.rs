@@ -1193,11 +1193,10 @@ fn block_beta_span_width_is_proportional_to_declared_columns() {
 
 /// Kanban cards must sit in their own lane's column (bd-iicc).
 ///
-/// IGNORED because it FAILS against a real defect, filed as bd-eg44: every card in every lane renders
-/// at x=144.0, because the swimlanes are laid out as horizontal bands stacked down the page instead of
-/// side-by-side columns. A kanban board's columns ARE its grammar — which lane a card is in is the
+/// This FAILED against a real defect, filed and fixed as bd-eg44: every card in every lane rendered
+/// at x=144.0, because the swimlanes were laid out as horizontal bands stacked down the page instead
+/// of side-by-side columns. A kanban board's columns ARE its grammar — which lane a card is in is the
 /// only thing the diagram exists to show. Same class as bd-5wbp (gitGraph branches drawn collinear).
-/// Un-ignoring this is bd-eg44's acceptance gate.
 #[test]
 fn kanban_cards_occupy_their_lane_column() {
     let svg = render_fixture("kanban_basic");
@@ -1234,6 +1233,108 @@ fn kanban_cards_occupy_their_lane_column() {
             cx(pair.0),
             pair.1,
             cx(pair.1)
+        );
+    }
+}
+
+/// The lane BOXES must not overlap each other, and cards must stack down their lane in declaration
+/// order (bd-eg44, criteria 3 and 4).
+///
+/// `kanban_cards_occupy_their_lane_column` judges the CARDS; this judges the swimlane rectangles and
+/// the within-lane ordering, which are separate defects. The lane boxes used to overlap by 68.5px on
+/// the vertical axis — two swimlane rectangles drawn on top of each other is a visible artifact
+/// regardless of which way the lanes run — and the constant 68.5 pointed at a band height that
+/// double-counted a header.
+///
+/// The lane titles are read from the FIXTURE, not restated here, so this cannot be satisfied by
+/// re-blessing and cannot silently judge fewer lanes than the board declares.
+#[test]
+fn kanban_lane_boxes_are_disjoint_and_cards_stack_in_declaration_order() {
+    let input = fs::read_to_string(golden_dir().join("kanban_basic.mmd")).expect("read fixture");
+    let svg = render_fixture("kanban_basic");
+    assert!(
+        !svg.contains("transform="),
+        "a transform would make these coordinates non-final"
+    );
+
+    // Lane titles and their cards, in declaration order, straight from the fixture.
+    let mut lanes: Vec<(String, Vec<String>)> = Vec::new();
+    let mut lane_indent: Option<usize> = None;
+    for line in input.lines() {
+        let text = line.trim();
+        if text.is_empty() || text == "kanban" {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if lane_indent.is_none_or(|declared| indent <= declared) {
+            lane_indent = Some(indent);
+            lanes.push((text.to_string(), Vec::new()));
+        } else if let Some(lane) = lanes.last_mut() {
+            lane.1.push(text.to_string());
+        }
+    }
+    assert_eq!(lanes.len(), 3, "fixture declares three lanes, read {lanes:?}");
+
+    // Swimlane rectangles, keyed by the title text the renderer draws next to each one.
+    let mut boxes: Vec<(String, f32, f32, f32, f32)> = Vec::new();
+    for chunk in svg.split("<rect id=\"fm-cluster-").skip(1) {
+        let num = |key: &str| -> Option<f32> {
+            let at = chunk.find(&format!("{key}=\""))?;
+            let rest = &chunk[at + key.len() + 2..];
+            rest[..rest.find('"')?].parse().ok()
+        };
+        let title = chunk
+            .split_once("class=\"fm-cluster-label\">")
+            .and_then(|(_, r)| r.split_once("</text>"))
+            .map(|(t, _)| strip_inner_tags(t))
+            .unwrap_or_default();
+        match (num("x"), num("y"), num("width"), num("height")) {
+            (Some(x), Some(y), Some(w), Some(h)) => boxes.push((title, x, y, w, h)),
+            _ => panic!("unreadable swimlane rect for {title:?}"),
+        }
+    }
+    for (title, ..) in &lanes {
+        assert!(
+            boxes.iter().any(|(t, ..)| t == title),
+            "lane {title:?} has no swimlane box; read {:?}",
+            boxes.iter().map(|(t, ..)| t).collect::<Vec<_>>()
+        );
+    }
+
+    // Criterion 3: no two lane boxes overlap. Rectangles are disjoint when they are separated on
+    // EITHER axis, so this is the exact statement and not a proxy for it.
+    for (i, a) in boxes.iter().enumerate() {
+        for b in boxes.iter().skip(i + 1) {
+            let x_apart = a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1;
+            let y_apart = a.2 + a.4 <= b.2 || b.2 + b.4 <= a.2;
+            assert!(
+                x_apart || y_apart,
+                "lane boxes {:?} at ({}, {}) {}x{} and {:?} at ({}, {}) {}x{} overlap",
+                a.0,
+                a.1,
+                a.2,
+                a.3,
+                a.4,
+                b.0,
+                b.1,
+                b.2,
+                b.3,
+                b.4
+            );
+        }
+    }
+
+    // Criterion 4: within a lane, cards stack downward in declaration order.
+    let centres = node_centres(&svg);
+    for (title, cards) in &lanes {
+        assert!(cards.len() >= 2, "lane {title:?} needs 2+ cards to order");
+        let ys: Vec<f32> = cards
+            .iter()
+            .map(|card| centre_of(&centres, card).1)
+            .collect();
+        assert!(
+            ys.windows(2).all(|w| w[1] > w[0]),
+            "lane {title:?} declares {cards:?} but they render at y {ys:?}"
         );
     }
 }
