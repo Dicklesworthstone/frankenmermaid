@@ -10067,9 +10067,9 @@ fn open_browser(url: &str) -> Result<()> {
 mod serve_tests {
     use super::{
         FnxFallbackArg, FnxModeArg, FnxProjectionArg, LayoutAlgorithm, LayoutConfig,
-        MermaidNativePressureSignals, MermaidParseMode, OutputFormat, ParserConfig,
-        RenderCommandOptions, ServeRoute, SvgRenderConfig, TermRenderConfig,
-        render_source_with_pressure, serve_playground_html, serve_route,
+        MermaidNativePressureSignals, MermaidParseMode, OutputFormat, PREVIEW_ENGINE_POOL_LIMIT,
+        ParserConfig, PreviewEnginePool, RenderCommandOptions, ServeRoute, SvgRenderConfig,
+        TermRenderConfig, render_source_with_pressure, serve_playground_html, serve_route,
     };
     use tiny_http::Method;
 
@@ -10084,21 +10084,9 @@ mod serve_tests {
         assert_eq!(serve_route("/missing", &Method::Get), ServeRoute::NotFound);
     }
 
-    /// The preview server reuses a layout when the document has not changed (bd-kgi4).
-    ///
-    /// This bead's stated differentiator over the incumbent extension is incremental computation,
-    /// and until now the preview server — the foundation the extension renders through — did a full
-    /// parse, layout and render on every keystroke. An engine held across requests is what makes the
-    /// claim true rather than aspirational.
-    ///
-    /// Three things are asserted, and the third is the one that matters:
-    ///   * a repeated render REUSES the layout;
-    ///   * a changed document does NOT (so the cache cannot be serving stale geometry);
-    ///   * the reused render is BYTE-IDENTICAL to the recomputed one — an incremental path that
-    ///     returns different output from a full recompute is a correctness bug, not a speedup.
-    #[test]
-    fn preview_render_reuses_layout_for_an_unchanged_document() {
-        let options = RenderCommandOptions {
+    /// Plain SVG render options for the preview tests below.
+    fn preview_test_options() -> RenderCommandOptions<'static> {
+        RenderCommandOptions {
             parse_mode: MermaidParseMode::Compat,
             parser_config: ParserConfig::default(),
             layout_algorithm: LayoutAlgorithm::Auto,
@@ -10119,7 +10107,24 @@ mod serve_tests {
             fnx_mode: FnxModeArg::Auto,
             fnx_projection: FnxProjectionArg::Undirected,
             fnx_fallback: FnxFallbackArg::Graceful,
-        };
+        }
+    }
+
+    /// The preview server reuses a layout when the document has not changed (bd-kgi4).
+    ///
+    /// This bead's stated differentiator over the incumbent extension is incremental computation,
+    /// and until now the preview server — the foundation the extension renders through — did a full
+    /// parse, layout and render on every keystroke. An engine held across requests is what makes the
+    /// claim true rather than aspirational.
+    ///
+    /// Three things are asserted, and the third is the one that matters:
+    ///   * a repeated render REUSES the layout;
+    ///   * a changed document does NOT (so the cache cannot be serving stale geometry);
+    ///   * the reused render is BYTE-IDENTICAL to the recomputed one — an incremental path that
+    ///     returns different output from a full recompute is a correctness bug, not a speedup.
+    #[test]
+    fn preview_render_reuses_layout_for_an_unchanged_document() {
+        let options = preview_test_options();
         let pressure = MermaidNativePressureSignals::sample().into_report();
         let mut engine = fm_layout::IncrementalLayoutEngine::default();
 
@@ -10179,6 +10184,87 @@ mod serve_tests {
         assert!(
             repeat_edit.layout_cache_hit,
             "the engine must cache the newly edited document too, not just the first one it saw"
+        );
+    }
+
+    /// Two open documents keep their own layout memos (bd-kgi4).
+    ///
+    /// An `IncrementalLayoutEngine` memoises exactly ONE layout, so a single shared engine misses on
+    /// every alternation between two files — which is the ordinary case in an editor, not an edge
+    /// case. This is the assertion the previous single-engine version CANNOT pass: rendering A, B,
+    /// A, B with one engine makes all four a recompute.
+    #[test]
+    fn preview_engines_are_per_document_so_alternating_files_still_reuse() {
+        let options = preview_test_options();
+        let pressure = MermaidNativePressureSignals::sample().into_report();
+        let mut engines = PreviewEnginePool::default();
+
+        let doc_a = "flowchart LR\n  A[Alpha] --> B[Beta]\n";
+        let doc_b = "flowchart TD\n  X[Xray] --> Y[Yankee] --> Z[Zulu]\n";
+
+        let mut render = |id: &str, source: &str| {
+            let engine = engines.engine_for(id);
+            render_source_with_pressure(source, &options, &pressure, Some(engine))
+                .expect("render")
+                .layout_cache_hit
+        };
+
+        // First sight of each document has nothing to reuse.
+        assert!(!render("a.mmd", doc_a), "first render of a.mmd");
+        assert!(!render("b.mmd", doc_b), "first render of b.mmd");
+
+        // Alternating back is the case a single shared engine gets wrong.
+        assert!(
+            render("a.mmd", doc_a),
+            "returning to a.mmd must reuse its layout; with one shared engine b.mmd would have \
+             evicted it"
+        );
+        assert!(
+            render("b.mmd", doc_b),
+            "returning to b.mmd must reuse its layout"
+        );
+        assert!(render("a.mmd", doc_a), "a.mmd still cached after alternating");
+
+        // NEGATIVE CASE: the id must actually select the memo. Rendering a.mmd's source under
+        // b.mmd's id has to miss, or the pool is keyed on something other than the document.
+        assert!(
+            !render("b.mmd", doc_a),
+            "a different document under an existing id must not be served from that id's memo"
+        );
+    }
+
+    /// The pool is bounded, so a long-running server cannot leak an engine per document it ever saw
+    /// (bd-kgi4). Each engine holds a full cached layout, so this is real memory.
+    #[test]
+    fn preview_engine_pool_evicts_the_least_recently_used_document() {
+        let mut engines = PreviewEnginePool::default();
+        for index in 0..PREVIEW_ENGINE_POOL_LIMIT {
+            let _ = engines.engine_for(&format!("doc-{index}.mmd"));
+        }
+        assert_eq!(engines.tracked_documents().len(), PREVIEW_ENGINE_POOL_LIMIT);
+
+        // Touch the oldest so it is no longer the eviction candidate.
+        let _ = engines.engine_for("doc-0.mmd");
+        // One past the limit evicts the least-recently-used, which is now doc-1.
+        let _ = engines.engine_for("overflow.mmd");
+
+        let tracked = engines.tracked_documents();
+        assert_eq!(
+            tracked.len(),
+            PREVIEW_ENGINE_POOL_LIMIT,
+            "the pool must stay bounded, got {tracked:?}"
+        );
+        assert!(
+            tracked.contains(&"doc-0.mmd"),
+            "a recently used document must survive eviction: {tracked:?}"
+        );
+        assert!(
+            !tracked.contains(&"doc-1.mmd"),
+            "the least-recently-used document should have been evicted: {tracked:?}"
+        );
+        assert!(
+            tracked.contains(&"overflow.mmd"),
+            "the newest document must be tracked: {tracked:?}"
         );
     }
 
