@@ -52,6 +52,14 @@ pub enum FailureSignature {
     /// Any diagnostic with Error severity is emitted. Always evaluated on parse diagnostics,
     /// because that is the only stage that produces them.
     AnyError,
+    /// The laid-out geometry breaks an invariant from [`fm_layout::invariants`] — a non-finite
+    /// coordinate or a negative extent.
+    ///
+    /// This is the signature a fuzz artifact needs: `fuzz_pipeline` fails on exactly this
+    /// predicate, via the same function, so an artifact that target rejects can be shrunk here
+    /// without a second copy of the rule. Always evaluated at layout, since that is where the
+    /// geometry exists; the stage is ignored.
+    InvariantViolation,
 }
 
 impl FailureSignature {
@@ -65,6 +73,7 @@ impl FailureSignature {
             Self::OutputMissing(_) => "output-missing",
             Self::NonDeterministic => "non-deterministic",
             Self::AnyError => "any-error",
+            Self::InvariantViolation => "invariant-violation",
         }
     }
 }
@@ -166,7 +175,18 @@ fn test_failure(input: &str, signature: &FailureSignature, stage: Stage) -> bool
 
         // Diagnostics exist only at parse time, so this signature ignores `stage` by design.
         FailureSignature::AnyError => fm_parser::parse(input).ir.has_errors(),
+
+        // Geometry exists only after layout, so this signature ignores `stage` too. The predicate
+        // is the same function `fuzz_pipeline` asserts on.
+        FailureSignature::InvariantViolation => !layout_geometry_violations_for(input).is_empty(),
     }
+}
+
+/// Geometry invariant violations for `input`, as the reducer and the fuzz target both define them.
+fn layout_geometry_violations_for(input: &str) -> Vec<fm_layout::invariants::InvariantViolation> {
+    let parsed = fm_parser::parse(input);
+    let layout = fm_layout::layout_diagram(&parsed.ir);
+    fm_layout::invariants::layout_geometry_violations(&layout)
 }
 
 /// Minimize a failing input using delta debugging (ddmin).
@@ -513,6 +533,47 @@ mod tests {
             result.hit_iteration_cap,
             "a one-iteration budget on a six-line input must report truncation"
         );
+    }
+
+    #[test]
+    fn invariant_signature_agrees_with_the_shared_checker_on_clean_input() {
+        // Clean input must NOT reproduce, and the reason must be the checker itself rather than an
+        // accident of the reducer: assert both directions against the shared predicate.
+        let input = "flowchart LR\n  A --> B\n  B --> C";
+        assert!(
+            layout_geometry_violations_for(input).is_empty(),
+            "fixture must be geometrically clean for this test to mean anything"
+        );
+
+        let result = minimize(
+            input,
+            &FailureSignature::InvariantViolation,
+            parse_options(),
+        );
+        assert!(!result.reproduced);
+        assert_eq!(result.iterations, 0);
+        assert_eq!(result.signature, "invariant-violation");
+    }
+
+    #[test]
+    fn invariant_signature_ignores_stage_because_geometry_only_exists_after_layout() {
+        // The predicate is evaluated at layout regardless of `--stage`, so a parse-stage request
+        // must give the identical verdict rather than silently checking nothing.
+        let input = "flowchart LR\n  A --> B";
+        for stage in [Stage::Parse, Stage::Layout, Stage::Render] {
+            let result = minimize(
+                input,
+                &FailureSignature::InvariantViolation,
+                MinimizeOptions {
+                    stage,
+                    max_iterations: 64,
+                },
+            );
+            assert!(
+                !result.reproduced,
+                "stage {stage:?} disagreed with the shared geometry checker"
+            );
+        }
     }
 
     #[test]

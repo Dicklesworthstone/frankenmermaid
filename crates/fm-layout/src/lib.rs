@@ -21,6 +21,7 @@ pub mod fnx_ordering;
 
 pub mod adapton;
 mod cga_routing;
+pub mod invariants;
 
 use std::cell::RefCell;
 use std::cmp::Reverse;

@@ -174,3 +174,136 @@ fn minimize_keeps_the_erroring_line_when_reducing_a_parse_error() {
         "the malformed directive is the cause and must survive: {minimized:?}"
     );
 }
+
+#[test]
+fn minimize_bundle_carries_the_input_and_a_trace_of_what_the_pipeline_did() {
+    let dir = TempDir::new().expect("temp dir");
+    let input = write_input(&dir, "dotted.mmd", DOTTED_EDGE_INPUT);
+    let bundle = dir.path().join("bundle");
+
+    let output = Command::new(BINARY)
+        .args([
+            "minimize",
+            &input,
+            "--stage",
+            "render",
+            "--signature",
+            "output-contains",
+            "--needle",
+            "fm-edge-dashed",
+            "--bundle",
+            bundle.to_str().expect("bundle path utf-8"),
+        ])
+        .output()
+        .expect("run minimize");
+    assert!(
+        output.status.success(),
+        "minimize failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bundled_input =
+        std::fs::read_to_string(bundle.join("minimized.mmd")).expect("bundled minimized.mmd");
+    assert!(
+        bundled_input.contains("-."),
+        "the bundle must carry the repro: {bundled_input:?}"
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(bundle.join("report.json")).expect("read report"))
+            .expect("report json");
+    let trace = &report["trace"];
+    assert_eq!(trace["diagram_type"], serde_json::json!("flowchart"));
+    assert!(
+        trace["node_count"].as_u64().expect("node_count") >= 1,
+        "trace must describe the minimized diagram: {trace:?}"
+    );
+    // The algorithm that actually ran is the first thing to check when a shrunken repro stops
+    // behaving like the original, so the bundle has to record it.
+    assert!(
+        trace["layout_selected"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()),
+        "trace must name the layout algorithm that ran: {trace:?}"
+    );
+    assert_eq!(
+        trace["invariant_violations"],
+        serde_json::json!([]),
+        "a healthy reduction must report no geometry violations: {trace:?}"
+    );
+}
+
+#[test]
+fn minimize_invariant_signature_does_not_fire_on_clean_input_but_still_leaves_a_bundle() {
+    let dir = TempDir::new().expect("temp dir");
+    let input = write_input(&dir, "clean.mmd", DOTTED_EDGE_INPUT);
+    let bundle = dir.path().join("bundle");
+
+    let output = Command::new(BINARY)
+        .args([
+            "minimize",
+            &input,
+            "--signature",
+            "invariant-violation",
+            "--bundle",
+            bundle.to_str().expect("bundle path utf-8"),
+        ])
+        .output()
+        .expect("run minimize");
+
+    assert!(
+        !output.status.success(),
+        "clean geometry must not report a reproduced invariant violation"
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(bundle.join("report.json")).expect("read report"))
+            .expect("report json");
+    assert_eq!(
+        report["signature"],
+        serde_json::json!("invariant-violation")
+    );
+    assert_eq!(report["reproduced"], serde_json::json!(false));
+    // The point of writing the bundle before the reproduced check: a failed triage attempt still
+    // leaves evidence of what was tried.
+    assert!(
+        bundle.join("minimized.mmd").exists(),
+        "the bundle must exist even when the signature never fired"
+    );
+}
+
+/// The non-vacuity companion to `fm_layout::invariants`' unit tests, which use synthetic broken
+/// layouts. This one proves the invariants are true of what the engine really produces — if they
+/// were wrong about real layouts, the checker would be firing constantly in production and the
+/// `invariant-violation` signature would be useless.
+#[test]
+fn real_layouts_across_diagram_types_hold_the_geometry_invariants() {
+    for input in [
+        "flowchart LR\n  A --> B\n  B --> C",
+        "sequenceDiagram\n  A->>B: msg",
+        "classDiagram\n  A <|-- B",
+        "stateDiagram-v2\n  [*] --> S1\n  S1 --> S2",
+        "erDiagram\n  A ||--o{ B : has",
+        "pie\n  \"A\" : 50\n  \"B\" : 50",
+        "mindmap\n  root\n    A\n    B",
+        "gantt\n  section S\n  T1 :a1, 2024-01-01, 3d",
+        "gitGraph\n  commit\n  branch dev\n  commit\n  checkout main\n  merge dev",
+        "kanban\n  Todo\n    task1\n  Done\n    task2",
+        "packet-beta\n  0-7: \"a\"\n  8-15: \"b\"",
+        "block-beta\n  columns 3\n  a b c",
+        "quadrantChart\n  x-axis Low --> High\n  A: [0.3, 0.6]",
+        "journey\n  section S\n    Task: 5: Me",
+        "xychart-beta\n  bar [1, 2, 3]",
+        "requirementDiagram\n  requirement r {\n  id: 1\n  text: t\n  }",
+        "sankey-beta\n  A,B,10",
+        "timeline\n  title T\n  2024 : event",
+        "C4Context\n  Person(a, \"A\")",
+        "mermaid-unknown-type\n  garbage ][ input",
+    ] {
+        let layout = fm_layout::layout_diagram(&fm_parser::parse(input).ir);
+        let violations = fm_layout::invariants::layout_geometry_violations(&layout);
+        assert!(
+            violations.is_empty(),
+            "{input:?} produced geometry violations: {violations:?}"
+        );
+    }
+}

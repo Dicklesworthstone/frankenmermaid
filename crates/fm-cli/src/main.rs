@@ -540,6 +540,11 @@ enum Command {
         /// Path for the JSON reduction report (repro artifact). Suppressed when omitted.
         #[arg(long)]
         report: Option<String>,
+
+        /// Directory for a triage bundle: `minimized.mmd` plus `report.json`. Written even when
+        /// the signature did not reproduce, so a failed attempt still leaves evidence.
+        #[arg(long)]
+        bundle: Option<String>,
     },
 
     /// Launch an interactive split-pane terminal editor with live diagram preview.
@@ -674,6 +679,9 @@ enum MinimizeSignatureArg {
     NonDeterministic,
     /// Parsing emits any error-severity diagnostic.
     AnyError,
+    /// The laid-out geometry breaks a `fm_layout::invariants` check — the same predicate the
+    /// `fuzz_pipeline` target asserts on, so a fuzz artifact can be reduced with this.
+    InvariantViolation,
 }
 
 /// Pipeline stage the `minimize` failure probe exercises.
@@ -1067,7 +1075,10 @@ struct RenderOutcome {
     /// default-feature clippy step red (bd-wra5). The expectation is scoped to exactly the
     /// feature combination where the field really is unused, so a genuinely dead field still
     /// fails the gate under `--features serve`.
-    #[cfg_attr(not(feature = "serve"), expect(dead_code, reason = "read only by `serve`"))]
+    #[cfg_attr(
+        not(feature = "serve"),
+        expect(dead_code, reason = "read only by `serve`")
+    )]
     layout_cache_hit: bool,
 }
 
@@ -3320,6 +3331,7 @@ fn main() -> Result<()> {
             max_iterations,
             output,
             report,
+            bundle,
         } => cmd_minimize(MinimizeRequest {
             input: &input,
             signature,
@@ -3329,6 +3341,7 @@ fn main() -> Result<()> {
             max_iterations,
             output: output.as_deref(),
             report: report.as_deref(),
+            bundle: bundle.as_deref(),
             max_input_bytes,
         }),
 
@@ -4068,6 +4081,7 @@ struct MinimizeRequest<'a> {
     max_iterations: usize,
     output: Option<&'a str>,
     report: Option<&'a str>,
+    bundle: Option<&'a str>,
     max_input_bytes: usize,
 }
 
@@ -4089,7 +4103,65 @@ struct MinimizeReport<'a> {
     hit_iteration_cap: bool,
     elapsed_ms: u128,
     panic_capture_available: bool,
+    trace: MinimizeTrace,
     minimized_input: &'a str,
+}
+
+/// What the pipeline did with the minimized input: enough to triage the repro without re-running
+/// it, and enough to notice that the reduction landed somewhere unexpected (a different layout
+/// algorithm, a lost diagram type).
+#[derive(Debug, Serialize)]
+struct MinimizeTrace {
+    diagram_type: String,
+    node_count: usize,
+    edge_count: usize,
+    layout_width: f64,
+    layout_height: f64,
+    /// Algorithm asked for versus the one that actually ran. A reduction that changes this has
+    /// changed the code under test, which is the failure mode to look for first when a shrunken
+    /// repro stops behaving like the original.
+    layout_requested: String,
+    layout_selected: String,
+    layout_guard_fallback_applied: bool,
+    /// Geometry invariant violations, as `fm_layout::invariants` defines them — the same predicate
+    /// `fuzz_pipeline` asserts on, so a fuzz artifact's violation set is directly comparable.
+    invariant_violations: Vec<String>,
+    /// Error-severity diagnostics emitted while parsing the minimized input, by rule id where one
+    /// exists and by message otherwise.
+    error_diagnostics: Vec<String>,
+}
+
+fn build_minimize_trace(input: &str) -> MinimizeTrace {
+    let parsed = parse_with_mode(input, MermaidParseMode::Compat);
+    let traced = fm_layout::layout_diagram_traced(&parsed.ir);
+    MinimizeTrace {
+        diagram_type: parsed.ir.diagram_type.as_str().to_string(),
+        node_count: parsed.ir.nodes.len(),
+        edge_count: parsed.ir.edges.len(),
+        layout_width: round6(traced.layout.bounds.width),
+        layout_height: round6(traced.layout.bounds.height),
+        layout_requested: traced.trace.dispatch.requested.as_str().to_string(),
+        layout_selected: traced.trace.dispatch.selected.as_str().to_string(),
+        layout_guard_fallback_applied: traced.trace.guard.fallback_applied,
+        invariant_violations: fm_layout::invariants::layout_geometry_violations(&traced.layout)
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        error_diagnostics: parsed
+            .ir
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.is_error())
+            .map(|diagnostic| {
+                // Prefer the machine-readable rule id; fall back to the message, because a
+                // diagnostic with no rule id is exactly the kind a triage report must not drop.
+                diagnostic
+                    .rule_id
+                    .clone()
+                    .unwrap_or_else(|| diagnostic.message.clone())
+            })
+            .collect(),
+    }
 }
 
 fn cmd_minimize(request: MinimizeRequest<'_>) -> Result<()> {
@@ -4114,6 +4186,7 @@ fn cmd_minimize(request: MinimizeRequest<'_>) -> Result<()> {
         ),
         MinimizeSignatureArg::NonDeterministic => minimize::FailureSignature::NonDeterministic,
         MinimizeSignatureArg::AnyError => minimize::FailureSignature::AnyError,
+        MinimizeSignatureArg::InvariantViolation => minimize::FailureSignature::InvariantViolation,
     };
 
     let content = load_input(request.input, request.max_input_bytes)?;
@@ -4145,10 +4218,31 @@ fn cmd_minimize(request: MinimizeRequest<'_>) -> Result<()> {
         hit_iteration_cap: result.hit_iteration_cap,
         elapsed_ms: result.elapsed.as_millis(),
         panic_capture_available: minimize::panic_capture_available(),
+        trace: build_minimize_trace(&result.minimized_input),
         minimized_input: &result.minimized_input,
     };
+    let report_json = serde_json::to_string_pretty(&report)?;
     if let Some(path) = request.report {
-        write_output(Some(path), &serde_json::to_string_pretty(&report)?)?;
+        write_output(Some(path), &report_json)?;
+    }
+    // The bundle is written BEFORE the reproduced check below, so a triage attempt that failed to
+    // reproduce still leaves the evidence of what was tried.
+    if let Some(dir) = request.bundle {
+        let dir = Path::new(dir);
+        std::fs::create_dir_all(dir).context(format!(
+            "Failed to create bundle directory: {}",
+            dir.display()
+        ))?;
+        let input_path = dir.join("minimized.mmd");
+        let report_path = dir.join("report.json");
+        std::fs::write(&input_path, &result.minimized_input)
+            .context(format!("Failed to write {}", input_path.display()))?;
+        std::fs::write(&report_path, &report_json)
+            .context(format!("Failed to write {}", report_path.display()))?;
+        info!(
+            bundle = %dir.display(),
+            "wrote reduction bundle (minimized.mmd + report.json)"
+        );
     }
 
     // A signature that never fired is the most common triage mistake and must not look like a
