@@ -7929,6 +7929,50 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     }
 }
 
+/// Group a kanban board's cards into one column per declared lane, in declaration order.
+///
+/// Returns `None` for anything that is not a kanban board with lanes, so journey — which shares
+/// this layout but ranks by edges — is untouched, and a kanban with no columns at all falls back
+/// rather than producing a single degenerate column.
+///
+/// Order WITHIN a lane is declaration order (`node_index`), not `compare_node_indices`' id sort: a
+/// board lists its cards in the order they should be read, and an id sort puts "Task 10" above
+/// "Task 2".
+fn kanban_lane_columns(ir: &MermaidDiagramIr) -> Option<Vec<Vec<usize>>> {
+    if ir.diagram_type != DiagramType::Kanban || ir.clusters.is_empty() {
+        return None;
+    }
+
+    // First lane that claims a card wins, so a card in two clusters cannot appear in two columns.
+    let mut lane_of_node = vec![usize::MAX; ir.nodes.len()];
+    for (lane, cluster) in ir.clusters.iter().enumerate() {
+        for member in &cluster.members {
+            if let Some(slot) = lane_of_node.get_mut(member.0)
+                && *slot == usize::MAX
+            {
+                *slot = lane;
+            }
+        }
+    }
+
+    // A card belonging to no lane still has to be drawn; it goes in a trailing column of its own
+    // rather than being silently folded into lane 0.
+    let mut columns: Vec<Vec<usize>> = vec![Vec::new(); ir.clusters.len()];
+    let mut orphans: Vec<usize> = Vec::new();
+    for (node_index, lane) in lane_of_node.iter().copied().enumerate() {
+        if lane == usize::MAX {
+            orphans.push(node_index);
+        } else {
+            columns[lane].push(node_index);
+        }
+    }
+    if !orphans.is_empty() {
+        columns.push(orphans);
+    }
+
+    columns.iter().any(|c| !c.is_empty()).then_some(columns)
+}
+
 fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     let node_count = ir.nodes.len();
     let mut node_sizes = compute_node_sizes(ir, &fm_core::FontMetrics::default_metrics());
@@ -7947,21 +7991,30 @@ fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         size.1 = size.1.max(42.0);
     }
 
-    let ranks = layered_ranks(ir);
-    // Dense rank index: kanban/journey assign ~a distinct rank per row, so ranks run 0..max densely.
-    // A `Vec<Vec>` indexed by rank iterates in the SAME sorted-rank order as the old `BTreeMap<usize,
-    // Vec>` (index order == key order) while dropping the per-node O(log) B-tree insert + node allocs
-    // and the tree-walk iterations below (`nodes_by_rank` insert + keys-scan was ~13% of journey layout).
-    // Byte-identical: a gap (empty) rank produces no `rank_bounds` entry, so the band `filter_map` skips
-    // it exactly as an absent BTreeMap key did; and the centre loop's empty inner loop is a no-op there.
-    let rank_count = ranks.iter().copied().max().map_or(0, |m| m + 1);
-    let mut nodes_by_rank: Vec<Vec<usize>> = vec![Vec::new(); rank_count];
-    for (node_index, rank) in ranks.iter().copied().enumerate() {
-        nodes_by_rank[rank].push(node_index);
-    }
-    for nodes in nodes_by_rank.iter_mut() {
-        nodes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
-    }
+    // A kanban board's columns ARE its grammar — which lane a card sits in is the only thing the
+    // diagram exists to say — and the lane is declared as a cluster, never as an edge. Ranking a
+    // kanban by `layered_ranks` therefore gave EVERY card rank 0 (no edges to rank by), so all of
+    // them stacked in one column at the same x and the lanes degenerated into horizontal bands
+    // (bd-eg44). Lane membership is read from the clusters instead; journey, which shares this
+    // layout and does rank by edges, keeps the edge-derived path unchanged.
+    let nodes_by_rank = kanban_lane_columns(ir).unwrap_or_else(|| {
+        let ranks = layered_ranks(ir);
+        // Dense rank index: kanban/journey assign ~a distinct rank per row, so ranks run 0..max densely.
+        // A `Vec<Vec>` indexed by rank iterates in the SAME sorted-rank order as the old `BTreeMap<usize,
+        // Vec>` (index order == key order) while dropping the per-node O(log) B-tree insert + node allocs
+        // and the tree-walk iterations below (`nodes_by_rank` insert + keys-scan was ~13% of journey layout).
+        // Byte-identical: a gap (empty) rank produces no `rank_bounds` entry, so the band `filter_map` skips
+        // it exactly as an absent BTreeMap key did; and the centre loop's empty inner loop is a no-op there.
+        let rank_count = ranks.iter().copied().max().map_or(0, |m| m + 1);
+        let mut by_rank: Vec<Vec<usize>> = vec![Vec::new(); rank_count];
+        for (node_index, rank) in ranks.iter().copied().enumerate() {
+            by_rank[rank].push(node_index);
+        }
+        for nodes in by_rank.iter_mut() {
+            nodes.sort_by(|left, right| compare_node_indices(ir, *left, *right));
+        }
+        by_rank
+    });
 
     let spacing = LayoutSpacing::default();
     let mut rank_by_node = vec![0_usize; node_count];
