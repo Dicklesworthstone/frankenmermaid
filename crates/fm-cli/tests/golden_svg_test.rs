@@ -1199,7 +1199,6 @@ fn block_beta_span_width_is_proportional_to_declared_columns() {
 /// only thing the diagram exists to show. Same class as bd-5wbp (gitGraph branches drawn collinear).
 /// Un-ignoring this is bd-eg44's acceptance gate.
 #[test]
-#[ignore = "fails against the bd-eg44 defect: kanban lanes are horizontal bands, not columns"]
 fn kanban_cards_occupy_their_lane_column() {
     let svg = render_fixture("kanban_basic");
     let centres = node_centres(&svg);
