@@ -102,17 +102,17 @@ fn nodemap_performance_under_load() {
     }
     let lookup_time = lookup_start.elapsed();
 
-    // Performance bounds: both should complete in < 100ms on any reasonable hardware
-    assert!(
-        insert_time.as_millis() < 1000,
-        "Insert took too long: {:?}",
-        insert_time
-    );
-    assert!(
-        lookup_time.as_millis() < 1000,
-        "Lookup took too long: {:?}",
-        lookup_time
-    );
+    // NO wall-clock deadline (bd-wadw). The substance of this test is the 10,000 lookups asserted
+    // above: the map is CORRECT at a size where hashing behaviour matters. An `insert_time < 1s`
+    // bound asserts nothing about that — only about how busy the host is — and under
+    // `cargo test --workspace`, with dozens of test binaries on every core, it reds the suite.
+    //
+    // Unlike bd-u6z4's sibling fix there is no relative property to substitute: that test had two
+    // arms measured back-to-back, so contention slowed both together and the RATIO survived. This
+    // one has a single arm, and inventing a second would be writing a different test. A genuine
+    // NodeMap performance guard belongs in a bench under this repo's A/A-null discipline, where a
+    // loaded host is controlled for rather than assumed away.
+    println!("NodeMap {N} inserts: {insert_time:?}, {N} lookups: {lookup_time:?}");
 }
 
 // ============================================================================
@@ -271,18 +271,11 @@ fn graceful_degradation_under_collisions() {
     }
     let lookup_time = lookup_start.elapsed();
 
-    // Even with collisions, operations should complete in reasonable time
-    // (< 10ms for 100 items, even with linear probing)
-    assert!(
-        insert_time.as_millis() < 100,
-        "Collision insert too slow: {:?}",
-        insert_time
-    );
-    assert!(
-        lookup_time.as_millis() < 100,
-        "Collision lookup too slow: {:?}",
-        lookup_time
-    );
+    // NO wall-clock deadline (bd-wadw) — and this was the most fragile of the family, a 100ms
+    // budget. What this test proves is in the loop above: every colliding key still resolves to its
+    // own value, so degradation under collisions is graceful in the sense that matters. Whether a
+    // contended machine takes 3ms or 300ms to do it says nothing about the map.
+    println!("colliding inserts: {insert_time:?}, colliding lookups: {lookup_time:?}");
 }
 
 // ============================================================================
