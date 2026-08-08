@@ -9,6 +9,87 @@ use fm_core::IrConstraint;
 use fm_layout::{ConstraintSolverMode, LayoutConfig, layout_diagram, layout_diagram_with_config};
 use fm_parser::parse;
 
+/// Every routed point of every edge, for comparing two routing configurations.
+fn routed_points(
+    ir: &fm_core::MermaidDiagramIr,
+    routing: fm_layout::EdgeRouting,
+) -> Vec<(f32, f32)> {
+    layout_diagram_with_config(
+        ir,
+        LayoutConfig {
+            edge_routing: routing,
+            ..LayoutConfig::default()
+        },
+    )
+    .edges
+    .iter()
+    .flat_map(|edge| {
+        edge.points
+            .iter()
+            .map(|point| (point.x, point.y))
+            .collect::<Vec<_>>()
+    })
+    .collect()
+}
+
+#[test]
+fn spline_routing_actually_differs_from_orthogonal() {
+    // bd-hfaw: requesting `EdgeRouting::Spline` used to produce BYTE-IDENTICAL geometry for every
+    // input, because the router inserted segment midpoints and `simplify_polyline` then removed them
+    // as axis-aligned-collinear. A config knob that silently does nothing is worse than an absent
+    // one, so this pins that it now does something — and that the default is untouched.
+    for source in [
+        "flowchart TB\n  a-->b\n  a-->c\n  b-->d\n  c-->d",
+        "flowchart LR\n  a-->b\n  a-->c\n  b-->d\n  c-->d\n  a-->d",
+        "digraph G {\n  a -> b;\n  a -> c;\n  b -> d;\n  c -> d;\n}",
+    ] {
+        let ir = parse(source).ir;
+        let orthogonal = routed_points(&ir, fm_layout::EdgeRouting::Orthogonal);
+        let spline = routed_points(&ir, fm_layout::EdgeRouting::Spline);
+        assert_ne!(
+            orthogonal, spline,
+            "spline routing must change the geometry for {source:?}"
+        );
+
+        // A chamfer replaces one corner with two points, so a bending route gains points; and the
+        // new segment must be DIAGONAL, which is what survives simplification.
+        assert!(
+            spline.len() > orthogonal.len(),
+            "chamfering must add points for {source:?}: {} -> {}",
+            orthogonal.len(),
+            spline.len()
+        );
+        assert!(
+            spline
+                .windows(2)
+                .any(|pair| (pair[0].0 - pair[1].0).abs() > 0.01
+                    && (pair[0].1 - pair[1].1).abs() > 0.01),
+            "at least one segment must be diagonal for {source:?}"
+        );
+    }
+}
+
+#[test]
+fn the_default_routing_is_unchanged_by_the_spline_fix() {
+    // The control that matters for goldens: Orthogonal is the default and every fixture uses it, so
+    // it must be byte-identical to what the explicit request produces.
+    let ir = parse("flowchart TB\n  a-->b\n  a-->c\n  b-->d\n  c-->d").ir;
+    let default_routed = layout_diagram(&ir)
+        .edges
+        .iter()
+        .flat_map(|edge| {
+            edge.points
+                .iter()
+                .map(|point| (point.x, point.y))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        default_routed,
+        routed_points(&ir, fm_layout::EdgeRouting::Orthogonal)
+    );
+}
+
 /// `b` and `c` would land on different ranks by structure — `a -> b -> c` is a chain — so any
 /// same-rank agreement in the output has to come from the constraint.
 const CHAIN_WITH_RANK_GROUP: &str = "digraph G {\n  { rank=same; b; c; }\n  a -> b;\n  b -> c;\n}";

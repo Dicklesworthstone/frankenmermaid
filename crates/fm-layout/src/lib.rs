@@ -1682,7 +1682,9 @@ fn derive_layout_diff(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -
             || previous_graph_nodes
                 .get(node_index)
                 .map(|node| &node.subgraphs)
-                != current_graph_nodes.get(node_index).map(|node| &node.subgraphs)
+                != current_graph_nodes
+                    .get(node_index)
+                    .map(|node| &node.subgraphs)
         {
             topology_equal = false;
             true
@@ -9486,12 +9488,8 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
                 .nodes
                 .get(to_idx)
                 .map_or(fm_core::NodeShape::Rect, |node| node.shape);
-            let from_pt = clip_to_shape_border(
-                from_center,
-                to_center,
-                &nodes[from_idx].bounds,
-                from_shape,
-            );
+            let from_pt =
+                clip_to_shape_border(from_center, to_center, &nodes[from_idx].bounds, from_shape);
             let to_pt =
                 clip_to_shape_border(to_center, from_center, &nodes[to_idx].bounds, to_shape);
 
@@ -14870,10 +14868,8 @@ fn edge_anchors(
         // Slanted shapes pull away from their box between the horizontal edges, so the side
         // midpoint is not on the drawn outline. Anchoring at the box there leaves the arrowhead
         // floating beside the node — a triangle is a quarter of its own width adrift.
-        let source_inset =
-            source_box.bounds.width * source_shape.horizontal_outline_inset_ratio();
-        let target_inset =
-            target_box.bounds.width * target_shape.horizontal_outline_inset_ratio();
+        let source_inset = source_box.bounds.width * source_shape.horizontal_outline_inset_ratio();
+        let target_inset = target_box.bounds.width * target_shape.horizontal_outline_inset_ratio();
 
         let (source_x, target_x) = if target_center.x >= source_center.x {
             (
@@ -15133,21 +15129,68 @@ fn route_edge_points_spline_with_obstacle_index(
         return orthogonal;
     }
 
-    let mut spline_points: EdgePoints = SmallVec::with_capacity(orthogonal.len() + 1);
-    spline_points.push(source);
-    for window in orthogonal.windows(2) {
-        let start = window[0];
-        let end = window[1];
-        if start != source {
-            spline_points.push(start);
+    // Replace each right-angle corner with a short diagonal across it — a chamfer.
+    //
+    // The previous implementation inserted the MIDPOINT of every orthogonal segment and then called
+    // `simplify_polyline`, which drops axis-aligned-collinear middles. A midpoint of an axis-aligned
+    // segment is collinear with its neighbours by definition, so every inserted point was removed
+    // again and this function returned its input unchanged — for EVERY input, not just some. That is
+    // why requesting `EdgeRouting::Spline` produced byte-identical geometry (bd-hfaw).
+    //
+    // A chamfer survives because its two points sit on DIFFERENT axes, so the segment between them is
+    // diagonal and nothing collinear can be simplified away. It is also visible with the renderer as
+    // it stands, which emits straight `L` commands only: a true cubic Bezier would need curve
+    // commands in the SVG writer and control points the IR has no room for, so this is the honest
+    // reachable approximation rather than a pretend Bezier.
+    let mut chamfered: EdgePoints = SmallVec::with_capacity(orthogonal.len() * 2);
+    chamfered.push(source);
+    for corner_index in 1..orthogonal.len() - 1 {
+        let before = orthogonal[corner_index - 1];
+        let corner = orthogonal[corner_index];
+        let after = orthogonal[corner_index + 1];
+
+        // A quarter of the shorter adjacent segment, so a chamfer can never overshoot into the next
+        // corner and invert the path on a short leg.
+        let incoming = (corner.x - before.x).abs().max((corner.y - before.y).abs());
+        let outgoing = (after.x - corner.x).abs().max((after.y - corner.y).abs());
+        let cut = (incoming.min(outgoing) * 0.25).max(0.0);
+        if cut <= f32::EPSILON {
+            chamfered.push(corner);
+            continue;
         }
-        spline_points.push(LayoutPoint {
-            x: f32::midpoint(start.x, end.x),
-            y: f32::midpoint(start.y, end.y),
+
+        // Step back along the incoming leg and forward along the outgoing one. Each leg is
+        // axis-aligned, so exactly one coordinate moves per point — which is what makes the segment
+        // between the two points diagonal, and therefore un-simplifiable.
+        let step_back = |from: f32, to: f32| {
+            if (to - from).abs() <= f32::EPSILON {
+                to
+            } else if to > from {
+                to - cut
+            } else {
+                to + cut
+            }
+        };
+        let step_forward = |from: f32, to: f32| {
+            if (to - from).abs() <= f32::EPSILON {
+                from
+            } else if to > from {
+                from + cut
+            } else {
+                from - cut
+            }
+        };
+        chamfered.push(LayoutPoint {
+            x: step_back(before.x, corner.x),
+            y: step_back(before.y, corner.y),
+        });
+        chamfered.push(LayoutPoint {
+            x: step_forward(corner.x, after.x),
+            y: step_forward(corner.y, after.y),
         });
     }
-    spline_points.push(target);
-    simplify_polyline(spline_points)
+    chamfered.push(target);
+    simplify_polyline(chamfered)
 }
 
 /// Check if a vertical segment at x-coordinate `mid_x` intersects any obstacle.
@@ -16671,7 +16714,10 @@ mod tests {
             fm_core::NodeShape::Triangle,
             fm_core::NodeShape::Triangle,
         );
-        assert!((from.y - 60.0).abs() < 1e-3 && (to.y - 0.0).abs() < 1e-3, "got {from:?} -> {to:?}");
+        assert!(
+            (from.y - 60.0).abs() < 1e-3 && (to.y - 0.0).abs() < 1e-3,
+            "got {from:?} -> {to:?}"
+        );
     }
 
     #[test]
@@ -16697,8 +16743,7 @@ mod tests {
 
         let half_w = bounds.width / 2.0;
         let half_h = bounds.height / 2.0;
-        let normalised =
-            ((endpoint.x - centre.x) / half_w).hypot((endpoint.y - centre.y) / half_h);
+        let normalised = ((endpoint.x - centre.x) / half_w).hypot((endpoint.y - centre.y) / half_h);
         assert!(
             (normalised - 1.0).abs() < 1e-3,
             "edge endpoint {endpoint:?} sits at {normalised:.4}x the inscribed radius; 1.0 is the \
