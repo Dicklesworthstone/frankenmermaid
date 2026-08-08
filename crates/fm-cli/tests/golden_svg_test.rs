@@ -2375,7 +2375,6 @@ fn rendered_text_width(text: &str, font_size: f32) -> f32 {
 /// padding demanded — so it cannot be satisfied by re-blessing and cannot fire on a near-miss.
 /// Un-ignoring it is bd-jnc1's acceptance gate.
 #[test]
-#[ignore = "specifies bd-jnc1: requirement node boxes are sized from the label alone, so the type header and metadata row overflow"]
 fn requirement_rows_stay_inside_their_node_box() {
     let svg = render_fixture("requirement_basic");
     let boxes = node_boxes_by_declared_id(&svg);

@@ -9643,13 +9643,89 @@ fn compute_node_size(
             // description's first baseline into the box but the `<tspan>` stack then descends from
             // there, so clamping the anchor does not bound the block — a 16-line description drew
             // 220px below its own rectangle (bd-9xjy).
-            match c4_description_height(node, metrics, width) {
+            let (width, height) = match c4_description_height(node, metrics, width) {
                 Some(description_height) => (width, height.max(description_height)),
+                None => (width, height),
+            };
+            // A requirement node's box must hold the two rows the renderer draws BESIDE the name:
+            // the `«type»` header and the `Risk: … | Verify: …` row. Nothing sized for them at all,
+            // so whether a row escaped depended on how long the declared `risk:`/`verifymethod:`
+            // strings happened to be — golden/requirement_basic's LoginReq measured 163.37 in a
+            // 133.05-wide box, spilling 15.16 past each side (bd-jnc1).
+            match requirement_row_dimensions(node, metrics) {
+                Some((rows_width, rows_height)) => (width.max(rows_width), height.max(rows_height)),
                 None => (width, height),
             }
         }
     }
 }
+
+/// Size a requirement node's box needs so the rows drawn beside its name stay inside it.
+///
+/// `None` when the node is not a requirement node, or when it declares neither a type nor any
+/// risk/verify metadata — then only the name is drawn and the base sizing already covers it.
+///
+/// Mirrors `fm-render-svg`'s `write_requirement_node_fragment_into`: an optional `«{type}»` row and
+/// an optional `Risk: …[ | Verify: …]` row (or `Verify: …` alone), both centred on `cx` at
+/// `font_size * 0.75`, with the name row between them at full size. Rows advance `font_size * 0.85`
+/// from a first baseline at `y + h * 0.25 + font_size * 0.35`.
+///
+/// Measured at the LAYOUT metrics' font size, which is the full node font; the renderer draws these
+/// rows at its own (smaller) detail-tier size, so this over-estimates rather than under-estimates.
+/// Over-sizing renders as padding; under-sizing is the defect.
+fn requirement_row_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> Option<(f32, f32)> {
+    let meta = node.requirement_meta.as_deref()?;
+
+    let font_size = metrics.font_size();
+    let subtitle_font = (font_size * 0.75).max(REQUIREMENT_FONT_FLOOR);
+    // `estimate_width` measures at `font_size`; these rows are drawn smaller, and width scales with
+    // the em size.
+    let subtitle_scale = subtitle_font / font_size.max(f32::EPSILON);
+    let mut widest = 0.0_f32;
+    let mut rows = 1_usize; // the name row, always drawn
+
+    if let Some(req_type) = meta.requirement_type.as_deref() {
+        // The renderer wraps the type in guillemets, which are two more glyphs to hold.
+        let mut row = String::with_capacity(req_type.len() + 2);
+        row.push('\u{00ab}');
+        row.push_str(req_type);
+        row.push('\u{00bb}');
+        widest = widest.max(metrics.estimate_width(&row) * subtitle_scale);
+        rows += 1;
+    }
+
+    let metadata_row = match (meta.risk.as_deref(), meta.verify_method.as_deref()) {
+        (Some(risk), Some(verify)) => Some(format!("Risk: {risk} | Verify: {verify}")),
+        (Some(risk), None) => Some(format!("Risk: {risk}")),
+        (None, Some(verify)) => Some(format!("Verify: {verify}")),
+        (None, None) => None,
+    };
+    if let Some(row) = metadata_row.as_deref() {
+        widest = widest.max(metrics.estimate_width(row) * subtitle_scale);
+        rows += 1;
+    }
+
+    if rows == 1 {
+        return None;
+    }
+
+    // Rows are centred on the box's centre, so the box needs the widest row plus a margin on each
+    // side. `REQUIREMENT_ROW_MARGIN` is the total of both sides.
+    let width = widest + REQUIREMENT_ROW_MARGIN;
+    // Vertical: the last row's baseline sits `0.25h + 0.35font + (rows - 1) * 0.85font` below the
+    // box top and needs its descender inside too. Solving `0.75h >= (0.35 + 0.85(rows-1) + 0.3)font`
+    // for `h` gives the floor below.
+    let height = ((rows - 1) as f32).mul_add(0.85, 0.65) * font_size / 0.75;
+    Some((width, height))
+}
+
+/// Smallest font the requirement subtitle rows are measured at, mirroring the renderer's
+/// `config.min_font_size` clamp on `font_size * 0.75`.
+const REQUIREMENT_FONT_FLOOR: f32 = 8.0;
+
+/// Horizontal breathing room a requirement box adds around its widest subtitle row, split evenly
+/// between the two sides.
+const REQUIREMENT_ROW_MARGIN: f32 = 24.0;
 
 /// Height a C4 node needs so its wrapped description stays inside the box. `None` when the node has
 /// no C4 description, or when the description fits on one line — the single-line case is already
@@ -9957,6 +10033,17 @@ fn node_size_cache_key(
     // coupling `class_meta` and `node.members` above have, for the same reason.
     if let Some(meta) = node.c4_meta.as_deref() {
         hash_str(&mut hash, meta.description.as_deref().unwrap_or_default());
+    }
+    // The requirement type / risk / verifymethod strings feed `compute_node_size` through
+    // `requirement_row_dimensions`, so lengthening a `verifymethod:` without touching the node's
+    // label must not serve the pre-edit size and put the row back outside the box (bd-jnc1).
+    if let Some(meta) = node.requirement_meta.as_deref() {
+        hash_str(
+            &mut hash,
+            meta.requirement_type.as_deref().unwrap_or_default(),
+        );
+        hash_str(&mut hash, meta.risk.as_deref().unwrap_or_default());
+        hash_str(&mut hash, meta.verify_method.as_deref().unwrap_or_default());
     }
     hash
 }
@@ -16165,8 +16252,8 @@ mod tests {
         layout_diagram_traced_with_algorithm, layout_diagram_traced_with_algorithm_and_guardrails,
         layout_diagram_traced_with_config_and_guardrails, layout_diagram_tree,
         layout_diagram_with_config, layout_diagram_with_cycle_strategy, layout_diagram_xychart,
-        layout_source_map, route_edge_points, route_edge_points_with_obstacles,
-        try_relayout_directed_path_suffix,
+        layout_source_map, node_size_cache_key, requirement_row_dimensions, route_edge_points,
+        route_edge_points_with_obstacles, try_relayout_directed_path_suffix,
     };
     use fm_core::{
         ArrowType, DiagramType, GanttDate, GanttExclude, GraphDirection, IrCluster, IrClusterId,
@@ -24585,6 +24672,116 @@ mod tests {
             "an entity with no attributes must size exactly like the same node without members"
         );
         assert!(er_compartment_dimensions(&bare.nodes[0], &metrics).is_none());
+    }
+
+    fn requirement_ir(
+        requirement_type: Option<&str>,
+        risk: Option<&str>,
+        verify: Option<&str>,
+    ) -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Requirement);
+        ir.nodes.push(IrNode {
+            id: "LoginReq".to_string(),
+            shape: NodeShape::Rect,
+            requirement_meta: Some(Box::new(fm_core::IrRequirementNodeMeta {
+                requirement_type: requirement_type.map(str::to_string),
+                risk: risk.map(str::to_string),
+                verify_method: verify.map(str::to_string),
+                ..fm_core::IrRequirementNodeMeta::default()
+            })),
+            ..IrNode::default()
+        });
+        ir
+    }
+
+    /// A requirement box must hold the two rows drawn BESIDE its name — the `«type»` header and the
+    /// `Risk: … | Verify: …` row (bd-jnc1).
+    ///
+    /// Asserted as a property over growing metadata rather than as pinned numbers, because the whole
+    /// defect was that the box did not depend on these strings at all: nothing sized for them, so
+    /// whether a row escaped was decided by how long the author's `verifymethod:` happened to be.
+    /// A box that ignores them fails here at the first string that outgrows the label.
+    #[test]
+    fn requirement_box_holds_its_type_and_metadata_rows() {
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let subtitle_scale = 0.75_f32;
+
+        let mut previous_width = 0.0_f32;
+        for extra in 0_usize..=20 {
+            let verify = format!("Demonstration{}", "s".repeat(extra));
+            let ir = requirement_ir(Some("functionalRequirement"), Some("Medium"), Some(&verify));
+            let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics);
+
+            let row = format!("Risk: Medium | Verify: {verify}");
+            let row_width = metrics.estimate_width(&row) * subtitle_scale;
+            assert!(
+                width >= row_width,
+                "verify={verify:?}: box width {width} is narrower than its own metadata row \
+                 {row_width}, so the row renders outside the box"
+            );
+            assert!(
+                width >= previous_width,
+                "box width must not shrink as the metadata row grows ({verify:?})"
+            );
+            previous_width = width;
+        }
+
+        // The `«type»` header is measured too, guillemets included.
+        let long_type = "aVeryLongRequirementTypeNameIndeedForThisNode";
+        let ir = requirement_ir(Some(long_type), None, None);
+        let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics);
+        let header_width =
+            metrics.estimate_width(&format!("\u{00ab}{long_type}\u{00bb}")) * subtitle_scale;
+        assert!(
+            width >= header_width,
+            "box width {width} is narrower than its type header {header_width}"
+        );
+
+        // NEGATIVE CASE: a requirement node with neither a type nor any metadata draws only its
+        // name, so it must size exactly like the same plain node — this pass must not widen boxes
+        // that have nothing extra to hold.
+        let bare = requirement_ir(None, None, None);
+        let mut plain = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        plain.nodes.push(IrNode {
+            id: "LoginReq".to_string(),
+            shape: NodeShape::Rect,
+            ..IrNode::default()
+        });
+        assert_eq!(
+            compute_node_size(&bare, &bare.nodes[0], &metrics),
+            compute_node_size(&plain, &plain.nodes[0], &metrics),
+            "a requirement with no type and no metadata must size like the same plain node"
+        );
+        assert!(requirement_row_dimensions(&bare.nodes[0], &metrics).is_none());
+    }
+
+    /// Editing a requirement's metadata must invalidate the cached node size (bd-jnc1).
+    ///
+    /// The same coupling `class_meta`, `node.members` and `c4_meta` already have: sizing reads these
+    /// strings, so the cache key must hash them or an edit that leaves the label alone serves the
+    /// pre-edit size and puts the row straight back outside the box.
+    #[test]
+    fn requirement_metadata_changes_the_node_size_cache_key() {
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let base = requirement_ir(Some("functionalRequirement"), Some("Medium"), Some("Test"));
+        let base_key = node_size_cache_key(&base, &base.nodes[0], &metrics);
+
+        for changed in [
+            requirement_ir(Some("performanceRequirement"), Some("Medium"), Some("Test")),
+            requirement_ir(Some("functionalRequirement"), Some("High"), Some("Test")),
+            requirement_ir(
+                Some("functionalRequirement"),
+                Some("Medium"),
+                Some("Demonstration"),
+            ),
+        ] {
+            assert_ne!(
+                base_key,
+                node_size_cache_key(&changed, &changed.nodes[0], &metrics),
+                "editing requirement metadata left the size cache key unchanged: {:?}",
+                changed.nodes[0].requirement_meta
+            );
+        }
     }
 
     /// One ER entity named `CUSTOMER` carrying `count` attributes.
