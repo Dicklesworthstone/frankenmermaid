@@ -1,6 +1,6 @@
 use std::{borrow::Cow, iter::Peekable, str::CharIndices};
 
-use fm_core::{ArrowType, DiagramType, NodeShape, Span};
+use fm_core::{ArrowType, DiagramType, IrConstraint, NodeShape, Span};
 use memchr::memchr2;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -58,6 +58,11 @@ pub fn parse_dot(input: &str) -> ParseResult {
     };
     let mut active_clusters: Vec<usize> = Vec::new();
     let mut active_subgraphs: Vec<usize> = Vec::new();
+    // One record per open `{`, so a `}` pops exactly what its own brace opened. An anonymous group
+    // (`{ a; b; }`, and the `{ rank=same; … }` idiom) opens no cluster and no subgraph; before this
+    // stack existed, its closing brace popped the ENCLOSING cluster, and every node after it
+    // silently fell outside the cluster it was written inside.
+    let mut brace_scopes: Vec<DotBraceScope> = Vec::new();
 
     for (index, line) in normalized_body.lines().enumerate() {
         let line_number = index + 1;
@@ -69,15 +74,72 @@ pub fn parse_dot(input: &str) -> ParseResult {
         for statement in split_dot_by(trimmed, ";") {
             let close_count = statement.chars().take_while(|ch| *ch == '}').count();
             for _ in 0..close_count {
-                let _ = active_clusters.pop();
-                let _ = active_subgraphs.pop();
+                close_dot_brace_scope(
+                    &mut brace_scopes,
+                    &mut active_clusters,
+                    &mut active_subgraphs,
+                    line_number,
+                    line,
+                    &mut builder,
+                );
             }
             let statement = statement.trim_start_matches('}').trim();
             if statement.is_empty() {
                 continue;
             }
             if statement == "{" {
+                brace_scopes.push(DotBraceScope::default());
                 continue;
+            }
+            // An anonymous group that opens on the same line as its first statement, e.g.
+            // `{ rank=same` after the `;` split. The brace opens a scope that pushes nothing.
+            let statement = if let Some(rest) = statement.strip_prefix('{') {
+                brace_scopes.push(DotBraceScope::default());
+                rest.trim()
+            } else {
+                statement
+            };
+            if statement.is_empty() {
+                continue;
+            }
+
+            // `rank=same` marks the innermost group as a same-rank set. DOT expresses it as a graph
+            // attribute inside the group, so it applies to the group, not to one node.
+            if let Some(rank_value) = parse_dot_rank_attribute(statement) {
+                match rank_value {
+                    DotRankValue::Same => {
+                        if let Some(scope) = brace_scopes.last_mut() {
+                            scope.same_rank = Some(Vec::new());
+                        } else {
+                            builder.add_warning(format!(
+                                "Line {line_number}: rank=same outside a group has no effect; \
+                                 wrap the nodes in braces, as in {{ rank=same; a; b; }}"
+                            ));
+                        }
+                    }
+                    DotRankValue::Unsupported(name) => {
+                        builder.add_warning(format!(
+                            "Line {line_number}: DOT rank={name} is not supported and was ignored; \
+                             only rank=same constrains layout"
+                        ));
+                    }
+                }
+                continue;
+            }
+
+            // Record the group's node references before dispatching, so the same-rank constraint
+            // names them. Node references are the form real `rank=same` groups use; an edge written
+            // inside the group still becomes an edge, but its endpoints are not collected.
+            if brace_scopes.iter().any(|scope| scope.same_rank.is_some())
+                && let Some(node) = parse_dot_node_fragment(statement)
+            {
+                for scope in &mut brace_scopes {
+                    if let Some(members) = scope.same_rank.as_mut()
+                        && !members.contains(&node.id)
+                    {
+                        members.push(node.id.clone());
+                    }
+                }
             }
 
             if let Some((cluster_key, cluster_title, opens_scope)) =
@@ -87,6 +149,7 @@ pub fn parse_dot(input: &str) -> ParseResult {
                 // For anonymous ones, the key already includes the line number.
                 let lookup_key = cluster_key.clone();
 
+                let mut scope = DotBraceScope::default();
                 if let Some(cluster_index) = builder.ensure_cluster(
                     &lookup_key,
                     cluster_title.as_deref(),
@@ -103,10 +166,18 @@ pub fn parse_dot(input: &str) -> ParseResult {
                     );
                     if opens_scope {
                         active_clusters.push(cluster_index);
+                        scope.pushed_cluster = true;
                         if let Some(subgraph_index) = subgraph_index {
                             active_subgraphs.push(subgraph_index);
+                            scope.pushed_subgraph = true;
                         }
                     }
+                }
+                // Record the scope whenever the brace opened, even if the cluster could not be
+                // created: the `}` is coming either way, and a missing record would make it unwind
+                // an enclosing scope instead.
+                if opens_scope {
+                    brace_scopes.push(scope);
                 }
                 continue;
             }
@@ -160,6 +231,77 @@ pub fn parse_dot(input: &str) -> ParseResult {
     }
 
     builder.finish(0.95, DetectionMethod::DotFormat)
+}
+
+/// What one `{` opened, so its matching `}` pops exactly that and nothing else.
+#[derive(Debug, Default)]
+struct DotBraceScope {
+    pushed_cluster: bool,
+    pushed_subgraph: bool,
+    /// `Some` once `rank=same` is seen in this group; accumulates the node ids it names.
+    same_rank: Option<Vec<String>>,
+}
+
+/// The `rank` graph attribute, split into what this engine can honor and what it cannot.
+#[derive(Debug, PartialEq, Eq)]
+enum DotRankValue {
+    /// `rank=same` — becomes an [`IrConstraint::SameRank`].
+    Same,
+    /// `rank=min|max|source|sink` — ordering semantics the IR has no constraint for.
+    Unsupported(String),
+}
+
+/// Recognize a bare `rank=<value>` statement, the form DOT uses inside a group.
+///
+/// Accepts surrounding whitespace, either quote style, and any capitalization, because all of those
+/// appear in real `.dot` files. `graph [rank=same]` is NOT matched here: attribute-list statements
+/// are skipped wholesale by the caller, and treating one as a group marker would need the whole
+/// attribute parser.
+fn parse_dot_rank_attribute(statement: &str) -> Option<DotRankValue> {
+    let (key, value) = statement.split_once('=')?;
+    if !key.trim().eq_ignore_ascii_case("rank") {
+        return None;
+    }
+    let value = value.trim().trim_matches(['"', '\'']).trim();
+    if value.eq_ignore_ascii_case("same") {
+        Some(DotRankValue::Same)
+    } else if value.is_empty() {
+        None
+    } else {
+        Some(DotRankValue::Unsupported(value.to_ascii_lowercase()))
+    }
+}
+
+/// Close the innermost brace scope: unwind only what it opened, and emit its same-rank constraint.
+fn close_dot_brace_scope(
+    brace_scopes: &mut Vec<DotBraceScope>,
+    active_clusters: &mut Vec<usize>,
+    active_subgraphs: &mut Vec<usize>,
+    line_number: usize,
+    source_line: &str,
+    builder: &mut IrBuilder,
+) {
+    // A `}` with no recorded scope is unbalanced input, not a reason to unwind a scope some other
+    // brace owns — silently popping here is exactly the bug this stack replaced.
+    let Some(scope) = brace_scopes.pop() else {
+        return;
+    };
+    if scope.pushed_cluster {
+        let _ = active_clusters.pop();
+    }
+    if scope.pushed_subgraph {
+        let _ = active_subgraphs.pop();
+    }
+    if let Some(node_ids) = scope.same_rank {
+        // One node is already on its own rank, so a single-member group constrains nothing and
+        // would only inflate the solver's applied-constraint count.
+        if node_ids.len() >= 2 {
+            builder.add_constraint(IrConstraint::SameRank {
+                node_ids,
+                span: span_for(line_number, source_line),
+            });
+        }
+    }
 }
 
 fn strip_all_comments_cow(input: &str) -> Cow<'_, str> {
@@ -1402,6 +1544,166 @@ mod tests {
             Some(fm_core::IrClusterId(0))
         );
         assert_eq!(parsed.ir.graph.subgraphs[0].members.len(), 2);
+    }
+
+    #[test]
+    fn anonymous_brace_group_inside_a_cluster_does_not_close_it_early() {
+        // `{ ... }` is a valid anonymous DOT group and does not open a cluster, so its closing
+        // brace must not pop one. Before the scope stack tracked braces explicitly, this `}` popped
+        // `cluster_0`, and every node after it silently fell outside the cluster.
+        let parsed = parse_dot("digraph G { subgraph cluster_0 { a; { b; } c; } a -> c; }");
+
+        assert_eq!(parsed.ir.clusters.len(), 1, "{:?}", parsed.ir.clusters);
+        let members: Vec<&str> = parsed.ir.clusters[0]
+            .members
+            .iter()
+            .map(|member| parsed.ir.nodes[member.0].id.as_str())
+            .collect();
+        assert_eq!(
+            members,
+            ["a", "b", "c"],
+            "every node inside cluster_0 must stay in it, including after the nested group"
+        );
+    }
+
+    #[test]
+    fn rank_same_group_becomes_a_same_rank_constraint() {
+        let parsed = parse_dot("digraph G { { rank=same; b; c; } a -> b; a -> c; }");
+
+        assert_eq!(
+            parsed.ir.constraints.len(),
+            1,
+            "{:?}",
+            parsed.ir.constraints
+        );
+        match &parsed.ir.constraints[0] {
+            fm_core::IrConstraint::SameRank { node_ids, .. } => {
+                assert_eq!(node_ids, &["b".to_string(), "c".to_string()]);
+            }
+            other => panic!("expected SameRank, got {other:?}"),
+        }
+        // The group's members are still ordinary nodes, not swallowed by the constraint.
+        let ids: Vec<&str> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert!(ids.contains(&"b") && ids.contains(&"c"), "{ids:?}");
+    }
+
+    #[test]
+    fn rank_same_accepts_spacing_quotes_and_capitalization() {
+        for source in [
+            "digraph G { { rank=same; b; c; } }",
+            "digraph G { { rank = same; b; c; } }",
+            "digraph G { { RANK=SAME; b; c; } }",
+            "digraph G { { rank=\"same\"; b; c; } }",
+        ] {
+            let parsed = parse_dot(source);
+            assert_eq!(
+                parsed.ir.constraints.len(),
+                1,
+                "{source} produced {:?}",
+                parsed.ir.constraints
+            );
+        }
+    }
+
+    #[test]
+    fn rank_same_with_one_member_constrains_nothing() {
+        // A single node is already alone on its rank, so emitting a constraint would only inflate
+        // the solver's applied count.
+        let parsed = parse_dot("digraph G { { rank=same; b; } a -> b; }");
+        assert!(
+            parsed.ir.constraints.is_empty(),
+            "{:?}",
+            parsed.ir.constraints
+        );
+    }
+
+    #[test]
+    fn two_rank_same_groups_are_kept_separate() {
+        let parsed =
+            parse_dot("digraph G { { rank=same; a; b; } { rank=same; c; d; } a -> c; b -> d; }");
+        assert_eq!(
+            parsed.ir.constraints.len(),
+            2,
+            "{:?}",
+            parsed.ir.constraints
+        );
+    }
+
+    #[test]
+    fn repeating_the_same_rank_group_does_not_duplicate_the_constraint() {
+        let parsed = parse_dot("digraph G { { rank=same; a; b; } { rank=same; a; b; } a -> b; }");
+        assert_eq!(
+            parsed.ir.constraints.len(),
+            1,
+            "{:?}",
+            parsed.ir.constraints
+        );
+    }
+
+    #[test]
+    fn unsupported_rank_values_warn_instead_of_constraining() {
+        for value in ["min", "max", "source", "sink"] {
+            let parsed = parse_dot(&format!(
+                "digraph G {{ {{ rank={value}; a; b; }} a -> b; }}"
+            ));
+            assert!(
+                parsed.ir.constraints.is_empty(),
+                "rank={value} must not produce a constraint: {:?}",
+                parsed.ir.constraints
+            );
+            assert!(
+                parsed
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains(value) && warning.contains("not supported")),
+                "rank={value} must warn: {:?}",
+                parsed.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn rank_same_inside_a_cluster_keeps_both_the_cluster_and_the_constraint() {
+        // The two mechanisms share the brace stack, so this is the case where a bug in one shows up
+        // as a silent failure of the other.
+        let parsed =
+            parse_dot("digraph G { subgraph cluster_0 { a; { rank=same; b; c; } d; } a -> d; }");
+
+        assert_eq!(
+            parsed.ir.constraints.len(),
+            1,
+            "{:?}",
+            parsed.ir.constraints
+        );
+        let members: Vec<&str> = parsed.ir.clusters[0]
+            .members
+            .iter()
+            .map(|member| parsed.ir.nodes[member.0].id.as_str())
+            .collect();
+        assert_eq!(
+            members,
+            ["a", "b", "c", "d"],
+            "the nested rank group must not close the cluster"
+        );
+    }
+
+    #[test]
+    fn rank_same_outside_any_group_warns_rather_than_silently_doing_nothing() {
+        let parsed = parse_dot("digraph G { rank=same; a -> b; }");
+        assert!(parsed.ir.constraints.is_empty());
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("rank=same")),
+            "{:?}",
+            parsed.warnings
+        );
     }
 
     #[test]

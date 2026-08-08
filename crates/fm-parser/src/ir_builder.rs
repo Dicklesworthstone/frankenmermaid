@@ -6,6 +6,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use fm_core::{
     ArrowType, ClassMemberKind, ClassStereotype, Diagnostic, DiagnosticCategory, DiagramType,
     FragmentAlternative, FragmentKind, GraphDirection, IrActivation, IrAttributeKey, IrC4NodeMeta,
+    IrConstraint,
     IrClassMember, IrClassNodeMeta, IrCluster, IrClusterId, IrEdge, IrEdgeKind, IrEndpoint,
     IrEntityAttribute, IrGanttMeta, IrGraphCluster, IrGraphEdge, IrGraphNode, IrLabel, IrLabelId,
     IrLabelSegment, IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup,
@@ -1147,6 +1148,17 @@ impl IrBuilder {
 
     pub(crate) fn add_warning(&mut self, warning: impl Into<String>) {
         self.warnings.push(warning.into());
+    }
+
+    /// Record a layout constraint for the constraint solver in `fm-layout`.
+    ///
+    /// Duplicates are dropped: DOT lets the same `{ rank=same; … }` group be written twice, and the
+    /// solver counts applied constraints, so a repeat would inflate that count without changing the
+    /// solution.
+    pub(crate) fn add_constraint(&mut self, constraint: IrConstraint) {
+        if !self.ir.constraints.contains(&constraint) {
+            self.ir.constraints.push(constraint);
+        }
     }
 
     /// Add a rich diagnostic to the IR.
