@@ -2711,18 +2711,12 @@ mod geometry_tests {
             // edge: `point.x - start.x` overflows to +inf while dx is exactly 0.0, so the
             // numerator forms inf * 0.0 = NaN.
             (
-                CgaLineSegment::new(
-                    CgaPoint::new(-f64::MAX, 0.0),
-                    CgaPoint::new(-f64::MAX, 1.0),
-                ),
+                CgaLineSegment::new(CgaPoint::new(-f64::MAX, 0.0), CgaPoint::new(-f64::MAX, 1.0)),
                 CgaPoint::new(f64::MAX, 0.5),
             ),
             // Same shape with the axes swapped: dy is 0.0 and the y difference overflows.
             (
-                CgaLineSegment::new(
-                    CgaPoint::new(0.0, -f64::MAX),
-                    CgaPoint::new(1.0, -f64::MAX),
-                ),
+                CgaLineSegment::new(CgaPoint::new(0.0, -f64::MAX), CgaPoint::new(1.0, -f64::MAX)),
                 CgaPoint::new(0.5, f64::MAX),
             ),
             // Segment whose squared length overflows even though every endpoint is finite.

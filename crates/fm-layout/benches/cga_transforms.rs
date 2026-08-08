@@ -44,7 +44,11 @@ fn steps(count: usize) -> Vec<(f64, f64, f64)> {
     (0..count)
         .map(|index| {
             let n = index as f64;
-            (n.mul_add(0.37, 1.0), n.mul_add(0.11, 0.5), n.mul_add(0.02, 1.01))
+            (
+                n.mul_add(0.37, 1.0),
+                n.mul_add(0.11, 0.5),
+                n.mul_add(0.02, 1.01),
+            )
         })
         .collect()
 }

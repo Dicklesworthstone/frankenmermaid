@@ -371,7 +371,9 @@ fn pie_basic_slice_angles_are_proportional_to_values() {
             continue;
         };
         let rest = &segment[d_start + 4..];
-        let Some(d_end) = rest.find('"') else { continue };
+        let Some(d_end) = rest.find('"') else {
+            continue;
+        };
         let d = &rest[..d_end];
         if !d.contains(" A ") {
             continue;
@@ -445,7 +447,10 @@ fn sankey_basic_flow_widths_are_proportional_to_values() {
     // the assertion is anchored to the input rather than to whatever the golden happens to hold.
     let declared: Vec<f64> = input
         .lines()
-        .filter_map(|line| line.rsplit_once(',').and_then(|(_, v)| v.trim().parse().ok()))
+        .filter_map(|line| {
+            line.rsplit_once(',')
+                .and_then(|(_, v)| v.trim().parse().ok())
+        })
         .collect();
     assert_eq!(declared.len(), 8, "fixture declares eight flows");
 
@@ -518,7 +523,9 @@ fn xychart_bar_heights_are_proportional_and_axis_anchored() {
     let mut bars: Vec<(f64, f64, f64)> = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
     for segment in rendered.split("<rect").skip(1) {
-        let Some(end) = segment.find('>') else { continue };
+        let Some(end) = segment.find('>') else {
+            continue;
+        };
         let tag = &segment[..end];
         if !tag.contains("fm-xychart-bar") || seen.contains(&tag) {
             continue;
@@ -538,7 +545,8 @@ fn xychart_bar_heights_are_proportional_and_axis_anchored() {
     assert_eq!(
         bars.len(),
         declared.len(),
-        "fixture declares {} bar values", declared.len()
+        "fixture declares {} bar values",
+        declared.len()
     );
 
     // ONE scale for every bar. Deriving it from the first and checking the rest catches a

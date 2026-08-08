@@ -17,7 +17,6 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod bench_identity;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use std::hint::black_box;
 use fm_core::{
     ArrowType, DiagramType, GraphDirection, IrEdge, IrEndpoint, IrGraphEdge, IrGraphNode, IrLabel,
     IrLabelId, IrNode, IrNodeId, IrSubgraph, IrSubgraphId, MermaidDiagramIr, Span,
@@ -26,6 +25,7 @@ use fm_layout::{
     IncrementalLayoutEngine, LayoutAlgorithm, LayoutGuardrails,
     layout_diagram_traced_with_config_and_guardrails,
 };
+use std::hint::black_box;
 
 /// Build a labeled graph with two subgraphs, suitable for incremental benchmarking.
 fn bench_ir(nodes_per_subgraph: usize) -> MermaidDiagramIr {

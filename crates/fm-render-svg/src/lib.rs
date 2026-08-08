@@ -15891,7 +15891,8 @@ mod tests {
         // beat classDef colours and solid shapes as well as the gradient, which is exactly the
         // collateral this approach avoids.
         assert!(
-            !printed.contains(".fm-node rect {\n    fill:") && !printed.contains("fill: #fff !important;\n  }\n  #fm-node-gradient"),
+            !printed.contains(".fm-node rect {\n    fill:")
+                && !printed.contains("fill: #fff !important;\n  }\n  #fm-node-gradient"),
             "print block must neutralise the gradient via its stops, not by overriding node fill"
         );
     }
