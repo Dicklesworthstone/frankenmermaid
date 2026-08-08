@@ -986,6 +986,9 @@ fn fnx_results_hash(parts: &[&str]) -> String {
 struct RenderOutcome {
     rendered: Vec<u8>,
     render_result: Option<RenderResult>,
+    /// Whether the layout came from an incremental engine's memo rather than a full recompute.
+    /// Always `false` on the one-shot CLI path, which passes no engine (bd-kgi4).
+    layout_cache_hit: bool,
 }
 
 const BATCH_RENDER_CACHE_VERSION: u32 = 1;
@@ -4140,6 +4143,7 @@ fn render_source(source: &str, options: &RenderCommandOptions<'_>) -> Result<Ren
         source,
         options,
         &MermaidNativePressureSignals::sample().into_report(),
+        None,
     )
 }
 
@@ -4156,6 +4160,7 @@ fn render_source_with_pressure(
     source: &str,
     options: &RenderCommandOptions<'_>,
     pressure: &MermaidPressureReport,
+    engine: Option<&mut fm_layout::IncrementalLayoutEngine>,
 ) -> Result<RenderOutcome> {
     if source.len() > options.max_input_bytes {
         anyhow::bail!(
@@ -4184,6 +4189,7 @@ fn render_source_with_pressure(
         budget_broker,
         options,
         pressure,
+        engine,
     )
 }
 
@@ -4204,6 +4210,7 @@ fn render_parsed_source_with_pressure(
     budget_broker: MermaidBudgetLedger,
     options: &RenderCommandOptions<'_>,
     pressure: &MermaidPressureReport,
+    engine: Option<&mut fm_layout::IncrementalLayoutEngine>,
 ) -> Result<RenderOutcome> {
     let fm_parser::ParseResult { ir, warnings, .. } = parsed;
     render_parsed_ir_with_pressure(
@@ -4215,6 +4222,7 @@ fn render_parsed_source_with_pressure(
         options,
         pressure,
         None,
+        engine,
     )
 }
 
@@ -4244,6 +4252,7 @@ fn render_batch_parse_ref_with_pressure(
         options,
         pressure,
         Some((batch_renderer, certified_prefix)),
+        None,
     )
 }
 
@@ -4257,6 +4266,7 @@ fn render_parsed_ir_with_pressure(
     options: &RenderCommandOptions<'_>,
     pressure: &MermaidPressureReport,
     batch_renderer: Option<(&mut SvgBatchRenderer, Option<CertifiedSvgBatchPrefix>)>,
+    engine: Option<&mut fm_layout::IncrementalLayoutEngine>,
 ) -> Result<RenderOutcome> {
     let RenderTiming {
         parse_time,
@@ -4285,12 +4295,24 @@ fn render_parsed_ir_with_pressure(
             .layout_iteration_budget(LayoutGuardrails::default().max_layout_iterations),
         max_route_ops: budget_broker.route_budget(LayoutGuardrails::default().max_route_ops),
     };
-    let traced_layout = fm_layout::layout_diagram_traced_with_config_and_guardrails(
-        ir,
-        options.layout_algorithm,
-        layout_config,
-        layout_guardrails,
-    );
+    // A caller that renders the SAME document repeatedly — the preview server, and through it the
+    // editor extension — hands in an engine so an unchanged edit reuses its layout instead of
+    // recomputing it (bd-kgi4). The one-shot CLI path passes `None` and is unchanged.
+    let traced_layout = match engine {
+        Some(engine) => engine.layout_diagram_traced_with_config_and_guardrails(
+            ir,
+            options.layout_algorithm,
+            layout_config,
+            layout_guardrails,
+        ),
+        None => fm_layout::layout_diagram_traced_with_config_and_guardrails(
+            ir,
+            options.layout_algorithm,
+            layout_config,
+            layout_guardrails,
+        ),
+    };
+    let layout_cache_hit = traced_layout.trace.incremental.cache_hit;
     let layout = &traced_layout.layout;
     let layout_time = layout_start.elapsed();
     budget_broker.record_layout(layout_time.as_millis().min(u128::from(u64::MAX)) as u64);
@@ -4485,6 +4507,7 @@ fn render_parsed_ir_with_pressure(
     Ok(RenderOutcome {
         rendered,
         render_result,
+        layout_cache_hit,
     })
 }
 
@@ -9736,10 +9759,25 @@ fn cmd_serve(host: &str, port: u16, open: bool, options: RenderCommandOptions<'_
         let _ = open_browser(&url);
     }
 
+    // A preview server renders the SAME document over and over as its author types, which is the
+    // one workload an incremental engine exists for — and the reason this bead claims a faster
+    // refresh than the incumbent extension. The engine lives across requests so an edit that does
+    // not change the layout inputs reuses the previous layout (bd-kgi4).
+    let mut engine = fm_layout::IncrementalLayoutEngine::default();
+
+    // Pressure is sampled ONCE, not per request, and that is load-bearing rather than a
+    // micro-optimisation. The layout guardrails are derived from the pressure report, and the
+    // guardrails are part of the engine's memo KEY — so re-sampling per request would make the key
+    // drift with host load and the cache would never hit. Sampling per request would also mean the
+    // preview's layout budget silently changes under the author as the machine gets busy.
+    let pressure = MermaidNativePressureSignals::sample().into_report();
+
     for mut request in server.incoming_requests() {
         let response = match serve_route(request.url(), request.method()) {
             ServeRoute::Playground => serve_playground_html(),
-            ServeRoute::Render => handle_render_request(&mut request, &options),
+            ServeRoute::Render => {
+                handle_render_request(&mut request, &options, &pressure, &mut engine)
+            }
             ServeRoute::MethodNotAllowed => serve_method_not_allowed(),
             ServeRoute::NotFound => Response::from_string("Not Found").with_status_code(404),
         };
@@ -9875,6 +9913,8 @@ fn serve_playground_html() -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
 fn handle_render_request(
     request: &mut tiny_http::Request,
     options: &RenderCommandOptions<'_>,
+    pressure: &MermaidPressureReport,
+    engine: &mut fm_layout::IncrementalLayoutEngine,
 ) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
     use tiny_http::{Header, Response};
 
@@ -9907,15 +9947,28 @@ fn handle_render_request(
         .with_status_code(413);
     }
 
-    let svg_bytes = match render_source(&body, options) {
-        Ok(outcome) => outcome.rendered,
+    let outcome = match render_source_with_pressure(&body, options, pressure, Some(engine)) {
+        Ok(outcome) => outcome,
         Err(err) => {
             return Response::from_string(format!("Render error: {err}")).with_status_code(400);
         }
     };
+    let cache_hit = outcome.layout_cache_hit;
 
-    let mut response = Response::from_data(svg_bytes);
+    let mut response = Response::from_data(outcome.rendered);
     if let Ok(header) = Header::from_bytes(&b"Content-Type"[..], &b"image/svg+xml"[..]) {
+        response = response.with_header(header);
+    }
+    // Surfaced so a client — the editor extension this bead is about — can tell a reused layout
+    // from a recomputed one without timing it, and so the reuse is observable rather than claimed.
+    if let Ok(header) = Header::from_bytes(
+        &b"X-FrankenMermaid-Layout"[..],
+        if cache_hit {
+            &b"reused"[..]
+        } else {
+            &b"recomputed"[..]
+        },
+    ) {
         response = response.with_header(header);
     }
     response
@@ -9939,7 +9992,12 @@ fn open_browser(url: &str) -> Result<()> {
 
 #[cfg(all(test, feature = "serve"))]
 mod serve_tests {
-    use super::{ServeRoute, serve_playground_html, serve_route};
+    use super::{
+        FnxFallbackArg, FnxModeArg, FnxProjectionArg, LayoutAlgorithm, LayoutConfig,
+        MermaidNativePressureSignals, MermaidParseMode, OutputFormat, ParserConfig,
+        RenderCommandOptions, ServeRoute, SvgRenderConfig, TermRenderConfig,
+        render_source_with_pressure, serve_playground_html, serve_route,
+    };
     use tiny_http::Method;
 
     #[test]
@@ -9953,11 +10011,111 @@ mod serve_tests {
         assert_eq!(serve_route("/missing", &Method::Get), ServeRoute::NotFound);
     }
 
+    /// The preview server reuses a layout when the document has not changed (bd-kgi4).
+    ///
+    /// This bead's stated differentiator over the incumbent extension is incremental computation,
+    /// and until now the preview server — the foundation the extension renders through — did a full
+    /// parse, layout and render on every keystroke. An engine held across requests is what makes the
+    /// claim true rather than aspirational.
+    ///
+    /// Three things are asserted, and the third is the one that matters:
+    ///   * a repeated render REUSES the layout;
+    ///   * a changed document does NOT (so the cache cannot be serving stale geometry);
+    ///   * the reused render is BYTE-IDENTICAL to the recomputed one — an incremental path that
+    ///     returns different output from a full recompute is a correctness bug, not a speedup.
+    #[test]
+    fn preview_render_reuses_layout_for_an_unchanged_document() {
+        let options = RenderCommandOptions {
+            parse_mode: MermaidParseMode::Compat,
+            parser_config: ParserConfig::default(),
+            layout_algorithm: LayoutAlgorithm::Auto,
+            layout_config: LayoutConfig::default(),
+            format: OutputFormat::Svg,
+            theme: "default",
+            font_size: None,
+            output: None,
+            max_input_bytes: 5_000_000,
+            svg_base_config: SvgRenderConfig::default(),
+            term_base_config: TermRenderConfig::rich(),
+            show_back_edges: false,
+            show_minimap: false,
+            embed_source_spans: false,
+            source_map_out: None,
+            dimensions: (None, None),
+            json_output: false,
+            fnx_mode: FnxModeArg::Auto,
+            fnx_projection: FnxProjectionArg::Undirected,
+            fnx_fallback: FnxFallbackArg::Graceful,
+        };
+        let pressure = MermaidNativePressureSignals::sample().into_report();
+        let mut engine = fm_layout::IncrementalLayoutEngine::default();
+
+        let source = "flowchart LR\n  A[Start] --> B[Middle] --> C[End]\n";
+
+        // Baseline: a full recompute with no engine at all, which is what the CLI does.
+        let baseline = render_source_with_pressure(source, &options, &pressure, None)
+            .expect("baseline render");
+        assert!(
+            !baseline.layout_cache_hit,
+            "a render with no engine can never be a cache hit"
+        );
+
+        let first = render_source_with_pressure(source, &options, &pressure, Some(&mut engine))
+            .expect("first render");
+        assert!(
+            !first.layout_cache_hit,
+            "the first render of a document has nothing to reuse"
+        );
+
+        let second = render_source_with_pressure(source, &options, &pressure, Some(&mut engine))
+            .expect("second render");
+        assert!(
+            second.layout_cache_hit,
+            "re-rendering an unchanged document must reuse its layout; that reuse is this \
+             feature's entire claim"
+        );
+
+        // The reuse must not change what the author sees.
+        assert_eq!(
+            first.rendered, second.rendered,
+            "a reused layout rendered different bytes from the recomputed one"
+        );
+        assert_eq!(
+            baseline.rendered, second.rendered,
+            "the incremental path diverged from a plain full recompute"
+        );
+
+        // NEGATIVE CASE: an actual edit must recompute, or the cache is serving stale geometry.
+        let edited = "flowchart LR\n  A[Start] --> B[Middle] --> C[End] --> D[More]\n";
+        let after_edit =
+            render_source_with_pressure(edited, &options, &pressure, Some(&mut engine))
+                .expect("edited render");
+        assert!(
+            !after_edit.layout_cache_hit,
+            "a changed document must not be served from the previous document's layout"
+        );
+        assert_ne!(
+            after_edit.rendered, second.rendered,
+            "the edited document rendered identically to the previous one"
+        );
+
+        // And the engine recovers: re-rendering the edited document reuses again.
+        let repeat_edit =
+            render_source_with_pressure(edited, &options, &pressure, Some(&mut engine))
+                .expect("repeat edited render");
+        assert!(
+            repeat_edit.layout_cache_hit,
+            "the engine must cache the newly edited document too, not just the first one it saw"
+        );
+    }
+
     #[test]
     fn preview_playground_inserts_render_errors_as_text() -> Result<(), &'static str> {
         let response = serve_playground_html();
-        let html =
-            String::from_utf8(response.into_data()).map_err(|_| "playground HTML is UTF-8")?;
+        // `into_reader().into_inner()` — tiny_http 0.12's `Response` has no `into_data()`, which is
+        // why the `serve` feature has not compiled since 211ab872 introduced this test (bd-kgi4).
+        let html = String::from_utf8(response.into_reader().into_inner())
+            .map_err(|_| "playground HTML is UTF-8")?;
 
         assert!(html.contains("function showError(message)"));
         assert!(html.contains("error.textContent = message;"));
