@@ -2144,6 +2144,114 @@ fn sequence_messages_run_between_their_declared_lifelines() {
     );
 }
 
+/// A sankey's rendered ribbons must CONSERVE at every intermediate node: the widths flowing in must
+/// total the widths flowing out (bd-iicc).
+///
+/// bd-iicc names conservation as the sankey property a byte golden is most blind to, and it is
+/// independent of the width guard above rather than implied by it. That guard asserts equal values
+/// render equal widths and larger values render wider — both of which a sqrt scale, or a scale
+/// recomputed per column, satisfies. Neither conserves: on this fixture a sqrt scale gives Process X
+/// 18.66 in against 18.37 out. A sankey whose ribbons do not balance at a node is not a sankey; it
+/// is a flow chart with tapering arrows.
+///
+/// Declared values and the flow topology are read FROM THE FIXTURE, and the balance is computed from
+/// RENDERED widths, so this cannot be satisfied by re-blessing.
+#[test]
+fn sankey_flows_conserve_width_at_every_intermediate_node() {
+    let input_path = golden_dir().join("sankey_basic.mmd");
+    let input = fs::read_to_string(&input_path)
+        .map_err(|err| format!("failed reading {}: {err}", input_path.display()))
+        .expect("read sankey fixture");
+
+    // (from, to, value) in document order — the same order the renderer emits edges in.
+    let flows: Vec<(String, String, f64)> = input
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.trim().split(',').collect();
+            if parts.len() != 3 {
+                return None;
+            }
+            let value: f64 = parts[2].trim().parse().ok()?;
+            Some((
+                parts[0].trim().to_string(),
+                parts[1].trim().to_string(),
+                value,
+            ))
+        })
+        .collect();
+    assert_eq!(
+        flows.len(),
+        8,
+        "fixture declares eight flows, read {flows:?}"
+    );
+
+    let parsed = parse(&input);
+    let rendered = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+    let widths: Vec<f64> = rendered
+        .split("<path")
+        .skip(1)
+        // Bound each segment at its own closing '>' — see the width guard above for why.
+        .filter_map(|segment| segment.split_once('>').map(|(tag, _)| tag))
+        .filter(|tag| tag.contains("data-fm-edge-id"))
+        .filter_map(|tag| {
+            let at = tag.find("stroke-width=\"")? + "stroke-width=\"".len();
+            let rest = &tag[at..];
+            rest[..rest.find('"')?].parse().ok()
+        })
+        .collect();
+    assert_eq!(
+        widths.len(),
+        flows.len(),
+        "every declared flow must render as an edge before conservation can be judged"
+    );
+
+    // Declared and rendered totals per node.
+    let mut declared_in: std::collections::BTreeMap<&str, f64> = std::collections::BTreeMap::new();
+    let mut declared_out: std::collections::BTreeMap<&str, f64> = std::collections::BTreeMap::new();
+    let mut drawn_in: std::collections::BTreeMap<&str, f64> = std::collections::BTreeMap::new();
+    let mut drawn_out: std::collections::BTreeMap<&str, f64> = std::collections::BTreeMap::new();
+    for ((from, to, value), width) in flows.iter().zip(&widths) {
+        *declared_out.entry(from.as_str()).or_default() += value;
+        *declared_in.entry(to.as_str()).or_default() += value;
+        *drawn_out.entry(from.as_str()).or_default() += width;
+        *drawn_in.entry(to.as_str()).or_default() += width;
+    }
+
+    // Only nodes the FIXTURE itself balances can be judged; a fixture that did not conserve would
+    // be a fixture bug, not a render bug, and this guard says so rather than blaming the renderer.
+    let mut judged = 0_usize;
+    for (node, incoming) in &declared_in {
+        let Some(outgoing) = declared_out.get(node) else {
+            continue; // a sink: nothing flows onward
+        };
+        if (incoming - outgoing).abs() > 1e-9 {
+            continue;
+        }
+        judged += 1;
+        let (drawn_i, drawn_o) = (drawn_in[node], drawn_out[node]);
+        // ABSOLUTE, and tight. A linear value-to-width scale conserves EXACTLY, so the only slack
+        // needed is the two decimal places the widths are printed with. A percentage tolerance is
+        // what lets a non-conserving scale through: a sqrt scale imbalances Process X by only
+        // 1.54% here, which any "within a few percent" reading would wave past, while being 0.63px
+        // — more than ten times this bound.
+        //
+        // If a future fixture adds a flow small enough to hit the renderer's minimum-width floor,
+        // this will fail. That is correct and worth surfacing: clamping a ribbon to stay visible
+        // genuinely breaks conservation, and the trade-off should be argued rather than hidden by
+        // a tolerance wide enough to cover it.
+        assert!(
+            (drawn_i - drawn_o).abs() < 0.05,
+            "{node} declares {incoming} in and {outgoing} out — balanced — but renders {drawn_i} \
+             of inbound width against {drawn_o} outbound, so the ribbons do not conserve"
+        );
+    }
+    assert!(
+        judged >= 2,
+        "sankey_basic must contain at least two nodes whose declared inflow equals its outflow, \
+         or this guard checks nothing; judged {judged}"
+    );
+}
+
 /// architecture-beta renders every declared service, and its edges fan out from the right one
 /// (bd-iicc).
 ///
