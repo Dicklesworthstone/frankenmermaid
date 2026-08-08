@@ -4609,6 +4609,41 @@ pub struct IrStateNote {
     pub span: Span,
 }
 
+// ── packet-beta bit ranges ─────────────────────────────────────────────
+
+/// One `start-end: "Label"` field of a `packet-beta` diagram, linked back to the node it interned.
+///
+/// The bit range is the diagram's coordinate system, not decoration: a field's width IS its bit
+/// count and its horizontal position IS its start bit. Carrying the range in the IR is what lets
+/// layout derive geometry from it; before this existed the range survived only as a
+/// `packet-bits-N` CSS class and a `[start-end]` suffix glued onto the label, so layout sized the
+/// box from the label text and a 4-bit field could render wider than a 6-bit one (bd-51tz).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct IrPacketField {
+    /// The node this field interned, so layout never has to re-derive the association by index.
+    pub node: IrNodeId,
+    /// First bit of the range, inclusive.
+    pub start_bit: u32,
+    /// Last bit of the range, inclusive. Equals `start_bit` for a single-bit field.
+    pub end_bit: u32,
+}
+
+impl IrPacketField {
+    /// Number of bits the field spans. Always at least 1 — the parser rejects reversed ranges.
+    #[must_use]
+    pub const fn bit_count(&self) -> u32 {
+        self.end_bit.saturating_sub(self.start_bit) + 1
+    }
+}
+
+/// `packet-beta`-specific metadata that extends the generic IR.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct IrPacketMeta {
+    /// Declared fields in source order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<IrPacketField>,
+}
+
 // ── Main IR container ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -4641,6 +4676,8 @@ pub struct MermaidDiagramIr {
     pub pie_meta: Option<IrPieMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quadrant_meta: Option<IrQuadrantMeta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packet_meta: Option<IrPacketMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_graph_meta: Option<IrGitGraphMeta>,
     /// Notes attached to state diagram nodes.
@@ -4684,6 +4721,7 @@ impl MermaidDiagramIr {
             xy_chart_meta: None,
             pie_meta: None,
             quadrant_meta: None,
+            packet_meta: None,
             git_graph_meta: None,
             state_notes: Vec::new(),
             diagnostics: Vec::new(),

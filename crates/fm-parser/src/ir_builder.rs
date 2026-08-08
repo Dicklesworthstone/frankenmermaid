@@ -372,6 +372,7 @@ fn clone_ir_reusing(target: &mut MermaidDiagramIr, source: &MermaidDiagramIr) {
     target.xy_chart_meta.clone_from(&source.xy_chart_meta);
     target.pie_meta.clone_from(&source.pie_meta);
     target.quadrant_meta.clone_from(&source.quadrant_meta);
+    target.packet_meta.clone_from(&source.packet_meta);
     target.git_graph_meta.clone_from(&source.git_graph_meta);
     target.state_notes.clone_from(&source.state_notes);
     target.diagnostics.clone_from(&source.diagnostics);
@@ -469,6 +470,7 @@ impl IrBuilder {
         self.ir.xy_chart_meta.clone_from(&source.ir.xy_chart_meta);
         self.ir.pie_meta.clone_from(&source.ir.pie_meta);
         self.ir.quadrant_meta.clone_from(&source.ir.quadrant_meta);
+        self.ir.packet_meta.clone_from(&source.ir.packet_meta);
         self.ir.git_graph_meta.clone_from(&source.ir.git_graph_meta);
         self.ir.state_notes.clone_from(&source.ir.state_notes);
         self.ir.diagnostics.clone_from(&source.ir.diagnostics);
@@ -653,6 +655,10 @@ impl IrBuilder {
 
     pub(crate) fn set_quadrant_meta(&mut self, quadrant_meta: fm_core::IrQuadrantMeta) {
         self.ir.quadrant_meta = Some(quadrant_meta);
+    }
+
+    pub(crate) fn set_packet_meta(&mut self, packet_meta: fm_core::IrPacketMeta) {
+        self.ir.packet_meta = Some(packet_meta);
     }
 
     pub(crate) fn set_git_graph_meta(&mut self, git_graph_meta: fm_core::IrGitGraphMeta) {

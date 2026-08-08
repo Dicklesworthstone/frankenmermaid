@@ -5330,6 +5330,7 @@ fn parse_timeline_events(
 fn parse_packet(input: &str, builder: &mut IrBuilder) {
     let mut field_index = 0_usize;
     let mut previous_field: Option<IrNodeId> = None;
+    let mut packet_meta = fm_core::IrPacketMeta::default();
 
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
@@ -5365,18 +5366,35 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
                 {
                     builder.add_class_to_node_id(node_id, "packet-field");
 
-                    // Parse bit range for width hint.
-                    if let Some((start_str, end_str)) = range.split_once('-')
-                        && let (Ok(start), Ok(end)) = (
-                            start_str.trim().parse::<usize>(),
-                            end_str.trim().parse::<usize>(),
-                        )
-                    {
-                        let bit_width = end.saturating_sub(start) + 1;
-                        builder.add_class_to_node_id(node_id, &format!("packet-bits-{bit_width}"));
-                        if bit_width > 8 {
-                            builder.add_class_to_node_id(node_id, "packet-field-wide");
+                    // Record the bit range. This is the field's geometry — layout derives width
+                    // from the bit count and x from the start bit — so a range that cannot be read
+                    // is a warning, not a silent fall-through to label-sized boxes (bd-51tz).
+                    match parse_packet_bit_range(range) {
+                        Some((start, end)) => {
+                            // The `packet-bits-N` styling hook stays keyed on an explicit
+                            // `start-end` span, as before; the geometry below is recorded for
+                            // single-bit fields too.
+                            if range.contains('-') {
+                                let bit_width = end - start + 1;
+                                builder.add_class_to_node_id(
+                                    node_id,
+                                    &format!("packet-bits-{bit_width}"),
+                                );
+                                if bit_width > 8 {
+                                    builder.add_class_to_node_id(node_id, "packet-field-wide");
+                                }
+                            }
+                            packet_meta.fields.push(fm_core::IrPacketField {
+                                node: node_id,
+                                start_bit: start,
+                                end_bit: end,
+                            });
                         }
+                        None => builder.add_warning(format!(
+                            "Line {line_number}: packet field range {range:?} is not a bit range \
+                             (`start` or `start-end`, end >= start); the field will be sized from \
+                             its label"
+                        )),
                     }
 
                     // Chain fields sequentially.
@@ -5414,6 +5432,30 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported packet syntax: {trimmed}"
             ));
+        }
+    }
+
+    if !packet_meta.fields.is_empty() {
+        builder.set_packet_meta(packet_meta);
+    }
+}
+
+/// Read a packet field's `start-end` (or single-bit `start`) range.
+///
+/// Returns `None` for anything that is not a well-formed, non-reversed range so the caller can
+/// warn rather than invent geometry. mermaid raises "End must be greater than start" for a
+/// reversed range; we degrade to a label-sized box with a diagnostic, matching this parser's
+/// best-effort contract.
+fn parse_packet_bit_range(range: &str) -> Option<(u32, u32)> {
+    match range.split_once('-') {
+        Some((start_str, end_str)) => {
+            let start = start_str.trim().parse::<u32>().ok()?;
+            let end = end_str.trim().parse::<u32>().ok()?;
+            (end >= start).then_some((start, end))
+        }
+        None => {
+            let bit = range.trim().parse::<u32>().ok()?;
+            Some((bit, bit))
         }
     }
 }

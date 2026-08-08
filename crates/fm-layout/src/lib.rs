@@ -1822,6 +1822,7 @@ fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> boo
         xy_chart_meta,
         pie_meta,
         quadrant_meta,
+        packet_meta,
         git_graph_meta,
         state_notes,
         diagnostics,
@@ -1846,6 +1847,7 @@ fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> boo
         && *xy_chart_meta == current.xy_chart_meta
         && *pie_meta == current.pie_meta
         && *quadrant_meta == current.quadrant_meta
+        && *packet_meta == current.packet_meta
         && *git_graph_meta == current.git_graph_meta
         && *state_notes == current.state_notes
         && *diagnostics == current.diagnostics
@@ -3138,7 +3140,8 @@ fn compute_traced_layout_with_config_and_guardrails(
         LayoutAlgorithm::XyChart => layout_diagram_xychart_traced(ir),
         LayoutAlgorithm::Sankey => layout_diagram_sankey_traced(ir),
         LayoutAlgorithm::Kanban => layout_diagram_kanban_traced(ir),
-        LayoutAlgorithm::Grid | LayoutAlgorithm::Packet => layout_diagram_grid_traced(ir),
+        LayoutAlgorithm::Grid => layout_diagram_grid_traced(ir),
+        LayoutAlgorithm::Packet => layout_diagram_packet_traced(ir),
         LayoutAlgorithm::Sequence => layout_diagram_sequence_traced(ir),
         LayoutAlgorithm::Pie => layout_diagram_pie_traced(ir),
         LayoutAlgorithm::Quadrant => layout_diagram_quadrant_traced(ir),
@@ -7473,6 +7476,138 @@ pub fn layout_diagram_grid_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         trace,
         matches!(ir.direction, GraphDirection::LR | GraphDirection::RL),
     )
+}
+
+/// Width, in px, of a single bit. A field spanning `n` bits is exactly `n * PACKET_BIT_WIDTH`
+/// wide — the pinned mermaid-js 11.15.0 `packet` config is
+/// `{rowHeight: 32, bitWidth: 32, bitsPerRow: 32, showBits: true, paddingX: 5, paddingY: 5}`.
+///
+/// Note we do NOT reproduce mermaid's `width = bits * bitWidth - paddingX` inter-block gap: that
+/// term makes width affine rather than proportional in the bit count (a 32-bit field would be
+/// 2.0099x a 16-bit one, not 2x), which is exactly the encoding this bead exists to make exact.
+/// Adjacent fields therefore share an edge, which is how a packet layout diagram is normally drawn.
+const PACKET_BIT_WIDTH: f32 = 32.0;
+
+/// Bits per row before wrapping, matching the pinned incumbent's `bitsPerRow`.
+const PACKET_BITS_PER_ROW: u32 = 32;
+
+/// Minimum row height, matching the pinned incumbent's `rowHeight`. The actual row height is the
+/// larger of this and what a two-line field label needs — our field labels carry the bit range on
+/// a second line (`"Source Port\n[0-15]"`), which mermaid draws as separate `packetByte` text
+/// above the block instead. Two lines is a constant of the diagram type, not of any label's text,
+/// so row height stays independent of what the fields are called.
+const PACKET_ROW_HEIGHT_MIN: f32 = 32.0;
+
+/// Vertical gap between rows: the incumbent's `paddingY` (5) plus the 10 its `getConfig` adds when
+/// `showBits` is on, which is the default.
+const PACKET_ROW_GAP: f32 = 15.0;
+
+/// Lay out a `packet-beta` diagram as a bit ruler.
+///
+/// Every geometric quantity comes from the declared bit range and nothing else:
+///
+/// * `width  = bit_count * PACKET_BIT_WIDTH` — so equal bit counts are equal widths, and a 32-bit
+///   field is exactly twice a 16-bit one;
+/// * `x      = (start_bit % PACKET_BITS_PER_ROW) * PACKET_BIT_WIDTH` — a field begins at its start
+///   bit's offset within its row;
+/// * `row    = start_bit / PACKET_BITS_PER_ROW` — rows wrap every 32 bits.
+///
+/// Label text is read for nothing, so renaming a field cannot move anything (bd-51tz). Before
+/// this existed, packet-beta fell through to `layout_diagram_grid_traced`, which sizes boxes from
+/// their labels: the fixture's three 16-bit fields rendered 148.72 / 176.77 / 154.50 wide and its
+/// 4-bit field rendered WIDER than its 6-bit one.
+///
+/// KNOWN DIVERGENCE (bd-1z4k): a field that straddles a row boundary is drawn as one box at its
+/// start bit and overflows its row to the right. mermaid splits such a block into one box per row
+/// (`getNextFittingBlock`), which needs a second box for one IR node and therefore a layout
+/// extension the renderer draws; that is filed separately rather than approximated here.
+fn layout_diagram_packet_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    let Some(packet) = ir.packet_meta.as_ref().filter(|m| !m.fields.is_empty()) else {
+        // Nothing declared a bit range (e.g. the `A -> B` connection form), so there is no ruler
+        // to lay out and the generic grid remains the honest answer.
+        return layout_diagram_grid_traced(ir);
+    };
+
+    let mut trace = LayoutTrace::default();
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let node_count = ir.nodes.len();
+    let row_height = metrics
+        .line_height_px()
+        .mul_add(2.0, 10.0)
+        .max(PACKET_ROW_HEIGHT_MIN);
+    let row_pitch = row_height + PACKET_ROW_GAP;
+
+    // Bit-derived box per declared field, indexed by node so a node interned twice (or a node the
+    // fallback parse produced) is handled exactly once below.
+    let mut boxes: Vec<Option<LayoutRect>> = vec![None; node_count];
+    let mut max_row = 0_u32;
+    for field in &packet.fields {
+        let Some(slot) = boxes.get_mut(field.node.0) else {
+            continue;
+        };
+        if slot.is_some() {
+            continue;
+        }
+        let row = field.start_bit / PACKET_BITS_PER_ROW;
+        max_row = max_row.max(row);
+        *slot = Some(LayoutRect {
+            x: (field.start_bit % PACKET_BITS_PER_ROW) as f32 * PACKET_BIT_WIDTH,
+            y: row as f32 * row_pitch,
+            width: field.bit_count() as f32 * PACKET_BIT_WIDTH,
+            height: row_height,
+        });
+    }
+
+    // Anything the packet grammar did not place (a stray node from the fallback edge/node parse)
+    // is stacked in declaration order below the ruler rather than dropped, so no declared content
+    // disappears from the picture.
+    let mut trailing_row = max_row + 1;
+    let mut nodes = Vec::with_capacity(node_count);
+    for (node_index, node) in ir.nodes.iter().enumerate() {
+        let bounds = boxes[node_index].unwrap_or_else(|| {
+            let (label_w, label_h) = metrics.estimate_dimensions(display_node_label_ref(ir, node));
+            let rect = LayoutRect {
+                x: 0.0,
+                y: trailing_row as f32 * row_pitch,
+                width: label_w + 24.0,
+                height: label_h.max(row_height),
+            };
+            trailing_row += 1;
+            rect
+        });
+        nodes.push(LayoutNodeBox {
+            node_index,
+            node_id: node.id.clone(),
+            span: node.span_primary,
+            bounds,
+            rank: (bounds.y / row_pitch) as usize,
+            order: node_index,
+        });
+    }
+
+    push_snapshot(&mut trace, "packet_layout", node_count, ir.edges.len(), 0, 0);
+
+    let bounds = compute_bounds(&nodes, &[], &[], LayoutSpacing::default());
+
+    TracedLayout {
+        layout: Arc::new(DiagramLayout {
+            nodes,
+            clusters: Vec::new(),
+            cycle_clusters: Vec::new(),
+            // The parser chains fields with sequential edges so the generic grid could order them.
+            // A bit ruler already carries that order in its geometry, and the incumbent draws no
+            // connectors between packet fields, so none are routed here.
+            edges: Vec::new(),
+            bounds,
+            stats: LayoutStats {
+                node_count,
+                ..LayoutStats::default()
+            },
+            extensions: LayoutExtensions::default(),
+            dirty_regions: Vec::new(),
+        }),
+        trace,
+    }
 }
 
 #[must_use]
