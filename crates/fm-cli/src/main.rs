@@ -9761,9 +9761,13 @@ fn cmd_serve(host: &str, port: u16, open: bool, options: RenderCommandOptions<'_
 
     // A preview server renders the SAME document over and over as its author types, which is the
     // one workload an incremental engine exists for — and the reason this bead claims a faster
-    // refresh than the incumbent extension. The engine lives across requests so an edit that does
-    // not change the layout inputs reuses the previous layout (bd-kgi4).
-    let mut engine = fm_layout::IncrementalLayoutEngine::default();
+    // refresh than the incumbent extension. Engines live across requests so an edit that does not
+    // change the layout inputs reuses the previous layout (bd-kgi4).
+    //
+    // One engine PER DOCUMENT, because an engine memoises exactly one layout: with a single shared
+    // engine, an editor with two files open misses on every alternation, which is the common case
+    // rather than an edge case.
+    let mut engines = PreviewEnginePool::default();
 
     // Pressure is sampled ONCE, not per request, and that is load-bearing rather than a
     // micro-optimisation. The layout guardrails are derived from the pressure report, and the
@@ -9776,7 +9780,7 @@ fn cmd_serve(host: &str, port: u16, open: bool, options: RenderCommandOptions<'_
         let response = match serve_route(request.url(), request.method()) {
             ServeRoute::Playground => serve_playground_html(),
             ServeRoute::Render => {
-                handle_render_request(&mut request, &options, &pressure, &mut engine)
+                handle_render_request(&mut request, &options, &pressure, &mut engines)
             }
             ServeRoute::MethodNotAllowed => serve_method_not_allowed(),
             ServeRoute::NotFound => Response::from_string("Not Found").with_status_code(404),
@@ -9909,14 +9913,82 @@ fn serve_playground_html() -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
     response
 }
 
+/// Header a preview client sets to say WHICH document it is rendering.
+///
+/// Absent, every request shares one slot — which is what a single-page playground wants. An editor
+/// with several files open sets it per document so each keeps its own memo (bd-kgi4).
+#[cfg(feature = "serve")]
+const PREVIEW_DOCUMENT_HEADER: &str = "X-FrankenMermaid-Document";
+
+/// How many documents keep a live layout memo at once.
+///
+/// Bounded on purpose: a long-running preview server that grew an engine per document it ever saw
+/// would be a slow memory leak, and each engine holds a full cached layout. Eight covers an
+/// ordinary editor session's open tabs; beyond that the least-recently-used document is evicted and
+/// simply recomputes next time, which is exactly the behaviour before any of this existed.
+#[cfg(feature = "serve")]
+const PREVIEW_ENGINE_POOL_LIMIT: usize = 8;
+
+/// Per-document incremental layout engines for the preview server.
+///
+/// An `IncrementalLayoutEngine` memoises ONE layout, so a single shared engine misses on every
+/// alternation between two open files. Keyed by the client's document id, with LRU eviction so the
+/// pool cannot grow without bound.
+#[cfg(feature = "serve")]
+#[derive(Debug, Default)]
+struct PreviewEnginePool {
+    /// Most-recently-used LAST, so eviction pops the front.
+    entries: Vec<(String, fm_layout::IncrementalLayoutEngine)>,
+}
+
+#[cfg(feature = "serve")]
+impl PreviewEnginePool {
+    /// The engine for `document`, creating it if new and marking it most-recently-used.
+    fn engine_for(&mut self, document: &str) -> &mut fm_layout::IncrementalLayoutEngine {
+        if let Some(index) = self.entries.iter().position(|(id, _)| id == document) {
+            // Move to the back so it is the newest; `remove` + `push` keeps the order explicit and
+            // the pool is capped at 8, so the shift is irrelevant.
+            let entry = self.entries.remove(index);
+            self.entries.push(entry);
+        } else {
+            if self.entries.len() >= PREVIEW_ENGINE_POOL_LIMIT {
+                self.entries.remove(0);
+            }
+            self.entries.push((
+                document.to_string(),
+                fm_layout::IncrementalLayoutEngine::default(),
+            ));
+        }
+        // `push` above guarantees a last element.
+        &mut self
+            .entries
+            .last_mut()
+            .expect("pool is non-empty after insert")
+            .1
+    }
+
+    #[cfg(test)]
+    fn tracked_documents(&self) -> Vec<&str> {
+        self.entries.iter().map(|(id, _)| id.as_str()).collect()
+    }
+}
+
 #[cfg(feature = "serve")]
 fn handle_render_request(
     request: &mut tiny_http::Request,
     options: &RenderCommandOptions<'_>,
     pressure: &MermaidPressureReport,
-    engine: &mut fm_layout::IncrementalLayoutEngine,
+    engines: &mut PreviewEnginePool,
 ) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
     use tiny_http::{Header, Response};
+
+    // Which document this render belongs to. Absent for the built-in playground, which only ever
+    // shows one; an editor sets it per file so each keeps its own memo (bd-kgi4).
+    let document = request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv(PREVIEW_DOCUMENT_HEADER))
+        .map_or_else(String::new, |header| header.value.as_str().to_string());
 
     let content_length = request
         .headers()
@@ -9947,6 +10019,7 @@ fn handle_render_request(
         .with_status_code(413);
     }
 
+    let engine = engines.engine_for(&document);
     let outcome = match render_source_with_pressure(&body, options, pressure, Some(engine)) {
         Ok(outcome) => outcome,
         Err(err) => {
