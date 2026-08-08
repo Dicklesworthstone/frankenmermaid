@@ -1061,6 +1061,13 @@ struct RenderOutcome {
     render_result: Option<RenderResult>,
     /// Whether the layout came from an incremental engine's memo rather than a full recompute.
     /// Always `false` on the one-shot CLI path, which passes no engine (bd-kgi4).
+    ///
+    /// Only the `serve` preview handler reads this, so without that feature the field is written
+    /// and never read — which `-D warnings` promotes to a dead-code error and which turned CI's
+    /// default-feature clippy step red (bd-wra5). The expectation is scoped to exactly the
+    /// feature combination where the field really is unused, so a genuinely dead field still
+    /// fails the gate under `--features serve`.
+    #[cfg_attr(not(feature = "serve"), expect(dead_code, reason = "read only by `serve`"))]
     layout_cache_hit: bool,
 }
 
