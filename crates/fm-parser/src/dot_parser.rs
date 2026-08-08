@@ -477,6 +477,7 @@ fn parse_dot_edge_statement(
     *last_part = last_fragment;
 
     let edge_label_str = shared_attrs.and_then(parse_dot_label);
+    let min_len = shared_attrs.and_then(parse_dot_minlen);
 
     // Edge groups (A -> {B C D}) are expanded in expand_edge_groups() before
     // normalization, so they arrive here as individual "A -> B", "A -> C" etc.
@@ -509,6 +510,34 @@ fn parse_dot_edge_statement(
             builder.push_edge(from_id, to_id, arrow, edge_label_str.as_deref(), span);
             add_node_to_active_groups(builder, active_clusters, active_subgraphs, from_id);
             add_node_to_active_groups(builder, active_clusters, active_subgraphs, to_id);
+
+            // `minlen` applies to every edge in the statement, including each hop of a chain like
+            // `a -> b -> c [minlen=2]`, which is what graphviz does with a shared attribute list.
+            match &min_len {
+                Some(DotMinLen::Ranks(ranks)) => {
+                    builder.add_constraint(IrConstraint::MinLength {
+                        from_id: from_node.id.clone(),
+                        to_id: to_node.id.clone(),
+                        min_len: *ranks,
+                        span,
+                    });
+                }
+                Some(DotMinLen::SameRankUnsupported) => {
+                    builder.add_warning(format!(
+                        "Line {line_number}: DOT minlen=0 asks for both endpoints on one rank, \
+                         which this engine cannot express for an edge; use {{ rank=same; \
+                         {}; {}; }} instead",
+                        from_node.id, to_node.id
+                    ));
+                }
+                Some(DotMinLen::Invalid(text)) => {
+                    builder.add_warning(format!(
+                        "Line {line_number}: DOT minlen={text} is not a non-negative integer and \
+                         was ignored"
+                    ));
+                }
+                None => {}
+            }
         }
     }
 
@@ -880,6 +909,36 @@ fn parse_dot_label_value(value: &str) -> Option<String> {
 fn parse_dot_label(attributes: &str) -> Option<String> {
     let value = extract_dot_attribute_raw(attributes, "label")?;
     parse_dot_label_value(value.as_ref())
+}
+
+/// Read DOT's `minlen` edge attribute — the minimum number of ranks an edge must span.
+///
+/// Becomes an [`IrConstraint::MinLength`], which both `apply_ir_constraints` and the LP solver
+/// already honor. Returns `None` for a missing, unparseable, or `minlen=1` value: 1 is the DOT
+/// default and every edge already spans at least one rank, so a constraint for it would only inflate
+/// the solver's applied-constraint count. `minlen=0` is DOT's "same rank" spelling for an edge, which
+/// [`IrConstraint::MinLength`] cannot express (its gap is a minimum, not an equality), so it is
+/// rejected here and reported by the caller rather than silently rounded up to 1.
+fn parse_dot_minlen(attributes: &str) -> Option<DotMinLen> {
+    let value = extract_dot_attribute_raw(attributes, "minlen")?;
+    let text = value.as_ref().trim().trim_matches(['"', '\'']).trim();
+    match text.parse::<usize>() {
+        Ok(0) => Some(DotMinLen::SameRankUnsupported),
+        Ok(1) => None,
+        Ok(min_len) => Some(DotMinLen::Ranks(min_len)),
+        Err(_) => Some(DotMinLen::Invalid(text.to_string())),
+    }
+}
+
+/// Outcome of reading `minlen`, kept distinct so the caller can report what it could not honor.
+#[derive(Debug, PartialEq, Eq)]
+enum DotMinLen {
+    /// A usable minimum rank span (>= 2).
+    Ranks(usize),
+    /// `minlen=0`: DOT's request to place both endpoints on one rank.
+    SameRankUnsupported,
+    /// Not a non-negative integer.
+    Invalid(String),
 }
 
 #[cfg(test)]
@@ -1704,6 +1763,110 @@ mod tests {
             "{:?}",
             parsed.warnings
         );
+    }
+
+    #[test]
+    fn edge_minlen_becomes_a_min_length_constraint() {
+        let parsed = parse_dot("digraph G { a -> b [minlen=3]; }");
+
+        assert_eq!(
+            parsed.ir.constraints.len(),
+            1,
+            "{:?}",
+            parsed.ir.constraints
+        );
+        match &parsed.ir.constraints[0] {
+            fm_core::IrConstraint::MinLength {
+                from_id,
+                to_id,
+                min_len,
+                ..
+            } => {
+                assert_eq!(from_id, "a");
+                assert_eq!(to_id, "b");
+                assert_eq!(*min_len, 3);
+            }
+            other => panic!("expected MinLength, got {other:?}"),
+        }
+        // The edge itself is still an ordinary edge.
+        assert_eq!(parsed.ir.edges.len(), 1);
+    }
+
+    #[test]
+    fn minlen_one_is_the_dot_default_and_constrains_nothing() {
+        // Every edge already spans at least one rank, so emitting a constraint for minlen=1 would
+        // only inflate the solver's applied count.
+        let parsed = parse_dot("digraph G { a -> b [minlen=1]; }");
+        assert!(
+            parsed.ir.constraints.is_empty(),
+            "{:?}",
+            parsed.ir.constraints
+        );
+        assert_eq!(parsed.ir.edges.len(), 1);
+    }
+
+    #[test]
+    fn minlen_zero_warns_because_min_length_cannot_express_it() {
+        // minlen=0 is DOT's "put both endpoints on one rank", which a MINIMUM gap cannot say.
+        // Rounding it silently up to 1 would look like support.
+        let parsed = parse_dot("digraph G { a -> b [minlen=0]; }");
+        assert!(
+            parsed.ir.constraints.is_empty(),
+            "{:?}",
+            parsed.ir.constraints
+        );
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("minlen=0") && warning.contains("rank=same")),
+            "the warning must point at the construct that works: {:?}",
+            parsed.warnings
+        );
+    }
+
+    #[test]
+    fn non_numeric_minlen_warns_and_is_ignored() {
+        let parsed = parse_dot("digraph G { a -> b [minlen=wide]; }");
+        assert!(parsed.ir.constraints.is_empty());
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("minlen=wide")),
+            "{:?}",
+            parsed.warnings
+        );
+    }
+
+    #[test]
+    fn minlen_applies_to_every_hop_of_a_chain() {
+        // graphviz applies a shared attribute list to each edge in the statement.
+        let parsed = parse_dot("digraph G { a -> b -> c [minlen=2]; }");
+        assert_eq!(parsed.ir.edges.len(), 2);
+        assert_eq!(
+            parsed.ir.constraints.len(),
+            2,
+            "{:?}",
+            parsed.ir.constraints
+        );
+    }
+
+    #[test]
+    fn minlen_survives_alongside_a_label_and_quoting() {
+        for source in [
+            "digraph G { a -> b [label=\"x\", minlen=2]; }",
+            "digraph G { a -> b [minlen=\"2\"]; }",
+            "digraph G { a -> b [MINLEN=2]; }",
+        ] {
+            let parsed = parse_dot(source);
+            assert_eq!(
+                parsed.ir.constraints.len(),
+                1,
+                "{source} produced {:?}",
+                parsed.ir.constraints
+            );
+        }
     }
 
     #[test]

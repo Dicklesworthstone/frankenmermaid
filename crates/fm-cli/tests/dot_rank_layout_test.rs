@@ -143,6 +143,38 @@ fn declaration_order_alone_does_not_change_the_ranks() {
 }
 
 #[test]
+fn dot_minlen_pushes_the_target_further_down_the_ranks() {
+    // `MinLength` is the second constraint kind that was implemented and unreachable. A plain
+    // `a -> b` puts b one rank below a; `minlen=3` must push it at least three.
+    let plain = layout_diagram(&parse("digraph G {\n  a -> b;\n}").ir);
+    let stretched = layout_diagram(&parse("digraph G {\n  a -> b [minlen=3];\n}").ir);
+
+    let rank_of = |layout: &fm_layout::DiagramLayout, id: &str| {
+        layout
+            .nodes
+            .iter()
+            .find(|node| node.node_id == id)
+            .map(|node| node.rank)
+            .unwrap_or_else(|| panic!("{id} must be laid out"))
+    };
+
+    assert_eq!(rank_of(&plain, "b") - rank_of(&plain, "a"), 1);
+    let stretched_span = rank_of(&stretched, "b") - rank_of(&stretched, "a");
+    assert!(
+        stretched_span >= 3,
+        "minlen=3 must span at least three ranks, got {stretched_span}"
+    );
+
+    // The vertical distance must grow with it, or the constraint changed a number nobody draws.
+    let plain_gap = node_position(&plain, "b").1 - node_position(&plain, "a").1;
+    let stretched_gap = node_position(&stretched, "b").1 - node_position(&stretched, "a").1;
+    assert!(
+        stretched_gap > plain_gap + 1.0,
+        "the drawn gap must grow: plain={plain_gap} stretched={stretched_gap}"
+    );
+}
+
+#[test]
 fn a_rank_group_inside_a_cluster_keeps_every_node_in_the_cluster() {
     // The brace-scope regression this shipped with: an anonymous `{ … }` group's closing brace used
     // to pop the enclosing cluster, so `d` fell outside it. Checked here at the IR level because a
