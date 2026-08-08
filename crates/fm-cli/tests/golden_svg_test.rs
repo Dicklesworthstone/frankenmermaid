@@ -3532,7 +3532,6 @@ fn composite_state_cluster_contains_only_its_declared_members() {
 /// it is independent of bd-w5j5 — it reproduces in a composite with no inner `[*]`, where the cluster
 /// is otherwise correct. Un-ignoring this is bd-9w54's acceptance gate.
 #[test]
-#[ignore = "specifies bd-9w54: a composite state is drawn twice, as its cluster and as a plain node"]
 fn a_composite_state_is_not_also_drawn_as_a_plain_node() {
     let svg = render_fixture("state_composite");
     let declared = state_declarations("state_composite");

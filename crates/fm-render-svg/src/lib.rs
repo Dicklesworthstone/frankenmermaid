@@ -8135,6 +8135,14 @@ fn render_node_into(
 ) {
     use fm_core::NodeShape;
 
+    // A composite state IS its container: `anchor_composite_state_nodes` gave this node its
+    // cluster's bounds so transitions attach to the container's boundary. Drawing it again here
+    // would stack a second labelled box on the container — the duplicate this removes (bd-9w54).
+    // The cluster still draws that box and its title, so nothing declared disappears.
+    if is_composite_state_node(ir, node_box) {
+        return;
+    }
+
     let ir_node = ir.nodes.get(node_box.node_index);
     let shape = ir_node.map_or(NodeShape::Rect, |n| n.shape);
     let (shape_style, text_style) = resolve_node_inline_styles(ir, node_box.node_index);
@@ -9905,6 +9913,28 @@ fn render_node(
     }
 
     group
+}
+
+/// Whether this laid-out node is a composite state that has been anchored to its own cluster.
+///
+/// SINGLE SOURCE OF TRUTH with `fm_layout::anchor_composite_state_nodes`, which selects on the same
+/// pair — state diagram, cluster title equal to the node id. Restating the condition in two crates is
+/// how a node stops being drawn while its container never appears, so both sides read the same two
+/// facts off the IR.
+fn is_composite_state_node(ir: &MermaidDiagramIr, node_box: &LayoutNodeBox) -> bool {
+    if ir.diagram_type != DiagramType::State {
+        return false;
+    }
+    let node_id = ir
+        .nodes
+        .get(node_box.node_index)
+        .map_or(node_box.node_id.as_str(), |node| node.id.as_str());
+    ir.clusters.iter().any(|cluster| {
+        cluster
+            .title
+            .and_then(|label_id| ir.labels.get(label_id.0))
+            .is_some_and(|label| label.text == node_id)
+    })
 }
 
 pub(crate) fn is_block_beta_space_node(node: &fm_core::IrNode) -> bool {

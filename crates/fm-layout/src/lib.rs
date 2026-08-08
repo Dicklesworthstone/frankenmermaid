@@ -4597,6 +4597,13 @@ fn layout_diagram_sugiyama_traced_with_config(
     let mut nodes = coordinate_assignment(ir, &node_sizes, &ranks, &ordering_by_rank, spacing);
     apply_subgraph_direction_overrides(ir, &node_sizes, &mut nodes, spacing);
     apply_constraint_solver(ir, &mut nodes, spacing, &config);
+    // Clusters are built BEFORE edge routing, not after. `build_cluster_boxes` is a pure function of
+    // the already-positioned `nodes`, so the boxes are identical either way — but a composite state
+    // has to become its container before its transitions are routed, or they attach to the plain box
+    // instead of the container (bd-9w54). Nothing between here and the old call site mutates
+    // `nodes`; the cycle-collapse pass that does runs after both, exactly as it did before.
+    let mut clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
+    anchor_composite_state_nodes(ir, &mut nodes, &clusters);
     let mut edges = build_edge_paths(
         ir,
         &nodes,
@@ -4604,7 +4611,6 @@ fn layout_diagram_sugiyama_traced_with_config(
         config.edge_routing,
     );
     bundle_parallel_edges(ir, &mut edges);
-    let mut clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
     let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
     let mut cycle_clusters = Vec::new();
 
@@ -15148,6 +15154,42 @@ fn is_axis_aligned_collinear(a: LayoutPoint, b: LayoutPoint, c: LayoutPoint) -> 
     let epsilon = 0.001_f32;
     ((a.x - b.x).abs() < epsilon && (b.x - c.x).abs() < epsilon)
         || ((a.y - b.y).abs() < epsilon && (b.y - c.y).abs() < epsilon)
+}
+
+/// Make a composite state's node BE its container.
+///
+/// A `state Processing { … }` block creates a cluster, and every `Idle --> Processing` transition
+/// separately interns `Processing` as an ordinary node. The same declared state was therefore drawn
+/// TWICE: a container holding `Validating`/`Computing`/`Formatting`, and a plain labelled box
+/// elsewhere that absorbed ALL the transitions. A reader tracing `Idle --start--> Processing`
+/// arrived at an empty rectangle, and the container that actually holds the contents had no incoming
+/// transition at all (bd-9w54).
+///
+/// Giving the node its cluster's bounds fixes both halves at once: edge routing already targets node
+/// boxes, so transitions now attach to the container's boundary, and the renderer skips drawing a
+/// node that has become its own cluster — the cluster already draws that box and its title.
+///
+/// Matched on cluster TITLE == node id, which is exactly what `begin_state_cluster` writes
+/// (`title.or(Some(name))`), and restricted to state diagrams so a flowchart `subgraph` that happens
+/// to share a node's name is left alone.
+fn anchor_composite_state_nodes(
+    ir: &MermaidDiagramIr,
+    nodes: &mut [LayoutNodeBox],
+    clusters: &[LayoutClusterBox],
+) {
+    if !matches!(ir.diagram_type, DiagramType::State) {
+        return;
+    }
+    for cluster in clusters {
+        let Some(title) = cluster.title.as_deref() else {
+            continue;
+        };
+        for node in nodes.iter_mut() {
+            if node.node_id == title {
+                node.bounds = cluster.bounds;
+            }
+        }
+    }
 }
 
 fn build_cluster_boxes(
