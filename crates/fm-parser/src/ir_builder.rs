@@ -973,6 +973,19 @@ impl IrBuilder {
         self.state_stack.pop().is_some()
     }
 
+    /// Lookup key of the composite state currently being parsed, or `None` at the top level.
+    ///
+    /// `[*]` is a pseudo-state, and its identity is SCOPED: the `[*]` inside `state Processing { … }`
+    /// is a different pseudo-state from the diagram's own. Interning both under one global id merged
+    /// them into a single node that then emitted every start transition from both scopes (bd-w5j5).
+    /// Nested composites need the full path, not just the innermost name, so this returns the same
+    /// key `begin_state_cluster` builds its cluster from.
+    pub(crate) fn state_scope_key(&self) -> Option<&str> {
+        self.state_stack
+            .last()
+            .map(|context| context.lookup_key.as_str())
+    }
+
     pub(crate) fn advance_state_region(&mut self, span: Span) -> bool {
         let Some(mut context) = self.state_stack.pop() else {
             return false;

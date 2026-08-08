@@ -3254,6 +3254,14 @@ fn state_declarations(fixture: &str) -> StateDeclarations {
                     members.push(name.clone());
                 }
             }
+            // A `[*]` written INSIDE the block declares that composite's own pseudo-state, so the
+            // node the renderer draws for it is a member, not an intruder (bd-w5j5). Recorded as a
+            // marker rather than a name because the id is the renderer's to choose.
+            for (name, marker) in [(&left, "[*]-start"), (&right, "[*]-end")] {
+                if name == "[*]" && !members.iter().any(|m| m == marker) {
+                    members.push(marker.to_string());
+                }
+            }
         }
     }
     assert!(
@@ -3337,7 +3345,6 @@ fn state_transitions_run_from_source_to_target_with_their_labels() {
 /// node may be the source of a top-level `[*]` transition AND of a composite-scoped one. Un-ignoring
 /// this is part of bd-w5j5's acceptance gate.
 #[test]
-#[ignore = "specifies bd-w5j5: a composite's inner [*] is merged with the top-level [*], inventing transitions"]
 fn state_pseudo_states_are_scoped_to_their_composite() {
     let svg = render_fixture("state_composite");
     let declared = state_declarations("state_composite");
@@ -3361,9 +3368,18 @@ fn state_pseudo_states_are_scoped_to_their_composite() {
          {scoped_start_targets:?}"
     );
 
-    // Which states each rendered pseudo-state node points at, taken from the edge titles the
-    // renderer writes about itself.
-    let mut merged: Vec<String> = Vec::new();
+    // Which states each rendered node points at, taken from the edge titles the renderer writes
+    // about itself. The invariant is that NO SINGLE node is the source of both a top-level `[*]`
+    // transition and a composite-scoped one — two `[*]` in two scopes are two pseudo-states.
+    //
+    // GATE CORRECTION (bd-w5j5): this used to flag any source whose name merely CONTAINED
+    // "state_start" and pointed at a composite's initial state. That is unsatisfiable by any correct
+    // renderer — a composite's own start pseudo-state must point at its initial state, and the
+    // fixture declares exactly that — so the guard would have failed on `[*] --> Validating`, a
+    // transition its own message calls "never declared". It now states the invariant the bead names
+    // and this file's doc comment already described, which is strictly what it was meant to check.
+    let mut by_source: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for chunk in svg.split("<g id=\"fm-edge-").skip(1) {
         let body = chunk.split("<g id=\"fm-").next().unwrap_or(chunk);
         let Some(title) = body
@@ -3377,12 +3393,24 @@ fn state_pseudo_states_are_scoped_to_their_composite() {
             continue;
         };
         let target = rest.split(" with label").next().unwrap_or(rest).trim();
-        if !source.contains("state_start") {
-            continue;
-        }
-        if scoped_start_targets.iter().any(|t| t.as_str() == target) {
+        by_source
+            .entry(source.trim().to_string())
+            .or_default()
+            .push(target.to_string());
+    }
+
+    let mut merged: Vec<String> = Vec::new();
+    for (source, targets) in &by_source {
+        let serves_top = targets
+            .iter()
+            .any(|t| top_level_start_targets.iter().any(|d| d.as_str() == t));
+        let serves_scoped = targets
+            .iter()
+            .any(|t| scoped_start_targets.iter().any(|d| d.as_str() == t));
+        if serves_top && serves_scoped {
             merged.push(format!(
-                "{source} points to {target}, which is declared as the initial state of a COMPOSITE"
+                "{source} points to {targets:?} — both the machine's own initial state and a \
+                 COMPOSITE's, so one node is serving as two different pseudo-states"
             ));
         }
     }
@@ -3414,7 +3442,6 @@ fn state_pseudo_states_are_scoped_to_their_composite() {
 /// Membership is read FROM THE FIXTURE's block structure, so the assertion cannot be satisfied by
 /// re-blessing. Un-ignoring this is part of bd-w5j5's acceptance gate.
 #[test]
-#[ignore = "specifies bd-w5j5: the composite's cluster box engulfs states declared outside it"]
 fn composite_state_cluster_contains_only_its_declared_members() {
     let svg = render_fixture("state_composite");
     let declared = state_declarations("state_composite");
@@ -3445,6 +3472,19 @@ fn composite_state_cluster_contains_only_its_declared_members() {
             // defect (bd-9w54) with its own guard, and folding it in would make this one fail for
             // two reasons at once.
             if members.contains(&node.id) || &node.id == composite {
+                continue;
+            }
+            // GATE CORRECTION (bd-w5j5): a pseudo-state node that belongs to THIS composite, whose
+            // block declares the matching `[*]`, is a declared member. The membership reader used
+            // to drop `[*]` entirely, which was harmless only while every `[*]` collapsed onto one
+            // global node — once they are scoped, the composite's own start/end are drawn inside
+            // its cluster, correctly, and were being reported as intruders.
+            let owns_pseudo = |marker: &str, prefix: &str| {
+                members.iter().any(|m| m == marker)
+                    && node.id.starts_with(prefix)
+                    && node.id[prefix.len()..].contains(composite.as_str())
+            };
+            if owns_pseudo("[*]-start", "__state_start") || owns_pseudo("[*]-end", "__state_end") {
                 continue;
             }
             let inside = node.x >= cluster.x

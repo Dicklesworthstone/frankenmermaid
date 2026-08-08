@@ -3709,20 +3709,23 @@ fn lower_state_flow_ast(
             label,
             to,
         } => {
+            let scope = builder.state_scope_key().map(str::to_string);
             let (from_id_key, from_label, from_shape) = state_edge_endpoint(
                 &from.id,
                 from.label.as_ref().map(ParsedLabel::as_str),
                 from.shape,
                 true,
+                scope.as_deref(),
             );
             let (to_id_key, to_label, to_shape) = state_edge_endpoint(
                 &to.id,
                 to.label.as_ref().map(ParsedLabel::as_str),
                 to.shape,
                 false,
+                scope.as_deref(),
             );
-            let from_id = builder.intern_node(from_id_key, from_label, from_shape, span);
-            let to_id = builder.intern_node(to_id_key, to_label, to_shape, span);
+            let from_id = builder.intern_node(from_id_key.as_ref(), from_label, from_shape, span);
+            let to_id = builder.intern_node(to_id_key.as_ref(), to_label, to_shape, span);
             if let (Some(f), Some(t)) = (from_id, to_id) {
                 builder.attach_state_node(f);
                 builder.attach_state_node(t);
@@ -3826,8 +3829,10 @@ fn lower_state_node(
     builder: &mut IrBuilder,
     span: Span,
 ) {
+    let scoped;
     let (id, label, shape) = if id == STATE_PSEUDO_TOKEN {
-        (STATE_START_NODE_ID, None, NodeShape::FilledCircle)
+        scoped = scoped_pseudo_state_id(STATE_START_NODE_ID, builder.state_scope_key());
+        (scoped.as_ref(), None, NodeShape::FilledCircle)
     } else {
         (id, label, shape)
     };
@@ -3836,20 +3841,55 @@ fn lower_state_node(
     }
 }
 
+/// Pseudo-state id for the composite currently being parsed.
+///
+/// `[*]` is scoped, not global: the one inside `state Processing { … }` is a different pseudo-state
+/// from the diagram's own. Interning both under `__state_start` merged them into ONE node that then
+/// emitted every start transition from both scopes — golden/state_composite drew the machine as able
+/// to begin directly in `Validating`, bypassing `Idle` and the entry into `Processing` entirely, and
+/// the shared node dragged the outer states into the composite's cluster (bd-w5j5).
+///
+/// Top-level `[*]` keeps the bare id, so no non-composite diagram moves. `/` is mapped to `_`
+/// because the key is a path (`state/Outer/Inner`) and these ids reach `data-id` and the element id.
+fn scoped_pseudo_state_id<'a>(base: &'a str, scope: Option<&str>) -> Cow<'a, str> {
+    match scope {
+        None => Cow::Borrowed(base),
+        Some(scope) => {
+            let mut id = String::with_capacity(base.len() + scope.len() + 2);
+            id.push_str(base);
+            id.push_str("__");
+            for ch in scope.chars() {
+                id.push(if ch == '/' { '_' } else { ch });
+            }
+            Cow::Owned(id)
+        }
+    }
+}
+
 fn state_edge_endpoint<'a>(
     id: &'a str,
     label: Option<&'a str>,
     shape: NodeShape,
     is_source: bool,
-) -> (&'a str, Option<&'a str>, NodeShape) {
+    scope: Option<&str>,
+) -> (Cow<'a, str>, Option<&'a str>, NodeShape) {
     if id != STATE_PSEUDO_TOKEN {
-        return (id, label, shape);
+        return (Cow::Borrowed(id), label, shape);
     }
 
+    // Scoped per composite — see `scoped_pseudo_state_id` (bd-w5j5).
     if is_source {
-        (STATE_START_NODE_ID, None, NodeShape::FilledCircle)
+        (
+            scoped_pseudo_state_id(STATE_START_NODE_ID, scope),
+            None,
+            NodeShape::FilledCircle,
+        )
     } else {
-        (STATE_END_NODE_ID, None, NodeShape::DoubleCircle)
+        (
+            scoped_pseudo_state_id(STATE_END_NODE_ID, scope),
+            None,
+            NodeShape::DoubleCircle,
+        )
     }
 }
 
