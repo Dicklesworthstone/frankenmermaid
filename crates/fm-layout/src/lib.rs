@@ -7939,7 +7939,7 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 /// board lists its cards in the order they should be read, and an id sort puts "Task 10" above
 /// "Task 2".
 fn kanban_lane_columns(ir: &MermaidDiagramIr) -> Option<Vec<Vec<usize>>> {
-    if true || ir.diagram_type != DiagramType::Kanban || ir.clusters.is_empty() {
+    if ir.diagram_type != DiagramType::Kanban || ir.clusters.is_empty() {
         return None;
     }
 
@@ -18798,6 +18798,84 @@ mod tests {
         assert!(
             xs.windows(2).any(|w| (w[0] - w[1]).abs() > 0.001),
             "unranged nodes must not all stack on one x: {xs:?}"
+        );
+    }
+
+    /// A kanban board has no edges, so its columns must come from the declared lanes. Ranking it
+    /// by `layered_ranks` gave every card rank 0 and stacked the whole board in one column
+    /// (bd-eg44). Card ids here are deliberately NOT in alphabetical order within a lane, so an id
+    /// sort — which is what the shared journey path applies — would fail the ordering assertion.
+    #[test]
+    fn kanban_layout_columns_come_from_the_declared_lanes() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Kanban);
+        for id in ["todo_z", "todo_a", "doing_z", "doing_a"] {
+            ir.nodes.push(IrNode {
+                id: id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for (name, members) in [("Todo", [0_usize, 1]), ("Doing", [2, 3])] {
+            ir.clusters.push(IrCluster {
+                id: name.to_string(),
+                members: members.map(IrNodeId).to_vec(),
+                ..IrCluster::default()
+            });
+        }
+
+        let layout = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Kanban).layout;
+        let boxes: BTreeMap<&str, LayoutRect> = layout
+            .nodes
+            .iter()
+            .map(|n| (n.node_id.as_str(), n.bounds))
+            .collect();
+
+        assert!(
+            (boxes["todo_z"].x - boxes["todo_a"].x).abs() < 0.001
+                && (boxes["doing_z"].x - boxes["doing_a"].x).abs() < 0.001,
+            "cards in one lane share a column: {boxes:?}"
+        );
+        assert!(
+            boxes["doing_z"].x >= boxes["todo_z"].x + boxes["todo_z"].width,
+            "different lanes must be separated by at least a card width: {boxes:?}"
+        );
+        assert!(
+            boxes["todo_a"].y > boxes["todo_z"].y && boxes["doing_a"].y > boxes["doing_z"].y,
+            "cards stack in DECLARATION order, not id order: {boxes:?}"
+        );
+        assert!(
+            layout.extensions.bands.is_empty(),
+            "the lanes are already drawn as cluster boxes with their own titles; a generic \
+             \"lane N\" band would be a second rectangle around the same cards"
+        );
+    }
+
+    /// A card that belongs to no lane still has to be drawn, in a column of its own rather than
+    /// silently folded into lane 0.
+    #[test]
+    fn kanban_layout_gives_a_lane_less_card_its_own_column() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Kanban);
+        for id in ["in_lane", "orphan"] {
+            ir.nodes.push(IrNode {
+                id: id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        ir.clusters.push(IrCluster {
+            id: "Todo".to_string(),
+            members: vec![IrNodeId(0)],
+            ..IrCluster::default()
+        });
+
+        let layout = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Kanban).layout;
+        let boxes: BTreeMap<&str, LayoutRect> = layout
+            .nodes
+            .iter()
+            .map(|n| (n.node_id.as_str(), n.bounds))
+            .collect();
+        assert_eq!(boxes.len(), 2, "both cards must be laid out");
+        assert!(
+            (boxes["orphan"].x - boxes["in_lane"].x).abs() > 0.001,
+            "the lane-less card must not land in lane 0's column: {boxes:?}"
         );
     }
 
