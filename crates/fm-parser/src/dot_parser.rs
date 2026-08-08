@@ -63,6 +63,7 @@ pub fn parse_dot(input: &str) -> ParseResult {
     // stack existed, its closing brace popped the ENCLOSING cluster, and every node after it
     // silently fell outside the cluster it was written inside.
     let mut brace_scopes: Vec<DotBraceScope> = Vec::new();
+    let mut defaults = DotDefaults::default();
 
     for (index, line) in normalized_body.lines().enumerate() {
         let line_number = index + 1;
@@ -78,6 +79,7 @@ pub fn parse_dot(input: &str) -> ParseResult {
                     &mut brace_scopes,
                     &mut active_clusters,
                     &mut active_subgraphs,
+                    &mut defaults,
                     line_number,
                     line,
                     &mut builder,
@@ -88,13 +90,19 @@ pub fn parse_dot(input: &str) -> ParseResult {
                 continue;
             }
             if statement == "{" {
-                brace_scopes.push(DotBraceScope::default());
+                brace_scopes.push(DotBraceScope {
+                    saved_defaults: defaults,
+                    ..DotBraceScope::default()
+                });
                 continue;
             }
             // An anonymous group that opens on the same line as its first statement, e.g.
             // `{ rank=same` after the `;` split. The brace opens a scope that pushes nothing.
             let statement = if let Some(rest) = statement.strip_prefix('{') {
-                brace_scopes.push(DotBraceScope::default());
+                brace_scopes.push(DotBraceScope {
+                    saved_defaults: defaults,
+                    ..DotBraceScope::default()
+                });
                 rest.trim()
             } else {
                 statement
@@ -156,7 +164,10 @@ pub fn parse_dot(input: &str) -> ParseResult {
                 // For anonymous ones, the key already includes the line number.
                 let lookup_key = cluster_key.clone();
 
-                let mut scope = DotBraceScope::default();
+                let mut scope = DotBraceScope {
+                    saved_defaults: defaults,
+                    ..DotBraceScope::default()
+                };
                 if let Some(cluster_index) = builder.ensure_cluster(
                     &lookup_key,
                     cluster_title.as_deref(),
@@ -217,28 +228,35 @@ pub fn parse_dot(input: &str) -> ParseResult {
                         .ok_or_else(|| value.as_ref().trim().trim_matches('"').to_string());
                     apply_dot_rankdir(rankdir, line_number, &mut builder);
                 }
+                // `node [shape=…]` and `edge [style=…]` set defaults for everything that FOLLOWS in
+                // this scope. A later statement of the same kind overrides only the attribute it
+                // names, matching DOT, where each default statement updates the current set.
+                if lower.starts_with("node") {
+                    if let Some(shape) = extract_dot_attribute_raw(statement, "shape")
+                        .as_deref()
+                        .and_then(parse_dot_shape_value)
+                    {
+                        defaults.node_shape = Some(shape);
+                    }
+                } else if lower.starts_with("edge")
+                    && let Some(style) = parse_dot_edge_style(statement)
+                {
+                    defaults.edge_style = Some(style);
+                }
                 continue;
             }
 
-            if parse_dot_edge_statement(
-                statement,
-                directed,
+            let ctx = DotStatementContext {
                 line_number,
-                line,
-                &active_clusters,
-                &active_subgraphs,
-                &mut builder,
-            ) {
+                source_line: line,
+                active_clusters: &active_clusters,
+                active_subgraphs: &active_subgraphs,
+                defaults,
+            };
+            if parse_dot_edge_statement(statement, directed, ctx, &mut builder) {
                 continue;
             }
-            if parse_dot_node_statement(
-                statement,
-                line_number,
-                line,
-                &active_clusters,
-                &active_subgraphs,
-                &mut builder,
-            ) {
+            if parse_dot_node_statement(statement, ctx, &mut builder) {
                 continue;
             }
 
@@ -266,6 +284,61 @@ struct DotBraceScope {
     pushed_subgraph: bool,
     /// `Some` once `rank=same` is seen in this group; accumulates the node ids it names.
     same_rank: Option<Vec<String>>,
+    /// The defaults in force when this brace opened, restored when it closes.
+    ///
+    /// DOT scopes `node [...]` / `edge [...]` defaults to the subgraph that declares them: they
+    /// apply to the rest of that subgraph and to nested ones, and revert on exit. Saving the
+    /// outer values here is what makes exit revert instead of leaking.
+    saved_defaults: DotDefaults,
+}
+
+/// `node [...]` / `edge [...]` defaults currently in force.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DotDefaults {
+    node_shape: Option<NodeShape>,
+    edge_style: Option<DotEdgeStyle>,
+}
+
+/// DOT's edge `style`, limited to the values this engine can draw.
+///
+/// `dashed` and `dotted` both map to the same rendering: the IR has one non-solid line family
+/// (`DottedArrow` / `DottedLine`), so distinguishing them here would promise a difference the
+/// renderer cannot show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DotEdgeStyle {
+    Dotted,
+    Bold,
+}
+
+/// Read an edge's `style` attribute.
+///
+/// DOT allows a comma list (`style="bold,dashed"`); the first recognized token wins, because the IR
+/// carries one line style per edge and cannot be both. Unrecognized tokens (`invis`, `tapered`, …)
+/// are skipped rather than treated as an error: they are valid DOT this engine simply does not draw.
+fn parse_dot_edge_style(attributes: &str) -> Option<DotEdgeStyle> {
+    let value = extract_dot_attribute_raw(attributes, "style")?;
+    value
+        .as_ref()
+        .trim()
+        .trim_matches(['"', '\''])
+        .split(',')
+        .find_map(|token| match token.trim().to_ascii_lowercase().as_str() {
+            "dashed" | "dotted" => Some(DotEdgeStyle::Dotted),
+            "bold" => Some(DotEdgeStyle::Bold),
+            _ => None,
+        })
+}
+
+/// The arrow type for an edge, given the graph's directedness and the style in force.
+const fn dot_arrow_type(directed: bool, style: Option<DotEdgeStyle>) -> ArrowType {
+    match (directed, style) {
+        (true, None) => ArrowType::Arrow,
+        (false, None) => ArrowType::Line,
+        (true, Some(DotEdgeStyle::Dotted)) => ArrowType::DottedArrow,
+        (false, Some(DotEdgeStyle::Dotted)) => ArrowType::DottedLine,
+        (true, Some(DotEdgeStyle::Bold)) => ArrowType::ThickArrow,
+        (false, Some(DotEdgeStyle::Bold)) => ArrowType::ThickLine,
+    }
 }
 
 /// The `rank` graph attribute, split into what this engine can honor and what it cannot.
@@ -318,6 +391,7 @@ fn close_dot_brace_scope(
     brace_scopes: &mut Vec<DotBraceScope>,
     active_clusters: &mut Vec<usize>,
     active_subgraphs: &mut Vec<usize>,
+    defaults: &mut DotDefaults,
     line_number: usize,
     source_line: &str,
     builder: &mut IrBuilder,
@@ -327,6 +401,8 @@ fn close_dot_brace_scope(
     let Some(scope) = brace_scopes.pop() else {
         return;
     };
+    // Defaults declared inside the group stop applying at its `}`.
+    *defaults = scope.saved_defaults;
     if scope.pushed_cluster {
         let _ = active_clusters.pop();
     }
@@ -485,15 +561,33 @@ fn starts_with_keyword(line: &str, keyword: &str) -> bool {
         .is_some_and(|ch| ch.is_whitespace() || ch == '{')
 }
 
+/// Everything a statement parser needs from the enclosing scope.
+///
+/// Bundled rather than threaded as separate parameters so that adding the next scoped attribute
+/// does not touch every call site — the defaults field is already the second thing to arrive here
+/// after the cluster/subgraph stacks.
+#[derive(Clone, Copy)]
+struct DotStatementContext<'a> {
+    line_number: usize,
+    source_line: &'a str,
+    active_clusters: &'a [usize],
+    active_subgraphs: &'a [usize],
+    defaults: DotDefaults,
+}
+
 fn parse_dot_edge_statement(
     statement: &str,
     directed: bool,
-    line_number: usize,
-    source_line: &str,
-    active_clusters: &[usize],
-    active_subgraphs: &[usize],
+    ctx: DotStatementContext<'_>,
     builder: &mut IrBuilder,
 ) -> bool {
+    let DotStatementContext {
+        line_number,
+        source_line,
+        active_clusters,
+        active_subgraphs,
+        defaults,
+    } = ctx;
     let Some(operator) = find_edge_operator(statement) else {
         return false;
     };
@@ -503,11 +597,6 @@ fn parse_dot_edge_statement(
         return false;
     }
 
-    let arrow = if operator == "->" || directed {
-        ArrowType::Arrow
-    } else {
-        ArrowType::Line
-    };
     let span = span_for(line_number, source_line);
 
     // Extract shared attributes from the last part
@@ -519,6 +608,11 @@ fn parse_dot_edge_statement(
 
     let edge_label_str = shared_attrs.and_then(parse_dot_label);
     let min_len = shared_attrs.and_then(parse_dot_minlen);
+    // A style on the statement wins over the `edge [style=…]` default, which is what DOT does.
+    let style = shared_attrs
+        .and_then(parse_dot_edge_style)
+        .or(defaults.edge_style);
+    let arrow = dot_arrow_type(operator == "->" || directed, style);
 
     // Edge groups (A -> {B C D}) are expanded in expand_edge_groups() before
     // normalization, so they arrive here as individual "A -> B", "A -> C" etc.
@@ -539,13 +633,23 @@ fn parse_dot_edge_statement(
             continue;
         };
 
+        // An endpoint mentioned only in an edge is still a node the `node [shape=…]` default
+        // applies to, so it must not be hardcoded to Rect.
+        let endpoint_shape = |declared: Option<NodeShape>| {
+            declared.or(defaults.node_shape).unwrap_or(NodeShape::Rect)
+        };
         let from = builder.intern_node(
             &from_node.id,
             from_node.label.as_deref(),
-            NodeShape::Rect,
+            endpoint_shape(from_node.shape),
             span,
         );
-        let to = builder.intern_node(&to_node.id, to_node.label.as_deref(), NodeShape::Rect, span);
+        let to = builder.intern_node(
+            &to_node.id,
+            to_node.label.as_deref(),
+            endpoint_shape(to_node.shape),
+            span,
+        );
 
         if let (Some(from_id), Some(to_id)) = (from, to) {
             builder.push_edge(from_id, to_id, arrow, edge_label_str.as_deref(), span);
@@ -640,17 +744,25 @@ fn find_edge_operator(statement: &str) -> Option<&'static str> {
 
 fn parse_dot_node_statement(
     statement: &str,
-    line_number: usize,
-    source_line: &str,
-    active_clusters: &[usize],
-    active_subgraphs: &[usize],
+    ctx: DotStatementContext<'_>,
     builder: &mut IrBuilder,
 ) -> bool {
+    let DotStatementContext {
+        line_number,
+        source_line,
+        active_clusters,
+        active_subgraphs,
+        defaults,
+    } = ctx;
     let Some(node) = parse_dot_node_fragment(statement) else {
         return false;
     };
     let span = span_for(line_number, source_line);
-    let node_id = builder.intern_node(&node.id, node.label.as_deref(), node.shape, span);
+    let shape = node
+        .shape
+        .or(defaults.node_shape)
+        .unwrap_or(NodeShape::Rect);
+    let node_id = builder.intern_node(&node.id, node.label.as_deref(), shape, span);
     if let Some(node_id) = node_id {
         add_node_to_active_groups(builder, active_clusters, active_subgraphs, node_id);
     }
@@ -675,7 +787,8 @@ fn add_node_to_active_groups(
 struct DotNode {
     id: String,
     label: Option<String>,
-    shape: NodeShape,
+    /// `None` when the statement named no usable shape, so a `node [shape=…]` default can apply.
+    shape: Option<NodeShape>,
 }
 
 fn parse_dot_node_fragment(raw: &str) -> Option<DotNode> {
@@ -693,7 +806,7 @@ fn parse_dot_node_fragment(raw: &str) -> Option<DotNode> {
         return None;
     }
 
-    let (label, shape) = attrs.map_or((None, NodeShape::Rect), parse_dot_node_attributes);
+    let (label, shape) = attrs.map_or((None, None), parse_dot_node_attributes);
 
     Some(DotNode { id, label, shape })
 }
@@ -805,7 +918,7 @@ impl<'a> Iterator for DotAttributeIter<'a> {
     }
 }
 
-fn parse_dot_node_attributes(attributes: &str) -> (Option<String>, NodeShape) {
+fn parse_dot_node_attributes(attributes: &str) -> (Option<String>, Option<NodeShape>) {
     let mut label_value = None;
     let mut shape_value = None;
 
@@ -821,10 +934,10 @@ fn parse_dot_node_attributes(attributes: &str) -> (Option<String>, NodeShape) {
     }
 
     let label = label_value.as_deref().and_then(parse_dot_label_value);
-    let shape = shape_value
-        .as_deref()
-        .and_then(parse_dot_shape_value)
-        .unwrap_or(NodeShape::Rect);
+    // `None` means the statement named no usable shape, which is DISTINCT from naming `rect`: only
+    // the former should fall back to a `node [shape=…]` default. The fallback lives at the call
+    // site, which is the only place that knows the defaults in force.
+    let shape = shape_value.as_deref().and_then(parse_dot_shape_value);
     (label, shape)
 }
 
@@ -1019,14 +1132,16 @@ enum DotMinLen {
 }
 
 #[cfg(test)]
-fn parse_dot_node_attributes_sequential(attributes: &str) -> (Option<String>, NodeShape) {
+fn parse_dot_node_attributes_sequential(attributes: &str) -> (Option<String>, Option<NodeShape>) {
     let label = parse_dot_label(attributes);
+    // Left as `Option` to match `parse_dot_node_attributes`, whose result this exists to
+    // cross-check: "no shape named" has to stay distinguishable from "shape=rect" so a
+    // `node [shape=…]` default can apply only to the former.
     let shape = if contains_ignore_ascii_case(attributes.as_bytes(), b"shape") {
         parse_dot_shape(attributes)
     } else {
         None
-    }
-    .unwrap_or(NodeShape::Rect);
+    };
     (label, shape)
 }
 
@@ -1570,7 +1685,7 @@ fn span_for(line_number: usize, line: &str) -> Span {
 
 #[cfg(test)]
 mod tests {
-    use fm_core::{ArrowType, DiagramType};
+    use fm_core::{ArrowType, DiagramType, NodeShape};
 
     use super::{looks_like_dot, parse_dot};
 
@@ -1839,6 +1954,142 @@ mod tests {
                 .any(|warning| warning.contains("rank=same")),
             "{:?}",
             parsed.warnings
+        );
+    }
+
+    #[test]
+    fn edge_style_selects_the_line_family() {
+        for (style, expected) in [
+            ("dashed", ArrowType::DottedArrow),
+            ("dotted", ArrowType::DottedArrow),
+            ("bold", ArrowType::ThickArrow),
+        ] {
+            let parsed = parse_dot(&format!("digraph G {{ a -> b [style={style}]; }}"));
+            assert_eq!(parsed.ir.edges[0].arrow, expected, "style={style}");
+        }
+        // Undirected graphs get the line forms, not the arrow forms.
+        let parsed = parse_dot("graph G { a -- b [style=dashed]; }");
+        assert_eq!(parsed.ir.edges[0].arrow, ArrowType::DottedLine);
+        let parsed = parse_dot("graph G { a -- b [style=bold]; }");
+        assert_eq!(parsed.ir.edges[0].arrow, ArrowType::ThickLine);
+    }
+
+    #[test]
+    fn plain_edges_keep_their_arrow_when_no_style_is_given() {
+        // The control: without `style` the arrow must be unchanged, or the assertions above could be
+        // satisfied by a parser that always rewrites the arrow.
+        assert_eq!(
+            parse_dot("digraph G { a -> b; }").ir.edges[0].arrow,
+            ArrowType::Arrow
+        );
+        assert_eq!(
+            parse_dot("graph G { a -- b; }").ir.edges[0].arrow,
+            ArrowType::Line
+        );
+    }
+
+    #[test]
+    fn unsupported_style_tokens_are_skipped_not_treated_as_errors() {
+        // `invis` and `tapered` are valid DOT this engine cannot draw; the first RECOGNIZED token in
+        // the list wins, since one edge cannot be both.
+        let parsed = parse_dot("digraph G { a -> b [style=\"invis,bold\"]; }");
+        assert_eq!(parsed.ir.edges[0].arrow, ArrowType::ThickArrow);
+
+        let parsed = parse_dot("digraph G { a -> b [style=tapered]; }");
+        assert_eq!(parsed.ir.edges[0].arrow, ArrowType::Arrow);
+    }
+
+    #[test]
+    fn node_shape_default_applies_to_later_nodes_and_edge_endpoints() {
+        let parsed = parse_dot("digraph G { node [shape=diamond]; a; b -> c; }");
+        for node in &parsed.ir.nodes {
+            assert_eq!(
+                node.shape,
+                NodeShape::Diamond,
+                "{} should inherit the default shape",
+                node.id
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_shape_overrides_the_default() {
+        let parsed = parse_dot("digraph G { node [shape=diamond]; a [shape=circle]; b; }");
+        let shape_of = |id: &str| {
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .map(|node| node.shape)
+                .expect(id)
+        };
+        assert_eq!(shape_of("a"), NodeShape::Circle);
+        assert_eq!(shape_of("b"), NodeShape::Diamond);
+    }
+
+    #[test]
+    fn defaults_declared_before_a_node_do_not_apply_retroactively() {
+        // DOT default statements affect what FOLLOWS them. A node declared earlier keeps its shape.
+        let parsed = parse_dot("digraph G { a; node [shape=diamond]; b; }");
+        let shape_of = |id: &str| {
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .map(|node| node.shape)
+                .expect(id)
+        };
+        assert_eq!(shape_of("a"), NodeShape::Rect);
+        assert_eq!(shape_of("b"), NodeShape::Diamond);
+    }
+
+    #[test]
+    fn defaults_are_scoped_to_the_subgraph_that_declares_them() {
+        // The scoping rule DOT specifies, and the reason defaults ride the brace stack: a default
+        // set inside a subgraph reverts at its `}`.
+        let parsed =
+            parse_dot("digraph G { subgraph cluster_0 { node [shape=diamond]; inner; } outer; }");
+        let shape_of = |id: &str| {
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .map(|node| node.shape)
+                .expect(id)
+        };
+        assert_eq!(shape_of("inner"), NodeShape::Diamond);
+        assert_eq!(
+            shape_of("outer"),
+            NodeShape::Rect,
+            "a default set inside the subgraph must not leak past its closing brace"
+        );
+    }
+
+    #[test]
+    fn defaults_inherit_into_nested_subgraphs() {
+        let parsed =
+            parse_dot("digraph G { node [shape=diamond]; subgraph cluster_0 { inner; } outer; }");
+        for node in &parsed.ir.nodes {
+            assert_eq!(node.shape, NodeShape::Diamond, "{}", node.id);
+        }
+    }
+
+    #[test]
+    fn edge_style_default_applies_and_is_overridden_per_edge() {
+        let parsed =
+            parse_dot("digraph G { edge [style=dashed]; a -> b; c -> d [style=bold]; e -> f; }");
+        let arrows: Vec<ArrowType> = parsed.ir.edges.iter().map(|edge| edge.arrow).collect();
+        assert_eq!(
+            arrows,
+            [
+                ArrowType::DottedArrow,
+                ArrowType::ThickArrow,
+                ArrowType::DottedArrow
+            ],
+            "the default applies except where the edge names its own style"
         );
     }
 
