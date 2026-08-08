@@ -9484,6 +9484,15 @@ fn apply_mermaid_config_value(value: Value, context: &str, span: Span, builder: 
     if let Some(curve) = parsed.config.flowchart_curve {
         builder.set_init_flowchart_curve(curve);
     }
+    // Spacing goes to the meta hints fm-layout reads, not just into the init record, so an init
+    // directive actually changes the drawn gaps. Recording it in `init.config` alone would leave a
+    // value nothing consumes.
+    if let Some(units) = parsed.config.node_spacing {
+        builder.set_init_node_spacing(units);
+    }
+    if let Some(units) = parsed.config.rank_spacing {
+        builder.set_init_rank_spacing(units);
+    }
     if let Some(mirror_actors) = parsed.config.sequence_mirror_actors {
         builder.set_init_sequence_mirror_actors(mirror_actors);
     }
@@ -12478,6 +12487,55 @@ mod tests {
             Some(GraphDirection::RL)
         );
         assert!(parsed.ir.meta.init.errors.is_empty());
+    }
+
+    #[test]
+    fn init_directive_maps_spacing_to_the_layout_hints() {
+        let parsed = parse_mermaid(
+            "%%{init: {\"flowchart\":{\"nodeSpacing\":60,\"rankSpacing\":90}}}%%\nflowchart TB\nA-->B",
+        );
+        // Recorded in the init config so `parse --json` still reports the directive...
+        assert_eq!(parsed.ir.meta.init.config.node_spacing, Some(60));
+        assert_eq!(parsed.ir.meta.init.config.rank_spacing, Some(90));
+        // ...AND applied to the meta hints, which is the half fm-layout actually reads. Recording it
+        // only in the init config would leave a value nothing consumes.
+        assert_eq!(parsed.ir.meta.node_spacing, Some(60));
+        assert_eq!(parsed.ir.meta.rank_spacing, Some(90));
+    }
+
+    #[test]
+    fn init_directive_spacing_is_absent_when_not_given() {
+        // The control: an unconditional Some would collapse every diagram to a fixed spacing.
+        let parsed = parse_mermaid("flowchart TB\nA-->B");
+        assert_eq!(parsed.ir.meta.node_spacing, None);
+        assert_eq!(parsed.ir.meta.rank_spacing, None);
+    }
+
+    #[test]
+    fn init_directive_rejects_negative_and_non_numeric_spacing() {
+        // A negative gap is not a smaller gap; reading it as 0 would collapse the diagram while
+        // looking like it worked, so it is refused with a typed error rather than clamped.
+        for payload in [
+            "{\"flowchart\":{\"nodeSpacing\":-10}}",
+            "{\"flowchart\":{\"rankSpacing\":\"wide\"}}",
+        ] {
+            let parsed = parse_mermaid(&format!("%%{{init: {payload}}}%%\nflowchart TB\nA-->B"));
+            assert_eq!(parsed.ir.meta.node_spacing, None, "{payload}");
+            assert_eq!(parsed.ir.meta.rank_spacing, None, "{payload}");
+            assert!(
+                !parsed.ir.meta.init.errors.is_empty() || !parsed.warnings.is_empty(),
+                "{payload} must be reported: {:?}",
+                parsed.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn init_directive_spacing_rounds_a_fractional_request() {
+        let parsed = parse_mermaid(
+            "%%{init: {\"flowchart\":{\"nodeSpacing\":60.6}}}%%\nflowchart TB\nA-->B",
+        );
+        assert_eq!(parsed.ir.meta.node_spacing, Some(61));
     }
 
     #[test]

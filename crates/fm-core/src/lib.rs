@@ -2264,6 +2264,10 @@ pub struct MermaidConfig {
     pub flowchart_direction: Option<GraphDirection>,
     /// Mermaid-style flowchart curve mode (for example, `basis`, `linear`).
     pub flowchart_curve: Option<String>,
+    /// Mermaid-style `flowchart.nodeSpacing` — minimum in-rank node gap, in layout units.
+    pub node_spacing: Option<u32>,
+    /// Mermaid-style `flowchart.rankSpacing` — minimum rank gap, in layout units.
+    pub rank_spacing: Option<u32>,
     /// Mermaid-style sequence mirror actors toggle.
     pub sequence_mirror_actors: Option<bool>,
     /// Mermaid-style sequence message numbering toggle.
@@ -2301,6 +2305,8 @@ impl Default for MermaidConfig {
             theme_variables: BTreeMap::new(),
             flowchart_direction: None,
             flowchart_curve: None,
+            node_spacing: None,
+            rank_spacing: None,
             sequence_mirror_actors: None,
             sequence_show_sequence_numbers: None,
         }
@@ -2333,6 +2339,13 @@ pub struct MermaidInitConfig {
     pub theme_variables: BTreeMap<String, String>,
     pub flowchart_direction: Option<GraphDirection>,
     pub flowchart_curve: Option<String>,
+    /// `flowchart.nodeSpacing` — minimum in-rank node gap, already in layout units.
+    ///
+    /// Whole units so this struct keeps its `Eq` derive, which the incremental layout memo relies on
+    /// when it compares meta by value.
+    pub node_spacing: Option<u32>,
+    /// `flowchart.rankSpacing` — minimum rank gap, in layout units. See [`Self::node_spacing`].
+    pub rank_spacing: Option<u32>,
     pub sequence_mirror_actors: Option<bool>,
     pub sequence_show_sequence_numbers: Option<bool>,
     pub sanitize_mode: MermaidSanitizeMode,
@@ -2448,6 +2461,8 @@ pub fn to_init_parse(parsed_config: MermaidConfigParse) -> MermaidInitParse {
         theme_variables: parsed_config.config.theme_variables.clone(),
         flowchart_direction: parsed_config.config.flowchart_direction,
         flowchart_curve: parsed_config.config.flowchart_curve.clone(),
+        node_spacing: parsed_config.config.node_spacing,
+        rank_spacing: parsed_config.config.rank_spacing,
         sequence_mirror_actors: parsed_config.config.sequence_mirror_actors,
         sequence_show_sequence_numbers: parsed_config.config.sequence_show_sequence_numbers,
         sanitize_mode: parsed_config.config.sanitize_mode,
@@ -2502,6 +2517,29 @@ fn parse_flowchart_config(value: &Value, parsed: &mut MermaidConfigParse) {
                     parsed.config.flowchart_curve = Some(curve.to_string());
                 } else {
                     push_type_error(parsed, "flowchart.curve", raw_value, "must be a string");
+                }
+            }
+            // Mermaid's spacing options, already in layout units, so no conversion — unlike DOT's
+            // `nodesep`/`ranksep`, which are inches and are converted by the DOT parser.
+            "nodeSpacing" | "rankSpacing" => {
+                match raw_value.as_f64() {
+                    // Rejecting negatives here rather than clamping: a negative gap is not a smaller
+                    // gap, it is a request the layout cannot honor, and silently reading it as 0
+                    // would collapse the diagram while looking like it worked.
+                    Some(number) if number.is_finite() && number >= 0.0 => {
+                        let units = number.round().min(f64::from(u32::MAX)) as u32;
+                        if key == "nodeSpacing" {
+                            parsed.config.node_spacing = Some(units);
+                        } else {
+                            parsed.config.rank_spacing = Some(units);
+                        }
+                    }
+                    _ => push_type_error(
+                        parsed,
+                        &format!("flowchart.{key}"),
+                        raw_value,
+                        "must be a non-negative number of layout units",
+                    ),
                 }
             }
             other => push_warning(

@@ -334,6 +334,27 @@ fn dot_ranksep_and_nodesep_change_the_drawn_gaps() {
 }
 
 #[test]
+fn mermaid_init_spacing_changes_the_drawn_gaps_too() {
+    // The same meta hints, reached from the OTHER dialect. Mermaid's own
+    // `%%{init: {"flowchart": {"rankSpacing": …}}}%%` was unsupported until now, so this proves the
+    // hint fields are not DOT-specific plumbing.
+    let plain = layout_diagram(&parse("flowchart TB\n  a-->b").ir);
+    let wide = layout_diagram(
+        &parse("%%{init: {\"flowchart\":{\"rankSpacing\":200}}}%%\nflowchart TB\n  a-->b").ir,
+    );
+
+    let gap = |layout: &fm_layout::DiagramLayout| {
+        node_position(layout, "b").1 - node_position(layout, "a").1
+    };
+    assert!(
+        gap(&wide) > gap(&plain) + 1.0,
+        "rankSpacing must widen the rank gap: plain={} wide={}",
+        gap(&plain),
+        gap(&wide)
+    );
+}
+
+#[test]
 fn dot_bgcolor_reaches_the_rendered_background() {
     // bgcolor was one of the attributes bd-mf4d consumed-and-ignored. It maps onto the Mermaid theme
     // variable the SVG renderer already honors, so this asserts on the drawing rather than the IR.

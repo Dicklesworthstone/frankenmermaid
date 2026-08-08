@@ -683,6 +683,19 @@ impl IrBuilder {
         self.ir.meta.rank_spacing = Some(units);
     }
 
+    /// Apply `flowchart.nodeSpacing` from an init directive: to the layout hint AND to the init
+    /// record, so `parse --json` still reports the directive that was given.
+    pub(crate) const fn set_init_node_spacing(&mut self, units: u32) {
+        self.ir.meta.init.config.node_spacing = Some(units);
+        self.ir.meta.node_spacing = Some(units);
+    }
+
+    /// Apply `flowchart.rankSpacing` from an init directive. See [`Self::set_init_node_spacing`].
+    pub(crate) const fn set_init_rank_spacing(&mut self, units: u32) {
+        self.ir.meta.init.config.rank_spacing = Some(units);
+        self.ir.meta.rank_spacing = Some(units);
+    }
+
     /// Set an already-created cluster's title, for syntaxes that name a group from INSIDE its body.
     ///
     /// DOT does exactly that (`subgraph cluster_0 { label="Backend"; … }`), so the cluster exists
