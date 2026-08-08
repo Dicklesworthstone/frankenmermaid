@@ -1,6 +1,12 @@
 /* @ts-self-types="./frankenmermaid.d.ts" */
 
 export class Diagram {
+    static __wrap(ptr) {
+        const obj = Object.create(Diagram.prototype);
+        obj.__wbg_ptr = ptr;
+        DiagramFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
         this.__wbg_ptr = 0;
@@ -13,6 +19,89 @@ export class Diagram {
     }
     destroy() {
         wasm.diagram_destroy(this.__wbg_ptr);
+    }
+    /**
+     * Creates a renderer for an `OffscreenCanvas` transferred to a worker.
+     *
+     * The offscreen 2D context implements the same CanvasRenderingContext2D
+     * method surface used by `Canvas2dContext`; it is stored structurally so
+     * the renderer can share the normal Canvas2D path without main-thread DOM
+     * access. Event registration remains unavailable because an offscreen
+     * canvas is not an `EventTarget`.
+     * @param {OffscreenCanvas} canvas
+     * @param {any | null} [config]
+     * @returns {Diagram}
+     */
+    static fromOffscreenCanvas(canvas, config) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.diagram_fromOffscreenCanvas(retptr, addHeapObject(canvas), isLikeNone(config) ? 0 : addHeapObject(config));
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return Diagram.__wrap(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Return the nearest rendered edge index within a canvas-space tolerance.
+     *
+     * The query uses CGA point-to-segment distance over the latest render's edge paths, excludes
+     * bundled non-rendered paths, and returns `None` for invalid coordinates or tolerance.
+     * @param {number} x
+     * @param {number} y
+     * @param {number} max_distance
+     * @returns {number | undefined}
+     */
+    hitTestEdge(x, y, max_distance) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.diagram_hitTestEdge(retptr, this.__wbg_ptr, x, y, max_distance);
+            var r0 = getDataViewMemory0().getFloat64(retptr + 8 * 0, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
+            return r0 === Number.MAX_SAFE_INTEGER ? undefined : r0;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Return the laid-out node below a canvas-space pointer, if any.
+     *
+     * The query uses CGA rectangle containment against the latest render's layout, so it never
+     * reparses or relayouts the diagram. Non-finite coordinates and calls before the first render
+     * return `None`.
+     * @param {number} x
+     * @param {number} y
+     * @returns {string | undefined}
+     */
+    hitTestNode(x, y) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.diagram_hitTestNode(retptr, this.__wbg_ptr, x, y);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
+            let v1;
+            if (r0 !== 0) {
+                v1 = getStringFromWasm0(r0, r1).slice();
+                wasm.__wbindgen_export4(r0, r1 * 1, 1);
+            }
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
     /**
      * @param {HTMLCanvasElement} canvas
@@ -424,6 +513,10 @@ function __wbg_get_imports() {
             const ret = getObject(arg0).getContext(getStringFromWasm0(arg1, arg2));
             return isLikeNone(ret) ? 0 : addHeapObject(ret);
         }, arguments); },
+        __wbg_getContext_fd298c901058eb31: function() { return handleError(function (arg0, arg1, arg2) {
+            const ret = getObject(arg0).getContext(getStringFromWasm0(arg1, arg2));
+            return isLikeNone(ret) ? 0 : addHeapObject(ret);
+        }, arguments); },
         __wbg_get_507a50627bffa49b: function(arg0, arg1) {
             const ret = getObject(arg0)[arg1 >>> 0];
             return addHeapObject(ret);
@@ -437,6 +530,10 @@ function __wbg_get_imports() {
             return addHeapObject(ret);
         },
         __wbg_height_6eec812c213259a1: function(arg0) {
+            const ret = getObject(arg0).height;
+            return ret;
+        },
+        __wbg_height_f2cc35b336f266f1: function(arg0) {
             const ret = getObject(arg0).height;
             return ret;
         },
@@ -599,6 +696,10 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbg_width_84477c442af415ce: function(arg0) {
+            const ret = getObject(arg0).width;
+            return ret;
+        },
+        __wbg_width_f9b3cbe357a34b85: function(arg0) {
             const ret = getObject(arg0).width;
             return ret;
         },

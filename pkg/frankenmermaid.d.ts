@@ -5,6 +5,31 @@ export class Diagram {
     free(): void;
     [Symbol.dispose](): void;
     destroy(): void;
+    /**
+     * Creates a renderer for an `OffscreenCanvas` transferred to a worker.
+     *
+     * The offscreen 2D context implements the same CanvasRenderingContext2D
+     * method surface used by `Canvas2dContext`; it is stored structurally so
+     * the renderer can share the normal Canvas2D path without main-thread DOM
+     * access. Event registration remains unavailable because an offscreen
+     * canvas is not an `EventTarget`.
+     */
+    static fromOffscreenCanvas(canvas: OffscreenCanvas, config?: any | null): Diagram;
+    /**
+     * Return the nearest rendered edge index within a canvas-space tolerance.
+     *
+     * The query uses CGA point-to-segment distance over the latest render's edge paths, excludes
+     * bundled non-rendered paths, and returns `None` for invalid coordinates or tolerance.
+     */
+    hitTestEdge(x: number, y: number, max_distance: number): number | undefined;
+    /**
+     * Return the laid-out node below a canvas-space pointer, if any.
+     *
+     * The query uses CGA rectangle containment against the latest render's layout, so it never
+     * reparses or relayouts the diagram. Non-finite coordinates and calls before the first render
+     * return `None`.
+     */
+    hitTestNode(x: number, y: number): string | undefined;
     constructor(canvas: HTMLCanvasElement, config?: any | null);
     on(event: string, callback: Function): void;
     render(input: string, config?: any | null): any;
@@ -40,6 +65,9 @@ export interface InitOutput {
     readonly detectType: (a: number, b: number, c: number) => void;
     readonly diagramLens: (a: number, b: number, c: number) => void;
     readonly diagram_destroy: (a: number) => void;
+    readonly diagram_fromOffscreenCanvas: (a: number, b: number, c: number) => void;
+    readonly diagram_hitTestEdge: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly diagram_hitTestNode: (a: number, b: number, c: number, d: number) => void;
     readonly diagram_new: (a: number, b: number, c: number) => void;
     readonly diagram_on: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly diagram_render: (a: number, b: number, c: number, d: number, e: number) => void;
