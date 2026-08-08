@@ -1693,7 +1693,7 @@ fn packet_field_widths_are_proportional_to_bit_ranges() {
     let per_bit = unit_width / unit_bits;
     for (name, bits, width) in &fields {
         assert!(
-            (width - bits * per_bit).abs() < 0.5,
+            (width - bits * per_bit).abs() < 0.05,
             "{name} spans {bits} bits so at {per_bit}/bit (from {unit_name}) it should be {} wide, \
              but renders {width}",
             bits * per_bit
@@ -1800,7 +1800,7 @@ fn packet_fields_start_at_their_bit_offset_and_rows_wrap_every_32_bits() {
         // Horizontal: the field's left edge sits at its start bit's offset WITHIN its row.
         let expected_x = left + (start % BITS_PER_ROW) as f32 * per_bit;
         assert!(
-            (x - expected_x).abs() < 0.5,
+            (x - expected_x).abs() < 0.05,
             "{label} starts at bit {start} (offset {} in its row), so its left edge should be \
              {expected_x} at {per_bit}/bit, but it renders at {x}",
             start % BITS_PER_ROW,
@@ -2567,7 +2567,7 @@ fn xychart_axis_ticks_describe_the_scale_the_bars_are_drawn_on() {
     for (value, (label, pos)) in y_values.iter().zip(&y_ticks) {
         let expected = p0 - (value - v0) * px_per_unit;
         assert!(
-            (pos - expected).abs() < 0.5,
+            (pos - expected).abs() < 0.05,
             "y tick {label} sits at {pos} but a linear axis puts it at {expected}"
         );
     }
@@ -2607,7 +2607,7 @@ fn xychart_axis_ticks_describe_the_scale_the_bars_are_drawn_on() {
     for (value, height) in bar_values.iter().zip(&bar_heights) {
         let expected = (value - declared_min) * px_per_unit;
         assert!(
-            (height - expected).abs() < 0.5,
+            (height - expected).abs() < 0.05,
             "a bar of {value} on an axis labelled {declared_min}..{declared_max} should stand \
              {expected} tall, but renders {height} — the axis and the data are on different scales"
         );
