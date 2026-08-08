@@ -2429,6 +2429,191 @@ fn sequence_activations_and_notes_attach_to_their_declared_participants() {
     }
 }
 
+/// An xychart's AXIS must describe the same scale its data is drawn on (bd-iicc).
+///
+/// The bar guard above proves every bar shares one scale and sits on the baseline; it never looks at
+/// the axis. So a chart whose y-axis is labelled 4000..11000 while the bars are drawn to some other
+/// range passes it, and passes the byte golden too — every number in the file is stable and each
+/// element looks right on its own. The axis is what tells a reader what a bar HEIGHT means; if the
+/// two disagree the picture lies while looking tidy.
+///
+/// Declared range and categories are read FROM THE FIXTURE, and the scale is recovered from the
+/// rendered tick positions, so nothing here can be satisfied by re-blessing.
+#[test]
+fn xychart_axis_ticks_describe_the_scale_the_bars_are_drawn_on() {
+    let read = fs::read_to_string(golden_dir().join("xychart_basic.mmd"));
+    assert!(read.is_ok(), "read xychart_basic fixture: {:?}", read.err());
+    let source = read.unwrap_or_default();
+
+    // Declared y range: `y-axis "Revenue (in $)" 4000 --> 11000`.
+    let (declared_min, declared_max) = source
+        .lines()
+        .find_map(|line| {
+            let rest = line.trim().strip_prefix("y-axis ")?;
+            let (lo, hi) = rest.split_once("-->")?;
+            let lo: f64 = lo
+                .rsplit(['"', ' '])
+                .find(|t| !t.is_empty())?
+                .parse()
+                .ok()?;
+            let hi: f64 = hi.trim().parse().ok()?;
+            Some((lo, hi))
+        })
+        .expect("fixture declares a `y-axis ... lo --> hi` range");
+    assert!(
+        declared_max > declared_min,
+        "declared y range must be non-degenerate, read {declared_min}..{declared_max}"
+    );
+
+    // Declared x categories: `x-axis [Jan, Feb, Mar, Apr, May]`.
+    let categories: Vec<String> = source
+        .lines()
+        .find_map(|line| {
+            let rest = line.trim().strip_prefix("x-axis ")?;
+            let inner = rest.trim().strip_prefix('[')?.strip_suffix(']')?;
+            Some(
+                inner
+                    .split(',')
+                    .map(|c| c.trim().to_string())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .expect("fixture declares `x-axis [..]` categories");
+
+    // Declared bar values.
+    let bar_values: Vec<f64> = source
+        .lines()
+        .find_map(|line| {
+            let rest = line.trim().strip_prefix("bar ")?;
+            let inner = rest.trim().strip_prefix('[')?.strip_suffix(']')?;
+            Some(
+                inner
+                    .split(',')
+                    .filter_map(|v| v.trim().parse().ok())
+                    .collect::<Vec<f64>>(),
+            )
+        })
+        .expect("fixture declares a `bar [..]` series");
+    assert_eq!(
+        bar_values.len(),
+        categories.len(),
+        "fixture must declare one bar per category"
+    );
+
+    let svg = render_fixture("xychart_basic");
+
+    // Rendered ticks, as (label, position).
+    let ticks = |class: &str| -> Vec<(String, f64)> {
+        let mut out = Vec::new();
+        for chunk in svg.split("<text").skip(1) {
+            let Some((tag, rest)) = chunk.split_once('>') else {
+                continue;
+            };
+            if !tag.contains(class) {
+                continue;
+            }
+            let Some((label, _)) = rest.split_once("</text>") else {
+                continue;
+            };
+            let coord = if class.contains("y-tick") { "y" } else { "x" };
+            let num = |key: &str| -> Option<f64> {
+                let at = tag.find(&format!("{key}=\""))? + key.len() + 2;
+                let tail = &tag[at..];
+                tail[..tail.find('"')?].parse().ok()
+            };
+            if let Some(pos) = num(coord) {
+                out.push((label.trim().to_string(), pos));
+            }
+        }
+        out
+    };
+
+    // ── y axis ────────────────────────────────────────────────────────────
+    let y_ticks = ticks("fm-xychart-y-tick");
+    assert!(
+        y_ticks.len() >= 2,
+        "need at least two y ticks to define a scale, read {y_ticks:?}"
+    );
+    let y_values: Vec<f64> = y_ticks
+        .iter()
+        .map(|(label, _)| {
+            label
+                .parse::<f64>()
+                .unwrap_or_else(|_| panic!("y tick {label:?} is not numeric"))
+        })
+        .collect();
+
+    // The axis must span exactly what the fixture declared — not a rounded-out "nice" range that
+    // silently redefines what the bars are measured against.
+    assert!(
+        (y_values[0] - declared_min).abs() < 1e-6,
+        "first y tick is {} but the fixture declares a minimum of {declared_min}",
+        y_values[0]
+    );
+    assert!(
+        (y_values[y_values.len() - 1] - declared_max).abs() < 1e-6,
+        "last y tick is {} but the fixture declares a maximum of {declared_max}",
+        y_values[y_values.len() - 1]
+    );
+
+    // Larger values sit HIGHER (smaller y), and positions are linear in value.
+    let (v0, p0) = (y_values[0], y_ticks[0].1);
+    let (v1, p1) = (y_values[y_values.len() - 1], y_ticks[y_ticks.len() - 1].1);
+    assert!(
+        p1 < p0,
+        "the y axis must increase upward: {v0} is at y {p0} and {v1} at y {p1}"
+    );
+    let px_per_unit = (p0 - p1) / (v1 - v0);
+    for (value, (label, pos)) in y_values.iter().zip(&y_ticks) {
+        let expected = p0 - (value - v0) * px_per_unit;
+        assert!(
+            (pos - expected).abs() < 0.5,
+            "y tick {label} sits at {pos} but a linear axis puts it at {expected}"
+        );
+    }
+
+    // ── x axis ────────────────────────────────────────────────────────────
+    let x_ticks = ticks("fm-xychart-x-tick");
+    assert_eq!(
+        x_ticks.iter().map(|(l, _)| l.clone()).collect::<Vec<_>>(),
+        categories,
+        "x tick labels must be the declared categories, in declaration order"
+    );
+    assert!(
+        x_ticks.windows(2).all(|w| w[1].1 > w[0].1),
+        "categories must run left to right in declaration order: {x_ticks:?}"
+    );
+
+    // ── the cross-check ───────────────────────────────────────────────────
+    // A bar's HEIGHT must be its value measured on the scale the TICKS define. This is the
+    // assertion neither the bar guard nor the byte golden can make: the bar guard derives its
+    // scale from the bars themselves, so a chart internally consistent but mislabelled passes it.
+    let bar_heights: Vec<f64> = svg
+        .split("<rect")
+        .skip(1)
+        .filter_map(|chunk| chunk.split_once('>').map(|(tag, _)| tag))
+        .filter(|tag| tag.contains("fm-xychart-bar"))
+        .filter_map(|tag| {
+            let at = tag.find("height=\"")? + "height=\"".len();
+            let rest = &tag[at..];
+            rest[..rest.find('"')?].parse().ok()
+        })
+        .collect();
+    assert_eq!(
+        bar_heights.len(),
+        bar_values.len(),
+        "every declared bar must render"
+    );
+    for (value, height) in bar_values.iter().zip(&bar_heights) {
+        let expected = (value - declared_min) * px_per_unit;
+        assert!(
+            (height - expected).abs() < 0.5,
+            "a bar of {value} on an axis labelled {declared_min}..{declared_max} should stand \
+             {expected} tall, but renders {height} — the axis and the data are on different scales"
+        );
+    }
+}
+
 /// architecture-beta renders every declared service, and its edges fan out from the right one
 /// (bd-iicc).
 ///
