@@ -113,6 +113,21 @@ pub fn parse_dot(input: &str) -> ParseResult {
                 continue;
             }
 
+            // A bare `label=…` statement names the enclosing group — the standard DOT spelling for a
+            // cluster title — or the whole graph at top level. Handled before the node parser, which
+            // would otherwise read `label` as a node id and draw a stray box.
+            if let Some(text) = parse_dot_label_statement(statement) {
+                apply_dot_label_statement(
+                    &text,
+                    &active_clusters,
+                    &active_subgraphs,
+                    line_number,
+                    line,
+                    &mut builder,
+                );
+                continue;
+            }
+
             // `rankdir` is a graph attribute, so it applies to the whole diagram wherever it
             // appears. Handled before the `graph …` skip below, which would otherwise discard it.
             if let Some(rankdir) = parse_dot_rankdir(statement) {
@@ -505,6 +520,42 @@ fn parse_dot_rank_attribute(statement: &str) -> Option<DotRankValue> {
         None
     } else {
         Some(DotRankValue::Unsupported(value.to_ascii_lowercase()))
+    }
+}
+
+/// Recognize a bare `label=<value>` statement and return its text.
+///
+/// Deliberately narrow: the statement must be exactly a `label` assignment, so an edge or node
+/// statement that merely carries a label attribute (`a [label="x"]`) is left to its own parser.
+fn parse_dot_label_statement(statement: &str) -> Option<String> {
+    let (key, value) = statement.split_once('=')?;
+    if !key.trim().eq_ignore_ascii_case("label") {
+        return None;
+    }
+    parse_dot_label_value(value)
+}
+
+/// Apply a bare `label=…` statement to the innermost group, or to the diagram at top level.
+fn apply_dot_label_statement(
+    text: &str,
+    active_clusters: &[usize],
+    active_subgraphs: &[usize],
+    line_number: usize,
+    source_line: &str,
+    builder: &mut IrBuilder,
+) {
+    let span = span_for(line_number, source_line);
+    match active_clusters.last() {
+        Some(&cluster_index) => {
+            builder.set_cluster_title(cluster_index, text, span);
+            // Keep the subgraph view in step: a renderer reading subgraph titles must not see a
+            // different name from one reading cluster titles.
+            if let Some(&subgraph_index) = active_subgraphs.last() {
+                builder.set_subgraph_title(subgraph_index, text, span);
+            }
+        }
+        // At top level `label=` is the GRAPH's label, which is the diagram title.
+        None => builder.set_title(text.to_string()),
     }
 }
 
@@ -2125,6 +2176,84 @@ mod tests {
             matches!(style.target, fm_core::IrStyleTarget::Node(node_id) if node_id.0 == node_index)
                 .then(|| style.style.clone())
         })
+    }
+
+    #[test]
+    fn top_level_label_statement_becomes_the_diagram_title() {
+        let parsed = parse_dot("digraph G { label=\"System Overview\"; a -> b; }");
+        assert_eq!(
+            parsed.ir.meta.title.as_deref(),
+            Some("System Overview"),
+            "a graph-level label is the diagram title"
+        );
+        let ids: Vec<&str> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(ids, ["a", "b"]);
+    }
+
+    #[test]
+    fn a_node_label_attribute_is_not_mistaken_for_a_label_statement() {
+        // The narrowness check: `a [label="x"]` must stay a node with a label, not be swallowed as a
+        // group-naming statement.
+        let parsed = parse_dot("digraph G { a [label=\"Alpha\"]; }");
+        assert_eq!(parsed.ir.nodes.len(), 1);
+        assert_eq!(parsed.ir.nodes[0].id, "a");
+        let label = parsed.ir.nodes[0]
+            .label
+            .and_then(|id| parsed.ir.labels.get(id.0))
+            .map(|label| label.text.as_str());
+        assert_eq!(label, Some("Alpha"));
+        assert_eq!(parsed.ir.meta.title, None, "a node label is not a title");
+    }
+
+    #[test]
+    fn nested_cluster_labels_attach_to_their_own_cluster() {
+        let parsed = parse_dot(
+            "digraph G { subgraph cluster_0 { label=\"Outer\"; subgraph cluster_1 { label=\"Inner\"; x; } y; } }",
+        );
+        let title_of = |index: usize| {
+            parsed.ir.clusters[index]
+                .title
+                .and_then(|id| parsed.ir.labels.get(id.0))
+                .map(|label| label.text.as_str())
+        };
+        assert_eq!(parsed.ir.clusters.len(), 2);
+        assert_eq!(title_of(0), Some("Outer"));
+        assert_eq!(
+            title_of(1),
+            Some("Inner"),
+            "the inner label must not overwrite the outer cluster's title"
+        );
+    }
+
+    #[test]
+    fn cluster_label_statement_sets_the_title_and_makes_no_node() {
+        // `label="…"` inside a subgraph body is how DOT names a cluster — it is the standard
+        // spelling, not an edge case. It must set the cluster title, and it must NOT be read as a
+        // node id, which would draw a stray box labelled `label`.
+        let parsed = parse_dot("digraph G { subgraph cluster_0 { label=\"Backend\"; a; b; } }");
+
+        let ids: Vec<&str> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(ids, ["a", "b"], "a label statement must not become a node");
+        assert_eq!(parsed.ir.clusters.len(), 1);
+        let title = parsed.ir.clusters[0]
+            .title
+            .and_then(|label_id| parsed.ir.labels.get(label_id.0))
+            .map(|label| label.text.as_str());
+        assert_eq!(
+            title,
+            Some("Backend"),
+            "the cluster must take its title from the label statement"
+        );
     }
 
     #[test]

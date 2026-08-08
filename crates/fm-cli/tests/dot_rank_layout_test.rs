@@ -275,6 +275,33 @@ fn dot_penwidth_and_font_attributes_reach_the_rendered_svg() {
 }
 
 #[test]
+fn dot_cluster_label_is_drawn_and_adds_no_phantom_box() {
+    // `label="…"` inside a subgraph is the standard DOT way to name a cluster. It used to be read as
+    // a node id, so a stray box appeared and the title was lost.
+    let parsed = parse(
+        "digraph G {\n  subgraph cluster_0 {\n    label=\"Backend\";\n    a;\n    b;\n  }\n}",
+    );
+    let layout = layout_diagram(&parsed.ir);
+
+    let ids: Vec<&str> = layout
+        .nodes
+        .iter()
+        .map(|node| node.node_id.as_str())
+        .collect();
+    assert_eq!(
+        ids.len(),
+        2,
+        "only a and b may be drawn, got {ids:?} — `label` must not be a node"
+    );
+
+    let svg = fm_render_svg::render_svg(&parsed.ir);
+    assert!(
+        svg.contains("Backend"),
+        "the cluster title must reach the drawing: {svg:.400}"
+    );
+}
+
+#[test]
 fn a_rank_group_inside_a_cluster_keeps_every_node_in_the_cluster() {
     // The brace-scope regression this shipped with: an anonymous `{ … }` group's closing brace used
     // to pop the enclosing cluster, so `d` fell outside it. Checked here at the IR level because a

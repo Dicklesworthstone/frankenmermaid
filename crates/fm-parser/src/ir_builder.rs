@@ -673,6 +673,42 @@ impl IrBuilder {
         self.ir.meta.title = Some(title);
     }
 
+    /// Set an already-created cluster's title, for syntaxes that name a group from INSIDE its body.
+    ///
+    /// DOT does exactly that (`subgraph cluster_0 { label="Backend"; … }`), so the cluster exists
+    /// before its name is known and [`Self::ensure_cluster`]'s creation-time title cannot carry it.
+    /// An explicit label statement overwrites any earlier title, because the attribute is the
+    /// authoritative name of the group; `ensure_cluster` deliberately only fills a vacant one, which
+    /// is right for re-opening a cluster but wrong here.
+    pub(crate) fn set_cluster_title(&mut self, cluster_index: usize, title: &str, span: Span) {
+        let Some(title_text) = clean_label(Some(title)) else {
+            return;
+        };
+        let label = ParsedLabel::plain(title_text);
+        let label_id = self.intern_label(&label, span);
+        self.mark_reusable_prefix_cluster_dirty(cluster_index);
+        if let Some(cluster) = self.ir.clusters.get_mut(cluster_index) {
+            cluster.title = Some(label_id);
+        }
+        // The graph view mirrors clusters by the same index, so both must move together or a
+        // renderer reading one would disagree with a renderer reading the other.
+        if let Some(graph_cluster) = self.ir.graph.clusters.get_mut(cluster_index) {
+            graph_cluster.title = Some(label_id);
+        }
+    }
+
+    /// Set an already-created subgraph's title, for the same reason as [`Self::set_cluster_title`].
+    pub(crate) fn set_subgraph_title(&mut self, subgraph_index: usize, title: &str, span: Span) {
+        let Some(title_text) = clean_label(Some(title)) else {
+            return;
+        };
+        let label = ParsedLabel::plain(title_text);
+        let label_id = self.intern_label(&label, span);
+        if let Some(subgraph) = self.ir.graph.subgraphs.get_mut(subgraph_index) {
+            subgraph.title = Some(label_id);
+        }
+    }
+
     pub(crate) fn set_acc_descr(&mut self, descr: String) {
         self.ir.meta.acc_descr = Some(descr);
     }
