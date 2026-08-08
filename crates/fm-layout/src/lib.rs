@@ -23805,16 +23805,25 @@ mod tests {
     }
 
     /// Writer that captures output into a shared Vec.
+    ///
+    /// Buffers BYTES, not a `String`. The previous shape decoded each incoming chunk with
+    /// `if let Ok(s) = std::str::from_utf8(buf)` and SILENTLY DISCARDED it on failure — which is
+    /// what happens whenever a multi-byte character straddles a `write` boundary, since neither
+    /// half decodes alone. That was the last silent-drop path left in this writer after the missing
+    /// `Drop` was fixed, and bd-ryxg's investigation flagged it as the next lead while noting the
+    /// argument for its harmlessness ("the dispatch event's fields are ASCII") was reasoning rather
+    /// than measurement. Buffering bytes and decoding only at line boundaries removes the path
+    /// entirely instead of arguing about whether it can be taken.
     struct CaptureWriter {
         lines: Arc<Mutex<Vec<String>>>,
-        buffer: String,
+        buffer: Vec<u8>,
     }
 
     impl CaptureWriter {
         fn new(lines: Arc<Mutex<Vec<String>>>) -> Self {
             Self {
                 lines,
-                buffer: String::new(),
+                buffer: Vec::new(),
             }
         }
 
@@ -23828,13 +23837,14 @@ mod tests {
 
     impl std::io::Write for CaptureWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            if let Ok(s) = std::str::from_utf8(buf) {
-                self.buffer.push_str(s);
-                while let Some(pos) = self.buffer.find('\n') {
-                    let line = self.buffer[..pos].to_string();
-                    self.buffer.drain(..=pos);
-                    self.push_line(&line);
-                }
+            // Every byte is kept. Decoding is deferred to the line boundary, and uses
+            // `from_utf8_lossy` so that even genuinely malformed output surfaces as a line the
+            // assertion can report on, rather than vanishing.
+            self.buffer.extend_from_slice(buf);
+            while let Some(pos) = self.buffer.iter().position(|byte| *byte == b'\n') {
+                let line = String::from_utf8_lossy(&self.buffer[..pos]).into_owned();
+                self.buffer.drain(..=pos);
+                self.push_line(&line);
             }
             Ok(buf.len())
         }
@@ -23842,7 +23852,7 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             if !self.buffer.is_empty() {
                 let remainder = std::mem::take(&mut self.buffer);
-                self.push_line(&remainder);
+                self.push_line(&String::from_utf8_lossy(&remainder));
             }
             Ok(())
         }
@@ -23864,6 +23874,56 @@ mod tests {
             use std::io::Write as _;
             let _ = self.flush();
         }
+    }
+
+    /// The capture writer must not lose a line whose bytes arrive split mid-character (bd-ryxg).
+    ///
+    /// This is the last silent-drop path the bd-ryxg investigation identified and left open,
+    /// explicitly noting that the case for its harmlessness was reasoning rather than measurement.
+    /// It is measured here: with the old `if let Ok(s) = from_utf8(buf)` chunk decode, the first
+    /// `write` below decodes as Err (it ends mid-character) and the whole chunk — including
+    /// `layout.dispatch` — was discarded, so the line never reached `lines` at all. That is exactly
+    /// the reported failure shape: other events present, one specific event missing.
+    ///
+    /// A writer that silently drops output cannot be trusted to say an event never happened, which
+    /// is the only thing the tracing tests assert.
+    #[test]
+    fn capture_writer_keeps_a_line_split_mid_character() {
+        use std::io::Write as _;
+
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        // A JSON-ish line carrying a multi-byte character, cut so the split lands INSIDE it.
+        let payload = "{\"event\":\"layout.dispatch\",\"reason\":\"café\"}\n";
+        let bytes = payload.as_bytes();
+        let cut = payload
+            .find('é')
+            .expect("payload contains the multi-byte char")
+            + 1;
+        assert!(
+            std::str::from_utf8(&bytes[..cut]).is_err(),
+            "this test only means something if the first chunk is invalid UTF-8 on its own"
+        );
+
+        {
+            let mut writer = CaptureWriter::new(Arc::clone(&lines));
+            writer.write_all(&bytes[..cut]).expect("first chunk");
+            writer.write_all(&bytes[cut..]).expect("second chunk");
+        }
+
+        let captured = lines.lock().unwrap().clone();
+        assert_eq!(
+            captured.len(),
+            1,
+            "expected exactly the one written line, got {captured:?}"
+        );
+        assert!(
+            captured[0].contains("layout.dispatch"),
+            "the split line lost its content: {captured:?}"
+        );
+        assert!(
+            captured[0].contains("café"),
+            "the split character was not reassembled: {captured:?}"
+        );
     }
 
     // ── Observability output format tests (bd-gy4.8) ──────────────────
