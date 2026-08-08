@@ -195,17 +195,31 @@ fn fxhash_faster_than_siphash() {
     assert_ne!(fx_sum, 0);
     assert_ne!(sip_sum, 0);
 
-    // FxHash should be significantly faster (typically 5-10x)
-    // We only assert it's not slower to avoid flaky tests
     let fx_ns = fx_time.as_nanos();
     let sip_ns = sip_time.as_nanos();
 
-    // Just verify both complete reasonably (< 1s)
-    assert!(fx_time.as_millis() < 1000, "FxHash too slow: {:?}", fx_time);
+    // Assert the RELATIVE property this test is named for, and nothing absolute (bd-u6z4).
+    //
+    // This used to assert `fx_time < 1s` and `sip_time < 1s` — an absolute wall-clock deadline,
+    // which is a property of how busy the host is, not of the code. Under `cargo test --workspace`
+    // the machine runs dozens of test binaries across every core, and two million hash operations
+    // exceeding a second there is ordinary; it red the suite four times in one session while
+    // passing every isolated re-run. Raising the budget would have kept a host-speed assertion and
+    // merely made it fire less often.
+    //
+    // A ratio between two arms measured back-to-back in the same process is the shape that
+    // SURVIVES contention, because scheduling pressure slows both arms together. It is also the
+    // property the test's name claims and its old comment promised ("we only assert it's not
+    // slower") but which was never actually asserted — `fx_ns` and `sip_ns` were computed and then
+    // used only in the `println!` below.
+    //
+    // The bound is deliberately weak in one direction only: FxHash must not be SLOWER than
+    // SipHash. The real ratio is 5-10x, so a genuine regression that inverted them still fails,
+    // while ordinary scheduling jitter between two adjacent loops cannot.
     assert!(
-        sip_time.as_millis() < 1000,
-        "SipHash too slow: {:?}",
-        sip_time
+        fx_ns <= sip_ns,
+        "FxHash must not be slower than SipHash over the same workload: FxHash {fx_time:?} vs \
+         SipHash {sip_time:?}"
     );
 
     // Log the ratio for documentation purposes
