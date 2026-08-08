@@ -271,6 +271,17 @@ pub fn parse_dot(input: &str) -> ParseResult {
                 continue;
             }
 
+            // Every remaining bare `key=value` is a graph attribute this engine does not implement.
+            // Consumed here — AHEAD of the node parser — so it cannot become a phantom node, and
+            // named in a warning so an ignored attribute does not read as a supported one. The keys
+            // that ARE implemented (rankdir, label, rank) are matched earlier and never reach this.
+            if let Some(key) = parse_dot_graph_attribute_key(statement) {
+                builder.add_warning(format!(
+                    "Line {line_number}: DOT graph attribute '{key}' is not supported and was ignored"
+                ));
+                continue;
+            }
+
             let ctx = DotStatementContext {
                 line_number,
                 source_line: line,
@@ -521,6 +532,30 @@ fn parse_dot_rank_attribute(statement: &str) -> Option<DotRankValue> {
     } else {
         Some(DotRankValue::Unsupported(value.to_ascii_lowercase()))
     }
+}
+
+/// Recognize a bare `key=value` graph-attribute statement and return its key.
+///
+/// Per the DOT grammar an `ID = ID` at statement position sets a graph attribute. The node parser
+/// accepts almost anything as an id and runs late in the dispatch chain, so without this every
+/// unimplemented graph attribute became a stray box: `bgcolor=white` drew a node called `bgcolor`.
+/// Consuming them generically closes that whole family rather than one attribute at a time.
+///
+/// The key must be a plain DOT identifier — letters, digits, underscore, or a quoted string — which
+/// is what keeps `a [label="x"]` out: its first `=` sits inside an attribute list, so the text before
+/// it is not an identifier. A statement carrying an edge operator is also excluded, since `a=b -> c`
+/// belongs to the edge parser.
+fn parse_dot_graph_attribute_key(statement: &str) -> Option<&str> {
+    if find_edge_operator(statement).is_some() {
+        return None;
+    }
+    let (key, _) = statement.split_once('=')?;
+    let key = key.trim().trim_matches(['"', '\'']).trim();
+    let is_identifier = !key.is_empty()
+        && key
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '-' || ch == '.');
+    is_identifier.then_some(key)
 }
 
 /// Recognize a bare `label=<value>` statement and return its text.
@@ -2176,6 +2211,87 @@ mod tests {
             matches!(style.target, fm_core::IrStyleTarget::Node(node_id) if node_id.0 == node_index)
                 .then(|| style.style.clone())
         })
+    }
+
+    #[test]
+    fn bare_graph_attributes_are_consumed_not_turned_into_nodes() {
+        // Per the DOT grammar a bare `ID = ID` at statement position sets a graph attribute. The node
+        // parser accepts almost anything as an id and runs late in the dispatch chain, so every such
+        // attribute this engine does not implement used to become a stray box — the same family as
+        // the graph/node/edge defaults and the cluster label statement.
+        let parsed = parse_dot(
+            "digraph G { bgcolor=white; ratio=fill; size=\"6,6\"; splines=ortho; nodesep=0.5; ranksep=1.2; a -> b; }",
+        );
+
+        let ids: Vec<&str> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            ["a", "b"],
+            "graph attributes must not become nodes: {ids:?}"
+        );
+
+        // Degrading silently would be worse than a stray box: it would look like support. Each
+        // unimplemented attribute is named in a warning.
+        for key in ["bgcolor", "ratio", "size", "splines", "nodesep", "ranksep"] {
+            assert!(
+                parsed
+                    .ir
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.message.contains(key))
+                    || parsed.warnings.iter().any(|w| w.contains(key)),
+                "{key} must be reported as unsupported: {:?}",
+                parsed.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn the_graph_attribute_consumer_does_not_swallow_nodes_or_edges() {
+        // The boundary a generic `key=value` consumer must respect. Each of these carries an `=` and
+        // must still parse as what it is.
+        let parsed = parse_dot(
+            "digraph G { bgcolor=white; a [shape=box]; b [label=\"B\"]; a -> b [minlen=2]; }",
+        );
+
+        let ids: Vec<&str> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(ids, ["a", "b"], "{ids:?}");
+        assert_eq!(
+            parsed.ir.nodes[0].shape,
+            NodeShape::Rect,
+            "shape=box → rect"
+        );
+        assert_eq!(parsed.ir.edges.len(), 1, "the edge must survive");
+        assert_eq!(
+            parsed.ir.constraints.len(),
+            1,
+            "minlen on the edge must still constrain: {:?}",
+            parsed.ir.constraints
+        );
+    }
+
+    #[test]
+    fn a_quoted_attribute_key_is_still_consumed() {
+        // DOT allows quoted ids, so `"bgcolor"=white` is the same statement and must not become a
+        // node called `"bgcolor"`.
+        let parsed = parse_dot("digraph G { \"bgcolor\"=white; a -> b; }");
+        let ids: Vec<&str> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(ids, ["a", "b"], "{ids:?}");
     }
 
     #[test]

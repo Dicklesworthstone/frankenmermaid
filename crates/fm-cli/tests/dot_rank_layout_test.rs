@@ -302,6 +302,53 @@ fn dot_cluster_label_is_drawn_and_adds_no_phantom_box() {
 }
 
 #[test]
+fn a_realistic_dot_file_draws_only_its_real_nodes() {
+    // The shape of an actual graphviz file: a preamble of graph attributes, defaults, a named
+    // cluster. Every line of that preamble used to add a stray box — seven phantom nodes here.
+    let source = concat!(
+        "digraph G {\n",
+        "  rankdir=LR;\n",
+        "  bgcolor=white;\n",
+        "  ratio=fill;\n",
+        "  splines=ortho;\n",
+        "  nodesep=0.4;\n",
+        "  node [shape=box, style=filled, color=lightgrey];\n",
+        "  edge [color=grey40];\n",
+        "  subgraph cluster_api {\n",
+        "    label=\"API\";\n",
+        "    handler;\n",
+        "    router;\n",
+        "  }\n",
+        "  client -> router;\n",
+        "  router -> handler;\n",
+        "}\n"
+    );
+    let parsed = parse(source);
+    let layout = layout_diagram(&parsed.ir);
+
+    let mut ids: Vec<&str> = layout
+        .nodes
+        .iter()
+        .map(|node| node.node_id.as_str())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        ["client", "handler", "router"],
+        "only the three real nodes may be drawn"
+    );
+
+    // And the supported attributes still took effect through all that preamble.
+    assert_eq!(parsed.ir.direction, fm_core::GraphDirection::LR);
+    let svg = fm_render_svg::render_svg(&parsed.ir);
+    assert!(svg.contains("API"), "the cluster title must render");
+    assert!(
+        svg.contains("fill:lightgrey"),
+        "the node default fill must render: {svg:.400}"
+    );
+}
+
+#[test]
 fn a_rank_group_inside_a_cluster_keeps_every_node_in_the_cluster() {
     // The brace-scope regression this shipped with: an anonymous `{ … }` group's closing brace used
     // to pop the enclosing cluster, so `d` fell outside it. Checked here at the IR level because a
