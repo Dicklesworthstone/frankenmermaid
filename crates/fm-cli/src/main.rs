@@ -10223,7 +10223,10 @@ mod serve_tests {
             render("b.mmd", doc_b),
             "returning to b.mmd must reuse its layout"
         );
-        assert!(render("a.mmd", doc_a), "a.mmd still cached after alternating");
+        assert!(
+            render("a.mmd", doc_a),
+            "a.mmd still cached after alternating"
+        );
 
         // NEGATIVE CASE: the id must actually select the memo. Rendering a.mmd's source under
         // b.mmd's id has to miss, or the pool is keyed on something other than the document.
