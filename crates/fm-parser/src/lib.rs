@@ -957,6 +957,48 @@ pub fn apply_parse_lens_edit(
     })
 }
 
+/// Delete the element `element_id` addresses, returning the result plus a snapshot of the source
+/// that remains.
+///
+/// The re-snapshot is the reason this belongs beside [`apply_parse_lens_edit`] rather than being
+/// left to callers: element ids and spans are derived from the source, so every one of them shifts
+/// after a delete. A caller reusing the pre-delete snapshot would address the wrong bytes on its
+/// next edit.
+pub fn apply_parse_lens_delete(
+    input: &str,
+    element_id: &str,
+) -> Result<ParseLensEditResponse, MermaidLensError> {
+    let snapshot = build_parse_lens(input);
+    let result =
+        fm_core::apply_lens_delete(snapshot.original_source(), &snapshot.source_map, element_id)?;
+    let updated_snapshot = build_parse_lens(&result.updated_source);
+    Ok(ParseLensEditResponse {
+        result,
+        snapshot: updated_snapshot,
+    })
+}
+
+/// Insert `text` as a new line after the line holding `element_id`, returning the result plus a
+/// snapshot of the updated source. Re-snapshots for the same reason as [`apply_parse_lens_delete`].
+pub fn apply_parse_lens_insert_line_after(
+    input: &str,
+    element_id: &str,
+    text: &str,
+) -> Result<ParseLensEditResponse, MermaidLensError> {
+    let snapshot = build_parse_lens(input);
+    let result = fm_core::apply_lens_insert_line_after(
+        snapshot.original_source(),
+        &snapshot.source_map,
+        element_id,
+        text,
+    )?;
+    let updated_snapshot = build_parse_lens(&result.updated_source);
+    Ok(ParseLensEditResponse {
+        result,
+        snapshot: updated_snapshot,
+    })
+}
+
 #[must_use]
 pub fn capture_format_complement(input: &str) -> MermaidFormatComplement {
     let (offsets, line_ending) = line_offsets_and_ending_style(input);

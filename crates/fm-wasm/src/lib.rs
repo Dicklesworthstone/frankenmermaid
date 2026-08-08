@@ -34,7 +34,10 @@ use fm_layout::{
     LayoutConfig, LayoutGuardrails, TracedLayout, build_layout_decision_explanation,
     layout_diagram_traced, layout_diagram_traced_with_config_and_guardrails,
 };
-use fm_parser::{apply_parse_lens_edit, build_parse_lens, detect_type_with_confidence, parse};
+use fm_parser::{
+    apply_parse_lens_delete, apply_parse_lens_edit, apply_parse_lens_insert_line_after,
+    build_parse_lens, detect_type_with_confidence, parse,
+};
 use fm_render_canvas::CanvasRenderConfig;
 #[cfg(target_arch = "wasm32")]
 use fm_render_canvas::render_to_canvas_with_layout;
@@ -1320,6 +1323,34 @@ pub fn apply_parse_lens_edit_js(
     to_js_value(&result)
 }
 
+/// Delete an element addressed by the lens, and return the post-delete snapshot with it.
+///
+/// The companion to `applyParseLensEdit` for the case a replacement cannot express: an empty
+/// replacement leaves the element's indentation and line terminator behind, stranding a blank line
+/// per removed node. The returned snapshot is re-derived from the shortened source, because every
+/// element id and span after the deletion has moved.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = applyParseLensDelete))]
+pub fn apply_parse_lens_delete_js(input: &str, element_id: &str) -> Result<JsValue, JsValue> {
+    let result = apply_parse_lens_delete(input, element_id).map_err(|e| js_error(e.to_string()))?;
+    to_js_value(&result)
+}
+
+/// Insert a line after the line holding an element, matching that line's indentation and the
+/// document's line ending, and return the post-insert snapshot with it.
+#[cfg_attr(
+    target_arch = "wasm32",
+    wasm_bindgen(js_name = applyParseLensInsertLineAfter)
+)]
+pub fn apply_parse_lens_insert_line_after_js(
+    input: &str,
+    element_id: &str,
+    text: &str,
+) -> Result<JsValue, JsValue> {
+    let result = apply_parse_lens_insert_line_after(input, element_id, text)
+        .map_err(|e| js_error(e.to_string()))?;
+    to_js_value(&result)
+}
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = describeDiagram))]
 pub fn describe_diagram_js(input: &str) -> Result<String, JsValue> {
     let parsed = parse(input);
@@ -1907,7 +1938,10 @@ mod tests {
         IncrementalLayoutEngine, LayoutAlgorithm, LayoutConfig, LayoutGuardrails,
         layout_diagram_traced,
     };
-    use fm_parser::{apply_parse_lens_edit, build_parse_lens, parse};
+    use fm_parser::{
+        apply_parse_lens_delete, apply_parse_lens_edit, apply_parse_lens_insert_line_after,
+        build_parse_lens, parse,
+    };
     use fm_render_canvas::CanvasRenderConfig;
     use fm_render_svg::{SvgRenderConfig, describe_diagram_with_layout};
 
@@ -2351,6 +2385,97 @@ mod tests {
             WorkerRenderAction::Cancelled { request_id: 7 },
         );
         assert!(!coordinator.complete(7));
+    }
+
+    /// The element id of the first lens binding whose span covers `needle`.
+    fn binding_covering(input: &str, needle: &str) -> String {
+        let snapshot = build_parse_lens(input);
+        snapshot
+            .source_map
+            .entries
+            .iter()
+            .find(|entry| {
+                fm_core::resolve_span_text_range(input, entry.span)
+                    .and_then(|range| input.get(range.start_byte..range.end_byte))
+                    .is_some_and(|text| text.contains(needle))
+            })
+            .map(|entry| entry.element_id.clone())
+            .unwrap_or_else(|| panic!("no binding covers {needle:?} in {input:?}"))
+    }
+
+    #[test]
+    fn lens_delete_removes_the_line_and_re_snapshots_the_shortened_source() {
+        // Exercises exactly what `applyParseLensDelete` calls. The re-snapshot is the part a caller
+        // cannot skip: every id and span after the deletion has moved.
+        let input = "flowchart LR\n  A-->B\n  C-->D\n";
+        let element_id = binding_covering(input, "C-->D");
+
+        let response = apply_parse_lens_delete(input, &element_id).expect("delete applies");
+
+        assert_eq!(response.result.updated_source, "flowchart LR\n  A-->B\n");
+        assert_eq!(response.result.replacement, "");
+        assert_eq!(
+            response.snapshot.original_source(),
+            response.result.updated_source,
+            "the returned snapshot must describe the source AFTER the delete"
+        );
+        // Restoring the reported snippet at the reported offset must rebuild the original exactly.
+        let mut restored = response.result.updated_source.clone();
+        restored.insert_str(
+            response.result.replaced_range.start_byte,
+            &response.result.previous_snippet,
+        );
+        assert_eq!(restored, input);
+    }
+
+    #[test]
+    fn lens_insert_places_a_line_after_the_target_with_its_indentation() {
+        let input = "flowchart LR\n    A-->B\n    C-->D\n";
+        let element_id = binding_covering(input, "A-->B");
+
+        let response = apply_parse_lens_insert_line_after(input, &element_id, "E-->F")
+            .expect("insert applies");
+
+        assert_eq!(
+            response.result.updated_source,
+            "flowchart LR\n    A-->B\n    E-->F\n    C-->D\n"
+        );
+        assert!(response.result.previous_snippet.is_empty());
+        assert_eq!(
+            response.snapshot.original_source(),
+            response.result.updated_source
+        );
+        // The inserted line must be real syntax the parser sees, not just text.
+        assert!(
+            response
+                .snapshot
+                .parsed
+                .ir
+                .nodes
+                .iter()
+                .any(|node| node.id == "E"),
+            "the inserted edge must parse into nodes: {:?}",
+            response
+                .snapshot
+                .parsed
+                .ir
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn lens_delete_and_insert_refuse_an_unknown_element_by_name() {
+        let input = "flowchart LR\n  A-->B\n";
+        let delete_error = apply_parse_lens_delete(input, "fm-node-nope-9")
+            .expect_err("an unknown id must not resolve");
+        assert!(delete_error.to_string().contains("fm-node-nope-9"));
+
+        let insert_error = apply_parse_lens_insert_line_after(input, "fm-node-nope-9", "C-->D")
+            .expect_err("an unknown id must not resolve");
+        assert!(insert_error.to_string().contains("fm-node-nope-9"));
     }
 
     #[test]
