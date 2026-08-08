@@ -245,6 +245,16 @@ pub fn parse_dot(input: &str) -> ParseResult {
                         .ok_or_else(|| value.as_ref().trim().trim_matches('"').to_string());
                     apply_dot_rankdir(rankdir, line_number, &mut builder);
                 }
+                // `graph [bgcolor=white]` is the attribute-list spelling of the bare statement.
+                if is_graph_defaults
+                    && active_clusters.is_empty()
+                    && let Some(value) = extract_dot_attribute_raw(statement, "bgcolor")
+                {
+                    let color = value.as_ref().trim().trim_matches(['"', '\'']).trim();
+                    if !color.is_empty() {
+                        builder.insert_theme_variable("background".to_string(), color.to_string());
+                    }
+                }
                 // `node [shape=…]` and `edge [style=…]` set defaults for everything that FOLLOWS in
                 // this scope. A later statement of the same kind overrides only the attribute it
                 // names, matching DOT, where each default statement updates the current set.
@@ -267,6 +277,25 @@ pub fn parse_dot(input: &str) -> ParseResult {
                     if !visuals.is_empty() {
                         defaults.edge_visuals = visuals.resolved_over(&defaults.edge_visuals);
                     }
+                }
+                continue;
+            }
+
+            // `bgcolor` is the graph's background, which maps onto the Mermaid theme variable the SVG
+            // renderer already honors. Handled before the generic consumer below, which would
+            // otherwise ignore it with a warning.
+            if let Some(color) = parse_dot_named_attribute(statement, "bgcolor") {
+                // A cluster's own bgcolor is a DIFFERENT thing — the group's fill, which needs an
+                // IrStyleTarget::Cluster this IR does not have — so only the graph-level one is taken,
+                // and an in-cluster one is reported rather than silently applied to the whole canvas.
+                if active_clusters.is_empty() {
+                    builder.insert_theme_variable("background".to_string(), color);
+                } else {
+                    builder.add_warning(format!(
+                        "Line {line_number}: DOT bgcolor inside a subgraph sets that cluster's fill, \
+                         which is not supported; it was ignored rather than applied to the whole \
+                         diagram"
+                    ));
                 }
                 continue;
             }
@@ -532,6 +561,20 @@ fn parse_dot_rank_attribute(statement: &str) -> Option<DotRankValue> {
     } else {
         Some(DotRankValue::Unsupported(value.to_ascii_lowercase()))
     }
+}
+
+/// Recognize a bare `<name>=<value>` statement and return its value.
+///
+/// Shares the identifier-key discipline of [`parse_dot_graph_attribute_key`], so an attribute list
+/// that happens to mention `name` (`a [bgcolor=red]`) is not mistaken for the bare statement.
+fn parse_dot_named_attribute(statement: &str, name: &str) -> Option<String> {
+    let key = parse_dot_graph_attribute_key(statement)?;
+    if !key.eq_ignore_ascii_case(name) {
+        return None;
+    }
+    let (_, value) = statement.split_once('=')?;
+    let text = value.trim().trim_matches(['"', '\'']).trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 /// Recognize a bare `key=value` graph-attribute statement and return its key.
@@ -2214,6 +2257,70 @@ mod tests {
     }
 
     #[test]
+    fn bgcolor_sets_the_theme_background() {
+        for source in [
+            "digraph G { bgcolor=lightyellow; a -> b; }",
+            "digraph G { bgcolor=\"lightyellow\"; a -> b; }",
+            "digraph G { graph [bgcolor=lightyellow]; a -> b; }",
+        ] {
+            let parsed = parse_dot(source);
+            assert_eq!(
+                parsed
+                    .ir
+                    .meta
+                    .theme_overrides
+                    .theme_variables
+                    .get("background")
+                    .map(String::as_str),
+                Some("lightyellow"),
+                "{source}"
+            );
+            let ids: Vec<&str> = parsed
+                .ir
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect();
+            assert_eq!(ids, ["a", "b"], "{source}");
+        }
+    }
+
+    #[test]
+    fn no_bgcolor_leaves_the_theme_untouched() {
+        // The control: an unconditional insert would make the assertions above vacuous.
+        let parsed = parse_dot("digraph G { a -> b; }");
+        assert!(
+            parsed.ir.meta.theme_overrides.theme_variables.is_empty(),
+            "{:?}",
+            parsed.ir.meta.theme_overrides.theme_variables
+        );
+    }
+
+    #[test]
+    fn bgcolor_inside_a_cluster_is_refused_rather_than_recolouring_the_canvas() {
+        // A cluster's bgcolor is that GROUP's fill, which needs an IrStyleTarget::Cluster this IR does
+        // not have. Applying it to the whole diagram would be visibly wrong, so it is reported.
+        let parsed = parse_dot("digraph G { subgraph cluster_0 { bgcolor=red; a; } }");
+        assert!(
+            !parsed
+                .ir
+                .meta
+                .theme_overrides
+                .theme_variables
+                .contains_key("background"),
+            "a cluster bgcolor must not become the diagram background"
+        );
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("bgcolor")),
+            "{:?}",
+            parsed.warnings
+        );
+    }
+
+    #[test]
     fn bare_graph_attributes_are_consumed_not_turned_into_nodes() {
         // Per the DOT grammar a bare `ID = ID` at statement position sets a graph attribute. The node
         // parser accepts almost anything as an id and runs late in the dispatch chain, so every such
@@ -2236,8 +2343,10 @@ mod tests {
         );
 
         // Degrading silently would be worse than a stray box: it would look like support. Each
-        // unimplemented attribute is named in a warning.
-        for key in ["bgcolor", "ratio", "size", "splines", "nodesep", "ranksep"] {
+        // unimplemented attribute is named in a warning. `bgcolor` is deliberately absent from this
+        // list — it IS implemented (see `bgcolor_sets_the_theme_background`), so warning about it
+        // would be the false report.
+        for key in ["ratio", "size", "splines", "nodesep", "ranksep"] {
             assert!(
                 parsed
                     .ir

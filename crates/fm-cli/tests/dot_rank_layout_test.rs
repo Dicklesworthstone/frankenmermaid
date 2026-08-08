@@ -302,6 +302,24 @@ fn dot_cluster_label_is_drawn_and_adds_no_phantom_box() {
 }
 
 #[test]
+fn dot_bgcolor_reaches_the_rendered_background() {
+    // bgcolor was one of the attributes bd-mf4d consumed-and-ignored. It maps onto the Mermaid theme
+    // variable the SVG renderer already honors, so this asserts on the drawing rather than the IR.
+    let svg =
+        fm_render_svg::render_svg(&parse("digraph G {\n  bgcolor=lightyellow;\n  a -> b;\n}").ir);
+    assert!(
+        svg.contains("lightyellow"),
+        "the background must reach the SVG: {svg:.500}"
+    );
+
+    let plain = fm_render_svg::render_svg(&parse("digraph G {\n  a -> b;\n}").ir);
+    assert!(
+        !plain.contains("lightyellow"),
+        "an unstyled graph must not carry it"
+    );
+}
+
+#[test]
 fn a_realistic_dot_file_draws_only_its_real_nodes() {
     // The shape of an actual graphviz file: a preamble of graph attributes, defaults, a named
     // cluster. Every line of that preamble used to add a stray box — seven phantom nodes here.
