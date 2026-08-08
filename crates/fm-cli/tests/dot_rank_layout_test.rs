@@ -246,6 +246,35 @@ fn dot_colors_reach_the_rendered_svg() {
 }
 
 #[test]
+fn dot_penwidth_and_font_attributes_reach_the_rendered_svg() {
+    // Emitting CSS the renderer drops would be work nothing consumes, so this asserts on output.
+    let parsed = parse(
+        "digraph G {\n  a [penwidth=3, fontsize=18, fontname=Georgia];\n  a -> b [penwidth=2];\n}",
+    );
+    let svg = fm_render_svg::render_svg(&parsed.ir);
+
+    for needle in [
+        "stroke-width:3",
+        "font-size:18pt",
+        "font-family:Georgia",
+        "stroke-width:2",
+    ] {
+        assert!(
+            svg.contains(needle),
+            "{needle} must reach the SVG: {svg:.600}"
+        );
+    }
+
+    let plain = fm_render_svg::render_svg(&parse("digraph G {\n  a -> b;\n}").ir);
+    for needle in ["stroke-width:3", "font-size:18pt", "font-family:Georgia"] {
+        assert!(
+            !plain.contains(needle),
+            "an unstyled graph must not carry {needle}"
+        );
+    }
+}
+
+#[test]
 fn a_rank_group_inside_a_cluster_keeps_every_node_in_the_cluster() {
     // The brace-scope regression this shipped with: an anonymous `{ … }` group's closing brace used
     // to pop the enclosing cluster, so `d` fell outside it. Checked here at the IR level because a

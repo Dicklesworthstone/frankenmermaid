@@ -248,8 +248,9 @@ pub fn parse_dot(input: &str) -> ParseResult {
                     if let Some(style) = parse_dot_edge_style(statement) {
                         defaults.edge_style = Some(style);
                     }
-                    if let Some(color) = parse_dot_color(statement) {
-                        defaults.edge_color = Some(color);
+                    let visuals = DotNodeColors::parse(statement);
+                    if !visuals.is_empty() {
+                        defaults.edge_visuals = visuals.resolved_over(&defaults.edge_visuals);
                     }
                 }
                 continue;
@@ -307,10 +308,11 @@ struct DotDefaults {
     node_shape: Option<NodeShape>,
     edge_style: Option<DotEdgeStyle>,
     node_colors: DotNodeColors,
-    edge_color: Option<String>,
+    edge_visuals: DotNodeColors,
 }
 
-/// A node's DOT color attributes, kept separate because graphviz resolves them together.
+/// A DOT element's visual attributes, resolved together because graphviz's color rules are
+/// interdependent and because defaults merge attribute by attribute.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct DotNodeColors {
     /// `color=` — the border color, or the FILL when `style=filled` and no `fillcolor` is given.
@@ -319,10 +321,22 @@ struct DotNodeColors {
     fill: Option<String>,
     /// Whether `style` contained `filled`.
     filled: bool,
+    /// `penwidth=` — stroke thickness, in points.
+    penwidth: Option<String>,
+    /// `fontsize=` — text size, in points.
+    font_size: Option<String>,
+    /// `fontname=` — font family.
+    font_name: Option<String>,
+    //
+    // `fontcolor` is deliberately NOT here. This renderer colors text with `fill` on the text
+    // element, and `fill` in a node-level style ref already means the SHAPE fill, so the two cannot
+    // coexist in one declaration. Emitting `color:` instead was tried and measured: it survives the
+    // IR's property allowlist and is then dropped by the renderer, i.e. CSS nothing consumes.
+    // Parsing it would be work with no observable effect, so it stays unsupported and stated.
 }
 
 impl DotNodeColors {
-    /// Read the three color-relevant attributes off one attribute list.
+    /// Read every visual attribute off one attribute list.
     fn parse(attributes: &str) -> Self {
         let value = |key: &str| {
             extract_dot_attribute_raw(attributes, key)
@@ -341,12 +355,15 @@ impl DotNodeColors {
             color: value("color"),
             fill: value("fillcolor"),
             filled,
+            penwidth: value("penwidth"),
+            font_size: value("fontsize"),
+            font_name: value("fontname"),
         }
     }
 
     /// Whether this carries nothing, so a caller can skip emitting an empty style.
     fn is_empty(&self) -> bool {
-        self.color.is_none() && self.fill.is_none() && !self.filled
+        *self == Self::default()
     }
 
     /// Overlay `self` on top of `base`, attribute by attribute.
@@ -354,11 +371,45 @@ impl DotNodeColors {
     /// Per-attribute rather than all-or-nothing because DOT resolves each independently: a node that
     /// names only `fillcolor` still inherits a default `color`.
     fn resolved_over(&self, base: &Self) -> Self {
+        let pick = |mine: &Option<String>, theirs: &Option<String>| {
+            mine.clone().or_else(|| theirs.clone())
+        };
         Self {
-            color: self.color.clone().or_else(|| base.color.clone()),
-            fill: self.fill.clone().or_else(|| base.fill.clone()),
+            color: pick(&self.color, &base.color),
+            fill: pick(&self.fill, &base.fill),
             filled: self.filled || base.filled,
+            penwidth: pick(&self.penwidth, &base.penwidth),
+            font_size: pick(&self.font_size, &base.font_size),
+            font_name: pick(&self.font_name, &base.font_name),
         }
+    }
+
+    /// The element-independent properties: thickness and typography.
+    ///
+    /// DOT measures `penwidth` and `fontsize` in POINTS. `font-size` therefore emits `pt`, which is
+    /// faithful and valid CSS. `stroke-width` is unitless SVG user units, so a penwidth crosses over
+    /// as a bare number — an approximation, named as one here rather than presented as exact.
+    fn push_shared(&self, properties: &mut Vec<String>) {
+        if let Some(width) = self.penwidth.as_deref() {
+            properties.push(format!("stroke-width:{width}"));
+        }
+        if let Some(size) = self.font_size.as_deref() {
+            properties.push(format!("font-size:{size}pt"));
+        }
+        if let Some(family) = self.font_name.as_deref() {
+            properties.push(format!("font-family:{family}"));
+        }
+    }
+
+    /// The CSS an EDGE maps to. `color` is always the stroke: an edge has no interior, so the
+    /// `style=filled` rule below does not apply to it.
+    fn to_edge_css(&self) -> Option<String> {
+        let mut properties: Vec<String> = Vec::new();
+        if let Some(color) = self.color.as_deref() {
+            properties.push(format!("stroke:{color}"));
+        }
+        self.push_shared(&mut properties);
+        (!properties.is_empty()).then(|| properties.join(","))
     }
 
     /// The CSS this maps to, or `None` when there is nothing to say.
@@ -380,6 +431,7 @@ impl DotNodeColors {
                 }
             }
         }
+        self.push_shared(&mut properties);
         (!properties.is_empty()).then(|| properties.join(","))
     }
 }
@@ -412,13 +464,6 @@ fn parse_dot_edge_style(attributes: &str) -> Option<DotEdgeStyle> {
             "bold" => Some(DotEdgeStyle::Bold),
             _ => None,
         })
-}
-
-/// Read a `color` attribute as a bare value, for edges where it is simply the stroke.
-fn parse_dot_color(attributes: &str) -> Option<String> {
-    let value = extract_dot_attribute_raw(attributes, "color")?;
-    let text = value.as_ref().trim().trim_matches(['"', '\'']).trim();
-    (!text.is_empty()).then(|| text.to_string())
 }
 
 /// The arrow type for an edge, given the graph's directedness and the style in force.
@@ -706,9 +751,12 @@ fn parse_dot_edge_statement(
         .and_then(parse_dot_edge_style)
         .or(defaults.edge_style);
     let arrow = dot_arrow_type(operator == "->" || directed, style);
-    let edge_color = shared_attrs
-        .and_then(parse_dot_color)
-        .or_else(|| defaults.edge_color.clone());
+    // Edge visuals resolve the same way node visuals do: per attribute, statement over default.
+    let edge_css = shared_attrs
+        .map(DotNodeColors::parse)
+        .unwrap_or_default()
+        .resolved_over(&defaults.edge_visuals)
+        .to_edge_css();
 
     // Edge groups (A -> {B C D}) are expanded in expand_edge_groups() before
     // normalization, so they arrive here as individual "A -> B", "A -> C" etc.
@@ -752,12 +800,8 @@ fn parse_dot_edge_statement(
             // index of the edge about to be added is the current count.
             let edge_index = builder.edge_count();
             builder.push_edge(from_id, to_id, arrow, edge_label_str.as_deref(), span);
-            if let Some(color) = edge_color.as_deref() {
-                builder.push_style_ref(
-                    IrStyleTarget::Link(edge_index),
-                    format!("stroke:{color}"),
-                    span,
-                );
+            if let Some(css) = edge_css.clone() {
+                builder.push_style_ref(IrStyleTarget::Link(edge_index), css, span);
             }
             add_node_to_active_groups(builder, active_clusters, active_subgraphs, from_id);
             add_node_to_active_groups(builder, active_clusters, active_subgraphs, to_id);
@@ -2081,6 +2125,100 @@ mod tests {
             matches!(style.target, fm_core::IrStyleTarget::Node(node_id) if node_id.0 == node_index)
                 .then(|| style.style.clone())
         })
+    }
+
+    #[test]
+    fn penwidth_and_font_attributes_become_css_on_nodes() {
+        let parsed = parse_dot("digraph G { a [penwidth=3, fontsize=18, fontname=Georgia]; }");
+        let css = node_style_css(&parsed, "a").expect("style for a");
+        // fontsize is POINTS in DOT, so it carries a pt unit; penwidth becomes bare SVG user units.
+        assert!(css.contains("stroke-width:3"), "{css}");
+        assert!(css.contains("font-size:18pt"), "{css}");
+        assert!(css.contains("font-family:Georgia"), "{css}");
+    }
+
+    #[test]
+    fn fontcolor_is_not_emitted_because_the_renderer_would_drop_it() {
+        // Measured, not assumed: mapping `fontcolor` to `color:` survives the IR allowlist and is
+        // then dropped by the renderer, so it would be CSS nothing consumes. Text color here is
+        // `fill` on the text element, which collides with the shape fill in one node style ref.
+        let parsed = parse_dot("digraph G { a [fontcolor=green]; }");
+        assert_eq!(
+            node_style_css(&parsed, "a"),
+            None,
+            "fontcolor alone must produce no style entry rather than a dropped property"
+        );
+    }
+
+    #[test]
+    fn penwidth_and_font_attributes_become_css_on_edges() {
+        let parsed = parse_dot("digraph G { a -> b [penwidth=2, fontsize=9, color=red]; }");
+        let css = parsed
+            .ir
+            .style_refs
+            .iter()
+            .find(|style| matches!(style.target, fm_core::IrStyleTarget::Link(_)))
+            .map(|style| style.style.clone())
+            .expect("link style");
+        assert!(css.contains("stroke:red"), "{css}");
+        assert!(css.contains("stroke-width:2"), "{css}");
+        assert!(css.contains("font-size:9pt"), "{css}");
+    }
+
+    #[test]
+    fn an_edge_ignores_style_filled_because_it_has_no_interior() {
+        // The node rule (style=filled makes `color` the fill) must NOT leak to edges: an edge has no
+        // interior, so its color is always the stroke.
+        let parsed = parse_dot("digraph G { a -> b [style=filled, color=red]; }");
+        let css = parsed
+            .ir
+            .style_refs
+            .iter()
+            .find(|style| matches!(style.target, fm_core::IrStyleTarget::Link(_)))
+            .map(|style| style.style.clone())
+            .expect("link style");
+        assert_eq!(css, "stroke:red");
+    }
+
+    #[test]
+    fn font_and_width_defaults_apply_and_merge_with_per_element_values() {
+        let parsed =
+            parse_dot("digraph G { node [fontname=Georgia, penwidth=4]; a; b [penwidth=1]; }");
+        let css_a = node_style_css(&parsed, "a").expect("style for a");
+        assert!(
+            css_a.contains("font-family:Georgia") && css_a.contains("stroke-width:4"),
+            "{css_a}"
+        );
+
+        // `b` overrides only the width and must keep the inherited font.
+        let css_b = node_style_css(&parsed, "b").expect("style for b");
+        assert!(css_b.contains("stroke-width:1"), "{css_b}");
+        assert!(
+            css_b.contains("font-family:Georgia"),
+            "the inherited font must survive a width override: {css_b}"
+        );
+    }
+
+    #[test]
+    fn edge_font_defaults_revert_at_the_end_of_a_subgraph() {
+        let parsed =
+            parse_dot("digraph G { subgraph cluster_0 { edge [penwidth=5]; a -> b; } c -> d; }");
+        let link_styles: Vec<(usize, String)> = parsed
+            .ir
+            .style_refs
+            .iter()
+            .filter_map(|style| match style.target {
+                fm_core::IrStyleTarget::Link(index) => Some((index, style.style.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            link_styles.len(),
+            1,
+            "only the in-scope edge may be styled: {link_styles:?}"
+        );
+        assert_eq!(link_styles[0].0, 0);
+        assert!(link_styles[0].1.contains("stroke-width:5"));
     }
 
     #[test]
