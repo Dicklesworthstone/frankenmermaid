@@ -2252,6 +2252,183 @@ fn sankey_flows_conserve_width_at_every_intermediate_node() {
     );
 }
 
+/// A sequence diagram's activation bars and notes must attach to the participants they name
+/// (bd-iicc).
+///
+/// The message guard above covers arrows only. These are the other two things sequence_advanced
+/// declares that carry meaning positionally: `activate S` claims a span of S's lifeline, `Note right
+/// of S` belongs beside S, and `Note over C,S` claims the region between two named participants.
+/// Each is a relationship between declared input and rendered geometry, and each is invisible to a
+/// byte golden — a note drawn beside the wrong participant, or an activation bar on the wrong
+/// lifeline, is perfectly stable output.
+///
+/// Everything is read from the FIXTURE, so none of it can be satisfied by re-blessing.
+#[test]
+fn sequence_activations_and_notes_attach_to_their_declared_participants() {
+    let read = fs::read_to_string(golden_dir().join("sequence_advanced.mmd"));
+    assert!(
+        read.is_ok(),
+        "read sequence_advanced fixture: {:?}",
+        read.err()
+    );
+    let source = read.unwrap_or_default();
+
+    // Walk the fixture once, numbering messages so an activate/deactivate pair can be expressed as
+    // the range of messages it encloses.
+    let mut message_index = 0_usize;
+    let mut activations: Vec<(String, usize, usize)> = Vec::new();
+    let mut open: Vec<(String, usize)> = Vec::new();
+    let mut notes_right: Vec<String> = Vec::new();
+    let mut notes_over: Vec<(String, String)> = Vec::new();
+    for line in source.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("activate ") {
+            open.push((rest.trim().to_string(), message_index));
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("deactivate ") {
+            let who = rest.trim().to_string();
+            if let Some(pos) = open.iter().rposition(|(p, _)| *p == who) {
+                let (_, from) = open.remove(pos);
+                activations.push((who, from, message_index.saturating_sub(1)));
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("Note right of ") {
+            if let Some((who, _)) = rest.split_once(':') {
+                notes_right.push(who.trim().to_string());
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("Note over ") {
+            if let Some((who, _)) = rest.split_once(':')
+                && let Some((a, b)) = who.split_once(',')
+            {
+                notes_over.push((a.trim().to_string(), b.trim().to_string()));
+            }
+            continue;
+        }
+        if line.contains("->>") {
+            message_index += 1;
+        }
+    }
+    assert!(
+        !activations.is_empty() && !notes_right.is_empty() && !notes_over.is_empty(),
+        "sequence_advanced must declare an activate block, a `Note right of`, and a `Note over` \
+         for this guard to mean anything; read {activations:?}, {notes_right:?}, {notes_over:?}"
+    );
+
+    let svg = render_fixture("sequence_advanced");
+    let boxes = node_boxes_by_declared_id(&svg);
+    let lifeline_x = |id: &str| -> f32 {
+        let found = boxes.iter().find(|b| b.id == id);
+        assert!(found.is_some(), "participant {id:?} was not rendered");
+        found.map_or(f32::NAN, |b| b.x + b.width / 2.0)
+    };
+
+    // Message ys, in declaration order, recovered from the arrow paths.
+    let mut message_ys: Vec<f32> = Vec::new();
+    for chunk in svg.split("<g id=\"fm-edge-").skip(1) {
+        let body = chunk.split("<g id=\"fm-").next().unwrap_or(chunk);
+        let Some(d) = body
+            .find(" d=\"")
+            .map(|at| &body[at + 4..])
+            .and_then(|rest| rest.find('"').map(|end| &rest[..end]))
+        else {
+            continue;
+        };
+        if let Ok((start, _)) = path_endpoints(d) {
+            message_ys.push(start.1);
+        }
+    }
+    message_ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Rendered rects carrying a given class.
+    let rects = |class: &str| -> Vec<(f32, f32, f32, f32)> {
+        let mut out = Vec::new();
+        for tag in svg.split("<rect").skip(1) {
+            let Some((tag, _)) = tag.split_once('>') else {
+                continue;
+            };
+            if !tag.contains(class) {
+                continue;
+            }
+            let num = |key: &str| -> Option<f32> {
+                let at = tag.find(&format!("{key}=\""))? + key.len() + 2;
+                let rest = &tag[at..];
+                rest[..rest.find('"')?].parse().ok()
+            };
+            if let (Some(x), Some(y), Some(w), Some(h)) =
+                (num("x"), num("y"), num("width"), num("height"))
+            {
+                out.push((x, y, w, h));
+            }
+        }
+        out
+    };
+
+    // An activation bar sits ON its participant's lifeline and covers the messages it encloses.
+    let bars = rects("fm-activation-bar");
+    assert_eq!(
+        bars.len(),
+        activations.len(),
+        "the fixture declares {} activation(s) but {} bar(s) rendered",
+        activations.len(),
+        bars.len()
+    );
+    for ((who, first, last), (x, y, w, h)) in activations.iter().zip(&bars) {
+        let lifeline = lifeline_x(who);
+        assert!(
+            (x + w / 2.0 - lifeline).abs() < 1.0,
+            "{who}'s activation bar is centred at {} but its lifeline is at {lifeline}",
+            x + w / 2.0
+        );
+        let (top, bottom) = (*y, y + h);
+        for index in *first..=*last {
+            let Some(message_y) = message_ys.get(index) else {
+                continue;
+            };
+            assert!(
+                *message_y >= top - 1.0 && *message_y <= bottom + 1.0,
+                "{who} is active across message {index} at y {message_y}, but its bar only spans \
+                 {top}..{bottom}"
+            );
+        }
+    }
+
+    // `Note over A,B` must CONTAIN both lifelines; `Note right of X` must start right of X's.
+    // Both are assertions a merely-present note passes and a misplaced one fails.
+    let notes = rects("fm-sequence-note");
+    assert_eq!(
+        notes.len(),
+        notes_right.len() + notes_over.len(),
+        "the fixture declares {} note(s) but {} rendered",
+        notes_right.len() + notes_over.len(),
+        notes.len()
+    );
+    for (a, b) in &notes_over {
+        let left = lifeline_x(a).min(lifeline_x(b));
+        let right = lifeline_x(a).max(lifeline_x(b));
+        let spanning = notes
+            .iter()
+            .find(|(x, _, w, _)| *x <= left + 1.0 && x + w >= right - 1.0);
+        assert!(
+            spanning.is_some(),
+            "`Note over {a},{b}` must span both lifelines ({left}..{right}), but no note rect \
+             covers that range; notes are {notes:?}"
+        );
+    }
+    for who in &notes_right {
+        let lifeline = lifeline_x(who);
+        let beside = notes.iter().find(|(x, ..)| *x > lifeline);
+        assert!(
+            beside.is_some(),
+            "`Note right of {who}` must start right of its lifeline at {lifeline}; notes are \
+             {notes:?}"
+        );
+    }
+}
+
 /// architecture-beta renders every declared service, and its edges fan out from the right one
 /// (bd-iicc).
 ///
