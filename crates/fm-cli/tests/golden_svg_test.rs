@@ -1924,6 +1924,79 @@ fn packet_field_geometry_does_not_depend_on_field_names() {
     }
 }
 
+/// The `Class : member` colon shorthand must become a MEMBER ROW, not a literal node label
+/// (bd-4e2k).
+///
+/// class_basic was pinned for a long time by its byte golden alone, and the byte golden was happy:
+/// the rendered text was `Animal : +name` and `Dog`, i.e. the whole source line drawn as one label,
+/// with `+bark()` absent from the output entirely. Nothing was misplaced or malformed, so a hash
+/// could not tell the wrong picture from the right one — the same blindness bd-iicc exists to cover.
+///
+/// The expected members are READ FROM THE FIXTURE rather than restated here, so this cannot drift
+/// from what the diagram declares, and it cannot be satisfied by re-blessing.
+#[test]
+fn class_colon_shorthand_renders_as_member_rows() {
+    let read = fs::read_to_string(golden_dir().join("class_basic.mmd"));
+    assert!(read.is_ok(), "read class_basic fixture: {:?}", read.err());
+    let source = read.unwrap_or_default();
+
+    // `Class : member` lines, skipping the relation lines (which also carry `:` for edge labels).
+    let mut declared: Vec<(String, String)> = Vec::new();
+    for line in source.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("classDiagram") {
+            continue;
+        }
+        if line.contains("--") || line.contains("..") {
+            continue;
+        }
+        if let Some((class, member)) = line.split_once(':') {
+            let (class, member) = (class.trim(), member.trim());
+            if !class.is_empty() && !member.is_empty() && !class.contains(char::is_whitespace) {
+                declared.push((class.to_string(), member.to_string()));
+            }
+        }
+    }
+    assert!(
+        declared.len() >= 2,
+        "class_basic must declare at least two `Class : member` shorthands for this guard to mean \
+         anything; read {declared:?}"
+    );
+
+    let svg = render_fixture("class_basic");
+    let boxes = node_boxes_by_declared_id(&svg);
+
+    for (class, member) in &declared {
+        let node = boxes.iter().find(|b| &b.id == class);
+        assert!(
+            node.is_some(),
+            "{class} declares member {member:?} but no node with that id was rendered; read {:?}",
+            boxes.iter().map(|b| &b.id).collect::<Vec<_>>()
+        );
+        let rows: Vec<&str> = node
+            .map(|n| n.texts.iter().map(|(t, _)| t.as_str()).collect())
+            .unwrap_or_default();
+
+        // The member is a row of its own...
+        assert!(
+            rows.iter().any(|row| row.trim() == member),
+            "{class} declares member {member:?}, which is not a row of its box; rows are {rows:?}"
+        );
+        // ...the class name is a row of its own...
+        assert!(
+            rows.iter().any(|row| row.trim() == class),
+            "{class}'s own name is not a row of its box; rows are {rows:?}"
+        );
+        // ...and NOT the whole source line as one label, which is the regression this bead names.
+        let literal = format!("{class} : {member}");
+        assert!(
+            !rows.iter().any(|row| row.trim() == literal),
+            "{class} renders {literal:?} as a single literal label, so the colon shorthand never \
+             reached class_meta; rows are {rows:?}"
+        );
+    }
+}
+
 /// architecture-beta renders every declared service, and its edges fan out from the right one
 /// (bd-iicc).
 ///
