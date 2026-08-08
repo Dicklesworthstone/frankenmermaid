@@ -5329,7 +5329,6 @@ fn parse_timeline_events(
 
 fn parse_packet(input: &str, builder: &mut IrBuilder) {
     let mut field_index = 0_usize;
-    let mut previous_field: Option<IrNodeId> = None;
     let mut packet_meta = fm_core::IrPacketMeta::default();
 
     for (index, line) in byte_lines(input).enumerate() {
@@ -5397,11 +5396,11 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
                         )),
                     }
 
-                    // Chain fields sequentially.
-                    if let Some(prev) = previous_field {
-                        builder.push_edge(prev, node_id, ArrowType::Line, None, span);
-                    }
-                    previous_field = Some(node_id);
+                    // Fields are NOT chained with edges. The chain existed only so the generic
+                    // grid layout would order them; the bit ruler carries that order in its
+                    // geometry (bd-51tz), a packet diagram has no connectors, and the edges made
+                    // the a11y description claim "8 nodes and 7 edges" for a picture that draws
+                    // none. The `A -> B` connection form below still parses its edges normally.
                     field_index += 1;
                 }
                 continue;
@@ -16026,6 +16025,52 @@ Rel_Back(db, app, "Responds")"#,
         );
     }
 
+    /// The bit range must reach `packet_meta`, because that is the only thing layout reads: a
+    /// range that stays behind as a CSS class is what let field width track label text (bd-51tz).
+    #[test]
+    fn packet_beta_records_bit_ranges_in_the_ir() {
+        let parsed = parse_mermaid(
+            "packet-beta\n  0-15: \"Source Port\"\n  16-31: \"Dest Port\"\n  32: \"Flag\"",
+        );
+        let meta = parsed.ir.packet_meta.expect("packet meta");
+        assert_eq!(
+            meta.fields
+                .iter()
+                .map(|f| (f.node.0, f.start_bit, f.end_bit, f.bit_count()))
+                .collect::<Vec<_>>(),
+            [(0, 0, 15, 16), (1, 16, 31, 16), (2, 32, 32, 1)],
+            "every declared field, including the single-bit one, must carry its range"
+        );
+    }
+
+    /// A range that cannot be read must be reported, not silently turned into a label-sized box.
+    #[test]
+    fn packet_beta_warns_on_an_unreadable_bit_range() {
+        let parsed = parse_mermaid("packet-beta\n  0-7: \"Good\"\n  31-16: \"Reversed\"");
+        let meta = parsed.ir.packet_meta.expect("packet meta");
+        assert_eq!(
+            meta.fields
+                .iter()
+                .map(|f| (f.start_bit, f.end_bit))
+                .collect::<Vec<_>>(),
+            [(0, 7)],
+            "the reversed range must not be admitted as geometry"
+        );
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| w.contains("31-16") && w.contains("bit range")),
+            "expected a diagnostic naming the bad range, got {:?}",
+            parsed.warnings
+        );
+        assert_eq!(
+            parsed.ir.nodes.len(),
+            2,
+            "the field itself still renders; only its geometry is unknown"
+        );
+    }
+
     #[test]
     fn packet_beta_wide_fields_get_class() {
         let parsed = parse_mermaid("packet-beta\n  0-31: \"Sequence Number\"");
@@ -16058,8 +16103,26 @@ Rel_Back(db, app, "Responds")"#,
     }
 
     #[test]
-    fn packet_beta_fields_linked_sequentially() {
+    fn packet_beta_fields_are_not_linked_by_edges() {
+        // Fields used to be chained so the generic grid layout could order them. The bit ruler
+        // orders them from their declared ranges instead, and a packet diagram has no connectors,
+        // so an edge here would only make the rendered a11y description count links that are never
+        // drawn (bd-51tz).
         let parsed = parse_mermaid("packet-beta\n  0-7: \"A\"\n  8-15: \"B\"\n  16-23: \"C\"");
-        assert_eq!(parsed.ir.edges.len(), 2, "3 fields should produce 2 edges");
+        assert_eq!(parsed.ir.nodes.len(), 3, "3 fields should produce 3 nodes");
+        assert!(
+            parsed.ir.edges.is_empty(),
+            "packet fields must not be connected: {:?}",
+            parsed.ir.edges
+        );
+        // The ranges still reach the IR, which is what actually orders them.
+        let meta = parsed.ir.packet_meta.expect("packet meta");
+        assert_eq!(
+            meta.fields
+                .iter()
+                .map(|f| (f.start_bit, f.end_bit))
+                .collect::<Vec<_>>(),
+            [(0, 7), (8, 15), (16, 23)]
+        );
     }
 }

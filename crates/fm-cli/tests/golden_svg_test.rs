@@ -1459,7 +1459,6 @@ fn journey_task_scores_are_distinguishable_in_the_output() {
 /// Un-ignoring this is bd-51tz's acceptance gate. The equal-bit-count assertion is the sharpest and is
 /// checked first; do not weaken it to a tolerance the current output happens to satisfy.
 #[test]
-#[ignore = "fails against bd-51tz: packet-beta field widths track label text, not bit ranges"]
 fn packet_field_widths_are_proportional_to_bit_ranges() {
     let svg = render_fixture("packet_basic");
     let centres = node_centres(&svg);
@@ -1520,6 +1519,229 @@ fn packet_field_widths_are_proportional_to_bit_ranges() {
             "{name} spans {bits} bits so at {per_bit}/bit (from {unit_name}) it should be {} wide, \
              but renders {width}",
             bits * per_bit
+        );
+    }
+}
+
+/// Read every rendered packet field as `(label, start_bit, end_bit, x, cy, width)`.
+///
+/// The bit range is PARSED FROM THE RENDERED LABEL, exactly as
+/// `packet_field_widths_are_proportional_to_bit_ranges` does, so these guards describe themselves
+/// from the output rather than restating a table that could drift from the fixture. A label whose
+/// range cannot be read is a hard error: a guard that silently judged fewer fields than the diagram
+/// declares would pass a renderer that dropped one.
+fn packet_fields(svg: &str) -> Vec<(String, u32, u32, f32, f32, f32)> {
+    let mut fields = Vec::new();
+    for (label, cx, cy, width) in node_centres(svg) {
+        let open = label.rfind('[');
+        assert!(
+            open.is_some(),
+            "packet field {label:?} has no [start-end] range in its rendered label"
+        );
+        let range = &label[open.unwrap_or(0) + 1..label.len().saturating_sub(1)];
+        let split = range.split_once('-');
+        assert!(
+            split.is_some(),
+            "packet field {label:?} range {range:?} is not start-end"
+        );
+        let (lo, hi) = split.unwrap_or(("", ""));
+        let (lo, hi) = (lo.trim().parse::<u32>(), hi.trim().parse::<u32>());
+        assert!(
+            lo.is_ok() && hi.is_ok(),
+            "packet field {label:?} range {range:?} is not numeric"
+        );
+        fields.push((
+            label.clone(),
+            lo.unwrap_or(0),
+            hi.unwrap_or(0),
+            cx - width / 2.0,
+            cy,
+            width,
+        ));
+    }
+    fields
+}
+
+/// A packet field begins at its start bit's offset within its row, and rows wrap every 32 bits
+/// (bd-51tz, criterion 4).
+///
+/// This is the half of the encoding that width proportionality cannot catch. Before the fix the
+/// fixture's eight fields rendered at x = 134.90, 435.40, 743.32, 92.00, 451.07, 768.49, 139.44,
+/// 446.54 — a generic three-column grid jumping left and right, with no relationship to the bit
+/// offsets those fields declare.
+///
+/// Both the per-bit scale and the row pitch are DERIVED FROM THE OUTPUT (narrowest field, and the
+/// distinct rendered rows), so nothing here is a restatement of a constant in the layout code; if
+/// layout and this guard both moved to a different `bitWidth` the assertions would still bite.
+#[test]
+fn packet_fields_start_at_their_bit_offset_and_rows_wrap_every_32_bits() {
+    const BITS_PER_ROW: u32 = 32;
+
+    let svg = render_fixture("packet_basic");
+    assert!(
+        !svg.contains("transform="),
+        "a transform would make these coordinates non-final"
+    );
+    let fields = packet_fields(&svg);
+    assert!(
+        fields.len() >= 8,
+        "expected the fixture's 8 packet fields, read {} — the guard is judging fewer fields than \
+         the diagram declares",
+        fields.len()
+    );
+
+    // Per-bit width from the narrowest field, so no scale constant is assumed here.
+    let narrowest = fields
+        .iter()
+        .min_by(|a, b| (a.2 - a.1).cmp(&(b.2 - b.1)))
+        .cloned()
+        .unwrap_or_default();
+    let per_bit = narrowest.5 / (narrowest.2 - narrowest.1 + 1) as f32;
+    assert!(
+        per_bit > 0.0,
+        "narrowest field {} has non-positive per-bit width",
+        narrowest.0
+    );
+
+    // The fixture must actually wrap, or this guard would be vacuous on it.
+    let rows: Vec<u32> = {
+        let mut r: Vec<u32> = fields.iter().map(|f| f.1 / BITS_PER_ROW).collect();
+        r.sort_unstable();
+        r.dedup();
+        r
+    };
+    assert!(
+        rows.len() >= 2,
+        "packet_basic no longer spans more than one 32-bit row, so row wrapping is untested here"
+    );
+
+    let left = fields.iter().map(|f| f.3).fold(f32::INFINITY, f32::min);
+    let top = fields.iter().map(|f| f.4).fold(f32::INFINITY, f32::min);
+
+    for (label, start, _, x, cy, _) in &fields {
+        // Horizontal: the field's left edge sits at its start bit's offset WITHIN its row.
+        let expected_x = left + (start % BITS_PER_ROW) as f32 * per_bit;
+        assert!(
+            (x - expected_x).abs() < 0.5,
+            "{label} starts at bit {start} (offset {} in its row), so its left edge should be \
+             {expected_x} at {per_bit}/bit, but it renders at {x}",
+            start % BITS_PER_ROW,
+        );
+
+        // Vertical: fields sharing a row share a y, and later rows are strictly lower.
+        for (other_label, other_start, _, _, other_cy, _) in &fields {
+            let same_row = start / BITS_PER_ROW == other_start / BITS_PER_ROW;
+            if same_row {
+                assert!(
+                    (cy - other_cy).abs() < 0.5,
+                    "{label} (bit {start}) and {other_label} (bit {other_start}) are both in \
+                     32-bit row {} but render at y {cy} and {other_cy}",
+                    start / BITS_PER_ROW
+                );
+            } else if start / BITS_PER_ROW < other_start / BITS_PER_ROW {
+                assert!(
+                    *cy < *other_cy,
+                    "{label} is in row {} and {other_label} in row {}, so {label} must render \
+                     above it, but the y values are {cy} and {other_cy}",
+                    start / BITS_PER_ROW,
+                    other_start / BITS_PER_ROW
+                );
+            }
+        }
+    }
+
+    // And the top row is the row containing bit 0, not merely some row.
+    let first_row_y = fields
+        .iter()
+        .filter(|f| f.1 / BITS_PER_ROW == 0)
+        .map(|f| f.4)
+        .fold(f32::INFINITY, f32::min);
+    assert!(
+        (first_row_y - top).abs() < 0.5,
+        "the row holding bit 0 renders at y {first_row_y} but the topmost row is at {top}"
+    );
+}
+
+/// Renaming a packet field must not move anything (bd-51tz, criterion 3).
+///
+/// The same invariant bd-h9gx needed for gantt bars, and for the same reason: label length must not
+/// leak into the encoding. Two diagrams declaring IDENTICAL bit ranges with wildly different field
+/// names must produce identical field geometry. A label-sized layout fails this immediately — it is
+/// what produced the original defect, where "Acknowledgment Number" got the widest box in the
+/// fixture purely for being the longest string.
+///
+/// The negative half is asserted too: the two sources really are different documents that really do
+/// render different label text, so a renderer that ignored labels entirely could not pass by
+/// accident.
+#[test]
+fn packet_field_geometry_does_not_depend_on_field_names() {
+    let terse = "packet-beta\n0-15: \"A\"\n16-31: \"B\"\n32-63: \"C\"\n64-95: \"D\"\n";
+    let verbose = "packet-beta\n\
+                   0-15: \"An extremely long source port field name\"\n\
+                   16-31: \"Bb\"\n\
+                   32-63: \"A considerably longer sequence number field name than any other\"\n\
+                   64-95: \"Dd\"\n";
+
+    let terse_svg = render_svg_with_config(&parse(terse).ir, &SvgRenderConfig::default());
+    let verbose_svg = render_svg_with_config(&parse(verbose).ir, &SvgRenderConfig::default());
+
+    let terse_fields = packet_fields(&terse_svg);
+    let verbose_fields = packet_fields(&verbose_svg);
+    assert_eq!(
+        terse_fields.len(),
+        4,
+        "expected 4 fields from the terse source, read {}",
+        terse_fields.len()
+    );
+    assert_eq!(
+        terse_fields.len(),
+        verbose_fields.len(),
+        "renaming changed how many fields render"
+    );
+
+    // Negative case: the labels really did change, so identical geometry below is not vacuous.
+    let renamed = terse_fields
+        .iter()
+        .zip(&verbose_fields)
+        .filter(|(a, b)| a.0 != b.0)
+        .count();
+    assert_eq!(
+        renamed,
+        terse_fields.len(),
+        "the two sources were supposed to render different label text for every field"
+    );
+
+    for (a, b) in terse_fields.iter().zip(&verbose_fields) {
+        assert_eq!(
+            (a.1, a.2),
+            (b.1, b.2),
+            "the two sources declare the same ranges; read {}-{} vs {}-{}",
+            a.1,
+            a.2,
+            b.1,
+            b.2
+        );
+        assert!(
+            (a.5 - b.5).abs() < 0.01,
+            "bits {}-{} render {} wide as {:?} and {} wide as {:?} — width is tracking the name",
+            a.1,
+            a.2,
+            a.5,
+            a.0,
+            b.5,
+            b.0
+        );
+        assert!(
+            (a.3 - b.3).abs() < 0.01 && (a.4 - b.4).abs() < 0.01,
+            "bits {}-{} sit at ({}, {}) as {:?} but ({}, {}) as {:?} — position is tracking the name",
+            a.1,
+            a.2,
+            a.3,
+            a.4,
+            a.0,
+            b.3,
+            b.4,
+            b.0
         );
     }
 }

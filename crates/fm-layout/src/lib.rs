@@ -7517,7 +7517,7 @@ const PACKET_ROW_GAP: f32 = 15.0;
 /// their labels: the fixture's three 16-bit fields rendered 148.72 / 176.77 / 154.50 wide and its
 /// 4-bit field rendered WIDER than its 6-bit one.
 ///
-/// KNOWN DIVERGENCE (bd-1z4k): a field that straddles a row boundary is drawn as one box at its
+/// KNOWN DIVERGENCE (bd-8vr0): a field that straddles a row boundary is drawn as one box at its
 /// start bit and overflows its row to the right. mermaid splits such a block into one box per row
 /// (`getNextFittingBlock`), which needs a second box for one IR node and therefore a layout
 /// extension the renderer draws; that is filed separately rather than approximated here.
@@ -7585,7 +7585,14 @@ fn layout_diagram_packet_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         });
     }
 
-    push_snapshot(&mut trace, "packet_layout", node_count, ir.edges.len(), 0, 0);
+    push_snapshot(
+        &mut trace,
+        "packet_layout",
+        node_count,
+        ir.edges.len(),
+        0,
+        0,
+    );
 
     let bounds = compute_bounds(&nodes, &[], &[], LayoutSpacing::default());
 
@@ -18585,6 +18592,151 @@ mod tests {
         assert!(hub.bounds.center().x < left_sink.bounds.center().x);
         assert!(hub.bounds.center().x < right_sink.bounds.center().x);
         assert_eq!(layout.extensions.bands.len(), 3);
+    }
+
+    /// Build a `packet-beta` IR from `(id, start_bit, end_bit)` triples.
+    fn packet_ir(fields: &[(&str, u32, u32)]) -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::PacketBeta);
+        let mut meta = fm_core::IrPacketMeta::default();
+        for (index, (id, start, end)) in fields.iter().enumerate() {
+            ir.nodes.push(IrNode {
+                id: (*id).to_string(),
+                ..IrNode::default()
+            });
+            meta.fields.push(fm_core::IrPacketField {
+                node: IrNodeId(index),
+                start_bit: *start,
+                end_bit: *end,
+            });
+        }
+        ir.packet_meta = Some(meta);
+        ir
+    }
+
+    /// Width is `bits * bit_width` and x is the start bit's offset in its row — nothing else
+    /// (bd-51tz). Two 16-bit fields must be identical in width even though their ids differ in
+    /// length, and the 32-bit field must be exactly twice as wide, not merely wider.
+    #[test]
+    fn packet_layout_derives_width_and_x_from_the_bit_range() {
+        let ir = packet_ir(&[
+            ("a", 0, 15),
+            ("a_much_longer_id_than_the_others", 16, 31),
+            ("c", 32, 63),
+        ]);
+        let layout = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Packet).layout;
+        let boxes: BTreeMap<&str, LayoutRect> = layout
+            .nodes
+            .iter()
+            .map(|n| (n.node_id.as_str(), n.bounds))
+            .collect();
+
+        let a = boxes["a"];
+        let b = boxes["a_much_longer_id_than_the_others"];
+        let c = boxes["c"];
+        assert!(
+            (a.width - b.width).abs() < 0.001,
+            "two 16-bit fields must be equally wide, got {} and {}",
+            a.width,
+            b.width
+        );
+        assert!(
+            (c.width - a.width * 2.0).abs() < 0.001,
+            "a 32-bit field must be exactly twice a 16-bit one, got {} vs {}",
+            c.width,
+            a.width
+        );
+        assert!(
+            (b.x - (a.x + a.width)).abs() < 0.001,
+            "bit 16 must start where bit 15 ends: {} vs {}",
+            b.x,
+            a.x + a.width
+        );
+        assert!(
+            (a.y - b.y).abs() < 0.001 && c.y > a.y,
+            "bits 0-31 share a row and bits 32-63 wrap to the next: {} {} {}",
+            a.y,
+            b.y,
+            c.y
+        );
+        assert!(
+            layout.edges.is_empty(),
+            "a bit ruler draws no connectors between fields"
+        );
+    }
+
+    /// Rows wrap every 32 bits, so bit 32 returns to the left edge under bit 0.
+    #[test]
+    fn packet_layout_wraps_rows_every_32_bits() {
+        let ir = packet_ir(&[("r0", 0, 31), ("r1", 32, 63), ("r2", 64, 95)]);
+        let layout = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Packet).layout;
+        let rows: Vec<LayoutRect> = layout.nodes.iter().map(|n| n.bounds).collect();
+        assert!(
+            rows.windows(2).all(|w| (w[0].x - w[1].x).abs() < 0.001),
+            "every full row starts at the same x: {rows:?}"
+        );
+        assert!(
+            rows.windows(2).all(|w| w[1].y > w[0].y),
+            "each 32-bit row sits below the previous: {rows:?}"
+        );
+        let pitch = rows[1].y - rows[0].y;
+        assert!(
+            ((rows[2].y - rows[1].y) - pitch).abs() < 0.001,
+            "row pitch must be uniform: {rows:?}"
+        );
+    }
+
+    /// KNOWN DIVERGENCE, pinned so it is a decision rather than a surprise (bd-8vr0): mermaid
+    /// splits a block that crosses a row boundary into one box per row; we draw one box at the
+    /// start bit, which overflows its row to the right. Width stays exactly proportional either
+    /// way, and the diagram bounds grow to contain the overflow rather than clipping it.
+    #[test]
+    fn packet_layout_draws_a_row_straddling_field_as_one_overflowing_box() {
+        let ir = packet_ir(&[("aligned", 0, 15), ("straddles", 16, 47)]);
+        let layout = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Packet).layout;
+        let boxes: BTreeMap<&str, LayoutRect> = layout
+            .nodes
+            .iter()
+            .map(|n| (n.node_id.as_str(), n.bounds))
+            .collect();
+        let aligned = boxes["aligned"];
+        let straddling = boxes["straddles"];
+
+        assert!(
+            (straddling.width - aligned.width * 2.0).abs() < 0.001,
+            "a 32-bit field is twice a 16-bit one even when it straddles: {} vs {}",
+            straddling.width,
+            aligned.width
+        );
+        assert!(
+            (straddling.y - aligned.y).abs() < 0.001,
+            "it is placed on the row its START bit belongs to"
+        );
+        let right = straddling.x + straddling.width;
+        assert!(
+            layout.bounds.x + layout.bounds.width >= right,
+            "the overflow must be inside the diagram bounds, not clipped: bounds end {} < {right}",
+            layout.bounds.x + layout.bounds.width
+        );
+    }
+
+    /// The `packet-beta` connection form declares no bit ranges, so there is no ruler and the
+    /// generic grid stays the honest answer rather than every node collapsing onto bit 0.
+    #[test]
+    fn packet_layout_without_bit_ranges_falls_back_to_the_grid() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::PacketBeta);
+        for id in ["Client", "Gateway", "Backend"] {
+            ir.nodes.push(IrNode {
+                id: id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        let layout = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Packet).layout;
+        assert_eq!(layout.nodes.len(), 3);
+        let xs: Vec<f32> = layout.nodes.iter().map(|n| n.bounds.x).collect();
+        assert!(
+            xs.windows(2).any(|w| (w[0] - w[1]).abs() > 0.001),
+            "unranged nodes must not all stack on one x: {xs:?}"
+        );
     }
 
     #[test]

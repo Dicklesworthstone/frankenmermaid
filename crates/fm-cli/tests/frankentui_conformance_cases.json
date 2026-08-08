@@ -586,7 +586,7 @@
   },
   {
     "id": "packet_basic",
-    "description": "Packet diagram with header fields.",
+    "description": "Packet diagram with header fields. Fields carry bit ranges and are NOT connected: the extraction source models them as `PacketField { label, bit_start, bit_end }` collected into `packet_fields` with `packet_bits_per_row: 32` (mermaid.rs:3936, 4966, 5541-5543) and emits no edges between them. The former expectation of 2 edges pinned a sequential chain we added only so the generic grid layout would order the fields; bd-51tz replaced that with a bit ruler, so the chain is gone and the edge count matches the cited source.",
     "input_path": "fixtures/frankentui_conformance/packet_basic.mmd",
     "source_refs": [
       "/dp/frankentui/crates/ftui-extras/src/mermaid.rs:packet_parser"
@@ -598,7 +598,7 @@
       },
       "counts": {
         "nodes": 3,
-        "edges": 2,
+        "edges": 0,
         "clusters": 0,
         "subgraphs": 0
       },
