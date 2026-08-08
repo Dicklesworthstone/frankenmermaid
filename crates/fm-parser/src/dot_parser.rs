@@ -1,6 +1,6 @@
 use std::{borrow::Cow, iter::Peekable, str::CharIndices};
 
-use fm_core::{ArrowType, DiagramType, IrConstraint, NodeShape, Span};
+use fm_core::{ArrowType, DiagramType, GraphDirection, IrConstraint, NodeShape, Span};
 use memchr::memchr2;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -103,6 +103,13 @@ pub fn parse_dot(input: &str) -> ParseResult {
                 continue;
             }
 
+            // `rankdir` is a graph attribute, so it applies to the whole diagram wherever it
+            // appears. Handled before the `graph …` skip below, which would otherwise discard it.
+            if let Some(rankdir) = parse_dot_rankdir(statement) {
+                apply_dot_rankdir(rankdir, line_number, &mut builder);
+                continue;
+            }
+
             // `rank=same` marks the innermost group as a same-rank set. DOT expresses it as a graph
             // attribute inside the group, so it applies to the group, not to one node.
             if let Some(rank_value) = parse_dot_rank_attribute(statement) {
@@ -182,6 +189,37 @@ pub fn parse_dot(input: &str) -> ParseResult {
                 continue;
             }
 
+            // `graph [...]`, `node [...]` and `edge [...]` set DEFAULTS for everything that follows.
+            // They must be consumed BEFORE the node parser, which otherwise reads the keyword as a
+            // node id and adds a phantom box labelled `graph`/`node`/`edge` to the diagram — a
+            // visible stray shape in any DOT file that sets defaults, which is most of them.
+            // The keyword must be followed by whitespace or `[`, so a node named `graphite` is
+            // untouched, and a statement containing an edge operator is left to the edge parser
+            // rather than silently dropped.
+            let lower = statement.trim().to_ascii_lowercase();
+            let is_graph_defaults = lower.starts_with("graph ")
+                || lower.starts_with("graph[")
+                || lower.starts_with("graph\t");
+            let is_defaults_statement = is_graph_defaults
+                || lower.starts_with("edge ")
+                || lower.starts_with("edge[")
+                || lower.starts_with("edge\t")
+                || lower.starts_with("node ")
+                || lower.starts_with("node[")
+                || lower.starts_with("node\t");
+            if is_defaults_statement && find_edge_operator(statement).is_none() {
+                // `graph [rankdir=LR]` is the attribute-list spelling of the bare `rankdir=LR`
+                // handled above, and just as common. The rest of the list is still skipped.
+                if is_graph_defaults
+                    && let Some(value) = extract_dot_attribute_raw(statement, "rankdir")
+                {
+                    let rankdir = parse_dot_rankdir_value(value.as_ref())
+                        .ok_or_else(|| value.as_ref().trim().trim_matches('"').to_string());
+                    apply_dot_rankdir(rankdir, line_number, &mut builder);
+                }
+                continue;
+            }
+
             if parse_dot_edge_statement(
                 statement,
                 directed,
@@ -204,21 +242,9 @@ pub fn parse_dot(input: &str) -> ParseResult {
                 continue;
             }
 
-            // Handle graph/edge/node default attribute statements.
-            // These are valid DOT but we parse-and-skip them (no runtime behavior yet).
-            let lower = statement.trim().to_ascii_lowercase();
-            if lower.starts_with("graph ")
-                || lower.starts_with("graph[")
-                || lower.starts_with("graph\t")
-                || lower.starts_with("edge ")
-                || lower.starts_with("edge[")
-                || lower.starts_with("edge\t")
-                || lower.starts_with("node ")
-                || lower.starts_with("node[")
-                || lower.starts_with("node\t")
-            {
-                continue;
-            }
+            builder.add_warning(format!(
+                "Line {line_number}: unsupported DOT statement: {statement}"
+            ));
 
             builder.add_warning(format!(
                 "Line {line_number}: unsupported DOT statement: {statement}"
@@ -269,6 +295,21 @@ fn parse_dot_rank_attribute(statement: &str) -> Option<DotRankValue> {
         None
     } else {
         Some(DotRankValue::Unsupported(value.to_ascii_lowercase()))
+    }
+}
+
+/// Apply a parsed `rankdir`, or warn about a value that is not one of DOT's four.
+fn apply_dot_rankdir(
+    rankdir: Result<GraphDirection, String>,
+    line_number: usize,
+    builder: &mut IrBuilder,
+) {
+    match rankdir {
+        Ok(direction) => builder.set_direction(direction),
+        Err(value) => builder.add_warning(format!(
+            "Line {line_number}: DOT rankdir={value} is not recognized and was ignored; \
+             expected TB, BT, LR, or RL"
+        )),
     }
 }
 
@@ -928,6 +969,42 @@ fn parse_dot_minlen(attributes: &str) -> Option<DotMinLen> {
         Ok(min_len) => Some(DotMinLen::Ranks(min_len)),
         Err(_) => Some(DotMinLen::Invalid(text.to_string())),
     }
+}
+
+/// Read DOT's `rankdir` graph attribute into a [`GraphDirection`].
+///
+/// `rankdir=LR` is one of the most common lines in real `.dot` files and was previously dropped on
+/// the floor with every other graph attribute, so a graph that asked to flow left-to-right rendered
+/// top-to-bottom. DOT spells only TB/BT/LR/RL; `TD` is Mermaid's synonym for TB and is accepted here
+/// because the two dialects meet in this parser.
+fn parse_dot_rankdir_value(value: &str) -> Option<GraphDirection> {
+    match value
+        .trim()
+        .trim_matches(['"', '\''])
+        .trim()
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "TB" => Some(GraphDirection::TB),
+        "TD" => Some(GraphDirection::TD),
+        "LR" => Some(GraphDirection::LR),
+        "RL" => Some(GraphDirection::RL),
+        "BT" => Some(GraphDirection::BT),
+        _ => None,
+    }
+}
+
+/// Recognize a bare `rankdir=<value>` statement.
+///
+/// Returns `Err` with the offending text for a recognized key with an unusable value, so the caller
+/// can warn instead of silently leaving the graph in its default direction.
+fn parse_dot_rankdir(statement: &str) -> Option<Result<GraphDirection, String>> {
+    let (key, value) = statement.split_once('=')?;
+    if !key.trim().eq_ignore_ascii_case("rankdir") {
+        return None;
+    }
+    let cleaned = value.trim().trim_matches(['"', '\'']).trim().to_string();
+    Some(parse_dot_rankdir_value(value).ok_or(cleaned))
 }
 
 /// Outcome of reading `minlen`, kept distinct so the caller can report what it could not honor.
@@ -1762,6 +1839,92 @@ mod tests {
                 .any(|warning| warning.contains("rank=same")),
             "{:?}",
             parsed.warnings
+        );
+    }
+
+    #[test]
+    fn rankdir_sets_the_graph_direction() {
+        for (value, expected) in [
+            ("TB", fm_core::GraphDirection::TB),
+            ("BT", fm_core::GraphDirection::BT),
+            ("LR", fm_core::GraphDirection::LR),
+            ("RL", fm_core::GraphDirection::RL),
+        ] {
+            let parsed = parse_dot(&format!("digraph G {{ rankdir={value}; a -> b; }}"));
+            assert_eq!(parsed.ir.direction, expected, "rankdir={value}");
+            assert_eq!(parsed.ir.meta.direction, expected, "rankdir={value} meta");
+        }
+    }
+
+    #[test]
+    fn rankdir_default_is_top_to_bottom_when_absent() {
+        // The control: without rankdir the direction must stay at DOT's default, or the assertions
+        // above could be satisfied by a parser that always sets a direction.
+        let parsed = parse_dot("digraph G { a -> b; }");
+        assert_eq!(parsed.ir.direction, fm_core::GraphDirection::TB);
+    }
+
+    #[test]
+    fn rankdir_accepts_quotes_spacing_and_lowercase() {
+        for source in [
+            "digraph G { rankdir=lr; a -> b; }",
+            "digraph G { rankdir = LR; a -> b; }",
+            "digraph G { rankdir=\"LR\"; a -> b; }",
+            "digraph G { RANKDIR=LR; a -> b; }",
+        ] {
+            let parsed = parse_dot(source);
+            assert_eq!(parsed.ir.direction, fm_core::GraphDirection::LR, "{source}");
+        }
+    }
+
+    #[test]
+    fn rankdir_in_a_graph_attribute_list_is_honored_too() {
+        // `graph [rankdir=LR]` used to be discarded with the whole attribute-list statement.
+        let parsed = parse_dot("digraph G { graph [rankdir=LR, bgcolor=white]; a -> b; }");
+        assert_eq!(parsed.ir.direction, fm_core::GraphDirection::LR);
+    }
+
+    #[test]
+    fn graph_default_attribute_statements_do_not_become_nodes() {
+        // `graph [...]`, `node [...]` and `edge [...]` set defaults; they are not nodes. If the node
+        // parser claims them first, the diagram grows phantom boxes labelled graph/node/edge.
+        let parsed = parse_dot(
+            "digraph G { graph [bgcolor=white]; node [shape=box]; edge [color=red]; a -> b; }",
+        );
+        let ids: Vec<&str> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(ids, ["a", "b"], "default statements must not create nodes");
+    }
+
+    #[test]
+    fn unrecognized_rankdir_warns_and_leaves_the_default() {
+        let parsed = parse_dot("digraph G { rankdir=diagonal; a -> b; }");
+        assert_eq!(parsed.ir.direction, fm_core::GraphDirection::TB);
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("rankdir=diagonal")),
+            "{:?}",
+            parsed.warnings
+        );
+    }
+
+    #[test]
+    fn rankdir_does_not_collide_with_the_rank_group_attribute() {
+        // `rank=same` and `rankdir=LR` share a prefix; a key match on "rank" would swallow rankdir
+        // and turn a direction into a same-rank group.
+        let parsed = parse_dot("digraph G { rankdir=LR; { rank=same; a; b; } a -> b; }");
+        assert_eq!(parsed.ir.direction, fm_core::GraphDirection::LR);
+        assert_eq!(
+            parsed.ir.constraints.len(),
+            1,
+            "{:?}",
+            parsed.ir.constraints
         );
     }
 

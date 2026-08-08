@@ -175,6 +175,49 @@ fn dot_minlen_pushes_the_target_further_down_the_ranks() {
 }
 
 #[test]
+fn dot_rankdir_lr_lays_the_graph_out_left_to_right() {
+    // `rankdir=LR` is one of the most common lines in real .dot files and was dropped with every
+    // other graph attribute, so a graph asking to flow left-to-right rendered top-to-bottom.
+    let top_down = layout_diagram(&parse("digraph G {\n  a -> b;\n}").ir);
+    let left_right = layout_diagram(&parse("digraph G {\n  rankdir=LR;\n  a -> b;\n}").ir);
+
+    let (ax, ay) = node_position(&top_down, "a");
+    let (bx, by) = node_position(&top_down, "b");
+    assert!(
+        by > ay + 1.0 && (bx - ax).abs() < 1.0,
+        "the default must flow downward: a=({ax},{ay}) b=({bx},{by})"
+    );
+
+    let (ax, ay) = node_position(&left_right, "a");
+    let (bx, by) = node_position(&left_right, "b");
+    assert!(
+        bx > ax + 1.0 && (by - ay).abs() < 1.0,
+        "rankdir=LR must flow rightward: a=({ax},{ay}) b=({bx},{by})"
+    );
+}
+
+#[test]
+fn dot_default_attribute_statements_do_not_render_phantom_nodes() {
+    // `node [shape=box]` sets a default; it is not a node. The node parser used to claim these
+    // statements first and add stray boxes labelled graph/node/edge to the drawing.
+    let layout = layout_diagram(
+        &parse("digraph G {\n  graph [bgcolor=white];\n  node [shape=box];\n  edge [color=red];\n  a -> b;\n}")
+            .ir,
+    );
+    let ids: Vec<&str> = layout
+        .nodes
+        .iter()
+        .map(|node| node.node_id.as_str())
+        .collect();
+    assert_eq!(
+        ids.len(),
+        2,
+        "only a and b may be drawn, got {ids:?} — a phantom box is a visible defect"
+    );
+    assert!(!ids.contains(&"graph") && !ids.contains(&"node") && !ids.contains(&"edge"));
+}
+
+#[test]
 fn a_rank_group_inside_a_cluster_keeps_every_node_in_the_cluster() {
     // The brace-scope regression this shipped with: an anonymous `{ … }` group's closing brace used
     // to pop the enclosing cluster, so `d` fell outside it. Checked here at the IR level because a
