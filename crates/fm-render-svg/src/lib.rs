@@ -694,11 +694,12 @@ fn strip_unused_state_css(svg: &mut String) {
     // emits only one of the two opacity rules still bounds correctly.
     let start = memchr::memmem::find(svg.as_bytes(), b".fm-node-inactive { opacity:")
         .or_else(|| memchr::memmem::find(svg.as_bytes(), b".fm-node-block-beta rect,"));
-    let after = memchr::memmem::find(svg.as_bytes(), b".fm-cluster { fill-opacity:").or_else(|| {
-        // End of the last semantic rule: its closing brace plus the newline after it.
-        let at = memchr::memmem::find(svg.as_bytes(), b".fm-node-border-double rect,")?;
-        memchr::memmem::find(&svg.as_bytes()[at..], b"}\n").map(|end| at + end + 2)
-    });
+    let after =
+        memchr::memmem::find(svg.as_bytes(), b".fm-cluster { fill-opacity:").or_else(|| {
+            // End of the last semantic rule: its closing brace plus the newline after it.
+            let at = memchr::memmem::find(svg.as_bytes(), b".fm-node-border-double rect,")?;
+            memchr::memmem::find(&svg.as_bytes()[at..], b"}\n").map(|end| at + end + 2)
+        });
     if let (Some(start), Some(after)) = (start, after)
         && after > start
         && after - start < 1500
@@ -8950,15 +8951,27 @@ fn render_node(
         }
     }
 
-    // Add accessibility attributes
-    if config.a11y.aria_labels {
-        group = group
-            .attr("role", "graphics-symbol")
-            .attr("aria-label", raw_label_text);
-    }
+    // Add accessibility attributes.
+    //
+    // A block-beta `space` is a grid spacer with no content: `raw_label_text` is forced to "" above,
+    // so the old unconditional emission produced `aria-label=""` — an empty accessible name on an
+    // element announced as a `graphics-symbol` — and `tabindex="0"` put an invisible empty cell into
+    // the keyboard tab order (bd-ukj2). The correct markup for a decorative element is to hide it
+    // from the accessibility tree entirely.
+    if placeholder_space_node {
+        if config.a11y.aria_labels {
+            group = group.attr("aria-hidden", "true");
+        }
+    } else {
+        if config.a11y.aria_labels {
+            group = group
+                .attr("role", "graphics-symbol")
+                .attr("aria-label", raw_label_text);
+        }
 
-    if config.a11y.keyboard_nav {
-        group = group.attr("tabindex", "0");
+        if config.a11y.keyboard_nav {
+            group = group.attr("tabindex", "0");
+        }
     }
 
     // Create shape element based on node type
@@ -9483,7 +9496,12 @@ fn render_node(
     }
 
     // Add label text — with three-compartment rendering for class diagrams.
-    if detail.show_node_labels {
+    //
+    // A block-beta `space` has no label: `raw_label_text` is forced to "" above, so this emitted
+    // `<text …></text>` — an empty text element on an invisible spacer. Dead output in the same
+    // family as an unreferenced `<defs>` entry, and it made the golden reader report the node as
+    // unreadable rather than as having no text, which is what blocked bd-7ute's gate (bd-ukj2).
+    if detail.show_node_labels && !placeholder_space_node {
         if let Some(node) = ir_node
             && let Some(ref meta) = node.class_meta
             && (!meta.attributes.is_empty() || !meta.methods.is_empty())
@@ -9818,8 +9836,14 @@ fn render_node(
         }
     }
 
-    // Add title element for text alternatives
+    // Add title element for text alternatives.
+    //
+    // Skipped for a `space`, whose description would be `Node: __space_4, rectangle` — a generated
+    // internal id, announced for an element that has no content and is drawn at opacity 0. It is
+    // also inside an `aria-hidden` group by then, so the title could never be reached anyway
+    // (bd-ukj2).
     if config.a11y.text_alternatives
+        && !placeholder_space_node
         && let Some(node) = ir_node
     {
         let node_desc = describe_node(node, ir);
@@ -9883,7 +9907,7 @@ fn render_node(
     group
 }
 
-fn is_block_beta_space_node(node: &fm_core::IrNode) -> bool {
+pub(crate) fn is_block_beta_space_node(node: &fm_core::IrNode) -> bool {
     node.id.starts_with("__space_")
         || node
             .classes

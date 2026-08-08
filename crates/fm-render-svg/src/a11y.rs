@@ -142,6 +142,11 @@ fn plural_suffix(count: usize) -> &'static str {
 fn summarize_key_nodes(ir: &MermaidDiagramIr) -> Vec<Cow<'_, str>> {
     ir.nodes
         .iter()
+        // A block-beta `space` is a grid spacer with no label, so `node_label` falls back to its
+        // GENERATED id and the description read "Key nodes: a, __space_4, c" — an internal name
+        // announced to a screen reader for a cell drawn at opacity 0 (bd-ukj2). Uses the renderer's
+        // own predicate rather than a private copy, for the same reason the node path does.
+        .filter(|node| !crate::is_block_beta_space_node(node))
         .filter_map(|node| node_label(node, ir))
         .filter(|label| !label.is_empty())
         .take(3)

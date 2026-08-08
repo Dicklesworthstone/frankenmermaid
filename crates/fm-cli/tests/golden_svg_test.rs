@@ -1123,6 +1123,73 @@ fn mindmap_depth_maps_to_radial_distance_from_root() {
     }
 }
 
+/// An invisible `space` cell must carry no accessible content (bd-ukj2).
+///
+/// A block-beta `space` is a grid spacer drawn at `opacity: 0`. It used to emit
+/// `<text …></text>` with nothing in it, `aria-label=""` on an element announced as a
+/// `graphics-symbol`, `tabindex="0"` (an invisible empty cell in the keyboard tab order), and a
+/// `<title>` reading `Node: __space_4, rectangle` — a generated internal id read out to a screen
+/// reader. Dead output in the same family as an unreferenced `<defs>` entry.
+///
+/// It also blocked `block_beta_span_width_is_proportional_to_declared_columns`: `node_centres`
+/// hard-errors on a node whose `<text>` it cannot read, deliberately, so that an absence it reports
+/// can never be an unreadability in disguise. That guard runs directly above.
+///
+/// Both halves are asserted. The NEGATIVE half — that ordinary cells in the same document keep
+/// their text and their accessible names — is what stops this from being satisfied by suppressing
+/// labels generally.
+#[test]
+fn block_beta_space_carries_no_accessible_content() {
+    let src = "block-beta\n  columns 3\n  A[\"a\"]\n  space\n  C[\"c\"]";
+    let svg = render_svg_with_config(&parse(src).ir, &SvgRenderConfig::default());
+
+    let space_group = svg
+        .split("<g id=\"fm-node-")
+        .skip(1)
+        .find(|chunk| chunk.contains("fm-node-block-beta-space"))
+        .map(|chunk| chunk.split("</g>").next().unwrap_or(chunk).to_string());
+    assert!(
+        space_group.is_some(),
+        "the fixture must render a `space` node, or this guard is vacuous"
+    );
+    let space_group = space_group.unwrap_or_default();
+
+    assert!(
+        !space_group.contains("<text"),
+        "the `space` cell emits a text element with nothing in it: {space_group}"
+    );
+    assert!(
+        !space_group.contains("aria-label"),
+        "the `space` cell carries an accessible name it has no content for: {space_group}"
+    );
+    assert!(
+        !space_group.contains("tabindex"),
+        "the `space` cell is in the keyboard tab order: {space_group}"
+    );
+    assert!(
+        !space_group.contains("<title"),
+        "the `space` cell announces its generated internal id: {space_group}"
+    );
+    assert!(
+        space_group.contains("aria-hidden=\"true\""),
+        "a decorative spacer must be hidden from the accessibility tree, not merely silent: \
+         {space_group}"
+    );
+
+    // NEGATIVE HALF: real cells in the SAME document keep their text and their accessible names.
+    for label in ["a", "c"] {
+        let group = svg
+            .split("<g id=\"fm-node-")
+            .skip(1)
+            .find(|chunk| chunk.contains(&format!(">{label}</text>")))
+            .unwrap_or("");
+        assert!(
+            !group.is_empty() && group.contains("aria-label") && group.contains("tabindex"),
+            "ordinary cell {label:?} lost its text or its accessible name"
+        );
+    }
+}
+
 /// block-beta must honour a CONTAINER's column span, and must place `space` where it was declared
 /// (bd-iicc).
 ///
@@ -1148,7 +1215,6 @@ fn mindmap_depth_maps_to_radial_distance_from_root() {
 /// the premise bd-ukj2 violates. Un-ignoring this is bd-ukj2's acceptance gate now; do not relax
 /// either assertion to whatever a fix happens to produce.
 #[test]
-#[ignore = "blocked on bd-ukj2: a `space` node emits an empty <text>, which node_centres rejects"]
 fn block_beta_span_width_is_proportional_to_declared_columns() {
     let src = "block-beta\n  columns 3\n  block:wide:3\n    W[\"x\"]\n  end\n  \
                N[\"a single column with a very long label indeed\"]\n  space\n  M[\"y\"]";
