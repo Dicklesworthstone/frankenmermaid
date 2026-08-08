@@ -9694,6 +9694,21 @@ fn requirement_row_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> 
         rows += 1;
     }
 
+    // `ID: …` and `Text: …` rows (bd-f3tc). Widened for, not wrapped: the incumbent's requirement
+    // renderer draws each as one unwrapped label and grows the box to its bbox, so wrapping here
+    // would diverge from it. A long `text:` therefore makes a wide box, exactly as it does there.
+    for (prefix, value) in [
+        ("ID: ", meta.req_id.as_deref()),
+        ("Text: ", meta.text.as_deref()),
+    ] {
+        let Some(value) = value else { continue };
+        let mut row = String::with_capacity(prefix.len() + value.len());
+        row.push_str(prefix);
+        row.push_str(value);
+        widest = widest.max(metrics.estimate_width(&row) * subtitle_scale);
+        rows += 1;
+    }
+
     let metadata_row = match (meta.risk.as_deref(), meta.verify_method.as_deref()) {
         (Some(risk), Some(verify)) => Some(format!("Risk: {risk} | Verify: {verify}")),
         (Some(risk), None) => Some(format!("Risk: {risk}")),
@@ -10044,6 +10059,9 @@ fn node_size_cache_key(
         );
         hash_str(&mut hash, meta.risk.as_deref().unwrap_or_default());
         hash_str(&mut hash, meta.verify_method.as_deref().unwrap_or_default());
+        // `id:` and `text:` became drawn rows in bd-f3tc, so they size the box too.
+        hash_str(&mut hash, meta.req_id.as_deref().unwrap_or_default());
+        hash_str(&mut hash, meta.text.as_deref().unwrap_or_default());
     }
     hash
 }
@@ -24679,6 +24697,16 @@ mod tests {
         risk: Option<&str>,
         verify: Option<&str>,
     ) -> MermaidDiagramIr {
+        requirement_ir_full(requirement_type, risk, verify, None, None)
+    }
+
+    fn requirement_ir_full(
+        requirement_type: Option<&str>,
+        risk: Option<&str>,
+        verify: Option<&str>,
+        req_id: Option<&str>,
+        text: Option<&str>,
+    ) -> MermaidDiagramIr {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Requirement);
         ir.nodes.push(IrNode {
             id: "LoginReq".to_string(),
@@ -24687,11 +24715,56 @@ mod tests {
                 requirement_type: requirement_type.map(str::to_string),
                 risk: risk.map(str::to_string),
                 verify_method: verify.map(str::to_string),
-                ..fm_core::IrRequirementNodeMeta::default()
+                req_id: req_id.map(str::to_string),
+                text: text.map(str::to_string),
             })),
             ..IrNode::default()
         });
         ir
+    }
+
+    /// The `ID:` and `Text:` rows added by bd-f3tc must be sized for, like the two rows bd-jnc1
+    /// added — they go in the same box, and `text:` is free-form prose that can be arbitrarily long.
+    #[test]
+    fn requirement_box_holds_its_id_and_text_rows() {
+        let metrics = fm_core::FontMetrics::default_metrics();
+        let subtitle_scale = 0.75_f32;
+
+        let mut previous_width = 0.0_f32;
+        for extra in 0_usize..=20 {
+            let text = format!("Users must authenticate{}", " thoroughly".repeat(extra));
+            let ir = requirement_ir_full(None, None, None, Some("REQ-001"), Some(&text));
+            let (width, _) = compute_node_size(&ir, &ir.nodes[0], &metrics);
+
+            for row in [format!("Text: {text}"), "ID: REQ-001".to_string()] {
+                let row_width = metrics.estimate_width(&row) * subtitle_scale;
+                assert!(
+                    width >= row_width,
+                    "box width {width} is narrower than its own row {row:?} ({row_width})"
+                );
+            }
+            assert!(
+                width >= previous_width,
+                "box width must not shrink as the text row grows ({text:?})"
+            );
+            previous_width = width;
+        }
+
+        // Editing either field must invalidate the cached size, for the same reason the other three
+        // strings do.
+        let base = requirement_ir_full(None, None, None, Some("REQ-001"), Some("a"));
+        let base_key = node_size_cache_key(&base, &base.nodes[0], &metrics);
+        for changed in [
+            requirement_ir_full(None, None, None, Some("REQ-002"), Some("a")),
+            requirement_ir_full(None, None, None, Some("REQ-001"), Some("b")),
+        ] {
+            assert_ne!(
+                base_key,
+                node_size_cache_key(&changed, &changed.nodes[0], &metrics),
+                "editing id:/text: left the size cache key unchanged: {:?}",
+                changed.nodes[0].requirement_meta
+            );
+        }
     }
 
     /// A requirement box must hold the two rows drawn BESIDE its name — the `«type»` header and the

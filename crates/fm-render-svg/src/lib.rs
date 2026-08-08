@@ -7906,6 +7906,34 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
     out.push_str("</text>");
     text_y += font_size * 0.85;
 
+    // `id:` and `text:` are the requirement's traceability key and the requirement itself — the
+    // sentence the diagram exists to record. Both were parsed into the IR, held there, and read by
+    // nothing (bd-f3tc). The incumbent draws them as their own rows between the name and the risk
+    // row (`ID: …` then `Text: …` in mermaid 11.15.0's requirement renderer), which is what these
+    // reproduce. The fixed prefixes hold no XML specials, so streaming the parts is byte-identical
+    // to escaping a joined `format!` without the per-node String.
+    for (prefix, value, class) in [
+        ("ID: ", meta.req_id.as_deref(), "fm-req-id"),
+        ("Text: ", meta.text.as_deref(), "fm-req-text"),
+    ] {
+        let Some(value) = value else { continue };
+        write_req_subtitle_body_into(
+            out,
+            cx,
+            text_y,
+            subtitle_font_size,
+            "",
+            " opacity=\"0.7\"",
+            &colors.text,
+            class,
+            |f| {
+                f.push_str(prefix);
+                let _ = write_escaped_text(f, value);
+            },
+        );
+        text_y += font_size * 0.85;
+    }
+
     // Stream `Risk: …[ | Verify: …]` — the fixed labels hold no XML specials, so streaming the parts is
     // byte-identical to escaping the old joined `format!` whole, without the per-node String alloc.
     match (meta.risk.as_deref(), meta.verify_method.as_deref()) {
@@ -9462,6 +9490,52 @@ fn render_node(
             );
             group = group.child(text_elem);
             text_y += node_font_size * 0.85;
+
+            // `ID:` / `Text:` rows — see the fast writer's comment (bd-f3tc). Kept in lockstep with
+            // it: same order, same classes, same `opacity 0.7`, same cursor advance.
+            for (prefix, value, class) in [
+                ("ID: ", req_meta.req_id.as_deref(), "fm-req-id"),
+                ("Text: ", req_meta.text.as_deref(), "fm-req-text"),
+            ] {
+                let Some(value) = value else { continue };
+                let row = format!("{prefix}{value}");
+                if stream_req_subtitles {
+                    let mut f = String::new();
+                    write_req_subtitle_into(
+                        &mut f,
+                        cx,
+                        text_y,
+                        subtitle_font_size,
+                        "",
+                        " opacity=\"0.7\"",
+                        &colors.text,
+                        class,
+                        &row,
+                    );
+                    group = group.child(Element::raw_svg(f));
+                } else {
+                    let mut row_elem = Element::text()
+                        .x(cx)
+                        .y(text_y)
+                        .content(&row)
+                        .attr("text-anchor", "middle")
+                        .attr("dominant-baseline", "central")
+                        .attr_num("font-size", subtitle_font_size)
+                        .font_family_unless_embedded_css(
+                            &config.font_family,
+                            config.embed_theme_css,
+                        )
+                        .fill(&colors.text)
+                        .attr("opacity", "0.7")
+                        .class(class);
+                    row_elem = apply_label_class(row_elem);
+                    if let Some(style) = text_style.as_deref() {
+                        row_elem = row_elem.attr("style", style);
+                    }
+                    group = group.child(row_elem);
+                }
+                text_y += node_font_size * 0.85;
+            }
 
             // Risk + verify method subtitle
             let mut info_parts = Vec::new();

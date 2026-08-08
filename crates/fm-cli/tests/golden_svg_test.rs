@@ -2448,7 +2448,6 @@ fn requirement_rows_stay_inside_their_node_box() {
 /// from what the diagram declares and cannot drift from it. A fixture declaring no `id:`/`text:` at
 /// all is a hard error rather than a quiet pass. Un-ignoring this is bd-f3tc's acceptance gate.
 #[test]
-#[ignore = "specifies bd-f3tc: requirement id: and text: are parsed into the IR and never rendered"]
 fn requirement_id_and_text_reach_the_output() {
     let read = fs::read_to_string(golden_dir().join("requirement_basic.mmd"));
     assert!(
