@@ -219,24 +219,17 @@ fn bnd_1_layout_coordinates_are_always_finite() {
     for input in &inputs {
         let parsed = parse(input);
         let layout = layout_diagram(&parsed.ir);
-        for node in &layout.nodes {
-            assert!(
-                node.bounds.x.is_finite() && node.bounds.y.is_finite(),
-                "BND-1 violation: non-finite node coordinates for input: {input}"
-            );
-            assert!(
-                node.bounds.width.is_finite() && node.bounds.height.is_finite(),
-                "BND-1 violation: non-finite node dimensions for input: {input}"
-            );
-        }
-        for edge in &layout.edges {
-            for pt in &edge.points {
-                assert!(
-                    pt.x.is_finite() && pt.y.is_finite(),
-                    "BND-1 violation: non-finite edge point for input: {input}"
-                );
-            }
-        }
+        // Delegates to `fm_layout::invariants` rather than re-checking coordinates here, so this
+        // adversarial harness, `fuzz_pipeline`, and `frankenmermaid minimize --signature
+        // invariant-violation` all enforce ONE definition of valid geometry (bd-2xl.14). The
+        // hand-rolled version this replaced covered node boxes and edge points only; the shared
+        // checker also covers cluster boxes, cycle-cluster boxes, the diagram bounds, and
+        // negative extents, and it names the exact offending field.
+        let violations = fm_layout::invariants::layout_geometry_violations(&layout);
+        assert!(
+            violations.is_empty(),
+            "BND-1 violation for input {input:?}: {violations:?}"
+        );
     }
 }
 
