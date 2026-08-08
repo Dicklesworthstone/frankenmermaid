@@ -123,6 +123,50 @@ fn a_source_can_now_select_curved_routing_from_both_dialects() {
 }
 
 #[test]
+fn a_routing_request_survives_a_different_dispatch_shape() {
+    // Coverage for bd-hfaw's last open item, which turned out NOT to be a defect. fm-layout has
+    // several `build_edge_paths(… EdgeRouting::default())` call sites, so the worry was that which
+    // routing you get depends on which algorithm the dispatcher picks. It does not, for any flowchart
+    // shape I could construct: a WIDE flowchart (one root, many children) dispatches away from
+    // Sugiyama — the other tests here use diamonds, whose join node gives it two parents — and it
+    // honors the request just the same. The remaining hardcoded sites serve diagram types whose edges
+    // are not orthogonally routed at all (gitGraph lanes, and the specialized-layout finalizer).
+    //
+    // Kept as a regression guard: this is the assertion that would fail if someone re-hardcoded
+    // routing on the dispatch path a wide diagram takes.
+    let tree =
+        "flowchart TB\n  a-->b\n  a-->c\n  a-->d\n  a-->e\n  a-->f\n  a-->g\n  a-->h\n  a-->i";
+    let routed = |source: &str| {
+        layout_diagram(&parse(source).ir)
+            .edges
+            .iter()
+            .flat_map(|edge| {
+                edge.points
+                    .iter()
+                    .map(|point| (point.x, point.y))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let plain = routed(tree);
+    let curved = routed(&format!(
+        "%%{{init: {{\"flowchart\":{{\"curve\":\"basis\"}}}}}}%%\n{tree}"
+    ));
+    assert_ne!(
+        plain, curved,
+        "a wide diagram must honor curve=basis, not just the shapes that take the general path"
+    );
+    assert_eq!(
+        routed(&format!(
+            "%%{{init: {{\"flowchart\":{{\"curve\":\"linear\"}}}}}}%%\n{tree}"
+        )),
+        plain,
+        "an orthogonal request must still reproduce the default"
+    );
+}
+
+#[test]
 fn the_default_routing_is_unchanged_by_the_spline_fix() {
     // The control that matters for goldens: Orthogonal is the default and every fixture uses it, so
     // it must be byte-identical to what the explicit request produces.
