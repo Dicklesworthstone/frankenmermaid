@@ -300,6 +300,34 @@ pub fn parse_dot(input: &str) -> ParseResult {
                 continue;
             }
 
+            // `nodesep` / `ranksep` are spacing requests. graphviz measures them in INCHES, so they
+            // are converted to layout units at 72 per inch — the same points-per-inch convention the
+            // font-size mapping uses, chosen for consistency rather than because either is exact.
+            if let Some(inches) = parse_dot_named_attribute(statement, "nodesep") {
+                apply_dot_spacing(
+                    &inches,
+                    "nodesep",
+                    line_number,
+                    &mut builder,
+                    |builder, units| {
+                        builder.set_node_spacing(units);
+                    },
+                );
+                continue;
+            }
+            if let Some(inches) = parse_dot_named_attribute(statement, "ranksep") {
+                apply_dot_spacing(
+                    &inches,
+                    "ranksep",
+                    line_number,
+                    &mut builder,
+                    |builder, units| {
+                        builder.set_rank_spacing(units);
+                    },
+                );
+                continue;
+            }
+
             // Every remaining bare `key=value` is a graph attribute this engine does not implement.
             // Consumed here — AHEAD of the node parser — so it cannot become a phantom node, and
             // named in a warning so an ignored attribute does not read as a supported one. The keys
@@ -634,6 +662,37 @@ fn apply_dot_label_statement(
         }
         // At top level `label=` is the GRAPH's label, which is the diagram title.
         None => builder.set_title(text.to_string()),
+    }
+}
+
+/// DOT measures spacing in inches; the layout works in units. 72 per inch matches the
+/// points-per-inch convention used for `fontsize`.
+const DOT_UNITS_PER_INCH: f64 = 72.0;
+
+/// Convert a DOT inch measurement to whole layout units and hand it to `apply`, or warn.
+///
+/// `ranksep` also accepts `equally` and a list form (`"0.5 equally"`); only the leading number is
+/// used, and a value with no leading number is reported rather than silently ignored.
+fn apply_dot_spacing(
+    value: &str,
+    key: &str,
+    line_number: usize,
+    builder: &mut IrBuilder,
+    apply: impl FnOnce(&mut IrBuilder, u32),
+) {
+    let leading = value.split_whitespace().next().unwrap_or_default();
+    match leading.parse::<f64>() {
+        Ok(inches) if inches.is_finite() && inches >= 0.0 => {
+            // `round` not `as`: a truncating cast would turn nodesep=0.49 into 35 units rather than
+            // the nearer 35.28 -> 35, and would silently floor every fractional request.
+            let units = (inches * DOT_UNITS_PER_INCH).round();
+            let units = units.clamp(0.0, f64::from(u32::MAX)) as u32;
+            apply(builder, units);
+        }
+        _ => builder.add_warning(format!(
+            "Line {line_number}: DOT {key}={value} is not a non-negative number of inches and was \
+             ignored"
+        )),
     }
 }
 
@@ -2257,6 +2316,61 @@ mod tests {
     }
 
     #[test]
+    fn nodesep_and_ranksep_convert_inches_to_layout_units() {
+        // graphviz measures both in inches; 72 units per inch is the documented conversion.
+        let parsed = parse_dot("digraph G { nodesep=0.5; ranksep=1.0; a -> b; }");
+        assert_eq!(parsed.ir.meta.node_spacing, Some(36));
+        assert_eq!(parsed.ir.meta.rank_spacing, Some(72));
+
+        // Rounding, not truncation: 0.49in is 35.28 units, which must land on 35 rather than being
+        // floored by a cast.
+        let parsed = parse_dot("digraph G { nodesep=0.49; a -> b; }");
+        assert_eq!(parsed.ir.meta.node_spacing, Some(35));
+    }
+
+    #[test]
+    fn absent_spacing_leaves_the_hints_unset() {
+        // The control: `None` is what tells the layout to keep its own default, so an unconditional
+        // Some(0) would silently collapse every diagram's spacing.
+        let parsed = parse_dot("digraph G { a -> b; }");
+        assert_eq!(parsed.ir.meta.node_spacing, None);
+        assert_eq!(parsed.ir.meta.rank_spacing, None);
+    }
+
+    #[test]
+    fn ranksep_takes_the_leading_number_of_a_list_form() {
+        // DOT allows `ranksep="0.75 equally"`; only the number is usable here.
+        let parsed = parse_dot("digraph G { ranksep=\"0.75 equally\"; a -> b; }");
+        assert_eq!(parsed.ir.meta.rank_spacing, Some(54));
+    }
+
+    #[test]
+    fn non_numeric_spacing_warns_and_leaves_the_default() {
+        let parsed = parse_dot("digraph G { nodesep=equally; ranksep=wide; a -> b; }");
+        assert_eq!(parsed.ir.meta.node_spacing, None);
+        assert_eq!(parsed.ir.meta.rank_spacing, None);
+        for key in ["nodesep", "ranksep"] {
+            assert!(
+                parsed.warnings.iter().any(|w| w.contains(key)),
+                "{key} must be reported: {:?}",
+                parsed.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn spacing_statements_do_not_become_nodes() {
+        let parsed = parse_dot("digraph G { nodesep=0.5; ranksep=1.0; a -> b; }");
+        let ids: Vec<&str> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(ids, ["a", "b"], "{ids:?}");
+    }
+
+    #[test]
     fn bgcolor_sets_the_theme_background() {
         for source in [
             "digraph G { bgcolor=lightyellow; a -> b; }",
@@ -2343,10 +2457,10 @@ mod tests {
         );
 
         // Degrading silently would be worse than a stray box: it would look like support. Each
-        // unimplemented attribute is named in a warning. `bgcolor` is deliberately absent from this
-        // list — it IS implemented (see `bgcolor_sets_the_theme_background`), so warning about it
-        // would be the false report.
-        for key in ["ratio", "size", "splines", "nodesep", "ranksep"] {
+        // unimplemented attribute is named in a warning. `bgcolor`, `nodesep` and `ranksep` are
+        // deliberately absent from this list — they ARE implemented now, so warning about them would
+        // be the false report. This list shrinking over time is the intended direction.
+        for key in ["ratio", "size", "splines"] {
             assert!(
                 parsed
                     .ir

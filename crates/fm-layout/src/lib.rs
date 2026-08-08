@@ -3560,7 +3560,9 @@ impl IncrementalLayoutEngine {
         }
 
         let node_sizes = compute_node_sizes(ir, &metrics);
-        let spacing = config.spacing;
+        // The incremental path must resolve spacing the same way the full path does, or an edit would
+        // silently re-lay part of the diagram at the default gaps.
+        let spacing = spacing_with_source_hints(config.spacing, ir);
         let mut nodes = cached_layout.traced.layout.nodes.clone();
         let highlighted_edge_indexes: BTreeSet<_> = cached_layout
             .traced
@@ -4561,7 +4563,7 @@ fn layout_diagram_sugiyama_traced_with_config(
     config: LayoutConfig,
 ) -> TracedLayout {
     let mut trace = LayoutTrace::default();
-    let spacing = config.spacing;
+    let spacing = spacing_with_source_hints(config.spacing, ir);
     let metrics = config
         .font_metrics
         .clone()
@@ -12118,6 +12120,21 @@ fn brandes_kopf_secondary_coords(
     }
 
     result
+}
+
+/// Overlay the source's spacing hints (`ir.meta.node_spacing` / `rank_spacing`) on `spacing`.
+///
+/// A caller's `LayoutConfig` still wins where the source says nothing, so this only fills in what the
+/// diagram itself asked for. Hints are whole layout units; DOT's inch measurements are converted in
+/// the parser, which is the only place that knows the source dialect's units.
+fn spacing_with_source_hints(mut spacing: LayoutSpacing, ir: &MermaidDiagramIr) -> LayoutSpacing {
+    if let Some(units) = ir.meta.node_spacing {
+        spacing.node_spacing = units as f32;
+    }
+    if let Some(units) = ir.meta.rank_spacing {
+        spacing.rank_spacing = units as f32;
+    }
+    spacing
 }
 
 fn coordinate_assignment(

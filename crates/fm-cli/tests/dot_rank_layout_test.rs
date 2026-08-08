@@ -302,6 +302,38 @@ fn dot_cluster_label_is_drawn_and_adds_no_phantom_box() {
 }
 
 #[test]
+fn dot_ranksep_and_nodesep_change_the_drawn_gaps() {
+    // The hints are only worth carrying if the layout honors them, so this asserts on geometry.
+    let plain = layout_diagram(&parse("digraph G {\n  a -> b;\n}").ir);
+    let wide = layout_diagram(&parse("digraph G {\n  ranksep=2.0;\n  a -> b;\n}").ir);
+
+    let gap = |layout: &fm_layout::DiagramLayout| {
+        node_position(layout, "b").1 - node_position(layout, "a").1
+    };
+    assert!(
+        gap(&wide) > gap(&plain) + 1.0,
+        "ranksep must widen the rank gap: plain={} wide={}",
+        gap(&plain),
+        gap(&wide)
+    );
+
+    // nodesep separates nodes WITHIN a rank, so it needs two siblings to be observable.
+    let siblings = "digraph G {\n  a -> b;\n  a -> c;\n}";
+    let plain = layout_diagram(&parse(siblings).ir);
+    let wide =
+        layout_diagram(&parse(&siblings.replace("digraph G {", "digraph G {\n  nodesep=2.0;")).ir);
+    let sibling_gap = |layout: &fm_layout::DiagramLayout| {
+        (node_position(layout, "c").0 - node_position(layout, "b").0).abs()
+    };
+    assert!(
+        sibling_gap(&wide) > sibling_gap(&plain) + 1.0,
+        "nodesep must widen the in-rank gap: plain={} wide={}",
+        sibling_gap(&plain),
+        sibling_gap(&wide)
+    );
+}
+
+#[test]
 fn dot_bgcolor_reaches_the_rendered_background() {
     // bgcolor was one of the attributes bd-mf4d consumed-and-ignored. It maps onto the Mermaid theme
     // variable the SVG renderer already honors, so this asserts on the drawing rather than the IR.

@@ -673,6 +673,16 @@ impl IrBuilder {
         self.ir.meta.title = Some(title);
     }
 
+    /// Record a source-level minimum in-rank node gap, in layout units.
+    pub(crate) const fn set_node_spacing(&mut self, units: u32) {
+        self.ir.meta.node_spacing = Some(units);
+    }
+
+    /// Record a source-level minimum rank gap, in layout units.
+    pub(crate) const fn set_rank_spacing(&mut self, units: u32) {
+        self.ir.meta.rank_spacing = Some(units);
+    }
+
     /// Set an already-created cluster's title, for syntaxes that name a group from INSIDE its body.
     ///
     /// DOT does exactly that (`subgraph cluster_0 { label="Backend"; … }`), so the cluster exists

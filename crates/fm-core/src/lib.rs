@@ -3888,6 +3888,17 @@ pub struct MermaidDiagramMeta {
     pub support_level: MermaidSupportLevel,
     pub parse_mode: MermaidParseMode,
     pub block_beta_columns: Option<usize>,
+    /// Requested minimum gap between nodes within a rank, in layout units.
+    ///
+    /// A source-level HINT that overrides the engine default when present; `None` means "use the
+    /// default". Whole units on purpose: this struct is `Eq` so the incremental layout memo can
+    /// compare it by value, and sub-unit spacing has no observable effect on a layout whose
+    /// coordinates are measured in whole units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_spacing: Option<u32>,
+    /// Requested minimum gap between ranks, in layout units. See [`Self::node_spacing`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank_spacing: Option<u32>,
     pub init: MermaidInitParse,
     pub theme_overrides: MermaidThemeOverrides,
     pub c4_show_legend: bool,
@@ -4708,6 +4719,8 @@ impl MermaidDiagramIr {
                 support_level: diagram_type.support_level(),
                 parse_mode: MermaidParseMode::Compat,
                 block_beta_columns: None,
+                node_spacing: None,
+                rank_spacing: None,
                 init: MermaidInitParse::default(),
                 theme_overrides: MermaidThemeOverrides::default(),
                 c4_show_legend: false,
