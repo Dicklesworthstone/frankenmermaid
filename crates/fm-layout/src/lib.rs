@@ -3642,8 +3642,15 @@ impl IncrementalLayoutEngine {
                 .map_or(Span::default(), |node| node.span_primary);
         }
 
-        let mut edges =
-            build_edge_paths(ir, &nodes, &highlighted_edge_indexes, config.edge_routing);
+        let mut edges = build_edge_paths(
+            ir,
+            &nodes,
+            &highlighted_edge_indexes,
+            // Resolved the same way as the full path; wiring only one would make an edited
+            // diagram re-route part of itself with the caller's default instead of the source's
+            // request.
+            edge_routing_with_source_hints(config.edge_routing, ir),
+        );
         smooth_boundary_edges(ir, &mut edges, &dirty_node_indexes);
         bundle_parallel_edges(ir, &mut edges);
         let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
@@ -4638,7 +4645,7 @@ fn layout_diagram_sugiyama_traced_with_config(
         ir,
         &nodes,
         &cycle_result.highlighted_edge_indexes,
-        config.edge_routing,
+        edge_routing_with_source_hints(config.edge_routing, ir),
     );
     bundle_parallel_edges(ir, &mut edges);
     let cluster_dividers = build_state_cluster_dividers(ir, &nodes, &clusters);
@@ -12125,6 +12132,18 @@ fn brandes_kopf_secondary_coords(
 /// A caller's `LayoutConfig` still wins where the source says nothing, so this only fills in what the
 /// diagram itself asked for. Hints are whole layout units; DOT's inch measurements are converted in
 /// the parser, which is the only place that knows the source dialect's units.
+/// Overlay the source's edge-routing request (`ir.meta.edge_routing`) on `routing`.
+///
+/// Same contract as [`spacing_with_source_hints`]: the caller's `LayoutConfig` stands where the
+/// source says nothing.
+fn edge_routing_with_source_hints(routing: EdgeRouting, ir: &MermaidDiagramIr) -> EdgeRouting {
+    match ir.meta.edge_routing {
+        Some(fm_core::MermaidEdgeRoutingHint::Orthogonal) => EdgeRouting::Orthogonal,
+        Some(fm_core::MermaidEdgeRoutingHint::Curved) => EdgeRouting::Spline,
+        None => routing,
+    }
+}
+
 fn spacing_with_source_hints(mut spacing: LayoutSpacing, ir: &MermaidDiagramIr) -> LayoutSpacing {
     if let Some(units) = ir.meta.node_spacing {
         spacing.node_spacing = units as f32;

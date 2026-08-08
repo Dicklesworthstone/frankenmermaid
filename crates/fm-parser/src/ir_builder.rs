@@ -673,6 +673,11 @@ impl IrBuilder {
         self.ir.meta.title = Some(title);
     }
 
+    /// Record how the source asked for edges to be routed.
+    pub(crate) const fn set_edge_routing_hint(&mut self, hint: fm_core::MermaidEdgeRoutingHint) {
+        self.ir.meta.edge_routing = Some(hint);
+    }
+
     /// Record a source-level minimum in-rank node gap, in layout units.
     pub(crate) const fn set_node_spacing(&mut self, units: u32) {
         self.ir.meta.node_spacing = Some(units);

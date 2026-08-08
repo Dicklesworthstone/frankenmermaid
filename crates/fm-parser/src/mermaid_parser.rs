@@ -9482,6 +9482,12 @@ fn apply_mermaid_config_value(value: Value, context: &str, span: Span, builder: 
         builder.set_init_flowchart_direction(direction);
     }
     if let Some(curve) = parsed.config.flowchart_curve {
+        // `flowchart_curve` was recorded and read by nobody. Recognized names now also become a
+        // routing hint the layout honors; the string is still recorded, and an unrecognized name
+        // still parses exactly as before rather than becoming an error.
+        if let Some(hint) = fm_core::MermaidEdgeRoutingHint::from_mermaid_curve(&curve) {
+            builder.set_edge_routing_hint(hint);
+        }
         builder.set_init_flowchart_curve(curve);
     }
     // Spacing goes to the meta hints fm-layout reads, not just into the init record, so an init
@@ -12487,6 +12493,48 @@ mod tests {
             Some(GraphDirection::RL)
         );
         assert!(parsed.ir.meta.init.errors.is_empty());
+    }
+
+    #[test]
+    fn init_curve_becomes_an_edge_routing_hint() {
+        use fm_core::MermaidEdgeRoutingHint;
+        for (curve, expected) in [
+            ("basis", MermaidEdgeRoutingHint::Curved),
+            ("cardinal", MermaidEdgeRoutingHint::Curved),
+            ("natural", MermaidEdgeRoutingHint::Curved),
+            ("linear", MermaidEdgeRoutingHint::Orthogonal),
+            ("step", MermaidEdgeRoutingHint::Orthogonal),
+        ] {
+            let parsed = parse_mermaid(&format!(
+                "%%{{init: {{\"flowchart\":{{\"curve\":\"{curve}\"}}}}}}%%\nflowchart TB\nA-->B"
+            ));
+            assert_eq!(parsed.ir.meta.edge_routing, Some(expected), "curve={curve}");
+            // The string is still recorded, so nothing that read it before loses information.
+            assert_eq!(
+                parsed.ir.meta.init.config.flowchart_curve.as_deref(),
+                Some(curve)
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_curve_name_still_parses_and_sets_no_hint() {
+        // `curve` has always accepted any string. Rejecting unknown names would turn a tolerated
+        // input into a changed layout, so an unknown name records the string and no hint.
+        let parsed = parse_mermaid(
+            "%%{init: {\"flowchart\":{\"curve\":\"wobbly\"}}}%%\nflowchart TB\nA-->B",
+        );
+        assert_eq!(parsed.ir.meta.edge_routing, None);
+        assert_eq!(
+            parsed.ir.meta.init.config.flowchart_curve.as_deref(),
+            Some("wobbly")
+        );
+    }
+
+    #[test]
+    fn no_curve_directive_leaves_the_routing_hint_unset() {
+        let parsed = parse_mermaid("flowchart TB\nA-->B");
+        assert_eq!(parsed.ir.meta.edge_routing, None);
     }
 
     #[test]

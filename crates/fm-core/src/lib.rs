@@ -1105,10 +1105,9 @@ impl NodeShape {
             Self::Triangle => 0.25,
             // One horizontal edge is inset by `SLANTED_SHAPE_INSET_RATIO` and the other is not,
             // so the slanted side has travelled half that distance by mid-height.
-            Self::Trapezoid
-            | Self::InvTrapezoid
-            | Self::Parallelogram
-            | Self::InvParallelogram => SLANTED_SHAPE_INSET_RATIO / 2.0,
+            Self::Trapezoid | Self::InvTrapezoid | Self::Parallelogram | Self::InvParallelogram => {
+                SLANTED_SHAPE_INSET_RATIO / 2.0
+            }
             _ => 0.0,
         }
     }
@@ -3919,6 +3918,49 @@ pub struct MermaidCompatibilityReport {
     pub fatal: bool,
 }
 
+/// A source-level request for edge routing, expressed so both dialects can reach it.
+///
+/// Only the two shapes the layout engine implements (`EdgeRouting::Orthogonal` and
+/// `EdgeRouting::Spline`). Mermaid names many curve families and DOT several spline modes; both
+/// collapse onto these two rather than promising distinctions the renderer cannot draw.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum MermaidEdgeRoutingHint {
+    /// Manhattan segments: Mermaid `linear`/`step*`, DOT `ortho`/`polyline`/`line`.
+    Orthogonal,
+    /// Smoothed corners: Mermaid `basis`/`cardinal`/`natural`/`monotone*`, DOT `curved`/`spline`.
+    Curved,
+}
+
+impl MermaidEdgeRoutingHint {
+    /// Map Mermaid's `flowchart.curve` name onto a routing shape.
+    ///
+    /// `None` for an unrecognized name, deliberately: `curve` has always accepted any string, and
+    /// rejecting unknown names here would turn a tolerated input into a changed layout.
+    #[must_use]
+    pub fn from_mermaid_curve(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "linear" | "step" | "stepbefore" | "stepafter" => Some(Self::Orthogonal),
+            "basis" | "cardinal" | "catmullrom" | "natural" | "monotonex" | "monotoney"
+            | "bumpx" | "bumpy" => Some(Self::Curved),
+            _ => None,
+        }
+    }
+
+    /// Map DOT's `splines` value onto a routing shape.
+    ///
+    /// `polyline` and `line` mean straight segments, which this engine has no separate mode for, so
+    /// they take the orthogonal path — the nearer of the two — rather than being silently curved.
+    #[must_use]
+    pub fn from_dot_splines(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "ortho" | "polyline" | "line" | "false" | "none" => Some(Self::Orthogonal),
+            "curved" | "spline" | "true" | "compound" => Some(Self::Curved),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct MermaidDiagramMeta {
     pub diagram_type: DiagramType,
@@ -3937,6 +3979,10 @@ pub struct MermaidDiagramMeta {
     /// Requested minimum gap between ranks, in layout units. See [`Self::node_spacing`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rank_spacing: Option<u32>,
+    /// How the source asked for edges to be routed — Mermaid `flowchart.curve` or DOT `splines`.
+    /// `None` means "use the engine default".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_routing: Option<MermaidEdgeRoutingHint>,
     pub init: MermaidInitParse,
     pub theme_overrides: MermaidThemeOverrides,
     pub c4_show_legend: bool,
@@ -4759,6 +4805,7 @@ impl MermaidDiagramIr {
                 block_beta_columns: None,
                 node_spacing: None,
                 rank_spacing: None,
+                edge_routing: None,
                 init: MermaidInitParse::default(),
                 theme_overrides: MermaidThemeOverrides::default(),
                 c4_show_legend: false,
@@ -5706,7 +5753,10 @@ mod tests {
             super::NodeShape::Trapezoid.horizontal_outline_inset_ratio(),
             0.075_f32
         );
-        assert_eq!(super::NodeShape::Triangle.horizontal_outline_inset_ratio(), 0.25_f32);
+        assert_eq!(
+            super::NodeShape::Triangle.horizontal_outline_inset_ratio(),
+            0.25_f32
+        );
         // Shapes that touch their box at the side midpoints must report no inset.
         for shape in [
             super::NodeShape::Rect,

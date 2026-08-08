@@ -70,6 +70,59 @@ fn spline_routing_actually_differs_from_orthogonal() {
 }
 
 #[test]
+fn a_source_can_now_select_curved_routing_from_both_dialects() {
+    // The pair bd-hfaw left open: `flowchart.curve` was parsed and read by nobody, DOT `splines` was
+    // consumed and ignored, and the target they should feed did nothing. With the target fixed, both
+    // now change the drawn route. The fixture bends — a straight two-point hop has nothing to curve.
+    let bending_mermaid = "flowchart TB\n  a-->b\n  a-->c\n  b-->d\n  c-->d";
+    let bending_dot = "digraph G {\n  a -> b;\n  a -> c;\n  b -> d;\n  c -> d;\n}";
+
+    let routed = |source: &str| {
+        layout_diagram(&parse(source).ir)
+            .edges
+            .iter()
+            .flat_map(|edge| {
+                edge.points
+                    .iter()
+                    .map(|point| (point.x, point.y))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let mermaid_plain = routed(bending_mermaid);
+    let mermaid_curved = routed(&format!(
+        "%%{{init: {{\"flowchart\":{{\"curve\":\"basis\"}}}}}}%%\n{bending_mermaid}"
+    ));
+    assert_ne!(
+        mermaid_plain, mermaid_curved,
+        "curve=basis must change the routed geometry"
+    );
+
+    let dot_plain = routed(bending_dot);
+    let dot_curved = routed(&bending_dot.replace("digraph G {", "digraph G {\n  splines=curved;"));
+    assert_ne!(
+        dot_plain, dot_curved,
+        "splines=curved must change the routed geometry"
+    );
+
+    // An explicitly ORTHOGONAL request must reproduce the default exactly, or these assertions would
+    // pass for any hint rather than for the curved ones specifically.
+    assert_eq!(
+        routed(&format!(
+            "%%{{init: {{\"flowchart\":{{\"curve\":\"linear\"}}}}}}%%\n{bending_mermaid}"
+        )),
+        mermaid_plain,
+        "curve=linear is the default routing"
+    );
+    assert_eq!(
+        routed(&bending_dot.replace("digraph G {", "digraph G {\n  splines=ortho;")),
+        dot_plain,
+        "splines=ortho is the default routing"
+    );
+}
+
+#[test]
 fn the_default_routing_is_unchanged_by_the_spline_fix() {
     // The control that matters for goldens: Orthogonal is the default and every fixture uses it, so
     // it must be byte-identical to what the explicit request produces.

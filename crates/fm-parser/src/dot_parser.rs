@@ -328,6 +328,19 @@ pub fn parse_dot(input: &str) -> ParseResult {
                 continue;
             }
 
+            // `splines` chooses how edges are drawn, which the layout implements as
+            // EdgeRouting::Orthogonal or ::Spline.
+            if let Some(value) = parse_dot_named_attribute(statement, "splines") {
+                match fm_core::MermaidEdgeRoutingHint::from_dot_splines(&value) {
+                    Some(hint) => builder.set_edge_routing_hint(hint),
+                    None => builder.add_warning(format!(
+                        "Line {line_number}: DOT splines={value} is not recognized and was ignored; \
+                         expected ortho, polyline, line, curved, spline, true, or false"
+                    )),
+                }
+                continue;
+            }
+
             // Every remaining bare `key=value` is a graph attribute this engine does not implement.
             // Consumed here — AHEAD of the node parser — so it cannot become a phantom node, and
             // named in a warning so an ignored attribute does not read as a supported one. The keys
@@ -2316,6 +2329,48 @@ mod tests {
     }
 
     #[test]
+    fn splines_maps_to_an_edge_routing_hint() {
+        use fm_core::MermaidEdgeRoutingHint;
+        for (value, expected) in [
+            ("ortho", MermaidEdgeRoutingHint::Orthogonal),
+            ("polyline", MermaidEdgeRoutingHint::Orthogonal),
+            ("line", MermaidEdgeRoutingHint::Orthogonal),
+            ("false", MermaidEdgeRoutingHint::Orthogonal),
+            ("curved", MermaidEdgeRoutingHint::Curved),
+            ("spline", MermaidEdgeRoutingHint::Curved),
+            ("true", MermaidEdgeRoutingHint::Curved),
+        ] {
+            let parsed = parse_dot(&format!("digraph G {{ splines={value}; a -> b; }}"));
+            assert_eq!(
+                parsed.ir.meta.edge_routing,
+                Some(expected),
+                "splines={value}"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_splines_leaves_the_routing_hint_unset() {
+        // The control: `None` is what lets the caller's LayoutConfig stand.
+        let parsed = parse_dot("digraph G { a -> b; }");
+        assert_eq!(parsed.ir.meta.edge_routing, None);
+    }
+
+    #[test]
+    fn unrecognized_splines_warns_and_sets_no_hint() {
+        let parsed = parse_dot("digraph G { splines=zigzag; a -> b; }");
+        assert_eq!(parsed.ir.meta.edge_routing, None);
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("splines=zigzag")),
+            "{:?}",
+            parsed.warnings
+        );
+    }
+
+    #[test]
     fn nodesep_and_ranksep_convert_inches_to_layout_units() {
         // graphviz measures both in inches; 72 units per inch is the documented conversion.
         let parsed = parse_dot("digraph G { nodesep=0.5; ranksep=1.0; a -> b; }");
@@ -2459,8 +2514,10 @@ mod tests {
         // Degrading silently would be worse than a stray box: it would look like support. Each
         // unimplemented attribute is named in a warning. `bgcolor`, `nodesep` and `ranksep` are
         // deliberately absent from this list — they ARE implemented now, so warning about them would
-        // be the false report. This list shrinking over time is the intended direction.
-        for key in ["ratio", "size", "splines"] {
+        // be the false report. `splines` joined them once EdgeRouting::Spline was made to do
+        // something (bd-hfaw). `ratio` and `size` are canvas-fitting semantics with no equivalent
+        // here, so they may stay on this list.
+        for key in ["ratio", "size"] {
             assert!(
                 parsed
                     .ir
