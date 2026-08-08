@@ -18814,9 +18814,9 @@ mod tests {
                 ..IrNode::default()
             });
         }
-        for (name, members) in [("Todo", [0_usize, 1]), ("Doing", [2, 3])] {
+        for (lane, members) in [[0_usize, 1], [2, 3]].into_iter().enumerate() {
             ir.clusters.push(IrCluster {
-                id: name.to_string(),
+                id: IrClusterId(lane),
                 members: members.map(IrNodeId).to_vec(),
                 ..IrCluster::default()
             });
@@ -18861,7 +18861,7 @@ mod tests {
             });
         }
         ir.clusters.push(IrCluster {
-            id: "Todo".to_string(),
+            id: IrClusterId(0),
             members: vec![IrNodeId(0)],
             ..IrCluster::default()
         });

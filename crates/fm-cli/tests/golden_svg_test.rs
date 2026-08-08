@@ -1273,7 +1273,11 @@ fn kanban_lane_boxes_are_disjoint_and_cards_stack_in_declaration_order() {
             lane.1.push(text.to_string());
         }
     }
-    assert_eq!(lanes.len(), 3, "fixture declares three lanes, read {lanes:?}");
+    assert_eq!(
+        lanes.len(),
+        3,
+        "fixture declares three lanes, read {lanes:?}"
+    );
 
     // Swimlane rectangles, keyed by the title text the renderer draws next to each one.
     let mut boxes: Vec<(String, f32, f32, f32, f32)> = Vec::new();
