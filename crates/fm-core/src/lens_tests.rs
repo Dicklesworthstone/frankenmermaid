@@ -296,4 +296,135 @@ mod tests {
         let range = result.replaced_range;
         assert_eq!(&source[range.start_byte..range.end_byte], "A");
     }
+
+    // ── Delete and insert (bd-1t7l.1 item 6) ────────────────────────────────
+
+    /// A source map with one element covering an entire indented line, which is the shape a node
+    /// delete has to handle: removing it empties the line.
+    fn whole_line_source_map(line: u32, start_col: u32, end_col: u32) -> MermaidSourceMap {
+        MermaidSourceMap {
+            diagram_type: DiagramType::Flowchart,
+            entries: vec![MermaidSourceMapEntry {
+                kind: MermaidSourceMapKind::Node,
+                index: 0,
+                element_id: "fm-node-mid-0".into(),
+                source_id: Some("MID".into()),
+                span: span(line, start_col, end_col),
+            }],
+        }
+    }
+
+    #[test]
+    fn delete_takes_the_whole_line_when_nothing_but_whitespace_remains() {
+        // "  MID-->X" on line 2; deleting it must not leave "  " and a blank line behind.
+        let source = "flowchart LR\n  MID-->X\n  Y-->Z\n";
+        let source_map = whole_line_source_map(2, 3, 9);
+        let range = crate::resolve_span_text_range(source, source_map.entries[0].span).unwrap();
+        assert_eq!(&source[range.start_byte..range.end_byte], "MID-->X");
+
+        let result = crate::apply_lens_delete(source, &source_map, "fm-node-mid-0").unwrap();
+
+        assert_eq!(result.updated_source, "flowchart LR\n  Y-->Z\n");
+        // The reported range is what was actually removed, including the indentation and the
+        // newline, so restoring `previous_snippet` at that offset rebuilds the original exactly.
+        assert_eq!(result.previous_snippet, "  MID-->X\n");
+        let mut restored = result.updated_source.clone();
+        restored.insert_str(result.replaced_range.start_byte, &result.previous_snippet);
+        assert_eq!(restored, source, "the delete must be exactly undoable");
+    }
+
+    #[test]
+    fn delete_keeps_the_line_when_other_content_remains_on_it() {
+        // Deleting "MID" from "  MID-->X" leaves "  -->X": the line still has content, so its
+        // terminator must stay or this line would be joined to the next.
+        let source = "flowchart LR\n  MID-->X\n  Y-->Z\n";
+        let source_map = whole_line_source_map(2, 3, 5);
+        let range = crate::resolve_span_text_range(source, source_map.entries[0].span).unwrap();
+        assert_eq!(&source[range.start_byte..range.end_byte], "MID");
+
+        let result = crate::apply_lens_delete(source, &source_map, "fm-node-mid-0").unwrap();
+
+        assert_eq!(result.updated_source, "flowchart LR\n  -->X\n  Y-->Z\n");
+        assert_eq!(result.previous_snippet, "MID");
+    }
+
+    #[test]
+    fn delete_of_the_final_line_without_a_trailing_newline_does_not_underflow() {
+        let source = "flowchart LR\n  MID-->X";
+        let source_map = whole_line_source_map(2, 3, 9);
+
+        let result = crate::apply_lens_delete(source, &source_map, "fm-node-mid-0").unwrap();
+
+        assert_eq!(result.updated_source, "flowchart LR\n");
+        assert_eq!(result.previous_snippet, "  MID-->X");
+    }
+
+    #[test]
+    fn delete_reports_an_unknown_element_rather_than_removing_a_guess() {
+        let source = "flowchart LR\nA-->B\n";
+        let source_map = simple_source_map(source);
+        let error = crate::apply_lens_delete(source, &source_map, "fm-node-nope-9").unwrap_err();
+        assert!(error.to_string().contains("fm-node-nope-9"));
+    }
+
+    #[test]
+    fn insert_matches_the_indentation_of_the_line_it_follows() {
+        let source = "flowchart LR\n    MID-->X\n    Y-->Z\n";
+        let source_map = whole_line_source_map(2, 5, 11);
+
+        let result =
+            crate::apply_lens_insert_line_after(source, &source_map, "fm-node-mid-0", "NEW-->Q")
+                .unwrap();
+
+        assert_eq!(
+            result.updated_source,
+            "flowchart LR\n    MID-->X\n    NEW-->Q\n    Y-->Z\n"
+        );
+        assert!(result.previous_snippet.is_empty());
+        // The reported range is the empty insertion point, so a client can undo by deleting
+        // `replacement.len()` bytes there.
+        assert_eq!(
+            result.replaced_range.start_byte,
+            result.replaced_range.end_byte
+        );
+        let mut undone = result.updated_source.clone();
+        undone.replace_range(
+            result.replaced_range.start_byte
+                ..result.replaced_range.start_byte + result.replacement.len(),
+            "",
+        );
+        assert_eq!(undone, source, "the insert must be exactly undoable");
+    }
+
+    #[test]
+    fn insert_uses_crlf_in_a_crlf_document() {
+        // A bare \n inserted into a CRLF file shows up as a mixed-ending diff the user must clean
+        // up by hand, so the dominant ending is matched.
+        let source = "flowchart LR\r\n  MID-->X\r\n";
+        let source_map = whole_line_source_map(2, 3, 9);
+
+        let result =
+            crate::apply_lens_insert_line_after(source, &source_map, "fm-node-mid-0", "NEW-->Q")
+                .unwrap();
+
+        assert_eq!(
+            result.updated_source,
+            "flowchart LR\r\n  MID-->X\r\n  NEW-->Q\r\n"
+        );
+    }
+
+    #[test]
+    fn insert_after_a_final_line_with_no_trailing_newline_adds_the_separator() {
+        let source = "flowchart LR\n  MID-->X";
+        let source_map = whole_line_source_map(2, 3, 9);
+
+        let result =
+            crate::apply_lens_insert_line_after(source, &source_map, "fm-node-mid-0", "NEW-->Q")
+                .unwrap();
+
+        assert_eq!(
+            result.updated_source,
+            "flowchart LR\n  MID-->X\n  NEW-->Q\n"
+        );
+    }
 }

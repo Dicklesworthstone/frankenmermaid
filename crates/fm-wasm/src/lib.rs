@@ -1893,10 +1893,11 @@ mod tests {
         RuntimeInitConfig, SvgConfigOverrides, ThemePreset, WebRendererKind, WorkerRenderAction,
         WorkerRenderCoordinator, WorkerRenderMessage, WorkerRenderRequest, WorkerRenderResponse,
         align_canvas_typography_with_svg, apply_budget_svg_simplifications,
-        apply_canvas_theme_preset, canvas_font_size_px, collect_source_spans, handle_worker_message,
-        hit_test_layout_edge, hit_test_layout_node, merge_canvas_config, merge_pressure_config,
-        merge_renderer_kind, merge_svg_config, read_runtime_config, render, render_svg_js,
-        render_worker_request, requested_theme_preset, resolve_renderer, write_runtime_config,
+        apply_canvas_theme_preset, canvas_font_size_px, collect_source_spans,
+        handle_worker_message, hit_test_layout_edge, hit_test_layout_node, merge_canvas_config,
+        merge_pressure_config, merge_renderer_kind, merge_svg_config, read_runtime_config, render,
+        render_svg_js, render_worker_request, requested_theme_preset, resolve_renderer,
+        write_runtime_config,
     };
     use fm_core::{
         MermaidBudgetLedger, MermaidGuardReport, MermaidLensBinding, MermaidLensEdit,

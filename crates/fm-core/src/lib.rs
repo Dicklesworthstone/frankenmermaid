@@ -5152,6 +5152,156 @@ pub fn apply_lens_edit(
     })
 }
 
+/// Delete the element `element_id` addresses, leaving no blank line behind.
+///
+/// A caller can already delete by editing with an empty replacement, but that leaves the element's
+/// indentation and line terminator in place — a stranded blank line for every removed node, which
+/// accumulates over an editing session. This removes the element's own bytes and, when nothing but
+/// whitespace remains on that line, the whole line including its terminator. A line that still has
+/// other content keeps its terminator, so deleting one node from a shared line does not join it to
+/// the next.
+///
+/// The returned `replaced_range` is the range ACTUALLY removed, not the element's span, so an undo
+/// built from `previous_snippet` restores the source exactly.
+pub fn apply_lens_delete(
+    source: &str,
+    source_map: &MermaidSourceMap,
+    element_id: &str,
+) -> Result<MermaidLensEditResult, MermaidLensError> {
+    let entry = source_map
+        .entries
+        .iter()
+        .find(|entry| entry.element_id == element_id)
+        .ok_or_else(|| MermaidLensError::ElementNotFound(element_id.to_string()))?;
+    let span_range = resolve_span_text_range(source, entry.span)
+        .ok_or_else(|| MermaidLensError::UnresolvedSpan(element_id.to_string()))?;
+    if source
+        .get(span_range.start_byte..span_range.end_byte)
+        .is_none()
+    {
+        return Err(MermaidLensError::UnresolvedSpan(element_id.to_string()));
+    }
+
+    let line_start = source[..span_range.start_byte]
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
+    let line_end = source[span_range.end_byte..]
+        .find('\n')
+        .map_or(source.len(), |index| span_range.end_byte + index);
+
+    // Whatever the deletion leaves on this line, ignoring the element itself.
+    let before = &source[line_start..span_range.start_byte];
+    let after = &source[span_range.end_byte..line_end];
+    let removed_range = if before.trim().is_empty() && after.trim().is_empty() {
+        // Take the terminator too, so no blank line is stranded. `line_end` sits on the '\n' (or at
+        // EOF), and a preceding '\r' belongs to the same terminator.
+        let terminator_end = if line_end < source.len() {
+            line_end + 1
+        } else {
+            line_end
+        };
+        MermaidTextRange {
+            start_byte: line_start,
+            end_byte: terminator_end,
+        }
+    } else {
+        span_range
+    };
+
+    let previous_snippet = source
+        .get(removed_range.start_byte..removed_range.end_byte)
+        .map(str::to_string)
+        .ok_or_else(|| MermaidLensError::UnresolvedSpan(element_id.to_string()))?;
+    let mut updated_source =
+        String::with_capacity(source.len() - (removed_range.end_byte - removed_range.start_byte));
+    updated_source.push_str(&source[..removed_range.start_byte]);
+    updated_source.push_str(&source[removed_range.end_byte..]);
+
+    Ok(MermaidLensEditResult {
+        element_id: entry.element_id.clone(),
+        replaced_range: removed_range,
+        previous_snippet,
+        replacement: String::new(),
+        updated_source,
+    })
+}
+
+/// Insert `text` as a new line after the line holding `element_id`.
+///
+/// Matches that line's leading whitespace and the source's dominant line ending, because a node
+/// added with the wrong indentation or a bare `\n` in a CRLF document is a diff the user has to
+/// clean up by hand. `text` is inserted verbatim after the copied indentation, so a caller that
+/// wants no indentation can pass a line that already starts at column zero only by choosing an
+/// element on an unindented line.
+///
+/// The returned `replaced_range` is the empty range at the insertion point, and `previous_snippet`
+/// is empty: nothing was removed.
+pub fn apply_lens_insert_line_after(
+    source: &str,
+    source_map: &MermaidSourceMap,
+    element_id: &str,
+    text: &str,
+) -> Result<MermaidLensEditResult, MermaidLensError> {
+    let entry = source_map
+        .entries
+        .iter()
+        .find(|entry| entry.element_id == element_id)
+        .ok_or_else(|| MermaidLensError::ElementNotFound(element_id.to_string()))?;
+    let span_range = resolve_span_text_range(source, entry.span)
+        .ok_or_else(|| MermaidLensError::UnresolvedSpan(element_id.to_string()))?;
+    if source
+        .get(span_range.start_byte..span_range.end_byte)
+        .is_none()
+    {
+        return Err(MermaidLensError::UnresolvedSpan(element_id.to_string()));
+    }
+
+    let line_start = source[..span_range.start_byte]
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
+    let line_end = source[span_range.end_byte..]
+        .find('\n')
+        .map_or(source.len(), |index| span_range.end_byte + index);
+    let indent: String = source[line_start..line_end]
+        .chars()
+        .take_while(|ch| *ch == ' ' || *ch == '\t')
+        .collect();
+    let newline = if source.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+
+    // Insert after this line's terminator when it has one; at EOF, add one first so the existing
+    // last line is not joined to the new one.
+    let (insert_at, prefix) = if line_end < source.len() {
+        (line_end + 1, String::new())
+    } else {
+        (source.len(), newline.to_string())
+    };
+
+    let mut updated_source = String::with_capacity(
+        source.len() + prefix.len() + indent.len() + text.len() + newline.len(),
+    );
+    updated_source.push_str(&source[..insert_at]);
+    updated_source.push_str(&prefix);
+    updated_source.push_str(&indent);
+    updated_source.push_str(text);
+    updated_source.push_str(newline);
+    updated_source.push_str(&source[insert_at..]);
+
+    Ok(MermaidLensEditResult {
+        element_id: entry.element_id.clone(),
+        replaced_range: MermaidTextRange {
+            start_byte: insert_at,
+            end_byte: insert_at,
+        },
+        previous_snippet: String::new(),
+        replacement: format!("{prefix}{indent}{text}{newline}"),
+        updated_source,
+    })
+}
+
 #[must_use]
 pub fn resolve_span_text_range(source: &str, span: Span) -> Option<MermaidTextRange> {
     resolve_span_text_range_with_line_starts(source, span, None)
