@@ -23,7 +23,7 @@ use fm_core::cga::{CgaLineSegment, CgaPoint, CgaRect};
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use fm_core::mermaid_layout_guard_observability;
 use fm_core::{
-    MermaidBudgetLedger, MermaidLayoutDecisionExplanation, MermaidLinkMode,
+    Diagnostic, MermaidBudgetLedger, MermaidLayoutDecisionExplanation, MermaidLinkMode,
     MermaidWasmPressureSignals,
 };
 #[cfg(any(not(target_arch = "wasm32"), test))]
@@ -259,6 +259,158 @@ pub enum WorkerRenderAction {
     },
 }
 
+/// Per-stage wall time for one worker render, in milliseconds.
+///
+/// Reported so a UI can attribute a slow keystroke to parse, layout, or render instead of guessing
+/// from one total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerRenderTimings {
+    pub parse_ms: u64,
+    pub layout_ms: u64,
+    pub render_ms: u64,
+    pub total_ms: u64,
+}
+
+/// What a worker sends back to the UI thread.
+///
+/// Structured-clone-safe and `serde`-round-trippable, like [`WorkerRenderMessage`], so the host can
+/// forward it across `postMessage` without a browser-only representation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum WorkerRenderResponse {
+    /// The render finished and its output is safe to publish.
+    Completed {
+        request_id: u64,
+        svg: String,
+        detected_type: String,
+        accessibility_summary: String,
+        node_count: usize,
+        edge_count: usize,
+        svg_bytes: usize,
+        timings: WorkerRenderTimings,
+        /// Parse diagnostics verbatim, so the UI can surface the same severities, messages, spans
+        /// and remediation the CLI shows rather than a lossy summary.
+        diagnostics: Vec<Diagnostic>,
+    },
+    /// The request could not be rendered. Carries an actionable reason, and any diagnostics that
+    /// were produced before the failure.
+    Failed {
+        request_id: u64,
+        error: String,
+        diagnostics: Vec<Diagnostic>,
+    },
+    /// A newer request replaced this one, so its output must be discarded rather than published.
+    Superseded { request_id: u64 },
+}
+
+impl WorkerRenderResponse {
+    /// The request this response belongs to.
+    #[must_use]
+    pub const fn request_id(&self) -> u64 {
+        match self {
+            Self::Completed { request_id, .. }
+            | Self::Failed { request_id, .. }
+            | Self::Superseded { request_id } => *request_id,
+        }
+    }
+}
+
+/// Run one worker render request, honoring its per-request configuration.
+///
+/// `config_json` is applied here through the same `merge_svg_config` / `merge_pressure_config` path
+/// the `renderSvg` entry point uses, so a worker and a main-thread render with the same config
+/// produce the same bytes. Before this existed the field was carried across the protocol and
+/// silently dropped, which meant a themed worker render came back with default styling.
+#[must_use]
+pub fn render_worker_request(request: &WorkerRenderRequest) -> WorkerRenderResponse {
+    let overrides: RuntimeInitConfig = match request.config_json.as_deref() {
+        None => RuntimeInitConfig::default(),
+        Some(json) => match serde_json::from_str(json) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                return WorkerRenderResponse::Failed {
+                    request_id: request.request_id,
+                    error: format!(
+                        "invalid configJson: {error}; expected a JSON object of render overrides"
+                    ),
+                    diagnostics: Vec::new(),
+                };
+            }
+        },
+    };
+
+    let runtime = read_runtime_config();
+    let svg_config =
+        match merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref()) {
+            Ok(config) => config,
+            Err(error) => {
+                return WorkerRenderResponse::Failed {
+                    request_id: request.request_id,
+                    error,
+                    diagnostics: Vec::new(),
+                };
+            }
+        };
+    let pressure = merge_pressure_config(&runtime.pressure, &overrides.pressure).into_report();
+    let mut budget_broker = MermaidBudgetLedger::new(&pressure);
+
+    let parse_start = Instant::now();
+    let parsed = parse(&request.input);
+    let parse_ms = elapsed_ms(parse_start);
+    budget_broker.record_parse(parse_ms);
+
+    let layout_guardrails = LayoutGuardrails {
+        max_layout_time_ms: budget_broker.layout_time_budget_ms(),
+        max_layout_iterations: budget_broker
+            .layout_iteration_budget(LayoutGuardrails::default().max_layout_iterations),
+        max_route_ops: budget_broker.route_budget(LayoutGuardrails::default().max_route_ops),
+    };
+    let layout_config = LayoutConfig {
+        font_metrics: Some(svg_config.font_metrics()),
+        ..Default::default()
+    };
+    let layout_start = Instant::now();
+    let traced_layout = layout_diagram_traced_with_config_and_guardrails(
+        &parsed.ir,
+        fm_layout::LayoutAlgorithm::Auto,
+        layout_config,
+        layout_guardrails,
+    );
+    let layout_ms = elapsed_ms(layout_start);
+    budget_broker.record_layout(layout_ms);
+
+    let mut svg_config = svg_config;
+    apply_budget_svg_simplifications(&mut svg_config, &budget_broker);
+    let render_start = Instant::now();
+    let svg = render_svg_with_layout(&parsed.ir, &traced_layout.layout, &svg_config);
+    let render_ms = elapsed_ms(render_start);
+
+    WorkerRenderResponse::Completed {
+        request_id: request.request_id,
+        detected_type: parsed.ir.diagram_type.as_str().to_string(),
+        accessibility_summary: describe_diagram_with_layout(
+            &parsed.ir,
+            Some(&traced_layout.layout),
+        ),
+        node_count: traced_layout.layout.nodes.len(),
+        edge_count: traced_layout.layout.edges.len(),
+        svg_bytes: svg.len(),
+        timings: WorkerRenderTimings {
+            parse_ms,
+            layout_ms,
+            render_ms,
+            total_ms: parse_ms.saturating_add(layout_ms).saturating_add(render_ms),
+        },
+        diagnostics: parsed.ir.diagnostics.clone(),
+        svg,
+    }
+}
+
+fn elapsed_ms(start: Instant) -> u64 {
+    start.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
 /// Tracks the one live worker render so typing updates never publish stale output.
 #[derive(Debug, Default)]
 pub struct WorkerRenderCoordinator {
@@ -304,6 +456,43 @@ impl WorkerRenderCoordinator {
         } else {
             false
         }
+    }
+
+    /// Gate a finished render before it reaches the UI.
+    ///
+    /// Returns the response when it belongs to the live request, and
+    /// [`WorkerRenderResponse::Superseded`] when a newer typing update already replaced it. Hosts
+    /// should publish whatever comes back: the substitution is what stops stale output from
+    /// overwriting a newer diagram, and it stays observable instead of vanishing silently.
+    #[must_use]
+    pub fn publish(&mut self, response: WorkerRenderResponse) -> WorkerRenderResponse {
+        let request_id = response.request_id();
+        if self.complete(request_id) {
+            response
+        } else {
+            WorkerRenderResponse::Superseded { request_id }
+        }
+    }
+}
+
+/// Handle one protocol message end to end: decide the action, render when the action says to, and
+/// gate the result against a newer request.
+///
+/// This is the whole worker loop minus the `postMessage` plumbing, which keeps the decision logic
+/// testable without a browser.
+#[must_use]
+pub fn handle_worker_message(
+    coordinator: &mut WorkerRenderCoordinator,
+    message: WorkerRenderMessage,
+) -> Option<WorkerRenderResponse> {
+    match coordinator.handle(message) {
+        WorkerRenderAction::Start(request)
+        | WorkerRenderAction::Supersede { next: request, .. } => {
+            let response = render_worker_request(&request);
+            Some(coordinator.publish(response))
+        }
+        // A cancel produces no render, and an unknown request id is not ours to answer.
+        WorkerRenderAction::Cancelled { .. } | WorkerRenderAction::Ignored { .. } => None,
     }
 }
 
@@ -563,20 +752,25 @@ where
     }
 }
 
+/// Merge SVG overrides onto `base`.
+///
+/// Errors are `String`, not `JsValue`, so the merge is callable from contexts with no JS at all —
+/// the worker render path builds its config from JSON text, and a `JsValue` error there could not
+/// be read back into a structured response. Callers at the JS boundary map with [`js_error`].
 fn merge_svg_config(
     base: &SvgRenderConfig,
     overrides: &SvgConfigOverrides,
     theme_override: Option<&str>,
-) -> Result<SvgRenderConfig, JsValue> {
+) -> Result<SvgRenderConfig, String> {
     let mut merged = base.clone();
-    let parse_link_mode = |value: &str| -> Result<MermaidLinkMode, JsValue> {
+    let parse_link_mode = |value: &str| -> Result<MermaidLinkMode, String> {
         match value.trim().to_ascii_lowercase().as_str() {
             "off" | "disabled" => Ok(MermaidLinkMode::Off),
             "inline" | "on" | "enabled" => Ok(MermaidLinkMode::Inline),
             "footnote" | "notes" => Ok(MermaidLinkMode::Footnote),
-            other => Err(js_error(format!(
+            other => Err(format!(
                 "invalid link mode '{other}': expected off, inline, or footnote"
-            ))),
+            )),
         }
     };
 
@@ -624,9 +818,9 @@ fn merge_svg_config(
     let theme_name = overrides.theme.as_deref().or(theme_override);
     if let Some(name) = theme_name {
         merged.theme = name.parse::<ThemePreset>().map_err(|err| {
-            js_error(format!(
+            format!(
                 "invalid theme '{name}': {err}; expected one of default,dark,forest,neutral,corporate,neon,pastel,high-contrast,monochrome,blueprint"
-            ))
+            )
         })?;
     }
 
@@ -701,7 +895,8 @@ fn merge_pressure_config(
     merged
 }
 
-fn requested_theme_preset(overrides: &RuntimeInitConfig) -> Result<Option<ThemePreset>, JsValue> {
+/// Resolve the requested theme preset. `String` error for the same reason as [`merge_svg_config`].
+fn requested_theme_preset(overrides: &RuntimeInitConfig) -> Result<Option<ThemePreset>, String> {
     let theme_name = overrides
         .svg
         .theme
@@ -710,9 +905,9 @@ fn requested_theme_preset(overrides: &RuntimeInitConfig) -> Result<Option<ThemeP
     theme_name
         .map(|name| {
             name.parse::<ThemePreset>().map_err(|err| {
-                js_error(format!(
+                format!(
                     "invalid theme '{name}': {err}; expected one of default,dark,forest,neutral,corporate,neon,pastel,high-contrast,monochrome,blueprint"
-                ))
+                )
             })
         })
         .transpose()
@@ -962,8 +1157,9 @@ fn build_wasm_fnx_witness() -> Option<WasmFnxWitness> {
 pub fn init(config: Option<JsValue>) -> Result<(), JsValue> {
     let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
     let current = read_runtime_config();
-    let requested_theme = requested_theme_preset(&overrides)?;
-    let svg = merge_svg_config(&current.svg, &overrides.svg, overrides.theme.as_deref())?;
+    let requested_theme = requested_theme_preset(&overrides).map_err(js_error)?;
+    let svg = merge_svg_config(&current.svg, &overrides.svg, overrides.theme.as_deref())
+        .map_err(js_error)?;
     let canvas_base = requested_theme.map_or_else(
         || current.canvas.clone(),
         |preset| apply_canvas_theme_preset(current.canvas.clone(), preset),
@@ -987,8 +1183,8 @@ pub fn init(config: Option<JsValue>) -> Result<(), JsValue> {
 pub fn render_svg_js(input: &str, config: Option<JsValue>) -> Result<String, JsValue> {
     let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
     let runtime = read_runtime_config();
-    let mut svg_config =
-        merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref())?;
+    let mut svg_config = merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref())
+        .map_err(js_error)?;
     let pressure = merge_pressure_config(&runtime.pressure, &overrides.pressure).into_report();
     let mut budget_broker = MermaidBudgetLedger::new(&pressure);
     let parse_start = Instant::now();
@@ -1073,6 +1269,41 @@ pub fn apply_lens_edit_js(
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = parseLens))]
 pub fn parse_lens_js(input: &str) -> Result<JsValue, JsValue> {
     to_js_value(&build_parse_lens(input))
+}
+
+/// One live render per worker, so a superseded typing update cannot publish over a newer one.
+static WORKER_COORDINATOR: LazyLock<RwLock<WorkerRenderCoordinator>> =
+    LazyLock::new(|| RwLock::new(WorkerRenderCoordinator::default()));
+
+/// The worker entry point: hand it a [`WorkerRenderMessage`] as JSON, get a
+/// [`WorkerRenderResponse`] as JSON, or `null` when the message needs no reply (a cancel, or an id
+/// that is not the live request).
+///
+/// JSON text on both sides on purpose — a worker script can forward these straight through
+/// `postMessage` with no `JsValue` dependency, which is what makes the same payload usable from the
+/// main thread, a dedicated worker, and a native test.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = workerHandleMessage))]
+pub fn worker_handle_message_js(message_json: &str) -> Result<Option<String>, JsValue> {
+    let message: WorkerRenderMessage = serde_json::from_str(message_json).map_err(|error| {
+        js_error(format!(
+            "invalid worker message: {error}; expected {{\"kind\":\"render\",\"requestId\":N,\"input\":\"…\"}} or {{\"kind\":\"cancel\",\"requestId\":N}}"
+        ))
+    })?;
+
+    // A poisoned lock must not wedge the worker for the rest of the session: the coordinator holds
+    // only the live request id, so recovering the inner value keeps rendering possible.
+    let mut coordinator = match WORKER_COORDINATOR.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let Some(response) = handle_worker_message(&mut coordinator, message) else {
+        return Ok(None);
+    };
+    drop(coordinator);
+
+    serde_json::to_string(&response)
+        .map(Some)
+        .map_err(|error| js_error(format!("failed to encode worker response: {error}")))
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = applyParseLensEdit))]
@@ -1357,9 +1588,9 @@ impl Diagram {
     ) -> Result<Self, JsValue> {
         let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
         let runtime = read_runtime_config();
-        let requested_theme = requested_theme_preset(&overrides)?;
-        let svg_config =
-            merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref())?;
+        let requested_theme = requested_theme_preset(&overrides).map_err(js_error)?;
+        let svg_config = merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref())
+            .map_err(js_error)?;
         let canvas_base = requested_theme
             .map(|preset| apply_canvas_theme_preset(runtime.canvas.clone(), preset))
             .unwrap_or_else(|| runtime.canvas.clone());
@@ -1433,9 +1664,10 @@ impl Diagram {
         self.ensure_alive()?;
 
         let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
-        let requested_theme = requested_theme_preset(&overrides)?;
+        let requested_theme = requested_theme_preset(&overrides).map_err(js_error)?;
         let next_svg =
-            merge_svg_config(&self.svg_config, &overrides.svg, overrides.theme.as_deref())?;
+            merge_svg_config(&self.svg_config, &overrides.svg, overrides.theme.as_deref())
+                .map_err(js_error)?;
         let next_pressure = merge_pressure_config(&self.pressure_config, &overrides.pressure);
         let pressure_report = next_pressure.into_report();
         let mut budget_broker = MermaidBudgetLedger::new(&pressure_report);
@@ -1587,7 +1819,7 @@ impl Diagram {
             theme: Some(theme.to_string()),
             ..SvgConfigOverrides::default()
         };
-        self.svg_config = merge_svg_config(&self.svg_config, &overrides, None)?;
+        self.svg_config = merge_svg_config(&self.svg_config, &overrides, None).map_err(js_error)?;
         self.canvas_config = apply_canvas_theme_preset(self.canvas_config.clone(), preset);
         Ok(())
     }
@@ -1659,12 +1891,12 @@ mod tests {
     use super::{
         CanvasConfigOverrides, LayoutRuntimeSummary, PressureConfigOverrides, RuntimeConfig,
         RuntimeInitConfig, SvgConfigOverrides, ThemePreset, WebRendererKind, WorkerRenderAction,
-        WorkerRenderCoordinator, WorkerRenderMessage, WorkerRenderRequest,
+        WorkerRenderCoordinator, WorkerRenderMessage, WorkerRenderRequest, WorkerRenderResponse,
         align_canvas_typography_with_svg, apply_budget_svg_simplifications,
-        apply_canvas_theme_preset, canvas_font_size_px, collect_source_spans, hit_test_layout_edge,
-        hit_test_layout_node, merge_canvas_config, merge_pressure_config, merge_renderer_kind,
-        merge_svg_config, read_runtime_config, render, render_svg_js, requested_theme_preset,
-        resolve_renderer, write_runtime_config,
+        apply_canvas_theme_preset, canvas_font_size_px, collect_source_spans, handle_worker_message,
+        hit_test_layout_edge, hit_test_layout_node, merge_canvas_config, merge_pressure_config,
+        merge_renderer_kind, merge_svg_config, read_runtime_config, render, render_svg_js,
+        render_worker_request, requested_theme_preset, resolve_renderer, write_runtime_config,
     };
     use fm_core::{
         MermaidBudgetLedger, MermaidGuardReport, MermaidLensBinding, MermaidLensEdit,
@@ -2118,6 +2350,194 @@ mod tests {
             WorkerRenderAction::Cancelled { request_id: 7 },
         );
         assert!(!coordinator.complete(7));
+    }
+
+    #[test]
+    fn worker_render_reports_timings_diagnostics_and_counts() {
+        let response = render_worker_request(&WorkerRenderRequest {
+            request_id: 9,
+            input: "flowchart LR\n  A-->B\n  B-->C".to_string(),
+            config_json: None,
+        });
+
+        let WorkerRenderResponse::Completed {
+            request_id,
+            svg,
+            detected_type,
+            accessibility_summary,
+            node_count,
+            edge_count,
+            svg_bytes,
+            timings,
+            diagnostics,
+        } = response
+        else {
+            panic!("a valid flowchart must render: {response:?}");
+        };
+
+        assert_eq!(request_id, 9);
+        assert_eq!(detected_type, "flowchart");
+        assert_eq!(node_count, 3);
+        assert_eq!(edge_count, 2);
+        assert!(svg.contains("</svg>"));
+        assert_eq!(svg_bytes, svg.len());
+        assert!(!accessibility_summary.is_empty());
+        // Timings are wall clock and may each round to zero on a fast host; what must hold is that
+        // the total is the sum, so a UI cannot be handed inconsistent attribution.
+        assert_eq!(
+            timings.total_ms,
+            timings.parse_ms + timings.layout_ms + timings.render_ms
+        );
+        assert!(
+            diagnostics.iter().all(|diagnostic| !diagnostic.is_error()),
+            "a valid flowchart must not report errors: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn worker_render_applies_per_request_config_json() {
+        // The regression this pins: `configJson` was carried across the protocol and never read, so
+        // a themed worker render came back with default styling.
+        let request = |config: Option<&str>| WorkerRenderRequest {
+            request_id: 1,
+            input: "flowchart LR\n  A-->B".to_string(),
+            config_json: config.map(str::to_string),
+        };
+
+        let default_svg = match render_worker_request(&request(None)) {
+            WorkerRenderResponse::Completed { svg, .. } => svg,
+            other => panic!("default render failed: {other:?}"),
+        };
+        let dark_svg = match render_worker_request(&request(Some("{\"theme\":\"dark\"}"))) {
+            WorkerRenderResponse::Completed { svg, .. } => svg,
+            other => panic!("themed render failed: {other:?}"),
+        };
+
+        assert_ne!(
+            default_svg, dark_svg,
+            "the dark theme must change the output, else configJson is still being dropped"
+        );
+    }
+
+    #[test]
+    fn worker_render_rejects_malformed_config_with_an_actionable_error() {
+        let response = render_worker_request(&WorkerRenderRequest {
+            request_id: 3,
+            input: "flowchart LR\n  A-->B".to_string(),
+            config_json: Some("{\"theme\":".to_string()),
+        });
+
+        let WorkerRenderResponse::Failed {
+            request_id, error, ..
+        } = response
+        else {
+            panic!("malformed configJson must fail: {response:?}");
+        };
+        assert_eq!(request_id, 3);
+        assert!(
+            error.contains("configJson"),
+            "the error must name the offending field: {error}"
+        );
+    }
+
+    #[test]
+    fn worker_render_rejects_an_unknown_theme_by_name() {
+        let response = render_worker_request(&WorkerRenderRequest {
+            request_id: 4,
+            input: "flowchart LR\n  A-->B".to_string(),
+            config_json: Some("{\"theme\":\"chartreuse\"}".to_string()),
+        });
+
+        let WorkerRenderResponse::Failed { error, .. } = response else {
+            panic!("an unknown theme must fail: {response:?}");
+        };
+        assert!(
+            error.contains("chartreuse") && error.contains("expected one of"),
+            "the error must name the bad theme and the valid set: {error}"
+        );
+    }
+
+    #[test]
+    fn worker_publish_substitutes_superseded_for_stale_output() {
+        let mut coordinator = WorkerRenderCoordinator::default();
+        let stale = WorkerRenderRequest {
+            request_id: 10,
+            input: "flowchart LR\n  A-->B".to_string(),
+            config_json: None,
+        };
+        let fresh = WorkerRenderRequest {
+            request_id: 11,
+            input: "flowchart LR\n  A-->C".to_string(),
+            config_json: None,
+        };
+        let _ = coordinator.handle(WorkerRenderMessage::Render(stale.clone()));
+        let _ = coordinator.handle(WorkerRenderMessage::Render(fresh.clone()));
+
+        // The stale render finishes late. Publishing must NOT hand back its SVG.
+        let stale_published = coordinator.publish(render_worker_request(&stale));
+        assert_eq!(
+            stale_published,
+            WorkerRenderResponse::Superseded { request_id: 10 }
+        );
+
+        let fresh_published = coordinator.publish(render_worker_request(&fresh));
+        assert!(
+            matches!(
+                fresh_published,
+                WorkerRenderResponse::Completed { request_id: 11, .. }
+            ),
+            "the live request must publish normally: {fresh_published:?}"
+        );
+    }
+
+    #[test]
+    fn worker_message_loop_renders_a_render_and_answers_nothing_for_a_cancel() {
+        let mut coordinator = WorkerRenderCoordinator::default();
+        let request = WorkerRenderRequest {
+            request_id: 20,
+            input: "flowchart LR\n  A-->B".to_string(),
+            config_json: None,
+        };
+
+        let response = handle_worker_message(
+            &mut coordinator,
+            WorkerRenderMessage::Render(request.clone()),
+        );
+        assert!(
+            matches!(
+                response,
+                Some(WorkerRenderResponse::Completed { request_id: 20, .. })
+            ),
+            "a render message must produce a completed response: {response:?}"
+        );
+
+        // The render already completed, so this cancel refers to nothing live and needs no reply.
+        assert_eq!(
+            handle_worker_message(
+                &mut coordinator,
+                WorkerRenderMessage::Cancel { request_id: 20 }
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn worker_response_round_trips_through_json() {
+        // The response crosses `postMessage` as text, so a field that does not survive serde is a
+        // field the UI never sees.
+        let original = render_worker_request(&WorkerRenderRequest {
+            request_id: 77,
+            input: "flowchart LR\n  A-->B".to_string(),
+            config_json: None,
+        });
+        let json = serde_json::to_string(&original).expect("serialize response");
+        let restored: WorkerRenderResponse =
+            serde_json::from_str(&json).expect("deserialize response");
+        assert_eq!(original, restored);
+        assert!(
+            json.contains("\"timings\"") && json.contains("\"totalMs\""),
+            "timings must be on the wire in camelCase: {json}"
+        );
     }
 
     #[test]

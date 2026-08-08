@@ -27,13 +27,14 @@ fm-render-svg.workspace = true
 js-sys.workspace = true
 serde.workspace = true
 serde-wasm-bindgen.workspace = true
+# Needed on wasm32 too, not just natively: the worker protocol is deliberately JSON TEXT so a
+# request can cross `postMessage` without a browser-only `JsValue`, and the worker entry point has
+# to parse that text inside the wasm module. Already in the lock via fm-core/fm-layout.
+serde_json.workspace = true
 wasm-bindgen.workspace = true
 web-sys.workspace = true
 # Portable monotonic clock; `std::time::Instant` traps on wasm32-unknown-unknown (GH#3).
 web-time.workspace = true
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-serde_json.workspace = true
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
