@@ -1997,6 +1997,153 @@ fn class_colon_shorthand_renders_as_member_rows() {
     }
 }
 
+/// A sequence diagram's messages must run between the lifelines they were declared between, in the
+/// direction they were declared, down the page in declaration order (bd-iicc).
+///
+/// sequenceDiagram was the last of the 21 golden diagram types with NO semantic guard, despite
+/// having two fixtures. A byte golden proves the picture has not changed; it cannot prove the
+/// arrows ever pointed at the right participants. Reversing replies, or collapsing two lifelines
+/// onto one x, leaves every coordinate in the file looking perfectly reasonable.
+///
+/// Everything is read from the FIXTURE — participants, their aliases, and each message's sender,
+/// receiver and order — so none of it can be satisfied by re-blessing, and geometry is recovered
+/// from the rendered path endpoints rather than from anything the renderer says about itself.
+#[test]
+fn sequence_messages_run_between_their_declared_lifelines() {
+    let read = fs::read_to_string(golden_dir().join("sequence_advanced.mmd"));
+    assert!(
+        read.is_ok(),
+        "read sequence_advanced fixture: {:?}",
+        read.err()
+    );
+    let source = read.unwrap_or_default();
+
+    // Declared participants in order, as (id, display name).
+    let mut participants: Vec<(String, String)> = Vec::new();
+    // Declared messages in order, as (from_id, to_id, is_reply).
+    let mut messages: Vec<(String, String, bool)> = Vec::new();
+    for line in source.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("participant ") {
+            let (id, display) = rest
+                .split_once(" as ")
+                .map_or((rest, rest), |(i, d)| (i.trim(), d.trim()));
+            participants.push((id.to_string(), display.to_string()));
+            continue;
+        }
+        if line.starts_with("Note") || line.starts_with("alt ") || line.starts_with("else") {
+            continue;
+        }
+        for (arrow, is_reply) in [("-->>", true), ("->>", false)] {
+            let Some((from, rest)) = line.split_once(arrow) else {
+                continue;
+            };
+            let Some((to, _label)) = rest.split_once(':') else {
+                continue;
+            };
+            let (from, to) = (from.trim(), to.trim());
+            if !from.is_empty() && !to.is_empty() {
+                messages.push((from.to_string(), to.to_string(), is_reply));
+            }
+            break;
+        }
+    }
+    assert!(
+        participants.len() >= 3 && messages.len() >= 4,
+        "sequence_advanced must declare 3+ participants and 4+ messages for this guard to mean \
+         anything; read {participants:?} and {} messages",
+        messages.len()
+    );
+    assert!(
+        messages.iter().any(|(.., reply)| *reply) && messages.iter().any(|(.., reply)| !*reply),
+        "the fixture must declare BOTH request and reply messages, or the direction assertion \
+         below is vacuous"
+    );
+
+    let svg = render_fixture("sequence_advanced");
+    assert!(
+        !svg.contains("transform="),
+        "a transform would make these coordinates non-final"
+    );
+
+    // Lifeline x per participant, from the rendered header box.
+    let boxes = node_boxes_by_declared_id(&svg);
+    let lifeline_x = |id: &str| -> f32 {
+        let found = boxes.iter().find(|b| b.id == id);
+        assert!(found.is_some(), "participant {id:?} was not rendered");
+        found.map_or(f32::NAN, |b| b.x + b.width / 2.0)
+    };
+
+    // Participants march left to right in DECLARATION order. A collapse onto one x fails here.
+    for pair in participants.windows(2) {
+        let (left, right) = (&pair[0].0, &pair[1].0);
+        assert!(
+            lifeline_x(right) > lifeline_x(left) + 1.0,
+            "{left} is declared before {right} but their lifelines are at x {} and {}",
+            lifeline_x(left),
+            lifeline_x(right)
+        );
+    }
+
+    // Rendered message arrows, ordered down the page.
+    let mut arrows: Vec<(f32, f32, f32)> = Vec::new(); // (y, start_x, end_x)
+    for chunk in svg.split("<g id=\"fm-edge-").skip(1) {
+        let body = chunk.split("<g id=\"fm-").next().unwrap_or(chunk);
+        let Some(d) = body
+            .find(" d=\"")
+            .map(|at| &body[at + 4..])
+            .and_then(|rest| rest.find('"').map(|end| &rest[..end]))
+        else {
+            continue;
+        };
+        let Ok((start, end)) = path_endpoints(d) else {
+            continue;
+        };
+        arrows.push((start.1, start.0, end.0));
+    }
+    arrows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    assert_eq!(
+        arrows.len(),
+        messages.len(),
+        "the fixture declares {} messages but {} arrows rendered — this guard must not judge \
+         fewer messages than the diagram declares",
+        messages.len(),
+        arrows.len()
+    );
+
+    // Each message connects its declared pair, in its declared direction.
+    for ((from, to, is_reply), (y, start_x, end_x)) in messages.iter().zip(&arrows) {
+        let (want_start, want_end) = (lifeline_x(from), lifeline_x(to));
+        assert!(
+            (start_x - want_start).abs() < 1.0,
+            "{from} -> {to} (reply={is_reply}) at y {y} starts at x {start_x}, but {from}'s \
+             lifeline is at {want_start}"
+        );
+        assert!(
+            (end_x - want_end).abs() < 1.0,
+            "{from} -> {to} (reply={is_reply}) at y {y} ends at x {end_x}, but {to}'s lifeline \
+             is at {want_end}"
+        );
+        // The sharpest of the three: an implementation that drew every arrow left-to-right, or
+        // that swapped sender and receiver on replies, still produces plausible coordinates on
+        // the right lifelines — and fails here, because the SIGN must match the declaration.
+        let declared_sign = (want_end - want_start).signum();
+        let rendered_sign = (end_x - start_x).signum();
+        assert!(
+            (declared_sign - rendered_sign).abs() < f32::EPSILON,
+            "{from} -> {to} (reply={is_reply}) at y {y} is drawn in the wrong direction: declared \
+             {want_start} -> {want_end}, rendered {start_x} -> {end_x}"
+        );
+    }
+
+    // And messages descend the page in declaration order.
+    assert!(
+        arrows.windows(2).all(|w| w[1].0 > w[0].0),
+        "messages must descend the page in declaration order; ys are {:?}",
+        arrows.iter().map(|a| a.0).collect::<Vec<_>>()
+    );
+}
+
 /// architecture-beta renders every declared service, and its edges fan out from the right one
 /// (bd-iicc).
 ///
