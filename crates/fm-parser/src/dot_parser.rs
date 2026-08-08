@@ -1,6 +1,8 @@
 use std::{borrow::Cow, iter::Peekable, str::CharIndices};
 
-use fm_core::{ArrowType, DiagramType, GraphDirection, IrConstraint, NodeShape, Span};
+use fm_core::{
+    ArrowType, DiagramType, GraphDirection, IrConstraint, IrStyleTarget, NodeShape, Span,
+};
 use memchr::memchr2;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -91,7 +93,7 @@ pub fn parse_dot(input: &str) -> ParseResult {
             }
             if statement == "{" {
                 brace_scopes.push(DotBraceScope {
-                    saved_defaults: defaults,
+                    saved_defaults: defaults.clone(),
                     ..DotBraceScope::default()
                 });
                 continue;
@@ -100,7 +102,7 @@ pub fn parse_dot(input: &str) -> ParseResult {
             // `{ rank=same` after the `;` split. The brace opens a scope that pushes nothing.
             let statement = if let Some(rest) = statement.strip_prefix('{') {
                 brace_scopes.push(DotBraceScope {
-                    saved_defaults: defaults,
+                    saved_defaults: defaults.clone(),
                     ..DotBraceScope::default()
                 });
                 rest.trim()
@@ -165,7 +167,7 @@ pub fn parse_dot(input: &str) -> ParseResult {
                 let lookup_key = cluster_key.clone();
 
                 let mut scope = DotBraceScope {
-                    saved_defaults: defaults,
+                    saved_defaults: defaults.clone(),
                     ..DotBraceScope::default()
                 };
                 if let Some(cluster_index) = builder.ensure_cluster(
@@ -238,10 +240,17 @@ pub fn parse_dot(input: &str) -> ParseResult {
                     {
                         defaults.node_shape = Some(shape);
                     }
-                } else if lower.starts_with("edge")
-                    && let Some(style) = parse_dot_edge_style(statement)
-                {
-                    defaults.edge_style = Some(style);
+                    let colors = DotNodeColors::parse(statement);
+                    if !colors.is_empty() {
+                        defaults.node_colors = colors.resolved_over(&defaults.node_colors);
+                    }
+                } else if lower.starts_with("edge") {
+                    if let Some(style) = parse_dot_edge_style(statement) {
+                        defaults.edge_style = Some(style);
+                    }
+                    if let Some(color) = parse_dot_color(statement) {
+                        defaults.edge_color = Some(color);
+                    }
                 }
                 continue;
             }
@@ -251,7 +260,7 @@ pub fn parse_dot(input: &str) -> ParseResult {
                 source_line: line,
                 active_clusters: &active_clusters,
                 active_subgraphs: &active_subgraphs,
-                defaults,
+                defaults: &defaults,
             };
             if parse_dot_edge_statement(statement, directed, ctx, &mut builder) {
                 continue;
@@ -293,10 +302,86 @@ struct DotBraceScope {
 }
 
 /// `node [...]` / `edge [...]` defaults currently in force.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct DotDefaults {
     node_shape: Option<NodeShape>,
     edge_style: Option<DotEdgeStyle>,
+    node_colors: DotNodeColors,
+    edge_color: Option<String>,
+}
+
+/// A node's DOT color attributes, kept separate because graphviz resolves them together.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DotNodeColors {
+    /// `color=` — the border color, or the FILL when `style=filled` and no `fillcolor` is given.
+    color: Option<String>,
+    /// `fillcolor=` — the interior color, which does not need `style=filled` here.
+    fill: Option<String>,
+    /// Whether `style` contained `filled`.
+    filled: bool,
+}
+
+impl DotNodeColors {
+    /// Read the three color-relevant attributes off one attribute list.
+    fn parse(attributes: &str) -> Self {
+        let value = |key: &str| {
+            extract_dot_attribute_raw(attributes, key)
+                .map(|raw| raw.as_ref().trim().trim_matches(['"', '\'']).to_string())
+                .filter(|text| !text.is_empty())
+        };
+        let filled = extract_dot_attribute_raw(attributes, "style").is_some_and(|style| {
+            style.as_ref().split(',').any(|token| {
+                token
+                    .trim()
+                    .trim_matches(['"', '\''])
+                    .eq_ignore_ascii_case("filled")
+            })
+        });
+        Self {
+            color: value("color"),
+            fill: value("fillcolor"),
+            filled,
+        }
+    }
+
+    /// Whether this carries nothing, so a caller can skip emitting an empty style.
+    fn is_empty(&self) -> bool {
+        self.color.is_none() && self.fill.is_none() && !self.filled
+    }
+
+    /// Overlay `self` on top of `base`, attribute by attribute.
+    ///
+    /// Per-attribute rather than all-or-nothing because DOT resolves each independently: a node that
+    /// names only `fillcolor` still inherits a default `color`.
+    fn resolved_over(&self, base: &Self) -> Self {
+        Self {
+            color: self.color.clone().or_else(|| base.color.clone()),
+            fill: self.fill.clone().or_else(|| base.fill.clone()),
+            filled: self.filled || base.filled,
+        }
+    }
+
+    /// The CSS this maps to, or `None` when there is nothing to say.
+    ///
+    /// graphviz's rule, which is the non-obvious part: `color` is the BORDER, `fillcolor` is the
+    /// interior, and with `style=filled` but no `fillcolor` the `color` value fills the shape
+    /// instead of outlining it. Getting that backwards would paint borders as fills on a large share
+    /// of real .dot files, which lean on `style=filled, color=…`.
+    fn to_css(&self) -> Option<String> {
+        let mut properties: Vec<String> = Vec::new();
+        match (self.filled, self.fill.as_deref(), self.color.as_deref()) {
+            (true, None, Some(color)) => properties.push(format!("fill:{color}")),
+            (_, fill, color) => {
+                if let Some(fill) = fill {
+                    properties.push(format!("fill:{fill}"));
+                }
+                if let Some(color) = color {
+                    properties.push(format!("stroke:{color}"));
+                }
+            }
+        }
+        (!properties.is_empty()).then(|| properties.join(","))
+    }
 }
 
 /// DOT's edge `style`, limited to the values this engine can draw.
@@ -327,6 +412,13 @@ fn parse_dot_edge_style(attributes: &str) -> Option<DotEdgeStyle> {
             "bold" => Some(DotEdgeStyle::Bold),
             _ => None,
         })
+}
+
+/// Read a `color` attribute as a bare value, for edges where it is simply the stroke.
+fn parse_dot_color(attributes: &str) -> Option<String> {
+    let value = extract_dot_attribute_raw(attributes, "color")?;
+    let text = value.as_ref().trim().trim_matches(['"', '\'']).trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 /// The arrow type for an edge, given the graph's directedness and the style in force.
@@ -572,7 +664,8 @@ struct DotStatementContext<'a> {
     source_line: &'a str,
     active_clusters: &'a [usize],
     active_subgraphs: &'a [usize],
-    defaults: DotDefaults,
+    /// Borrowed rather than owned so the context stays `Copy` now that defaults carry color strings.
+    defaults: &'a DotDefaults,
 }
 
 fn parse_dot_edge_statement(
@@ -613,6 +706,9 @@ fn parse_dot_edge_statement(
         .and_then(parse_dot_edge_style)
         .or(defaults.edge_style);
     let arrow = dot_arrow_type(operator == "->" || directed, style);
+    let edge_color = shared_attrs
+        .and_then(parse_dot_color)
+        .or_else(|| defaults.edge_color.clone());
 
     // Edge groups (A -> {B C D}) are expanded in expand_edge_groups() before
     // normalization, so they arrive here as individual "A -> B", "A -> C" etc.
@@ -652,7 +748,17 @@ fn parse_dot_edge_statement(
         );
 
         if let (Some(from_id), Some(to_id)) = (from, to) {
+            // Captured BEFORE the push, because `push_style_ref` addresses the edge by index and the
+            // index of the edge about to be added is the current count.
+            let edge_index = builder.edge_count();
             builder.push_edge(from_id, to_id, arrow, edge_label_str.as_deref(), span);
+            if let Some(color) = edge_color.as_deref() {
+                builder.push_style_ref(
+                    IrStyleTarget::Link(edge_index),
+                    format!("stroke:{color}"),
+                    span,
+                );
+            }
             add_node_to_active_groups(builder, active_clusters, active_subgraphs, from_id);
             add_node_to_active_groups(builder, active_clusters, active_subgraphs, to_id);
 
@@ -765,6 +871,17 @@ fn parse_dot_node_statement(
     let node_id = builder.intern_node(&node.id, node.label.as_deref(), shape, span);
     if let Some(node_id) = node_id {
         add_node_to_active_groups(builder, active_clusters, active_subgraphs, node_id);
+        // Colors become an `IrStyleRef` on the node, the same shape `style A fill:#f9f` produces in
+        // Mermaid, so the renderer needs no DOT-specific path.
+        if let Some(css) = split_endpoint_and_attrs(statement.trim())
+            .1
+            .map(DotNodeColors::parse)
+            .unwrap_or_default()
+            .resolved_over(&defaults.node_colors)
+            .to_css()
+        {
+            builder.push_style_ref(IrStyleTarget::Node(node_id), css, span);
+        }
     }
     true
 }
@@ -1955,6 +2072,106 @@ mod tests {
             "{:?}",
             parsed.warnings
         );
+    }
+
+    /// The style CSS attached to a node id, if any.
+    fn node_style_css(parsed: &crate::ParseResult, id: &str) -> Option<String> {
+        let node_index = parsed.ir.nodes.iter().position(|node| node.id == id)?;
+        parsed.ir.style_refs.iter().find_map(|style| {
+            matches!(style.target, fm_core::IrStyleTarget::Node(node_id) if node_id.0 == node_index)
+                .then(|| style.style.clone())
+        })
+    }
+
+    #[test]
+    fn node_fillcolor_becomes_a_fill_and_color_becomes_a_stroke() {
+        let parsed = parse_dot("digraph G { a [fillcolor=red]; b [color=blue]; }");
+        assert_eq!(node_style_css(&parsed, "a").as_deref(), Some("fill:red"));
+        assert_eq!(node_style_css(&parsed, "b").as_deref(), Some("stroke:blue"));
+    }
+
+    #[test]
+    fn style_filled_without_fillcolor_makes_color_the_fill() {
+        // graphviz's rule and the whole reason these three attributes resolve together: with
+        // `style=filled` and no `fillcolor`, `color` FILLS the shape instead of outlining it.
+        // Reading it as a stroke would paint borders instead of fills on a large share of real
+        // .dot files, which lean on exactly this spelling.
+        let parsed = parse_dot("digraph G { a [style=filled, color=red]; }");
+        assert_eq!(node_style_css(&parsed, "a").as_deref(), Some("fill:red"));
+
+        // With BOTH, color returns to being the border.
+        let parsed = parse_dot("digraph G { a [style=filled, color=blue, fillcolor=red]; }");
+        assert_eq!(
+            node_style_css(&parsed, "a").as_deref(),
+            Some("fill:red,stroke:blue")
+        );
+    }
+
+    #[test]
+    fn a_node_with_no_color_attributes_gets_no_style_entry() {
+        // The control: an unconditional style entry would make every assertion above vacuous, and
+        // would also emit dead CSS for every plain node.
+        let parsed = parse_dot("digraph G { a; b -> c; }");
+        assert!(
+            parsed.ir.style_refs.is_empty(),
+            "plain nodes must not carry styles: {:?}",
+            parsed.ir.style_refs
+        );
+    }
+
+    #[test]
+    fn node_color_defaults_apply_and_merge_attribute_by_attribute() {
+        // `b` names only fillcolor, so it must still inherit the default border color rather than
+        // losing it to an all-or-nothing override.
+        let parsed = parse_dot("digraph G { node [color=blue]; a; b [fillcolor=red]; }");
+        assert_eq!(node_style_css(&parsed, "a").as_deref(), Some("stroke:blue"));
+        assert_eq!(
+            node_style_css(&parsed, "b").as_deref(),
+            Some("fill:red,stroke:blue")
+        );
+    }
+
+    #[test]
+    fn node_color_defaults_revert_at_the_end_of_a_subgraph() {
+        let parsed =
+            parse_dot("digraph G { subgraph cluster_0 { node [color=blue]; inner; } outer; }");
+        assert_eq!(
+            node_style_css(&parsed, "inner").as_deref(),
+            Some("stroke:blue")
+        );
+        assert_eq!(node_style_css(&parsed, "outer"), None);
+    }
+
+    #[test]
+    fn edge_color_becomes_a_link_style_on_the_right_edge() {
+        let parsed = parse_dot("digraph G { a -> b; c -> d [color=red]; }");
+        let link_styles: Vec<(usize, &str)> = parsed
+            .ir
+            .style_refs
+            .iter()
+            .filter_map(|style| match style.target {
+                fm_core::IrStyleTarget::Link(index) => Some((index, style.style.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            link_styles,
+            [(1, "stroke:red")],
+            "only the second edge is colored, and it must be addressed by ITS index"
+        );
+    }
+
+    #[test]
+    fn edge_color_default_applies_and_loses_to_a_per_edge_color() {
+        let parsed = parse_dot("digraph G { edge [color=blue]; a -> b; c -> d [color=red]; }");
+        let styles: Vec<&str> = parsed
+            .ir
+            .style_refs
+            .iter()
+            .filter(|style| matches!(style.target, fm_core::IrStyleTarget::Link(_)))
+            .map(|style| style.style.as_str())
+            .collect();
+        assert_eq!(styles, ["stroke:blue", "stroke:red"]);
     }
 
     #[test]

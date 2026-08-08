@@ -218,6 +218,34 @@ fn dot_default_attribute_statements_do_not_render_phantom_nodes() {
 }
 
 #[test]
+fn dot_colors_reach_the_rendered_svg() {
+    // The style refs are only worth emitting if the renderer honors them, so this asserts on the
+    // drawn output rather than on the IR. Without it, the parser could be producing style entries
+    // nothing consumes — the same unreachable-work trap as an unparsed attribute.
+    let parsed = parse("digraph G {\n  a [style=filled, color=red];\n  a -> b [color=blue];\n}");
+    let svg = fm_render_svg::render_svg(&parsed.ir);
+
+    // Bare colour NAMES are useless as needles: `red` occurs inside `prefers-reduced-motion` and
+    // `blue` inside the `blueprint` theme name, both of which the stylesheet emits unconditionally.
+    // Assert the property:value pairs instead.
+    assert!(
+        svg.contains("fill:red"),
+        "the node fill must reach the SVG: {svg:.600}"
+    );
+    assert!(
+        svg.contains("stroke:blue"),
+        "the edge stroke must reach the SVG: {svg:.600}"
+    );
+
+    // The control, with the same precise needles.
+    let plain = fm_render_svg::render_svg(&parse("digraph G {\n  a -> b;\n}").ir);
+    assert!(
+        !plain.contains("fill:red") && !plain.contains("stroke:blue"),
+        "an uncoloured graph must carry neither"
+    );
+}
+
+#[test]
 fn a_rank_group_inside_a_cluster_keeps_every_node_in_the_cluster() {
     // The brace-scope regression this shipped with: an anonymous `{ … }` group's closing brace used
     // to pop the enclosing cluster, so `d` fell outside it. Checked here at the IR level because a
