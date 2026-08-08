@@ -4360,3 +4360,167 @@ fn stress_dense_graph_100_nodes_with_cross_edges() {
     assert!(svg.contains("<svg"));
     assert!(!svg.contains("NaN"));
 }
+
+/// Look up a laid-out node's box by its IR id.
+fn block_box(
+    ir: &fm_core::MermaidDiagramIr,
+    layout: &fm_layout::DiagramLayout,
+    id: &str,
+) -> fm_layout::LayoutRect {
+    let index = ir
+        .nodes
+        .iter()
+        .position(|node| node.id == id)
+        .unwrap_or_else(|| {
+            panic!(
+                "no node {id:?} in {:?}",
+                ir.nodes.iter().map(|n| &n.id).collect::<Vec<_>>()
+            )
+        });
+    layout
+        .nodes
+        .iter()
+        .find(|node_box| node_box.node_index == index)
+        .unwrap_or_else(|| panic!("node {id:?} was not laid out"))
+        .bounds
+}
+
+/// A span declared on a CONTAINER (`block:name:N`) must reach the picture (bd-7ute, criteria 1-2).
+///
+/// Node-level spans (`A["a"]:3`) already worked; the container form did not, so `block:wide:3`
+/// holding a one-character label rendered 100px while a SINGLE-column block with a long label
+/// rendered 367.35px — width tracked the label, which is the encoding this must not use.
+///
+/// The pinned mermaid-js 11.15.0 `setBlockSizes` sets a child's width to
+/// `maxChildWidth * widthInColumns + padding * (widthInColumns - 1)` and then grows a composite's
+/// children to fill it, so a 3-column container's contents are three columns wide there too.
+///
+/// CRITERION 2 IS ASSERTED AS A RATIO, and this is a deliberate restatement of the bead's wording.
+/// bd-7ute asked for "renaming a block changes NO geometry", but a block grid's column PITCH is the
+/// widest cell's width in mermaid too (`setBlockSizes` takes `maxWidth` over the children), so an
+/// absolute-invariance reading would require clipping long labels and would not match the
+/// incumbent. What must not depend on labels is the ENCODING: a 3-column block is three columns
+/// wide whichever label happens to be longest. That is what is checked, in both documents.
+///
+/// Asserted at the LAYOUT level rather than through the rendered SVG because the golden reader
+/// rejects the empty `<text>` element an invisible `space` node still emits (bd-ukj2).
+#[test]
+fn block_beta_container_span_reaches_the_geometry() {
+    // Same structure, same declared spans; the long label moves from the single column to the
+    // 3-column container, which is exactly the swap that inverted the old label-sized widths.
+    let long = "a single column with a very long label indeed";
+    let sources = [
+        format!(
+            "block-beta\n  columns 3\n  block:wide:3\n    W[\"x\"]\n  end\n  N[\"{long}\"]\n  space\n  M[\"y\"]"
+        ),
+        format!(
+            "block-beta\n  columns 3\n  block:wide:3\n    W[\"{long}\"]\n  end\n  N[\"z\"]\n  space\n  M[\"y\"]"
+        ),
+    ];
+
+    let mut span_in_columns = Vec::new();
+    for src in &sources {
+        let parsed = parse(src);
+        let layout = layout_diagram(&parsed.ir);
+        let wide = block_box(&parsed.ir, &layout, "W");
+        let single = block_box(&parsed.ir, &layout, "N");
+
+        assert!(
+            wide.width > single.width * 1.5,
+            "a 3-column span ({}) must be much wider than a 1-column cell ({}), independent of \
+             labels — source: {src:?}",
+            wide.width,
+            single.width
+        );
+
+        // Column pitch read from the output, so no layout constant is restated here.
+        let mut xs: Vec<f32> = layout.nodes.iter().map(|n| n.bounds.x).collect();
+        xs.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        let pitch = xs
+            .windows(2)
+            .map(|w| w[1] - w[0])
+            .filter(|gap| *gap > 1.0)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            pitch.is_finite(),
+            "could not derive a column pitch from {xs:?}"
+        );
+        span_in_columns.push(wide.width / pitch);
+    }
+
+    // The 3-column container is three columns wide (less the one trailing gutter) in BOTH
+    // documents — the encoding, not the pitch, is what must be label-independent.
+    for columns in &span_in_columns {
+        assert!(
+            (2.5..=3.0).contains(columns),
+            "the 3-column container measures {columns} columns wide, so its declared span is not \
+             what sized it"
+        );
+    }
+    assert!(
+        (span_in_columns[0] - span_in_columns[1]).abs() < 0.01,
+        "moving the long label changed the container's span from {} to {} columns",
+        span_in_columns[0],
+        span_in_columns[1]
+    );
+}
+
+/// `space` must hold the CELL it was declared in, not be pushed to the end of the grid (bd-7ute,
+/// criteria 3-4).
+///
+/// The grid was ordered by node id STRING, and a `space`'s generated id sorts after ordinary ids, so
+/// it was emitted last: `A, space, C, D, E, F` over 3 columns put A and C adjacent in row 1 with the
+/// requested gap missing, and a phantom gap appeared at the end of the grid.
+#[test]
+fn block_beta_space_holds_its_declared_cell() {
+    let src = "block-beta\n  columns 3\n  A[\"a\"]\n  space\n  C[\"c\"]\n  D[\"d\"]\n  \
+               E[\"e\"]\n  F[\"f\"]";
+    let parsed = parse(src);
+    let layout = layout_diagram(&parsed.ir);
+    let at = |id: &str| block_box(&parsed.ir, &layout, id);
+
+    // Column pitch derived from the output: the smallest positive gap between distinct columns.
+    let mut xs: Vec<f32> = layout.nodes.iter().map(|n| n.bounds.x).collect();
+    xs.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+    let pitch = xs
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .filter(|gap| *gap > 1.0)
+        .fold(f32::INFINITY, f32::min);
+    assert!(
+        pitch.is_finite(),
+        "could not derive a column pitch from {xs:?}"
+    );
+
+    assert!(
+        (at("A").y - at("C").y).abs() < 0.01,
+        "A and C share the first row: {:?} vs {:?}",
+        at("A"),
+        at("C")
+    );
+    assert!(
+        (at("C").x - at("A").x).abs() > pitch * 1.5,
+        "`space` did not hold its cell: A at {:?} and C at {:?} are {} apart against a pitch of \
+         {pitch}, so the declared gap is missing",
+        at("A"),
+        at("C"),
+        (at("C").x - at("A").x).abs()
+    );
+    // And the row after the gap starts at the left column again, in declaration order.
+    assert!(
+        at("D").y > at("A").y && (at("D").x - at("A").x).abs() < 0.01,
+        "D should start the second row under A: {:?} vs {:?}",
+        at("D"),
+        at("A")
+    );
+    assert!(
+        at("E").y == at("D").y
+            && at("F").y == at("D").y
+            && at("E").x > at("D").x
+            && at("F").x > at("E").x,
+        "D, E, F must fill the second row in declaration order: {:?} {:?} {:?}",
+        at("D"),
+        at("E"),
+        at("F")
+    );
+}

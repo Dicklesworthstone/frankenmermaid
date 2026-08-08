@@ -7422,6 +7422,8 @@ pub fn layout_diagram_grid_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             column_count,
             cell_width,
             cell_height,
+            spacing.node_spacing,
+            &mut node_sizes,
             &mut rank_by_node,
             &mut order_by_node,
             &mut centers,
@@ -10806,7 +10808,8 @@ fn compare_block_beta_grid_node_indices(
         .is_empty()
         .cmp(&right_path.is_empty())
         .then_with(|| left_path.cmp(&right_path))
-        .then_with(|| compare_node_indices(ir, left, right))
+        // Declaration order, not id order — see `block_beta_item_anchor` (bd-7ute).
+        .then_with(|| left.cmp(&right))
 }
 
 fn block_beta_group_identity_path(ir: &MermaidDiagramIr, node_index: usize) -> Vec<usize> {
@@ -10841,11 +10844,14 @@ fn block_beta_node_span(node: &IrNode) -> usize {
         .unwrap_or(1)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layout_block_beta_grouped_items(
     ir: &MermaidDiagramIr,
     column_count: usize,
     cell_width: f32,
     cell_height: f32,
+    node_spacing: f32,
+    node_sizes: &mut [(f32, f32)],
     rank_by_node: &mut [usize],
     order_by_node: &mut [usize],
     centers: &mut [(f32, f32)],
@@ -10859,10 +10865,13 @@ fn layout_block_beta_grouped_items(
         ir,
         &items,
         column_count,
+        0.0,
         0,
         0,
         cell_width,
         cell_height,
+        node_spacing,
+        node_sizes,
         rank_by_node,
         order_by_node,
         centers,
@@ -10937,19 +10946,24 @@ fn compare_block_beta_items(
         })
 }
 
-fn block_beta_item_anchor(ir: &MermaidDiagramIr, item: BlockBetaGridItem) -> (String, usize) {
+/// Where an item sits in the SOURCE, which is the only order a block-beta grid may be read in.
+///
+/// This used to key on the node's id STRING, so the grid was alphabetised: `space` — whose
+/// generated id sorts after ordinary ids — was pushed to the end of the grid, taking the gap the
+/// author asked for with it and shifting every later cell one place earlier (bd-7ute). Interning
+/// order (`node_index`) is declaration order, so it is what the anchor reads now. An empty group
+/// has no member to anchor on and falls back to its own declaration index, which is still a source
+/// position rather than a name.
+fn block_beta_item_anchor(ir: &MermaidDiagramIr, item: BlockBetaGridItem) -> usize {
     match item {
-        BlockBetaGridItem::Node(node_index) => (ir.nodes[node_index].id.clone(), node_index),
+        BlockBetaGridItem::Node(node_index) => node_index,
         BlockBetaGridItem::Group(subgraph_id) => ir
             .graph
             .subgraph_members_recursive(subgraph_id)
             .into_iter()
             .map(|node_id| node_id.0)
-            .min_by(|left, right| compare_node_indices(ir, *left, *right))
-            .map_or_else(
-                || (format!("~group-{}", subgraph_id.0), subgraph_id.0),
-                |node_index| (ir.nodes[node_index].id.clone(), node_index),
-            ),
+            .min()
+            .unwrap_or(usize::MAX - subgraph_id.0),
     }
 }
 
@@ -11026,14 +11040,55 @@ fn block_beta_rows_required(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Columns a group's children actually consume in their widest row.
+///
+/// A container declaring `block:name:3` reserves three columns whether or not its children fill
+/// them. mermaid resolves the difference by GROWING the children to fit the container
+/// (`setBlockSizes`' "growing to fit" branch divides the parent's settled width among its
+/// children), which is why a `block:wide:3` holding one short-labelled node is three columns wide
+/// there and was 100px here (bd-7ute). This returns the denominator for that division.
+fn block_beta_group_used_columns(
+    ir: &MermaidDiagramIr,
+    items: &[BlockBetaGridItem],
+    available_columns: usize,
+) -> usize {
+    let mut widest = 0_usize;
+    let mut col = 0_usize;
+    for &item in items {
+        let span = block_beta_item_span(ir, item, available_columns);
+        if col != 0 && col + span > available_columns {
+            col = 0;
+        }
+        col += span;
+        widest = widest.max(col);
+        if col >= available_columns {
+            col = 0;
+        }
+    }
+    widest.clamp(1, available_columns.max(1))
+}
+
+/// Width a node occupies when it spans `span` cells of pitch `cell_width`.
+///
+/// Inverse of the cell pitch: one cell is a box plus one `node_spacing` gutter, so `span` cells are
+/// `span * cell_width` minus the single trailing gutter. Matches the widening the ungrouped path
+/// applies at the top level, so a node's width means the same thing inside and outside a container.
+fn block_beta_span_width(span: usize, cell_width: f32, node_spacing: f32) -> f32 {
+    (span as f32).mul_add(cell_width, -node_spacing)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn place_block_beta_items(
     ir: &MermaidDiagramIr,
     items: &[BlockBetaGridItem],
     available_columns: usize,
+    base_x: f32,
     base_col: usize,
     start_row: usize,
     cell_width: f32,
     cell_height: f32,
+    node_spacing: f32,
+    node_sizes: &mut [(f32, f32)],
     rank_by_node: &mut [usize],
     order_by_node: &mut [usize],
     centers: &mut [(f32, f32)],
@@ -11052,15 +11107,21 @@ fn place_block_beta_items(
             row_height = 1;
         }
 
+        let item_x = (col as f32).mul_add(cell_width, base_x);
         let item_col = base_col + col;
         let item_row = start_row + row_offset;
 
         match item {
             BlockBetaGridItem::Node(node_index) => {
                 centers[node_index] = (
-                    (item_col as f32).mul_add(cell_width, (span - 1) as f32 * cell_width / 2.0),
+                    (span - 1) as f32 * cell_width / 2.0 + item_x,
                     item_row as f32 * cell_height,
                 );
+                node_sizes[node_index].0 = node_sizes[node_index].0.max(block_beta_span_width(
+                    span,
+                    cell_width,
+                    node_spacing,
+                ));
                 if matches!(ir.direction, GraphDirection::LR | GraphDirection::RL) {
                     rank_by_node[node_index] = item_col;
                     order_by_node[node_index] = item_row;
@@ -11072,14 +11133,31 @@ fn place_block_beta_items(
             BlockBetaGridItem::Group(subgraph_id) => {
                 let child_items = block_beta_direct_items(ir, Some(subgraph_id));
                 if !child_items.is_empty() {
+                    // The container owns `span` columns of the OUTER grid. Its children divide
+                    // that width between the columns they actually use, so a container's declared
+                    // span reaches its contents instead of evaporating when they under-fill it.
+                    let used = block_beta_group_used_columns(ir, &child_items, span);
+                    let inner_cell_width = span as f32 * cell_width / used as f32;
+                    // `item_x` is the CENTRE of the container's first outer cell, and these
+                    // coordinates are cell centres throughout (a box is `centre ± width/2`). The
+                    // children's first cell is wider, so its centre is not the container's: shift
+                    // from the container's region centre back by half the inner run. Passing
+                    // `item_x` straight through left-aligned the children's centres to the outer
+                    // grid and pushed a 3-cell child 1.5 cells left of the row below it.
+                    let inner_base_x = (span - 1) as f32 * cell_width / 2.0
+                        - (used - 1) as f32 * inner_cell_width / 2.0
+                        + item_x;
                     place_block_beta_items(
                         ir,
                         &child_items,
-                        span,
+                        used,
+                        inner_base_x,
                         item_col,
                         item_row,
-                        cell_width,
+                        inner_cell_width,
                         cell_height,
+                        node_spacing,
+                        node_sizes,
                         rank_by_node,
                         order_by_node,
                         centers,

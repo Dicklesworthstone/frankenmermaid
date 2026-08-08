@@ -1137,10 +1137,18 @@ fn mindmap_depth_maps_to_radial_distance_from_root() {
 /// 2. `space` is ordered LAST rather than at its declared grid position, so every later cell shifts
 ///    one place earlier and the requested gap never appears.
 ///
-/// Un-ignoring this is bd-7ute's acceptance gate. Do not relax either assertion to whatever a fix
-/// happens to produce.
+/// BOTH LAYOUT DEFECTS ARE NOW FIXED and both assertions here pass at the layout level — see
+/// `block_beta_container_span_reaches_the_geometry` and `block_beta_space_holds_its_declared_cell`
+/// in tests/integration_test.rs, which assert exactly these two statements against `layout_diagram`.
+///
+/// This one stays #[ignore]d on a DIFFERENT blocker, filed as bd-ukj2: an invisible `space` node
+/// still emits an empty `<text>` element, and `node_centres` hard-errors on a node whose text it
+/// cannot read, so this test panics in the reader before reaching either assertion. The doc comment
+/// above ("`space` is invisible and carries no text, so `node_centres` already excludes it") states
+/// the premise bd-ukj2 violates. Un-ignoring this is bd-ukj2's acceptance gate now; do not relax
+/// either assertion to whatever a fix happens to produce.
 #[test]
-#[ignore = "fails against bd-7ute: block-beta drops container spans and mis-orders `space`"]
+#[ignore = "blocked on bd-ukj2: a `space` node emits an empty <text>, which node_centres rejects"]
 fn block_beta_span_width_is_proportional_to_declared_columns() {
     let src = "block-beta\n  columns 3\n  block:wide:3\n    W[\"x\"]\n  end\n  \
                N[\"a single column with a very long label indeed\"]\n  space\n  M[\"y\"]";
