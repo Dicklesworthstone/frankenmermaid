@@ -4327,8 +4327,32 @@ fn rendered_node_shapes(svg: &str) -> Vec<RenderedShape> {
                 (format!("rect(rx/h={ratio:.3},bars={bars})"), Some(ratio))
             }
             "path" => {
-                let vertices = tag.matches(" L").count() + 1;
-                (format!("path({vertices} vertices)"), None)
+                // Counting vertices is NOT enough to identify a polygon: a diamond, a
+                // parallelogram, a trapezoid and both their inversions are all four-sided, and a
+                // vertex count reports them as the same picture (bd-p0y6). Normalise the vertices
+                // into their own bounding box instead, so the signature is the SHAPE — scale- and
+                // position-independent, which is what "these two look the same" actually means.
+                let coords: Vec<(f32, f32)> = tag
+                    .split(['M', 'L'])
+                    .skip(1)
+                    .filter_map(|part| {
+                        let mut it = part.split_whitespace();
+                        let x: f32 = it.next()?.parse().ok()?;
+                        let y: f32 = it.next()?.trim_end_matches('Z').trim().parse().ok()?;
+                        Some((x, y))
+                    })
+                    .collect();
+                let (min_x, max_x, min_y, max_y) = coords.iter().fold(
+                    (f32::MAX, f32::MIN, f32::MAX, f32::MIN),
+                    |(a, b, c, d), &(x, y)| (a.min(x), b.max(x), c.min(y), d.max(y)),
+                );
+                let (w, h) = ((max_x - min_x).max(1e-3), (max_y - min_y).max(1e-3));
+                let outline = coords
+                    .iter()
+                    .map(|&(x, y)| format!("{:.2},{:.2}", (x - min_x) / w, (y - min_y) / h))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                (format!("path[{outline}]"), None)
             }
             other => (other.to_string(), None),
         };
@@ -4366,6 +4390,14 @@ fn flowchart_declared_node_shapes_stay_distinct() {
         "Hexagon",
         "Circle",
         "Asymmetric",
+        // The five bd-3w93 repaired. All five rendered as plain rectangles until 779817ed, and
+        // nothing in the corpus drew them, so their render path was unpinned by both the byte
+        // goldens and this guard (bd-p0y6).
+        "Database",
+        "Parallelogram",
+        "InvParallelogram",
+        "Trapezoid",
+        "InvTrapezoid",
     ];
 
     // The label check is not cosmetic: shape delimiters are SYNTAX, so a label carrying them back

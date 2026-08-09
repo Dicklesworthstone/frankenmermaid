@@ -10,12 +10,12 @@
       "node_count": 10
     },
     "all_node_shapes": {
-      "edge_count": 7,
+      "edge_count": 10,
       "layout_algorithm": "auto",
-      "layout_checksum": "abcb597cca8c3b41",
+      "layout_checksum": "826675100bcf055d",
       "layout_height": 317.0,
-      "layout_width": 1270.699951,
-      "node_count": 8
+      "layout_width": 2643.199707,
+      "node_count": 13
     },
     "architecture_basic": {
       "edge_count": 2,

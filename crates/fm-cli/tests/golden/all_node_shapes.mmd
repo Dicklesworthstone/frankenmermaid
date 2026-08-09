@@ -7,7 +7,14 @@ flowchart LR
     hex{{Hexagon}}
     circle((Circle))
     asym>Asymmetric]
+    cyl[(Database)]
+    para[/Parallelogram/]
+    invpara[\InvParallelogram\]
+    trap[/Trapezoid\]
+    invtrap[\InvTrapezoid/]
 
     rect --> round --> stadium --> sub
     diamond --> hex --> circle --> asym
+    cyl --> para --> invpara
+    trap --> invtrap
     rect --> diamond
