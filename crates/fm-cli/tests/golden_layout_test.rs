@@ -16,35 +16,41 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const CASE_IDS: &[&str] = &[
-    "dense_flowchart_stress",
-    "flowchart_simple",
-    "flowchart_cycle",
-    "cycle_braid",
-    "cycle_feedback",
-    "cycle_ladder",
-    "cycle_scc_heavy",
-    "fuzzy_keyword_recovery",
-    "sequence_basic",
-    "class_basic",
-    "state_basic",
-    "gantt_basic",
-    "pie_basic",
-    "malformed_recovery",
-    "er_basic",
-    "quadrant_basic",
-    "gitgraph_basic",
-    "xychart_basic",
-    "mindmap_basic",
-    "timeline_basic",
-    "all_node_shapes",
-    "all_edge_types",
-    "requirement_basic",
-    "c4_basic",
-    "stress_120_nodes",
-    "empty_diagram",
-    "single_node",
-];
+/// Every fixture in the golden corpus, discovered from disk rather than hand-listed.
+///
+/// This was a hand-maintained `const CASE_IDS` of 27 names, and it had silently stopped tracking the
+/// corpus: ten `.mmd` fixtures had no layout checksum, and among them were the ONLY cases exercising
+/// four dedicated layout algorithms — Sankey (sankey_basic), Kanban (kanban_basic, journey_basic),
+/// Grid (block_basic) and Packet (packet_basic).
+///
+/// That is a direct failure of bd-17e4's Success Metric 2, "every layout algorithm has golden
+/// checksum tests", and it was not theoretical. The kanban, block-beta and packet LAYOUT algorithms
+/// were all rewritten on 2026-08-08 (bd-eg44, bd-7ute, bd-51tz, bd-8vr0) and
+/// `layout_checksums.json` never moved, because none of those cases was in the list. The SVG byte
+/// goldens caught the changes; this corpus was blind to them.
+///
+/// Deriving the list from the directory means a new fixture cannot be added without also getting a
+/// layout checksum, so the hole cannot reopen. Sorted, so the file's entry order is deterministic.
+fn case_ids() -> Vec<String> {
+    let mut ids: Vec<String> = fs::read_dir(golden_dir())
+        .expect("read golden fixture directory")
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension()?.to_str()? != "mmd" {
+                return None;
+            }
+            Some(path.file_stem()?.to_str()?.to_string())
+        })
+        .collect();
+    ids.sort();
+    assert!(
+        ids.len() >= 27,
+        "the golden corpus has shrunk to {} fixtures; this test discovers its cases from disk, so \
+         a vanished fixture silently stops being checked",
+        ids.len()
+    );
+    ids
+}
 
 fn golden_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -159,7 +165,7 @@ fn layout_golden_checksums_are_stable() {
     };
     let mut any_failed = false;
 
-    for case_id in CASE_IDS {
+    for case_id in &case_ids() {
         let input_path = base.join(format!("{case_id}.mmd"));
         let input = fs::read_to_string(&input_path)
             .map_err(|err| format!("failed reading {}: {err}", input_path.display()))
@@ -190,7 +196,7 @@ fn layout_golden_checksums_are_stable() {
 
         if bless {
             checksums.insert(case_id.to_string(), entry);
-        } else if let Some(expected) = checksums.get(*case_id) {
+        } else if let Some(expected) = checksums.get(case_id.as_str()) {
             let expected_checksum = expected["layout_checksum"].as_str().unwrap_or("");
             if checksum != expected_checksum {
                 eprintln!(
@@ -237,7 +243,7 @@ fn layout_golden_checksums_are_stable() {
 #[test]
 fn layout_golden_cases_are_deterministic_across_runs() {
     let base = golden_dir();
-    for case_id in CASE_IDS {
+    for case_id in &case_ids() {
         let input_path = base.join(format!("{case_id}.mmd"));
         let input = fs::read_to_string(&input_path)
             .map_err(|err| format!("failed reading {}: {err}", input_path.display()))

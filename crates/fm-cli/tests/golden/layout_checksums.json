@@ -17,6 +17,22 @@
       "layout_width": 1274.0,
       "node_count": 8
     },
+    "architecture_basic": {
+      "edge_count": 2,
+      "layout_algorithm": "auto",
+      "layout_checksum": "148c842ace56caa9",
+      "layout_height": 421.5,
+      "layout_width": 543.287476,
+      "node_count": 3
+    },
+    "block_basic": {
+      "edge_count": 0,
+      "layout_algorithm": "auto",
+      "layout_checksum": "da1494d822512022",
+      "layout_height": 551.5,
+      "layout_width": 1071.574951,
+      "node_count": 5
+    },
     "c4_basic": {
       "edge_count": 2,
       "layout_algorithm": "auto",
@@ -89,6 +105,14 @@
       "layout_width": 247.774994,
       "node_count": 3
     },
+    "flowchart_classdef": {
+      "edge_count": 2,
+      "layout_algorithm": "auto",
+      "layout_checksum": "d57f1d4ce6c3b307",
+      "layout_height": 170.5,
+      "layout_width": 673.799988,
+      "node_count": 3
+    },
     "flowchart_cycle": {
       "edge_count": 3,
       "layout_algorithm": "auto",
@@ -129,6 +153,22 @@
       "layout_width": 503.3125,
       "node_count": 6
     },
+    "journey_basic": {
+      "edge_count": 6,
+      "layout_algorithm": "auto",
+      "layout_checksum": "5504a5494006f7f7",
+      "layout_height": 274.5,
+      "layout_width": 2110.337402,
+      "node_count": 7
+    },
+    "kanban_basic": {
+      "edge_count": 0,
+      "layout_algorithm": "auto",
+      "layout_checksum": "a6c9da29b2572ff1",
+      "layout_height": 478.5,
+      "layout_width": 932.0,
+      "node_count": 7
+    },
     "malformed_recovery": {
       "edge_count": 2,
       "layout_algorithm": "auto",
@@ -144,6 +184,14 @@
       "layout_height": 1058.405884,
       "layout_width": 994.383423,
       "node_count": 6
+    },
+    "packet_basic": {
+      "edge_count": 0,
+      "layout_algorithm": "auto",
+      "layout_checksum": "9d22ae763391b8c3",
+      "layout_height": 369.0,
+      "layout_width": 1128.0,
+      "node_count": 8
     },
     "pie_basic": {
       "edge_count": 0,
@@ -167,6 +215,22 @@
       "layout_checksum": "fbaa0703757435f0",
       "layout_height": 572.5,
       "layout_width": 305.581238,
+      "node_count": 3
+    },
+    "sankey_basic": {
+      "edge_count": 8,
+      "layout_algorithm": "auto",
+      "layout_checksum": "a16658929242db33",
+      "layout_height": 3802.0,
+      "layout_width": 744.924988,
+      "node_count": 7
+    },
+    "sequence_advanced": {
+      "edge_count": 11,
+      "layout_algorithm": "auto",
+      "layout_checksum": "912fb3d1a2e07d5e",
+      "layout_height": 1566.5,
+      "layout_width": 677.899963,
       "node_count": 3
     },
     "sequence_basic": {
@@ -193,6 +257,14 @@
       "layout_width": 228.800003,
       "node_count": 3
     },
+    "state_composite": {
+      "edge_count": 16,
+      "layout_algorithm": "auto",
+      "layout_checksum": "6f24424c5a9e77ee",
+      "layout_height": 2053.5,
+      "layout_width": 641.3125,
+      "node_count": 15
+    },
     "stress_120_nodes": {
       "edge_count": 130,
       "layout_algorithm": "auto",
@@ -216,6 +288,14 @@
       "layout_height": 480.0,
       "layout_width": 564.0,
       "node_count": 5
+    },
+    "xychart_comprehensive": {
+      "edge_count": 3,
+      "layout_algorithm": "auto",
+      "layout_checksum": "00af8a7325694c2b",
+      "layout_height": 480.0,
+      "layout_width": 576.0,
+      "node_count": 12
     }
   },
   "version": 1

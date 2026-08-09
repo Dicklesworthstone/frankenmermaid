@@ -4261,3 +4261,269 @@ fn a_composite_state_is_not_also_drawn_as_a_plain_node() {
         duplicated.join("\n  ")
     );
 }
+
+/// One rendered flowchart node: its visible label and a signature of the geometry primitive the
+/// renderer chose for it, normalised so position and label width cannot affect the comparison.
+struct RenderedShape {
+    label: String,
+    /// Element name plus the shape-defining attribute, with absolute coordinates stripped: `rect`
+    /// keyed on its corner radius as a FRACTION of its height, `path` on its vertex count, and the
+    /// round family on the element name alone. Two declared shapes that produce equal signatures
+    /// are indistinguishable on screen.
+    signature: String,
+    corner_radius_ratio: Option<f32>,
+}
+
+/// Pull each `fm-node` group's label and shape signature out of a rendered flowchart.
+///
+/// Reads the whole group rather than stopping at the first `</g>`: the subroutine shape wraps its
+/// rect and its two inner bars in a nested `<g>`, so a naive split truncates before the `<text>` and
+/// reports a labelled node as unlabelled — which is indistinguishable at a glance from a real defect.
+fn rendered_node_shapes(svg: &str) -> Vec<RenderedShape> {
+    let attr = |tag: &str, name: &str| -> Option<f32> {
+        let key = format!("{name}=\"");
+        let start = tag.find(&key)? + key.len();
+        let rest = &tag[start..];
+        rest[..rest.find('"')?].parse().ok()
+    };
+
+    let mut out = Vec::new();
+    for chunk in svg.split("<g id=\"fm-node").skip(1) {
+        // The group ends at the LAST `</g>` before the next node group starts, so take the whole
+        // chunk: anything after it belongs to a different node and carries a different data-id.
+        let label = chunk
+            .split("<text")
+            .skip(1)
+            .filter_map(|t| {
+                let open = t.find('>')?;
+                let close = t[open + 1..].find("</text>")?;
+                Some(t[open + 1..open + 1 + close].to_string())
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        if label.is_empty() {
+            continue;
+        }
+        let Some(tag) = chunk.split('<').find(|t| {
+            t.starts_with("rect ")
+                || t.starts_with("circle ")
+                || t.starts_with("ellipse ")
+                || t.starts_with("polygon ")
+                || t.starts_with("path ")
+        }) else {
+            continue;
+        };
+        let element = tag
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let (signature, corner_radius_ratio) = match element.as_str() {
+            "rect" => {
+                let height = attr(tag, "height").unwrap_or(1.0).max(1.0);
+                let ratio = attr(tag, "rx").unwrap_or(0.0) / height;
+                // Bars distinguish a subroutine from a plain rect of the same radius.
+                let bars = chunk.matches("<line").count();
+                (format!("rect(rx/h={ratio:.3},bars={bars})"), Some(ratio))
+            }
+            "path" => {
+                let vertices = tag.matches(" L").count() + 1;
+                (format!("path({vertices} vertices)"), None)
+            }
+            other => (other.to_string(), None),
+        };
+        out.push(RenderedShape {
+            label,
+            signature,
+            corner_radius_ratio,
+        });
+    }
+    out
+}
+
+/// Every DECLARED node shape must render as a shape distinguishable from the others (bd-iicc).
+///
+/// A byte golden proves the picture has not changed; it cannot prove two different declared shapes
+/// were ever drawn differently. `all_node_shapes.mmd` declares eight distinct shapes precisely so
+/// that collapsing any pair is a defect, and the golden pins a collapse exactly as happily as a
+/// correct render.
+///
+/// IGNORED PENDING bd-3w93: `stadium([Stadium])` currently parses as Rounded, so it renders with the
+/// same `rx` as `round(Rounded)` and draws its own syntax brackets as the label `[Stadium]`.
+/// Removing this `#[ignore]` is bd-3w93's acceptance gate — fix the parser, do not weaken the guard.
+#[test]
+#[ignore = "bd-3w93: ([text]) parses as Rounded, so stadium collapses onto the rounded rectangle"]
+fn flowchart_declared_node_shapes_stay_distinct() {
+    let rendered = render_fixture("all_node_shapes");
+    let shapes = rendered_node_shapes(&rendered);
+
+    // Anchored to the FIXTURE's declarations, not to the golden's contents, so re-blessing cannot
+    // satisfy it. Order matches all_node_shapes.mmd.
+    let declared = [
+        "Rectangle",
+        "Rounded",
+        "Stadium",
+        "Subroutine",
+        "Diamond",
+        "Hexagon",
+        "Circle",
+        "Asymmetric",
+    ];
+
+    // The label check is not cosmetic: shape delimiters are SYNTAX, so a label carrying them back
+    // ("[Stadium]") is direct evidence the shape token was never recognised.
+    for label in declared {
+        assert!(
+            shapes.iter().any(|s| s.label == label),
+            "declared node {label:?} does not appear with that exact label; rendered labels are \
+             {:?} — brackets surviving into a label mean the shape token was parsed as content",
+            shapes.iter().map(|s| &s.label).collect::<Vec<_>>()
+        );
+    }
+
+    // THE PROPERTY THIS GUARD EXISTS FOR: eight declared shapes, eight distinguishable pictures.
+    let mut collisions = Vec::new();
+    for (i, a) in shapes.iter().enumerate() {
+        for b in shapes.iter().skip(i + 1) {
+            if a.signature == b.signature {
+                collisions.push(format!(
+                    "{:?} and {:?} both render as {} — different declared shapes, identical picture",
+                    a.label, b.label, a.signature
+                ));
+            }
+        }
+    }
+    assert!(
+        collisions.is_empty(),
+        "{} declared node shape(s) collapsed onto another shape:\n  {}",
+        collisions.len(),
+        collisions.join("\n  ")
+    );
+
+    // A stadium is a PILL: its corner radius is exactly half its height, which is what makes the
+    // ends semicircular. This is the assertion a plausible-looking wrong picture fails — a rounded
+    // rectangle with a merely largish radius looks fine in isolation and is still the wrong shape.
+    let stadium = shapes
+        .iter()
+        .find(|s| s.label == "Stadium")
+        .and_then(|s| s.corner_radius_ratio);
+    let rounded = shapes
+        .iter()
+        .find(|s| s.label == "Rounded")
+        .and_then(|s| s.corner_radius_ratio);
+    if let (Some(stadium), Some(rounded)) = (stadium, rounded) {
+        assert!(
+            (stadium - 0.5).abs() < 0.01,
+            "stadium corner radius must be half its height to form a pill, but renders at \
+             {stadium:.3} of its height"
+        );
+        assert!(
+            stadium > rounded,
+            "stadium ({stadium:.3} of height) must be more rounded than the plain rounded \
+             rectangle ({rounded:.3}), otherwise the two shapes are the same picture"
+        );
+    }
+}
+
+/// Every DECLARED edge type must render with the decoration that distinguishes it (bd-iicc).
+///
+/// `all_edge_types.mmd` declares nine edge syntaxes whose whole purpose is to look different:
+/// solid/dotted/thick strokes crossed with arrow, plain, circle, cross and bidirectional ends. A
+/// byte golden cannot tell you whether two of them collapsed onto one rendering.
+#[test]
+fn flowchart_declared_edge_types_render_their_declared_decoration() {
+    let rendered = render_fixture("all_edge_types");
+
+    // (target label, dashed, stroke-width is the thick one, marker-end, marker-start)
+    let expected = [
+        ("Arrow", false, false, Some("arrow-end"), None),
+        ("Line", false, false, None, None),
+        ("Dotted Arrow", true, false, Some("arrow-end"), None),
+        ("Dotted Line", true, false, None, None),
+        ("Thick Arrow", false, true, Some("arrow-filled"), None),
+        ("Thick Line", false, true, None, None),
+        ("Circle End", false, false, Some("arrow-circle"), None),
+        ("Cross End", false, false, Some("arrow-cross"), None),
+        (
+            "Double Arrow",
+            false,
+            false,
+            Some("arrow-end"),
+            Some("arrow-start"),
+        ),
+    ];
+
+    let edges: Vec<(String, String)> = rendered
+        .split("<g id=\"fm-edge")
+        .skip(1)
+        .filter_map(|chunk| {
+            let end = chunk.find("</g>").unwrap_or(chunk.len());
+            let chunk = &chunk[..end];
+            let title_start = chunk.find("<title>")? + 7;
+            let title_end = chunk[title_start..].find("</title>")?;
+            Some((
+                chunk[title_start..title_start + title_end].to_string(),
+                chunk.to_string(),
+            ))
+        })
+        .collect();
+
+    let mut thin_widths = Vec::new();
+    let mut thick_widths = Vec::new();
+    for (target, dashed, thick, marker_end, marker_start) in expected {
+        // The title names both endpoints, so matching on the target label ties each rendered edge
+        // back to the fixture line that declared it.
+        let found = edges.iter().find(|(title, _)| title.ends_with(target));
+        assert!(
+            found.is_some(),
+            "no rendered edge ends at declared target {target:?}; rendered edges are {:?}",
+            edges.iter().map(|(t, _)| t).collect::<Vec<_>>()
+        );
+        let Some((title, body)) = found else { continue };
+
+        assert_eq!(
+            body.contains("stroke-dasharray"),
+            dashed,
+            "edge {title:?} dashed-ness does not match its declared syntax"
+        );
+        assert_eq!(
+            body.contains("marker-start"),
+            marker_start.is_some(),
+            "edge {title:?} start-marker presence does not match its declared syntax"
+        );
+        match marker_end {
+            Some(marker) => assert!(
+                body.contains(&format!("marker-end=\"url(#{marker})\"")),
+                "edge {title:?} must terminate in {marker}, so its head is distinguishable from \
+                 the other declared end styles"
+            ),
+            None => assert!(
+                !body.contains("marker-end"),
+                "edge {title:?} is declared without an arrowhead but renders one"
+            ),
+        }
+
+        let width: f32 = body
+            .split("stroke-width=\"")
+            .nth(1)
+            .and_then(|t| t.find('"').and_then(|i| t[..i].parse().ok()))
+            .unwrap_or(f32::NAN);
+        assert!(width.is_finite(), "edge {title:?} has no stroke-width");
+        if thick {
+            thick_widths.push(width);
+        } else {
+            thin_widths.push(width);
+        }
+    }
+
+    // Relative, not a pinned number: `==>` must actually be drawn heavier than `-->`. Asserting the
+    // literal widths would re-pin what the golden already pins and would break on a restyle that
+    // preserves the distinction.
+    let thinnest_thick = thick_widths.iter().copied().fold(f32::INFINITY, f32::min);
+    let thickest_thin = thin_widths.iter().copied().fold(0.0_f32, f32::max);
+    assert!(
+        thinnest_thick > thickest_thin,
+        "every thick edge must be drawn heavier than every normal edge, but the lightest thick \
+         edge is {thinnest_thick} and the heaviest normal edge is {thickest_thin}"
+    );
+}
