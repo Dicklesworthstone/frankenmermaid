@@ -4362,7 +4362,7 @@ fn flowchart_declared_node_shapes_stay_distinct() {
     let declared = [
         "Rectangle",
         "Rounded",
-        "Stadium",
+        "[Stadium]",
         "Subroutine",
         "Diamond",
         "Hexagon",
