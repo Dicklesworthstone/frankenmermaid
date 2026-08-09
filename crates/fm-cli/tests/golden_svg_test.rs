@@ -4348,11 +4348,9 @@ fn rendered_node_shapes(svg: &str) -> Vec<RenderedShape> {
 /// that collapsing any pair is a defect, and the golden pins a collapse exactly as happily as a
 /// correct render.
 ///
-/// IGNORED PENDING bd-3w93: `stadium([Stadium])` currently parses as Rounded, so it renders with the
-/// same `rx` as `round(Rounded)` and draws its own syntax brackets as the label `[Stadium]`.
-/// Removing this `#[ignore]` is bd-3w93's acceptance gate — fix the parser, do not weaken the guard.
+/// Un-ignored by bd-3w93, which added the missing `([…])` Stadium probe. This guard is what proved
+/// the defect and is now its regression gate.
 #[test]
-#[ignore = "bd-3w93: ([text]) parses as Rounded, so stadium collapses onto the rounded rectangle"]
 fn flowchart_declared_node_shapes_stay_distinct() {
     let rendered = render_fixture("all_node_shapes");
     let shapes = rendered_node_shapes(&rendered);

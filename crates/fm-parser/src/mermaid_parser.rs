@@ -614,6 +614,32 @@ fn flow_statement_parser<'a>()
         .ignore_then(any().and_is(just("])").not()).repeated().to_slice())
         .then_ignore(just("])"));
 
+    // Same precedence trap as stadium, in the other direction: `[(…)]` opens with `[` and closes
+    // with `]`, so the rect rule below swallows it whole and yields Rect labelled "(Database)".
+    let cylinder_content = just("[(")
+        .ignore_then(any().and_is(just(")]").not()).repeated().to_slice())
+        .then_ignore(just(")]"));
+
+    // The slanted family, all of which open `[` and close `]` and are therefore all swallowed by
+    // the rect rule below. Each pair must be tried whole: `[/Trap\]` shares its opener with
+    // `[/Para/]`, so the closing delimiter is what separates them and a rule that matched on the
+    // opener alone would mis-assign them to each other.
+    let parallelogram_content = just("[/")
+        .ignore_then(any().and_is(just("/]").not()).repeated().to_slice())
+        .then_ignore(just("/]"));
+
+    let inv_parallelogram_content = just("[\\")
+        .ignore_then(any().and_is(just("\\]").not()).repeated().to_slice())
+        .then_ignore(just("\\]"));
+
+    let trapezoid_content = just("[/")
+        .ignore_then(any().and_is(just("\\]").not()).repeated().to_slice())
+        .then_ignore(just("\\]"));
+
+    let inv_trapezoid_content = just("[\\")
+        .ignore_then(any().and_is(just("/]").not()).repeated().to_slice())
+        .then_ignore(just("/]"));
+
     let rect_content = just('[')
         .ignore_then(any().filter(|c: &char| *c != ']').repeated().to_slice())
         .then_ignore(just(']'));
@@ -630,6 +656,11 @@ fn flow_statement_parser<'a>()
         double_circle_content.map(|label: &str| (label, NodeShape::DoubleCircle)),
         hexagon_content.map(|label: &str| (label, NodeShape::Hexagon)),
         stadium_content.map(|label: &str| (label, NodeShape::Stadium)),
+        cylinder_content.map(|label: &str| (label, NodeShape::Cylinder)),
+        parallelogram_content.map(|label: &str| (label, NodeShape::Parallelogram)),
+        inv_parallelogram_content.map(|label: &str| (label, NodeShape::InvParallelogram)),
+        trapezoid_content.map(|label: &str| (label, NodeShape::Trapezoid)),
+        inv_trapezoid_content.map(|label: &str| (label, NodeShape::InvTrapezoid)),
         rect_content.map(|label: &str| (label, NodeShape::Rect)),
         rounded_content.map(|label: &str| (label, NodeShape::Rounded)),
         diamond_content.map(|label: &str| (label, NodeShape::Diamond)),
@@ -2022,6 +2053,19 @@ fn parse_fast_simple_flowchart_node_borrowed(
             // Byte scan for a nested `[`/`]` rather than `contains(['[', ']'])`; both are ASCII.
             if !is_fast_flow_identifier(id)
                 || label_raw.as_bytes().iter().any(|&b| b == b'[' || b == b']')
+            {
+                return None;
+            }
+            // The slanted shape family `[/…/]`, `[\…\]`, `[/…\]`, `[\…/]` reaches here as a label
+            // that both opens AND closes with a slash, and this path hardcodes Rect — so it was
+            // silently flattening all four to rectangles whose labels kept the slashes (bd-3w93).
+            // Defer exactly those to the general parser. Adding `/` to the forbidden-byte gate
+            // above would work too, but would push every ordinary "TCP/IP" label off the fast path
+            // for no correctness gain.
+            let slanted = |b: u8| b == b'/' || b == b'\\';
+            if label_raw.len() >= 2
+                && label_raw.as_bytes().first().copied().is_some_and(slanted)
+                && label_raw.as_bytes().last().copied().is_some_and(slanted)
             {
                 return None;
             }
@@ -8736,22 +8780,10 @@ fn parse_node_token_with_config(raw: &str, config: &ParserConfig) -> Option<Node
         {
             return Some(parsed);
         }
-        if let Some(parsed) = parse_wrapped_with_config(core, '[', ']', NodeShape::Rect, config) {
-            return Some(parsed);
-        }
-        if let Some(parsed) = parse_wrapped_with_config(core, '(', ')', NodeShape::Rounded, config)
-        {
-            return Some(parsed);
-        }
-        if let Some(parsed) = parse_wrapped_with_config(core, '{', '}', NodeShape::Diamond, config)
-        {
-            return Some(parsed);
-        }
-        if let Some(parsed) =
-            parse_wrapped_str_with_config(core, ">", "]", NodeShape::Asymmetric, config)
-        {
-            return Some(parsed);
-        }
+        // The slanted family must ALSO precede the bare `[…]` probe (bd-3w93). It sat after it,
+        // where it was unreachable: `[/Para/]` opens `[` and closes `]`, so the Rect probe matched
+        // first and produced a Rect labelled "/Para/" — delimiters and all — and these four probes
+        // could never run for a well-formed token.
         if let Some(parsed) =
             parse_wrapped_str_with_config(core, "[/", "/]", NodeShape::Parallelogram, config)
         {
@@ -8769,6 +8801,22 @@ fn parse_node_token_with_config(raw: &str, config: &ParserConfig) -> Option<Node
         }
         if let Some(parsed) =
             parse_wrapped_str_with_config(core, "[\\", "/]", NodeShape::InvTrapezoid, config)
+        {
+            return Some(parsed);
+        }
+        if let Some(parsed) = parse_wrapped_with_config(core, '[', ']', NodeShape::Rect, config) {
+            return Some(parsed);
+        }
+        if let Some(parsed) = parse_wrapped_with_config(core, '(', ')', NodeShape::Rounded, config)
+        {
+            return Some(parsed);
+        }
+        if let Some(parsed) = parse_wrapped_with_config(core, '{', '}', NodeShape::Diamond, config)
+        {
+            return Some(parsed);
+        }
+        if let Some(parsed) =
+            parse_wrapped_str_with_config(core, ">", "]", NodeShape::Asymmetric, config)
         {
             return Some(parsed);
         }
@@ -14968,6 +15016,41 @@ Rel_Back(db, app, "Responds")"#,
                 text,
                 Some(label),
                 "node {id} label — shape delimiters must not survive into the text"
+            );
+        }
+    }
+
+    /// Every multi-char shape delimiter must beat the single-char delimiter nested inside it
+    /// (bd-3w93). `[(x)]` starts with `[` and ends with `]`, `([x])` starts with `(` and ends with
+    /// `)`, and `[/x/]` starts with `[` and ends with `]` — so a greedy single-char rule swallows
+    /// each of them and yields a plausible wrong shape whose label keeps the inner delimiters.
+    #[test]
+    fn flowchart_multi_char_shape_delimiters_beat_their_nested_single_char_forms() {
+        let input = "flowchart LR\n  A([Stadium])\n  B[(Database)]\n  C[/Para/]\n  D[\\Inv\\]\n  \
+                     E[/Trap\\]\n  F[\\InvTrap/]";
+        let parsed = parse_mermaid(input);
+        let got = |id: &str| {
+            parsed.ir.nodes.iter().find(|n| n.id == id).map(|n| {
+                (
+                    n.shape,
+                    n.label
+                        .and_then(|label_id| parsed.ir.labels.get(label_id.0))
+                        .map(|value| value.text.clone()),
+                )
+            })
+        };
+        for (id, shape, label) in [
+            ("A", NodeShape::Stadium, "Stadium"),
+            ("B", NodeShape::Cylinder, "Database"),
+            ("C", NodeShape::Parallelogram, "Para"),
+            ("D", NodeShape::InvParallelogram, "Inv"),
+            ("E", NodeShape::Trapezoid, "Trap"),
+            ("F", NodeShape::InvTrapezoid, "InvTrap"),
+        ] {
+            assert_eq!(
+                got(id),
+                Some((shape, Some(label.to_string()))),
+                "node {id} must keep its declared shape and shed its delimiters"
             );
         }
     }
