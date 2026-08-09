@@ -14957,11 +14957,15 @@ Rel_Back(db, app, "Responds")"#,
                 .ir
                 .nodes
                 .iter()
-                .find(|n| n.id.0 == id)
+                .find(|n| n.id == id)
                 .unwrap_or_else(|| panic!("node {id} not parsed"));
             assert_eq!(node.shape, shape, "node {id} shape");
+            let text = node
+                .label
+                .and_then(|label_id| parsed.ir.labels.get(label_id.0))
+                .map(|value| value.text.as_str());
             assert_eq!(
-                node.label.as_ref().map(|l| l.text.as_str()),
+                text,
                 Some(label),
                 "node {id} label — shape delimiters must not survive into the text"
             );
@@ -14973,12 +14977,14 @@ Rel_Back(db, app, "Responds")"#,
     fn flowchart_stadium_is_not_parsed_as_rounded() {
         let parsed = parse_mermaid("flowchart LR\n  pill([Pill])\n  soft(Soft)");
         let shape_of = |id: &str| {
-            parsed
-                .ir
-                .nodes
-                .iter()
-                .find(|n| n.id.0 == id)
-                .map(|n| (n.shape, n.label.as_ref().map(|l| l.text.clone())))
+            parsed.ir.nodes.iter().find(|n| n.id == id).map(|n| {
+                (
+                    n.shape,
+                    n.label
+                        .and_then(|label_id| parsed.ir.labels.get(label_id.0))
+                        .map(|value| value.text.clone()),
+                )
+            })
         };
         assert_eq!(
             shape_of("pill"),
