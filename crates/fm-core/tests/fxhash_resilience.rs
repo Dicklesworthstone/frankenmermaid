@@ -127,6 +127,7 @@ fn nodemap_performance_under_load() {
 fn tombstone_resilience() {
     const ROUNDS: usize = 10;
     const BATCH_SIZE: usize = 1000;
+    const HALF: usize = ROUNDS / 2;
 
     let mut map: NodeMap<usize> = NodeMap::default();
     let mut times = Vec::with_capacity(ROUNDS);
@@ -151,15 +152,72 @@ fn tombstone_resilience() {
         times.push(start.elapsed());
     }
 
-    // Verify no round takes > 10x the first round (no degradation)
-    let first_time = times[0].as_micros().max(1);
-    for (i, t) in times.iter().enumerate() {
-        let ratio = t.as_micros() / first_time;
-        assert!(
-            ratio < 20,
-            "Round {i} took {ratio}x longer than first round (tombstone accumulation?)"
-        );
+    // The load-independent half of this test, and the only part that speaks to CORRECTNESS
+    // (bd-aou7). Tombstone handling that loses a live key or resurrects a removed one fails here
+    // no matter how busy the host is, which no timing bound can claim. Each round r < ROUNDS-1 had
+    // its first half removed by round r+1; the final round keeps its whole batch.
+    for round in 0..ROUNDS {
+        let base = round * BATCH_SIZE;
+        let removed = if round + 1 < ROUNDS {
+            BATCH_SIZE / 2
+        } else {
+            0
+        };
+        for i in 0..removed {
+            assert!(
+                !map.contains_key(&IrNodeId(base + i)),
+                "round {round} key {i} was removed and must not be resurrected by a rehash"
+            );
+        }
+        for i in removed..BATCH_SIZE {
+            assert_eq!(
+                map.get(&IrNodeId(base + i)),
+                Some(&i),
+                "round {round} key {i} is live and must survive tombstone compaction"
+            );
+        }
     }
+    assert_eq!(
+        map.len(),
+        ROUNDS * BATCH_SIZE - (ROUNDS - 1) * (BATCH_SIZE / 2),
+        "surviving key count must match the insert/remove schedule exactly"
+    );
+
+    // Compare the MINIMUM of the early rounds against the MINIMUM of the late rounds, rather than
+    // every round against times[0] (bd-aou7).
+    //
+    // Tombstone accumulation is a SYSTEMATIC cost: it inflates every late round. A scheduling stall
+    // is a ONE-ROUND event. Contention can only ADD time to a measurement and never remove it, so a
+    // minimum over a group converges on the uncontended cost as long as ONE round in that group
+    // runs clean. That separates the two.
+    //
+    // The old form divided by times[0], a single sample chosen for its position, and that failed in
+    // BOTH directions. Measured round times on an idle worker were
+    // [490, 670, 410, 419, 405, 1052, 411, 386, 400, 406]us: round 0 is not the fastest round (it
+    // carries the map's initial growth, 490 against a 386 minimum), and round 5 already stalls to
+    // 2.7x the minimum with no load at all. Headroom to the 20x bound was ~9ms of stall on a single
+    // round, which is ordinary under `cargo test --workspace`. Worse, a stall in round 0 INFLATES
+    // the denominator, so every later ratio is divided by an inflated baseline and the assertion
+    // passes regardless of what the map does — it could stop checking anything without saying so.
+    // That is the same class as bd-u6z4 and bd-wadw, both closed in this file.
+    //
+    // This deliberately no longer fails on one anomalously slow round. A single spike is not
+    // tombstone accumulation, it is the false positive; the correctness assertions above are what
+    // now cover a genuinely broken round.
+    let early = times[..HALF].iter().min().copied().expect("HALF > 0");
+    let late = times[HALF..].iter().min().copied().expect("HALF < ROUNDS");
+    println!(
+        "tombstone rounds (us): {:?}, early min {}us, late min {}us",
+        times.iter().map(|t| t.as_micros()).collect::<Vec<_>>(),
+        early.as_micros(),
+        late.as_micros()
+    );
+    let baseline = early.as_micros().max(1);
+    assert!(
+        late.as_micros() < baseline * 20,
+        "late rounds degraded systematically: early min {early:?} vs late min {late:?} \
+         (tombstone accumulation?)"
+    );
 }
 
 // ============================================================================
