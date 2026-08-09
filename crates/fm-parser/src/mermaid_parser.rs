@@ -607,6 +607,13 @@ fn flow_statement_parser<'a>()
         .ignore_then(any().and_is(just("}}").not()).repeated().to_slice())
         .then_ignore(just("}}"));
 
+    // Stadium `([…])` must precede the single-char `(…)` rule below (bd-3w93). Without it the
+    // rounded rule matches — `(` opens, `[Stadium]` is consumed as ordinary content, `)` closes — so
+    // the node parses as Rounded carrying its own shape delimiters as label text.
+    let stadium_content = just("([")
+        .ignore_then(any().and_is(just("])").not()).repeated().to_slice())
+        .then_ignore(just("])"));
+
     let rect_content = just('[')
         .ignore_then(any().filter(|c: &char| *c != ']').repeated().to_slice())
         .then_ignore(just(']'));
@@ -622,6 +629,7 @@ fn flow_statement_parser<'a>()
     let node_shape = choice((
         double_circle_content.map(|label: &str| (label, NodeShape::DoubleCircle)),
         hexagon_content.map(|label: &str| (label, NodeShape::Hexagon)),
+        stadium_content.map(|label: &str| (label, NodeShape::Stadium)),
         rect_content.map(|label: &str| (label, NodeShape::Rect)),
         rounded_content.map(|label: &str| (label, NodeShape::Rounded)),
         diamond_content.map(|label: &str| (label, NodeShape::Diamond)),
@@ -8719,6 +8727,15 @@ fn parse_node_token_with_config(raw: &str, config: &ParserConfig) -> Option<Node
         {
             return Some(parsed);
         }
+        // Stadium `([…])`, before BOTH single-char probes below (bd-3w93). Against `(…)` it is the
+        // ordinary multi-char-delimiter-first rule this chain already follows for `[(`/`[[`. Against
+        // `[…]` it only matters under `auto_close_delimiters`, where an unterminated `([x` would
+        // otherwise be salvaged as a Rect whose label keeps a stray `(`.
+        if let Some(parsed) =
+            parse_wrapped_str_with_config(core, "([", "])", NodeShape::Stadium, config)
+        {
+            return Some(parsed);
+        }
         if let Some(parsed) = parse_wrapped_with_config(core, '[', ']', NodeShape::Rect, config) {
             return Some(parsed);
         }
@@ -14918,6 +14935,58 @@ Rel_Back(db, app, "Responds")"#,
             parsed.ir.nodes.len() >= 8,
             "Should have 8 shaped nodes, got {}",
             parsed.ir.nodes.len()
+        );
+
+        // Assert the SHAPES, not just the count (bd-3w93). Counting alone is satisfied by every
+        // node parsing as Rounded, and that is exactly what happened: `D([Stadium])` parsed as
+        // Rounded with the literal label `[Stadium]` while this test stayed green for months.
+        // Each shape's delimiters are also its label boundary, so checking the label catches a
+        // delimiter drifting into the text even when the shape happens to be right.
+        let expected = [
+            ("A", NodeShape::Rect, "Rectangle"),
+            ("B", NodeShape::Rounded, "Rounded"),
+            ("C", NodeShape::Diamond, "Diamond"),
+            ("D", NodeShape::Stadium, "Stadium"),
+            ("E", NodeShape::Subroutine, "Subroutine"),
+            ("F", NodeShape::Cylinder, "Database"),
+            ("G", NodeShape::DoubleCircle, "Circle"),
+            ("H", NodeShape::Asymmetric, "Asymmetric"),
+        ];
+        for (id, shape, label) in expected {
+            let node = parsed
+                .ir
+                .nodes
+                .iter()
+                .find(|n| n.id.0 == id)
+                .unwrap_or_else(|| panic!("node {id} not parsed"));
+            assert_eq!(node.shape, shape, "node {id} shape");
+            assert_eq!(
+                node.label.as_ref().map(|l| l.text.as_str()),
+                Some(label),
+                "node {id} label — shape delimiters must not survive into the text"
+            );
+        }
+    }
+
+    /// A stadium and a rounded rectangle are different shapes and must stay different (bd-3w93).
+    #[test]
+    fn flowchart_stadium_is_not_parsed_as_rounded() {
+        let parsed = parse_mermaid("flowchart LR\n  pill([Pill])\n  soft(Soft)");
+        let shape_of = |id: &str| {
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .find(|n| n.id.0 == id)
+                .map(|n| (n.shape, n.label.as_ref().map(|l| l.text.clone())))
+        };
+        assert_eq!(
+            shape_of("pill"),
+            Some((NodeShape::Stadium, Some("Pill".to_string())))
+        );
+        assert_eq!(
+            shape_of("soft"),
+            Some((NodeShape::Rounded, Some("Soft".to_string())))
         );
     }
 
