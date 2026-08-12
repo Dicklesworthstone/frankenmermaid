@@ -122,3 +122,7 @@ perf.data.old
 # Generated input for the head-to-head harness (the corpus is regenerated + hash-checked per run;
 # see scripts/headtohead/pins.json). The run-*.jsonl / summary-*.json evidence IS committed.
 .benchmarks/headtohead/corpus.json
+# Unpinned local dumps. Named cert-* evidence stays tracked; these are
+# host-timestamped reruns and CPU profiles, not certification artifacts.
+.benchmarks/headtohead/profiles/
+.benchmarks/headtohead/ci-shared-subgraph-*-equivalence/
