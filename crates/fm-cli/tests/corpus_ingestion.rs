@@ -645,6 +645,12 @@ fn assert_xl_svg_completion(name: &str, input: &str, expected_nodes: usize, expe
         expected_edges,
         "{name} SVG omitted authored edge groups"
     );
+    for (edge_index, edge) in first.split("<g id=\"fm-edge-").skip(1).enumerate() {
+        assert!(
+            edge.contains("<path d=\""),
+            "{name} SVG omitted a routed path for edge {edge_index}"
+        );
+    }
 }
 
 const XL_NODE_COUNT: usize = 2_000;
