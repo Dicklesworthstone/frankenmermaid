@@ -710,5 +710,9 @@ export function assertXlCapabilityFixtures() {
     if (item.dnf_allowed !== true || item.js_budget_ms < 600_000) {
       throw new Error(`XL capability fixture ${item.id} must preserve DNF admission and its 600s budget`);
     }
+    const text = generate(item)[0];
+    if (text.length < 50_000) {
+      throw new Error(`XL capability fixture ${item.id} is no longer CI-scale`);
+    }
   }
 }
