@@ -21,6 +21,7 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import {
   accessSync,
   constants,
@@ -48,9 +49,16 @@ const BOOTSTRAP_RESAMPLES = 2_000;
 const PARSE_MIN_SAMPLE_MS = 250;
 const PARSE_CALIBRATION_TARGET_MS =
   PARSE_MIN_SAMPLE_MS + Math.ceil(PARSE_MIN_SAMPLE_MS / 2);
+const CHROMIUM_STARTUP_ATTEMPTS = 2;
+const CHROMIUM_EXIT_CONFIRM_MS = 5_000;
+const CHROMIUM_STARTUP_STDERR_TAIL_BYTES = 4_096;
 
 function effectRepsForMode(reps, parseOnly) {
   return parseOnly ? Math.max(MIN_NULL_ROUNDS, reps) : reps;
+}
+
+function appendStartupStderrTail(tail, chunk) {
+  return `${tail}${String(chunk)}`.slice(-CHROMIUM_STARTUP_STDERR_TAIL_BYTES);
 }
 
 // Bundle cache. Read by node, never by the browser, so a hidden dir is fine here.
@@ -181,36 +189,84 @@ class Cdp {
   close() { this.#ws.close(); }
 }
 
+async function confirmChromiumExit(proc) {
+  if (proc.exitCode !== null || proc.signalCode !== null) return true;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      proc.removeListener('exit', exited);
+      resolve(false);
+    }, CHROMIUM_EXIT_CONFIRM_MS);
+    const exited = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    proc.once('exit', exited);
+  });
+}
+
+async function stopChromiumForStartupRetry(proc) {
+  if (proc.exitCode === null && proc.signalCode === null) {
+    try {
+      proc.kill('SIGKILL');
+    } catch {
+      return false;
+    }
+  }
+  return confirmChromiumExit(proc);
+}
+
 async function launchChromium() {
   const bin = resolveChromiumBinary(process.env.FM_CHROMIUM_BIN, PINS.chromium.binary);
-  const profile = mkdtempSync(join(PROFILE_ROOT, 'fm-h2h-profile-'));
-  const port = 9500 + Math.floor(Math.random() * 400);
-  const proc = spawn(bin, [
-    '--headless=new',
-    `--remote-debugging-port=${port}`,
-    `--user-data-dir=${profile}`,
-    '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
-    '--no-first-run', '--no-default-browser-check', '--disable-extensions',
-    '--disable-background-networking', '--disable-sync', '--metrics-recording-only',
-    '--mute-audio', '--hide-scrollbars',
-    'about:blank',
-  ], { stdio: ['ignore', 'ignore', 'ignore'] });
-  let spawnError = null;
-  proc.once('error', (error) => { spawnError = error; });
+  let lastError = null;
+  let lastStderrTail = '';
+  for (let attempt = 1; attempt <= CHROMIUM_STARTUP_ATTEMPTS; attempt++) {
+    const profile = mkdtempSync(join(PROFILE_ROOT, 'fm-h2h-profile-'));
+    const port = 9500 + Math.floor(Math.random() * 400);
+    const proc = spawn(bin, [
+      '--headless=new',
+      `--remote-debugging-port=${port}`,
+      `--user-data-dir=${profile}`,
+      '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
+      '--no-first-run', '--no-default-browser-check', '--disable-extensions',
+      '--disable-background-networking', '--disable-sync', '--metrics-recording-only',
+      '--mute-audio', '--hide-scrollbars',
+      'about:blank',
+    ], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderrTail = '';
+    proc.stderr?.on('data', (chunk) => {
+      stderrTail = appendStartupStderrTail(stderrTail, chunk);
+    });
+    let spawnError = null;
+    proc.once('error', (error) => { spawnError = error; });
 
-  const deadline = Date.now() + 30_000;
-  for (;;) {
-    if (spawnError) throw new Error(`chromium failed to start from ${bin}: ${spawnError.message}`);
-    if (Date.now() > deadline) { proc.kill('SIGKILL'); throw new Error('chromium did not expose a devtools port within 30s'); }
     try {
-      const res = await fetch(`http://127.0.0.1:${port}/json/version`);
-      if (res.ok) {
-        const info = await res.json();
-        return { proc, port, info, bin, cdp: await Cdp.attach(info.webSocketDebuggerUrl) };
+      const deadline = Date.now() + 30_000;
+      for (;;) {
+        if (spawnError) throw new Error(`chromium failed to start from ${bin}: ${spawnError.message}`);
+        if (Date.now() > deadline) throw new Error('chromium did not expose a devtools port within 30s');
+        try {
+          const res = await fetch(`http://127.0.0.1:${port}/json/version`);
+          if (res.ok) {
+            const info = await res.json();
+            return { proc, port, info, bin, cdp: await Cdp.attach(info.webSocketDebuggerUrl) };
+          }
+        } catch { /* not up yet */ }
+        await new Promise((r) => setTimeout(r, 120));
       }
-    } catch { /* not up yet */ }
-    await new Promise((r) => setTimeout(r, 120));
+    } catch (error) {
+      lastError = error;
+      lastStderrTail = stderrTail;
+      if (!(await stopChromiumForStartupRetry(proc))) {
+        throw new Error(`chromium startup failed and process exit was not confirmed: ${error.message}`);
+      }
+    }
   }
+  const diagnostic = lastStderrTail.length > 0
+    ? `; chromium stderr tail: ${JSON.stringify(lastStderrTail)}`
+    : '';
+  throw new Error(
+    `chromium did not expose a devtools port after ${CHROMIUM_STARTUP_ATTEMPTS} clean startup attempts: ${lastError.message}${diagnostic}`,
+  );
 }
 
 // ---------------------------------------------------------------- deadlines
@@ -604,6 +660,24 @@ const PAGE_PROBE = `async ({ text, tag }) => {
 }`;
 
 if (has('self-test')) {
+  const startupTail = appendStartupStderrTail('abcd', 'efgh');
+  const boundedStartupTail = appendStartupStderrTail('x'.repeat(CHROMIUM_STARTUP_STDERR_TAIL_BYTES), 'tail');
+  if (startupTail !== 'abcdefgh' || boundedStartupTail.length !== CHROMIUM_STARTUP_STDERR_TAIL_BYTES || !boundedStartupTail.endsWith('tail')) {
+    throw new Error('chromium startup stderr tail must retain only the newest bounded diagnostic');
+  }
+  const exitedProcess = new EventEmitter();
+  exitedProcess.exitCode = null;
+  exitedProcess.signalCode = null;
+  exitedProcess.kill = (signal) => {
+    queueMicrotask(() => {
+      exitedProcess.signalCode = signal;
+      exitedProcess.emit('exit', null, signal);
+    });
+    return true;
+  };
+  if (!(await stopChromiumForStartupRetry(exitedProcess)) || exitedProcess.signalCode !== 'SIGKILL') {
+    throw new Error('chromium startup retry must wait for confirmed process exit');
+  }
   const timing = stats([3, 1]);
   if (timing.p50 !== 2) throw new Error('timing median must average the two middle values');
   if (timing.samples.join(',') !== '1,3') throw new Error('timing samples must remain available for the effect CI');
