@@ -2076,26 +2076,19 @@
       return candidates;
     })();
 
-    // Families the live WASM runtime draws in the gallery and spotlight; everything else uses the
-    // mermaid.js baseline. This set is EVIDENCE-BASED, not aspirational: every entry was rendered
-    // through the shipped pkg/frankenmermaid_bg.wasm build and reviewed against the baseline.
-    // Families whose engine output is still visibly weaker stay on the baseline and say why in
-    // `spotlightReasons` (class/state fold `: label` transition labels into the target node;
-    // gantt has no time axis yet; sankey, kanban, block-beta and C4 label placement is coarse).
-    const frankenReadyCategories = new Set([
-      "flowchart",
-      "sequence",
-      "er",
-      "journey",
-      "timeline",
-      "pie",
-      "mindmap",
-      "quadrantChart",
-      "xyChart",
-      "packetBeta"
-    ]);
+    // Every family the engine dispatches renders through the live WASM runtime (GH#8): this page
+    // showcases THIS engine, so all 24 categories route to pkg/frankenmermaid_bg.wasm — verified
+    // per-sample by scripts/verify_demo_samples.mjs. The mermaid.js baseline remains only as the
+    // in-page fallback when the runtime fails to boot or a render throws, and as the comparison
+    // surface in the playground. Families where the engine's output is still visibly rougher say
+    // so honestly in `spotlightReasons` instead of being quietly swapped to the baseline.
+    // Lazily derived from DIAGRAM_SAMPLES (declared below; renders happen long after both exist).
+    let frankenReadyCategories = null;
 
     function shouldUseFranken(category) {
+      if (!frankenReadyCategories) {
+        frankenReadyCategories = new Set(DIAGRAM_SAMPLES.map((entry) => entry.category));
+      }
       return frankenReadyCategories.has(category);
     }
 
@@ -2574,10 +2567,10 @@
     const spotlightReasons = {
       flowchart: "Shows the strongest currently implemented family with multi-stage operational flows and readable subgraphs.",
       sequence: "Exercises participant orchestration and message flow for real application and service interactions. This is the one family the engine still reports as Partial.",
-      class: "Surfaces structural modeling for realistic domain objects instead of toy inheritance examples. Rendered through the mermaid baseline: the engine still folds `: label` relationship labels into the target class name.",
-      state: "Makes lifecycle and rollback behavior visible in the kinds of approval systems real teams run. Rendered through the mermaid baseline: the engine still folds `: label` transition labels into the target state name.",
+      class: "Surfaces structural modeling for realistic domain objects instead of toy inheritance examples. Rendered live by the engine; known gap: `: label` relationship labels still fold into the target class name.",
+      state: "Makes lifecycle and rollback behavior visible in the kinds of approval systems real teams run. Rendered live by the engine; known gap: `: label` transition labels still fold into the target state name.",
       er: "Shows data relationships people use for platform, billing, audit, and operations models, including crow's-foot cardinality.",
-      gantt: "Demonstrates schedule storytelling with a realistic delivery program. Rendered through the mermaid baseline: the engine lays out task dependencies but has no calendar axis yet.",
+      gantt: "Demonstrates schedule storytelling with a realistic delivery program. Rendered live by the engine; known gap: task dependencies lay out but there is no calendar axis yet.",
       journey: "Covers user and operator experience mapping rather than only engineering process diagrams.",
       timeline: "Shows narrative milestone views that product and operations teams actually present.",
       pie: "Covers summary visualization families people still expect from Mermaid-compatible tooling.",
@@ -2585,11 +2578,11 @@
       mindmap: "Exercises the radial layout family on a hierarchy that fans out from a single root.",
       requirement: "Covers traceable requirement/verification modeling, including relationship kinds like derives and refines.",
       quadrantChart: "Proves the fixed-axis chart family: four labelled quadrants with normalized point placement.",
-      sankey: "Exercises weighted flow between stages. Rendered through the mermaid baseline while the engine's ribbon geometry is still coarse.",
+      sankey: "Exercises weighted flow between stages. Rendered live by the engine; its ribbon geometry is still coarse.",
       xyChart: "Covers the bar plus line chart family with an explicit value axis.",
-      blockBeta: "Exercises the fixed-column grid family. Rendered through the mermaid baseline while the engine's block packing is still coarse.",
+      blockBeta: "Exercises the fixed-column grid family. Rendered live by the engine; its block packing is still coarse.",
       packetBeta: "Covers bit-range packet layouts, the most structurally different family in the set.",
-      architectureBeta: "Shows grouped services with edge-anchored connections. Rendered through the mermaid baseline while the engine's icon and port rendering catches up.",
+      architectureBeta: "Shows grouped services with edge-anchored connections. Rendered live by the engine; icon and port rendering is still catching up.",
       c4Context: "Covers the C4 level-1 system context view with boundaries and external systems.",
       c4Container: "Covers the C4 level-2 container view including datastore containers.",
       c4Component: "Covers the C4 level-3 component decomposition of a single container.",

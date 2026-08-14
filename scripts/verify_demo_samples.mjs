@@ -11,13 +11,18 @@
 //   * it renders each example via the real WASM `renderSvg` and fails on any that throws or that
 //     silently produces empty output.
 //
-// GH#5 extended this guard to the OTHER render path: the showcase only routes the
+// GH#5 extended this guard to the OTHER render path: at the time the showcase routed only 10
 // `frankenReadyCategories` families through the WASM engine — every other family (and any WASM
-// failure) falls through to the mermaid.js baseline. The "Rendering Requirements Trace" tile
+// failure) fell through to the mermaid.js baseline. The "Rendering Requirements Trace" tile
 // broke on THAT path (mermaid's requirement grammar rejects unquoted values containing `-`)
-// while this script stayed green, because it only exercised the WASM path. Step 4 below now
+// while this script stayed green, because it only exercised the WASM path. Step 4 below
 // parses every sample through real mermaid.js (same major as the CDN pin in the HTML) under
 // jsdom, so a sample that either engine rejects fails the guard.
+//
+// GH#8/#9: the showcase now routes ALL supported families through the WASM engine (the page
+// showcases this engine); mermaid.js remains only as the boot/render-failure fallback and the
+// playground comparison surface. The step-4 baseline parse stays: the fallback path must keep
+// accepting every shipped sample.
 //
 // Usage (after `./build-wasm.sh` so pkg/ is current, and `bun install` in scripts/ for the
 // mermaid baseline dependencies):
