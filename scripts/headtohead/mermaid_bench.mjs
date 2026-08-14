@@ -52,6 +52,7 @@ const PARSE_CALIBRATION_TARGET_MS =
 const CHROMIUM_STARTUP_ATTEMPTS = 2;
 const CHROMIUM_EXIT_CONFIRM_MS = 5_000;
 const CHROMIUM_STARTUP_STDERR_TAIL_BYTES = 4_096;
+const DEVTOOLS_PORT_LINE = /DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//;
 
 function effectRepsForMode(reps, parseOnly) {
   return parseOnly ? Math.max(MIN_NULL_ROUNDS, reps) : reps;
@@ -59,6 +60,13 @@ function effectRepsForMode(reps, parseOnly) {
 
 function appendStartupStderrTail(tail, chunk) {
   return `${tail}${String(chunk)}`.slice(-CHROMIUM_STARTUP_STDERR_TAIL_BYTES);
+}
+
+function devtoolsPortFromStderr(stderrTail) {
+  const match = DEVTOOLS_PORT_LINE.exec(stderrTail);
+  if (!match) return null;
+  const port = Number.parseInt(match[1], 10);
+  return Number.isSafeInteger(port) && port > 0 && port <= 65_535 ? port : null;
 }
 
 // Bundle cache. Read by node, never by the browser, so a hidden dir is fine here.
@@ -221,10 +229,9 @@ async function launchChromium() {
   let lastStderrTail = '';
   for (let attempt = 1; attempt <= CHROMIUM_STARTUP_ATTEMPTS; attempt++) {
     const profile = mkdtempSync(join(PROFILE_ROOT, 'fm-h2h-profile-'));
-    const port = 9500 + Math.floor(Math.random() * 400);
     const proc = spawn(bin, [
       '--headless=new',
-      `--remote-debugging-port=${port}`,
+      '--remote-debugging-port=0',
       `--user-data-dir=${profile}`,
       '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
       '--no-first-run', '--no-default-browser-check', '--disable-extensions',
@@ -244,6 +251,11 @@ async function launchChromium() {
       for (;;) {
         if (spawnError) throw new Error(`chromium failed to start from ${bin}: ${spawnError.message}`);
         if (Date.now() > deadline) throw new Error('chromium did not expose a devtools port within 30s');
+        const port = devtoolsPortFromStderr(stderrTail);
+        if (port === null) {
+          await new Promise((r) => setTimeout(r, 120));
+          continue;
+        }
         try {
           const res = await fetch(`http://127.0.0.1:${port}/json/version`);
           if (res.ok) {
@@ -664,6 +676,13 @@ if (has('self-test')) {
   const boundedStartupTail = appendStartupStderrTail('x'.repeat(CHROMIUM_STARTUP_STDERR_TAIL_BYTES), 'tail');
   if (startupTail !== 'abcdefgh' || boundedStartupTail.length !== CHROMIUM_STARTUP_STDERR_TAIL_BYTES || !boundedStartupTail.endsWith('tail')) {
     throw new Error('chromium startup stderr tail must retain only the newest bounded diagnostic');
+  }
+  if (
+    devtoolsPortFromStderr('DevTools listening on ws://127.0.0.1:49321/devtools/browser/id') !== 49321 ||
+    devtoolsPortFromStderr('DevTools listening on ws://127.0.0.1:0/devtools/browser/id') !== null ||
+    devtoolsPortFromStderr('not a DevTools listener') !== null
+  ) {
+    throw new Error('chromium DevTools port parser must accept only assigned loopback ports');
   }
   const exitedProcess = new EventEmitter();
   exitedProcess.exitCode = null;
