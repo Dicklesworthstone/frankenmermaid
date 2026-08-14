@@ -12915,6 +12915,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn renders_every_node_in_a_2000_node_flowchart_deterministically() {
+        const NODE_COUNT: usize = 2_000;
+
+        let mut input = String::from("flowchart LR\n");
+        for index in 0..NODE_COUNT {
+            input.push_str(&format!("  N{index}[node {index}]\n"));
+        }
+        for index in 0..NODE_COUNT - 1 {
+            input.push_str(&format!("  N{index}-->N{}\n", index + 1));
+        }
+
+        let ir = fm_parser::parse(&input).ir;
+        assert_eq!(ir.nodes.len(), NODE_COUNT);
+        assert_eq!(ir.edges.len(), NODE_COUNT - 1);
+
+        let layout = fm_layout::layout_diagram_traced(&ir).layout;
+        assert_eq!(layout.nodes.len(), NODE_COUNT);
+
+        let first = render_svg_with_layout(&ir, &layout, &SvgRenderConfig::default());
+        let second = render_svg_with_layout(&ir, &layout, &SvgRenderConfig::default());
+        assert_eq!(
+            first, second,
+            "large flowchart output must be deterministic"
+        );
+        assert!(first.contains("data-nodes=\"2000\""));
+        assert!(first.contains("id=\"fm-edge-"), "edges must be emitted");
+        for index in 0..NODE_COUNT {
+            assert!(
+                first.contains(&format!("data-id=\"N{index}\"")),
+                "render omitted authored node N{index}"
+            );
+        }
+    }
+
+    #[test]
     fn batch_renderer_reuses_shared_flowchart_prefix_byte_identically() {
         let inputs = [
             concat!(
