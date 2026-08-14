@@ -2588,6 +2588,7 @@ for (const { item, threads } of measurements) {
     row.mjs_budget_ms = m.budget_ms;
     row.mjs_elapsed_ms = m.elapsed_ms;
     row.mjs_dnf_phase = m.phase;
+    row.mjs_failure_class = m.failure_class ?? null;
     row.error = m.error;
     // Only the dedicated one-render probe can bound one job. A timed-phase deadline covers
     // calibration, warmup, A/A and effect samples together, so dividing that whole item budget by
@@ -2790,6 +2791,8 @@ const summary = {
   dnf: dnf.map((r) => ({
     id: r.id, budget_ms: r.mjs_budget_ms, phase: r.mjs_dnf_phase,
     fm_p50_ns: r.fm_p50_ns, speedup_lower_bound: r.speedup_lower_bound, error: r.error,
+    failure_class: r.mjs_failure_class,
+    native_output_validation: r.native_output_validation,
   })),
   // Rendered structural equivalence is the common semantic oracle for both modes. In parse mode it
   // proves the native parse results feed equivalent user-visible output without forcing either
@@ -2994,7 +2997,8 @@ if (dnf.length) {
         );
       }
     } else {
-      console.log(`  ${' '.repeat(22)} FAILED after ${(r.mjs_elapsed_ms / 1000).toFixed(1)}s: ${r.error}`);
+      const failureClass = r.mjs_failure_class ? ` [${r.mjs_failure_class}]` : '';
+      console.log(`  ${' '.repeat(22)} FAILED${failureClass} after ${(r.mjs_elapsed_ms / 1000).toFixed(1)}s: ${r.error}`);
       console.log(
         `  ${' '.repeat(22)} frankenmermaid: ${ms(r.fm_p50_ns)} ms. mermaid does not `
           + `${measurementMode} this input at any budget, so there is no ratio to state.`,

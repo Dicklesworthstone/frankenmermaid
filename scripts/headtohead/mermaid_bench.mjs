@@ -80,6 +80,14 @@ function chromiumStartupRecoveryHint(stderrTail) {
     '`sudo /usr/lib/snapd/snap-discard-ns chromium`, then retry.';
 }
 
+/** Stable, queryable category for a comparator failure; the raw error remains the evidence. */
+function normalizedFailureClass(reason) {
+  const text = String(reason);
+  if (/\bRangeError\b|Maximum call stack size exceeded/.test(text)) return 'range_error';
+  if (/\b(?:out of memory|oom)\b/i.test(text)) return 'out_of_memory';
+  return 'uncategorized';
+}
+
 // Bundle cache. Read by node, never by the browser, so a hidden dir is fine here.
 const CACHE = join(homedir(), '.cache', 'fm-headtohead');
 
@@ -703,6 +711,14 @@ if (has('self-test')) {
     chromiumStartupRecoveryHint('Failed to create socket directory') !== ''
   ) {
     throw new Error('chromium snap namespace recovery hint must require the complete failure signature');
+  }
+  if (
+    normalizedFailureClass('RangeError: Maximum call stack size exceeded') !== 'range_error' ||
+    normalizedFailureClass('render failed after parse accepted: Maximum call stack size exceeded') !== 'range_error' ||
+    normalizedFailureClass('FATAL ERROR: JavaScript heap out of memory') !== 'out_of_memory' ||
+    normalizedFailureClass('mermaid rejected the render') !== 'uncategorized'
+  ) {
+    throw new Error('mermaid failure classification must retain only stable error categories');
   }
   const exitedProcess = new EventEmitter();
   exitedProcess.exitCode = null;
@@ -1354,6 +1370,7 @@ try {
         kind,
         phase,
         error: reason,
+        failure_class: kind === 'failed' ? normalizedFailureClass(reason) : null,
         budget_ms: budgetMs,
         elapsed_ms: elapsed,
         wall_s: elapsed / 1000,
