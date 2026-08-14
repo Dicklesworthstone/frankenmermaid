@@ -702,6 +702,11 @@ export function assertXlCapabilityFixtures() {
     'wide_xl_50x50', 'cyclic_scc_xl_2500', 'dense_dag_xl_2000', 'sequence_xl_2000',
     'class_xl_2000', 'state_xl_2000', 'er_xl_2000',
   ]);
+  const headers = new Map([
+    ['wide_xl_50x50', 'flowchart'], ['cyclic_scc_xl_2500', 'flowchart'], ['dense_dag_xl_2000', 'flowchart'],
+    ['sequence_xl_2000', 'sequenceDiagram'], ['class_xl_2000', 'classDiagram'], ['state_xl_2000', 'stateDiagram'],
+    ['er_xl_2000', 'erDiagram'],
+  ]);
   const actual = new Set(CORPUS.map((item) => item.id));
   if ([...expected].some((id) => !actual.has(id))) {
     throw new Error(`XL capability fixtures changed: expected ${[...expected].join(', ')}`);
@@ -713,6 +718,9 @@ export function assertXlCapabilityFixtures() {
     const text = generate(item)[0];
     if (text.length < 50_000) {
       throw new Error(`XL capability fixture ${item.id} is no longer CI-scale`);
+    }
+    if (!text.startsWith(headers.get(item.id))) {
+      throw new Error(`XL capability fixture ${item.id} no longer generates its declared syntax family`);
     }
   }
 }
