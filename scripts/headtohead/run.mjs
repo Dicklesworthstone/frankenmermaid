@@ -714,6 +714,16 @@ function validBuildRevision(record) {
 
 const validSha256 = (value) => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 
+// The sanctioned busy-host comparison order: each arm owns identical slot positions.
+const BALANCED_SQUARE = Object.freeze(['fm', 'mjs', 'mjs', 'fm', 'fm', 'mjs', 'mjs', 'fm']);
+
+function balancedSquareIsSymmetric(schedule = BALANCED_SQUARE) {
+  return schedule.length === 8
+    && schedule.filter((arm) => arm === 'fm').length === 4
+    && schedule.filter((arm) => arm === 'mjs').length === 4
+    && schedule.slice(0, 4).join('') === schedule.slice(4).join('');
+}
+
 function validRchBuildProvenance(builder, base, cleanOverlay) {
   return (
     typeof builder === 'string' &&
@@ -1138,6 +1148,9 @@ function fmBracket(before, after) {
 }
 
 if (has('self-test')) {
+  if (!balancedSquareIsSymmetric() || balancedSquareIsSymmetric(['fm', 'mjs'])) {
+    throw new Error('balanced-square slot symmetry regression');
+  }
   const perfect = { sufficient: true, n: 9, median: 1, ci95_lo: 1, ci95_hi: 1, half_width: 0 };
   const noisy = { sufficient: true, n: 9, median: 1, ci95_lo: 0.98, ci95_hi: 1.02, half_width: 0.02 };
   // Clause 3 fixtures. `biased` has a TIGHT CI that excludes 1.0 -- under the fleet-wide straddle
