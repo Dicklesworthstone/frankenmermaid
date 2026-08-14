@@ -9134,8 +9134,8 @@ fn force_temperature(iteration: usize, max_iterations: usize, k: f32) -> f32 {
 
 /// Compute force displacements for all nodes.
 ///
-/// Uses direct O(n^2) repulsive forces. For graphs > 100 nodes, uses
-/// Barnes-Hut grid approximation.
+/// Small diagrams use the exact O(n^2) kernel; larger diagrams use a
+/// deterministic adaptive Barnes-Hut quadtree.
 fn force_compute_displacements(
     positions: &[(f32, f32)],
     node_sizes: &[(f32, f32)],
@@ -9148,23 +9148,7 @@ fn force_compute_displacements(
     let k_sq = k * k;
 
     if n <= 100 {
-        // Direct O(n^2) repulsive forces.
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let dx = positions[i].0 - positions[j].0;
-                let dy = positions[i].1 - positions[j].1;
-                let dist_sq = dy.mul_add(dy, dx * dx).max(1.0);
-                // Fruchterman-Reingold repulsive force: k^2 / d
-                // Vector component: (dx / d) * (k^2 / d) = dx * k^2 / d^2
-                let force_over_d = k_sq / dist_sq;
-                let fx = dx * force_over_d;
-                let fy = dy * force_over_d;
-                displacements[i].0 += fx;
-                displacements[i].1 += fy;
-                displacements[j].0 -= fx;
-                displacements[j].1 -= fy;
-            }
-        }
+        force_direct_repulsion(positions, k_sq, &mut displacements);
     } else {
         // Barnes-Hut grid approximation for large graphs.
         force_barnes_hut_repulsion(positions, k_sq, &mut displacements);
@@ -9203,10 +9187,182 @@ fn force_compute_displacements(
     displacements
 }
 
-/// Barnes-Hut grid-based approximation for repulsive forces.
+/// Exact Fruchterman-Reingold repulsion, retained as the small-graph control.
+fn force_direct_repulsion(positions: &[(f32, f32)], k_sq: f32, displacements: &mut [(f32, f32)]) {
+    for (left_index, &(left_x, left_y)) in positions.iter().enumerate() {
+        for (right_index, &(right_x, right_y)) in positions.iter().enumerate().skip(left_index + 1)
+        {
+            let dx = left_x - right_x;
+            let dy = left_y - right_y;
+            let dist_sq = dy.mul_add(dy, dx * dx).max(1.0);
+            let force_over_d = k_sq / dist_sq;
+            let fx = dx * force_over_d;
+            let fy = dy * force_over_d;
+            displacements[left_index].0 += fx;
+            displacements[left_index].1 += fy;
+            displacements[right_index].0 -= fx;
+            displacements[right_index].1 -= fy;
+        }
+    }
+}
+
+const FORCE_QUADTREE_LEAF_CAPACITY: usize = 8;
+const FORCE_QUADTREE_MAX_DEPTH: usize = 24;
+const FORCE_QUADTREE_OPENING_SQ: f32 = 0.49;
+
+/// A deterministic Barnes-Hut cell. Children are ordered NW, NE, SW, SE.
+struct ForceQuadTreeNode {
+    center: (f32, f32),
+    half_width: f32,
+    mass: usize,
+    centroid: (f32, f32),
+    members: Vec<usize>,
+    children: [Option<Box<Self>>; 4],
+}
+
+impl ForceQuadTreeNode {
+    fn is_leaf(&self) -> bool {
+        self.children.iter().all(Option::is_none)
+    }
+}
+
+fn force_quadrant((x, y): (f32, f32), center: (f32, f32)) -> usize {
+    usize::from(x >= center.0) | (usize::from(y >= center.1) << 1)
+}
+
+fn force_build_quadtree(
+    positions: &[(f32, f32)],
+    members: &[usize],
+    center: (f32, f32),
+    half_width: f32,
+    depth: usize,
+) -> ForceQuadTreeNode {
+    let (sum_x, sum_y) = members
+        .iter()
+        .fold((0.0_f32, 0.0_f32), |(sum_x, sum_y), &member| {
+            (sum_x + positions[member].0, sum_y + positions[member].1)
+        });
+    let mass = members.len();
+    let centroid = (sum_x / mass as f32, sum_y / mass as f32);
+
+    if mass <= FORCE_QUADTREE_LEAF_CAPACITY || depth >= FORCE_QUADTREE_MAX_DEPTH {
+        return ForceQuadTreeNode {
+            center,
+            half_width,
+            mass,
+            centroid,
+            members: members.to_vec(),
+            children: std::array::from_fn(|_| None),
+        };
+    }
+
+    let mut child_members: [Vec<usize>; 4] = std::array::from_fn(|_| Vec::new());
+    for &member in members {
+        child_members[force_quadrant(positions[member], center)].push(member);
+    }
+    let child_half_width = half_width * 0.5;
+    let children = std::array::from_fn(|quadrant| {
+        (!child_members[quadrant].is_empty()).then(|| {
+            let child_center = (
+                center.0
+                    + if quadrant & 1 == 0 {
+                        -child_half_width
+                    } else {
+                        child_half_width
+                    },
+                center.1
+                    + if quadrant & 2 == 0 {
+                        -child_half_width
+                    } else {
+                        child_half_width
+                    },
+            );
+            Box::new(force_build_quadtree(
+                positions,
+                &child_members[quadrant],
+                child_center,
+                child_half_width,
+                depth + 1,
+            ))
+        })
+    });
+
+    ForceQuadTreeNode {
+        center,
+        half_width,
+        mass,
+        centroid,
+        members: Vec::new(),
+        children,
+    }
+}
+
+fn force_add_repulsion(
+    displacement: &mut (f32, f32),
+    from: (f32, f32),
+    to: (f32, f32),
+    mass: usize,
+    k_sq: f32,
+) {
+    let dx = from.0 - to.0;
+    let dy = from.1 - to.1;
+    let dist_sq = dy.mul_add(dy, dx * dx).max(1.0);
+    let force_over_d = (k_sq * mass as f32) / dist_sq;
+    displacement.0 = dx.mul_add(force_over_d, displacement.0);
+    displacement.1 = dy.mul_add(force_over_d, displacement.1);
+}
+
+fn force_accumulate_quadtree_repulsion(
+    node: &ForceQuadTreeNode,
+    positions: &[(f32, f32)],
+    target: usize,
+    k_sq: f32,
+    contains_target: bool,
+    displacement: &mut (f32, f32),
+) {
+    if node.is_leaf() {
+        for &member in &node.members {
+            if member != target {
+                force_add_repulsion(displacement, positions[target], positions[member], 1, k_sq);
+            }
+        }
+        return;
+    }
+
+    let dx = positions[target].0 - node.centroid.0;
+    let dy = positions[target].1 - node.centroid.1;
+    let dist_sq = dy.mul_add(dy, dx * dx).max(1.0);
+    let cell_width = node.half_width * 2.0;
+    if !contains_target && (cell_width * cell_width) / dist_sq < FORCE_QUADTREE_OPENING_SQ {
+        force_add_repulsion(
+            displacement,
+            positions[target],
+            node.centroid,
+            node.mass,
+            k_sq,
+        );
+        return;
+    }
+
+    let target_quadrant = force_quadrant(positions[target], node.center);
+    for (quadrant, child) in node.children.iter().enumerate() {
+        if let Some(child) = child {
+            force_accumulate_quadtree_repulsion(
+                child,
+                positions,
+                target,
+                k_sq,
+                contains_target && quadrant == target_quadrant,
+                displacement,
+            );
+        }
+    }
+}
+
+/// Adaptive Barnes-Hut approximation for repulsive forces.
 ///
-/// Divides the space into a grid and computes repulsive forces from
-/// grid cell centroids for distant nodes.
+/// Unlike the old fixed grid, this traverses only the cells needed for the
+/// current node and aggregates well-separated subtrees at their centroid.
 fn force_barnes_hut_repulsion(
     positions: &[(f32, f32)],
     k_sq: f32,
@@ -9228,98 +9384,13 @@ fn force_barnes_hut_repulsion(
         max_y = max_y.max(y);
     }
 
-    let range_x = (max_x - min_x).max(1.0);
-    let range_y = (max_y - min_y).max(1.0);
+    let half_width = ((max_x - min_x).max(max_y - min_y) * 0.5).max(1.0);
+    let center = ((min_x + max_x) * 0.5, (min_y + max_y) * 0.5);
+    let members: Vec<usize> = (0..n).collect();
+    let root = force_build_quadtree(positions, &members, center, half_width, 0);
 
-    // Grid size: roughly sqrt(n) cells per side.
-    let grid_size = (n as f32).sqrt().ceil() as usize;
-    let cell_w = range_x / grid_size as f32;
-    let cell_h = range_y / grid_size as f32;
-
-    // Assign nodes to grid cells and compute cell centroids.
-    let mut cell_sum_x = vec![0.0_f32; grid_size * grid_size];
-    let mut cell_sum_y = vec![0.0_f32; grid_size * grid_size];
-    let mut cell_count = vec![0_u32; grid_size * grid_size];
-    let mut node_cell = vec![0_usize; n];
-    let mut nodes_in_cell = vec![Vec::new(); grid_size * grid_size];
-
-    for (i, &(x, y)) in positions.iter().enumerate() {
-        let cx = ((x - min_x) / cell_w).floor() as usize;
-        let cy = ((y - min_y) / cell_h).floor() as usize;
-        let cx = cx.min(grid_size - 1);
-        let cy = cy.min(grid_size - 1);
-        let cell_idx = cy * grid_size + cx;
-        node_cell[i] = cell_idx;
-        cell_sum_x[cell_idx] += x;
-        cell_sum_y[cell_idx] += y;
-        cell_count[cell_idx] += 1;
-        nodes_in_cell[cell_idx].push(i);
-    }
-
-    // Compute centroids.
-    let mut centroids = vec![(0.0_f32, 0.0_f32, 0_u32); grid_size * grid_size];
-    for idx in 0..(grid_size * grid_size) {
-        if cell_count[idx] > 0 {
-            centroids[idx] = (
-                cell_sum_x[idx] / cell_count[idx] as f32,
-                cell_sum_y[idx] / cell_count[idx] as f32,
-                cell_count[idx],
-            );
-        }
-    }
-
-    let theta_sq: f32 = 1.5; // Barnes-Hut opening angle threshold squared
-
-    for i in 0..n {
-        let (px, py) = positions[i];
-        let my_cell = node_cell[i];
-
-        for (cell_idx, &(cx, cy, count)) in centroids.iter().enumerate() {
-            if count == 0 {
-                continue;
-            }
-
-            if cell_idx == my_cell {
-                // Same cell: compute direct forces.
-                for &j in &nodes_in_cell[my_cell] {
-                    if j == i {
-                        continue;
-                    }
-                    let dx = px - positions[j].0;
-                    let dy = py - positions[j].1;
-                    let dist_sq = dy.mul_add(dy, dx * dx).max(1.0);
-                    let force = k_sq / dist_sq.sqrt();
-                    let dist = dist_sq.sqrt();
-                    displacements[i].0 = (dx / dist).mul_add(force, displacements[i].0);
-                    displacements[i].1 = (dy / dist).mul_add(force, displacements[i].1);
-                }
-            } else {
-                // Different cell: check if far enough for approximation.
-                let dx = px - cx;
-                let dy = py - cy;
-                let dist_sq = dy.mul_add(dy, dx * dx).max(1.0);
-                let cell_size_sq = cell_w * cell_w + cell_h * cell_h;
-
-                if cell_size_sq / dist_sq < theta_sq {
-                    // Use centroid approximation (multiply force by count).
-                    let force = k_sq * count as f32 / dist_sq.sqrt();
-                    let dist = dist_sq.sqrt();
-                    displacements[i].0 = (dx / dist).mul_add(force, displacements[i].0);
-                    displacements[i].1 = (dy / dist).mul_add(force, displacements[i].1);
-                } else {
-                    // Too close: compute direct forces.
-                    for &j in &nodes_in_cell[cell_idx] {
-                        let dx2 = px - positions[j].0;
-                        let dy2 = py - positions[j].1;
-                        let dist_sq2 = dy2.mul_add(dy2, dx2 * dx2).max(1.0);
-                        let force2 = k_sq / dist_sq2.sqrt();
-                        let dist2 = dist_sq2.sqrt();
-                        displacements[i].0 = (dx2 / dist2).mul_add(force2, displacements[i].0);
-                        displacements[i].1 = (dy2 / dist2).mul_add(force2, displacements[i].1);
-                    }
-                }
-            }
-        }
+    for (target, displacement) in displacements.iter_mut().enumerate() {
+        force_accumulate_quadtree_repulsion(&root, positions, target, k_sq, true, displacement);
     }
 }
 
@@ -20776,6 +20847,47 @@ mod tests {
         let first = layout_diagram_force_traced(&ir);
         let second = layout_diagram_force_traced(&ir);
         assert_eq!(first, second, "Force layout must be deterministic");
+    }
+
+    #[test]
+    fn adaptive_barnes_hut_repulsion_is_deterministic_and_bounded_against_exact_control() {
+        let positions: Vec<(f32, f32)> = (0..144)
+            .map(|index| {
+                let row = index / 12;
+                let column = index % 12;
+                (
+                    column as f32 * 31.0 + (row % 3) as f32 * 2.5,
+                    row as f32 * 29.0 + (column % 4) as f32 * 1.75,
+                )
+            })
+            .collect();
+        let mut exact = vec![(0.0_f32, 0.0_f32); positions.len()];
+        let mut first = vec![(0.0_f32, 0.0_f32); positions.len()];
+        let mut second = vec![(0.0_f32, 0.0_f32); positions.len()];
+
+        force_direct_repulsion(&positions, 900.0, &mut exact);
+        force_barnes_hut_repulsion(&positions, 900.0, &mut first);
+        force_barnes_hut_repulsion(&positions, 900.0, &mut second);
+
+        assert_eq!(first, second, "quadtree traversal must be deterministic");
+        assert!(
+            first.iter().all(|(x, y)| x.is_finite() && y.is_finite()),
+            "quadtree approximation produced a non-finite displacement"
+        );
+
+        let exact_energy: f32 = exact.iter().map(|(x, y)| x.abs() + y.abs()).sum();
+        let error_energy: f32 = exact
+            .iter()
+            .zip(&first)
+            .map(|((exact_x, exact_y), (approx_x, approx_y))| {
+                (exact_x - approx_x).abs() + (exact_y - approx_y).abs()
+            })
+            .sum();
+        assert!(
+            error_energy / exact_energy < 0.12,
+            "quadtree relative force error exceeded the 12% tolerance: {}",
+            error_energy / exact_energy
+        );
     }
 
     #[test]

@@ -391,6 +391,9 @@ for (const item of items) {
       id: item.id,
       status: 'incumbent_did_not_render',
       revisions: texts.length,
+      // These bind the native validation to the exact corpus revision measured by run.mjs.
+      input_sha256: corpus.get(item.id).sha256,
+      fm_input_sha256: fmRecord.input_sha256,
       incumbent_status: jsRecord?.status ?? 'missing',
       incumbent_detail: jsRecord?.dnf ?? jsRecord?.error ?? null,
       equivalence: null,

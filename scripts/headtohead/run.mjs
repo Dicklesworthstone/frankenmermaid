@@ -1639,6 +1639,20 @@ if (has('self-test')) {
   ) {
     throw new Error('DNF exact-one-job lower-bound validation regression');
   }
+  if (
+    nativeDnfValidationStatus({ status: 'incumbent_did_not_render', native_output_validation: { verdict: 'pass' } }) !== 'native_verified'
+    || nativeDnfValidationStatus({ status: 'incumbent_did_not_render' }) !== 'missing_native_validation'
+    || nativeDnfValidationStatus({ status: 'compared', native_output_validation: { verdict: 'pass' } }) !== 'not_dnf_artifact'
+  ) {
+    throw new Error('DNF native-validation admission regression');
+  }
+  if (
+    preflightOutputProof({ status: 'verified' }, { status: 'missing_native_validation' }).status !== 'verified'
+    || preflightOutputProof({ status: 'no_matching_artifact' }, { status: 'native_verified' }).status !== 'native_dnf_verified'
+    || preflightOutputProof({ status: 'divergent' }, { status: 'native_invalid' }).status !== 'missing_output_proof'
+  ) {
+    throw new Error('pre-measure output-proof admission regression');
+  }
   const bracketRecord = (p50, nullControl = perfect) => ({
     status: 'ok',
     ...(measurementMode === 'parse' ? { parse_ns: { p50 } } : { pipeline_ns: { p50 } }),
@@ -1973,6 +1987,31 @@ if (pinArg !== 'off') {
 }
 env.pinned_cpu = pin;
 
+// Conflict resolution note (rebase of f26310c3 onto upstream): upstream already declares the
+// untimed provenance probe -- `fmCmd`/`fmArgs`/`fmProvenance`/`provenanceBinary` plus its
+// build-revision gates -- further down this file, so the copy this commit carried is dropped as a
+// duplicate. What upstream does NOT have, and what is therefore kept verbatim below, is the
+// preflight output-proof gate: it refuses to spend either engine's arm when no equivalence or
+// native-DNF proof matches this ELF. Dropping the whole hunk would have silently removed a gate.
+const preflightOutputProofs = items.map((item) => {
+  const inputSha = corpus.get(item.id)?.sha256;
+  const equivalence = findEquivalenceVerdict(item.id, inputSha, provenanceBinary.elf_sha256, PINS.mermaid.sha256);
+  const nativeDnfValidation = findDnfNativeValidation(
+    item.id,
+    inputSha,
+    provenanceBinary.elf_sha256,
+    PINS.mermaid.sha256,
+  );
+  return { id: item.id, ...preflightOutputProof(equivalence, nativeDnfValidation) };
+});
+const missingPreflightProofs = preflightOutputProofs.filter((proof) => proof.status === 'missing_output_proof');
+if (missingPreflightProofs.length > 0) {
+  console.error(
+    '[run] OUTPUT EQUIVALENCE PRE-FLIGHT FAIL: no matching proof for ' +
+    `${missingPreflightProofs.map((proof) => proof.id).join(', ')}; run scripts/headtohead/equivalence.mjs first`,
+  );
+  process.exit(7);
+}
 // ARM-ASYMMETRY GUARD (trap 3). The two engines are separate runtimes -- a Rust process and
 // Chromium -- so they cannot be interleaved inside one measured routine the way a same-binary A/B
 // can be. They run in sequence, which means host load drifting between the two phases biases the
@@ -2346,6 +2385,83 @@ function findEquivalenceVerdict(id, inputSha, elfSha, bundleSha) {
     };
   }
   return { status: 'no_matching_artifact', directory: equivalenceDir, rejected: candidates.slice(0, 4) };
+}
+
+/**
+ * A comparator DNF has no SVG from mermaid-js, so it cannot satisfy the ordinary cross-engine
+ * equivalence contract. It must instead link to the source-grounded native validation generated
+ * by equivalence.mjs from the same corpus bytes, Rust ELF, and pinned mermaid bundle.
+ */
+function findDnfNativeValidation(id, inputSha, elfSha, bundleSha) {
+  let names;
+  try {
+    names = readdirSync(equivalenceDir).filter((n) => n.startsWith('equivalence-') && n.endsWith('.json'));
+  } catch {
+    return { status: 'no_artifact_directory', directory: equivalenceDir };
+  }
+  const byNewest = names
+    .map((name) => ({ name, ts: Number(/-(\d+)\.json$/.exec(name)?.[1] ?? 0) }))
+    .sort((a, b) => b.ts - a.ts)
+    .map((entry) => entry.name);
+  const candidates = [];
+  for (const name of byNewest) {
+    let artifact;
+    try {
+      artifact = JSON.parse(readFileSync(join(equivalenceDir, name), 'utf8'));
+    } catch {
+      continue;
+    }
+    const row = (artifact.rows ?? []).find((r) => r.id === id);
+    if (!row) continue;
+    const mismatch = [];
+    if (row.input_sha256 !== inputSha) mismatch.push('input_sha256');
+    if (elfSha && artifact.provenance?.fm_elf_sha256 !== elfSha) mismatch.push('fm_elf_sha256');
+    if (bundleSha && artifact.pins?.bundle_sha256 !== bundleSha) mismatch.push('mermaid_bundle_sha256');
+    if (mismatch.length > 0) {
+      candidates.push({ artifact: name, mismatch });
+      continue;
+    }
+    const status = nativeDnfValidationStatus(row);
+    if (status !== 'native_verified' && status !== 'native_invalid') {
+      candidates.push({ artifact: name, status, reason: row.status });
+      continue;
+    }
+    const validation = row.native_output_validation;
+    return {
+      status,
+      artifact: name,
+      method: validation.method,
+      claim: validation.claim,
+      diagrams: validation.diagrams,
+      verified: validation.verified,
+      divergent: validation.divergent,
+      unverified: validation.unverified,
+      by_family: validation.by_family,
+      divergent_samples: validation.divergent_samples,
+      unverified_samples: validation.unverified_samples,
+    };
+  }
+  return { status: 'no_matching_artifact', directory: equivalenceDir, rejected: candidates.slice(0, 4) };
+}
+
+/** Fail closed unless an equivalence artifact explicitly records a passing DNF native validation. */
+function nativeDnfValidationStatus(row) {
+  if (row.status !== 'incumbent_did_not_render') return 'not_dnf_artifact';
+  if (!row.native_output_validation) return 'missing_native_validation';
+  return row.native_output_validation.verdict === 'pass' ? 'native_verified' : 'native_invalid';
+}
+
+/** Require a proof before the matching ELF may enter a timed comparator arm. */
+function preflightOutputProof(equivalence, nativeDnfValidation) {
+  if (equivalence.status === 'verified') return { status: 'verified', proof: equivalence };
+  if (nativeDnfValidation.status === 'native_verified') {
+    return { status: 'native_dnf_verified', proof: nativeDnfValidation };
+  }
+  return {
+    status: 'missing_output_proof',
+    equivalence,
+    native_dnf_validation: nativeDnfValidation,
+  };
 }
 
 // ---------------------------------------------------------------- join + gate
@@ -2857,6 +2973,19 @@ for (const row of ok) {
 const equivalenceFailures = ok
   .filter((r) => !r.content_verified)
   .map((r) => `${threadSweep.length > 0 ? `${r.id}@t${r.fm_worker_threads}` : r.id}:${r.output_equivalence.status}`);
+for (const row of dnf) {
+  const validation = findDnfNativeValidation(
+    row.id,
+    corpus.get(row.id)?.sha256,
+    elfShaForEquivalence,
+    PINS.mermaid.sha256,
+  );
+  row.native_output_validation = validation;
+  row.content_verified = validation.status === 'native_verified';
+}
+const dnfValidationFailures = dnf
+  .filter((row) => !row.content_verified)
+  .map((row) => `${threadSweep.length > 0 ? `${row.id}@t${row.fm_worker_threads}` : row.id}:${row.native_output_validation.status}`);
 const speedups = ok.map((r) => r.speedup);
 const speedupsMin = ok.map((r) => r.speedup_min);
 const speedupAggregate = speedups.length
@@ -2928,18 +3057,22 @@ const summary = {
   // proves the native parse results feed equivalent user-visible output without forcing either
   // engine to serialize into the other's internal AST representation.
   output_equivalence_gate: {
-    verdict: equivalenceFailures.length === 0
-      ? 'pass'
-      : (allowUnverifiedOutput ? 'admitted_unverified' : 'fail'),
-    rule: 'every measured row needs a passing cross-engine equivalence verdict from the same input, '
-      + 'Rust ELF and mermaid bundle (scripts/headtohead/equivalence.mjs)',
+    verdict: dnfValidationFailures.length > 0
+      ? 'fail'
+      : equivalenceFailures.length === 0
+        ? 'pass'
+        : (allowUnverifiedOutput ? 'admitted_unverified' : 'fail'),
+    rule: 'every measured ratio row needs a passing cross-engine equivalence verdict from the same '
+      + 'input, Rust ELF and mermaid bundle; every comparator-DNF row needs a matching passing '
+      + 'source-grounded native-output validation from scripts/headtohead/equivalence.mjs',
     method: (measurementMode === 'parse' ? 'linked_parse_semantics_via_' : '')
       + 'svg_structural (rendered-text token containment + rendered-path edge topology '
       + 'cross-checked against input truth); not byte equality, not a rasterized perceptual diff',
     allow_unverified_output: allowUnverifiedOutput,
-    failures: equivalenceFailures,
+    failures: [...equivalenceFailures, ...dnfValidationFailures],
+    dnf_native_validation_failures: dnfValidationFailures,
     // Spelled out so a row produced under the override cannot be quoted as verified.
-    caveat: equivalenceFailures.length > 0 && allowUnverifiedOutput
+    caveat: equivalenceFailures.length > 0 && allowUnverifiedOutput && dnfValidationFailures.length === 0
       ? 'these rows compare renders that are NOT known to carry the same content; the ratio is a '
         + 'performance observation, not a like-for-like speedup claim'
       : null,
@@ -3027,11 +3160,12 @@ for (const r of rows) {
   if (r.status === 'comparator_dnf') {
     const timedOut = r.mjs_dnf_kind === 'timeout';
     const bounded = Number.isFinite(r.speedup_lower_bound);
+    const nativeGate = r.content_verified ? 'dnf-native' : `dnf-${r.native_output_validation.status}`;
     console.log(
       `${pad(displayId, 22)}${lpad(r.nodes, 6)}${lpad(r.edges, 7)}${lpad(ms(r.fm_p50_ns), 12)}` +
       `${lpad(bounded ? `DNF>${(r.mjs_budget_ms / 1000).toFixed(0)}s` : (timedOut ? 'TIMEOUT' : 'CANNOT'), 12)}` +
       `${lpad(bounded ? `>${r.speedup_lower_bound.toFixed(0)}x` : 'n/a', 10)}` +
-      `${lpad('-', 10)}${lpad(r.fm_mad_pct.toFixed(1), 9)}${lpad('-', 9)}${lpad('-', 8)}  n/a`,
+      `${lpad('-', 10)}${lpad(r.fm_mad_pct.toFixed(1), 9)}${lpad('-', 9)}${lpad('-', 8)}  ${nativeGate}`,
     );
     continue;
   }
@@ -3155,8 +3289,16 @@ if (equivGate.verdict !== 'pass') {
       console.log(`  ${r.id}: ${e.status}${e.reason ? ` (${e.reason})` : ''} -- run scripts/headtohead/equivalence.mjs`);
     }
   }
+  for (const r of dnf.filter((row) => !row.content_verified)) {
+    const validation = r.native_output_validation;
+    console.log(
+      `  ${r.id}: comparator DNF lacks a matching passing native validation `
+        + `(${validation.status}) -- run scripts/headtohead/equivalence.mjs`,
+    );
+  }
   console.log(
-    `  a ${measurementMode} ratio without linked equivalent rendered semantics is not a like-for-like speedup.`,
+    `  a ${measurementMode} ratio without linked equivalent rendered semantics is not a like-for-like speedup; `
+      + 'a DNF outcome without linked native validation is not a structural result.',
   );
 }
 if (summary.median_ci_gate_failures.length) {

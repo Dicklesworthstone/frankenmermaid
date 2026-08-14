@@ -1652,6 +1652,11 @@ fn main() {
         })
     );
 
+    // This untimed probe identifies the exact process ELF before the driver permits any timing.
+    if std::env::var_os("FM_H2H_PROVENANCE_ONLY").is_some() {
+        return;
+    }
+
     // Measurement aid. Each item is normally timed twice, once per profile, so `perf stat` on the whole
     // process cannot attribute instructions to one of them. Forcing BOTH passes to the same profile makes
     // the process's instruction count proportional to that profile alone, which turns a load-sensitive
