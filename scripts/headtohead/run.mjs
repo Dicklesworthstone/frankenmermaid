@@ -707,6 +707,10 @@ function validElfSelfReport(record) {
   );
 }
 
+function validBuildRevision(record) {
+  return typeof record?.build_git_revision === 'string' && /^[0-9a-f]{40}$/.test(record.build_git_revision);
+}
+
 const validSha256 = (value) => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 
 function validRchBuildProvenance(builder, base, cleanOverlay) {
@@ -1677,6 +1681,10 @@ const allowOversubscription = has('allow-oversubscription');
 const fmBuilder = arg('fm-builder');
 const fmBuildBase = arg('fm-build-base');
 const fmBuildCleanOverlay = has('fm-build-clean-overlay');
+if (fmBuildBase !== null && !/^[0-9a-f]{40}$/.test(fmBuildBase)) {
+  console.error('[run] --fm-build-base must be a lowercase 40-hex source revision');
+  process.exit(2);
+}
 // A speedup over a render that dropped content is not a speedup. Every measured row must be backed
 // by a passing cross-engine equivalence verdict (see equivalence.mjs) produced from the SAME input,
 // the SAME Rust ELF and the SAME mermaid bundle. `--allow-unverified-output` still permits a run --
@@ -1888,6 +1896,26 @@ if (pinArg !== 'off') {
 env.pinned_cpu = pin;
 
 const [fmCmd, fmArgs] = pin ? ['taskset', ['-c', String(pin.cpu), fmBin, corpusPath]] : [fmBin, [corpusPath]];
+const fmProvenance = runJsonl('frankenmermaid-provenance', fmCmd, fmArgs, {
+  FM_H2H_MODE: measurementMode,
+  FM_H2H_PROVENANCE_ONLY: '1',
+  FM_H2H_THREAD_PROBE: measurementMode === 'parse' ? '1' : '0',
+  ...(measurementMode === 'parse' ? { FM_H2H_MIN_SAMPLE_NS: String(PARSE_MIN_SAMPLE_NS) } : {}),
+});
+const provenanceBinaryRecords = fmProvenance.records.filter((record) => record.record === 'binary');
+const provenanceBinary = provenanceBinaryRecords[0];
+if (fmProvenance.code !== 0 || provenanceBinaryRecords.length !== 1 || !validElfSelfReport(provenanceBinary)) {
+  console.error('[run] INVALID: untimed frankenmermaid provenance probe did not self-report one valid ELF');
+  process.exit(2);
+}
+if (!validBuildRevision(provenanceBinary)) {
+  console.error('[run] INVALID: benchmark ELF did not self-report a 40-hex FM_H2H_BUILD_GIT_REV');
+  process.exit(2);
+}
+if (fmBuildBase === null || provenanceBinary.build_git_revision !== fmBuildBase || fmBuildBase !== env.git_rev) {
+  console.error('[run] INVALID: benchmark ELF build revision must match both --fm-build-base and checked-out HEAD');
+  process.exit(2);
+}
 // ARM-ASYMMETRY GUARD (trap 3). The two engines are separate runtimes -- a Rust process and
 // Chromium -- so they cannot be interleaved inside one measured routine the way a same-binary A/B
 // can be. They run in sequence, which means host load drifting between the two phases biases the
