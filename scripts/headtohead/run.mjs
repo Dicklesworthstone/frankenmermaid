@@ -724,6 +724,15 @@ function balancedSquareIsSymmetric(schedule = BALANCED_SQUARE) {
     && schedule.slice(0, 4).join('') === schedule.slice(4).join('');
 }
 
+function balancedSquarePhaseIndexes(schedule = BALANCED_SQUARE) {
+  if (!balancedSquareIsSymmetric(schedule)) return null;
+  return {
+    fm_before: schedule.map((arm, index) => (arm === 'fm' && index < 4 ? index : null)).filter(Number.isInteger),
+    mjs: schedule.map((arm, index) => (arm === 'mjs' ? index : null)).filter(Number.isInteger),
+    fm_after: schedule.map((arm, index) => (arm === 'fm' && index >= 4 ? index : null)).filter(Number.isInteger),
+  };
+}
+
 function validRchBuildProvenance(builder, base, cleanOverlay) {
   return (
     typeof builder === 'string' &&
@@ -1150,6 +1159,10 @@ function fmBracket(before, after) {
 if (has('self-test')) {
   if (!balancedSquareIsSymmetric() || balancedSquareIsSymmetric(['fm', 'mjs'])) {
     throw new Error('balanced-square slot symmetry regression');
+  }
+  const squarePhases = balancedSquarePhaseIndexes();
+  if (JSON.stringify(squarePhases) !== JSON.stringify({ fm_before: [0, 3], mjs: [1, 2, 5, 6], fm_after: [4, 7] })) {
+    throw new Error('balanced-square phase partition regression');
   }
   const perfect = { sufficient: true, n: 9, median: 1, ci95_lo: 1, ci95_hi: 1, half_width: 0 };
   const noisy = { sufficient: true, n: 9, median: 1, ci95_lo: 0.98, ci95_hi: 1.02, half_width: 0.02 };
