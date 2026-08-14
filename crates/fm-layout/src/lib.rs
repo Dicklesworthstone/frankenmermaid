@@ -24067,10 +24067,13 @@ mod tests {
             // `from_utf8_lossy` so that even genuinely malformed output surfaces as a line the
             // assertion can report on, rather than vanishing.
             self.buffer.extend_from_slice(buf);
-            while let Some(pos) = self.buffer.iter().position(|byte| *byte == b'\n') {
-                let line = String::from_utf8_lossy(&self.buffer[..pos]).into_owned();
-                self.buffer.drain(..=pos);
-                self.push_line(&line);
+            let Some(last_newline) = self.buffer.iter().rposition(|byte| *byte == b'\n') else {
+                return Ok(buf.len());
+            };
+            let tail = self.buffer.split_off(last_newline + 1);
+            let complete = std::mem::replace(&mut self.buffer, tail);
+            for line in complete.split(|byte| *byte == b'\n') {
+                self.push_line(&String::from_utf8_lossy(line));
             }
             Ok(buf.len())
         }
@@ -24204,6 +24207,26 @@ mod tests {
             lines.lock().unwrap().as_slice(),
             ["{\"event\":\"layout.dispatch\"}"],
             "Drop must observe the buffer drained by flush and not duplicate the event"
+        );
+    }
+
+    #[test]
+    fn capture_writer_commits_complete_lines_and_retains_the_tail() {
+        use std::io::Write as _;
+
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        {
+            let mut writer = CaptureWriter::new(Arc::clone(&lines));
+            writer
+                .write_all(b"first\nsecond\ntail")
+                .expect("first write");
+            assert_eq!(lines.lock().unwrap().as_slice(), ["first", "second"]);
+            writer.write_all(b"-continued\n").expect("second write");
+        }
+        assert_eq!(
+            lines.lock().unwrap().as_slice(),
+            ["first", "second", "tail-continued"],
+            "complete records commit immediately while an unterminated tail survives to its newline"
         );
     }
 
