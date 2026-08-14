@@ -738,6 +738,12 @@ function runBalancedSquare(runArm, schedule = BALANCED_SQUARE) {
   return schedule.map((arm, slot) => ({ arm, slot, value: runArm(arm, slot) }));
 }
 
+function balancedSquareArmValues(slots) {
+  const values = { fm: [], mjs: [] };
+  for (const slot of slots) values[slot.arm].push(slot.value);
+  return values;
+}
+
 function validRchBuildProvenance(builder, base, cleanOverlay) {
   return (
     typeof builder === 'string' &&
@@ -1175,6 +1181,9 @@ if (has('self-test')) {
     { arm: 'fm', slot: 4, value: 'fm4' }, { arm: 'mjs', slot: 5, value: 'mjs5' },
     { arm: 'mjs', slot: 6, value: 'mjs6' }, { arm: 'fm', slot: 7, value: 'fm7' },
   ])) throw new Error('balanced-square runner regression');
+  if (JSON.stringify(balancedSquareArmValues(runBalancedSquare((arm, slot) => slot))) !== JSON.stringify({
+    fm: [0, 3, 4, 7], mjs: [1, 2, 5, 6],
+  })) throw new Error('balanced-square aggregation regression');
   const perfect = { sufficient: true, n: 9, median: 1, ci95_lo: 1, ci95_hi: 1, half_width: 0 };
   const noisy = { sufficient: true, n: 9, median: 1, ci95_lo: 0.98, ci95_hi: 1.02, half_width: 0.02 };
   // Clause 3 fixtures. `biased` has a TIGHT CI that excludes 1.0 -- under the fleet-wide straddle
