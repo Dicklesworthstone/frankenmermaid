@@ -721,7 +721,8 @@ fn xl_incumbent_dnf_workloads_complete_structurally_and_deterministically() {
         state.push_str(&format!("  S{index} --> S{}: event{index}\n", index + 1));
     }
     state.push_str("  S1999 --> [*]\n");
-    assert_xl_svg_completion("state_xl_2000", &state, NODE_COUNT, 2_000);
+    // The two explicit `[*]` pseudo-states are authored nodes too.
+    assert_xl_svg_completion("state_xl_2000", &state, NODE_COUNT + 2, 2_000);
 
     let mut er = String::from("erDiagram\n");
     for index in 0..NODE_COUNT - 1 {
