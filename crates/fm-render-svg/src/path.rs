@@ -341,6 +341,33 @@ where
         return;
     }
 
+    // Near-collinear collapse (GH#7): orthogonal routes whose source and target almost line up
+    // produce a polyline with a tiny mid-route jog (a few px). Catmull-Rom smoothing of that jog
+    // rendered as a visible S-wiggle in an otherwise straight edge. If every interior waypoint
+    // sits within `STRAIGHT_EPS` of the start→end chord, the honest shape is a straight line.
+    const STRAIGHT_EPS: f32 = 2.0;
+    let last = point_at(n - 1);
+    let chord = (last.0 - first.0, last.1 - first.1);
+    let chord_len = (chord.0 * chord.0 + chord.1 * chord.1).sqrt();
+    if chord_len > f32::EPSILON {
+        let mut straight = true;
+        for i in 1..(n - 1) {
+            let p = point_at(i);
+            let dev = ((p.0 - first.0) * chord.1 - (p.1 - first.1) * chord.0).abs() / chord_len;
+            // Reject points that deviate laterally OR lie outside the chord span (backtracking).
+            let along = ((p.0 - first.0) * chord.0 + (p.1 - first.1) * chord.1) / chord_len;
+            if dev > STRAIGHT_EPS || along < -STRAIGHT_EPS || along > chord_len + STRAIGHT_EPS {
+                straight = false;
+                break;
+            }
+        }
+        if straight {
+            out.push(' ');
+            write_point(out, 'L', last.0, last.1);
+            return;
+        }
+    }
+
     let t: f32 = 0.25;
     for i in 0..(n - 1) {
         let p_prev = if i == 0 { point_at(0) } else { point_at(i - 1) };
@@ -352,10 +379,28 @@ where
             point_at(n - 1)
         };
 
-        let cp1x = p_cur.0 + (p_next.0 - p_prev.0) * t;
-        let cp1y = p_cur.1 + (p_next.1 - p_prev.1) * t;
-        let cp2x = p_next.0 - (p_next2.0 - p_cur.0) * t;
-        let cp2y = p_next.1 - (p_next2.1 - p_cur.1) * t;
+        // Catmull-Rom tangents, then clamp each control point into the current segment's
+        // bounding box (GH#7). Unclamped neighbor-chord tangents overshoot at right-angle
+        // waypoints — an edge leaving a node straight down and then turning left first bulged
+        // ~25px to the RIGHT, so sibling branches from one port crossed each other in a
+        // pretzel. The cubic convex-hull property means clamped control points keep every
+        // segment inside the channel the router actually chose, so smoothed edges can no
+        // longer swing wide or cross where their polylines do not.
+        let (seg_lo_x, seg_hi_x) = if p_cur.0 <= p_next.0 {
+            (p_cur.0, p_next.0)
+        } else {
+            (p_next.0, p_cur.0)
+        };
+        let (seg_lo_y, seg_hi_y) = if p_cur.1 <= p_next.1 {
+            (p_cur.1, p_next.1)
+        } else {
+            (p_next.1, p_cur.1)
+        };
+
+        let cp1x = (p_cur.0 + (p_next.0 - p_prev.0) * t).clamp(seg_lo_x, seg_hi_x);
+        let cp1y = (p_cur.1 + (p_next.1 - p_prev.1) * t).clamp(seg_lo_y, seg_hi_y);
+        let cp2x = (p_next.0 - (p_next2.0 - p_cur.0) * t).clamp(seg_lo_x, seg_hi_x);
+        let cp2y = (p_next.1 - (p_next2.1 - p_cur.1) * t).clamp(seg_lo_y, seg_hi_y);
 
         out.push(' ');
         write_cubic(out, 'C', (cp1x, cp1y), (cp2x, cp2y), (p_next.0, p_next.1));
@@ -669,9 +714,11 @@ mod tests {
         let points = [(10.0, 20.0), (30.0, 60.0), (70.0, 60.0), (90.0, 20.0)];
         let path = build_smooth_path_by(points.len(), |index| points[index]);
 
+        // Middle-segment control points clamp into the segment's bounding box (GH#7): the
+        // unclamped Catmull-Rom tangents put them at y=70, 10px above the 60→60 crest.
         assert_eq!(
             path,
-            "M10 20 C15 30,15 50,30 60 C45 70,55 70,70 60 C85 50,85 30,90 20"
+            "M10 20 C15 30,15 50,30 60 C45 60,55 60,70 60 C85 50,85 30,90 20"
         );
     }
 

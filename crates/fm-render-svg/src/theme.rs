@@ -487,6 +487,12 @@ impl Theme {
             ""
         };
 
+        // Hover feedback is stroke-accent + shadow ONLY — never a transform (GH#6). A CSS
+        // transform on SVG shape children resolves `transform-origin: center` against the
+        // view-box (these rules set no `transform-box: fill-box`), so even a 1% scale
+        // displaced off-center nodes by view-box-relative distances and made boxes jump on
+        // hover/unhover. Motion belongs to the opt-in `.fm-animations-enabled` group hover,
+        // which scales correctly via `transform-box: fill-box`.
         let hover_shadow_filter = if shadows {
             "filter: drop-shadow(0 8px 20px rgba(0, 0, 0, 0.14)) drop-shadow(0 3px 8px rgba(0, 0, 0, 0.08));"
         } else {
@@ -532,7 +538,7 @@ svg {{
   vector-effect: non-scaling-stroke;
   shape-rendering: geometricPrecision;
   {shadow_filter}
-  transition: fill 200ms ease, stroke 200ms ease, filter 200ms ease, transform 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  transition: fill 200ms ease, stroke 200ms ease, filter 200ms ease;
 }}
 .fm-node line {{
   stroke: var(--fm-node-accent);
@@ -553,8 +559,6 @@ svg {{
 .fm-node:hover polygon {{
   stroke: var(--fm-node-hover-accent);
   {hover_shadow_filter}
-  transform: translateY(-2px) scale(1.01);
-  transform-origin: center;
 }}
 .fm-node-accent-1 {{
   --fm-node-accent: var(--fm-node-stroke);
