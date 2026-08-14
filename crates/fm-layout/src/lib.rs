@@ -24152,6 +24152,40 @@ mod tests {
         );
     }
 
+    /// Dropping a writer must retain a split UTF-8 event even when fmt never terminates it.
+    ///
+    /// This joins the two failure modes that made the workspace-only flake plausible: the first
+    /// chunk ends inside a multi-byte character, and the completed event has no trailing newline
+    /// for [`CaptureWriter::write`] to commit. The only correct commit point is then `Drop`.
+    #[test]
+    fn capture_writer_drop_keeps_unterminated_line_split_mid_character() {
+        use std::io::Write as _;
+
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let payload = "{\"event\":\"layout.dispatch\",\"reason\":\"café\"}";
+        let bytes = payload.as_bytes();
+        let cut = payload
+            .find('é')
+            .expect("payload contains the multi-byte char")
+            + 1;
+        assert!(
+            std::str::from_utf8(&bytes[..cut]).is_err(),
+            "this control needs an invalid first UTF-8 chunk"
+        );
+
+        {
+            let mut writer = CaptureWriter::new(Arc::clone(&lines));
+            writer.write_all(&bytes[..cut]).expect("first chunk");
+            writer.write_all(&bytes[cut..]).expect("second chunk");
+        }
+
+        assert_eq!(
+            lines.lock().unwrap().as_slice(),
+            [payload],
+            "Drop must commit the whole unterminated event without losing its split character"
+        );
+    }
+
     // ── Observability output format tests (bd-gy4.8) ──────────────────
 
     #[test]
