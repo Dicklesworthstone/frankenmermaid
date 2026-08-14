@@ -733,6 +733,11 @@ function balancedSquarePhaseIndexes(schedule = BALANCED_SQUARE) {
   };
 }
 
+function runBalancedSquare(runArm, schedule = BALANCED_SQUARE) {
+  if (!balancedSquareIsSymmetric(schedule)) throw new Error('invalid balanced-square schedule');
+  return schedule.map((arm, slot) => ({ arm, slot, value: runArm(arm, slot) }));
+}
+
 function validRchBuildProvenance(builder, base, cleanOverlay) {
   return (
     typeof builder === 'string' &&
@@ -1164,6 +1169,12 @@ if (has('self-test')) {
   if (JSON.stringify(squarePhases) !== JSON.stringify({ fm_before: [0, 3], mjs: [1, 2, 5, 6], fm_after: [4, 7] })) {
     throw new Error('balanced-square phase partition regression');
   }
+  if (JSON.stringify(runBalancedSquare((arm, slot) => `${arm}${slot}`)) !== JSON.stringify([
+    { arm: 'fm', slot: 0, value: 'fm0' }, { arm: 'mjs', slot: 1, value: 'mjs1' },
+    { arm: 'mjs', slot: 2, value: 'mjs2' }, { arm: 'fm', slot: 3, value: 'fm3' },
+    { arm: 'fm', slot: 4, value: 'fm4' }, { arm: 'mjs', slot: 5, value: 'mjs5' },
+    { arm: 'mjs', slot: 6, value: 'mjs6' }, { arm: 'fm', slot: 7, value: 'fm7' },
+  ])) throw new Error('balanced-square runner regression');
   const perfect = { sufficient: true, n: 9, median: 1, ci95_lo: 1, ci95_hi: 1, half_width: 0 };
   const noisy = { sufficient: true, n: 9, median: 1, ci95_lo: 0.98, ci95_hi: 1.02, half_width: 0.02 };
   // Clause 3 fixtures. `biased` has a TIGHT CI that excludes 1.0 -- under the fleet-wide straddle
