@@ -55,6 +55,12 @@ function arg(name, fallback = null) {
 const has = (name) => process.argv.includes(`--${name}`);
 const measurementMode = arg('mode', 'render');
 const hostAdmissionOnly = has('host-admission-only');
+
+function timedEngineBinaryError(fmBin, admissionOnly) {
+  if (admissionOnly || fmBin) return null;
+  return '[run] --fm-bin <path> is required (build: cargo build --release -p frankenmermaid-cli --example headtohead)';
+}
+
 if (!['render', 'parse'].includes(measurementMode)) {
   console.error(`[run] --mode must be render or parse, got ${JSON.stringify(measurementMode)}`);
   process.exit(2);
@@ -1414,6 +1420,13 @@ if (has('self-test')) {
     throw new Error('host-admission-only result regression');
   }
   if (
+    timedEngineBinaryError(null, true) !== null ||
+    timedEngineBinaryError('/tmp/headtohead', false) !== null ||
+    timedEngineBinaryError(null, false) === null
+  ) {
+    throw new Error('host-admission-only must bypass only the timed-engine binary requirement');
+  }
+  if (
     JSON.stringify(hostWidePhaseLabels([], false))
       !== JSON.stringify(['frankenmermaid-before', 'mermaid-js', 'frankenmermaid-after']) ||
     JSON.stringify(hostWidePhaseLabels([1, 8], false))
@@ -1832,8 +1845,9 @@ function runJsonl(label, cmd, args, extraEnv = {}) {
 }
 
 const fmBin = arg('fm-bin');
-if (!fmBin) {
-  console.error('[run] --fm-bin <path> is required (build: cargo build --release -p frankenmermaid-cli --example headtohead)');
+const fmBinError = timedEngineBinaryError(fmBin, hostAdmissionOnly);
+if (fmBinError !== null) {
+  console.error(fmBinError);
   process.exit(2);
 }
 
@@ -1959,27 +1973,6 @@ if (pinArg !== 'off') {
 }
 env.pinned_cpu = pin;
 
-const [fmCmd, fmArgs] = pin ? ['taskset', ['-c', String(pin.cpu), fmBin, corpusPath]] : [fmBin, [corpusPath]];
-const fmProvenance = runJsonl('frankenmermaid-provenance', fmCmd, fmArgs, {
-  FM_H2H_MODE: measurementMode,
-  FM_H2H_PROVENANCE_ONLY: '1',
-  FM_H2H_THREAD_PROBE: measurementMode === 'parse' ? '1' : '0',
-  ...(measurementMode === 'parse' ? { FM_H2H_MIN_SAMPLE_NS: String(PARSE_MIN_SAMPLE_NS) } : {}),
-});
-const provenanceBinaryRecords = fmProvenance.records.filter((record) => record.record === 'binary');
-const provenanceBinary = provenanceBinaryRecords[0];
-if (fmProvenance.code !== 0 || provenanceBinaryRecords.length !== 1 || !validElfSelfReport(provenanceBinary)) {
-  console.error('[run] INVALID: untimed frankenmermaid provenance probe did not self-report one valid ELF');
-  process.exit(2);
-}
-if (!validBuildRevision(provenanceBinary)) {
-  console.error('[run] INVALID: benchmark ELF did not self-report a 40-hex FM_H2H_BUILD_GIT_REV');
-  process.exit(2);
-}
-if (fmBuildBase === null || provenanceBinary.build_git_revision !== fmBuildBase || fmBuildBase !== env.git_rev) {
-  console.error('[run] INVALID: benchmark ELF build revision must match both --fm-build-base and checked-out HEAD');
-  process.exit(2);
-}
 // ARM-ASYMMETRY GUARD (trap 3). The two engines are separate runtimes -- a Rust process and
 // Chromium -- so they cannot be interleaved inside one measured routine the way a same-binary A/B
 // can be. They run in sequence, which means host load drifting between the two phases biases the
@@ -2072,6 +2065,28 @@ if (hostAdmissionOnly) {
   }
   console.log(JSON.stringify(hostAdmissionOnlyResult(env, admission)));
   process.exit(0);
+}
+
+const [fmCmd, fmArgs] = pin ? ['taskset', ['-c', String(pin.cpu), fmBin, corpusPath]] : [fmBin, [corpusPath]];
+const fmProvenance = runJsonl('frankenmermaid-provenance', fmCmd, fmArgs, {
+  FM_H2H_MODE: measurementMode,
+  FM_H2H_PROVENANCE_ONLY: '1',
+  FM_H2H_THREAD_PROBE: measurementMode === 'parse' ? '1' : '0',
+  ...(measurementMode === 'parse' ? { FM_H2H_MIN_SAMPLE_NS: String(PARSE_MIN_SAMPLE_NS) } : {}),
+});
+const provenanceBinaryRecords = fmProvenance.records.filter((record) => record.record === 'binary');
+const provenanceBinary = provenanceBinaryRecords[0];
+if (fmProvenance.code !== 0 || provenanceBinaryRecords.length !== 1 || !validElfSelfReport(provenanceBinary)) {
+  console.error('[run] INVALID: untimed frankenmermaid provenance probe did not self-report one valid ELF');
+  process.exit(2);
+}
+if (!validBuildRevision(provenanceBinary)) {
+  console.error('[run] INVALID: benchmark ELF did not self-report a 40-hex FM_H2H_BUILD_GIT_REV');
+  process.exit(2);
+}
+if (fmBuildBase === null || provenanceBinary.build_git_revision !== fmBuildBase || fmBuildBase !== env.git_rev) {
+  console.error('[run] INVALID: benchmark ELF build revision must match both --fm-build-base and checked-out HEAD');
+  process.exit(2);
 }
 
 /** Aggregate scheduler time across all CPUs. Passive: no busy-wait. */
