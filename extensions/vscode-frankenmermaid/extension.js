@@ -2,9 +2,10 @@
 
 const crypto = require('node:crypto');
 const vscode = require('vscode');
-const { buildPreviewHtml, isMermaidDocument } = require('./preview-contract.cjs');
+const { buildPreviewHtml, DebouncedRenderScheduler, isMermaidDocument } = require('./preview-contract.cjs');
 
 const panels = new Map();
+const DEFAULT_PREVIEW_DEBOUNCE_MS = 75;
 
 function previewResources(context, panel) {
   const packageRoot = vscode.Uri.joinPath(
@@ -41,6 +42,16 @@ function postRender(entry) {
   });
 }
 
+function scheduleRender(entry) {
+  entry.scheduler.schedule(() => postRender(entry));
+}
+
+function previewDebounceMs() {
+  return vscode.workspace
+    .getConfiguration('frankenmermaid')
+    .get('previewDebounceMs', DEFAULT_PREVIEW_DEBOUNCE_MS);
+}
+
 function showPreview(context, document) {
   if (!isMermaidDocument(document)) {
     void vscode.window.showWarningMessage('FrankenMermaid previews .mmd and Mermaid-language documents.');
@@ -62,8 +73,16 @@ function showPreview(context, document) {
       localResourceRoots: resources.localResourceRoots,
     };
     panel.webview.html = resources.html;
-    panel.onDidDispose(() => panels.delete(key), undefined, context.subscriptions);
-    entry = { document, panel, ready: false };
+    entry = {
+      document,
+      panel,
+      ready: false,
+      scheduler: new DebouncedRenderScheduler(previewDebounceMs()),
+    };
+    panel.onDidDispose(() => {
+      entry.scheduler.dispose();
+      panels.delete(key);
+    }, undefined, context.subscriptions);
     panel.webview.onDidReceiveMessage((message) => {
       if (message?.type === 'ready') {
         entry.ready = true;
@@ -94,7 +113,7 @@ function activate(context) {
       const entry = panels.get(event.document.uri.toString());
       if (entry) {
         entry.document = event.document;
-        postRender(entry);
+        scheduleRender(entry);
       }
     }),
     vscode.workspace.onDidCloseTextDocument((document) => {

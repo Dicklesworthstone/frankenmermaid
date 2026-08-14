@@ -6,6 +6,32 @@ function isMermaidDocument(document) {
   return MERMAID_LANGUAGE_IDS.has(document.languageId) || /\.mmd$/iu.test(document.fileName);
 }
 
+class DebouncedRenderScheduler {
+  constructor(delayMs, setTimer = setTimeout, clearTimer = clearTimeout) {
+    this.delayMs = delayMs;
+    this.setTimer = setTimer;
+    this.clearTimer = clearTimer;
+    this.timer = undefined;
+  }
+
+  schedule(render) {
+    if (this.timer !== undefined) {
+      this.clearTimer(this.timer);
+    }
+    this.timer = this.setTimer(() => {
+      this.timer = undefined;
+      render();
+    }, this.delayMs);
+  }
+
+  dispose() {
+    if (this.timer !== undefined) {
+      this.clearTimer(this.timer);
+      this.timer = undefined;
+    }
+  }
+}
+
 function buildPreviewHtml({ cspSource, nonce, scriptUri, wasmModuleUri, wasmBinaryUri }) {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -22,4 +48,4 @@ function buildPreviewHtml({ cspSource, nonce, scriptUri, wasmModuleUri, wasmBina
 </html>`;
 }
 
-module.exports = { buildPreviewHtml, isMermaidDocument };
+module.exports = { buildPreviewHtml, DebouncedRenderScheduler, isMermaidDocument };

@@ -21,7 +21,19 @@
         "command": "frankenmermaid.showPreview",
         "title": "FrankenMermaid: Show Live Preview"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "FrankenMermaid",
+      "properties": {
+        "frankenmermaid.previewDebounceMs": {
+          "type": "integer",
+          "default": 75,
+          "minimum": 0,
+          "maximum": 1000,
+          "description": "Milliseconds to wait after an edit before refreshing a live preview."
+        }
+      }
+    }
   },
   "scripts": {
     "test": "node --test test/*.test.cjs"
