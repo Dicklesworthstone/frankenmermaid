@@ -2,10 +2,14 @@
 
 const crypto = require('node:crypto');
 const vscode = require('vscode');
-const { buildPreviewHtml, DebouncedRenderScheduler, isMermaidDocument } = require('./preview-contract.cjs');
+const {
+  buildPreviewHtml,
+  DebouncedRenderScheduler,
+  isMermaidDocument,
+  normalizePreviewDebounceMs,
+} = require('./preview-contract.cjs');
 
 const panels = new Map();
-const DEFAULT_PREVIEW_DEBOUNCE_MS = 75;
 
 function previewResources(context, panel) {
   const packageRoot = vscode.Uri.joinPath(
@@ -47,9 +51,9 @@ function scheduleRender(entry) {
 }
 
 function previewDebounceMs() {
-  return vscode.workspace
-    .getConfiguration('frankenmermaid')
-    .get('previewDebounceMs', DEFAULT_PREVIEW_DEBOUNCE_MS);
+  return normalizePreviewDebounceMs(
+    vscode.workspace.getConfiguration('frankenmermaid').get('previewDebounceMs'),
+  );
 }
 
 function showPreview(context, document) {
@@ -114,6 +118,14 @@ function activate(context) {
       if (entry) {
         entry.document = event.document;
         scheduleRender(entry);
+      }
+    }),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration('frankenmermaid.previewDebounceMs')) {
+        const delayMs = previewDebounceMs();
+        for (const entry of panels.values()) {
+          entry.scheduler.setDelayMs(delayMs);
+        }
       }
     }),
     vscode.workspace.onDidCloseTextDocument((document) => {

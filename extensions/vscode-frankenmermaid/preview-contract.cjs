@@ -1,17 +1,30 @@
 'use strict';
 
 const MERMAID_LANGUAGE_IDS = new Set(['mermaid', 'mmd']);
+const DEFAULT_PREVIEW_DEBOUNCE_MS = 75;
+const MAX_PREVIEW_DEBOUNCE_MS = 1000;
 
 function isMermaidDocument(document) {
   return MERMAID_LANGUAGE_IDS.has(document.languageId) || /\.mmd$/iu.test(document.fileName);
 }
 
+function normalizePreviewDebounceMs(value) {
+  if (!Number.isInteger(value) || value < 0 || value > MAX_PREVIEW_DEBOUNCE_MS) {
+    return DEFAULT_PREVIEW_DEBOUNCE_MS;
+  }
+  return value;
+}
+
 class DebouncedRenderScheduler {
   constructor(delayMs, setTimer = setTimeout, clearTimer = clearTimeout) {
-    this.delayMs = delayMs;
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
     this.timer = undefined;
+    this.setDelayMs(delayMs);
+  }
+
+  setDelayMs(delayMs) {
+    this.delayMs = normalizePreviewDebounceMs(delayMs);
   }
 
   schedule(render) {
@@ -48,4 +61,9 @@ function buildPreviewHtml({ cspSource, nonce, scriptUri, wasmModuleUri, wasmBina
 </html>`;
 }
 
-module.exports = { buildPreviewHtml, DebouncedRenderScheduler, isMermaidDocument };
+module.exports = {
+  buildPreviewHtml,
+  DebouncedRenderScheduler,
+  isMermaidDocument,
+  normalizePreviewDebounceMs,
+};

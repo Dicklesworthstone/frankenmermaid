@@ -6,6 +6,7 @@ const {
   buildPreviewHtml,
   DebouncedRenderScheduler,
   isMermaidDocument,
+  normalizePreviewDebounceMs,
 } = require('../preview-contract.cjs');
 
 test('recognizes Mermaid documents by language or .mmd extension', () => {
@@ -55,4 +56,16 @@ test('render scheduler keeps only the latest edit and cancels disposal work', ()
   scheduler.schedule(() => renders.push('disposed'));
   scheduler.dispose();
   assert.deepEqual(cleared, [1, 3]);
+});
+
+test('render scheduler validates and applies later debounce settings', () => {
+  const scheduler = new DebouncedRenderScheduler(-1);
+  assert.equal(scheduler.delayMs, 75);
+  assert.equal(normalizePreviewDebounceMs(0), 0);
+  assert.equal(normalizePreviewDebounceMs(1000), 1000);
+  assert.equal(normalizePreviewDebounceMs(1001), 75);
+  assert.equal(normalizePreviewDebounceMs(12.5), 75);
+
+  scheduler.setDelayMs(0);
+  assert.equal(scheduler.delayMs, 0);
 });
