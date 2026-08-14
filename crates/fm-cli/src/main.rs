@@ -4620,31 +4620,17 @@ fn render_parsed_ir_with_pressure(
     let mut layout_config = options.layout_config.clone();
     layout_config.fnx_enabled = fnx_enabled;
     let layout_start = Instant::now();
-    // Guardrails normally come from the budget broker AFTER `record_parse`, and `record_parse`
-    // calls `rebalance_after_parse`, which recomputes `layout.allocated_ms` from the MEASURED parse
-    // time. For the one-shot CLI that is the point: a slow parse leaves less budget for layout.
+    // Guardrails come from the budget broker, which has already recorded the measured parse time.
+    // That is safe — and the memo key built from these guardrails is stable across two renders of
+    // the same document — only because the broker's guardrail accessors read its PLANNED stage
+    // split rather than the post-parse rebalance. See
+    // `MermaidBudgetLedger::layout_time_budget_ms`: everything measured stays in the ledger's
+    // accounting, and nothing measured reaches the layout decision.
     //
-    // For an incremental caller it is a defect, and a subtle one. The guardrails are part of
-    // `layout_memo_key`, so a budget derived from measured wall time makes the memo key drift
-    // between two renders of the SAME document — the cache then misses for a reason that has
-    // nothing to do with the document. Sampling pressure once (see `cmd_serve`) does not fix it on
-    // its own, because the drift is reintroduced here.
-    //
-    // So an engine-backed render derives guardrails from a broker that has recorded no parse time:
-    // they depend only on the once-sampled pressure report, and the key is stable by construction.
-    // Found because `preview_render_reuses_layout_for_an_unchanged_document` flaked under
-    // concurrent load — the same measured-wall-time coupling this repo has been bitten by before.
-    let guardrail_broker = if engine.is_some() {
-        MermaidBudgetLedger::new(pressure)
-    } else {
-        budget_broker.clone()
-    };
-    let layout_guardrails = LayoutGuardrails {
-        max_layout_time_ms: guardrail_broker.layout_time_budget_ms(),
-        max_layout_iterations: guardrail_broker
-            .layout_iteration_budget(LayoutGuardrails::default().max_layout_iterations),
-        max_route_ops: guardrail_broker.route_budget(LayoutGuardrails::default().max_route_ops),
-    };
+    // Two flakes came from this coupling before it was cut at the source:
+    // `preview_render_reuses_layout_for_an_unchanged_document` (memo key drift on an engine-backed
+    // render) and the layout dispatch selecting a different algorithm under load (bd-ryxg).
+    let layout_guardrails = LayoutGuardrails::from(&budget_broker);
     // A caller that renders the SAME document repeatedly — the preview server, and through it the
     // editor extension — hands in an engine so an unchanged edit reuses its layout instead of
     // recomputing it (bd-kgi4). The one-shot CLI path passes `None` and is unchanged.
@@ -7965,12 +7951,7 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
     let mut layout_config = layout_config;
     layout_config.fnx_enabled = fnx_enabled;
     let layout_start = Instant::now();
-    let layout_guardrails = LayoutGuardrails {
-        max_layout_time_ms: budget_broker.layout_time_budget_ms(),
-        max_layout_iterations: budget_broker
-            .layout_iteration_budget(LayoutGuardrails::default().max_layout_iterations),
-        max_route_ops: budget_broker.route_budget(LayoutGuardrails::default().max_route_ops),
-    };
+    let layout_guardrails = LayoutGuardrails::from(&budget_broker);
     let traced_layout = layout_diagram_traced_with_config_and_guardrails(
         &parsed.ir,
         layout_algorithm,

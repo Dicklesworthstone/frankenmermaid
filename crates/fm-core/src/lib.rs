@@ -2948,6 +2948,14 @@ impl Default for MermaidBudgetLedger {
     }
 }
 
+/// The per-stage time split a [`MermaidBudgetLedger`] plans at construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlannedStageBudgets {
+    parse_ms: u64,
+    layout_ms: u64,
+    render_ms: u64,
+}
+
 impl MermaidBudgetLedger {
     const ARBITRATION_POLICY: &'static str = "parse_first_then_layout_heavy_then_render_tail";
     const EXPECTED_EVENT_CAPACITY: usize = 12;
@@ -2957,18 +2965,41 @@ impl MermaidBudgetLedger {
         Self::new_with_event_capacity(pressure, Self::EXPECTED_EVENT_CAPACITY)
     }
 
-    fn new_with_event_capacity(pressure: &MermaidPressureReport, event_capacity: usize) -> Self {
-        let total_budget_ms: u64 = match pressure.tier {
+    /// The stage split as *planned*, before any stage has been measured.
+    ///
+    /// A pure function of the pressure tier's total budget: same tier in, same split out, on any
+    /// host, under any load. Everything that can reach rendered output reads the split from here
+    /// rather than from [`Self::layout`] / [`Self::render`], whose `allocated_ms` is rebalanced
+    /// from the MEASURED parse time — see [`Self::rebalance_after_parse`].
+    const fn planned_stage_budgets(total_budget_ms: u64) -> PlannedStageBudgets {
+        let parse_ms = total_budget_ms.div_ceil(5);
+        let render_ms = total_budget_ms.div_ceil(5);
+        let layout_ms = total_budget_ms
+            .saturating_sub(parse_ms)
+            .saturating_sub(render_ms);
+        PlannedStageBudgets {
+            parse_ms,
+            layout_ms,
+            render_ms,
+        }
+    }
+
+    const fn total_budget_for(tier: MermaidPressureTier) -> u64 {
+        match tier {
             MermaidPressureTier::Unknown | MermaidPressureTier::High => 120,
             MermaidPressureTier::Nominal => 250,
             MermaidPressureTier::Elevated => 180,
             MermaidPressureTier::Critical => 80,
-        };
-        let parse_budget_ms = total_budget_ms.div_ceil(5);
-        let render_budget_ms = total_budget_ms.div_ceil(5);
-        let layout_budget_ms = total_budget_ms
-            .saturating_sub(parse_budget_ms)
-            .saturating_sub(render_budget_ms);
+        }
+    }
+
+    fn new_with_event_capacity(pressure: &MermaidPressureReport, event_capacity: usize) -> Self {
+        let total_budget_ms = Self::total_budget_for(pressure.tier);
+        let PlannedStageBudgets {
+            parse_ms: parse_budget_ms,
+            layout_ms: layout_budget_ms,
+            render_ms: render_budget_ms,
+        } = Self::planned_stage_budgets(total_budget_ms);
         let mut notes = Vec::new();
         if pressure.conservative_fallback {
             notes.push(String::from(
@@ -3074,29 +3105,63 @@ impl MermaidBudgetLedger {
         self.finish_stage_accounting();
     }
 
+    /// Layout time guardrail, in milliseconds.
+    ///
+    /// Derived from the PLANNED layout share, never from [`Self::layout`]`.allocated_ms`. The
+    /// distinction is the whole point: `allocated_ms` is rebalanced from the measured parse time,
+    /// so deriving a guardrail from it makes the layout guardrail — and through it the selected
+    /// algorithm, the geometry, and the output bytes — a function of how busy the host happened to
+    /// be. Two renders of the same document on the same binary would then disagree.
     #[must_use]
     pub fn layout_time_budget_ms(&self) -> usize {
-        usize::try_from(self.layout.allocated_ms.max(1)).unwrap_or(usize::MAX)
+        usize::try_from(
+            Self::planned_stage_budgets(self.total_budget_ms)
+                .layout_ms
+                .max(1),
+        )
+        .unwrap_or(usize::MAX)
     }
 
+    /// Layout iteration guardrail. Planned-share derived, for the reason on
+    /// [`Self::layout_time_budget_ms`].
     #[must_use]
     pub fn layout_iteration_budget(&self, default_budget: usize) -> usize {
-        scale_budget(default_budget, self.layout.allocated_ms, 250)
+        scale_budget(
+            default_budget,
+            Self::planned_stage_budgets(self.total_budget_ms).layout_ms,
+            250,
+        )
     }
 
+    /// Edge-routing operation guardrail. Planned-share derived, for the reason on
+    /// [`Self::layout_time_budget_ms`].
     #[must_use]
     pub fn route_budget(&self, default_budget: usize) -> usize {
-        scale_budget(default_budget, self.layout.allocated_ms, 250)
+        scale_budget(
+            default_budget,
+            Self::planned_stage_budgets(self.total_budget_ms).layout_ms,
+            250,
+        )
     }
 
+    /// Whether the caller should drop decorative render work (theme, shadows).
+    ///
+    /// Planned-share derived, for the reason on [`Self::layout_time_budget_ms`]: this one selects
+    /// a different THEME in the CLI, so a measured-time input here changes output bytes directly.
     #[must_use]
     pub const fn should_simplify_render(&self) -> bool {
         matches!(
             self.pressure_tier,
             MermaidPressureTier::High | MermaidPressureTier::Critical
-        ) || self.render.allocated_ms <= 24
+        ) || Self::planned_stage_budgets(self.total_budget_ms).render_ms <= 24
     }
 
+    /// Re-split what the total budget has left after the measured parse.
+    ///
+    /// This is ACCOUNTING, and it is reported as such: it records that a slow parse left less room
+    /// for the stages that follow. It must not be read by anything that can change rendered
+    /// output, because `parse.used_ms` is measured wall time — the guardrail accessors above
+    /// deliberately read the planned split instead.
     fn rebalance_after_parse(&mut self) {
         let remaining_total = self.total_budget_ms.saturating_sub(self.parse.used_ms);
         let render_budget_ms = remaining_total.div_ceil(4);
@@ -8441,6 +8506,75 @@ mod tests {
         assert_eq!(scale_budget(4000, 25, 250), 400);
     }
 
+    /// No output-affecting budget decision may move when the MEASURED parse time moves.
+    ///
+    /// The four accessors below all reach rendered output: three become `LayoutGuardrails` (and
+    /// through `estimate_layout_cost` decide which layout algorithm actually runs), and
+    /// `should_simplify_render` swaps the CLI's theme. Before this was fixed they read
+    /// `layout.allocated_ms` / `render.allocated_ms`, which `rebalance_after_parse` recomputes
+    /// from `parse.used_ms` — so on a nominal-tier host the layout guardrail ranged over
+    /// 180ms (10ms parse) down to 37ms (200ms parse), and the 200ms arm additionally flipped
+    /// `should_simplify_render` to true. Identical input, identical binary, different output,
+    /// selected by how busy the machine was.
+    ///
+    /// The 10ms arm is the control: it is a real recorded parse, so a naive fix that simply
+    /// ignored `record_parse` entirely would still have to keep the arms equal to each other AND
+    /// keep the ledger's own accounting intact, which the last block asserts.
+    #[test]
+    fn budget_decisions_do_not_move_with_measured_parse_time() {
+        let pressure = MermaidPressureReport {
+            tier: MermaidPressureTier::Nominal,
+            telemetry_available: true,
+            ..MermaidPressureReport::default()
+        };
+        let decisions = |parse_ms: u64| {
+            let mut broker = MermaidBudgetLedger::new(&pressure);
+            broker.record_parse(parse_ms);
+            (
+                broker.layout_time_budget_ms(),
+                broker.layout_iteration_budget(200),
+                broker.route_budget(4_000),
+                broker.should_simplify_render(),
+            )
+        };
+
+        let fast = decisions(10);
+        let slow = decisions(200);
+        assert_eq!(
+            fast, slow,
+            "budget decisions moved with measured parse time: 10ms parse gave {fast:?}, \
+             200ms parse gave {slow:?}"
+        );
+        // And they match the never-measured plan, so a caller that has not parsed yet agrees too.
+        let unmeasured = MermaidBudgetLedger::new(&pressure);
+        assert_eq!(
+            fast,
+            (
+                unmeasured.layout_time_budget_ms(),
+                unmeasured.layout_iteration_budget(200),
+                unmeasured.route_budget(4_000),
+                unmeasured.should_simplify_render(),
+            )
+        );
+
+        // The measurement is still recorded and still rebalances the ledger's accounting — the fix
+        // decouples decisions from measured time, it does not stop measuring.
+        let mut measured = MermaidBudgetLedger::new(&pressure);
+        measured.record_parse(200);
+        assert_eq!(measured.parse.used_ms, 200);
+        assert_eq!(
+            measured.layout.allocated_ms, 37,
+            "remaining 250-200=50, render tail ceil(50/4)=13, layout 50-13"
+        );
+        assert!(
+            measured
+                .events
+                .iter()
+                .any(|event| event.kind == "rebalance" && event.stage.as_deref() == Some("layout")),
+            "parse arbitration must still appear in the event trail"
+        );
+    }
+
     #[test]
     fn should_simplify_render_triggers_on_high_pressure_or_low_render_budget() {
         // High pressure → simplify
@@ -8469,6 +8603,24 @@ mod tests {
         };
         let broker_nom = MermaidBudgetLedger::new(&pressure_nom);
         assert!(!broker_nom.should_simplify_render());
+
+        // Unknown → simplify, and it does NOT depend on how long the parse took.
+        //
+        // Pinned because this is a deliberate behavior change, not an accident of the planned-share
+        // rewrite. Unknown means `into_report` found no telemetry at all, and it says so in its own
+        // note: "pressure tier is unknown and callers should use a conservative policy". Unknown
+        // shares High's 120ms total, so the planned render tail is exactly 24ms and trips the
+        // `<= 24` rule. The old measured-share rule gave 30ms for a sub-millisecond parse and 24ms
+        // or less once the parse passed ~24ms, so a no-telemetry render used to simplify or not
+        // according to the clock. It now always takes the conservative branch.
+        let pressure_unknown = MermaidPressureReport::default();
+        assert_eq!(pressure_unknown.tier, MermaidPressureTier::Unknown);
+        let mut broker_unknown = MermaidBudgetLedger::new(&pressure_unknown);
+        assert!(broker_unknown.should_simplify_render());
+        broker_unknown.record_parse(0);
+        assert!(broker_unknown.should_simplify_render());
+        broker_unknown.record_parse(90);
+        assert!(broker_unknown.should_simplify_render());
     }
 
     #[test]

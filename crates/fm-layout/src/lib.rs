@@ -38,8 +38,8 @@ use web_time::Instant;
 
 use fm_core::{
     DiagramType, FxHashMap, FxHashSet, GanttDate, GanttExclude, GanttTaskType, GraphDirection,
-    IrEndpoint, IrGanttMeta, IrNode, IrXyChartMeta, IrXySeriesKind, MermaidComplexity,
-    MermaidConfig, MermaidDecisionWeight, MermaidDiagramIr, MermaidGuardReport,
+    IrEndpoint, IrGanttMeta, IrNode, IrXyChartMeta, IrXySeriesKind, MermaidBudgetLedger,
+    MermaidComplexity, MermaidConfig, MermaidDecisionWeight, MermaidDiagramIr, MermaidGuardReport,
     MermaidLayoutDecisionAlternative, MermaidLayoutDecisionExplanation,
     MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidObservabilityIds,
     MermaidPressureReport, MermaidPressureTier, MermaidSourceMap, MermaidSourceMapEntry,
@@ -1103,6 +1103,24 @@ impl Default for LayoutGuardrails {
             max_layout_time_ms: 250,
             max_layout_iterations: defaults.layout_iteration_budget,
             max_route_ops: defaults.route_budget,
+        }
+    }
+}
+
+/// The one mapping from a budget broker to layout guardrails.
+///
+/// Every surface that renders under a budget — CLI, WASM, preview server — needs this triple, and
+/// each one used to spell it out itself. One mapping means the guardrails a document is laid out
+/// under cannot quietly differ between surfaces, and that the ledger's determinism guarantee
+/// (`MermaidBudgetLedger::layout_time_budget_ms`: planned share, never measured time) reaches all
+/// of them at once.
+impl From<&MermaidBudgetLedger> for LayoutGuardrails {
+    fn from(broker: &MermaidBudgetLedger) -> Self {
+        let defaults = Self::default();
+        Self {
+            max_layout_time_ms: broker.layout_time_budget_ms(),
+            max_layout_iterations: broker.layout_iteration_budget(defaults.max_layout_iterations),
+            max_route_ops: broker.route_budget(defaults.max_route_ops),
         }
     }
 }
@@ -16532,8 +16550,9 @@ mod tests {
         IrConstraint, IrEdge, IrEndpoint, IrGanttMeta, IrGanttSection, IrGanttTask, IrGraphCluster,
         IrGraphEdge, IrGraphNode, IrLabel, IrLabelId, IrLifecycleEvent, IrNode, IrNodeId,
         IrParticipantGroup, IrPieMeta, IrPieSlice, IrSequenceMeta, IrSequenceNote, IrSubgraph,
-        IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind, MermaidDiagramIr,
-        MermaidPressureTier, MermaidSourceMapKind, NodeShape, Span,
+        IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind, MermaidBudgetLedger,
+        MermaidDiagramIr, MermaidPressureReport, MermaidPressureTier, MermaidSourceMapKind,
+        NodeShape, Span,
     };
     use proptest::prelude::*;
     use std::cell::RefCell;

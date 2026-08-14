@@ -363,12 +363,7 @@ pub fn render_worker_request(request: &WorkerRenderRequest) -> WorkerRenderRespo
     let parse_ms = elapsed_ms(parse_start);
     budget_broker.record_parse(parse_ms);
 
-    let layout_guardrails = LayoutGuardrails {
-        max_layout_time_ms: budget_broker.layout_time_budget_ms(),
-        max_layout_iterations: budget_broker
-            .layout_iteration_budget(LayoutGuardrails::default().max_layout_iterations),
-        max_route_ops: budget_broker.route_budget(LayoutGuardrails::default().max_route_ops),
-    };
+    let layout_guardrails = LayoutGuardrails::from(&budget_broker);
     let layout_config = LayoutConfig {
         font_metrics: Some(svg_config.font_metrics()),
         ..Default::default()
@@ -1072,12 +1067,7 @@ pub fn render(input: &str) -> WasmRenderOutput {
             .try_into()
             .unwrap_or(u64::MAX),
     );
-    let layout_guardrails = LayoutGuardrails {
-        max_layout_time_ms: budget_broker.layout_time_budget_ms(),
-        max_layout_iterations: budget_broker
-            .layout_iteration_budget(LayoutGuardrails::default().max_layout_iterations),
-        max_route_ops: budget_broker.route_budget(LayoutGuardrails::default().max_route_ops),
-    };
+    let layout_guardrails = LayoutGuardrails::from(&budget_broker);
     let layout_start = Instant::now();
     let layout_config = LayoutConfig {
         font_metrics: Some(runtime.svg.font_metrics()),
@@ -1199,12 +1189,7 @@ pub fn render_svg_js(input: &str, config: Option<JsValue>) -> Result<String, JsV
             .try_into()
             .unwrap_or(u64::MAX),
     );
-    let layout_guardrails = LayoutGuardrails {
-        max_layout_time_ms: budget_broker.layout_time_budget_ms(),
-        max_layout_iterations: budget_broker
-            .layout_iteration_budget(LayoutGuardrails::default().max_layout_iterations),
-        max_route_ops: budget_broker.route_budget(LayoutGuardrails::default().max_route_ops),
-    };
+    let layout_guardrails = LayoutGuardrails::from(&budget_broker);
     let layout_start = Instant::now();
     let layout_config = LayoutConfig {
         font_metrics: Some(svg_config.font_metrics()),
@@ -1720,12 +1705,7 @@ impl Diagram {
                 .try_into()
                 .unwrap_or(u64::MAX),
         );
-        let layout_guardrails = LayoutGuardrails {
-            max_layout_time_ms: budget_broker.layout_time_budget_ms(),
-            max_layout_iterations: budget_broker
-                .layout_iteration_budget(LayoutGuardrails::default().max_layout_iterations),
-            max_route_ops: budget_broker.route_budget(LayoutGuardrails::default().max_route_ops),
-        };
+        let layout_guardrails = LayoutGuardrails::from(&budget_broker);
         let layout_start = Instant::now();
         let layout_config = LayoutConfig {
             font_metrics: Some(next_svg.font_metrics()),
