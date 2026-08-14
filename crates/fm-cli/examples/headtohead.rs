@@ -812,6 +812,21 @@ impl RenderExecutor {
         }
     }
 
+    /// Materialize a complete batch without consulting or populating the output snapshot.
+    ///
+    /// Timed head-to-head arms measure parsing, layout, and SVG construction. The snapshot-backed
+    /// methods below remain available for the incremental-product controls, but using one here
+    /// would turn a calibrated batch into repeated O(1) memo probes after its first iteration.
+    fn render_all_uncached(
+        &self,
+        texts: &Arc<[String]>,
+        cfg: &Arc<SvgRenderConfig>,
+    ) -> Arc<[String]> {
+        let mut rendered = Vec::with_capacity(texts.len());
+        self.render_all_observing(texts, cfg, &mut rendered, None);
+        rendered.into()
+    }
+
     fn render_all_cached(
         &self,
         texts: &Arc<[String]>,
@@ -1410,7 +1425,7 @@ fn render_item(
     item: &CorpusItem,
     cfg: &Arc<SvgRenderConfig>,
 ) -> Arc<[String]> {
-    executor.render_all_versioned(&item.texts, cfg, &item.revision_key)
+    executor.render_all_uncached(&item.texts, cfg)
 }
 
 fn calibrate_batch(
@@ -1939,7 +1954,7 @@ mod tests {
         CorpusItem, RenderExecutor, WorkloadMode, balanced_shards, bootstrap_median_ci,
         build_git_revision, calibrated_batch, contiguous_shards, full_pipeline_parsed,
         is_git_revision, measure_parse, median, new_batch_revision_key, parse_cpu_list,
-        parse_results_reference, ratio_stats, rescaled_batch, stats,
+        parse_results_reference, ratio_stats, render_item, rescaled_batch, stats,
     };
 
     #[test]
@@ -2122,6 +2137,29 @@ mod tests {
         let distinct_text_output = executor.render_all(&distinct_texts, &config);
         assert!(Arc::ptr_eq(&first, &distinct_text_output));
         assert_eq!(first, distinct_text_output);
+    }
+
+    #[test]
+    fn timed_render_item_bypasses_a_prepopulated_render_snapshot() {
+        let item = CorpusItem {
+            id: "uncached-timing".to_owned(),
+            texts: vec!["flowchart LR\nA[First]-->B[Second]".to_owned()].into(),
+            revision_key: new_batch_revision_key(),
+            reps: 1,
+            warmup: 0,
+        };
+        let config = Arc::new(SvgRenderConfig::default());
+        let executor = RenderExecutor::new(1).expect("scalar executor");
+
+        let cached = executor.render_all_versioned(&item.texts, &config, &item.revision_key);
+        let first_timed = render_item(&executor, &item, &config);
+        let second_timed = render_item(&executor, &item, &config);
+
+        assert!(!Arc::ptr_eq(&cached, &first_timed));
+        assert!(!Arc::ptr_eq(&cached, &second_timed));
+        assert!(!Arc::ptr_eq(&first_timed, &second_timed));
+        assert_eq!(cached, first_timed);
+        assert_eq!(first_timed, second_timed);
     }
 
     #[test]
