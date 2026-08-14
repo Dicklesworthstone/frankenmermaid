@@ -1,0 +1,32 @@
+{
+  "name": "frankenmermaid-vscode",
+  "displayName": "FrankenMermaid Preview",
+  "description": "Live Mermaid previews rendered by FrankenMermaid WebAssembly.",
+  "version": "0.1.0",
+  "publisher": "frankenmermaid",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Visualization"
+  ],
+  "activationEvents": [
+    "onCommand:frankenmermaid.showPreview"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "frankenmermaid.showPreview",
+        "title": "FrankenMermaid: Show Live Preview"
+      }
+    ]
+  },
+  "scripts": {
+    "test": "node --test test/*.test.cjs"
+  },
+  "dependencies": {
+    "@frankenmermaid/core": "^0.2.0"
+  }
+}
