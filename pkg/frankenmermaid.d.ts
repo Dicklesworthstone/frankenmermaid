@@ -38,7 +38,23 @@ export class Diagram {
 
 export function applyLensEdit(input: string, element_id: string, replacement: string): any;
 
+/**
+ * Delete an element addressed by the lens, and return the post-delete snapshot with it.
+ *
+ * The companion to `applyParseLensEdit` for the case a replacement cannot express: an empty
+ * replacement leaves the element's indentation and line terminator behind, stranding a blank line
+ * per removed node. The returned snapshot is re-derived from the shortened source, because every
+ * element id and span after the deletion has moved.
+ */
+export function applyParseLensDelete(input: string, element_id: string): any;
+
 export function applyParseLensEdit(input: string, element_id: string, replacement: string): any;
+
+/**
+ * Insert a line after the line holding an element, matching that line's indentation and the
+ * document's line ending, and return the post-insert snapshot with it.
+ */
+export function applyParseLensInsertLineAfter(input: string, element_id: string, text: string): any;
 
 export function describeDiagram(input: string): string;
 
@@ -54,13 +70,26 @@ export function parseLens(input: string): any;
 
 export function renderSvg(input: string, config?: any | null): string;
 
+/**
+ * The worker entry point: hand it a [`WorkerRenderMessage`] as JSON, get a
+ * [`WorkerRenderResponse`] as JSON, or `null` when the message needs no reply (a cancel, or an id
+ * that is not the live request).
+ *
+ * JSON text on both sides on purpose — a worker script can forward these straight through
+ * `postMessage` with no `JsValue` dependency, which is what makes the same payload usable from the
+ * main thread, a dedicated worker, and a native test.
+ */
+export function workerHandleMessage(message_json: string): string | undefined;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_diagram_free: (a: number, b: number) => void;
     readonly applyLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+    readonly applyParseLensDelete: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly applyParseLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+    readonly applyParseLensInsertLineAfter: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly describeDiagram: (a: number, b: number, c: number) => void;
     readonly detectType: (a: number, b: number, c: number) => void;
     readonly diagramLens: (a: number, b: number, c: number) => void;
@@ -76,6 +105,7 @@ export interface InitOutput {
     readonly parse: (a: number, b: number, c: number) => void;
     readonly parseLens: (a: number, b: number, c: number) => void;
     readonly renderSvg: (a: number, b: number, c: number, d: number) => void;
+    readonly workerHandleMessage: (a: number, b: number, c: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_export3: (a: number) => void;

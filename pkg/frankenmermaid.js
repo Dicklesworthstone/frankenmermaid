@@ -216,6 +216,37 @@ export function applyLensEdit(input, element_id, replacement) {
 }
 
 /**
+ * Delete an element addressed by the lens, and return the post-delete snapshot with it.
+ *
+ * The companion to `applyParseLensEdit` for the case a replacement cannot express: an empty
+ * replacement leaves the element's indentation and line terminator behind, stranding a blank line
+ * per removed node. The returned snapshot is re-derived from the shortened source, because every
+ * element id and span after the deletion has moved.
+ * @param {string} input
+ * @param {string} element_id
+ * @returns {any}
+ */
+export function applyParseLensDelete(input, element_id) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(input, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(element_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.applyParseLensDelete(retptr, ptr0, len0, ptr1, len1);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        if (r2) {
+            throw takeObject(r1);
+        }
+        return takeObject(r0);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
  * @param {string} input
  * @param {string} element_id
  * @param {string} replacement
@@ -231,6 +262,36 @@ export function applyParseLensEdit(input, element_id, replacement) {
         const ptr2 = passStringToWasm0(replacement, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len2 = WASM_VECTOR_LEN;
         wasm.applyParseLensEdit(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        if (r2) {
+            throw takeObject(r1);
+        }
+        return takeObject(r0);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Insert a line after the line holding an element, matching that line's indentation and the
+ * document's line ending, and return the post-insert snapshot with it.
+ * @param {string} input
+ * @param {string} element_id
+ * @param {string} text
+ * @returns {any}
+ */
+export function applyParseLensInsertLineAfter(input, element_id, text) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(input, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(element_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(text, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len2 = WASM_VECTOR_LEN;
+        wasm.applyParseLensInsertLineAfter(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
@@ -408,6 +469,41 @@ export function renderSvg(input, config) {
     } finally {
         wasm.__wbindgen_add_to_stack_pointer(16);
         wasm.__wbindgen_export4(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * The worker entry point: hand it a [`WorkerRenderMessage`] as JSON, get a
+ * [`WorkerRenderResponse`] as JSON, or `null` when the message needs no reply (a cancel, or an id
+ * that is not the live request).
+ *
+ * JSON text on both sides on purpose — a worker script can forward these straight through
+ * `postMessage` with no `JsValue` dependency, which is what makes the same payload usable from the
+ * main thread, a dedicated worker, and a native test.
+ * @param {string} message_json
+ * @returns {string | undefined}
+ */
+export function workerHandleMessage(message_json) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(message_json, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.workerHandleMessage(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+        if (r3) {
+            throw takeObject(r2);
+        }
+        let v2;
+        if (r0 !== 0) {
+            v2 = getStringFromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export4(r0, r1 * 1, 1);
+        }
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
     }
 }
 function __wbg_get_imports() {
