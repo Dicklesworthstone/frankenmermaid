@@ -24186,6 +24186,27 @@ mod tests {
         );
     }
 
+    /// An explicit flush and the subsequent Drop must not duplicate an event.
+    #[test]
+    fn capture_writer_flush_then_drop_commits_once() {
+        use std::io::Write as _;
+
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        {
+            let mut writer = CaptureWriter::new(Arc::clone(&lines));
+            writer
+                .write_all(b"{\"event\":\"layout.dispatch\"}")
+                .expect("event write");
+            writer.flush().expect("explicit flush");
+        }
+
+        assert_eq!(
+            lines.lock().unwrap().as_slice(),
+            ["{\"event\":\"layout.dispatch\"}"],
+            "Drop must observe the buffer drained by flush and not duplicate the event"
+        );
+    }
+
     // ── Observability output format tests (bd-gy4.8) ──────────────────
 
     #[test]
