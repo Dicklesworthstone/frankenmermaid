@@ -54,6 +54,7 @@ function arg(name, fallback = null) {
 }
 const has = (name) => process.argv.includes(`--${name}`);
 const measurementMode = arg('mode', 'render');
+const hostAdmissionOnly = has('host-admission-only');
 if (!['render', 'parse'].includes(measurementMode)) {
   console.error(`[run] --mode must be render or parse, got ${JSON.stringify(measurementMode)}`);
   process.exit(2);
@@ -1349,6 +1350,23 @@ if (has('self-test')) {
   ) {
     throw new Error('host-wide exclusivity classification regression');
   }
+  const admissionOnly = hostAdmissionOnlyResult(
+    {
+      git_rev: 'a'.repeat(40),
+      host_identity: 'test-host',
+      affinity_cpus: [0],
+      power_policy: powerPolicy,
+    },
+    { ...quietHost, phase: 'host-admission-only' },
+  );
+  if (
+    admissionOnly.schema !== 'frankenmermaid.headtohead.host-admission.v1' ||
+    admissionOnly.status !== 'clear' ||
+    admissionOnly.host_wide_exclusivity.phase !== 'host-admission-only' ||
+    admissionOnly.affinity_cpus.length !== 1
+  ) {
+    throw new Error('host-admission-only result regression');
+  }
   if (
     JSON.stringify(hostWidePhaseLabels([], false))
       !== JSON.stringify(['frankenmermaid-before', 'mermaid-js', 'frankenmermaid-after']) ||
@@ -1985,6 +2003,29 @@ function requireHostWideQuiescence(label) {
     `${HOST_WIDE_QUIET_MAX_ATTEMPTS * HOST_WIDE_QUIET_SAMPLE_MS}ms`,
   );
   process.exit(6);
+}
+
+/** Emit the exact admission decision without starting either timed engine arm. */
+function hostAdmissionOnlyResult(environment, check) {
+  return {
+    schema: 'frankenmermaid.headtohead.host-admission.v1',
+    status: check.verdict,
+    git_rev: environment.git_rev,
+    host_identity: environment.host_identity,
+    affinity_cpus: environment.affinity_cpus,
+    power_policy: powerPolicySummary(environment.power_policy),
+    host_wide_exclusivity: check,
+  };
+}
+
+if (hostAdmissionOnly) {
+  requireHostWideQuiescence('host-admission-only');
+  const admission = hostWideQuiescenceChecks.at(-1);
+  if (!admission || admission.verdict !== 'clear') {
+    throw new Error('host-admission-only returned without a clear admission record');
+  }
+  console.log(JSON.stringify(hostAdmissionOnlyResult(env, admission)));
+  process.exit(0);
 }
 
 /** Aggregate scheduler time across all CPUs. Passive: no busy-wait. */
