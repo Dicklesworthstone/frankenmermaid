@@ -640,9 +640,10 @@ fn assert_xl_svg_completion(name: &str, input: &str, expected_nodes: usize, expe
         expected_nodes,
         "{name} SVG omitted authored node groups"
     );
-    assert!(
-        first.contains("id=\"fm-edge-"),
-        "{name} SVG omitted authored edges"
+    assert_eq!(
+        first.matches("<g id=\"fm-edge-").count(),
+        expected_edges,
+        "{name} SVG omitted authored edge groups"
     );
 }
 
