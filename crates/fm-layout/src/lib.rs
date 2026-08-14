@@ -22579,6 +22579,97 @@ mod tests {
         ir
     }
 
+    /// Two renders of the SAME document must not disagree because the host was busy (bd-ryxg).
+    ///
+    /// `MermaidBudgetLedger::record_parse` takes MEASURED parse wall time, and the ledger
+    /// rebalances its stage split from it. When the guardrail triple was read off that rebalanced
+    /// split, a nominal-tier host gave `max_layout_time_ms` 180 for a 10ms parse and 37 for a
+    /// 200ms parse — and this document's Sugiyama estimate sits between them, so the two arms
+    /// selected different algorithms and produced different geometry from identical input.
+    ///
+    /// The last block is the control: it lays the same document out under the two guardrail
+    /// triples the old rule actually produced, and requires them to disagree. Without it the
+    /// equality assertions could pass vacuously on a document no guardrail can influence.
+    ///
+    /// The algorithm is requested explicitly rather than left to `Auto` so the test measures the
+    /// guardrail, not the auto-selector's heuristics: `dispatch_layout_algorithm` honours an
+    /// explicit request, and `evaluate_layout_guardrails` then applies the budget to it exactly as
+    /// it does for an auto-selected one. Sizing is chosen against `estimate_layout_cost`:
+    /// 40 nodes / 60 edges costs Sugiyama 40*60/50 + ceil(40/4)*5 + 10 = 108ms, 124 iterations and
+    /// 60*24 + 40*4 = 1600 route ops, which fits inside the 10ms-parse triple (180/144/2880) and
+    /// breaches the 200ms-parse one (37/30/592) on all three axes.
+    #[test]
+    fn measured_parse_time_does_not_change_the_layout_of_the_same_document() {
+        let edges: Vec<(usize, usize)> = (0..60).map(|i| (i % 40, (i * 7 + 3) % 40)).collect();
+        let ir = graph_ir(DiagramType::Flowchart, 40, &edges);
+        let pressure = MermaidPressureReport {
+            tier: MermaidPressureTier::Nominal,
+            telemetry_available: true,
+            ..MermaidPressureReport::default()
+        };
+        let arm = |parse_ms: u64| {
+            let mut broker = MermaidBudgetLedger::new(&pressure);
+            broker.record_parse(parse_ms);
+            let guardrails = LayoutGuardrails::from(&broker);
+            (
+                guardrails,
+                layout_diagram_traced_with_algorithm_and_guardrails(
+                    &ir,
+                    LayoutAlgorithm::Sugiyama,
+                    guardrails,
+                ),
+            )
+        };
+
+        let (fast_guardrails, fast) = arm(10);
+        let (slow_guardrails, slow) = arm(200);
+        assert_eq!(
+            fast_guardrails, slow_guardrails,
+            "guardrails moved with measured parse time"
+        );
+        assert_eq!(
+            fast.trace.guard.selected_algorithm, slow.trace.guard.selected_algorithm,
+            "a slow parse selected a different layout algorithm for the same document"
+        );
+        assert_eq!(
+            fast.layout, slow.layout,
+            "a slow parse produced different geometry for the same document"
+        );
+
+        // CONTROL — the guardrail span measured parse time used to produce, laid out directly.
+        //
+        // These two triples are what the OLD rule handed this exact document: the ledger's
+        // post-parse rebalance gave layout 250-10 = 240, minus a ceil(240/4) render tail, i.e.
+        // 180ms for a 10ms parse; and 250-200 = 50, minus ceil(50/4), i.e. 37ms for a 200ms parse.
+        // The iteration and route budgets scale with that share. Laying the same document out
+        // under both proves the span was not cosmetic — it changed the chosen algorithm — which is
+        // what makes the equality assertions above worth making. Without this the test could pass
+        // vacuously on a document no guardrail can influence.
+        let under = |guardrails: LayoutGuardrails| {
+            layout_diagram_traced_with_algorithm_and_guardrails(
+                &ir,
+                LayoutAlgorithm::Sugiyama,
+                guardrails,
+            )
+        };
+        let old_fast_parse = under(LayoutGuardrails {
+            max_layout_time_ms: 180,
+            max_layout_iterations: 144,
+            max_route_ops: 2_880,
+        });
+        let old_slow_parse = under(LayoutGuardrails {
+            max_layout_time_ms: 37,
+            max_layout_iterations: 30,
+            max_route_ops: 592,
+        });
+        assert_ne!(
+            old_fast_parse.trace.guard.selected_algorithm,
+            old_slow_parse.trace.guard.selected_algorithm,
+            "control failed: measured parse time no longer spans a guardrail range that changes \
+             this document's algorithm, so the equality assertions above prove nothing"
+        );
+    }
+
     fn layout_with_constraints(ir: &MermaidDiagramIr) -> DiagramLayout {
         layout_diagram_with_config(
             ir,
