@@ -1953,8 +1953,8 @@ mod tests {
     use super::{
         CorpusItem, RenderExecutor, WorkloadMode, balanced_shards, bootstrap_median_ci,
         build_git_revision, calibrated_batch, contiguous_shards, full_pipeline_parsed,
-        is_git_revision, measure_parse, median, new_batch_revision_key, parse_cpu_list,
-        parse_results_reference, ratio_stats, render_item, rescaled_batch, stats,
+        is_git_revision, lock_unpoisoned, measure_parse, median, new_batch_revision_key,
+        parse_cpu_list, parse_results_reference, ratio_stats, render_item, rescaled_batch, stats,
     };
 
     #[test]
@@ -2160,6 +2160,27 @@ mod tests {
         assert!(!Arc::ptr_eq(&first_timed, &second_timed));
         assert_eq!(cached, first_timed);
         assert_eq!(first_timed, second_timed);
+    }
+
+    #[test]
+    fn timed_render_item_never_populates_the_render_snapshot() {
+        let item = CorpusItem {
+            id: "uncached-snapshot-population".to_owned(),
+            texts: vec!["flowchart LR\nA[First]-->B[Second]".to_owned()].into(),
+            revision_key: new_batch_revision_key(),
+            reps: 1,
+            warmup: 0,
+        };
+        let config = Arc::new(SvgRenderConfig::default());
+        let executor = RenderExecutor::new(1).expect("scalar executor");
+
+        assert!(lock_unpoisoned(&executor.render_snapshot_cache).is_empty());
+        let rendered = render_item(&executor, &item, &config);
+        assert!(!rendered.is_empty());
+        assert!(
+            lock_unpoisoned(&executor.render_snapshot_cache).is_empty(),
+            "a timed full-render sample must not seed a later memo hit"
+        );
     }
 
     #[test]
