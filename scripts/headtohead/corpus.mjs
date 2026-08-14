@@ -694,3 +694,20 @@ export function generateAll() {
   }
   return out;
 }
+
+/** Keep the structural-capability tier complete: every formerly sub-XL family stays represented. */
+export function assertXlCapabilityFixtures() {
+  const expected = new Set([
+    'wide_xl_50x50', 'cyclic_scc_xl_2500', 'dense_dag_xl_2000', 'sequence_xl_2000',
+    'class_xl_2000', 'state_xl_2000', 'er_xl_2000',
+  ]);
+  const actual = new Set(CORPUS.map((item) => item.id));
+  if ([...expected].some((id) => !actual.has(id))) {
+    throw new Error(`XL capability fixtures changed: expected ${[...expected].join(', ')}`);
+  }
+  for (const item of CORPUS.filter((candidate) => expected.has(candidate.id))) {
+    if (item.dnf_allowed !== true || item.js_budget_ms < 600_000) {
+      throw new Error(`XL capability fixture ${item.id} must preserve DNF admission and its 600s budget`);
+    }
+  }
+}
