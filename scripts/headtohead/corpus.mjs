@@ -612,6 +612,35 @@ export const CORPUS = [
   { id: 'ci_batch_500',         gen: 'doc_build',    params: { copies: 100 },                class: 'doc_build',  reps_js: 1, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 1500_000, dnf_allowed: true },
 
   // ---------------------------------------------------------------------------------------------
+  // XL tier for the SEVEN syntax families that never had one.
+  //
+  // The XL block above reaches thousands of nodes through exactly five generators: `flowchart`,
+  // `architecture`, `er_schema`, `edit_trace` and `doc_build`. The other seven generators in this
+  // file stop at the pinned baseline sizes -- 20 participants, 40 states, 40 ER entities, 50
+  // classes, 100 cyclic nodes, 200 dense-DAG nodes, 512 wide-layout nodes -- so seven of the twelve
+  // syntax families this corpus can express were never taken anywhere near the regime where the
+  // comparator stops working. Every ratio measured on them describes a size nobody's CI job hits.
+  //
+  // The claim these items exist to decide is a COMPLETION claim, not a timing one: at this size,
+  // does mermaid-js produce a diagram at all? `dnf_allowed` is what makes that answerable -- it
+  // downgrades mermaid's own failure (its size guardrails, a stack overflow, an OOM) from a hard
+  // run failure to a recorded `status: "dnf"` with `kind: "failed"`, which run.mjs keeps out of the
+  // ratio aggregate and out of the cross-engine equivalence gate, because an engine that rendered
+  // nothing cannot be compared against and cannot bound a ratio.
+  //
+  // Sizes are chosen to clear 2,000 nodes in every family, since that is where the comparator has
+  // been observed to stop, and to keep each family's own shape: `wide` stays layered, `cyclic`
+  // stays SCC-heavy, `dense_dag` keeps fanout 4, `class` keeps its members, `er` keeps its chain.
+  // Nothing here is a new generator or a new shape -- same runtime-selected generators, one tier up.
+  { id: 'wide_xl_50x50',        gen: 'wide',         params: { layers: 50, width: 50 },      class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
+  { id: 'cyclic_scc_xl_2500',   gen: 'cyclic',       params: { n: 2500, ring: 5 },           class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
+  { id: 'dense_dag_xl_2000',    gen: 'dense_dag',    params: { n: 2000, fanout: 4 },         class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
+  { id: 'sequence_xl_2000',     gen: 'sequence',     params: { n: 2000 },                    class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
+  { id: 'class_xl_2000',        gen: 'class',        params: { n: 2000 },                    class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
+  { id: 'state_xl_2000',        gen: 'state',        params: { n: 2000 },                    class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
+  { id: 'er_xl_2000',           gen: 'er',           params: { n: 2000 },                    class: 'single',     reps_js: 1, warmup_js: 0, reps_rs: 40, warmup_rs: 3, js_budget_ms: 600_000, dnf_allowed: true },
+
+  // ---------------------------------------------------------------------------------------------
   // PHASE 2 — whole jobs a real user runs, on realistic data. See the generator notes above: these
   // differ from `doc_build`/`edit_trace` in DISTRIBUTION, not just size — flowchart-dominated type
   // mix, right-skewed diagram sizes, and labels that actually contain `&`, `<`, `>`, apostrophes and
