@@ -8,7 +8,6 @@
 target/
 
 # Web/WASM artifacts
-pkg/
 *.wasm
 node_modules/
 .wrangler/

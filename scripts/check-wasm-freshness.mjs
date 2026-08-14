@@ -35,8 +35,15 @@ if (!existsSync(PKG_JS) || !existsSync(PKG_WASM)) {
   process.exit(2);
 }
 
-const { initSync, renderSvg } = await import(PKG_JS);
-initSync({ module: readFileSync(PKG_WASM) });
+let renderSvg;
+try {
+  const packageModule = await import(PKG_JS);
+  packageModule.initSync({ module: readFileSync(PKG_WASM) });
+  ({ renderSvg } = packageModule);
+} catch (err) {
+  console.error(`cannot run: failed to load the published package: ${err.message}`);
+  process.exit(2);
+}
 
 /** Left edge of every `<rect>` inside a node group whose id matches `idPattern`. */
 function nodeRectXs(svg, idPattern) {

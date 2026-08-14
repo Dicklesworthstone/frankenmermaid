@@ -1057,6 +1057,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # `pkg/` is a vendored package, not an untracked build directory.  Check the
+      # consumer-facing artifact before rebuilding so a source change cannot mask
+      # a stale committed package in the same CI run.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Verify published WASM package freshness
+        run: node scripts/check-wasm-freshness.mjs
+
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
