@@ -1218,6 +1218,129 @@ export function compareDiagram({ index, family, fmSvg, jsSvg, source }) {
   };
 }
 
+/**
+ * Verify one FrankenMermaid SVG against the subset of Mermaid source that the
+ * harness can decode independently. This is intentionally NOT equivalence:
+ * it exists for incumbent-DNF rows, where there is no mermaid-js SVG to compare.
+ *
+ * A successful result proves source-grounded node/edge (and, for class
+ * diagrams, relationship-marker) preservation. It never creates a cross-engine
+ * ratio or substitutes for `compareDiagram` when both engines rendered.
+ */
+export function verifyFrankenmermaidAgainstSource({ index, family, fmSvg, source }) {
+  const fm = signature(fmSvg, 'frankenmermaid');
+  const truth = source ? groundTruth(source) : null;
+  const checks = [];
+
+  const nodesDecidable = truth !== null && fm.node_ids.length > 0;
+  const nodes = nodesDecidable
+    ? diffMultisets(multiset(fm.node_ids), multiset(truth.node_ids))
+    : null;
+  checks.push({
+    invariant: 'node_id_set_vs_input__frankenmermaid',
+    tier: 1,
+    decided: nodesDecidable,
+    pass: nodesDecidable ? nodes.equal : null,
+    detail: nodes ?? { reason: truth === null ? 'input_not_decodable' : 'no_rendered_node_ids' },
+  });
+
+  const topologyDecidable = truth !== null && fm.topology !== null;
+  const topology = topologyDecidable
+    ? diffMultisets(multiset(fm.topology), multiset(truth.edges))
+    : null;
+  checks.push({
+    invariant: 'edge_topology_vs_input__frankenmermaid',
+    tier: 2,
+    decided: topologyDecidable,
+    pass: topologyDecidable ? topology.equal : null,
+    detail: topology ?? { reason: truth === null ? 'input_not_decodable' : fm.topology_status },
+  });
+
+  if (family === 'class') {
+    const relationshipsDecidable = truth?.class_relationships !== undefined
+      && fm.class_relationships !== null;
+    const relationships = relationshipsDecidable
+      ? diffMultisets(multiset(fm.class_relationships), multiset(truth.class_relationships))
+      : null;
+    checks.push({
+      invariant: 'class_relationship_semantics_vs_input__frankenmermaid',
+      tier: 2,
+      decided: relationshipsDecidable,
+      pass: relationshipsDecidable ? relationships.equal : null,
+      detail: relationships ?? {
+        reason: truth?.class_relationships === undefined
+          ? 'class_input_not_decodable'
+          : fm.class_relationships_status,
+      },
+    });
+  }
+
+  const required = ['node_id_set_vs_input__frankenmermaid'];
+  if (TIER2_FAMILIES.has(family)) {
+    required.push(
+      family === 'class'
+        ? 'class_relationship_semantics_vs_input__frankenmermaid'
+        : 'edge_topology_vs_input__frankenmermaid',
+    );
+  }
+  const decided = checks.filter((check) => check.decided);
+  const failed = decided.filter((check) => check.pass === false);
+  const missing = required.filter((invariant) =>
+    !decided.some((check) => check.invariant === invariant));
+  const verdict = failed.length > 0 ? 'divergent' : missing.length > 0 ? 'unverified' : 'verified';
+
+  return {
+    index,
+    family,
+    verdict,
+    unverified_reason: verdict === 'unverified'
+      ? `required source-grounded invariants undecidable: ${missing.join(', ')}`
+      : undefined,
+    tiers_decided: [...new Set(decided.map((check) => check.tier))].sort(),
+    checks_decided: decided.length,
+    checks_failed: failed.length,
+    checks,
+    fm: {
+      bytes: fm.bytes,
+      node_count: fm.node_count,
+      edge_element_count: fm.edge_element_count,
+      topology_status: fm.topology_status,
+      class_relationships_status: fm.class_relationships_status,
+    },
+  };
+}
+
+/** Summarize source-grounded native validation for incumbent-DNF rows. */
+export function summarizeFrankenmermaidValidation(results) {
+  const divergent = results.filter((result) => result.verdict === 'divergent');
+  const unverified = results.filter((result) => result.verdict === 'unverified');
+  const families = new Map();
+  for (const result of results) {
+    const row = families.get(result.family) ?? { diagrams: 0, verified: 0, divergent: 0, unverified: 0 };
+    row.diagrams += 1;
+    row[result.verdict] += 1;
+    families.set(result.family, row);
+  }
+  return {
+    method: 'frankenmermaid_svg_vs_input_structural',
+    claim: 'source-grounded native-output validation for incumbent-DNF rows: decoded node ids, '
+      + 'source-decodable edge topology, and class relationship marker kind plus owning end. '
+      + 'It is not cross-engine equivalence and does not support a competitive ratio.',
+    diagrams: results.length,
+    verified: results.length - divergent.length - unverified.length,
+    divergent: divergent.length,
+    unverified: unverified.length,
+    verdict: divergent.length === 0 && unverified.length === 0 ? 'pass' : 'fail',
+    by_family: Object.fromEntries(families),
+    divergent_samples: divergent.slice(0, 5),
+    unverified_samples: unverified.slice(0, 5).map((result) => ({
+      index: result.index,
+      family: result.family,
+      reason: result.unverified_reason,
+    })),
+  };
+}
+
 /** Roll per-diagram verdicts into the record the harness gates on. */
 export function summarize(results) {
   const byInvariant = new Map();
@@ -1381,6 +1504,18 @@ export function selfTest() {
       && fallback.js.topology_status === 'declared_path_endpoints',
     { verdict: fallback.verdict, js: fallback.js, failed: failedInvariants(fallback) });
   record('baseline_decides_tier2', base.tiers_decided.includes(2), base.tiers_decided);
+  const nativeBase = verifyFrankenmermaidAgainstSource({
+    index: 0,
+    family: 'flowchart',
+    fmSvg: fm,
+    source,
+  });
+  record('native_source_validation_baseline_is_verified',
+    nativeBase.verdict === 'verified',
+    { verdict: nativeBase.verdict, checks: nativeBase.checks });
+  record('native_source_validation_summary_passes',
+    summarizeFrankenmermaidValidation([nativeBase]).verdict === 'pass',
+    summarizeFrankenmermaidValidation([nativeBase]));
   // The extractor's own geometry must agree with mermaid's declared endpoints, or a topology
   // "agreement" downstream proves nothing.
   record('baseline_geometry_matches_declared_ids',
@@ -1400,6 +1535,15 @@ export function selfTest() {
       && classBase.checks.some((c) =>
         c.invariant === 'class_relationship_semantics_cross_engine' && c.pass === true),
     { verdict: classBase.verdict, failed: failedInvariants(classBase) });
+  const nativeClassBase = verifyFrankenmermaidAgainstSource({
+    index: 0,
+    family: 'class',
+    fmSvg: classPair.fm,
+    source: classPair.source,
+  });
+  record('native_class_source_validation_is_verified',
+    nativeClassBase.verdict === 'verified',
+    { verdict: nativeClassBase.verdict, checks: nativeClassBase.checks });
 
   // CLASS MUTATION 1 -- preserve endpoints but turn composition into aggregation.
   const wrongClassKind = classPair.fm.replace(
@@ -1414,6 +1558,18 @@ export function selfTest() {
       && failedInvariants(classM1).includes('class_relationship_semantics_cross_engine')
       && failedInvariants(classM1).includes('class_relationship_semantics_vs_input__frankenmermaid'),
     { verdict: classM1.verdict, failed: failedInvariants(classM1) });
+  const nativeWrongClassKind = verifyFrankenmermaidAgainstSource({
+    index: 0,
+    family: 'class',
+    fmSvg: wrongClassKind,
+    source: classPair.source,
+  });
+  record('native_class_relationship_kind_mutation_is_divergent',
+    nativeWrongClassKind.verdict === 'divergent'
+      && nativeWrongClassKind.checks.some((check) =>
+        check.invariant === 'class_relationship_semantics_vs_input__frankenmermaid'
+          && check.pass === false),
+    { verdict: nativeWrongClassKind.verdict, checks: nativeWrongClassKind.checks });
 
   // CLASS MUTATION 2 -- preserve kind and endpoints but put the ownership diamond on the wrong end.
   const wrongClassEnd = classPair.fm.replace(
@@ -1597,6 +1753,17 @@ export function selfTest() {
     && failedInvariants(m2).includes('edge_topology_cross_engine')
     && failedInvariants(m2).includes('edge_topology_vs_input__frankenmermaid'),
     { verdict: m2.verdict, failed: failedInvariants(m2) });
+  const nativeDroppedEdge = verifyFrankenmermaidAgainstSource({
+    index: 0,
+    family: 'flowchart',
+    fmSvg: droppedEdge,
+    source,
+  });
+  record('native_source_validation_dropped_edge_is_divergent',
+    nativeDroppedEdge.verdict === 'divergent'
+      && nativeDroppedEdge.checks.some((check) =>
+        check.invariant === 'edge_topology_vs_input__frankenmermaid' && check.pass === false),
+    { verdict: nativeDroppedEdge.verdict, checks: nativeDroppedEdge.checks });
 
   // MUTATION 3 -- the incumbent drops a path. Because declarations live on paths, the fallback
   // cannot conceal this: both cross-engine and input-grounded topology lose that edge.

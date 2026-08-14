@@ -19,8 +19,9 @@
  *     --only ci_batch_500 [--out <dir>] [--keep-dumps]
  *
  * Exit codes: `0` every diagram equivalent · `1` an engine errored or the dump/hash linkage broke ·
- * `2` invalid arguments · `3` corpus drift · `7` the equivalence gate failed (a diagram diverged, or
- * a family that claims a Tier 2 semantic invariant could not have it decided).
+ * `2` invalid arguments · `3` corpus drift · `7` the structural gate failed (a cross-engine diagram
+ * diverged, a claimed Tier 2 invariant was undecidable, or a native DNF SVG failed source-grounded
+ * validation).
  *
  * See `svg_equivalence.mjs` for exactly which invariants are checked and which are not.
  */
@@ -33,7 +34,13 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { CORPUS, generateAll } from './corpus.mjs';
-import { TIER2_FAMILIES, compareDiagram, summarize } from './svg_equivalence.mjs';
+import {
+  TIER2_FAMILIES,
+  compareDiagram,
+  summarize,
+  summarizeFrankenmermaidValidation,
+  verifyFrankenmermaidAgainstSource,
+} from './svg_equivalence.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, '..', '..');
@@ -354,18 +361,48 @@ for (const item of items) {
     log(`FAIL ${item.id}: frankenmermaid status=${fmRecord?.status ?? 'missing'}`);
     process.exit(EXIT_ENGINE_ERROR);
   }
-  // A comparator that cannot render cannot be checked for equivalence, and that is a legitimate
-  // outcome for the XL/DNF tier -- reported, not silently passed.
+  // A comparator that cannot render cannot be checked for equivalence. It is still not enough to
+  // observe that our process returned SVG: prove the inspected native bytes preserve every
+  // source-grounded invariant this family can decide before recording the structural outcome.
   if (!jsRecord || jsRecord.status !== 'ok') {
+    const fmSvgs = readRevisions(fmDump, item.id, '.default.svg');
+    const linkage = {
+      fm_revisions_dumped: fmSvgs.length,
+      revisions_expected: texts.length,
+      fm_dump_sha256: sha256(fmSvgs.join('')),
+      fm_reported_sha256: fmRecord.output_sha256,
+    };
+    linkage.counts_match = linkage.fm_revisions_dumped === linkage.revisions_expected;
+    linkage.fm_matches_measured = linkage.fm_dump_sha256 === linkage.fm_reported_sha256;
+    if (!linkage.counts_match || !linkage.fm_matches_measured) {
+      log(`FAIL ${item.id}: native DNF validation SVGs are not provably the measured render`);
+      log(`  ${JSON.stringify(linkage)}`);
+      process.exit(EXIT_ENGINE_ERROR);
+    }
+    const nativeResults = texts.map((source, index) => verifyFrankenmermaidAgainstSource({
+      index,
+      family: familyOf(source),
+      fmSvg: fmSvgs[index],
+      source,
+    }));
+    const nativeValidation = summarizeFrankenmermaidValidation(nativeResults);
+    if (nativeValidation.verdict !== 'pass') gateFailed = true;
     rows.push({
       id: item.id,
       status: 'incumbent_did_not_render',
+      revisions: texts.length,
       incumbent_status: jsRecord?.status ?? 'missing',
       incumbent_detail: jsRecord?.dnf ?? jsRecord?.error ?? null,
       equivalence: null,
-      note: 'no equivalence claim is possible for an item mermaid-js did not render',
+      linkage,
+      native_output_validation: nativeValidation,
+      note: 'no cross-engine equivalence claim is possible for an item mermaid-js did not render; '
+        + 'native source-grounded validation is reported separately',
     });
-    log(`SKIP ${item.id}: mermaid-js status=${jsRecord?.status ?? 'missing'} -- no comparison possible`);
+    log(`${nativeValidation.verdict === 'pass' ? 'PASS' : 'FAIL'} ${item.id}: `
+      + `mermaid-js status=${jsRecord?.status ?? 'missing'}; native structural validation `
+      + `${nativeValidation.verified}/${nativeValidation.diagrams} verified, `
+      + `${nativeValidation.divergent} divergent, ${nativeValidation.unverified} unverified`);
     continue;
   }
 
@@ -483,12 +520,15 @@ const artifact = {
       + 'geometrically; mermaid-js uses the same geometry when unambiguous and uniquely resolved '
       + 'per-path data-id endpoints otherwise. '
       + `Claimed for: ${[...TIER2_FAMILIES].join(', ')}.`,
+    incumbent_dnf: 'when mermaid-js does not render, no cross-engine equivalence or ratio is '
+      + 'claimed. The measured FrankenMermaid SVG revisions must instead pass a separate '
+      + 'source-grounded native-output validation before the DNF outcome is recorded.',
     extractor: 'single shared implementation applied to both engines (svg_equivalence.mjs); a '
       + 'per-engine extractor pair could agree by construction',
-    self_test: 'svg_equivalence.mjs --self-test: 16 mutation controls (including dropped or '
+    self_test: 'svg_equivalence.mjs --self-test: mutation controls (including dropped or '
       + 'rewired edges, displaced nodes, swapped class relationship kinds, wrong owning endpoint, '
       + 'unknown markers, invalid diamond bodies, inward or filled inheritance triangles, and '
-      + 'cardinality/label drift) '
+      + 'cardinality/label drift), including source-grounded native DNF validation controls, '
       + 'and 4 negative controls (including benign path ordering and extra content)',
     undecidable_is_not_a_pass: true,
   },
@@ -518,6 +558,15 @@ console.log('method: SVG structural (text-token containment + rendered-path topo
 console.log('');
 console.log('item                  diagrams  equiv  diverg  unver  verdict');
 for (const row of rows) {
+  if (row.status === 'incumbent_did_not_render') {
+    const native = row.native_output_validation;
+    console.log(
+      `${row.id.padEnd(21)} ${String(native.diagrams).padStart(8)}  ${'DNF'.padStart(5)}  `
+      + `${String(native.divergent).padStart(6)}  ${String(native.unverified).padStart(5)}  `
+      + `NATIVE-${native.verdict.toUpperCase()}`,
+    );
+    continue;
+  }
   if (row.status !== 'compared') {
     console.log(`${row.id.padEnd(21)} ${String(row.revisions ?? '-').padStart(8)}  ${'-'.padStart(5)}  ${'-'.padStart(6)}  ${'-'.padStart(5)}  ${row.status}`);
     continue;
@@ -552,7 +601,7 @@ for (const row of rows) {
 console.log('');
 console.log(`verdict: ${artifact.verdict.toUpperCase()}`);
 if (gateFailed) {
-  console.log('a divergent or unverified diagram means a speedup for that item compares two');
-  console.log('different renders; it is not a win until the divergence is explained or fixed.');
+  console.log('a divergent or unverified row cannot support its corresponding performance outcome');
+  console.log('until the structural failure is explained or fixed.');
 }
 process.exit(gateFailed ? EXIT_GATE_FAILED : 0);
