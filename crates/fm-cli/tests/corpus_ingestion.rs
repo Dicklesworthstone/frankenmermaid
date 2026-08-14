@@ -602,3 +602,130 @@ fn corpus_evidence_log_emitted() {
     });
     println!("{}", serde_json::to_string(&evidence).unwrap());
 }
+
+fn assert_xl_svg_completion(name: &str, input: &str, expected_nodes: usize, expected_edges: usize) {
+    let parsed = parse(input);
+    assert_eq!(
+        parsed.ir.nodes.len(),
+        expected_nodes,
+        "{name} parser omitted authored nodes"
+    );
+    assert_eq!(
+        parsed.ir.edges.len(),
+        expected_edges,
+        "{name} parser omitted authored edges"
+    );
+
+    let layout = layout_diagram(&parsed.ir);
+    assert_eq!(
+        layout.nodes.len(),
+        expected_nodes,
+        "{name} layout omitted parsed nodes"
+    );
+    assert_eq!(
+        layout.edges.len(),
+        expected_edges,
+        "{name} layout omitted parsed edges"
+    );
+
+    let config = SvgRenderConfig::default();
+    let first = render_svg_with_layout(&parsed.ir, &layout, &config);
+    let second = render_svg_with_layout(&parsed.ir, &layout, &config);
+    assert_eq!(
+        first, second,
+        "{name} SVG must be byte-identical across renders"
+    );
+    assert_eq!(
+        first.matches("<g id=\"fm-node-").count(),
+        expected_nodes,
+        "{name} SVG omitted authored node groups"
+    );
+    assert!(
+        first.contains("id=\"fm-edge-"),
+        "{name} SVG omitted authored edges"
+    );
+}
+
+#[test]
+fn xl_incumbent_dnf_workloads_complete_structurally_and_deterministically() {
+    const NODE_COUNT: usize = 2_000;
+
+    let mut wide = String::from("flowchart TD\n");
+    for layer in 0..50 {
+        for width in 0..50 {
+            wide.push_str(&format!("  W{layer}_{width}[L{layer} W{width}]\n"));
+        }
+    }
+    for layer in 0..49 {
+        for width in 0..50 {
+            wide.push_str(&format!("  W{layer}_{width}-->W{}_{width}\n", layer + 1));
+            wide.push_str(&format!(
+                "  W{layer}_{width}-->W{}_{}\n",
+                layer + 1,
+                (width + 1) % 50
+            ));
+        }
+    }
+    assert_xl_svg_completion("wide_xl_50x50", &wide, 2_500, 4_900);
+
+    let mut cyclic = String::from("flowchart TD\n");
+    for index in 0..2_500 {
+        cyclic.push_str(&format!("  C{index}[C{index}]\n"));
+    }
+    for index in 0..2_500 {
+        let ring_start = index / 5 * 5;
+        let next = ring_start + (index - ring_start + 1) % 5;
+        cyclic.push_str(&format!("  C{index}-->C{next}\n"));
+        if index + 5 < 2_500 {
+            cyclic.push_str(&format!("  C{index}-->C{}\n", index + 5));
+        }
+    }
+    assert_xl_svg_completion("cyclic_scc_xl_2500", &cyclic, 2_500, 4_995);
+
+    let mut dense_dag = String::from("flowchart LR\n");
+    for index in 0..NODE_COUNT {
+        dense_dag.push_str(&format!("  D{index}[D{index}]\n"));
+    }
+    for index in 0..NODE_COUNT {
+        for offset in 1..=4 {
+            if index + offset < NODE_COUNT {
+                dense_dag.push_str(&format!("  D{index}-->D{}\n", index + offset));
+            }
+        }
+    }
+    assert_xl_svg_completion("dense_dag_xl_2000", &dense_dag, NODE_COUNT, 7_990);
+
+    let mut sequence = String::from("sequenceDiagram\n");
+    for index in 0..NODE_COUNT {
+        sequence.push_str(&format!("  participant P{index}\n"));
+    }
+    for index in 0..NODE_COUNT - 1 {
+        sequence.push_str(&format!("  P{index}->>P{}: request {index}\n", index + 1));
+        sequence.push_str(&format!("  P{}-->>P{index}: response {index}\n", index + 1));
+    }
+    assert_xl_svg_completion("sequence_xl_2000", &sequence, NODE_COUNT, 3_998);
+
+    let mut class = String::from("classDiagram\n");
+    for index in 0..NODE_COUNT {
+        class.push_str(&format!(
+            "  class C{index} {{\n    +int field{index}\n    +method{index}() bool\n  }}\n"
+        ));
+    }
+    for index in 0..NODE_COUNT - 1 {
+        class.push_str(&format!("  C{index} <|-- C{}\n", index + 1));
+    }
+    assert_xl_svg_completion("class_xl_2000", &class, NODE_COUNT, 1_999);
+
+    let mut state = String::from("stateDiagram-v2\n  [*] --> S0\n");
+    for index in 0..NODE_COUNT - 1 {
+        state.push_str(&format!("  S{index} --> S{}: event{index}\n", index + 1));
+    }
+    state.push_str("  S1999 --> [*]\n");
+    assert_xl_svg_completion("state_xl_2000", &state, NODE_COUNT, 2_000);
+
+    let mut er = String::from("erDiagram\n");
+    for index in 0..NODE_COUNT - 1 {
+        er.push_str(&format!("  E{index} ||--o{{ E{} : has\n", index + 1));
+    }
+    assert_xl_svg_completion("er_xl_2000", &er, NODE_COUNT, 1_999);
+}
