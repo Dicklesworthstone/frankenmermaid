@@ -12950,6 +12950,33 @@ mod tests {
     }
 
     #[test]
+    fn parallel_node_renderer_preserves_2048_node_flowchart_structure() {
+        // Keep this at the native parallel-render threshold. The 2k DNF witness above covers
+        // incumbent failure admission; this one additionally exercises our threaded node writer.
+        const NODE_COUNT: usize = 2_048;
+
+        let mut input = String::from("flowchart LR\n");
+        for index in 0..NODE_COUNT {
+            input.push_str(&format!("  N{index}[node {index}]\n"));
+        }
+        for index in 0..NODE_COUNT - 1 {
+            input.push_str(&format!("  N{index}-->N{}\n", index + 1));
+        }
+
+        let ir = fm_parser::parse(&input).ir;
+        let layout = fm_layout::layout_diagram_traced(&ir).layout;
+        let first = render_svg_with_layout(&ir, &layout, &SvgRenderConfig::default());
+        let second = render_svg_with_layout(&ir, &layout, &SvgRenderConfig::default());
+
+        assert_eq!(
+            first, second,
+            "parallel node fragments must retain stable ordering"
+        );
+        assert_eq!(first.matches("<g id=\"fm-node-").count(), NODE_COUNT);
+        assert_eq!(first.matches("id=\"fm-edge-").count(), NODE_COUNT - 1);
+    }
+
+    #[test]
     fn batch_renderer_reuses_shared_flowchart_prefix_byte_identically() {
         let inputs = [
             concat!(
