@@ -69,6 +69,17 @@ function devtoolsPortFromStderr(stderrTail) {
   return Number.isSafeInteger(port) && port > 0 && port <= 65_535 ? port : null;
 }
 
+function chromiumStartupRecoveryHint(stderrTail) {
+  if (
+    !stderrTail.includes('Failed to create socket directory') ||
+    !stderrTail.includes('Failed to create a ProcessSingleton')
+  ) {
+    return '';
+  }
+  return ' Detected Chromium snap private-tmp namespace failure; ask the host operator to run ' +
+    '`sudo /usr/lib/snapd/snap-discard-ns chromium`, then retry.';
+}
+
 // Bundle cache. Read by node, never by the browser, so a hidden dir is fine here.
 const CACHE = join(homedir(), '.cache', 'fm-headtohead');
 
@@ -276,8 +287,9 @@ async function launchChromium() {
   const diagnostic = lastStderrTail.length > 0
     ? `; chromium stderr tail: ${JSON.stringify(lastStderrTail)}`
     : '';
+  const recoveryHint = chromiumStartupRecoveryHint(lastStderrTail);
   throw new Error(
-    `chromium did not expose a devtools port after ${CHROMIUM_STARTUP_ATTEMPTS} clean startup attempts: ${lastError.message}${diagnostic}`,
+    `chromium did not expose a devtools port after ${CHROMIUM_STARTUP_ATTEMPTS} clean startup attempts: ${lastError.message}${diagnostic}${recoveryHint}`,
   );
 }
 
@@ -683,6 +695,14 @@ if (has('self-test')) {
     devtoolsPortFromStderr('not a DevTools listener') !== null
   ) {
     throw new Error('chromium DevTools port parser must accept only assigned loopback ports');
+  }
+  const singletonFailure = 'ERROR:chrome/browser/process_singleton_posix.cc:1043] Failed to create socket directory.\n' +
+    'ERROR:chrome/app/chrome_main_delegate.cc:520] Failed to create a ProcessSingleton for your profile directory.';
+  if (
+    !chromiumStartupRecoveryHint(singletonFailure).includes('snap-discard-ns chromium') ||
+    chromiumStartupRecoveryHint('Failed to create socket directory') !== ''
+  ) {
+    throw new Error('chromium snap namespace recovery hint must require the complete failure signature');
   }
   const exitedProcess = new EventEmitter();
   exitedProcess.exitCode = null;
