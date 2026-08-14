@@ -24230,6 +24230,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn capture_writer_surfaces_malformed_complete_lines() {
+        use std::io::Write as _;
+
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        {
+            let mut writer = CaptureWriter::new(Arc::clone(&lines));
+            writer
+                .write_all(b"before\nmalformed-\xff\nafter\n")
+                .expect("capture write succeeds");
+        }
+
+        let captured = lines.lock().expect("capture lines lock");
+        assert_eq!(captured.len(), 3, "each complete record is retained");
+        assert_eq!(captured[0], "before");
+        assert!(captured[1].contains("malformed-"));
+        assert_eq!(captured[2], "after");
+    }
+
     // ── Observability output format tests (bd-gy4.8) ──────────────────
 
     #[test]
