@@ -126,6 +126,22 @@ fn self_elf_sha256() -> (String, u64) {
     }
 }
 
+/// Return the source revision embedded by the strict-remote benchmark build.
+///
+/// The driver rejects an untagged or malformed revision before it measures either
+/// engine. This closes the stale-ELF gap that an ELF hash alone cannot detect:
+/// the hash proves which executable ran, while this value binds that executable
+/// to the exact source revision the campaign requested.
+fn build_git_revision() -> Option<&'static str> {
+    option_env!("FM_H2H_BUILD_GIT_REV").filter(|revision| is_git_revision(revision))
+}
+
+fn is_git_revision(revision: &str) -> bool {
+    revision.len() == 40
+        && revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase())
+}
 /// The lean output profile: no per-element accessibility metadata, no source spans.
 /// This is what `A11yConfig::none()` already produces today; it exists as a config, never as a
 /// default. Reported here so output-size dominance is measured, not asserted.
@@ -1596,6 +1612,7 @@ fn main() {
             "record": "binary",
             "elf_sha256": elf_sha256,
             "elf_bytes": elf_bytes,
+            "build_git_revision": build_git_revision(),
             "worker_threads": executor.threads,
             "thread_count_requested": executor.threads,
             "thread_probe_required": executor.thread_probe_enabled,
@@ -1920,11 +1937,19 @@ mod tests {
 
     use super::{
         CorpusItem, RenderExecutor, WorkloadMode, balanced_shards, bootstrap_median_ci,
-        calibrated_batch, contiguous_shards, full_pipeline_parsed, measure_parse, median,
-        new_batch_revision_key, parse_cpu_list, parse_results_reference, ratio_stats,
-        rescaled_batch, stats,
+        build_git_revision, calibrated_batch, contiguous_shards, full_pipeline_parsed,
+        is_git_revision, measure_parse, median, new_batch_revision_key, parse_cpu_list,
+        parse_results_reference, ratio_stats, rescaled_batch, stats,
     };
 
+    #[test]
+    fn benchmark_binary_revision_rejects_malformed_build_stamps() {
+        assert_eq!(build_git_revision(), option_env!("FM_H2H_BUILD_GIT_REV"));
+        assert!(is_git_revision(&"a".repeat(40)));
+        assert!(!is_git_revision("a"));
+        assert!(!is_git_revision(&"A".repeat(40)));
+        assert!(!is_git_revision(&"z".repeat(40)));
+    }
     /// Right-skewed sizes, the shape every realistic documentation corpus has.
     fn skewed_inputs(count: usize) -> Vec<String> {
         (0..count)
