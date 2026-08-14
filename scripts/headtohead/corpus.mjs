@@ -686,6 +686,7 @@ export function generate(item) {
 
 /** Generate every corpus input and return `{id -> {texts, sha256, bytes}}`. */
 export function generateAll() {
+  assertXlCapabilityFixtures();
   const out = new Map();
   for (const item of CORPUS) {
     const texts = generate(item);
