@@ -47,13 +47,6 @@ const PARSE_CALIBRATION_TARGET_NS =
 const HOST_WIDE_MAX_BUSY_FRACTION = 0.20;
 const HOST_WIDE_QUIET_SAMPLE_MS = 1_000;
 const HOST_WIDE_QUIET_MAX_ATTEMPTS = 900;
-// Windows sampled for provenance when the run is NOT demanding an idle host. Enough to describe
-// how busy the box was, few enough that describing it costs seconds rather than a quarter hour.
-const HOST_WIDE_OBSERVE_ATTEMPTS = 2;
-// Balanced-square A/A null bound, ported from franken_networkx's balanced_square_ab.py: an arm
-// whose own first-half/second-half ratio leaves +/-2% of 1.0 was measured under drift, and its
-// ratio is not a result. Matches this harness's existing null-median clause-3 bound.
-const BALANCED_SQUARE_NULL_BOUND = 0.02;
 
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);
@@ -149,8 +142,7 @@ function hostWidePhaseLabels(threadSweep, skipMermaid) {
   const after = threadSweep.length > 0
     ? threadSweep.map((threads) => `frankenmermaid-after-t${threads}`)
     : ['frankenmermaid-after'];
-  // `A B B A`: the incumbent occupies two mirrored slots so it carries its own A/A null.
-  return [...before, 'mermaid-js', 'mermaid-js-null', ...after];
+  return [...before, 'mermaid-js', ...after];
 }
 
 function validExclusiveHostClaim(value) {
@@ -1436,18 +1428,12 @@ if (has('self-test')) {
   }
   if (
     JSON.stringify(hostWidePhaseLabels([], false))
-      !== JSON.stringify([
-        'frankenmermaid-before',
-        'mermaid-js',
-        'mermaid-js-null',
-        'frankenmermaid-after',
-      ]) ||
+      !== JSON.stringify(['frankenmermaid-before', 'mermaid-js', 'frankenmermaid-after']) ||
     JSON.stringify(hostWidePhaseLabels([1, 8], false))
       !== JSON.stringify([
         'frankenmermaid-before-t1',
         'frankenmermaid-before-t8',
         'mermaid-js',
-        'mermaid-js-null',
         'frankenmermaid-after-t1',
         'frankenmermaid-after-t8',
       ]) ||
@@ -1782,9 +1768,6 @@ function positiveIntList(raw) {
 
 const threadSweep = positiveIntList(arg('thread-sweep'));
 const exclusiveHostClaim = arg('exclusive-host-claim');
-// Restore the pre-balanced-square behaviour: block until every affinity CPU is under the busy
-// ceiling. Only meaningful on a box you actually hold exclusively; see requireHostWideQuiescence.
-const requireIdleHost = has('require-idle-host');
 const allowOversubscription = has('allow-oversubscription');
 const fmBuilder = arg('fm-builder');
 const fmBuildBase = arg('fm-build-base');
@@ -2043,33 +2026,8 @@ if (missingPreflightProofs.length > 0) {
 const phaseLoad = [];
 const hostWideQuiescenceChecks = [];
 
-/**
- * Sample full-host busyness before a measured phase.
- *
- * WHY THIS NO LONGER BLOCKS. It used to demand that EVERY affinity CPU sit at or below a 20%
- * busy ceiling, retrying up to 900 one-second windows before exiting 6. On this box that predicate
- * is unsatisfiable, measured rather than assumed: sampling it with this function's own instrument
- * gave 12 blocked windows out of 12, a per-window maximum busy fraction of 89-100%, and 47 of 64
- * CPUs over the ceiling at least once. franken_networkx recorded the same shape on the same host
- * (bead br-r37-c1-3s8x7: 25 consecutive attempts, zero admitted; one run aborted after 300 windows
- * on a single busy CPU). A gate that can never clear does not protect a number, it prevents the
- * number from existing — which is how a fleet ends up producing integrity work instead of ratios.
- *
- * WHAT REPLACES IT, so this is not a relaxation. The design ported from
- * `/data/projects/franken_networkx/scripts/balanced_square_ab.py` (72761094c) does not try to make
- * the host quiet; it makes the COMPARISON immune to the host being busy. Both arms occupy mirrored
- * slot positions in one round (`A B B A`), so drift and foreign load hit both equally, and each arm
- * carries its own A/A null that must land at 1.0. Contention is then caught PER ROW, after the
- * fact, by a null that fails — instead of being excluded up front by a condition nothing can meet.
- * The incumbent arm gains a null it never had (it reported `null=missing` before this change).
- *
- * The sample is still taken and still recorded in full, because it remains real provenance: a row
- * measured at 95% host busy should say so. `--require-idle-host` restores the blocking behaviour
- * for anyone who does hold an exclusive box.
- */
 function requireHostWideQuiescence(label) {
-  const maxAttempts = requireIdleHost ? HOST_WIDE_QUIET_MAX_ATTEMPTS : HOST_WIDE_OBSERVE_ATTEMPTS;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  for (let attempt = 1; attempt <= HOST_WIDE_QUIET_MAX_ATTEMPTS; attempt++) {
     const livePowerPolicy = cpuPowerPolicy();
     const livePowerPolicyValid = validCpuPowerPolicy(livePowerPolicy);
     const powerPolicyMatchesBaseline =
@@ -2112,24 +2070,17 @@ function requireHostWideQuiescence(label) {
       .join(',');
     console.error(
       `[run] host-wide exclusivity waiting before ${label} ` +
-      `(attempt ${attempt}/${maxAttempts}): ` +
+      `(attempt ${attempt}/${HOST_WIDE_QUIET_MAX_ATTEMPTS}): ` +
       `missing=[${record.missing_cpus.join(',')}] busy=[${busy}] ` +
       `power-policy=${livePowerPolicyValid ? (powerPolicyMatchesBaseline ? 'match' : 'changed') : 'invalid'} ` +
       `(limit ${(HOST_WIDE_MAX_BUSY_FRACTION * 100).toFixed(1)}%)`,
     );
   }
-  if (requireIdleHost) {
-    console.error(
-      `[run] HOST-WIDE EXCLUSIVITY BLOCKED before ${label}: no clear sample in ` +
-      `${HOST_WIDE_QUIET_MAX_ATTEMPTS * HOST_WIDE_QUIET_SAMPLE_MS}ms`,
-    );
-    process.exit(6);
-  }
   console.error(
-    `[run] host-wide exclusivity NOT clear before ${label} after ${maxAttempts} sample(s); ` +
-    'proceeding under the balanced-square design — contention is caught per row by the A/A ' +
-    'nulls, not excluded up front (pass --require-idle-host to block instead)',
+    `[run] HOST-WIDE EXCLUSIVITY BLOCKED before ${label}: no clear sample in ` +
+    `${HOST_WIDE_QUIET_MAX_ATTEMPTS * HOST_WIDE_QUIET_SAMPLE_MS}ms`,
   );
+  process.exit(6);
 }
 
 /** Emit the exact admission decision without starting either timed engine arm. */
@@ -2298,23 +2249,9 @@ mjsArgs.push('--mode', measurementMode);
 if (only) mjsArgs.push('--only', only);
 if (repsScale !== 1) mjsArgs.push('--reps-scale', String(repsScale));
 if (budgetScale !== 1) mjsArgs.push('--js-budget-scale', String(budgetScale));
-// BALANCED SQUARE (ported from franken_networkx scripts/balanced_square_ab.py, 72761094c).
-//
-// The round is `A B B A`: frankenmermaid, mermaid, mermaid, frankenmermaid. Each arm occupies
-// mirrored slot positions, so drift across the round — a peer's build starting, a governor step,
-// the box quieting down — lands on both arms equally instead of biasing whichever ran later.
-//
-// The second incumbent slot is what gives the mermaid arm an A/A null. Until now it reported
-// `null=missing`: the Rust arm's null was measured entirely inside its own phase and could not see
-// cross-phase drift, and mermaid had no null at all. Two mermaid slots in one round divide into
-// each other, and that ratio must land at 1.0 like any other null. This is the mechanism that
-// replaces the host-wide idle precondition: contention is DETECTED per row rather than excluded.
 const mjs = has('skip-mermaid')
   ? { records: [], code: 0 }
   : timedPhase('mermaid-js', () => runJsonl('mermaid-js', process.execPath, mjsArgs));
-const mjsNull = has('skip-mermaid')
-  ? { records: [], code: 0 }
-  : timedPhase('mermaid-js-null', () => runJsonl('mermaid-js-null', process.execPath, mjsArgs));
 const fmAfter = has('skip-mermaid')
   ? fmBefore
   // Mirror the before sweep around the incumbent phase. With the same order on both sides, t1
@@ -2541,9 +2478,6 @@ const byFmKey = (recs) =>
 const fmBeforeById = byFmKey(fmBefore.records);
 const fmAfterById = byFmKey(fmAfter.records);
 const mjsById = byId(mjs.records);
-// Second incumbent slot of the balanced square, keyed the same way so each row can divide its two
-// mermaid observations into an A/A null.
-const mjsNullById = byId(mjsNull.records);
 
 function rowHostWideExclusivity(threads) {
   const phases = threadSweep.length === 0
@@ -2553,7 +2487,6 @@ function rowHostWideExclusivity(threads) {
       : [
           `frankenmermaid-before-t${threads}`,
           'mermaid-js',
-          'mermaid-js-null',
           `frankenmermaid-after-t${threads}`,
         ];
   const checks = phases.map((phase) => {
@@ -2570,14 +2503,6 @@ function rowHostWideExclusivity(threads) {
   });
   return {
     verdict: checks.every((check) => check.verdict === 'clear') ? 'clear' : 'blocked',
-    // Split out of `verdict` deliberately. Two different things were fused into one pass/fail:
-    // (a) "no other process was busy", which on a shared box is unsatisfiable and is now covered
-    // per row by the balanced-square A/A nulls, and (b) "the CPU governor did not change under
-    // the run", which IS satisfiable, is not about other tenants, and genuinely invalidates a
-    // comparison if it drifts. Only (b) still vetoes a row.
-    power_policy_stable: checks.every(
-      (check) => check.power_policy_valid && check.power_policy_matches_baseline,
-    ),
     exclusive_host_claim: exclusiveHostClaim,
     maximum_busy_fraction: HOST_WIDE_MAX_BUSY_FRACTION,
     sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
@@ -2693,18 +2618,13 @@ for (const { item, threads } of measurements) {
     },
   };
 
-  // A governor change under the run still voids the row: it is satisfiable, it is nothing to do
-  // with other tenants, and it changes the machine the two arms were measured on. Full-host
-  // quiescence no longer voids it — that is what the balanced square's per-row A/A nulls detect,
-  // and `host_wide_exclusivity.verdict` is retained in the artifact as provenance so a row
-  // measured on a busy box says so.
-  if (row.host_wide_exclusivity?.power_policy_stable !== true) {
+  if (row.host_wide_exclusivity?.verdict !== 'clear') {
     hardFail = true;
     rows.push({
       ...row,
-      status: 'power_policy_unstable',
+      status: 'host_wide_exclusivity_invalid',
       error:
-        'every measured phase requires a valid CPU power policy unchanged from the run baseline',
+        'every measured phase requires clear full-host quiescence and the unchanged baseline power policy',
     });
     continue;
   }
@@ -2960,26 +2880,6 @@ for (const { item, threads } of measurements) {
     continue;
   }
   row.mjs_p50_ns = mTiming.p50;
-  // BALANCED-SQUARE A/A NULL for the incumbent arm. The two mermaid slots of the round are the
-  // same work measured twice at mirrored positions, so their ratio is a null: it must land at 1.0,
-  // and a value outside +/-2% means the round drifted and this row's ratio is not a result. This is
-  // the detector that replaces the host-wide idle precondition — the incumbent previously carried
-  // no null of any kind, so cross-phase drift on its side was simply invisible.
-  const mNullRecord = mjsNullById.get(item.id);
-  const mNullTiming = mNullRecord ? incumbentTimingStats(mNullRecord) : null;
-  row.mjs_balanced_square_null = mNullTiming && mTiming.p50 > 0
-    ? {
-        first_slot_p50_ns: mTiming.p50,
-        second_slot_p50_ns: mNullTiming.p50,
-        null_ratio: mNullTiming.p50 / mTiming.p50,
-        bound: BALANCED_SQUARE_NULL_BOUND,
-        square: 'A B B A',
-        verdict:
-          Math.abs(mNullTiming.p50 / mTiming.p50 - 1) <= BALANCED_SQUARE_NULL_BOUND
-            ? 'pass'
-            : 'fail',
-      }
-    : { verdict: 'missing', reason: 'no second incumbent slot for this item' };
   row.mjs_min_ns = mTiming.min;
   row.mjs_cv_pct = m.cv_pct;
   row.mjs_mad_pct = m.mad_pct;
@@ -3184,21 +3084,6 @@ const summary = {
   fm_bracket_gate_failures: ok
     .filter((r) => r.fm_bracket.verdict === 'fail')
     .map(rowLabel),
-  // Balanced-square incumbent null. `A B B A` means the two mermaid slots are the same work at
-  // mirrored positions; their ratio must land at 1.0. A row that fails here was measured through
-  // drift and its ratio is not a result — this is the detector that took over from the host-wide
-  // idle precondition, so it is a hard gate, not a note.
-  incumbent_null_gate: {
-    rule: `each row's two incumbent slots must divide to within ${BALANCED_SQUARE_NULL_BOUND * 100}% of 1.0`,
-    square: 'A B B A',
-    verdict: ok.every((r) => r.mjs_balanced_square_null?.verdict === 'pass') ? 'pass' : 'fail',
-    failures: ok
-      .filter((r) => r.mjs_balanced_square_null?.verdict !== 'pass')
-      .map((r) => `${rowLabel(r)}:${r.mjs_balanced_square_null?.verdict ?? 'absent'}` +
-        (r.mjs_balanced_square_null?.null_ratio
-          ? `(${r.mjs_balanced_square_null.null_ratio.toFixed(4)})`
-          : '')),
-  },
   thread_sweep: threadSweep.length > 0
     ? {
         threads: threadSweep,
@@ -3254,7 +3139,6 @@ const events = has('skip-mermaid')
   : [
       ...tagPhase(fmBefore.records, 'frankenmermaid-before'),
       ...tagPhase(mjs.records, 'mermaid-js'),
-      ...tagPhase(mjsNull.records, 'mermaid-js-null'),
       ...tagPhase(fmAfter.records, 'frankenmermaid-after'),
     ];
 writeFileSync(jsonlPath, events.map((r) => JSON.stringify(r)).join('\n') + '\n');
@@ -3431,20 +3315,12 @@ if (asym) {
 console.log(`\nevents:  ${jsonlPath}`);
 console.log(`summary: ${join(outDir, `summary-${stamp}.json`)}`);
 
-if (hardFail || fmBefore.code !== 0 || mjs.code !== 0 || mjsNull.code !== 0 || fmAfter.code !== 0) {
+if (hardFail || fmBefore.code !== 0 || mjs.code !== 0 || fmAfter.code !== 0) {
   console.error('\n[run] FAILED: at least one engine reported an error (see rows above)');
   process.exit(1);
 }
 if (summary.median_ci_gate_failures.length) process.exit(4);
 if (summary.fm_bracket_gate_failures.length) process.exit(5);
-if (summary.incumbent_null_gate.verdict === 'fail') {
-  console.error(
-    `\n[run] INCUMBENT NULL GATE FAIL: ${summary.incumbent_null_gate.failures.join(', ')} — the two `
-    + 'mermaid slots of the balanced square disagree, so the round drifted and these ratios are not '
-    + 'results',
-  );
-  process.exit(8);
-}
 // Last, so a run that is both slow-verified and content-divergent still reports the statistical
 // gates first; content divergence is the more fundamental problem but the least ambiguous to fix.
 if (equivGate.verdict === 'fail') process.exit(7);
