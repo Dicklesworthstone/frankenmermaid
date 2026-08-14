@@ -126,6 +126,18 @@ function classifyHostWideQuiescence(busyRecords, allowedCpus, limit) {
   };
 }
 
+/** Every competitive arm needs the same pre-phase whole-host admission contract. */
+function hostWidePhaseLabels(threadSweep, skipMermaid) {
+  const before = threadSweep.length > 0
+    ? threadSweep.map((threads) => `frankenmermaid-before-t${threads}`)
+    : ['frankenmermaid-before'];
+  if (skipMermaid) return before;
+  const after = threadSweep.length > 0
+    ? threadSweep.map((threads) => `frankenmermaid-after-t${threads}`)
+    : ['frankenmermaid-after'];
+  return [...before, 'mermaid-js', ...after];
+}
+
 function validExclusiveHostClaim(value) {
   return (
     typeof value === 'string' &&
@@ -1334,6 +1346,22 @@ if (has('self-test')) {
     throw new Error('host-wide exclusivity classification regression');
   }
   if (
+    JSON.stringify(hostWidePhaseLabels([], false))
+      !== JSON.stringify(['frankenmermaid-before', 'mermaid-js', 'frankenmermaid-after']) ||
+    JSON.stringify(hostWidePhaseLabels([1, 8], false))
+      !== JSON.stringify([
+        'frankenmermaid-before-t1',
+        'frankenmermaid-before-t8',
+        'mermaid-js',
+        'frankenmermaid-after-t1',
+        'frankenmermaid-after-t8',
+      ]) ||
+    JSON.stringify(hostWidePhaseLabels([1, 8], true))
+      !== JSON.stringify(['frankenmermaid-before-t1', 'frankenmermaid-before-t8'])
+  ) {
+    throw new Error('host-wide admission phase sequence regression');
+  }
+  if (
     !validExclusiveHostClaim('trj-booking:1234') ||
     validExclusiveHostClaim('other-host:1234') ||
     validExclusiveHostClaim('trj-booking') ||
@@ -1951,11 +1979,11 @@ function cpuTotals() {
  * -- which it was, 21.8 -> 6.6 over the run -- that alone manufactures an apparent asymmetry.
  * `os.cpus()` scheduler-time deltas cover the exact interval on Linux and macOS, so they compare
  * like with like regardless of how differently long the two phases are. This remains provenance
- * only; exclusive sweeps additionally block on the idle full-host sample immediately before every
- * phase.
+ * only; every competitive run additionally blocks on the idle full-host sample immediately before
+ * every phase.
  */
 function timedPhase(label, fn) {
-  if (threadSweep.length > 0 || measurementMode === 'parse') requireHostWideQuiescence(label);
+  requireHostWideQuiescence(label);
   const c0 = cpuTotals();
   const t0 = Date.now();
   const out = fn();
@@ -2206,14 +2234,15 @@ const fmAfterById = byFmKey(fmAfter.records);
 const mjsById = byId(mjs.records);
 
 function rowHostWideExclusivity(threads) {
-  if (threadSweep.length === 0) return null;
-  const phases = has('skip-mermaid')
-    ? [`frankenmermaid-before-t${threads}`]
-    : [
-        `frankenmermaid-before-t${threads}`,
-        'mermaid-js',
-        `frankenmermaid-after-t${threads}`,
-      ];
+  const phases = threadSweep.length === 0
+    ? hostWidePhaseLabels([], has('skip-mermaid'))
+    : has('skip-mermaid')
+      ? [`frankenmermaid-before-t${threads}`]
+      : [
+          `frankenmermaid-before-t${threads}`,
+          'mermaid-js',
+          `frankenmermaid-after-t${threads}`,
+        ];
   const checks = phases.map((phase) => {
     const check = hostWideQuiescenceChecks.findLast((candidate) => candidate.phase === phase);
     return {
@@ -2343,16 +2372,13 @@ for (const { item, threads } of measurements) {
     },
   };
 
-  if (
-    threadSweep.length > 0 &&
-    row.host_wide_exclusivity?.verdict !== 'clear'
-  ) {
+  if (row.host_wide_exclusivity?.verdict !== 'clear') {
     hardFail = true;
     rows.push({
       ...row,
       status: 'host_wide_exclusivity_invalid',
       error:
-        'every measured sweep phase requires clear full-host quiescence and the unchanged baseline power policy',
+        'every measured phase requires clear full-host quiescence and the unchanged baseline power policy',
     });
     continue;
   }
@@ -2711,17 +2737,27 @@ const speedupMinAggregate = speedupsMin.length
 const rowLabel = (row) =>
   threadSweep.length > 0 ? `${row.id}@t${row.fm_worker_threads}` : row.id;
 const measurementOrder = phaseLoad.map((phase) => phase.phase);
-const expectedHostWidePhases = threadSweep.length === 0
-  ? []
-  : has('skip-mermaid')
-    ? threadSweep.map((threads) => `frankenmermaid-before-t${threads}`)
-    : [
-        ...threadSweep.map((threads) => `frankenmermaid-before-t${threads}`),
-        'mermaid-js',
-        ...threadSweep.map((threads) => `frankenmermaid-after-t${threads}`),
-      ];
+const expectedHostWidePhases = hostWidePhaseLabels(threadSweep, has('skip-mermaid'));
 const finalHostWideChecks = expectedHostWidePhases.map((phase) =>
   hostWideQuiescenceChecks.findLast((candidate) => candidate.phase === phase));
+const hostWideExclusivity = {
+  verdict:
+    finalHostWideChecks.length === expectedHostWidePhases.length &&
+    finalHostWideChecks.every((check) => check?.verdict === 'clear')
+      ? 'clear'
+      : 'blocked',
+  exclusive_host_claim: exclusiveHostClaim,
+  claim_reference_format: threadSweep.length > 0 ? 'trj-booking:<Agent-Mail-CLAIM-message-id>' : null,
+  complete_host_cpuset: env.affinity_cpus.length === env.logical_threads,
+  maximum_busy_fraction: HOST_WIDE_MAX_BUSY_FRACTION,
+  sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
+  maximum_admission_attempts: HOST_WIDE_QUIET_MAX_ATTEMPTS,
+  checked_before_every_measured_phase: true,
+  expected_phase_count: expectedHostWidePhases.length,
+  sample_attempt_count: hostWideQuiescenceChecks.length,
+  final_phase_checks: finalHostWideChecks,
+  checks: hostWideQuiescenceChecks,
+};
 const summary = {
   schema: measurementMode === 'parse'
     ? 'frankenmermaid.headtohead.parse.v1'
@@ -2744,6 +2780,7 @@ const summary = {
     isa: env.isa,
     power_policy: powerPolicySummary(env.power_policy),
   },
+  host_wide_exclusivity: hostWideExclusivity,
   corpus_items: items.length,
   measurement_rows: rows.length,
   ok_items: ok.length,
@@ -2785,24 +2822,7 @@ const summary = {
     ? {
         threads: threadSweep,
         requested_threads: threadSweep,
-        host_wide_exclusivity: {
-          verdict:
-            finalHostWideChecks.length === expectedHostWidePhases.length &&
-            finalHostWideChecks.every((check) => check?.verdict === 'clear')
-              ? 'clear'
-              : 'blocked',
-          exclusive_host_claim: exclusiveHostClaim,
-          claim_reference_format: 'trj-booking:<Agent-Mail-CLAIM-message-id>',
-          complete_host_cpuset: env.affinity_cpus.length === env.logical_threads,
-          maximum_busy_fraction: HOST_WIDE_MAX_BUSY_FRACTION,
-          sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
-          maximum_admission_attempts: HOST_WIDE_QUIET_MAX_ATTEMPTS,
-          checked_before_every_measured_phase: true,
-          expected_phase_count: expectedHostWidePhases.length,
-          sample_attempt_count: hostWideQuiescenceChecks.length,
-          final_phase_checks: finalHostWideChecks,
-          checks: hostWideQuiescenceChecks,
-        },
+        host_wide_exclusivity: hostWideExclusivity,
         actual_observed_threads: rows
           .filter((row) => Number.isSafeInteger(row.fm_worker_threads_actually_used))
           .map((row) => ({
@@ -2837,10 +2857,7 @@ const summary = {
   parse_speedup_min_estimator: measurementMode === 'parse' ? speedupMinAggregate : null,
   rows,
 };
-if (
-  summary.thread_sweep &&
-  summary.thread_sweep.host_wide_exclusivity.verdict !== 'clear'
-) {
+if (summary.host_wide_exclusivity.verdict !== 'clear') {
   hardFail = true;
 }
 
