@@ -646,9 +646,13 @@ fn assert_xl_svg_completion(name: &str, input: &str, expected_nodes: usize, expe
         "{name} SVG omitted authored edge groups"
     );
     for (edge_index, edge) in first.split("<g id=\"fm-edge-").skip(1).enumerate() {
+        let path_data = edge
+            .split_once("<path d=\"")
+            .and_then(|(_, path)| path.split_once('"'))
+            .map_or("", |(path, _)| path);
         assert!(
-            edge.contains("<path d=\""),
-            "{name} SVG omitted a routed path for edge {edge_index}"
+            !path_data.is_empty(),
+            "{name} SVG omitted a non-empty routed path for edge {edge_index}"
         );
     }
 }
