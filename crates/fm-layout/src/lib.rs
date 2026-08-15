@@ -16534,8 +16534,9 @@ mod tests {
         build_layout_guard_report, build_render_scene, certify_directed_path_layout_prefix,
         compute_node_size, dispatch_layout_algorithm, er_compartment_dimensions,
         estimate_layout_cost, evaluate_layout_guardrails, find_obstacle_nudge_x,
-        find_obstacle_nudge_y, incremental_overlap_alignment, is_directed_path, layout,
-        layout_diagram, layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
+        find_obstacle_nudge_y, force_barnes_hut_repulsion, force_direct_repulsion,
+        incremental_overlap_alignment, is_directed_path, layout, layout_diagram,
+        layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
         layout_diagram_grid, layout_diagram_incremental_traced_with_config_and_guardrails,
         layout_diagram_radial, layout_diagram_sankey, layout_diagram_sequence,
         layout_diagram_sequence_traced, layout_diagram_timeline, layout_diagram_traced,
@@ -22613,14 +22614,23 @@ mod tests {
     /// The algorithm is requested explicitly rather than left to `Auto` so the test measures the
     /// guardrail, not the auto-selector's heuristics: `dispatch_layout_algorithm` honours an
     /// explicit request, and `evaluate_layout_guardrails` then applies the budget to it exactly as
-    /// it does for an auto-selected one. Sizing is chosen against `estimate_layout_cost`:
-    /// 40 nodes / 60 edges costs Sugiyama 40*60/50 + ceil(40/4)*5 + 10 = 108ms, 124 iterations and
-    /// 60*24 + 40*4 = 1600 route ops, which fits inside the 10ms-parse triple (180/144/2880) and
-    /// breaches the 200ms-parse one (37/30/592) on all three axes.
+    /// it does for an auto-selected one.
+    ///
+    /// SIZING — a starved budget alone does not change the algorithm. `evaluate_layout_guardrails`
+    /// only moves off the requested algorithm when a *fallback candidate* is itself within budget
+    /// (or scores lower); when every candidate breaches too, it keeps the original and reports
+    /// `guardrail_forced_*`. So the document has to make one candidate cheap, and a 24-node
+    /// directed path does: `estimate_layout_cost` prices `Tree` on its path specialization
+    /// (ceil(24/16) + ceil(23/16) + 1 = 5ms, 24+4 = 28 iterations, 23*8 + 24 = 208 route ops)
+    /// while `Sugiyama` costs 24*23/50 + ceil(24/4)*5 + 10 = 52ms, 84 iterations and
+    /// 23*24 + 24*4 = 648 route ops. Against the two triples the old rule produced, that gives
+    /// Sugiyama inside the 10ms-parse budget (180/144/2880) and outside the 200ms-parse one
+    /// (37/30/592) on all three axes, with Tree inside both — so the guardrail really does swap
+    /// the algorithm, which is what the control below requires.
     #[test]
     fn measured_parse_time_does_not_change_the_layout_of_the_same_document() {
-        let edges: Vec<(usize, usize)> = (0..60).map(|i| (i % 40, (i * 7 + 3) % 40)).collect();
-        let ir = graph_ir(DiagramType::Flowchart, 40, &edges);
+        let edges: Vec<(usize, usize)> = (0..23).map(|i| (i, i + 1)).collect();
+        let ir = graph_ir(DiagramType::Flowchart, 24, &edges);
         let pressure = MermaidPressureReport {
             tier: MermaidPressureTier::Nominal,
             telemetry_available: true,
@@ -22685,7 +22695,19 @@ mod tests {
             old_fast_parse.trace.guard.selected_algorithm,
             old_slow_parse.trace.guard.selected_algorithm,
             "control failed: measured parse time no longer spans a guardrail range that changes \
-             this document's algorithm, so the equality assertions above prove nothing"
+             this document's algorithm, so the equality assertions above prove nothing. \
+             fast triple: reason={} estimate={}ms/{}it/{}ops; slow triple: reason={} \
+             estimate={}ms/{}it/{}ops — a `guardrail_forced_*` reason on the slow arm means every \
+             fallback candidate breached the budget too, so the guardrail kept the requested \
+             algorithm and the document needs resizing, not the assertion relaxing",
+            old_fast_parse.trace.guard.reason,
+            old_fast_parse.trace.guard.estimated_layout_time_ms,
+            old_fast_parse.trace.guard.estimated_layout_iterations,
+            old_fast_parse.trace.guard.estimated_route_ops,
+            old_slow_parse.trace.guard.reason,
+            old_slow_parse.trace.guard.estimated_layout_time_ms,
+            old_slow_parse.trace.guard.estimated_layout_iterations,
+            old_slow_parse.trace.guard.estimated_route_ops,
         );
     }
 
@@ -24112,11 +24134,10 @@ mod tests {
             .with(tracing_subscriber::filter::LevelFilter::TRACE)
             .with(fmt_layer);
 
-        // Run layout under the subscriber.
+        // Run layout under the subscriber. The returned trace is kept because it carries the
+        // dispatch decision as DATA, independent of tracing — see the panic below (bd-ryxg).
         let ir = graph_ir(DiagramType::Flowchart, 5, &[(0, 1), (1, 2), (2, 3), (3, 4)]);
-        tracing::subscriber::with_default(subscriber, || {
-            let _traced = layout_diagram_traced(&ir);
-        });
+        let traced = tracing::subscriber::with_default(subscriber, || layout_diagram_traced(&ir));
 
         let events = captured.lock().unwrap().clone();
         assert!(
@@ -24125,10 +24146,38 @@ mod tests {
         );
 
         // Find the dispatch event.
+        //
+        // When this one goes missing under whole-machine load (bd-ryxg), the failure alone cannot
+        // say whether the engine took a path that never dispatched, or whether the event was
+        // emitted and the capture never saw it. The returned trace settles that on the spot: it is
+        // the same decision, carried back as a value rather than through `tracing`. If the trace
+        // below shows a dispatch while the event is absent, the engine dispatched and the fault is
+        // in the tracing/capture layer, not in a load-sensitive layout decision.
         let dispatch_event = events
             .iter()
             .find(|e| e.contains("layout.dispatch"))
-            .expect("Should emit a layout.dispatch event");
+            .unwrap_or_else(|| {
+                panic!(
+                    "Should emit a layout.dispatch event.\n\
+                     ENGINE SIDE (returned trace, not tracing): requested={:?} selected={:?} \
+                     decision_mode={} reason={} | guard: initial={:?} selected={:?} \
+                     fallback_applied={} guard_reason={} | incremental: query_type={} \
+                     cache_hit={}\n\
+                     CAPTURED {} event(s): {:#?}",
+                    traced.trace.dispatch.requested,
+                    traced.trace.dispatch.selected,
+                    traced.trace.dispatch.decision_mode,
+                    traced.trace.dispatch.reason,
+                    traced.trace.guard.initial_algorithm,
+                    traced.trace.guard.selected_algorithm,
+                    traced.trace.guard.fallback_applied,
+                    traced.trace.guard.reason,
+                    traced.trace.incremental.query_type,
+                    traced.trace.incremental.cache_hit,
+                    events.len(),
+                    events,
+                )
+            });
 
         let json: serde_json::Value =
             serde_json::from_str(dispatch_event).expect("Event must be valid JSON");
