@@ -422,6 +422,8 @@ impl CachedRenderedBatch {
 }
 
 const RENDER_SNAPSHOT_CACHE_CAPACITY: usize = 2;
+const TIMED_RENDER_REUSES_OUTPUT_SNAPSHOT: bool = false;
+const TIMED_RENDER_REUSES_PARSE_PLAN: bool = false;
 
 impl FixedShardPool {
     fn new(threads: usize) -> Result<Self, String> {
@@ -828,7 +830,13 @@ impl RenderExecutor {
         cfg: &Arc<SvgRenderConfig>,
     ) -> Arc<[String]> {
         let mut rendered = Vec::with_capacity(texts.len());
-        self.render_all_observing(texts, cfg, &mut rendered, None, false);
+        self.render_all_observing(
+            texts,
+            cfg,
+            &mut rendered,
+            None,
+            TIMED_RENDER_REUSES_PARSE_PLAN,
+        );
         rendered.into()
     }
 
@@ -1647,6 +1655,8 @@ fn main() {
             "persistent_parse_plan": executor.persistent_parse_plan,
             "persistent_parse_snapshot": executor.persistent_parse_snapshot,
             "persistent_render_snapshot": executor.persistent_render_snapshot,
+            "timed_render_reuses_output_snapshot": TIMED_RENDER_REUSES_OUTPUT_SNAPSHOT,
+            "timed_render_reuses_parse_plan": TIMED_RENDER_REUSES_PARSE_PLAN,
             "content_keyed_render_snapshot": executor.content_keyed_render_snapshot,
             "revision_keyed_render_snapshot": executor.revision_keyed_render_snapshot,
             "rematerialize_batch_inputs": executor.rematerialize_batch_inputs,
@@ -1903,6 +1913,8 @@ fn main() {
                 "calibration_target_ns": executor.calibration_target_ns,
                 "execution_model": executor.execution_model(),
                 "persistent_parse_plan": executor.persistent_parse_plan,
+                "timed_render_reuses_output_snapshot": TIMED_RENDER_REUSES_OUTPUT_SNAPSHOT,
+                "timed_render_reuses_parse_plan": TIMED_RENDER_REUSES_PARSE_PLAN,
                 "shared_prefix_reuse": executor.shared_prefix_reuse,
                 "shard_schedule": if executor.balanced_shards { "balanced_lpt_bytes" } else { "fixed_contiguous" },
                 "revisions": item.texts.len(),
