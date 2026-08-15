@@ -50,6 +50,16 @@ const RESULT_CLASS_MARKER = '**Campaign result class:**';
 const INCUMBENT_MARKER = '**Legacy incumbent arm (same invocation):**';
 const MAINTENANCE_SELF_SPEEDUP = 'maintenance-self-speedup';
 const INCUMBENT_WIN = 'incumbent-win';
+// A result the previous two classes cannot express: the incumbent did not COMPLETE on the input, so
+// there is no comparator time and therefore no ratio. Before this class existed the only ways to
+// record such a result were to omit the classification entirely (leaving the strongest capability
+// evidence this project produces unbanked) or to invent a ratio for an engine that produced
+// nothing, which is proof-class inflation. This class demands MORE than a maintenance row -- the
+// pinned incumbent artifact, the shared invocation, a named failure class per fixture, and our own
+// verified output -- and it FORBIDS a measured_ratio, so it can never be used to launder a
+// competitive number. A gate change that suddenly produces wins is a loosening; this one produces
+// no ratios at all.
+const INCUMBENT_DNF = 'incumbent-dnf';
 const COUNTED_METRIC = /\b(instructions?|cycles?|syscalls?|allocations?|faults?)\b/i;
 const MEASURED_VALUE =
   /(?:\d[\d,]*(?:\.\d+)?(?:%|x|ns|us|µs|ms|s)?|unchanged|identical|flat|no (?:measurable |material )?(?:work|change|difference))/i;
@@ -129,7 +139,9 @@ function resultClass(body) {
   const value = markerParagraph(body, RESULT_CLASS_MARKER)
     .replaceAll('`', '')
     .split(/\s/)[0];
-  return value === MAINTENANCE_SELF_SPEEDUP || value === INCUMBENT_WIN ? value : null;
+  return value === MAINTENANCE_SELF_SPEEDUP || value === INCUMBENT_WIN || value === INCUMBENT_DNF
+    ? value
+    : null;
 }
 
 function incumbentEvidence(body) {
@@ -145,6 +157,33 @@ function incumbentEvidence(body) {
   return { ok: missing.length === 0, missing };
 }
 
+const INCUMBENT_OUTCOME = /\boutcome=did_not_complete\b/i;
+const INCUMBENT_FAILURE_CLASS = /\bfailure_class=[a-z0-9][a-z0-9._-]*\b/i;
+
+/**
+ * Evidence for an `incumbent-dnf` row.
+ *
+ * Same provenance spine as an incumbent-win -- the pinned artifact and the shared invocation, so
+ * the claim names exactly which build of which comparator failed and in which run -- minus the
+ * ratio, which does not exist, plus the two things a completion claim actually needs: an explicit
+ * `outcome=did_not_complete` and a named `failure_class` so "it broke" is queryable rather than
+ * prose. A `measured_ratio` is REFUSED here: an engine that produced no output cannot bound one.
+ */
+function incumbentDnfEvidence(body) {
+  const evidence = markerParagraph(body, INCUMBENT_MARKER);
+  const missing = [];
+  if (!INCUMBENT_NAME.test(evidence)) missing.push('name=mermaid-js');
+  if (!INCUMBENT_VERSION.test(evidence)) missing.push('version=<pin>');
+  if (!INCUMBENT_ARTIFACT.test(evidence)) missing.push('artifact_sha256=<64 lowercase hex>');
+  if (!INCUMBENT_INVOCATION.test(evidence)) missing.push('invocation_id=<shared invocation>');
+  if (!INCUMBENT_OUTCOME.test(evidence)) missing.push('outcome=did_not_complete');
+  if (!INCUMBENT_FAILURE_CLASS.test(evidence)) missing.push('failure_class=<observed class>');
+  if (INCUMBENT_RATIO.test(evidence)) {
+    missing.push('a did-not-complete row must NOT carry measured_ratio');
+  }
+  return { ok: missing.length === 0, missing };
+}
+
 function resultEvidence(body) {
   if (!keepEvidence(body)) return { ok: false, why: `missing ${ELF_MARKER}` };
 
@@ -157,6 +196,14 @@ function resultEvidence(body) {
   }
   if (classification === MAINTENANCE_SELF_SPEEDUP) {
     return { ok: true, why: 'maintenance self-speedup (not campaign output)' };
+  }
+
+  if (classification === INCUMBENT_DNF) {
+    const dnf = incumbentDnfEvidence(body);
+    if (!dnf.ok) {
+      return { ok: false, why: `incomplete ${INCUMBENT_MARKER} ${dnf.missing.join(', ')}` };
+    }
+    return { ok: true, why: 'same-invocation incumbent did-not-complete' };
   }
 
   const incumbent = incumbentEvidence(body);
@@ -223,6 +270,11 @@ if (has('self-test')) {
   const selfSpeedup = `${ELF_MARKER} \`${hash}\`
 
 ${RESULT_CLASS_MARKER} ${MAINTENANCE_SELF_SPEEDUP}`;
+  const incumbentDnf = `${ELF_MARKER} \`${hash}\`
+
+${RESULT_CLASS_MARKER} ${INCUMBENT_DNF}
+
+${INCUMBENT_MARKER} name=mermaid-js version=11.15.0 artifact_sha256=${hash} invocation_id=equiv-1 outcome=did_not_complete failure_class=range_error`;
   const incumbentWin = `${selfSpeedup.replace(MAINTENANCE_SELF_SPEEDUP, INCUMBENT_WIN)}
 
 ${NULL_MARKER} baseline/null median ratio 1.0012x, CI [0.999, 1.003].
@@ -307,6 +359,29 @@ ${NULL_MARKER} baseline/null median ratio 1.0x, CI [0.99, 1.01].`,
       'a pinned mermaid-js arm in the same invocation is accepted',
       resultEvidence(incumbentWin).ok &&
         resultEvidence(incumbentWin).why === 'same-invocation actual-incumbent win',
+    ],
+    [
+      'an incumbent-dnf with outcome and failure class is accepted',
+      resultEvidence(incumbentDnf).ok &&
+        resultEvidence(incumbentDnf).why === 'same-invocation incumbent did-not-complete',
+    ],
+    [
+      'an incumbent-dnf carrying a ratio is refused -- nothing completed to bound one',
+      !resultEvidence(
+        `${incumbentDnf} measured_ratio=401800000x`,
+      ).ok,
+    ],
+    [
+      'an incumbent-dnf without a named failure class is refused',
+      !resultEvidence(incumbentDnf.replace(' failure_class=range_error', '')).ok,
+    ],
+    [
+      'an incumbent-dnf without the pinned comparator artifact is refused',
+      !resultEvidence(incumbentDnf.replace(`artifact_sha256=${hash}`, 'artifact_sha256=unknown')).ok,
+    ],
+    [
+      'an incumbent-dnf still needs the process-self-reported ELF',
+      !resultEvidence(incumbentDnf.replace(`${ELF_MARKER} \`${hash}\`\n\n`, '')).ok,
     ],
     [
       'modified PERF_LEDGER KEEP appears in the lint delta',

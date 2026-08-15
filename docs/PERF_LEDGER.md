@@ -3910,3 +3910,66 @@ itself.
 `dirty_node_indexes_for_edits` changes; if the incremental fast paths ahead of them change which
 walk runs; or if the fixed-iteration harness or its A/A identity check changes. A retry is
 admissible only with the harness A/A at exactly 1.000000000 and distinct self-reported ELFs.
+
+## INCUMBENT DID-NOT-COMPLETE: mermaid-js 11.15.0 cannot render 6 of 7 syntax families at 2,000+ nodes; frankenmermaid renders all 7 in 1.9-9.7 ms (2026-08-14)
+
+**Campaign result class:** incumbent-dnf
+
+**Legacy incumbent arm (same invocation):** name=mermaid-js version=11.15.0
+artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de
+invocation_id=equivalence-4bcb1b80-1786765165168 outcome=did_not_complete failure_class=range_error
+securityLevel=strict, runtime Chrome/151.0.7922.108 via /usr/bin/chromium-browser, per-item wall
+budget 600000 ms, `--render-once`. No ratio is stated or implied: an engine that produced no output
+cannot bound one.
+
+**Executing ELF SHA-256 (self-reported by process):**
+`afeba973853e6ae3660afa6bb06dd20d6dbd0aed4f335b6051f94291af358f30` (8,186,016 bytes, execution model
+scalar), reported by the measured binary from inside its own process, not computed beside the run.
+
+**What was measured.** Both engines over byte-identical generated inputs in ONE invocation
+(`scripts/headtohead/equivalence.mjs --only` the seven `*_xl_*` corpus items, host thinkstation1,
+load1 12.42, rev 4bcb1b80-dirty).
+
+| family | nodes | mermaid-js 11.15.0 | frankenmermaid p50 | our SVG bytes |
+|---|---|---|---|---|
+| `wide_xl_50x50` | 2,500 | DNF `range_error` 8.8 s | 5.464 ms | 2,680,224 |
+| `cyclic_scc_xl_2500` | 2,500 | DNF `range_error` 8.8 s | 6.395 ms | 2,639,090 |
+| `dense_dag_xl_2000` | 2,000 | DNF `range_error` 46.5 s | 8.346 ms | 3,691,665 |
+| `class_xl_2000` | 2,000 | DNF `range_error` 20.7 s | 5.005 ms | 2,172,685 |
+| `state_xl_2000` | 2,002 | DNF `range_error` 7.8 s | 3.219 ms | 1,873,269 |
+| `er_xl_2000` | 2,000 | DNF `range_error` 7.6 s | 1.916 ms | 2,423,436 |
+| `sequence_xl_2000` | 2,000 | **completed** | 9.662 ms | 3,927,941 |
+
+Every DNF carries `probe_parse_accepted: true`: mermaid ACCEPTS the document and then exhausts the
+JS call stack while rendering. All six are `kind=failed`, not `timeout`, so no budget increase
+changes the outcome.
+
+**Six of seven, not seven.** `sequence_xl_2000` renders in mermaid at 2,000 participants and 3,998
+messages. It is an ordinary comparison row here, and its cross-engine structural equivalence verdict
+is **pass** (1 diagram, 0 divergent, 0 unverified).
+
+**How far our own output is verified, stated exactly.** The harness's source-grounded native
+validator (`frankenmermaid_svg_vs_input_structural`) decides 4 of the 6 DNF families **pass** —
+`wide`, `cyclic_scc`, `dense_dag`, `class`. It returns **undecidable** for `state_xl_2000`
+(`node_id_set_vs_input__frankenmermaid`, `edge_topology_vs_input__frankenmermaid`) and
+`er_xl_2000` (`node_id_set_vs_input__frankenmermaid`), so the artifact's overall verdict is FAIL and
+the run exits 7. Undecidable is NOT divergent and NOT a pass: nothing here says our state or ER
+output is wrong, and nothing here establishes it is right. The claim this row supports is therefore
+**4 families verified correct where the incumbent cannot run, plus 1 family cross-engine equivalent
+where it can** — not 7/7. The oracle gap is filed as its own bead rather than rounded up.
+
+**Independent crate-level evidence for all seven** (`crates/fm-cli/tests/xl_scale_classes_test.rs`,
+7 passed / 0 failed in 0.72 s): every declared node reaches layout by equality not `>=`, the LAST
+declared node survives, zero violations from the shared `layout_geometry_violations` checker used by
+the fuzzer and reducer, the SVG closes, and two INDEPENDENT runs agree byte for byte. Determinism is
+corroborated across invocations: all seven byte counts above are identical to a prior separate run.
+
+**Why this is not an `incumbent-win`.** There is no comparator time on six of these rows, so there
+is no ratio, no A/A null against a comparator that never ran, and nothing to put a CI around. The
+`incumbent-dnf` class exists precisely so this result can be banked without inventing one; the
+linter refuses a `measured_ratio` on this class.
+
+**Retry predicate:** re-measure if the mermaid pin moves off 11.15.0, if the Chromium runtime major
+changes, if any `*_xl_*` corpus hash in `pins.json` changes, or if `maxEdges`/`maxTextSize` in the
+pin change — those limits are already raised above mermaid's defaults so the inputs render at all,
+and lowering them would turn a render failure into a guardrail refusal, which is a different result.
