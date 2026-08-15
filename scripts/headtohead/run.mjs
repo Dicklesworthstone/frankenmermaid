@@ -2119,31 +2119,10 @@ if (pinArg !== 'off') {
 }
 env.pinned_cpu = pin;
 
-// Conflict resolution note (rebase of f26310c3 onto upstream): upstream already declares the
-// untimed provenance probe -- `fmCmd`/`fmArgs`/`fmProvenance`/`provenanceBinary` plus its
-// build-revision gates -- further down this file, so the copy this commit carried is dropped as a
-// duplicate. What upstream does NOT have, and what is therefore kept verbatim below, is the
-// preflight output-proof gate: it refuses to spend either engine's arm when no equivalence or
-// native-DNF proof matches this ELF. Dropping the whole hunk would have silently removed a gate.
-const preflightOutputProofs = items.map((item) => {
-  const inputSha = corpus.get(item.id)?.sha256;
-  const equivalence = findEquivalenceVerdict(item.id, inputSha, provenanceBinary.elf_sha256, PINS.mermaid.sha256);
-  const nativeDnfValidation = findDnfNativeValidation(
-    item.id,
-    inputSha,
-    provenanceBinary.elf_sha256,
-    PINS.mermaid.sha256,
-  );
-  return { id: item.id, ...preflightOutputProof(equivalence, nativeDnfValidation) };
-});
-const missingPreflightProofs = preflightOutputProofs.filter((proof) => proof.status === 'missing_output_proof');
-if (missingPreflightProofs.length > 0) {
-  console.error(
-    '[run] OUTPUT EQUIVALENCE PRE-FLIGHT FAIL: no matching proof for ' +
-    `${missingPreflightProofs.map((proof) => proof.id).join(', ')}; run scripts/headtohead/equivalence.mjs first`,
-  );
-  process.exit(7);
-}
+// The preflight output-proof gate lives further down, immediately after `provenanceBinary` is
+// declared and its build-revision gates have run. It is keyed by that ELF sha256, so it cannot be
+// evaluated here: a rebase (d8f3155b) left it above the declaration and every invocation of this
+// driver died in the temporal dead zone before measuring anything.
 // ARM-ASYMMETRY GUARD (trap 3). The two engines are separate runtimes -- a Rust process and
 // Chromium -- so they cannot be interleaved inside one measured routine the way a same-binary A/B
 // can be. They run in sequence, which means host load drifting between the two phases biases the
@@ -2258,6 +2237,29 @@ if (!validBuildRevision(provenanceBinary)) {
 if (fmBuildBase === null || provenanceBinary.build_git_revision !== fmBuildBase || fmBuildBase !== env.git_rev) {
   console.error('[run] INVALID: benchmark ELF build revision must match both --fm-build-base and checked-out HEAD');
   process.exit(2);
+}
+
+// PREFLIGHT OUTPUT-PROOF GATE: refuse to spend either engine's arm when no equivalence verdict or
+// native-DNF validation matches THIS ELF. It must sit here rather than earlier in the file — it is
+// keyed by `provenanceBinary.elf_sha256`, which does not exist until the probe above has run.
+const preflightOutputProofs = items.map((item) => {
+  const inputSha = corpus.get(item.id)?.sha256;
+  const equivalence = findEquivalenceVerdict(item.id, inputSha, provenanceBinary.elf_sha256, PINS.mermaid.sha256);
+  const nativeDnfValidation = findDnfNativeValidation(
+    item.id,
+    inputSha,
+    provenanceBinary.elf_sha256,
+    PINS.mermaid.sha256,
+  );
+  return { id: item.id, ...preflightOutputProof(equivalence, nativeDnfValidation) };
+});
+const missingPreflightProofs = preflightOutputProofs.filter((proof) => proof.status === 'missing_output_proof');
+if (missingPreflightProofs.length > 0) {
+  console.error(
+    '[run] OUTPUT EQUIVALENCE PRE-FLIGHT FAIL: no matching proof for ' +
+    `${missingPreflightProofs.map((proof) => proof.id).join(', ')}; run scripts/headtohead/equivalence.mjs first`,
+  );
+  process.exit(7);
 }
 
 /** Aggregate scheduler time across all CPUs. Passive: no busy-wait. */
