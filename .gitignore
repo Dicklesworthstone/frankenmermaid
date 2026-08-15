@@ -119,9 +119,15 @@ perf.data
 perf.data.old
 
 # Generated input for the head-to-head harness (the corpus is regenerated + hash-checked per run;
-# see scripts/headtohead/pins.json). The run-*.jsonl / summary-*.json evidence IS committed.
+# see scripts/headtohead/pins.json). Named cert-* / named-campaign evidence stays tracked
+# (gitignore never untracks already-committed files). Loose host-timestamped dumps at the
+# headtohead root are not certification artifacts.
 .benchmarks/headtohead/corpus.json
 # Unpinned local dumps. Named cert-* evidence stays tracked; these are
-# host-timestamped reruns and CPU profiles, not certification artifacts.
+# host-timestamped reruns, CPU profiles, and XL oracle scratch, not certification artifacts.
 .benchmarks/headtohead/profiles/
 .benchmarks/headtohead/ci-shared-subgraph-*-equivalence/
+.benchmarks/headtohead/run-*.jsonl
+.benchmarks/headtohead/summary-*.json
+.benchmarks/headtohead/equivalence/
+.benchmarks/xl-oracle-dump/
