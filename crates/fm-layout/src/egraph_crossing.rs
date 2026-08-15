@@ -222,7 +222,11 @@ fn parse_node_symbol(sym: &egg::Symbol) -> Option<usize> {
 pub enum BudgetType {
     /// E-graph node count exceeded max_enodes.
     NodeLimit,
-    /// Wall-clock time exceeded max_time.
+    /// The wall-clock liveness valve fired, and the result was failed closed (bd-giej).
+    ///
+    /// Unlike the two counted budgets, this one does **not** mean "here is the best ordering found
+    /// in the time available" — that ordering would be a function of host load. It means the search
+    /// was abandoned and [`SaturationResult::ordering`] is the unmodified input ordering.
     TimeLimit,
     /// Iteration count exceeded max_iterations.
     IterationLimit,
@@ -243,20 +247,39 @@ pub struct BudgetExhausted {
     pub best_cost: usize,
 }
 
+/// Wall-clock ceiling for a single saturation run, in milliseconds (bd-giej).
+///
+/// This is a **liveness valve, not a budget**. The budget that shapes the returned ordering is
+/// entirely counted — `node_limit` and `iter_limit` — because a stop condition read off the clock
+/// makes the result a function of how busy the host is. The valve exists only so a pathological
+/// input cannot wedge a render, and if it ever fires the result is failed closed to the input
+/// ordering rather than extracted from a partially-explored e-graph.
+///
+/// It is deliberately the same for every preset and independent of graph shape: shape is already
+/// handled by the counted limits, and a shape-derived clock budget is exactly the coupling this
+/// constant exists to remove. Two orders of magnitude above what any counted budget here costs, so
+/// on a correct run it never binds.
+pub const WALL_CLOCK_VALVE_MS: u64 = 30_000;
+
 /// Configuration for equality saturation with budget guards.
 ///
-/// Implements the budget model from §6.6.3:
+/// Implements the budget model from §6.6.3, with the time budget replaced by a counted one:
 /// - Node budget: `min(100_000, 50 * |V|²)`
-/// - Time budget: `min(500ms, 10ms * |layers|)`
 /// - Iteration budget: 1000 rewrites
+/// - Wall clock: [`WALL_CLOCK_VALVE_MS`], a liveness valve that never shapes the result
 #[derive(Debug, Clone)]
 pub struct SaturationConfig {
     /// Maximum number of e-graph nodes before stopping.
     pub node_limit: usize,
     /// Maximum number of iterations before stopping.
     pub iter_limit: usize,
-    /// Maximum wall-clock time in milliseconds.
-    pub time_limit_ms: u64,
+    /// Wall-clock ceiling in milliseconds, as a liveness valve only.
+    ///
+    /// Firing this does **not** produce a shorter search whose answer is kept: it produces the
+    /// deterministic fallback, announced as [`BudgetType::TimeLimit`]. Nothing about the returned
+    /// ordering may depend on how long the run happened to take, so this value must never be used
+    /// to trade quality for speed — lower `node_limit` or `iter_limit` for that.
+    pub wall_clock_valve_ms: u64,
 }
 
 impl Default for SaturationConfig {
@@ -264,7 +287,7 @@ impl Default for SaturationConfig {
         Self {
             node_limit: 10_000,
             iter_limit: 30,
-            time_limit_ms: 100,
+            wall_clock_valve_ms: WALL_CLOCK_VALVE_MS,
         }
     }
 }
@@ -274,8 +297,12 @@ impl SaturationConfig {
     ///
     /// Uses the formulas from §6.6:
     /// - Node budget: `min(100_000, 50 * node_count²)`
-    /// - Time budget: `min(500ms, 10ms * layer_count)`
     /// - Iteration budget: 1000
+    ///
+    /// `layer_count` no longer buys clock time. It used to set a `min(500ms, 10ms * layers)` stop
+    /// condition, which meant a wide graph got a longer search and therefore a *different* answer
+    /// on a quiet host than on a busy one. Layer count already reaches the search through
+    /// `node_count`; the wall clock is now the fixed liveness valve for every graph.
     #[must_use]
     pub fn for_graph(node_count: usize, layer_count: usize) -> Self {
         // Use saturating arithmetic to prevent overflow for large graphs
@@ -283,14 +310,13 @@ impl SaturationConfig {
             .saturating_mul(node_count)
             .saturating_mul(node_count)
             .min(100_000);
-        let time_limit_ms = (10_u64.saturating_mul(layer_count as u64)).min(500);
         let iter_limit = 1000;
 
         tracing::debug!(
             node_count,
             layer_count,
             node_limit,
-            time_limit_ms,
+            wall_clock_valve_ms = WALL_CLOCK_VALVE_MS,
             iter_limit,
             "egraph.budget.computed"
         );
@@ -298,17 +324,21 @@ impl SaturationConfig {
         Self {
             node_limit,
             iter_limit,
-            time_limit_ms,
+            wall_clock_valve_ms: WALL_CLOCK_VALVE_MS,
         }
     }
 
     /// Create conservative config for interactive use (small graphs).
+    ///
+    /// Conservative means a smaller COUNTED search, not a shorter clock: the interactive path gets
+    /// a bounded amount of work, and gets the same answer for that work whatever else the machine
+    /// is doing.
     #[must_use]
     pub fn interactive() -> Self {
         Self {
             node_limit: 5_000,
             iter_limit: 20,
-            time_limit_ms: 50,
+            wall_clock_valve_ms: WALL_CLOCK_VALVE_MS,
         }
     }
 
@@ -318,7 +348,7 @@ impl SaturationConfig {
         Self {
             node_limit: 100_000,
             iter_limit: 100,
-            time_limit_ms: 1000,
+            wall_clock_valve_ms: WALL_CLOCK_VALVE_MS,
         }
     }
 }
@@ -365,11 +395,15 @@ pub fn saturate_layer(
         .with_expr(&expr)
         .with_node_limit(config.node_limit)
         .with_iter_limit(config.iter_limit)
-        .with_time_limit(std::time::Duration::from_millis(config.time_limit_ms))
+        .with_time_limit(std::time::Duration::from_millis(config.wall_clock_valve_ms))
         .run(&rules);
 
     let egraph_nodes = runner.egraph.total_size();
     let iterations = runner.iterations.len();
+    // bd-giej. A node- or iteration-limited e-graph is a pure function of the input, so extracting
+    // from it is safe. A CLOCK-limited one is not: how far the search got depends on how busy the
+    // host was, so its contents must never reach the returned ordering.
+    let wall_clock_valve_fired = matches!(runner.stop_reason, Some(egg::StopReason::TimeLimit(_)));
 
     // Determine budget exhaustion details
     let (hit_limit, budget_exhausted) = match &runner.stop_reason {
@@ -412,16 +446,16 @@ pub fn saturate_layer(
             let elapsed_ms = (*duration_secs * 1000.0) as u64;
             tracing::warn!(
                 elapsed_ms,
-                limit_ms = config.time_limit_ms,
+                valve_ms = config.wall_clock_valve_ms,
                 iterations,
-                "egraph.budget.time_limit_exhausted"
+                "egraph.valve.wall_clock_fired_result_failed_closed"
             );
             (
                 true,
                 Some(BudgetExhausted {
                     budget_type: BudgetType::TimeLimit,
                     value: elapsed_ms,
-                    limit: config.time_limit_ms,
+                    limit: config.wall_clock_valve_ms,
                     iterations_completed: iterations,
                     best_cost: 0,
                 }),
@@ -438,18 +472,28 @@ pub fn saturate_layer(
         Some(egg::StopReason::Other(_)) => (false, None),
     };
 
-    // Extract best ordering
+    // Extract best ordering.
+    //
+    // bd-giej: when the wall-clock valve fired we do NOT extract. The e-graph in hand is however
+    // far the search happened to get before the clock ran out, so extracting from it would return
+    // an ordering chosen by host load — the same document laid out differently on a busy machine.
+    // Failing closed to the input ordering keeps the result a pure function of the input, and the
+    // `BudgetType::TimeLimit` verdict says out loud that no optimization was applied.
+    let deterministic_fallback = || {
+        let crossings = crate::egraph_ordering::local_crossing_count(
+            initial,
+            ctx.upper_ordering.as_ref().zip(ctx.upper_edges.as_ref()),
+            ctx.lower_ordering.as_ref().zip(ctx.lower_edges.as_ref()),
+        );
+        (initial.clone(), crossings)
+    };
     let root = runner.roots[0];
-    let (ordering, crossing_count) = extract_best_ordering(&runner.egraph, root, ctx)
-        .unwrap_or_else(|| {
-            // Fallback to initial ordering if extraction fails
-            let crossings = crate::egraph_ordering::local_crossing_count(
-                initial,
-                ctx.upper_ordering.as_ref().zip(ctx.upper_edges.as_ref()),
-                ctx.lower_ordering.as_ref().zip(ctx.lower_edges.as_ref()),
-            );
-            (initial.clone(), crossings)
-        });
+    let (ordering, crossing_count) = if wall_clock_valve_fired {
+        deterministic_fallback()
+    } else {
+        // Fallback to initial ordering if extraction fails
+        extract_best_ordering(&runner.egraph, root, ctx).unwrap_or_else(deterministic_fallback)
+    };
 
     // Update best_cost in budget_exhausted
     let budget_exhausted = budget_exhausted.map(|mut b| {
@@ -798,13 +842,161 @@ mod tests {
         assert_eq!(result.ordering.order, vec![2, 1, 0]);
     }
 
+    /// The wall-clock valve must never silently reshape the ordering (bd-giej).
+    ///
+    /// Before this, `saturate_layer` stopped on a `min(500ms, 10ms * layers)` clock budget and then
+    /// extracted from whatever e-graph the search had reached, so the ordering this module returned
+    /// was a function of how busy the host was. The module's existing
+    /// `fault_deterministic_output_across_runs` cannot see that: repeated runs on a quiet host all
+    /// stay inside the limit, so the limit never binds and the test agrees with itself.
+    ///
+    /// This probe STARVES the budget instead, which is the only way a budget-driven divergence
+    /// shows up at all — the same vacuity lesson as bd-9a1t's probe 2 control.
+    #[test]
+    fn wall_clock_valve_never_silently_reshapes_the_ordering() {
+        // Five nodes, fully inverted against the lower layer. Two reasons for five rather than the
+        // three used elsewhere in this file: the optimized answer is far enough from the input that
+        // the two are unmistakable, and saturation takes many iterations, so the starved arm cannot
+        // race egg's limit check — with three nodes a run can saturate before the clock is ever
+        // consulted, which would make the starved assertion flaky rather than wrong.
+        let initial = LayerOrdering::new(vec![0, 1, 2, 3, 4]);
+        let lower = LayerOrdering::new(vec![5, 6, 7, 8, 9]);
+        let edges = LayerEdges {
+            edges: vec![(0, 9), (1, 8), (2, 7), (3, 6), (4, 5)],
+        };
+        let ctx = CrossingContext {
+            upper_ordering: None,
+            upper_edges: None,
+            lower_ordering: Some(lower),
+            lower_edges: Some(edges),
+        };
+        let run = |valve_ms: u64| {
+            saturate_layer(
+                &initial,
+                &ctx,
+                &SaturationConfig {
+                    wall_clock_valve_ms: valve_ms,
+                    ..SaturationConfig::default()
+                },
+            )
+        };
+        let verdict =
+            |result: &SaturationResult| result.budget_exhausted.as_ref().map(|b| b.budget_type);
+
+        // The counted answer, with a valve that cannot bind. Taken as data rather than hardcoded so
+        // the probe tests the PROPERTY and not this fixture's particular optimum.
+        let unstarved = run(WALL_CLOCK_VALVE_MS);
+        assert_ne!(
+            verdict(&unstarved),
+            Some(BudgetType::TimeLimit),
+            "the fixed valve must not bind on a five-node layer"
+        );
+        assert_eq!(
+            run(WALL_CLOCK_VALVE_MS).ordering.order,
+            unstarved.ordering.order,
+            "the counted search must be repeatable"
+        );
+
+        // NON-VACUITY CONTROL. If saturation left the ordering alone, the fallback and the counted
+        // answer would be the same value and every assertion below would hold for free.
+        assert_ne!(
+            unstarved.ordering.order, initial.order,
+            "control failed: saturation did not move this fixture, so fallback and optimum are \
+             indistinguishable and this probe proves nothing"
+        );
+        assert!(
+            unstarved.crossing_count < 4,
+            "saturation should reduce crossings here"
+        );
+
+        // A valve that cannot be met fires, and the result is the INPUT, announced as such.
+        let starved = run(0);
+        assert_eq!(
+            verdict(&starved),
+            Some(BudgetType::TimeLimit),
+            "a zero valve must report the wall-clock verdict, not a counted one"
+        );
+        assert_eq!(
+            starved.ordering.order, initial.order,
+            "a fired valve must fail closed to the input ordering, never to a partially-explored one"
+        );
+
+        // THE CASE THAT ACTUALLY DISCRIMINATES, and the reason the zero-valve case above is not
+        // enough on its own: at zero the search has explored nothing, so even the OLD code could
+        // only have extracted the input ordering back — that arm passes either way. The defect
+        // lived where the clock fired PART WAY THROUGH a search that had already found better
+        // orderings. Nine fully-inverted nodes with the counted budget lifted far out of the way:
+        // adjacent-swap saturation over 9! orderings cannot finish inside the valve, and any
+        // completed iteration leaves the e-graph holding orderings cheaper than the input, so
+        // extracting from it returns a third answer while failing closed returns the input.
+        let wide_initial = LayerOrdering::new((0..9).collect());
+        let wide_lower = LayerOrdering::new((9..18).collect());
+        let wide_ctx = CrossingContext {
+            upper_ordering: None,
+            upper_edges: None,
+            lower_ordering: Some(wide_lower),
+            lower_edges: Some(LayerEdges {
+                edges: (0..9).map(|i| (i, 17 - i)).collect(),
+            }),
+        };
+        let mid_search = saturate_layer(
+            &wide_initial,
+            &wide_ctx,
+            &SaturationConfig {
+                node_limit: 1_000_000,
+                iter_limit: 10_000,
+                wall_clock_valve_ms: 20,
+            },
+        );
+        assert_eq!(
+            verdict(&mid_search),
+            Some(BudgetType::TimeLimit),
+            "the counted budget was lifted so the CLOCK is what stops this run; a counted verdict \
+             means the fixture no longer exercises the valve"
+        );
+        // CONTROL for this case: the search must have gone somewhere before the clock fired,
+        // otherwise failing closed and extracting are the same answer and the assertion below is
+        // free.
+        assert!(
+            mid_search.egraph_nodes > wide_initial.order.len(),
+            "control failed: the valve fired before the search explored past the input \
+             ({} e-nodes), so this case cannot tell fail-closed from an empty e-graph",
+            mid_search.egraph_nodes
+        );
+        assert_eq!(
+            mid_search.ordering.order, wide_initial.order,
+            "a valve that fires MID-SEARCH must still return the input ordering; returning the \
+             best-so-far is the defect, because how far the search got is a function of host load"
+        );
+
+        // THE DEFECT, stated as the property that used to fail: across four orders of magnitude of
+        // valve values — every one of which leaves the counted budget untouched — the answer is
+        // only ever the deterministic fallback or the counted answer. A third ordering means the
+        // clock chose it, which is exactly what the old code returned.
+        for valve_ms in [1_u64, 5, 50, 500, 5_000, WALL_CLOCK_VALVE_MS] {
+            let result = run(valve_ms);
+            if verdict(&result) == Some(BudgetType::TimeLimit) {
+                assert_eq!(
+                    result.ordering.order, initial.order,
+                    "valve {valve_ms}ms fired but did not fail closed"
+                );
+            } else {
+                assert_eq!(
+                    result.ordering.order, unstarved.ordering.order,
+                    "valve {valve_ms}ms produced a third answer: neither the deterministic \
+                     fallback nor the counted answer, i.e. an ordering chosen by the clock"
+                );
+            }
+        }
+    }
+
     #[test]
     fn saturation_respects_node_limit() {
         let initial = LayerOrdering::new(vec![0, 1, 2, 3, 4]);
         let config = SaturationConfig {
             node_limit: 50,
             iter_limit: 100,
-            time_limit_ms: 1000,
+            wall_clock_valve_ms: WALL_CLOCK_VALVE_MS,
         };
 
         let result = saturate_layer(&initial, &CrossingContext::default(), &config);
@@ -875,7 +1067,7 @@ mod tests {
         let config = SaturationConfig::default();
         assert_eq!(config.node_limit, 10_000);
         assert_eq!(config.iter_limit, 30);
-        assert_eq!(config.time_limit_ms, 100);
+        assert_eq!(config.wall_clock_valve_ms, WALL_CLOCK_VALVE_MS);
     }
 
     #[test]
@@ -883,8 +1075,10 @@ mod tests {
         // Small graph: 10 nodes, 5 layers
         let config = SaturationConfig::for_graph(10, 5);
         assert_eq!(config.node_limit, 50 * 10 * 10); // 5000
-        assert_eq!(config.time_limit_ms, 10 * 5); // 50
         assert_eq!(config.iter_limit, 1000);
+        // The valve is fixed, NOT 10ms * 5 layers. A shape-derived clock budget is the bd-giej
+        // defect: it hands a wider graph a longer search and so a different answer per host load.
+        assert_eq!(config.wall_clock_valve_ms, WALL_CLOCK_VALVE_MS);
     }
 
     #[test]
@@ -892,7 +1086,8 @@ mod tests {
         // Large graph: should hit caps
         let config = SaturationConfig::for_graph(100, 100);
         assert_eq!(config.node_limit, 100_000); // capped
-        assert_eq!(config.time_limit_ms, 500); // capped
+        // Only the COUNTED budget caps. 100 layers no longer buys 500ms of extra search.
+        assert_eq!(config.wall_clock_valve_ms, WALL_CLOCK_VALVE_MS);
     }
 
     #[test]
@@ -909,7 +1104,7 @@ mod tests {
         let config = SaturationConfig {
             node_limit: 10, // Very small - will be hit
             iter_limit: 1000,
-            time_limit_ms: 10000,
+            wall_clock_valve_ms: WALL_CLOCK_VALVE_MS,
         };
 
         let result = saturate_layer(&initial, &CrossingContext::default(), &config);
@@ -928,7 +1123,7 @@ mod tests {
         let config = SaturationConfig {
             node_limit: 100_000,
             iter_limit: 1, // Very small - will be hit
-            time_limit_ms: 10000,
+            wall_clock_valve_ms: WALL_CLOCK_VALVE_MS,
         };
 
         let result = saturate_layer(&initial, &CrossingContext::default(), &config);
@@ -943,16 +1138,20 @@ mod tests {
     #[test]
     fn config_interactive_is_conservative() {
         let config = SaturationConfig::interactive();
+        // Conservative is a COUNTED property. The old `time_limit_ms <= 50` assertion is gone
+        // because the quantity it pinned no longer reaches the answer at all (bd-giej); pinning
+        // the counted budget is what actually bounds the interactive path's work.
         assert!(config.node_limit <= 5_000);
         assert!(config.iter_limit <= 20);
-        assert!(config.time_limit_ms <= 50);
+        assert!(config.node_limit < SaturationConfig::batch().node_limit);
+        assert!(config.iter_limit < SaturationConfig::batch().iter_limit);
     }
 
     #[test]
     fn config_batch_is_permissive() {
         let config = SaturationConfig::batch();
         assert!(config.node_limit >= 100_000);
-        assert!(config.time_limit_ms >= 1000);
+        assert!(config.iter_limit >= 100);
     }
 
     // -------------------------------------------------------------------------
@@ -997,7 +1196,7 @@ mod tests {
         let config = SaturationConfig {
             node_limit: 5, // Very small - will be exceeded
             iter_limit: 1000,
-            time_limit_ms: 10000,
+            wall_clock_valve_ms: WALL_CLOCK_VALVE_MS,
         };
 
         let result = saturate_with_fallback(&initial, &ctx, &config);
@@ -1106,7 +1305,7 @@ mod tests {
         let config = SaturationConfig {
             node_limit: 20, // Very small - will definitely be hit
             iter_limit: 1000,
-            time_limit_ms: 10000,
+            wall_clock_valve_ms: WALL_CLOCK_VALVE_MS,
         };
 
         let result = saturate_with_fallback(&upper, &ctx, &config);
@@ -1142,7 +1341,7 @@ mod tests {
         let config = SaturationConfig {
             node_limit: 100_000,
             iter_limit: 1, // Very small - will be hit
-            time_limit_ms: 10000,
+            wall_clock_valve_ms: WALL_CLOCK_VALVE_MS,
         };
 
         let result = saturate_with_fallback(&initial, &ctx, &config);
@@ -1236,7 +1435,7 @@ mod tests {
         let config = SaturationConfig {
             node_limit: 10, // Force budget hit
             iter_limit: 1000,
-            time_limit_ms: 10000,
+            wall_clock_valve_ms: WALL_CLOCK_VALVE_MS,
         };
 
         let result = saturate_with_fallback(&upper, &ctx, &config);
@@ -1279,7 +1478,7 @@ mod tests {
         let config = SaturationConfig {
             node_limit: 50,
             iter_limit: 10,
-            time_limit_ms: 100,
+            wall_clock_valve_ms: WALL_CLOCK_VALVE_MS,
         };
 
         let start = Instant::now();
