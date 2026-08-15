@@ -53,6 +53,10 @@ const CHROMIUM_STARTUP_ATTEMPTS = 2;
 const CHROMIUM_EXIT_CONFIRM_MS = 5_000;
 const CHROMIUM_STARTUP_STDERR_TAIL_BYTES = 4_096;
 const DEVTOOLS_PORT_LINE = /DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//;
+const DEVTOOLS_PORT_LINE_ALL = /DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//g;
+// Longer than the whole announcement line (43 chars including a 5-digit port), so a line split
+// across any chunk boundary is still whole once the carry is prepended.
+const DEVTOOLS_PORT_CARRY_BYTES = 128;
 
 function effectRepsForMode(reps, parseOnly) {
   return parseOnly ? Math.max(MIN_NULL_ROUNDS, reps) : reps;
@@ -63,10 +67,48 @@ function appendStartupStderrTail(tail, chunk) {
 }
 
 function devtoolsPortFromStderr(stderrTail) {
-  const match = DEVTOOLS_PORT_LINE.exec(stderrTail);
-  if (!match) return null;
-  const port = Number.parseInt(match[1], 10);
-  return Number.isSafeInteger(port) && port > 0 && port <= 65_535 ? port : null;
+  return lastDevtoolsPortIn(stderrTail);
+}
+
+/// The NEWEST announced listener, not the first.
+///
+/// Chromium can announce more than once inside a single startup attempt (it relaunches itself in
+/// some failure paths), and an older line names a port that is already dead. Scanning to the last
+/// match costs nothing and removes the possibility of attaching CDP to a corpse.
+function lastDevtoolsPortIn(text) {
+  let port = null;
+  for (const match of String(text).matchAll(DEVTOOLS_PORT_LINE_ALL)) {
+    const candidate = Number.parseInt(match[1], 10);
+    if (Number.isSafeInteger(candidate) && candidate > 0 && candidate <= 65_535) port = candidate;
+  }
+  return port;
+}
+
+/// Latch the assigned port the moment it is announced, independently of the diagnostic tail.
+///
+/// `stderrTail` is deliberately bounded to `CHROMIUM_STARTUP_STDERR_TAIL_BYTES` so a failure report
+/// stays small. Discovery must NOT share that buffer: Chromium prints its DevTools line once and
+/// then keeps talking — on a noisy host (`--no-sandbox`, GPU and dbus warnings, the snap
+/// process-singleton spew of bd-8nms) more than 4 KiB can follow, the line scrolls out of the
+/// window, and the startup loop waits the full 30 s for a port that was announced in the first
+/// hundred milliseconds. Then the harness reports "chromium did not expose a devtools port" and the
+/// whole incumbent arm is lost to a diagnostic buffer size.
+///
+/// The latch keeps a short carry so a line split across two chunk boundaries still matches, and it
+/// never un-latches: once a live port is known, later noise cannot erase it.
+function createDevtoolsPortLatch() {
+  let carry = '';
+  let port = null;
+  return {
+    feed(chunk) {
+      const text = `${carry}${String(chunk)}`;
+      const found = lastDevtoolsPortIn(text);
+      if (found !== null) port = found;
+      carry = text.slice(-DEVTOOLS_PORT_CARRY_BYTES);
+      return port;
+    },
+    port: () => port,
+  };
 }
 
 function chromiumStartupRecoveryHint(stderrTail) {
@@ -259,7 +301,9 @@ async function launchChromium() {
       'about:blank',
     ], { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderrTail = '';
+    const portLatch = createDevtoolsPortLatch();
     proc.stderr?.on('data', (chunk) => {
+      portLatch.feed(chunk);
       stderrTail = appendStartupStderrTail(stderrTail, chunk);
     });
     let spawnError = null;
@@ -270,7 +314,7 @@ async function launchChromium() {
       for (;;) {
         if (spawnError) throw new Error(`chromium failed to start from ${bin}: ${spawnError.message}`);
         if (Date.now() > deadline) throw new Error('chromium did not expose a devtools port within 30s');
-        const port = devtoolsPortFromStderr(stderrTail);
+        const port = portLatch.port();
         if (port === null) {
           await new Promise((r) => setTimeout(r, 120));
           continue;
@@ -703,6 +747,39 @@ if (has('self-test')) {
     devtoolsPortFromStderr('not a DevTools listener') !== null
   ) {
     throw new Error('chromium DevTools port parser must accept only assigned loopback ports');
+  }
+  // The latch must survive the diagnostic window it used to share (bd-vaq3). The CONTROL is the
+  // second half: the bounded tail genuinely loses the line, so this pair fails without the latch
+  // rather than passing for free.
+  const announce = 'DevTools listening on ws://127.0.0.1:49321/devtools/browser/id\n';
+  const overflowLatch = createDevtoolsPortLatch();
+  overflowLatch.feed(announce);
+  let overflowTail = appendStartupStderrTail('', announce);
+  for (let i = 0; i < 4; i++) {
+    const noise = `${'W'.repeat(CHROMIUM_STARTUP_STDERR_TAIL_BYTES)}\n`;
+    overflowLatch.feed(noise);
+    overflowTail = appendStartupStderrTail(overflowTail, noise);
+  }
+  if (overflowLatch.port() !== 49321 || devtoolsPortFromStderr(overflowTail) !== null) {
+    throw new Error('chromium port discovery must outlive the bounded stderr diagnostic window');
+  }
+  const splitLatch = createDevtoolsPortLatch();
+  splitLatch.feed('DevTools listening on ws://127.0.0.1:493');
+  if (splitLatch.port() !== null) {
+    throw new Error('chromium port latch must not accept a truncated announcement');
+  }
+  splitLatch.feed('21/devtools/browser/id\n');
+  if (splitLatch.port() !== 49321) {
+    throw new Error('chromium port latch must join an announcement split across chunks');
+  }
+  const relaunchLatch = createDevtoolsPortLatch();
+  relaunchLatch.feed(announce);
+  relaunchLatch.feed('DevTools listening on ws://127.0.0.1:51000/devtools/browser/id\n');
+  if (
+    relaunchLatch.port() !== 51000 ||
+    lastDevtoolsPortIn(`${announce}DevTools listening on ws://127.0.0.1:51000/devtools/browser/id`) !== 51000
+  ) {
+    throw new Error('chromium port discovery must name the newest listener, not the first');
   }
   const singletonFailure = 'ERROR:chrome/browser/process_singleton_posix.cc:1043] Failed to create socket directory.\n' +
     'ERROR:chrome/app/chrome_main_delegate.cc:520] Failed to create a ProcessSingleton for your profile directory.';
