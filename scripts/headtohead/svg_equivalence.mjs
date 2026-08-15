@@ -1982,6 +1982,14 @@ export function selfTest() {
         'c2>c3|start=inheritance|end=none',
       ].join(',');
   })(), groundTruth('classDiagram\n  C0 *-- C1\n  C1 --o C2\n  C2 <|-- C3\n'));
+  record('ground_truth_reads_state_transitions', (() => {
+    const t = groundTruth('stateDiagram-v2\n  [*] --> S0\n  S0 --> S1: next\n  S1 --> [*]\n');
+    return t !== null && t.node_ids.join(',') === 's0,s1' && t.edges.join(',') === 's0>s1';
+  })(), groundTruth('stateDiagram-v2\n  [*] --> S0\n  S0 --> S1: next\n  S1 --> [*]\n'));
+  record('ground_truth_reads_er_relationships', (() => {
+    const t = groundTruth('erDiagram\n  E0 ||--o{ E1 : has\n');
+    return t !== null && t.node_ids.join(',') === 'e0,e1' && t.edges.join(',') === 'e0>e1';
+  })(), groundTruth('erDiagram\n  E0 ||--o{ E1 : has\n'));
   record('unsupported_source_is_not_decodable',
     groundTruth('sequenceDiagram\n  A->>B: hello\n') === null,
     null);
