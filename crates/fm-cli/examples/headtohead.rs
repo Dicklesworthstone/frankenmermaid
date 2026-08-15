@@ -12,6 +12,13 @@
 //!
 //! Run via `scripts/headtohead/run.mjs`, not directly.
 
+// The per-item run record is one `serde_json::json!` literal, and every provenance field the
+// campaign adds to it (worker threads, affinity, ELF self-report, the timed-render reuse flags,
+// the integrated-sample vectors) costs macro expansion depth. It crossed rustc's default 128 and
+// the example stopped compiling, which takes the whole head-to-head harness with it. Raised rather
+// than split because the record is one object and reads best as one literal.
+#![recursion_limit = "512"]
+
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
