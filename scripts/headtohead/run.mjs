@@ -1893,6 +1893,32 @@ if (has('self-test')) {
   ) {
     throw new Error('pre-measure output-proof admission regression');
   }
+  {
+    // Artifact provenance must fail CLOSED when it cannot be proved (bd-llx6). The old form skipped
+    // the ELF and bundle checks whenever the caller had nothing to compare, which is precisely the
+    // run whose binary is unknown.
+    const hexA = 'a'.repeat(64);
+    const hexB = 'b'.repeat(64);
+    const hexC = 'c'.repeat(64);
+    const artifact = { provenance: { fm_elf_sha256: hexB }, pins: { bundle_sha256: hexC } };
+    const row = { input_sha256: hexA };
+    const matched = artifactProvenanceMismatch(artifact, row, hexA, hexB, hexC);
+    const noElf = artifactProvenanceMismatch(artifact, row, hexA, null, hexC);
+    const shortElf = artifactProvenanceMismatch(artifact, row, hexA, 'deadbeef', hexC);
+    const wrongElf = artifactProvenanceMismatch(artifact, row, hexA, hexC, hexC);
+    const noBundle = artifactProvenanceMismatch(artifact, row, hexA, hexB, '');
+    const noInput = artifactProvenanceMismatch(artifact, row, undefined, hexB, hexC);
+    if (
+      matched.length !== 0
+      || !noElf.includes('unprovable_fm_elf_sha256')
+      || !shortElf.includes('unprovable_fm_elf_sha256')
+      || !wrongElf.includes('fm_elf_sha256')
+      || !noBundle.includes('unprovable_mermaid_bundle_sha256')
+      || !noInput.includes('unprovable_input_sha256')
+    ) {
+      throw new Error('equivalence artifact provenance must fail closed on unprovable binding');
+    }
+  }
   const bracketRecord = (p50, nullControl = perfect) => ({
     status: 'ok',
     ...(measurementMode === 'parse' ? { parse_ns: { p50 } } : { pipeline_ns: { p50 } }),
@@ -2611,6 +2637,34 @@ function armAsymmetry(phases = phaseLoad) {
  * bytes, the Rust ELF that rendered them, and the mermaid bundle it was compared against. A stale
  * artifact from a different binary is worse than none, because it reads as verification.
  */
+/**
+ * Bind an equivalence artifact to THIS run's input, ELF and comparator bundle — and refuse when the
+ * binding cannot be proved (bd-llx6).
+ *
+ * The previous form was `if (elfSha && artifact.provenance?.fm_elf_sha256 !== elfSha)`, which reads
+ * as a guard and behaves as an escape hatch: `elfShaForEquivalence` is deliberately `null` when the
+ * process did not self-report a 64-hex ELF, so on exactly the runs whose binary provenance is
+ * unknown the ELF check was SKIPPED and an artifact produced by a different binary satisfied the
+ * gate on its input hash alone. That is the "stale" case this gate exists to catch, and it failed
+ * open in it. Same shape for the pinned mermaid bundle.
+ *
+ * Absent provenance is now its own rejection reason rather than a pass, and both matchers share
+ * this one function so the two gates cannot drift apart.
+ */
+function artifactProvenanceMismatch(artifact, row, inputSha, elfSha, bundleSha) {
+  const mismatch = [];
+  // Regex literal rather than a module-level const: this function is called from the --self-test
+  // block, which runs above these declarations, and a `const` is in its temporal dead zone there.
+  const check = (label, expected, actual) => {
+    if (!/^[0-9a-f]{64}$/.test(String(expected ?? ''))) mismatch.push(`unprovable_${label}`);
+    else if (actual !== expected) mismatch.push(label);
+  };
+  check('input_sha256', inputSha, row.input_sha256);
+  check('fm_elf_sha256', elfSha, artifact.provenance?.fm_elf_sha256);
+  check('mermaid_bundle_sha256', bundleSha, artifact.pins?.bundle_sha256);
+  return mismatch;
+}
+
 function findEquivalenceVerdict(id, inputSha, elfSha, bundleSha) {
   let names;
   try {
@@ -2634,10 +2688,7 @@ function findEquivalenceVerdict(id, inputSha, elfSha, bundleSha) {
     }
     const row = (artifact.rows ?? []).find((r) => r.id === id);
     if (!row) continue;
-    const mismatch = [];
-    if (row.input_sha256 !== inputSha) mismatch.push('input_sha256');
-    if (elfSha && artifact.provenance?.fm_elf_sha256 !== elfSha) mismatch.push('fm_elf_sha256');
-    if (bundleSha && artifact.pins?.bundle_sha256 !== bundleSha) mismatch.push('mermaid_bundle_sha256');
+    const mismatch = artifactProvenanceMismatch(artifact, row, inputSha, elfSha, bundleSha);
     if (mismatch.length > 0) {
       candidates.push({ artifact: name, mismatch });
       continue;
@@ -2690,10 +2741,7 @@ function findDnfNativeValidation(id, inputSha, elfSha, bundleSha) {
     }
     const row = (artifact.rows ?? []).find((r) => r.id === id);
     if (!row) continue;
-    const mismatch = [];
-    if (row.input_sha256 !== inputSha) mismatch.push('input_sha256');
-    if (elfSha && artifact.provenance?.fm_elf_sha256 !== elfSha) mismatch.push('fm_elf_sha256');
-    if (bundleSha && artifact.pins?.bundle_sha256 !== bundleSha) mismatch.push('mermaid_bundle_sha256');
+    const mismatch = artifactProvenanceMismatch(artifact, row, inputSha, elfSha, bundleSha);
     if (mismatch.length > 0) {
       candidates.push({ artifact: name, mismatch });
       continue;
