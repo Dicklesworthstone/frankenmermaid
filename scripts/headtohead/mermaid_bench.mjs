@@ -83,7 +83,7 @@ function chromiumStartupRecoveryHint(stderrTail) {
 /** Stable, queryable category for a comparator failure; the raw error remains the evidence. */
 function normalizedFailureClass(reason) {
   const text = String(reason);
-  if (/\brangeerror\b|maximum call stack size exceeded|too much recursion/i.test(text)) return 'range_error';
+  if (/\brange[ _-]?error\b|maximum call stack size exceeded|too much recursion/i.test(text)) return 'range_error';
   if (/\b(?:out of memory|oom)\b/i.test(text)) return 'out_of_memory';
   return 'uncategorized';
 }
@@ -717,6 +717,8 @@ if (has('self-test')) {
     normalizedFailureClass('rangeerror: maximum call stack size exceeded') !== 'range_error' ||
     normalizedFailureClass('RangeError: too much recursion') !== 'range_error' ||
     normalizedFailureClass('RangeError [ERR_STACK_OVERFLOW]') !== 'range_error' ||
+    normalizedFailureClass('range_error') !== 'range_error' ||
+    normalizedFailureClass('range-error') !== 'range_error' ||
     normalizedFailureClass('maximum call stack size exceeded while rendering') !== 'range_error' ||
     normalizedFailureClass('render failed after parse accepted: Maximum call stack size exceeded') !== 'range_error' ||
     normalizedFailureClass('FATAL ERROR: JavaScript heap out of memory') !== 'out_of_memory' ||
