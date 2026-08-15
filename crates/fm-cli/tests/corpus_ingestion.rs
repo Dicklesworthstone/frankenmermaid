@@ -801,12 +801,16 @@ fn class_xl_2000_completes_structurally_and_deterministically() {
 
 #[test]
 fn state_xl_2000_completes_structurally_and_deterministically() {
-    // The two explicit `[*]` pseudo-states are authored nodes too.
+    // The two explicit `[*]` pseudo-states are authored nodes too, and they bring an authored
+    // TRANSITION each. `state_xl_input` writes `[*] --> S0`, then `XL_NODE_COUNT - 1` chain
+    // transitions, then `S1999 --> [*]`: 1 + 1999 + 1 = XL_NODE_COUNT + 1 edges. The +2 on nodes was
+    // counted and the matching +1 on edges was not, so this asserted 2000 against a document that
+    // authors 2001 and reported the engine as having "omitted" an edge it had parsed correctly.
     assert_xl_svg_completion(
         "state_xl_2000",
         &state_xl_input(),
         XL_NODE_COUNT + 2,
-        XL_NODE_COUNT,
+        XL_NODE_COUNT + 1,
     );
 }
 
