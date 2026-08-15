@@ -19898,3 +19898,33 @@ jobs.
   the `should_use_egraph` 100-node cap than the ER catalog reaches — or if the candidate set is
   ever consumed without materializing orderings at all, which would remove the second generator
   rather than add one.
+
+### BLOCKED: the rch fleet refused every frankenmermaid job for the whole session (2026-08-15)
+
+Recorded so the next lane does not read "no measurement rows this session" as "nobody tried", and
+does not re-derive the admission signature from scratch.
+
+- **What was attempted, all with the mandated form** `RCH_REQUIRE_REMOTE=1 env -u
+  CARGO_TARGET_DIR rch exec -- <cmd>`: `cargo test -p frankenmermaid-cli --example headtohead`
+  (twice), `cargo test --workspace --no-fail-fast` (three times), `cargo test -p fm-layout --lib
+  measured_parse_time_does_not_change_the_layout_of_the_same_document` (once). Seven refusals
+  across roughly four hours.
+- **The refusal, verbatim and stable across every attempt.** `[RCH] remote required; refusing local
+  fallback (no admissible workers: insufficient_slots=3..5, insufficient_total_slots=4..6,
+  active_project_exclusion=1) — retryable`, process exit **103**. `active_project_exclusion=1` is
+  the informative term: this project already held the fleet's per-project slot, so the refusal is
+  a peer lane's job succeeding, not a broken fleet.
+- **This is a scheduling failure, not a result.** No local fallback was taken and no gate was
+  relaxed to route around it. A refusal writes NOTHING to the log, so it is indistinguishable from
+  a hung build to any file-size probe — which is why it is recorded here as an event rather than
+  waited on.
+- **One job did get admitted earlier in the same session**, so the fleet was live throughout:
+  `cargo clippy --workspace --all-targets -- -D warnings` on worker `vmi1149989`, 196.2s, exit 0.
+  That is the only remotely-gated result this session, and it is what bd-dqkg closed on.
+- **What could not be verified as a direct consequence**, stated rather than glossed: the
+  `headtohead` example's own `#[cfg(test)]` block never ran (bd-dqkg), bd-9a1t probe 2 was not
+  re-run on a named worker (it had already passed locally at 477/477 when it landed in `8e4fbd08`,
+  before the remote-only rule), and bd-8bbq (three-harness cross-check) and bd-oarm (layout bump
+  arena) could not be started at all, since both need a measurement slot rather than a reading.
+- **No ratio, no row, no class.** Nothing here is a performance verdict; it is the reason the
+  session's landed work is all JS-gateable correctness (`node … --self-test`) rather than measured.
