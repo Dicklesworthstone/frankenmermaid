@@ -12494,6 +12494,35 @@ fn apply_constraint_solver(
     }
 }
 
+/// Counted stop for the constraint LP, as a pure function of the problem's size (bd-4q4d).
+///
+/// The wall-clock valve is a liveness backstop and nothing more: whether a solve fits inside it
+/// depends on the machine, so if it is the only bound then which branch the caller takes — proven
+/// optimum or heuristic fallback — is still decided by host load. A simplex iteration is the same
+/// unit of work on every machine, so bounding iterations makes the stopping point identical
+/// everywhere, and `constraint_solution_is_usable` then turns a stop into the same deterministic
+/// fallback on every machine.
+///
+/// Shape of the model: 6 variables per node, and 4 displacement rows per node plus roughly one row
+/// per declared constraint. Simplex on a problem this shape converges in O(rows), so 64x the row
+/// count is headroom no correct solve uses. The clamp keeps the value inside `i32` for HiGHS
+/// without ever making the bound depend on anything but the input.
+#[cfg(not(target_arch = "wasm32"))]
+const fn constraint_lp_iteration_limit(node_count: usize, constraint_count: usize) -> i32 {
+    const HEADROOM: usize = 64;
+    const CEILING: usize = 2_000_000;
+    let rows = node_count
+        .saturating_mul(4)
+        .saturating_add(constraint_count);
+    let limit = rows.saturating_mul(HEADROOM);
+    // `min` is not const-callable on usize in this position, so the clamp is written out.
+    if limit > CEILING {
+        CEILING as i32
+    } else {
+        limit as i32
+    }
+}
+
 /// May this LP result be written into node coordinates? (bd-9xwk)
 ///
 /// Only a PROVEN optimum may. `model.solve()` returning `Ok` is not that: good_lp's HiGHS backend
@@ -12566,6 +12595,14 @@ fn solve_constraint_coordinates(
     let mut model = variables
         .minimise(objective)
         .using(default_solver)
+        // bd-4q4d. The OPERATIVE bound is counted, so the solver stops at the same place on every
+        // machine; the clock below is only a liveness backstop. Naming the HiGHS option means
+        // naming the backend, which this crate already pins (`good_lp` with only the `highs`
+        // feature, so `default_solver` IS `highs`).
+        .set_option(
+            "simplex_iteration_limit",
+            constraint_lp_iteration_limit(nodes.len(), ir.constraints.len()),
+        )
         // A valve of 0 means "spend no clock here" and is honoured as such. It used to be clamped
         // up to 1 ms, which made "no optimization" unrequestable and left no way to exercise the
         // fail-closed path without racing the solver (bd-9xwk).
@@ -16594,11 +16631,11 @@ mod tests {
         SubgraphRegionId, SubgraphRegionKind, TracedLayout, build_directed_path_edge_paths,
         build_edge_paths, build_layout_decision_ledger, build_layout_guard_report,
         build_render_scene, certify_directed_path_layout_prefix, compute_node_size,
-        constraint_solution_is_usable, dispatch_layout_algorithm, er_compartment_dimensions,
-        estimate_layout_cost, evaluate_layout_guardrails, find_obstacle_nudge_x,
-        find_obstacle_nudge_y, force_barnes_hut_repulsion, force_direct_repulsion,
-        incremental_overlap_alignment, is_directed_path, layout, layout_diagram,
-        layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
+        constraint_lp_iteration_limit, constraint_solution_is_usable, dispatch_layout_algorithm,
+        er_compartment_dimensions, estimate_layout_cost, evaluate_layout_guardrails,
+        find_obstacle_nudge_x, find_obstacle_nudge_y, force_barnes_hut_repulsion,
+        force_direct_repulsion, incremental_overlap_alignment, is_directed_path, layout,
+        layout_diagram, layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
         layout_diagram_grid, layout_diagram_incremental_traced_with_config_and_guardrails,
         layout_diagram_radial, layout_diagram_sankey, layout_diagram_sequence,
         layout_diagram_sequence_traced, layout_diagram_timeline, layout_diagram_traced,
@@ -22807,6 +22844,32 @@ mod tests {
     /// running the end-to-end probe with this predicate disabled — it still passed, i.e. it is
     /// VACUOUS for this branch. Provoking a genuine feasible-but-suboptimal stop means interrupting
     /// phase 2 of the simplex, which is a race and has no place in a test.
+    /// The LP's operative stop is counted, so it lands in the same place on every machine (bd-4q4d).
+    ///
+    /// A wall clock cannot do this job: whether a solve fits inside it depends on the box, so with
+    /// only a clock the CHOICE between proven optimum and heuristic fallback stays a function of
+    /// host load even when each branch is itself deterministic. A simplex iteration is the same unit
+    /// of work everywhere.
+    #[test]
+    fn constraint_lp_iteration_bound_is_a_pure_function_of_problem_size() {
+        // Deterministic: the same problem shape always gets the same bound, on any machine.
+        assert_eq!(
+            constraint_lp_iteration_limit(120, 3),
+            constraint_lp_iteration_limit(120, 3)
+        );
+        // Sized from the problem, and strictly so on both axes.
+        assert!(constraint_lp_iteration_limit(240, 3) > constraint_lp_iteration_limit(120, 3));
+        assert!(constraint_lp_iteration_limit(120, 9) > constraint_lp_iteration_limit(120, 3));
+        // Headroom no correct solve uses: simplex on this shape converges in O(rows).
+        assert_eq!(constraint_lp_iteration_limit(120, 3), (120 * 4 + 3) * 64);
+        // Clamped, and the clamp cannot overflow i32 or depend on anything but the input.
+        assert_eq!(
+            constraint_lp_iteration_limit(usize::MAX, usize::MAX),
+            2_000_000
+        );
+        assert_eq!(constraint_lp_iteration_limit(0, 0), 0);
+    }
+
     #[test]
     fn constraint_lp_result_is_used_only_when_proven_optimal() {
         assert!(
