@@ -44,6 +44,24 @@ const THREAD_SWEEP_CALIBRATION_TARGET_NS = 75_000_000;
 const PARSE_MIN_SAMPLE_NS = 250_000_000;
 const PARSE_CALIBRATION_TARGET_NS =
   PARSE_MIN_SAMPLE_NS + Math.ceil(PARSE_MIN_SAMPLE_NS / 2);
+// bd-bh7d work-proof ceiling. Every gate this harness had asked whether the NUMBER was sound --
+// integration floor, bracket agreement, median CI, A/A null, output equivalence. None asked whether
+// our arm had done the WORK. `schema_catalog_25` passed all of them while reporting a p50 of 16 ns
+// for a job whose own record claims 1,663,670 output bytes: the batch loop was feeding the engine's
+// revision memo, so iterations 2..N were cache probes and the reported p50 was the cost of a probe.
+//
+// This is the missing question, asked as physics rather than as a tuned threshold. A row that claims
+// B result bytes at P ns per job asserts a production rate of B/P bytes/ns. The widest cores in
+// existence retire at most 64 bytes of stores per cycle into L1; at 8 GHz -- above any shipping part
+// -- that is 512 B/ns per thread, and that is before a single byte of parsing, layout or SVG
+// construction is paid for. So a rate above this ceiling is not "suspiciously fast", it is proof the
+// bytes were not produced inside the timed region.
+//
+// Deliberately unfalsifiable in the honest direction: no real row can be refused by it, because no
+// real row can exceed its own hardware's store bandwidth. The 16 ns row sits 203x over. Delete this
+// gate when every arm reports a counted work proof (retired instructions or allocations scaling with
+// the diagram) instead of a rate bound.
+const RESULT_BYTES_PER_NS_PER_THREAD_CEILING = 512;
 const HOST_WIDE_MAX_BUSY_FRACTION = 0.20;
 const HOST_WIDE_QUIET_SAMPLE_MS = 1_000;
 const HOST_WIDE_QUIET_MAX_ATTEMPTS = 900;
@@ -908,6 +926,44 @@ function nativeResultBytes(record) {
   return measurementMode === 'parse' ? record?.parse_result_bytes : record?.output_bytes;
 }
 
+/// Did our arm actually produce the bytes it reports, inside the timed region? (bd-bh7d)
+///
+/// Returns `null` when the row is admissible, or a violation object naming the impossible rate.
+/// A record that cannot state both its result bytes and its per-job p50 is refused too: an
+/// unstateable rate is not a passed check, and this gate must never be satisfied by absence.
+///
+/// Threads are taken from the arm's OBSERVED count, never its requested one, because the ceiling
+/// is per-thread and a row may not buy headroom it did not spend.
+function workProofViolation(record) {
+  const bytes = nativeResultBytes(record);
+  const perJobNs = timingStats(record)?.p50;
+  const threads = record?.thread_count_actually_used;
+  if (
+    !Number.isFinite(bytes) || bytes < 0 ||
+    !Number.isFinite(perJobNs) || perJobNs <= 0 ||
+    !Number.isSafeInteger(threads) || threads < 1
+  ) {
+    return {
+      reason: 'unstateable_production_rate',
+      result_bytes: bytes ?? null,
+      per_job_ns: perJobNs ?? null,
+      threads_actually_used: threads ?? null,
+    };
+  }
+  const bytesPerNs = bytes / perJobNs;
+  const ceiling = RESULT_BYTES_PER_NS_PER_THREAD_CEILING * threads;
+  if (bytesPerNs <= ceiling) return null;
+  return {
+    reason: 'result_bytes_exceed_store_bandwidth',
+    result_bytes: bytes,
+    per_job_ns: perJobNs,
+    threads_actually_used: threads,
+    bytes_per_ns: bytesPerNs,
+    ceiling_bytes_per_ns: ceiling,
+    over_ceiling_factor: bytesPerNs / ceiling,
+  };
+}
+
 const PARSE_TYPE_NORMALIZATION = new Map([
   ['flowchart', 'flowchart'],
   ['flowchart-v2', 'flowchart'],
@@ -1643,6 +1699,57 @@ if (has('self-test')) {
       throw new Error('parse floor must reject the 50 ms thread-sweep floor');
     }
   }
+  // bd-bh7d work-proof gate. The fixture is the actual defect: summary-08d27375 reported
+  // schema_catalog_25 at p50 16 ns while claiming 1,663,670 output bytes.
+  const workProofRecord = (bytes, p50, threads = 1) => ({
+    thread_count_actually_used: threads,
+    ...(measurementMode === 'parse'
+      ? { parse_ns: { p50 }, parse_result_bytes: bytes }
+      : { pipeline_ns: { p50 }, output_bytes: bytes }),
+  });
+  const observedDefect = workProofViolation(workProofRecord(1_663_670, 16));
+  if (observedDefect?.reason !== 'result_bytes_exceed_store_bandwidth') {
+    throw new Error('work-proof gate must refuse the 16 ns / 1.66 MB memo-hit row');
+  }
+  // The SAME job, honestly measured (15.856699 ms), has to be admitted -- otherwise the gate is
+  // refusing the workload rather than the artifact.
+  if (workProofViolation(workProofRecord(1_663_670, 15_856_699)) !== null) {
+    throw new Error('work-proof gate must admit the same job measured at its real cost');
+  }
+  // NEGATIVE CASE, and the reason this is a rate and not a time floor: a small diagram legitimately
+  // renders in well under a microsecond. Any gate phrased as "refuse a p50 below N ns" fails here.
+  if (workProofViolation(workProofRecord(300, 800)) !== null) {
+    throw new Error('work-proof gate must admit a small job that is genuinely fast');
+  }
+  // Absence is not a pass: a record that cannot state its rate is refused, not skipped.
+  for (const missing of [
+    workProofRecord(undefined, 16),
+    workProofRecord(1_663_670, undefined),
+    workProofRecord(1_663_670, 0),
+    { ...workProofRecord(1_663_670, 16), thread_count_actually_used: null },
+  ]) {
+    if (workProofViolation(missing)?.reason !== 'unstateable_production_rate') {
+      throw new Error('work-proof gate must refuse a record that cannot state its production rate');
+    }
+  }
+  // Boundary exactness, so the ceiling is the number it says it is.
+  if (
+    workProofViolation(workProofRecord(RESULT_BYTES_PER_NS_PER_THREAD_CEILING, 1)) !== null ||
+    workProofViolation(workProofRecord(RESULT_BYTES_PER_NS_PER_THREAD_CEILING + 1, 1)) === null
+  ) {
+    throw new Error('work-proof ceiling must be boundary-exact at one byte per nanosecond-thread');
+  }
+  // Threads scale the ceiling, and only OBSERVED threads do. A rate that violates on one thread is
+  // admissible on four when four were actually used, and stays refused when four were merely asked
+  // for -- the field a memo-fed row could inflate for free.
+  const fourThreadRate = workProofRecord(4 * RESULT_BYTES_PER_NS_PER_THREAD_CEILING, 1, 4);
+  if (
+    workProofViolation(fourThreadRate) !== null ||
+    workProofViolation({ ...fourThreadRate, thread_count_actually_used: 1, worker_threads: 4 })
+      === null
+  ) {
+    throw new Error('work-proof ceiling must scale with observed threads only');
+  }
   if (
     comparatorDnfLowerBound(
       { status: 'dnf', kind: 'timeout', phase: 'probe', budget_ms: 100 },
@@ -1702,6 +1809,11 @@ if (has('self-test')) {
       affinity_logical_cpus: liveTopology.affinity_cpus.length,
     },
     actual_thread_probe_gate: 'required',
+    work_proof_gate: {
+      rule: 'result_bytes_per_ns_within_per_thread_store_bandwidth',
+      ceiling_bytes_per_ns_per_observed_thread: RESULT_BYTES_PER_NS_PER_THREAD_CEILING,
+      checked_arms: 'both_rust_bracket_arms',
+    },
     whole_job_effect_ci_gate: {
       method: 'independent_bootstrap_ratio_of_whole_job_medians',
       minimum_samples_per_engine: MIN_EFFECT_SAMPLES,
@@ -2736,6 +2848,25 @@ for (const { item, threads } of measurements) {
       error:
         `every Rust bracket arm must integrate for at least ` +
         `${THREAD_SWEEP_MIN_SAMPLE_NS} ns at its p50`,
+    });
+    continue;
+  }
+  // bd-bh7d. Checked on BOTH bracket arms, before the bracket picks one: a memo-fed arm is not
+  // repaired by being the slower of the two, and refusing only the selected arm would let the
+  // defect decide which arm gets audited.
+  const workProof = [
+    ['before', workProofViolation(fBefore)],
+    ['after', workProofViolation(fAfter)],
+  ].filter(([, violation]) => violation !== null);
+  if (workProof.length > 0) {
+    hardFail = true;
+    rows.push({
+      ...row,
+      status: 'work_proof_violation',
+      work_proof: Object.fromEntries(workProof),
+      error:
+        'a Rust bracket arm reports result bytes it could not have produced in its own timed ' +
+        `region (ceiling ${RESULT_BYTES_PER_NS_PER_THREAD_CEILING} B/ns per observed thread)`,
     });
     continue;
   }
