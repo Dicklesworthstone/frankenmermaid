@@ -12940,6 +12940,10 @@ mod tests {
             "large flowchart output must be deterministic"
         );
         assert!(first.contains("data-nodes=\"2000\""));
+        assert!(
+            first.trim_end().ends_with("</svg>"),
+            "large flowchart SVG must complete rather than stopping after a partial document"
+        );
         assert!(first.contains("id=\"fm-edge-"), "edges must be emitted");
         for index in 0..NODE_COUNT {
             assert!(
