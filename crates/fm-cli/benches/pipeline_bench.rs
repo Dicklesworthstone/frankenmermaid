@@ -386,6 +386,27 @@ fn bench_layout_wide(c: &mut Criterion) {
     group.finish();
 }
 
+/// Parse + layout + SVG on the wide corpus, through the SIMPLE call path.
+///
+/// **This is not the head-to-head harness's timed region, and the two numbers are not
+/// interchangeable** (bd-8bbq). Same input — `gen_wide` is byte-identical to the corpus, enforced by
+/// `tests/bench_corpus_parity.rs` — but a different call sequence, so they measure different work:
+///
+/// | stage  | here                            | `examples/headtohead.rs` timed region     |
+/// |--------|---------------------------------|-------------------------------------------|
+/// | layout | `layout_diagram(&ir)`           | `layout_diagram_traced(&ir).layout`       |
+/// | render | `render_svg_with_layout(...)`   | `SvgBatchRenderer::render(ir, layout, …)` |
+/// | ir     | owned, by reference             | `Arc::new(parsed.ir)`                     |
+///
+/// `layout_diagram_traced` additionally builds the dispatch/guard/snapshot trace, which this path
+/// never pays for, and the batch renderer carries prefix-reuse machinery the plain renderer does
+/// not have. So a criterion `full_pipeline_wide` figure carried over to a head-to-head row — or the
+/// reverse — is comparing traced+batch against untraced+plain and calling the difference noise.
+///
+/// This is the frankenlibc hazard in its original form: two sanctioned harnesses, one named
+/// primitive, different measured work, and each internally consistent enough to pass its own A/A
+/// null. Keep both — the simple path is the right thing to profile a lever against — but if you
+/// cross-check them (bd-8bbq), align the call sequences first or report the gap as the finding.
 fn bench_full_pipeline_wide(c: &mut Criterion) {
     let mut group = c.benchmark_group("full_pipeline_wide");
     let config = fm_render_svg::SvgRenderConfig::default();
