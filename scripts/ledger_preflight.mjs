@@ -69,11 +69,37 @@ const INCUMBENT_DNF = 'incumbent-dnf';
 // maintenance-self-speedup, because a self A/B is corrupted by split arms exactly as badly as a
 // competitive one.
 const HOST_MARKER = '**Measurement host (observed, both arms):**';
-const HOST_WORKER = /\bworker=[a-z0-9][a-z0-9._-]*\b/i;
 const HOST_THREADS = /\bthreads=\d+\b/i;
 const HOST_GOVERNOR = /\bgovernor=[a-z0-9][a-z0-9._-]*\b/i;
 const HOST_ISA = /\bisa=[a-z0-9][a-z0-9._+-]*\b/i;
 const HOST_WORKER_ALL = /\bworker=([a-z0-9][a-z0-9._-]*)/gi;
+// The local-measurement spelling of the same fact, adopted from frankenfs's form
+// (`RCH_WORKER=<id>` or `same_host=<hostname>`). This repo's head-to-head driver runs BOTH arms on
+// this box rather than on an rch worker, and a row that measured locally has no rch worker id to
+// give. Without this spelling the honest local row would either be blocked or tempted to invent a
+// `worker=` value, which is worse than no field at all. Either spelling answers "where", and the
+// multi-value refusal below counts them together: `worker=hz2 same_host=csd` is two machines.
+const HOST_SAME_ALL = /\bsame_host=([a-z0-9][a-z0-9._-]*)/gi;
+// WHICH HARNESS produced the number. Adopted 2026-08-15 alongside `worker=`, after a second
+// fleet-wide finding that is independent of the first: frankenlibc measured malloc/free on the SAME
+// worker (hz2) through two separately-sanctioned harnesses and got 5.9459x and 12.385414x -- a ~2x
+// spread -- with BOTH A/A nulls passing in tolerance. So a passing null does not certify that a
+// harness measures what its row says it measures, and two rows from different harnesses are no more
+// comparable than two rows from different workers. This repo has more than one: the head-to-head
+// driver (`scripts/headtohead/run.mjs`), the `perf stat` instruction A/B used for maintenance rows,
+// and the per-crate criterion benches.
+//
+// If two harnesses here ever disagree on the same primitive, the DISAGREEMENT is the finding and
+// both numbers get banked with their harness named. Picking the friendlier one is the failure mode
+// this field exists to make impossible to do silently.
+const HOST_HARNESS = /\bharness=[a-z0-9][a-z0-9._/-]*\b/i;
+// Retro-flag for rows banked BEFORE the provenance gate existed. It does not excuse a row from
+// naming where it ran -- it removes the row from the comparable set, which is a strictly worse
+// outcome for the row and therefore not a way around the gate. See `measurementHostEvidence`.
+const SCOPED_MARKER = '**Measurement provenance:**';
+const SCOPED_VALUE = /\bWORKER-SCOPED\b/;
+const SCOPED_BACKLOG = /\bpre-gate-backlog\b/i;
+const SCOPED_AUDIT = /\bbd-[a-z0-9]+\b/i;
 const COUNTED_METRIC = /\b(instructions?|cycles?|syscalls?|allocations?|faults?)\b/i;
 const MEASURED_VALUE =
   /(?:\d[\d,]*(?:\.\d+)?(?:%|x|ns|us|µs|ms|s)?|unchanged|identical|flat|no (?:measurable |material )?(?:work|change|difference))/i;
@@ -156,25 +182,55 @@ function keepEvidence(body) {
  * declaring in its own words that its arms landed on different hosts, which is the exact shape the
  * fleet measured a 13.6x swing across. The fields are the ones that differ between workers and
  * change a ratio without changing the code: which box, how many threads were observed on it, what
- * the scaling governor was doing, and which ISA level the executable was allowed to use.
+ * the scaling governor was doing, which ISA level the executable was allowed to use, and — since
+ * 2026-08-15 — which HARNESS produced the number.
+ *
+ * ONE ALTERNATIVE IS ACCEPTED, for the backlog only. A row banked before this gate existed may
+ * instead declare itself WORKER-SCOPED. That is not an exemption: it takes the row OUT of the
+ * comparable set, and `incumbent-win` is refused outright, so the flag can never carry a
+ * competitive claim. A new row gains nothing by reaching for it — it would be trading a comparable
+ * result for a non-comparable one — which is what makes it safe to accept at all. The alternative
+ * exists because the audit that found these rows (bd-kcy4) established that their measurement host
+ * is UNKNOWABLE: the artifacts of that era carry no host, worker, thread, affinity, governor or ISA
+ * field, so demanding those four values would leave the truth unrecordable and the rows silently
+ * trusted, which is worse than saying plainly that they are not comparable.
  */
-function measurementHostEvidence(body) {
+function measurementHostEvidence(body, classification = null) {
+  const scoped = markerParagraph(body, SCOPED_MARKER);
+  if (SCOPED_VALUE.test(scoped)) {
+    const missing = [];
+    if (!SCOPED_BACKLOG.test(scoped)) {
+      missing.push('pre-gate-backlog (this form is for rows banked before the gate, nothing else)');
+    }
+    if (!SCOPED_AUDIT.test(scoped)) missing.push('the bead id of the audit that established it');
+    if (classification === INCUMBENT_WIN) {
+      missing.push(
+        'a competitive claim can never be worker-scoped; an incumbent-win row must name its host',
+      );
+    }
+    return { ok: missing.length === 0, missing, scoped: true };
+  }
+
   const evidence = markerParagraph(body, HOST_MARKER);
   const missing = [];
-  if (!HOST_WORKER.test(evidence)) missing.push('worker=<observed host or rch worker id>');
+  const machines = new Set([
+    ...[...evidence.matchAll(HOST_WORKER_ALL)].map((match) => match[1].toLowerCase()),
+    ...[...evidence.matchAll(HOST_SAME_ALL)].map((match) => match[1].toLowerCase()),
+  ]);
+  if (machines.size === 0) {
+    missing.push('worker=<rch worker id> or same_host=<hostname that ran both arms>');
+  }
   if (!HOST_THREADS.test(evidence)) missing.push('threads=<observed thread count>');
   if (!HOST_GOVERNOR.test(evidence)) missing.push('governor=<scaling governor>');
   if (!HOST_ISA.test(evidence)) missing.push('isa=<ISA level the build targeted>');
+  if (!HOST_HARNESS.test(evidence)) missing.push('harness=<which harness produced the number>');
 
-  const workers = new Set(
-    [...evidence.matchAll(HOST_WORKER_ALL)].map((match) => match[1].toLowerCase()),
-  );
-  if (workers.size > 1) {
+  if (machines.size > 1) {
     missing.push(
-      `both arms must be measured on ONE worker in ONE invocation; this row names ${workers.size}: ${[...workers].join(', ')}`,
+      `both arms must be measured on ONE machine in ONE invocation; this row names ${machines.size}: ${[...machines].join(', ')}`,
     );
   }
-  return { ok: missing.length === 0, missing };
+  return { ok: missing.length === 0, missing, scoped: false };
 }
 
 function resultClass(body) {
@@ -229,10 +285,16 @@ function incumbentDnfEvidence(body) {
 function resultEvidence(body) {
   if (!keepEvidence(body)) return { ok: false, why: `missing ${ELF_MARKER}` };
 
-  const host = measurementHostEvidence(body);
-  if (!host.ok) return { ok: false, why: `incomplete ${HOST_MARKER} ${host.missing.join(', ')}` };
-
   const classification = resultClass(body);
+
+  // Host evidence is checked against the classification, because the one alternative form is
+  // refused for a competitive claim: an incumbent-win row must name where it ran, always.
+  const host = measurementHostEvidence(body, classification);
+  if (!host.ok) {
+    const marker = host.scoped ? SCOPED_MARKER : HOST_MARKER;
+    return { ok: false, why: `incomplete ${marker} ${host.missing.join(', ')}` };
+  }
+
   if (!classification) {
     return {
       ok: false,
@@ -240,7 +302,12 @@ function resultEvidence(body) {
     };
   }
   if (classification === MAINTENANCE_SELF_SPEEDUP) {
-    return { ok: true, why: 'maintenance self-speedup (not campaign output)' };
+    return {
+      ok: true,
+      why: host.scoped
+        ? 'maintenance self-speedup, WORKER-SCOPED (not comparable to any other row)'
+        : 'maintenance self-speedup (not campaign output)',
+    };
   }
 
   if (classification === INCUMBENT_DNF) {
@@ -312,7 +379,7 @@ if (has('self-test')) {
     `## MAINTENANCE SELF-SPEEDUP: missing class marker\n\n${ELF_MARKER} \`${hash}\`\n`,
     PERFORMANCE_LEDGER,
   )[0];
-  const host = `${HOST_MARKER} worker=hz2 threads=64 governor=performance isa=x86-64-v2`;
+  const host = `${HOST_MARKER} worker=hz2 threads=64 governor=performance isa=x86-64-v2 harness=headtohead/run.mjs`;
   const selfSpeedup = `${ELF_MARKER} \`${hash}\`
 
 ${host}
@@ -461,6 +528,67 @@ ${NULL_MARKER} baseline/null median ratio 1.0x, CI [0.99, 1.01].`,
     [
       'a passing A/A null does not excuse a missing measurement host',
       !resultEvidence(incumbentWin.replace(`${host}\n\n`, '')).ok,
+    ],
+    // harness= (2026-08-15). frankenlibc got 5.9459x and 12.385414x for the same primitive on the
+    // SAME worker through two sanctioned harnesses, both A/A nulls passing. Worker identity alone
+    // does not make two rows comparable.
+    [
+      'a measurement host missing the harness is rejected',
+      !resultEvidence(selfSpeedup.replace(' harness=headtohead/run.mjs', '')).ok,
+    ],
+    [
+      'a row naming worker AND harness is admitted',
+      resultEvidence(selfSpeedup).ok,
+    ],
+    // same_host= is the local-measurement spelling of "where", from frankenfs's form. Our
+    // head-to-head runs both arms on this box, so it has no rch worker id to give; without this
+    // spelling the honest local row is either blocked or tempted to invent a worker= value.
+    [
+      'same_host= names the machine just as well as worker= for a locally measured row',
+      resultEvidence(selfSpeedup.replace('worker=hz2', 'same_host=csd')).ok,
+    ],
+    [
+      'two different same_host values are refused exactly like two workers',
+      !resultEvidence(selfSpeedup.replace('worker=hz2', 'same_host=csd same_host=csd2')).ok,
+    ],
+    [
+      'a worker and a different same_host in one row is still two machines',
+      !resultEvidence(selfSpeedup.replace('worker=hz2', 'worker=hz2 same_host=csd')).ok,
+    ],
+    [
+      'the same machine named twice in both spellings is not two machines',
+      resultEvidence(selfSpeedup.replace('worker=hz2', 'worker=hz2 same_host=hz2')).ok,
+    ],
+    // The WORKER-SCOPED backlog form. It must DEMOTE, never excuse.
+    [
+      'a pre-gate backlog row may declare itself worker-scoped instead of naming a host',
+      resultEvidence(
+        selfSpeedup.replace(
+          host,
+          `${SCOPED_MARKER} WORKER-SCOPED (pre-gate-backlog, bd-kcy4)`,
+        ),
+      ).ok,
+    ],
+    [
+      'a worker-scoped row that does not say which audit established it is refused',
+      !resultEvidence(
+        selfSpeedup.replace(host, `${SCOPED_MARKER} WORKER-SCOPED (pre-gate-backlog)`),
+      ).ok,
+    ],
+    [
+      'a worker-scoped row that does not declare itself backlog is refused',
+      !resultEvidence(selfSpeedup.replace(host, `${SCOPED_MARKER} WORKER-SCOPED (bd-kcy4)`)).ok,
+    ],
+    // THE TEETH. Without this the flag would be a way for a competitive claim to skip naming its
+    // host, which is exactly the hole the gate exists to close.
+    [
+      'an incumbent-win can NEVER be worker-scoped, however well formed the flag is',
+      !resultEvidence(
+        incumbentWin.replace(
+          host,
+          `${SCOPED_MARKER} WORKER-SCOPED (pre-gate-backlog, bd-kcy4)`,
+        ),
+      ).ok,
     ],
     [
       'modified PERF_LEDGER KEEP appears in the lint delta',

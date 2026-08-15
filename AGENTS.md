@@ -788,11 +788,17 @@ Every KEEP row must also record:
 Computing a hash beside the run is not sufficient. The executing process must
 identify its own ELF.
 
-Every KEEP row must also name the machine both arms were observed on:
+Every KEEP row must also name the machine both arms were observed on, and the
+harness that produced them:
 
 ```markdown
-**Measurement host (observed, both arms):** worker=<host or rch worker id> threads=<n> governor=<name> isa=<level>
+**Measurement host (observed, both arms):** worker=<rch worker id> threads=<n> governor=<name> isa=<level> harness=<name>
 ```
+
+Use `same_host=<hostname>` in place of `worker=` when both arms ran on this box
+rather than on an rch worker — the head-to-head driver does exactly that, and a
+local row has no worker id to give. Either spelling answers "where"; naming two
+different machines in either spelling is a refusal, not a caveat.
 
 This is required on every result class, `maintenance-self-speedup` included. The
 reason is measured, not procedural: the same cell measured on two different rch
@@ -801,9 +807,32 @@ workers produced `1.2693x` on one and `0.0093x` on the other — a 13.6x swing �
 blind to between-worker differences in CPU model, cache, memory bandwidth and
 contention. A passing null therefore does NOT make a cross-worker comparison
 valid, and **a row that does not name its worker cannot be compared to any other
-row**. Naming two different workers in the marker is a refusal, not a caveat:
-both arms must run in the same invocation on the same worker, which is what the
-campaign law already required — this is the empirical reason why.
+row**. Both arms must run in the same invocation on the same machine, which is
+what the campaign law already required — this is the empirical reason why.
+
+`harness=` is required for an independent reason of the same shape: the same
+primitive measured on the SAME worker through two separately-sanctioned harnesses
+came out `5.9459x` and `12.385414x` — a ~2x spread — again **with both A/A nulls
+passing in tolerance**. A passing null does not certify that a harness measures
+what its row says it measures, so two rows from different harnesses are no more
+comparable than two rows from different workers. This repo has more than one:
+`scripts/headtohead/run.mjs`, the `perf stat` instruction A/B behind maintenance
+rows, and the per-crate criterion benches. **If two of them disagree on the same
+primitive, the disagreement is itself the finding** — bank both numbers with
+their harness named. Picking the friendlier one is the failure mode the field
+exists to make impossible to do quietly.
+
+A row banked before this gate existed, whose measurement host cannot be
+reconstructed, declares that instead of inventing one:
+
+```markdown
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, <bd-id of the audit>)
+```
+
+That is a demotion, not an exemption: it takes the row out of the comparable set,
+and an `incumbent-win` may never use it — a competitive claim must always name
+where it ran. A new measurement gains nothing by reaching for this form, which is
+what makes it safe to accept at all.
 
 `scripts/headtohead/run.mjs` already records `host_identity`, core counts, NUMA
 topology, affinity and boost state; the marker is where that reaches the ledger.
