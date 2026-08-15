@@ -83,7 +83,7 @@ function chromiumStartupRecoveryHint(stderrTail) {
 /** Stable, queryable category for a comparator failure; the raw error remains the evidence. */
 function normalizedFailureClass(reason) {
   const text = String(reason);
-  if (/\bRangeError\b|Maximum call stack size exceeded/.test(text)) return 'range_error';
+  if (/\brangeerror\b|maximum call stack size exceeded/i.test(text)) return 'range_error';
   if (/\b(?:out of memory|oom)\b/i.test(text)) return 'out_of_memory';
   return 'uncategorized';
 }
@@ -714,6 +714,7 @@ if (has('self-test')) {
   }
   if (
     normalizedFailureClass('RangeError: Maximum call stack size exceeded') !== 'range_error' ||
+    normalizedFailureClass('rangeerror: maximum call stack size exceeded') !== 'range_error' ||
     normalizedFailureClass('render failed after parse accepted: Maximum call stack size exceeded') !== 'range_error' ||
     normalizedFailureClass('FATAL ERROR: JavaScript heap out of memory') !== 'out_of_memory' ||
     normalizedFailureClass('mermaid rejected the render') !== 'uncategorized'
