@@ -1075,10 +1075,19 @@ export function groundTruth(text) {
  * goes undecided. Collapsing that into "equivalent" would hand a renderer a way to evade the gate
  * by degrading its own geometry, so the third verdict exists and the harness gate refuses it.
  */
-export const TIER2_FAMILIES = new Set(['flowchart', 'state', 'class']);
+// `er` belongs here for the same reason `state` does, and its absence was a hole rather than a
+// judgement: `groundTruth` already decodes `A ||--o{ B : label` into edges, and `signature` already
+// reads our `fm-edge` groups, so the topology invariant was DECIDABLE for ER all along — it just was
+// not REQUIRED. Measured before the change: an ER document whose every relationship was dropped from
+// the output returned `verified`, deciding only the entity-id set, while the identical shape in
+// `state` returned `unverified`. That gap sat under `schema_catalog_25`, this repo's worst certified
+// ratio and an ER document, where a dropped-relationship defect would both inflate the ratio and
+// pass the oracle.
+export const TIER2_FAMILIES = new Set(['flowchart', 'state', 'class', 'er']);
 const TIER2_REQUIRED_INVARIANTS = new Map([
   ['flowchart', ['edge_topology_cross_engine']],
   ['state', ['edge_topology_cross_engine']],
+  ['er', ['edge_topology_cross_engine']],
   ['class', [
     'class_relationship_semantics_cross_engine',
     'class_relationship_semantics_vs_input__frankenmermaid',
@@ -2064,6 +2073,33 @@ export function selfTest() {
     const t = groundTruth('erDiagram\n  E0 ||--o{ E1 : has\n');
     return t !== null && t.node_ids.join(',') === 'e0,e1' && t.edges.join(',') === 'e0>e1';
   })(), groundTruth('erDiagram\n  E0 ||--o{ E1 : has\n'));
+  // ER is a Tier 2 family: dropping every relationship must NOT verify. Before `er` was added to
+  // TIER2_FAMILIES this returned `verified` on the strength of the entity-id set alone, and the
+  // cross-engine arm returned `equivalent` while mermaid drew relationships we did not. The
+  // positive case is kept alongside so the requirement is shown to cost nothing when the output is
+  // honest — a gate that fails everything is not a gate.
+  {
+    const erSource = 'erDiagram\n  CUSTOMER ||--o{ ORDER : places\n  ORDER ||--|{ LINE : contains\n';
+    const erNode = (id, i) =>
+      `<g id="fm-node-${id}-${i}" class="fm-node" data-id="${id}"><rect x="${i * 40}" y="0" width="30" height="20"/></g>`;
+    const erEdge = (i, x0, x1) =>
+      `<g class="fm-edge" data-fm-edge-id="${i}"><path d="M${x0},10 L${x1},10"/></g>`;
+    const erIds = ['customer', 'order', 'line'];
+    const erWhole = `<svg>${erIds.map(erNode).join('')}${erEdge(0, 30, 40)}${erEdge(1, 70, 80)}</svg>`;
+    const erStripped = `<svg>${erIds.map(erNode).join('')}</svg>`;
+    const whole = verifyFrankenmermaidAgainstSource({ index: 0, family: 'er', fmSvg: erWhole, source: erSource });
+    const stripped = verifyFrankenmermaidAgainstSource({ index: 0, family: 'er', fmSvg: erStripped, source: erSource });
+    const crossEngine = compareDiagram({ index: 0, family: 'er', fmSvg: erStripped, jsSvg: erWhole, source: erSource });
+    record('er_is_a_tier2_family', TIER2_FAMILIES.has('er'), [...TIER2_FAMILIES].join(','));
+    record('er_relationships_present_still_verifies', whole.verdict === 'verified', whole.verdict);
+    record('er_dropping_every_relationship_is_not_verified',
+      stripped.verdict === 'unverified'
+      && !stripped.checks.some((check) => check.decided
+        && check.invariant === 'edge_topology_vs_input__frankenmermaid'),
+      stripped.verdict);
+    record('er_relationships_mermaid_draws_and_we_do_not_is_not_equivalent',
+      crossEngine.verdict !== 'equivalent', crossEngine.verdict);
+  }
   record('native_untransformed_rect_nodes_anchor', (() => {
     const s = signature('<svg><g id="fm-node-s0-1" class="fm-node" data-id="S0"><rect x="10" y="20" width="30" height="40"/></g></svg>', 'frankenmermaid');
     return s.node_ids.join(',') === 's0' && s.topology_status === 'no_edge_elements';
