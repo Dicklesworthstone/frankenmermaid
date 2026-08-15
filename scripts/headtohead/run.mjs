@@ -13,6 +13,7 @@
 // item is reported with `status: "error"`, never dropped from the table.
 
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { cpus, hostname, loadavg, platform, release, tmpdir, totalmem } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
@@ -62,6 +63,45 @@ const PARSE_CALIBRATION_TARGET_NS =
 // gate when every arm reports a counted work proof (retired instructions or allocations scaling with
 // the diagram) instead of a rate bound.
 const RESULT_BYTES_PER_NS_PER_THREAD_CEILING = 512;
+// WHICH HARNESS produced the row, hashed, because a harness is as much a source of disagreement as
+// a worker is. frankenlibc measured malloc/free on the SAME worker through two separately-sanctioned
+// harnesses and got 5.9459x and 12.385414x — a ~2x spread — with BOTH A/A nulls passing. A null
+// controls noise inside one harness; it cannot tell you the harness is measuring the wrong thing.
+//
+// The three files that decide what gets measured are hashed together, so a row names not just "the
+// head-to-head harness" but WHICH REVISION of it. Two rows produced by different revisions of these
+// files are no more comparable than two rows from different machines, and this makes that visible
+// instead of assumed. `ledgerProvenanceMarker` below emits the line a ledger row must carry, so the
+// row cannot disagree with the run that produced it.
+const HARNESS_FILES = ['run.mjs', 'corpus.mjs', 'mermaid_bench.mjs'];
+const HARNESS_ID = (() => {
+  const digest = createHash('sha256');
+  for (const file of HARNESS_FILES) digest.update(readFileSync(join(HERE, file)));
+  return `headtohead/run.mjs@${digest.digest('hex').slice(0, 12)}`;
+})();
+
+/**
+ * The provenance line a ledger row produced by this run must carry, emitted BY the run.
+ *
+ * Copying these four facts by hand is how they drift from the run that produced them. Threads are
+ * the OBSERVED count for this row, not the requested one. `same_host=` rather than `worker=`
+ * because both arms are timed on this box under the host-wide exclusivity gate — rch only ever
+ * compiles here, it never times anything — so there is no rch worker id to give and inventing one
+ * would be worse than the truth.
+ */
+/// Takes the environment as an argument rather than closing over the module-level `env`: `env` is
+/// initialized far below this point, and a function that reads it from here dies in the temporal
+/// dead zone the moment anything calls it early — which is exactly the defect that made this whole
+/// driver unrunnable (bd-dqkg). A pure function also lets the self-test check the emitted shape
+/// without standing up a host probe.
+function ledgerProvenanceMarker(environment, observedThreads) {
+  const governor = environment.power_policy?.governors?.join('+') || 'unknown';
+  return (
+    '**Measurement host (observed, both arms):** ' +
+    `same_host=${environment.host_identity} threads=${observedThreads} ` +
+    `governor=${governor} isa=${environment.isa} harness=${HARNESS_ID}`
+  );
+}
 const HOST_WIDE_MAX_BUSY_FRACTION = 0.20;
 const HOST_WIDE_QUIET_SAMPLE_MS = 1_000;
 const HOST_WIDE_QUIET_MAX_ATTEMPTS = 900;
@@ -1699,6 +1739,39 @@ if (has('self-test')) {
       throw new Error('parse floor must reject the 50 ms thread-sweep floor');
     }
   }
+  // The provenance line this harness emits must be the line the ledger gate accepts. These are the
+  // exact patterns scripts/ledger_preflight.mjs matches; if that file tightens a field and this one
+  // does not follow, every row this harness produces becomes unbankable, and the failure would
+  // otherwise show up only at commit time on a row someone had already spent a quiet host earning.
+  const provenance = ledgerProvenanceMarker(
+    {
+      host_identity: 'thinkstation1',
+      isa: 'x86-64-v2',
+      power_policy: { governors: ['powersave'] },
+    },
+    64,
+  );
+  for (const [field, pattern] of [
+    ['same_host', /\bsame_host=[a-z0-9][a-z0-9._-]*\b/i],
+    ['threads', /\bthreads=\d+\b/i],
+    ['governor', /\bgovernor=[a-z0-9][a-z0-9._-]*\b/i],
+    ['isa', /\bisa=[a-z0-9][a-z0-9._+-]*\b/i],
+    ['harness', /\bharness=[a-z0-9][a-z0-9._/-]*\b/i],
+  ]) {
+    if (!pattern.test(provenance)) {
+      throw new Error(`emitted ledger provenance is missing ${field}: ${provenance}`);
+    }
+  }
+  // Exactly one machine. The gate counts worker= and same_host= together and refuses two.
+  if ((provenance.match(/\b(?:worker|same_host)=/g) ?? []).length !== 1) {
+    throw new Error(`emitted ledger provenance must name exactly one machine: ${provenance}`);
+  }
+  // The harness identity is a CONTENT hash, so editing what gets measured changes the id rather
+  // than silently reusing it.
+  if (!/^headtohead\/run\.mjs@[0-9a-f]{12}$/.test(HARNESS_ID)) {
+    throw new Error(`harness id must be a content hash, got ${HARNESS_ID}`);
+  }
+
   // bd-bh7d work-proof gate. The fixture is the actual defect: summary-08d27375 reported
   // schema_catalog_25 at p50 16 ns while claiming 1,663,670 output bytes.
   const workProofRecord = (bytes, p50, threads = 1) => ({
@@ -1809,6 +1882,15 @@ if (has('self-test')) {
       affinity_logical_cpus: liveTopology.affinity_cpus.length,
     },
     actual_thread_probe_gate: 'required',
+    harness: HARNESS_ID,
+    ledger_provenance_example: ledgerProvenanceMarker(
+      {
+        host_identity: liveTopology.host_identity,
+        isa: liveIsa.architecture,
+        power_policy: livePowerPolicy,
+      },
+      1,
+    ),
     work_proof_gate: {
       rule: 'result_bytes_per_ns_within_per_thread_store_bandwidth',
       ceiling_bytes_per_ns_per_observed_thread: RESULT_BYTES_PER_NS_PER_THREAD_CEILING,
@@ -2750,6 +2832,12 @@ for (const { item, threads } of measurements) {
       frankenmermaid_elf: binaryRecordBefore?.elf_sha256 ?? null,
       mermaid_js_bundle: m?.bundle_sha256 ?? null,
     },
+    harness: HARNESS_ID,
+    // Emitted so a ledger row cannot disagree with the run that produced it.
+    ledger_provenance: ledgerProvenanceMarker(
+      env,
+      f.thread_count_actually_used ?? row.fm_worker_threads_requested ?? threads,
+    ),
   };
 
   if (row.host_wide_exclusivity?.verdict !== 'clear') {
