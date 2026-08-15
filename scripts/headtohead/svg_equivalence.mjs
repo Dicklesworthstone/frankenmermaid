@@ -2000,6 +2000,28 @@ export function selfTest() {
     const s = signature('<svg><g id="fm-node-s0-1" class="fm-node" data-id="S0"><rect x="10" y="20" width="30" height="40"/></g></svg>', 'frankenmermaid');
     return s.node_ids.join(',') === 's0' && s.topology_status === 'no_edge_elements';
   })(), 'fm-node state-style group with absolute rect geometry');
+  record('native_dnf_state_and_er_are_source_verifiable', (() => {
+    const nodes = (ids) => ids.map((id, index) => `<g id="fm-node-${id}-${index}" class="fm-node" data-id="${id}"><rect x="${index * 20}" y="0" width="10" height="10"/></g>`).join('');
+    const erEdge = '<g class="fm-edge" data-fm-edge-id="0"><path d="M5,5 L25,5"/></g>';
+    const stateEdges = [
+      '<g class="fm-edge" data-fm-edge-id="0"><path d="M5,5 L25,5"/></g>',
+      '<g class="fm-edge" data-fm-edge-id="1"><path d="M25,5 L45,5"/></g>',
+      '<g class="fm-edge" data-fm-edge-id="2"><path d="M45,5 L5,5"/></g>',
+    ].join('');
+    const state = verifyFrankenmermaidAgainstSource({
+      index: 0,
+      family: 'state',
+      source: 'stateDiagram-v2\n  [*] --> S0\n  S0 --> S1\n  S1 --> [*]\n',
+      fmSvg: `<svg>${nodes(['state-start', 'S0', 'S1'])}${stateEdges}</svg>`,
+    });
+    const er = verifyFrankenmermaidAgainstSource({
+      index: 1,
+      family: 'er',
+      source: 'erDiagram\n  E0 ||--o{ E1 : has\n',
+      fmSvg: `<svg>${nodes(['E0', 'E1'])}${erEdge}</svg>`,
+    });
+    return state.verdict === 'verified' && er.verdict === 'verified';
+  })(), 'native state/ER groups with source-grounded topology');
   record('unsupported_source_is_not_decodable',
     groundTruth('sequenceDiagram\n  A->>B: hello\n') === null,
     null);
