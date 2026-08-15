@@ -967,7 +967,11 @@ export function groundTruth(text) {
       const [from, to] = transition.slice(1).map((node) => node.toLowerCase());
       if (from !== '[*]') nodes.add(from);
       if (to !== '[*]') nodes.add(to);
-      if (from !== '[*]' && to !== '[*]') edges.push(`${from}>${to}`);
+      // The start/end marker is authored topology, even though each renderer assigns it a
+      // private node id. `signature` collapses those renderer-private ids to `#pseudo`, so
+      // retain the transition here under that same canonical endpoint instead of silently
+      // exempting the two edges that connect a state machine to its lifecycle boundary.
+      edges.push(`${from === '[*]' ? '#pseudo' : from}>${to === '[*]' ? '#pseudo' : to}`);
     }
     return nodes.size === 0 ? null : { node_ids: [...nodes].sort(), edges: edges.sort() };
   }
@@ -1984,7 +1988,9 @@ export function selfTest() {
   })(), groundTruth('classDiagram\n  C0 *-- C1\n  C1 --o C2\n  C2 <|-- C3\n'));
   record('ground_truth_reads_state_transitions', (() => {
     const t = groundTruth('stateDiagram-v2\n  [*] --> S0\n  S0 --> S1: next\n  S1 --> [*]\n');
-    return t !== null && t.node_ids.join(',') === 's0,s1' && t.edges.join(',') === 's0>s1';
+    return t !== null
+      && t.node_ids.join(',') === 's0,s1'
+      && t.edges.join(',') === '#pseudo>s0,s0>s1,s1>#pseudo';
   })(), groundTruth('stateDiagram-v2\n  [*] --> S0\n  S0 --> S1: next\n  S1 --> [*]\n'));
   record('ground_truth_reads_er_relationships', (() => {
     const t = groundTruth('erDiagram\n  E0 ||--o{ E1 : has\n');
