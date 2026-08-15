@@ -16,6 +16,21 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// The generators that MIRROR the head-to-head corpus live in their own file so
+// `tests/bench_corpus_parity.rs` can compile the identical source and assert, against committed
+// corpus fixtures, that they still do (bd-9cma). Two of the three had silently stopped.
+#[path = "corpus_generators.rs"]
+mod corpus_generators;
+use corpus_generators::{gen_cyclic_scc, gen_dense_dag, gen_wide};
+
+/// A chain plus two long-range cross edges. **Deliberately NOT the corpus `flowchart_*` item**,
+/// which is a plain chain: the cross edges exist so this bench has non-trivial crossing
+/// minimization to do, and a plain chain gives it none.
+///
+/// So the ids under `parse/flowchart` and `layout/flowchart` here are NOT comparable with the
+/// head-to-head rows named `flowchart_small_10` / `flowchart_medium_100`, despite the similar
+/// names. Nothing in the code ever claimed they were; this comment exists so nobody infers it
+/// (bd-9cma). If you want the corpus flowchart, add it to `corpus_generators.rs` with a fixture.
 fn gen_flowchart(node_count: usize) -> String {
     let mut lines = vec![String::from("flowchart LR")];
     for i in 0..node_count {
@@ -51,31 +66,6 @@ fn gen_cyclic(node_count: usize) -> String {
     // Extra cross-edges
     for i in (0..node_count).step_by(3) {
         lines.push(format!("  N{i}-->N{}", (i + 2) % node_count));
-    }
-    lines.join("\n")
-}
-
-/// Generate a *wide* layered DAG: `layers` ranks of `width` nodes each, with each
-/// node fanning out to two nodes in the next layer. This produces ranks with many
-/// nodes — the realistic shape for fan-out pipelines, ER/state diagrams, and org
-/// charts — which exercises the crossing-minimization barycenter sweep far more than
-/// a linear chain (where every rank holds a single node).
-fn gen_wide(layers: usize, width: usize) -> String {
-    let mut lines = vec![String::from("flowchart TD")];
-    for layer in 0..layers {
-        for w in 0..width {
-            lines.push(format!("  N{layer}_{w}[L{layer} W{w}]"));
-        }
-    }
-    for layer in 0..layers.saturating_sub(1) {
-        for w in 0..width {
-            lines.push(format!("  N{layer}_{w}-->N{}_{w}", layer + 1));
-            lines.push(format!(
-                "  N{layer}_{w}-->N{}_{}",
-                layer + 1,
-                (w + 1) % width
-            ));
-        }
     }
     lines.join("\n")
 }
@@ -335,26 +325,13 @@ fn bench_layout(c: &mut Criterion) {
 // These isolate the crossing-minimization barycenter sweep on graphs whose ranks
 // contain many nodes (the cost driver that linear-chain benches never trigger).
 
-/// Dense DAG: `n` nodes, each with forward edges to a few successors, so `edges ≈ 4·nodes` while the
-/// obstacle count stays `= nodes`. This is the shape the obstacle-index work-gate targets — the count-only
-/// `DENSE_INDEX_OBSTACLES` floor excludes it, but its O(edges·obstacles) linear scan is the cost driver.
-fn gen_dense_dag(n: usize) -> String {
-    let mut lines = vec![String::from("flowchart TD")];
-    for i in 0..n {
-        lines.push(format!("  N{i}[Node {i}]"));
-    }
-    for i in 0..n {
-        for step in [1_usize, 2, 3, 5] {
-            if i + step < n {
-                lines.push(format!("  N{i}-->N{}", i + step));
-            }
-        }
-    }
-    lines.join("\n")
-}
-
-/// Layout of dense DAGs — the workload the obstacle-index work-gate lever affects. `dense_200` mirrors the
-/// corpus `dense_dag_200` (≈200 nodes / ≈790 edges); the larger rows check the O(edges·obstacles) scaling.
+/// Layout of dense DAGs — the workload the obstacle-index work-gate lever affects. `dense_200`
+/// mirrors the corpus `dense_dag_200` (≈200 nodes / ≈790 edges), now enforced by
+/// `tests/bench_corpus_parity.rs`; the larger rows check the O(edges·obstacles) scaling.
+///
+/// RE-BASELINED by bd-9cma: this generator used to emit `flowchart TD` with `N{i}[Node {i}]` ids and
+/// an edge step of 5, against the corpus's `LR`, `D{i}[D{i}]` and step 4. Every `layout_dense`
+/// number from before that fix measured a different graph and is not comparable to one after it.
 fn bench_layout_dense(c: &mut Criterion) {
     let mut group = c.benchmark_group("layout_dense");
     for (label, n) in [
@@ -362,7 +339,9 @@ fn bench_layout_dense(c: &mut Criterion) {
         ("dense_400", 400),
         ("dense_800", 800),
     ] {
-        let input = gen_dense_dag(n);
+        // fanout=4 is the corpus parameter for `dense_dag_200`; the larger rows keep it so the
+        // scaling rows differ from `dense_200` only in node count.
+        let input = gen_dense_dag(n, 4);
         let parsed = fm_parser::parse(&input);
         group.bench_with_input(BenchmarkId::new("dag", label), &parsed.ir, |b, ir| {
             b.iter(|| fm_layout::layout_diagram(ir));
@@ -371,29 +350,12 @@ fn bench_layout_dense(c: &mut Criterion) {
     group.finish();
 }
 
-/// Cyclic SCC graph: rings of `ring` nodes each fully cyclic, chained forward — the shape that routes to
-/// Sugiyama (cycles ⇒ `detect_cycle_components`), so `layout_diagram` runs the full Brandes-Köpf coordinate
-/// assignment. Mirrors the corpus `cyclic_scc_100`.
-fn gen_cyclic_scc(node_count: usize, ring: usize) -> String {
-    let mut lines = vec![String::from("flowchart TD")];
-    for i in 0..node_count {
-        lines.push(format!("  C{i}[Node {i}]"));
-    }
-    for i in 0..node_count {
-        let ring_start = (i / ring) * ring;
-        let next = ring_start + ((i - ring_start + 1) % ring);
-        if next < node_count {
-            lines.push(format!("  C{i}-->C{next}"));
-        }
-        if i + ring < node_count {
-            lines.push(format!("  C{i}-->C{}", i + ring));
-        }
-    }
-    lines.join("\n")
-}
-
 /// Layout of cyclic-SCC graphs — the Sugiyama path, exercising Brandes-Köpf coordinate assignment (the
-/// `bk_vertical_alignment` dense-lookup lever). `scc_100` mirrors the corpus `cyclic_scc_100`.
+/// `bk_vertical_alignment` dense-lookup lever). `scc_100` mirrors the corpus `cyclic_scc_100`, now
+/// enforced by `tests/bench_corpus_parity.rs`.
+///
+/// RE-BASELINED by bd-9cma: the labels used to be `C{i}[Node {i}]` against the corpus's `C{i}[C{i}]`.
+/// Same edges, wider nodes, so every `scc_*` number from before that fix measured different geometry.
 fn bench_layout_sugiyama(c: &mut Criterion) {
     let mut group = c.benchmark_group("layout_sugiyama");
     for (label, n) in [("scc_100", 100_usize), ("scc_300", 300), ("scc_600", 600)] {

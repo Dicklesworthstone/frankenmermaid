@@ -9,6 +9,12 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
+# Benches are declared explicitly below, not auto-discovered (bd-9cma).
+# `benches/corpus_generators.rs` is a SHARED SOURCE compiled into both `pipeline_bench` and
+# `tests/bench_corpus_parity.rs` via `#[path]`, so that the parity test checks the very generators
+# the bench runs. With autodiscovery on, cargo also built it as an empty extra bench target.
+# Adding a real bench now means adding a `[[bench]]` section for it.
+autobenches = false
 # This package ships three binaries, so a bare `cargo run -p frankenmermaid-cli` cannot pick one and
 # errors out. CI relies on exactly that form (`cargo run -p … -- determinism-manifest`), so name the
 # canonical binary here rather than adding `--bin` at every call site (bd-7l56). `frankenmermaid`, not
