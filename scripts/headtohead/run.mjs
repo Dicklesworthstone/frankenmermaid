@@ -1001,6 +1001,23 @@ function workProofViolation(record) {
     bytes_per_ns: bytesPerNs,
     ceiling_bytes_per_ns: ceiling,
     over_ceiling_factor: bytesPerNs / ceiling,
+    // THE INCREMENTAL CASE, named here so the next person to hit it does not read this refusal as a
+    // hardware claim and "fix" the gate by raising the ceiling (bd-dqkg, bd-1buv.3).
+    //
+    // This gate proves bytes were PRODUCED in the timed region. An incremental-edit row's whole
+    // point is that they were not: a memo hit returns a document it did not recompute, so it will
+    // always land far above this ceiling and will always be refused. That is correct for every mode
+    // the harness has today — all of them are cold renders, and reuse in a timed sample is the
+    // bd-bh7d defect. It is NOT a ceiling that wants relaxing when the incremental workload finally
+    // gets measured.
+    //
+    // An incremental mode needs a DIFFERENT work proof, counted rather than rate-based: fm-layout
+    // already carries `IncrementalRecomputeTrace { recomputed_nodes, total_nodes, cache_hit }`, and
+    // the honest proof is that `recomputed_nodes` scales with the EDIT and not with the document.
+    // Whoever builds that mode must add that gate, not widen this one.
+    not_a_hardware_claim_if_reuse_was_intended:
+      'a memo-reuse row cannot satisfy a byte-production gate by construction; it needs a counted ' +
+      'work proof (recomputed_nodes vs total_nodes), not a higher ceiling — see bd-dqkg',
   };
 }
 
@@ -1783,6 +1800,11 @@ if (has('self-test')) {
   const observedDefect = workProofViolation(workProofRecord(1_663_670, 16));
   if (observedDefect?.reason !== 'result_bytes_exceed_store_bandwidth') {
     throw new Error('work-proof gate must refuse the 16 ns / 1.66 MB memo-hit row');
+  }
+  // The refusal must carry the incremental note, so a future incremental row's refusal cannot be
+  // mistaken for a hardware claim and answered by raising the ceiling (bd-dqkg).
+  if (!/counted work proof/.test(observedDefect.not_a_hardware_claim_if_reuse_was_intended ?? '')) {
+    throw new Error('a work-proof refusal must say why a reuse row can never satisfy this gate');
   }
   // The SAME job, honestly measured (15.856699 ms), has to be admitted -- otherwise the gate is
   // refusing the workload rather than the artifact.
