@@ -111,6 +111,29 @@ function createDevtoolsPortLatch() {
   };
 }
 
+/// Choose WHICH attempt's stderr tail to report, deterministically and without losing the
+/// actionable one (bd-ghi7).
+///
+/// Reporting the last attempt is deterministic but lossy: attempts fail independently, so a run can
+/// hit the snap private-tmp namespace failure on attempt 1 (which names its own fix) and a plain
+/// 30s timeout on attempt 3, and reporting only the last discards the one diagnostic that told the
+/// operator what to do. bd-8nms is exactly that failure, and it cost the fleet hours twice — the
+/// first time debugging the harness instead of the host.
+///
+/// Rule: the FIRST attempt whose tail yields a recovery hint, else the LAST attempt. Both branches
+/// are a pure function of the tails, so the selection is reproducible from the same inputs; the
+/// chosen attempt number is reported so the choice is visible rather than implied.
+function selectStartupDiagnostic(stderrTails) {
+  const tails = Array.isArray(stderrTails) ? stderrTails : [];
+  for (let i = 0; i < tails.length; i++) {
+    const hint = chromiumStartupRecoveryHint(tails[i] ?? '');
+    if (hint !== '') return { attempt: i + 1, tail: tails[i] ?? '', hint, reason: 'recovery_hint' };
+  }
+  if (tails.length === 0) return { attempt: 0, tail: '', hint: '', reason: 'no_attempts' };
+  const attempt = tails.length;
+  return { attempt, tail: tails[attempt - 1] ?? '', hint: '', reason: 'last_attempt' };
+}
+
 function chromiumStartupRecoveryHint(stderrTail) {
   if (
     !stderrTail.includes('Failed to create socket directory') ||
@@ -287,7 +310,7 @@ async function stopChromiumForStartupRetry(proc) {
 async function launchChromium() {
   const bin = resolveChromiumBinary(process.env.FM_CHROMIUM_BIN, PINS.chromium.binary);
   let lastError = null;
-  let lastStderrTail = '';
+  const stderrTails = [];
   for (let attempt = 1; attempt <= CHROMIUM_STARTUP_ATTEMPTS; attempt++) {
     const profile = mkdtempSync(join(PROFILE_ROOT, 'fm-h2h-profile-'));
     const proc = spawn(bin, [
@@ -330,18 +353,18 @@ async function launchChromium() {
       }
     } catch (error) {
       lastError = error;
-      lastStderrTail = stderrTail;
+      stderrTails.push(stderrTail);
       if (!(await stopChromiumForStartupRetry(proc))) {
         throw new Error(`chromium startup failed and process exit was not confirmed: ${error.message}`);
       }
     }
   }
-  const diagnostic = lastStderrTail.length > 0
-    ? `; chromium stderr tail: ${JSON.stringify(lastStderrTail)}`
+  const selected = selectStartupDiagnostic(stderrTails);
+  const diagnostic = selected.tail.length > 0
+    ? `; chromium stderr tail (attempt ${selected.attempt}/${CHROMIUM_STARTUP_ATTEMPTS}, selected by ${selected.reason}): ${JSON.stringify(selected.tail)}`
     : '';
-  const recoveryHint = chromiumStartupRecoveryHint(lastStderrTail);
   throw new Error(
-    `chromium did not expose a devtools port after ${CHROMIUM_STARTUP_ATTEMPTS} clean startup attempts: ${lastError.message}${diagnostic}${recoveryHint}`,
+    `chromium did not expose a devtools port after ${CHROMIUM_STARTUP_ATTEMPTS} clean startup attempts: ${lastError.message}${diagnostic}${selected.hint}`,
   );
 }
 
@@ -788,6 +811,28 @@ if (has('self-test')) {
     chromiumStartupRecoveryHint('Failed to create socket directory') !== ''
   ) {
     throw new Error('chromium snap namespace recovery hint must require the complete failure signature');
+  }
+  // Diagnostic SELECTION must be deterministic and must not discard the actionable attempt
+  // (bd-ghi7). Attempts fail independently, so the hint-bearing one is often not the last.
+  const genericTail = 'chromium did not expose a devtools port within 30s';
+  const hintFirst = selectStartupDiagnostic([singletonFailure, genericTail, genericTail]);
+  const hintLast = selectStartupDiagnostic([genericTail, genericTail, singletonFailure]);
+  const noHint = selectStartupDiagnostic([genericTail, `${genericTail} second`]);
+  if (
+    hintFirst.attempt !== 1 || hintFirst.reason !== 'recovery_hint' ||
+    !hintFirst.hint.includes('snap-discard-ns chromium') ||
+    hintLast.attempt !== 3 || hintLast.reason !== 'recovery_hint' ||
+    noHint.attempt !== 2 || noHint.reason !== 'last_attempt' || noHint.hint !== '' ||
+    noHint.tail !== `${genericTail} second`
+  ) {
+    throw new Error('chromium startup diagnostic must prefer the attempt that names its own fix, else the last');
+  }
+  if (selectStartupDiagnostic([]).reason !== 'no_attempts') {
+    throw new Error('chromium startup diagnostic selection must be total');
+  }
+  const repeated = [singletonFailure, genericTail];
+  if (JSON.stringify(selectStartupDiagnostic(repeated)) !== JSON.stringify(selectStartupDiagnostic(repeated))) {
+    throw new Error('chromium startup diagnostic selection must be deterministic for identical input');
   }
   if (
     normalizedFailureClass('RangeError: Maximum call stack size exceeded') !== 'range_error' ||
