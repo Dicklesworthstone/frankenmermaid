@@ -23027,6 +23027,184 @@ mod tests {
         assert_eq!(optimized, disabled);
     }
 
+    /// Layout with the solver on, and the same layout with it off, for one IR.
+    ///
+    /// Every fault test below is "does the engine fall back CLEANLY", and the only honest way to
+    /// say "fell back" is that the coordinates equal the solver-disabled ones exactly.
+    fn constrained_and_heuristic(ir: &MermaidDiagramIr) -> (DiagramLayout, DiagramLayout) {
+        (
+            layout_with_constraints(ir),
+            layout_diagram_with_config(
+                ir,
+                LayoutConfig {
+                    constraint_solver: ConstraintSolverMode::Disabled,
+                    ..LayoutConfig::default()
+                },
+            ),
+        )
+    }
+
+    /// An LP that cannot be satisfied must fall back, not panic and not half-apply (bd-1s1g.3).
+    ///
+    /// `MinLength` A->B and B->A on the same axis demand `y_B - y_A >= g` and `y_A - y_B >= g` with
+    /// both gaps positive, which is infeasible. good_lp maps HiGHS `Infeasible` to
+    /// `ResolutionError::Infeasible`, `solve_constraint_coordinates` propagates it, and
+    /// `apply_constraint_solver` takes its `layout.constraint_solver.fallback` branch leaving the
+    /// heuristic coordinates untouched.
+    #[test]
+    fn contradictory_constraints_fall_back_to_the_heuristic_layout() {
+        let mut ir = labeled_graph_ir(6, &[(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)]);
+        // min_len 12 rather than 3: min_length_gap is (height + rank_spacing) * min_len, and a
+        // six-node chain already separates N1 from N4 by about three of those, so min_len 3 sits
+        // right on the boundary. A control that only marginally forces movement is a bad control.
+        ir.constraints.push(IrConstraint::MinLength {
+            from_id: "N1".to_string(),
+            to_id: "N4".to_string(),
+            min_len: 12,
+            span: Span::default(),
+        });
+        ir.constraints.push(IrConstraint::MinLength {
+            from_id: "N4".to_string(),
+            to_id: "N1".to_string(),
+            min_len: 12,
+            span: Span::default(),
+        });
+
+        let (constrained, heuristic) = constrained_and_heuristic(&ir);
+        assert_eq!(
+            constrained.nodes, heuristic.nodes,
+            "an infeasible LP must leave the heuristic coordinates exactly as they were, not \
+             half-apply a partial solution"
+        );
+
+        // CONTROL. Drop the contradiction and the solver moves this document, so the equality above
+        // is a statement about infeasibility rather than about a graph the solver ignores.
+        ir.constraints.pop();
+        let (satisfiable, heuristic_again) = constrained_and_heuristic(&ir);
+        assert_ne!(
+            satisfiable.nodes, heuristic_again.nodes,
+            "control failed: the solver does not move this document even when the constraints are \
+             satisfiable, so the fallback assertion proves nothing"
+        );
+    }
+
+    /// The fallback must be DETERMINISTIC, because that is the whole point of bd-9xwk.
+    #[test]
+    fn infeasible_constraint_fallback_is_deterministic() {
+        let mut ir = labeled_graph_ir(5, &[(0, 1), (1, 2), (2, 3), (3, 4)]);
+        ir.constraints.push(IrConstraint::Pin {
+            node_id: "N1".to_string(),
+            x: 10.0,
+            y: 40.0,
+            span: Span::default(),
+        });
+        ir.constraints.push(IrConstraint::Pin {
+            node_id: "N1".to_string(),
+            x: 900.0,
+            y: 700.0,
+            span: Span::default(),
+        });
+
+        let first = layout_with_constraints(&ir);
+        let second = layout_with_constraints(&ir);
+        assert_eq!(
+            first.nodes, second.nodes,
+            "two runs of the same contradictory document must agree; a fallback that varies is the \
+             load-dependence bd-9xwk removed"
+        );
+    }
+
+    /// A constraint naming a node that does not exist must be skipped, not panic (bd-1s1g.3).
+    #[test]
+    fn constraints_on_unknown_nodes_are_skipped_without_panicking() {
+        let mut ir = labeled_graph_ir(4, &[(0, 1), (1, 2), (2, 3)]);
+        ir.constraints.push(IrConstraint::MinLength {
+            from_id: "GHOST_FROM".to_string(),
+            to_id: "N2".to_string(),
+            min_len: 2,
+            span: Span::default(),
+        });
+        ir.constraints.push(IrConstraint::Pin {
+            node_id: "ALSO_MISSING".to_string(),
+            x: 5.0,
+            y: 5.0,
+            span: Span::default(),
+        });
+        ir.constraints.push(IrConstraint::SameRank {
+            node_ids: vec!["N0".to_string(), "NOT_A_NODE".to_string()],
+            span: Span::default(),
+        });
+
+        let (constrained, heuristic) = constrained_and_heuristic(&ir);
+        // Every resolvable constraint here degenerates to nothing (SameRank over one real node
+        // constrains nothing), so the layout must be exactly the heuristic one — and above all the
+        // engine must not have panicked reaching that conclusion.
+        assert_eq!(constrained.nodes, heuristic.nodes);
+        assert_eq!(constrained.nodes.len(), 4);
+    }
+
+    /// Degenerate inputs must not reach the solver at all (bd-1s1g.3).
+    #[test]
+    fn degenerate_inputs_skip_the_solver_entirely() {
+        // No constraints: the guard is `ir.constraints.is_empty()`.
+        let plain = labeled_graph_ir(3, &[(0, 1), (1, 2)]);
+        let (constrained, heuristic) = constrained_and_heuristic(&plain);
+        assert_eq!(constrained.nodes, heuristic.nodes);
+
+        // No nodes: the guard is `nodes.is_empty()`, reached with a constraint present so the
+        // earlier guard cannot be the one doing the work.
+        let mut empty = labeled_graph_ir(0, &[]);
+        empty.constraints.push(IrConstraint::Pin {
+            node_id: "N0".to_string(),
+            x: 1.0,
+            y: 1.0,
+            span: Span::default(),
+        });
+        let empty_layout = layout_with_constraints(&empty);
+        assert!(empty_layout.nodes.is_empty());
+
+        // One node, one pin: the smallest problem the solver can actually be handed.
+        let mut single = labeled_graph_ir(1, &[]);
+        single.constraints.push(IrConstraint::Pin {
+            node_id: "N0".to_string(),
+            x: 320.0,
+            y: 24.0,
+            span: Span::default(),
+        });
+        let solved = layout_with_constraints(&single);
+        let pinned = node_bounds(&solved, "N0");
+        assert!((pinned.x - 320.0).abs() < 1.0 && (pinned.y - 24.0).abs() < 1.0);
+    }
+
+    /// Extreme coefficients must not produce non-finite geometry (bd-1s1g.3).
+    ///
+    /// Coordinates are `f32` in the layout and `f64` in the LP, so a 1e15 pin is representable but
+    /// far outside any real diagram. Whatever the solver decides, nothing downstream may receive a
+    /// NaN or an infinity — those propagate through every later geometry pass silently.
+    #[test]
+    fn extreme_constraint_magnitudes_keep_coordinates_finite() {
+        for (x, y) in [(1e15_f64, -1e15_f64), (1e-15, 1e-15), (0.0, 0.0)] {
+            let mut ir = labeled_graph_ir(4, &[(0, 1), (1, 2), (2, 3)]);
+            ir.constraints.push(IrConstraint::Pin {
+                node_id: "N1".to_string(),
+                x,
+                y,
+                span: Span::default(),
+            });
+            let layout = layout_with_constraints(&ir);
+            assert!(
+                layout.nodes.iter().all(|node| {
+                    node.bounds.x.is_finite()
+                        && node.bounds.y.is_finite()
+                        && node.bounds.width.is_finite()
+                        && node.bounds.height.is_finite()
+                }),
+                "pin ({x}, {y}) produced non-finite geometry"
+            );
+            assert!(layout.bounds.width.is_finite() && layout.bounds.height.is_finite());
+        }
+    }
+
     #[test]
     fn constraint_solver_enforces_pin_coordinates() {
         let mut ir = labeled_graph_ir(4, &[(0, 2), (1, 2), (2, 3)]);
