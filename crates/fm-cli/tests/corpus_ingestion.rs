@@ -654,6 +654,10 @@ fn assert_xl_svg_completion(name: &str, input: &str, expected_nodes: usize, expe
             !path_data.is_empty(),
             "{name} SVG omitted a non-empty routed path for edge {edge_index}"
         );
+        assert!(
+            path_data.starts_with('M'),
+            "{name} SVG emitted an unrouted path for edge {edge_index}: {path_data:?}"
+        );
     }
 }
 
