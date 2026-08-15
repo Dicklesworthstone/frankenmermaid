@@ -960,6 +960,29 @@ export function groundTruth(text) {
       class_relationships: relationships.sort(),
     };
   }
+  if (/^stateDiagram(?:-v2)?\b/.test(header)) {
+    for (const line of text.split('\n').map((raw) => raw.trim())) {
+      const transition = /^([^\s]+)\s*--?>\s*([^\s:]+)(?:\s*:\s*.*)?$/.exec(line);
+      if (!transition) continue;
+      const [from, to] = transition.slice(1).map((node) => node.toLowerCase());
+      if (from !== '[*]') nodes.add(from);
+      if (to !== '[*]') nodes.add(to);
+      if (from !== '[*]' && to !== '[*]') edges.push(`${from}>${to}`);
+    }
+    return nodes.size === 0 ? null : { node_ids: [...nodes].sort(), edges: edges.sort() };
+  }
+  if (/^erDiagram\b/.test(header)) {
+    for (const line of text.split('\n').map((raw) => raw.trim())) {
+      const relation = /^([A-Za-z_]\w*)\s+[^\s]+\s+([A-Za-z_]\w*)\s*:/.exec(line);
+      if (!relation) continue;
+      const from = relation[1].toLowerCase();
+      const to = relation[2].toLowerCase();
+      nodes.add(from);
+      nodes.add(to);
+      edges.push(`${from}>${to}`);
+    }
+    return nodes.size === 0 ? null : { node_ids: [...nodes].sort(), edges: edges.sort() };
+  }
   if (!isFlow) return null;
 
   // `A[Label]`, `A(Label)`, `A{Label}` and bare `A`, joined by an arrow with an optional
