@@ -716,6 +716,7 @@ if (has('self-test')) {
     normalizedFailureClass('RangeError: Maximum call stack size exceeded') !== 'range_error' ||
     normalizedFailureClass('rangeerror: maximum call stack size exceeded') !== 'range_error' ||
     normalizedFailureClass('RangeError: too much recursion') !== 'range_error' ||
+    normalizedFailureClass('maximum call stack size exceeded while rendering') !== 'range_error' ||
     normalizedFailureClass('render failed after parse accepted: Maximum call stack size exceeded') !== 'range_error' ||
     normalizedFailureClass('FATAL ERROR: JavaScript heap out of memory') !== 'out_of_memory' ||
     normalizedFailureClass('mermaid rejected the render') !== 'uncategorized'
