@@ -60,6 +60,20 @@ const INCUMBENT_WIN = 'incumbent-win';
 // competitive number. A gate change that suddenly produces wins is a loosening; this one produces
 // no ratios at all.
 const INCUMBENT_DNF = 'incumbent-dnf';
+// Where the arms actually ran. Adopted 2026-08-15 after a fleet-wide finding: frankenscipy measured
+// the SAME cubic splu cell on two different rch workers and got 1.2693x on one and 0.0093x on the
+// other -- a 13.6x swing -- with BOTH A/A nulls PASSING. The null only controls within-invocation
+// noise; it is blind to between-worker differences in CPU model, cache, memory bandwidth and
+// contention. So a passing null does not make a cross-worker comparison valid, and a row that does
+// not name its worker cannot be compared to any other row. Required on EVERY kept row, including
+// maintenance-self-speedup, because a self A/B is corrupted by split arms exactly as badly as a
+// competitive one.
+const HOST_MARKER = '**Measurement host (observed, both arms):**';
+const HOST_WORKER = /\bworker=[a-z0-9][a-z0-9._-]*\b/i;
+const HOST_THREADS = /\bthreads=\d+\b/i;
+const HOST_GOVERNOR = /\bgovernor=[a-z0-9][a-z0-9._-]*\b/i;
+const HOST_ISA = /\bisa=[a-z0-9][a-z0-9._+-]*\b/i;
+const HOST_WORKER_ALL = /\bworker=([a-z0-9][a-z0-9._-]*)/gi;
 const COUNTED_METRIC = /\b(instructions?|cycles?|syscalls?|allocations?|faults?)\b/i;
 const MEASURED_VALUE =
   /(?:\d[\d,]*(?:\.\d+)?(?:%|x|ns|us|µs|ms|s)?|unchanged|identical|flat|no (?:measurable |material )?(?:work|change|difference))/i;
@@ -135,6 +149,34 @@ function keepEvidence(body) {
   return ELF_VALUE.test(elfEvidence);
 }
 
+/**
+ * Evidence that both arms were observed on ONE named machine.
+ *
+ * Two distinct `worker=` values in the same marker is a refusal, not a warning: that is a row
+ * declaring in its own words that its arms landed on different hosts, which is the exact shape the
+ * fleet measured a 13.6x swing across. The fields are the ones that differ between workers and
+ * change a ratio without changing the code: which box, how many threads were observed on it, what
+ * the scaling governor was doing, and which ISA level the executable was allowed to use.
+ */
+function measurementHostEvidence(body) {
+  const evidence = markerParagraph(body, HOST_MARKER);
+  const missing = [];
+  if (!HOST_WORKER.test(evidence)) missing.push('worker=<observed host or rch worker id>');
+  if (!HOST_THREADS.test(evidence)) missing.push('threads=<observed thread count>');
+  if (!HOST_GOVERNOR.test(evidence)) missing.push('governor=<scaling governor>');
+  if (!HOST_ISA.test(evidence)) missing.push('isa=<ISA level the build targeted>');
+
+  const workers = new Set(
+    [...evidence.matchAll(HOST_WORKER_ALL)].map((match) => match[1].toLowerCase()),
+  );
+  if (workers.size > 1) {
+    missing.push(
+      `both arms must be measured on ONE worker in ONE invocation; this row names ${workers.size}: ${[...workers].join(', ')}`,
+    );
+  }
+  return { ok: missing.length === 0, missing };
+}
+
 function resultClass(body) {
   const value = markerParagraph(body, RESULT_CLASS_MARKER)
     .replaceAll('`', '')
@@ -186,6 +228,9 @@ function incumbentDnfEvidence(body) {
 
 function resultEvidence(body) {
   if (!keepEvidence(body)) return { ok: false, why: `missing ${ELF_MARKER}` };
+
+  const host = measurementHostEvidence(body);
+  if (!host.ok) return { ok: false, why: `incomplete ${HOST_MARKER} ${host.missing.join(', ')}` };
 
   const classification = resultClass(body);
   if (!classification) {
@@ -267,10 +312,15 @@ if (has('self-test')) {
     `## MAINTENANCE SELF-SPEEDUP: missing class marker\n\n${ELF_MARKER} \`${hash}\`\n`,
     PERFORMANCE_LEDGER,
   )[0];
+  const host = `${HOST_MARKER} worker=hz2 threads=64 governor=performance isa=x86-64-v2`;
   const selfSpeedup = `${ELF_MARKER} \`${hash}\`
+
+${host}
 
 ${RESULT_CLASS_MARKER} ${MAINTENANCE_SELF_SPEEDUP}`;
   const incumbentDnf = `${ELF_MARKER} \`${hash}\`
+
+${host}
 
 ${RESULT_CLASS_MARKER} ${INCUMBENT_DNF}
 
@@ -382,6 +432,35 @@ ${NULL_MARKER} baseline/null median ratio 1.0x, CI [0.99, 1.01].`,
     [
       'an incumbent-dnf still needs the process-self-reported ELF',
       !resultEvidence(incumbentDnf.replace(`${ELF_MARKER} \`${hash}\`\n\n`, '')).ok,
+    ],
+    [
+      'a kept row without a measurement host is rejected',
+      !resultEvidence(selfSpeedup.replace(`${host}\n\n`, '')).ok,
+    ],
+    [
+      'a measurement host missing the observed thread count is rejected',
+      !resultEvidence(selfSpeedup.replace(' threads=64', '')).ok,
+    ],
+    [
+      'a measurement host missing the governor is rejected',
+      !resultEvidence(selfSpeedup.replace(' governor=performance', '')).ok,
+    ],
+    [
+      'a measurement host missing the ISA level is rejected',
+      !resultEvidence(selfSpeedup.replace(' isa=x86-64-v2', '')).ok,
+    ],
+    [
+      'arms named on two different workers are refused even with every other marker present',
+      !resultEvidence(
+        incumbentWin.replace(
+          'worker=hz2 threads=64',
+          'worker=hz2 worker=vmi1293453 threads=64',
+        ),
+      ).ok,
+    ],
+    [
+      'a passing A/A null does not excuse a missing measurement host',
+      !resultEvidence(incumbentWin.replace(`${host}\n\n`, '')).ok,
     ],
     [
       'modified PERF_LEDGER KEEP appears in the lint delta',

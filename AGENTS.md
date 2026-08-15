@@ -788,6 +788,28 @@ Every KEEP row must also record:
 Computing a hash beside the run is not sufficient. The executing process must
 identify its own ELF.
 
+Every KEEP row must also name the machine both arms were observed on:
+
+```markdown
+**Measurement host (observed, both arms):** worker=<host or rch worker id> threads=<n> governor=<name> isa=<level>
+```
+
+This is required on every result class, `maintenance-self-speedup` included. The
+reason is measured, not procedural: the same cell measured on two different rch
+workers produced `1.2693x` on one and `0.0093x` on the other — a 13.6x swing —
+**with both A/A nulls passing**. The null controls within-invocation noise; it is
+blind to between-worker differences in CPU model, cache, memory bandwidth and
+contention. A passing null therefore does NOT make a cross-worker comparison
+valid, and **a row that does not name its worker cannot be compared to any other
+row**. Naming two different workers in the marker is a refusal, not a caveat:
+both arms must run in the same invocation on the same worker, which is what the
+campaign law already required — this is the empirical reason why.
+
+`scripts/headtohead/run.mjs` already records `host_identity`, core counts, NUMA
+topology, affinity and boost state; the marker is where that reaches the ledger.
+Note that `worker_threads` / `caller_workers_observed` in the harness are Node
+worker threads, not rch workers — do not source `worker=` from them.
+
 Every kept performance result must also use exactly one result class:
 
 ```markdown
