@@ -146,6 +146,19 @@ function chromiumStartupRecoveryHint(stderrTail) {
 }
 
 /** Stable, queryable category for a comparator failure; the raw error remains the evidence. */
+/// The queryable class of a DNF record, TOTAL over both kinds (bd-2o8j).
+///
+/// A timeout used to record `null`. That left the one DNF shape which bounds the speedup from below
+/// — mermaid was still working when the budget expired — with no class at all, so it could not be
+/// queried alongside the crashes, and an `incumbent-dnf` ledger row, whose gate requires
+/// `failure_class=<observed class>`, had nothing true to put there.
+///
+/// `timeout` is a class in its own right, not a crash wearing a label: only `failed` reasons are
+/// pattern matched, and the record's `kind` field still separates "was still working" from "raised".
+function dnfFailureClass(kind, reason) {
+  return kind === 'failed' ? normalizedFailureClass(reason) : 'timeout';
+}
+
 function normalizedFailureClass(reason) {
   const text = String(reason);
   if (/\brange[ _-]?error\b|maximum call stack size exceeded|too much recursion|stack overflow/i.test(text)) return 'range_error';
@@ -827,6 +840,21 @@ if (has('self-test')) {
   ) {
     throw new Error('chromium startup diagnostic must prefer the attempt that names its own fix, else the last');
   }
+  // Every DNF record carries a queryable class, timeouts included (bd-2o8j).
+  if (
+    dnfFailureClass('timeout', 'budget expired while mermaid was still laying out') !== 'timeout' ||
+    dnfFailureClass('failed', 'RangeError: Maximum call stack size exceeded') !== 'range_error' ||
+    dnfFailureClass('failed', 'FATAL ERROR: JavaScript heap out of memory') !== 'out_of_memory' ||
+    dnfFailureClass('failed', 'something nobody has seen before') !== 'uncategorized'
+  ) {
+    throw new Error('DNF failure class must classify crashes and still name a timeout');
+  }
+  for (const [kind, reason] of [['timeout', ''], ['failed', ''], ['timeout', 'x'], ['failed', 'x']]) {
+    const cls = dnfFailureClass(kind, reason);
+    if (typeof cls !== 'string' || !/^[a-z][a-z0-9_]*$/.test(cls)) {
+      throw new Error(`DNF failure class must be total over kinds; ${kind}/${JSON.stringify(reason)} gave ${JSON.stringify(cls)}`);
+    }
+  }
   if (selectStartupDiagnostic([]).reason !== 'no_attempts') {
     throw new Error('chromium startup diagnostic selection must be total');
   }
@@ -1503,7 +1531,7 @@ try {
         kind,
         phase,
         error: reason,
-        failure_class: kind === 'failed' ? normalizedFailureClass(reason) : null,
+        failure_class: dnfFailureClass(kind, reason),
         budget_ms: budgetMs,
         elapsed_ms: elapsed,
         wall_s: elapsed / 1000,
