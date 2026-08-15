@@ -36,6 +36,7 @@ or:
 ## MAINTENANCE SELF-SPEEDUP (KEEP): drop the redundant membership hash probe — `arch_100x50` −2.92% instructions (2026-07-25)
 
 **Bead:** `bd-1buv.69` (parent `bd-1buv`). **Lane:** cc/STRUCTURAL (`BoldPanther`).
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Full artifact:** `.benchmarks/bd_1buv_69_membership_hash_probe_WIN.md`.
 **Campaign result class:** maintenance-self-speedup
 
@@ -92,6 +93,7 @@ or:
 ## MAINTENANCE SELF-SPEEDUP RE-CERTIFICATION (KEEP; not the strict queue): five resurrection reruns (2026-07-25)
 
 **Bead:** `bd-1buv.67`. **Lane:** cod / HARNESS+FRONTIER (`CreamGorge`).
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Full artifact:** `.benchmarks/bd-1buv.67_harness_resurrection.md`.
 **Campaign result class:** maintenance-self-speedup
 
@@ -134,6 +136,7 @@ re-decided and rejected; that result lives in `docs/NEGATIVE_EVIDENCE.md`.
 ## MAINTENANCE SELF-SPEEDUP (KEEP): feature-keyed transformed theme-CSS cache — `doc_build_40` +30.61% (2026-07-25)
 
 **Bead:** `bd-1buv.67`. **Lane:** cod / HARNESS+FRONTIER (`CreamGorge`).
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Full artifact:** `.benchmarks/render_theme_css_minify_memoization_CANDIDATE.md`.
 **Campaign result class:** maintenance-self-speedup
 
@@ -1344,6 +1347,7 @@ whole-job effect CI excludes 1 and clears twice the largest null radius; `cv_gat
 
 ## KEEP: caller-owned exact SVG prefix reuse in batch workers (2026-08-01)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-6t9z`. **Lane:** cod (`BlackThrush`).
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `bddb134cc226880b5cae41d64c6100be13a4656d08e2e15ae9f48bc9548918a7`
@@ -1375,6 +1379,7 @@ instructions** and **16.92% fewer cycles** (`1.3723x` and `1.2037x` ratios).
 
 ## KEEP: one-pass closed-form directed-path tree layout (2026-08-01)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-07ml`. **Lane:** cod (`BlackThrush`).
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `34c3550fa644e2ada586e2654941821a11c7742ccfb683d448dbfdd8ce0847d7`
@@ -1412,6 +1417,7 @@ instructions** and **4.92% fewer cycles** (`1.0931x` and `1.0518x` ratios).
 
 ## KEEP: reusable parser builder slots with borrowed batch rendering (2026-08-01)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-bb1r`. **Lane:** cod (`BlackThrush`).
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `8df8cb24e5ed61c7c433c4aedbc4cdaa0c42220a86ec7f5f80625c1a1ff350b9`
@@ -1457,6 +1463,7 @@ instructions** and **4.51% fewer cycles** (`1.0273x` and `1.0473x` ratios).
 
 ## KEEP: O(delta) reset for certified shared-prefix batch parsing (2026-08-01)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-znl1`. **Lane:** cod (`BlackThrush`).
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `df5abf5eb8446baa4855e198af7a584126403a54c2010c5e6df563161eb34949`
@@ -1501,6 +1508,7 @@ instructions** and **6.35% fewer cycles** (`1.0671x` and `1.0678x` ratios).
 
 ## KEEP: write-time certification for shared-prefix batch parsing (2026-08-01)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-b4vy`. **Lane:** cod (`BlackThrush`).
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `daf58f9bdc59d420aa2f347f5b811cbba98a263738bce3a725519143c0e0ce3a`
@@ -1546,6 +1554,7 @@ instructions** and **7.68% fewer cycles** (`1.0585x` and `1.0832x` ratios).
 
 ## KEEP: prefix-certified directed-path geometry transplant (2026-08-01)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-ctwu`. **Lane:** cod (`BlackThrush`).
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `012b25bdc3a92fc399275a818d4575d48c2a28ebcc76baac6f75e8d02e266863`
@@ -1588,6 +1597,7 @@ instructions** and **16.09% fewer cycles** (`1.3184x` and `1.1917x` ratios).
 
 ## KEEP: broadcast one certified cold-prefix renderer seed to batch workers (2026-08-01)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-v792`. **Lane:** cod (`BlackThrush`).
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `76dbeeb00d7c570e716546a336b60d855691093c35f7a7bdbf3f7e49c923a739`
@@ -1628,6 +1638,7 @@ fewer cycles, and 9.63% less CPU time** (`1.8125x`, `1.1132x`, and `1.1065x` rat
 
 ## KEEP: persistent unchanged-output bypass for repository batch renders (2026-08-01)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-m86p`. **Lane:** cod (`BlackThrush`).
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `08384cf5bc0a10f173294ec8d394a3b6e8d0f35f550a4d152047ccd7ec39e93a`
@@ -1664,6 +1675,7 @@ writes. Both arms reported 20,685,143 output bytes.
 
 ## KEEP: sparse-miss repository batch rebuilds (2026-08-01)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-oaub`. **Lane:** cod (`BlackThrush`).
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `96314cd7fc38814719b9b2c3449f6a7b69b67581bf6a6f6ee7d14155008723d8`
@@ -1708,6 +1720,7 @@ cycles, and 93.13% less CPU time** (`5.5259x`, `12.7941x`, and `14.5505x` ratios
 
 ## KEEP: hoist the fixed neighbour layer out of both crossing searches — `schema_catalog_25` −40.92% instructions (2026-08-01)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Commits:** `2a8e6c01` (e-graph candidate search) and `c18bc2e0` (refinement transpose + sifting).
 
 **Campaign result class:** maintenance-self-speedup
@@ -1806,6 +1819,7 @@ cycles, and 93.13% less CPU time** (`5.5259x`, `12.7941x`, and `14.5505x` ratios
 
 ## KEEP: caller-certified change sets remove repository-wide cache validation (2026-08-01)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-nsgu`. **Lane:** cod (`BlackThrush`).
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `ebe425403369f7b133c238892135a49e819e9d2fe6bf2dae5ddf90c9dac8dd97`
@@ -1855,6 +1869,7 @@ instructions, 39.26% fewer cycles, and 39.02% less CPU time** (`1.4447x`, `1.646
 
 ## KEEP: one persistent renderer amortizes repeated edit-session startup (2026-08-01)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-0ga1`. **Lane:** cod (`BlackThrush`).
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `8596343e563ea2881cbd6155ec84a93b0a08196ab3349ad0e5d57b76bc7df046`
@@ -1899,6 +1914,7 @@ same long-lived process and matched the external digest above.
 
 ## KEEP: retain the batch manifest across persistent edit epochs (2026-08-01)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-3gfw`. **Lane:** cod (`BlackThrush`).
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `22f2438c6b960cc504b4876cf8c75266d436630c44dbfc48bc8ffd3cc4cc92b7`
@@ -1944,6 +1960,7 @@ therefore not a hidden reduction in repository validation.
 
 ## KEEP: bucket adjacent-rank layer edges in one pass — `docs_site_50` −4.79%, `docs_site_200` −3.90% instructions (2026-08-01)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Commit:** `b84ddd72`.
 **Campaign result class:** maintenance-self-speedup
 
@@ -2005,6 +2022,7 @@ therefore not a hidden reduction in repository validation.
 
 ## KEEP: retain immutable batch topology across persistent edit epochs (2026-08-01)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-wiyw`. **Lane:** cod (`BlackThrush`).
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `faf21e816c8356f8178d7f8a5ee4f41211345f680123553d043220ab50775643`
@@ -2053,6 +2071,7 @@ name/path/display constructions. Exact-final-ELF `strace -f -c` also measured `s
 
 ## KEEP: default `render-batch` to physical cores, not logical — default path −26.7% on `docs_site_200` (2026-08-01)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Commit:** `adc4f55c`.
 **Campaign result class:** maintenance-self-speedup
 
@@ -2133,6 +2152,7 @@ name/path/display constructions. Exact-final-ELF `strace -f -c` also measured `s
 
 ## KEEP: execute persistent edit epochs over changed diagrams only (2026-08-02)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-3qp4`. **Lane:** cod (`BlackThrush`).
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `d90f1b2dc1c12d53563db0916de43230d45a7fffc31a0d48c29cd0085e506cd9`
@@ -2179,6 +2199,7 @@ from 936 to 974, while the candidate still won.
 
 ## KEEP: resume clean edit streams without a repository recovery scan (2026-08-02)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-riso`. **Lane:** cod (`BlackThrush`).
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `aa1c68f177a8c03e1e63ef745746c477628c08d68c498bbd56bcab2691142ee7`
@@ -2225,6 +2246,7 @@ process leaves it absent and therefore forces the existing full recovery scan.
 
 ## KEEP: project the resident plan into sparse edit epochs (2026-08-02)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-byke`. **Lane:** cod (`BlackThrush`).
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `7ebd5796463b03a41f6d18dbaee290810ca089cac70d6de4a3f6437ab1bbb0a9`
@@ -2267,6 +2289,7 @@ from 2,345 to 2,265 over the 20-epoch job.
 
 ## KEEP: sample host pressure once per persistent edit stream (2026-08-02)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-369j`. **Lane:** cod (`BlackThrush`).
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `6402f257587890fb261f7b31200d6b8a1e0847df9fe89a752d04e060323c9b70`
@@ -2309,6 +2332,7 @@ syscalls from 1,604 to 863 over the 20-epoch job.
 
 ## KEEP: replay the two most recent rendered revisions in persistent edit streams (2026-08-02)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-ucpx`. **Lane:** cod.
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `0ff8a1f2e8663388edab3c5be482dcc9764b1fff6f60fa58cf2aa30f209eccbc`
@@ -2356,6 +2380,7 @@ an exact digest+options+executable-key hit.
 
 ## KEEP: retain exact rendered revisions across multi-diagram churn (2026-08-02)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-b5f4`. **Lane:** cod.
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `4b0919e95556db4d9708b74e9e5f329f13cc4b83b8752019ae13270e2858bf5d`
@@ -2403,6 +2428,7 @@ laid out, and rendered only the first 32 distinct diagram/revision pairs; the co
 
 ## KEEP: materialize only the final revision of a change-set stream (2026-08-02)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-go2d`. **Lane:** cod.
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `f927f269ea2bd4e80cafcfef71d03ddfc99c49add2417e6e321450c8d7ee9bd0`
@@ -2453,6 +2479,7 @@ writes / 547,055,712 bytes in each candidate arm.
 
 ## KEEP: submit only the coalesced final source state (2026-08-02)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-pvdh`. **Lane:** cod.
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `e65133efc86488a911f2e024da2c9d89714e90304c69a91a9812ab661182a9a4`
@@ -2507,6 +2534,7 @@ for the control versus 288 source writes and 36 transactions in each candidate a
 
 ## KEEP: retain the render engine across observable final-state transactions (2026-08-02)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-q959`. **Lane:** cod.
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `957f20ad34df7dc83c8dd257898eef0d4a077f1d6f23a8186b3725508ccda1ea`
@@ -2561,6 +2589,7 @@ every observable output state.
 
 ## KEEP: coalesce resident final-state outputs at EOF (2026-08-02)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-mzzl`. **Lane:** cod.
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `af91786bc58fd4c5adae43ee45f651f1fc61a48a82c55fe2e60a29124b5286b9`
@@ -2614,6 +2643,7 @@ candidate arm, exactly 32x fewer.
 
 ## KEEP: retain one Rayon worker pool across resident transactions (2026-08-02)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-kef8`. **Lane:** cod.
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `fb81536198fa6559a88beb749b511823ee85f783d7ca80aba2df8271c7147248`
@@ -2668,6 +2698,7 @@ revision replays, and 12,288 observable diagram states per round.
 
 ## KEEP: replay complete resident revisions before the generic batch engine (2026-08-02)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-d8vo`. **Lane:** cod.
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `378ee0a4a1ced267bd0f15c5332d54117df1db43531c79773941f9a27a0a9aa7`
@@ -2723,6 +2754,7 @@ and accounted for the same 441,216 persistent diagram hits and 1,152 first-seen 
 
 ## KEEP: coalesce resident final-state source writes at EOF (2026-08-02)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-ej6d`. **Lane:** cod.
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `7981692790034c0e80160a2d7e69c829972f36a5fbe9ad83b0cdf313d35ea7d8`
@@ -2776,6 +2808,7 @@ rendered 1,152 first-seen revisions, reported 441,216 persistent hits, and wrote
 
 ## KEEP: pipeline resident final-state acknowledgments at EOF (2026-08-02)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-s1kd`. **Lane:** cod.
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `697640122efe90b3520368d395a97d4041ab2829a408ee18c361cbbb6bc62712`
@@ -2832,6 +2865,7 @@ performed 1,080 complete revision replays, rendered 1,152 first-seen revisions, 
 
 ## KEEP: reuse prepared resident final-state payloads (2026-08-02)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-l057`. **Lane:** cod.
 **Campaign result class:** maintenance-self-speedup
 **Executing ELF SHA-256 (self-reported by process):** `79c1150963b3003f2cd7751fee97a4a448a9940020323b8b131d26e0b006c184`
@@ -3848,6 +3882,7 @@ while exact content matching remains a collision-free fallback.
 
 ## MAINTENANCE SELF-SPEEDUP (KEEP): fuse the topology verdict into the edit walk — `single_node_label_edit/incremental/1000` −0.610% instructions/edit (2026-08-05)
 
+**Measurement provenance:** WORKER-SCOPED (pre-gate-backlog, bd-kcy4) — banked before the provenance gate; its two arms cannot be shown to have run on the same machine in one invocation, so it is true of wherever it ran and is not comparable to any other row.
 **Bead:** `bd-9rq7`. **Lane:** cc (`PeachGorge`). **Commit:** `83a94342`.
 **Campaign result class:** maintenance-self-speedup
 
