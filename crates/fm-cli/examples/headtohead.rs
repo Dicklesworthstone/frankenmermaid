@@ -373,6 +373,25 @@ struct CachedParsedBatch {
     results: Arc<[ParseResult]>,
 }
 
+/// Render-snapshot memo, retained for the incremental-edit workload (bd-1buv.3) and unreachable
+/// from the timed arm on purpose.
+///
+/// bd-bh7d removed the only production caller: feeding this memo inside a calibrated batch turned
+/// iterations 2..N into O(1) probes and produced a 16 ns "render". Keeping the machinery is
+/// deliberate — measuring memo reuse IS the incremental workload — but until that lane lands a
+/// caller, nothing outside `#[cfg(test)]` touches it.
+///
+/// `expect` rather than `allow`, and `not(test)` rather than unconditional, so this annotation is
+/// enforced in both directions: it fails the build the moment a real caller appears (delete it
+/// then), and it does not fire in the test profile where these methods are exercised. See bd-dqkg
+/// for the (a) reinstate / (b) remove decision this is holding open.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "incremental-edit memo, no caller until bd-1buv.3 (bd-dqkg)"
+    )
+)]
 struct CachedRenderedBatch {
     texts: Arc<[String]>,
     config: Arc<SvgRenderConfig>,
@@ -380,6 +399,13 @@ struct CachedRenderedBatch {
     output: Arc<[String]>,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "incremental-edit memo, no caller until bd-1buv.3 (bd-dqkg)"
+    )
+)]
 impl CachedRenderedBatch {
     fn same_texts(&self, texts: &Arc<[String]>, content_keyed: bool) -> bool {
         Arc::ptr_eq(&self.texts, texts) || (content_keyed && self.texts.as_ref() == texts.as_ref())
@@ -622,6 +648,14 @@ struct RenderExecutor {
     balanced_shards: bool,
     parse_plan_cache: Mutex<Option<CachedFlowchartBatchPlan>>,
     parse_snapshot_cache: Mutex<Option<CachedParsedBatch>>,
+    /// See [`CachedRenderedBatch`]: retained for bd-1buv.3, no timed-arm caller (bd-dqkg).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "incremental-edit memo, no caller until bd-1buv.3 (bd-dqkg)"
+        )
+    )]
     render_snapshot_cache: Mutex<Vec<CachedRenderedBatch>>,
     pool: Option<FixedShardPool>,
 }
@@ -847,6 +881,14 @@ impl RenderExecutor {
         rendered.into()
     }
 
+    /// See [`CachedRenderedBatch`]: retained for bd-1buv.3, no timed-arm caller (bd-dqkg).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "incremental-edit memo, no caller until bd-1buv.3 (bd-dqkg)"
+        )
+    )]
     fn render_all_cached(
         &self,
         texts: &Arc<[String]>,
@@ -921,6 +963,14 @@ impl RenderExecutor {
         self.render_all_with_revision(texts, cfg, None)
     }
 
+    /// See [`CachedRenderedBatch`]: retained for bd-1buv.3, no timed-arm caller (bd-dqkg).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "incremental-edit memo, no caller until bd-1buv.3 (bd-dqkg)"
+        )
+    )]
     fn render_all_versioned(
         &self,
         texts: &Arc<[String]>,
@@ -930,6 +980,14 @@ impl RenderExecutor {
         self.render_all_with_revision(texts, cfg, Some(revision_key))
     }
 
+    /// See [`CachedRenderedBatch`]: retained for bd-1buv.3, no timed-arm caller (bd-dqkg).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "incremental-edit memo, no caller until bd-1buv.3 (bd-dqkg)"
+        )
+    )]
     fn render_all_with_revision(
         &self,
         texts: &Arc<[String]>,
