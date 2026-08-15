@@ -987,6 +987,33 @@ export function groundTruth(text) {
     }
     return nodes.size === 0 ? null : { node_ids: [...nodes].sort(), edges: edges.sort() };
   }
+  if (/^sequenceDiagram\b/.test(header)) {
+    const tokens = [];
+    const participants = new Set();
+    for (const rawLine of text.split('\n')) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('%%')) continue;
+      const participant = /^participant\s+([^\s]+)(?:\s+as\s+.*)?$/i.exec(line);
+      if (participant) {
+        participants.add(participant[1]);
+        continue;
+      }
+      // Make the sender lazy: a greedy identifier would consume the first dash of `Bob-->>Alice`
+      // and manufacture a distinct `Bob-` participant.
+      const message = /^([A-Za-z_][\w-]*?)\s*(?:-->>|->>|-->|->)\s*([^\s:]+)\s*:\s*(.+)$/.exec(line);
+      if (!message) continue;
+      participants.add(message[1]);
+      participants.add(message[2]);
+      tokens.push(...tokenize(message[3]));
+    }
+    if (participants.size === 0 || tokens.length === 0) return null;
+    return {
+      // Participants can be rendered as lane labels rather than SVG node groups. Their names and
+      // every authored message label are nevertheless visible text, so this strict multiset is the
+      // source-grounded invariant the renderer actually exposes for sequence diagrams.
+      sequence_tokens: [...participants].flatMap(tokenize).concat(tokens).sort(),
+    };
+  }
   if (!isFlow) return null;
 
   // `A[Label]`, `A(Label)`, `A{Label}` and bare `A`, joined by an arrow with an optional
@@ -1251,15 +1278,18 @@ export function compareDiagram({ index, family, fmSvg, jsSvg, source }) {
  * it exists for incumbent-DNF rows, where there is no mermaid-js SVG to compare.
  *
  * A successful result proves source-grounded node/edge (and, for class
- * diagrams, relationship-marker) preservation. It never creates a cross-engine
- * ratio or substitutes for `compareDiagram` when both engines rendered.
+ * diagrams, relationship-marker) preservation. Sequence diagrams expose
+ * participants and messages as bands/text rather than node groups, so their
+ * required invariant is the source token multiset. It never creates a
+ * cross-engine ratio or substitutes for `compareDiagram` when both engines
+ * rendered.
  */
 export function verifyFrankenmermaidAgainstSource({ index, family, fmSvg, source }) {
   const fm = signature(fmSvg, 'frankenmermaid');
   const truth = source ? groundTruth(source) : null;
   const checks = [];
 
-  const nodesDecidable = truth !== null && fm.node_ids.length > 0;
+  const nodesDecidable = truth?.node_ids !== undefined && fm.node_ids.length > 0;
   const nodes = nodesDecidable
     ? diffMultisets(multiset(fm.node_ids), multiset(truth.node_ids))
     : null;
@@ -1271,7 +1301,7 @@ export function verifyFrankenmermaidAgainstSource({ index, family, fmSvg, source
     detail: nodes ?? { reason: truth === null ? 'input_not_decodable' : 'no_rendered_node_ids' },
   });
 
-  const topologyDecidable = truth !== null && fm.topology !== null;
+  const topologyDecidable = truth?.edges !== undefined && fm.topology !== null;
   const topology = topologyDecidable
     ? diffMultisets(multiset(fm.topology), multiset(truth.edges))
     : null;
@@ -1281,6 +1311,18 @@ export function verifyFrankenmermaidAgainstSource({ index, family, fmSvg, source
     decided: topologyDecidable,
     pass: topologyDecidable ? topology.equal : null,
     detail: topology ?? { reason: truth === null ? 'input_not_decodable' : fm.topology_status },
+  });
+
+  const sequenceTokensDecidable = truth?.sequence_tokens !== undefined;
+  const sequenceTokens = sequenceTokensDecidable
+    ? shortfall(multiset(truth.sequence_tokens), multiset(fm.visible_tokens))
+    : null;
+  checks.push({
+    invariant: 'sequence_source_tokens_vs_output__frankenmermaid',
+    tier: 1,
+    decided: sequenceTokensDecidable,
+    pass: sequenceTokensDecidable ? sequenceTokens.total_missing === 0 : null,
+    detail: sequenceTokens ?? { reason: 'sequence_input_not_decodable' },
   });
 
   if (family === 'class') {
@@ -1302,7 +1344,9 @@ export function verifyFrankenmermaidAgainstSource({ index, family, fmSvg, source
     });
   }
 
-  const required = ['node_id_set_vs_input__frankenmermaid'];
+  const required = family === 'sequence'
+    ? ['sequence_source_tokens_vs_output__frankenmermaid']
+    : ['node_id_set_vs_input__frankenmermaid'];
   if (TIER2_FAMILIES.has(family)) {
     required.push(
       family === 'class'
@@ -2022,8 +2066,27 @@ export function selfTest() {
     });
     return state.verdict === 'verified' && er.verdict === 'verified';
   })(), 'native state/ER groups with source-grounded topology');
+  record('sequence_source_tokens_require_every_message', (() => {
+    const source = 'sequenceDiagram\n  participant Alice\n  participant Bob\n  Alice->>Bob: request one\n  Bob-->>Alice: reply one\n';
+    const complete = verifyFrankenmermaidAgainstSource({
+      index: 0,
+      family: 'sequence',
+      source,
+      fmSvg: '<svg><text>Alice</text><text>Bob</text><text>request one</text><text>reply one</text></svg>',
+    });
+    const dropped = verifyFrankenmermaidAgainstSource({
+      index: 0,
+      family: 'sequence',
+      source,
+      fmSvg: '<svg><text>Alice</text><text>Bob</text><text>request one</text></svg>',
+    });
+    return complete.verdict === 'verified'
+      && dropped.verdict === 'divergent'
+      && dropped.checks.some((check) =>
+        check.invariant === 'sequence_source_tokens_vs_output__frankenmermaid' && check.pass === false);
+  })(), 'dropped sequence message must fail source-token validation');
   record('unsupported_source_is_not_decodable',
-    groundTruth('sequenceDiagram\n  A->>B: hello\n') === null,
+    groundTruth('journey\n  title Untested\n') === null,
     null);
 
   return { ok: true, cases: cases.length, mutation_controls: 16, negative_controls: 4 };
