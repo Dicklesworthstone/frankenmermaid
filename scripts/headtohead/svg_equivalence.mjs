@@ -900,8 +900,9 @@ export function signature(svg, engine) {
 
 /**
  * The true node, edge and class-relationship sets of one corpus revision, read from the Mermaid
- * source the harness generated. Flat `flowchart`/`graph` and the generated `classDiagram` form are
- * decoded; anything else returns `null` and the diagram carries only output-derived invariants.
+ * source the harness generated. Flat `flowchart`/`graph`, the generated `classDiagram` form, and
+ * the actor/message subset of `sequenceDiagram` are decoded; anything else returns `null` and the
+ * diagram carries only output-derived invariants.
  *
  * This is what makes the check engine-vs-spec rather than only engine-vs-engine.
  */
@@ -914,6 +915,39 @@ export function groundTruth(text) {
   // A hyphen is legal inside a mermaid node id, but a greedy `[\w-]*` swallows the `--` of the
   // following arrow and yields ids like `b--`. Allow `-` only when it does not begin an arrow.
   const NODE = '[A-Za-z_](?:\\w|-(?![->]))*';
+  if (/^sequenceDiagram\b/.test(header)) {
+    const messageTokens = [];
+    let messageCount = 0;
+    const participantRe = new RegExp(`^(?:participant|actor)\\s+(${NODE})(?:\\s+as\\s+.+)?$`, 'i');
+    const messageRe = new RegExp(
+      `^(${NODE})\\s*(?:--?>?>?|--?x)\\s*(${NODE})(?:\\s*:\\s*(.*))?$`,
+    );
+    for (const rawLine of text.split('\n')) {
+      const line = rawLine.trim();
+      if (!line || line === 'sequenceDiagram' || line.startsWith('%%')) continue;
+      const participant = participantRe.exec(line);
+      if (participant) {
+        nodes.add(participant[1].toLowerCase());
+        continue;
+      }
+      const message = messageRe.exec(line);
+      if (message) {
+        const from = message[1].toLowerCase();
+        const to = message[2].toLowerCase();
+        nodes.add(from);
+        nodes.add(to);
+        edges.push(`${from}>${to}`);
+        messageCount += 1;
+        messageTokens.push(...tokenize(message[3] ?? ''));
+      }
+    }
+    return nodes.size === 0 ? null : {
+      node_ids: [...nodes].sort(),
+      edges: edges.sort(),
+      sequence_message_count: messageCount,
+      sequence_message_tokens: messageTokens,
+    };
+  }
   if (/^classDiagram\b/.test(header)) {
     const relationships = [];
     const relationRe = new RegExp(
@@ -1267,6 +1301,34 @@ export function verifyFrankenmermaidAgainstSource({ index, family, fmSvg, source
     detail: nodes ?? { reason: truth === null ? 'input_not_decodable' : 'no_rendered_node_ids' },
   });
 
+  if (family === 'sequence') {
+    const messageCountDecidable = truth?.sequence_message_count !== undefined;
+    const messageCount = messageCountDecidable
+      ? fm.edge_element_count === truth.sequence_message_count
+      : null;
+    checks.push({
+      invariant: 'sequence_message_count_vs_input__frankenmermaid',
+      tier: 1,
+      decided: messageCountDecidable,
+      pass: messageCount,
+      detail: messageCountDecidable
+        ? { expected: truth.sequence_message_count, actual: fm.edge_element_count }
+        : { reason: 'sequence_input_not_decodable' },
+    });
+
+    const messageTokensDecidable = truth?.sequence_message_tokens !== undefined;
+    const messageTokens = messageTokensDecidable
+      ? shortfall(multiset(truth.sequence_message_tokens), multiset(fm.visible_tokens))
+      : null;
+    checks.push({
+      invariant: 'sequence_message_tokens_no_loss_vs_input__frankenmermaid',
+      tier: 1,
+      decided: messageTokensDecidable,
+      pass: messageTokensDecidable ? messageTokens.total_missing === 0 : null,
+      detail: messageTokens ?? { reason: 'sequence_input_not_decodable' },
+    });
+  }
+
   const topologyDecidable = truth !== null && fm.topology !== null;
   const topology = topologyDecidable
     ? diffMultisets(multiset(fm.topology), multiset(truth.edges))
@@ -1299,6 +1361,12 @@ export function verifyFrankenmermaidAgainstSource({ index, family, fmSvg, source
   }
 
   const required = ['node_id_set_vs_input__frankenmermaid'];
+  if (family === 'sequence') {
+    required.push(
+      'sequence_message_count_vs_input__frankenmermaid',
+      'sequence_message_tokens_no_loss_vs_input__frankenmermaid',
+    );
+  }
   if (TIER2_FAMILIES.has(family)) {
     required.push(
       family === 'class'
@@ -1990,9 +2058,45 @@ export function selfTest() {
     const t = groundTruth('erDiagram\n  E0 ||--o{ E1 : has\n');
     return t !== null && t.node_ids.join(',') === 'e0,e1' && t.edges.join(',') === 'e0>e1';
   })(), groundTruth('erDiagram\n  E0 ||--o{ E1 : has\n'));
-  record('unsupported_source_is_not_decodable',
-    groundTruth('sequenceDiagram\n  A->>B: hello\n') === null,
-    null);
+  record('ground_truth_reads_sequence_actor_message_topology', (() => {
+    const t = groundTruth(
+      'sequenceDiagram\n  participant Alice\n  participant Bob\n'
+      + '  Alice->>Bob: request 7\n  Bob-->>Alice: response 7\n',
+    );
+    return t !== null
+      && t.node_ids.join(',') === 'alice,bob'
+      && t.edges.join(',') === 'alice>bob,bob>alice'
+      && t.sequence_message_count === 2
+      && t.sequence_message_tokens.join(',') === 'request,7,response,7';
+  })(), groundTruth(
+    'sequenceDiagram\n  participant Alice\n  participant Bob\n'
+    + '  Alice->>Bob: request 7\n  Bob-->>Alice: response 7\n',
+  ));
+  record('sequence_source_validation_rejects_dropped_message', (() => {
+    const source = 'sequenceDiagram\n  participant Alice\n  participant Bob\n'
+      + '  Alice->>Bob: request\n  Bob-->>Alice: response\n';
+    const completeSvg = '<svg>'
+      + '<g id="fm-node-alice-0" class="fm-node" data-id="Alice"><rect x="0" y="0" width="10" height="10"/><text>Alice</text></g>'
+      + '<g id="fm-node-bob-1" class="fm-node" data-id="Bob"><rect x="20" y="0" width="10" height="10"/><text>Bob</text></g>'
+      + '<g id="fm-edge-0" class="fm-edge" data-fm-edge-id="0"><path d="M10,5L20,5"/></g>'
+      + '<g id="fm-edge-1" class="fm-edge" data-fm-edge-id="1"><path d="M20,5L10,5"/></g>'
+      + '<text>request</text><text>response</text></svg>';
+    const droppedMessageSvg = completeSvg
+      .replace('<g id="fm-edge-1" class="fm-edge" data-fm-edge-id="1"><path d="M20,5L10,5"/></g>', '')
+      .replace('<text>response</text>', '');
+    const complete = verifyFrankenmermaidAgainstSource({
+      index: 0, family: 'sequence', fmSvg: completeSvg, source,
+    });
+    const dropped = verifyFrankenmermaidAgainstSource({
+      index: 0, family: 'sequence', fmSvg: droppedMessageSvg, source,
+    });
+    return complete.verdict === 'verified'
+      && dropped.verdict === 'divergent'
+      && dropped.checks.some((check) => check.invariant === 'sequence_message_count_vs_input__frankenmermaid'
+        && check.pass === false)
+      && dropped.checks.some((check) => check.invariant === 'sequence_message_tokens_no_loss_vs_input__frankenmermaid'
+        && check.pass === false);
+  })(), 'complete sequence validates; missing message path and label diverge');
 
   return { ok: true, cases: cases.length, mutation_controls: 16, negative_controls: 4 };
 }
