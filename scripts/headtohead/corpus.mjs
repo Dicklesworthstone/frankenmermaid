@@ -673,6 +673,17 @@ export const CORPUS = [
   { id: 'schema_catalog_25',    gen: 'schema_catalog', params: { schemas: 25, min_entities: 8, max_entities: 80, seed: 20260728 }, class: 'doc_build', reps_js: 2, warmup_js: 0, reps_rs: 20, warmup_rs: 2, js_budget_ms: 1500_000, dnf_allowed: true },
 ];
 
+/** Native-output sentinels for the seven incumbent-termination capability fixtures. */
+export const XL_CAPABILITY_SENTINELS = Object.freeze({
+  wide_xl_50x50: 'N49_49',
+  cyclic_scc_xl_2500: 'C2499',
+  dense_dag_xl_2000: 'D1999',
+  sequence_xl_2000: 'P1999',
+  class_xl_2000: 'C1999',
+  state_xl_2000: 'S1999',
+  er_xl_2000: 'E1999',
+});
+
 export function sha256(text) {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
@@ -721,6 +732,9 @@ export function assertXlCapabilityFixtures() {
     }
     if (!text.startsWith(headers.get(item.id))) {
       throw new Error(`XL capability fixture ${item.id} no longer generates its declared syntax family`);
+    }
+    if (!text.includes(XL_CAPABILITY_SENTINELS[item.id])) {
+      throw new Error(`XL capability fixture ${item.id} lost its terminal native-output sentinel`);
     }
   }
 }
