@@ -771,9 +771,12 @@ impl RenderExecutor {
         cfg: &Arc<SvgRenderConfig>,
         sink: &mut Vec<String>,
         workers_seen: Option<Arc<[AtomicBool]>>,
+        reuse_parse_plan: bool,
     ) {
         sink.clear();
-        let parse_plan = self.flowchart_batch_plan(texts);
+        let parse_plan = reuse_parse_plan
+            .then(|| self.flowchart_batch_plan(texts))
+            .flatten();
         if let Some(pool) = &self.pool {
             let shards: Arc<[Box<[u32]>]> = if self.balanced_shards {
                 balanced_shards(texts, pool.threads).into()
@@ -812,18 +815,20 @@ impl RenderExecutor {
         }
     }
 
-    /// Materialize a complete batch without consulting or populating the output snapshot.
+    /// Materialize a complete batch without consulting or populating persistent snapshots.
     ///
     /// Timed head-to-head arms measure parsing, layout, and SVG construction. The snapshot-backed
     /// methods below remain available for the incremental-product controls, but using one here
     /// would turn a calibrated batch into repeated O(1) memo probes after its first iteration.
+    /// The shared-prefix parse plan is likewise excluded because its construction performs parse
+    /// work outside the timed sample.
     fn render_all_uncached(
         &self,
         texts: &Arc<[String]>,
         cfg: &Arc<SvgRenderConfig>,
     ) -> Arc<[String]> {
         let mut rendered = Vec::with_capacity(texts.len());
-        self.render_all_observing(texts, cfg, &mut rendered, None);
+        self.render_all_observing(texts, cfg, &mut rendered, None, false);
         rendered.into()
     }
 
@@ -855,7 +860,7 @@ impl RenderExecutor {
         }
 
         let mut rendered = Vec::with_capacity(texts.len());
-        self.render_all_observing(texts, cfg, &mut rendered, None);
+        self.render_all_observing(texts, cfg, &mut rendered, None, true);
         let output: Arc<[String]> = rendered.into();
         if self.persistent_render_snapshot {
             let mut cache = lock_unpoisoned(&self.render_snapshot_cache);
@@ -951,7 +956,7 @@ impl RenderExecutor {
         // calibration count cannot reveal another worker, and an O(1) snapshot hit can make that
         // count hundreds of thousands -- turning an out-of-band provenance check into hours of
         // deliberately uncached rendering.
-        self.render_all_observing(texts, cfg, &mut sink, Some(Arc::clone(&workers_seen)));
+        self.render_all_observing(texts, cfg, &mut sink, Some(Arc::clone(&workers_seen)), true);
         workers_seen
             .iter()
             .filter(|seen| seen.load(Ordering::Relaxed))
@@ -2168,7 +2173,7 @@ mod tests {
     }
 
     #[test]
-    fn timed_render_item_never_populates_the_render_snapshot() {
+    fn timed_render_item_never_populates_persistent_snapshots_or_parse_plans() {
         let item = CorpusItem {
             id: "uncached-snapshot-population".to_owned(),
             texts: vec!["flowchart LR\nA[First]-->B[Second]".to_owned()].into(),
@@ -2180,11 +2185,16 @@ mod tests {
         let executor = RenderExecutor::new(1).expect("scalar executor");
 
         assert!(lock_unpoisoned(&executor.render_snapshot_cache).is_empty());
+        assert!(lock_unpoisoned(&executor.parse_plan_cache).is_none());
         let rendered = render_item(&executor, &item, &config);
         assert!(!rendered.is_empty());
         assert!(
             lock_unpoisoned(&executor.render_snapshot_cache).is_empty(),
             "a timed full-render sample must not seed a later memo hit"
+        );
+        assert!(
+            lock_unpoisoned(&executor.parse_plan_cache).is_none(),
+            "a timed full-render sample must not precompute parsing outside a later sample"
         );
     }
 
