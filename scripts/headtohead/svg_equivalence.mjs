@@ -1990,6 +1990,10 @@ export function selfTest() {
     const t = groundTruth('erDiagram\n  E0 ||--o{ E1 : has\n');
     return t !== null && t.node_ids.join(',') === 'e0,e1' && t.edges.join(',') === 'e0>e1';
   })(), groundTruth('erDiagram\n  E0 ||--o{ E1 : has\n'));
+  record('native_untransformed_rect_nodes_anchor', (() => {
+    const s = signature('<svg><g id="fm-node-s0-1" class="fm-node" data-id="S0"><rect x="10" y="20" width="30" height="40"/></g></svg>', 'frankenmermaid');
+    return s.node_ids.join(',') === 's0' && s.topology_status === 'no_edge_elements';
+  })(), 'fm-node state-style group with absolute rect geometry');
   record('unsupported_source_is_not_decodable',
     groundTruth('sequenceDiagram\n  A->>B: hello\n') === null,
     null);
