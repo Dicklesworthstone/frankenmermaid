@@ -832,6 +832,14 @@ function validParseThreadProvenance(record) {
   );
 }
 
+function validTimedRenderWorkPolicy(record) {
+  return (
+    record?.measurement_boundary === 'parse_layout_render_svg' &&
+    record.timed_render_reuses_output_snapshot === false &&
+    record.timed_render_reuses_parse_plan === false
+  );
+}
+
 function medianNumber(values) {
   if (!Array.isArray(values) || values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
@@ -1518,6 +1526,18 @@ if (has('self-test')) {
     validParseThreadProvenance({ ...validParseThreads, thread_count_actually_used: null })
   ) {
     throw new Error('parse actual-thread provenance validation regression');
+  }
+  const validTimedRender = {
+    measurement_boundary: 'parse_layout_render_svg',
+    timed_render_reuses_output_snapshot: false,
+    timed_render_reuses_parse_plan: false,
+  };
+  if (
+    !validTimedRenderWorkPolicy(validTimedRender) ||
+    validTimedRenderWorkPolicy({ ...validTimedRender, timed_render_reuses_output_snapshot: true }) ||
+    validTimedRenderWorkPolicy({ ...validTimedRender, timed_render_reuses_parse_plan: true })
+  ) {
+    throw new Error('timed full-render work-policy admission regression');
   }
   if (
     !validRchBuildProvenance('hz1', 'a'.repeat(40), true) ||
@@ -2666,6 +2686,19 @@ for (const { item, threads } of measurements) {
     continue;
   }
   if (
+    measurementMode === 'render' &&
+    (!validTimedRenderWorkPolicy(fBefore) || !validTimedRenderWorkPolicy(fAfter))
+  ) {
+    hardFail = true;
+    rows.push({
+      ...row,
+      status: 'timed_render_work_policy_invalid',
+      error:
+        'render rows require fresh parse/layout/SVG work: output snapshots and shared parse plans are forbidden inside timed samples',
+    });
+    continue;
+  }
+  if (
     threadSweep.length > 0 &&
     (
       !validRustThreadProvenance(fBefore, threads) ||
@@ -2727,6 +2760,8 @@ for (const { item, threads } of measurements) {
   const fTiming = timingStats(f);
   row.fm_bracket = bracket;
   row.fm_execution_model = f.execution_model ?? 'scalar';
+  row.fm_timed_render_reuses_output_snapshot = f.timed_render_reuses_output_snapshot;
+  row.fm_timed_render_reuses_parse_plan = f.timed_render_reuses_parse_plan;
   row.fm_available_parallelism = f.available_parallelism ?? null;
   row.fm_oversubscribed = f.oversubscribed === true;
   row.fm_requested_to_available_ratio =
