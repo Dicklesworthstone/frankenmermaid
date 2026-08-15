@@ -188,6 +188,15 @@ fn assert_renders_at_scale(case: &str, source: &str, expected_nodes: usize, last
         svg.trim_end().ends_with("</svg>"),
         "{case}: SVG document does not close — the render bailed part way",
     );
+    assert_eq!(
+        svg.matches("<g id=\"fm-node-").count(),
+        expected_nodes,
+        "{case}: SVG emitted a different number of node groups than the source declares",
+    );
+    assert!(
+        svg.contains(&format!("data-id=\"{last_node_id}\"")),
+        "{case}: SVG omitted the last authored node id '{last_node_id}'",
+    );
 
     // Determinism at scale, run independently rather than by cloning the first layout: a hash-order
     // dependence only shows up when the containers are rebuilt.

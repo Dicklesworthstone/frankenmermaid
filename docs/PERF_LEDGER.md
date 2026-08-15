@@ -3948,15 +3948,17 @@ changes the outcome.
 messages. It is an ordinary comparison row here, and its cross-engine structural equivalence verdict
 is **pass** (1 diagram, 0 divergent, 0 unverified).
 
-**How far our own output is verified, stated exactly.** The harness's source-grounded native
-validator (`frankenmermaid_svg_vs_input_structural`) decides 4 of the 6 DNF families **pass** —
-`wide`, `cyclic_scc`, `dense_dag`, `class`. It returns **undecidable** for `state_xl_2000`
-(`node_id_set_vs_input__frankenmermaid`, `edge_topology_vs_input__frankenmermaid`) and
-`er_xl_2000` (`node_id_set_vs_input__frankenmermaid`), so the artifact's overall verdict is FAIL and
-the run exits 7. Undecidable is NOT divergent and NOT a pass: nothing here says our state or ER
-output is wrong, and nothing here establishes it is right. The claim this row supports is therefore
-**4 families verified correct where the incumbent cannot run, plus 1 family cross-engine equivalent
-where it can** — not 7/7. The oracle gap is filed as its own bead rather than rounded up.
+**Corrected native-output verification (same invocation).**
+`equivalence-522fc3e6-1786768704879.json` reran the exact seven pinned inputs with the live
+incumbent and the same self-reporting ELF. All six `RangeError` DNF families now pass the
+source-grounded native validator (`verified=1`, `divergent=0`, `unverified=0` each): `wide`,
+`cyclic_scc`, `dense_dag`, `class`, `state`, and `er`. The `state` decoder preserves the authored
+`[*]` lifecycle transitions as canonical pseudo-topology; the ER decoder preserves relationship
+endpoints. `sequence_xl_2000` completed in mermaid-js and remains cross-engine equivalent
+(`1/1`, zero divergent, zero unverified); its native source-token control requires every declared
+participant and message label. This is **6/6 verified-correct output where mermaid-js cannot run,
+plus 1/1 cross-engine equivalent output where it can**. The artifact is an untimed structural
+result: it states no ratio and uses no timing outcome.
 
 **Independent crate-level evidence for all seven** (`crates/fm-cli/tests/xl_scale_classes_test.rs`,
 7 passed / 0 failed in 0.72 s): every declared node reaches layout by equality not `>=`, the LAST

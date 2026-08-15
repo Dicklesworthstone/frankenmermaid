@@ -900,9 +900,8 @@ export function signature(svg, engine) {
 
 /**
  * The true node, edge and class-relationship sets of one corpus revision, read from the Mermaid
- * source the harness generated. Flat `flowchart`/`graph`, the generated `classDiagram` form, and
- * the actor/message subset of `sequenceDiagram` are decoded; anything else returns `null` and the
- * diagram carries only output-derived invariants.
+ * source the harness generated. Flat `flowchart`/`graph` and the generated `classDiagram` form are
+ * decoded; anything else returns `null` and the diagram carries only output-derived invariants.
  *
  * This is what makes the check engine-vs-spec rather than only engine-vs-engine.
  */
@@ -915,39 +914,6 @@ export function groundTruth(text) {
   // A hyphen is legal inside a mermaid node id, but a greedy `[\w-]*` swallows the `--` of the
   // following arrow and yields ids like `b--`. Allow `-` only when it does not begin an arrow.
   const NODE = '[A-Za-z_](?:\\w|-(?![->]))*';
-  if (/^sequenceDiagram\b/.test(header)) {
-    const messageTokens = [];
-    let messageCount = 0;
-    const participantRe = new RegExp(`^(?:participant|actor)\\s+(${NODE})(?:\\s+as\\s+.+)?$`, 'i');
-    const messageRe = new RegExp(
-      `^(${NODE})\\s*(?:--?>?>?|--?x)\\s*(${NODE})(?:\\s*:\\s*(.*))?$`,
-    );
-    for (const rawLine of text.split('\n')) {
-      const line = rawLine.trim();
-      if (!line || line === 'sequenceDiagram' || line.startsWith('%%')) continue;
-      const participant = participantRe.exec(line);
-      if (participant) {
-        nodes.add(participant[1].toLowerCase());
-        continue;
-      }
-      const message = messageRe.exec(line);
-      if (message) {
-        const from = message[1].toLowerCase();
-        const to = message[2].toLowerCase();
-        nodes.add(from);
-        nodes.add(to);
-        edges.push(`${from}>${to}`);
-        messageCount += 1;
-        messageTokens.push(...tokenize(message[3] ?? ''));
-      }
-    }
-    return nodes.size === 0 ? null : {
-      node_ids: [...nodes].sort(),
-      edges: edges.sort(),
-      sequence_message_count: messageCount,
-      sequence_message_tokens: messageTokens,
-    };
-  }
   if (/^classDiagram\b/.test(header)) {
     const relationships = [];
     const relationRe = new RegExp(
@@ -1001,7 +967,11 @@ export function groundTruth(text) {
       const [from, to] = transition.slice(1).map((node) => node.toLowerCase());
       if (from !== '[*]') nodes.add(from);
       if (to !== '[*]') nodes.add(to);
-      if (from !== '[*]' && to !== '[*]') edges.push(`${from}>${to}`);
+      // The start/end marker is authored topology, even though each renderer assigns it a
+      // private node id. `signature` collapses those renderer-private ids to `#pseudo`, so
+      // retain the transition here under that same canonical endpoint instead of silently
+      // exempting the two edges that connect a state machine to its lifecycle boundary.
+      edges.push(`${from === '[*]' ? '#pseudo' : from}>${to === '[*]' ? '#pseudo' : to}`);
     }
     return nodes.size === 0 ? null : { node_ids: [...nodes].sort(), edges: edges.sort() };
   }
@@ -1016,6 +986,39 @@ export function groundTruth(text) {
       edges.push(`${from}>${to}`);
     }
     return nodes.size === 0 ? null : { node_ids: [...nodes].sort(), edges: edges.sort() };
+  }
+  if (/^sequenceDiagram\b/.test(header)) {
+    const tokens = [];
+    const participants = new Set();
+    const edges = [];
+    for (const rawLine of text.split('\n')) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('%%')) continue;
+      const participant = /^participant\s+([^\s]+)(?:\s+as\s+.*)?$/i.exec(line);
+      if (participant) {
+        participants.add(participant[1]);
+        continue;
+      }
+      // Make the sender lazy: a greedy identifier would consume the first dash of `Bob-->>Alice`
+      // and manufacture a distinct `Bob-` participant.
+      const message = /^([A-Za-z_][\w-]*?)\s*(?:-->>|->>|-->|->)\s*([^\s:]+)\s*:\s*(.+)$/.exec(line);
+      if (!message) continue;
+      participants.add(message[1]);
+      participants.add(message[2]);
+      edges.push(`${message[1].toLowerCase()}>${message[2].toLowerCase()}`);
+      tokens.push(...tokenize(message[3]));
+    }
+    if (participants.size === 0 || tokens.length === 0) return null;
+    return {
+      // The native renderer exposes every participant as an `fm-node` data-id and every message as
+      // an `fm-edge`; source tokens additionally retain repeated labels that a count alone cannot
+      // distinguish. Geometry intentionally remains optional because long message paths can meet
+      // multiple lifelines at the same endpoint.
+      node_ids: [...participants].map((participant) => participant.toLowerCase()).sort(),
+      edges: edges.sort(),
+      sequence_message_count: edges.length,
+      sequence_tokens: [...participants].flatMap(tokenize).concat(tokens).sort(),
+    };
   }
   if (!isFlow) return null;
 
@@ -1281,15 +1284,18 @@ export function compareDiagram({ index, family, fmSvg, jsSvg, source }) {
  * it exists for incumbent-DNF rows, where there is no mermaid-js SVG to compare.
  *
  * A successful result proves source-grounded node/edge (and, for class
- * diagrams, relationship-marker) preservation. It never creates a cross-engine
- * ratio or substitutes for `compareDiagram` when both engines rendered.
+ * diagrams, relationship-marker) preservation. Sequence diagrams expose
+ * participants and messages as bands/text rather than node groups, so their
+ * required invariant is the source token multiset. It never creates a
+ * cross-engine ratio or substitutes for `compareDiagram` when both engines
+ * rendered.
  */
 export function verifyFrankenmermaidAgainstSource({ index, family, fmSvg, source }) {
   const fm = signature(fmSvg, 'frankenmermaid');
   const truth = source ? groundTruth(source) : null;
   const checks = [];
 
-  const nodesDecidable = truth !== null && fm.node_ids.length > 0;
+  const nodesDecidable = truth?.node_ids !== undefined && fm.node_ids.length > 0;
   const nodes = nodesDecidable
     ? diffMultisets(multiset(fm.node_ids), multiset(truth.node_ids))
     : null;
@@ -1301,35 +1307,21 @@ export function verifyFrankenmermaidAgainstSource({ index, family, fmSvg, source
     detail: nodes ?? { reason: truth === null ? 'input_not_decodable' : 'no_rendered_node_ids' },
   });
 
-  if (family === 'sequence') {
-    const messageCountDecidable = truth?.sequence_message_count !== undefined;
-    const messageCount = messageCountDecidable
-      ? fm.edge_element_count === truth.sequence_message_count
-      : null;
-    checks.push({
-      invariant: 'sequence_message_count_vs_input__frankenmermaid',
-      tier: 1,
-      decided: messageCountDecidable,
-      pass: messageCount,
-      detail: messageCountDecidable
-        ? { expected: truth.sequence_message_count, actual: fm.edge_element_count }
-        : { reason: 'sequence_input_not_decodable' },
-    });
+  const sequenceMessageCountDecidable = truth?.sequence_message_count !== undefined;
+  const sequenceMessageCount = sequenceMessageCountDecidable
+    ? fm.edge_element_count === truth.sequence_message_count
+    : null;
+  checks.push({
+    invariant: 'sequence_message_count_vs_input__frankenmermaid',
+    tier: 1,
+    decided: sequenceMessageCountDecidable,
+    pass: sequenceMessageCount,
+    detail: sequenceMessageCountDecidable
+      ? { expected: truth.sequence_message_count, actual: fm.edge_element_count }
+      : { reason: 'sequence_input_not_decodable' },
+  });
 
-    const messageTokensDecidable = truth?.sequence_message_tokens !== undefined;
-    const messageTokens = messageTokensDecidable
-      ? shortfall(multiset(truth.sequence_message_tokens), multiset(fm.visible_tokens))
-      : null;
-    checks.push({
-      invariant: 'sequence_message_tokens_no_loss_vs_input__frankenmermaid',
-      tier: 1,
-      decided: messageTokensDecidable,
-      pass: messageTokensDecidable ? messageTokens.total_missing === 0 : null,
-      detail: messageTokens ?? { reason: 'sequence_input_not_decodable' },
-    });
-  }
-
-  const topologyDecidable = truth !== null && fm.topology !== null;
+  const topologyDecidable = truth?.edges !== undefined && fm.topology !== null;
   const topology = topologyDecidable
     ? diffMultisets(multiset(fm.topology), multiset(truth.edges))
     : null;
@@ -1339,6 +1331,18 @@ export function verifyFrankenmermaidAgainstSource({ index, family, fmSvg, source
     decided: topologyDecidable,
     pass: topologyDecidable ? topology.equal : null,
     detail: topology ?? { reason: truth === null ? 'input_not_decodable' : fm.topology_status },
+  });
+
+  const sequenceTokensDecidable = truth?.sequence_tokens !== undefined;
+  const sequenceTokens = sequenceTokensDecidable
+    ? shortfall(multiset(truth.sequence_tokens), multiset(fm.visible_tokens))
+    : null;
+  checks.push({
+    invariant: 'sequence_source_tokens_vs_output__frankenmermaid',
+    tier: 1,
+    decided: sequenceTokensDecidable,
+    pass: sequenceTokensDecidable ? sequenceTokens.total_missing === 0 : null,
+    detail: sequenceTokens ?? { reason: 'sequence_input_not_decodable' },
   });
 
   if (family === 'class') {
@@ -1360,13 +1364,13 @@ export function verifyFrankenmermaidAgainstSource({ index, family, fmSvg, source
     });
   }
 
-  const required = ['node_id_set_vs_input__frankenmermaid'];
-  if (family === 'sequence') {
-    required.push(
+  const required = family === 'sequence'
+    ? [
+      'node_id_set_vs_input__frankenmermaid',
       'sequence_message_count_vs_input__frankenmermaid',
-      'sequence_message_tokens_no_loss_vs_input__frankenmermaid',
-    );
-  }
+      'sequence_source_tokens_vs_output__frankenmermaid',
+    ]
+    : ['node_id_set_vs_input__frankenmermaid'];
   if (TIER2_FAMILIES.has(family)) {
     required.push(
       family === 'class'
@@ -2052,51 +2056,72 @@ export function selfTest() {
   })(), groundTruth('classDiagram\n  C0 *-- C1\n  C1 --o C2\n  C2 <|-- C3\n'));
   record('ground_truth_reads_state_transitions', (() => {
     const t = groundTruth('stateDiagram-v2\n  [*] --> S0\n  S0 --> S1: next\n  S1 --> [*]\n');
-    return t !== null && t.node_ids.join(',') === 's0,s1' && t.edges.join(',') === 's0>s1';
+    return t !== null
+      && t.node_ids.join(',') === 's0,s1'
+      && t.edges.join(',') === '#pseudo>s0,s0>s1,s1>#pseudo';
   })(), groundTruth('stateDiagram-v2\n  [*] --> S0\n  S0 --> S1: next\n  S1 --> [*]\n'));
   record('ground_truth_reads_er_relationships', (() => {
     const t = groundTruth('erDiagram\n  E0 ||--o{ E1 : has\n');
     return t !== null && t.node_ids.join(',') === 'e0,e1' && t.edges.join(',') === 'e0>e1';
   })(), groundTruth('erDiagram\n  E0 ||--o{ E1 : has\n'));
-  record('ground_truth_reads_sequence_actor_message_topology', (() => {
-    const t = groundTruth(
-      'sequenceDiagram\n  participant Alice\n  participant Bob\n'
-      + '  Alice->>Bob: request 7\n  Bob-->>Alice: response 7\n',
-    );
-    return t !== null
-      && t.node_ids.join(',') === 'alice,bob'
-      && t.edges.join(',') === 'alice>bob,bob>alice'
-      && t.sequence_message_count === 2
-      && t.sequence_message_tokens.join(',') === 'request,7,response,7';
-  })(), groundTruth(
-    'sequenceDiagram\n  participant Alice\n  participant Bob\n'
-    + '  Alice->>Bob: request 7\n  Bob-->>Alice: response 7\n',
-  ));
-  record('sequence_source_validation_rejects_dropped_message', (() => {
-    const source = 'sequenceDiagram\n  participant Alice\n  participant Bob\n'
-      + '  Alice->>Bob: request\n  Bob-->>Alice: response\n';
+  record('native_untransformed_rect_nodes_anchor', (() => {
+    const s = signature('<svg><g id="fm-node-s0-1" class="fm-node" data-id="S0"><rect x="10" y="20" width="30" height="40"/></g></svg>', 'frankenmermaid');
+    return s.node_ids.join(',') === 's0' && s.topology_status === 'no_edge_elements';
+  })(), 'fm-node state-style group with absolute rect geometry');
+  record('native_dnf_state_and_er_are_source_verifiable', (() => {
+    const nodes = (ids) => ids.map((id, index) => `<g id="fm-node-${id}-${index}" class="fm-node" data-id="${id}"><rect x="${index * 20}" y="0" width="10" height="10"/></g>`).join('');
+    const erEdge = '<g class="fm-edge" data-fm-edge-id="0"><path d="M5,5 L25,5"/></g>';
+    const stateEdges = [
+      '<g class="fm-edge" data-fm-edge-id="0"><path d="M5,5 L25,5"/></g>',
+      '<g class="fm-edge" data-fm-edge-id="1"><path d="M25,5 L45,5"/></g>',
+      '<g class="fm-edge" data-fm-edge-id="2"><path d="M45,5 L5,5"/></g>',
+    ].join('');
+    const state = verifyFrankenmermaidAgainstSource({
+      index: 0,
+      family: 'state',
+      source: 'stateDiagram-v2\n  [*] --> S0\n  S0 --> S1\n  S1 --> [*]\n',
+      fmSvg: `<svg>${nodes(['state-start', 'S0', 'S1'])}${stateEdges}</svg>`,
+    });
+    const er = verifyFrankenmermaidAgainstSource({
+      index: 1,
+      family: 'er',
+      source: 'erDiagram\n  E0 ||--o{ E1 : has\n',
+      fmSvg: `<svg>${nodes(['E0', 'E1'])}${erEdge}</svg>`,
+    });
+    return state.verdict === 'verified' && er.verdict === 'verified';
+  })(), 'native state/ER groups with source-grounded topology');
+  record('sequence_source_requires_actor_identity_and_message_multiplicity', (() => {
+    const source = 'sequenceDiagram\n  participant Alice\n  participant Bob\n  Alice->>Bob: ping\n  Bob-->>Alice: ping\n';
     const completeSvg = '<svg>'
       + '<g id="fm-node-alice-0" class="fm-node" data-id="Alice"><rect x="0" y="0" width="10" height="10"/><text>Alice</text></g>'
       + '<g id="fm-node-bob-1" class="fm-node" data-id="Bob"><rect x="20" y="0" width="10" height="10"/><text>Bob</text></g>'
       + '<g id="fm-edge-0" class="fm-edge" data-fm-edge-id="0"><path d="M10,5L20,5"/></g>'
       + '<g id="fm-edge-1" class="fm-edge" data-fm-edge-id="1"><path d="M20,5L10,5"/></g>'
-      + '<text>request</text><text>response</text></svg>';
-    const droppedMessageSvg = completeSvg
-      .replace('<g id="fm-edge-1" class="fm-edge" data-fm-edge-id="1"><path d="M20,5L10,5"/></g>', '')
-      .replace('<text>response</text>', '');
+      + '<text>ping</text><text>ping</text></svg>';
     const complete = verifyFrankenmermaidAgainstSource({
-      index: 0, family: 'sequence', fmSvg: completeSvg, source,
+      index: 0,
+      family: 'sequence',
+      source,
+      fmSvg: completeSvg,
     });
     const dropped = verifyFrankenmermaidAgainstSource({
-      index: 0, family: 'sequence', fmSvg: droppedMessageSvg, source,
+      index: 0,
+      family: 'sequence',
+      source,
+      fmSvg: completeSvg
+        .replace('<g id="fm-edge-1" class="fm-edge" data-fm-edge-id="1"><path d="M20,5L10,5"/></g>', '')
+        .replace('<text>ping</text>', ''),
     });
     return complete.verdict === 'verified'
       && dropped.verdict === 'divergent'
       && dropped.checks.some((check) => check.invariant === 'sequence_message_count_vs_input__frankenmermaid'
         && check.pass === false)
-      && dropped.checks.some((check) => check.invariant === 'sequence_message_tokens_no_loss_vs_input__frankenmermaid'
-        && check.pass === false);
-  })(), 'complete sequence validates; missing message path and label diverge');
+      && dropped.checks.some((check) =>
+        check.invariant === 'sequence_source_tokens_vs_output__frankenmermaid' && check.pass === false);
+  })(), 'dropped duplicate-label message must fail count and source-token validation');
+  record('unsupported_source_is_not_decodable',
+    groundTruth('journey\n  title Untested\n') === null,
+    null);
 
   return { ok: true, cases: cases.length, mutation_controls: 16, negative_controls: 4 };
 }
