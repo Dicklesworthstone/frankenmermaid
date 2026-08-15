@@ -1756,6 +1756,24 @@ if (has('self-test')) {
       throw new Error('parse floor must reject the 50 ms thread-sweep floor');
     }
   }
+  // bd-kt8s. The phase-load record must carry, in-band, the reason it cannot be used to test the
+  // quiescence veto. Without it the obvious analysis — correlate this busyness column against the
+  // ratio, find a weak r, conclude the veto is uncorrelated — reads as evidence when it is an
+  // artifact of the veto having censored its own validation set.
+  const asymmetry = armAsymmetry([
+    { phase: 'frankenmermaid-before', seconds: 0.5, busy_fraction: 0.11 },
+    { phase: 'mermaid-js', seconds: 140, busy_fraction: 0.19 },
+  ]);
+  if (!/censored to the admitted band/.test(asymmetry?.validation_note ?? '')) {
+    throw new Error('phase-load provenance must state that its busyness is censored by the veto');
+  }
+  if (asymmetry.admitted_busy_band?.limit !== HOST_WIDE_MAX_BUSY_FRACTION) {
+    throw new Error('phase-load provenance must stamp the admitted busy band it was sampled under');
+  }
+  if (asymmetry.admitted_busy_band.observed_hi !== 0.19) {
+    throw new Error('the stamped band must be the OBSERVED range, not a constant');
+  }
+
   // The provenance line this harness emits must be the line the ledger gate accepts. These are the
   // exact patterns scripts/ledger_preflight.mjs matches; if that file tightens a field and this one
   // does not follow, every row this harness produces becomes unbankable, and the failure would
@@ -2546,20 +2564,41 @@ if (!sameElf) {
  * different durations and include the engines' own CPU consumption. The blocking host-drift check
  * is the same-ELF Rust-before/Rust-after bracket above.
  */
-function armAsymmetry() {
-  const phases = phaseLoad;
+/// Takes the phases as an argument so the self-test can exercise it without standing up a measured
+/// run. The default is only evaluated when the caller omits it, so passing phases explicitly never
+/// touches the module-level `phaseLoad` (which is declared below this point).
+function armAsymmetry(phases = phaseLoad) {
   if (phases.length < 2) return null;
   const lo = Math.min(...phases.map((phase) => phase.busy_fraction));
   const hi = Math.max(...phases.map((phase) => phase.busy_fraction));
   const ratio = lo > 0 ? hi / lo : null;
   const heavier = phases.reduce((a, b) => (a.busy_fraction >= b.busy_fraction ? a : b));
   return {
-    phases: phaseLoad,
+    phases,
     busy_ratio: ratio,
     heavier_phase: heavier.phase,
     verdict: 'provenance_only',
     gate: 'never',
     rule: 'global phase CPU busy is provenance; numeric gate uses bracketed Rust A/A',
+    // bd-kt8s. This column CANNOT be used to test whether the quiescence veto predicts ratio error,
+    // and the artifact says so in-band because the analysis is tempting and wrong.
+    //
+    // `requireHostWideQuiescence` refuses to measure at all while any affinity CPU is above
+    // HOST_WIDE_MAX_BUSY_FRACTION. So every run that reaches this record was admitted BELOW the
+    // limit, and the busyness recorded here is censored to the admitted band by construction —
+    // across all eight banked runs it spans 0.0532..0.2481. Correlating a censored predictor against
+    // the ratio ATTENUATES any real relationship toward zero, so a weak r measured this way is
+    // evidence about the sampling, not about the veto. The high-load half of the design space is
+    // exactly the half the veto deletes.
+    //
+    // Testing the veto honestly needs runs at INDUCED load spanning above the limit, with the veto
+    // bypassed for that experiment only, and the outcome variable has to be ratio ERROR against a
+    // quiet-host reference for the same fixture/worker/harness — not the raw ratio, which differs
+    // per fixture and cannot be pooled.
+    validation_note:
+      'busyness here is censored to the admitted band by requireHostWideQuiescence; it cannot ' +
+      'support or refute "the quiescence veto is uncorrelated with ratio error" (bd-kt8s)',
+    admitted_busy_band: { limit: HOST_WIDE_MAX_BUSY_FRACTION, observed_lo: lo, observed_hi: hi },
   };
 }
 
