@@ -658,6 +658,14 @@ fn assert_xl_svg_completion(name: &str, input: &str, expected_nodes: usize, expe
             path_data.starts_with('M'),
             "{name} SVG emitted an unrouted path for edge {edge_index}: {path_data:?}"
         );
+        let has_draw_segment = path_data
+            .chars()
+            .skip(1)
+            .any(|command| matches!(command, 'L' | 'C' | 'A' | 'H' | 'V' | 'S' | 'Q' | 'T' | 'Z'));
+        assert!(
+            has_draw_segment,
+            "{name} SVG emitted a move-only path for edge {edge_index}: {path_data:?}"
+        );
     }
 }
 
