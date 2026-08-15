@@ -49,7 +49,9 @@ use fm_core::{
 #[cfg(not(target_arch = "wasm32"))]
 use good_lp::solvers::WithTimeLimit;
 #[cfg(not(target_arch = "wasm32"))]
-use good_lp::{Expression, Solution, SolverModel, constraint, default_solver, variable};
+use good_lp::{
+    Expression, Solution, SolutionStatus, SolverModel, constraint, default_solver, variable,
+};
 use smallvec::{SmallVec, smallvec};
 use tracing::{debug, info, trace, warn};
 
@@ -832,8 +834,23 @@ pub struct LayoutConfig {
     /// Enable FNX-assisted ordering heuristics when available.
     pub fnx_enabled: bool,
     pub constraint_solver: ConstraintSolverMode,
-    pub constraint_solver_time_limit_ms: u64,
+    /// Wall-clock ceiling for the LP solve, in milliseconds, as a **liveness valve only** (bd-9xwk).
+    ///
+    /// It must never be used to trade solution quality for speed. HiGHS answers a wall-clock stop
+    /// with `ReachedTimeLimit` and a FEASIBLE-but-suboptimal primal solution, which good_lp hands
+    /// back as `Ok`; writing those coordinates out makes the rendered geometry a function of how
+    /// busy the host was. `solve_constraint_coordinates` therefore refuses any status other than
+    /// `SolutionStatus::Optimal` and leaves the heuristic coordinates in place, so a fired valve
+    /// costs the optimization rather than silently changing it.
+    pub constraint_solver_wall_clock_valve_ms: u64,
 }
+
+/// Default for [`LayoutConfig::constraint_solver_wall_clock_valve_ms`] (bd-9xwk).
+///
+/// Was 1_000 ms, which a normally-loaded host reaches on real documents — so the valve was part of
+/// the layout, not a backstop against one. Set two orders of magnitude above what these LPs cost so
+/// that on any correct run it does not bind, exactly as [`egraph_crossing::WALL_CLOCK_VALVE_MS`].
+pub const CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS: u64 = 30_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConstraintSolverMode {
@@ -852,7 +869,7 @@ impl Default for LayoutConfig {
             font_metrics: None,
             fnx_enabled: true,
             constraint_solver: ConstraintSolverMode::Optimize,
-            constraint_solver_time_limit_ms: 1_000,
+            constraint_solver_wall_clock_valve_ms: CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS,
         }
     }
 }
@@ -1059,7 +1076,7 @@ struct LayoutMemoKey {
     fnx_enabled: bool,
     edge_routing: EdgeRouting,
     constraint_solver: ConstraintSolverMode,
-    constraint_solver_time_limit_ms: u64,
+    constraint_solver_wall_clock_valve_ms: u64,
     node_spacing_bits: u32,
     rank_spacing_bits: u32,
     cluster_padding_bits: u32,
@@ -3781,7 +3798,7 @@ fn layout_memo_key(
         fnx_enabled: config.fnx_enabled,
         edge_routing: config.edge_routing,
         constraint_solver: config.constraint_solver,
-        constraint_solver_time_limit_ms: config.constraint_solver_time_limit_ms,
+        constraint_solver_wall_clock_valve_ms: config.constraint_solver_wall_clock_valve_ms,
         node_spacing_bits: config.spacing.node_spacing.to_bits(),
         rank_spacing_bits: config.spacing.rank_spacing.to_bits(),
         cluster_padding_bits: config.spacing.cluster_padding.to_bits(),
@@ -12458,7 +12475,12 @@ fn apply_constraint_solver(
         return;
     }
 
-    match solve_constraint_coordinates(ir, nodes, spacing, config.constraint_solver_time_limit_ms) {
+    match solve_constraint_coordinates(
+        ir,
+        nodes,
+        spacing,
+        config.constraint_solver_wall_clock_valve_ms,
+    ) {
         Ok(applied) if applied > 0 => {
             info!(
                 constraint_count = applied,
@@ -12472,12 +12494,31 @@ fn apply_constraint_solver(
     }
 }
 
+/// May this LP result be written into node coordinates? (bd-9xwk)
+///
+/// Only a PROVEN optimum may. `model.solve()` returning `Ok` is not that: good_lp's HiGHS backend
+/// maps `ReachedTimeLimit`, `ReachedIterationLimit`, `ReachedSolutionLimit`, `ReachedInterrupt` and
+/// `ReachedMemoryLimit` onto `SolutionStatus::TimeLimit` and still returns `Ok(solution)` whenever a
+/// feasible primal point exists. Writing such a point out makes the rendered geometry a function of
+/// how much clock the solver happened to get.
+///
+/// This is a free function rather than an inline `matches!` so the decision is testable on its own.
+/// The end-to-end layout probe cannot reach it: to make HiGHS stop with a feasible-but-suboptimal
+/// point you have to interrupt it mid-phase-2, which is a race, and a valve short enough to be
+/// deterministic stops it before feasibility, where good_lp returns `Err` and the caller would fall
+/// back anyway. So the probe alone proves nothing about this branch — `constraint_lp_result_is_used_
+/// only_when_proven_optimal` is what pins it.
+#[cfg(not(target_arch = "wasm32"))]
+const fn constraint_solution_is_usable(status: SolutionStatus) -> bool {
+    matches!(status, SolutionStatus::Optimal)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn solve_constraint_coordinates(
     ir: &MermaidDiagramIr,
     nodes: &mut [LayoutNodeBox],
     spacing: LayoutSpacing,
-    time_limit_ms: u64,
+    wall_clock_valve_ms: u64,
 ) -> Result<usize, String> {
     let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
     let id_to_index: BTreeMap<&str, usize> = ir
@@ -12525,7 +12566,10 @@ fn solve_constraint_coordinates(
     let mut model = variables
         .minimise(objective)
         .using(default_solver)
-        .with_time_limit((time_limit_ms.max(1) as f64) / 1000.0);
+        // A valve of 0 means "spend no clock here" and is honoured as such. It used to be clamped
+        // up to 1 ms, which made "no optimization" unrequestable and left no way to exercise the
+        // fail-closed path without racing the solver (bd-9xwk).
+        .with_time_limit((wall_clock_valve_ms as f64) / 1000.0);
 
     for (index, node) in nodes.iter().enumerate() {
         let base_x = f64::from(node.bounds.x);
@@ -12636,6 +12680,23 @@ fn solve_constraint_coordinates(
     }
 
     let solution = model.solve().map_err(|error| error.to_string())?;
+    // bd-9xwk. `Ok` is NOT "solved". HiGHS answers a budget stop with `ReachedTimeLimit` (or
+    // `ReachedIterationLimit`/`ReachedMemoryLimit`) and, whenever a feasible primal point exists,
+    // good_lp returns it as `Ok` carrying `SolutionStatus::TimeLimit`. Writing that point out puts
+    // a partially-optimized geometry into the render, chosen by how busy the machine was — the
+    // same defect class as bd-9a1t and bd-giej, one level closer to the output because these are
+    // coordinates rather than an algorithm choice.
+    //
+    // So the result is failed CLOSED: anything other than a proven optimum is refused here, the
+    // caller takes its `layout.constraint_solver.fallback` branch, and the deterministic heuristic
+    // coordinates stay. A fired valve costs the optimization; it never changes it.
+    if !constraint_solution_is_usable(solution.status()) {
+        return Err(format!(
+            "constraint LP stopped at {:?} rather than a proven optimum; keeping heuristic \
+             coordinates so geometry does not depend on host load",
+            solution.status()
+        ));
+    }
     for (index, node) in nodes.iter_mut().enumerate() {
         node.bounds.x = solution.value(x_vars[index]) as f32;
         node.bounds.y = solution.value(y_vars[index]) as f32;
@@ -12650,7 +12711,7 @@ fn solve_constraint_coordinates(
     _ir: &MermaidDiagramIr,
     _nodes: &mut [LayoutNodeBox],
     _spacing: LayoutSpacing,
-    _time_limit_ms: u64,
+    _wall_clock_valve_ms: u64,
 ) -> Result<usize, String> {
     Err(String::from(
         "constraint solver is unavailable on wasm32 builds and falls back to heuristic layout",
@@ -16524,15 +16585,16 @@ mod tests {
         clippy::many_single_char_names
     )]
     use super::{
-        CachedNodeSize, ConstraintSolverMode, CycleStrategy, DependencyGraph, DiagramLayout,
-        DirtySet, EdgeRouting, GraphMetrics, IncrementalLayoutEngine, IncrementalLayoutSession,
-        LayoutAlgorithm, LayoutConfig, LayoutDependencyGraph, LayoutEdit, LayoutGuardrails,
-        LayoutNodeBox, LayoutPoint, LayoutRect, LayoutSequenceLifecycleMarkerKind, LayoutSpacing,
-        ObstacleSpatialIndex, RegionInput, RegionMemoryBudget, RenderClip, RenderItem,
-        RenderSource, SubgraphRegion, SubgraphRegionId, SubgraphRegionKind, TracedLayout,
-        build_directed_path_edge_paths, build_edge_paths, build_layout_decision_ledger,
-        build_layout_guard_report, build_render_scene, certify_directed_path_layout_prefix,
-        compute_node_size, dispatch_layout_algorithm, er_compartment_dimensions,
+        CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS, CachedNodeSize, ConstraintSolverMode, CycleStrategy,
+        DependencyGraph, DiagramLayout, DirtySet, EdgeRouting, GraphMetrics,
+        IncrementalLayoutEngine, IncrementalLayoutSession, LayoutAlgorithm, LayoutConfig,
+        LayoutDependencyGraph, LayoutEdit, LayoutGuardrails, LayoutNodeBox, LayoutPoint,
+        LayoutRect, LayoutSequenceLifecycleMarkerKind, LayoutSpacing, ObstacleSpatialIndex,
+        RegionInput, RegionMemoryBudget, RenderClip, RenderItem, RenderSource, SubgraphRegion,
+        SubgraphRegionId, SubgraphRegionKind, TracedLayout, build_directed_path_edge_paths,
+        build_edge_paths, build_layout_decision_ledger, build_layout_guard_report,
+        build_render_scene, certify_directed_path_layout_prefix, compute_node_size,
+        constraint_solution_is_usable, dispatch_layout_algorithm, er_compartment_dimensions,
         estimate_layout_cost, evaluate_layout_guardrails, find_obstacle_nudge_x,
         find_obstacle_nudge_y, force_barnes_hut_repulsion, force_direct_repulsion,
         incremental_overlap_alignment, is_directed_path, layout, layout_diagram,
@@ -16555,6 +16617,7 @@ mod tests {
         MermaidDiagramIr, MermaidPressureReport, MermaidPressureTier, MermaidSourceMapKind,
         NodeShape, Span,
     };
+    use good_lp::SolutionStatus;
     use proptest::prelude::*;
     use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet};
@@ -22728,6 +22791,163 @@ mod tests {
             .find(|node| node.node_id == node_id)
             .unwrap()
             .bounds
+    }
+
+    /// An LP result is written into coordinates ONLY when it is a proven optimum (bd-9xwk).
+    ///
+    /// This is the deterministic half of the fix, and the half the end-to-end probe below cannot
+    /// reach. `model.solve()` returning `Ok` does not mean solved: good_lp's HiGHS backend maps
+    /// every budget stop onto `SolutionStatus::TimeLimit` and still returns `Ok` whenever a feasible
+    /// primal point exists, and the old code — which checked only for `Err` — wrote that point
+    /// straight into `node.bounds`.
+    ///
+    /// Asserted on the decision itself because it cannot be provoked through a layout: a valve short
+    /// enough to fire deterministically stops HiGHS before it has a feasible point at all, so
+    /// good_lp returns `Err` and the caller falls back for a different reason. I confirmed that by
+    /// running the end-to-end probe with this predicate disabled — it still passed, i.e. it is
+    /// VACUOUS for this branch. Provoking a genuine feasible-but-suboptimal stop means interrupting
+    /// phase 2 of the simplex, which is a race and has no place in a test.
+    #[test]
+    fn constraint_lp_result_is_used_only_when_proven_optimal() {
+        assert!(
+            constraint_solution_is_usable(SolutionStatus::Optimal),
+            "a proven optimum is the one result that may become geometry"
+        );
+        assert!(
+            !constraint_solution_is_usable(SolutionStatus::TimeLimit),
+            "a budget-stopped solve carries a feasible-but-suboptimal point and must be refused; \
+             good_lp reports it as Ok, so nothing upstream of this check would catch it"
+        );
+        assert!(
+            !constraint_solution_is_usable(SolutionStatus::GapLimit),
+            "a gap-limited solve is not a proven optimum either"
+        );
+    }
+
+    /// The LP's wall-clock valve must never reach the coordinates (bd-9xwk).
+    ///
+    /// `model.solve()` returning `Ok` does not mean "solved": HiGHS answers a budget stop with
+    /// `ReachedTimeLimit` and, whenever a feasible primal point exists, good_lp hands that
+    /// suboptimal point back as `Ok`. Before the status check, those coordinates went straight into
+    /// `node.bounds`, so the same document rendered differently depending on how busy the host was
+    /// — on the DEFAULT path, since `ConstraintSolverMode::Optimize` is `#[default]` and the DOT
+    /// bridge populates `ir.constraints` from ordinary `rank=same` / `minlen`.
+    ///
+    /// The probe starves the valve rather than trusting a quiet host, because a budget that never
+    /// binds is invisible to any test that does not starve it (the lesson from bd-9a1t's probe 2
+    /// control and bd-giej).
+    #[test]
+    fn constraint_solver_wall_clock_valve_never_reaches_the_coordinates() {
+        // A LAYERED DAG, not a chain, and laid out through an EXPLICIT Sugiyama request with the
+        // guardrails lifted. Both details are load-bearing and cost me a run to learn:
+        // `apply_constraint_solver` is called from ONE place — inside
+        // `layout_diagram_sugiyama_traced_with_config` — so a document that the guardrail diverts
+        // to Tree, or that the directed-path specialization claims, never reaches the LP at all,
+        // and the control below correctly reported the fixture rather than the fix.
+        const NODES: usize = 120;
+        const WIDTH: usize = 8;
+        let edges: Vec<(usize, usize)> = (0..NODES - WIDTH).map(|i| (i, i + WIDTH)).collect();
+        let mut ir = labeled_graph_ir(NODES, &edges);
+        ir.constraints.push(IrConstraint::SameRank {
+            node_ids: (0..NODES)
+                .step_by(WIDTH + 3)
+                .map(|i| format!("N{i}"))
+                .collect(),
+            span: Span::default(),
+        });
+        ir.constraints.push(IrConstraint::MinLength {
+            from_id: "N0".to_string(),
+            to_id: format!("N{}", NODES - 1),
+            min_len: 9,
+            span: Span::default(),
+        });
+        // A pin is the most forceful constraint there is — an equality to an absolute coordinate —
+        // so it doubles as the reachability check below. If the LP runs at all, N5 lands here.
+        ir.constraints.push(IrConstraint::Pin {
+            node_id: "N5".to_string(),
+            x: 1_500.0,
+            y: 900.0,
+            span: Span::default(),
+        });
+
+        let guardrails = LayoutGuardrails {
+            max_layout_time_ms: 600_000,
+            max_layout_iterations: 1_000_000,
+            max_route_ops: 100_000_000,
+        };
+        let lay = |solver: ConstraintSolverMode, valve_ms: u64| {
+            layout_diagram_traced_with_config_and_guardrails(
+                &ir,
+                LayoutAlgorithm::Sugiyama,
+                LayoutConfig {
+                    constraint_solver: solver,
+                    constraint_solver_wall_clock_valve_ms: valve_ms,
+                    ..LayoutConfig::default()
+                },
+                guardrails,
+            )
+            .layout
+            .nodes
+            .clone()
+        };
+        let heuristic = lay(
+            ConstraintSolverMode::Disabled,
+            CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS,
+        );
+        let solved = lay(
+            ConstraintSolverMode::Optimize,
+            CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS,
+        );
+
+        // REACHABILITY CHECK, separate from the control so a failure says WHICH thing is wrong.
+        // `apply_constraint_solver` has exactly one caller, inside
+        // `layout_diagram_sugiyama_traced_with_config`, so a document routed anywhere else never
+        // reaches the LP. If the pin did not land, the fixture is not reaching the solver and no
+        // conclusion about the valve can be drawn from anything below.
+        let pinned = solved
+            .iter()
+            .find(|node| node.node_id == "N5")
+            .expect("N5 is in the layout");
+        assert!(
+            (pinned.bounds.x - 1_500.0).abs() < 1.0 && (pinned.bounds.y - 900.0).abs() < 1.0,
+            "the LP never ran for this fixture: N5 is pinned to (1500, 900) but sits at ({}, {}), \
+             so this document is not being routed through the Sugiyama path that calls \
+             apply_constraint_solver",
+            pinned.bounds.x,
+            pinned.bounds.y
+        );
+
+        // CONTROL. If the LP does not move this document, "solved" and "heuristic" are the same
+        // value, every assertion below holds for free, and the probe proves nothing.
+        assert_ne!(
+            solved, heuristic,
+            "control failed: the LP does not move this document, so a fired valve and a solved LP \
+             are indistinguishable here"
+        );
+
+        // THE FAIL-CLOSED PATH, exercised deterministically rather than by racing the solver. A
+        // valve of zero cannot be met by any machine, so HiGHS stops without a proven optimum, and
+        // the coordinates must be exactly the untouched heuristic ones. Before the status check
+        // this returned whatever feasible point the solver happened to be holding.
+        assert_eq!(
+            lay(ConstraintSolverMode::Optimize, 0),
+            heuristic,
+            "a valve that cannot be met must leave the heuristic coordinates untouched, not write \
+             out whatever partial solution the LP had reached"
+        );
+
+        // THE PROPERTY. Across four orders of magnitude of valve — every one of which leaves the
+        // problem itself untouched — the coordinates are only ever the proven optimum or the
+        // deterministic heuristic fallback. A third geometry is a partially-optimized solution
+        // that reached the output, which is the defect.
+        for valve_ms in [1_u64, 2, 5, 25, 250, CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS] {
+            let nodes = lay(ConstraintSolverMode::Optimize, valve_ms);
+            assert!(
+                nodes == solved || nodes == heuristic,
+                "valve {valve_ms}ms produced a third geometry: neither the proven optimum nor the \
+                 heuristic fallback, i.e. coordinates chosen by how much clock the solver got"
+            );
+        }
     }
 
     #[test]
