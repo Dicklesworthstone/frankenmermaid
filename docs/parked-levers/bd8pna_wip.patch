@@ -1,0 +1,238 @@
+diff --git a/crates/fm-layout/src/lib.rs b/crates/fm-layout/src/lib.rs
+index 40a2a370..52691513 100644
+--- a/crates/fm-layout/src/lib.rs
++++ b/crates/fm-layout/src/lib.rs
+@@ -1532,6 +1532,7 @@ fn dirty_node_indexes_for_edits(
+     let LayoutDiff {
+         edits,
+         topology_equal: same_topology,
++        edge_topology_equal: _,
+     } = derive_layout_diff(previous_ir, current_ir);
+     if edits.is_empty() {
+         return BTreeSet::new();
+@@ -1692,6 +1693,14 @@ struct LayoutDiff {
+     /// subgraph. Topology ignores labels, titles, arrows, directions and spans, so it is a
+     /// strict subset of what the edit walk already decides.
+     topology_equal: bool,
++    /// Did the EDGE topology survive the edit — same edge count, same endpoints on every edge?
++    ///
++    /// Narrower than `topology_equal` on purpose. An edge's arrow, label and span are carried in
++    /// the same edit pair (`EdgeRemoved` + `EdgeAdded`) as a rewiring, so the edits alone cannot
++    /// tell a relabelled edge from a re-pointed one — and the two have opposite consequences for
++    /// the incremental path. Deciding it here, in the walk that already compares the endpoints,
++    /// costs nothing extra (bd-8pna).
++    edge_topology_equal: bool,
+ }
+ 
+ fn derive_layout_diff(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> LayoutDiff {
+@@ -1739,11 +1748,15 @@ fn derive_layout_diff(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -
+     }
+ 
+     let shared_edges = previous.edges.len().min(current.edges.len());
++    // A count change is itself an edge-topology change; the trailing added/removed loops below
++    // fire in that case too.
++    let mut edge_topology_equal = previous.edges.len() == current.edges.len();
+     for (edge_index, (left, right)) in previous.edges.iter().zip(current.edges.iter()).enumerate() {
+         // Endpoints are the topology-bearing half of an edge; arrow, label and span are not.
+         let endpoints_differ = left.from != right.from || left.to != right.to;
+         if endpoints_differ {
+             topology_equal = false;
++            edge_topology_equal = false;
+         }
+ 
+         if endpoints_differ
+@@ -1799,6 +1812,7 @@ fn derive_layout_diff(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -
+     LayoutDiff {
+         edits,
+         topology_equal,
++        edge_topology_equal,
+     }
+ }
+ 
+@@ -3449,7 +3463,8 @@ impl IncrementalLayoutEngine {
+             return None;
+         }
+ 
+-        let edits = derive_layout_diff(&cached_graph.ir, ir).edits;
++        let diff = derive_layout_diff(&cached_graph.ir, ir);
++        let edits = diff.edits;
+         if edits.is_empty() {
+             return None;
+         }
+@@ -3461,6 +3476,28 @@ impl IncrementalLayoutEngine {
+         }) {
+             return None;
+         }
++        // AN EDGE-TOPOLOGY EDIT IS GLOBAL, SO IT CANNOT BE SERVED SELECTIVELY (bd-8pna).
++        //
++        // Everything below starts from `cached_layout.traced.layout.nodes.clone()` and re-lays only
++        // the regions the dirty set names, re-anchoring each to the bounds it previously occupied.
++        // That is sound exactly when the edit is LOCAL. Rewiring an edge is not: Sugiyama ranks
++        // every node from the whole edge set, so a rank shift caused by one new edge moves nodes
++        // in regions the dirty set calls clean, and their retained coordinates are then geometry
++        // from the PREVIOUS topology. Measured on the fixture this bead was filed with: the engine
++        // returned 95 node rects with max y 11749.5 against the full recompute's 65 and 11563.0 —
++        // same edge count, different picture.
++        //
++        // Rebuilding the dependency graph (which the code below already does when topology moved)
++        // does not rescue it: a fresh graph changes which regions are re-laid, not the fact that
++        // the untouched ones keep coordinates computed for a different graph.
++        //
++        // The condition is `edge_topology_equal` and NOT the presence of an `EdgeAdded`/
++        // `EdgeRemoved` edit: `derive_layout_diff` emits that same pair for an edge's arrow, label
++        // or span changing, and bailing on those would send every edge-label edit down the full
++        // path — a regression in exactly the fast case the cache exists for.
++        if !diff.edge_topology_equal {
++            return None;
++        }
+ 
+         // Label/style-only edits leave the dependency topology unchanged, so the cached
+         // dependency graph can be reused and the dirty set derived directly from edits.
+@@ -18222,6 +18259,52 @@ mod tests {
+         assert_eq!(dy, 160.0);
+     }
+ 
++    #[test]
++    fn zz_shape_probe() {
++        let config = super::LayoutConfig::default();
++        let guardrails = LayoutGuardrails::default();
++        let ir_a = large_two_subgraph_ir(32);
++        let ir_b = {
++            let mut edges = Vec::new();
++            for i in (0..31).step_by(2) {
++                edges.push((i, i + 1));
++            }
++            for i in (32..63).step_by(2) {
++                edges.push((i, i + 1));
++            }
++            edges.push((5, 40));
++            edges.push((10, 50));
++            labeled_graph_ir(64, &edges)
++        };
++        let ir_c = large_subgraph_dependency_ir();
++        let mut ir_d = ir_c.clone();
++        toggle_edge(&mut ir_d, 5, 20);
++
++        for (name, ir) in [
++            ("ir_a large_two_subgraph_ir(32)", &ir_a),
++            ("ir_b labeled_graph_ir(64)", &ir_b),
++            ("ir_c large_subgraph_dependency_ir", &ir_c),
++            ("ir_d toggled", &ir_d),
++        ] {
++            let full = layout_diagram_traced_with_config_and_guardrails(
++                ir,
++                LayoutAlgorithm::Auto,
++                config.clone(),
++                guardrails,
++            );
++            println!(
++                "SHAPE {name}: ir.nodes={} ir.edges={} subgraphs={} layout.nodes={} layout.edges={} clusters={} algo={:?}",
++                ir.nodes.len(),
++                ir.edges.len(),
++                ir.graph.subgraphs.len(),
++                full.layout.nodes.len(),
++                full.layout.edges.len(),
++                full.layout.clusters.len(),
++                full.trace.guard.selected_algorithm,
++            );
++        }
++    }
++
+     #[test]
+     fn incremental_layout_engine_selectively_relayouts_large_topology_change_with_stable_nodes() {
+         let mut engine = IncrementalLayoutEngine::default();
+@@ -18240,24 +18323,33 @@ mod tests {
+         toggle_edge(&mut edited, 5, 20);
+ 
+         let rerun = engine.layout_diagram_traced_with_config_and_guardrails(
++            &edited,
++            LayoutAlgorithm::Auto,
++            config.clone(),
++            guardrails,
++        );
++        let full = layout_diagram_traced_with_config_and_guardrails(
+             &edited,
+             LayoutAlgorithm::Auto,
+             config,
+             guardrails,
+         );
+ 
++        // PROBE (bd-8pna): does the incremental answer equal the full recompute here, and is the
++        // clean-region locality claim actually true of a full recompute?
+         assert_eq!(
+-            rerun.trace.incremental.query_type,
+-            "layout_incremental_subgraph_relayout"
++            rerun.layout, full.layout,
++            "PROBE-A: incremental disagrees with a full recompute of the same edited IR"
+         );
+-        assert!(rerun.trace.incremental.recomputed_nodes <= 32);
+         for node_index in 32..64 {
+             assert_eq!(
+-                rerun.layout.nodes[node_index].bounds,
++                full.layout.nodes[node_index].bounds,
+                 baseline_layout.layout.nodes[node_index].bounds,
+-                "clean right-side region drifted for node {node_index}"
++                "PROBE-B: a FULL recompute moved node {node_index}, so the clean-region claim is \
++                 false and the old assertion was pinning stale geometry"
+             );
+         }
++        assert!(rerun.trace.incremental.recomputed_nodes <= 32);
+     }
+ 
+     proptest! {
+@@ -26714,16 +26806,27 @@ mod tests {
+             config.clone(),
+             guardrails,
+         );
+-        // This test checks SURVIVABILITY, not the contract its name states. The layout returned
+-        // here is measurably NOT the one a full recompute produces (bd-8pna), so the structural
+-        // checks below are all that can pass today.
++        // This test now checks the contract its NAME states, which it did not when it was written:
++        // an edge-topology-only edit must trigger a full recompute (bd-8pna, fixed). Its body used
++        // to check survivability only, under a comment calling the mismatch "a known limitation" —
++        // a test named `..._triggers_full_recompute` whose body accepted a layout built from the
++        // PREVIOUS edge topology, defending the defect it was named after and leaving whoever
++        // eventually fixed invalidation with no failing assertion telling them it mattered.
+         //
+-        // ⚠️ The comment that used to sit here called that "a known limitation" and moved on. That
+-        // is the thing to avoid: a test named `..._triggers_full_recompute` whose body accepts a
+-        // layout built from the PREVIOUS edge topology defends the defect it is named after, and
+-        // leaves whoever eventually fixes invalidation with no failing assertion telling them it
+-        // mattered. The contract now lives in `fault_stale_cache_matches_a_full_recompute` below,
+-        // which is #[ignore]d because it REPRODUCES the defect rather than because it is unfinished.
++        // The strong form lives in `fault_stale_cache_matches_a_full_recompute` below, which is no
++        // longer #[ignore]d. The structural checks here are kept because they are cheap and catch a
++        // different failure — non-finite or zero-size boxes — rather than being deleted as
++        // redundant.
++        let full_b = layout_diagram_traced_with_config_and_guardrails(
++            &ir_b,
++            LayoutAlgorithm::Auto,
++            config,
++            guardrails,
++        );
++        assert_eq!(
++            result_b.layout, full_b.layout,
++            "an edge-topology-only edit must be recomputed, not served from the cache"
++        );
+         assert_eq!(result_b.layout.nodes.len(), 64);
+         // Verify structural validity: all nodes must have finite, positive-size bounds.
+         for (i, node) in result_b.layout.nodes.iter().enumerate() {
+@@ -26745,14 +26848,15 @@ mod tests {
+     /// taken, only that taking it did not change the answer — and it is the one
+     /// `fault_rapid_100_edits_produces_correct_final_layout` already applies to node-level edits.
+     ///
+-    /// ⚠️ `#[ignore]` BECAUSE IT REPRODUCES A LIVE DEFECT. Run with `--ignored` and it FAILS:
++    /// This was `#[ignore]`d because it REPRODUCED the defect. Before the fix it failed with:
+     ///
+     ///     engine (incremental)   node rects 95   edge paths 34   max y 11749.5
+     ///     full recompute         node rects 65   edge paths 34   max y 11563.0
+     ///
+-    /// Same edge count, different geometry. Un-ignoring it is bd-8pna's acceptance gate.
++    /// Same edge count, different picture — and 95 rects for a 64-node IR, because the incremental
++    /// path returned the CACHED node vector with only the dirty regions re-laid. Un-ignoring it is
++    /// bd-8pna's acceptance gate, and it is un-ignored here.
+     #[test]
+-    #[ignore = "bd-8pna: reproduces a live stale-cache defect; un-ignore as the acceptance gate"]
+     fn fault_stale_cache_matches_a_full_recompute() {
+         let mut engine = IncrementalLayoutEngine::default();
+         let ir_a = large_two_subgraph_ir(32);
