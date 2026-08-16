@@ -2755,3 +2755,207 @@ mod geometry_tests {
         }
     }
 }
+
+/// Floating-point fault tests for rotors (bd-1s1g.2).
+///
+/// These cover the numeric edges a transform stack actually reaches: long composition chains,
+/// coordinates whose conformal embedding squares near the top of `f64`, rotations too small or too
+/// close to π to be well conditioned, and non-finite input. Each asserts the OBSERVABLE
+/// consequence — what a point does under the transform — not just an internal invariant, because a
+/// rotor whose norm is fine can still move geometry and a rotor whose norm drifts is only a defect
+/// if it scales something.
+#[cfg(test)]
+mod rotor_fault_tests {
+    use super::*;
+
+    /// The distance a transform must preserve, expressed on a point rather than on the rotor.
+    fn radius_after(rotor: Rotor, x: f64, y: f64) -> f64 {
+        let (rx, ry) = rotor.to_affine_matrix().apply(x, y);
+        rx.hypot(ry)
+    }
+
+    /// Composing many small rotations must not accumulate scale.
+    ///
+    /// This is the drift that has a visible consequence: a rotor is applied through
+    /// `to_affine_matrix`, so a norm that creeps away from 1 becomes a progressive scaling of every
+    /// transformed coordinate. 10,000 steps of 0.001 rad is 10 rad total, which also wraps past 2π
+    /// several times and so exercises the sign structure rather than a single quadrant.
+    #[test]
+    fn chained_small_rotations_do_not_accumulate_scale() {
+        let step = Rotor::rotation(0.001);
+        let mut chained = Rotor::identity();
+        for _ in 0..10_000 {
+            chained = chained.compose(step);
+        }
+
+        let norm_sq = chained.norm_squared();
+        assert!(
+            norm_sq.is_finite(),
+            "10k composed rotations produced a non-finite norm: {norm_sq}"
+        );
+        assert!(
+            (norm_sq - 1.0).abs() < 1e-9,
+            "rotor norm drifted to {norm_sq} after 10k compositions (want 1 within 1e-9)"
+        );
+
+        // The consequence, measured on geometry: a rotation may not change a point's radius.
+        let radius = radius_after(chained, 1.0, 0.0);
+        assert!(
+            (radius - 1.0).abs() < 1e-9,
+            "10k composed rotations scaled a unit point to radius {radius}"
+        );
+
+        // And it must still be the rotation it claims to be: 10,000 * 0.001 rad = 10 rad.
+        let (cx, cy) = chained.to_affine_matrix().apply(1.0, 0.0);
+        let (ex, ey) = Rotor::rotation(10.0).to_affine_matrix().apply(1.0, 0.0);
+        assert!(
+            (cx - ex).abs() < 1e-6 && (cy - ey).abs() < 1e-6,
+            "chained rotation landed at ({cx}, {cy}), single rotation(10.0) lands at ({ex}, {ey})"
+        );
+    }
+
+    /// Extreme coordinates must stay finite through the conformal embedding.
+    ///
+    /// The embedding squares coordinates, so (1e15)^2 = 1e30 — large but representable. The failure
+    /// this guards is the one already recorded for distances: an intermediate that overflows to
+    /// infinity and then meets a zero, because `inf * 0.0` is NaN and a NaN coordinate silently
+    /// removes a node from the output rather than misplacing it.
+    #[test]
+    fn extreme_coordinates_transform_without_nan() {
+        for rotor in [
+            Rotor::identity(),
+            Rotor::rotation(std::f64::consts::FRAC_PI_4),
+            Rotor::translation(1.0, -1.0),
+            Rotor::scale(2.0),
+        ] {
+            let (x, y) = rotor.to_affine_matrix().apply(1e15, 1e15);
+            assert!(
+                !x.is_nan() && !y.is_nan(),
+                "rotor {:?} turned (1e15, 1e15) into a NaN coordinate ({x}, {y})",
+                rotor.components
+            );
+            assert!(
+                x.is_finite() && y.is_finite(),
+                "rotor {:?} turned (1e15, 1e15) into a non-finite coordinate ({x}, {y})",
+                rotor.components
+            );
+        }
+    }
+
+    /// A rotation far below the angle resolution of the geometry must still be a valid rotor.
+    #[test]
+    fn near_zero_rotation_is_a_valid_identity_like_rotor() {
+        let tiny = Rotor::rotation(1e-15);
+        assert!(
+            (tiny.norm_squared() - 1.0).abs() < 1e-12,
+            "rotation(1e-15) has norm {} (want 1)",
+            tiny.norm_squared()
+        );
+        assert!(
+            (tiny.components[0] - 1.0).abs() < 1e-15,
+            "cos(theta/2) should be ~1 for a 1e-15 rotation, got {}",
+            tiny.components[0]
+        );
+        let (x, y) = tiny.to_affine_matrix().apply(1.0, 0.0);
+        assert!(
+            (x - 1.0).abs() < 1e-12 && y.abs() < 1e-12,
+            "a 1e-15 rotation moved (1,0) to ({x}, {y})"
+        );
+    }
+
+    /// Just short of π is where a half-angle formulation can flip sign.
+    ///
+    /// The rotor stores cos(θ/2) and sin(θ/2); at θ ≈ π the scalar part passes through zero, so a
+    /// sign error here produces a rotation by -π instead of π — visually a mirror, and silent.
+    #[test]
+    fn near_pi_rotation_does_not_flip_sign() {
+        let angle = std::f64::consts::PI - 1e-15;
+        let rotor = Rotor::rotation(angle);
+        let (x, y) = rotor.to_affine_matrix().apply(1.0, 0.0);
+        assert!(
+            (x + 1.0).abs() < 1e-9,
+            "rotation by ~pi should send (1,0) to (-1,0), got ({x}, {y})"
+        );
+        assert!(
+            y.abs() < 1e-6,
+            "rotation by ~pi put a large imaginary-axis component at ({x}, {y})"
+        );
+        // The sign of the rotation direction must match a slightly smaller angle, i.e. approaching
+        // pi from below must not jump to approaching it from above.
+        let just_under = Rotor::rotation(angle - 1e-3).to_affine_matrix().apply(1.0, 0.0);
+        assert!(
+            just_under.1.signum() == y.signum() || y.abs() < 1e-12,
+            "the rotation direction flipped between {} and {angle} rad: {just_under:?} vs ({x}, {y})",
+            angle - 1e-3
+        );
+    }
+
+    /// A zero translation must be exactly the identity, not merely close to it.
+    #[test]
+    fn zero_translation_is_exactly_identity() {
+        assert_eq!(
+            Rotor::translation(0.0, 0.0).components,
+            Rotor::identity().components,
+            "translation(0,0) must be bit-identical to the identity rotor"
+        );
+    }
+
+    /// A negative scale is refused rather than silently producing a wrong transform.
+    ///
+    /// A reflection is not a rotor: `scale` is built from `cosh(ln s / 2)`, and `ln` of a negative
+    /// number is undefined. The API asserts, and this pins that contract — the alternative, letting
+    /// a NaN rotor through, would mirror geometry or delete it depending on where the NaN landed.
+    #[test]
+    #[should_panic(expected = "scale factor must be positive")]
+    fn negative_scale_is_refused() {
+        let _ = Rotor::scale(-1.0);
+    }
+
+    /// A unit scale is the identity, which is the positive half of the contract above.
+    #[test]
+    fn unit_scale_is_identity_like() {
+        let rotor = Rotor::scale(1.0);
+        let (x, y) = rotor.to_affine_matrix().apply(3.0, -7.0);
+        assert!(
+            (x - 3.0).abs() < 1e-12 && (y + 7.0).abs() < 1e-12,
+            "scale(1.0) moved (3,-7) to ({x}, {y})"
+        );
+    }
+
+    /// A NaN coordinate must stay detectable rather than becoming a plausible number.
+    ///
+    /// The transform API returns `(f64, f64)` and so cannot report a structured error; what it must
+    /// not do is launder a NaN into a finite coordinate, because a finite-but-wrong point is placed
+    /// in the diagram and never questioned, while a NaN is caught by the finite-coordinate
+    /// invariants the layout and renderers already assert.
+    #[test]
+    fn nan_input_stays_nan_rather_than_becoming_a_plausible_point() {
+        let rotor = Rotor::rotation(std::f64::consts::FRAC_PI_3);
+        let (x, y) = rotor.to_affine_matrix().apply(f64::NAN, 0.0);
+        assert!(
+            x.is_nan() || y.is_nan(),
+            "a NaN input coordinate produced the finite point ({x}, {y}); a NaN must stay visible"
+        );
+    }
+
+    /// Inverting a drifted rotor must still undo it.
+    ///
+    /// `inverse` takes a fast path when the norm is within 1e-12 of 1 (returning the reverse) and a
+    /// division path otherwise. A long chain lands near but not exactly on that boundary, so this
+    /// exercises whichever path the drift selects and requires the round trip either way.
+    #[test]
+    fn inverse_undoes_a_long_composition_chain() {
+        let step = Rotor::rotation(0.001);
+        let mut chained = Rotor::identity();
+        for _ in 0..10_000 {
+            chained = chained.compose(step);
+        }
+        let inverse = chained.inverse().expect("a composed rotation chain must be invertible");
+        let round_trip = chained.compose(inverse);
+        let (x, y) = round_trip.to_affine_matrix().apply(5.0, -2.0);
+        assert!(
+            (x - 5.0).abs() < 1e-6 && (y + 2.0).abs() < 1e-6,
+            "rotor composed with its inverse moved (5,-2) to ({x}, {y})"
+        );
+    }
+}
