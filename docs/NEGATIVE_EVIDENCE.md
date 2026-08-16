@@ -19951,3 +19951,20 @@ Distinct from the fleet-refusal row above, and worth separating: this one is **n
   (`wide_8x16`, `wide_12x24`, `wide_16x32`, `dense_dag_200`, `cyclic_scc_100`), so the cross-check
   must use one of those. Every other bench generator is documented as deliberately not mirroring the
   corpus.
+
+### BLOCKED: rotor fault tests written but never compiled — no slot (bd-1s1g.2, 2026-08-15)
+
+- **Attempted twice**, both `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo test -p
+  fm-core --lib rotor_fault_tests`, both exit **103**: `no admissible workers:
+  critical_pressure=1, insufficient_slots=4, insufficient_total_slots=4,
+  active_project_exclusion=1`. `critical_pressure=1` is new this session — a worker is under disk
+  pressure on top of the contention.
+- **Nothing was committed.** ~180 lines of new `#[cfg(test)] mod rotor_fault_tests` sit in the
+  working tree under an exclusive lease on `crates/fm-core/src/cga.rs`; they have never been
+  compiled, so committing them could red `main` on a typo alone. No local fallback was taken.
+- **The bead was not claimed either**: `bd-1s1g.2` is a child of the blocked epic `bd-2q3f`, and
+  `br` refuses `--status=in_progress` on it. The work is recorded as a comment on that bead instead
+  of forcing the graph.
+- **No result is claimed from unrun tests.** If `chained_small_rotations_do_not_accumulate_scale`
+  fails on its first real run, the fix is a `Rotor::normalize` — the type has `norm_squared`,
+  `reverse` and `inverse` and nothing that renormalizes — not a wider epsilon.
