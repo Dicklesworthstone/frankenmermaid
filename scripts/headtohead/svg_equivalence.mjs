@@ -996,13 +996,25 @@ export function groundTruth(text) {
   if (/^sequenceDiagram\b/.test(header)) {
     const tokens = [];
     const participants = new Set();
+    // identity -> display name, for `participant C as Client`. See the participant regex below.
+    const displayNames = new Map();
     const edges = [];
     for (const rawLine of text.split('\n')) {
       const line = rawLine.trim();
       if (!line || line.startsWith('%%')) continue;
-      const participant = /^participant\s+([^\s]+)(?:\s+as\s+.*)?$/i.exec(line);
+      // `participant C as Client` declares an IDENTITY (`C`) and a DISPLAY NAME (`Client`). The
+      // renderer puts the identity in `data-id` and draws the display name, which is what mermaid
+      // does too — so requiring the alias to appear in the output text asserted the opposite of the
+      // syntax's meaning. golden/sequence_advanced was reported DIVERGENT for exactly three missing
+      // tokens, `C`, `S` and `D`, against a render that correctly shows Client, Server and Database.
+      //
+      // `actor` is the same construct with a different glyph and is matched here for the same
+      // reason; leaving it out would keep the false divergence for actor-based diagrams.
+      const participant = /^(?:participant|actor)\s+([^\s]+)(?:\s+as\s+(.+))?$/i.exec(line);
       if (participant) {
         participants.add(participant[1]);
+        const display = participant[2]?.trim();
+        if (display) displayNames.set(participant[1], display);
         continue;
       }
       // Make the sender lazy: a greedy identifier would consume the first dash of `Bob-->>Alice`
@@ -1023,7 +1035,12 @@ export function groundTruth(text) {
       node_ids: [...participants].map((participant) => participant.toLowerCase()).sort(),
       edges: edges.sort(),
       sequence_message_count: edges.length,
-      sequence_tokens: [...participants].flatMap(tokenize).concat(tokens).sort(),
+      // Tokens are what the output must SHOW, so a participant contributes its display name when
+      // it declared one; `node_ids` above keeps the identity, which is what `data-id` carries.
+      sequence_tokens: [...participants]
+        .flatMap((participant) => tokenize(displayNames.get(participant) ?? participant))
+        .concat(tokens)
+        .sort(),
     };
   }
   if (!isFlow) return null;
@@ -2106,6 +2123,31 @@ export function selfTest() {
     const t = groundTruth('erDiagram\n  E0 ||--o{ E1 : has\n');
     return t !== null && t.node_ids.join(',') === 'e0,e1' && t.edges.join(',') === 'e0>e1';
   })(), groundTruth('erDiagram\n  E0 ||--o{ E1 : has\n'));
+  // `participant C as Client` — the output must SHOW Client while `data-id` keeps C. Requiring the
+  // alias in the rendered text asserted the opposite of what the syntax means, and reported
+  // golden/sequence_advanced divergent for exactly three tokens (C, S, D) against a correct render.
+  {
+    const aliased = groundTruth('sequenceDiagram\n  participant C as Client\n  participant S as Server\n  C->>S: hi\n');
+    const actorAliased = groundTruth('sequenceDiagram\n  actor A as Alice\n  participant B\n  A->>B: hi\n');
+    const plain = groundTruth('sequenceDiagram\n  participant Client\n  participant Server\n  Client->>Server: hi\n');
+    record('participant_alias_contributes_its_display_name_as_a_token',
+      aliased !== null
+      && aliased.sequence_tokens.includes('Client') && aliased.sequence_tokens.includes('Server')
+      && !aliased.sequence_tokens.includes('C') && !aliased.sequence_tokens.includes('S'),
+      aliased?.sequence_tokens);
+    record('participant_alias_keeps_its_identity_in_node_ids',
+      aliased !== null && aliased.node_ids.join(',') === 'c,s',
+      aliased?.node_ids);
+    record('actor_alias_is_read_like_a_participant_alias',
+      actorAliased !== null
+      && actorAliased.sequence_tokens.includes('Alice')
+      && actorAliased.node_ids.includes('a') && actorAliased.node_ids.includes('b'),
+      actorAliased?.node_ids);
+    record('an_unaliased_participant_still_contributes_its_own_name',
+      plain !== null && plain.sequence_tokens.includes('Client') && plain.node_ids.join(',') === 'client,server',
+      plain?.sequence_tokens);
+  }
+
   // A composite state must verify: it is a state drawn as a container, plus one scoped pseudo-state
   // per `[*]` inside it. Both halves are needed — the container supplies the missing id, the scoped
   // pseudo ids are extra ones that must be filtered — so each is asserted separately as well as
