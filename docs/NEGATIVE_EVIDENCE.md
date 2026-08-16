@@ -20317,3 +20317,38 @@ labels — a profile where small-diagram fixed costs, not asymptotics, dominate.
 
 **No new measurement is claimed here.** Every number above is quoted from an existing certified row;
 the only new content is which row answers the question.
+
+### SIZED BEFORE BUILDING: the mixed-script width lever reaches 10.6% of `docs_site_50`'s labels (2026-08-16)
+
+bd-gl6y proposes keeping the ASCII width table for labels that contain *some* non-ASCII, because
+`estimate_width` currently gates its fast path on the whole string being ASCII. Before anyone spends
+a build on it, here is how much of the target workload it actually touches. Counted, not estimated;
+no build was run.
+
+- **Method.** `node` over `scripts/headtohead/corpus.mjs`, generating the pinned `docs_site_50` item
+  (`gen: docs_site`, `count: 50`, `seed: 20260728`) and counting label-shaped text. No compilation:
+  the corpus generator is deterministic JS and this is the same seed the certified row used.
+- **Result, 50 diagrams, 971 extracted labels:**
+  - pure-ASCII labels: **868**
+  - mixed-script labels: **103 (10.6%)**
+  - characters inside those 103 labels: **1,377**, of which **1,214 (88.2%) are ASCII** and 163 are
+    not.
+- **What that means for the lever.** Today all 1,377 of those characters go through the
+  `classify()` match chain, because one non-ASCII character disqualifies the whole label. The fix
+  moves **1,214 characters** onto the table lookup and leaves 163 on `classify()`. It does not touch
+  the other 868 labels at all — they already take the byte-table path.
+
+**THIS IS A DOWNGRADE OF bd-gl6y'S OWN FRAMING, and it is the point of measuring first.** The bead
+was filed off the ledger's description of `docs_site_50` as having "escaping/non-ASCII labels",
+which reads as though non-ASCII dominates. It does not: **89.4% of labels are pure ASCII and already
+fast.** The lever is real, strictly-less-work and bit-identical by construction, but it is a
+~1,200-character improvement inside a 5.887478 ms whole-job sample, not a structural win. It should
+be judged against that, and it is not the lever to spend a scarce build slot on first.
+
+⚠️ **The label count is approximate and the direction of the error is stated.** Labels were
+extracted with a bracket/paren/brace/`: text` regex, giving 971 against the certified row's "940
+nodes / 902 edges". So the count over-approximates node labels and under-approximates edge labels;
+the 10.6% mixed-script *share* is the load-bearing figure and is not sensitive to that, since the
+same regex selects both classes.
+
+**No timing is claimed.** This sizes a candidate; it does not measure one.
