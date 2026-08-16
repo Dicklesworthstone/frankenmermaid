@@ -15117,11 +15117,11 @@ Rel_Back(db, app, "Responds")"#,
 
     #[test]
     fn flowchart_node_shapes_basic() {
-        let input = "flowchart TB\n  A[Rectangle]\n  B(Rounded)\n  C{Diamond}\n  D([Stadium])\n  E[[Subroutine]]\n  F[(Database)]\n  G((Circle))\n  H>Asymmetric]";
+        let input = "flowchart TB\n  A[Rectangle]\n  B(Rounded)\n  C{Diamond}\n  D([Stadium])\n  E[[Subroutine]]\n  F[(Database)]\n  G((Circle))\n  H>Asymmetric]\n  I(((DoubleCircle)))";
         let parsed = parse_mermaid(input);
         assert!(
-            parsed.ir.nodes.len() >= 8,
-            "Should have 8 shaped nodes, got {}",
+            parsed.ir.nodes.len() >= 9,
+            "Should have 9 shaped nodes, got {}",
             parsed.ir.nodes.len()
         );
 
@@ -15137,8 +15137,16 @@ Rel_Back(db, app, "Responds")"#,
             ("D", NodeShape::Stadium, "Stadium"),
             ("E", NodeShape::Subroutine, "Subroutine"),
             ("F", NodeShape::Cylinder, "Database"),
-            ("G", NodeShape::DoubleCircle, "Circle"),
+            // `((x))` is a PLAIN circle. This row asserted DoubleCircle until bd-vfxu / 57767867
+            // made the parser distinguish the two syntaxes, and the stale expectation then failed —
+            // it was encoding the very conflation that commit removed. The fixture always said
+            // `G((Circle))`, so the expectation contradicted its own input.
+            ("G", NodeShape::Circle, "Circle"),
             ("H", NodeShape::Asymmetric, "Asymmetric"),
+            // The CONTROL for the row above, and the reason this is a correction rather than a
+            // re-bless: `(((x)))` must still be DoubleCircle. Asserting only that `((x))` is Circle
+            // would be satisfied by a parser that had simply lost DoubleCircle altogether.
+            ("I", NodeShape::DoubleCircle, "DoubleCircle"),
         ];
         for (id, shape, label) in expected {
             let node = parsed
