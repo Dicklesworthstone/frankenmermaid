@@ -19928,3 +19928,26 @@ does not re-derive the admission signature from scratch.
   arena) could not be started at all, since both need a measurement slot rather than a reading.
 - **No ratio, no row, no class.** Nothing here is a performance verdict; it is the reason the
   session's landed work is all JS-gateable correctness (`node … --self-test`) rather than measured.
+
+### BLOCKED: the three-harness cross-check has its binary but no quiet host (bd-8bbq, 2026-08-15)
+
+Distinct from the fleet-refusal row above, and worth separating: this one is **not** blocked on rch.
+
+- **The build went through.** `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo build
+  --release -p frankenmermaid-cli --example headtohead` returned `BUILD_EXIT=0`, "Finished release
+  profile in 26m 11s", on rch **worker `vmi1264463`** (1725.1s), harness `cargo build --release
+  --example headtohead`. The ELF was shipped back rather than silently skipped:
+  `target/release/examples/headtohead`, 7.8 MB, sha256
+  `63a3c79de5357a0d74356e4ee15f194f3578b0c748126da8b2a350d217258898`.
+- **The host is what refuses.** Every measured phase blocks on `requireHostWideQuiescence`, which
+  admits only when every affinity CPU sits at or below a 20.0% busy fraction. At the attempt: load
+  average **21.83** on 64 CPUs, a peer's `gauntlet_lane_sweep_h2h` at **746% CPU**, plus frankentorch,
+  franken_networkx and two smartedgar processes. bd-a9rt already observed 123 consecutive refusals
+  under these conditions, so this was recorded rather than re-proved for another 15 minutes.
+- **No number was produced and none was estimated.** The gate was not relaxed, no local-fallback or
+  busy-host sample was substituted, and nothing here is a performance verdict.
+- **The remaining work is one quiet-host window**, and the input is already pinned: after bd-9cma
+  only five fixtures are byte-identical between the criterion bench and the head-to-head corpus
+  (`wide_8x16`, `wide_12x24`, `wide_16x32`, `dense_dag_200`, `cyclic_scc_100`), so the cross-check
+  must use one of those. Every other bench generator is documented as deliberately not mirroring the
+  corpus.
