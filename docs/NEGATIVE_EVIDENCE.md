@@ -3755,6 +3755,23 @@
   `cpu51`, `cpu54`) — and it still refused, because the gate needs all 64. `frankensearch_q` alone,
   at ~484-520% CPU, occupies roughly five cores continuously, and that is sufficient to block the
   gate **permanently** while 59 cores sit idle. Six attempts: 493, 542, 900, 900, 900, 900.
+- **SEVENTH ATTEMPT, timed deliberately to the quietest window ever observed — and the failure
+  mode is VOLATILITY, not sustained load.** Launched at **loadavg 12.45** with only **9-10 of 64
+  CPUs** above 20%, no peer measurement, ELF
+  `9f06917458e63344f2785eeaa5557b70df73f9a96c76317602c328751d568034` pinned as
+  `headtohead.scarletmeadow.9f069174`, revision `05fe57a082378838aaef3abf8903f55087469186`
+  embedded, clean tree, equivalence **PASS** 1/1 (`equivalence-05fe57a0-1786908917615.json`).
+  Result: **900/900**, blocked.
+  Observed loadavg TRACE across the single 15-minute run: **12.45 -> 51.16 -> 38.33 -> 8.39 ->
+  94.15**. The host swung by more than a factor of ten inside one run, twice. At +10 min the
+  refusal line listed only **four** busy CPUs; at +14 min loadavg was **8.39**; the final samples
+  showed cpu0-cpu13 all at 100% as a fresh external job landed.
+- **Timing runs to quiet windows does not work here, and this attempt is the test of that.** The
+  window was chosen on three consecutive pre-launch samples and was the best of seven attempts. It
+  closed within five minutes of entry. The gate needs all 64 CPUs quiet in ONE 1-second sample; the
+  host does not hold still for one second at a time, let alone stay quiet long enough for a sample
+  to coincide with the poll. Seven attempts: 493, 542, 900, 900, 900, 900, 900.
+
 - **This reclassifies the blocker.** It is not "wait for a quiet moment" — waiting has been tried
   five times across a 10x range of load averages, including a deliberately chosen falling window.
   Every frankenmermaid-side input is green and reproducible, so the remaining problem is
