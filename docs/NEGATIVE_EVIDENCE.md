@@ -20574,3 +20574,45 @@ row that genuinely exists — `0.998891`, CI `[0.987375, 1.014245]`, including o
 **What would produce the row:** one quiet window on this host. Everything else is now in place — the
 binary, its provenance, a passing structural proof at the committed rev, and a working A/A null on
 our arm. This is the first attempt where the only missing input is host availability.
+
+### QUANTIFIED: the `docs_site_50` timed run is not admissible on this host while the fleet runs (2026-08-16)
+
+Fourth attempt at the worst valid render ratio, and the first to measure *how far* the host is from
+the admission criterion rather than just recording a refusal. **No ratio; none claimed.**
+
+Everything upstream is now in place and was re-verified at this rev:
+
+- Clean tree at `e9d321c4`. Binary `target/local/release/examples/headtohead`, path from
+  `--message-format=json`, built with `RCH_CARGO_WRAPPER_BYPASS=1` and `env -u CARGO_TARGET_DIR`.
+  **ELF SHA-256 `04a09fa85b607f2915f055fb3db176b69e9d7f7abc8221ee5920dfbcffa3ca2e`.**
+- Equivalence **PASS: 50/50 equivalent, 0 divergent, 0 unverified, er=4/4** — the bd-19es fix holds
+  at this rev.
+
+The timed run was refused: `HOST-WIDE EXCLUSIVITY BLOCKED before frankenmermaid-before: no clear
+sample in 900000ms`, at **load1 25.11** — less than half the load of the previous attempt, with the
+pinned CPU only 10% busy.
+
+**The gate requires every one of 64 affinity CPUs under 20% in a single sample. Across all 900
+samples:**
+
+| statistic | value |
+|---|---|
+| samples refused | 900 / 900 |
+| samples at the reporting cap (≥12 CPUs over ceiling) | 866 |
+| fewest CPUs over ceiling in any sample | **8**, and those were at 95–100% |
+| five lowest per-sample maxima | 61%, 63%, 66%, 71%, 73% |
+
+**This is not a near miss.** In the quietest moment observed across fifteen minutes, at least one
+CPU was 61% busy — three times the ceiling — and the best sample by count still had eight CPUs
+essentially pinned. Halving the load average (50.12 → 25.11) did not move the outcome, which says
+the binding constraint is per-CPU occupancy from sibling builds, not aggregate load.
+
+**Consequence.** This row is not obtainable on `thinkstation1` while the fleet is active. It needs
+either genuine exclusive host time, or an owner's decision on whether an all-64-CPUs-under-20%
+criterion is the right admission rule for a shared box. Bypassing the veto is not on the table: a
+wall-time cross-engine ratio taken under this occupancy is exactly the measurement this repo's rules
+exist to refuse, and the harness cannot interleave the arms to compensate.
+
+**Unchanged and still the only piece of the requested row that exists:** our arm's A/A null,
+`0.998891`, CI `[0.987375, 1.014245]`, from the equivalence pass. The incumbent reports
+`null=missing` by construction.
