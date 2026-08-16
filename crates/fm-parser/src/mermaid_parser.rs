@@ -1570,12 +1570,37 @@ fn parse_flowchart_document_items<'a>(
     // the enclosing block early and desynchronize the whole document.
     let mut flattened_opens = 0_usize;
     let mut depth_warned = false;
+    // Inside a multi-line `accDescr { … }` block (bd-0di8). Its BODY lines look like ordinary node
+    // statements, so without this the description text is interned as nodes of its own.
+    let mut in_acc_descr_block = false;
 
     while let Some((line_number, line)) = lines.get(*next_index).copied() {
         *next_index += 1;
 
         let trimmed = trim_fast(line);
         if trimmed.is_empty() || is_comment(trimmed) {
+            continue;
+        }
+
+        // Accessibility directives are extracted from the original input AFTER parsing, so they
+        // need no item here — but they must not fall through to the node fallback either, which
+        // interned `accTitle: My Title` as a NODE displayed as that text and announced to screen
+        // readers as `aria-label="accTitle: My Title"` on a role="graphics-symbol". The directive
+        // meant to improve accessibility was degrading it. The class path has guarded this all
+        // along via `is_class_non_node_statement`; the flowchart path was the outlier, exactly as
+        // it was for subgraph titles in bd-ka77.
+        if in_acc_descr_block {
+            if trimmed == "}" || trimmed.ends_with('}') {
+                in_acc_descr_block = false;
+            }
+            continue;
+        }
+        if let Some(rest) = flowchart_accessibility_directive(trimmed) {
+            // `accDescr {` opens a block whose body must be swallowed too; `accDescr: text` and
+            // `accTitle: text` are complete on their own line.
+            if rest.starts_with('{') && !rest.contains('}') {
+                in_acc_descr_block = true;
+            }
             continue;
         }
 
@@ -1897,6 +1922,29 @@ fn parse_flowchart_statement_asts(
     }
 
     let _ = source_line;
+    None
+}
+
+/// Recognise a flowchart accessibility directive, returning what follows the keyword (bd-0di8).
+///
+/// Matches `accTitle: …`, `accDescr: …` and the block opener `accDescr {`. Keys on the DIRECTIVE
+/// form — the keyword followed by `:` or whitespace — rather than on the identifier, so a node
+/// legitimately named `accTitle` (`accTitle[Box]`) is still a node.
+///
+/// Mirrors the `accessibility(..)` arm of `is_class_non_node_statement`, which has guarded the class
+/// path against this since it was written.
+fn flowchart_accessibility_directive(statement: &str) -> Option<&str> {
+    for keyword in ["accTitle", "accDescr"] {
+        if let Some(rest) = statement.strip_prefix(keyword) {
+            let rest_trimmed = trim_fast(rest);
+            if let Some(after_colon) = rest_trimmed.strip_prefix(':') {
+                return Some(trim_fast(after_colon));
+            }
+            if rest.starts_with(char::is_whitespace) || rest.is_empty() {
+                return Some(rest_trimmed);
+            }
+        }
+    }
     None
 }
 
@@ -14671,6 +14719,78 @@ Rel_Back(db, app, "Responds")"#,
             meta.attributes[3].visibility,
             fm_core::ClassVisibility::Package
         );
+    }
+
+    /// bd-0di8: a flowchart accessibility directive is not a node.
+    ///
+    /// `accTitle: My Title` was interned by the generic node fallback, so the directive text was
+    /// drawn as a box AND carried `aria-label="accTitle: My Title"` on a role="graphics-symbol" —
+    /// a directive meant to improve accessibility was degrading it. The classDiagram path has
+    /// guarded this all along; the flowchart path was the outlier.
+    #[test]
+    fn flowchart_accessibility_directives_are_not_nodes() {
+        let ids = |src: &str| -> Vec<String> {
+            parse_mermaid(src)
+                .ir
+                .nodes
+                .iter()
+                .map(|n| n.id.clone())
+                .collect()
+        };
+
+        assert_eq!(
+            ids("flowchart LR\n  accTitle: My Title\n  A --> B\n"),
+            vec!["A", "B"],
+            "accTitle was interned as a node"
+        );
+        assert_eq!(
+            ids("flowchart LR\n  accDescr: Some description\n  A --> B\n"),
+            vec!["A", "B"],
+            "accDescr was interned as a node"
+        );
+
+        // 2. The multi-line block BODY must be swallowed too. Guarding only the single-line form
+        //    leaves the description text behind as its own node — measured as `multi_line`.
+        assert_eq!(
+            ids("flowchart LR\n  accDescr {\n    multi line\n  }\n  A --> B\n"),
+            vec!["A", "B"],
+            "the accDescr block body was interned"
+        );
+    }
+
+    /// NEGATIVE CASES from bd-0di8.
+    #[test]
+    fn flowchart_accessibility_guard_is_narrow() {
+        // 1. The directive must STILL take effect — removing the node must not remove its meaning.
+        let parsed = parse_mermaid("flowchart LR\n  accTitle: My Title\n  A --> B\n");
+        assert_eq!(
+            parsed.ir.meta.acc_title.as_deref(),
+            Some("My Title"),
+            "the accessible title was lost along with the phantom node"
+        );
+
+        // 3. A node legitimately named `accTitle` is still a node: the guard keys on the DIRECTIVE
+        //    form, not on the identifier.
+        let shaped: Vec<String> = parse_mermaid("flowchart LR\n  accTitle[Box] --> B\n")
+            .ir
+            .nodes
+            .iter()
+            .map(|n| n.id.clone())
+            .collect();
+        assert_eq!(
+            shaped,
+            vec!["accTitle", "B"],
+            "a real node named accTitle was swallowed"
+        );
+
+        // 4. CONTROL: a flowchart with no directive is unchanged.
+        let plain: Vec<String> = parse_mermaid("flowchart LR\n  A --> B\n")
+            .ir
+            .nodes
+            .iter()
+            .map(|n| n.id.clone())
+            .collect();
+        assert_eq!(plain, vec!["A", "B"]);
     }
 
     /// bd-v9zd: a date contradicting the declared `dateFormat` is accepted but WARNED about.
