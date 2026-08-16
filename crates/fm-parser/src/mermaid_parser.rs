@@ -1878,6 +1878,12 @@ fn parse_flowchart_statement_asts(
             }
         }
     }
+    // `id@{ shape: …, label: … }` before the generic node token parse (bd-9x8r): otherwise the whole
+    // directive is interned as one node whose displayed name is the directive text.
+    if let Some(node) = parse_flowchart_node_metadata(statement, config) {
+        return Some(vec![FlowAst::Node(node)]);
+    }
+
     if let Some(node) = parse_node_token_with_config(statement, config) {
         return Some(vec![FlowAst::Node(FlowAstNode {
             id: node.id,
@@ -1889,6 +1895,107 @@ fn parse_flowchart_statement_asts(
 
     let _ = source_line;
     None
+}
+
+/// Map a mermaid 11 `shape:` name onto the `NodeShape` its bracket spelling produces (bd-9x8r).
+///
+/// Returns `None` for an unrecognised name so the caller can keep the node's existing shape rather
+/// than invent one — the same tolerance `curve` already applies to unknown names.
+fn flowchart_metadata_shape(name: &str) -> Option<NodeShape> {
+    Some(match name {
+        "rect" | "rectangle" | "box" | "proc" | "process" => NodeShape::Rect,
+        "rounded" | "round" | "event" => NodeShape::Rounded,
+        "stadium" | "pill" | "terminal" => NodeShape::Stadium,
+        "subroutine" | "subprocess" | "framed-rectangle" | "fr-rect" => NodeShape::Subroutine,
+        "cylinder" | "cyl" | "database" | "db" => NodeShape::Cylinder,
+        "circle" | "circ" => NodeShape::Circle,
+        "double-circle" | "doublecircle" | "dbl-circ" => NodeShape::DoubleCircle,
+        "diamond" | "decision" | "diam" | "question" => NodeShape::Diamond,
+        "hexagon" | "hex" => NodeShape::Hexagon,
+        "parallelogram" | "lean-r" | "in-out" => NodeShape::Parallelogram,
+        "trapezoid" | "trap-b" | "priority" => NodeShape::Trapezoid,
+        _ => return None,
+    })
+}
+
+/// Split an `@{ ... }` body on commas that are OUTSIDE quotes.
+///
+/// A naive `split(',')` breaks `label: "one, two"` into two bogus pairs, which is negative case 4 of
+/// bd-9x8r. Quote tracking is the minimum needed to keep a comma inside a label.
+fn split_metadata_pairs(body: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0_usize;
+    let mut quote: Option<char> = None;
+    for (index, ch) in body.char_indices() {
+        match ch {
+            '"' | '\'' => {
+                if quote == Some(ch) {
+                    quote = None;
+                } else if quote.is_none() {
+                    quote = Some(ch);
+                }
+            }
+            ',' if quote.is_none() => {
+                out.push(&body[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&body[start..]);
+    out
+}
+
+/// Parse a standalone `id@{ key: value, … }` flowchart node-metadata statement (bd-9x8r).
+///
+/// mermaid 11 documents this as the unified way to give a node a shape and a label. We did not
+/// recognise it on the flowchart path, so `parse_node_token_with_config` interned the whole line and
+/// the diagram gained a class whose displayed name was the directive text itself —
+/// `shape: rect, label: "Shaped` — with the declared shape and label both lost.
+///
+/// Returns `None` for anything that is not this exact form, so every other statement falls through
+/// to the existing node/edge parsing untouched.
+fn parse_flowchart_node_metadata(statement: &str, config: &ParserConfig) -> Option<FlowAstNode> {
+    let at_pos = statement.find("@{")?;
+    let close = statement.rfind('}')?;
+    if close < at_pos + 2 || !trim_fast(&statement[close + 1..]).is_empty() {
+        return None;
+    }
+    let id = trim_fast(&statement[..at_pos]);
+    if id.is_empty() || id.contains(char::is_whitespace) {
+        return None;
+    }
+    // Reuse the ordinary token parser for the id so shaped spellings and `:::class` keep working.
+    let base = parse_node_token_with_config(id, config)?;
+
+    let mut shape = base.shape;
+    let mut label = base.label;
+    for pair in split_metadata_pairs(&statement[at_pos + 2..close]) {
+        let Some((key, value)) = pair.split_once(':') else {
+            continue;
+        };
+        let value = trim_fast(value).trim_matches('"').trim_matches('\'');
+        match trim_fast(key).to_ascii_lowercase().as_str() {
+            // An unrecognised shape name leaves the shape alone rather than inventing one.
+            "shape" => {
+                if let Some(mapped) = flowchart_metadata_shape(&value.to_ascii_lowercase()) {
+                    shape = mapped;
+                }
+            }
+            "label" | "title" => {
+                if !value.is_empty() {
+                    label = Some(ParsedLabel::plain(value));
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(FlowAstNode {
+        id: base.id,
+        label,
+        icon: base.icon,
+        shape,
+    })
 }
 
 fn parse_fast_simple_flowchart_statement_ast(statement: &str) -> Option<FlowAst> {
@@ -14427,6 +14534,87 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(
             meta.attributes[3].visibility,
             fm_core::ClassVisibility::Package
+        );
+    }
+
+    /// bd-9x8r: `A@{ shape: rect, label: "Shaped" }` must declare node A, not a node named after
+    /// the directive.
+    ///
+    /// The whole line used to be interned by `parse_node_token_with_config`, so the diagram gained a
+    /// class whose DISPLAYED NAME was the literal `shape: rect, label: "Shaped` — truncated at the
+    /// closing quote — and both the declared shape and the declared label were lost.
+    #[test]
+    fn flowchart_at_metadata_declares_the_node_it_names() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n  A@{ shape: cyl, label: \"Shaped\" }\n  B[Plain]\n  A --> B\n",
+        );
+        let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["A", "B"], "the directive text became a node");
+
+        let a = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "A")
+            .expect("node A");
+        assert_eq!(a.shape, NodeShape::Cylinder, "`shape:` was not applied");
+        let a_label = a
+            .label
+            .and_then(|id| parsed.ir.labels.get(id.0))
+            .map(|l| l.text.as_str());
+        assert_eq!(a_label, Some("Shaped"), "`label:` was not applied");
+        assert_eq!(
+            parsed.ir.edges.len(),
+            1,
+            "the edge must still connect A to B"
+        );
+    }
+
+    /// NEGATIVE CASES from bd-9x8r.
+    #[test]
+    fn flowchart_at_metadata_handles_the_hostile_forms() {
+        // 2. `shape:` must agree with the bracket spelling, or the two ways of saying the same
+        //    thing diverge.
+        let bracket = parse_mermaid("flowchart LR\n  A[(Store)]\n");
+        let meta = parse_mermaid("flowchart LR\n  A@{ shape: cylinder, label: \"Store\" }\n");
+        assert_eq!(
+            meta.ir.nodes[0].shape, bracket.ir.nodes[0].shape,
+            "`@{{ shape: cylinder }}` and `[(…)]` must produce the same NodeShape"
+        );
+
+        // 3. An unknown shape name must not invent a node and must not panic; the node keeps its
+        //    default shape, the way `curve` tolerates unknown names.
+        let unknown = parse_mermaid("flowchart LR\n  A@{ shape: nonesuch }\n");
+        let unknown_ids: Vec<&str> = unknown.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(unknown_ids, vec!["A"], "unknown shape invented a node");
+
+        // 4. A label containing a comma AND a colon must survive the key/value split. A naive
+        //    `split(',')` turns this into two bogus pairs and loses the tail.
+        let tricky = parse_mermaid("flowchart LR\n  A@{ label: \"one, two: three\" }\n");
+        let tricky_label = tricky.ir.nodes[0]
+            .label
+            .and_then(|id| tricky.ir.labels.get(id.0))
+            .map(|l| l.text.as_str());
+        assert_eq!(tricky_label, Some("one, two: three"));
+
+        // 1. CONTROL: a node with no metadata must be untouched, so the common line does not move.
+        let plain = parse_mermaid("flowchart LR\n  A[Plain]\n  A --> B\n");
+        let plain_ids: Vec<&str> = plain.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(plain_ids, vec!["A", "B"]);
+        assert_eq!(plain.ir.nodes[0].shape, NodeShape::Rect);
+
+        // PARTIAL, and recorded as such: the edge-id form `e1@{ animate: true }` still declares a
+        // node `e1`, because distinguishing an edge id from a node id needs an edge-id concept the
+        // IR does not have (filed separately). What this fix DOES remove is the invented display
+        // name — `e1` no longer renders as a class called "animate: true".
+        let edge_meta = parse_mermaid("flowchart TD\n  e1@{ animate: true }\n");
+        let edge_label = edge_meta.ir.nodes[0]
+            .label
+            .and_then(|id| edge_meta.ir.labels.get(id.0))
+            .map(|l| l.text.as_str());
+        assert!(
+            edge_label.is_none_or(|text| !text.contains("animate")),
+            "the directive text is still being drawn as a node name: {edge_label:?}"
         );
     }
 
