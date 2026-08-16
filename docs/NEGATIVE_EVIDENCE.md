@@ -20243,6 +20243,39 @@ not committed.**
   line 58 already sits inside `[dev-dependencies]` (which opens at line 50), confirmed by
   `cargo tree -p fm-layout --edges normal -i tracing-serde` resolving nothing.
 
+### REFINEMENT of the above: `docs_site_50` is itself retired; the floor is `sequence_20` at 380.8x (2026-08-16)
+
+Agrees with the entry below that sorting `measured_ratio` is a SELECTION hazard, and extends it. Two
+corrections, both read from the ledger and the certified summaries; no measurement was taken.
+
+- **`docs_site_50` cannot be the answer, by the ledger's own text.** The Historical-correction
+  paragraph states: "The numeric `class_50`, `doc_build_40`, `ci_batch_500`, **`docs_site_50`**, and
+  `docs_site_200` rows above are known to contain this unequal-work class surface and **are not
+  current campaign output**." Picking it as the worst VALID ratio selects a row the ledger has
+  already withdrawn.
+- **Why it was missed: prose vs per-item rows.** `measured_ratio` in the ledger is a per-INVOCATION
+  aggregate. The per-ITEM rows live in `.benchmarks/headtohead/cert-*/summary-*.json` under `rows[]`
+  with a `speedup` field, and they are where a per-workload floor actually is. Sorting the prose
+  cannot see them, which is why the CLI-lifecycle rows dominated that sort.
+- **The floor among valid per-item render rows is `sequence_20` at `380.754586x`** (`cert-v8`), and
+  it survives every check the retired rows fail:
+  - **Work proof:** `fm_bytes` 43,562 against `fm_p50_ns` 83,781 = **0.52 bytes/ns**, three orders
+    below the 512 bytes/ns per-thread ceiling. Real rendering, not a memo hit — unlike
+    `schema_catalog_25`, whose 16 ns for 662 entities `bd-bh7d` already refuted.
+  - **Gate:** `median_ci_gate` verdict `pass`, rule `null_ci95_2x_margin`, null radius 0.0402,
+    min-decidable 1.0805.
+  - **Reproduced across three independent invocations:** 329.785x (`cert-v2`), 362.426x (`cert-v3`),
+    380.755x (`cert-v8`) — same 43,562 output bytes each time.
+  - **Not on the retired list**, unlike `docs_site_50`.
+  - The ledger's own aggregate for that section states the range as **`381x - 9,486x`**, i.e. it
+    already names this row as its floor; the number simply is not reachable by sorting a
+    `measured_ratio` field.
+- **Consequence for whoever attacks it:** `sequence_20` is 20 participants and 38 labelled messages.
+  Its SVG path is already on the streaming fast path and `write_labeled_edge_fragment_into` is
+  already allocation-free, so the remaining cost is parse+layout and the next step is a phase
+  profile, not another render lever. Two ABBA attempts on it were refused by host admission
+  (493/900 and 542/900) and are recorded above.
+
 ### CORRECTION: "the worst measured ratio" cannot be found by sorting the ledger on `measured_ratio` (2026-08-16)
 
 Selecting the weakest vs-incumbent result by sorting `docs/PERF_LEDGER.md` on `measured_ratio`
