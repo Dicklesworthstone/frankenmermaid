@@ -37,7 +37,34 @@ fnx-views = { git = "https://github.com/Dicklesworthstone/franken_networkx.git",
 
 anyhow = "1.0.102"
 chumsky = { version = "0.10", default-features = false, features = ["std"] }
-clap = { version = "4.5.60", features = ["derive"] }
+# `color` is DROPPED, `suggestions` and the rest of the defaults are KEPT (bd-kpgs next lever).
+#
+# The worst certified vs-mermaid ratio in docs/PERF_LEDGER.md is 90.86x, and its own counted
+# mechanism records that every arm "started zero render workers" -- it measures CLI process
+# lifecycle, not rendering. Its profile-first attribution is dominated by one-time process setup:
+# kernel ELF/page-fault 5.87% + 5.78%, Clap value parsing 3.82%, Clap command construction 3.52%,
+# and dynamic-loader symbol lookup 2.69% + 2.51%. Three of those five are a function of how much
+# code is linked in and how large the Command tree is.
+#
+# clap's default `color` feature pulls SIX crates into the link -- anstream, anstyle-parse,
+# anstyle-query, colorchoice, is_terminal_polyfill and utf8parse -- purely to ANSI-style clap's own
+# help and error text. (`anstyle` itself stays; clap_builder depends on it directly.)
+#
+# It costs nothing here that anyone can see, because the CLI does not use it. `ColorChoice` in
+# fm-cli is the CLI's OWN enum and `diff_use_colors` decides via `std::io::IsTerminal`, so the
+# `--color` flag and every coloured diff are untouched. The only behavioural delta is that clap's
+# help and error output is no longer ANSI-styled.
+#
+# `suggestions` is deliberately RETAINED even though `strsim` is the other droppable crate: it is
+# what turns a mistyped subcommand into "did you mean", and typo help is worth a crate.
+clap = { version = "4.5.60", default-features = false, features = [
+    "std",
+    "help",
+    "usage",
+    "error-context",
+    "suggestions",
+    "derive",
+] }
 js-sys = "0.3.85"
 rustc-hash = "2.1"
 serde = { version = "1.0.228", features = ["derive"] }

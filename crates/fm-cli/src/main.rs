@@ -2229,6 +2229,67 @@ mod batch_render_cache_tests {
         assert_eq!(replay.encoded_payload_bytes, 0);
     }
 
+    /// The clap features this CLI actually needs must survive dropping `color` (bd-kpgs lever).
+    ///
+    /// The lever is `default-features = false` at the workspace root, which is a blunt instrument:
+    /// it turns off `help`, `usage`, `error-context` and `suggestions` as well, and every one of
+    /// them has to be named back. Getting that list wrong degrades the CLI silently — the binary
+    /// still builds and still parses valid input, and you only find out when a user mistypes a
+    /// subcommand and gets no help. So each retained feature is asserted through the behaviour it
+    /// exists for, not by reading the manifest.
+    ///
+    /// The `color` DROP itself is not asserted here, deliberately. clap emits no ANSI when stdout
+    /// is not a terminal, which is exactly the condition a test runs under, so a "contains no
+    /// escape codes" assertion would pass identically with the feature on and prove nothing. The
+    /// drop is evidenced by the dependency count in the commit message instead: anstream,
+    /// anstyle-parse, anstyle-query, colorchoice, is_terminal_polyfill and utf8parse leave the
+    /// link, checked with `cargo tree -i`.
+    #[test]
+    fn clap_help_usage_and_suggestions_survive_dropping_color() {
+        let render = |args: &[&str]| -> String {
+            Cli::try_parse_from(args)
+                .expect_err("these inputs are all parse failures or help requests")
+                .to_string()
+        };
+
+        // `help`: --help still renders, and still lists the subcommands.
+        let help = render(&["fm-cli", "--help"]);
+        assert!(
+            help.contains("render"),
+            "clap `help` feature lost -- --help no longer lists subcommands: {help}"
+        );
+
+        // `suggestions`: this is the discriminating control. It is the one feature a careless
+        // `default-features = false` would drop while everything else still looked fine, and it is
+        // backed by the only other crate the lever could have removed (strsim), so it is exactly
+        // the assertion that fails if someone trims the feature list further to save one more
+        // dependency.
+        let typo = render(&["fm-cli", "rendr"]);
+        assert!(
+            typo.contains("render"),
+            "clap `suggestions` feature lost -- a mistyped subcommand no longer suggests the real \
+             one: {typo}"
+        );
+
+        // `usage` + `error-context`: a bad flag names the offending argument AND prints usage,
+        // rather than failing with a bare unhelpful code.
+        let bad_flag = render(&["fm-cli", "render", "--definitely-not-a-flag", "a.mmd"]);
+        assert!(
+            bad_flag.contains("--definitely-not-a-flag"),
+            "clap `error-context` lost -- the error no longer names the bad argument: {bad_flag}"
+        );
+        assert!(
+            bad_flag.to_ascii_lowercase().contains("usage"),
+            "clap `usage` feature lost -- the error no longer prints a usage line: {bad_flag}"
+        );
+
+        // Non-vacuity: a VALID invocation must still parse. Every assertion above is on an error
+        // path, so without this the whole test would pass against a CLI that rejects everything.
+        let ok = Cli::try_parse_from(["fm-cli", "render", "a.mmd"])
+            .expect("a valid render invocation must still parse");
+        assert!(matches!(ok.command, Command::Render { .. }));
+    }
+
     #[test]
     fn resident_exact_jobs_accept_group_acknowledgments() {
         let cli = Cli::try_parse_from([
@@ -7249,6 +7310,29 @@ fn cmd_render_batch(
     Ok(())
 }
 
+/// Force the ASCII-only terminal surface for `--format ascii` (bd-t228).
+///
+/// This USED to be `if matches!(config.tier, MermaidTier::Auto) { tier = Compact }` plus a
+/// `glyph_mode` assignment, and it never worked: `term_base_config` comes from
+/// `TermRenderConfig::rich()`, whose tier is `Rich` and whose `render_mode` is `Braille`, so the
+/// guard never fired. `-f ascii` took the sub-cell path and emitted braille -- byte-identical to
+/// `-f term` and 99.4% non-ASCII, against a `--help` line promising "ASCII-only output (no Unicode
+/// box-drawing)".
+///
+/// `glyph_mode` alone cannot carry this: it feeds the cell-mode box glyphs
+/// (`BoxGlyphs`/`EdgeGlyphs`/`ClusterGlyphs`), while the canvas picks its cell painter from
+/// `render_mode` (`render_braille_cell`). All three are set here, and `render_layout` takes the
+/// cell path on either `tier == Compact` or `render_mode == CellOnly`, so neither knob alone is
+/// load-bearing.
+fn ascii_term_config(base: TermRenderConfig) -> TermRenderConfig {
+    TermRenderConfig {
+        tier: MermaidTier::Compact,
+        render_mode: fm_core::MermaidRenderMode::CellOnly,
+        glyph_mode: fm_core::MermaidGlyphMode::Ascii,
+        ..base
+    }
+}
+
 fn render_format(
     ir: &MermaidDiagramIr,
     layout: &fm_layout::DiagramLayout,
@@ -7338,11 +7422,7 @@ fn render_format(
         OutputFormat::Ascii => {
             warn_if_unknown_theme(theme, svg_base_config.theme);
             let (cols, rows) = terminal_size(width, height);
-            let mut config = term_base_config;
-            if matches!(config.tier, MermaidTier::Auto) {
-                config.tier = MermaidTier::Compact;
-            }
-            config.glyph_mode = fm_core::MermaidGlyphMode::Ascii;
+            let mut config = ascii_term_config(term_base_config);
             config.apply_degradation(&degradation);
             let result = render_term_with_layout_and_config(ir, render_layout, &config, cols, rows);
             let output = if show_minimap {
@@ -9211,6 +9291,58 @@ mod input_tests {
 
 #[cfg(test)]
 mod interactive_tests {
+    /// `--format ascii` must produce an ASCII-only surface whatever the base config is (bd-t228).
+    ///
+    /// The regression this pins: the old code only downgraded the tier `if` it was already `Auto`,
+    /// but the base is `TermRenderConfig::rich()` with tier `Rich` and render_mode `Braille`, so
+    /// the guard never fired and `-f ascii` emitted braille -- byte-identical to `-f term` and
+    /// 99.4% non-ASCII.
+    #[test]
+    fn ascii_format_forces_a_cell_mode_ascii_surface() {
+        // rich() is the ACTUAL base the CLI uses, and the one the old guard silently skipped.
+        let cfg = super::ascii_term_config(fm_render_term::TermRenderConfig::rich());
+        assert_eq!(cfg.tier, fm_core::MermaidTier::Compact, "tier was not downgraded");
+        assert_eq!(
+            cfg.render_mode,
+            fm_core::MermaidRenderMode::CellOnly,
+            "render_mode still selects a sub-cell painter"
+        );
+        assert_eq!(cfg.glyph_mode, fm_core::MermaidGlyphMode::Ascii);
+
+        // A base that was ALREADY Auto must land in the same place -- the old code's one working
+        // case must keep working.
+        let from_auto = super::ascii_term_config(fm_render_term::TermRenderConfig::default());
+        assert_eq!(from_auto.tier, fm_core::MermaidTier::Compact);
+        assert_eq!(from_auto.render_mode, fm_core::MermaidRenderMode::CellOnly);
+    }
+
+    /// The end-to-end property: that surface must emit no byte above 0x7F, and still draw.
+    ///
+    /// Asserted on the BYTES rather than on the absence of braille -- "no braille" would pass
+    /// while emitting Unicode box-drawing, which is the other half of what the flag promises.
+    #[test]
+    fn the_ascii_surface_emits_no_non_ascii_byte() {
+        let parsed = fm_parser::parse("flowchart LR\n  Alpha --> Beta\n");
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+        let cfg = super::ascii_term_config(fm_render_term::TermRenderConfig::rich());
+        let out = fm_render_term::render_term_with_layout_and_config(
+            &parsed.ir, &layout, &cfg, 80, 24,
+        );
+
+        let offending: Vec<char> = out.output.chars().filter(|c| !c.is_ascii()).collect();
+        assert!(
+            offending.is_empty(),
+            "ascii surface emitted {} non-ASCII chars, e.g. {:?}",
+            offending.len(),
+            &offending[..offending.len().min(8)]
+        );
+        // An empty canvas is ASCII-only too; the flag must still draw the diagram.
+        assert!(
+            out.output.contains("Alpha") && out.output.contains("Beta"),
+            "the ascii surface drew no labels"
+        );
+    }
+
     use super::{
         InteractiveBuffer, InteractiveSnapshot, cycle_interactive_theme, diagnostic_summary_line,
         interactive_help_line, interactive_layout, interactive_status_line,
