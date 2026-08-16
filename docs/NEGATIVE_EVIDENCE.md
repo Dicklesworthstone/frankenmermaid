@@ -20352,3 +20352,40 @@ the 10.6% mixed-script *share* is the load-bearing figure and is not sensitive t
 same regex selects both classes.
 
 **No timing is claimed.** This sizes a candidate; it does not measure one.
+
+### CORRECTION: `docs_site_50`'s work is NOT dominated by small-diagram fixed costs (2026-08-16)
+
+Two rows above I wrote that `docs_site_50` is "a profile where small-diagram fixed costs, not
+asymptotics, dominate", reasoning from the ledger's description of "right-skewed 4–60-node
+diagrams". Measured, that is wrong, and it points lever selection in the opposite direction.
+
+- **Method.** `node` over `scripts/headtohead/corpus.mjs`, generating the pinned `docs_site_50` item
+  (`gen: docs_site`, `count: 50`, `seed: 20260728`) and measuring per-diagram statement-line counts.
+  No build.
+- **Composition, 50 diagrams:** flowchart 30, sequence 6, class 5, state 5, ER 4. So the workload is
+  **60% flowchart by diagram count**, which matches the ledger's "flowchart-dominated".
+- **Size distribution is strongly right-skewed:** min 5, p25 12, **median 22**, p75 **76**, p90
+  **108**, max **118** statement lines. Total 2,126 lines, mean 42.5.
+- **The small diagrams are numerous but nearly weightless:**
+
+  | cut | diagrams | share of diagrams | share of all statement lines |
+  |---|---:|---:|---:|
+  | ≤10 lines | 10 | 20% | **3%** |
+  | ≤20 lines | 24 | 48% | **13%** |
+  | ≤30 lines | 27 | 54% | **17%** |
+
+  Half the diagrams carry an eighth of the content. **83% of the work sits in the 26 largest
+  diagrams**, in the 76–118 line range.
+
+**Consequence for lever selection.** Per-diagram fixed cost — process setup, config resolution,
+allocator warmup, per-document scaffolding — cannot be the dominant term when 48% of the diagrams
+hold 13% of the content. The target is the medium-to-large flowchart, not the tiny one. Combined
+with the recorded phase split for this shape (layout ~53%, parse ~25%, render ~20%), the next
+primitive for the worst render ratio is a **flowchart layout** lever on graphs of roughly 40–120
+statements, not a per-document fixed-cost lever and not a text-measurement micro-lever.
+
+**This also explains why bd-gl6y sized small.** It is a per-character cost on 10.6% of labels; the
+labels are spread across all diagram sizes, so it neither concentrates where the work is nor scales
+with the skew.
+
+**No timing is claimed.** This is a corpus measurement that redirects where to look, not a result.
