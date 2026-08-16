@@ -3707,6 +3707,21 @@
   Admission then refused **542 of 900 attempts** over a 560 s window at `load1` 10.53-11.69 — the
   quietest the host has been across any attempt — with `cpu19=100%`, `cpu40=100%`, `cpu54=100%`
   throughout. **Still no row, still no A/A null.**
+- **THIRD ATTEMPT (freeze lifted, 319G free) — fully clean provenance, and the harness's own
+  definitive refusal.** Tree clean at `963dc31e` with NO `-dirty` suffix for the first time; binary
+  rebuilt locally in 29.5 s with `RCH_CARGO_WRAPPER_BYPASS=1`, executable path taken from
+  `--message-format=json`; ELF sha **moved** `9e53f56d...` -> `250e4308fdb3fd3c7691651228b626e0133f8b6ec129220963cba0b757fc303e`
+  with revision `963dc31e791da6a99dc5fe04055cdabe084de259` embedded and verified; equivalence
+  regenerated for the new sha, **PASS** 1/1 equivalent
+  (`equivalence-963dc31e-1786901097763.json`). Admission then ran its FULL budget and returned its
+  own terminal verdict:
+  `HOST-WIDE EXCLUSIVITY BLOCKED before frankenmermaid-before: no clear sample in 900000ms` —
+  **900 of 900 attempts**, versus 493 and 542 in the earlier two, which my own tool timeouts had
+  truncated. Pre-flight sampling showed **15 of 64 CPUs above 20% busy**; `frankensearch_q` held
+  ~1000-1330% CPU throughout, with `cpu48`/`cpu51`/`cpu54` repeatedly at 100%.
+  **Still no row and no A/A null.** Every precondition on the frankenmermaid side is now green and
+  reproducible — clean tree, moved sha, embedded revision, passing equivalence — and the ONLY
+  remaining blocker is another project's CPU.
 - **What the two attempts together establish.** The blocker is not provenance, not equivalence, and
   not the build: all three are now green and reproducible. It is solely host contention from other
   projects, and a falling `load1` is NOT sufficient — the gate is per-CPU, and three cores pegged at
