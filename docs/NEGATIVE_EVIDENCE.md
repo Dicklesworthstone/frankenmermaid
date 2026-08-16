@@ -20060,3 +20060,26 @@ why this was measurable at all on a host with 4–11 CPUs pinned by other projec
 - **Both fixes stay on disk, uncommitted.** An uncompiled renderer change would red main, and
   hand-writing golden bytes to avoid a build is fabrication. Neither is a result and neither is
   claimed as one.
+
+### BLOCKED: no clean vs-mermaid-js timing obtainable — 56 consecutive admission refusals (2026-08-15)
+
+The campaign wants a measured speedup row. It cannot be taken honestly right now, and this records
+why rather than producing a number the gate would refuse.
+
+- **The admission gate refused 56 consecutive samples.** `node scripts/headtohead/run.mjs
+  --host-admission-only` on this host: load average 12.26, with individual CPUs pinned at
+  `cpu48=100%`, `cpu54=100%`, `cpu55=99%`, `cpu51=96%` against a **20.0% per-affinity-CPU ceiling**.
+  `power-policy=match` throughout, so the refusal is purely busyness — eight sibling projects are
+  building on this box.
+- **This is the gate working, not failing.** A wall-time ratio taken under that load is exactly the
+  measurement this repo's own ledger rules forbid, and the fleet's 13.6x cross-worker swing with
+  both A/A nulls passing is what made those rules non-negotiable. Bypassing the veto to produce a
+  number would be gate self-weakening.
+- **A counted comparison is not available as a substitute.** Instruction counting is load-immune and
+  is how this repo gates work-removal levers, but the incumbent runs inside Chromium; there is no
+  honest way to count mermaid-js instructions against ours. Counted evidence works for a self A/B,
+  not for the incumbent arm.
+- **What would produce the row:** one quiet window on this host, the pinned corpus, both arms in a
+  single invocation with its A/A null. The harness is built and the Chromium blocker (bd-8nms) is
+  fixed; only the host is missing.
+- **No number was produced and none is claimed**, in either direction.
