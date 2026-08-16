@@ -37,7 +37,8 @@ use std::sync::Arc;
 use web_time::Instant;
 
 use fm_core::{
-    DiagramType, FxHashMap, FxHashSet, GanttDate, GanttExclude, GanttTaskType, GraphDirection,
+    DiagramType, FxHashMap, FxHashSet, GanttDate, GanttExclude, GanttTaskType, GanttTickInterval,
+    GraphDirection,
     IrEndpoint, IrGanttMeta, IrNode, IrXyChartMeta, IrXySeriesKind, MermaidBudgetLedger,
     MermaidComplexity, MermaidConfig, MermaidDecisionWeight, MermaidDiagramIr, MermaidGuardReport,
     MermaidLayoutDecisionAlternative, MermaidLayoutDecisionExplanation,
@@ -6812,12 +6813,35 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         (Some(first_node), Some(raw_left)) => first_node.bounds.x - raw_left,
         _ => 0.0,
     };
-    layout.extensions.axis_ticks = (0..=total_span_days)
-        .map(|day_offset| LayoutAxisTick {
-            label: format_gantt_axis_tick(min_start_day.saturating_add(day_offset as i32)),
-            position: (day_offset as f32).mul_add(base_col_width, day_zero_x),
-        })
+    // `axisFormat`, `tickInterval` and `weekday` are read HERE and nowhere else (bd-w3pw). All
+    // three describe the axis, and the axis tick label is built in layout, not in any renderer, so
+    // this is the only place they can take effect. Until bd-trsd drew the axis at all they were
+    // unimplementable: there was no label to format and no tick row whose density to control.
+    //
+    // A tick is emitted only on an interval boundary, so `tickInterval 1month` on a year-long chart
+    // gives twelve ticks instead of three hundred and sixty five overlapping ones — the density
+    // problem is the whole reason mermaid has the directive.
+    let tick_interval = gantt_meta.tick_interval.unwrap_or(GanttTickInterval::Day);
+    // mermaid's `weekday` default is sunday, which is also the parser's encoding for 0.
+    let weekday_start = gantt_meta.weekday_start.unwrap_or(0);
+    let axis_format = gantt_meta.axis_format.as_deref();
+    let tick_at = |day: i32| LayoutAxisTick {
+        label: format_gantt_axis_label(day, axis_format),
+        position: ((day - min_start_day) as f32).mul_add(base_col_width, day_zero_x),
+    };
+    let mut axis_ticks: Vec<LayoutAxisTick> = (0..=total_span_days)
+        .map(|day_offset| min_start_day.saturating_add(day_offset as i32))
+        .filter(|&day| gantt_day_starts_interval(day, tick_interval, weekday_start))
+        .map(&tick_at)
         .collect();
+    // A short chart with a coarse interval can contain no boundary at all — `tickInterval 1month`
+    // over six days crosses no first-of-month. Falling back to the first day keeps an axis the
+    // reader can anchor on; emitting nothing would silently undo bd-trsd for exactly the documents
+    // that asked for a coarser axis.
+    if axis_ticks.is_empty() {
+        axis_ticks.push(tick_at(min_start_day));
+    }
+    layout.extensions.axis_ticks = axis_ticks;
     layout.extensions.bands = section_to_nodes
         .iter()
         .filter_map(|(section, node_indexes)| {
@@ -7375,7 +7399,12 @@ const fn is_weekend_day_number(day: i32) -> bool {
     matches!(day.rem_euclid(7), 0 | 6)
 }
 
-fn format_gantt_axis_tick(days_since_epoch: i32) -> String {
+/// Civil `(year, month, day)` from a days-since-epoch count (Howard Hinnant's `civil_from_days`).
+///
+/// Extracted from `format_gantt_axis_tick` unchanged so the tick-interval predicate and the
+/// `axisFormat` writer read the same calendar the ISO label always has. Two independent copies of
+/// this arithmetic is how an axis comes to disagree with itself about what month a tick is in.
+const fn gantt_civil_from_days(days_since_epoch: i32) -> (i32, i32, i32) {
     let z = days_since_epoch + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let day_of_era = z - era * 146_097;
@@ -7386,7 +7415,142 @@ fn format_gantt_axis_tick(days_since_epoch: i32) -> String {
     let month_prime = (5 * day_of_year + 2) / 153;
     let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
-    let year = year + i32::from(month <= 2);
+    let year = year + if month <= 2 { 1 } else { 0 };
+    (year, month, day)
+}
+
+/// Day of the week, `0` = Sunday, matching the parser's `weekday` encoding.
+///
+/// 1970-01-01 was a Thursday, hence the `+ 4`; `rem_euclid` so pre-epoch dates do not wrap
+/// negative.
+fn gantt_weekday(days_since_epoch: i32) -> u8 {
+    (days_since_epoch + 4).rem_euclid(7) as u8
+}
+
+/// Does this day begin a `tickInterval` period?
+fn gantt_day_starts_interval(
+    days_since_epoch: i32,
+    interval: GanttTickInterval,
+    weekday_start: u8,
+) -> bool {
+    let (_, month, day) = gantt_civil_from_days(days_since_epoch);
+    match interval {
+        GanttTickInterval::Day => true,
+        GanttTickInterval::Week => gantt_weekday(days_since_epoch) == weekday_start,
+        GanttTickInterval::Month => day == 1,
+        GanttTickInterval::Quarter => day == 1 && matches!(month, 1 | 4 | 7 | 10),
+        GanttTickInterval::Year => day == 1 && month == 1,
+    }
+}
+
+const GANTT_MONTH_NAMES: [(&str, &str); 12] = [
+    ("Jan", "January"),
+    ("Feb", "February"),
+    ("Mar", "March"),
+    ("Apr", "April"),
+    ("May", "May"),
+    ("Jun", "June"),
+    ("Jul", "July"),
+    ("Aug", "August"),
+    ("Sep", "September"),
+    ("Oct", "October"),
+    ("Nov", "November"),
+    ("Dec", "December"),
+];
+
+const GANTT_DAY_NAMES: [(&str, &str); 7] = [
+    ("Sun", "Sunday"),
+    ("Mon", "Monday"),
+    ("Tue", "Tuesday"),
+    ("Wed", "Wednesday"),
+    ("Thu", "Thursday"),
+    ("Fri", "Friday"),
+    ("Sat", "Saturday"),
+];
+
+/// Render one axis tick, honouring `axisFormat` when the document declared one.
+///
+/// mermaid formats gantt axis labels with d3's `timeFormat`, so the directive is a strftime-style
+/// template. Only the date specifiers can mean anything here — the IR carries whole days with no
+/// time-of-day — so `%H`/`%M`/`%S` render as `00` rather than being dropped, which keeps a template
+/// like `%d/%m %H:%M` structurally intact instead of collapsing it into something unreadable.
+///
+/// An UNKNOWN specifier is emitted verbatim, percent included. Silently swallowing it would turn a
+/// typo into a mysteriously missing piece of every label; leaving it visible points at the typo.
+fn format_gantt_axis_label(days_since_epoch: i32, axis_format: Option<&str>) -> String {
+    let Some(format) = axis_format.filter(|format| !format.is_empty()) else {
+        return format_gantt_axis_tick(days_since_epoch);
+    };
+    let (year, month, day) = gantt_civil_from_days(days_since_epoch);
+    let month_names = GANTT_MONTH_NAMES[(month.clamp(1, 12) - 1) as usize];
+    let day_names = GANTT_DAY_NAMES[gantt_weekday(days_since_epoch) as usize];
+    let day_of_year = days_since_epoch
+        - gantt_days_from_civil(year, 1, 1)
+        + 1;
+
+    let mut out = String::with_capacity(format.len() + 8);
+    let mut chars = format.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            out.push(ch);
+            continue;
+        }
+        // `%-d` / `%-m` are d3's "no zero padding" forms.
+        let mut unpadded = false;
+        let Some(mut spec) = chars.next() else {
+            out.push('%');
+            break;
+        };
+        if spec == '-' {
+            unpadded = true;
+            match chars.next() {
+                Some(next) => spec = next,
+                None => {
+                    out.push_str("%-");
+                    break;
+                }
+            }
+        }
+        match spec {
+            'Y' => out.push_str(&format!("{year:04}")),
+            'y' => out.push_str(&format!("{:02}", year.rem_euclid(100))),
+            'm' if unpadded => out.push_str(&month.to_string()),
+            'm' => out.push_str(&format!("{month:02}")),
+            'd' if unpadded => out.push_str(&day.to_string()),
+            'd' => out.push_str(&format!("{day:02}")),
+            'e' => out.push_str(&format!("{day:2}")),
+            'b' | 'h' => out.push_str(month_names.0),
+            'B' => out.push_str(month_names.1),
+            'a' => out.push_str(day_names.0),
+            'A' => out.push_str(day_names.1),
+            'j' => out.push_str(&format!("{day_of_year:03}")),
+            'H' | 'M' | 'S' => out.push_str("00"),
+            '%' => out.push('%'),
+            other => {
+                out.push('%');
+                if unpadded {
+                    out.push('-');
+                }
+                out.push(other);
+            }
+        }
+    }
+    out
+}
+
+/// Days since epoch from a civil `(year, month, day)` — the inverse of [`gantt_civil_from_days`],
+/// used only to find January 1st for `%j`.
+const fn gantt_days_from_civil(year: i32, month: i32, day: i32) -> i32 {
+    let year = year - if month <= 2 { 1 } else { 0 };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+fn format_gantt_axis_tick(days_since_epoch: i32) -> String {
+    let (year, month, day) = gantt_civil_from_days(days_since_epoch);
     // Fast path: write the fixed 10-byte `YYYY-MM-DD` directly instead of `format!`'s
     // `Formatter`/`pad_integral` zero-pad machinery — this runs once per axis-tick DAY (the entire
     // timeline span) and was ~30% of gantt layout (format_inner + fmt::write + i32 Display + pad_integral).
@@ -19346,6 +19510,183 @@ mod tests {
                 pair[1].position
             );
         }
+    }
+
+    /// Build a one-task gantt whose axis directives are set directly, so each test varies exactly
+    /// one directive against the same geometry.
+    fn gantt_axis_probe(
+        start: &str,
+        duration_days: u32,
+        axis_format: Option<&str>,
+        tick_interval: Option<fm_core::GanttTickInterval>,
+        weekday_start: Option<u8>,
+    ) -> DiagramLayout {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Gantt);
+        ir.labels.push(IrLabel {
+            text: "Work".to_string(),
+            ..IrLabel::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "a1".to_string(),
+            label: Some(IrLabelId(0)),
+            ..IrNode::default()
+        });
+        ir.gantt_meta = Some(IrGanttMeta {
+            sections: vec![IrGanttSection {
+                name: "S".to_string(),
+            }],
+            axis_format: axis_format.map(str::to_string),
+            tick_interval,
+            weekday_start,
+            tasks: vec![IrGanttTask {
+                node: IrNodeId(0),
+                section_idx: 0,
+                task_id: Some("a1".to_string()),
+                start: Some(GanttDate::Absolute(start.to_string())),
+                end: Some(GanttDate::DurationDays(duration_days)),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        layout_diagram_gantt(&ir)
+    }
+
+    fn tick_labels(layout: &DiagramLayout) -> Vec<String> {
+        layout
+            .extensions
+            .axis_ticks
+            .iter()
+            .map(|tick| tick.label.clone())
+            .collect()
+    }
+
+    /// `axisFormat` is read here or nowhere (bd-w3pw): the tick label is built in layout, not in any
+    /// renderer. Before bd-trsd drew the axis there was no label to format, so the directive could
+    /// only ever have been asserted against a struct field.
+    #[test]
+    fn gantt_axis_format_rewrites_every_tick_label() {
+        let formatted = gantt_axis_probe("2026-01-01", 3, Some("%m/%d"), None, None);
+        assert_eq!(
+            tick_labels(&formatted),
+            vec!["01/01", "01/02", "01/03"],
+            "axisFormat %m/%d must produce month/day labels"
+        );
+
+        // Control: the SAME geometry with no directive keeps the ISO label, so the assertion above
+        // is about the directive and not about some unconditional relabelling.
+        let plain = gantt_axis_probe("2026-01-01", 3, None, None, None);
+        assert_eq!(
+            tick_labels(&plain),
+            vec!["2026-01-01", "2026-01-02", "2026-01-03"],
+            "with no axisFormat the tick label must stay ISO"
+        );
+        assert_eq!(
+            formatted.extensions.axis_ticks.len(),
+            plain.extensions.axis_ticks.len(),
+            "axisFormat changes label text only, never tick density"
+        );
+        for (formatted_tick, plain_tick) in formatted
+            .extensions
+            .axis_ticks
+            .iter()
+            .zip(&plain.extensions.axis_ticks)
+        {
+            assert!(
+                (formatted_tick.position - plain_tick.position).abs() < 0.01,
+                "axisFormat must not move a tick"
+            );
+        }
+
+        // Names, and an unknown specifier surviving verbatim rather than vanishing: a swallowed
+        // typo is a mysteriously missing piece of every label with nothing to point at.
+        // A one-day task still spans two ticks: `total_span_days` has a floor of 1, so the axis
+        // always shows a measurable interval rather than a single unanchored mark.
+        assert_eq!(
+            tick_labels(&gantt_axis_probe("2026-01-01", 1, Some("%a %d %B %Y"), None, None)),
+            vec!["Thu 01 January 2026", "Fri 02 January 2026"]
+        );
+        assert_eq!(
+            tick_labels(&gantt_axis_probe("2026-01-01", 1, Some("%Y-%Q"), None, None)),
+            vec!["2026-%Q", "2026-%Q"]
+        );
+    }
+
+    /// `tickInterval` is the density directive: without it a year-long chart gets 365 overlapping
+    /// daily ticks, which is the state bd-trsd's fix shipped and the reason mermaid has the knob.
+    #[test]
+    fn gantt_tick_interval_thins_the_axis_to_period_starts() {
+        // 2026-01-01 + 90 days spans January, February and March.
+        let monthly = gantt_axis_probe(
+            "2026-01-01",
+            90,
+            None,
+            Some(fm_core::GanttTickInterval::Month),
+            None,
+        );
+        assert_eq!(
+            tick_labels(&monthly),
+            vec!["2026-01-01", "2026-02-01", "2026-03-01"],
+            "tickInterval 1month must emit one tick per month start"
+        );
+        // Positions must still be the real day offsets, not a re-spaced row: Feb 1 is 31 days in
+        // and Mar 1 is 59 (2026 is not a leap year), at 48px per day.
+        let positions: Vec<f32> = monthly
+            .extensions
+            .axis_ticks
+            .iter()
+            .map(|tick| tick.position)
+            .collect();
+        assert!(
+            (positions[1] - positions[0] - 31.0 * 48.0).abs() < 0.01
+                && (positions[2] - positions[1] - 28.0 * 48.0).abs() < 0.01,
+            "monthly ticks must sit on their real days, got {positions:?}"
+        );
+
+        // Non-vacuity: the same span with no directive is still one tick per day.
+        let daily = gantt_axis_probe("2026-01-01", 90, None, None, None);
+        assert_eq!(daily.extensions.axis_ticks.len(), 90);
+
+        // A span containing NO boundary must not lose its axis entirely — six days cross no
+        // first-of-month, and silently emitting nothing would undo bd-trsd for exactly the
+        // documents that asked for a coarser axis.
+        let too_short = gantt_axis_probe(
+            "2026-01-02",
+            5,
+            None,
+            Some(fm_core::GanttTickInterval::Month),
+            None,
+        );
+        assert_eq!(tick_labels(&too_short), vec!["2026-01-02"]);
+    }
+
+    /// `weekday` moves every week boundary, so it can only be observed through a weekly tick
+    /// interval — and it must actually move them, not merely be accepted.
+    #[test]
+    fn gantt_weekday_directive_moves_the_weekly_tick_boundaries() {
+        // 2026-01-01 is a Thursday; the probe spans 2026-01-01..2026-01-14.
+        let mondays = gantt_axis_probe(
+            "2026-01-01",
+            14,
+            None,
+            Some(fm_core::GanttTickInterval::Week),
+            Some(1),
+        );
+        assert_eq!(
+            tick_labels(&mondays),
+            vec!["2026-01-05", "2026-01-12"],
+            "weekday monday must put the weekly ticks on Mondays"
+        );
+
+        // Control: the default (sunday) over the identical span lands on different days, so the
+        // assertion above cannot be satisfied by ignoring the directive.
+        let sundays = gantt_axis_probe(
+            "2026-01-01",
+            14,
+            None,
+            Some(fm_core::GanttTickInterval::Week),
+            None,
+        );
+        assert_eq!(tick_labels(&sundays), vec!["2026-01-04", "2026-01-11"]);
     }
 
     #[test]
