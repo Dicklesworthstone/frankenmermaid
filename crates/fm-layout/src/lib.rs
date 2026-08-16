@@ -9590,7 +9590,9 @@ fn force_build_node_boxes(
 fn force_parallel_edge_offsets(ir: &MermaidDiagramIr) -> Vec<f32> {
     let mut seen: FxHashSet<(usize, usize)> = FxHashSet::default();
     seen.reserve(ir.edges.len());
-    let pair_of = |edge: &IrEdge| {
+    // `fm_core::IrEdge` is not in this module's import list (see the `use fm_core::{…}` at the top),
+    // so it is named in full here rather than widening that list for one closure.
+    let pair_of = |edge: &fm_core::IrEdge| {
         let source = endpoint_node_index(ir, edge.from).unwrap_or(usize::MAX);
         let target = endpoint_node_index(ir, edge.to).unwrap_or(usize::MAX);
         (source.min(target), source.max(target))
