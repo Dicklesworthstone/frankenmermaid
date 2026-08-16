@@ -282,6 +282,13 @@ pub fn parse_mermaid_with_detection_and_config(
     config: &ParserConfig,
 ) -> ParseResult {
     let (content, front_matter_payload) = split_front_matter_block(input);
+    // bd-ec1t: a fuzzy-matched header is a MIS-TYPED header, not a node. Detection has already
+    // decided that; without this the statement loop interns the typo as a graph node and draws it.
+    // Allocates only on the fuzzy path, which is the rare one.
+    let fuzzy_blanked = (detection.method == crate::DetectionMethod::FuzzyKeyword)
+        .then(|| blank_fuzzy_matched_header(content))
+        .flatten();
+    let content = fuzzy_blanked.as_deref().unwrap_or(content);
     let diagram_type = detection.diagram_type;
     // Capacity hint only (feeds `with_capacity_hint`'s node/edge estimates — no semantic
     // effect), so an approximate line count is fine. Count `\n` with memchr's SIMD scan: the
@@ -11182,6 +11189,41 @@ pub fn first_significant_line(input: &str) -> Option<&str> {
     })
 }
 
+/// Blank the mistyped diagram-type header so it is not interned as a graph node (bd-ec1t).
+///
+/// `flowchat LR` is a one-letter typo. Detection already recognises it: `fuzzy_diagram_type`
+/// matches it against the keyword list within the configured edit distance and emits
+/// "Fuzzy match: possible typo in diagram type declaration". But the line is not an EXACT header,
+/// so `is_flowchart_header` rejects it, the statement loop falls through to the node parser, and
+/// the user's typo becomes a box captioned `flowchat LR`. mermaid-js rejects both `flowchat LR`
+/// and an unknown header outright, so the user gets a spurious node where the incumbent gives an
+/// error.
+///
+/// This fires ONLY for `DetectionMethod::FuzzyKeyword`, which is precisely the case where the
+/// parser has already concluded that this line IS a mis-typed diagram-type declaration. A
+/// headerless diagram reaches flowchart through `ContentHeuristic` instead, and there the first
+/// line genuinely IS content — blanking it there would delete a node the user wrote.
+///
+/// The line's bytes are removed but its newline is KEPT, so every subsequent line keeps its number
+/// and the existing typo warning still points at line 1.
+fn blank_fuzzy_matched_header(content: &str) -> Option<String> {
+    let header = first_significant_line(content)?;
+    // `first_significant_line` trims, so locate the untrimmed line that contains it.
+    let mut out = String::with_capacity(content.len());
+    let mut blanked = false;
+    for line in content.split_inclusive('\n') {
+        if !blanked && trim_fast(line.trim_end_matches('\n')) == header {
+            blanked = true;
+            if line.ends_with('\n') {
+                out.push('\n');
+            }
+            continue;
+        }
+        out.push_str(line);
+    }
+    blanked.then_some(out)
+}
+
 fn is_flowchart_header(line: &str) -> bool {
     // A flowchart header is `flowchart`/`graph` (case-insensitive) at the start of the
     // already-trimmed statement, so its first byte must be one of those keywords'
@@ -15243,6 +15285,70 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(
             first("classDiagram\n  class C {\n    +getName() String\n  }\n"),
             ("getName()".to_string(), false, false, Some("String".to_string()))
+        );
+    }
+
+    /// A mistyped diagram-type header must not become a graph node (bd-ec1t).
+    ///
+    /// `flowchat LR` is a one-letter typo. Detection already flags it -- "Fuzzy match: possible
+    /// typo in diagram type declaration" -- and then the statement loop interned that same line as
+    /// a node, so the user's typo was DRAWN as a box captioned `flowchat LR`. mermaid-js rejects
+    /// the input outright, so we were inventing a node where the incumbent gives an error.
+    #[test]
+    fn a_mistyped_diagram_header_is_not_interned_as_a_node() {
+        let result = parse_mermaid("flowchat LR\n  A --> B\n  B --> C\n");
+        let ids: Vec<&str> = result.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["A", "B", "C"],
+            "the mistyped header leaked into the graph"
+        );
+
+        // The diagnosis must SURVIVE the fix: removing the phantom must not remove the warning
+        // that tells the user why their header did not take effect.
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("typo") || w.contains("Fuzzy")),
+            "the typo warning was lost with the phantom: {:?}",
+            result.warnings
+        );
+
+        // Edges must still connect the real nodes, not dangle off a phantom.
+        assert_eq!(result.ir.edges.len(), 2, "edges were lost with the header");
+    }
+
+    /// CONTROLS for bd-ec1t: neither neighbouring case may move.
+    #[test]
+    fn header_blanking_controls_are_unchanged() {
+        let ids_of = |src: &str| -> Vec<String> {
+            parse_mermaid(src)
+                .ir
+                .nodes
+                .iter()
+                .map(|n| n.id.clone())
+                .collect()
+        };
+
+        // 1. The CORRECT header was already clean and must stay clean.
+        assert_eq!(ids_of("flowchart LR\n  A --> B\n"), vec!["A", "B"]);
+
+        // 2. ⚠️ THE CASE THIS FIX MUST NOT BREAK. A headerless diagram reaches flowchart through
+        //    content heuristics, NOT fuzzy matching, and there the first line genuinely is a node.
+        //    Blanking it would delete something the user wrote. This is why the guard keys on
+        //    DetectionMethod::FuzzyKeyword rather than on "the first line is not a valid header".
+        assert_eq!(ids_of("A --> B\n  B --> C\n"), vec!["A", "B", "C"]);
+
+        // 3. A node whose id merely STARTS with a keyword is not a header and must survive.
+        assert_eq!(ids_of("flowchart LR\n  graph1[Box] --> B\n"), vec!["graph1", "B"]);
+
+        // 4. Only the FIRST significant line is treated as the header; a later typo-shaped line is
+        //    ordinary content.
+        let ids = ids_of("flowchat LR\n  A --> B\n  flowchat --> C\n");
+        assert!(
+            ids.contains(&"flowchat".to_string()),
+            "a later line must not be blanked too: {ids:?}"
         );
     }
 
