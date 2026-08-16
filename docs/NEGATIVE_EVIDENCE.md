@@ -20783,3 +20783,51 @@ record the spread" is a change to what the comparison *means*, and it should not
 person whose row it unblocks.
 
 **Observed at commit time:** loadavg 64.74 43.46 36.28; CPU min=1429 max=3930 spread=2.750x. No certification run was attempted.
+
+### CORRECTION, MEASURED: an idle-selected core does NOT leave our arm running slow (2026-08-16)
+
+The row above (bd-hmfi) listed three defects. **The second one is wrong**, and this retracts it before
+anyone voids a row on it.
+
+**The claim was:** `pickIdleCpu()` takes the least-busy core, and on per-core DVFS the least-busy
+core sits at the 1429 MHz floor, so the selection rule "actively prefers the SLOWEST clock for our
+arm". That inference was from `scaling_cur_freq` **at rest**. It does not survive measurement.
+
+**Two independent trials**, replicating the harness's selection rule then pinning a CPU-bound child
+to the chosen core exactly as `taskset -c <cpu>` does:
+
+| trial | core picked (busy) | MHz at rest | MHz while pinned work ran |
+|---|---|---:|---:|
+| 1 | cpu6 (0.0%) | 2090 | 4217–4292, mean **4282** |
+| 2 | cpu1 (0.0%) | 3433 | 4289–4292, mean **4291** |
+
+The governor ramps the core to within 0.1% of the observed host maximum (4292 MHz) inside the first
+0.5 s sample and holds it. An idle core is slow *at rest* and fast *under load*, which is what DVFS
+is for. **So the 2.7–3.0x "spread" is overwhelmingly idle-versus-busy, not fast-arm-versus-slow-arm,
+and both arms are busy while being measured.**
+
+**What survives from bd-hmfi:**
+- Only the frankenmermaid arm is pinned; `taskset` appears at exactly one site. Still true.
+- CPU frequency is recorded nowhere. Still true, and still worth fixing — the per-phase capture is
+  written and parked.
+
+**What replaces the retracted claim, and it points the opposite way.** The residual asymmetry is
+*all-core versus single-core boost*: our arm pinned to ONE core can hold single-core boost (~4292
+MHz), while Chromium spread across many cores runs at whatever the all-core sustained clock is,
+which on this part is lower. That biases in **our** favour, not against us. It is smaller than 2.7x
+and it is the opposite sign to what the original row asserted.
+
+⚠️ **Also retracted: a sibling-frequency artifact in my own probe.** An earlier sampler appeared to
+show SMT siblings at different clocks (cpu19 3093 vs cpu51 4121, same physical core). Frequency is
+per physical core, so siblings cannot differ; the gap was an averaging artifact — each core's mean
+was taken only over the samples in which *that* core exceeded 50% busy, so the two means covered
+different time windows. No sibling frequency split was observed.
+
+**Placement question, answered honestly: I still cannot say which cores each arm ran on in a
+certification run**, because none has been admissible. The probe I ran used `equivalence.mjs`,
+which pins NEITHER arm (only `run.mjs` pins), and per-core busy sampling cannot attribute cores to
+processes while 31 cores are above 50% from sibling projects. Answering it properly needs
+per-process `/proc/<pid>/stat` attribution during an admitted run.
+
+**Observed:** loadavg 12.94 17.69 25.84; host CPU min 1429 MHz, max 4292 MHz, spread 3.004x. No certification
+run attempted.
