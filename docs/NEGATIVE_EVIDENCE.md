@@ -3628,6 +3628,49 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### BLOCKED: sequence_20 re-measurement refused by host admission, 493/900 attempts (2026-08-16)
+- **Bead:** `bd-8557`. **No ratio is claimed and none was produced.** This records a fully
+  provenanced attempt that the admission gate refused, so the next agent does not repeat the setup.
+- **Why this row.** `sequence_20` is the WORST certified vs-incumbent ratio: extracting all 55 `ok`
+  rows from `.benchmarks/headtohead/cert-*/summary-*.json` gives **380.8x** (`cert-v8`, fm
+  83,781 ns vs mermaid-js 31,900,000 ns), with 362.4x and 329.8x for the same item in `cert-v3`/
+  `cert-v2`. That 380.8x IS the `381x` floor of the ledger's `381x - 9,486x` range. My working note
+  had said the worst was ER at 412.8x; that was wrong, and `bd-bh7d` had already recorded the
+  412.8x `schema_catalog_25` row as a warm-cache memo artifact. **Read the ledger, do not recall it.**
+- **Executing ELF (self-reported, built LOCALLY):**
+  `255c8bed83514628b84b6768d04a97874141c7ed746d5bdb47ebff2aff041448`, embedded revision
+  `53f319a56d7c1a6b449b5c8f932af3a12f882dd1`, built with
+  `RCH_CARGO_WRAPPER_BYPASS=1 FM_H2H_BUILD_GIT_REV=<rev> env -u CARGO_TARGET_DIR cargo build
+  --release -p frankenmermaid-cli --example headtohead` into this repo's `target/local`, 1m19s.
+  Built locally on purpose: **rch does not return the linked binary**, so anything intended for
+  MEASUREMENT must be built here. rch remains correct for check/clippy/test.
+- **Equivalence: PASS.** `sequence_20` 1/1 equivalent, 0 divergent, 0 unverified against pinned
+  mermaid-js `11.15.0` (bundle `70137e77...`), chromium `151.0.7922.108`. Artifact
+  `.benchmarks/headtohead/equivalence/equivalence-53f319a5-1786891065526.json`. The proof is keyed to
+  the ELF sha, so the earlier proof against `efa4c340...` did not carry over and had to be regenerated.
+- **Refusal.** Host-wide exclusivity gate, busy fraction <= 20.0% per CPU over 1000 ms samples:
+  **493 of 900 attempts, never admitted**, across a 560 s window. Observed throughout:
+  `cpu54=100%`, `cpu48=100%`, `cpu55=90%`, `cpu19=88.9%`; load1 16.5-19.8 on 64 logical CPUs.
+- **The load is not this project.** `ps` showed `h2h_dense.bin` at ~617% CPU, `python` at ~270% and
+  `br` at ~200% — other projects sharing `thinkstation1`. **An Agent Mail claim cannot make the host
+  exclusive**, because the projects generating the load never read the thread. The booking thread is
+  a coordination courtesy; only the CPU admission gate is proof, and it did its job by refusing. The
+  failure mode to fear is the run that ADMITS on a contended host and publishes a number.
+- **A/A null:** none exists. The gate refused before any timed phase, so there is no null, no
+  bracket, and nothing to certify. Recording the absence rather than a number is the point of this
+  entry.
+- **Tree state:** `rev=53f319a5-dirty` — three ungated files were in the working tree
+  (`fm-render-svg` sankey hoist, `fm-render-term` title + canvas-ceiling fixes). The provenance gate
+  accepted the run only once `--fm-build-base` and `--fm-builder` were supplied; a clean tree is
+  required before any row from this binary is certifiable.
+- **Retry predicate.** Re-run exactly this, no rebuild needed while the ELF sha holds, when the host
+  is quiet:
+  `node scripts/headtohead/run.mjs --only sequence_20 --fm-bin target/local/release/examples/headtohead
+  --fm-build-base <HEAD> --fm-builder local-thinkstation1 --fm-build-clean-overlay`.
+  Regenerate equivalence first if the ELF sha changes. Commit the tree clean first, or the row cannot
+  be certified regardless of admission.
+
+
 ### CORRECTION: cycle_removal is ~13µs, NOT 173µs — the "hotspot" was FM_PROFILE noise (2026-06-27)
 - Before building the cycle_removal→GraphMetrics acyclic-flag threading lever (flagged last cycle off
   a `173µs` reading), I **sub-profiled cycle_removal**: `resolved_edges` 0.4–1.7µs, `priorities`
