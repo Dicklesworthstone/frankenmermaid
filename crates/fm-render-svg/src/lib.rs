@@ -9167,7 +9167,7 @@ fn render_node(
 
         NodeShape::Circle | NodeShape::FilledCircle | NodeShape::DoubleCircle => {
             let r = w.min(h) / 2.0;
-            let mut elem = Element::circle()
+            let elem = Element::circle()
                 .cx(cx)
                 .cy(cy)
                 .r(r)
@@ -9179,11 +9179,35 @@ fn render_node(
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width_unless_embedded_css(1.6, config.embed_theme_css);
 
-            if shape == NodeShape::DoubleCircle {
-                // For double circle, we'll use a slightly smaller stroke
-                elem = elem.stroke_width(2.0);
+            if shape != NodeShape::DoubleCircle {
+                return elem;
             }
-            elem
+
+            // A double circle needs a SECOND RING, not a thicker stroke (bd-vfxu).
+            //
+            // The previous code drew one circle and nudged `stroke_width` to 2.0 to stand in for the
+            // inner ring. That was a no-op in the shipping theme, whose base node stroke already
+            // resolves to 2.0 — so `A(((Double Circle)))` and `B((Circle))` rendered byte-identical
+            // apart from their centre, and a reader could not tell the two declared shapes apart.
+            // The same shape carries a stateDiagram end state, so an end state was indistinguishable
+            // from an ordinary circular state.
+            //
+            // The inner ring is inset by a fixed 4px rather than a ratio: mermaid's own double circle
+            // keeps a constant gap, and a proportional inset would collapse to invisible on a small
+            // node and gape on a large one. It is unfilled so the outer fill (or gradient) shows
+            // through unchanged, which keeps this a purely additive change to the shape.
+            let inner_r = (r - 4.0).max(r * 0.5);
+            Element::group()
+                .child(elem)
+                .child(
+                    Element::circle()
+                        .cx(cx)
+                        .cy(cy)
+                        .r(inner_r)
+                        .fill("none")
+                        .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                        .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
+                )
         }
 
         NodeShape::HorizontalBar => Element::rect()
@@ -16959,6 +16983,52 @@ marker#arrow-open path {
     ///
     /// The two halves are asserted together because fixing only the geometry clips the text and fixing
     /// only the text leaves the bars lying.
+    /// `(((x)))` must not render identically to `((x))` (bd-vfxu).
+    ///
+    /// The double circle used to be one circle with `stroke_width(2.0)` standing in for the inner
+    /// ring — a no-op in the shipping theme, whose base node stroke already resolves to 2.0. The two
+    /// declared shapes therefore produced byte-identical geometry apart from their centre, and the
+    /// same shape carries a stateDiagram end state, so an end state looked like an ordinary circular
+    /// state.
+    ///
+    /// The control is the plain circle: it must still emit exactly ONE circle, or a fix that simply
+    /// added a ring everywhere would pass the first assertion while breaking every other node.
+    #[test]
+    fn double_circle_draws_two_rings_and_a_plain_circle_still_draws_one() {
+        let count_circles = |src: &str| -> usize {
+            let parsed = fm_parser::parse(src);
+            let svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+            svg.matches("<circle").count()
+        };
+
+        let plain = count_circles("flowchart TD\n  B((Circle))\n");
+        let double = count_circles("flowchart TD\n  A(((Double Circle)))\n");
+
+        assert_eq!(plain, 1, "a plain circle node must emit exactly one <circle>");
+        assert_eq!(
+            double, 2,
+            "a double circle must emit two concentric <circle> elements, got {double}"
+        );
+
+        // The rings must be CONCENTRIC and DISTINCT: same centre, different radius. Equal radii
+        // would satisfy the count above while still being one visible ring.
+        let parsed = fm_parser::parse("flowchart TD\n  A(((Double Circle)))\n");
+        let svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+        let radii: Vec<f32> = svg
+            .split("<circle")
+            .skip(1)
+            .filter_map(|chunk| {
+                let tag = chunk.split('>').next()?;
+                tag.split("r=\"").nth(1)?.split('"').next()?.parse().ok()
+            })
+            .collect();
+        assert_eq!(radii.len(), 2, "expected two radii, got {radii:?}");
+        assert!(
+            (radii[0] - radii[1]).abs() > 1.0,
+            "the two rings must differ by more than a hairline: {radii:?}"
+        );
+    }
+
     /// An `alt` / `opt` / `loop` / `par` frame must be drawn INSIDE the canvas (bd-zwh3).
     ///
     /// `build_sequence_fragment_geometry` anchors the frame at `-padding` and widens it by
