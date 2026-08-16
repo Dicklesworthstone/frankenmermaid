@@ -3214,6 +3214,27 @@ fn parse_class_member(trimmed: &str) -> Option<fm_core::IrClassMember> {
 /// The source cardinality is a quoted string after the left-hand class name
 /// and before the operator.  The target cardinality is a quoted string after
 /// the operator and before the right-hand class name.
+/// Exchange an edge AST's endpoints, leaving its arrow, label and everything else alone.
+///
+/// Used for class-diagram `<..`, whose meaning is its mirror image (bd-8yj9). Non-edge ASTs pass
+/// through untouched so the caller can apply this without first matching on the variant.
+fn swap_edge_endpoints(ast: FlowAst) -> FlowAst {
+    match ast {
+        FlowAst::Edge {
+            from,
+            arrow,
+            label,
+            to,
+        } => FlowAst::Edge {
+            from: to,
+            arrow,
+            label,
+            to: from,
+        },
+        other => other,
+    }
+}
+
 fn strip_class_cardinality(statement: &str) -> Option<(String, Option<String>, Option<String>)> {
     // Cardinality labels are ALWAYS quoted (`"1"`, `"*"`). A statement with no `"` therefore carries
     // no cardinality to strip — the common class relationship line (`A --> B : label`). Gate the whole
@@ -3357,11 +3378,38 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
             config,
             0,
         ) {
+            // `A <.. B` MEANS `B ..> A`, and until bd-8yj9 we drew it as the latter's mirror image.
+            //
+            // CLASS_OPERATORS gives every other reversed relation its own ArrowType — `<|--`
+            // Inheritance vs `--|>` InheritanceReverse, `o--` vs `--o`, `*--` vs `--*` — but `..>`
+            // and `<..` share ArrowType::DottedArrow. DottedArrow draws marker-END, so `A <.. B` put
+            // the arrowhead on B when mermaid-js puts it on A: a dependency pointing the wrong way,
+            // which is worse than a missing arrowhead because the diagram still looks well-formed.
+            //
+            // Swapping the endpoints here rather than adding a DottedArrowReverse variant keeps the
+            // change inside the parser: a new ArrowType would touch fm-core's enum and every
+            // exhaustive match over it, including fm-layout and all three renderers.
+            //
+            // ⚠️ THE CARDINALITIES MUST SWAP WITH THE ENDPOINTS. `strip_class_cardinality` pulls
+            // them from the LEFT and RIGHT of the operator textually, so after the endpoints swap
+            // the left-hand label belongs to the new TARGET. Moving the arrowhead while leaving the
+            // labels attached to the original ends would trade one wrong picture for another.
+            let reversed_dependency = find_operator(edge_input, &CLASS_OPERATORS, CLASS_OP_GATE)
+                .is_some_and(|(_, operator, _)| operator == "<..");
             for ast in asts {
-                statements.push(ClassStatement::Ast(ast));
+                statements.push(ClassStatement::Ast(if reversed_dependency {
+                    swap_edge_endpoints(ast)
+                } else {
+                    ast
+                }));
                 // Attach cardinality to this edge in lower_class_statement. `stripped` is `Some`
                 // only when at least one cardinality was extracted, so no is_some() re-check.
                 if let Some((_, source_card, target_card)) = &stripped {
+                    let (source_card, target_card) = if reversed_dependency {
+                        (target_card, source_card)
+                    } else {
+                        (source_card, target_card)
+                    };
                     statements.push(ClassStatement::Cardinality(
                         source_card.clone(),
                         target_card.clone(),
@@ -14317,6 +14365,70 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(
             meta.attributes[3].visibility,
             fm_core::ClassVisibility::Package
+        );
+    }
+
+    /// bd-8yj9: `A <.. B` is `B ..> A`, so its arrowhead belongs on A.
+    ///
+    /// `..>` and `<..` share ArrowType::DottedArrow, which draws marker-END, so before the fix both
+    /// operators put the arrowhead on the right-hand class and the two opposite statements were
+    /// indistinguishable in the output. A dependency pointing the wrong way is worse than a missing
+    /// one: the diagram still looks well-formed while asserting the reverse of what was written.
+    ///
+    /// The `..>` half is the CONTROL. An implementation that swapped both operators, or that swapped
+    /// nothing, fails one of these two assertions.
+    #[test]
+    fn class_reverse_dependency_points_at_the_left_hand_class() {
+        let reversed = parse_mermaid("classDiagram\n  A <.. B\n");
+        assert_eq!(reversed.ir.edges.len(), 1, "expected exactly one relation");
+        let edge = &reversed.ir.edges[0];
+        assert_eq!(edge.arrow, ArrowType::DottedArrow);
+        let endpoints = |ir: &fm_core::MermaidDiagramIr, edge: &fm_core::IrEdge| {
+            let name = |endpoint: fm_core::IrEndpoint| match endpoint {
+                fm_core::IrEndpoint::Node(id) => ir.nodes[id.0].id.clone(),
+                other => format!("{other:?}"),
+            };
+            (name(edge.from), name(edge.to))
+        };
+        assert_eq!(
+            endpoints(&reversed.ir, edge),
+            ("B".to_string(), "A".to_string()),
+            "`A <.. B` must be lowered as B -> A so the arrowhead lands on A"
+        );
+
+        // CONTROL: the forward operator must be untouched.
+        let forward = parse_mermaid("classDiagram\n  C ..> D\n");
+        let forward_edge = &forward.ir.edges[0];
+        assert_eq!(forward_edge.arrow, ArrowType::DottedArrow);
+        assert_eq!(
+            endpoints(&forward.ir, forward_edge),
+            ("C".to_string(), "D".to_string()),
+            "`C ..> D` must still point at D"
+        );
+    }
+
+    /// The endpoint swap must carry the CARDINALITIES with it (bd-8yj9).
+    ///
+    /// `strip_class_cardinality` takes the labels from the left and right of the operator
+    /// textually, so once the endpoints swap the left-hand label belongs to the new target. Moving
+    /// the arrowhead while leaving the labels on their original ends would trade one wrong picture
+    /// for another, which is why the bead demanded a fixture with cardinality on BOTH ends.
+    #[test]
+    fn class_reverse_dependency_swaps_its_cardinalities_too() {
+        let parsed = parse_mermaid("classDiagram\n  A \"1\" <.. \"many\" B\n");
+        assert_eq!(parsed.ir.edges.len(), 1);
+        let edge = &parsed.ir.edges[0];
+        // Written left-to-right the labels are A="1", B="many". After the swap the edge runs B -> A,
+        // so its SOURCE is B ("many") and its TARGET is A ("1").
+        assert_eq!(
+            edge.source_cardinality(),
+            Some("many"),
+            "source cardinality must follow the new source (B)"
+        );
+        assert_eq!(
+            edge.target_cardinality(),
+            Some("1"),
+            "target cardinality must follow the new target (A)"
         );
     }
 
