@@ -20735,3 +20735,51 @@ refusing 2,700 of 2,700 samples while load fell by 60%.
 **Not attempted:** `--allow-oversubscription`. A wall-time cross-engine ratio taken with four CPUs
 at 100% is the measurement this gate exists to refuse, and the harness cannot interleave the arms to
 compensate for drift between phases.
+
+### MEASUREMENT-INTEGRITY DEFECT: only ONE arm is pinned, and CPU frequency was never recorded (2026-08-16)
+
+Acting on the fleet-wide report of a 2.879x cross-core frequency spread. Reproduced here
+independently, and the harness turns out to have a matching structural bias.
+
+**Observed on `thinkstation1`, live:** cpu10, cpu15, cpu24, cpu27, cpu28 parked at **1429 MHz**
+while cpu34 ran at **3914 MHz** — a **2.739x** spread across cores at the same instant. The
+harness's own power-policy gate reports the hardware range as `scaling_min_khz 1429008` /
+`scaling_max_khz 4561833`, i.e. **3.19x**, so idle cores sit exactly at the floor.
+
+**Three defects, all confirmed by reading `scripts/headtohead/run.mjs`:**
+
+1. **Only the frankenmermaid arm is pinned.** `taskset` appears at exactly one site (the
+   `fmCmd`/`fmArgs` construction). The mermaid-js arm runs under Chromium unpinned and free to
+   migrate across all 64 cores.
+2. **The pinned core is chosen for IDLENESS**, by `pickIdleCpu()`, which sorts by busy fraction and
+   takes the minimum. On a per-core DVFS host the least-busy core is precisely the one parked at the
+   1429 MHz floor — so the selection rule actively prefers the slowest available clock for our arm,
+   while the unpinned incumbent runs on whatever cores its own load has already boosted.
+3. **Frequency was recorded nowhere.** `grep -c 'scaling_cur_freq|cpu_mhz|MHz'` over the driver
+   returned **0** before this change.
+
+**Why no existing gate can see it.** Busy fraction is occupancy, not speed. The host-wide quiescence
+veto bounds *how busy* cores are, not *how fast* they are clocked — and a core at 5% busy and
+1429 MHz passes it comfortably. Each engine's A/A null is measured entirely inside its own phase, at
+whatever frequency that phase ran at, so a null of 0.998891 says the arm was self-consistent, not
+that it ran at a comparable clock to the other arm.
+
+**Scope: every certified cross-engine ratio in `docs/PERF_LEDGER.md` was produced this way.** This
+is not a claim that any specific row is wrong — the bias direction depends on where Chromium
+actually ran — it is a claim that the rows carry no evidence either way, because the quantity that
+can move a ratio by up to 2.7x was never recorded.
+
+**WRITTEN AND PARKED, NOT LANDED** — ScarletMeadow holds an exclusive lease on `run.mjs` until 22:24, so the code is saved as a patch rather than committed into their file: per-phase CPU MHz capture. `cpuMhz()` reads `scaling_cur_freq` for every core;
+`cpuMhzSummary()` reduces it to cores / min / max / mean / spread_ratio plus the pinned core's own
+frequency; `phaseLoad` now carries `cpu_mhz_before` and `cpu_mhz_after` for **each phase**, so
+each arm records the clock it actually ran at rather than a host-level average that hides the
+spread. Harness self-test green (12 median-CI cases, 4 bracket cases) with the change applied, before it was parked.
+
+⚠️ **NOT FIXED, and deliberately left to an owner: making both arms run on comparable cores.**
+Pinning Chromium is not symmetric with pinning a single-threaded Rust process — a browser is
+multi-process and multi-threaded, so `taskset` on it changes its parallelism, not just its clock.
+Choosing between "pin both and accept a different Chromium execution model" and "pin neither and
+record the spread" is a change to what the comparison *means*, and it should not be made by the
+person whose row it unblocks.
+
+**Observed at commit time:** loadavg 64.74 43.46 36.28; CPU min=1429 max=3930 spread=2.750x. No certification run was attempted.
