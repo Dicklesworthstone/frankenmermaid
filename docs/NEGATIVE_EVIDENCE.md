@@ -3628,6 +3628,30 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### ATTRIBUTION: layout_golden_checksums_are_stable fails BEFORE the parser Cow work, not because of it (2026-08-16)
+- **Beads:** `bd-njyf`, `bd-ni70` (exonerated), `bd-t228` (verified). Observed loadavg 13.11 / 18.12 / 24.47.
+- `cargo test -p frankenmermaid-cli` surfaced `layout_golden_checksums_are_stable ... FAILED`
+  ("Layout golden checksum mismatches detected. Run with BLESS_LAYOUT=1 to update"). The parser had
+  just gained `normalize_identifier_cow` and four borrowing call sites, and a change to identifier
+  normalization COULD move node ids and therefore layout checksums, so the suspicion was reasonable.
+- **Tested rather than argued.** Re-ran the same golden at `be8a9031`, the commit immediately
+  preceding both parser commits: it **fails there too**. The failure predates the Cow work and is
+  not caused by it.
+- **Actual cause is elsewhere and already being handled:** three layout-affecting commits landed in
+  the same window — `45457d5e` (gantt axisFormat/tickInterval/weekday), `d522bbef` (class-diagram
+  note channel) and `9f309a48` (gantt time axis and section bands) — and
+  `crates/fm-cli/tests/golden_layout_test.rs` is currently modified in another agent's working tree,
+  consistent with a re-bless in progress. **Not touched here**; blessing another agent's goldens
+  mid-edit would destroy their work.
+- **Method note.** "My change is byte-identical by construction" is an argument, not evidence. One
+  build against a base that predates the change settles authorship in five minutes and is worth it
+  before either accepting blame or dismissing it.
+- **Also verified in the same run:** `bd-t228`'s fix, which had been swept into `9638cb5c` from an
+  uncommitted tree and never gated, PASSES —
+  `interactive_tests::ascii_format_forces_a_cell_mode_ascii_surface ... ok` and
+  `the_ascii_surface_emits_no_non_ascii_byte ... ok`. That outstanding risk on main is closed.
+
+
 ### METHODOLOGY: `target/release/frankenmermaid` is a STALE ORACLE — never refreshed by rch runs (2026-08-16)
 - **Bead:** `bd-oqfv`, retracted. **Affects any finding measured by running the local CLI.**
 - **What happened.** A P1 bead was filed claiming flowchart `title X` is interned as a phantom node
