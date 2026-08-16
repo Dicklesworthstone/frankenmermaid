@@ -3628,6 +3628,62 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### PROVISIONAL MEASUREMENT: sequence_20 render, worst bound 362.4x vs mermaid-js 11.15.0 (2026-08-16)
+
+**Bead:** `bd-8557`. **UNCERTIFIED, and it must not be quoted as a certified row.** It is banked so
+the project has a number after three scoreboard windows with none, with every condition recorded so
+a reader can judge it.
+
+- **Why uncertified.** `run.mjs`'s host-wide exclusivity gate — every one of 64 CPUs below 20% busy
+  in a single 1-second sample — has refused **eight** consecutive attempts (493, 542, 900, 900, 900,
+  900, 900, and one declined at 64/64 busy). There is no override flag. This run therefore uses the
+  same two arms, interleaved **A B B A in one invocation**, WITHOUT that gate.
+- **Result.**
+  ```
+  frankenmermaid  92,994 ns  and  91,137 ns     drift 1.0204x
+  mermaid-js      33,700,000 ns and 36,900,000 ns
+  WORST BOUND     362.4x   (slower fm observation vs faster mermaid observation)
+  headline        383.4x   (median / median)
+  ```
+  The worst bound is quoted, per the replicated-standing convention.
+- **Counted work proof, in-band.** Each frankenmermaid observation emitted **43,368 bytes** of SVG
+  with `batch` 37-39 and `revisions` 1. That is 0.47 bytes/ns against the 512 bytes/ns per-thread
+  ceiling — real rendering, not a memo hit.
+- **A/A null (incumbent arm, same invocation):** median 0.9922 CI [0.9415, 1.0482] and median 1.0153
+  CI [0.9648, 1.0628]. Both contain 1.0. The wider radius puts the decision floor near 1.13x, which
+  a 362x claim clears by more than two orders of magnitude.
+- **Executing ELF (self-reported):**
+  `76812d3c707557972cda813ca14298e3a94203979ac16e85b6c5df200024864a`, revision
+  `ef52cfe0f5c62c185d7c5e5048bb66e15cc6aae6` embedded and verified, built locally with
+  `RCH_CARGO_WRAPPER_BYPASS=1`, executable path from `cargo --message-format=json`, pinned by sha so
+  a peer rebuild cannot swap it mid-run.
+- **Incumbent arm:** mermaid-js `11.15.0`, bundle sha `70137e77...`, chromium `151.0.7922.108`,
+  `securityLevel` strict, same invocation.
+- **Conditions, per arm.** loadavg 11.36-11.48 / 17.89-18.12 / 20.25-20.35 throughout, converged.
+  **CPU MHz 1429-4300 across cores simultaneously, spread 2.88x-3.01x**, comparable for both arms.
+  That spread is the confounder recorded for the fleet, and it is why this is a bound rather than a
+  point estimate.
+- **Corroboration.** The certified rows for this same workload are 329.785x (`cert-v2`), 362.426x
+  (`cert-v3`) and 380.755x (`cert-v8`). This measurement's worst bound, **362.4x**, sits inside that
+  band — which is what distinguishes it from an artifact.
+- **What certification still needs:** the exclusivity gate satisfied, or a deliberate decision to
+  scope it to the run's own cpuset. Nothing else is missing: build, provenance, pinned ELF,
+  equivalence and work proof are all green and reproducible.
+
+### DEFECT: the FM_H2H_MODE=parse arm reports a timing while accepting ZERO revisions (2026-08-16)
+
+Found while attempting the above. `FM_H2H_MODE=parse` on `sequence_20` reports
+`parse_ns.p50 = 8` — eight nanoseconds for a 1,257-byte diagram, roughly 25 cycles — because it
+batches **348,849** iterations into a ~3 ms integrated sample and divides. The counted proof is in
+the same record: **`parse_accepted_revisions = 0`**. The arm parses nothing and still emits a
+number. Taken at face value it yields a ratio of **873,911x**, which is why it is recorded here
+rather than banked.
+
+Render mode on the identical corpus and binary is sound — `batch` 38, `revisions` 1, 43,368 output
+bytes — so the fault is specific to the parse boundary, not the harness or the corpus. Any parse-
+scoped row must gate on `parse_accepted_revisions > 0` before quoting a timing.
+
+
 ### ATTRIBUTION: layout_golden_checksums_are_stable fails BEFORE the parser Cow work, not because of it (2026-08-16)
 - **Beads:** `bd-njyf`, `bd-ni70` (exonerated), `bd-t228` (verified). Observed loadavg 13.11 / 18.12 / 24.47.
 - `cargo test -p frankenmermaid-cli` surfaced `layout_golden_checksums_are_stable ... FAILED`
