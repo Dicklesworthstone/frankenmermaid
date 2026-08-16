@@ -3745,6 +3745,16 @@
   below 20%. The gate does not want a quiet average; it wants 64 simultaneous idle cores, and on a
   host shared with `frankensearch_q`, `fp-bench`, `smartedgar` and assorted `python3` workers that
   conjunction never occurs. Five attempts now: 493, 542, 900, 900, 900.
+- **SIXTH ATTEMPT pins the threshold exactly: ONE ~5-core co-tenant is enough to block forever.**
+  Best conditions of any attempt — load average falling 27 -> 18 -> 13, only 20-24 of 64 CPUs busy
+  at launch, no peer measurement — with ELF
+  `f010c4cc8a4c3984ae30cf820532a2b926db2716f0fb277184e89a55d70e2b42` pinned as
+  `headtohead.scarletmeadow.f010c4cc`, revision `600909ad5f61915a5906f93fa794b88892881cc1`
+  embedded, clean tree, equivalence **PASS** 1/1. Result: **900/900**, blocked.
+  At its quietest the refusal line listed only **five** CPUs over 20% (`cpu16`, `cpu18`, `cpu23`,
+  `cpu51`, `cpu54`) — and it still refused, because the gate needs all 64. `frankensearch_q` alone,
+  at ~484-520% CPU, occupies roughly five cores continuously, and that is sufficient to block the
+  gate **permanently** while 59 cores sit idle. Six attempts: 493, 542, 900, 900, 900, 900.
 - **This reclassifies the blocker.** It is not "wait for a quiet moment" — waiting has been tried
   five times across a 10x range of load averages, including a deliberately chosen falling window.
   Every frankenmermaid-side input is green and reproducible, so the remaining problem is
