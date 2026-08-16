@@ -315,3 +315,39 @@ fn the_generic_title_extractor_does_not_overreach() {
         Some("First")
     );
 }
+
+/// A gantt SECTION's name must reach terminal output (bd-u3fo, renderer half).
+///
+/// The band loop in `render_subcell_mode` draws each kind's GEOMETRY -- a dashed lifeline, a
+/// section's rules, a column's separator -- and no text for any kind, while `LayoutBand` carries a
+/// `label` that fm-render-svg does draw. So a gantt section band was drawn as two bare rules with
+/// its name nowhere on the canvas.
+#[test]
+fn a_gantt_section_shows_its_name_in_terminal() {
+    let ir = fm_parser::parse(
+        "gantt\n  dateFormat YYYY-MM-DD\n  section Zulu\n  Task :a, 2026-01-01, 5d\n",
+    )
+    .ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 100, 40).output;
+    assert!(out.contains("Zulu"), "the section name is missing from terminal output");
+    assert_eq!(out.matches("Zulu").count(), 1, "the section name was drawn more than once");
+}
+
+/// CONTROL: the overlay must not invent a label or displace node text.
+#[test]
+fn band_label_overlay_does_not_invent_or_displace() {
+    // A sequence diagram's lifeline bands carry no user-facing name; participants are NODES and
+    // must still appear exactly once each.
+    let seq = fm_parser::parse("sequenceDiagram\n  Alpha->>Beta: hi\n").ir;
+    let sout = render_term_with_config(&seq, &TermRenderConfig::rich(), 100, 40).output;
+    assert_eq!(sout.matches("Alpha").count(), 1, "participant drawn more than once");
+    assert_eq!(sout.matches("Beta").count(), 1, "participant drawn more than once");
+
+    // A gantt task label must survive alongside its section name.
+    let g = fm_parser::parse(
+        "gantt\n  dateFormat YYYY-MM-DD\n  section Zulu\n  Yankee :a, 2026-01-01, 5d\n",
+    )
+    .ir;
+    let gout = render_term_with_config(&g, &TermRenderConfig::rich(), 100, 40).output;
+    assert!(gout.contains("Zulu") && gout.contains("Yankee"), "a label was overwritten");
+}

@@ -1278,6 +1278,41 @@ impl TermRenderer {
             lines.push(vec![' '; cell_width]);
         }
 
+        // Overlay BAND labels (kanban columns, gantt sections).
+        //
+        // The band loop in `render_subcell_mode` draws each kind's GEOMETRY -- a dashed lifeline, a
+        // section's rules, a column's separator -- and no text for any kind, while `LayoutBand`
+        // carries a `label` that fm-render-svg does draw. Measured: a kanban column named `Alpha`
+        // appeared in the SVG and was absent from `-f term`, with the card inside it drawn; the
+        // only node id in that diagram is the card, so the column name had no other route in.
+        //
+        // Drawing this was only made safe by the layout half of bd-u3fo. Before it, the Column
+        // band's label was `format!("column {}", rank + 1)`, so an overlay here would have printed
+        // "column 1" over the user's own name -- a placeholder rendered confidently, which is worse
+        // than a blank.
+        for band in &layout.extensions.bands {
+            if band.label.is_empty() {
+                continue;
+            }
+            let (x, y, w, _h) = self.bounds_to_cells(&band.bounds, scale_x, scale_y);
+            if w < 3 || y >= lines.len() {
+                continue;
+            }
+            // FIT the label to the band rather than dropping it. A gantt section band spans the
+            // whole chart and has room to spare; a kanban column band is one card wide, so an
+            // all-or-nothing guard silently discarded exactly the labels this fix exists to draw.
+            // The band's own width is the budget, so a label can still never spill across a
+            // neighbouring band's geometry.
+            let budget = w - 2;
+            let label: String = self.truncate_label(&band.label).chars().take(budget).collect();
+            for (offset, ch) in label.chars().enumerate() {
+                let col = x + 1 + offset;
+                if col < cell_width {
+                    lines[y][col] = ch;
+                }
+            }
+        }
+
         // Overlay node labels.
         for node_box in &layout.nodes {
             let (x, y, w, h) = self.bounds_to_cells(&node_box.bounds, scale_x, scale_y);
