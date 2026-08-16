@@ -20209,3 +20209,45 @@ not committed.**
   said fm-cli *and* fm-layout both needed this move. Only fm-cli does. `crates/fm-layout/Cargo.toml`
   line 58 already sits inside `[dev-dependencies]` (which opens at line 50), confirmed by
   `cargo tree -p fm-layout --edges normal -i tracing-serde` resolving nothing.
+
+### CORRECTION: "the worst measured ratio" cannot be found by sorting the ledger on `measured_ratio` (2026-08-16)
+
+Selecting the weakest vs-incumbent result by sorting `docs/PERF_LEDGER.md` on `measured_ratio`
+returns CLI-lifecycle rows whose candidate arm performs **no rendering at all**. Read from the
+ledger text alone; no measurement was taken to establish this.
+
+- **Six of the nine lowest rows state it themselves,** in their own `Counted mechanism`:
+  `90.86x` — "started zero render workers, and wrote zero sources or SVGs" (of *every* arm);
+  `92.99x` — "started zero workers, and wrote zero sources or SVGs";
+  `261.36x` — candidate "rendered zero revisions" against a control that rendered 73,728;
+  `423.93x` — candidate "started zero workers";
+  `451.41x` and `499.72x` — same family, snapshot ingress rather than rendering.
+- **This is a SELECTION hazard, not a false claim in the ledger.** Every one of those rows labels
+  the number `**Legacy incumbent arm (same invocation):**` and carries its real result separately as
+  a self A/B — the `90.86x` row's headline is `63.152315x`, process-per-job against one resident
+  process. The rows are honest about what they measured. What is broken is reading the
+  `measured_ratio` field as "how far ahead we render", which is exactly what "take your worst
+  measured vs-incumbent ratio" invites.
+- **Only one row's stated boundary includes rendering.** `CERTIFIED INCUMBENT RESULTS: realistic
+  whole jobs vs mermaid-js 11.15.0` (2026-07-28): "One sample consumes every source string in the
+  named job and includes parse, layout, SVG rendering, and SVG serialization."
+- **Its lowest entry is already refuted.** `schema_catalog_25` at `412.825519x` is the workload
+  **bd-bh7d** proved is a memo probe — our arm measured 16 ns for 25 diagrams totalling 662 entities
+  because the harness batches 342,682 iterations against a warm revision cache. It must not be
+  quoted, and it is not the worst valid ratio; it is not a ratio.
+
+**THE WORST VALID RENDER RATIO IS `docs_site_50` AT `434.107779x`** — 50 diagrams, 940 nodes / 902
+edges, Rust job median `5.887478 ms` against mermaid-js `2,555.800 ms`, median-CI floor `1.062796x`,
+A/A nulls `[0.991972, 1.006976]` and `[0.996270, 1.003342]` over n=30, Rust bracket `1.000767x`
+pass. It is flowchart-dominated with right-skewed 4–60-node diagrams and escaping/non-ASCII labels,
+so it is a full parse + layout + render + serialize workload.
+
+**Consequence for lever selection, which is the actionable part.** bd-akv2 (clap `color`) and
+bd-2f5y (exit teardown) attack the `90.86x` row's profile — real CLI process-lifecycle cost, and the
+self A/B they serve is valid, so neither is wasted. But they are not levers on rendering, because
+that row does not render. Work aimed at "the worst ratio we render at" belongs on `docs_site_50`:
+flowchart parse, layout and SVG serialization on 4–60-node diagrams with escaped and non-ASCII
+labels — a profile where small-diagram fixed costs, not asymptotics, dominate.
+
+**No new measurement is claimed here.** Every number above is quoted from an existing certified row;
+the only new content is which row answers the question.
