@@ -132,10 +132,10 @@
     "fuzzy_keyword_recovery": {
       "edge_count": 5,
       "layout_algorithm": "auto",
-      "layout_checksum": "28c5a74c03220a66",
-      "layout_height": 916.5,
+      "layout_checksum": "22fa9d6905006bd1",
+      "layout_height": 730.0,
       "layout_width": 509.5,
-      "node_count": 6
+      "node_count": 5
     },
     "gantt_basic": {
       "edge_count": 1,
