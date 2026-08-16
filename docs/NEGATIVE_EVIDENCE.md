@@ -20126,3 +20126,70 @@ why rather than producing a number the gate would refuse.
   single invocation with its A/A null. The harness is built and the Chromium blocker (bd-8nms) is
   fixed; only the host is missing.
 - **No number was produced and none is claimed**, in either direction.
+
+### BANKED (counted, not timed): CLI link weight, and two false signals found while counting it (2026-08-16)
+
+Counted evidence for the process-startup levers on **bd-kpgs**, whose `measured_ratio=90.86x` is the
+lowest in `docs/PERF_LEDGER.md`. That row's own counted mechanism records that every arm "started
+zero render workers, and wrote zero sources or SVGs", so it measures CLI process lifecycle rather
+than rendering, and its profile is 17% kernel ELF/page-fault (5.87 + 5.78) plus dynamic-loader
+symbol lookup (2.69 + 2.51) — both functions of how much code is linked.
+
+- **Landed, gated: clap `color` dropped (bd-akv2, `9638cb5c`).** Six crates leave the shipped link —
+  `anstream`, `anstyle-parse`, `anstyle-query`, `colorchoice`, `is_terminal_polyfill`, `utf8parse` —
+  while `strsim` (kept, backs `suggestions`) and `anstyle` (a direct `clap_builder` dependency)
+  correctly remain. Gate `cargo test -j 1 -p frankenmermaid-cli --bin frankenmermaid`, **78 passed,
+  0 failed**, rch **worker `vmi1227854`**, harness `cargo test -j 1 -p frankenmermaid-cli --bin
+  frankenmermaid`.
+- **Baseline after that change: 135 crates** in `cargo tree -p frankenmermaid-cli --edges normal`,
+  unique name+version. Per direct-dependency subtree: `tracing-subscriber` 30, `crossterm` 27,
+  `serde_yaml` 14, `clap` 11, `sha2` 9, `toml` 7, `rayon` 6, `serde_json` 5, `time` 5, `mimalloc` 2,
+  `anyhow` 1. The pre-`color` figure was never measured directly and is not claimed.
+- **`regex` is NOT linked**, so `tracing-subscriber`'s `env-filter` is not dragging the regex engine
+  in — the usual reason that dependency is heavy. Recorded so nobody re-checks.
+- **NO TIMING IS CLAIMED IN EITHER DIRECTION.** A crate count is not a speedup. It is a reason to
+  expect movement in the two profile entries that scale with binary size, and that expectation is
+  what a re-measurement would test. Re-certifying 90.86x needs the cod-lane harness on
+  `thinkstation1`, which this pane does not have; that row's retry predicate does not list
+  dependency set, so it is not automatically invalidated either.
+
+⚠️ **FALSE SIGNAL 1 — `cargo tree --edges normal -i <crate>` IGNORES THE EDGE FILTER.** Checking
+whether `tracing-serde` had left the shipped graph, the inverse query reported it **still linked**
+while the tree itself contained it **zero times** under both `--edges normal` and `--edges no-dev`,
+and correctly still present under `--edges all` for tests. The `-i` inverse search resolves against
+the full graph regardless of `--edges`, so it reports dev-only dependencies as present. **Count
+occurrences in the tree output; do not trust `-i` to answer a shipped-vs-dev question.** Every
+`-i`-based claim in this file's clap row above was cross-checked against tree output for this
+reason.
+
+⚠️ **FALSE SIGNAL 2 — A BACKGROUND-TASK WRAPPER REPORTED `exit code 0` FOR A BUILD THAT NEVER RAN.**
+See the BLOCKED row immediately below. This is the same family as the pipe-masks-exit-status trap:
+the status you read is the wrapper's, not the compiler's.
+
+### BLOCKED: bd-53p4 link-weight lever ungated — rch SSH timeout on `vmi1264463` (2026-08-16)
+
+The next lever after bd-akv2 is moving `tracing-subscriber`'s `json` feature out of fm-cli's
+`[dependencies]` and into `[dev-dependencies]`, so `tracing-serde` leaves the shipped binary while
+`crates/fm-cli/tests/debug_test.rs` — the only fm-cli caller of `.json()` — keeps it through
+dev-dependency feature unification. **It is written and metadata-verified but NOT gated, so it is
+not committed.**
+
+- **Metadata verification (no build):** shipped normal-deps **135 → 134**, and `tracing-serde` drops
+  to zero occurrences in both the `--edges normal` and `--edges no-dev` trees while remaining
+  present under `--edges all`. That is the whole mechanism: the JSON formatter and its serde bridge
+  stop being linked into the CLI.
+- **The gate did not run.** `cargo test -j 1 -p frankenmermaid-cli` on rch **worker `vmi1264463`**
+  failed with `[RCH-E104] SSH command timed out after 1800s`, local fallback refused. No test
+  executed, so there is no verdict in either direction.
+- ⚠️ **The background-task wrapper reported "completed (exit code 0)" for that run.** The failure
+  was only visible by reading the log for `[RCH-E104]` / `refusing local fallback`. A task
+  notification's exit status describes the wrapper, not the build. **Read the log, not the status.**
+- **The change is reversed out of the tree and saved as a patch**, because ungated code must not sit
+  in a shared working tree and must certainly not land. What would produce the result: one
+  successful `cargo test -j 1 -p frankenmermaid-cli` on any worker other than the one that timed
+  out. The decisive assertion is that `debug_test.rs` still compiles — if it does not, the
+  dev-dependency feature does not unify into the test target and the change is wrong, not the test.
+- ⚠️ **A correction to bd-53p4's own filing, recorded here because it changes the work:** that bead
+  said fm-cli *and* fm-layout both needed this move. Only fm-cli does. `crates/fm-layout/Cargo.toml`
+  line 58 already sits inside `[dev-dependencies]` (which opens at line 50), confirmed by
+  `cargo tree -p fm-layout --edges normal -i tracing-serde` resolving nothing.
