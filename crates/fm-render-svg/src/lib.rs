@@ -4554,6 +4554,9 @@ fn render_layout_to_svg(
         detail,
         colors: &theme.colors,
         accessible_node_labels: accessible_node_labels.as_deref(),
+        // Computed ONCE here; the per-edge helper used to recompute it, re-parsing every flow
+        // value on every edge.
+        sankey_widest_flow: sankey_widest_flow(ir),
     };
 
     // Fast path for the common case: a diagram small enough that both loops render serially AND for
@@ -11719,6 +11722,33 @@ struct EdgeRenderContext<'a> {
     detail: RenderDetailProfile,
     colors: &'a ThemeColors,
     accessible_node_labels: Option<&'a [&'a str]>,
+    /// Largest sankey flow value in the diagram, or `None` when this is not a sankey.
+    ///
+    /// Every ribbon's width is its value normalised against this ONE number, so it is invariant
+    /// across the whole render. It used to be recomputed inside the per-edge width helper, which
+    /// re-scanned `ir.edges` and re-parsed every flow value on every edge: O(E^2) float parses to
+    /// produce E widths. Computing it once with the context makes the render O(E).
+    sankey_widest_flow: Option<f32>,
+}
+
+/// Value carried by a sankey flow, which `parse_sankey` stores as the edge LABEL.
+fn sankey_flow_value(ir: &MermaidDiagramIr, edge: &fm_core::IrEdge) -> Option<f32> {
+    let text = ir.labels.get(edge.label?.0)?.text.trim();
+    let value = text.parse::<f32>().ok()?;
+    (value.is_finite() && value > 0.0).then_some(value)
+}
+
+/// Largest sankey flow in the diagram, computed ONCE per render. `None` for every other type.
+fn sankey_widest_flow(ir: &MermaidDiagramIr) -> Option<f32> {
+    if ir.diagram_type != DiagramType::Sankey {
+        return None;
+    }
+    let widest = ir
+        .edges
+        .iter()
+        .filter_map(|edge| sankey_flow_value(ir, edge))
+        .fold(0.0_f32, f32::max);
+    (widest > 0.0).then_some(widest)
 }
 
 /// Serialize a common solid-arrow edge `<path>` directly into raw SVG bytes, **byte-identical** to
@@ -12144,31 +12174,22 @@ fn write_labeled_edge_fragment_into<const A11Y: bool>(
 ///
 /// Returns `None` for anything that is not a numeric sankey flow, so every other diagram type and
 /// any malformed row keeps the arrow-derived width exactly as before.
-fn sankey_flow_stroke_width(ir: &MermaidDiagramIr, edge: Option<&fm_core::IrEdge>) -> Option<f32> {
+fn sankey_flow_stroke_width(
+    ir: &MermaidDiagramIr,
+    edge: Option<&fm_core::IrEdge>,
+    widest: Option<f32>,
+) -> Option<f32> {
     /// Keeps the smallest flow visible instead of collapsing it to a hairline.
     const MIN_WIDTH: f32 = 1.5;
     /// Width of the largest flow; every other flow is scaled against it.
     const MAX_WIDTH: f32 = 24.0;
 
-    if ir.diagram_type != DiagramType::Sankey {
-        return None;
-    }
-
-    // `parse_sankey` stores the flow amount as the edge LABEL, so that is where the quantity is.
-    let value_of = |candidate: &fm_core::IrEdge| -> Option<f32> {
-        let text = ir.labels.get(candidate.label?.0)?.text.trim();
-        let value = text.parse::<f32>().ok()?;
-        (value.is_finite() && value > 0.0).then_some(value)
-    };
-
-    let value = value_of(edge?)?;
+    // `widest` is `None` for every non-sankey diagram and for a sankey with no usable flow, so it
+    // subsumes the old `diagram_type` guard AND the old `widest <= 0.0` bail.
+    let widest = widest?;
+    let value = sankey_flow_value(ir, edge?)?;
     // Normalise against the widest flow so the ratio between two ribbons equals the ratio between
     // their values — the property a reader actually reads off the picture.
-    let widest = ir.edges.iter().filter_map(value_of).fold(0.0_f32, f32::max);
-    if widest <= 0.0 {
-        return None;
-    }
-
     Some(((value / widest) * MAX_WIDTH).max(MIN_WIDTH))
 }
 
@@ -12183,6 +12204,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         detail,
         colors,
         accessible_node_labels,
+        sankey_widest_flow: sankey_widest,
     } = *context;
 
     let edge_index = edge_path.edge_index;
@@ -12328,7 +12350,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         }
     };
 
-    let stroke_width = sankey_flow_stroke_width(ir, ir_edge).unwrap_or(match arrow {
+    let stroke_width = sankey_flow_stroke_width(ir, ir_edge, sankey_widest).unwrap_or(match arrow {
         ArrowType::ThickArrow | ArrowType::DoubleThickArrow | ArrowType::ThickLine => 2.5,
         _ => 1.8,
     });
@@ -12690,6 +12712,7 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
         detail,
         colors,
         accessible_node_labels,
+        sankey_widest_flow: sankey_widest,
     } = *context;
     let edge_index = edge_path.edge_index;
     let ir_edge = ir.edges.get(edge_index);
@@ -12730,7 +12753,7 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
         // A sankey flow's WIDTH is its value (bd-e69x). This labeled-edge fast path is the one
         // sankey actually takes — its edges always carry a label, because the parser stores the
         // flow amount there — so the width must be resolved here, not only after the arrow match.
-        let labeled_stroke_width = sankey_flow_stroke_width(ir, ir_edge).unwrap_or(1.8);
+        let labeled_stroke_width = sankey_flow_stroke_width(ir, ir_edge, sankey_widest).unwrap_or(1.8);
         if !label_str.contains('\n') && resolve_edge_inline_style(ir, edge_index).is_none() {
             let path_str = smooth_layout_edge_path(edge_path, offset_x, offset_y);
             if a11y {
@@ -13073,7 +13096,7 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
     // every flow drew identically and the diagram conveyed nothing (bd-e69x). Applied here, after
     // the arrow match, so it overrides whichever arm ran and leaves every other diagram type on
     // exactly the width it had before.
-    let stroke_width = sankey_flow_stroke_width(ir, ir_edge).unwrap_or(stroke_width);
+    let stroke_width = sankey_flow_stroke_width(ir, ir_edge, sankey_widest).unwrap_or(stroke_width);
     // Was `text_alternatives && aria_labels && keyboard_nav`. The fragment writer now has a lean
     // (a11y-off) shape too, so the gate accepts a11y that is uniformly on OR uniformly off and dispatches
     // to the matching monomorphization. Mixed combinations (e.g. `A11yConfig::minimal()`) still take the
@@ -14222,6 +14245,7 @@ mod tests {
                 detail,
                 colors: &colors,
                 accessible_node_labels: None,
+                sankey_widest_flow: sankey_widest_flow(&ir),
             };
 
             let mut streamed = String::new();
@@ -14297,6 +14321,7 @@ mod tests {
                 detail,
                 colors: &colors,
                 accessible_node_labels: None,
+                sankey_widest_flow: sankey_widest_flow(&ir),
             };
 
             let mut streamed = String::new();
@@ -14398,6 +14423,7 @@ mod tests {
                 detail,
                 colors: &colors,
                 accessible_node_labels: None,
+                sankey_widest_flow: sankey_widest_flow(&ir),
             };
 
             let mut streamed = String::new();
@@ -14570,6 +14596,7 @@ mod tests {
             detail,
             colors: &colors,
             accessible_node_labels: None,
+            sankey_widest_flow: sankey_widest_flow(&ir),
         };
 
         let mut streamed = String::new();
@@ -19294,6 +19321,110 @@ marker#arrow-open path {
             "timeline",
             1,
         );
+    }
+
+    /// Ribbon widths are proportional to flow value, and stay so after hoisting the normaliser.
+    ///
+    /// `sankey_flow_stroke_width` used to recompute the widest flow ON EVERY EDGE, re-scanning
+    /// `ir.edges` and re-parsing each flow value: O(E^2) float parses to produce E widths. The
+    /// widest flow is invariant across a render, so it now rides on `EdgeRenderContext`.
+    ///
+    /// This is a pure hoist, so the contract is that the OUTPUT does not move. The expected widths
+    /// are written from the formula (`value / widest * 24`, floored at 1.5) rather than copied from
+    /// a run, so the test fails if the hoist changed the arithmetic as well as where it happens.
+    #[test]
+    fn sankey_ribbon_widths_are_proportional_to_flow_value() {
+        let svg = render_source("sankey-beta\n\nA,B,100\nA,C,50\nA,D,10\n");
+        let widths = path_stroke_widths(&svg);
+
+        // widest = 100 -> 24.0; 50 -> 12.0; 10 -> 2.4
+        assert!(
+            widths.contains(&"24".to_string()),
+            "the widest flow must get the full ribbon width; got {widths:?}"
+        );
+        assert!(
+            widths.contains(&"12".to_string()),
+            "a half-size flow must get half the width; got {widths:?}"
+        );
+        assert!(
+            widths.contains(&"2.40".to_string()),
+            "a tenth-size flow must get a tenth of the width; got {widths:?}"
+        );
+    }
+
+    /// The smallest flow is floored so it stays visible rather than collapsing to a hairline.
+    #[test]
+    fn a_tiny_sankey_flow_is_floored_not_hairline() {
+        let svg = render_source("sankey-beta\n\nA,B,1000\nA,C,1\n");
+        let widths = path_stroke_widths(&svg);
+        // 1/1000 * 24 = 0.024, below the 1.5 floor.
+        assert!(
+            widths.contains(&"1.50".to_string()),
+            "the smallest flow must clamp to the 1.5 floor; got {widths:?}"
+        );
+        assert!(
+            !widths.iter().any(|w| w.parse::<f32>().is_ok_and(|v| v > 0.0 && v < 1.5)),
+            "no RIBBON may be thinner than the 1.5 floor; got {widths:?}"
+        );
+    }
+
+    /// CONTROL: a diagram that is NOT a sankey must be completely unaffected by the hoist.
+    ///
+    /// The old helper bailed on `diagram_type != Sankey`; the new one bails because
+    /// `sankey_widest_flow` returns `None`. This pins that the two bail conditions agree, which is
+    /// the only way the hoist could have changed a non-sankey render.
+    #[test]
+    fn non_sankey_edge_widths_are_unchanged_by_the_hoist() {
+        let flow = render_source("flowchart LR\n  A --> B\n  B --> C\n");
+        let widths = path_stroke_widths(&flow);
+        assert!(
+            !widths.is_empty(),
+            "the control must actually observe some edge widths, or it proves nothing"
+        );
+        assert!(
+            !widths.contains(&"24".to_string()),
+            "a flowchart edge must never pick up a sankey ribbon width; got {widths:?}"
+        );
+    }
+
+    /// CONTROL: a sankey whose flows are not numbers must fall back, not divide by zero.
+    ///
+    /// `sankey_widest_flow` returns `None` when no edge carries a usable value, which is the
+    /// replacement for the old `widest <= 0.0` bail. Without it this would be `value / 0.0`.
+    #[test]
+    fn a_sankey_with_no_usable_flow_values_falls_back() {
+        let svg = render_source("sankey-beta\n\nA,B,notanumber\n");
+        let widths = path_stroke_widths(&svg);
+        assert!(
+            !widths.iter().any(|w| w.contains("NaN") || w.contains("inf")),
+            "a non-numeric flow must not produce a non-finite width; got {widths:?}"
+        );
+    }
+
+    fn render_source(src: &str) -> String {
+        let parsed = fm_parser::parse(src);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+        render_svg_with_layout(&parsed.ir, &layout, &SvgRenderConfig::default())
+    }
+
+    /// stroke-width of every `<path>` only.
+    ///
+    /// ⚠️ Deliberately NOT every stroke-width in the document. Node rects carry 0.75 and 1, which
+    /// are legitimately below the 1.5 ribbon floor — judging those against it would fail on
+    /// correct output. The ribbons are paths.
+    fn path_stroke_widths(svg: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for tag in svg.split("<path").skip(1) {
+            let Some(end_of_tag) = tag.find('>') else { continue };
+            let head = &tag[..end_of_tag];
+            if let Some(at) = head.find("stroke-width=\"") {
+                let rest = &head[at + 14..];
+                if let Some(end) = rest.find('"') {
+                    out.push(rest[..end].to_string());
+                }
+            }
+        }
+        out
     }
 
     #[test]
