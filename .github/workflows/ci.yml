@@ -243,6 +243,25 @@ jobs:
           echo "linting docs/NEGATIVE_EVIDENCE.md and docs/PERF_LEDGER.md against $BASE"
           node scripts/ledger_preflight.mjs --lint --base "$BASE"
 
+      # The gates were themselves ungated. Every rule above — the ELF self-report, the result class,
+      # the pinned same-invocation incumbent arm, and the measurement-host/harness provenance added
+      # after the fleet's 13.6x cross-worker and ~2x cross-harness findings — lives in
+      # ledger_preflight.mjs, and nothing in CI ever ran its self-test. The same was true of the
+      # cross-engine equivalence oracle, which decides whether a render is allowed to be called
+      # equivalent at all: its mutation and negative controls ran only when someone remembered to
+      # run them by hand.
+      #
+      # These are node-only and take seconds. `set -euo pipefail` matters here for the same reason
+      # it does in the invariant-proof step (bd-7l56): without it a failing self-test in a pipeline
+      # reports the last command's status.
+      - name: The evidence gates must pass their own self-tests
+        run: |
+          set -euo pipefail
+          node scripts/ledger_preflight.mjs --self-test
+          node scripts/headtohead/svg_equivalence.mjs --self-test
+          node scripts/headtohead/mermaid_bench.mjs --self-test
+          node scripts/headtohead/run.mjs --self-test
+
   golden-checksum-guard:
     name: Golden Checksum Guard
     needs: quality-gate-config
