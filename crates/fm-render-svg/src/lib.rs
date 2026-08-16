@@ -9197,6 +9197,18 @@ fn render_node(
             // node and gape on a large one. It is unfilled so the outer fill (or gradient) shows
             // through unchanged, which keeps this a purely additive change to the shape.
             let inner_r = (r - 4.0).max(r * 0.5);
+
+            // The inner disc is FILLED for a state diagram's terminal pseudo-state and hollow
+            // everywhere else (bd-wbxc). mermaid draws a state `[*]` end as a ring around a solid
+            // dot, while a flowchart `(((x)))` is two hollow rings — one NodeShape carries both, so
+            // the fill is decided by the diagram it belongs to rather than by the shape. Without it
+            // the end state showed a target symbol where the incumbent shows a bullseye, which was
+            // the surviving half of bd-vfxu.
+            let inner_fill = if ir.diagram_type == fm_core::DiagramType::State {
+                colors.node_stroke.as_str()
+            } else {
+                "none"
+            };
             Element::group()
                 .child(elem)
                 .child(
@@ -9204,7 +9216,7 @@ fn render_node(
                         .cx(cx)
                         .cy(cy)
                         .r(inner_r)
-                        .fill("none")
+                        .fill(inner_fill)
                         .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                         .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
                 )
@@ -17044,6 +17056,46 @@ marker#arrow-open path {
         assert!(
             (radii[0] - radii[1]).abs() > 1.0,
             "the two rings must differ by more than a hairline: {radii:?}"
+        );
+    }
+
+    /// A state `[*]` end is a ring around a FILLED dot; a flowchart `(((x)))` is two hollow rings
+    /// (bd-wbxc).
+    ///
+    /// One NodeShape::DoubleCircle carries both, so the inner fill is decided by the diagram rather
+    /// than by the shape. The flowchart half is the control: filling the inner disc unconditionally
+    /// would satisfy the state assertion while turning every flowchart double circle into a
+    /// bullseye.
+    #[test]
+    fn double_circle_inner_disc_is_filled_only_for_a_state_terminal() {
+        let inner_fills = |src: &str| -> Vec<String> {
+            let parsed = fm_parser::parse(src);
+            let svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+            svg.split("<circle")
+                .skip(1)
+                .filter_map(|chunk| {
+                    let tag = chunk.split('>').next()?;
+                    let fill = tag.split("fill=\"").nth(1)?.split('"').next()?;
+                    Some(fill.to_string())
+                })
+                .collect()
+        };
+
+        let state = inner_fills("stateDiagram-v2\n  [*] --> Idle\n  Idle --> [*]\n");
+        assert!(
+            state.iter().any(|fill| fill != "none" && !fill.is_empty()),
+            "a state terminal must have a filled inner disc, got {state:?}"
+        );
+
+        let flow = inner_fills("flowchart TD\n  A(((Double)))\n");
+        assert_eq!(
+            flow.len(),
+            2,
+            "a flowchart double circle must emit two circles, got {flow:?}"
+        );
+        assert!(
+            flow.iter().any(|fill| fill == "none"),
+            "a flowchart double circle must keep its inner ring hollow, got {flow:?}"
         );
     }
 
