@@ -599,7 +599,16 @@ fn flow_statement_parser<'a>()
 
     // -- Node shapes ---------------------------------------------------------
     // Multi-char delimiters must be tried before single-char ones.
-    let double_circle_content = just("((")
+    // `(((x)))` is the DOUBLE circle and `((x))` is the plain circle. This rule used to match `((`
+    // and call the result `DoubleCircle`, with no `(((` rule at all — so both syntaxes collapsed
+    // into one shape before rendering, which is why a double circle and a circle came out
+    // geometrically identical (bd-vfxu). Order matters as much as the patterns: `(((` must be tried
+    // first or the `((` rule matches its opening pair and leaves a stray `)` in the label.
+    let double_circle_content = just("(((")
+        .ignore_then(any().and_is(just(")))").not()).repeated().to_slice())
+        .then_ignore(just(")))"));
+
+    let circle_content = just("((")
         .ignore_then(any().and_is(just("))").not()).repeated().to_slice())
         .then_ignore(just("))"));
 
@@ -654,6 +663,7 @@ fn flow_statement_parser<'a>()
 
     let node_shape = choice((
         double_circle_content.map(|label: &str| (label, NodeShape::DoubleCircle)),
+        circle_content.map(|label: &str| (label, NodeShape::Circle)),
         hexagon_content.map(|label: &str| (label, NodeShape::Hexagon)),
         stadium_content.map(|label: &str| (label, NodeShape::Stadium)),
         cylinder_content.map(|label: &str| (label, NodeShape::Cylinder)),
