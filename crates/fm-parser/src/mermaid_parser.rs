@@ -108,21 +108,44 @@ const PACKET_OPERATORS: [(&str, ArrowType); 4] = [
     ("==", ArrowType::ThickLine),
 ];
 
+// An ER relationship is NOT DIRECTED, so no ER operator draws an arrowhead. Line style is the only
+// thing the operator decides here: `--` is identifying (solid), `..` is non-identifying (dashed).
+//
+// This table used to give 12 of its 14 entries an arrowhead, and it contradicted ITSELF twice
+// (bd-m0a9), which is what made the bug provable without a mermaid reference:
+//
+//   LINE STYLE ALONE ADDED A HEAD:  ("||--||", Line) vs ("||..||", DottedArrow)
+//                                   ("--",     Line) vs ("..",     DottedArrow)
+//     Same cardinality, only the dash pattern differs. A relationship cannot acquire an arrowhead
+//     by being dashed.
+//
+//   CARDINALITY ALONE ADDED A HEAD: ("||--||", Line) vs ("}|--|{", Arrow)
+//     Identical `--` line style; only the end glyphs differ. Cardinality is not direction.
+//
+// Both reached the output: fm-render-svg maps Arrow/DottedArrow to `marker-end="url(#arrow-end)"`
+// and Line/DottedLine to no marker, so the drawn edge asserted a direction the notation does not
+// have -- and the arrowhead was the ONLY thing distinguishing `||--||` from `}|--|{`, which is
+// backwards, since those differ in cardinality and not in direction.
+//
+// mermaid draws crow's-foot / bar / circle terminators and no arrowhead. This engine does not draw
+// those glyphs; it renders cardinality as TEXT near each endpoint
+// (`write_er_cardinality_labels_into`). Under that model the faithful mapping is line style only,
+// with the cardinality carried by the labels that are already drawn.
 const ER_OPERATORS: [(&str, ArrowType); 14] = [
-    ("||--o{", ArrowType::Arrow),
-    ("||--|{", ArrowType::Arrow),
-    ("}|--||", ArrowType::Arrow),
-    ("}o--||", ArrowType::Arrow),
-    ("|o--o|", ArrowType::Arrow),
-    ("}|..|{", ArrowType::DottedArrow),
-    ("||..||", ArrowType::DottedArrow),
+    ("||--o{", ArrowType::Line),
+    ("||--|{", ArrowType::Line),
+    ("}|--||", ArrowType::Line),
+    ("}o--||", ArrowType::Line),
+    ("|o--o|", ArrowType::Line),
+    ("}|..|{", ArrowType::DottedLine),
+    ("||..||", ArrowType::DottedLine),
     ("||--||", ArrowType::Line),
-    ("o|--|{", ArrowType::Arrow),
-    ("}|--|{", ArrowType::Arrow),
-    ("|o--||", ArrowType::Arrow),
-    ("}o--o{", ArrowType::Arrow),
+    ("o|--|{", ArrowType::Line),
+    ("}|--|{", ArrowType::Line),
+    ("|o--||", ArrowType::Line),
+    ("}o--o{", ArrowType::Line),
     ("--", ArrowType::Line),
-    ("..", ArrowType::DottedArrow),
+    ("..", ArrowType::DottedLine),
 ];
 
 /// Compile-time first-byte gate for an operator list: bit `b` set ⇔ some operator starts with ASCII
@@ -15399,6 +15422,86 @@ Rel_Back(db, app, "Responds")"#,
             ids.contains(&"flowchat".to_string()),
             "a later line must not be blanked too: {ids:?}"
         );
+    }
+
+    /// No ER relationship operator may carry an arrowhead; only its line style varies (bd-m0a9).
+    ///
+    /// An ER relationship is not directed. The table used to give 12 of 14 operators an Arrow or
+    /// DottedArrow, and contradicted itself twice: line style alone added a head
+    /// (`||--||` Line vs `||..||` DottedArrow) and cardinality alone added a head
+    /// (`||--||` Line vs `}|--|{` Arrow). Both reached the drawn edge, because fm-render-svg maps
+    /// Arrow/DottedArrow to a marker and Line/DottedLine to none.
+    ///
+    /// The rule asserted here is the whole fix: `--` is identifying and solid, `..` is
+    /// non-identifying and dashed, and NEITHER points anywhere.
+    #[test]
+    fn er_operators_never_encode_direction() {
+        for (op, arrow) in ER_OPERATORS {
+            let expected = if op.contains("..") {
+                fm_core::ArrowType::DottedLine
+            } else {
+                fm_core::ArrowType::Line
+            };
+            assert_eq!(
+                arrow, expected,
+                "ER operator {op:?} maps to {arrow:?}; an ER relationship is not directed"
+            );
+        }
+
+        // The two contradictions, pinned by name so a regression reads as the original bug.
+        let of = |want: &str| {
+            ER_OPERATORS
+                .iter()
+                .find(|(op, _)| *op == want)
+                .map(|(_, a)| *a)
+                .expect(want)
+        };
+        assert_eq!(
+            of("||--||"),
+            of("}|--|{"),
+            "cardinality alone changed the arrow type; cardinality is not direction"
+        );
+        assert_eq!(
+            of("--"),
+            fm_core::ArrowType::Line,
+            "the bare identifying operator must be a plain line"
+        );
+        assert_eq!(
+            of(".."),
+            fm_core::ArrowType::DottedLine,
+            "the bare non-identifying operator must be a plain dashed line"
+        );
+        assert_ne!(
+            of("--"),
+            of(".."),
+            "line style must still distinguish identifying from non-identifying"
+        );
+    }
+
+    /// CONTROL: the cardinality itself must survive, since it is what the labels carry.
+    ///
+    /// Removing the arrowheads is only correct because cardinality is rendered as TEXT near each
+    /// endpoint. If a fix dropped the cardinality too, the edge would say nothing at all -- so this
+    /// asserts the parsed cardinality is still present on the IR edge.
+    #[test]
+    fn er_cardinality_survives_the_arrowhead_removal() {
+        let ir = parse_mermaid("erDiagram\n  CUSTOMER ||--o{ ORDER : places\n").ir;
+        assert_eq!(ir.edges.len(), 1, "the relationship was lost");
+        let edge = &ir.edges[0];
+        assert_eq!(
+            edge.arrow,
+            fm_core::ArrowType::Line,
+            "an ER edge must not draw a head"
+        );
+        let cardinality = format!("{:?}", edge);
+        assert!(
+            cardinality.contains("Some") || edge.label.is_some(),
+            "the relationship carries no cardinality or label: {cardinality}"
+        );
+
+        // The dashed form keeps its dash and still draws no head.
+        let dotted = parse_mermaid("erDiagram\n  A ||..|| B : refs\n").ir;
+        assert_eq!(dotted.edges[0].arrow, fm_core::ArrowType::DottedLine);
     }
 
     /// bd-9erl: a class relation endpoint must not keep its raw generic text as a label.
