@@ -3733,6 +3733,23 @@
   `smartedgar`, a `python3` at 4269%), which is real — but part of the blocking was self-inflicted
   at the project level and is ours to fix. **Measurement needs the same one-at-a-time discipline as
   the build slot, announced and released in Agent Mail.**
+- **FIX ADOPTED for the shared-path hazard: pin a sha-stamped copy and measure THAT.** Build
+  normally, take the executable from `cargo --message-format=json`, verify the embedded revision,
+  then `cp` it to `<exe>.<agent>.<sha8>` and pass the copy to `--fm-bin`. A peer rebuilding the
+  shared `target/local/release/examples/headtohead` can then no longer change what is executing
+  mid-run. Costs one file, not a second target tree. Current pin:
+  `headtohead.scarletmeadow.fb08c75b`, sha
+  `fb08c75b7a277444cd946f75454a9632d27c2f9657c7737f90a5e4e2a60c9081`, revision
+  `330a87521933ad2fea23830d19ae3f4236ed99cd` embedded and verified, equivalence **PASS** 1/1
+  (`equivalence-330a8752-1786904254013.json`), tree clean with no `-dirty` suffix.
+- **FIFTH ATTEMPT NOT STARTED, deliberately.** Three consecutive samples showed **64 of 64 CPUs
+  above 20% busy** with load average **99.37 and rising** (99.37 / 82.86 / 66.37), driven by
+  external `python3` (~2400%), `fp-bench` (~1486%) and `frankensearch_q`. The measurement spec's
+  own precondition is per-CPU quiescence, so starting would have been a guaranteed fifth refusal
+  costing another 15 minutes of a contended host. **The refusals are now fully characterised and
+  the remaining work is scheduling, not method** — every frankenmermaid-side input is staged and
+  verified, and the run is a single command whenever the host clears.
+
 - ⚠️⚠️ **WE ALSO SHARE ONE `--fm-bin` PATH, so the ELF you verify is not necessarily the ELF you
   measure.** Both agents build into `target/local/release/examples/headtohead`. Tracked by sha
   (mtime on this host is skewed ~4h and is useless): I built `615538033722d3b8...` at `9e47ca5b`,
