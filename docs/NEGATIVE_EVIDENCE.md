@@ -20635,3 +20635,52 @@ exist to refuse, and the harness cannot interleave the arms to compensate.
 **Unchanged and still the only piece of the requested row that exists:** our arm's A/A null,
 `0.998891`, CI `[0.987375, 1.014245]`, from the equivalence pass. The incumbent reports
 `null=missing` by construction.
+
+### DIAGNOSED: `docs_site_50` admission is blocked by ~4 permanently-pinned CPUs, not by fleet load (2026-08-16)
+
+Third full admission window spent on the worst valid render ratio. Refused again — **no ratio, none
+claimed** — but three windows now give a trend, and the trend identifies the actual obstacle.
+
+Provenance re-verified at `600909ad`, clean tree: ELF SHA-256
+**`f010c4cc8a4c3984ae30cf820532a2b926db2716f0fb277184e89a55d70e2b42`**, path from
+`--message-format=json`; equivalence **PASS 50/50, 0 divergent, 0 unverified, er=4/4**.
+
+**The binding metric across three windows** (CPUs over the 20% ceiling in the *best* of 900 samples):
+
+| window | load1 | best sample | quietest per-sample max |
+|---|---:|---:|---:|
+| first | 50.12 | — (all samples at reporting cap) | — |
+| second | 25.11 | **8** CPUs over, at 95–100% | 61% |
+| third | 20.25 | **4** CPUs over, at 100% | 62% |
+
+Halving load again (25.11 → 20.25) halved the over-ceiling count (8 → 4) — but the *quietest
+maximum barely moved*, 61% → 62%, and the four survivors sit at a flat 100%.
+
+**The obstacle is a small set of continuously saturated CPUs, and they are nameable.** Frequency of
+appearance in the over-ceiling list across 900 samples:
+
+```
+cpu54 699/900   cpu48 661/900   cpu51 591/900   cpu55 499/900
+cpu23 450/900   cpu40 425/900   cpu8  411/900   cpu19 408/900
+```
+
+`cpu48`, `cpu51`, `cpu54`, `cpu55` are busy in the majority of samples and clustered in one narrow
+range, which is the signature of a single long-running job pinned to an affinity set rather than of
+diffuse fleet activity. General load can fall to 20 and those four stay at 100%.
+
+**Why this matters for the rule, not just for this row.** The gate requires all 64 affinity CPUs
+under 20% simultaneously. If four CPUs are held at 100% by one continuous job, that conjunction is
+unsatisfiable no matter how quiet everything else becomes — which is consistent with three windows
+refusing 2,700 of 2,700 samples while load fell by 60%.
+
+**Two decisions this surfaces, both for an owner rather than for me:**
+1. Whether the measurement's affinity set should exclude CPUs held by a known long-running job, so
+   "host-wide quiescence" means the CPUs the measurement can actually use. That is a change to what
+   the gate asserts and must not be made by the person whose row it unblocks.
+2. Whether cross-engine rows on a shared box should be scheduled against a `trj` exclusive booking
+   (`--exclusive-host-claim`) rather than attempted opportunistically. The harness already expects
+   that form for `--mode parse` and `--thread-sweep`.
+
+**Not attempted:** `--allow-oversubscription`. A wall-time cross-engine ratio taken with four CPUs
+at 100% is the measurement this gate exists to refuse, and the harness cannot interleave the arms to
+compensate for drift between phases.
