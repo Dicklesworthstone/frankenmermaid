@@ -20012,3 +20012,51 @@ why this was measurable at all on a host with 4–11 CPUs pinned by other projec
   Retry the arena only if that instrument shows allocations per node rising back above ~10 on a
   fixture that a shipped workload actually produces, or if a profile on the ER/`schema_catalog_25`
   shape (not reproducible here as IR) contradicts the dense_dag numbers above.
+
+### BLOCKED: gantt arrowhead fix drafted, gate refused three times (bd-8zo0, 2026-08-15)
+
+- **The defect is measured, not pending**: all 74 committed golden SVGs were scanned for
+  `url(#id)` / `href="#id"` references with no matching `id=` in the same document. Exactly two
+  files carry one, and they are the same gantt render in both corpora
+  (`crates/fm-cli/tests/golden/gantt_basic.svg` and
+  `artifacts/regression-harness/latest/golden/gantt_basic.svg`), both referencing `#arrowhead`
+  against an empty `<defs>`. The other 72 resolve everything; the dual scan for
+  declared-but-unreferenced defs is 0.
+- **Fix and test are drafted in the working tree and NOT committed.** Three
+  `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- cargo test -p fm-render-svg --lib
+  gantt_url_references_resolve_within_the_document` attempts, all exit **103**, `no admissible
+  workers: critical_pressure=1, insufficient_slots=4, insufficient_total_slots=4,
+  active_project_exclusion=1`. No local fallback was taken and the renderer change has never been
+  compiled, so committing it could red `main`.
+- **One slot did open earlier in the same window** and was spent gating the rotor fault suite
+  (`4375cf60`, worker `vmi1264463`), which is why that one landed and this one did not.
+- **Landing it will move `gantt_basic.svg`** — a `<defs>` with one `<marker>` appears and the
+  dependency `marker-end` id changes. That is a semantic golden change (missing content appears) and
+  it collides with bd-0nr2, already in progress on that golden.
+
+### BLOCKED: two renderer fixes written, six gate refusals, fleet capacity (bd-8zo0 + bd-zwh3, 2026-08-15)
+
+- **The exclusion cleared and the capacity did not.** Earlier refusals carried
+  `active_project_exclusion=1` — a peer's `cargo test -p fm-layout --test alloc_profile` on worker
+  `vmi1293453` held this repo's single per-project slot. After that job ended and the
+  pressure-blocked worker was refreshed, the refusal became
+  `no admissible workers: critical_pressure=1, insufficient_slots=5, insufficient_total_slots=4`,
+  with **no** project exclusion. So the blocker changed identity mid-session: first serialization,
+  now fragmented capacity.
+- **Fleet state at the last attempt**, recorded because "the box is idle" and "rch can admit my job"
+  are different claims: `rch status` reports 10/10 workers healthy, **14/49 slots available**,
+  posture `degraded`, with worker **`ovh-a` in critical pressure** (`disk_critical_without_fresh_telemetry`).
+  frankenmermaid held **zero** jobs; frankentorch, frankenscipy, frankenredis, frankenpandas,
+  frankenlibc and franken_numpy each held at least one. The free slots exist but are spread across
+  workers that cannot individually admit one job.
+- **Six refusals, all exit 103**, across `BLESS=1 FM_GOLDEN_CASE=gantt_basic … golden_svg_test` and
+  `cargo test -p fm-render-svg --lib` for the two fixes. No local fallback was taken and no gate was
+  relaxed.
+- **One measured result DID land in the same window**, so this is capacity and not breakage:
+  `cargo test -p frankenmermaid-cli --test golden_svg_test` on rch **worker `vmi1152480`**,
+  harness `cargo test -p frankenmermaid-cli --test golden_svg_test` — **40 passed, 1 failed**, the
+  single failure being `FNV hash mismatch for case gantt_basic`, which is the expected blast radius
+  of bd-8zo0's fix and nothing else.
+- **Both fixes stay on disk, uncommitted.** An uncompiled renderer change would red main, and
+  hand-writing golden bytes to avoid a build is fabrication. Neither is a result and neither is
+  claimed as one.
