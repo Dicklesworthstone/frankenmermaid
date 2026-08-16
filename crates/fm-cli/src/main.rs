@@ -7381,7 +7381,14 @@ fn cmd_render_batch(
 /// load-bearing.
 fn ascii_term_config(base: TermRenderConfig) -> TermRenderConfig {
     TermRenderConfig {
-        tier: MermaidTier::Compact,
+        // `CellOnly` alone is what gets us off the braille sub-cell painter -- `render_layout`
+        // takes the cell path on either `tier == Compact` OR `render_mode == CellOnly`.
+        //
+        // ⚠️ The tier is deliberately NOT forced to Compact any more. Doing so also imposed
+        // Compact's label budget (max_label_chars.min(12), max_label_lines 1) and a smaller
+        // canvas, which silently DROPPED content that `-f term` draws: measured, a quadrant point
+        // label vanished and the output fell from 5,771 bytes to 904. Asking for ASCII glyphs is
+        // not asking for lower fidelity, and coupling the two was a defect in the original fix.
         render_mode: fm_core::MermaidRenderMode::CellOnly,
         glyph_mode: fm_core::MermaidGlyphMode::Ascii,
         ..base
@@ -9355,8 +9362,8 @@ mod interactive_tests {
     #[test]
     fn ascii_format_forces_a_cell_mode_ascii_surface() {
         // rich() is the ACTUAL base the CLI uses, and the one the old guard silently skipped.
-        let cfg = super::ascii_term_config(fm_render_term::TermRenderConfig::rich());
-        assert_eq!(cfg.tier, fm_core::MermaidTier::Compact, "tier was not downgraded");
+        let base = fm_render_term::TermRenderConfig::rich();
+        let cfg = super::ascii_term_config(base.clone());
         assert_eq!(
             cfg.render_mode,
             fm_core::MermaidRenderMode::CellOnly,
@@ -9364,11 +9371,22 @@ mod interactive_tests {
         );
         assert_eq!(cfg.glyph_mode, fm_core::MermaidGlyphMode::Ascii);
 
-        // A base that was ALREADY Auto must land in the same place -- the old code's one working
-        // case must keep working.
-        let from_auto = super::ascii_term_config(fm_render_term::TermRenderConfig::default());
-        assert_eq!(from_auto.tier, fm_core::MermaidTier::Compact);
-        assert_eq!(from_auto.render_mode, fm_core::MermaidRenderMode::CellOnly);
+        // ⚠️ The TIER must be left alone. An earlier version forced Compact here, which does get
+        // off the braille painter but also imposes Compact's label budget and a smaller canvas --
+        // measured, that silently dropped a quadrant point label and shrank the output from 5,771
+        // bytes to 904. CellOnly alone is what selects the cell path; the tier is fidelity, and
+        // asking for ASCII glyphs is not asking for less of the diagram.
+        assert_eq!(
+            cfg.tier, base.tier,
+            "the tier was downgraded; ASCII should change glyphs, not fidelity"
+        );
+
+        // A different base must reach the same cell-mode ASCII surface, and likewise keep its tier.
+        let default_base = fm_render_term::TermRenderConfig::default();
+        let from_default = super::ascii_term_config(default_base.clone());
+        assert_eq!(from_default.render_mode, fm_core::MermaidRenderMode::CellOnly);
+        assert_eq!(from_default.glyph_mode, fm_core::MermaidGlyphMode::Ascii);
+        assert_eq!(from_default.tier, default_base.tier);
     }
 
     /// The end-to-end property: that surface must emit no byte above 0x7F, and still draw.
@@ -9396,6 +9414,21 @@ mod interactive_tests {
             out.output.contains("Alpha") && out.output.contains("Beta"),
             "the ascii surface drew no labels"
         );
+
+        // ⚠️ FIDELITY, not just ASCII-ness. Forcing Compact tier alongside CellOnly made the
+        // surface ASCII by throwing content away -- a measured quadrant label disappeared and the
+        // output shrank 5,771 -> 904 bytes. Asking for ASCII glyphs is not asking for a smaller
+        // diagram, so the ascii surface must carry the same labels the term surface does.
+        let term = fm_render_term::render_term_with_layout_and_config(
+            &parsed.ir, &layout, &fm_render_term::TermRenderConfig::rich(), 80, 24,
+        );
+        for label in ["Alpha", "Beta"] {
+            assert_eq!(
+                out.output.contains(label),
+                term.output.contains(label),
+                "ascii and term disagree on whether {label} is drawn"
+            );
+        }
     }
 
     use super::{
