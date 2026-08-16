@@ -6041,6 +6041,18 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         };
 
         let parsed_meta = parse_gantt_task_metadata(raw_meta, gantt_meta.date_format.as_deref());
+        // A date that contradicts the declared dateFormat is still ACCEPTED via the ISO fallback --
+        // this is a diagnostic, not a rejection, because the leniency keeps diagrams working that
+        // render correctly today (bd-v9zd). Naming the token and the declared format is the point:
+        // "bad date" is not actionable in a chart with fifty tasks.
+        if let Some(declared) = gantt_meta.date_format.as_deref() {
+            for token in &parsed_meta.date_format_mismatches {
+                builder.add_warning(format!(
+                    "Line {line_number}: gantt date {token} does not match the declared dateFormat \
+                     {declared}; parsed as ISO YYYY-MM-DD instead"
+                ));
+            }
+        }
         if let Some(task_id_ref) = parsed_meta.task_id.as_ref() {
             task_ids_to_nodes.entry(task_id_ref.clone()).or_insert(node);
         }
@@ -6121,6 +6133,10 @@ struct ParsedGanttTaskMeta {
     depends_on: Vec<String>,
     progress: Option<f32>,
     task_type: GanttTaskType,
+    /// Date tokens that did NOT match the declared `dateFormat` and were only parsed by the ISO
+    /// fallback (bd-v9zd). Collected here rather than warned about in place because this function
+    /// has no builder; the caller emits the diagnostic.
+    date_format_mismatches: Vec<String>,
 }
 
 fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> ParsedGanttTaskMeta {
@@ -6166,8 +6182,11 @@ fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> Parse
         }
 
         if parsed.start.is_none()
-            && let Some(date) = parse_gantt_absolute_date(token, date_format)
+            && let Some((date, fallback)) = parse_gantt_absolute_date_checked(token, date_format)
         {
+            if fallback {
+                parsed.date_format_mismatches.push(token.to_string());
+            }
             parsed.start = Some(GanttDate::Absolute(date));
             continue;
         }
@@ -6180,8 +6199,11 @@ fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> Parse
         }
 
         if parsed.end.is_none()
-            && let Some(date) = parse_gantt_absolute_date(token, date_format)
+            && let Some((date, fallback)) = parse_gantt_absolute_date_checked(token, date_format)
         {
+            if fallback {
+                parsed.date_format_mismatches.push(token.to_string());
+            }
             parsed.end = Some(GanttDate::Absolute(date));
             continue;
         }
@@ -6205,8 +6227,28 @@ fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> Parse
 }
 
 fn parse_gantt_absolute_date(token: &str, date_format: Option<&str>) -> Option<String> {
-    normalize_gantt_date_with_format(token, date_format.unwrap_or("YYYY-MM-DD"))
-        .or_else(|| normalize_gantt_date_with_format(token, "YYYY-MM-DD"))
+    parse_gantt_absolute_date_checked(token, date_format).map(|(date, _)| date)
+}
+
+/// Parse a gantt date, reporting whether the DECLARED format was bypassed (bd-v9zd).
+///
+/// A token that does not match the declared `dateFormat` is silently retried as ISO. That leniency
+/// is deliberate — rejecting outright would break diagrams that render correctly today — but it
+/// means `dateFormat DD-MM-YYYY` with an ISO date in the body is accepted with no signal at all,
+/// and where both readings are valid dates the user never learns which one was taken.
+///
+/// The bool is `true` only when the declared format FAILED and the ISO fallback succeeded, so a
+/// document with no `dateFormat`, or one whose dates match it, reports nothing.
+fn parse_gantt_absolute_date_checked(
+    token: &str,
+    date_format: Option<&str>,
+) -> Option<(String, bool)> {
+    let declared = date_format.unwrap_or("YYYY-MM-DD");
+    if let Some(date) = normalize_gantt_date_with_format(token, declared) {
+        return Some((date, false));
+    }
+    let date = normalize_gantt_date_with_format(token, "YYYY-MM-DD")?;
+    Some((date, declared != "YYYY-MM-DD"))
 }
 
 fn normalize_gantt_date_with_format(token: &str, date_format: &str) -> Option<String> {
@@ -14628,6 +14670,71 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(
             meta.attributes[3].visibility,
             fm_core::ClassVisibility::Package
+        );
+    }
+
+    /// bd-v9zd: a date contradicting the declared `dateFormat` is accepted but WARNED about.
+    ///
+    /// The ISO fallback is deliberate leniency — rejecting outright would break diagrams that
+    /// render correctly today — but it meant `dateFormat DD-MM-YYYY` with an ISO date in the body
+    /// was accepted with no signal, and where both readings are valid dates the user never learned
+    /// which was taken. This is a diagnostic, not a rejection.
+    #[test]
+    fn gantt_date_contradicting_the_declared_format_warns() {
+        let parsed = parse_mermaid(
+            "gantt\n  dateFormat DD-MM-YYYY\n  section S\n  T1 :a1, 2024-01-15, 3d\n",
+        );
+        let warned: Vec<&String> = parsed
+            .warnings
+            .iter()
+            .filter(|w| w.contains("dateFormat"))
+            .collect();
+        assert_eq!(
+            warned.len(),
+            1,
+            "expected exactly one dateFormat warning, got {:?}",
+            parsed.warnings
+        );
+        // The warning must be actionable: it names the offending token AND the declared format.
+        assert!(
+            warned[0].contains("2024-01-15") && warned[0].contains("DD-MM-YYYY"),
+            "warning is not actionable: {}",
+            warned[0]
+        );
+        // It must remain a DIAGNOSTIC: the diagram still parses and the task still has a date.
+        assert_eq!(parsed.ir.nodes.len(), 1, "the task was dropped");
+    }
+
+    /// NEGATIVE CASES from bd-v9zd — the common paths must stay silent.
+    #[test]
+    fn gantt_date_format_warning_stays_silent_when_it_should() {
+        let count = |src: &str| -> usize {
+            parse_mermaid(src)
+                .warnings
+                .iter()
+                .filter(|w| w.contains("dateFormat"))
+                .count()
+        };
+
+        // 1. A date that MATCHES the declared format warns not at all, or the diagnostic is noise.
+        assert_eq!(
+            count("gantt\n  dateFormat DD-MM-YYYY\n  section S\n  T1 :a1, 15-01-2024, 3d\n"),
+            0,
+            "a conforming date must not warn"
+        );
+
+        // 3. No dateFormat directive at all: the default IS ISO, so there is nothing to contradict.
+        assert_eq!(
+            count("gantt\n  section S\n  T1 :a1, 2024-01-15, 3d\n"),
+            0,
+            "a document with no declared format must not warn"
+        );
+
+        // An explicitly declared ISO format must also stay silent — `declared != ISO` is the gate.
+        assert_eq!(
+            count("gantt\n  dateFormat YYYY-MM-DD\n  section S\n  T1 :a1, 2024-01-15, 3d\n"),
+            0,
+            "an explicitly declared ISO format must not warn"
         );
     }
 
