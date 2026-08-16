@@ -3663,6 +3663,22 @@
   (`fm-render-svg` sankey hoist, `fm-render-term` title + canvas-ceiling fixes). The provenance gate
   accepted the run only once `--fm-build-base` and `--fm-builder` were supplied; a clean tree is
   required before any row from this binary is certifiable.
+- **SECOND ATTEMPT (same day), with the dirty-tree caveat REMOVED — still refused.** The three
+  ungated files were stashed with an explicit pathspec (so no peer WIP could be caught) and the
+  binary REBUILT from the clean tree in 24 s. The ELF sha MOVED,
+  `255c8bed83514628...` -> `9e53f56d63a83b05577f4cfb401573c577cb3762baf0b2169ce7b28d986df7bd`,
+  which is itself the proof that the earlier binary really did contain the uncommitted changes and
+  that the first attempt's row would not have been certifiable. Equivalence regenerated for the new
+  sha: **PASS**, `sequence_20` 1/1 equivalent, artifact
+  `.benchmarks/headtohead/equivalence/equivalence-0a205f2b-1786892016638.json`.
+  Admission then refused **542 of 900 attempts** over a 560 s window at `load1` 10.53-11.69 — the
+  quietest the host has been across any attempt — with `cpu19=100%`, `cpu40=100%`, `cpu54=100%`
+  throughout. **Still no row, still no A/A null.**
+- **What the two attempts together establish.** The blocker is not provenance, not equivalence, and
+  not the build: all three are now green and reproducible. It is solely host contention from other
+  projects, and a falling `load1` is NOT sufficient — the gate is per-CPU, and three cores pegged at
+  100% by someone else's work will refuse a 64-core box whose average looks idle. Anyone retrying
+  should check per-CPU busy, not load average.
 - **Retry predicate.** Re-run exactly this, no rebuild needed while the ELF sha holds, when the host
   is quiet:
   `node scripts/headtohead/run.mjs --only sequence_20 --fm-bin target/local/release/examples/headtohead
