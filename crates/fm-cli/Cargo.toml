@@ -62,7 +62,10 @@ sha2 = "0.11"
 time = { version = "0.3.41", features = ["formatting", "parsing"] }
 toml = "1.1"
 tracing.workspace = true
-tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }
+# `json` is NOT here: the shipped binary never builds a JSON subscriber, only
+# `crates/fm-cli/tests/debug_test.rs` does, so it belongs in [dev-dependencies] below where it
+# reaches the tests and not the CLI (bd-53p4). It pulls `tracing-serde` into the link.
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 
 # Optional dependencies
 notify = { version = "8.2", optional = true }
@@ -82,6 +85,9 @@ mimalloc = { version = "0.1", default-features = false }
 criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3.25"
 fm-render-canvas.workspace = true
+# Cargo unifies dev-dependency features into test and bench builds only, so `debug_test.rs` keeps
+# its JSON subscriber while the shipped binary drops `tracing-serde` (bd-53p4).
+tracing-subscriber = { workspace = true, features = ["json"] }
 
 [[bench]]
 name = "pipeline_bench"
