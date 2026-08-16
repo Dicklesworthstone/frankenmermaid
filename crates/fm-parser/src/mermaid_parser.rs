@@ -6599,6 +6599,12 @@ fn parse_pie(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        // bd-6r13: `style a fill:#f9f` was interned as a SLICE (`style_a_fill`), adding a phantom
+        // wedge to the chart. Narrow style predicate only — see bd-t2fp.
+        if is_non_graph_statement(trimmed) {
+            continue;
+        }
+
         // Header line — may include "showData" and/or "title ..." on the same line.
         if trimmed.starts_with("pie") {
             if trimmed.contains("showData") {
@@ -6684,6 +6690,11 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
             continue;
         }
         if trimmed == "quadrantChart" {
+            continue;
+        }
+
+        // bd-6r13: `style A fill:#f9f` was interned as a quadrant POINT (`style_A_fill`).
+        if is_non_graph_statement(trimmed) {
             continue;
         }
 
@@ -14838,6 +14849,69 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(
             meta.attributes[3].visibility,
             fm_core::ClassVisibility::Package
+        );
+    }
+
+    /// bd-6r13: pie and quadrant leaked too, and the rest of the family is enumerated clean.
+    ///
+    /// This test is the family's BOUNDARY as much as its guard: the eight clean paths are asserted
+    /// alongside the two that leaked, so a future regression in any of them shows up here rather
+    /// than needing the whole sweep to be redone.
+    ///
+    /// ⚠️ Asserted on the IR node-id list, which is the only authoritative method here. Two
+    /// output-shaped proxies misreported during this family: grepping `data-id` from rendered SVG
+    /// called gantt clean when it leaked (gantt task rects carry no `data-id`), and the `parse`
+    /// command's node_count called erDiagram dirty when it is clean.
+    #[test]
+    fn style_directive_leak_boundary_across_all_diagram_paths() {
+        let ids = |src: &str| -> Vec<String> {
+            parse_mermaid(src)
+                .ir
+                .nodes
+                .iter()
+                .map(|n| n.id.clone())
+                .collect()
+        };
+        let no_phantom = |src: &str| {
+            let got = ids(src);
+            assert!(
+                !got.iter()
+                    .any(|id| id.starts_with("style") || id.starts_with("classDef")),
+                "directive leaked: {got:?} for {:?}",
+                src.lines().next()
+            );
+        };
+
+        // Leaked before this fix.
+        no_phantom("pie\n  \"a\" : 10\n  style a fill:#f9f\n");
+        no_phantom("quadrantChart\n  x-axis Low --> High\n  A: [0.3, 0.6]\n  style A fill:#f9f\n");
+
+        // Measured clean — these are the boundary of the family.
+        no_phantom("erDiagram\n  classDef big fill:#f9f\n  A ||--o{ B : x\n");
+        no_phantom("requirementDiagram\n  element e { type: sim }\n  style e fill:#f9f\n");
+        no_phantom("sequenceDiagram\n  classDef big fill:#f9f\n  A->>B: x\n");
+        no_phantom("sankey-beta\n  a,b,10\n  style a fill:#f9f\n");
+        no_phantom("xychart-beta\n  bar [1,2]\n  style a fill:#f9f\n");
+        no_phantom("packet-beta\n  0-7: \"x\"\n  style a fill:#f9f\n");
+        no_phantom("C4Context\n  Person(u, \"U\")\n  style u fill:#f9f\n");
+        no_phantom("architecture-beta\n  group g\n  service s in g\n  style s fill:#f9f\n");
+    }
+
+    /// CONTROL for bd-6r13: pie and quadrant without a directive are unchanged.
+    #[test]
+    fn pie_and_quadrant_without_directives_are_unchanged() {
+        let ids = |src: &str| -> Vec<String> {
+            parse_mermaid(src)
+                .ir
+                .nodes
+                .iter()
+                .map(|n| n.id.clone())
+                .collect()
+        };
+        assert_eq!(ids("pie\n  \"a\" : 10\n  \"b\" : 20\n"), vec!["a", "b"]);
+        assert_eq!(
+            ids("quadrantChart\n  x-axis Low --> High\n  A: [0.3, 0.6]\n"),
+            vec!["A"]
         );
     }
 
