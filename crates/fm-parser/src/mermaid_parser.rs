@@ -85,11 +85,27 @@ const CLASS_OPERATORS: [(&str, ArrowType); 10] = [
     ("--", ArrowType::Line),
 ];
 
+// `==` is a THICK LINE, not a thick arrow. The other three entries already follow the rule the
+// syntax states -- the two forms that draw a head get `Arrow`, the one that does not gets `Line` --
+// and `==` broke it, drawing `url(#arrow-filled)` (fm-render-svg:12231) for a token with no head in
+// it, and leaving no way to express a plain thick connector at all. This engine's own flowchart
+// table gets the same two tokens right: `("==>", ThickArrow)` beside `("==", ThickLine)`.
+//
+// Mirror image of bd-e29r / bd-gp82, which LOST heads the syntax asked for; this one DREW one it
+// did not (bd-zf1k).
+//
+// ⚠️ STILL OPEN, and deliberately not resolved here: whether mermaid's packet-beta accepts edges at
+// all. Its documented grammar is bit-range rows, and this table is only consulted on the fallback
+// path for a line that is not a `start-end: "label"` row (`parse_packet`). If the incumbent has no
+// packet edge syntax then the right change is to delete this table and the fallback rather than to
+// correct one entry. That needs the pinned mermaid-js harness to settle; this change is the
+// strictly-better mapping under EITHER answer, since a dead entry that is wrong is still worth not
+// being wrong.
 const PACKET_OPERATORS: [(&str, ArrowType); 4] = [
     ("-->", ArrowType::Arrow),
     ("->", ArrowType::Arrow),
     ("--", ArrowType::Line),
-    ("==", ArrowType::ThickArrow),
+    ("==", ArrowType::ThickLine),
 ];
 
 const ER_OPERATORS: [(&str, ArrowType); 14] = [
@@ -11508,6 +11524,41 @@ mod tests {
             let got: Vec<&str> = byte_lines(case).collect();
             assert_eq!(got, expected, "byte_lines mismatch for {case:?}");
         }
+    }
+
+    /// `operator_tables_are_longest_prefix_first` below checks ORDER. Nothing checked MEANING, and
+    /// meaning is where every defect this audit found actually lived (bd-e29r, bd-8yj9, bd-gp82,
+    /// bd-zf1k, bd-m0a9).
+    ///
+    /// Asserted directly on the tables rather than through a rendered packet diagram, because the
+    /// packet edge path is a FALLBACK for lines that are not bit-range rows, and routing the
+    /// assertion through a whole parse would make it depend on that fallback continuing to be
+    /// reachable — which bd-zf1k explicitly leaves open. The mapping is the claim; the table is
+    /// where the mapping lives.
+    #[test]
+    fn a_headless_operator_token_maps_to_a_headless_arrow_type() {
+        let arrow_for = |table: &[(&str, ArrowType)], token: &str| -> ArrowType {
+            table
+                .iter()
+                .find(|(candidate, _)| *candidate == token)
+                .unwrap_or_else(|| panic!("{token:?} is no longer in the table"))
+                .1
+        };
+
+        // `==` has no arrowhead in its syntax, in either family that spells it.
+        assert_eq!(arrow_for(&PACKET_OPERATORS, "=="), ArrowType::ThickLine);
+        assert_eq!(arrow_for(&FLOW_OPERATORS, "=="), ArrowType::ThickLine);
+
+        // CONTROL, and the reason this is not just "everything is a line": the arrowed form of the
+        // SAME token in the same table must still carry its head. A fix that mapped all of `=` to
+        // ThickLine would pass the two assertions above and fail here.
+        assert_eq!(arrow_for(&FLOW_OPERATORS, "==>"), ArrowType::ThickArrow);
+
+        // Second control, on the other three packet entries: the two that DO spell a head keep one,
+        // so this test pins the distinction rather than a blanket direction.
+        assert_eq!(arrow_for(&PACKET_OPERATORS, "-->"), ArrowType::Arrow);
+        assert_eq!(arrow_for(&PACKET_OPERATORS, "->"), ArrowType::Arrow);
+        assert_eq!(arrow_for(&PACKET_OPERATORS, "--"), ArrowType::Line);
     }
 
     #[test]
