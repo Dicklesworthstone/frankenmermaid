@@ -9865,6 +9865,21 @@ fn force_parallel_edge_offsets(ir: &MermaidDiagramIr) -> Vec<f32> {
 
 fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec<LayoutEdgePath> {
     let parallel_offsets = force_parallel_edge_offsets(ir);
+    // Obstacle set for avoidance (bd-h2ze). This builder used to emit a bare `[from, to]` line for
+    // every edge, so a node sitting between two connected nodes was simply drawn through -- 30
+    // cases across five committed goldens, up to 33.2px into a 66.5px-tall box, i.e. the CENTRE of
+    // the node rather than a clipped corner. An edge crossing a node reads as connecting to it, so
+    // the picture asserted relationships the source never declared.
+    //
+    // The avoidance machinery was never overridden here; it was never CALLED. `build_edge_paths`
+    // (the Sugiyama path) consults `route_edge_points_with_obstacle_index`, and this one did not,
+    // which is why 27 of the 30 cases sit in cycle_* fixtures: cycle-heavy graphs dispatch to
+    // force layout and take this builder.
+    // `None` for the spatial index: the router falls back to a linear AABB scan, which is the
+    // right call here rather than duplicating `build_edge_paths`'s eligibility heuristic. Force
+    // layout is chosen for small-to-medium graphs, so the scan is cheap; if a large force graph
+    // ever shows up in a profile, the index can be added behind the same threshold.
+    let mut obstacle_bounds: Vec<LayoutRect> = nodes.iter().map(|node| node.bounds).collect();
     ir.edges
         .iter()
         .enumerate()
@@ -9914,7 +9929,39 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
             let to_pt =
                 clip_to_shape_border(to_center, from_center, &nodes[to_idx].bounds, to_shape);
 
-            let mut points = smallvec![from_pt, to_pt];
+            // An edge must not avoid its OWN endpoints, so park those two boxes far away for the
+            // duration of this query and restore them afterwards -- the same technique
+            // `build_edge_paths` uses. Restoring matters: the set is shared across every edge, so a
+            // parked box left parked would make the next edge blind to that node.
+            let saved_from = obstacle_bounds.get(from_idx).copied();
+            let saved_to = obstacle_bounds.get(to_idx).copied();
+            let parked = LayoutRect {
+                x: 1e30,
+                y: 1e30,
+                width: 0.0,
+                height: 0.0,
+            };
+            if let Some(slot) = obstacle_bounds.get_mut(from_idx) {
+                *slot = parked;
+            }
+            if let Some(slot) = obstacle_bounds.get_mut(to_idx) {
+                *slot = parked;
+            }
+            // `false` for `horizontal_ranks`: force layout has no rank orientation, and this is the
+            // same convention the self-loop branch above already uses.
+            let mut points = route_edge_points_with_obstacle_index(
+                from_pt,
+                to_pt,
+                false,
+                &obstacle_bounds,
+                None,
+            );
+            if let (Some(slot), Some(saved)) = (obstacle_bounds.get_mut(from_idx), saved_from) {
+                *slot = saved;
+            }
+            if let (Some(slot), Some(saved)) = (obstacle_bounds.get_mut(to_idx), saved_to) {
+                *slot = saved;
+            }
             if parallel_offset.abs() > 0.01 {
                 // Same helper and same orientation convention the Sugiyama builder uses, so the two
                 // layouts fan a repeated pair identically instead of one of them stacking the edges.
@@ -21863,6 +21910,120 @@ mod tests {
                 .iter()
                 .all(|p| p.x.is_finite() && p.y.is_finite()),
             "self-loop path must not contain non-finite coordinates"
+        );
+    }
+
+    /// A force-layout edge must not be drawn through an unrelated node (bd-h2ze).
+    ///
+    /// `force_build_edge_paths` emitted a bare `[from, to]` line for every edge and never consulted
+    /// the obstacle machinery `build_edge_paths` has always used — not overridden, never CALLED.
+    /// Measured on the committed corpus: 30 edges across five goldens crossing unrelated node
+    /// boxes, worst 33.2px into a 66.5px-tall box, i.e. the node's CENTRE. An edge through a node
+    /// reads as connecting to it, so the picture asserted relationships nobody wrote.
+    ///
+    /// Driven at `force_build_edge_paths` with HAND-PLACED boxes rather than through
+    /// `layout_diagram_force`, because force placement is emergent: my first attempt asked the
+    /// solver for three collinear nodes, it produced a triangle, and the non-vacuity control
+    /// correctly failed. Fixing the geometry by hand is what makes the fixture actually contain
+    /// the defect.
+    #[test]
+    fn force_layout_edges_do_not_cross_unrelated_nodes() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
+        for node_id in ["LEFT", "MIDDLE", "RIGHT"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(2)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+
+        // Three boxes on one row: LEFT, MIDDLE, RIGHT. A centre-to-centre line from LEFT to RIGHT
+        // runs straight through MIDDLE.
+        let boxes: Vec<LayoutNodeBox> = ["LEFT", "MIDDLE", "RIGHT"]
+            .iter()
+            .enumerate()
+            .map(|(i, id)| LayoutNodeBox {
+                node_index: i,
+                node_id: (*id).to_string(),
+                rank: 0,
+                order: i,
+                span: Span::default(),
+                bounds: LayoutRect {
+                    x: 100.0 + 200.0 * i as f32,
+                    y: 100.0,
+                    width: 100.0,
+                    height: 60.0,
+                },
+            })
+            .collect();
+
+        let middle = boxes[1].bounds;
+        let margin = 3.0_f32;
+        let inside = |p: LayoutPoint| {
+            p.x > middle.x + margin
+                && p.x < middle.x + middle.width - margin
+                && p.y > middle.y + margin
+                && p.y < middle.y + middle.height - margin
+        };
+
+        // NON-VACUITY FIRST: the straight centre-to-centre line must actually cross MIDDLE, or this
+        // fixture cannot detect the defect and the assertion below would pass for free.
+        let a = boxes[0].bounds.center();
+        let b = boxes[2].bounds.center();
+        let straight_hits = (0..=200).any(|step| {
+            let t = step as f32 / 200.0;
+            inside(LayoutPoint {
+                x: a.x + (b.x - a.x) * t,
+                y: a.y + (b.y - a.y) * t,
+            })
+        });
+        assert!(
+            straight_hits,
+            "CONTROL FAILED: a straight LEFT->RIGHT line misses MIDDLE, so this fixture cannot \
+             detect the defect it was written for"
+        );
+
+        let edges = crate::force_build_edge_paths(&ir, &boxes);
+        assert_eq!(edges.len(), 1);
+        let edge = &edges[0];
+
+        // ENDPOINTS UNCHANGED: a route that avoids a node by RETARGETING is not a fix.
+        let near = |p: &LayoutPoint, r: &LayoutRect| {
+            p.x >= r.x - 1.0
+                && p.x <= r.x + r.width + 1.0
+                && p.y >= r.y - 1.0
+                && p.y <= r.y + r.height + 1.0
+        };
+        assert!(
+            near(edge.points.first().unwrap(), &boxes[0].bounds)
+                && near(edge.points.last().unwrap(), &boxes[2].bounds),
+            "endpoints moved off their nodes: {:?}",
+            edge.points.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()
+        );
+
+        // THE CLAIM: no sampled point on the routed path lies inside MIDDLE.
+        let mut hit: Option<LayoutPoint> = None;
+        for pair in edge.points.windows(2) {
+            for step in 0..=60 {
+                let t = step as f32 / 60.0;
+                let sample = LayoutPoint {
+                    x: pair[0].x + (pair[1].x - pair[0].x) * t,
+                    y: pair[0].y + (pair[1].y - pair[0].y) * t,
+                };
+                if inside(sample) {
+                    hit = Some(sample);
+                }
+            }
+        }
+        assert!(
+            hit.is_none(),
+            "edge LEFT->RIGHT passes through MIDDLE at {hit:?}; path is {:?}",
+            edge.points.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()
         );
     }
 
