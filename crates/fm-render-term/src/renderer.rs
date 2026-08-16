@@ -27,6 +27,68 @@ pub struct TermRenderResult {
     pub node_count: usize,
     /// Edge count.
     pub edge_count: usize,
+    /// How many of those nodes left no box on the canvas at all.
+    ///
+    /// A terminal is a fixed grid, so a diagram taller or wider than the viewport cannot draw every
+    /// node: boxes land on the same cells and each one overwrites the one before it. That is a
+    /// legitimate response to an impossible viewport — what is not legitimate is doing it silently.
+    /// `node_count` keeps meaning "nodes the layout produced"; this is the number of them the reader
+    /// cannot see, so a caller can warn instead of presenting a clean, plausible, incomplete
+    /// diagram. Zero whenever the diagram fits.
+    pub occluded_node_count: usize,
+}
+
+/// Count nodes whose box is completely covered by nodes drawn after them.
+///
+/// Works in CELL space, so it is independent of which render mode produced the output: both modes
+/// map layout coordinates onto the same `cell_width` x `cell_height` grid via `scale_x`/`scale_y`.
+///
+/// Draw order is significant and runs FORWARD, so a later node overwrites an earlier one. This walks
+/// the nodes in REVERSE and marks the cells each one claims; a node all of whose cells are already
+/// claimed by a later node has been painted over entirely and is invisible to the reader. A node
+/// that is merely clipped, or partly overlapped, still shows and is not counted — the count is
+/// deliberately conservative, because an over-count would cry wolf on a diagram that renders fine.
+fn count_occluded_nodes(
+    nodes: &[fm_layout::LayoutNodeBox],
+    scale_x: f32,
+    scale_y: f32,
+    cell_width: usize,
+    cell_height: usize,
+) -> usize {
+    if cell_width == 0 || cell_height == 0 {
+        return 0;
+    }
+    let mut claimed = vec![false; cell_width * cell_height];
+    let mut occluded = 0;
+
+    for node in nodes.iter().rev() {
+        let x0 = (node.bounds.x * scale_x).floor().max(0.0) as usize;
+        let y0 = (node.bounds.y * scale_y).floor().max(0.0) as usize;
+        let x1 = (((node.bounds.x + node.bounds.width) * scale_x).ceil().max(0.0) as usize)
+            .min(cell_width);
+        let y1 = (((node.bounds.y + node.bounds.height) * scale_y).ceil().max(0.0) as usize)
+            .min(cell_height);
+
+        // Entirely off-canvas: nothing was drawn, so the reader cannot see it either.
+        if x0 >= cell_width || y0 >= cell_height || x0 >= x1 || y0 >= y1 {
+            occluded += 1;
+            continue;
+        }
+
+        let mut all_claimed = true;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if !claimed[y * cell_width + x] {
+                    all_claimed = false;
+                    claimed[y * cell_width + x] = true;
+                }
+            }
+        }
+        if all_claimed {
+            occluded += 1;
+        }
+    }
+    occluded
 }
 
 /// Terminal diagram renderer.
@@ -197,6 +259,13 @@ impl TermRenderer {
             render_mode: self.config.render_mode,
             node_count: layout.nodes.len(),
             edge_count: layout.edges.len(),
+            occluded_node_count: count_occluded_nodes(
+                &layout.nodes,
+                scale_x,
+                scale_y,
+                cell_width,
+                cell_height,
+            ),
         }
     }
 
@@ -367,6 +436,13 @@ impl TermRenderer {
             render_mode: self.config.render_mode,
             node_count: layout.nodes.len(),
             edge_count: layout.edges.len(),
+            occluded_node_count: count_occluded_nodes(
+                &layout.nodes,
+                scale_x,
+                scale_y,
+                cell_width,
+                cell_height,
+            ),
         }
     }
 

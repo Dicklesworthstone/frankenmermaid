@@ -65,8 +65,12 @@ SESSION_REPORT.md
 SESSION_*.md
 verify_*.sh
 newfile.txt
-repro_*.rs
-reproduce_*.rs
+# Anchored to the repo root ON PURPOSE (bd-uk8w). Unanchored, these matched inside
+# crates/*/tests/, where cargo compiles every top-level .rs as its own integration target
+# with no declaration anywhere -- so an ignored file became a live test that ran on one
+# machine and existed for nobody else, CI included.
+/repro_*.rs
+/reproduce_*.rs
 
 # Test output binaries/files (parser test artifacts at repo root)
 /test_*
