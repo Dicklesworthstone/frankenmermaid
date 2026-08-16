@@ -261,6 +261,14 @@ jobs:
           node scripts/headtohead/svg_equivalence.mjs --self-test
           node scripts/headtohead/mermaid_bench.mjs --self-test
           node scripts/headtohead/run.mjs --self-test
+          node scripts/golden_svg_health.mjs --self-test
+
+      # The corpus scan itself (`node scripts/golden_svg_health.mjs`, no flag) is NOT armed here
+      # yet: it exits 1 today on the two committed gantt_basic.svg copies, which reference
+      # `url(#arrowhead)` against an empty `<defs>` — the real defect bd-8zo0 is open on. Arming it
+      # before that fix and its golden land together would put main red on a defect main already
+      # has. bd-8zo0 adds this line in the same commit as the re-blessed golden, so the fix cannot
+      # land without its regression net and the net cannot land without the fix.
 
   golden-checksum-guard:
     name: Golden Checksum Guard
