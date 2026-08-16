@@ -19968,3 +19968,47 @@ Distinct from the fleet-refusal row above, and worth separating: this one is **n
 - **No result is claimed from unrun tests.** If `chained_small_rotations_do_not_accumulate_scale`
   fails on its first real run, the fix is a `Rotor::normalize` — the type has `norm_squared`,
   `reverse` and `inverse` and nothing that renormalizes — not a wider epsilon.
+
+### REJECTED: layout-scoped bump arena — the histogram it is aimed at no longer exists (bd-oarm, 2026-08-15)
+
+**Counted mechanism:** allocations per `layout_diagram`, measured in-tree by a counting
+`GlobalAlloc` over `System` (`crates/fm-layout/tests/alloc_profile.rs`, landed `9493363d`), six
+fixtures built as IR directly so nothing but layout is counted. Remote worker `vmi1264463`, harness
+`fm-layout/tests/alloc_profile.rs`. Counts, not time — allocation counts are load-immune, which is
+why this was measurable at all on a host with 4–11 CPUs pinned by other projects.
+
+| fixture | nodes | edges | allocs | per node | 8–15 B | 32–39 B | 64 B |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `chain_100` | 100 | 99 | 130 | 1.30 | 0 | 0 | 1 |
+| `chain_1000` | 1000 | 999 | 1031 | 1.03 | 0 | 0 | 1 |
+| `wide_8x16` | 128 | 224 | 205 | 1.60 | 16 | 5 | 2 |
+| `wide_16x32` | 512 | 960 | 627 | 1.22 | 32 | 4 | 4 |
+| `dense_dag_200` | 200 | 790 | 401 | 2.00 | 1 | 4 | 150 |
+| `dense_dag_800` | 800 | 3190 | 1452 | 1.81 | 1 | 4 | 600 |
+
+- **The premise does not reproduce.** bd-oarm states 3,481 allocations at n=100 with 1,195 in the
+  8–15 B bucket, 900 in 32–39 B and 398 at 64 B — "~17 small allocs per node+edge". Measured today
+  the rate is **1.03–2.00 allocations per node**, and the 8–15 B and 32–39 B buckets are empty or
+  negligible on every fixture, including the dense ones the bead targets. The engine has absorbed a
+  great deal of allocation work since that histogram was taken; this ledger records those levers.
+- **Why that kills the arena rather than delaying it.** The bead's bar is layout instructions −25%,
+  and it declares "anything below −10% instructions is a REJECT row, not a landing". A full layout of
+  an 800-node / 3,190-edge graph performs **1,452 allocations total**. Its stated motivation — that
+  >50% of layout time sits inside the allocator — cannot hold at ~1.8 allocations per node. An arena
+  threaded through the layout phases is a large, position-critical refactor, and there is no measured
+  headroom to buy it.
+- **One bucket survives, and it is a different, much smaller lever.** 64 B allocations are **37.4%**
+  of all allocations on `dense_dag_200` and **41.3%** on `dense_dag_800`, at exactly **0.75 per node**
+  on both, while being 1–4 on chain and wide. So they are specific to high-fanout graphs. Ruled out
+  by reading: it is not the obstacle spatial index, which is already CSR (`offsets`/`flat`, no
+  per-cell `Vec`s). Identifying the site needs an allocator backtrace with a reentrancy guard, which
+  the instrument does not yet have.
+- **No source refactor was performed.** `scripts/ledger_preflight.mjs` exits 2 on this lever with
+  eight keyword-matched rows, several carrying no retry predicate at all; the bead's own admission
+  note says no refactor may begin until each is satisfied. The owner directed this bead to be taken,
+  so the measurement was done first — and the measurement says the lever is not there, which settles
+  it without touching the source.
+- **Retry predicate.** Re-run `cargo test -p fm-layout --test alloc_profile -- --ignored --nocapture`.
+  Retry the arena only if that instrument shows allocations per node rising back above ~10 on a
+  fixture that a shipped workload actually produces, or if a profile on the ER/`schema_catalog_25`
+  shape (not reproducible here as IR) contradicts the dense_dag numbers above.
