@@ -1754,6 +1754,54 @@ mod tests {
         assert_eq!(result.warnings.len(), 1);
     }
 
+    /// The five ir_builder sites converted to the borrowing form must behave identically.
+    ///
+    /// `add_sequence_note`, `activate_participant`, `deactivate_participant`,
+    /// `add_lifecycle_create` and `add_lifecycle_destroy` each allocated a `String` purely to
+    /// borrow it for one lookup and then dropped it. They now take `normalize_identifier_cow`.
+    /// Every one of them resolves a participant by NAME, so a conversion error would show up as a
+    /// lookup that silently misses — a note attached to nothing, an activation that never opens,
+    /// a destroy marker that never lands. This drives all five through one document and asserts
+    /// the resolved effects, not merely that parsing succeeded.
+    #[test]
+    fn sequence_participant_lookups_survive_the_borrowing_conversion() {
+        let src = "sequenceDiagram\n  participant Alice\n  participant Bob\n  \
+Note over Alice,Bob: setup\n  Alice->>+Bob: request\n  Bob-->>-Alice: reply\n  \
+create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: bye\n";
+        let ir = parse(src).ir;
+
+        // Participants resolved by name, including the one created mid-diagram.
+        let ids: Vec<&str> = ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        for want in ["Alice", "Bob", "Carol"] {
+            assert!(ids.contains(&want), "participant {want} missing: {ids:?}");
+        }
+
+        // add_sequence_note resolved its target rather than dropping the note.
+        let notes = ir
+            .sequence_meta
+            .as_ref()
+            .map_or(0, |m| m.notes.len());
+        assert!(notes >= 1, "the note did not resolve to a participant");
+
+        // activate/deactivate resolved Bob: an unresolved name leaves no activation at all.
+        let activations = ir
+            .sequence_meta
+            .as_ref()
+            .map_or(0, |m| m.activations.len());
+        assert!(activations >= 1, "activation did not resolve its participant");
+
+        // add_lifecycle_create / add_lifecycle_destroy resolved Carol; an unresolved name would
+        // leave no lifecycle event at all, which is precisely how a bad conversion would present.
+        let lifecycle = ir
+            .sequence_meta
+            .as_ref()
+            .map_or(0, |m| m.lifecycle_events.len());
+        assert!(lifecycle >= 1, "create/destroy did not resolve their participant");
+
+        // The messages themselves are unaffected.
+        assert!(ir.edges.len() >= 4, "expected four messages, got {}", ir.edges.len());
+    }
+
     /// The Cow variant must be BYTE-IDENTICAL to the owning one on every shape of input.
     ///
     /// This is the whole safety argument for the lever: `normalize_identifier` now delegates to

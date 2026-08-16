@@ -16,7 +16,7 @@ use fm_core::{
 };
 
 use crate::mermaid_parser::trim_fast;
-use crate::{ParseResult, ParserConfig, normalize_identifier};
+use crate::{ParseResult, ParserConfig, normalize_identifier, normalize_identifier_cow};
 
 /// Open fragment entry: (kind, label, `start_edge`, alternatives, `child_fragment_indices`).
 type OpenFragment = (
@@ -831,8 +831,9 @@ impl IrBuilder {
         let participants: Vec<IrNodeId> = participant_names
             .iter()
             .filter_map(|name| {
-                let normalized = normalize_identifier(name);
-                self.node_id_index.get(&normalized, &self.ir.nodes)
+                // Lookup only: the owned String was allocated purely to be borrowed here.
+                let normalized = normalize_identifier_cow(name);
+                self.node_id_index.get(normalized.as_ref(), &self.ir.nodes)
             })
             .collect();
 
@@ -849,6 +850,9 @@ impl IrBuilder {
     }
 
     pub(crate) fn activate_participant(&mut self, name: &str) {
+        // NOT converted to the borrowing form on purpose: `entry` below takes an OWNED key, so this
+        // site genuinely needs a String and a Cow would only add an `into_owned()` for the same one
+        // allocation. The borrowing form pays off where the value is a pure lookup and is dropped.
         let normalized = normalize_identifier(name);
         let Some(node_id) = self.node_id_index.get(&normalized, &self.ir.nodes) else {
             return;
@@ -861,8 +865,10 @@ impl IrBuilder {
     }
 
     pub(crate) fn deactivate_participant(&mut self, name: &str) {
-        let normalized = normalize_identifier(name);
-        let Some(stack) = self.activation_stacks.get_mut(&normalized) else {
+        // Lookup only. `.as_ref()` is required here, not merely tidy: HashMap::get_mut's
+        // Borrow bound does not accept `&Cow<str>`.
+        let normalized = normalize_identifier_cow(name);
+        let Some(stack) = self.activation_stacks.get_mut(normalized.as_ref()) else {
             return;
         };
         let Some((node_id, start_edge)) = stack.pop() else {
@@ -921,8 +927,9 @@ impl IrBuilder {
     }
 
     pub(crate) fn add_lifecycle_create(&mut self, name: &str) {
-        let normalized = normalize_identifier(name);
-        let Some(node_id) = self.node_id_index.get(&normalized, &self.ir.nodes) else {
+        // Lookup only: the owned String was allocated purely to be borrowed here.
+        let normalized = normalize_identifier_cow(name);
+        let Some(node_id) = self.node_id_index.get(normalized.as_ref(), &self.ir.nodes) else {
             return;
         };
         let at_edge = self.ir.edges.len();
@@ -938,8 +945,9 @@ impl IrBuilder {
     }
 
     pub(crate) fn add_lifecycle_destroy(&mut self, name: &str) {
-        let normalized = normalize_identifier(name);
-        let Some(node_id) = self.node_id_index.get(&normalized, &self.ir.nodes) else {
+        // Lookup only: the owned String was allocated purely to be borrowed here.
+        let normalized = normalize_identifier_cow(name);
+        let Some(node_id) = self.node_id_index.get(normalized.as_ref(), &self.ir.nodes) else {
             return;
         };
         let at_edge = self.ir.edges.len().saturating_sub(1);
