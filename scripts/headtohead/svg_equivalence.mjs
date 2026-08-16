@@ -546,19 +546,53 @@ function declaredEdgePair(edge, nodeIds) {
   const nodes = new Set(nodeIds.map((id) => id.toLowerCase()));
   const body = /^(?:L|id)_(.+)_\d+$/.exec(edge.declared)?.[1];
   if (!body) return { pair: null, status: 'malformed_path_declaration' };
-  const candidates = new Map();
-  for (let i = 0; i < body.length; i++) {
-    if (body[i] !== '_') continue;
-    const from = body.slice(0, i).toLowerCase();
-    const to = body.slice(i + 1).toLowerCase();
-    if (nodes.has(from) && nodes.has(to)) {
-      candidates.set(`${pseudo(from)}>${pseudo(to)}`, { from: pseudo(from), to: pseudo(to) });
+  const collect = (normalize) => {
+    const found = new Map();
+    for (let i = 0; i < body.length; i++) {
+      if (body[i] !== '_') continue;
+      const from = normalize(body.slice(0, i));
+      const to = normalize(body.slice(i + 1));
+      if (nodes.has(from) && nodes.has(to)) {
+        found.set(`${pseudo(from)}>${pseudo(to)}`, { from: pseudo(from), to: pseudo(to) });
+      }
     }
+    return found;
+  };
+
+  const candidates = collect((half) => half.toLowerCase());
+  if (candidates.size === 1) {
+    return { pair: [...candidates.values()][0], status: 'declared_path_endpoints' };
   }
-  if (candidates.size !== 1) {
-    return { pair: null, status: `ambiguous_path_declaration(candidates=${candidates.size})` };
+
+  // ER RETRY (bd-19es). Mermaid writes an ER relationship's `data-id` as
+  // `id_entity-E0-0_entity-E1-1_0`, i.e. the two node references carry their KIND prefix and the
+  // per-element counter but NOT the diagram-id prefix. The rendered node `<g>` carries no
+  // `data-id`, so `canonicalNodeId` reduces `docssite50_r0_j0_0-entity-E0-0` to `e0` -- while these
+  // halves reduce to nothing, because that function's regex requires something before the kind.
+  // The two sides therefore never met and EVERY ER edge resolved to `candidates=0`, reporting
+  // `topology undecidable` for the whole diagram.
+  //
+  // This is a RESOLUTION, not a relaxation, and it is written to make that checkable:
+  //   * The raw pass above runs FIRST and returns unchanged whenever it already decides, so no
+  //     currently-decidable declaration can change verdict. This retry can only turn `candidates=0`
+  //     into a decision.
+  //   * The acceptance rule is untouched: a split still counts only when BOTH halves name a node
+  //     that was actually rendered, and the result is still rejected unless exactly one split does.
+  //     An edge naming an entity that does not exist stays unresolved.
+  //   * `canonicalNodeId` itself is deliberately NOT modified. Making its kind prefix optional
+  //     would also change how plain node ids like `flowchart-A-1` reduce, which would move
+  //     verdicts for families that are currently fine. The normalization here is local to edge
+  //     declaration halves.
+  const kindPrefixed = new RegExp(`^(?:${MERMAID_KINDS})-(.+)$`);
+  const retried = collect((half) => {
+    const withoutKind = kindPrefixed.exec(half)?.[1] ?? half;
+    return withoutKind.replace(/-\d+$/, '').toLowerCase();
+  });
+  if (retried.size === 1) {
+    return { pair: [...retried.values()][0], status: 'declared_path_endpoints' };
   }
-  return { pair: [...candidates.values()][0], status: 'declared_path_endpoints' };
+  const reported = candidates.size === 0 ? retried.size : candidates.size;
+  return { pair: null, status: `ambiguous_path_declaration(candidates=${reported})` };
 }
 
 function declaredEdgeTopology(edges, nodeIds) {
@@ -1658,6 +1692,44 @@ export function selfTest() {
       && fallback.js.topology_status === 'declared_path_endpoints',
     { verdict: fallback.verdict, js: fallback.js, failed: failedInvariants(fallback) });
   record('baseline_decides_tier2', base.tiers_decided.includes(2), base.tiers_decided);
+  // ── bd-19es: ER declaration halves carry a kind prefix and an element counter ──────────────
+  //
+  // These exercise `declaredEdgePair` directly, because the bug was invisible at the diagram level
+  // for every fixture that existed: `er_40` passed while every ER diagram in `docs_site_50` came
+  // back undecidable, so a test that only re-runs a passing fixture proves nothing.
+  const erNodes = ['e0', 'e1', 'e2'];
+
+  record('er_declaration_resolves_through_kind_prefix',
+    declaredEdgePair({ declared: 'id_entity-E0-0_entity-E1-1_0' }, erNodes).status
+      === 'declared_path_endpoints',
+    declaredEdgePair({ declared: 'id_entity-E0-0_entity-E1-1_0' }, erNodes));
+
+  record('er_declaration_resolves_to_the_RIGHT_pair',
+    JSON.stringify(declaredEdgePair({ declared: 'id_entity-E1-1_entity-E2-2_1' }, erNodes).pair)
+      === JSON.stringify({ from: 'e1', to: 'e2' }),
+    declaredEdgePair({ declared: 'id_entity-E1-1_entity-E2-2_1' }, erNodes));
+
+  // THE CONTROL THAT MAKES THIS A RESOLUTION RATHER THAN A RELAXATION. An edge naming an entity
+  // that was never rendered must still fail to resolve. If this ever passes, the retry has stopped
+  // checking that both halves name a real node and the oracle has gone blind rather than gained
+  // sight -- which is the failure mode that matters, because it would silently certify divergent
+  // topologies as equivalent.
+  record('er_declaration_naming_an_absent_entity_still_fails',
+    declaredEdgePair({ declared: 'id_entity-E0-0_entity-E9-9_0' }, erNodes).pair === null,
+    declaredEdgePair({ declared: 'id_entity-E0-0_entity-E9-9_0' }, erNodes));
+
+  // Existing flowchart/class declarations must be untouched: the raw pass runs first and returns
+  // before the retry is reached, so their behaviour cannot have moved.
+  record('plain_declaration_still_resolves_unchanged',
+    JSON.stringify(declaredEdgePair({ declared: 'L_A_B_0' }, ['a', 'b']).pair)
+      === JSON.stringify({ from: 'a', to: 'b' }),
+    declaredEdgePair({ declared: 'L_A_B_0' }, ['a', 'b']));
+
+  record('unknown_plain_declaration_still_fails',
+    declaredEdgePair({ declared: 'L_A_Z_0' }, ['a', 'b']).pair === null,
+    declaredEdgePair({ declared: 'L_A_Z_0' }, ['a', 'b']));
+
+
   const nativeBase = verifyFrankenmermaidAgainstSource({
     index: 0,
     family: 'flowchart',
