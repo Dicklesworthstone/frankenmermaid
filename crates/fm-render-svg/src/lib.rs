@@ -4403,6 +4403,63 @@ fn render_layout_to_svg(
         doc = doc.child(line);
     }
 
+    // stateDiagram notes (bd-a6l4). `ir.state_notes` had been parsed, carried and hashed for
+    // incremental equality since the note syntax landed, but no renderer had ever read it, so
+    // `note right of X : text` was accepted and then silently dropped from the output.
+    //
+    // Empty for every diagram type but state, and for a state diagram that declares no notes, so
+    // this loop is a no-op everywhere else and no other output moves. It lives in the PREFIX region
+    // above the streaming fast-path gate deliberately: the gate's condition is "the slow path
+    // inserts no child BETWEEN or AFTER the edge and node fragments", which a prefix child does not
+    // violate — state diagrams keep streaming.
+    for note in &layout.extensions.state_notes {
+        let nx = note.bounds.x + offset_x;
+        let ny = note.bounds.y + offset_y;
+
+        // Leader from the state's edge to the note's, dashed like mermaid-js's note connector.
+        doc = doc.child(
+            Element::line()
+                .x1(note.leader_start.x + offset_x)
+                .y1(note.leader_start.y + offset_y)
+                .x2(note.leader_end.x + offset_x)
+                .y2(note.leader_end.y + offset_y)
+                .stroke(&theme.colors.edge)
+                .stroke_width(1.0)
+                .stroke_dasharray("4,3")
+                .class("fm-state-note-leader"),
+        );
+
+        doc = doc.child(
+            Element::rect()
+                .x(nx)
+                .y(ny)
+                .width(note.bounds.width)
+                .height(note.bounds.height)
+                .rx(4.0)
+                .ry(4.0)
+                .fill(&theme.colors.node_fill)
+                .stroke(&theme.colors.accents[4 % theme.colors.accents.len()])
+                .stroke_width(1.0)
+                .class("fm-state-note"),
+        );
+
+        if !note.text.is_empty() {
+            doc = doc.child(
+                TextBuilder::new(&note.text)
+                    .x(nx + 10.0)
+                    .y(ny + 8.0)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                    .font_size(config.font_size * 0.8)
+                    .line_height(config.line_height)
+                    .baseline(text::DominantBaseline::Hanging)
+                    .anchor(TextAnchor::Start)
+                    .fill(&theme.colors.text)
+                    .class("fm-state-note-text")
+                    .build(),
+            );
+        }
+    }
+
     // Build centrality tier lookup map for O(1) access during node rendering. Hoisted above the
     // edge/node emission so the flowchart fast path below can reference it.
     let centrality_map: HashMap<usize, CentralityTier> = layout
@@ -4831,6 +4888,7 @@ fn layout_svg_capacity_hint(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> us
         + layout.extensions.sequence_notes.len()
         + layout.extensions.sequence_fragments.len()
         + layout.extensions.cluster_dividers.len()
+        + layout.extensions.state_notes.len()
         + layout.extensions.sequence_mirror_headers.len();
 
     BASE_DOCUMENT_BYTES

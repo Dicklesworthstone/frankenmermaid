@@ -4557,3 +4557,100 @@ fn flowchart_declared_edge_types_render_their_declared_decoration() {
          edge is {thinnest_thick} and the heaviest normal edge is {thickest_thin}"
     );
 }
+
+/// bd-a6l4: a `stateDiagram` note must reach the SVG.
+///
+/// `note right of X : text` parsed into `ir.state_notes` and was then read by exactly one thing in
+/// the whole workspace — `memo_ir_equal`, the incremental equality probe. No layout pass positioned
+/// it and no renderer drew it, so the engine accepted the statement and silently produced a document
+/// that did not contain it. Measured before the fix: the complete `<text>` content of the diagram
+/// below was `Idle | Running | Crashed` with the note string absent.
+///
+/// This is an END-TO-END assertion on the rendered bytes on purpose. The layout-side tests in
+/// fm-layout pin the geometry, but only the rendered document proves the pipeline is connected —
+/// the defect was precisely a stage that held correct data and never handed it on.
+#[test]
+fn state_diagram_notes_reach_the_rendered_svg() {
+    let source = "stateDiagram-v2\n    Idle --> Running\n    Running --> Crashed\n    \
+                  note right of Crashed : Restart required\n    note left of Idle : Waiting for input\n";
+    let svg = render_svg_with_config(&parse(source).ir, &SvgRenderConfig::default());
+
+    for expected in ["Restart required", "Waiting for input"] {
+        assert!(
+            svg.contains(expected),
+            "the note text {expected:?} never reached the SVG; rendered text runs were {:?}",
+            svg_text_runs(&svg)
+        );
+    }
+    assert_eq!(
+        svg.matches("fm-state-note-leader").count(),
+        2,
+        "each note must be joined to its state by a leader line"
+    );
+
+    // CONTAINMENT: a note drawn outside the viewBox is as invisible as one never drawn, which is
+    // the failure mode bd-zwh3 documents for sequence fragment frames.
+    let view_box = svg
+        .split("viewBox=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_default()
+        .to_string();
+    let bounds: Vec<f32> = view_box
+        .split_whitespace()
+        .filter_map(|token| token.parse().ok())
+        .collect();
+    assert_eq!(bounds.len(), 4, "unparsable viewBox {view_box:?}");
+    for note in svg.match_indices("class=\"fm-state-note\"") {
+        let element_start = svg[..note.0].rfind("<rect").unwrap_or(0);
+        let element = &svg[element_start..note.0];
+        let attr = |name: &str| -> f32 {
+            element
+                .split(&format!("{name}=\""))
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(f32::NAN)
+        };
+        let (x, y, w, h) = (attr("x"), attr("y"), attr("width"), attr("height"));
+        assert!(
+            x >= bounds[0] - 0.51
+                && y >= bounds[1] - 0.51
+                && x + w <= bounds[0] + bounds[2] + 0.51
+                && y + h <= bounds[1] + bounds[3] + 0.51,
+            "note box ({x:.2},{y:.2},{w:.2},{h:.2}) is drawn outside viewBox {view_box:?} and \
+             would be clipped"
+        );
+    }
+}
+
+/// NEGATIVE CONTROL for the test above: a state diagram that declares no notes must render with no
+/// note markup at all. Without this, an implementation that emitted an empty note box for every
+/// state would still satisfy the assertions above.
+#[test]
+fn a_state_diagram_without_notes_emits_no_note_markup() {
+    let svg = render_svg_with_config(
+        &parse("stateDiagram-v2\n    Idle --> Running\n").ir,
+        &SvgRenderConfig::default(),
+    );
+    assert!(!svg.contains("fm-state-note"));
+}
+
+/// Collect the text content of every `<text>`/`<tspan>` run, for failure messages that say what WAS
+/// rendered instead of only what was not.
+fn svg_text_runs(svg: &str) -> Vec<String> {
+    let mut runs = Vec::new();
+    let mut rest = svg;
+    while let Some(open) = rest.find("<text") {
+        let after = &rest[open..];
+        let Some(gt) = after.find('>') else { break };
+        let Some(close) = after.find("</text>") else {
+            break;
+        };
+        if close > gt {
+            runs.push(after[gt + 1..close].to_string());
+        }
+        rest = &after[close + 7..];
+    }
+    runs
+}

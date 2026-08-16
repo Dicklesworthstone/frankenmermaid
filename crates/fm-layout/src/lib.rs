@@ -2084,6 +2084,40 @@ pub struct LayoutExtensions {
     /// other diagram type and for any packet whose fields are row-aligned; when empty the renderer
     /// draws each field as the single box its `LayoutNodeBox` describes.
     pub packet_field_continuations: Vec<LayoutPacketFieldContinuation>,
+    /// `stateDiagram` note boxes, one per `note left/right of X` whose target resolves to a node.
+    /// Empty for every other diagram type and for a state diagram that declares no notes, in which
+    /// case nothing about the layout changes.
+    pub state_notes: Vec<LayoutStateNote>,
+}
+
+/// Which side of its target state a [`LayoutStateNote`] was placed on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateNoteSide {
+    Left,
+    Right,
+}
+
+/// A `stateDiagram` note box, positioned beside the state it annotates.
+///
+/// `ir.state_notes` has been parsed and carried since the note syntax landed, but until bd-a6l4
+/// nothing read it except `memo_ir_equal` — so `note right of X : text` was accepted, hashed for
+/// incremental equality, and then dropped on the floor. This is the geometry that makes it visible.
+///
+/// Decided in layout, not the renderer, for the reason bd-h9gx established for gantt labels: a note
+/// sits outside every node box `compute_bounds` measured, so only layout can grow the canvas to hold
+/// it. A renderer-only placement lands outside the viewBox and is clipped.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutStateNote {
+    /// Index into [`DiagramLayout::nodes`] for the state this note annotates.
+    pub node_index: usize,
+    /// Side the note was placed on, from `IrStateNote::position`.
+    pub side: StateNoteSide,
+    /// Note text; may be multi-line for the `note right of X … end note` form.
+    pub text: String,
+    pub bounds: LayoutRect,
+    /// Leader line from the state's edge to the note's edge, drawn dashed like mermaid-js's.
+    pub leader_start: LayoutPoint,
+    pub leader_end: LayoutPoint,
 }
 
 /// One extra box for a packet-beta field that does not fit in the row its start bit belongs to.
@@ -3191,6 +3225,15 @@ fn compute_traced_layout_with_config_and_guardrails(
         guarded_dispatch.reason = guard.reason;
     }
 
+    // Captured before `config` is moved into the dispatch arms; a caller that supplied custom
+    // `font_metrics` must have its notes measured with them, not with the default preset.
+    let state_note_metrics = matches!(ir.diagram_type, DiagramType::State).then(|| {
+        config
+            .font_metrics
+            .clone()
+            .unwrap_or_else(fm_core::FontMetrics::default_metrics)
+    });
+
     let mut traced = match guarded_dispatch.selected {
         LayoutAlgorithm::Sugiyama | LayoutAlgorithm::Auto => {
             layout_diagram_sugiyama_traced_with_config(ir, config)
@@ -3210,6 +3253,17 @@ fn compute_traced_layout_with_config_and_guardrails(
         LayoutAlgorithm::Quadrant => layout_diagram_quadrant_traced(ir),
         LayoutAlgorithm::GitGraph => layout_diagram_gitgraph_traced(ir),
     };
+    // State notes are attached HERE, after the dispatch match rather than inside one algorithm, for
+    // two reasons: a state diagram can land on Sugiyama, Force, Tree or Radial depending on config
+    // and guardrails, and the placement only needs final node boxes, which every arm has produced by
+    // now. `build_state_note_geometry` returns empty for every non-state diagram and for a state
+    // diagram with no notes, so this is a no-op — not merely a cheap one — everywhere else (bd-a6l4).
+    if let Some(metrics) = state_note_metrics.filter(|_| !ir.state_notes.is_empty()) {
+        let layout = Arc::make_mut(&mut traced.layout);
+        let notes = build_state_note_geometry(ir, &layout.nodes, &metrics);
+        layout.extensions.state_notes = notes;
+        extend_bounds_for_state_notes(layout);
+    }
     traced.trace.dispatch = guarded_dispatch;
     traced.trace.guard = guard;
     traced.trace.snapshots.insert(
@@ -6236,6 +6290,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 node_centrality: Vec::new(),
                 gantt_task_labels: Vec::new(),
                 packet_field_continuations: Vec::new(),
+                state_notes: Vec::new(),
             },
             dirty_regions: Vec::new(),
         }),
@@ -15595,6 +15650,142 @@ fn anchor_composite_state_nodes(
     }
 }
 
+/// Gap between a state's box and the note that annotates it — the span the dashed leader crosses.
+const STATE_NOTE_GAP: f32 = 32.0;
+/// Horizontal padding inside a state note box, per side.
+const STATE_NOTE_PAD_X: f32 = 10.0;
+/// Vertical padding inside a state note box, per side.
+const STATE_NOTE_PAD_Y: f32 = 8.0;
+/// Vertical gap between two notes stacked on the same side of the same state.
+const STATE_NOTE_STACK_GAP: f32 = 8.0;
+/// The renderer draws note text at `config.font_size * 0.8`, matching sequence notes, so the layout
+/// estimate is scaled by the same factor — `metrics` measures at its own base size.
+const STATE_NOTE_FONT_SCALE: f32 = 0.8;
+
+/// Place a box beside each `note left/right of X` in a state diagram.
+///
+/// Notes are the only state-diagram content with no node of its own, so nothing in the Sugiyama
+/// pipeline reserves room for them. They are positioned here, from the final node boxes, and the
+/// canvas is grown afterwards by [`extend_bounds_for_state_notes`].
+///
+/// A note whose `target` matches no node is DROPPED rather than defaulted to some node: silently
+/// attaching `note right of Typo` to whichever state happened to be first would be a worse failure
+/// than not drawing it, because it invents a claim the source never made.
+///
+/// Several notes on the same side of the same state stack downward instead of coinciding.
+fn build_state_note_geometry(
+    ir: &MermaidDiagramIr,
+    nodes: &[LayoutNodeBox],
+    metrics: &fm_core::FontMetrics,
+) -> Vec<LayoutStateNote> {
+    if !matches!(ir.diagram_type, DiagramType::State) || ir.state_notes.is_empty() {
+        return Vec::new();
+    }
+
+    let mut placed: Vec<LayoutStateNote> = Vec::with_capacity(ir.state_notes.len());
+    for note in &ir.state_notes {
+        let Some(target) = nodes.iter().find(|node| node.node_id == note.target) else {
+            continue;
+        };
+        let side = if note.position.eq_ignore_ascii_case("left") {
+            StateNoteSide::Left
+        } else {
+            StateNoteSide::Right
+        };
+
+        let (text_width, text_height) = metrics.estimate_dimensions(&note.text);
+        let width = STATE_NOTE_FONT_SCALE.mul_add(text_width, 2.0 * STATE_NOTE_PAD_X);
+        let height = STATE_NOTE_FONT_SCALE.mul_add(text_height, 2.0 * STATE_NOTE_PAD_Y);
+
+        // Start beside the target, then clear any OTHER state box the note's own row runs into.
+        // Without this a note on a state that shares its rank with a neighbour is drawn on top of
+        // that neighbour, which trades one invisible note for two unreadable boxes.
+        let row_top = target.bounds.center().y - height / 2.0;
+        let row_bottom = row_top + height;
+        let row_neighbours = nodes.iter().filter(|other| {
+            other.node_index != target.node_index
+                && other.bounds.y < row_bottom
+                && other.bounds.y + other.bounds.height > row_top
+        });
+        // Folded as a single max/min over the whole row rather than nudged per neighbour: a
+        // one-pass nudge in node order is not a fixpoint, so a node visited before the push could
+        // still be overlapped afterwards.
+        let x = match side {
+            StateNoteSide::Right => {
+                let clear_of = row_neighbours
+                    .fold(target.bounds.x + target.bounds.width, |acc, other| {
+                        acc.max(other.bounds.x + other.bounds.width)
+                    });
+                clear_of + STATE_NOTE_GAP
+            }
+            StateNoteSide::Left => {
+                let clear_of =
+                    row_neighbours.fold(target.bounds.x, |acc, other| acc.min(other.bounds.x));
+                clear_of - STATE_NOTE_GAP - width
+            }
+        };
+        // Stack below any note already placed on this same side of this same state.
+        let mut y = target.bounds.center().y - height / 2.0;
+        for earlier in &placed {
+            if earlier.node_index == target.node_index && earlier.side == side {
+                y = y.max(earlier.bounds.y + earlier.bounds.height + STATE_NOTE_STACK_GAP);
+            }
+        }
+
+        let leader_y = target.bounds.center().y;
+        let (leader_start_x, leader_end_x) = match side {
+            StateNoteSide::Right => (target.bounds.x + target.bounds.width, x),
+            StateNoteSide::Left => (target.bounds.x, x + width),
+        };
+
+        placed.push(LayoutStateNote {
+            node_index: target.node_index,
+            side,
+            text: note.text.clone(),
+            bounds: LayoutRect {
+                x,
+                y,
+                width,
+                height,
+            },
+            leader_start: LayoutPoint {
+                x: leader_start_x,
+                y: leader_y,
+            },
+            leader_end: LayoutPoint {
+                x: leader_end_x,
+                y: leader_y,
+            },
+        });
+    }
+    placed
+}
+
+/// Grow the canvas to hold the state notes [`build_state_note_geometry`] placed outside it.
+///
+/// Same requirement `extend_bounds_for_gantt_labels` exists for: a note sits beyond every node box
+/// `compute_bounds` measured, so without this it is drawn past the viewBox edge and clipped —
+/// exactly the failure bd-zwh3 documents for sequence fragment frames.
+fn extend_bounds_for_state_notes(layout: &mut DiagramLayout) {
+    if layout.extensions.state_notes.is_empty() {
+        return;
+    }
+    let mut min_x = layout.bounds.x;
+    let mut min_y = layout.bounds.y;
+    let mut max_x = layout.bounds.x + layout.bounds.width;
+    let mut max_y = layout.bounds.y + layout.bounds.height;
+    for note in &layout.extensions.state_notes {
+        min_x = min_x.min(note.bounds.x);
+        min_y = min_y.min(note.bounds.y);
+        max_x = max_x.max(note.bounds.x + note.bounds.width);
+        max_y = max_y.max(note.bounds.y + note.bounds.height);
+    }
+    layout.bounds.x = min_x;
+    layout.bounds.y = min_y;
+    layout.bounds.width = max_x - min_x;
+    layout.bounds.height = max_y - min_y;
+}
+
 fn build_cluster_boxes(
     ir: &MermaidDiagramIr,
     nodes: &[LayoutNodeBox],
@@ -16702,19 +16893,20 @@ mod tests {
         IncrementalLayoutEngine, IncrementalLayoutSession, LayoutAlgorithm, LayoutConfig,
         LayoutDependencyGraph, LayoutEdit, LayoutGuardrails, LayoutNodeBox, LayoutPoint,
         LayoutRect, LayoutSequenceLifecycleMarkerKind, LayoutSpacing, ObstacleSpatialIndex,
-        RegionInput, RegionMemoryBudget, RenderClip, RenderItem, RenderSource, SubgraphRegion,
-        SubgraphRegionId, SubgraphRegionKind, TracedLayout, build_directed_path_edge_paths,
-        build_edge_paths, build_layout_decision_ledger, build_layout_guard_report,
-        build_render_scene, certify_directed_path_layout_prefix, compute_node_size,
-        constraint_lp_iteration_limit, constraint_solution_is_usable, dispatch_layout_algorithm,
-        er_compartment_dimensions, estimate_layout_cost, evaluate_layout_guardrails,
-        find_obstacle_nudge_x, find_obstacle_nudge_y, force_barnes_hut_repulsion,
-        force_direct_repulsion, incremental_overlap_alignment, is_directed_path, layout,
-        layout_diagram, layout_diagram_force, layout_diagram_force_traced, layout_diagram_gantt,
-        layout_diagram_grid, layout_diagram_incremental_traced_with_config_and_guardrails,
-        layout_diagram_radial, layout_diagram_sankey, layout_diagram_sequence,
-        layout_diagram_sequence_traced, layout_diagram_timeline, layout_diagram_traced,
-        layout_diagram_traced_with_algorithm, layout_diagram_traced_with_algorithm_and_guardrails,
+        RegionInput, RegionMemoryBudget, RenderClip, RenderItem, RenderSource, StateNoteSide,
+        SubgraphRegion, SubgraphRegionId, SubgraphRegionKind, TracedLayout,
+        build_directed_path_edge_paths, build_edge_paths, build_layout_decision_ledger,
+        build_layout_guard_report, build_render_scene, certify_directed_path_layout_prefix,
+        compute_node_size, constraint_lp_iteration_limit, constraint_solution_is_usable,
+        dispatch_layout_algorithm, er_compartment_dimensions, estimate_layout_cost,
+        evaluate_layout_guardrails, find_obstacle_nudge_x, find_obstacle_nudge_y,
+        force_barnes_hut_repulsion, force_direct_repulsion, incremental_overlap_alignment,
+        is_directed_path, layout, layout_diagram, layout_diagram_force,
+        layout_diagram_force_traced, layout_diagram_gantt, layout_diagram_grid,
+        layout_diagram_incremental_traced_with_config_and_guardrails, layout_diagram_radial,
+        layout_diagram_sankey, layout_diagram_sequence, layout_diagram_sequence_traced,
+        layout_diagram_timeline, layout_diagram_traced, layout_diagram_traced_with_algorithm,
+        layout_diagram_traced_with_algorithm_and_guardrails,
         layout_diagram_traced_with_config_and_guardrails, layout_diagram_tree,
         layout_diagram_with_config, layout_diagram_with_cycle_strategy, layout_diagram_xychart,
         layout_source_map, node_size_cache_key, requirement_row_dimensions, route_edge_points,
@@ -22926,6 +23118,223 @@ mod tests {
             });
         }
         ir
+    }
+
+    /// A two-state diagram with `note <position> of <target> : <text>` on it.
+    fn state_ir_with_note(position: &str, target: &str, text: &str) -> MermaidDiagramIr {
+        let mut ir = graph_ir(DiagramType::State, 2, &[(0, 1)]);
+        ir.state_notes.push(fm_core::IrStateNote {
+            target: target.to_string(),
+            position: position.to_string(),
+            text: text.to_string(),
+            span: Span::default(),
+        });
+        ir
+    }
+
+    /// bd-a6l4: the note must EXIST in the layout at all. Before this, `ir.state_notes` was read by
+    /// nothing but `memo_ir_equal`, so a declared note produced no geometry and no output.
+    #[test]
+    fn state_note_is_placed_beside_its_target() {
+        let ir = state_ir_with_note("right", "N1", "This is a note");
+        let layout = layout_diagram(&ir);
+        assert_eq!(
+            layout.extensions.state_notes.len(),
+            1,
+            "the declared note produced no geometry"
+        );
+        let note = &layout.extensions.state_notes[0];
+        let target = &layout.nodes[1];
+        assert_eq!(note.node_index, 1, "note attached to the wrong state");
+        assert_eq!(note.text, "This is a note");
+        assert!(
+            note.bounds.x >= target.bounds.x + target.bounds.width,
+            "a `right of` note must start at or past its state's right edge: note.x={:.2} vs \
+             target right={:.2}",
+            note.bounds.x,
+            target.bounds.x + target.bounds.width
+        );
+        // The leader has to actually span the gap, not be a zero-length stub.
+        assert!(
+            note.leader_end.x > note.leader_start.x,
+            "right-side leader must run left-to-right"
+        );
+    }
+
+    /// NEGATIVE CASE 2 from bd-a6l4: an implementation that ignores `IrStateNote::position`
+    /// passes a right-only test. `left` must land on the OPPOSITE side.
+    #[test]
+    fn state_note_position_decides_which_side_it_lands_on() {
+        let right = layout_diagram(&state_ir_with_note("right", "N1", "note text"));
+        let left = layout_diagram(&state_ir_with_note("left", "N1", "note text"));
+        let right_note = &right.extensions.state_notes[0];
+        let left_note = &left.extensions.state_notes[0];
+        assert_eq!(right_note.side, StateNoteSide::Right);
+        assert_eq!(left_note.side, StateNoteSide::Left);
+        let target = &right.nodes[1];
+        assert!(
+            left_note.bounds.x + left_note.bounds.width <= target.bounds.x,
+            "a `left of` note must end at or before its state's left edge: right edge={:.2} vs \
+             target left={:.2}",
+            left_note.bounds.x + left_note.bounds.width,
+            target.bounds.x
+        );
+        assert!(
+            left_note.bounds.x < right_note.bounds.x,
+            "left and right notes coincided at x={:.2} — position was ignored",
+            left_note.bounds.x
+        );
+    }
+
+    /// NEGATIVE CASE 1: the box must RESPOND to the text, and the canvas must grow to hold it.
+    ///
+    /// Swept over lengths rather than asserted at one, and asserted STRICTLY increasing, so the
+    /// test cannot pass by agreeing with a constant — the pre-fix behaviour is no box at all, and a
+    /// fixed-width box would fail here too.
+    #[test]
+    fn state_note_box_and_canvas_grow_with_the_note_text() {
+        let mut widths = Vec::new();
+        let mut canvas_widths = Vec::new();
+        for length in [4_usize, 20, 40, 80, 160] {
+            let text = "x".repeat(length);
+            let layout = layout_diagram(&state_ir_with_note("right", "N1", &text));
+            let note = &layout.extensions.state_notes[0];
+            widths.push(note.bounds.width);
+            canvas_widths.push(layout.bounds.width);
+            let right_edge = note.bounds.x + note.bounds.width;
+            let canvas_right = layout.bounds.x + layout.bounds.width;
+            assert!(
+                right_edge <= canvas_right + 0.01,
+                "note of {length} chars runs {:.2}px past the canvas — it would be clipped",
+                right_edge - canvas_right
+            );
+        }
+        for pair in widths.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "note width did not grow with its text: {widths:?}"
+            );
+        }
+        for pair in canvas_widths.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "canvas did not grow with the note: {canvas_widths:?}"
+            );
+        }
+    }
+
+    /// NEGATIVE CASE 3: a state diagram with no notes must be untouched — not "nearly", exactly.
+    /// The control is the same diagram WITH a note, which must differ.
+    #[test]
+    fn a_state_diagram_without_notes_is_unchanged_by_the_note_pass() {
+        let plain = layout_diagram(&graph_ir(DiagramType::State, 2, &[(0, 1)]));
+        assert!(plain.extensions.state_notes.is_empty());
+        let noted = layout_diagram(&state_ir_with_note("right", "N1", "a note"));
+        assert_eq!(
+            plain.nodes, noted.nodes,
+            "adding a note moved the state boxes"
+        );
+        assert_eq!(
+            plain.bounds.height, noted.bounds.height,
+            "a side note must not change the diagram height"
+        );
+        // Control: the note pass DID do something, so the equality above is not vacuous.
+        assert!(noted.bounds.width > plain.bounds.width);
+    }
+
+    /// NEGATIVE CASE 4: a note whose target does not exist is dropped, not silently reattached to
+    /// some other state, and does not panic.
+    #[test]
+    fn state_note_targeting_an_unknown_state_is_dropped_not_reattached() {
+        let layout = layout_diagram(&state_ir_with_note("right", "NoSuchState", "orphan"));
+        assert!(
+            layout.extensions.state_notes.is_empty(),
+            "an orphan note was attached to {:?}",
+            layout
+                .extensions
+                .state_notes
+                .first()
+                .map(|note| note.node_index)
+        );
+        let plain = layout_diagram(&graph_ir(DiagramType::State, 2, &[(0, 1)]));
+        assert_eq!(
+            plain.bounds, layout.bounds,
+            "an orphan note moved the canvas"
+        );
+    }
+
+    /// Two notes on the same side of the same state must stack, not coincide — the same defect
+    /// class as the force-layout parallel edges pinned in 56a8eafc.
+    #[test]
+    fn two_notes_on_one_state_stack_instead_of_coinciding() {
+        let mut ir = state_ir_with_note("right", "N1", "first note");
+        ir.state_notes.push(fm_core::IrStateNote {
+            target: "N1".to_string(),
+            position: "right".to_string(),
+            text: "second note".to_string(),
+            span: Span::default(),
+        });
+        let layout = layout_diagram(&ir);
+        assert_eq!(layout.extensions.state_notes.len(), 2);
+        let (first, second) = (
+            &layout.extensions.state_notes[0],
+            &layout.extensions.state_notes[1],
+        );
+        assert!(
+            second.bounds.y >= first.bounds.y + first.bounds.height,
+            "two notes on one state overlapped: first y={:.2} h={:.2}, second y={:.2}",
+            first.bounds.y,
+            first.bounds.height,
+            second.bounds.y
+        );
+    }
+
+    /// A note must clear every state box its own row runs into, not just its target's.
+    ///
+    /// Fixture is a fan-out, so `N1` and `N2` share a rank and sit side by side; a note on `N1`
+    /// placed only relative to `N1` lands on top of `N2`. Asserted against EVERY node box, so the
+    /// test states the property (no overlap) rather than the fixture's particular geometry.
+    #[test]
+    fn a_state_note_clears_the_other_states_on_its_row() {
+        let mut ir = graph_ir(DiagramType::State, 3, &[(0, 1), (0, 2)]);
+        ir.state_notes.push(fm_core::IrStateNote {
+            target: "N1".to_string(),
+            position: "right".to_string(),
+            text: "a note long enough to reach its neighbour".to_string(),
+            span: Span::default(),
+        });
+        let layout = layout_diagram(&ir);
+        let note = &layout.extensions.state_notes[0];
+        for node in &layout.nodes {
+            let overlap_x = (note.bounds.x + note.bounds.width)
+                .min(node.bounds.x + node.bounds.width)
+                - note.bounds.x.max(node.bounds.x);
+            let overlap_y = (note.bounds.y + note.bounds.height)
+                .min(node.bounds.y + node.bounds.height)
+                - note.bounds.y.max(node.bounds.y);
+            assert!(
+                overlap_x <= 0.0 || overlap_y <= 0.0,
+                "the note overlaps state {} by {overlap_x:.2}x{overlap_y:.2}",
+                node.node_id
+            );
+        }
+    }
+
+    /// A note on a FLOWCHART-typed IR must produce nothing even if the field is populated: the pass
+    /// is gated on the diagram type, so no other diagram type can be moved by it.
+    #[test]
+    fn state_note_geometry_is_confined_to_state_diagrams() {
+        let mut ir = graph_ir(DiagramType::Flowchart, 2, &[(0, 1)]);
+        ir.state_notes.push(fm_core::IrStateNote {
+            target: "N1".to_string(),
+            position: "right".to_string(),
+            text: "should never be drawn".to_string(),
+            span: Span::default(),
+        });
+        let layout = layout_diagram(&ir);
+        assert!(layout.extensions.state_notes.is_empty());
+        let plain = layout_diagram(&graph_ir(DiagramType::Flowchart, 2, &[(0, 1)]));
+        assert_eq!(plain.bounds, layout.bounds);
     }
 
     /// Two renders of the SAME document must not disagree because the host was busy (bd-ryxg).
