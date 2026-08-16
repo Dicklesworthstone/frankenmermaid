@@ -2276,7 +2276,31 @@ fn intern_flow_ast_node(
     Some(node_id)
 }
 
+/// Parse a `subgraph …` header, defaulting the title to the subgraph's own id (bd-ka77).
+///
+/// mermaid displays the id when no explicit title is given, so `subgraph one` is labelled `one`.
+/// We returned `None`, and `None` does not mean "draw the id" downstream — it means the cluster
+/// label is never emitted at all and `build_cluster_boxes` never sizes for it, leaving the group
+/// the author named anonymous in the picture.
+///
+/// `parse_subgraph_statement_raw` keeps the original extraction untouched, including its deliberate
+/// `.filter(|value| value != &key)` redundancy drop; the difference is that a dropped-as-redundant
+/// title now falls back to the id instead of to nothing. Dropping a REDUNDANT title and dropping
+/// the title ENTIRELY are different outcomes and only the first was intended.
+///
+/// This mirrors what the state path already does: `begin_state_cluster` passes
+/// `title.or(Some(name))`, so a state composite always carries a title. Flowchart subgraphs were
+/// the outlier.
 fn parse_subgraph_statement(
+    statement: &str,
+    config: &ParserConfig,
+) -> Option<(String, Option<String>)> {
+    let (key, title) = parse_subgraph_statement_raw(statement, config)?;
+    let title = title.or_else(|| Some(key.clone()));
+    Some((key, title))
+}
+
+fn parse_subgraph_statement_raw(
     statement: &str,
     config: &ParserConfig,
 ) -> Option<(String, Option<String>)> {
@@ -14535,6 +14559,57 @@ Rel_Back(db, app, "Responds")"#,
             meta.attributes[3].visibility,
             fm_core::ClassVisibility::Package
         );
+    }
+
+    /// bd-ka77: a bare `subgraph one` is labelled with its id, the way mermaid labels it.
+    ///
+    /// We returned no title at all, so the group box was drawn unlabelled and the grouping the
+    /// author named was anonymous in the picture. The bracketed form is the control: it must still
+    /// win over the id, or this fix would have traded one wrong label for another.
+    #[test]
+    fn bare_subgraph_is_titled_with_its_id() {
+        let config = ParserConfig::default();
+        assert_eq!(
+            super::parse_subgraph_statement("subgraph one", &config),
+            Some(("one".to_string(), Some("one".to_string()))),
+            "a bare subgraph must be labelled with its id"
+        );
+
+        // CONTROL 1: the bracketed title still wins.
+        assert_eq!(
+            super::parse_subgraph_statement("subgraph one [Titled]", &config),
+            Some(("one".to_string(), Some("Titled".to_string()))),
+            "the bracketed title must not be replaced by the id"
+        );
+
+        // CONTROL 2: a quoted title still wins.
+        let quoted = super::parse_subgraph_statement("subgraph one \"My Group\"", &config);
+        assert_eq!(
+            quoted
+                .as_ref()
+                .map(|(key, title)| (key.as_str(), title.as_deref())),
+            Some(("one", Some("My Group"))),
+            "a quoted title must not be replaced by the id"
+        );
+
+        // CONTROL 3: an explicit title that EQUALS the id must survive the redundancy filter —
+        // the user asked for a label either way, and dropping it leaves the box unlabelled.
+        assert_eq!(
+            super::parse_subgraph_statement("subgraph one [one]", &config),
+            Some(("one".to_string(), Some("one".to_string())))
+        );
+    }
+
+    /// End-to-end for bd-ka77: the title must reach the IR's cluster, not just the parse result.
+    #[test]
+    fn bare_subgraph_title_reaches_the_cluster() {
+        let parsed = parse_mermaid("flowchart TB\n  subgraph one\n    a --> b\n  end\n");
+        assert_eq!(parsed.ir.clusters.len(), 1, "expected one cluster");
+        let title = parsed.ir.clusters[0]
+            .title
+            .and_then(|id| parsed.ir.labels.get(id.0))
+            .map(|l| l.text.as_str());
+        assert_eq!(title, Some("one"), "the cluster carries no title");
     }
 
     /// bd-9x8r: `A@{ shape: rect, label: "Shaped" }` must declare node A, not a node named after
