@@ -10169,7 +10169,14 @@ fn parse_c4_relationship(
     };
 
     let (actual_from, actual_to, arrow) = match function_name {
-        "BiRel" => (from_node, to_node, ArrowType::Line),
+        // `BiRel(a, b, "…")` is a BIDIRECTIONAL relationship — C4 draws an arrowhead on each end.
+        // Mapping it to `Line` dropped both, so the relationship rendered as a bare undirected
+        // segment: visually indistinguishable from a diagram that had drawn no relationship arrow
+        // at all, and carrying strictly less information than the `Rel` it is meant to contrast
+        // with. `DoubleArrow` is the same variant `<-->` produces, and the SVG renderer already
+        // gives it `MARKER_START | MARKER_END` (fm-render-svg lib.rs:3322), so the arrowheads reach
+        // the output rather than only the IR.
+        "BiRel" => (from_node, to_node, ArrowType::DoubleArrow),
         "Rel_Back" => (to_node, from_node, ArrowType::Arrow),
         _ => (from_node, to_node, ArrowType::Arrow),
     };
@@ -13289,7 +13296,18 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(parsed.ir.diagram_type, DiagramType::C4Dynamic);
         assert_eq!(parsed.ir.nodes.len(), 3);
         assert_eq!(parsed.ir.edges.len(), 2);
-        assert_eq!(parsed.ir.edges[0].arrow, ArrowType::Line);
+        // STRENGTHENED, not relaxed: this line used to assert `ArrowType::Line`, which pinned the
+        // defect rather than the specification — a `BiRel` that renders as a bare undirected
+        // segment has lost the very property that distinguishes it from `Rel`. `DoubleArrow` is
+        // what `<-->` produces and what the SVG renderer gives markers on both ends.
+        assert_eq!(parsed.ir.edges[0].arrow, ArrowType::DoubleArrow);
+        // Control: a plain `Rel` must stay single-headed, so the fix cannot have simply made every
+        // C4 relationship bidirectional.
+        let plain = parse_mermaid(
+            "C4Context\nPerson(user, \"User\")\nSystem(app, \"App\")\nRel(user, app, \"Uses\")",
+        );
+        assert_eq!(plain.ir.edges.len(), 1);
+        assert_eq!(plain.ir.edges[0].arrow, ArrowType::Arrow);
 
         let back_edge = &parsed.ir.edges[1];
         let endpoints_are_nodes = matches!(
