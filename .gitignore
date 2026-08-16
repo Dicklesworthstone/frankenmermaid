@@ -39,6 +39,13 @@ B\[*
 
 # Beads history snapshots (JSONL export is tracked, history is local)
 .beads/.br_history/
+# Local br recovery copies and FrankenSQLite sidecars (machine-local, regenerated)
+.beads/.br_recovery/
+.beads/*wal-cert
+.beads/*wal-cert-head
+.beads/beads.db-fsqlite-ns-*
+.beads/*-fsqlite-ns-gate
+.beads/*-fsqlite-ns-use
 
 # Beads ephemeral DB artifacts (rebuild, recovery, test, bad snapshots)
 .beads/beads.db.bad_*
