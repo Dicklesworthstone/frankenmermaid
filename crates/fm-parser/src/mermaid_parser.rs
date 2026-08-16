@@ -3214,6 +3214,58 @@ fn parse_class_member(trimmed: &str) -> Option<fm_core::IrClassMember> {
 /// The source cardinality is a quoted string after the left-hand class name
 /// and before the operator.  The target cardinality is a quoted string after
 /// the operator and before the right-hand class name.
+/// Split a class relation's trailing `: label` off the statement (bd-sq8p).
+///
+/// mermaid's class grammar is `<classA> <relation> <classB> [: <label>]`, with the label AFTER the
+/// target. `parse_edge_statement_asts` takes everything right of the operator as the target token,
+/// so without this `A --|> B : implements` interns a class literally named `B : implements` and
+/// drops the label. Flowcharts are unaffected because their label syntax (`A -->|label| B`) is
+/// already understood by the edge parser; only the class form needs this.
+///
+/// Returns the statement with the label removed, plus the label. Both borrow from `statement`.
+///
+/// The colon is searched only AFTER the operator, which is what keeps the member shorthand
+/// (`Animal : +name`, no operator at all) out of this path entirely.
+fn split_class_relation_label(statement: &str) -> (&str, Option<&str>) {
+    let Some((op_idx, op_str, _)) = find_operator(statement, &CLASS_OPERATORS, CLASS_OP_GATE)
+    else {
+        return (statement, None);
+    };
+    let after_op = op_idx + op_str.len();
+    let Some(colon_offset) = statement[after_op..].find(':') else {
+        return (statement, None);
+    };
+    let colon_idx = after_op + colon_offset;
+    // `:::` is the CSS-class shorthand (`A --> B:::styled`), not a label. Splitting on the first
+    // colon blindly would turn it into a label named `:styled` and strip the class assignment.
+    if statement[colon_idx..].starts_with(":::") {
+        return (statement, None);
+    }
+    let label = trim_fast(&statement[colon_idx + 1..]);
+    if label.is_empty() {
+        return (statement, None);
+    }
+    (trim_end_fast(&statement[..colon_idx]), Some(label))
+}
+
+/// Attach a relation label to an edge AST, leaving a label the edge parser already found alone.
+fn with_edge_label(ast: FlowAst, label: &str) -> FlowAst {
+    match ast {
+        FlowAst::Edge {
+            from,
+            arrow,
+            label: existing,
+            to,
+        } => FlowAst::Edge {
+            from,
+            arrow,
+            label: existing.or_else(|| Some(label.to_string())),
+            to,
+        },
+        other => other,
+    }
+}
+
 /// Exchange an edge AST's endpoints, leaving its arrow, label and everything else alone.
 ///
 /// Used for class-diagram `<..`, whose meaning is its mirror image (bd-8yj9). Non-edge ASTs pass
@@ -3365,10 +3417,14 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
 
         // Try edge parsing — first strip cardinality labels if present. `None` ⇒ no quoted
         // cardinality, so the edge parser sees the original borrowed `statement` (no rebuild alloc).
-        let stripped = strip_class_cardinality(statement);
+        // Take the trailing `: label` off FIRST (bd-sq8p), so neither the cardinality stripper nor
+        // the edge parser sees it. `A --|> B : implements` otherwise interns a class literally
+        // named `B : implements`.
+        let (relation_body, relation_label) = split_class_relation_label(statement);
+        let stripped = strip_class_cardinality(relation_body);
         let edge_input = match &stripped {
             Some((cleaned, ..)) => cleaned.as_str(),
-            None => statement,
+            None => relation_body,
         };
         if let Some(asts) = parse_edge_statement_asts(
             edge_input,
@@ -3397,11 +3453,17 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
             let reversed_dependency = find_operator(edge_input, &CLASS_OPERATORS, CLASS_OP_GATE)
                 .is_some_and(|(_, operator, _)| operator == "<..");
             for ast in asts {
-                statements.push(ClassStatement::Ast(if reversed_dependency {
+                let ast = if reversed_dependency {
                     swap_edge_endpoints(ast)
                 } else {
                     ast
-                }));
+                };
+                // The label belongs to the edge whichever way it points, so this runs after the swap.
+                let ast = match relation_label {
+                    Some(label) => with_edge_label(ast, label),
+                    None => ast,
+                };
+                statements.push(ClassStatement::Ast(ast));
                 // Attach cardinality to this edge in lower_class_statement. `stripped` is `Some`
                 // only when at least one cardinality was extracted, so no is_some() re-check.
                 if let Some((_, source_card, target_card)) = &stripped {
@@ -14366,6 +14428,94 @@ Rel_Back(db, app, "Responds")"#,
             meta.attributes[3].visibility,
             fm_core::ClassVisibility::Package
         );
+    }
+
+    /// bd-sq8p: a class relation's `: label` must become the EDGE label, not part of the target.
+    ///
+    /// `A --|> B : implements` used to intern a class literally named `B : implements`, so the
+    /// diagram contained a class the source never declared, no class named `B`, and no edge label.
+    /// The invented name is the worse half: every later reference to `B` interned a SECOND node,
+    /// silently splitting one class in two.
+    #[test]
+    fn class_relation_label_becomes_the_edge_label_not_the_target_name() {
+        let parsed = parse_mermaid("classDiagram\n  A --|> B : implements\n");
+        let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["A", "B"], "the label leaked into a node id");
+        // ⚠️ The id assertion above is NOT sufficient and the negative control proved it: with the
+        // split disabled the ids are still ["A", "B"] and only the DISPLAYED label is polluted, so
+        // an ids-only test would pass against the defect. The visible half is the node's label.
+        let b = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "B")
+            .expect("class B");
+        let b_label = b.label.and_then(|id| parsed.ir.labels.get(id.0));
+        assert!(
+            b_label.is_none_or(|l| !l.text.contains(':')),
+            "class B renders as {:?}, the relation label leaked into its displayed name",
+            b_label.map(|l| l.text.as_str())
+        );
+        assert_eq!(parsed.ir.edges.len(), 1);
+        let label = parsed.ir.edges[0]
+            .label
+            .and_then(|id| parsed.ir.labels.get(id.0))
+            .map(|l| l.text.as_str());
+        assert_eq!(label, Some("implements"), "the relation label was dropped");
+    }
+
+    /// NEGATIVE CASES from bd-sq8p, each a real syntax a blind colon split breaks.
+    #[test]
+    fn class_relation_label_split_respects_the_other_colon_forms() {
+        // 1. `:::` is the CSS-class shorthand, not a label. A blind split on the first colon
+        //    turns it into a label named ":styled" and eats the class assignment.
+        let styled = parse_mermaid("classDiagram\n  A --> B:::styled\n");
+        let styled_ids: Vec<&str> = styled.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(styled_ids, vec!["A", "B"], ":::shorthand was mis-split");
+        assert!(
+            styled.ir.edges[0].label.is_none(),
+            "`:::` must not produce an edge label"
+        );
+
+        // 2. The member shorthand has NO operator, so it must never reach the relation-label path.
+        let member = parse_mermaid("classDiagram\n  Animal <|-- Dog\n  Animal : +name\n");
+        assert!(
+            member.ir.nodes.iter().any(|n| n.id == "Animal"),
+            "member shorthand lost its class"
+        );
+        assert!(
+            !member.ir.nodes.iter().any(|n| n.id.contains(':')),
+            "member shorthand leaked a colon into a node id"
+        );
+
+        // 3. Cardinality AND label together: both must survive, and the label must not eat the
+        //    cardinality.
+        let both = parse_mermaid("classDiagram\n  A \"1\" --|> \"many\" B : implements\n");
+        let both_ids: Vec<&str> = both.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(both_ids, vec!["A", "B"]);
+        assert_eq!(both.ir.edges[0].source_cardinality(), Some("1"));
+        assert_eq!(both.ir.edges[0].target_cardinality(), Some("many"));
+        let both_label = both.ir.edges[0]
+            .label
+            .and_then(|id| both.ir.labels.get(id.0))
+            .map(|l| l.text.as_str());
+        assert_eq!(both_label, Some("implements"));
+
+        // 4. A label containing a colon splits on the FIRST colon after the operator.
+        let colon = parse_mermaid("classDiagram\n  A --|> B : has : colon\n");
+        let colon_ids: Vec<&str> = colon.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(colon_ids, vec!["A", "B"]);
+        let colon_label = colon.ir.edges[0]
+            .label
+            .and_then(|id| colon.ir.labels.get(id.0))
+            .map(|l| l.text.as_str());
+        assert_eq!(colon_label, Some("has : colon"));
+
+        // 5. CONTROL: a relation with no label must be unchanged, so the common line does not move.
+        let plain = parse_mermaid("classDiagram\n  A --|> B\n");
+        let plain_ids: Vec<&str> = plain.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(plain_ids, vec!["A", "B"]);
+        assert!(plain.ir.edges[0].label.is_none());
     }
 
     /// bd-8yj9: `A <.. B` is `B ..> A`, so its arrowhead belongs on A.
