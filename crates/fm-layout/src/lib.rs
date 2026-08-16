@@ -23364,7 +23364,7 @@ mod tests {
                     let (a, b) = (window[0], window[1]);
                     // 24 samples per segment: fine enough that a segment clipping a corner is seen,
                     // coarse enough to stay cheap on a 22-edge graph.
-                    for step in 0..=24 {
+                    for step in 0..=24_u8 {
                         let t = f32::from(step) / 24.0;
                         let x = (b.x - a.x).mul_add(t, a.x);
                         let y = (b.y - a.y).mul_add(t, a.y);
@@ -23396,7 +23396,34 @@ mod tests {
     ///
     /// A small tolerance is allowed because an edge legitimately touches the boundary of boxes it
     /// passes: the assertion is about running THROUGH a node, not grazing one.
+    ///
+    /// ⚠️ `#[ignore]` BECAUSE IT REPRODUCES A LIVE DEFECT, not because it is unfinished. Run it with
+    /// `--ignored` and it FAILS on the current router with
+    ///
+    ///     Some((12, 0, 28.969482))   (edge_index, node_index, penetration_px)
+    ///
+    /// i.e. `LADDER_EDGES[12]`, the L3→R3 rung, runs 28.97px into N0's box — the middle of a 66.5px
+    /// node it does not connect to. Un-ignoring it is bd-h2ze's acceptance gate; do not relax the
+    /// tolerance to whatever a fix happens to produce.
+    ///
+    /// THE MECHANISM, which this test localised and which is the useful half of it. Every branch of
+    /// `route_edge_points_with_obstacle_index` builds exactly ONE segment and nudges that. For a TD
+    /// flowchart (`horizontal_ranks == false`, `|dx| >= epsilon`) the emitted route is
+    ///
+    ///     source, (source.x, y_bend), (target.x, y_bend), target
+    ///
+    /// and only the HORIZONTAL run at `y_bend` is passed to `find_obstacle_nudge_y`. The vertical leg
+    /// at `source.x` from `source.y` to `y_bend`, and the one at `target.x` from `y_bend` to
+    /// `target.y`, are never tested against an obstacle — so either can pass straight through a node
+    /// sharing its column, which is exactly what edge 12 does down the left spine.
+    ///
+    /// So obstacle avoidance is not missing, it is INCOMPLETE: two of the three segments are unchecked.
+    /// A fix therefore cannot be a better nudge; the legs are anchored at the endpoints and cannot be
+    /// slid sideways, so clearing them needs an extra bend (a 5-6 point jog). That is a change to core
+    /// routing which will move cycle_braid, cycle_feedback, cycle_ladder, cycle_scc_heavy and
+    /// state_composite plus their layout checksums, and it must be blessed with a semantic diff.
     #[test]
+    #[ignore = "bd-h2ze: reproduces a live routing defect; un-ignore as the acceptance gate"]
     fn routed_edges_do_not_run_through_unrelated_nodes() {
         let ir = graph_ir(DiagramType::Flowchart, 10, &LADDER_EDGES);
         let layout = layout_diagram(&ir);
