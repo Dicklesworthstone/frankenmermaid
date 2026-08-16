@@ -23308,6 +23308,106 @@ mod tests {
         );
     }
 
+    /// Edge list of `golden/cycle_ladder.mmd`, the fixture with the most measured crossings.
+    ///
+    /// Two parallel spines, rungs in BOTH directions between them, and four back edges. Nodes are
+    /// `N0..N4` for the left spine and `N5..N9` for the right, in the fixture's declaration order.
+    const LADDER_EDGES: [(usize, usize); 22] = [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 4),
+        (5, 6),
+        (6, 7),
+        (7, 8),
+        (8, 9),
+        (0, 5),
+        (5, 0),
+        (1, 6),
+        (6, 1),
+        (2, 7),
+        (7, 2),
+        (3, 8),
+        (8, 3),
+        (4, 9),
+        (9, 4),
+        (2, 0),
+        (8, 6),
+        (4, 1),
+        (9, 5),
+    ];
+
+    /// Deepest penetration of any routed edge into a node box that is NOT one of its endpoints.
+    ///
+    /// Returns `(edge_index, node_index, depth)` for the worst offender. Depth is the distance from
+    /// the deepest sampled point to the NEAREST box edge, so a value near half the box height means
+    /// the edge runs through the middle of the node rather than clipping a corner.
+    ///
+    /// Samples the routed POLYLINE, which is what layout owns. The SVG backend smooths these points
+    /// into a curve, so the rendered path can bulge slightly further; measuring the polyline keeps
+    /// this a claim about layout and nothing else.
+    fn deepest_edge_incursion(
+        layout: &DiagramLayout,
+        edges: &[(usize, usize)],
+    ) -> Option<(usize, usize, f32)> {
+        let mut worst: Option<(usize, usize, f32)> = None;
+        for path in &layout.edges {
+            let Some(&(source, target)) = edges.get(path.edge_index) else {
+                continue;
+            };
+            for node in &layout.nodes {
+                if node.node_index == source || node.node_index == target {
+                    continue;
+                }
+                let rect = node.bounds;
+                for window in path.points.windows(2) {
+                    let (a, b) = (window[0], window[1]);
+                    // 24 samples per segment: fine enough that a segment clipping a corner is seen,
+                    // coarse enough to stay cheap on a 22-edge graph.
+                    for step in 0..=24 {
+                        let t = f32::from(step) / 24.0;
+                        let x = (b.x - a.x).mul_add(t, a.x);
+                        let y = (b.y - a.y).mul_add(t, a.y);
+                        let dx = (x - rect.x).min(rect.x + rect.width - x);
+                        let dy = (y - rect.y).min(rect.y + rect.height - y);
+                        if dx > 0.0 && dy > 0.0 {
+                            let depth = dx.min(dy);
+                            if worst.is_none_or(|(_, _, best)| depth > best) {
+                                worst = Some((path.edge_index, node.node_index, depth));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        worst
+    }
+
+    /// bd-h2ze: a routed edge must not run through a node it does not connect to.
+    ///
+    /// An edge crossing a node box reads as connecting to it, so the picture asserts a relationship
+    /// the source never declared — the same class as bd-h9gx and bd-5wbp, where the diagram still
+    /// looks well-formed and is simply wrong.
+    ///
+    /// The fixture is `cycle_ladder`'s edge list, which carried 5 of the 30 crossings measured
+    /// across the committed goldens. Its shape is the point: the rungs run in BOTH directions
+    /// between the spines, so cycle removal reverses some of them and the survivors span ranks that
+    /// a middle node already occupies.
+    ///
+    /// A small tolerance is allowed because an edge legitimately touches the boundary of boxes it
+    /// passes: the assertion is about running THROUGH a node, not grazing one.
+    #[test]
+    fn routed_edges_do_not_run_through_unrelated_nodes() {
+        let ir = graph_ir(DiagramType::Flowchart, 10, &LADDER_EDGES);
+        let layout = layout_diagram(&ir);
+        let worst = deepest_edge_incursion(&layout, &LADDER_EDGES);
+        assert!(
+            worst.is_none_or(|(_, _, depth)| depth <= 4.0),
+            "an edge is routed through a node it does not connect to: {worst:?} \
+             (edge_index, node_index, penetration_px)"
+        );
+    }
+
     /// A note must clear every state box its own row runs into, not just its target's.
     ///
     /// Fixture is a fan-out, so `N1` and `N2` share a rank and sit side by side; a note on `N1`
