@@ -262,6 +262,8 @@ jobs:
           node scripts/headtohead/mermaid_bench.mjs --self-test
           node scripts/headtohead/run.mjs --self-test
           node scripts/golden_svg_health.mjs --self-test
+          node scripts/untracked_rust_guard.mjs --self-test
+          node scripts/untracked_rust_guard.mjs
 
       # The corpus scan itself (`node scripts/golden_svg_health.mjs`, no flag) is NOT armed here
       # yet: it exits 1 today on the two committed gantt_basic.svg copies, which reference
