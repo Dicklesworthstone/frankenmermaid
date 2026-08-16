@@ -23244,21 +23244,40 @@ mod tests {
 
     /// NEGATIVE CASE 4: a note whose target does not exist is dropped, not silently reattached to
     /// some other state, and does not panic.
+    ///
+    /// ⚠️ THE ORPHAN IS PAIRED WITH A VALID NOTE IN THE SAME IR, and that pairing is the whole
+    /// design of this test. "Assert the list is empty" passes just as well when the feature is
+    /// switched off entirely as when the orphan is correctly rejected — the negative control for
+    /// this bead proved exactly that, this test being one of only two that survived disabling the
+    /// pass. Placing a resolvable note beside the orphan makes the assertion discriminating: the
+    /// list must contain the valid one and ONLY the valid one, which is false both when nothing is
+    /// placed and when the orphan is reattached to whatever node came first.
     #[test]
     fn state_note_targeting_an_unknown_state_is_dropped_not_reattached() {
-        let layout = layout_diagram(&state_ir_with_note("right", "NoSuchState", "orphan"));
-        assert!(
-            layout.extensions.state_notes.is_empty(),
-            "an orphan note was attached to {:?}",
-            layout
-                .extensions
-                .state_notes
-                .first()
-                .map(|note| note.node_index)
+        let mut ir = state_ir_with_note("right", "NoSuchState", "orphan");
+        ir.state_notes.push(fm_core::IrStateNote {
+            target: "N1".to_string(),
+            position: "right".to_string(),
+            text: "resolvable".to_string(),
+            span: Span::default(),
+        });
+        let layout = layout_diagram(&ir);
+        let placed: Vec<&str> = layout
+            .extensions
+            .state_notes
+            .iter()
+            .map(|note| note.text.as_str())
+            .collect();
+        assert_eq!(
+            placed,
+            vec!["resolvable"],
+            "the orphan note must be dropped and the resolvable one kept"
         );
+        // And the canvas must be sized for the note that WAS placed, not for the orphan.
+        let orphan_only = layout_diagram(&state_ir_with_note("right", "NoSuchState", "orphan"));
         let plain = layout_diagram(&graph_ir(DiagramType::State, 2, &[(0, 1)]));
         assert_eq!(
-            plain.bounds, layout.bounds,
+            plain.bounds, orphan_only.bounds,
             "an orphan note moved the canvas"
         );
     }
@@ -23322,19 +23341,36 @@ mod tests {
 
     /// A note on a FLOWCHART-typed IR must produce nothing even if the field is populated: the pass
     /// is gated on the diagram type, so no other diagram type can be moved by it.
+    ///
+    /// ⚠️ Same trap as the orphan test: "the flowchart has no notes" is also true when the pass is
+    /// off, so the SAME note is fed to a State-typed IR as a live control. The type gate is only
+    /// demonstrated if one produces geometry and the other does not.
     #[test]
     fn state_note_geometry_is_confined_to_state_diagrams() {
-        let mut ir = graph_ir(DiagramType::Flowchart, 2, &[(0, 1)]);
-        ir.state_notes.push(fm_core::IrStateNote {
-            target: "N1".to_string(),
-            position: "right".to_string(),
-            text: "should never be drawn".to_string(),
-            span: Span::default(),
-        });
-        let layout = layout_diagram(&ir);
-        assert!(layout.extensions.state_notes.is_empty());
+        let populate = |diagram_type| {
+            let mut ir = graph_ir(diagram_type, 2, &[(0, 1)]);
+            ir.state_notes.push(fm_core::IrStateNote {
+                target: "N1".to_string(),
+                position: "right".to_string(),
+                text: "drawn for state diagrams only".to_string(),
+                span: Span::default(),
+            });
+            layout_diagram(&ir)
+        };
+        let flowchart = populate(DiagramType::Flowchart);
+        let state = populate(DiagramType::State);
+        assert!(
+            flowchart.extensions.state_notes.is_empty(),
+            "a flowchart was given state-note geometry"
+        );
+        assert_eq!(
+            state.extensions.state_notes.len(),
+            1,
+            "CONTROL FAILED: the identical note produced nothing on a state diagram either, so \
+             this test proves nothing about the type gate"
+        );
         let plain = layout_diagram(&graph_ir(DiagramType::Flowchart, 2, &[(0, 1)]));
-        assert_eq!(plain.bounds, layout.bounds);
+        assert_eq!(plain.bounds, flowchart.bounds);
     }
 
     /// Two renders of the SAME document must not disagree because the host was busy (bd-ryxg).
