@@ -3628,6 +3628,39 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### METHODOLOGY: `target/release/frankenmermaid` is a STALE ORACLE — never refreshed by rch runs (2026-08-16)
+- **Bead:** `bd-oqfv`, retracted. **Affects any finding measured by running the local CLI.**
+- **What happened.** A P1 bead was filed claiming flowchart `title X` is interned as a phantom node
+  `title_X`, measured by rendering with `target/release/frankenmermaid` and reading `data-id`
+  attributes. **The guard already existed in HEAD** at `crates/fm-parser/src/mermaid_parser.rs:1631`,
+  landed by `fedfc8f1` (bd-ij0f) at 04:28Z — written by the same agent that then "measured" its
+  absence.
+- **Mechanism of the error.** The binary was built at **2026-08-15T22:18Z** and predated **eight**
+  landed `fm-parser` commits (bd-ij0f, bd-7oyz, bd-t2fp, bd-6r13, bd-9erl, bd-7i6b/bd-dw91, bd-1fw3,
+  bd-zf1k, bd-ec1t). **rch test runs compile on a worker and never refresh the local binary**, so it
+  does not move no matter how many green gates pass. Nothing in a green gate tells you the CLI beside
+  it is stale.
+- **Gate before using the CLI as an oracle:**
+  ```
+  BIN_T=$(date -u -r target/release/frankenmermaid +%s)
+  SRC_T=$(git log -1 --format=%ct -- crates/<crate-under-test>)
+  [ "$BIN_T" -gt "$SRC_T" ] || echo "STALE ORACLE"
+  ```
+- **Blast radius, and how to triage it.** Findings from **compiled tests** (rch `cargo test`) are
+  unaffected — they build from current source. Findings from the **CLI binary** are suspect. A
+  finding whose mechanism was independently confirmed by READING current source survives the caveat;
+  one resting on the binary alone does not. On that basis `bd-t228` (`-f ascii` emits braille) and
+  `bd-193x` (terminal drops chart titles) are retained with an explicit caveat — both mechanisms are
+  visible in HEAD source — while `bd-oqfv` is retracted outright.
+- **Symmetry worth remembering.** The companion trap runs the other way: an rch-RETRIEVED binary
+  preserves worker mtimes and looks *older* than it is. So mtime is misleading in both directions and
+  is never sufficient alone — compare it against the relevant source commit, and prefer a sha that
+  moved.
+- **What caught it.** Reading the source about to be changed, and finding the guard already there
+  with its bead id in the comment. Second time in this campaign that source-reading overturned a
+  measurement.
+
+
 ### BLOCKED: sequence_20 re-measurement refused by host admission, 493/900 attempts (2026-08-16)
 - **Bead:** `bd-8557`. **No ratio is claimed and none was produced.** This records a fully
   provenanced attempt that the admission gate refused, so the next agent does not repeat the setup.
