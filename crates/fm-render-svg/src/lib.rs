@@ -4117,10 +4117,28 @@ fn render_layout_to_svg(
     }
 
     // Render sequence diagram interaction fragments (loop, alt, par, etc.).
+    //
+    // The frame is CLAMPED to the diagram's own bounds (bd-zwh3). `build_sequence_fragment_geometry`
+    // anchors it at `-padding` and widens it by `2 * padding`, but the padding it uses comes from the
+    // message gap while the canvas is derived from `total_width` — the right edge of the last
+    // participant — so the overhang has nowhere to live. In golden/sequence_advanced that put the
+    // dashed border at x = -2 with width 761.90 against a 757.90-wide canvas: clipped on BOTH sides,
+    // and the `alt` label chip lost its left edge with it. Every alt/opt/loop/par frame in every
+    // sequence diagram was drawn open at the ends instead of closed.
+    //
+    // Clamping here rather than widening the canvas is the faithful choice: our canvas IS the
+    // participant span, which is what mermaid draws the frame within, so growing it would add
+    // whitespace the incumbent does not have. Layout emitting out-of-bounds geometry is still worth
+    // fixing at the source for the other renderers — recorded on the bead — but no consumer should
+    // have to draw outside its own viewBox to honour it.
+    let drawable_left = offset_x + layout.bounds.x;
+    let drawable_right = drawable_left + layout.bounds.width;
     for fragment in &layout.extensions.sequence_fragments {
-        let fx = fragment.bounds.x + offset_x;
+        let raw_x = fragment.bounds.x + offset_x;
+        let fx = raw_x.max(drawable_left);
         let fy = fragment.bounds.y + offset_y;
-        let fw = fragment.bounds.width;
+        let fw = (raw_x + fragment.bounds.width).min(drawable_right) - fx;
+        let fw = fw.max(0.0);
         let fh = fragment.bounds.height;
 
         let mut fragment_rect = Element::rect()
@@ -5830,12 +5848,33 @@ fn render_gantt_svg(
                 dep_svg.push_str("\" fill=\"none\" stroke=\"");
                 let _ = write_escaped_attr(&mut dep_svg, &theme.colors.edge);
                 dep_svg.push_str(
-                    "\" stroke-width=\"1.2\" marker-end=\"url(#arrowhead)\" class=\"fm-gantt-dependency\"/>",
+                    "\" stroke-width=\"1.2\" marker-end=\"url(#fm-gantt-arrowhead)\" class=\"fm-gantt-dependency\"/>",
                 );
             }
         }
         if !dep_svg.is_empty() {
-            doc = doc.child(Element::raw_svg(dep_svg));
+            // Define the marker in the fragment that references it.
+            //
+            // These arrows used to point at `url(#arrowhead)`, an id NOTHING in this document ever
+            // defined: gantt renders through `render_gantt_svg`, which only appends children to a
+            // document whose `<defs>` is already closed and, for this diagram type, empty — the
+            // committed golden shows `<defs></defs>`. So every dependency arrowhead silently failed
+            // to draw, in every gantt render, in every conformant viewer. It is not the shared
+            // `arrow-*` set either; those ids are `arrow-end`, `arrow-filled`, … and none of them is
+            // `arrowhead`.
+            //
+            // The id is namespaced rather than reusing `arrow-end` because this defs block is local
+            // to the gantt fragment: a bare `arrow-end` here would shadow, or be shadowed by, the
+            // shared set if the two ever appear in one document.
+            let marker = ArrowheadMarker::standard("fm-gantt-arrowhead", &theme.colors.edge)
+                .to_element()
+                .render();
+            let mut fragment = String::with_capacity(marker.len() + dep_svg.len() + 13);
+            fragment.push_str("<defs>");
+            fragment.push_str(&marker);
+            fragment.push_str("</defs>");
+            fragment.push_str(&dep_svg);
+            doc = doc.child(Element::raw_svg(fragment));
         }
     }
 
@@ -16862,6 +16901,130 @@ marker#arrow-open path {
     ///
     /// The two halves are asserted together because fixing only the geometry clips the text and fixing
     /// only the text leaves the bars lying.
+    /// An `alt` / `opt` / `loop` / `par` frame must be drawn INSIDE the canvas (bd-zwh3).
+    ///
+    /// `build_sequence_fragment_geometry` anchors the frame at `-padding` and widens it by
+    /// `2 * padding`, while the canvas is derived from the participant span — so the overhang had
+    /// nowhere to live and the dashed border was clipped on both sides in every sequence diagram
+    /// that used a fragment. golden/sequence_advanced carried it at x = -2 with width 761.90
+    /// against a 757.90-wide viewBox.
+    ///
+    /// The second half is the non-vacuity control: a sequence diagram with NO fragment emits no
+    /// `fm-sequence-fragment` at all, so an "everything is inside the viewBox" assertion would pass
+    /// on a document that had simply stopped drawing frames.
+    #[test]
+    fn sequence_fragment_frames_are_drawn_inside_the_canvas() {
+        let with_fragment = fm_parser::parse(
+            "sequenceDiagram\n  participant A\n  participant B\n  A->>B: ask\n  alt happy path\n\
+             \n    B-->>A: yes\n  else sad path\n    B-->>A: no\n  end\n",
+        );
+        let svg = render_svg_with_config(&with_fragment.ir, &SvgRenderConfig::default());
+
+        assert!(
+            svg.contains("fm-sequence-fragment"),
+            "fixture emitted no interaction fragment, so the containment check is vacuous"
+        );
+
+        let view_box = svg
+            .split("viewBox=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("rendered svg must carry a viewBox");
+        let bounds: Vec<f32> = view_box
+            .split_whitespace()
+            .map(|value| value.parse().expect("viewBox components must be numeric"))
+            .collect();
+        let (vx, vw) = (bounds[0], bounds[2]);
+
+        for chunk in svg.split("<rect ").skip(1) {
+            let tag = chunk.split('>').next().unwrap_or("");
+            if !tag.contains("fm-sequence-fragment") {
+                continue;
+            }
+            let attr = |key: &str| -> f32 {
+                tag.split(&format!("{key}=\""))
+                    .nth(1)
+                    .and_then(|rest| rest.split('"').next())
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(f32::NAN)
+            };
+            let x = attr("x");
+            let width = attr("width");
+            assert!(
+                x >= vx - 0.01,
+                "fragment rect starts at {x}, left of the viewBox origin {vx}: {tag}"
+            );
+            assert!(
+                x + width <= vx + vw + 0.01,
+                "fragment rect ends at {} past the viewBox right edge {}: {tag}",
+                x + width,
+                vx + vw
+            );
+        }
+    }
+
+    /// Every `url(#id)` a gantt render emits must resolve to an id the same document declares.
+    ///
+    /// The dependency arrows referenced `url(#arrowhead)` and no element anywhere in the output
+    /// carried that id — `render_gantt_svg` appends to a document whose `<defs>` is already closed
+    /// and empty for this diagram type, and the shared marker set is named `arrow-end`,
+    /// `arrow-filled`, … , never `arrowhead`. So every dependency arrowhead silently failed to draw.
+    ///
+    /// The assertion is the GENERIC invariant rather than a check for one id, because a dangling
+    /// reference is a family: any future marker, gradient, filter or clip path added to this
+    /// fragment has to be defined in it too. The second half is the non-vacuity control — a fixture
+    /// with no dependency edge emits no reference at all, so a test that only checked "no dangling
+    /// ids" would pass on a document that had stopped drawing arrows entirely.
+    #[test]
+    fn gantt_url_references_resolve_within_the_document() {
+        let render = |src: &str| -> String {
+            let parsed = fm_parser::parse(src);
+            render_svg_with_config(&parsed.ir, &SvgRenderConfig::default())
+        };
+        let declared = |svg: &str| -> std::collections::HashSet<String> {
+            svg.split(" id=\"")
+                .skip(1)
+                .filter_map(|rest| rest.split('"').next().map(str::to_string))
+                .collect()
+        };
+        let referenced = |svg: &str| -> Vec<String> {
+            svg.split("url(#")
+                .skip(1)
+                .filter_map(|rest| rest.split(')').next().map(str::to_string))
+                .collect()
+        };
+
+        let with_dependency = render(
+            "gantt\n  dateFormat YYYY-MM-DD\n  section P\n  Design :a1, 2024-01-01, 3d\n  \
+             Build :a2, after a1, 4d",
+        );
+        let ids = declared(&with_dependency);
+        let refs = referenced(&with_dependency);
+        for id in &refs {
+            assert!(
+                ids.contains(id),
+                "gantt render references url(#{id}) but declares no such id; declared: {ids:?}"
+            );
+        }
+
+        // Non-vacuity: this fixture must actually exercise a dependency arrow, or the loop above
+        // proved nothing.
+        assert!(
+            with_dependency.contains("class=\"fm-gantt-dependency\""),
+            "fixture emitted no dependency arrow, so the reference check is vacuous"
+        );
+        assert!(
+            !refs.is_empty(),
+            "a gantt with a dependency must reference its arrowhead marker"
+        );
+
+        // And the marker must be a real definition, not an empty placeholder.
+        assert!(
+            with_dependency.contains("<marker"),
+            "the referenced arrowhead is not defined as a <marker> element"
+        );
+    }
+
     #[test]
     fn gantt_task_name_renders_in_full_without_changing_bar_geometry() {
         /// One rendered gantt label: anchor x, `text-anchor`, and the text as emitted.

@@ -9578,16 +9578,83 @@ fn force_build_node_boxes(
 }
 
 /// Build straight-line edge paths for force-directed layout.
+/// Fan offset per edge index for edges sharing an unordered endpoint pair.
+///
+/// Same formula the Sugiyama builder uses — a symmetric fan of 12px steps centred on zero — so the
+/// two layouts separate parallel edges by the same amount. Returns an empty `Vec` when no pair
+/// repeats, which is the common case, so callers skip the work entirely.
+///
+/// Without this the Force path gave every edge between one pair identical geometry, so an ER model
+/// with two relationships between the same entities (`A ||--o{ B : owns` and `A ||--o{ B : rents`)
+/// drew one line and silently lost the other.
+fn force_parallel_edge_offsets(ir: &MermaidDiagramIr) -> Vec<f32> {
+    let mut seen: FxHashSet<(usize, usize)> = FxHashSet::default();
+    seen.reserve(ir.edges.len());
+    let pair_of = |edge: &IrEdge| {
+        let source = endpoint_node_index(ir, edge.from).unwrap_or(usize::MAX);
+        let target = endpoint_node_index(ir, edge.to).unwrap_or(usize::MAX);
+        (source.min(target), source.max(target))
+    };
+    if ir.edges.iter().all(|edge| seen.insert(pair_of(edge))) {
+        return Vec::new();
+    }
+
+    let mut count: FxHashMap<(usize, usize), usize> = FxHashMap::default();
+    count.reserve(ir.edges.len());
+    let mut index = Vec::with_capacity(ir.edges.len());
+    for edge in &ir.edges {
+        let slot = count.entry(pair_of(edge)).or_insert(0);
+        index.push(*slot);
+        *slot += 1;
+    }
+    index
+        .iter()
+        .zip(ir.edges.iter())
+        .map(|(&pair_idx, edge)| {
+            let pair_total = count.get(&pair_of(edge)).copied().unwrap_or(1);
+            if pair_total > 1 {
+                let offset_step = 12.0_f32;
+                (pair_idx as f32 - (pair_total - 1) as f32 / 2.0) * offset_step
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
 fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec<LayoutEdgePath> {
+    let parallel_offsets = force_parallel_edge_offsets(ir);
     ir.edges
         .iter()
         .enumerate()
         .filter_map(|(ei, edge)| {
+            let parallel_offset = parallel_offsets.get(ei).copied().unwrap_or(0.0);
             let from_idx = endpoint_node_index(ir, edge.from)?;
             let to_idx = endpoint_node_index(ir, edge.to)?;
             if from_idx >= nodes.len() || to_idx >= nodes.len() {
                 return None;
             }
+            // A self-reference is a real relationship and must be drawn as one. Clipping a
+            // centre-to-centre line when both centres are the SAME point yields two identical
+            // points — `clip_to_shape_border` returns `from` unchanged for a zero-length direction
+            // — so the edge existed in the layout but had no extent and rendered as nothing. The
+            // Sugiyama builder already routes these through `route_self_loop`; this path did not,
+            // and ER diagrams (`EMPLOYEE ||--o{ EMPLOYEE : manages`) are laid out here.
+            if from_idx == to_idx {
+                return Some(LayoutEdgePath {
+                    edge_index: ei,
+                    span: edge.span,
+                    // Force layout has no rank orientation, so use the same vertical loop the
+                    // Sugiyama path draws for a top-to-bottom graph.
+                    points: route_self_loop(&nodes[from_idx], false),
+                    reversed: false,
+                    is_self_loop: true,
+                    parallel_offset: 0.0,
+                    bundle_count: 1,
+                    bundled: false,
+                });
+            }
+
             let from_center = nodes[from_idx].bounds.center();
             let to_center = nodes[to_idx].bounds.center();
 
@@ -9606,13 +9673,19 @@ fn force_build_edge_paths(ir: &MermaidDiagramIr, nodes: &[LayoutNodeBox]) -> Vec
             let to_pt =
                 clip_to_shape_border(to_center, from_center, &nodes[to_idx].bounds, to_shape);
 
+            let mut points = smallvec![from_pt, to_pt];
+            if parallel_offset.abs() > 0.01 {
+                // Same helper and same orientation convention the Sugiyama builder uses, so the two
+                // layouts fan a repeated pair identically instead of one of them stacking the edges.
+                apply_parallel_offset(&mut points, parallel_offset, false);
+            }
             Some(LayoutEdgePath {
                 edge_index: ei,
                 span: edge.span,
-                points: smallvec![from_pt, to_pt],
+                points,
                 reversed: false,
                 is_self_loop: from_idx == to_idx,
-                parallel_offset: 0.0,
+                parallel_offset,
                 bundle_count: 1,
                 bundled: false,
             })
@@ -21100,8 +21173,69 @@ mod tests {
         });
         let layout = layout_diagram_force(&ir);
         assert_eq!(layout.nodes.len(), 1);
-        // Self-loop creates a degenerate edge (from == to node), still present in output.
         assert_eq!(layout.edges.len(), 1);
+
+        // It must be DRAWABLE, not merely present. This previously produced two identical points —
+        // `clip_to_shape_border` returns its input unchanged when the direction is zero-length, and
+        // a self-loop's two endpoints are the same centre — so the path had no extent and rendered
+        // as nothing at all. An ER self-reference silently vanished.
+        let path = &layout.edges[0];
+        assert!(
+            path.is_self_loop,
+            "a from == to edge must be flagged as a self-loop"
+        );
+        assert!(
+            path.points.len() >= 3,
+            "a self-loop needs a routed path, got {} point(s)",
+            path.points.len()
+        );
+        let min_x = path.points.iter().map(|p| p.x).fold(f32::MAX, f32::min);
+        let max_x = path.points.iter().map(|p| p.x).fold(f32::MIN, f32::max);
+        let min_y = path.points.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+        let max_y = path.points.iter().map(|p| p.y).fold(f32::MIN, f32::max);
+        assert!(
+            (max_x - min_x) > 1.0 && (max_y - min_y) > 1.0,
+            "a self-loop must enclose area to be visible; got extent {}x{}",
+            max_x - min_x,
+            max_y - min_y
+        );
+        assert!(
+            path.points
+                .iter()
+                .all(|p| p.x.is_finite() && p.y.is_finite()),
+            "self-loop path must not contain non-finite coordinates"
+        );
+    }
+
+    /// The self-loop must leave the node's box, or it is drawn underneath the node and invisible.
+    #[test]
+    fn force_layout_self_loop_escapes_the_node_box() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
+        ir.nodes.push(IrNode {
+            id: "EMPLOYEE".to_string(),
+            ..IrNode::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(0)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+
+        let layout = layout_diagram_force(&ir);
+        let node = &layout.nodes[0].bounds;
+        let path = &layout.edges[0];
+        assert!(
+            path.points.iter().any(|point| {
+                point.x < node.x
+                    || point.x > node.x + node.width
+                    || point.y < node.y
+                    || point.y > node.y + node.height
+            }),
+            "every point of the self-loop is inside the node box {node:?}, so the loop is drawn \
+             under the node and cannot be seen: {:?}",
+            path.points
+        );
     }
 
     #[test]
