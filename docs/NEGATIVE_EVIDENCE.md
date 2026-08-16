@@ -20389,3 +20389,61 @@ labels are spread across all diagram sizes, so it neither concentrates where the
 with the skew.
 
 **No timing is claimed.** This is a corpus measurement that redirects where to look, not a result.
+
+### BLOCKED: `docs_site_50` cannot be re-certified — 3 of its 4 ER diagrams are structurally undecidable (2026-08-16)
+
+Attempt to re-measure the worst VALID render ratio (`docs_site_50`, certified `434.107779x`). Every
+provenance gate passed; the run was refused at the output-equivalence pre-flight, so **no ratio was
+produced and none is claimed**.
+
+- **Binary.** `cargo build --release -p frankenmermaid-cli --example headtohead`, built locally with
+  `RCH_CARGO_WRAPPER_BYPASS=1` and `env -u CARGO_TARGET_DIR`; executable path taken from
+  `--message-format=json`, not guessed: `target/local/release/examples/headtohead`.
+  **ELF SHA-256 `24c33bcdb606947a1eec17b9fed410a122bb3491a4201015e8b29a7b191fb604`**, rev
+  `788afbb4f9301d6f9b2cd34e1df8a0b35c218ab2` (clean tree, `FM_H2H_BUILD_GIT_REV` baked in — the ELF
+  sha moved from `4ad10196…` when it was, which is the proof the rebuild took).
+- **Host.** `thinkstation1`, 64 CPUs, load1 9.31 at admission, `amd-pstate-epp` / `powersave` /
+  `balance_performance`, boost on. Pinned to an idle CPU by the harness.
+- **Incumbent.** `mermaid@11.15.0`, `Chrome/151.0.7922.108`, `/usr/bin/chromium-browser`,
+  `mode=render`. It did run: `docs_site_50 p50=4165.6ms bytes=2536069`, **`null=missing`**.
+- **The refusal.** `[equiv] FAIL docs_site_50: 47/50 equivalent, 0 divergent, 3 unverified |
+  er=1/4 flowchart=30/30 class=5/5 state=5/5 sequence=6/6`. Artifact
+  `equivalence-788afbb4-1786901739170.json`. The harness then refuses the timed run:
+  "a divergent or unverified row cannot support its corresponding performance outcome".
+
+**THE FAILURE IS ON THE INCUMBENT'S SIDE OF THE ORACLE, NOT IN OUR OUTPUT.** Zero diagrams diverged.
+All three unverified samples carry the same shape of reason:
+
+```
+tier2 claimed for er but topology undecidable
+  (fm=geometric, js=ambiguous_path_declaration(candidates=0),
+   js_geometry=ambiguous(unresolved=1|4|5, unparsed=0))
+```
+
+Our ER edges resolve geometrically; mermaid-js's ER paths yield `candidates=0`, so the oracle cannot
+extract endpoints from the incumbent's SVG and declines to decide. **UNVERIFIED IS NOT PASS** and it
+is not FAIL either — it is the gate correctly refusing to certify what it cannot read.
+
+**Consequence: the worst valid render ratio is currently un-recertifiable.** Not because performance
+moved, and not because our rendering is wrong, but because a quarter of that workload's ER diagrams
+cannot be structurally compared at all. Any future attempt on `docs_site_50` hits this same wall
+until the oracle can resolve mermaid-js ER path declarations.
+
+⚠️ **ABBA INTERLEAVING IS NOT AVAILABLE FOR A CROSS-ENGINE RATIO, BY CONSTRUCTION.** The harness
+documents this itself as its ARM-ASYMMETRY GUARD (trap 3): "The two engines are separate runtimes --
+a Rust process and Chromium -- so they cannot be interleaved inside one measured routine the way a
+same-binary A/B can be. They run in sequence, which means host load drifting between the two phases
+biases the ratio directly, and not symmetrically... Neither engine's internal A/A can see this,
+because each null is measured entirely inside its own phase." Its mitigation is a per-phase
+host-wide quiescence re-check at a 20% per-affinity-CPU ceiling, not interleaving. A row claiming an
+ABBA cross-engine ratio from this harness would be describing something the harness cannot do.
+
+**No A/A null is banked because none was produced:** the incumbent phase reported `null=missing` and
+the run aborted at the pre-flight before the Rust arm's null or any ratio was computed. Recording
+the ELF sha without a ratio is the honest half of what was asked for; inventing the other half is
+not.
+
+**Related, and this is the second time ER has been the least-verified family:** the oracle's
+`erDiagram` ground-truth branch also discards the relationship operator (`[^\s]+`), recorded earlier
+in this file, and bd-m0a9 has ER's operator table contradicting itself twice. ER is the weakest
+verification surface in the corpus on both the ground-truth and rendered-geometry sides.
