@@ -1026,7 +1026,12 @@ export function groundTruth(text) {
   // `|edge label|`. Only the two-endpoint form is decoded; chained `A-->B-->C` is expanded.
   const linkRe = new RegExp(
     `(${NODE})\\s*(?:\\[[^\\]]*\\]|\\([^)]*\\)|\\{[^}]*\\})?\\s*` +
-    '(?:-{2,3}>|-{2,3}|={2,3}>|-\\.->)\\s*' +
+    // Longest form first: `<-->` must not be read as a bare `-->` that starts one character late,
+    // which loses the target. `--o` and `--x` are the circle and cross terminators, and a bare
+    // `===`/`==` is the thick line without an arrowhead. Under-decoding here is not a silent gap:
+    // an edge form the truth cannot see removes its endpoints from `node_ids`, so a CORRECT render
+    // of `A --o H` decides node_id_set_vs_input FALSE and the row is reported DIVERGENT.
+    '(?:<-{2,3}>|<-{2,3}|-{2,3}[ox]|-{2,3}>|-{2,3}|={2,3}>|={2,3}|-\\.->|-\\.-)\\s*' +
     `(?:\\|[^|]*\\|\\s*)?(${NODE})`,
     'g',
   );
@@ -2073,6 +2078,34 @@ export function selfTest() {
     const t = groundTruth('erDiagram\n  E0 ||--o{ E1 : has\n');
     return t !== null && t.node_ids.join(',') === 'e0,e1' && t.edges.join(',') === 'e0>e1';
   })(), groundTruth('erDiagram\n  E0 ||--o{ E1 : has\n'));
+  // Flowchart edge forms the truth used to be blind to. This is not a cosmetic gap: an undecoded
+  // edge removes its endpoints from `node_ids`, so a CORRECT render of `A --o H` decided
+  // node_id_set_vs_input FALSE and the row was reported DIVERGENT. Measured on the committed
+  // corpus: golden/all_edge_types decoded 7 nodes / 6 edges against a render carrying all 10, and
+  // it now decodes 10 / 9 and verifies.
+  {
+    const forms = [
+      ['circle terminator', 'flowchart LR\n  A[Start] --o H[Circle End]\n', 'a', 'h'],
+      ['cross terminator', 'flowchart LR\n  A[Start] --x I[Cross End]\n', 'a', 'i'],
+      ['bidirectional arrow', 'flowchart LR\n  B[Arrow] <--> J[Double]\n', 'b', 'j'],
+      ['thick line', 'flowchart LR\n  A[Start] === G[Thick Line]\n', 'a', 'g'],
+      ['dotted line', 'flowchart LR\n  A[Start] -.- E[Dotted]\n', 'a', 'e'],
+    ];
+    for (const [label, source, from, to] of forms) {
+      const truth = groundTruth(source);
+      record(`flowchart_truth_decodes_${label.replace(/\s+/g, '_')}`,
+        truth !== null
+        && truth.node_ids.includes(from) && truth.node_ids.includes(to)
+        && truth.edges.includes(`${from}>${to}`),
+        truth);
+    }
+    // The bidirectional case is the one a shorter alternation gets subtly wrong rather than
+    // missing: reading `<-->` as a bare `-->` starting one character late drops the SOURCE.
+    const bidi = groundTruth('flowchart LR\n  B <--> J\n');
+    record('bidirectional_arrow_keeps_its_source_endpoint',
+      bidi !== null && bidi.node_ids.join(',') === 'b,j', bidi);
+  }
+
   // ER is a Tier 2 family: dropping every relationship must NOT verify. Before `er` was added to
   // TIER2_FAMILIES this returned `verified` on the strength of the entity-id set alone, and the
   // cross-engine arm returned `equivalent` while mermaid drew relationships we did not. The
