@@ -3504,6 +3504,42 @@ fn parse_class_member(trimmed: &str) -> Option<fm_core::IrClassMember> {
 /// The source cardinality is a quoted string after the left-hand class name
 /// and before the operator.  The target cardinality is a quoted string after
 /// the operator and before the right-hand class name.
+/// Strip generic parameters from a class RELATION's endpoints (bd-9erl).
+///
+/// `class Container~T~ { … }` extracts generics via `extract_class_generics`, but a relation
+/// endpoint went through the ordinary node-token parser, which normalises the ID to `Container`
+/// while keeping the RAW token as the display label. So `Container~T~ o-- Item` rendered the class
+/// as `Container~T~`, and when a block declaration supplied generics as well the renderer's
+/// class-name formatting ran over an already-tilde'd label and produced `Container~T~` followed by
+/// a second, angle-bracketed copy of the parameters.
+///
+/// Returns the statement with each endpoint's tilde group removed, plus `(clean_name, generics)`
+/// for every endpoint that carried one, so the caller can record them the way the block form does.
+fn strip_class_relation_generics(statement: &str) -> Option<(String, Vec<(String, Vec<String>)>)> {
+    if !statement.contains('~') {
+        return None;
+    }
+    let (operator_idx, operator, _) = find_operator(statement, &CLASS_OPERATORS, CLASS_OP_GATE)?;
+    let mut found = Vec::new();
+    let mut rewrite = |side: &str| -> String {
+        let trimmed = trim_fast(side);
+        let (clean, generics) = extract_class_generics(trimmed);
+        if generics.is_empty() || clean.is_empty() {
+            return side.to_string();
+        }
+        found.push((clean.to_string(), generics));
+        // Keep the surrounding whitespace so cardinality extraction, which works on byte offsets
+        // around the operator, sees the same shape it did before.
+        side.replacen(trimmed, clean, 1)
+    };
+    let left = rewrite(&statement[..operator_idx]);
+    let right = rewrite(&statement[operator_idx + operator.len()..]);
+    if found.is_empty() {
+        return None;
+    }
+    Some((format!("{left}{operator}{right}"), found))
+}
+
 /// Split a class relation's trailing `: label` off the statement (bd-sq8p).
 ///
 /// mermaid's class grammar is `<classA> <relation> <classB> [: <label>]`, with the label AFTER the
@@ -3710,6 +3746,22 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
         // Take the trailing `: label` off FIRST (bd-sq8p), so neither the cardinality stripper nor
         // the edge parser sees it. `A --|> B : implements` otherwise interns a class literally
         // named `B : implements`.
+        // bd-9erl: take generics off the relation's endpoints BEFORE anything else reads them, so
+        // the endpoint interns as `Container` with its generics recorded, rather than as a class
+        // whose displayed name is the raw `Container~T~`.
+        let generics_rewrite = strip_class_relation_generics(statement);
+        let (statement, relation_generics) = match &generics_rewrite {
+            Some((rewritten, found)) => (rewritten.as_str(), found.as_slice()),
+            None => (statement, &[][..]),
+        };
+        for (class_name, generics) in relation_generics {
+            statements.push(ClassStatement::BlockStart(
+                class_name.clone(),
+                generics.clone(),
+            ));
+            statements.push(ClassStatement::End);
+        }
+
         let (relation_body, relation_label) = split_class_relation_label(statement);
         let stripped = strip_class_cardinality(relation_body);
         let edge_input = match &stripped {
@@ -14850,6 +14902,106 @@ Rel_Back(db, app, "Responds")"#,
             meta.attributes[3].visibility,
             fm_core::ClassVisibility::Package
         );
+    }
+
+    /// bd-9erl: a class relation endpoint must not keep its raw generic text as a label.
+    ///
+    /// The block form already extracted generics correctly. A relation endpoint went through the
+    /// ordinary node-token parser, which normalised the ID to `Container` but kept the raw token as
+    /// the DISPLAY LABEL — so the class rendered as `Container~T~`, and when both forms appeared
+    /// the renderer formatted the parameters a second time on top of that label.
+    #[test]
+    fn class_relation_generics_are_extracted_not_left_in_the_label() {
+        let describe = |src: &str| -> Vec<(String, String, Vec<String>)> {
+            let ir = parse_mermaid(src).ir;
+            ir.nodes
+                .iter()
+                .map(|n| {
+                    let label = n
+                        .label
+                        .and_then(|i| ir.labels.get(i.0))
+                        .map_or_else(String::new, |l| l.text.clone());
+                    let generics = n
+                        .class_meta
+                        .as_ref()
+                        .map_or_else(Vec::new, |m| m.generics.clone());
+                    (n.id.clone(), label, generics)
+                })
+                .collect()
+        };
+
+        // Relation alone: the generics must be RECORDED and the label must not carry them.
+        let rel = describe("classDiagram\n  Container~T~ o-- Item\n");
+        let container = rel
+            .iter()
+            .find(|(id, ..)| id == "Container")
+            .expect("Container");
+        assert!(
+            !container.1.contains('~'),
+            "the raw generic text stayed in the label: {:?}",
+            container.1
+        );
+        assert_eq!(
+            container.2,
+            vec!["T".to_string()],
+            "generics were not extracted"
+        );
+
+        // Both forms: exactly one set of generics, and still no tilde in the label — this is the
+        // case that rendered the parameters twice.
+        let both = describe("classDiagram\n  class Container~T~ {\n  }\n  Container~T~ o-- Item\n");
+        let c2 = both
+            .iter()
+            .find(|(id, ..)| id == "Container")
+            .expect("Container");
+        assert!(!c2.1.contains('~'), "double-rendered label: {:?}", c2.1);
+        assert_eq!(c2.2, vec!["T".to_string()]);
+
+        // 2. A multi-parameter generic must survive as two parameters, not be split into phantom
+        //    classes — the comma inside a generic list is a live hazard (bd-yf4r).
+        let multi = describe("classDiagram\n  Box~K,V~ o-- Item\n");
+        let ids: Vec<&str> = multi.iter().map(|(id, ..)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["Box", "Item"],
+            "the generic list split into phantoms"
+        );
+        let boxed = multi.iter().find(|(id, ..)| id == "Box").expect("Box");
+        assert_eq!(boxed.2, vec!["K".to_string(), "V".to_string()]);
+    }
+
+    /// CONTROLS for bd-9erl: the forms that were already correct must not move.
+    #[test]
+    fn class_generics_controls_are_unchanged() {
+        let generics_of = |src: &str, want_id: &str| -> Vec<String> {
+            let ir = parse_mermaid(src).ir;
+            ir.nodes
+                .iter()
+                .find(|n| n.id == want_id)
+                .and_then(|n| n.class_meta.as_ref().map(|m| m.generics.clone()))
+                .unwrap_or_default()
+        };
+
+        // 3. The block form was already correct.
+        assert_eq!(
+            generics_of("classDiagram\n  class Container~T~ {\n  }\n", "Container"),
+            vec!["T".to_string()]
+        );
+
+        // 1. A relation with NO generics must be untouched: no generics invented, both classes
+        //    present, and no label conjured for either.
+        let ir = parse_mermaid("classDiagram\n  Container o-- Item\n").ir;
+        let ids: Vec<&str> = ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["Container", "Item"]);
+        for node in &ir.nodes {
+            assert!(
+                node.class_meta
+                    .as_ref()
+                    .is_none_or(|m| m.generics.is_empty()),
+                "generics were invented for {}",
+                node.id
+            );
+        }
     }
 
     /// bd-6r13: pie and quadrant leaked too, and the rest of the family is enumerated clean.
