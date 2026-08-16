@@ -673,6 +673,15 @@ impl IrBuilder {
         self.ir.meta.title = Some(title);
     }
 
+    /// Whether no diagram title has been recorded yet.
+    ///
+    /// The post-parse generic title extractor uses this so it can never clobber a title a
+    /// type-specific parser already set (journey, timeline, gantt, pie, quadrant, xychart all call
+    /// `set_title` themselves, several also storing it in their own meta).
+    pub(crate) const fn title_is_unset(&self) -> bool {
+        self.ir.meta.title.is_none()
+    }
+
     /// Record how the source asked for edges to be routed.
     pub(crate) const fn set_edge_routing_hint(&mut self, hint: fm_core::MermaidEdgeRoutingHint) {
         self.ir.meta.edge_routing = Some(hint);

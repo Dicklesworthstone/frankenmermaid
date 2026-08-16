@@ -171,28 +171,147 @@ fn reported_loss_tracks_the_rendered_text_at_every_viewport() {
 
     assert!(cramped > medium, "a 24-row terminal must lose more than a 60-row one");
     assert!(medium >= roomy && roomy >= huge, "more room must never lose more nodes");
-    assert!(cramped > 0 && huge > 0, "this test measures nothing if nothing is ever lost");
+    // These all use the DEFAULT config, whose max_width/max_height cap the usable area at 120x40
+    // however large the terminal argument is, so `huge` is still lossy here. The uncapped case is
+    // a_terminal_with_room_to_spare_loses_nothing.
+    assert!(cramped > 0, "a 50-node chain in 24 rows must still lose nodes");
+    assert!(huge > 0, "under the default 120x40 cap a 50-node chain cannot fit");
 }
 
-/// GATE for the `base_scale` ceiling — the canvas never grows to the terminal it was given.
+/// Given genuine room, the canvas grows and nothing is lost (bd-8tsw).
 ///
-/// `layout_to_cell_dimensions` sizes the canvas as `bounds * base_scale` and then clamps that DOWN
-/// to the viewport, so the hardcoded scale acts as an absolute ceiling: a 50-node chain renders onto
-/// a 47x40 canvas and loses 12 nodes whether the terminal is 80x400 or 400x400. Enlarging the
-/// terminal buys nothing.
+/// `base_scale` used to be an absolute CEILING: the canvas was `bounds * base_scale` and the
+/// viewport could only clamp it DOWN, so enlarging the terminal bought nothing.
 ///
-/// Ignored because it fails today and the fix is a rendering change, tracked separately. It states
-/// the contract a fix has to meet: given room, use it.
+/// ⚠️ The terminal argument alone does not decide how much room there is. `ResolvedConfig::resolve`
+/// clamps it by `config.max_width`/`max_height`, which default to 120x40 — a deliberate default, not
+/// a defect. An earlier version of this test asked for a 400x400 terminal on the DEFAULT config and
+/// then blamed the renderer for a 120x40 canvas; it was measuring the config cap, not the ceiling.
+/// The config below raises the cap so the terminal genuinely offers the room.
 #[test]
-#[ignore = "bd-beqx sibling: base_scale caps the canvas at 47x40 regardless of viewport"]
 fn a_terminal_with_room_to_spare_loses_nothing() {
     let ir = vertical_chain(50);
-    let r = render_term_with_config(&ir, &TermRenderConfig::default(), 400, 400);
+    let config = TermRenderConfig {
+        max_width: 400,
+        max_height: 400,
+        ..TermRenderConfig::default()
+    };
+    let r = render_term_with_config(&ir, &config, 400, 400);
+
     assert_eq!(
-        r.occluded_node_count,
-        0,
-        "a 50-node chain in a 400x400 terminal still lost nodes; canvas was {}x{}",
-        r.width,
-        r.height
+        r.occluded_node_count, 0,
+        "a 50-node chain with room to spare still lost nodes; canvas was {}x{}",
+        r.width, r.height
+    );
+    assert_eq!(
+        labels_absent_from_output(&r.output, 50),
+        Vec::<usize>::new(),
+        "the reported loss and the rendered text must agree at the large size too"
+    );
+    // The growth must be real, not an accounting change.
+    let capped = render_term_with_config(&ir, &TermRenderConfig::default(), 400, 400);
+    assert!(
+        r.height > capped.height,
+        "canvas did not grow: {}x{} with room vs {}x{} under the default cap",
+        r.width, r.height, capped.width, capped.height
+    );
+}
+
+/// Every chart type must draw its title in terminal output, exactly once.
+///
+/// `generic_terminal_diagram_title` used to return `None` for pie, gantt, xychart and quadrant
+/// because each "has a specialized title renderer". None of them drew one, so the title vanished:
+/// measured with the shipping binary, `title ZZTITLE` appeared in the SVG for all four and in the
+/// terminal for none, while flowchart and journey showed it in both.
+///
+/// EXACTLY ONCE is the load-bearing part. The suppression existed to prevent a double-draw, so
+/// removing it has to be pinned against the hazard it was guarding: if a specialized renderer ever
+/// starts drawing its own title, this fails rather than silently showing it twice.
+#[test]
+fn every_chart_type_draws_its_title_exactly_once() {
+    let cases: [(&str, &str); 6] = [
+        ("pie", "pie title ZZTITLE\n  \"a\" : 40\n  \"b\" : 60\n"),
+        (
+            "gantt",
+            "gantt\n  title ZZTITLE\n  dateFormat YYYY-MM-DD\n  section S\n  T :a, 2026-01-01, 5d\n",
+        ),
+        ("xychart", "xychart-beta\n  title \"ZZTITLE\"\n  x-axis [a, b]\n  bar [1, 2]\n"),
+        (
+            "quadrant",
+            "quadrantChart\n  title ZZTITLE\n  x-axis Low --> High\n  y-axis Bad --> Good\n  P: [0.3, 0.6]\n",
+        ),
+        // journey promotes `title` in its own statement loop and is the regression control for
+        // the generic path.
+        ("journey", "journey\n  title ZZTITLE\n  section S\n    T: 5: Me\n"),
+        // flowchart is here BECAUSE it was the case that failed. bd-ij0f taught the flowchart
+        // statement loop to stop interning `title My Flow` as a node — with a bare `continue`, so
+        // the line was dropped and nothing ever called set_title. Not a phantom any more, but not a
+        // title either: a compiled run of this test reported "flowchart: title drawn 0 times".
+        // extract_generic_diagram_title now promotes it post-parse.
+        ("flowchart", "flowchart LR\n  title ZZTITLE\n  A --> B\n"),
+    ];
+
+    for (name, src) in cases {
+        let ir = fm_parser::parse(src).ir;
+        // ⚠️ rich() is the config the CLI actually ships (main.rs builds term_base_config from it),
+        // and it is the config every measurement behind this fix was taken through. An earlier
+        // version of this test used TermRenderConfig::default() and the flowchart CONTROL failed
+        // with 0 titles — default() is a config nobody ships, so the test was asking a question the
+        // evidence had never answered. Whether default() also drops titles is a separate question,
+        // recorded on the bead rather than guessed at here.
+        let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 100, 40).output;
+        let seen = out.matches("ZZTITLE").count();
+        assert_eq!(seen, 1, "{name}: title drawn {seen} times, expected exactly once");
+    }
+}
+
+/// CONTROL: a diagram with no title must not gain one.
+#[test]
+fn a_chart_without_a_title_gains_none() {
+    let ir = fm_parser::parse("pie\n  \"a\" : 40\n  \"b\" : 60\n").ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 100, 40).output;
+    assert!(
+        !out.contains("ZZTITLE"),
+        "a titleless chart must stay titleless"
+    );
+    // and it must still draw its content
+    assert!(out.chars().any(|c| !c.is_whitespace()), "the chart drew nothing at all");
+}
+
+/// NEGATIVE CASES for the generic title extractor.
+///
+/// The extractor runs post-parse over raw input for EVERY diagram, so its blast radius is the whole
+/// parser. These pin the three ways it could do damage.
+#[test]
+fn the_generic_title_extractor_does_not_overreach() {
+    let title_of = |src: &str| fm_parser::parse(src).ir.meta.title.clone();
+
+    // 1. A node whose id merely starts with the keyword is NOT a directive. `title` must be
+    //    followed by whitespace to count, so `title[Box]` stays a node and sets no title.
+    assert_eq!(
+        title_of("flowchart LR\n  title[Box] --> B\n"),
+        None,
+        "a node named title[Box] was mistaken for a title directive"
+    );
+
+    // 2. It must never CLOBBER a title a type-specific parser already set. journey/gantt/pie and
+    //    friends call set_title themselves, several also storing it in their own meta.
+    assert_eq!(
+        title_of("journey\n  title Real\n  section S\n    T: 5: Me\n").as_deref(),
+        Some("Real")
+    );
+    assert_eq!(
+        title_of("pie title Real\n  \"a\" : 40\n").as_deref(),
+        Some("Real")
+    );
+
+    // 3. A diagram with no title gains none, and an empty directive sets nothing.
+    assert_eq!(title_of("flowchart LR\n  A --> B\n"), None);
+    assert_eq!(title_of("flowchart LR\n  title\n  A --> B\n"), None);
+
+    // 4. Only the FIRST title line counts; a later one is not a second diagram title.
+    assert_eq!(
+        title_of("flowchart LR\n  title First\n  A --> B\n  title Second\n").as_deref(),
+        Some("First")
     );
 }

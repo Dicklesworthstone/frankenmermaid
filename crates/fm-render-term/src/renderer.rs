@@ -166,7 +166,7 @@ impl TermRenderer {
     #[must_use]
     pub fn render_layout(&self, ir: &MermaidDiagramIr, layout: &DiagramLayout) -> TermRenderResult {
         let (cell_width, cell_height, scale_x, scale_y) =
-            self.layout_to_cell_dimensions(&layout.bounds, ir.direction);
+            self.fit_cell_dimensions(&layout.bounds, ir.direction, &layout.nodes);
 
         // Use cell-based rendering for Compact tier or CellOnly mode.
         if matches!(self.config.tier, MermaidTier::Compact)
@@ -446,10 +446,61 @@ impl TermRenderer {
         }
     }
 
+    /// Canvas size at the tier's preferred scale.
     fn layout_to_cell_dimensions(
         &self,
         bounds: &fm_layout::LayoutRect,
         direction: GraphDirection,
+    ) -> (usize, usize, f32, f32) {
+        self.cell_dimensions_scaled(bounds, direction, 1.0)
+    }
+
+    /// Canvas size, growing toward the viewport only while nodes are still being lost.
+    ///
+    /// `base_scale` used to act as an absolute CEILING: the canvas was `bounds * base_scale` and the
+    /// terminal could only clamp that DOWN, so a 400x400 terminal produced the same 47x40 canvas —
+    /// and lost the same 12 nodes — as an 80x400 one. Enlarging the terminal bought nothing, which
+    /// left a user with a clipped diagram no remedy at all.
+    ///
+    /// The growth is gated on `count_occluded_nodes`, the same measure the result reports, so a
+    /// diagram that already fits is left EXACTLY as it was: the loop exits before the first step
+    /// and the returned tuple is the old one, byte for byte. Only a diagram that was actually
+    /// losing nodes moves, and only until the loss stops or the viewport runs out.
+    fn fit_cell_dimensions(
+        &self,
+        bounds: &fm_layout::LayoutRect,
+        direction: GraphDirection,
+        nodes: &[fm_layout::LayoutNodeBox],
+    ) -> (usize, usize, f32, f32) {
+        let base = self.cell_dimensions_scaled(bounds, direction, 1.0);
+        let occluded = |d: (usize, usize, f32, f32)| count_occluded_nodes(nodes, d.2, d.3, d.0, d.1);
+        if occluded(base) == 0 {
+            return base;
+        }
+
+        let mut best = base;
+        let mut mult = 1.0_f32;
+        // Doubling reaches any usable terminal in a handful of steps; the loop also stops as soon
+        // as growing stops changing the size, which is what "the viewport is exhausted" looks like.
+        for _ in 0..8 {
+            mult *= 2.0;
+            let candidate = self.cell_dimensions_scaled(bounds, direction, mult);
+            if candidate.0 == best.0 && candidate.1 == best.1 {
+                break;
+            }
+            best = candidate;
+            if occluded(candidate) == 0 {
+                break;
+            }
+        }
+        best
+    }
+
+    fn cell_dimensions_scaled(
+        &self,
+        bounds: &fm_layout::LayoutRect,
+        direction: GraphDirection,
+        mult: f32,
     ) -> (usize, usize, f32, f32) {
         let padding_total = self.config.padding * 2;
         let max_width = self.config.cols.saturating_sub(padding_total).max(1);
@@ -460,8 +511,8 @@ impl TermRenderer {
             MermaidTier::Rich | MermaidTier::Auto => 0.25,
         };
 
-        let base_width = (bounds.width * base_scale) as usize;
-        let base_height = (bounds.height * base_scale) as usize;
+        let base_width = (bounds.width * base_scale * mult) as usize;
+        let base_height = (bounds.height * base_scale * mult) as usize;
 
         // Adjust for direction (LR/RL diagrams are wider).
         let (width, height) = match direction {
@@ -1829,20 +1880,17 @@ fn is_block_beta_space_node(node: &fm_core::IrNode) -> bool {
 }
 
 fn generic_terminal_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
-    let has_specialized_title_renderer = (ir.diagram_type == fm_core::DiagramType::Pie
-        && ir
-            .pie_meta
-            .as_ref()
-            .is_some_and(|meta| !meta.slices.is_empty()))
-        || (ir.diagram_type == fm_core::DiagramType::Gantt && ir.gantt_meta.is_some())
-        || (ir.diagram_type == fm_core::DiagramType::XyChart && ir.xy_chart_meta.is_some())
-        || (ir.diagram_type == fm_core::DiagramType::QuadrantChart && ir.quadrant_meta.is_some());
-
-    if has_specialized_title_renderer {
-        None
-    } else {
-        ir.meta.title.as_deref()
-    }
+    // The title used to be SUPPRESSED for pie, gantt, xychart and quadrant, on the ground that each
+    // "has a specialized title renderer" that would draw it instead. None of them does. Measured
+    // with the shipping binary, a `title ZZTITLE` on each of the four appears in the SVG and is
+    // absent from `-f term`, while the generic types (flowchart, journey) show it in both. The
+    // guard was preventing a double-draw that could not happen, and the cost was the title
+    // vanishing entirely on exactly the four chart types whose title carries the most meaning.
+    //
+    // If a specialized renderer ever does start drawing its own title, the fix is for THAT renderer
+    // to stop, or for this to test what it actually drew -- not to suppress unconditionally.
+    // `every_chart_type_draws_its_title_exactly_once` fails on a double-draw.
+    ir.meta.title.as_deref()
 }
 
 /// Render a pie chart as an ASCII ellipse with wedge detection and a side legend.

@@ -345,6 +345,10 @@ pub fn parse_mermaid_with_detection_and_config(
     // Extract accessibility directives (accTitle / accDescr) from any diagram type.
     extract_accessibility_directives(content, &mut builder);
 
+    // Promote a `title` directive that the statement loop dropped rather than promoted (bd-193x
+    // sibling). No-op when a type-specific parser already set one.
+    extract_generic_diagram_title(content, &mut builder);
+
     // Extract style/classDef/linkStyle directives for all diagram types.
     // (Previously only called from parse_flowchart; now runs generically
     // so that class, state, block-beta, etc. all support styling.)
@@ -11415,6 +11419,51 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
 /// - `accTitle: My Title`
 /// - `accDescr: Single-line description`
 /// - `accDescr { multi-line description }`
+/// Promote a swallowed `title` directive into the diagram title (bd-193x sibling).
+///
+/// bd-ij0f taught the flowchart statement loop to stop interning `title My Flow` as a node
+/// `title_My_Flow`. It does that with a bare `continue` — the line is DROPPED, and nothing ever
+/// calls `set_title`, so the title is not a phantom any more but it is not a title either. Measured
+/// by a compiled test: `flowchart LR / title ZZTITLE / A --> B` renders the title ZERO times, while
+/// journey (which promotes it in its own statement loop) renders it once.
+///
+/// This runs post-parse over the raw input, exactly like `extract_accessibility_directives`, which
+/// is the established pattern for a directive whose meaning is extracted separately from the
+/// statement stream.
+///
+/// ⚠️ It must NOT overwrite a title a type-specific parser already set. journey, timeline, gantt,
+/// pie, quadrant and xychart all call `set_title` themselves, several of them also storing it in
+/// their own meta; clobbering that here would break the paths that are already correct. Hence
+/// `title_is_unset`.
+fn extract_generic_diagram_title(input: &str, builder: &mut IrBuilder) {
+    // Bail before the per-line scan when the keyword is absent — this runs on every parse.
+    if memchr::memmem::find(input.as_bytes(), b"title").is_none() {
+        return;
+    }
+    if !builder.title_is_unset() {
+        return;
+    }
+
+    for line in input.lines() {
+        let trimmed = trim_fast(line);
+        // Only the DIRECTIVE form: `title` followed by whitespace. `title[Box]` is a node and
+        // `titles` is an identifier; neither may be swallowed. Mirrors the guard in
+        // `parse_flowchart_document_items` that drops the line in the first place.
+        let Some(rest) = trimmed.strip_prefix("title") else {
+            continue;
+        };
+        if !rest.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let title = rest.trim();
+        if !title.is_empty() {
+            builder.set_title(title.to_string());
+        }
+        // First significant title only; a later `title ...` line is not a second diagram title.
+        return;
+    }
+}
+
 fn extract_accessibility_directives(input: &str, builder: &mut IrBuilder) {
     // The only accessibility directives are `accTitle`/`accDescr`; if neither keyword
     // appears, bail before the per-line scan (run on every parse of every diagram type).
