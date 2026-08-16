@@ -24,10 +24,27 @@ pub use mermaid_parser::first_significant_line;
 /// This ensures consistent node identity across the engine and safe identifiers
 /// for backend layout engines and rendering formats.
 #[must_use]
-pub fn normalize_identifier(raw: &str) -> String {
+/// Normalize an identifier, BORROWING when the input already normalizes to itself.
+///
+/// The ledger has carried this as a deferred lever since 2026-07-12: "`normalize_identifier`'s
+/// remaining self-time is its `to_owned()` alloc on the fast path -- a structural Cow/borrow lever
+/// (return `&str`/`Cow` when unchanged so the interner clones once instead of twice), deferred as
+/// it touches ~30 callers."
+///
+/// This lands the borrow WITHOUT touching those callers. `normalize_identifier` keeps its `String`
+/// signature and delegates here, so all 49 existing call sites are byte-identical and pay exactly
+/// what they paid before. A call site that only reads or compares the result can switch to this one
+/// and pay nothing.
+///
+/// The fast path -- an id already made of `[A-Za-z0-9_./-]` with no trailing `_` -- is the
+/// overwhelmingly common case for generated node ids, and returns `Cow::Borrowed` into the caller's
+/// own input rather than a fresh allocation.
+#[must_use]
+pub fn normalize_identifier_cow(raw: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
     let trimmed = crate::mermaid_parser::trim_fast(raw);
     if trimmed.is_empty() {
-        return String::new();
+        return Cow::Borrowed("");
     }
 
     let (cleaned, was_quoted) = if (trimmed.starts_with('"') && trimmed.ends_with('"'))
@@ -44,25 +61,26 @@ pub fn normalize_identifier(raw: &str) -> String {
     };
 
     if cleaned.is_empty() {
-        return String::new();
+        return Cow::Borrowed("");
     }
 
-    // Fast path: an identifier already made up entirely of the bytes the loop below keeps verbatim
-    // (ASCII alphanumerics + `_ - . /`) with no trailing `_` (so `trim_end_matches('_')` is a no-op)
-    // normalizes to ITSELF — the overwhelmingly common case for generated/most node ids. Return a
-    // single owned copy and skip the char-by-char rebuild plus its throwaway `out` allocation (the
-    // slow path allocates `out`, then reallocates for `out.trim_end_matches(..).to_string()`).
-    // Byte-identical: the loop pushes each such char unchanged and the trim/fallback leave it as-is;
-    // a non-ASCII byte fails `is_ascii_alphanumeric`, correctly deferring to the slow path.
+    // THE LEVER. This branch previously ended in `cleaned.to_owned()` -- one heap allocation per
+    // identifier, on the hottest path in the parser. It now borrows.
     let cleaned_bytes = cleaned.as_bytes();
     if cleaned_bytes[cleaned_bytes.len() - 1] != b'_'
         && cleaned_bytes
             .iter()
             .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/'))
     {
-        return cleaned.to_owned();
+        return Cow::Borrowed(cleaned);
     }
 
+    Cow::Owned(normalize_identifier_rebuild(cleaned, was_quoted))
+}
+
+/// Owning slow path: the char-by-char rebuild, its `_`-trim, the grapheme fallback and the hashed
+/// last resort. Unchanged from the original function body; only its home moved.
+fn normalize_identifier_rebuild(cleaned: &str, was_quoted: bool) -> String {
     let mut out = String::with_capacity(cleaned.len());
     for ch in cleaned.chars() {
         if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/') {
@@ -115,6 +133,15 @@ pub fn normalize_identifier(raw: &str) -> String {
     }
 
     result
+}
+
+/// Normalize an identifier to an owned `String`.
+///
+/// Delegates to [`normalize_identifier_cow`]; byte-identical to the previous implementation. Kept
+/// so the existing call sites need no change.
+#[must_use]
+pub fn normalize_identifier(raw: &str) -> String {
+    normalize_identifier_cow(raw).into_owned()
 }
 
 fn fnv1a_hash(bytes: &[u8]) -> u64 {
@@ -1400,7 +1427,8 @@ mod tests {
     use super::{
         FlowchartBatchParsePlan, FlowchartBatchParseScratch, MermaidLineEndingStyle,
         MermaidWhitespaceKind, ParserConfig, apply_parse_lens_edit, build_parse_lens,
-        capture_format_complement, detect_type, normalize_identifier, parse, parse_with_mode,
+        capture_format_complement, detect_type, normalize_identifier, normalize_identifier_cow, parse,
+        parse_with_mode,
     };
 
     #[test]
@@ -1724,6 +1752,81 @@ mod tests {
         let result = parse("");
         assert_eq!(result.ir.diagram_type, DiagramType::Unknown);
         assert_eq!(result.warnings.len(), 1);
+    }
+
+    /// The Cow variant must be BYTE-IDENTICAL to the owning one on every shape of input.
+    ///
+    /// This is the whole safety argument for the lever: `normalize_identifier` now delegates to
+    /// `normalize_identifier_cow`, so if the two ever disagree, 49 call sites change behaviour at
+    /// once. The cases below walk every branch — fast path, each quote style, whitespace joining,
+    /// the `:;,` break, the trailing-`_` trim, the grapheme fallback and the hashed last resort.
+    #[test]
+    fn normalize_identifier_cow_matches_the_owning_form_exactly() {
+        let cases = [
+            "",
+            "   ",
+            "A",
+            "P0",
+            "Node_1",
+            "a-b.c/d",
+            "trailing_",
+            "\"quoted id\"",
+            "'single quoted'",
+            "`backtick quoted`",
+            "with spaces here",
+            "break:here",
+            "break;here",
+            "break,here",
+            "leading break:x",
+            "___",
+            "  padded  ",
+            "\"\"",
+            "naïve",
+            "日本語",
+            "emoji 🎉 here",
+            "!!!",
+            "!!!abc",
+        ];
+        for case in cases {
+            assert_eq!(
+                normalize_identifier_cow(case).as_ref(),
+                normalize_identifier(case).as_str(),
+                "cow and owning forms disagree on {case:?}"
+            );
+        }
+    }
+
+    /// The lever itself: the common case must BORROW, not allocate.
+    ///
+    /// Asserted on the pointer, because `Cow::Borrowed` is the entire point — checking only the
+    /// string value would pass just as happily if the fast path still called `to_owned()`, which is
+    /// exactly the regression this guards.
+    #[test]
+    fn a_clean_identifier_borrows_instead_of_allocating() {
+        let raw = String::from("P0");
+        match normalize_identifier_cow(&raw) {
+            std::borrow::Cow::Borrowed(borrowed) => assert!(
+                std::ptr::eq(borrowed.as_ptr(), raw.as_ptr()),
+                "borrowed, but not from the caller's own buffer"
+            ),
+            std::borrow::Cow::Owned(_) => panic!("clean id allocated; the lever is not firing"),
+        }
+
+        // A trimmed-but-otherwise-clean id still borrows, pointing INTO the input.
+        assert!(matches!(
+            normalize_identifier_cow("  Node_1  "),
+            std::borrow::Cow::Borrowed(_)
+        ));
+
+        // And an id that genuinely needs rebuilding must still own.
+        assert!(matches!(
+            normalize_identifier_cow("with spaces"),
+            std::borrow::Cow::Owned(_)
+        ));
+        assert!(matches!(
+            normalize_identifier_cow("trailing_"),
+            std::borrow::Cow::Owned(_)
+        ));
     }
 
     #[test]
