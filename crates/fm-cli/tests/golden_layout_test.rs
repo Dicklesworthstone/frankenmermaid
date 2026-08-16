@@ -199,8 +199,27 @@ fn layout_golden_checksums_are_stable() {
         } else if let Some(expected) = checksums.get(case_id.as_str()) {
             let expected_checksum = expected["layout_checksum"].as_str().unwrap_or("");
             if checksum != expected_checksum {
+                // Localise the drift to nodes or edges. A bare checksum mismatch says only "some
+                // geometry moved", and recovering which half cost a worktree at the last-blessed
+                // commit plus two builds to answer (bd-38wq). The section sub-checksums make the
+                // next occurrence self-diagnosing: compare these two lines across revisions and the
+                // half that moved names itself.
+                let node_lines: String = canonical
+                    .lines()
+                    .filter(|line| line.starts_with("node:"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let edge_lines: String = canonical
+                    .lines()
+                    .filter(|line| line.starts_with("edge:"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 eprintln!(
-                    "LAYOUT CHECKSUM MISMATCH for {case_id}:\n  expected: {expected_checksum}\n  got:      {checksum}"
+                    "LAYOUT CHECKSUM MISMATCH for {case_id}:\n  expected: {expected_checksum}\n  got:      {checksum}\n  nodes-only: {} ({} nodes)\n  edges-only: {} ({} edges)",
+                    fnv_hex(&node_lines),
+                    canonical.lines().filter(|l| l.starts_with("node:")).count(),
+                    fnv_hex(&edge_lines),
+                    canonical.lines().filter(|l| l.starts_with("edge:")).count(),
                 );
                 eprintln!("  Run with BLESS_LAYOUT=1 to update.");
                 any_failed = true;
