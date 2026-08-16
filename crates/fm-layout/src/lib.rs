@@ -26246,14 +26246,19 @@ mod tests {
         let result_b = engine.layout_diagram_traced_with_config_and_guardrails(
             &ir_b,
             LayoutAlgorithm::Auto,
-            config,
+            config.clone(),
             guardrails,
         );
-        // NOTE: Current behavior — engine may use incremental path when only edges
-        // change (same node count). `derive_layout_edits` detects node-level changes
-        // but not pure edge-topology changes. The incremental path still produces
-        // a structurally valid layout via dependency graph dirty propagation, even if
-        // the cache is stale. This is documented as a known limitation.
+        // This test checks SURVIVABILITY, not the contract its name states. The layout returned
+        // here is measurably NOT the one a full recompute produces (bd-8pna), so the structural
+        // checks below are all that can pass today.
+        //
+        // ⚠️ The comment that used to sit here called that "a known limitation" and moved on. That
+        // is the thing to avoid: a test named `..._triggers_full_recompute` whose body accepts a
+        // layout built from the PREVIOUS edge topology defends the defect it is named after, and
+        // leaves whoever eventually fixes invalidation with no failing assertion telling them it
+        // mattered. The contract now lives in `fault_stale_cache_matches_a_full_recompute` below,
+        // which is #[ignore]d because it REPRODUCES the defect rather than because it is unfinished.
         assert_eq!(result_b.layout.nodes.len(), 64);
         // Verify structural validity: all nodes must have finite, positive-size bounds.
         for (i, node) in result_b.layout.nodes.iter().enumerate() {
@@ -26266,6 +26271,76 @@ mod tests {
                 "node {i} has zero bounds with stale cache"
             );
         }
+    }
+
+    /// bd-8pna: an edge-topology-only edit must not be served from a stale cache.
+    ///
+    /// Whatever path the engine picks, its answer must equal the full recompute for the SAME IR.
+    /// That invariant is strategy-agnostic — it does not care whether the incremental path was
+    /// taken, only that taking it did not change the answer — and it is the one
+    /// `fault_rapid_100_edits_produces_correct_final_layout` already applies to node-level edits.
+    ///
+    /// ⚠️ `#[ignore]` BECAUSE IT REPRODUCES A LIVE DEFECT. Run with `--ignored` and it FAILS:
+    ///
+    ///     engine (incremental)   node rects 95   edge paths 34   max y 11749.5
+    ///     full recompute         node rects 65   edge paths 34   max y 11563.0
+    ///
+    /// Same edge count, different geometry. Un-ignoring it is bd-8pna's acceptance gate.
+    #[test]
+    #[ignore = "bd-8pna: reproduces a live stale-cache defect; un-ignore as the acceptance gate"]
+    fn fault_stale_cache_matches_a_full_recompute() {
+        let mut engine = IncrementalLayoutEngine::default();
+        let ir_a = large_two_subgraph_ir(32);
+        let config = super::LayoutConfig::default();
+        let guardrails = LayoutGuardrails::default();
+
+        let result_a = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir_a,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+
+        let ir_b = {
+            let mut edges = Vec::new();
+            for i in (0..31).step_by(2) {
+                edges.push((i, i + 1));
+            }
+            for i in (32..63).step_by(2) {
+                edges.push((i, i + 1));
+            }
+            edges.push((5, 40));
+            edges.push((10, 50));
+            labeled_graph_ir(64, &edges)
+        };
+
+        let result_b = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir_b,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            guardrails,
+        );
+        let full_b = layout_diagram_traced_with_config_and_guardrails(
+            &ir_b,
+            LayoutAlgorithm::Auto,
+            config,
+            guardrails,
+        );
+
+        // NON-VACUITY CONTROL FIRST, because the equality below is only informative once A and B
+        // are known to differ. Both sides of that equality are computed from ir_b, so if the two
+        // IRs laid out identically it would hold even with a stale cache — the exact failure this
+        // test exists to catch.
+        assert_ne!(
+            result_a.layout, full_b.layout,
+            "CONTROL FAILED: IR A and IR B lay out identically, so the equality below would be \
+             satisfied by a stale cache and this test would prove nothing"
+        );
+        assert_eq!(
+            result_b.layout, full_b.layout,
+            "an edge-topology-only edit was served from a stale cache: the engine's layout \
+             disagrees with a full recompute of the same IR"
+        );
     }
 
     #[test]
