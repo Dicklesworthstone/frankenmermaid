@@ -1976,6 +1976,22 @@ fn is_non_node_directive_statement(statement: &str) -> bool {
         || followed_by_space("callback")
 }
 
+/// True for an accessibility directive only — `accTitle:` / `accDescr:` / `accDescr {` (bd-7oyz).
+///
+/// Deliberately NARROWER than `is_non_node_directive_statement`. Paths differ in which directives
+/// they already parse into real items: timeline promotes `title …` into diagram meta, and the
+/// flowchart path parses `click`/`link`/`callback` into `FlowAst::ClickDirective`. Swallowing a
+/// directive a path already handles is a regression, not a fix — bd-ij0f broke eight click tests
+/// that way and this predicate exists so the remaining paths can be guarded without repeating it.
+fn is_accessibility_directive_statement(statement: &str) -> bool {
+    let statement = trim_fast(statement);
+    ["accTitle", "accDescr"].iter().any(|name| {
+        statement.strip_prefix(name).is_some_and(|rest| {
+            rest.starts_with(':') || rest.starts_with(char::is_whitespace) || rest.is_empty()
+        })
+    })
+}
+
 /// Recognise a flowchart accessibility directive, returning what follows the keyword (bd-0di8).
 ///
 /// Matches `accTitle: …`, `accDescr: …` and the block opener `accDescr {`. Keys on the DIRECTIVE
@@ -4504,6 +4520,11 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        // bd-7oyz: accessibility directives are not mindmap nodes.
+        if is_accessibility_directive_statement(trimmed) {
+            continue;
+        }
+
         // Handle icon directive (::icon(...)) - applies to last node
         if trimmed.starts_with("::icon(") {
             if let Some(node_id) = last_node_id
@@ -5251,6 +5272,12 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        // bd-7oyz: accessibility directives are not journey items. Accessibility-only on purpose —
+        // see `is_accessibility_directive_statement` for why a broader guard regresses these paths.
+        if is_accessibility_directive_statement(trimmed) {
+            continue;
+        }
+
         if let Some(title) = trimmed.strip_prefix("title ")
             && let Some(title) = clean_label(Some(title))
         {
@@ -5634,6 +5661,15 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
 
         // Skip header
         if trimmed == "timeline" {
+            continue;
+        }
+
+        // bd-7oyz: accessibility directives are not timeline entries.
+        //
+        // ⚠️ ACCESSIBILITY ONLY. The broader predicate also matches `title …`, which THIS path
+        // promotes into diagram meta — swallowing it broke
+        // `timeline_inline_title_is_promoted_to_diagram_meta`.
+        if is_accessibility_directive_statement(trimmed) {
             continue;
         }
 
@@ -7358,6 +7394,11 @@ fn parse_block_beta_document_items(
         // Header/`end` skip without the per-line `to_ascii_lowercase()` heap alloc (fires on every
         // block line, then `parse_block_beta_columns`/`_blocks` below each lowercased again).
         if starts_with_ci(trimmed, "block-beta") {
+            continue;
+        }
+
+        // bd-7oyz: `accTitle: T` interned BOTH `accTitle` and the title text `T` as blocks.
+        if is_accessibility_directive_statement(trimmed) {
             continue;
         }
 
@@ -14782,6 +14823,75 @@ Rel_Back(db, app, "Responds")"#,
             meta.attributes[3].visibility,
             fm_core::ClassVisibility::Package
         );
+    }
+
+    /// bd-7oyz: the directive-as-node leak also covered journey, mindmap, timeline and block-beta.
+    ///
+    /// Measured AFTER bd-0di8 and bd-ij0f landed, so these were genuinely uncovered rather than
+    /// stale. timeline and block-beta were the worse rows: the keyword became one node and the
+    /// title TEXT became a second, so one directive produced two boxes named after its own syntax.
+    #[test]
+    fn remaining_diagram_paths_do_not_intern_directives() {
+        let ids = |src: &str| -> Vec<String> {
+            parse_mermaid(src)
+                .ir
+                .nodes
+                .iter()
+                .map(|n| n.id.clone())
+                .collect()
+        };
+
+        assert!(
+            !ids("journey\n  accTitle: T\n  section S\n    Task: 5: Me\n")
+                .iter()
+                .any(|id| id.contains("accTitle")),
+            "journey interned the directive"
+        );
+        assert!(
+            !ids("mindmap\n  accTitle: T\n  root((r))\n    child\n")
+                .iter()
+                .any(|id| id.contains("accTitle")),
+            "mindmap interned the directive"
+        );
+        // timeline and block interned BOTH the keyword and the title text, so both must be gone.
+        let tl = ids("timeline\n  accTitle: T\n  2021 : A\n");
+        assert!(
+            !tl.iter().any(|id| id == "accTitle" || id == "T"),
+            "timeline still interns the directive or its text: {tl:?}"
+        );
+        let bl = ids("block-beta\n  accTitle: T\n  columns 1\n  A\n");
+        assert!(
+            !bl.iter().any(|id| id == "accTitle" || id == "T"),
+            "block-beta still interns the directive or its text: {bl:?}"
+        );
+
+        // CONTROLS: paths that were already correct must stay correct.
+        assert_eq!(
+            ids("sequenceDiagram\n  accTitle: T\n  A->>B: x\n"),
+            vec!["A", "B"]
+        );
+        assert_eq!(
+            ids("classDiagram\n  accTitle: T\n  A <|-- B\n"),
+            vec!["A", "B"]
+        );
+    }
+
+    /// The directive must still TAKE EFFECT in the newly guarded paths (bd-7oyz).
+    #[test]
+    fn remaining_paths_still_apply_the_directive() {
+        for src in [
+            "journey\n  accTitle: T\n  section S\n    Task: 5: Me\n",
+            "mindmap\n  accTitle: T\n  root((r))\n    child\n",
+            "timeline\n  accTitle: T\n  2021 : A\n",
+            "block-beta\n  accTitle: T\n  columns 1\n  A\n",
+        ] {
+            let parsed = parse_mermaid(src);
+            assert_eq!(
+                parsed.ir.meta.acc_title.as_deref(),
+                Some("T"),
+                "the accessible title was lost along with the phantom in: {src}"
+            );
+        }
     }
 
     /// bd-ij0f: a non-node directive is not a node, in EVERY diagram path.
