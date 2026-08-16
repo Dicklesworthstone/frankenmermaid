@@ -227,6 +227,8 @@ enum ClassStatement {
     Stereotype(String, fm_core::ClassStereotype),
     /// Cardinality labels to attach to the most recently created edge.
     Cardinality(Option<String>, Option<String>),
+    /// `note for <class> "<text>"` — target name and note text (bd-1fw3).
+    Note(String, String),
     End,
 }
 
@@ -3488,6 +3490,10 @@ fn parse_class_member(trimmed: &str) -> Option<fm_core::IrClassMember> {
     // Check if it's a method (contains parentheses)
     let is_method = rest.contains('(');
 
+    // Static (`$`) and abstract (`*`) markers sit immediately after the member's NAME, which for a
+    // method is its closing paren -- a return type may follow. Testing the end of the whole line
+    // therefore only ever fired for a member with no return type: `+count()$` was static while
+    // `+count()$ int`, equally valid mermaid, silently was not.
     // Static (`$`) and abstract (`*`) classifiers appear in two documented places, and only the
     // first was handled:
     //
@@ -3775,6 +3781,19 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
         // Accessibility and styling are extracted from the original input after this parser runs.
         // They must be handled here too: otherwise the generic node fallback below interns the
         // directive text as a class node before its actual meaning is extracted.
+        // `note for <class> "<text>"` was DISCARDED here (bd-1fw3): it is correctly not a node
+        // declaration, so it fell into the non-node arm below and was dropped, and the note text
+        // never reached the IR at all — an earlier failure than the state note of bd-a6l4, which at
+        // least survived parsing. This runs BEFORE the non-node check so a well-formed note is
+        // captured; a malformed one still falls through to that check and is dropped rather than
+        // interned as a class called `note`, which is the judgement that made dropping right in the
+        // first place.
+        if let Some((target, text)) = parse_class_note(statement) {
+            statements.push(ClassStatement::Note(target, text));
+            handled_non_node_statement = true;
+            continue;
+        }
+
         if is_class_non_node_statement(statement) {
             handled_non_node_statement = true;
             continue;
@@ -3933,7 +3952,13 @@ fn is_class_non_node_statement(statement: &str) -> bool {
         || keyword("click")
         || keyword("link")
         || keyword("callback")
-        || statement.starts_with("note for ")
+        // `note for X ...` was the only note form excluded here, so a STANDALONE `note "text"`
+        // fell through to the generic node fallback and interned a class literally named `note` —
+        // a phantom box in the rendered diagram, the same family as bd-yrxu's invented `A_e1`.
+        // Found by the bd-1fw3 test that asserts a note never declares a node; `keyword` covers
+        // both forms and requires the token to stand alone, so a class genuinely called
+        // `noteworthy` is untouched, and `class note` still declares one explicitly.
+        || keyword("note")
 }
 
 fn lower_class_statement(
@@ -3974,10 +3999,48 @@ fn lower_class_statement(
         ClassStatement::Cardinality(source, target) => {
             builder.set_last_edge_cardinality(source.as_deref(), target.as_deref());
         }
+        ClassStatement::Note(target, text) => {
+            // Deliberately does NOT intern the target, unlike the state-diagram note path. A note
+            // for a class that was never declared must not CREATE that class — inventing a node
+            // from a note is precisely the outcome dropping the statement was avoiding. An
+            // unresolvable note is carried in the IR and dropped by layout, where the same rule is
+            // already enforced for state notes.
+            builder.ir_mut().state_notes.push(fm_core::IrStateNote {
+                target,
+                position: "right".to_string(),
+                text,
+                span: span_for(line_number, source_line),
+            });
+        }
         ClassStatement::End => {
             builder.clear_current_class();
         }
     }
+}
+
+/// Parse `note for <class> "<text>"`, mermaid's class-diagram note.
+///
+/// The text is taken WHOLE after the target token and only its surrounding quotes are stripped, so
+/// a note containing a colon survives — `mermaid_parser.rs` already flags that exact case as a
+/// hazard for the member shorthand, which splits on the first colon. Splitting here would turn
+/// `note for A "text: here"` into a truncated note or, worse, a member of a class named `note`.
+///
+/// Returns `None` for the standalone `note "<text>"` form, which has no target: placing an
+/// unattached note needs geometry the targeted path has no notion of. It stays dropped, and
+/// visibly so, rather than being silently reattached to an arbitrary class.
+fn parse_class_note(statement: &str) -> Option<(String, String)> {
+    let rest = trim_fast(trim_fast(statement).strip_prefix("note for ")?);
+    let (target, remainder) = rest.split_once(char::is_whitespace)?;
+    let target = trim_fast(target);
+    let text = trim_fast(remainder);
+    let text = text
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .map_or(text, trim_fast);
+    if target.is_empty() || text.is_empty() {
+        return None;
+    }
+    Some((target.to_string(), text.to_string()))
 }
 
 fn parse_state(input: &str, builder: &mut IrBuilder) {
@@ -17540,6 +17603,79 @@ Rel_Back(db, app, "Responds")"#,
             .as_ref()
             .expect("node should have inline_style from classDef");
         assert_eq!(style.properties.get("fill").unwrap(), "#f00");
+    }
+
+    /// `note for Duck "can swim"` produced NOTHING (bd-1fw3): the statement is correctly not a
+    /// node declaration, so it fell into the non-node arm and was dropped, text and all. An
+    /// earlier failure than bd-a6l4's state note, which at least survived parsing.
+    #[test]
+    fn class_diagram_note_reaches_the_ir_without_inventing_a_class() {
+        let parsed = parse_mermaid(
+            "classDiagram\n    class Duck\n    Animal <|-- Duck\n    \
+             note for Duck \"can swim: and fly\"",
+        );
+
+        assert_eq!(parsed.ir.state_notes.len(), 1, "the note must reach the IR");
+        let note = &parsed.ir.state_notes[0];
+        assert_eq!(note.target, "Duck");
+        assert_eq!(note.position, "right");
+        // The colon must survive whole. The member shorthand on the same statement grammar splits
+        // on the first colon, and doing that here would cut the note short or, worse, read it as a
+        // member of a class called `note`.
+        assert_eq!(note.text, "can swim: and fly");
+
+        // The note must not have interned anything. Declaring a class from a note is exactly the
+        // outcome that made dropping the statement the right call originally.
+        let ids: Vec<&str> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["Duck", "Animal"], "unexpected nodes: {ids:?}");
+    }
+
+    /// The two ways a note must NOT create a node, kept separate from the happy path because each
+    /// fails differently: one has a target that does not exist, the other has no target at all.
+    #[test]
+    fn class_diagram_notes_never_declare_nodes() {
+        let orphan = parse_mermaid(
+            "classDiagram\n    class Duck\n    note for Ghost \"nobody declared me\"",
+        );
+        assert_eq!(
+            orphan.ir.nodes.len(),
+            1,
+            "a note for an undeclared class must not create it: {:?}",
+            orphan
+                .ir
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            orphan.ir.state_notes.len(),
+            1,
+            "the orphan note is still carried; layout is where an unresolvable target is dropped"
+        );
+
+        // The standalone form has no target. It stays dropped rather than being attached to an
+        // arbitrary class — and, as before, must not intern a node called `note`.
+        let standalone = parse_mermaid("classDiagram\n    class Duck\n    note \"loose text\"");
+        assert!(
+            standalone.ir.state_notes.is_empty(),
+            "the untargeted note form is not implemented and must not be guessed at"
+        );
+        assert_eq!(
+            standalone
+                .ir
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Duck"],
+            "a standalone note must not intern a node"
+        );
     }
 
     // ── Class diagram cardinality and namespace tests ─────────────────
