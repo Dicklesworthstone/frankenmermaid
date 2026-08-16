@@ -1880,8 +1880,11 @@ fn parse_flowchart_statement_asts(
     }
     // `id@{ shape: …, label: … }` before the generic node token parse (bd-9x8r): otherwise the whole
     // directive is interned as one node whose displayed name is the directive text.
-    if let Some(node) = parse_flowchart_node_metadata(statement, config) {
-        return Some(vec![FlowAst::Node(node)]);
+    if let Some(handled) = parse_flowchart_node_metadata(statement, config) {
+        // `Some(None)` = recognised as `@{…}` metadata but describing no node, so nothing is
+        // declared. Returning an empty statement list is what stops the generic fallback below
+        // from interning the directive text (bd-yrxu).
+        return Some(handled.map_or_else(Vec::new, |node| vec![FlowAst::Node(node)]));
     }
 
     if let Some(node) = parse_node_token_with_config(statement, config) {
@@ -1895,6 +1898,34 @@ fn parse_flowchart_statement_asts(
 
     let _ = source_line;
     None
+}
+
+/// Drop a mermaid 11 edge-id prefix from an edge's left-hand side (bd-yrxu).
+///
+/// `A e1@--> B` names the EDGE `e1`. Everything left of the operator was interned as one endpoint,
+/// so `A e1@` normalised to a class called `A_e1` — an invented node — and the edge ran from it,
+/// leaving the real `A` unconnected to anything.
+///
+/// The id is the last whitespace-separated token and must end in `@` with an otherwise ordinary
+/// identifier body. Requiring BOTH a preceding token and that shape is what keeps this off every
+/// other endpoint: a bare `A@` (no left neighbour) is left alone, so a node whose id genuinely ends
+/// in `@` is not mangled.
+///
+/// The id itself is discarded. The IR has no edge-id concept, and inventing one here would be a
+/// bigger change than the defect warrants — bd-yrxu records that the `e1@{…}` metadata form still
+/// cannot be tied back to its edge.
+fn strip_trailing_edge_id(left: &str) -> &str {
+    let Some((head, last)) = left.rsplit_once(char::is_whitespace) else {
+        return left;
+    };
+    let Some(id) = last.strip_suffix('@') else {
+        return left;
+    };
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return left;
+    }
+    let head = trim_end_fast(head);
+    if head.is_empty() { left } else { head }
 }
 
 /// Map a mermaid 11 `shape:` name onto the `NodeShape` its bracket spelling produces (bd-9x8r).
@@ -1955,7 +1986,10 @@ fn split_metadata_pairs(body: &str) -> Vec<&str> {
 ///
 /// Returns `None` for anything that is not this exact form, so every other statement falls through
 /// to the existing node/edge parsing untouched.
-fn parse_flowchart_node_metadata(statement: &str, config: &ParserConfig) -> Option<FlowAstNode> {
+fn parse_flowchart_node_metadata(
+    statement: &str,
+    config: &ParserConfig,
+) -> Option<Option<FlowAstNode>> {
     let at_pos = statement.find("@{")?;
     let close = statement.rfind('}')?;
     if close < at_pos + 2 || !trim_fast(&statement[close + 1..]).is_empty() {
@@ -1970,6 +2004,11 @@ fn parse_flowchart_node_metadata(statement: &str, config: &ParserConfig) -> Opti
 
     let mut shape = base.shape;
     let mut label = base.label;
+    // Whether any key that describes a NODE was present. `e1@{ animate: true }` names an EDGE, and
+    // mermaid declares no node for it; declaring one leaves a stray empty box in the diagram
+    // (bd-yrxu). Recognising the statement but emitting nothing is the honest outcome: we cannot
+    // attach the metadata to its edge without an edge-id concept, but we can stop inventing a node.
+    let mut saw_node_key = false;
     for pair in split_metadata_pairs(&statement[at_pos + 2..close]) {
         let Some((key, value)) = pair.split_once(':') else {
             continue;
@@ -1978,11 +2017,13 @@ fn parse_flowchart_node_metadata(statement: &str, config: &ParserConfig) -> Opti
         match trim_fast(key).to_ascii_lowercase().as_str() {
             // An unrecognised shape name leaves the shape alone rather than inventing one.
             "shape" => {
+                saw_node_key = true;
                 if let Some(mapped) = flowchart_metadata_shape(&value.to_ascii_lowercase()) {
                     shape = mapped;
                 }
             }
             "label" | "title" => {
+                saw_node_key = true;
                 if !value.is_empty() {
                     label = Some(ParsedLabel::plain(value));
                 }
@@ -1990,12 +2031,15 @@ fn parse_flowchart_node_metadata(statement: &str, config: &ParserConfig) -> Opti
             _ => {}
         }
     }
-    Some(FlowAstNode {
+    if !saw_node_key {
+        return Some(None);
+    }
+    Some(Some(FlowAstNode {
         id: base.id,
         label,
         icon: base.icon,
         shape,
-    })
+    }))
 }
 
 fn parse_fast_simple_flowchart_statement_ast(statement: &str) -> Option<FlowAst> {
@@ -8510,7 +8554,7 @@ fn parse_edge_statement_asts(
 ) -> Option<Vec<FlowAst>> {
     let (first_operator_idx, first_operator, first_arrow) =
         find_operator(statement, operators, gate)?;
-    let left_raw = trim_fast(&statement[..first_operator_idx]);
+    let left_raw = strip_trailing_edge_id(trim_fast(&statement[..first_operator_idx]));
     if left_raw.is_empty() {
         return None;
     }
@@ -14587,6 +14631,71 @@ Rel_Back(db, app, "Responds")"#,
         );
     }
 
+    /// bd-yrxu: `A e1@--> B` names the EDGE `e1`, so the edge must run from A, not from `A_e1`.
+    ///
+    /// Everything left of the operator was interned as one endpoint, so `A e1@` normalised to an
+    /// invented class `A_e1`, the edge ran from it, and the real `A` was left unconnected to
+    /// anything. A three-node picture for a two-node source, with the wrong thing wired up.
+    #[test]
+    fn flowchart_edge_id_prefix_does_not_invent_a_node() {
+        let parsed = parse_mermaid("flowchart TD\n  A e1@--> B\n");
+        let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["A", "B"], "the edge id was interned as a node");
+
+        assert_eq!(parsed.ir.edges.len(), 1);
+        let endpoint = |e: fm_core::IrEndpoint| match e {
+            fm_core::IrEndpoint::Node(id) => parsed.ir.nodes[id.0].id.clone(),
+            other => format!("{other:?}"),
+        };
+        assert_eq!(
+            (
+                endpoint(parsed.ir.edges[0].from),
+                endpoint(parsed.ir.edges[0].to)
+            ),
+            ("A".to_string(), "B".to_string()),
+            "the edge must connect the declared nodes, not a phantom"
+        );
+    }
+
+    /// NEGATIVE CASES from bd-yrxu.
+    #[test]
+    fn flowchart_edge_id_stripping_is_narrow() {
+        let ids = |src: &str| -> Vec<String> {
+            parse_mermaid(src)
+                .ir
+                .nodes
+                .iter()
+                .map(|n| n.id.clone())
+                .collect()
+        };
+
+        // 2. CONTROL: a flowchart with no edge ids must be untouched.
+        assert_eq!(ids("flowchart TD\n  A --> B\n"), vec!["A", "B"]);
+
+        // 4. A lone `A@` has no preceding token, so it is NOT an edge-id prefix and must be left
+        //    alone rather than stripped to nothing.
+        let lone = ids("flowchart TD\n  A@ --> B\n");
+        assert_eq!(lone.len(), 2, "a bare trailing @ was mangled: {lone:?}");
+        assert_eq!(lone[1], "B");
+
+        // 3. `e1@{ animate: true }` names an EDGE and mermaid declares no node for it. We cannot
+        //    attach the metadata to its edge without an edge-id concept, but we must stop inventing
+        //    a node — previously this rendered a class displayed as "animate: true".
+        assert!(
+            ids("flowchart TD\n  A --> B\n  e1@{ animate: true }\n")
+                .iter()
+                .all(|id| id == "A" || id == "B"),
+            "edge metadata declared a node"
+        );
+
+        // CONTROL for that rule: metadata that DOES describe a node still declares it.
+        assert_eq!(
+            ids("flowchart TD\n  C@{ shape: cyl }\n"),
+            vec!["C"],
+            "node metadata must still declare its node"
+        );
+    }
+
     /// bd-yf4r: a classDiagram block declaration is not a CSS-class assignment.
     ///
     /// `extract_style_directives` matched any `class ` prefix as the flowchart directive
@@ -14779,18 +14888,20 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(plain_ids, vec!["A", "B"]);
         assert_eq!(plain.ir.nodes[0].shape, NodeShape::Rect);
 
-        // PARTIAL, and recorded as such: the edge-id form `e1@{ animate: true }` still declares a
-        // node `e1`, because distinguishing an edge id from a node id needs an edge-id concept the
-        // IR does not have (filed separately). What this fix DOES remove is the invented display
-        // name — `e1` no longer renders as a class called "animate: true".
+        // The edge-id form declares NO node. bd-9x8r originally left it declaring an unlabelled
+        // `e1`, and this assertion was written for that weaker state; bd-yrxu then made metadata
+        // describing no node declare nothing, which is what mermaid does. Tightened rather than
+        // deleted, so the stronger guarantee is the one pinned.
         let edge_meta = parse_mermaid("flowchart TD\n  e1@{ animate: true }\n");
-        let edge_label = edge_meta.ir.nodes[0]
-            .label
-            .and_then(|id| edge_meta.ir.labels.get(id.0))
-            .map(|l| l.text.as_str());
         assert!(
-            edge_label.is_none_or(|text| !text.contains("animate")),
-            "the directive text is still being drawn as a node name: {edge_label:?}"
+            edge_meta.ir.nodes.is_empty(),
+            "edge metadata declared a node: {:?}",
+            edge_meta
+                .ir
+                .nodes
+                .iter()
+                .map(|n| n.id.as_str())
+                .collect::<Vec<_>>()
         );
     }
 
