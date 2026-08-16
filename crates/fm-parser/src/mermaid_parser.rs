@@ -1595,6 +1595,20 @@ fn parse_flowchart_document_items<'a>(
             }
             continue;
         }
+        // bd-ij0f: `title My Flow` was still interned as `title_My_Flow` after bd-0di8 covered the
+        // accessibility pair.
+        //
+        // ⚠️ ONLY `title` here, deliberately. The flowchart path already HANDLES the rest —
+        // classDef/style/linkStyle via `is_non_graph_statement`, and click/link/callback as real
+        // `FlowAst::ClickDirective` items. Applying the whole shared predicate on this path
+        // swallowed those before they were parsed and broke eight click tests; a guard belongs only
+        // where the path would otherwise intern a phantom.
+        if trimmed
+            .strip_prefix("title")
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+        {
+            continue;
+        }
         if let Some(rest) = flowchart_accessibility_directive(trimmed) {
             // `accDescr {` opens a block whose body must be swallowed too; `accDescr: text` and
             // `accTitle: text` are complete on their own line.
@@ -1923,6 +1937,43 @@ fn parse_flowchart_statement_asts(
 
     let _ = source_line;
     None
+}
+
+/// True when a statement is a non-node DIRECTIVE rather than a node declaration (bd-ij0f).
+///
+/// Three partial guards existed — `is_class_non_node_statement` (class), `is_non_graph_statement`
+/// (style/classDef/linkStyle) and `flowchart_accessibility_directive` (bd-0di8) — and no path
+/// covered everything, so each unguarded combination interned the directive text as a phantom node:
+/// `title My State` became a node `title_My_State`, `click A "…"` became `click_A`, and so on. The
+/// phantom also carried the raw syntax as its accessible name, so assistive technology announced it.
+///
+/// Keys on the DIRECTIVE FORM — the keyword followed by whitespace, or by `:` for the accessibility
+/// pair — never on the bare identifier. That is what keeps a node legitimately named `title[Box]`
+/// or `click(Round)` a node.
+fn is_non_node_directive_statement(statement: &str) -> bool {
+    let statement = trim_fast(statement);
+    let followed_by_space = |name: &str| {
+        statement
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+    };
+    // `accTitle`/`accDescr` accept `:` immediately, and `accDescr` may open a `{` block.
+    let accessibility = |name: &str| {
+        statement.strip_prefix(name).is_some_and(|rest| {
+            rest.starts_with(':') || rest.starts_with(char::is_whitespace) || rest.is_empty()
+        })
+    };
+
+    accessibility("accTitle")
+        || accessibility("accDescr")
+        || followed_by_space("title")
+        || followed_by_space("style")
+        || followed_by_space("classDef")
+        || followed_by_space("linkStyle")
+        || followed_by_space("cssClass")
+        || followed_by_space("click")
+        || followed_by_space("link")
+        || followed_by_space("callback")
 }
 
 /// Recognise a flowchart accessibility directive, returning what follows the keyword (bd-0di8).
@@ -3866,6 +3917,13 @@ fn parse_state(input: &str, builder: &mut IrBuilder) {
 }
 
 fn parse_state_statements(line: &str, config: &ParserConfig) -> Option<Vec<StateStatement>> {
+    // Directives are extracted from the original input elsewhere; here they must simply not become
+    // states. Returning an empty statement list rather than `None` also suppresses the
+    // "unsupported state syntax" warning, which would otherwise fire on valid mermaid (bd-ij0f).
+    if is_non_node_directive_statement(line) {
+        return Some(Vec::new());
+    }
+
     if line.starts_with("direction ") {
         return parse_graph_direction(line)
             .map(|direction| vec![StateStatement::Direction(direction)]);
@@ -4701,6 +4759,11 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
         }
 
         if trimmed == "erDiagram" {
+            continue;
+        }
+
+        // bd-ij0f: `accTitle: T` and `style A fill:#bbf` were interned as entities.
+        if is_non_node_directive_statement(trimmed) {
             continue;
         }
 
@@ -14719,6 +14782,94 @@ Rel_Back(db, app, "Responds")"#,
             meta.attributes[3].visibility,
             fm_core::ClassVisibility::Package
         );
+    }
+
+    /// bd-ij0f: a non-node directive is not a node, in EVERY diagram path.
+    ///
+    /// Three partial guards existed and none covered everything, so each unguarded combination
+    /// interned the directive text as a phantom: `title My State` became `title_My_State`,
+    /// `click A "…"` became `click_A`, `style A fill:#bbf` became `style_A_fill`.
+    #[test]
+    fn non_node_directives_are_not_interned_as_nodes() {
+        let ids = |src: &str| -> Vec<String> {
+            parse_mermaid(src)
+                .ir
+                .nodes
+                .iter()
+                .map(|n| n.id.clone())
+                .collect()
+        };
+
+        // Each row was measured as a phantom before this fix.
+        assert_eq!(
+            ids("stateDiagram-v2\n  accTitle: T\n  A --> B\n"),
+            vec!["A", "B"]
+        );
+        assert_eq!(
+            ids("erDiagram\n  accTitle: T\n  A ||--o{ B : x\n"),
+            vec!["A", "B"]
+        );
+        assert_eq!(
+            ids("stateDiagram-v2\n  title My State\n  A --> B\n"),
+            vec!["A", "B"]
+        );
+        assert_eq!(
+            ids("flowchart LR\n  title My Flow\n  A --> B\n"),
+            vec!["A", "B"]
+        );
+        assert_eq!(
+            ids("stateDiagram-v2\n  classDef big fill:#f9f\n  A --> B\n"),
+            vec!["A", "B"]
+        );
+        assert_eq!(
+            ids("stateDiagram-v2\n  A --> B\n  click A \"https://x.com\"\n"),
+            vec!["A", "B"]
+        );
+        assert_eq!(
+            ids("erDiagram\n  A ||--o{ B : x\n  style A fill:#bbf\n"),
+            vec!["A", "B"]
+        );
+
+        // CONTROL: the class path already handled this and must stay correct.
+        assert_eq!(
+            ids("classDiagram\n  accTitle: T\n  A <|-- B\n"),
+            vec!["A", "B"]
+        );
+    }
+
+    /// NEGATIVE CASES from bd-ij0f: the guard must not swallow real nodes or real meaning.
+    #[test]
+    fn non_node_directive_guard_is_narrow() {
+        // 1. The directives must STILL take effect. Removing the phantom must not remove meaning.
+        let titled = parse_mermaid("stateDiagram-v2\n  accTitle: T\n  A --> B\n");
+        assert_eq!(titled.ir.meta.acc_title.as_deref(), Some("T"));
+
+        // 2. Nodes legitimately NAMED after a keyword must survive — the guard keys on the
+        //    directive form (keyword then whitespace or `:`), never on the bare identifier.
+        let shaped = |src: &str| -> Vec<String> {
+            parse_mermaid(src)
+                .ir
+                .nodes
+                .iter()
+                .map(|n| n.id.clone())
+                .collect()
+        };
+        assert_eq!(
+            shaped("flowchart LR\n  title[Box] --> B\n"),
+            vec!["title", "B"]
+        );
+        assert_eq!(
+            shaped("flowchart LR\n  click(Round) --> B\n"),
+            vec!["click", "B"]
+        );
+        assert_eq!(
+            shaped("flowchart LR\n  style{Diamond} --> B\n"),
+            vec!["style", "B"]
+        );
+
+        // 3. CONTROL: diagrams with no directives are unchanged.
+        assert_eq!(shaped("flowchart LR\n  A --> B\n"), vec!["A", "B"]);
+        assert_eq!(shaped("stateDiagram-v2\n  A --> B\n"), vec!["A", "B"]);
     }
 
     /// bd-0di8: a flowchart accessibility directive is not a node.
