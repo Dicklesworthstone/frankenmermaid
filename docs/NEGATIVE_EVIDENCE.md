@@ -3733,6 +3733,25 @@
   `smartedgar`, a `python3` at 4269%), which is real — but part of the blocking was self-inflicted
   at the project level and is ours to fix. **Measurement needs the same one-at-a-time discipline as
   the build slot, announced and released in Agent Mail.**
+- **FIFTH ATTEMPT, AND THE DECISIVE ONE: the gate is unachievable on this host, not merely
+  unlucky.** Ran with every input verified — ELF `04a09fa85b607f2915f055fb3db176b69e9d7f7abc8221ee5920dfbcffa3ca2e`
+  pinned as `headtohead.scarletmeadow.04a09fa8`, revision `e9d321c4fd47d82cafdb6a23905c6937675520e8`
+  embedded, tree clean, equivalence **PASS** 1/1 (`equivalence-e9d321c4-1786905135059.json`), and
+  **no peer measurement running** (the in-project mutual block of the previous attempt was cleared).
+  Launched deliberately into a FALLING load: 48 -> 33 -> 25 over the preceding fifteen minutes,
+  46 of 64 CPUs busy at launch. Result: `HOST-WIDE EXCLUSIVITY BLOCKED`, **900/900**.
+- **THE QUANTIFIED FINDING.** Across 900 one-second samples spanning 15 minutes, at a load average
+  of ~25 on 64 cores — a **39% average** — there was **not one sample** in which all 64 CPUs sat
+  below 20%. The gate does not want a quiet average; it wants 64 simultaneous idle cores, and on a
+  host shared with `frankensearch_q`, `fp-bench`, `smartedgar` and assorted `python3` workers that
+  conjunction never occurs. Five attempts now: 493, 542, 900, 900, 900.
+- **This reclassifies the blocker.** It is not "wait for a quiet moment" — waiting has been tried
+  five times across a 10x range of load averages, including a deliberately chosen falling window.
+  Every frankenmermaid-side input is green and reproducible, so the remaining problem is
+  **fleet-level scheduling**: this measurement needs a host, or a window, that is arranged rather
+  than waited for. A per-CPU gate on a shared 64-core box is a conjunction of 64 independent
+  quiet conditions, and its probability does not improve with patience.
+
 - **FIX ADOPTED for the shared-path hazard: pin a sha-stamped copy and measure THAT.** Build
   normally, take the executable from `cargo --message-format=json`, verify the embedded revision,
   then `cp` it to `<exe>.<agent>.<sha8>` and pass the copy to `--fm-bin`. A peer rebuilding the
