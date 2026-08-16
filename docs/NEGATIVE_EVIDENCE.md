@@ -20447,3 +20447,40 @@ not.
 `erDiagram` ground-truth branch also discards the relationship operator (`[^\s]+`), recorded earlier
 in this file, and bd-m0a9 has ER's operator table contradicting itself twice. ER is the weakest
 verification surface in the corpus on both the ground-truth and rendered-geometry sides.
+
+### ROOT CAUSE: the ER undecidability blocking `docs_site_50` is an id-prefix asymmetry in the oracle (2026-08-16)
+
+Second attempt at the worst valid render ratio. Same refusal as the row above (47/50 equivalent, 0
+divergent, 3 unverified, `er=1/4`), so **still no ratio and none claimed** — but the cause is now
+identified from dumped SVGs rather than left as "undecidable".
+
+- **ER is NOT undecidable in general.** `er_40` through the same oracle, same binary, same host:
+  **PASS, 1/1 equivalent, 0 unverified, `tier2_decided=1`**. So the failure is specific to the ER
+  diagrams `docsSite` generates, not to the ER family.
+- **The asymmetry, read straight out of the mermaid dump** (`docs_site_50.rev00000.mermaid.svg`):
+
+  ```
+  node id : docssite50_r0_j0_0-entity-E0-0
+  edge id : docssite50_r0_j0_0-id_entity-E0-0_entity-E1-1_0
+  ```
+
+  `declaredEdgePair` (`svg_equivalence.mjs:544`) takes the edge's `data-id`, strips
+  `^(?:L|id)_(.+)_\d+$` to a body, and accepts a split only when **both halves name a rendered
+  node**. Here the body is `entity-E0-0_entity-E1-1` — node references WITHOUT the diagram-id
+  prefix — while the collected node ids carry it. No split matches, every ER edge resolves to
+  `candidates=0`, and tier2 reports `topology undecidable`.
+- **Why `er_40` escapes it** is the part still to confirm: a single-diagram item prefixes
+  differently, so its declared body and node ids agree. That difference is the thing to pin when
+  fixing this, because it is what makes the bug invisible to the ER fixture that exists.
+
+**I DID NOT PATCH THE ORACLE.** Changing the equivalence gate so that my own blocked measurement
+starts passing is the highest-risk edit in this repo, and the standing rule is that a fail→pass flip
+on unchanged dumps means the ORACLE changed and must be diffed before adoption — resolution versus
+relaxation. Teaching `declaredEdgePair` to reconcile the prefix is plausibly a *resolution*, but it
+is a change to the instrument that would certify my own number, so it wants an owner and a review
+rather than a quiet fix inside a measurement turn. Filed as a bead.
+
+**Still no A/A null and no ratio**, for the same reason as the previous attempt: the run aborts at
+the equivalence pre-flight, before either arm's null or any timing is computed. ELF
+`24c33bcdb606947a1eec17b9fed410a122bb3491a4201015e8b29a7b191fb604`, rev `788afbb4`, host
+`thinkstation1`, `mermaid@11.15.0` under `Chrome/151.0.7922.108`.
