@@ -5723,26 +5723,35 @@ fn render_gantt_svg(
     }
 
     // Section background bands (alternating fills).
+    //
+    // This loop read `layout.clusters`, which is EMPTY on the gantt path — `build_cluster_boxes`
+    // builds from `ir.clusters` and a gantt has none — so it ran zero times and no section band or
+    // section label ever reached the output (bd-trsd). The gantt layout arm puts its sections in
+    // `extensions.bands`, one `LayoutBandKind::Section` per section with the section name as the
+    // band label, which is the data this loop was always describing. Sourcing the name from
+    // `band.label` rather than `gantt_meta.sections[idx]` also fixes a latent mispairing: the bands
+    // are collected from a map keyed by section NAME, so their order is not the declaration order
+    // the old index lookup assumed.
     let section_fills = ["#f0f4ff", "#fff8f0", "#f0fff4", "#fff0f8"];
-    for (cluster_idx, cluster) in layout.clusters.iter().enumerate() {
-        let fill = section_fills[cluster_idx % section_fills.len()];
+    for (band_idx, band) in layout.extensions.bands.iter().enumerate() {
+        let fill = section_fills[band_idx % section_fills.len()];
         doc = doc.child(
             Element::rect()
-                .x(cluster.bounds.x + offset_x)
-                .y(cluster.bounds.y + offset_y)
-                .width(cluster.bounds.width)
-                .height(cluster.bounds.height)
+                .x(band.bounds.x + offset_x)
+                .y(band.bounds.y + offset_y)
+                .width(band.bounds.width)
+                .height(band.bounds.height)
                 .fill(fill)
                 .attr("fill-opacity", "0.5")
                 .rx(4.0)
                 .class("fm-gantt-section-bg"),
         );
-        if let Some(section) = gantt_meta.sections.get(cluster_idx) {
+        if !band.label.is_empty() {
             doc = doc.child(
                 Element::text()
-                    .x(cluster.bounds.x + offset_x + 6.0)
-                    .y(cluster.bounds.y + offset_y + config.font_size * 0.9)
-                    .content(&section.name)
+                    .x(band.bounds.x + offset_x + 6.0)
+                    .y(band.bounds.y + offset_y + config.font_size * 0.9)
+                    .content(&band.label)
                     .attr("text-anchor", "start")
                     .attr("font-weight", "600")
                     .attr_num("font-size", config.font_size * 0.85)
@@ -5751,6 +5760,36 @@ fn render_gantt_svg(
                     .class("fm-gantt-section-label"),
             );
         }
+    }
+
+    // The time axis. A gantt chart with no dates is not a gantt chart: before bd-trsd the complete
+    // text content of the shipped `gantt_basic.svg` was "Roadmap | Design | Build" — two bars whose
+    // lengths encode durations no reader could name, with nothing to measure them against.
+    //
+    // The generic axis-tick loop that draws xychart's axis sits BELOW the gantt early return in
+    // `render_svg_with_config`, so the one diagram type whose layout populates `axis_ticks` was the
+    // one type that could never reach it. Drawing them here with the SAME writer keeps a single
+    // source of tick markup, and taking label and x straight from `extensions.axis_ticks` keeps a
+    // single source of tick GEOMETRY — re-deriving day positions here is how an axis and its bars
+    // come to disagree about where a day is.
+    //
+    // `tick_y` is the top of the layout bounds, which for gantt sits a fixed ~52px above the topmost
+    // bar (normalization pins the first bar's top at y=20 and `compute_bounds` pads above it), so
+    // the tick line — drawn from `tick_y + 4` to `tick_y + 16` — clears the bars with room to spare
+    // and stays inside the canvas rather than being clipped at the viewBox edge.
+    if !layout.extensions.axis_ticks.is_empty() {
+        let mut ticks_svg = String::new();
+        let tick_y = layout.bounds.y + offset_y + 12.0;
+        for tick in &layout.extensions.axis_ticks {
+            write_layout_axis_tick_into(
+                &mut ticks_svg,
+                tick.label.as_str(),
+                tick.position + offset_x,
+                tick_y,
+                config,
+            );
+        }
+        doc = doc.child(Element::raw_svg(ticks_svg));
     }
 
     // Task bars with type-based coloring.
@@ -17159,6 +17198,153 @@ marker#arrow-open path {
                 vx + vw
             );
         }
+    }
+
+    /// A gantt chart with no dates is not a gantt chart (bd-trsd).
+    ///
+    /// The complete `<text>` content of the shipped `gantt_basic.svg` was "Roadmap | Design |
+    /// Build": no date anywhere, and the declared section name absent too. Not missing computation
+    /// — the gantt layout arm fills `extensions.axis_ticks` (one per day) and `extensions.bands`
+    /// (one per section) and the renderer threw both away, because the generic loops that draw them
+    /// sit BELOW the gantt early return and the gantt arm's own band loop read `layout.clusters`,
+    /// which is empty on this path.
+    ///
+    /// The assertions are the ones a naive implementation fails. Emitting a tick row is easy;
+    /// emitting one that INDEXES ITS OWN BARS is what this diagram type exists for, so the axis is
+    /// checked positionally against the bar geometry, and vertically against the topmost bar so the
+    /// row cannot be drawn across the chart it annotates.
+    #[test]
+    fn gantt_draws_a_time_axis_and_named_section_bands() {
+        let src = "gantt\n  title Roadmap\n  dateFormat YYYY-MM-DD\n  section Core\n  \
+                   Design :a1, 2026-01-01, 3d\n  Build :a2, after a1, 4d";
+        let parsed = fm_parser::parse(src);
+        let layout = fm_layout::layout_diagram_gantt(&parsed.ir);
+        let config = SvgRenderConfig::default();
+        let svg = render_svg_with_config(&parsed.ir, &config);
+
+        let attr = |elem: &str, name: &str| -> f32 {
+            let key = format!(" {name}=\"");
+            let rest = elem
+                .split(&key)
+                .nth(1)
+                .unwrap_or_else(|| panic!("no {name} in {elem}"));
+            rest.split('"').next().unwrap().parse().unwrap()
+        };
+        let elems = |tag: &str, class: &str| -> Vec<String> {
+            svg.match_indices(&format!("<{tag} "))
+                .map(|(at, _)| {
+                    let end = svg[at..].find('>').unwrap();
+                    svg[at..=at + end].to_string()
+                })
+                .filter(|e| e.contains(class))
+                .collect()
+        };
+
+        // The section is drawn AND named. A band with no label still fails a reader looking for
+        // "Core"; the shipped golden had neither.
+        assert_eq!(
+            elems("rect", "fm-gantt-section-bg").len(),
+            1,
+            "one declared section must draw exactly one band"
+        );
+        assert_eq!(
+            svg.matches(">Core<").count(),
+            1,
+            "the declared section name must appear exactly once in the output"
+        );
+
+        // One tick per day over the inclusive 2026-01-01..2026-01-07 span — not an empty axis and
+        // not a tick per pixel.
+        let tick_labels: Vec<&str> = svg
+            .match_indices("class=\"fm-axis-tick-label\">")
+            .map(|(at, m)| {
+                let from = at + m.len();
+                &svg[from..from + svg[from..].find('<').unwrap()]
+            })
+            .collect();
+        assert_eq!(
+            tick_labels.len(),
+            7,
+            "expected 7 daily ticks over a 6-day span, got {tick_labels:?}"
+        );
+        assert!(
+            tick_labels.contains(&"2026-01-01") && tick_labels.contains(&"2026-01-04"),
+            "both task start dates must be labelled on the axis: {tick_labels:?}"
+        );
+
+        // POSITIONAL consistency: the tick labelled with a task's start date sits on that bar's
+        // left edge. A tick row that merely exists can still be offset from the bars it indexes,
+        // which is the failure this whole family is about — and it WAS offset, by the normalization
+        // translation the raw day-space tick positions never received.
+        let bars = elems("rect", "fm-gantt-task");
+        assert_eq!(bars.len(), 2, "two tasks must draw two bars");
+        let tick_x_for = |label: &str| -> f32 {
+            let marker = format!("class=\"fm-axis-tick-label\">{label}<");
+            let at = svg
+                .find(&marker)
+                .unwrap_or_else(|| panic!("no tick labelled {label}"));
+            let text_start = svg[..at].rfind("<text ").unwrap();
+            // The label is drawn 3px right of its tick line, per `write_layout_axis_tick_into`.
+            attr(&svg[text_start..at], "x") - 3.0
+        };
+        for (bar_index, start_label) in [(0usize, "2026-01-01"), (1usize, "2026-01-04")] {
+            let bar_left = attr(&bars[bar_index], "x");
+            let tick_x = tick_x_for(start_label);
+            assert!(
+                (tick_x - bar_left).abs() <= 1.0,
+                "tick {start_label} at x={tick_x} does not sit on the left edge x={bar_left} of \
+                 the bar that starts that day"
+            );
+        }
+
+        // The axis annotates the chart; it must not be drawn across it. Read the tick lines out of
+        // the tick groups themselves rather than every `<line>` in the document, so an unrelated
+        // line elsewhere can neither satisfy nor break this.
+        let lowest_tick = svg
+            .match_indices("<g class=\"fm-axis-tick\">")
+            .map(|(at, m)| {
+                let rest = &svg[at + m.len()..];
+                let line = &rest[..rest.find('>').unwrap() + 1];
+                attr(line, "y2")
+            })
+            .fold(f32::MIN, f32::max);
+        let topmost_bar = bars.iter().map(|e| attr(e, "y")).fold(f32::MAX, f32::min);
+        assert!(
+            lowest_tick < topmost_bar,
+            "tick marks reach y={lowest_tick} but the first bar starts at y={topmost_bar}"
+        );
+
+        // The bars are untouched by this change: their x still comes straight from the layout box,
+        // so the annotation cannot have moved the chart it annotates.
+        let offset_x = config.padding - layout.bounds.x;
+        for (bar_index, node) in layout.nodes.iter().enumerate() {
+            assert!(
+                (attr(&bars[bar_index], "x") - (node.bounds.x + offset_x)).abs() <= 0.01,
+                "bar {bar_index} x drifted from its layout box"
+            );
+        }
+    }
+
+    /// Control for the bd-trsd fix. A timeline is the diagram type that reaches BOTH generic loops
+    /// the gantt early return skipped — `extensions.bands` and `extensions.axis_ticks` — so it is
+    /// the one that would break if the fix had been made by moving or relaxing the shared code
+    /// instead of by giving the gantt arm its own draw calls. Without this, "gantt now has an axis"
+    /// is compatible with having broken the axis everywhere else.
+    #[test]
+    fn timeline_bands_and_axis_are_unaffected_by_the_gantt_axis_fix() {
+        let parsed = fm_parser::parse(
+            "timeline\n  title History\n  section Era\n  2021 : Started\n  2022 : Shipped",
+        );
+        let svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+        assert!(
+            svg.contains("fm-axis-tick"),
+            "timeline must still draw its axis through the generic loop"
+        );
+        assert_eq!(
+            svg.matches("class=\"fm-axis-tick-label\">").count(),
+            2,
+            "timeline must still emit one tick per period"
+        );
     }
 
     /// Every `url(#id)` a gantt render emits must resolve to an id the same document declares.

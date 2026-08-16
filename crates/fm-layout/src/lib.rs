@@ -6778,6 +6778,14 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         }
     }
 
+    // The left edge of the first bar in RAW day-space, captured before `centers` is consumed.
+    // `finalize_specialized_layout` normalizes every centre by one uniform translation, so raw
+    // day-space (day 0 at x = 0) is not the space the placed bars end up in.
+    let raw_first_left_edge = centers
+        .first()
+        .zip(node_sizes.first())
+        .map(|(&(center_x, _), &(width, _))| center_x - width / 2.0);
+
     let mut traced = finalize_specialized_layout(
         ir,
         &node_sizes,
@@ -6790,10 +6798,24 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
 
     // Freshly built by `finalize_specialized_layout` (refcount 1) ⇒ clone-free `make_mut`.
     let layout = Arc::make_mut(&mut traced.layout);
+    // Ticks used to be emitted at `day_offset * base_col_width`, i.e. in raw day-space, while the
+    // bars they index were shifted right by normalization (>= 20px, more when the earliest task is a
+    // milestone, whose marker extends half a width left of its day). Nothing caught it because no
+    // renderer drew the axis (bd-trsd): the misalignment only becomes visible the moment it does.
+    // An axis offset from its own bars is worse than no axis — it reads as authoritative and lies
+    // about which day a bar starts on, which is the whole failure family bd-h9gx opened.
+    //
+    // The shift is RECOVERED from a placed node rather than by re-deriving the normalization
+    // formula, so there is one source of truth: if normalization changes, the ticks follow it
+    // instead of silently drifting apart again.
+    let day_zero_x = match (layout.nodes.first(), raw_first_left_edge) {
+        (Some(first_node), Some(raw_left)) => first_node.bounds.x - raw_left,
+        _ => 0.0,
+    };
     layout.extensions.axis_ticks = (0..=total_span_days)
         .map(|day_offset| LayoutAxisTick {
             label: format_gantt_axis_tick(min_start_day.saturating_add(day_offset as i32)),
-            position: day_offset as f32 * base_col_width,
+            position: (day_offset as f32).mul_add(base_col_width, day_zero_x),
         })
         .collect();
     layout.extensions.bands = section_to_nodes
@@ -19239,6 +19261,91 @@ mod tests {
         assert!(launch.y > kickoff.y);
         assert!(retro.y > period_2025.y);
         assert_eq!(layout.extensions.axis_ticks.len(), 2);
+    }
+
+    /// A tick that merely EXISTS is not an axis. If the tick labelled with a task's start date does
+    /// not sit on that task's left edge, the axis indexes days the bars do not start on — which is
+    /// strictly worse than the no-axis state bd-trsd found, because a wrong axis is still read as
+    /// authoritative. Ticks were emitted in raw day-space while the bars were normalized, so every
+    /// tick was >= 20px left of the day it named.
+    #[test]
+    fn gantt_axis_ticks_land_on_the_bars_they_index() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Gantt);
+        for label in ["Design", "Build"] {
+            ir.labels.push(IrLabel {
+                text: label.to_string(),
+                ..IrLabel::default()
+            });
+        }
+        for (node_id, label) in [("a1", IrLabelId(0)), ("a2", IrLabelId(1))] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                label: Some(label),
+                ..IrNode::default()
+            });
+        }
+        ir.gantt_meta = Some(IrGanttMeta {
+            sections: vec![IrGanttSection {
+                name: "Core".to_string(),
+            }],
+            tasks: vec![
+                IrGanttTask {
+                    node: IrNodeId(0),
+                    section_idx: 0,
+                    task_id: Some("a1".to_string()),
+                    start: Some(GanttDate::Absolute("2026-01-01".to_string())),
+                    end: Some(GanttDate::DurationDays(3)),
+                    ..Default::default()
+                },
+                IrGanttTask {
+                    node: IrNodeId(1),
+                    section_idx: 0,
+                    task_id: Some("a2".to_string()),
+                    start: Some(GanttDate::Absolute("2026-01-04".to_string())),
+                    end: Some(GanttDate::DurationDays(4)),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+
+        let layout = layout_diagram_gantt(&ir);
+        let ticks = &layout.extensions.axis_ticks;
+
+        // One tick per day of the span, inclusive of both ends: 2026-01-01 through 2026-01-07 is a
+        // 6-day span, so 7 ticks. Neither an empty axis nor a tick per pixel.
+        assert_eq!(
+            ticks.len(),
+            7,
+            "expected one tick per day over the inclusive span, got {:?}",
+            ticks.iter().map(|t| t.label.as_str()).collect::<Vec<_>>()
+        );
+
+        for (task_index, start_label) in [(0usize, "2026-01-01"), (1usize, "2026-01-04")] {
+            let tick = ticks
+                .iter()
+                .find(|tick| tick.label == start_label)
+                .unwrap_or_else(|| panic!("no tick labelled {start_label}"));
+            let bar_left = layout.nodes[task_index].bounds.x;
+            assert!(
+                (tick.position - bar_left).abs() <= 1.0,
+                "tick {start_label} sits at {} but the bar starting that day has its left edge at \
+                 {bar_left}: the axis does not index its own bars",
+                tick.position
+            );
+        }
+
+        // Control on the OTHER axis of the same claim: consecutive ticks are exactly one column
+        // apart, so the fix is a translation of the whole tick row and not a per-tick refit that
+        // happens to land on the two bars probed above.
+        for pair in ticks.windows(2) {
+            assert!(
+                (pair[1].position - pair[0].position - 48.0).abs() <= 0.01,
+                "consecutive ticks must be one 48px column apart, got {} -> {}",
+                pair[0].position,
+                pair[1].position
+            );
+        }
     }
 
     #[test]
