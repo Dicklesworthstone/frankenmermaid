@@ -4520,8 +4520,8 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // bd-7oyz: accessibility directives are not mindmap nodes.
-        if is_accessibility_directive_statement(trimmed) {
+        // bd-7oyz / bd-t2fp: accessibility and style directives are not mindmap nodes.
+        if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
             continue;
         }
 
@@ -5272,9 +5272,11 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // bd-7oyz: accessibility directives are not journey items. Accessibility-only on purpose —
-        // see `is_accessibility_directive_statement` for why a broader guard regresses these paths.
-        if is_accessibility_directive_statement(trimmed) {
+        // bd-7oyz / bd-t2fp: accessibility and style directives are not journey items.
+        // `is_non_graph_statement` is the NARROW style predicate (style/classDef/linkStyle only);
+        // the broader `is_non_node_directive_statement` also matches `title`, which other paths
+        // promote into diagram meta.
+        if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
             continue;
         }
 
@@ -5666,10 +5668,13 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
 
         // bd-7oyz: accessibility directives are not timeline entries.
         //
-        // ⚠️ ACCESSIBILITY ONLY. The broader predicate also matches `title …`, which THIS path
-        // promotes into diagram meta — swallowing it broke
-        // `timeline_inline_title_is_promoted_to_diagram_meta`.
-        if is_accessibility_directive_statement(trimmed) {
+        // ⚠️ NEVER the broad predicate here: it also matches `title …`, which THIS path promotes
+        // into diagram meta — swallowing it broke
+        // `timeline_inline_title_is_promoted_to_diagram_meta` (bd-7oyz).
+        //
+        // `is_non_graph_statement` is safe to add because it matches style/classDef/linkStyle ONLY
+        // (bd-t2fp): `style A fill:#f9f` was interning both `style_A_fill` and a stray `f9f`.
+        if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
             continue;
         }
 
@@ -6078,6 +6083,16 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         }
 
         if trimmed == "gantt" {
+            continue;
+        }
+
+        // bd-t2fp: `style T1 fill:#f9f` was interned as a TASK (`style_T1_fill`), so a style line
+        // added a phantom bar to the chart. Accessibility is already handled above this loop.
+        //
+        // ⚠️ gantt was recorded as a clean CONTROL on the bead from an SVG-attribute probe. That
+        // probe was blind here — gantt task rects carry no `data-id`, so it reported no phantom for
+        // a path that had one. The IR-level test is what found it; the bead is corrected.
+        if is_non_graph_statement(trimmed) {
             continue;
         }
 
@@ -7397,8 +7412,9 @@ fn parse_block_beta_document_items(
             continue;
         }
 
-        // bd-7oyz: `accTitle: T` interned BOTH `accTitle` and the title text `T` as blocks.
-        if is_accessibility_directive_statement(trimmed) {
+        // bd-7oyz / bd-t2fp: `accTitle: T` interned BOTH `accTitle` and the title text `T` as
+        // blocks; `style A fill:#f9f` was split on whitespace into TWO blocks, `style` and `fill`.
+        if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
             continue;
         }
 
@@ -14822,6 +14838,59 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(
             meta.attributes[3].visibility,
             fm_core::ClassVisibility::Package
+        );
+    }
+
+    /// bd-t2fp: style and classDef directives are not nodes either, in the same four paths.
+    ///
+    /// bd-7oyz guarded these paths against ACCESSIBILITY directives and explicitly recorded that
+    /// style/classDef was not measured. Measured afterwards, they leaked too — and worse:
+    /// block-beta split `style A fill:#f9f` on whitespace into TWO blocks (`style`, `fill`), which
+    /// adds two boxes to the grid and shifts the layout of everything after it, and timeline
+    /// produced both `style_A_fill` and a stray `f9f` from the colour literal.
+    #[test]
+    fn style_directives_are_not_interned_as_nodes() {
+        let ids = |src: &str| -> Vec<String> {
+            parse_mermaid(src)
+                .ir
+                .nodes
+                .iter()
+                .map(|n| n.id.clone())
+                .collect()
+        };
+        let no_style_phantom = |src: &str| {
+            let got = ids(src);
+            assert!(
+                !got.iter().any(|id| id.starts_with("style")
+                    || id.starts_with("classDef")
+                    || id == "fill"
+                    || id == "f9f"),
+                "directive leaked into the node table: {got:?} for {src}"
+            );
+        };
+
+        no_style_phantom("journey\n  section S\n    Task: 5: Me\n  style Task fill:#f9f\n");
+        no_style_phantom("journey\n  classDef big fill:#f9f\n  section S\n    Task: 5: Me\n");
+        no_style_phantom("mindmap\n  root((r))\n    child\n  style root fill:#f9f\n");
+        no_style_phantom("mindmap\n  classDef big fill:#f9f\n  root((r))\n    child\n");
+        no_style_phantom("block-beta\n  columns 1\n  A\n  style A fill:#f9f\n");
+        no_style_phantom("timeline\n  2021 : A\n  style A fill:#f9f\n");
+
+        // CONTROLS: paths already correct for the same line must stay correct.
+        no_style_phantom("sequenceDiagram\n  A->>B: x\n  style A fill:#f9f\n");
+        no_style_phantom("gantt\n  section S\n  T1 :a1, 2024-01-01, 3d\n  style T1 fill:#f9f\n");
+    }
+
+    /// ⚠️ The style guard must NOT swallow timeline's `title`, which that path promotes into
+    /// diagram meta. bd-7oyz broke exactly this by reaching for the broad directive predicate, so
+    /// bd-t2fp uses the narrow style-only one and pins the regression here.
+    #[test]
+    fn timeline_title_survives_the_style_guard() {
+        let parsed = parse_mermaid("timeline\n  title Shipping History\n  2021 : A\n");
+        assert_eq!(
+            parsed.ir.meta.title.as_deref(),
+            Some("Shipping History"),
+            "the style guard swallowed timeline's title promotion again"
         );
     }
 
