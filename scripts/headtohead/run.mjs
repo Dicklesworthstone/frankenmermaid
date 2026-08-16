@@ -863,13 +863,24 @@ function validIncumbentThreadProvenance(record) {
     record?.worker_threads === 1 &&
     record.thread_count_requested === 1 &&
     record.thread_count_actually_used === 1 &&
-    record.thread_probe?.method === 'single_cdp_page_main_execution_context' &&
     record.thread_probe?.caller_workers_observed === 1 &&
-    record.execution_model === 'single_page_main_thread' &&
-    typeof record.chromium_binary === 'string' &&
-    record.chromium_binary.startsWith('/') &&
-    typeof record.chromium_version === 'string' &&
-    record.chromium_version.length > 0
+    // Two transports, each with its own provenance. The browserless one (bd-9jm6) runs
+    // mermaid.parse() in a node:vm context and genuinely has no browser, so it must NOT be asked
+    // for a chromium binary -- but it must still name the host that DID execute it. Neither branch
+    // is allowed to pass with the other's evidence.
+    (record.thread_probe?.method === 'single_cdp_page_main_execution_context'
+      ? record.execution_model === 'single_page_main_thread' &&
+        typeof record.chromium_binary === 'string' &&
+        record.chromium_binary.startsWith('/') &&
+        typeof record.chromium_version === 'string' &&
+        record.chromium_version.length > 0
+      : record.thread_probe?.method === 'single_node_vm_main_context' &&
+        record.execution_model === 'single_vm_main_context' &&
+        record.transport === 'node:vm' &&
+        record.chromium_binary === null &&
+        record.chromium_version === null &&
+        typeof record.node_version === 'string' &&
+        record.node_version.startsWith('v'))
   );
 }
 
@@ -1613,9 +1624,46 @@ if (has('self-test')) {
       caller_workers_observed: 1,
     },
   };
+  // The browserless transport (bd-9jm6) has its own provenance: no chromium, but it must still
+  // name the node that executed it. The cases below exist so neither branch can be satisfied by
+  // the OTHER branch's evidence -- a vm record must not pass by omitting chromium, and a record
+  // claiming a CDP page must not pass without one.
+  const validVmIncumbentThreads = {
+    worker_threads: 1,
+    thread_count_requested: 1,
+    thread_count_actually_used: 1,
+    execution_model: 'single_vm_main_context',
+    transport: 'node:vm',
+    chromium_binary: null,
+    chromium_version: null,
+    node_version: 'v24.14.0',
+    thread_probe: {
+      method: 'single_node_vm_main_context',
+      caller_workers_observed: 1,
+    },
+  };
   if (
     !validIncumbentThreadProvenance(validIncumbentThreads) ||
-    validIncumbentThreadProvenance({ ...validIncumbentThreads, thread_count_actually_used: null })
+    validIncumbentThreadProvenance({ ...validIncumbentThreads, thread_count_actually_used: null }) ||
+    // chromium branch must not pass with its binary stripped
+    validIncumbentThreadProvenance({ ...validIncumbentThreads, chromium_binary: null }) ||
+    !validIncumbentThreadProvenance(validVmIncumbentThreads) ||
+    // vm branch must name its node
+    validIncumbentThreadProvenance({ ...validVmIncumbentThreads, node_version: null }) ||
+    // vm branch must not smuggle in a chromium binary it never used
+    validIncumbentThreadProvenance({
+      ...validVmIncumbentThreads,
+      chromium_binary: '/usr/bin/google-chrome',
+    }) ||
+    // a CDP method with vm evidence, and a vm method with CDP evidence, are both rejected
+    validIncumbentThreadProvenance({
+      ...validVmIncumbentThreads,
+      thread_probe: { method: 'single_cdp_page_main_execution_context', caller_workers_observed: 1 },
+    }) ||
+    validIncumbentThreadProvenance({
+      ...validIncumbentThreads,
+      thread_probe: { method: 'single_node_vm_main_context', caller_workers_observed: 1 },
+    })
   ) {
     throw new Error('incumbent actual-thread provenance validation regression');
   }
@@ -2528,6 +2576,7 @@ if (!elfSelfReportBeforeValid) {
 
 const mjsArgs = [join(HERE, 'mermaid_bench.mjs')];
 mjsArgs.push('--mode', measurementMode);
+if (has('browserless')) mjsArgs.push('--browserless');
 if (only) mjsArgs.push('--only', only);
 if (repsScale !== 1) mjsArgs.push('--reps-scale', String(repsScale));
 if (budgetScale !== 1) mjsArgs.push('--js-budget-scale', String(budgetScale));

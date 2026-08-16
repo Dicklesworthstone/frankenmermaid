@@ -34,7 +34,7 @@ import {
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Script } from 'node:vm';
+import { Script, createContext, runInContext } from 'node:vm';
 import { CORPUS, REVISION_SEP, generate, sha256 } from './corpus.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -1067,6 +1067,17 @@ if (!['render', 'parse'].includes(mode)) {
   process.exit(2);
 }
 const parseOnly = mode === 'parse';
+// Browserless transport (bd-9jm6). The incumbent needs Chromium to RENDER, which has blocked every
+// vs-incumbent timing row for this project. It does not need one to PARSE: the pinned UMD bundle
+// evaluates in a bare `node:vm` context whose globalThis/self/window point at the sandbox, and
+// `mermaid.parse()` runs there with no browser, no jsdom and no package install.
+//
+// This is deliberately confined to --mode parse. Render is untouched and still requires the browser.
+const browserless = has('browserless');
+if (browserless && !parseOnly) {
+  log('--browserless applies to --mode parse only; render genuinely needs the browser');
+  process.exit(2);
+}
 const repsScale = Number(arg('reps-scale', '1'));
 const jobBatch = Number(arg('job-batch', '1'));
 if (!Number.isSafeInteger(jobBatch) || jobBatch < 1) {
@@ -1139,6 +1150,58 @@ const INIT_EXPR = `(() => {
     })()`;
 
 /**
+ * Bring mermaid up inside a bare `node:vm` context — the browserless twin of `newBrowser()`.
+ *
+ * The sandbox is given ONLY real Node platform globals. `document` is deliberately left undefined:
+ * nothing here fakes a DOM, so mermaid either parses without one or fails honestly, and any diagram
+ * type whose parse path reaches DOMPurify is reported as a DNF rather than quietly made to work.
+ *
+ * ⚠️ Stubbing DOMPurify would widen coverage from 6 diagram types to 12 and it is exactly the wrong
+ * trade. pins.json already records that mermaid's default securityLevel is "strict" (sanitisation
+ * ON) and that earlier ad-hoc comparators used "loose", which makes mermaid FASTER and therefore
+ * UNDERSTATES our speedup. Disabling sanitisation to buy coverage is that same error in a new place:
+ * it would flatter us.
+ *
+ * The bundle text, its SHA-256 check and INIT_EXPR — including the dispatch-trap guard that asserts
+ * the object answering parse() is the pinned library and not a shim — are byte-identical to the
+ * browser path. Only the host changes.
+ */
+function newSandbox() {
+  const sandbox = {};
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+  sandbox.window = sandbox;
+  sandbox.console = console;
+  sandbox.performance = performance;
+  sandbox.setTimeout = setTimeout;
+  sandbox.clearTimeout = clearTimeout;
+  sandbox.setInterval = setInterval;
+  sandbox.clearInterval = clearInterval;
+  sandbox.queueMicrotask = queueMicrotask;
+  sandbox.structuredClone = structuredClone;
+  sandbox.TextEncoder = TextEncoder;
+  sandbox.TextDecoder = TextDecoder;
+  sandbox.URL = URL;
+  sandbox.URLSearchParams = URLSearchParams;
+  sandbox.Blob = Blob;
+  const context = createContext(sandbox);
+
+  runInContext(bundleText, context, { filename: 'mermaid.min.js' });
+  const init = runInContext(INIT_EXPR, context, { filename: 'mermaid-init.js' });
+  if (init !== 'ok') throw new Error(String(init));
+  return { context, sandbox };
+}
+
+/** Evaluate `fn(args)` in the sandbox. Same contract as `evaluateInPage`, same bench body. */
+function evaluateInSandbox(fn, args, deadlineMs) {
+  const invoke = (async () => {
+    const callable = runInContext(`(${fn})`, sandboxHost.context, { filename: 'bench-body.js' });
+    return { result: { value: await callable(args) } };
+  })();
+  return withDeadline(invoke, deadlineMs);
+}
+
+/**
  * Launch a browser and bring one page up to "mermaid initialized". Factored out because timing an
  * item out wedges its page permanently (mermaid's layout is synchronous), so a DNF has to be
  * followed by a fresh browser before the next item can be measured.
@@ -1171,8 +1234,13 @@ function killBrowser(b) {
   try { b.proc.kill('SIGKILL'); } catch { /* already gone */ }
 }
 
-let browser = await newBrowser();
-log(`browser=${browser.info.Browser} binary=${browser.bin} bundle=mermaid@${version} mode=${mode}`);
+let browser = browserless ? null : await newBrowser();
+let sandboxHost = browserless ? newSandbox() : null;
+log(
+  browserless
+    ? `browser=none transport=node:vm node=${process.version} bundle=mermaid@${version} mode=${mode}`
+    : `browser=${browser.info.Browser} binary=${browser.bin} bundle=mermaid@${version} mode=${mode}`,
+);
 
 /** Evaluate `fn(args)` in the live page, under an optional wall deadline. */
 function evaluateInPage(fn, args, deadlineMs) {
@@ -1248,6 +1316,12 @@ function remainingBudgetMs(startedAt, budgetMs) {
 }
 
 async function replaceBrowser() {
+  // A wedged page needs a new process; a sandbox just needs a fresh context. Both discard every
+  // bit of engine state, which is the property the caller is actually asking for.
+  if (browserless) {
+    sandboxHost = newSandbox();
+    return;
+  }
   killBrowser(browser);
   browser = await newBrowser();
 }
@@ -1487,19 +1561,25 @@ try {
       version,
       bundle_url: url,
       bundle_sha256: bundleSha,
-      chromium_binary: browser.bin,
-      chromium_version: browser.info.Browser,
+      transport: browserless ? 'node:vm' : 'chromium-cdp',
+      chromium_binary: browserless ? null : browser.bin,
+      chromium_version: browserless ? null : browser.info.Browser,
+      node_version: browserless ? process.version : null,
       security_level: securityLevel,
       worker_threads: 1,
       thread_count_requested: 1,
       thread_count_actually_used: 1,
       thread_probe: {
-        method: 'single_cdp_page_main_execution_context',
+        // Must describe the transport that actually ran. Claiming a CDP page with no browser
+        // attached would defeat run.mjs's incumbent provenance gate rather than satisfy it.
+        method: browserless
+          ? 'single_node_vm_main_context'
+          : 'single_cdp_page_main_execution_context',
         caller_workers_observed: 1,
         portable_across_isa: true,
         inside_timed_region: false,
       },
-      execution_model: 'single_page_main_thread',
+      execution_model: browserless ? 'single_vm_main_context' : 'single_page_main_thread',
       measurement_mode: mode,
       measurement_boundary: parseOnly ? 'public_parse_validate' : 'parse_layout_render_svg',
       job_batch: parseOnly ? 1 : jobBatch,
@@ -1539,8 +1619,7 @@ try {
       }));
       // The page is wedged inside mermaid's synchronous layout; nothing short of a new process
       // gets it back.
-      killBrowser(browser);
-      browser = await newBrowser();
+      await replaceBrowser();
     };
 
     // Probe phase: one untimed render of the largest revision, so an item that cannot finish is
@@ -1618,7 +1697,8 @@ try {
             jobBatch,
           );
       } else {
-        res = await evaluateInPage(
+        const evaluate = browserless ? evaluateInSandbox : evaluateInPage;
+        res = await evaluate(
           parseOnly ? PAGE_PARSE_BENCH : PAGE_BENCH,
           args,
           budgetMs ? budgetMs - (Date.now() - t0) : null,
@@ -1751,7 +1831,7 @@ try {
     );
   }
 } finally {
-  killBrowser(browser);
+  if (!browserless) killBrowser(browser);
 }
 
 if (failed) { log('one or more comparator renders failed'); process.exit(2); }
