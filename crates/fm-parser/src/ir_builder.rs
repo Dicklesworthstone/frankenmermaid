@@ -986,6 +986,22 @@ impl IrBuilder {
             .stereotype = Some(stereotype);
     }
 
+    /// Set the stereotype of the class block currently open.
+    ///
+    /// The in-block annotation spelling names no class, so it resolves through the same
+    /// `current_class_node_id` that members already use rather than re-looking-up a name.
+    pub(crate) fn set_current_class_stereotype(&mut self, stereotype: ClassStereotype) {
+        let Some(node_id) = self.current_class_node_id else {
+            return;
+        };
+        let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
+            return;
+        };
+        node.class_meta
+            .get_or_insert_with(|| Box::new(IrClassNodeMeta::default()))
+            .stereotype = Some(stereotype);
+    }
+
     pub(crate) fn set_class_generics(&mut self, class_name: &str, generics: Vec<String>) {
         let Some(node_id) = self.node_id_index.get(class_name, &self.ir.nodes) else {
             return;

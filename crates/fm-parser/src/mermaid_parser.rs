@@ -3322,6 +3322,21 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
         // only needs to know a block is open — the previous per-member `class_name.clone()` was written
         // into `cn` and immediately dropped unused, one wasted heap alloc+copy+free per member line.
         if in_block.is_some() {
+            // A bare `<<interface>>` on its own line inside the braces is mermaid's OWN documented
+            // form, and it is the one that was falling through: the statement-level branch below
+            // only fires for `<<interface>> ClassName`, which needs a name AFTER the closing
+            // angles. With nothing after it the annotation reached `parse_class_member` and
+            // interned as an attribute literally named `<<interface>>`, drawn as a member row
+            // where mermaid draws the stereotype under the class name.
+            if let Some(stereotype) = parse_bare_class_stereotype(trimmed) {
+                lower_class_statement(
+                    ClassStatement::Stereotype(String::new(), stereotype),
+                    line_number,
+                    line,
+                    builder,
+                );
+                continue;
+            }
             if let Some(member) = parse_class_member(trimmed) {
                 lower_class_statement(ClassStatement::Member(member), line_number, line, builder);
             }
@@ -3422,6 +3437,32 @@ fn parse_class_shorthand_member(
 }
 
 /// Parse a class member declaration like `+String name`, `-int age`, `#doSomething() void`.
+/// Map an annotation body onto a stereotype. Shared so the in-block and the
+/// `<<interface>> ClassName` spellings can never drift apart on which words they recognise.
+fn class_stereotype_from_annotation(annotation: &str) -> fm_core::ClassStereotype {
+    match annotation.to_lowercase().as_str() {
+        "interface" => fm_core::ClassStereotype::Interface,
+        "abstract" => fm_core::ClassStereotype::Abstract,
+        "enum" | "enumeration" => fm_core::ClassStereotype::Enum,
+        "service" => fm_core::ClassStereotype::Service,
+        _ => fm_core::ClassStereotype::Custom(annotation.to_string()),
+    }
+}
+
+/// A line inside a class block that is ONLY an annotation, e.g. `<<interface>>`.
+///
+/// Requires the line to be exactly the annotation: anything after the closing angles is a
+/// different construct (`<<interface>> Shape` names its target and is handled at statement
+/// level), and a member that merely mentions an angle bracket must not be swallowed.
+fn parse_bare_class_stereotype(line: &str) -> Option<fm_core::ClassStereotype> {
+    let rest = line.strip_prefix("<<")?;
+    let body = rest.strip_suffix(">>")?;
+    if body.is_empty() || body.contains('<') || body.contains('>') {
+        return None;
+    }
+    Some(class_stereotype_from_annotation(body))
+}
+
 fn parse_class_member(trimmed: &str) -> Option<fm_core::IrClassMember> {
     // The sole caller (the `parse_class_statements` line loop) already `trim_fast`s the line and
     // `continue`s on an empty/comment line, so `trimmed` is a non-empty, whitespace-trimmed slice.
@@ -3447,10 +3488,37 @@ fn parse_class_member(trimmed: &str) -> Option<fm_core::IrClassMember> {
     // Check if it's a method (contains parentheses)
     let is_method = rest.contains('(');
 
-    // Check for static ($) and abstract (*) markers at end
-    let is_static = rest.ends_with('$');
-    let is_abstract = rest.ends_with('*');
-    let rest = trim_fast(rest.trim_end_matches('$').trim_end_matches('*'));
+    // Static (`$`) and abstract (`*`) classifiers appear in two documented places, and only the
+    // first was handled:
+    //
+    //   `+getName()$ String`  marker against the method's closing paren, RETURN TYPE after it
+    //   `int id$`             marker at the very end of the line
+    //
+    // The end-of-line test alone silently dropped the classifier from every method that declared a
+    // return type, which is mermaid's own spelling in its classifier examples. mermaid underlines
+    // static members and italicises abstract ones, so the marker is the whole visible difference.
+    let marker_at = if let Some(b'$' | b'*') = rest.as_bytes().last() {
+        Some(rest.len() - 1)
+    } else {
+        // A method may carry the marker directly after `)`, with the return type following.
+        memchr::memrchr(b')', rest.as_bytes())
+            .map(|paren| paren + 1)
+            .filter(|at| matches!(rest.as_bytes().get(*at), Some(b'$' | b'*')))
+    };
+    let marker = marker_at.and_then(|at| rest.as_bytes().get(at).copied());
+    let is_static = marker == Some(b'$');
+    let is_abstract = marker == Some(b'*');
+    let owned;
+    let rest = if let Some(at) = marker_at.filter(|_| is_static || is_abstract) {
+        // Remove only the marker byte, so a return type after it survives.
+        let mut without = String::with_capacity(rest.len() - 1);
+        without.push_str(&rest[..at]);
+        without.push_str(&rest[at + 1..]);
+        owned = without;
+        trim_fast(&owned)
+    } else {
+        rest
+    };
 
     // Parse type annotation. `rsplit_once(':')` / `rfind(')')` on a single ASCII char go through
     // the scalar `CharSearcher` reverse searcher (a profiled self-symbol on class parse); the SIMD
@@ -3695,13 +3763,7 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
     {
         let annotation = &line[2..end];
         let class_name = line[end + 2..].trim().to_string();
-        let stereotype = match annotation.to_lowercase().as_str() {
-            "interface" => fm_core::ClassStereotype::Interface,
-            "abstract" => fm_core::ClassStereotype::Abstract,
-            "enum" | "enumeration" => fm_core::ClassStereotype::Enum,
-            "service" => fm_core::ClassStereotype::Service,
-            _ => fm_core::ClassStereotype::Custom(annotation.to_string()),
-        };
+        let stereotype = class_stereotype_from_annotation(annotation);
         if !class_name.is_empty() {
             return Some(vec![ClassStatement::Stereotype(class_name, stereotype)]);
         }
@@ -3902,6 +3964,11 @@ fn lower_class_statement(
             builder.add_class_member(member);
         }
         ClassStatement::Stereotype(class_name, stereotype) => {
+            // An empty name is the in-block spelling: the target is whichever class is open.
+            if class_name.is_empty() {
+                builder.set_current_class_stereotype(stereotype);
+                return;
+            }
             builder.set_class_stereotype(&class_name, stereotype);
         }
         ClassStatement::Cardinality(source, target) => {
@@ -14901,6 +14968,167 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(
             meta.attributes[3].visibility,
             fm_core::ClassVisibility::Package
+        );
+    }
+
+    /// A stereotype written on its own line inside the class braces must SET the stereotype.
+    ///
+    /// This is mermaid's own documented spelling. Ours only recognised the `<<interface>>
+    /// ClassName` form, which requires a name after the closing angles; the bare form fell through
+    /// to the member parser and became an attribute literally named `<<interface>>`, so the
+    /// class box grew a member row reading the annotation instead of showing the stereotype under
+    /// its name.
+    #[test]
+    fn a_bare_stereotype_line_sets_the_stereotype_instead_of_becoming_a_member() {
+        let describe = |src: &str| {
+            let ir = parse_mermaid(src).ir;
+            let node = ir.nodes.first().expect("one class").clone();
+            let meta = node.class_meta.clone().expect("class meta");
+            (
+                meta.stereotype.clone(),
+                meta.attributes
+                    .iter()
+                    .map(|a| a.name.clone())
+                    .collect::<Vec<_>>(),
+                meta.methods.iter().map(|m| m.name.clone()).collect::<Vec<_>>(),
+            )
+        };
+
+        let (stereotype, attrs, methods) =
+            describe("classDiagram\n  class Shape {\n    <<interface>>\n    +area() float\n  }\n");
+        assert_eq!(
+            stereotype,
+            Some(fm_core::ClassStereotype::Interface),
+            "the annotation did not reach the stereotype"
+        );
+        assert!(
+            !attrs.iter().any(|a| a.contains('<')),
+            "the annotation is still interned as a member: {attrs:?}"
+        );
+        // The real member must survive; a guard that ate the whole line would also satisfy the
+        // assertion above.
+        assert_eq!(methods, vec!["area()".to_string()]);
+
+        for (word, want) in [
+            ("abstract", fm_core::ClassStereotype::Abstract),
+            ("enumeration", fm_core::ClassStereotype::Enum),
+            ("service", fm_core::ClassStereotype::Service),
+        ] {
+            let src = format!("classDiagram\n  class C {{\n    <<{word}>>\n  }}\n");
+            assert_eq!(describe(&src).0, Some(want), "{word} did not map");
+        }
+
+        // An unrecognised word is carried through rather than dropped.
+        assert_eq!(
+            describe("classDiagram\n  class C {\n    <<entity>>\n  }\n").0,
+            Some(fm_core::ClassStereotype::Custom("entity".to_string()))
+        );
+    }
+
+    /// CONTROLS for the bare-stereotype fix: the neighbouring spellings must not move.
+    #[test]
+    fn stereotype_controls_are_unchanged() {
+        let meta_of = |src: &str| {
+            let ir = parse_mermaid(src).ir;
+            ir.nodes
+                .first()
+                .and_then(|n| n.class_meta.clone())
+                .expect("class meta")
+        };
+
+        // The named form, in mermaid's documented order: the class is declared FIRST and the
+        // annotation names it afterwards. This is the regression control for the existing path.
+        assert_eq!(
+            meta_of("classDiagram\n  class Shape\n  <<interface>> Shape\n").stereotype,
+            Some(fm_core::ClassStereotype::Interface)
+        );
+
+        // A class with no annotation must not acquire one.
+        let plain = meta_of("classDiagram\n  class Plain {\n    +go() void\n  }\n");
+        assert_eq!(plain.stereotype, None, "a stereotype was invented");
+        assert_eq!(plain.methods.len(), 1);
+    }
+
+    /// `$` (static) and `*` (abstract) must be honoured when a return type follows them.
+    ///
+    /// The marker sits immediately after the member NAME — for a method, its closing paren — and a
+    /// return type may follow. The old check tested the end of the whole line, so it fired only for
+    /// a member with no return type. mermaid underlines static members and italicises abstract
+    /// ones, so the marker is the whole visible difference.
+    #[test]
+    fn static_and_abstract_markers_survive_a_return_type() {
+        let members = |src: &str| {
+            let ir = parse_mermaid(src).ir;
+            let meta = ir
+                .nodes
+                .first()
+                .and_then(|n| n.class_meta.clone())
+                .expect("class meta");
+            meta.methods
+                .iter()
+                .chain(meta.attributes.iter())
+                .map(|m| {
+                    (
+                        m.name.clone(),
+                        m.is_static,
+                        m.is_abstract,
+                        m.return_type.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            members("classDiagram\n  class C {\n    +count()$ int\n    +draw()* void\n  }\n"),
+            vec![
+                ("count()".to_string(), true, false, Some("int".to_string())),
+                ("draw()".to_string(), false, true, Some("void".to_string())),
+            ],
+            "markers or return types were lost"
+        );
+
+        // An ATTRIBUTE carries the marker at the END of the line (mermaid writes attributes
+        // type-first, `int id`). That spelling already worked and must keep working — the fix
+        // must not buy the method form by breaking this one.
+        assert_eq!(
+            members("classDiagram\n  class C {\n    int id$\n  }\n"),
+            vec![("int id".to_string(), true, false, None)]
+        );
+    }
+
+    /// CONTROLS for the marker fix: the forms that already worked, and one that must NOT fire.
+    #[test]
+    fn marker_controls_are_unchanged() {
+        let first = |src: &str| {
+            let ir = parse_mermaid(src).ir;
+            let meta = ir
+                .nodes
+                .first()
+                .and_then(|n| n.class_meta.clone())
+                .expect("class meta");
+            let m = meta
+                .methods
+                .first()
+                .or_else(|| meta.attributes.first())
+                .expect("a member")
+                .clone();
+            (m.name, m.is_static, m.is_abstract, m.return_type)
+        };
+
+        // No return type: the form that already worked.
+        assert_eq!(
+            first("classDiagram\n  class C {\n    +count()$\n  }\n"),
+            ("count()".to_string(), true, false, None)
+        );
+        // An ordinary member must not be marked.
+        assert_eq!(
+            first("classDiagram\n  class C {\n    +plain() int\n  }\n"),
+            ("plain()".to_string(), false, false, Some("int".to_string()))
+        );
+        // A method with a return type and NO classifier must not acquire one.
+        assert_eq!(
+            first("classDiagram\n  class C {\n    +getName() String\n  }\n"),
+            ("getName()".to_string(), false, false, Some("String".to_string()))
         );
     }
 
