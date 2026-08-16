@@ -332,7 +332,13 @@ export function canonicalNodeId(engine, rawId) {
  * strictness on two specific names. No corpus item uses them.
  */
 export function isSyntheticNode(id) {
-  return /^(?:__)?(?:root[_-])?(?:state[_-])?(?:start|end)$/.test(id)
+  // The trailing `(?:__.*)?` covers the COMPOSITE-SCOPED pseudo states. A `[*]` inside
+  // `state Processing { … }` renders as `__state_start__state_Processing`, one per composite, and
+  // the unscoped pattern matched only the diagram-level `__state_start`. Those extra ids then
+  // appeared in the rendered node set, absent from the source truth, so every composite-state
+  // diagram failed `node_id_set_vs_input` against a correct render — golden/state_composite carried
+  // two of them.
+  return /^(?:__)?(?:root[_-])?(?:state[_-])?(?:start|end)(?:__.*)?$/.test(id)
     || /^root[_-]/.test(id);
 }
 
@@ -1309,9 +1315,31 @@ export function verifyFrankenmermaidAgainstSource({ index, family, fmSvg, source
   const truth = source ? groundTruth(source) : null;
   const checks = [];
 
-  const nodesDecidable = truth?.node_ids !== undefined && fm.node_ids.length > 0;
+  // A composite state is a STATE that happens to be drawn as a container.
+  //
+  // `state Processing { … }` is a state you can be in — the source names it and transitions point
+  // at it (`Idle --> Processing : start`), so `groundTruth` puts it in `node_ids`. The renderer
+  // draws it, correctly and like mermaid, as a cluster box with a label rather than a node group,
+  // so it carries no `data-id` and `signature` never sees it. The result was that EVERY
+  // composite-state diagram failed `node_id_set_vs_input` against a correct render:
+  // golden/state_composite decoded 11 node ids and matched only 10, the missing one being the
+  // container itself.
+  //
+  // Restricted to `state` because that is the family where a container is semantically a node.
+  // A flowchart `subgraph` is a grouping, not a node you can transition to, and folding its label
+  // into the node set there would admit output that had genuinely lost a node.
+  const clusterStateLabels = family === 'state'
+    ? [...String(fmSvg).matchAll(/class="fm-cluster-label"[^>]*>([^<]*)</g)]
+      .map((match) => match[1].trim().toLowerCase())
+      .filter((label) => label.length > 0)
+    : [];
+  const renderedNodeIds = clusterStateLabels.length > 0
+    ? [...fm.node_ids, ...clusterStateLabels]
+    : fm.node_ids;
+
+  const nodesDecidable = truth?.node_ids !== undefined && renderedNodeIds.length > 0;
   const nodes = nodesDecidable
-    ? diffMultisets(multiset(fm.node_ids), multiset(truth.node_ids))
+    ? diffMultisets(multiset(renderedNodeIds), multiset(truth.node_ids))
     : null;
   checks.push({
     invariant: 'node_id_set_vs_input__frankenmermaid',
@@ -2078,6 +2106,40 @@ export function selfTest() {
     const t = groundTruth('erDiagram\n  E0 ||--o{ E1 : has\n');
     return t !== null && t.node_ids.join(',') === 'e0,e1' && t.edges.join(',') === 'e0>e1';
   })(), groundTruth('erDiagram\n  E0 ||--o{ E1 : has\n'));
+  // A composite state must verify: it is a state drawn as a container, plus one scoped pseudo-state
+  // per `[*]` inside it. Both halves are needed — the container supplies the missing id, the scoped
+  // pseudo ids are extra ones that must be filtered — so each is asserted separately as well as
+  // together, or a later change could fix one and silently reintroduce the other.
+  record('composite_scoped_pseudo_states_are_synthetic',
+    isSyntheticNode('__state_start__state_processing')
+    && isSyntheticNode('__state_end__state_processing')
+    && isSyntheticNode('__state_start'),
+    ['__state_start__state_processing', '__state_end__state_processing']);
+  record('a_real_state_named_like_a_pseudo_state_is_not_filtered',
+    !isSyntheticNode('started') && !isSyntheticNode('endpoint') && !isSyntheticNode('restart'),
+    ['started', 'endpoint', 'restart']);
+  {
+    const compositeSource = 'stateDiagram-v2\n  [*] --> Idle\n  state Processing {\n    [*] --> Validating\n'
+      + '    Validating --> [*]\n  }\n  Idle --> Processing : start\n';
+    const node = (id, i) =>
+      `<g id="fm-node-${id}-${i}" class="fm-node" data-id="${id}"><rect x="${i * 40}" y="0" width="30" height="20"/></g>`;
+    const svg = '<svg>'
+      + ['Idle', 'Validating', '__state_start', '__state_start__state_Processing', '__state_end__state_Processing']
+        .map(node).join('')
+      + '<rect id="fm-cluster-0" class="fm-cluster"/><text class="fm-cluster-label">Processing</text>'
+      + '</svg>';
+    const verdict = verifyFrankenmermaidAgainstSource({ index: 0, family: 'state', fmSvg: svg, source: compositeSource });
+    const nodeCheck = verdict.checks.find((c) => c.invariant === 'node_id_set_vs_input__frankenmermaid');
+    record('composite_state_container_counts_as_its_state', nodeCheck?.decided === true && nodeCheck.pass === true,
+      nodeCheck?.detail);
+    // The container may not paper over a genuinely missing state: drop Validating and it must fail.
+    const missing = svg.replace(node('Validating', 1), '');
+    const missingVerdict = verifyFrankenmermaidAgainstSource({ index: 0, family: 'state', fmSvg: missing, source: compositeSource });
+    record('composite_state_container_does_not_hide_a_dropped_state',
+      missingVerdict.checks.find((c) => c.invariant === 'node_id_set_vs_input__frankenmermaid')?.pass === false,
+      missingVerdict.verdict);
+  }
+
   // Flowchart edge forms the truth used to be blind to. This is not a cosmetic gap: an undecoded
   // edge removes its endpoints from `node_ids`, so a CORRECT render of `A --o H` decided
   // node_id_set_vs_input FALSE and the row was reported DIVERGENT. Measured on the committed
