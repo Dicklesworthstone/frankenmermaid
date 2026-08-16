@@ -3722,6 +3722,26 @@
   **Still no row and no A/A null.** Every precondition on the frankenmermaid side is now green and
   reproducible — clean tree, moved sha, embedded revision, passing equivalence — and the ONLY
   remaining blocker is another project's CPU.
+- **FOURTH ATTEMPT — refused 900/900 again, and the cause was partly OURS.** Rebuilt at rev
+  `9e47ca5b` (ELF `615538033722d3b8...`, revision embedded and verified, executable path taken from
+  `cargo --message-format=json`), equivalence regenerated and **PASS** 1/1. Admission then exhausted
+  its full budget: `HOST-WIDE EXCLUSIVITY BLOCKED ... no clear sample in 900000ms`.
+- ⚠️⚠️ **TWO AGENTS IN THIS PROJECT WERE MEASURING AT ONCE, AND WE CANCELLED EACH OTHER.** While my
+  run polled, a peer was running `run.mjs --only docs_site_50` on the same host. The gate requires
+  EVERY CPU under 20%; a second measurement inside the same project guarantees neither clears it. I
+  had attributed the earlier refusals wholly to external load (`frankensearch_q` ~700-1300%,
+  `smartedgar`, a `python3` at 4269%), which is real — but part of the blocking was self-inflicted
+  at the project level and is ours to fix. **Measurement needs the same one-at-a-time discipline as
+  the build slot, announced and released in Agent Mail.**
+- ⚠️⚠️ **WE ALSO SHARE ONE `--fm-bin` PATH, so the ELF you verify is not necessarily the ELF you
+  measure.** Both agents build into `target/local/release/examples/headtohead`. Tracked by sha
+  (mtime on this host is skewed ~4h and is useless): I built `615538033722d3b8...` at `9e47ca5b`,
+  verified it, and passed that path to my run; the file is now `bd45eb43098348d2...` carrying rev
+  `9a076ba2` — the peer's rebuild, landed underneath a live run. My run was refused before timing
+  anything so no false number resulted, but a row banked across such a rebuild would cite a sha that
+  is not what executed. **Build to a per-agent `--target-dir`, or copy the verified ELF to a
+  sha-stamped filename and pass that.**
+
 - **What the two attempts together establish.** The blocker is not provenance, not equivalence, and
   not the build: all three are now green and reproducible. It is solely host contention from other
   projects, and a falling `load1` is NOT sufficient — the gate is per-CPU, and three cores pegged at
