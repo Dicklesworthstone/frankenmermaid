@@ -4133,7 +4133,7 @@ fn render_layout_to_svg(
     // have to draw outside its own viewBox to honour it.
     let drawable_left = offset_x + layout.bounds.x;
     let drawable_right = drawable_left + layout.bounds.width;
-    for fragment in &layout.extensions.sequence_fragments {
+    for (fragment_index, fragment) in layout.extensions.sequence_fragments.iter().enumerate() {
         let raw_x = fragment.bounds.x + offset_x;
         let fx = raw_x.max(drawable_left);
         let fy = fragment.bounds.y + offset_y;
@@ -4216,6 +4216,83 @@ fn render_layout_to_svg(
                 .fill(&theme.colors.text)
                 .class("fm-sequence-fragment-label"),
         );
+
+        // Branch dividers: the `else` of an alt, the `and` of a par, the `option` of a critical.
+        //
+        // Before bd-zsfo the complete text of `alt is ok / … / else is bad / … / end` was
+        // "alt [is ok] | start | yes | no" — `is bad` appeared NOWHERE and no divider of any kind
+        // separated the branches, so the reader saw ONE undivided box labelled only with the first
+        // condition. Half the meaning of an `alt` was not in the document.
+        //
+        // This is a consumer gap, not a parse gap: the parser has preserved the branch label in
+        // `IrSequenceFragment.alternatives` all along and neither layout nor any renderer read the
+        // field. The fix is renderer-only. `build_sequence_fragment_geometry` maps
+        // `meta.fragments` 1:1 in order, so `fragment_index` indexes back into the IR, and the
+        // sequence layout builds one edge path per `ir.edges` entry carrying its own `edge_index`,
+        // so a branch's `start_edge` resolves to the y of the message it starts at.
+        //
+        // The divider's offset above its branch's first message is DERIVED, not a new constant: the
+        // frame's own top sits `lead` above the fragment's first message, so reusing that same lead
+        // puts each divider in the same relation to its branch that the frame has to its first. A
+        // fixed fraction of the frame height would drift away from the messages as soon as two
+        // branches hold different numbers of them.
+        let alternatives = ir
+            .sequence_meta
+            .as_ref()
+            .and_then(|meta| meta.fragments.get(fragment_index))
+            .map(|ir_fragment| ir_fragment.alternatives.as_slice())
+            .unwrap_or(&[]);
+        if !alternatives.is_empty() {
+            let message_y = |edge_index: usize| -> Option<f32> {
+                layout
+                    .edges
+                    .iter()
+                    .find(|edge| edge.edge_index == edge_index)
+                    .and_then(|edge| edge.points.first())
+                    .map(|point| point.y + offset_y)
+            };
+            let lead = ir
+                .sequence_meta
+                .as_ref()
+                .and_then(|meta| meta.fragments.get(fragment_index))
+                .and_then(|ir_fragment| message_y(ir_fragment.start_edge))
+                .map_or(0.0, |first_message_y| first_message_y - fy);
+            for alternative in alternatives {
+                let Some(branch_y) = message_y(alternative.start_edge) else {
+                    continue;
+                };
+                let divider_y = branch_y - lead;
+                // The divider spans the frame, so it inherits the same out-of-canvas hazard the
+                // frame border did (bd-zwh3) and is drawn between the SAME clamped edges.
+                doc = doc.child(
+                    Element::line()
+                        .x1(fx)
+                        .y1(divider_y)
+                        .x2(fx + fw)
+                        .y2(divider_y)
+                        .stroke(&theme.colors.cluster_stroke)
+                        .stroke_width(1.0)
+                        .stroke_dasharray("6,4")
+                        .class("fm-sequence-fragment-divider"),
+                );
+                if !alternative.label.is_empty() {
+                    doc = doc.child(
+                        Element::text()
+                            .x(fx + 6.0)
+                            .y(divider_y - 3.0)
+                            .content(&format!("[{}]", alternative.label))
+                            .attr_num("font-size", config.font_size * 0.75)
+                            .attr("font-weight", "bold")
+                            .font_family_unless_embedded_css(
+                                &config.font_family,
+                                config.embed_theme_css,
+                            )
+                            .fill(&theme.colors.text)
+                            .class("fm-sequence-fragment-alt-label"),
+                    );
+                }
+            }
+        }
     }
 
     // Render clusters (subgraphs) as background rectangles
@@ -17198,6 +17275,130 @@ marker#arrow-open path {
                 vx + vw
             );
         }
+    }
+
+    /// An `alt` whose second branch is invisible is not an `alt` (bd-zsfo).
+    ///
+    /// The complete text of `alt is ok / … / else is bad / … / end` was "A | B | alt [is ok] |
+    /// start | yes | no": `is bad` appeared nowhere and nothing separated the branches, so the
+    /// reader saw one undivided box labelled only with the first condition. The parser had
+    /// preserved the branch label in `IrSequenceFragment.alternatives` the whole time — neither
+    /// layout nor any renderer read the field.
+    ///
+    /// The branches deliberately hold DIFFERENT numbers of messages: a divider placed at a fixed
+    /// fraction of the frame height passes on symmetric branches and fails here, which is the
+    /// implementation this test exists to reject.
+    #[test]
+    fn sequence_alt_branches_are_divided_and_both_conditions_are_drawn() {
+        let src = "sequenceDiagram\n    A->>B: start\n    alt is ok\n        A->>B: yes\n        \
+                   A->>B: yes2\n    else is bad\n        A->>B: no\n    end";
+        let parsed = fm_parser::parse(src);
+        let layout = fm_layout::layout_diagram(&parsed.ir);
+        let config = SvgRenderConfig::default();
+        let svg = render_svg_with_config(&parsed.ir, &config);
+
+        // Both conditions reach the document. A test that only checked for a divider would pass
+        // while the second condition was still being dropped.
+        assert!(
+            svg.contains("alt [is ok]"),
+            "the fragment's own condition must still be drawn"
+        );
+        assert_eq!(
+            svg.matches(">[is bad]<").count(),
+            1,
+            "the `else` condition must be drawn exactly once"
+        );
+
+        let dividers: Vec<&str> = svg
+            .match_indices("<line ")
+            .map(|(at, _)| &svg[at..=at + svg[at..].find('>').unwrap()])
+            .filter(|e| e.contains("fm-sequence-fragment-divider"))
+            .collect();
+        assert_eq!(
+            dividers.len(),
+            1,
+            "one `else` must draw exactly one divider, got {dividers:?}"
+        );
+        let attr = |elem: &str, name: &str| -> f32 {
+            let key = format!(" {name}=\"");
+            elem.split(&key).nth(1).unwrap().split('"').next().unwrap().parse().unwrap()
+        };
+        let divider_y = attr(dividers[0], "y1");
+        assert!(
+            (attr(dividers[0], "y2") - divider_y).abs() < 0.01,
+            "a branch divider must be horizontal"
+        );
+
+        // POSITIONAL: the divider sits between the last message of the first branch (yes2, edge 2)
+        // and the first message of the second (no, edge 3) — not at a fixed fraction of the frame.
+        let offset_y = config.padding - layout.bounds.y;
+        let message_y = |edge_index: usize| -> f32 {
+            layout
+                .edges
+                .iter()
+                .find(|edge| edge.edge_index == edge_index)
+                .and_then(|edge| edge.points.first())
+                .map(|point| point.y + offset_y)
+                .unwrap_or_else(|| panic!("no layout edge {edge_index}"))
+        };
+        assert!(
+            message_y(2) < divider_y && divider_y < message_y(3),
+            "divider at y={divider_y} is not between the last message of the first branch \
+             (y={}) and the first of the second (y={})",
+            message_y(2),
+            message_y(3)
+        );
+
+        // The frame is spanned, and spanned within the clamp bd-zwh3 put on the frame border: a
+        // divider that ran past the viewBox would reintroduce exactly that defect.
+        let frame = svg
+            .match_indices("<rect ")
+            .map(|(at, _)| &svg[at..=at + svg[at..].find('>').unwrap()])
+            .find(|e| e.contains("fm-sequence-fragment\""))
+            .expect("the alt frame must still be drawn");
+        assert!(
+            (attr(dividers[0], "x1") - attr(frame, "x")).abs() < 0.01
+                && (attr(dividers[0], "x2") - (attr(frame, "x") + attr(frame, "width"))).abs()
+                    < 0.01,
+            "the divider must span exactly the (clamped) frame"
+        );
+    }
+
+    /// Control for bd-zsfo: an `alt` with NO `else` has no branch boundary, so it must draw no
+    /// divider. An implementation that emits one per FRAGMENT rather than per branch passes the
+    /// test above and fails here, adding a line that means nothing.
+    #[test]
+    fn a_sequence_fragment_without_branches_draws_no_divider() {
+        let with_branch = render_svg_with_config(
+            &fm_parser::parse(
+                "sequenceDiagram\n    A->>B: hi\n    alt ok\n        A->>B: yes\n    \
+                 else no\n        A->>B: nope\n    end",
+            )
+            .ir,
+            &SvgRenderConfig::default(),
+        );
+        let without_branch = render_svg_with_config(
+            &fm_parser::parse("sequenceDiagram\n    A->>B: hi\n    alt ok\n        A->>B: yes\n    end")
+                .ir,
+            &SvgRenderConfig::default(),
+        );
+        assert!(
+            with_branch.contains("fm-sequence-fragment-divider"),
+            "non-vacuity: the two-branch arm of this control must draw a divider"
+        );
+        assert!(
+            !without_branch.contains("fm-sequence-fragment-divider"),
+            "an alt with no else must draw no divider"
+        );
+        // And a sequence diagram with no fragment at all is untouched.
+        let plain = render_svg_with_config(
+            &fm_parser::parse("sequenceDiagram\n    A->>B: hi\n    B->>A: bye").ir,
+            &SvgRenderConfig::default(),
+        );
+        assert!(
+            !plain.contains("fm-sequence-fragment"),
+            "a sequence diagram with no fragments must draw no fragment markup"
+        );
     }
 
     /// A gantt chart with no dates is not a gantt chart (bd-trsd).
