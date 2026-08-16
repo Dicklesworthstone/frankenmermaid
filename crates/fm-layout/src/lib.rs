@@ -21207,6 +21207,99 @@ mod tests {
         );
     }
 
+    /// Two relationships between the same pair must be two visible lines, not one (Force path).
+    ///
+    /// `force_build_edge_paths` gave every edge between a pair the same centre-to-centre geometry,
+    /// so an ER model with `A ||--o{ B : owns` and `A ||--o{ B : rents` drew one line and silently
+    /// lost the other. Sugiyama has fanned these apart via `apply_parallel_offset` all along.
+    #[test]
+    fn force_layout_parallel_edges_do_not_coincide() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
+        for node_id in ["CUSTOMER", "ORDER"] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        for _ in 0..3 {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(0)),
+                to: IrEndpoint::Node(IrNodeId(1)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let layout = layout_diagram_force(&ir);
+        assert_eq!(layout.edges.len(), 3);
+        for (left, right) in [(0, 1), (1, 2), (0, 2)] {
+            assert_ne!(
+                layout.edges[left].points.as_slice(),
+                layout.edges[right].points.as_slice(),
+                "parallel edges {left} and {right} have identical geometry, so only one is visible"
+            );
+        }
+
+        // A single edge between the pair must NOT be displaced — the fan is centred on zero, so a
+        // lone edge keeps the geometry it had before this fix and no golden moves for it.
+        let mut single = MermaidDiagramIr::empty(DiagramType::Er);
+        for node_id in ["CUSTOMER", "ORDER"] {
+            single.nodes.push(IrNode {
+                id: node_id.to_string(),
+                ..IrNode::default()
+            });
+        }
+        single.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+        let single_layout = layout_diagram_force(&single);
+        assert_eq!(single_layout.edges[0].parallel_offset, 0.0);
+        assert_eq!(
+            layout.edges[1].parallel_offset, 0.0,
+            "the middle edge of an odd fan sits on the centre line"
+        );
+    }
+
+    /// The two layouts must fan a repeated pair by the same amount, or a diagram's edge separation
+    /// changes when dispatch picks a different algorithm for reasons unrelated to its edges.
+    #[test]
+    fn force_and_sugiyama_agree_on_parallel_edge_offsets() {
+        let mut ir = labeled_graph_ir(2, &[]);
+        for _ in 0..4 {
+            ir.edges.push(IrEdge {
+                from: IrEndpoint::Node(IrNodeId(0)),
+                to: IrEndpoint::Node(IrNodeId(1)),
+                arrow: ArrowType::Arrow,
+                ..IrEdge::default()
+            });
+        }
+
+        let mut force: Vec<f32> = layout_diagram_force(&ir)
+            .edges
+            .iter()
+            .map(|edge| edge.parallel_offset)
+            .collect();
+        let mut sugiyama: Vec<f32> = layout_diagram(&ir)
+            .edges
+            .iter()
+            .map(|edge| edge.parallel_offset)
+            .collect();
+        force.sort_by(f32::total_cmp);
+        sugiyama.sort_by(f32::total_cmp);
+        assert_eq!(
+            force, sugiyama,
+            "the two builders fan the same four parallel edges differently"
+        );
+        assert_eq!(
+            force,
+            vec![-18.0, -6.0, 6.0, 18.0],
+            "a four-edge fan is symmetric about zero in 12px steps"
+        );
+    }
+
     /// The self-loop must leave the node's box, or it is drawn underneath the node and invisible.
     #[test]
     fn force_layout_self_loop_escapes_the_node_box() {
