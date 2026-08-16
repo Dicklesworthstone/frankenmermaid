@@ -20519,3 +20519,41 @@ rather than a quiet fix inside a measurement turn. Filed as a bead.
 the equivalence pre-flight, before either arm's null or any timing is computed. ELF
 `24c33bcdb606947a1eec17b9fed410a122bb3491a4201015e8b29a7b191fb604`, rev `788afbb4`, host
 `thinkstation1`, `mermaid@11.15.0` under `Chrome/151.0.7922.108`.
+
+### PARTIAL: `docs_site_50` structural blocker FIXED, timed run refused on host contention (2026-08-16)
+
+Third attempt at the worst valid render ratio. The blocker that stopped the previous two is gone;
+what remains is transient host load. **No ratio was produced and none is claimed.**
+
+- **Fixed and landed (`9a076ba2`, bd-19es).** The ER undecidability was an id-prefix asymmetry in
+  `declaredEdgePair`. Equivalence for `docs_site_50` now reads **PASS: 50/50 equivalent, 0
+  divergent, 0 unverified, er=4/4**, against 47/50 with 3 unverified before. Artifact
+  `equivalence-9a076ba2-1786902721940.json`. `er_40` still PASS 1/1, and the oracle self-test is
+  green at 75 cases including the control that fails if the retry stops requiring both halves to
+  name a rendered node.
+- **Binary.** `target/local/release/examples/headtohead`, path from `--message-format=json`,
+  built with `RCH_CARGO_WRAPPER_BYPASS=1` and `env -u CARGO_TARGET_DIR`. **ELF SHA-256
+  `bd45eb43098348d24931a2b46b4e2b49f753e06d5acd6e0c105b849133c557a9`** at rev `9a076ba2`, clean
+  tree. The sha moved from `24c33bcd…` at the previous rev, which is the proof the rebuild took.
+- **The refusal is the quiescence gate, not the oracle.** `HOST-WIDE EXCLUSIVITY BLOCKED before
+  frankenmermaid-before: no clear sample in 900000ms` — **900 of 900 attempts refused** against a
+  20.0% per-affinity-CPU ceiling, `power-policy=match` throughout. Representative samples:
+  `cpu40=100.0% cpu34=92.9% cpu36=91.8%`, and at attempt 898 every CPU `cpu0..cpu11=100.0%`.
+  Load1 reached 50.12 on 64 CPUs. Eight sibling projects were building.
+- **This is the gate working.** A wall-time cross-engine ratio taken under that load is exactly the
+  measurement this repo's rules forbid, and the fleet's 13.6x cross-worker swing with both A/A nulls
+  passing is why those rules are non-negotiable. Bypassing the veto to produce a number would be
+  gate self-weakening.
+
+⚠️ **NUMBERS OBSERVED DURING THE EQUIVALENCE PASS, WHICH ARE NOT A RATIO AND MUST NOT BE QUOTED AS
+ONE.** That pass reported `frankenmermaid docs_site_50 p50=4.754ms null=0.998891
+[0.987375,1.014245]` and `mermaid-js docs_site_50 p50=2986.8ms null=missing`. They are unusable as a
+result for three independent reasons, any one of which is disqualifying: the equivalence pass runs
+`--render-once` at `--reps-scale 0.333`, not the certified timing protocol; the incumbent has **no
+A/A null at all** (`null=missing`); and both were taken under the same contention the timed gate
+then refused. The frankenmermaid-side null is recorded because it is the one piece of the requested
+row that genuinely exists — `0.998891`, CI `[0.987375, 1.014245]`, including one.
+
+**What would produce the row:** one quiet window on this host. Everything else is now in place — the
+binary, its provenance, a passing structural proof at the committed rev, and a working A/A null on
+our arm. This is the first attempt where the only missing input is host availability.
