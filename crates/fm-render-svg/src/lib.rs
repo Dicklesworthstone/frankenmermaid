@@ -9180,8 +9180,8 @@ fn render_node(
                 .stroke_width_unless_embedded_css(1.6, config.embed_theme_css);
 
             if shape != NodeShape::DoubleCircle {
-                return elem;
-            }
+                elem
+            } else {
 
             // A double circle needs a SECOND RING, not a thicker stroke (bd-vfxu).
             //
@@ -9208,6 +9208,7 @@ fn render_node(
                         .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                         .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
                 )
+            }
         }
 
         NodeShape::HorizontalBar => Element::rect()
@@ -17008,6 +17009,23 @@ marker#arrow-open path {
         assert_eq!(
             double, 2,
             "a double circle must emit two concentric <circle> elements, got {double}"
+        );
+
+        // The node's own structure must survive. An earlier attempt used an early `return` for the
+        // plain-circle branch, which returned from the whole function and skipped the group wrapper,
+        // the shape class and the label text — the circle-count assertions above still passed while
+        // every plain circle silently lost its label. Assert the structure, not just the rings.
+        let plain_svg = render_svg_with_config(
+            &fm_parser::parse("flowchart TD\n  B((Circle))\n").ir,
+            &SvgRenderConfig::default(),
+        );
+        assert!(
+            plain_svg.contains("fm-node-shape-circle"),
+            "a plain circle must keep its shape class"
+        );
+        assert!(
+            plain_svg.contains(">Circle<"),
+            "a plain circle must keep its label text"
         );
 
         // The rings must be CONCENTRIC and DISTINCT: same centre, different radius. Equal radii
