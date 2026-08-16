@@ -21,6 +21,9 @@
 //! Run: `cargo test -p fm-layout --test alloc_profile -- --ignored --nocapture`
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::backtrace::Backtrace;
+use std::cell::Cell;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fm_core::{
@@ -52,6 +55,13 @@ fn record(size: usize) {
     if COUNTING.load(Ordering::Relaxed) == 0 {
         return;
     }
+    // The backtrace machinery allocates heavily, and those allocations reach this function too.
+    // Counting them inflated `dense_dag_200` from 401 to 53,528 on the first capture run — the
+    // instrument measuring itself. The capture guard has to suppress COUNTING as well as recursion,
+    // or every histogram taken with capture enabled is nonsense.
+    if IN_CAPTURE.with(Cell::get) {
+        return;
+    }
     ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
     ALLOC_BYTES.fetch_add(size, Ordering::Relaxed);
     let index = BUCKETS
@@ -61,6 +71,46 @@ fn record(size: usize) {
     BUCKET_HITS[index].fetch_add(1, Ordering::Relaxed);
 }
 
+// ---------------------------------------------------------------- backtrace capture (bd-cs09)
+//
+// Capturing a backtrace INSIDE a GlobalAlloc allocates — the capture itself, the symbol strings, the
+// Vec push, the Mutex — so without a guard this recurses until the stack dies. The guard is a
+// thread-local `Cell` with a `const` initialiser specifically so the TLS slot itself never lazily
+// allocates on first touch, which would reintroduce the recursion it exists to prevent.
+//
+// Off by default: `CAPTURE_SIZE` is 0 unless a profile opts in, so the ordinary counting path pays
+// nothing but one relaxed load.
+
+/// Only allocations of exactly this size are traced. 0 disables capture.
+static CAPTURE_SIZE: AtomicUsize = AtomicUsize::new(0);
+/// Stop after this many, because the interesting thing is which site repeats, not all 600 of them.
+const CAPTURE_LIMIT: usize = 4;
+static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+thread_local! {
+    static IN_CAPTURE: Cell<bool> = const { Cell::new(false) };
+}
+
+fn maybe_capture(size: usize) {
+    let want = CAPTURE_SIZE.load(Ordering::Relaxed);
+    if want == 0 || size != want {
+        return;
+    }
+    IN_CAPTURE.with(|guard| {
+        if guard.get() {
+            return;
+        }
+        guard.set(true);
+        // Everything in here allocates; the guard makes those allocations invisible to this path.
+        if let Ok(mut captured) = CAPTURED.lock()
+            && captured.len() < CAPTURE_LIMIT
+        {
+            captured.push(format!("{}", Backtrace::force_capture()));
+        }
+        guard.set(false);
+    });
+}
+
 struct CountingAllocator;
 
 // SAFETY: every method forwards to `System` with the same layout it was handed, and the only added
@@ -68,6 +118,7 @@ struct CountingAllocator;
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         record(layout.size());
+        maybe_capture(layout.size());
         unsafe { System.alloc(layout) }
     }
 
@@ -94,9 +145,21 @@ struct AllocProfile {
     buckets: [usize; BUCKETS.len() + 1],
 }
 
-/// Count every allocation `body` makes. Not reentrant: one window at a time, and the tests here are
-/// `#[ignore]`d so they do not race the rest of the suite.
+/// Serialises measurement windows.
+///
+/// Every counter here is a process-global, and libtest runs tests on concurrent THREADS in one
+/// process — so two profiling windows open at once corrupt each other. That is not hypothetical: the
+/// first run with both instruments enabled reported `chain_100` at 377 allocations with 31 at 64 B,
+/// against its true 130 and 1, because `layout_allocation_profile` and
+/// `dense_graph_64_byte_allocation_sites` were interleaving. `#[ignore]` keeps these off the normal
+/// suite; it does nothing about each other.
+static PROFILE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Count every allocation `body` makes, with the whole window held under [`PROFILE_LOCK`].
 fn profile<T>(body: impl FnOnce() -> T) -> (T, AllocProfile) {
+    let _window = PROFILE_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     ALLOC_CALLS.store(0, Ordering::Relaxed);
     REALLOC_CALLS.store(0, Ordering::Relaxed);
     ALLOC_BYTES.store(0, Ordering::Relaxed);
@@ -262,6 +325,69 @@ fn counting_allocator_observes_allocations_and_stays_off_outside_the_window() {
         before,
         "the counter kept counting after the window closed"
     );
+}
+
+/// Which call site produces the 64 B allocations that are ~40% of dense-graph layout allocs
+/// (bd-cs09)?
+///
+/// The histogram says they are 0.75 per node on `dense_dag` and absent on chain/wide, so something
+/// allocates per node only once fanout is high — the shape of a spilled inline buffer, a `Vec` grown
+/// to capacity 8, or 8 `usize`s. Reading ruled out the obstacle index, which is already CSR. This
+/// prints the stacks.
+#[test]
+#[ignore = "allocation site instrument; run with --ignored --nocapture"]
+fn dense_graph_64_byte_allocation_sites() {
+    let ir = dense_dag_ir(200, 4);
+    std::hint::black_box(layout_diagram(&ir));
+
+    CAPTURED.lock().expect("capture mutex").clear();
+    CAPTURE_SIZE.store(64, Ordering::Relaxed);
+    let (layout, profile) = profile(|| layout_diagram(&ir));
+    CAPTURE_SIZE.store(0, Ordering::Relaxed);
+    std::hint::black_box(&layout);
+
+    let sixty_four = profile.buckets[BUCKETS.len() - 1];
+    // TOTALS UNDER CAPTURE ARE NOT A HISTOGRAM. Even with the reentrancy guard suppressing both
+    // counting and recursion, symbolising a backtrace leaves residue: this fixture measures 401
+    // allocations with capture off and ~4,100 with it on. (Before the guard covered `record` as
+    // well, it was 53,528 — the instrument measuring itself.) Use `layout_allocation_profile` for
+    // counts and this test only for SITES.
+    println!(
+        "dense_dag_200 [capture on; total {} is polluted, use layout_allocation_profile for counts]",
+        profile.allocs
+    );
+    println!("  64 B allocations traced: {sixty_four}");
+    // The 64 B count IS trustworthy: those allocations are recorded before capture is entered, and
+    // the machinery's own allocations are guarded out. It must match the capture-off figure of 150.
+    assert!(
+        (140..=170).contains(&sixty_four),
+        "expected ~150 64 B allocations as measured with capture off, got {sixty_four}; either the \
+         fixture changed or the guard stopped suppressing the backtrace machinery"
+    );
+    let captured = CAPTURED.lock().expect("capture mutex");
+    println!("captured {} stack(s):", captured.len());
+    for (index, trace) in captured.iter().enumerate() {
+        // Workspace frames are the signal; std/backtrace frames are noise. But which allocations
+        // land in the first CAPTURE_LIMIT slots shifts between runs, so a run can capture stacks
+        // with no workspace frame at all — and a filter that then prints nothing looks like a broken
+        // instrument. Fall back to raw frames rather than silence.
+        let workspace: Vec<&str> = trace
+            .lines()
+            .filter(|line| line.contains("fm_layout") || line.contains("fm_core"))
+            .take(12)
+            .collect();
+        println!("--- stack {index} ---");
+        if workspace.is_empty() {
+            println!("  (no workspace frame; raw head)");
+            for line in trace.lines().take(10) {
+                println!("  {}", line.trim());
+            }
+        } else {
+            for line in workspace {
+                println!("  {}", line.trim());
+            }
+        }
+    }
 }
 
 /// The layout allocation histogram bd-oarm is aimed at. `--ignored`, because it is an instrument
