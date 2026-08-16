@@ -4757,12 +4757,18 @@ pub struct IrQuadrantMeta {
 
 // ── State diagram note ────────────────────────────────────────────────
 
-/// A note attached to a state node.
+/// A note attached to a node by name.
+///
+/// Named for the state diagrams it was introduced for, but since bd-1fw3 it is the note channel
+/// for CLASS diagrams too: `note for Duck "can swim"` lands here with `position` fixed to
+/// `"right"`, which is where mermaid puts a class note. One channel rather than a parallel
+/// `IrClassNote` because layout and the renderer would otherwise need a second copy of placement
+/// and drawing code that is identical in every respect except the field it reads.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct IrStateNote {
-    /// Target state name the note is attached to.
+    /// Target state or class name the note is attached to.
     pub target: String,
-    /// Position relative to the state: `"right"` or `"left"`.
+    /// Position relative to the target: `"right"` or `"left"`.
     pub position: String,
     /// Note text content (may be multi-line).
     pub text: String,

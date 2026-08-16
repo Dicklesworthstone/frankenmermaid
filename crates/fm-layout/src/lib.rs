@@ -38,10 +38,9 @@ use web_time::Instant;
 
 use fm_core::{
     DiagramType, FxHashMap, FxHashSet, GanttDate, GanttExclude, GanttTaskType, GanttTickInterval,
-    GraphDirection,
-    IrEndpoint, IrGanttMeta, IrNode, IrXyChartMeta, IrXySeriesKind, MermaidBudgetLedger,
-    MermaidComplexity, MermaidConfig, MermaidDecisionWeight, MermaidDiagramIr, MermaidGuardReport,
-    MermaidLayoutDecisionAlternative, MermaidLayoutDecisionExplanation,
+    GraphDirection, IrEndpoint, IrGanttMeta, IrNode, IrXyChartMeta, IrXySeriesKind,
+    MermaidBudgetLedger, MermaidComplexity, MermaidConfig, MermaidDecisionWeight, MermaidDiagramIr,
+    MermaidGuardReport, MermaidLayoutDecisionAlternative, MermaidLayoutDecisionExplanation,
     MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidObservabilityIds,
     MermaidPressureReport, MermaidPressureTier, MermaidSourceMap, MermaidSourceMapEntry,
     MermaidSourceMapKind, Span, mermaid_cluster_element_id, mermaid_edge_element_id,
@@ -3228,12 +3227,13 @@ fn compute_traced_layout_with_config_and_guardrails(
 
     // Captured before `config` is moved into the dispatch arms; a caller that supplied custom
     // `font_metrics` must have its notes measured with them, not with the default preset.
-    let state_note_metrics = matches!(ir.diagram_type, DiagramType::State).then(|| {
-        config
-            .font_metrics
-            .clone()
-            .unwrap_or_else(fm_core::FontMetrics::default_metrics)
-    });
+    let state_note_metrics = matches!(ir.diagram_type, DiagramType::State | DiagramType::Class)
+        .then(|| {
+            config
+                .font_metrics
+                .clone()
+                .unwrap_or_else(fm_core::FontMetrics::default_metrics)
+        });
 
     let mut traced = match guarded_dispatch.selected {
         LayoutAlgorithm::Sugiyama | LayoutAlgorithm::Auto => {
@@ -7484,9 +7484,7 @@ fn format_gantt_axis_label(days_since_epoch: i32, axis_format: Option<&str>) -> 
     let (year, month, day) = gantt_civil_from_days(days_since_epoch);
     let month_names = GANTT_MONTH_NAMES[(month.clamp(1, 12) - 1) as usize];
     let day_names = GANTT_DAY_NAMES[gantt_weekday(days_since_epoch) as usize];
-    let day_of_year = days_since_epoch
-        - gantt_days_from_civil(year, 1, 1)
-        + 1;
+    let day_of_year = days_since_epoch - gantt_days_from_civil(year, 1, 1) + 1;
 
     let mut out = String::with_capacity(format.len() + 8);
     let mut chars = format.chars();
@@ -15864,7 +15862,14 @@ fn build_state_note_geometry(
     nodes: &[LayoutNodeBox],
     metrics: &fm_core::FontMetrics,
 ) -> Vec<LayoutStateNote> {
-    if !matches!(ir.diagram_type, DiagramType::State) || ir.state_notes.is_empty() {
+    // Class diagrams share this channel since bd-1fw3: `note for Duck "can swim"` is the same
+    // shape as `note right of X : text` once parsed — a target name, a side and some text — so it
+    // gets the same placement and the same renderer loop rather than a parallel implementation.
+    // Every OTHER diagram type still returns empty here, which is what keeps flowchart, sequence
+    // and the rest byte-identical.
+    if !matches!(ir.diagram_type, DiagramType::State | DiagramType::Class)
+        || ir.state_notes.is_empty()
+    {
         return Vec::new();
     }
 
@@ -19602,11 +19607,23 @@ mod tests {
         // A one-day task still spans two ticks: `total_span_days` has a floor of 1, so the axis
         // always shows a measurable interval rather than a single unanchored mark.
         assert_eq!(
-            tick_labels(&gantt_axis_probe("2026-01-01", 1, Some("%a %d %B %Y"), None, None)),
+            tick_labels(&gantt_axis_probe(
+                "2026-01-01",
+                1,
+                Some("%a %d %B %Y"),
+                None,
+                None
+            )),
             vec!["Thu 01 January 2026", "Fri 02 January 2026"]
         );
         assert_eq!(
-            tick_labels(&gantt_axis_probe("2026-01-01", 1, Some("%Y-%Q"), None, None)),
+            tick_labels(&gantt_axis_probe(
+                "2026-01-01",
+                1,
+                Some("%Y-%Q"),
+                None,
+                None
+            )),
             vec!["2026-%Q", "2026-%Q"]
         );
     }
