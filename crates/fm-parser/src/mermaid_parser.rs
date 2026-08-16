@@ -10554,8 +10554,15 @@ fn add_node_to_architecture_parent(
 }
 
 fn parse_architecture_edge(line: &str) -> Option<(String, String, ArrowType)> {
+    // `<-->` is BIDIRECTIONAL and must keep an arrowhead on each end (bd-e29r's defect, second
+    // family). Mapping it to `Line` dropped both, so an architecture edge that says "these two talk
+    // in both directions" rendered as a bare undirected segment — indistinguishable from the plain
+    // `--` on the last row, and carrying strictly less information than the one-way `-->` it exists
+    // to contrast with. `DoubleArrow` is the variant flowchart `<-->` already produces, and
+    // fm-render-svg gives it MARKER_START | MARKER_END, so the heads reach the output rather than
+    // only the IR. `reverse` stays false for it: a bidirectional edge has no source to swap.
     const OPERATORS: [(&str, ArrowType, bool); 4] = [
-        ("<-->", ArrowType::Line, true),
+        ("<-->", ArrowType::DoubleArrow, false),
         ("-->", ArrowType::Arrow, false),
         ("<--", ArrowType::Arrow, true),
         ("--", ArrowType::Line, false),
@@ -10854,8 +10861,23 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
             }
         } else if let Some(rest) = line.strip_prefix("class ") {
             // class nodeA,nodeB className — assign CSS class to nodes.
+            //
+            // ⚠️ A classDiagram BLOCK DECLARATION shares this prefix (bd-yf4r). `class Container~T~ {`
+            // rsplit_once(' ')s into (`Container~T~`, `{`), and `{` is a non-empty string, so it was
+            // accepted as a CSS class name: the head was interned as a phantom node and the real
+            // class gained a junk class literally named `{`. With a multi-parameter generic the head
+            // was then split on the generic's own comma, so `class Box~K,V~ {` produced TWO phantoms
+            // named `Box~K` and `V~`.
+            //
+            // Whether it fired depended on a SPACE — `class Container~T~{` has none, so rsplit_once
+            // returned None and the line was left alone, which is what pinned the mechanism.
+            //
+            // A block declaration always ends at the opening brace, and the CSS directive never
+            // does, so that is the discriminator. Trailing whitespace is already gone via `trim`.
             let rest = rest.trim();
-            if let Some((nodes_raw, class_name)) = rest.rsplit_once(' ') {
+            if let Some((nodes_raw, class_name)) = rest.rsplit_once(' ')
+                && !rest.ends_with('{')
+            {
                 let class_name = class_name.trim();
                 if !class_name.is_empty() {
                     for node_key in nodes_raw.split(',') {
@@ -13421,7 +13443,11 @@ api <--> db",
         assert_eq!(parsed.ir.nodes.len(), 2);
         assert_eq!(parsed.ir.edges.len(), 2);
         assert_eq!(parsed.ir.edges[0].arrow, ArrowType::Arrow);
-        assert_eq!(parsed.ir.edges[1].arrow, ArrowType::Line);
+        // STRENGTHENED, not relaxed: this asserted ArrowType::Line, which pinned the defect rather
+        // than the specification — `api <--> db` is bidirectional and a bare line states nothing
+        // about direction at all. The `<--` row above is the control: a one-way edge must stay
+        // single-headed, so this cannot have made every architecture edge bidirectional.
+        assert_eq!(parsed.ir.edges[1].arrow, ArrowType::DoubleArrow);
 
         let first_edge = &parsed.ir.edges[0];
         let endpoints_are_nodes = matches!(
@@ -14559,6 +14585,81 @@ Rel_Back(db, app, "Responds")"#,
             meta.attributes[3].visibility,
             fm_core::ClassVisibility::Package
         );
+    }
+
+    /// bd-yf4r: a classDiagram block declaration is not a CSS-class assignment.
+    ///
+    /// `extract_style_directives` matched any `class ` prefix as the flowchart directive
+    /// `class nodeA,nodeB className`, so `class Container~T~ {` became "assign CSS class `{` to node
+    /// `Container~T~`" — interning a phantom class and attaching a junk class named `{`. With a
+    /// two-parameter generic the head was then split on the generic's own comma, producing phantoms
+    /// named after fragments of the parameter list.
+    #[test]
+    fn class_block_declaration_is_not_a_css_class_assignment() {
+        let ids = |src: &str| -> Vec<String> {
+            parse_mermaid(src)
+                .ir
+                .nodes
+                .iter()
+                .map(|n| n.id.clone())
+                .collect()
+        };
+
+        assert_eq!(
+            ids("classDiagram\n  class Container~T~ {\n  }\n"),
+            vec!["Container"],
+            "a phantom class was interned from the generic text"
+        );
+
+        // The comma case is the sharper one: the generic's own separator was being used to split a
+        // node list, so ONE class became three.
+        assert_eq!(
+            ids("classDiagram\n  class Box~K,V~ {\n  }\n"),
+            vec!["Box"],
+            "the generic parameter list was split into phantom classes"
+        );
+
+        // The no-space spelling never triggered the branch, so it is the untouched control: it must
+        // still produce exactly one class.
+        assert_eq!(
+            ids("classDiagram\n  class Container~T~{\n  }\n"),
+            vec!["Container"]
+        );
+
+        // ⚠️ Asserting only "no phantom node" would MISS the other half: `class Plain {` interns no
+        // phantom because the node already exists, but the real class still gained a CSS class
+        // literally named `{`. The class list has to be asserted too.
+        let plain = parse_mermaid("classDiagram\n  class Plain {\n  }\n");
+        let plain_node = plain
+            .ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "Plain")
+            .expect("class Plain");
+        assert!(
+            !plain_node.classes.iter().any(|c| c.contains('{')),
+            "the opening brace was attached as a CSS class: {:?}",
+            plain_node.classes
+        );
+    }
+
+    /// CONTROL for bd-yf4r: the directive this branch exists for must still work.
+    #[test]
+    fn flowchart_class_assignment_directive_still_applies() {
+        let parsed = parse_mermaid("flowchart LR\n  A --> B\n  class A,B myClass\n");
+        for id in ["A", "B"] {
+            let node = parsed
+                .ir
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap_or_else(|| panic!("node {id}"));
+            assert!(
+                node.classes.iter().any(|c| c == "myClass"),
+                "node {id} lost its CSS class: {:?}",
+                node.classes
+            );
+        }
     }
 
     /// bd-ka77: a bare `subgraph one` is labelled with its id, the way mermaid labels it.
