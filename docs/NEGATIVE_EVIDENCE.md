@@ -3670,6 +3670,48 @@ a reader can judge it.
   scope it to the run's own cpuset. Nothing else is missing: build, provenance, pinned ELF,
   equivalence and work proof are all green and reproducible.
 
+#### REPLICATION, second independent run on a DIFFERENT binary (2026-08-17)
+
+Still **PROVISIONAL** — 16 of 64 CPUs were at or above 20% busy, so the exclusivity gate would have
+refused a ninth time. Loadavg was converged and low (18.16 / 18.61 / 21.93), which is exactly why
+this is recorded: **converged load did not mean an idle host**, and occupancy is what the gate reads.
+
+Reproduced with `scripts/headtohead/abba_render.py`, the script landed so this row is not mine alone
+to re-derive. Independent binary: ELF
+`573b743f53b656206413d8ee6ce0a29ebe401110bc473e5eec85285e8f4b5d78` at rev `6ef585d0`, provenance
+string verified present INSIDE the ELF, pinned by content before measuring.
+
+```
+A1 fm       93,746 ns   work {bytes 43368, batch 37, revisions 1}
+B1 mermaid  38,300,000 ns
+B2 mermaid  37,800,000 ns
+A2 fm       89,441 ns   work {bytes 43368, batch 39, revisions 1}
+fm drift 1.0481x
+WORST BOUND 403.2x      headline 415.4x
+```
+
+- **Per-arm loadavg:** A1 14.90/17.34/21.11, B1 and B2 14.26/17.17/21.04, A2 13.92/17.05/20.98.
+- **Per-arm CPU MHz:** A1 1429–4092 spread 2.864x; B1 1429–4220 spread 2.953x; B2 1429–4297 spread
+  3.007x; A2 2508–4214 spread **1.680x**. A2 is the one arm that did not see an idle core, and it is
+  also the fastest fm observation — consistent with the cross-core spread mattering, and a reason the
+  number stays a bound.
+- **A/A null (incumbent, same invocation):** 1.0068 CI [0.8947, 1.0831] and 0.9594 CI [0.9180,
+  1.0371]. Both contain 1.0. The first is WIDER than either null in run 1 (±9%), so this window was
+  noisier on the incumbent side even though loadavg read lower.
+
+**THE QUOTED NUMBER DOES NOT CHANGE. It stays 362.4x** — the worst bound either run produced, per the
+replicated-standing convention. The standing is now two independent runs, on two different ELFs, at
+two different revisions, both with counted work proofs and both with A/A nulls containing 1.0.
+
+**What moved, and it is the incumbent.** Across both runs frankenmermaid produced 89,441 / 91,137 /
+92,994 / 93,746 ns — a 1.048x spread over four observations on two separately built binaries — while
+mermaid-js produced 33.7 / 36.9 / 37.8 / 38.3 ms, a 1.136x spread. The ratio rose from 362.4x to
+403.2x because the INCUMBENT got slower in this window, not because we got faster. Anyone tempted to
+read the higher number as an improvement should read those two spreads first.
+
+Both runs emitted **43,368 bytes** of SVG for the identical case, which is the equivalence signal
+worth having alongside the timing: the two binaries did the same work, four times.
+
 ### RETRACTED, and the retraction matters more than the claim: parse_accepted_revisions is NOT a work proof (2026-08-16)
 
 **I filed this as "the parse arm accepts zero revisions, therefore it parses nothing". That was
