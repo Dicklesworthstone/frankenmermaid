@@ -3988,6 +3988,27 @@ rebuilt by another agent mid-run — that has happened to this harness before.
 |---|---|---|---|---|---|---|---|
 | 1 | 92,994 ns | 91,137 ns | 1.0204x | 33.7 ms | 36.9 ms | **362.4x** | 383.4x |
 | 2 | 93,746 ns | 89,441 ns | 1.0481x | 38.3 ms | 37.8 ms | 403.2x | 415.4x |
+| 3 | 88,165 ns | 91,824 ns | 1.0415x | 34.8 ms | 34.9 ms | 379.0x | 387.2x |
+
+**Run 3 (2026-08-17, added later) is the first row in this campaign with UNBROKEN PROVENANCE**: the
+harness reported `binary embeds HEAD 3a84be6a` rather than accepting a stale-ELF override, ELF sha256
+`f4461460…`, verified two ways before measuring — the exe sha moved AND the revision string is present
+in the ELF, because mtime is worthless as a provenance check here. It ran `--no-pin`, `batch` 37/39,
+and it PASSES the drift control added in `ee930f50` (1.0415x against a 1.10x ceiling) rather than
+merely reporting a drift nobody read. Per-arm loadavg `[7.41,11.68,13.63]` → `[8.55,11.78,13.64]`;
+per-arm mean MHz 2534 / 2135 / 3311 / 3329, cross-core spread 2.86-3.01x. Window verified directly,
+not taken on report: idle 85.4-90.8% (avg 87.90%) over four `mpstat` samples, iowait ≤0.24%,
+16/64 CPUs below 80% idle. Its incumbent arms agree to **0.3%** (34.8 vs 34.9 ms), the tightest pair
+in this table.
+
+**It does not move the quoted figure.** 362.4x remains the worst bound any run produced, and run 3 at
+379.0x sits between runs 1 and 2 — a third independent invocation landing inside the existing spread
+is corroboration, which is exactly what should NOT change a conservative bound.
+
+⚠️ **Do not read run 3's cleaner provenance as promoting this row to CERTIFIED.** It is still
+UNCERTIFIED: no host-exclusivity gate was held, 16 of 64 CPUs were below 80% idle, and unpinned arms
+leave clocks uncontrolled at ~3x cross-core spread. Clean provenance answers "which code ran", not
+"was the host quiet enough to certify".
 
 **Counted work proof, in band, every observation:** 43,368 bytes of SVG emitted, `revisions` 1,
 `batch` 37-39. That is 0.47 bytes/ns against the 512 bytes/ns per-observed-thread ceiling — real
