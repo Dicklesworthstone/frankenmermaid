@@ -223,6 +223,9 @@ impl Canvas2dRenderer {
         // Draw the time/category axis (gantt dates, xychart categories).
         self.draw_axis_ticks(layout, ctx, offset_x, offset_y);
 
+        // Draw stateDiagram notes.
+        self.draw_state_notes(layout, ctx, offset_x, offset_y);
+
         // Draw sequence activation bars.
         self.draw_activation_bars(layout, ctx, offset_x, offset_y);
 
@@ -844,6 +847,76 @@ impl Canvas2dRenderer {
             }));
             ctx.fill_text(&tick.label, f64::from(tick.position) + offset_x, y);
             self.draw_calls += 1;
+        }
+    }
+
+    /// Draw stateDiagram notes -- box, leader and text.
+    ///
+    /// `extensions.state_notes` is filled by the state layout arm (bd-a6l4) and drawn by
+    /// fm-render-svg; this renderer referenced it nowhere (bd-t1jj). Canvas is the browser preview
+    /// surface -- fm-wasm renders through `render_to_canvas_with_layout` -- so `note right of X : ...`
+    /// produced a note that existed in the layout, was hashed into the layout checksum, and appeared
+    /// nowhere on screen.
+    ///
+    /// The LEADER is drawn, not just the box, for the same reason the terminal draws it (1d7324f7): a
+    /// box beside a state with nothing connecting them reads as another node rather than as an
+    /// annotation OF that state. That is a different wrong picture, not a smaller one.
+    fn draw_state_notes<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) {
+        if layout.extensions.state_notes.is_empty() {
+            return;
+        }
+        let mut note_font: Option<String> = None;
+        for note in &layout.extensions.state_notes {
+            let x = f64::from(note.bounds.x) + offset_x;
+            let y = f64::from(note.bounds.y) + offset_y;
+            let w = f64::from(note.bounds.width);
+            let h = f64::from(note.bounds.height);
+            if w <= 0.0 || h <= 0.0 {
+                continue;
+            }
+
+            ctx.set_fill_style(&self.config.node_fill);
+            ctx.fill_rect(x, y, w, h);
+            ctx.set_stroke_style(&self.config.node_stroke);
+            ctx.set_line_width(self.config.node_stroke_width);
+            ctx.stroke_rect(x, y, w, h);
+
+            // Leader from the annotated state to the note.
+            ctx.set_stroke_style(&self.config.edge_stroke);
+            ctx.begin_path();
+            ctx.move_to(
+                f64::from(note.leader_start.x) + offset_x,
+                f64::from(note.leader_start.y) + offset_y,
+            );
+            ctx.line_to(
+                f64::from(note.leader_end.x) + offset_x,
+                f64::from(note.leader_end.y) + offset_y,
+            );
+            ctx.stroke();
+
+            if !note.text.is_empty() {
+                ctx.set_fill_style(&self.config.label_color);
+                ctx.set_font(note_font.get_or_insert_with(|| {
+                    format!("{}px {}", self.config.font_size * 0.8, self.config.font_family)
+                }));
+                // Multi-line aware: `note right of X … end note` is the form that carries more than a
+                // sentence, and drawing only the first line would silently drop the rest.
+                let line_height = self.config.font_size * 1.2;
+                for (row, line) in note.text.lines().enumerate() {
+                    let line_y = y + line_height * (row as f64 + 1.0);
+                    if line_y > y + h {
+                        break;
+                    }
+                    ctx.fill_text(line, x + 4.0, line_y);
+                }
+            }
+            self.draw_calls += 3;
         }
     }
 
@@ -3091,6 +3164,97 @@ mod tests {
             alpha_draws, 1,
             "a label was drawn more than once, suggesting the axis pass ran for a diagram with no axis"
         );
+    }
+
+
+    /// A stateDiagram note must appear in the browser preview (bd-t1jj).
+    ///
+    /// `extensions.state_notes` is filled by the state layout arm (bd-a6l4) and drawn by
+    /// fm-render-svg; this renderer referenced it nowhere. Canvas is the browser preview surface --
+    /// fm-wasm renders through `render_to_canvas_with_layout` -- so `note right of X : ...` produced a
+    /// note that existed in the layout, was hashed into the layout checksum, and appeared nowhere on
+    /// screen.
+    #[test]
+    fn canvas_draws_a_state_note() {
+        let ir = fm_parser::parse(
+            "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Running\n  note right of Idle : waiting for work\n",
+        )
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+
+        // NON-VACUITY: the layout must actually publish a note, or this asserts nothing about the
+        // renderer and would pass on a diagram with nothing to draw.
+        let note = layout
+            .extensions
+            .state_notes
+            .first()
+            .expect(
+                "CONTROL FAILED: this source produced no state note, so the renderer has nothing to \
+                 draw and this test cannot detect the defect it was written for",
+            );
+        assert!(!note.text.is_empty(), "an empty note cannot be detected");
+
+        let mut ctx = MockCanvas2dContext::new(1200.0, 800.0);
+        let _ = crate::render_to_canvas_with_layout(
+            &ir,
+            &layout,
+            &mut ctx,
+            &CanvasRenderConfig::default(),
+        );
+        let ops = ctx.operations().to_vec();
+
+        let drew_text = ops.iter().any(|op| match op {
+            DrawOperation::FillText(text, _, _) => note.text.lines().any(|line| line == text),
+            _ => false,
+        });
+        assert!(drew_text, "the note text was never drawn");
+
+        // The LEADER must be drawn too: a box beside a state with nothing connecting them reads as
+        // another node rather than as an annotation of that state.
+        let sx = f64::from(note.leader_start.x);
+        let sy = f64::from(note.leader_start.y);
+        let ex = f64::from(note.leader_end.x);
+        let ey = f64::from(note.leader_end.y);
+        let drew_leader = ops.windows(2).any(|pair| match (&pair[0], &pair[1]) {
+            (DrawOperation::MoveTo(x0, y0), DrawOperation::LineTo(x1, y1)) => {
+                // Offsets are applied uniformly, so match on the leader's DELTA, which is
+                // offset-independent.
+                ((x1 - x0) - (ex - sx)).abs() < 0.01 && ((y1 - y0) - (ey - sy)).abs() < 0.01
+            }
+            _ => false,
+        });
+        assert!(
+            drew_leader,
+            "the note leader was never drawn; the box does not say which state it annotates"
+        );
+    }
+
+    /// A state diagram with no note draws none.
+    ///
+    /// Regression guard: without it, a renderer that drew a note unconditionally would satisfy the
+    /// claim above.
+    #[test]
+    fn canvas_draws_no_state_note_without_one() {
+        let ir = fm_parser::parse("stateDiagram-v2\n  [*] --> Idle\n  Idle --> Running\n").ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        assert!(
+            layout.extensions.state_notes.is_empty(),
+            "CONTROL FAILED: this source produced a note, so it cannot show the pass is inert"
+        );
+
+        let mut ctx = MockCanvas2dContext::new(1200.0, 800.0);
+        let before = ctx.operations().len();
+        let _ = crate::render_to_canvas_with_layout(
+            &ir,
+            &layout,
+            &mut ctx,
+            &CanvasRenderConfig::default(),
+        );
+        let drew_note_text = ctx.operations().iter().skip(before).any(|op| match op {
+            DrawOperation::FillText(text, _, _) => text.contains("waiting"),
+            _ => false,
+        });
+        assert!(!drew_note_text, "note text was drawn for a diagram with no note");
     }
 
 
