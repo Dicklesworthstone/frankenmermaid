@@ -1382,6 +1382,57 @@ impl Canvas2dRenderer {
                 }
             }
 
+            // CARDINALITIES reach the canvas (bd-rk14).
+            //
+            // `"1" --> "many"` lives in `IrEdgeExtras`, not in `edge.label`, and this path drew the
+            // label and nothing else — measured drawing in the SVG and absent from the canvas. Last
+            // of the eight drops in that bead, and the canvas twin of bd-o2wf.
+            //
+            // Placed OUTSIDE the label block on purpose: an edge may carry cardinality and no label.
+            // Each number goes by ITS OWN endpoint, since which end carries `1` and which carries
+            // `many` is the entire content.
+            //
+            // Unlike the terminal, this needs no blank-cell search: the canvas has real coordinates
+            // rather than a character grid, so the numbers are simply inset along the edge — the
+            // same approach fm-render-svg takes.
+            if let Some(edge) = ir_edge.filter(|e| {
+                e.source_cardinality().is_some() || e.target_cardinality().is_some()
+            }) && points.len() >= 2
+            {
+                let inset = self.config.font_size * 1.2;
+                let font = edge_label_font
+                    .get_or_insert_with(|| secondary_label_font_css(&self.config));
+                ctx.set_font(font.as_str());
+                ctx.set_fill_style(&self.config.label_color);
+                ctx.set_text_align(TextAlign::Center);
+                ctx.set_text_baseline(TextBaseline::Middle);
+
+                let mut place = |text: Option<&str>, from: &fm_layout::LayoutPoint, toward: &fm_layout::LayoutPoint| {
+                    let Some(text) = text.filter(|t| !t.is_empty()) else {
+                        return;
+                    };
+                    let (fx, fy) = (f64::from(from.x), f64::from(from.y));
+                    let (tx, ty) = (f64::from(toward.x), f64::from(toward.y));
+                    let (dx, dy) = (tx - fx, ty - fy);
+                    let len = dx.hypot(dy);
+                    // A zero-length segment has no direction to inset along; draw at the point.
+                    let (ux, uy) = if len > 0.0 { (dx / len, dy / len) } else { (0.0, 0.0) };
+                    ctx.fill_text(
+                        text,
+                        fx + ux * inset + offset_x,
+                        fy + uy * inset + offset_y,
+                    );
+                    self.draw_calls += 1;
+                };
+
+                let first = points[0];
+                let second = points[1];
+                let last = points[points.len() - 1];
+                let penultimate = points[points.len() - 2];
+                place(edge.source_cardinality(), &first, &second);
+                place(edge.target_cardinality(), &last, &penultimate);
+            }
+
             // Draw edge label if present
             if let Some(label_id) = ir_edge.and_then(|e| e.label)
                 && let Some(label) = ir.labels.get(label_id.0)

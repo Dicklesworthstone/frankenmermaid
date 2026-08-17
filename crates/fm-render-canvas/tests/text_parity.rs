@@ -45,6 +45,74 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ("flowchart_subgraph", "flowchart TD\n  subgraph Backend\n    a[Alpha]\n  end\n  a --> b[Beta]\n", &["Backend", "Alpha", "Beta"]),
 ];
 
+/// Class CARDINALITIES must reach the canvas (bd-rk14).
+///
+/// They live in `IrEdgeExtras`, not `edge.label`, and the canvas edge path drew the label and
+/// nothing else. Last of the eight drops in this bead, and the canvas twin of bd-o2wf.
+#[test]
+fn class_cardinalities_reach_the_canvas() {
+    let ir = fm_parser::parse("classDiagram\n  Alpha \"1\" --> \"many\" Beta\n").ir;
+    let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+    render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let texts = drawn_text(&format!("{:?}", context.operations()));
+
+    assert!(
+        texts.iter().any(|t| t.contains("Alpha")) && texts.iter().any(|t| t.contains("Beta")),
+        "the classes are missing: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t == "1"),
+        "the source cardinality never reached the canvas: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t == "many"),
+        "the target cardinality never reached the canvas: {texts:?}"
+    );
+}
+
+/// CONTROL: an edge WITHOUT cardinalities gains nothing.
+///
+/// The block runs for every edge, outside the label branch. Without this, a bug drawing an empty or
+/// stray string at each endpoint would go unnoticed on the case above, where extra glyphs would be
+/// mistaken for the numbers under test.
+#[test]
+fn class_edge_without_cardinality_gains_nothing_on_the_canvas() {
+    let ir = fm_parser::parse("classDiagram\n  Alpha --> Beta\n").ir;
+    let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+    render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let texts = drawn_text(&format!("{:?}", context.operations()));
+
+    assert!(
+        texts.iter().any(|t| t.contains("Alpha")) && texts.iter().any(|t| t.contains("Beta")),
+        "the classes are missing: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t == "many" || t == "1"),
+        "a cardinality was drawn for an edge that declares none: {texts:?}"
+    );
+}
+
+/// CONTROL: the edge's own LABEL survives alongside the cardinalities.
+///
+/// The two are drawn by adjacent blocks — numbers inset at the endpoints, label at the midpoint —
+/// so this pins that adding one did not cost the other.
+#[test]
+fn canvas_cardinality_does_not_displace_the_edge_label() {
+    let ir = fm_parser::parse("classDiagram\n  Alpha \"1\" --> \"many\" Beta : uses\n").ir;
+    let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+    render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let texts = drawn_text(&format!("{:?}", context.operations()));
+
+    assert!(
+        texts.iter().any(|t| t.contains("uses")),
+        "the edge label was displaced by a cardinality: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t == "many"),
+        "the cardinality is missing: {texts:?}"
+    );
+}
+
 /// A gitGraph BRANCH NAME must reach the canvas (bd-rk14).
 ///
 /// Measured: the layout carries `[(Lane,"main"), (Lane,"dev")]` from bd-jgco and the canvas drew
