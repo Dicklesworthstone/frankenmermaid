@@ -89,6 +89,22 @@ CORPUS_MJS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "corpus.mj
 # Physics ceiling from the work-proof gate: no single observed thread emits more than this.
 MAX_BYTES_PER_NS = 512.0
 
+# The fm bracket's own drift IS an A/A null on our arm: two runs of the SAME binary over the SAME
+# input inside ONE invocation. Until now this script computed it, printed it, and quoted the ratio
+# anyway -- the identical defect this file already names for `incumbent_starved` further down
+# ("a guard that exists and is never read is the same as no guard"). Observed live: a bracket whose
+# fm arm drifted 1.7078x still printed "WORST-BOUND RATIO: 228.1x".
+#
+# The ceiling is empirical, so publish the split rather than asserting a physics bound:
+#
+#   honest brackets (unpinned)   1.0094, 1.0119, 1.0201, 1.0204, 1.0481   worst EXCESS 0.0481
+#   pinned brackets              1.7078, 1.7175                           worst EXCESS 0.7175
+#
+# 1.10 sits ~2.1x above the worst honest excess and refuses the pinned ones by ~7x. That gap is what
+# makes it a separator and not a tuned filter; if an honest bracket ever lands near it, widen only
+# with the measurement that justifies it, and record the new observation in this table.
+MAX_FM_DRIFT = 1.10
+
 
 def loadavg() -> list[float]:
     with open("/proc/loadavg", encoding="utf-8") as handle:
@@ -311,6 +327,86 @@ def check_work_proof(arm: dict) -> str | None:
     return None
 
 
+def check_drift_control(fm_vals: list[int], arms: list[dict]) -> str | None:
+    """Refuse to quote a ratio our own arm could not reproduce.
+
+    A margin is only as trustworthy as the numerator's repeatability. When the two fm observations
+    disagree by more than `MAX_FM_DRIFT`, the bracket is measuring the environment, not the engine,
+    and the printed bound is arithmetic on noise.
+
+    The calibrated batch is reported alongside because it names the usual cause without a second
+    run: the harness records `batch` on every arm and nothing has ever read it. Single-core pinning
+    drives it into the low 20s while unpinned brackets sit at 37-39, measured independently twice
+    (bd-hmfi, bd-8557). A drifting bracket whose batch is in the low band is almost certainly the
+    pinning artifact rather than a busy host.
+    """
+    if len(fm_vals) < 2:
+        return None
+    drift = max(fm_vals) / min(fm_vals)
+    if drift <= MAX_FM_DRIFT:
+        return None
+    batches = [(arm.get("work") or {}).get("batch") for arm in arms]
+    return (
+        f"the fm arm drifted {drift:.4f}x between two runs of the same binary on the same input "
+        f"inside this invocation, over the {MAX_FM_DRIFT}x ceiling -- calibrated batch {batches}"
+    )
+
+
+def self_test() -> int:
+    """Prove the drift control separates the brackets that produced it.
+
+    Every row below is a real bracket measured on this host, not a fixture invented to pass. A gate
+    that has never been shown to REFUSE anything is indistinguishable from a gate that is never
+    reached, which is the failure this whole file keeps rediscovering.
+    """
+    # (label, fm observations ns, batch, must_refuse)
+    CASES = [
+        # Pinned to one core -- the artifact this gate exists to catch. Measured twice, independently.
+        ("pinned bd-8557", [93454, 159599], 22, True),
+        ("pinned bd-hmfi", [156370, 91043], 20, True),
+        # Unpinned brackets in the same windows, same ELF and input.
+        ("no-pin bd-8557", [88899, 89739], 39, False),
+        ("no-pin bd-hmfi 1st", [96557, 94654], 38, False),
+        ("no-pin bd-hmfi 2nd", [92143, 91060], 37, False),
+        # The banked sequence_20 row's two brackets: the loosest HONEST drifts on record (1.0204x,
+        # 1.0481x). If the ceiling ever refuses these, it has become a filter and not a separator.
+        ("banked bracket A", [100000, 102040], 39, False),
+        ("banked bracket B", [100000, 104810], 38, False),
+    ]
+
+    failures = 0
+    for label, vals, batch, must_refuse in CASES:
+        arms = [{"work": {"batch": batch}}, {"work": {"batch": batch}}]
+        why = check_drift_control(vals, arms)
+        refused = why is not None
+        drift = max(vals) / min(vals)
+        if refused != must_refuse:
+            verb = "REFUSED" if refused else "ADMITTED"
+            print(f"  FAIL {label}: drift {drift:.4f}x was {verb}, expected the opposite")
+            failures += 1
+        else:
+            print(f"  ok   {label}: drift {drift:.4f}x {'refused' if refused else 'admitted'}")
+
+    # A one-observation bracket cannot drift, and must not be refused for it -- absence of evidence
+    # is not a failed check, it is an incomplete one handled elsewhere.
+    if check_drift_control([88899], [{"work": {"batch": 39}}]) is not None:
+        print("  FAIL a single observation was refused for drift it cannot have")
+        failures += 1
+    else:
+        print("  ok   single observation not refused for drift it cannot have")
+
+    # The refusal must NAME the batch, since that is what tells the operator to try --no-pin.
+    why = check_drift_control([93454, 159599], [{"work": {"batch": 22}}, {"work": {"batch": 22}}])
+    if "22" not in (why or ""):
+        print("  FAIL the refusal does not report the calibrated batch")
+        failures += 1
+    else:
+        print("  ok   the refusal reports the calibrated batch")
+
+    print("self-test PASSED" if not failures else f"self-test FAILED ({failures})")
+    return 1 if failures else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fm-bin", required=True, help="content-pinned frankenmermaid h2h binary")
@@ -335,11 +431,23 @@ def main() -> int:
         "then say so, because the bias runs in our favour",
     )
     parser.add_argument(
+        "--self-test", action="store_true", help="check the gates against real measured brackets"
+    )
+    parser.add_argument(
+        "--allow-drifting-arm",
+        action="store_true",
+        help="quote a ratio even when the fm bracket fails its own drift control; the row must then "
+        "state the drift, because the margin is then arithmetic on noise",
+    )
+    parser.add_argument(
         "--allow-stale-elf",
         action="store_true",
         help="measure a binary not built from HEAD; the row must then state which revision it was",
     )
     args = parser.parse_args()
+
+    if args.self_test:
+        return self_test()
 
     print("=== A/B/B/A, one invocation, RENDER-scoped, UNCERTIFIED (no host-exclusivity gate) ===")
     rev = head_revision()
@@ -423,6 +531,19 @@ def main() -> int:
     print()
     print(f"fm  observations ns: {fm_vals}  drift {max(fm_vals) / min(fm_vals):.4f}x")
     print(f"mjs observations ns: {mj_vals}")
+
+    # Gate BEFORE the bounds are printed. A refusal that still prints the number it is refusing gets
+    # quoted anyway -- that is how the 228.1x bound escaped into a doc.
+    why = check_drift_control(fm_vals, [a1, a2])
+    if why is not None and not args.allow_drifting_arm:
+        print()
+        print(f"REFUSING TO QUOTE A RATIO: {why}")
+        print("  a bracket whose numerator cannot reproduce itself is measuring the environment")
+        print("  if the batch is in the low 20s, re-run with --no-pin before blaming the host")
+        print("  or pass --allow-drifting-arm and state the drift on the row")
+        return 2
+    if why is not None:
+        print(f"\nDRIFT OVERRIDDEN: {why}")
     # Worst bound: slower fm against faster mermaid.
     print(f"WORST-BOUND RATIO: {min(mj_vals) / max(fm_vals):.1f}x")
     print(f"headline (median/median): {statistics.median(mj_vals) / statistics.median(fm_vals):.1f}x")
