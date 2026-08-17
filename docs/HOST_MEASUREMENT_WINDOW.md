@@ -88,13 +88,38 @@ for them without needing any engine-side cause.
 
 ### What would actually fix it
 
-Either of these, not both:
+**CORRECTION to an earlier version of this note**, which said lengthening the arms meant editing the
+corpus to `reps_rs` 322,000 and `reps_js` 860. It does not: **`--reps-scale` already exists and
+scales BOTH arms** — `run.mjs:2229-2230` multiplies `reps_rs`/`warmup_rs`, `mermaid_bench.mjs:1528`
+multiplies `reps_js`/`warmup_js`, and `run.mjs:2672` forwards the flag. No corpus change is needed,
+and none should be made: an unpinned or re-pinned case is a hard `exit 3` for every run, and editing
+existing cases would silently move the baseline every banked row was measured against.
 
-1. **Make each arm span several periods.** At ~10 s, an arm of 30 s or more averages over three-plus
-   cycles. That means roughly `reps_rs` 322,000 (from 100) and `reps_js` 860 (from 15) — a large
-   change to the corpus, and it must be applied to BOTH arms or the asymmetry above gets worse.
-2. **Repeat the whole A/B/B/A many times and take medians across repeats**, so the phase is sampled
-   rather than fixed. Cheaper to run, but it needs enough repeats that the phases decorrelate.
+**But the knob is a SINGLE multiplier, and that is the real obstacle.** The two arms differ ~375x in
+per-rep cost, so one scale cannot bring both above the ~10 s interference period:
+
+| scale | frankenmermaid arm | mermaid-js arm | verdict |
+|---:|---:|---:|---|
+| 1 (today) | ~9 ms | ~0.5 s | both far below the period |
+| 60 | ~0.54 s | ~30 s | incumbent covered; OUR arm still inside one phase |
+| 3,300 | ~30 s | ~28 min | both covered; ~1.9 h for one A/B/B/A |
+
+So the choice is a genuine cost, not an oversight: covering the SHORT arm forces the long arm to
+~28 minutes each, i.e. roughly two hours for a single interleaved run. Covering only the incumbent
+is cheap and leaves the frankenmermaid arm exactly as phase-exposed as it is now — which is the arm
+whose drift (1.0204x, 1.0481x) prompted this investigation.
+
+Two ways forward, and they are not equivalent:
+
+1. **Run at `--reps-scale 3300` once, in a window that stays stationary for two hours.** Expensive,
+   and the stationarity requirement is stronger than anything this host has shown.
+2. **Repeat the whole A/B/B/A many times at scale 1 and take medians across repeats**, so the phase
+   is sampled rather than fixed. Cheap per run, but it needs enough repeats that phases decorrelate,
+   and nothing currently records which phase a given run landed in.
+
+A third option — scaling the arms INDEPENDENTLY so both reach ~30 s without the 28-minute incumbent —
+would need a per-arm flag that does not exist today. That is the change worth making if this
+comparison is to be trusted on a shared host, and it is a harness change, not an engine one.
 
 Neither is a code change to the engines, and neither should be attempted while `window_check.sh`
 reports NOT MEASURABLE — a longer arm on an oscillating host still needs the oscillation to be
