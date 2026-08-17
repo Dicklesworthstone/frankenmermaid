@@ -120,6 +120,51 @@ fn canonical_layout(ir: &fm_core::MermaidDiagramIr) -> String {
         ));
     }
 
+    // Bands — lane/section/column strips: gantt sections, journey lanes, kanban columns, gitGraph
+    // branches (bd-8e8z).
+    //
+    // THE LABEL IS HASHED, not just the geometry, and that is the whole point. bd-jgco was a
+    // MISSING LABEL on a correctly placed band: gitGraph branch names never reached any output.
+    // When that fix landed, `gitgraph_basic.svg` moved and this file did NOT — so a regression
+    // dropping every branch name would have left the layout gate green. A geometry-only band line
+    // would reproduce that blindness exactly.
+    //
+    // Emitted in layout order (the lane order the layout assigns), with the index included, so a
+    // reordering is a change rather than a silent permutation.
+    for (index, band) in layout.extensions.bands.iter().enumerate() {
+        lines.push(format!(
+            "band:{index} kind={:?} label={} x={:.6} y={:.6} w={:.6} h={:.6}",
+            band.kind,
+            band.label,
+            round6(band.bounds.x),
+            round6(band.bounds.y),
+            round6(band.bounds.width),
+            round6(band.bounds.height),
+        ));
+    }
+
+    // Clusters — subgraph boxes, and their TITLES for the same reason (bd-8e8z).
+    //
+    // bd-u3fo was a dropped cluster title. That one was a renderer defect and so would not have
+    // been caught here wherever this hashed, but the layout carries `cluster.title` and a
+    // layout-side regression that dropped it is exactly as invisible as the band case was.
+    //
+    // Sorted by `cluster_index` for a deterministic order independent of how layout happens to
+    // accumulate them.
+    let mut clusters: Vec<_> = layout.clusters.iter().collect();
+    clusters.sort_by_key(|cluster| cluster.cluster_index);
+    for cluster in &clusters {
+        lines.push(format!(
+            "cluster:{} title={} x={:.6} y={:.6} w={:.6} h={:.6}",
+            cluster.cluster_index,
+            cluster.title.as_deref().unwrap_or(""),
+            round6(cluster.bounds.x),
+            round6(cluster.bounds.y),
+            round6(cluster.bounds.width),
+            round6(cluster.bounds.height),
+        ));
+    }
+
     // Bounds
     lines.push(format!(
         "bounds: x={:.6} y={:.6} w={:.6} h={:.6}",
@@ -152,6 +197,41 @@ fn save_golden_checksums(checksums: &BTreeMap<String, serde_json::Value>) {
     });
     let content = serde_json::to_string_pretty(&value).expect("serialize checksums");
     fs::write(&path, format!("{content}\n")).expect("write golden checksums");
+}
+
+#[test]
+fn canonical_layout_covers_band_and_cluster_labels_not_just_geometry() {
+    // bd-8e8z's actual claim. The nine checksums that moved when bands and clusters were added to
+    // the hash prove those STRUCTURES are now covered — but not the labels, because adding geometry
+    // alone would have moved exactly the same nine (bands were absent from the hash entirely).
+    // This pins the part that matters: bd-jgco was a MISSING LABEL on a correctly placed band, so a
+    // hash that covered band geometry and not band text would have stayed green through it.
+    let ir = fm_parser::parse(
+        "gitGraph\n    commit\n    commit\n    branch develop\n    checkout develop\n    commit\n",
+    )
+    .ir;
+    let canonical = canonical_layout(&ir);
+
+    assert!(
+        canonical.contains("label=main"),
+        "the branch name `main` is not in the hashed layout string, so a regression dropping it \
+         would not move the checksum:\n{canonical}"
+    );
+    assert!(
+        canonical.contains("label=develop"),
+        "the branch name `develop` is not in the hashed layout string:\n{canonical}"
+    );
+
+    // Cluster titles likewise, via a diagram whose clusters carry names.
+    let subgraph_ir = fm_parser::parse(
+        "flowchart TD\n  subgraph Backend\n    a[Alpha]\n  end\n  a --> b[Beta]\n",
+    )
+    .ir;
+    let subgraph_canonical = canonical_layout(&subgraph_ir);
+    assert!(
+        subgraph_canonical.contains("title=Backend"),
+        "the subgraph title is not in the hashed layout string:\n{subgraph_canonical}"
+    );
 }
 
 #[test]
