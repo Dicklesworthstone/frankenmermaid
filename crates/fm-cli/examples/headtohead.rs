@@ -58,6 +58,15 @@ struct CorpusItem {
     texts: Arc<[String]>,
     /// Opaque identity for this immutable deserialized batch revision. Callers create a new key
     /// whenever any input changes; reconstructed internal allocations retain this exact key.
+    ///
+    /// No TIMED arm reads it any more (bd-8557). It keyed `parse_all_versioned`'s memo, which the
+    /// parse arm stopped consulting once it was found to be measuring the cache rather than the
+    /// parse; the field is kept because it is part of the corpus item's deserialized shape and the
+    /// memo's semantics tests still exercise it.
+    #[expect(
+        dead_code,
+        reason = "keyed the parse memo that no timed arm may consult; retained for corpus shape and semantics tests"
+    )]
     #[serde(skip, default = "new_batch_revision_key")]
     revision_key: Arc<BatchRevisionKey>,
     reps: usize,
@@ -143,11 +152,19 @@ fn build_git_revision() -> Option<&'static str> {
     option_env!("FM_H2H_BUILD_GIT_REV").filter(|revision| is_git_revision(revision))
 }
 
+/// A 40-character lowercase HEX object name, which is what git actually produces.
+///
+/// This used to accept `is_ascii_lowercase()`, i.e. the whole of a-z, so a 40-character run of `z`
+/// validated as a revision -- and its own test, which asserts exactly that case, was already failing
+/// on main. It matters beyond tidiness: this predicate is what decides whether the provenance stamp
+/// baked into a measured binary is trustworthy, and a row's build identity is only as good as the
+/// check that admitted it. Hex digits are 0-9 and a-f; uppercase stays rejected because git emits
+/// lowercase and the test pins that too.
 fn is_git_revision(revision: &str) -> bool {
     revision.len() == 40
         && revision
             .bytes()
-            .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase())
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 /// The lean output profile: no per-element accessibility metadata, no source spans.
 /// This is what `A11yConfig::none()` already produces today; it exists as a config, never as a
@@ -776,6 +793,16 @@ impl RenderExecutor {
     /// The opaque revision identity is the invalidation proof: callers mint a fresh key whenever
     /// any input changes. A hit therefore needs neither a corpus hash nor an O(total input bytes)
     /// equality walk, and the single retained batch bounds memory independently of request count.
+    /// Retained deliberately, with NO timed caller (bd-8557).
+    ///
+    /// Every arm that measures parsing now uses `parse_all_uncached`. This is kept because the
+    /// `persistent_parse_snapshot` flag is still reported in each row's provenance block and its
+    /// semantics are pinned by tests -- deleting it would silently drop a field that recorded rows
+    /// already carry. It must not be reintroduced into a timed loop.
+    #[expect(
+        dead_code,
+        reason = "memo path kept for its reported provenance flag and semantics tests; no timed arm may call it"
+    )]
     fn parse_all_versioned(
         &self,
         texts: &Arc<[String]>,
@@ -806,12 +833,15 @@ impl RenderExecutor {
 
     /// Parse every revision, ALWAYS doing the work, never consulting the snapshot cache.
     ///
-    /// `parse_all_versioned` exists so the RENDER arm measures rendering instead of re-parsing its
-    /// inputs on every iteration. Calling it from the PARSE arm inverts that: the first iteration
-    /// parses and caches, and every iteration after it hits `Arc::ptr_eq` and returns an
-    /// `Arc::clone`, so a calibrated batch performs ONE parse and N-1 pointer comparisons under a
-    /// mutex. Dividing the integrated time by the batch then reports the cost of a lock and a
-    /// refcount bump as if it were the cost of parsing.
+    /// `parse_all_versioned` memoizes a whole parsed batch on its revision key. Calling it from the
+    /// PARSE arm is self-defeating: the first iteration parses and caches, and every iteration after
+    /// it hits `Arc::ptr_eq` and returns an `Arc::clone`, so a calibrated batch performs ONE parse
+    /// and N-1 pointer comparisons under a mutex. Dividing the integrated time by the batch then
+    /// reports the cost of a lock and a refcount bump as if it were the cost of parsing.
+    ///
+    /// Worth stating plainly: moving these call sites revealed that the parse arm was that cache's
+    /// ONLY caller. It was not shared with the render arm, which has its own parse-plan and render
+    /// snapshots -- so the memo existed solely inside the loop whose cost it erased.
     ///
     /// That is exactly what happened: `sequence_20` reported `parse_ns.p50 = 8` -- eight nanoseconds
     /// for a 1,257-byte document, roughly 25 cycles -- from a batch of 348,849, which taken at face
@@ -1393,14 +1423,28 @@ fn calibrate_parse_batch(executor: &RenderExecutor, item: &CorpusItem) -> usize 
     }
     let mut batch = calibrated_batch(executor.min_sample_ns, fastest_warmup);
     for _ in 0..4 {
-        let t0 = Instant::now();
-        let parsed = run_parse_batch(executor, item, batch);
-        let elapsed = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        std::hint::black_box(parsed);
-        if elapsed >= executor.calibration_target_ns {
+        // Calibrate against the FASTEST observation of this batch, not a single one.
+        //
+        // `measure_parse` later rejects the whole measurement if ANY integrated sample falls below
+        // `min_sample_ns`, so the quantity that has to clear the floor is the fastest sample, not a
+        // typical one. Accepting a batch on one observation lets a CONTENDED run -- slow purely
+        // because a neighbour had the core -- satisfy the target, after which an uncontended timed
+        // sample runs comfortably more than the 1.5x margin faster and misses the floor. That
+        // surfaced as `measure_parse` returning Err only when the suite ran in parallel, i.e. a
+        // flake that appears under load and vanishes when the test is run alone.
+        //
+        // Taking the minimum of two runs makes calibration measure the same case the guard tests.
+        let mut fastest = u64::MAX;
+        for _ in 0..2 {
+            let t0 = Instant::now();
+            let parsed = run_parse_batch(executor, item, batch);
+            fastest = fastest.min(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX));
+            std::hint::black_box(parsed);
+        }
+        if fastest >= executor.calibration_target_ns {
             return batch;
         }
-        batch = rescaled_batch(batch, executor.calibration_target_ns, elapsed);
+        batch = rescaled_batch(batch, executor.calibration_target_ns, fastest);
     }
     batch
 }
@@ -1744,6 +1788,10 @@ fn main() {
             "execution_model": executor.execution_model(),
             "persistent_parse_plan": executor.persistent_parse_plan,
             "persistent_parse_snapshot": executor.persistent_parse_snapshot,
+            // Independent of the flag above: the parse arm always does the work. A reader of an
+            // archived row needs to know whether its parse timing was a parse or a cache hit, and
+            // for every row emitted before this the answer was "cache hit" (bd-8557).
+            "parse_arm_uses_snapshot": false,
             "persistent_render_snapshot": executor.persistent_render_snapshot,
             "timed_render_reuses_output_snapshot": TIMED_RENDER_REUSES_OUTPUT_SNAPSHOT,
             "timed_render_reuses_parse_plan": TIMED_RENDER_REUSES_PARSE_PLAN,
@@ -2066,7 +2114,8 @@ mod tests {
         CorpusItem, RenderExecutor, WorkloadMode, balanced_shards, bootstrap_median_ci,
         build_git_revision, calibrated_batch, contiguous_shards, full_pipeline_parsed,
         is_git_revision, lock_unpoisoned, measure_parse, median, new_batch_revision_key,
-        parse_cpu_list, parse_results_reference, ratio_stats, render_item, rescaled_batch, stats,
+        parse_cpu_list, parse_results_reference, ratio_stats, render_item, rescaled_batch,
+        run_parse_batch, stats,
     };
 
     #[test]
@@ -2471,9 +2520,10 @@ mod tests {
         );
 
         // ...and it must still be parsing the right thing, not skipping work to win the assertion.
-        assert_eq!(
-            parse_results_reference(&first).expect("first reference"),
-            parse_results_reference(&second).expect("second reference")
+        assert!(
+            parse_results_reference(&first).expect("first reference")
+                == parse_results_reference(&second).expect("second reference"),
+            "two uncached batch runs disagreed about what the input parses to"
         );
         assert_eq!(first.len(), item.texts.len());
 
