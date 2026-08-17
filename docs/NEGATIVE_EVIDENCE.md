@@ -3628,6 +3628,53 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### SCREEN, not banked rows: sequence_20 is an OUTLIER worst cell, not one of a cluster (2026-08-17)
+
+Asked to take "the next worst cell" after the sequence_20 standing (362.4x), I first had to find out
+which cell that is. The record said ER -- "WORST=ER 412.8x, LAYOUT-bound". **That is stale.** Measured
+here, `er_40` comes in at **964.6x**, nearly three times better than sequence_20.
+
+Eight cells, render-scoped A/B/B/A through `scripts/headtohead/abba_render.py`, executing ELF
+`c99c28575481a7ae4ffa2cd0eb53611da81b5d0fe061d1bc5dccaa7a035dec5e` at rev `07768c81`, provenance
+verified inside the ELF and the binary pinned by content before measuring.
+
+| cell | worst bound | fm drift | note |
+|---|---:|---:|---|
+| **sequence_20** | **362.4x** | 1.0204x | the banked standing |
+| er_40 | 964.6x | 1.0250x | the actual next-worst |
+| cyclic_scc_100 | 1155.1x | 1.1181x | |
+| class_50 | 1279.6x | 1.9429x | drift high; bound is conservative |
+| state_40 | 1626.3x | 1.0062x | cleanest bracket in the sweep |
+| flowchart_medium_100 | 2198.2x | 1.6641x | drift high; bound is conservative |
+| wide_12x24 | 3031.6x | 1.0341x | |
+| dense_dag_200 | 3650.7x | 1.0665x | |
+
+**THIS IS A SCREEN, AND THE SEVEN NON-SEQUENCE CELLS ARE DELIBERATELY NOT BANKED AS ROWS.** Only
+`er_40` carries the full per-arm conditions this fleet requires of a row (loadavg 25.65/25.48/27.38,
+24.48/25.24/27.28, 23.96/25.12/27.23; CPU MHz 1429-4096, spread 2.847x-2.866x; A/A nulls 1.0085
+[0.9586, 1.0629] and 1.0025 [0.9782, 1.0711], both containing 1.0; counted work 51,183 bytes,
+revisions 1). For the rest I captured the ratio and the drift but not the per-arm block, so they are
+recorded as an ORDERING and must not be quoted as rows. Banking a number without the provenance the
+convention demands is how a screen turns into a claim.
+
+**Conditions degraded across the sweep and that is not hidden.** Loadavg ran 20-27 at the start and
+**171.57** by the last cells. Every figure is a WORST bound -- slower fm observation against faster
+mermaid observation -- so contention inflates our arm's time and DEPRESSES the ratio: these are lower
+bounds, and the true separations are wider. Two cells (`class_50` 1.94x, `flowchart_medium_100`
+1.66x) show fm drift large enough that only their bound, never their headline, means anything.
+
+**THE FINDING THAT MATTERS.** sequence_20 is not the low end of a cluster; it is an outlier by a
+factor of 2.7 against the next cell. Seven of eight cells sit above 960x and five above 1150x. So
+"improve the worst ratio" is not diffuse work across the corpus -- it is a single identified weak
+spot in sequence rendering, and effort spent anywhere else in this corpus is spent on cells that are
+already an order of magnitude clear.
+
+**Still uncertified, fourteenth consecutive refusal.** 19 of 64 CPUs at or above 20% busy at the
+start; the host-wide exclusivity gate requires zero. Note also that these were measured with NEITHER
+arm pinned, which is symmetric -- unlike the certified path before `52b72e34`, which pinned our arm
+to the frequency floor while leaving the incumbent unpinned.
+
+
 ### PROMOTED TO A STANDING — see docs/PERF_LEDGER.md: sequence_20 render, worst bound 362.4x vs mermaid-js 11.15.0 (2026-08-16, promoted 2026-08-17)
 
 > **This entry is now HISTORY.** The row was replicated on a second independent binary and passed a
