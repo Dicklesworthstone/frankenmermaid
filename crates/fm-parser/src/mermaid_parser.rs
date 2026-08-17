@@ -4744,8 +4744,15 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
                 continue;
             }
 
-            if let Some((field @ ("id" | "text" | "risk" | "verifymethod"), rest)) =
-                trimmed.split_once(':')
+            // `type` and `docRef` are an ELEMENT's fields, and their absence here was bd-qdmn: they
+            // fell through this match, so the parser dropped them and no renderer could draw them.
+            // `docRef` is matched in BOTH casings because mermaid's grammar spells it camelCase and
+            // this match is on the raw field text — a lowercase-only arm would silently keep
+            // dropping every `docRef:` an author actually writes.
+            if let Some((
+                field @ ("id" | "text" | "risk" | "verifymethod" | "type" | "docRef" | "docref"),
+                rest,
+            )) = trimmed.split_once(':')
                 && let Some(node_id) = current_req_node
                 && let Some(node) = builder.node_mut(node_id)
             {
@@ -4768,6 +4775,8 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
                     "text" => meta.text = Some(value),
                     "risk" => meta.risk = Some(value),
                     "verifymethod" => meta.verify_method = Some(value),
+                    "type" => meta.element_type = Some(value),
+                    "docRef" | "docref" => meta.doc_ref = Some(value),
                     _ => unreachable!(),
                 }
                 continue;

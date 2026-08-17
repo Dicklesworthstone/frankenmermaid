@@ -2116,9 +2116,13 @@ impl Canvas2dRenderer {
 
                 ctx.set_font(fonts.1.as_str());
                 ctx.set_text_align(TextAlign::Left);
+                // `type`/`doc` are an ELEMENT's fields (bd-qdmn), in the SVG's row order so all
+                // three backends read alike — ID, Text, Type, Doc, then Risk and Verify.
                 for (prefix, value) in [
                     ("id: ", meta.req_id.as_deref()),
                     ("text: ", meta.text.as_deref()),
+                    ("type: ", meta.element_type.as_deref()),
+                    ("doc: ", meta.doc_ref.as_deref()),
                     ("risk: ", meta.risk.as_deref()),
                     ("verify: ", meta.verify_method.as_deref()),
                 ] {

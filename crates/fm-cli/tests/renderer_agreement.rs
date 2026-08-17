@@ -97,12 +97,11 @@ const CASES: &[(&str, &str, &str)] = &[
     ("quadrant_name", "quadrantChart\n  title Reach\n  x-axis Low --> High\n  quadrant-1 Do it\n  A: [0.3, 0.6]\n", "Do it"),
     ("arch_group", "architecture-beta\n  group api(cloud)[API Layer]\n  service db(database)[Database] in api\n", "API Layer"),
     ("c4_boundary", "C4Context\n  title S\n  System_Boundary(b, \"Internal\") {\n    Person(a, \"Alice\", \"A user\")\n  }\n", "Internal"),
-    // `req_element` DELIBERATELY OMITTED, and it is the defect this widening found: a requirement
-    // ELEMENT's `type:` reaches no renderer because it reaches no IR — `IrRequirementNodeMeta` has
-    // no field for it. All three renderers "agree" by drawing nothing, so this gate is blind to it
-    // by construction; only the SVG-reference assertion caught it. Filed as bd-qdmn with an
-    // #[ignore]d reproducer at crates/fm-render-svg/tests/requirement_element.rs. It belongs there,
-    // not here: this corpus compares BACKENDS, and the content never gets far enough to compare.
+    // RESTORED once bd-qdmn gave the field an IR home. It was omitted for one commit because a
+    // requirement ELEMENT's `type:` reached no renderer — it reached no IR — so all three "agreed"
+    // by drawing nothing and this corpus was blind to it by construction; only the SVG-reference
+    // assertion caught it. Back here now that there is something to compare.
+    ("req_element", "requirementDiagram\n  element E {\n  type: simulation\n  }\n", "simulation"),
     ("state_transition_label", "stateDiagram-v2\n  A --> B : go\n", "go"),
     ("timeline_section", "timeline\n  title Hist\n  section Age\n    2001 : Alpha\n", "Age"),
 ];

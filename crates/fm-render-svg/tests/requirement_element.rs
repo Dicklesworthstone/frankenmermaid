@@ -39,17 +39,8 @@ fn a_requirement_element_reaches_the_diagram_as_a_node() {
     );
 }
 
-/// ACCEPTANCE GATE for bd-qdmn.
-///
-/// ⚠️ `#[ignore]` BECAUSE IT REPRODUCES A LIVE DEFECT, not because it is unfinished. Un-ignoring it
-/// is how bd-qdmn closes. Measured today: the SVG does not contain `simulation` at all.
-///
-/// Fixing it means adding the two fields to `IrRequirementNodeMeta`, populating them on the element
-/// parse path, and drawing them in the three renderers as the requirement rows already are. Note
-/// that several SVG fast paths gate on `requirement_meta.is_none()`, so an element that suddenly
-/// HAS meta may take a different path — check those rather than assuming.
+/// ACCEPTANCE GATE for bd-qdmn. Was `#[ignore]`d while the field had no IR home at all.
 #[test]
-#[ignore = "bd-qdmn: a requirement element's type:/docRef: have no IR field, so nothing can draw them"]
 fn a_requirement_element_draws_its_declared_type() {
     let svg = fm_render_svg::render_svg(
         &fm_parser::parse("requirementDiagram\n  element E {\n  type: simulation\n  }\n").ir,
@@ -58,5 +49,53 @@ fn a_requirement_element_draws_its_declared_type() {
     assert!(
         svg.contains("simulation"),
         "the element's declared type never reached the SVG:\n{svg}"
+    );
+}
+
+/// `docRef:` is spelled camelCase in mermaid's grammar, and this parser matches the RAW field text.
+/// A lowercase-only arm would compile, pass every other test here, and silently keep dropping the
+/// spelling authors actually write — so both casings are asserted.
+#[test]
+fn a_requirement_element_draws_its_doc_ref_in_either_casing() {
+    for source in [
+        "requirementDiagram\n  element E {\n  type: simulation\n  docRef: ./spec.md\n  }\n",
+        "requirementDiagram\n  element E {\n  type: simulation\n  docref: ./spec.md\n  }\n",
+    ] {
+        let svg = fm_render_svg::render_svg(&fm_parser::parse(source).ir);
+        assert!(
+            svg.contains("./spec.md"),
+            "the element's docRef never reached the SVG for:\n{source}\n{svg}"
+        );
+    }
+}
+
+/// NEGATIVE CASE, and it is the one a naive fix fails. `requirement_type` is the KEYWORD a
+/// requirement was declared with (`requirement`, `functionalRequirement`, …); `element_type` is a
+/// value the author writes inside an `element` block. Wiring `type:` into the existing
+/// `requirement_type` field would satisfy the gate above and CORRUPT every requirement's declared
+/// category — so a plain requirement must still report its keyword, and must not gain a Type row it
+/// never declared.
+#[test]
+fn a_requirement_keyword_is_not_overwritten_by_the_element_type_field() {
+    let ir = fm_parser::parse(
+        "requirementDiagram\n  functionalRequirement R {\n  id: 1\n  text: hello\n  }\n",
+    )
+    .ir;
+
+    let meta = ir
+        .nodes
+        .iter()
+        .find_map(|node| node.requirement_meta.as_deref())
+        .expect("the requirement must carry meta");
+
+    assert_eq!(
+        meta.requirement_type.as_deref(),
+        Some("functionalRequirement"),
+        "the declared keyword was lost or overwritten"
+    );
+    assert!(
+        meta.element_type.is_none(),
+        "a requirement that declared no `type:` gained one: {:?}",
+        meta.element_type
     );
 }

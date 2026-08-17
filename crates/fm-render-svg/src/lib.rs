@@ -8317,9 +8317,15 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
     // row (`ID: …` then `Text: …` in mermaid 11.15.0's requirement renderer), which is what these
     // reproduce. The fixed prefixes hold no XML specials, so streaming the parts is byte-identical
     // to escaping a joined `format!` without the per-node String.
+    // `Type:` and `Doc:` are an ELEMENT's fields, added by bd-qdmn for the same reason bd-f3tc added
+    // the two above: declared by the author, dropped before the IR, drawn by nothing. They join this
+    // table rather than getting their own block so an element's rows stack with a requirement's in
+    // one order, and so a future row cannot forget the `text_y` advance below.
     for (prefix, value, class) in [
         ("ID: ", meta.req_id.as_deref(), "fm-req-id"),
         ("Text: ", meta.text.as_deref(), "fm-req-text"),
+        ("Type: ", meta.element_type.as_deref(), "fm-req-element-type"),
+        ("Doc: ", meta.doc_ref.as_deref(), "fm-req-docref"),
     ] {
         let Some(value) = value else { continue };
         write_req_subtitle_body_into(

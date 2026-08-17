@@ -4794,6 +4794,17 @@ pub struct IrRequirementNodeMeta {
     /// Verification method from the `verifymethod:` field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_method: Option<String>,
+    /// An ELEMENT's `type:` field — `element E { type: simulation }` (bd-qdmn).
+    ///
+    /// Distinct from [`Self::requirement_type`], which is the KEYWORD a requirement was declared
+    /// with (`requirement`, `functionalRequirement`, …). This is a value the author writes inside an
+    /// `element` block, and until bd-qdmn there was no field for it, so the parser dropped it and no
+    /// renderer could draw it — all three "agreed" by showing nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_type: Option<String>,
+    /// An ELEMENT's `docRef:` field — a pointer to the document the element stands for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_ref: Option<String>,
 }
 
 /// A data point in a quadrant chart with normalized [0, 1] coordinates.

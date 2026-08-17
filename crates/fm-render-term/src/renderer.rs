@@ -2496,10 +2496,15 @@ impl TermRenderer {
             row += 1;
         }
 
-        // Field order matches the SVG's row order so the two renderers read alike.
-        let fields: [(&str, Option<&str>); 4] = [
+        // Field order matches the SVG's row order so the two renderers read alike. `type`/`doc` are
+        // an ELEMENT's fields and join the same table for the same reason (bd-qdmn); the SVG orders
+        // them ID, Text, Type, Doc, then Risk/Verify, so the risk and verify rows stay last here to
+        // preserve that reading order rather than merely to append.
+        let fields: [(&str, Option<&str>); 6] = [
             ("id: ", meta.req_id.as_deref()),
             ("text: ", meta.text.as_deref()),
+            ("type: ", meta.element_type.as_deref()),
+            ("doc: ", meta.doc_ref.as_deref()),
             ("risk: ", meta.risk.as_deref()),
             ("verify: ", meta.verify_method.as_deref()),
         ];
