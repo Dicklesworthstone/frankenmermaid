@@ -140,7 +140,48 @@ fn golden_render_config() -> SvgRenderConfig {
     }
 }
 
-fn run_case(case_id: &str, bless: bool) {
+/// Localise a golden mismatch to its first differing region.
+///
+/// `FNV hash mismatch for case X` names the case and says nothing about WHAT moved, so attributing a
+/// stale golden to the change that caused it meant diffing two SVGs by hand. All seven goldens
+/// re-blessed in 4d415dcd were attributed that way. This is the same walk, done by the tooling:
+/// in from both ends to the first and last differing byte, quoting a bounded slice of each side.
+fn first_difference(expected: &str, got: &str) -> String {
+    let head = expected
+        .bytes()
+        .zip(got.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let head = {
+        let mut h = head.min(expected.len()).min(got.len());
+        while h > 0 && (!expected.is_char_boundary(h) || !got.is_char_boundary(h)) {
+            h -= 1;
+        }
+        h
+    };
+    let clip = |text: &str| -> String {
+        let mut start = head.min(text.len());
+        while start > 0 && !text.is_char_boundary(start) {
+            start -= 1;
+        }
+        let shown: String = text[start..].chars().take(140).collect();
+        shown
+    };
+    format!(
+        "    lengths {} vs {}, first difference at byte {head}\n    expected: {:?}\n    got:      {:?}",
+        expected.len(),
+        got.len(),
+        clip(expected),
+        clip(got),
+    )
+}
+
+/// Returns `Some(report)` when this case's golden snapshot does not match.
+///
+/// It REPORTS rather than panicking so the driver can name every stale golden in one run. This test
+/// used to abort on the first mismatch, so a run said `cycle_braid` and nothing else; discovering
+/// that seven goldens were stale took six bless-and-revert cycles at one build each.
+fn run_case(case_id: &str, bless: bool) -> Option<String> {
     let base = golden_dir();
     let input_path = base.join(format!("{case_id}.mmd"));
     let expected_path = base.join(format!("{case_id}.svg"));
@@ -198,14 +239,20 @@ fn run_case(case_id: &str, bless: bool) {
     let expected = normalize_svg(&expected);
     let expected_hash = fnv_hex(&expected);
 
-    assert_eq!(
-        output_hash, expected_hash,
-        "FNV hash mismatch for case {case_id}"
-    );
-    assert_eq!(
-        rendered, expected,
-        "golden snapshot content mismatch for case {case_id}"
-    );
+    let mismatch = if output_hash == expected_hash {
+        // Equal hashes with differing content would be an FNV collision on this corpus. Assert it
+        // rather than trusting the hash, because the hash is what the report quotes.
+        assert_eq!(
+            rendered, expected,
+            "golden snapshot content mismatch for case {case_id} despite equal hashes"
+        );
+        None
+    } else {
+        Some(format!(
+            "  {case_id}: expected {expected_hash}, got {output_hash}\n{}",
+            first_difference(&expected, &rendered)
+        ))
+    };
 
     if let Some(expectation) = resilience_expectation(case_id) {
         assert!(
@@ -265,9 +312,16 @@ fn run_case(case_id: &str, bless: bool) {
         "diagnostic_count": parsed.warnings.len(),
         "degradation_tier": degradation_tier,
         "output_artifact_hash": output_hash,
-        "pass_fail_reason": if bless { "bless-updated" } else { "matched-golden" },
+        "pass_fail_reason": if bless {
+            "bless-updated"
+        } else if mismatch.is_some() {
+            "golden-mismatch"
+        } else {
+            "matched-golden"
+        },
     });
     println!("{evidence}");
+    mismatch
 }
 
 fn selected_case_ids() -> Vec<&'static str> {
@@ -292,9 +346,17 @@ fn selected_case_ids() -> Vec<&'static str> {
 #[test]
 fn svg_golden_snapshots_are_stable() {
     let bless = std::env::var("BLESS").is_ok_and(|v| v == "1");
-    for case_id in selected_case_ids() {
-        run_case(case_id, bless);
-    }
+    let mismatches: Vec<String> = selected_case_ids()
+        .into_iter()
+        .filter_map(|case_id| run_case(case_id, bless))
+        .collect();
+    assert!(
+        mismatches.is_empty(),
+        "{} golden snapshot(s) out of date. EVERY stale case is listed, so one run attributes them \
+         all; re-bless only the ones whose change you can explain:\n{}",
+        mismatches.len(),
+        mismatches.join("\n"),
+    );
 }
 
 #[test]
