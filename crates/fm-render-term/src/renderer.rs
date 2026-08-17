@@ -1282,9 +1282,13 @@ impl TermRenderer {
         //
         // The band loop in `render_subcell_mode` draws each kind's GEOMETRY -- a dashed lifeline, a
         // section's rules, a column's separator -- and no text for any kind, while `LayoutBand`
-        // carries a `label` that fm-render-svg does draw. Measured: a kanban column named `Alpha`
-        // appeared in the SVG and was absent from `-f term`, with the card inside it drawn; the
-        // only node id in that diagram is the card, so the column name had no other route in.
+        // carries a `label` that fm-render-svg does draw.
+        //
+        // ⚠️ CORRECTION to what this comment used to say: it cited a kanban column named `Alpha` as
+        // the motivating case. That was wrong. A parsed kanban reaches the renderer with ZERO bands
+        // — `layout_diagram_kanban_traced` returns before the band block when the columns are
+        // declared lanes — so its columns are CLUSTERS and are handled by the cluster-title overlay
+        // below. This loop's live users are journey lanes and gantt sections.
         //
         // Drawing this was only made safe by the layout half of bd-u3fo. Before it, the Column
         // band's label was `format!("column {}", rank + 1)`, so an overlay here would have printed
@@ -1309,6 +1313,72 @@ impl TermRenderer {
                 let col = x + 1 + offset;
                 if col < cell_width {
                     lines[y][col] = ch;
+                }
+            }
+        }
+
+        // Overlay CLUSTER titles (bd-u3fo).
+        //
+        // `render_cluster_canvas` draws each cluster's RECTANGLE and nothing else, while
+        // fm-render-svg draws the box AND its title. So every subgraph name — a flowchart
+        // `subgraph Backend`, a kanban column — was a nameless box in `-f term`.
+        //
+        // This is the path a real kanban column actually takes, which is NOT the band path the
+        // comment above describes. `layout_diagram_kanban_traced` returns early when the columns
+        // are declared lanes (fm-layout `columns_are_declared_lanes`), so a parsed kanban reaches
+        // the renderer with ZERO bands and its columns as clusters; measured on `kanban / Alpha /
+        // t1[Beta]`: 1 node, 0 bands, and the terminal drew the card `Beta` and the column box but
+        // never `Alpha`. The band overlay stays for journey, whose lanes are bands.
+        //
+        // Placed at the first INTERIOR row rather than over the top border: the border row is the
+        // box's own geometry and overwriting it would trade a drawn edge for the text. Skipped
+        // entirely unless every target cell is blank, so a title can never displace a card label or
+        // a nested cluster's border — a name that overwrote the content it names is a worse outcome
+        // than the missing name this fixes.
+        if self.config.show_clusters {
+            for cluster_box in &layout.clusters {
+                let title = cluster_box
+                    .title
+                    .as_deref()
+                    .or_else(|| {
+                        ir.clusters
+                            .get(cluster_box.cluster_index)
+                            .and_then(|cluster| cluster.title)
+                            .and_then(|label_id| ir.labels.get(label_id.0))
+                            .map(|label| label.text.as_str())
+                    })
+                    .unwrap_or("");
+                if title.is_empty() {
+                    continue;
+                }
+                let (x, y, w, h) = self.bounds_to_cells(&cluster_box.bounds, scale_x, scale_y);
+                // `h < 3` has no interior row at all, and `w < 3` no room between the side borders.
+                if w < 3 || h < 3 {
+                    continue;
+                }
+                let row = y + 1;
+                if row >= lines.len() {
+                    continue;
+                }
+                let text: String = self.truncate_label(title).chars().take(w - 2).collect();
+                let start = x + 1;
+                // The canvas fills empty cells with the BLANK BRAILLE PATTERN, not a space, so a
+                // space-only check would read every empty cell as occupied and drop every title.
+                // `chars().enumerate()`, NOT `char_indices()`: the write loop below advances one
+                // CELL per char, so a byte offset would check the wrong columns for any title with
+                // a multi-byte character in it.
+                let is_free = text.chars().enumerate().all(|(offset, _)| {
+                    let col = start + offset;
+                    col < cell_width
+                        && lines[row]
+                            .get(col)
+                            .is_some_and(|cell| *cell == ' ' || *cell == '\u{2800}')
+                });
+                if !is_free {
+                    continue;
+                }
+                for (offset, ch) in text.chars().enumerate() {
+                    lines[row][start + offset] = ch;
                 }
             }
         }

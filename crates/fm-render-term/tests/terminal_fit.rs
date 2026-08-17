@@ -333,29 +333,68 @@ fn a_gantt_section_shows_its_name_in_terminal() {
     assert_eq!(out.matches("Zulu").count(), 1, "the section name was drawn more than once");
 }
 
+/// GENERALITY CONTROL: the fix is a CLUSTER-title overlay, not a kanban special case.
+///
+/// A flowchart `subgraph` is the same layout construct reached by a completely different layout
+/// path, so if this passes too, the missing title was the renderer's and not kanban's. Without
+/// this, a fix that keyed off `DiagramType::Kanban` would look just as green.
+#[test]
+fn a_flowchart_subgraph_shows_its_name_in_terminal() {
+    let ir = fm_parser::parse("flowchart TD\n  subgraph Backend\n    a[Alpha]\n  end\n  a --> b[Beta]\n").ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 100, 40).output;
+
+    assert!(
+        out.contains("Backend"),
+        "the subgraph name is missing from terminal output:\n{out}"
+    );
+    assert!(
+        out.contains("Alpha") && out.contains("Beta"),
+        "the subgraph title displaced node content:\n{out}"
+    );
+}
+
+/// CONFIG CONTROL: no title without its box.
+///
+/// The overlay sits behind the same `show_clusters` gate that draws the rectangle. If it did not,
+/// a config that deliberately hides clusters would still get their names floating on the canvas
+/// with nothing to attach them to — content invented where the user asked for none.
+#[test]
+fn cluster_titles_are_hidden_when_clusters_are() {
+    let ir = fm_parser::parse("kanban\n  Alpha\n    t1[Beta]\n").ir;
+    let mut config = TermRenderConfig::rich();
+    config.show_clusters = false;
+    let out = render_term_with_config(&ir, &config, 100, 40).output;
+
+    assert!(
+        !out.contains("Alpha"),
+        "a cluster title was drawn while clusters were hidden:\n{out}"
+    );
+    // The card must still be there — this control must fail for the RIGHT reason, not because the
+    // canvas came back empty.
+    assert!(
+        out.contains("Beta"),
+        "the fixture rendered nothing, so the assertion above proves nothing:\n{out}"
+    );
+}
+
 /// A kanban COLUMN's name must reach terminal output (bd-u3fo, the bead's headline case).
 ///
-/// The gantt-section test above covers the renderer half. This covers the case the bead was
-/// actually filed for and it exercises BOTH halves at once, which neither existing test does:
+/// The column is a CLUSTER, not a band. `layout_diagram_kanban_traced` returns early when the
+/// columns are declared lanes, so a parsed kanban arrives at the renderer with zero bands and its
+/// columns as clusters — and `render_cluster_canvas` drew each cluster's rectangle and no title,
+/// so the name was a nameless box. Measured on this exact fixture before the fix: 1 node, 0 bands,
+/// canvas showed the card `Beta` and the column rectangle, and `Alpha` nowhere.
 ///
-///   * the layout half, because a kanban column band's label used to be the generated placeholder
-///     `lane 1` — so before that fix this test would have found `lane 1` on the canvas and the
-///     user's own name nowhere, which is a placeholder rendered confidently and worse than a blank;
-///   * the renderer half, because the band loop drew each kind's geometry and no text at all.
+/// ⚠️ CORRECTION to this test's earlier `#[ignore]` note, which claimed `-f term` emitted NO text
+/// at all and that the card was missing too. That was wrong — dumping the canvas shows `Beta` and
+/// both box borders drawn. Only the cluster title was ever missing, which is why the fix is a
+/// title overlay and not the empty-canvas hunt the note sent the next reader on.
 ///
-/// Measured in the bead with the shipping binary: SVG drew both `Alpha` and `Beta`, `-f term` drew
-/// `Beta` only, and the sole node id in the diagram is the card — so the column name had no other
-/// route into the picture.
-///
-/// ⚠️ `#[ignore]` BECAUSE IT REPRODUCES A LIVE DEFECT, not because it is unfinished — the same
-/// standing this repo gave bd-8pna's acceptance test. Run with `--ignored` and it FAILS on the
-/// FIRST assertion, and the defect is wider than the label: measured with the shipping binary,
-/// `-f term` on this fixture emits NO text at all — not the column name and not the card — at
-/// 100x40, 200x60 and 400x100 alike, so it is not the viewport ceiling of bd-8tsw. The same
-/// fixture through `-f svg` draws both `Alpha` and `Beta` and no `lane N` placeholder, which
-/// confirms the IR and the layout half are correct and puts the fault in the terminal path.
+/// The three assertions, in order: the column name reaches the output; the card survives alongside
+/// it (a title that overwrote its own card would trade one piece of dropped content for another —
+/// the overlay's blank-cell guard is what makes this hold); and no `lane 1` placeholder appears,
+/// which is what fails if a future change routes kanban columns back through the band path.
 #[test]
-#[ignore = "bd-u3fo: reproduces a live defect — kanban emits no text in terminal at any viewport"]
 fn a_kanban_column_shows_its_name_in_terminal() {
     let ir = fm_parser::parse("kanban\n  Alpha\n    t1[Beta]\n").ir;
     let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 100, 40).output;
