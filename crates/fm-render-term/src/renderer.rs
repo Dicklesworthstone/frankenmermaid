@@ -404,13 +404,14 @@ impl TermRenderer {
         //
         // Four conditions, mirroring the SVG and canvas arms so no two backends disagree about
         // whether a marker belongs: the date is supplied (never the clock, see the config field),
-        // it parses via the SAME `parse_iso_day_number` the layout used to place the bars, it falls
-        // inside the charted span, and `todayMarker off` suppresses it. The x comes from
-        // `axis.x_for_day` and is never re-derived here — `LayoutGanttDayAxis`'s own doc warns that
-        // re-deriving day positions is how a marker and its axis come to disagree about where a day
-        // is.
-        if let (Some(today), Some(axis)) = (
-            self.config.gantt_today.as_deref(),
+        // it parses as a calendar date via the SAME `parse_iso_day_number` the layout used to place
+        // the bars (done once in `ResolvedConfig::resolve`, so this file holds no second copy of
+        // that arithmetic), it falls inside the charted span, and `todayMarker off` suppresses it.
+        // The x comes from `axis.x_for_day` and is never re-derived here — `LayoutGanttDayAxis`'s
+        // own doc warns that re-deriving day positions is how a marker and its axis come to
+        // disagree about where a day is.
+        if let (Some(day), Some(axis)) = (
+            self.config.gantt_today_day,
             layout.extensions.gantt_day_axis,
         ) {
             let disabled = ir
@@ -419,7 +420,6 @@ impl TermRenderer {
                 .and_then(|meta| meta.today_marker_style.as_deref())
                 .is_some_and(|style| style.trim().eq_ignore_ascii_case("off"));
             if !disabled
-                && let Some(day) = fm_layout::parse_iso_day_number(today)
                 && let Some(marker_x) = axis.x_for_day(day)
             {
                 // `draw_line` takes `isize` and clips internally. Casting to `usize` here would wrap

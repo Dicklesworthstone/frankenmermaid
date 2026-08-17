@@ -162,6 +162,18 @@ pub struct ResolvedConfig {
     pub show_clusters: bool,
     pub diagonal_edges: bool,
     pub padding: usize,
+    /// [`TermRenderConfig::gantt_today`] resolved to an epoch day number, or `None` when no date
+    /// was supplied or the one supplied is not a calendar date.
+    ///
+    /// The NUMBER rather than the string, for two reasons. This struct is `Copy` and an
+    /// `Option<String>` would end that for every consumer. And the parse belongs here: it happens
+    /// once, through the same `parse_iso_day_number` the layout used to place the bars, so the
+    /// renderer cannot accidentally grow a second copy of that arithmetic — which is exactly how a
+    /// marker and its axis come to disagree about where a day is.
+    ///
+    /// Nothing about it depends on the resolved tier: a today marker is one line drawn on the
+    /// canvas layer, so there is no size at which dropping it buys room for anything else.
+    pub gantt_today_day: Option<i32>,
 }
 
 impl ResolvedConfig {
@@ -198,6 +210,10 @@ impl ResolvedConfig {
             show_clusters: config.show_clusters && !matches!(tier, MermaidTier::Compact),
             diagonal_edges: config.diagonal_edges,
             padding: config.padding,
+            gantt_today_day: config
+                .gantt_today
+                .as_deref()
+                .and_then(fm_layout::parse_iso_day_number),
         }
     }
 
@@ -298,6 +314,7 @@ mod tests {
             show_clusters: true,
             diagonal_edges: true,
             padding: 1,
+            gantt_today_day: None,
         };
         assert_eq!(config.subcell_multiplier(), (2, 4));
     }
