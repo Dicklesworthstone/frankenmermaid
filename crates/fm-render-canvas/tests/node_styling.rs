@@ -128,6 +128,20 @@ fn styling_applies_only_to_the_named_node() {
 // unconditionally, so `linkStyle` was discarded exactly as `style`/`classDef` was on nodes. The
 // SVG renderer honours `LinkDefault` at lib.rs:2868, so a coloured edge appeared in an export and
 // stayed grey in the canvas preview — the same two-outputs-disagree symptom as the node half.
+//
+// PROVED NON-VACUOUS by disarm, not by argument. Forcing the two resolved values back to the
+// pre-fix constants (`stroke = config.edge_stroke`, `stroke_width = legacy_width`) fails exactly
+// the four positive tests and none of the controls:
+//
+//     FAILED: a_linkstyle_index_colours_its_edge, linkstyle_default_colours_all_edges,
+//             an_indexed_linkstyle_beats_the_default,
+//             an_indexed_linkstyle_does_not_leak_to_other_edges
+//     PASSED: the two theme-default controls below, plus the four node tests above
+//     observed strokes while disarmed: ["#475569", "#475569", "#94a3b8", "#94a3b8", "#94a3b8"]
+//
+// That split is the point: a gate whose CONTROLS also fail when disarmed is not measuring the
+// thing it names. The controls hold because the disarmed renderer still emits theme colours —
+// which is precisely what they assert.
 // ---------------------------------------------------------------------------------------------
 
 /// `linkStyle <n>` reaches the canvas.
