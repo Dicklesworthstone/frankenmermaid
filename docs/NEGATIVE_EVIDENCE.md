@@ -21332,6 +21332,26 @@ change around it. The script now GENERATES the corpus from `corpus.mjs`, the sam
 incumbent arm consumes, and prints its sha: the two arms can no longer disagree about bytes or shape
 by construction rather than by assertion.
 
+**ADDENDUM 2026-08-17, the volatility QUANTIFIED rather than asserted.** A later tick was described
+to me as "CPU idle 85 pct, iowait 0 — genuinely clean window despite loadavg 31". One
+`window_check.sh` run agreed it looked calm (spread 7, idle 82.0-88.3%). Five consecutive 8-sample
+windows over the next ~2 minutes did not:
+
+| run | count spread | max busy | idle range across the SAME samples | load1 |
+|---|---:|---:|---|---:|
+| 1 | 7 | 14 | 82.0-88.3% | 12.19 |
+| 2 | 49 | 64 | 30.9-80.7% | 16.56 |
+| 3 | 42 | 64 | 20.1-76.0% | 17.09 |
+| 4 | 48 | 64 | **0.8**-81.5% | 16.75 |
+| 5 | 11 | 24 | 76.6-86.3% | 16.33 |
+
+**This host went from 88.3% idle to 0.8% idle inside two minutes, with the 1-minute loadavg moving
+only 12.2 -> 16.8.** So loadavg saw almost nothing, and any single idle reading — including the 85%
+in my orders — is a coin flip on which second it landed. I went in suspecting `window_check.sh`'s
+spread tolerance of 4 might be a gate set at the operating point, the failure this campaign has hit
+three times. It is not: run 1 reached spread 7, so the gate is approachable, and runs 2-4 are exactly
+the swing its docstring describes. The instrument is right and I was wrong to suspect it.
+
 **Do-not-retry note:** do not re-attempt this certification on a converged-but-busy host. Converged
 load is not an idle host — 64/64 cpus were over 20% busy in every admitted run above while the
 1-minute loadavg looked acceptable. Run `scripts/window_check.sh` FIRST and believe its verdict.
