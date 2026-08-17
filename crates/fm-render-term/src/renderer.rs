@@ -303,6 +303,29 @@ impl TermRenderer {
             }
         }
 
+        // PACKET FIELD CONTINUATIONS (bd-t1jj). A packet-beta field that crosses a 32-bit row
+        // boundary is laid out as a primary box plus one continuation box per extra row, and the
+        // terminal drew only the primary. Measured on `24-47: "CrossingField"`: layout emits the
+        // primary at (768, 0, 256, 55) and a continuation at (0, 70, 512, 55), and the terminal drew
+        // the 256-wide box alone -- so a 24-bit field was rendered with the extent of an 8-bit one.
+        //
+        // That is not a missing decoration. A packet diagram exists to show how wide each field is,
+        // so dropping two thirds of a field's extent misstates the one thing the diagram is for.
+        for continuation in &layout.extensions.packet_field_continuations {
+            let x = (continuation.bounds.x * pixel_scale_x) as isize + padding_x as isize;
+            let y = (continuation.bounds.y * pixel_scale_y) as isize + padding_y as isize;
+            let w = (continuation.bounds.width * pixel_scale_x) as isize;
+            let h = (continuation.bounds.height * pixel_scale_y) as isize;
+            if w > 2 && h > 2 && x >= 0 && y >= 0 {
+                canvas.draw_rect(
+                    usize::try_from(x).unwrap_or(0),
+                    usize::try_from(y).unwrap_or(0),
+                    usize::try_from(w).unwrap_or(0),
+                    usize::try_from(h).unwrap_or(0),
+                );
+            }
+        }
+
         // stateDiagram NOTES (bd-t1jj). `extensions.state_notes` is filled by the state layout arm
         // and drawn by fm-render-svg; the terminal referenced it nowhere, so `note right of X : ...`
         // produced a note that existed in the layout and appeared in no terminal output.
@@ -1394,6 +1417,35 @@ impl TermRenderer {
                 }
                 if written > 0 {
                     last_end = Some(x + written);
+                }
+            }
+        }
+
+        // PACKET CONTINUATION LABELS (bd-t1jj). fm-render-svg labels each continuation, and it is
+        // right to: a second box on a later row with no name in it does not say WHICH field wrapped,
+        // which is the only thing a reader needs from it. The name therefore appears on both
+        // segments, exactly as the SVG arm renders it.
+        for continuation in &layout.extensions.packet_field_continuations {
+            let Some(node) = ir.nodes.get(continuation.node_index) else {
+                continue;
+            };
+            let Some(label) = self.node_display_label(ir, Some(node), &node.id) else {
+                continue;
+            };
+            let (x, y, w, h) = self.bounds_to_cells(&continuation.bounds, scale_x, scale_y);
+            if w < 3 || h < 1 || y >= lines.len() {
+                continue;
+            }
+            let label_len = label.chars().count();
+            let label_x = x + (w.saturating_sub(label_len)) / 2;
+            let label_y = y + h / 2;
+            if label_y >= lines.len() {
+                continue;
+            }
+            for (offset, ch) in label.chars().enumerate() {
+                let col = label_x + offset;
+                if col < cell_width && col < lines[label_y].len() {
+                    lines[label_y][col] = ch;
                 }
             }
         }

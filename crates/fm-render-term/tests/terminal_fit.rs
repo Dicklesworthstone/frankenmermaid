@@ -721,3 +721,79 @@ fn a_flowchart_label_is_unaffected_by_gantt_placement() {
         "a flowchart label was duplicated or displaced:\n{out}"
     );
 }
+
+/// A packet field that crosses a 32-bit row boundary must be drawn on BOTH rows (bd-t1jj).
+///
+/// `extensions.packet_field_continuations` gives one extra box per additional row a field occupies,
+/// and fm-render-svg draws each with its label. The terminal drew only the primary box, so measured
+/// on `24-47: "CrossingField"` -- primary at (768, 0, 256, 55), continuation at (0, 70, 512, 55) --
+/// a 24-bit field rendered with the extent of an 8-bit one.
+///
+/// That is not a missing decoration. A packet diagram exists to show how wide each field is, so
+/// dropping two thirds of a field's extent misstates the one thing the diagram is for.
+///
+/// ASSERTED BY OCCURRENCE COUNT, which is what distinguishes a drawn continuation from a drawn
+/// primary: the wrapped field's name must appear TWICE, once per segment, while fields that do not
+/// wrap appear exactly once. A `contains` check would have passed before the fix, because the
+/// primary box always carried the name.
+#[test]
+fn a_wrapped_packet_field_is_drawn_on_both_rows() {
+    let src = "packet-beta\n  0-15: \"SourcePort\"\n  16-23: \"Flags\"\n  24-47: \"CrossingField\"\n  48-63: \"Checksum\"\n";
+    let ir = fm_parser::parse(src).ir;
+    let layout = fm_layout::layout_diagram(&ir);
+
+    // NON-VACUITY: layout must actually emit a continuation, or this test asserts nothing about the
+    // renderer and would pass on a packet whose fields all fit one row.
+    assert_eq!(
+        layout.extensions.packet_field_continuations.len(),
+        1,
+        "CONTROL FAILED: expected exactly one continuation for a field crossing the 32-bit \
+         boundary, so this fixture cannot detect the defect it was written for"
+    );
+
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 120, 40).output;
+    assert_eq!(
+        out.matches("CrossingField").count(),
+        2,
+        "the wrapped field was drawn on one row only, so its extent is understated:\n{out}"
+    );
+    // Fields that do NOT wrap must still appear exactly once -- a continuation pass that labelled
+    // every field twice would satisfy the assertion above while corrupting the rest of the packet.
+    assert_eq!(
+        out.matches("SourcePort").count(),
+        1,
+        "an unwrapped field was duplicated by the continuation pass:\n{out}"
+    );
+    assert_eq!(
+        out.matches("Checksum").count(),
+        1,
+        "an unwrapped field was duplicated by the continuation pass:\n{out}"
+    );
+}
+
+/// A packet whose fields all fit one row gains no continuation boxes.
+///
+/// Regression guard: without it, a renderer that emitted continuations unconditionally would satisfy
+/// the test above.
+#[test]
+fn an_unwrapped_packet_gains_no_continuation() {
+    let src = "packet-beta\n  0-15: \"SourcePort\"\n  16-31: \"DestPort\"\n";
+    let ir = fm_parser::parse(src).ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    assert!(
+        layout.extensions.packet_field_continuations.is_empty(),
+        "CONTROL FAILED: this packet produced a continuation, so it cannot show the pass is inert"
+    );
+
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 120, 40).output;
+    assert_eq!(
+        out.matches("SourcePort").count(),
+        1,
+        "a field was duplicated although nothing wrapped:\n{out}"
+    );
+    assert_eq!(
+        out.matches("DestPort").count(),
+        1,
+        "a field was duplicated although nothing wrapped:\n{out}"
+    );
+}
