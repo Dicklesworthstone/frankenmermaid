@@ -363,6 +363,56 @@ fn gantt_section_name_is_truncated_to_the_band_width() {
     );
 }
 
+/// A class STEREOTYPE must reach terminal output (bd-039t).
+///
+/// Measured SVG vs terminal: an `interface` stereotype drew in the SVG and not in the terminal.
+/// Unlike the other members of this bead, this was a gap INSIDE an overlay that already existed —
+/// the class compartments drew name, attributes and methods and skipped `meta.stereotype`.
+#[test]
+fn class_stereotype_reaches_terminal_output() {
+    let ir = fm_parser::parse(
+        "classDiagram\n  class Alpha {\n    +String name\n  }\n  <<interface>> Alpha\n",
+    )
+    .ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(out.contains("Alpha"), "the class name is missing:\n{out}");
+    assert!(out.contains("interface"), "the stereotype never reached the terminal:\n{out}");
+    // The members must survive: the stereotype is inserted ABOVE the name inside the same box, so a
+    // miscounted row would push the compartment rows out of the box rather than fail loudly.
+    assert!(out.contains("name"), "the stereotype displaced the class members:\n{out}");
+
+    // THE EXACT SOURCE THE PROBE REPORTED, which declares the class and its member separately
+    // rather than in a block. A fix verified only against a differently-shaped fixture would not
+    // have closed the case that was actually filed.
+    let probe_form =
+        fm_parser::parse("classDiagram\n  class Alpha\n  <<interface>> Alpha\n  Alpha : +run()\n").ir;
+    let probe_out = render_term_with_config(&probe_form, &TermRenderConfig::rich(), 200, 60).output;
+    assert!(
+        probe_out.contains("interface"),
+        "the stereotype is still missing for the separately-declared form the probe used:\n{probe_out}"
+    );
+}
+
+/// CONTROL: a class WITHOUT a stereotype is unchanged.
+///
+/// The new row is emitted only when `meta.stereotype` is present. Without this, an unconditional
+/// row would shift every class box's contents down by one and go unnoticed on the case above.
+#[test]
+fn class_without_stereotype_is_unchanged() {
+    let ir = fm_parser::parse("classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n").ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(
+        out.contains("Alpha") && out.contains("name") && out.contains("run"),
+        "a stereotype-free class regressed:\n{out}"
+    );
+    assert!(
+        !out.contains("interface"),
+        "a stereotype was drawn for a class that declares none:\n{out}"
+    );
+}
+
 /// A C4 element's TYPE, TECHNOLOGY and DESCRIPTION must reach terminal output (bd-039t).
 ///
 /// Measured SVG vs terminal: `Person(a, "Alice", "A user")` drew `A user` in the SVG and not in the

@@ -2405,6 +2405,33 @@ impl TermRenderer {
         // Content must stay above the bottom border row.
         let max_content_row = if h >= 2 { y + h - 1 } else { y + h };
 
+        // STEREOTYPE, above the name and centred, exactly where fm-render-svg puts it (bd-039t).
+        //
+        // Measured SVG vs terminal: `<<interface>> Alpha` drew the stereotype in the SVG and not in
+        // the terminal. Unlike the ER, requirement and C4 cases in this bead — each of which needed
+        // a whole new overlay — this one is a gap INSIDE an overlay that already existed: the class
+        // compartments drew name, attributes and methods and simply skipped `meta.stereotype`.
+        //
+        // The variant-to-text mapping mirrors `write_class_stereotype_into` in fm-render-svg,
+        // including that `Enum` renders as `<<enumeration>>` and a `Custom` stereotype is written
+        // verbatim (the author already supplied its own brackets).
+        if let Some(stereotype) = &meta.stereotype
+            && row < max_content_row
+        {
+            let stereo_text = match stereotype {
+                fm_core::ClassStereotype::Interface => "<<interface>>",
+                fm_core::ClassStereotype::Abstract => "<<abstract>>",
+                fm_core::ClassStereotype::Enum => "<<enumeration>>",
+                fm_core::ClassStereotype::Service => "<<service>>",
+                fm_core::ClassStereotype::Custom(s) => s.as_str(),
+            };
+            let stereo = self.truncate_label(stereo_text);
+            let stereo_chars = stereo.chars().count();
+            let stereo_x = x + 1 + inner_w.saturating_sub(stereo_chars) / 2;
+            write_text(grid, row, stereo_x, &stereo, inner_w);
+            row += 1;
+        }
+
         // Header: class name (centered).
         let class_name = node
             .label
