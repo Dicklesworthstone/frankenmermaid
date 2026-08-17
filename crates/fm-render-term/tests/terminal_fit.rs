@@ -333,6 +333,61 @@ fn a_gantt_section_shows_its_name_in_terminal() {
     assert_eq!(out.matches("Zulu").count(), 1, "the section name was drawn more than once");
 }
 
+/// An ER entity's ATTRIBUTES must reach terminal output (bd-ekx2).
+///
+/// Measured before the fix: `CUSTOMER { string name PK / int age }` parsed to an IR carrying 2
+/// members, and the terminal drew the entity NAME only — `name`, `age` and `PK` absent at 100x40,
+/// 200x60 AND 400x120. Size-independent, so not the viewport ceiling of bd-8tsw. The identifier
+/// `members` appeared nowhere in the terminal renderer.
+#[test]
+fn er_entity_attributes_reach_terminal_output() {
+    let ir = fm_parser::parse(
+        "erDiagram\n  CUSTOMER {\n    string name PK\n    int age\n  }\n  CUSTOMER ||--o{ ORDER : places\n",
+    )
+    .ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(out.contains("CUSTOMER"), "the entity name is missing:\n{out}");
+    assert!(out.contains("name"), "attribute `name` never reached the terminal:\n{out}");
+    assert!(out.contains("age"), "attribute `age` never reached the terminal:\n{out}");
+    // The KEY marker is the part an ER reader relies on to tell a primary key from a plain column.
+    assert!(out.contains("PK"), "the PK key marker never reached the terminal:\n{out}");
+    // The relationship label must survive alongside the new rows — attributes drawn over the rest
+    // of the diagram would trade one piece of dropped content for another.
+    assert!(out.contains("places"), "the relationship label was displaced:\n{out}");
+}
+
+/// CONTROL: class compartments still render, unchanged.
+///
+/// The ER branch is inserted directly after the class branch in the same node loop. If it were
+/// ordered or guarded wrongly it could swallow class nodes, which carry their members in
+/// `class_meta` rather than `members` — this fails loudly if that happens.
+#[test]
+fn class_compartments_still_render_after_the_er_branch() {
+    let ir = fm_parser::parse("classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n").ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(
+        out.contains("Alpha") && out.contains("name") && out.contains("run"),
+        "class compartments regressed:\n{out}"
+    );
+}
+
+/// CONTROL: an ER entity with NO attributes still draws its name.
+///
+/// The new branch is gated on `!members.is_empty()`, so a bare entity must fall through to ordinary
+/// node rendering rather than losing its label to an empty compartment.
+#[test]
+fn er_entity_without_attributes_still_shows_its_name() {
+    let ir = fm_parser::parse("erDiagram\n  CUSTOMER ||--o{ ORDER : places\n").ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(
+        out.contains("CUSTOMER") && out.contains("ORDER"),
+        "a bare ER entity lost its name:\n{out}"
+    );
+}
+
 /// GENERALITY CONTROL: the fix is a CLUSTER-title overlay, not a kanban special case.
 ///
 /// A flowchart `subgraph` is the same layout construct reached by a completely different layout

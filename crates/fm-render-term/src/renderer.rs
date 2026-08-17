@@ -1586,6 +1586,25 @@ impl TermRenderer {
                 continue;
             }
 
+            // ER entities get the SAME treatment (bd-ekx2).
+            //
+            // `IrNode::members` is populated only for ER entities, and the identifier `members` did
+            // not appear anywhere in this file: the terminal drew the box and the entity name and
+            // stopped. Measured on `CUSTOMER { string name PK / int age }`, the IR carried 2 members
+            // while `name`, `age` and `PK` were absent at 100x40, 200x60 AND 400x120 —
+            // size-independent, so not the viewport ceiling of bd-8tsw. The class branch directly
+            // above proves the terminal can draw compartments; ER simply never got them.
+            //
+            // No layout change is needed: `er_compartment_dimensions` already sizes the entity box
+            // to hold its rows, so the box has been big enough all along and only the text was
+            // missing.
+            if let Some(node) = ir_node
+                && !node.members.is_empty()
+            {
+                self.overlay_er_compartments(&mut lines, x, y, w, h, ir, node, cell_width);
+                continue;
+            }
+
             let Some(label) = self.node_display_label(ir, ir_node, &node_box.node_id) else {
                 continue;
             };
@@ -1924,6 +1943,108 @@ impl TermRenderer {
     /// │ +eat()   │  ← methods with visibility
     /// └──────────┘
     /// ```
+    /// Draw an ER entity as a name header, a divider and one row per attribute (bd-ekx2).
+    ///
+    /// The row text mirrors fm-render-svg EXACTLY — `{key_prefix}{data_type} {name}`, plus the
+    /// comment when present — so the two renderers say the same thing about the same entity. It is
+    /// also the concatenation `er_attribute_row_width` measures in layout, which is why the box
+    /// already has room for it.
+    #[allow(clippy::too_many_arguments)]
+    fn overlay_er_compartments(
+        &self,
+        grid: &mut [Vec<char>],
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        ir: &MermaidDiagramIr,
+        node: &fm_core::IrNode,
+        grid_width: usize,
+    ) {
+        let inner_w = w.saturating_sub(2);
+        let glyphs = &self.box_glyphs;
+
+        let write_text =
+            |grid: &mut [Vec<char>], row: usize, col: usize, text: &str, max_w: usize| {
+                if row >= grid.len() {
+                    return;
+                }
+                for (i, ch) in text.chars().take(max_w).enumerate() {
+                    let c = col + i;
+                    if c < grid_width && c < grid[row].len() {
+                        grid[row][c] = ch;
+                    }
+                }
+            };
+
+        let draw_separator = |grid: &mut [Vec<char>], row: usize| {
+            if row >= grid.len() {
+                return;
+            }
+            if x < grid_width && x < grid[row].len() {
+                grid[row][x] = glyphs.t_right;
+            }
+            for dx in 1..w.saturating_sub(1) {
+                let c = x + dx;
+                if c < grid_width && c < grid[row].len() {
+                    grid[row][c] = glyphs.horizontal;
+                }
+            }
+            let right = x + w.saturating_sub(1);
+            if right < grid_width && right < grid[row].len() {
+                grid[row][right] = glyphs.t_left;
+            }
+        };
+
+        let mut row = y + 1;
+        // Content must stay above the bottom border row, exactly as the class overlay does: a box
+        // too short for even the header draws nothing rather than writing over its own border.
+        let max_content_row = if h >= 2 { y + h - 1 } else { y + h };
+
+        let entity_name = node
+            .label
+            .and_then(|lid| ir.labels.get(lid.0))
+            .map(|l| l.text.as_str())
+            .unwrap_or(&node.id);
+        let name_text = self.truncate_label(entity_name);
+        let name_chars = name_text.chars().count();
+        let name_x = x + 1 + inner_w.saturating_sub(name_chars) / 2;
+        if row < max_content_row {
+            write_text(grid, row, name_x, &name_text, inner_w);
+            row += 1;
+        }
+
+        if row < max_content_row {
+            draw_separator(grid, row);
+            row += 1;
+        }
+
+        for attr in &node.members {
+            if row >= max_content_row {
+                // Out of box: stop rather than spill rows into whatever is laid out below.
+                break;
+            }
+            let key_prefix = match attr.key {
+                fm_core::IrAttributeKey::Pk => "PK ",
+                fm_core::IrAttributeKey::Fk => "FK ",
+                fm_core::IrAttributeKey::Uk => "UK ",
+                fm_core::IrAttributeKey::None => "",
+            };
+            let mut text =
+                String::with_capacity(key_prefix.len() + attr.data_type.len() + attr.name.len() + 1);
+            text.push_str(key_prefix);
+            text.push_str(&attr.data_type);
+            text.push(' ');
+            text.push_str(&attr.name);
+            if let Some(comment) = attr.comment.as_deref().filter(|c| !c.is_empty()) {
+                text.push(' ');
+                text.push_str(comment);
+            }
+            write_text(grid, row, x + 1, &self.truncate_label(&text), inner_w);
+            row += 1;
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn overlay_class_compartments(
         &self,
