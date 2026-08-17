@@ -435,3 +435,67 @@ fn band_label_overlay_does_not_invent_or_displace() {
     let gout = render_term_with_config(&g, &TermRenderConfig::rich(), 100, 40).output;
     assert!(gout.contains("Zulu") && gout.contains("Yankee"), "a label was overwritten");
 }
+
+/// GENERIC INVARIANT: text the user declared must reach the terminal canvas, for every diagram
+/// type — not just the one that was reported broken.
+///
+/// bd-u3fo arrived as "kanban column names are invisible in `-f term`" and the fix was a
+/// cluster-title overlay. The instance-shaped question is "is kanban fixed"; the useful question is
+/// "what else does the terminal silently drop that fm-render-svg draws". This asserts the second
+/// one, so the next member of the family fails here instead of being reported as its own bug.
+///
+/// Measured when this was added: all ten types below pass, so cluster titles were the only member
+/// and this starts life green. That is the point — it is a tripwire for a class, not a reproducer.
+/// It is deliberately cheap (parse + render at one large viewport) so it can cover breadth.
+///
+/// The viewport is large on purpose: a small one would fail for the unrelated reason that the
+/// content did not fit, which is bd-8tsw's subject, not this one.
+#[test]
+fn declared_text_reaches_the_terminal_for_every_diagram_type() {
+    // (name, source, strings the user wrote that must appear)
+    let cases: &[(&str, &str, &[&str])] = &[
+        ("er", "erDiagram\n  CUSTOMER ||--o{ ORDER : places\n", &["CUSTOMER", "ORDER", "places"]),
+        ("state", "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy : go\n", &["Idle", "Busy", "go"]),
+        ("timeline", "timeline\n  title Hist\n  2001 : Alpha\n  2002 : Beta\n", &["Alpha", "Beta"]),
+        ("mindmap", "mindmap\n  root((Core))\n    Alpha\n    Beta\n", &["Core", "Alpha", "Beta"]),
+        ("gitgraph", "gitGraph\n  commit id: \"Alpha\"\n  branch dev\n  commit id: \"Beta\"\n", &["Alpha", "Beta"]),
+        ("requirement", "requirementDiagram\n  requirement Alpha {\n  id: 1\n  text: hello\n  }\n", &["Alpha"]),
+        ("sankey", "sankey-beta\n\nAlpha,Beta,5\n", &["Alpha", "Beta"]),
+        ("block", "block-beta\n  columns 2\n  Alpha[\"Alpha\"] Beta[\"Beta\"]\n", &["Alpha", "Beta"]),
+        ("journey", "journey\n  title Day\n  section Morning\n    Wake: 5: Me\n", &["Morning", "Wake"]),
+        ("class", "classDiagram\n  class Alpha\n  Alpha : +run()\n", &["Alpha", "run"]),
+        // The bd-u3fo cases, kept here so the class gate covers them too: a kanban column and a
+        // flowchart subgraph are both CLUSTER titles, reached by different layout paths.
+        ("kanban", "kanban\n  Alpha\n    t1[Beta]\n", &["Alpha", "Beta"]),
+        (
+            "flowchart_subgraph",
+            "flowchart TD\n  subgraph Backend\n    a[Alpha]\n  end\n  a --> b[Beta]\n",
+            &["Backend", "Alpha", "Beta"],
+        ),
+    ];
+
+    let mut failures: Vec<String> = Vec::new();
+    for (name, source, wants) in cases {
+        let ir = fm_parser::parse(source).ir;
+        let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+        // ANTI-BLINDNESS CONTROL, per case. `contains` on a whole canvas is a weak probe: if a type
+        // ever rendered its ENTIRE source verbatim, or if `out` grew some debug dump, every `wants`
+        // check would pass for the wrong reason. A string the user never wrote must be absent.
+        assert!(
+            !out.contains("zznotdeclaredzz"),
+            "{name}: the canvas contains text that was never declared, so the checks below are not              evidence:\n{out}"
+        );
+
+        let missing: Vec<&str> = wants.iter().copied().filter(|want| !out.contains(want)).collect();
+        if !missing.is_empty() {
+            failures.push(format!("{name}: missing {missing:?}"));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "declared text never reached the terminal canvas:\n  {}",
+        failures.join("\n  ")
+    );
+}
