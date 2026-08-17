@@ -229,6 +229,64 @@ is cheap and should land with the flag: assert the arm's total render COUNT equa
 reps, rather than trusting that a bigger number was honoured. Raising or relaxing the rate ceiling
 would be the wrong repair — the same conclusion the ledger reached about this gate before.
 
+## CORRECTION: the 1.71x drift was SINGLE-CORE PINNING, not the host's interference phase
+
+I attributed the frankenmermaid arm's 1.7078x drift to phase exposure — an arm ~1/1000 of the
+interference period sampling one instant of a slow oscillation. **That explanation was wrong**, or at
+best irrelevant at this scale. Re-running the identical arm UNPINNED collapses the drift:
+
+| | pinned to cpu19 | unpinned (`--no-pin`) |
+|---|---:|---:|
+| A1 / A2 | 93,454 / 159,599 ns | 88,899 / 89,739 ns |
+| **fm drift** | **1.7078x** | **1.0094x** |
+| calibrated batch | **22** | **39** |
+| worst bound | 228.1x | **368.8x** |
+| headline | 292.4x | 371.7x |
+
+The arm is the SAME ~9 ms against the SAME ~10 s interference period in both runs. If phase exposure
+were driving the drift, unpinning could not have removed it. It went from 71% to **0.94%**.
+
+### The batch count was a pre-registered prediction, and it hit
+
+A peer's finding (`project_single_core_pinning_is_a_noise_source`) records that the harness's
+calibrated batch is the tell — **21-25 = slow regime, 37-39 = fast** — and that it is recorded and
+never read. My two runs land on opposite sides of exactly that split: **batch 22 pinned, batch 39
+unpinned**. That is a mechanism confirmation, not a correlation I went looking for after the fact,
+and it is why this correction is stated as a cause rather than an association.
+
+### What this does to the banked row
+
+It **corroborates** it. `368.8x` worst bound unpinned sits close to the banked **362.4x**, from an
+independent invocation. Both arms' A/A nulls are tight (`0.982` and `1.003`, radii ~±2-6%), and the
+incumbent arms agree within 0.6% (33.1 vs 33.3 ms).
+
+So the earlier `228.1x` should be read as **the pinned artifact depressing our own arm**, not as
+evidence against the banked figure — and my previous note's suggestion that the banked row's tight
+drift was "two lucky draws" is withdrawn. It was tight because it was measured in a regime that
+behaves.
+
+### Consequences for the `--fm-reps` recommendation
+
+Downgraded from blocking to merely desirable. It was justified on the claim that our arm cannot hold
+still at ~9 ms; unpinned, it holds still to **0.94%**. Longer arms remain defensible for margin, but
+they are no longer the thing standing between this campaign and a credible row — **running unpinned
+is**, and that costs nothing.
+
+### Standing conditions on this row
+
+- **UNCERTIFIED**: no host-exclusivity gate; 20/64 CPUs below 80% idle at the start.
+- **STALE ELF, declared**: the harness reported the binary does not embed HEAD `c37579d3`. The SVG
+  render path (`fm-core`, `fm-parser`, `fm-layout`, `fm-render-svg`) is untouched since `816a781e`,
+  and BOTH arms use the same ELF, so staleness cannot bias a pinned-vs-unpinned comparison — but the
+  absolute ratio describes `816a781e`, not HEAD.
+- Unpinned means **clocks are uncontrolled**: cross-core spread ~3.0x, per-arm mean MHz
+  3160 / 2858 / 3363 / 3668. This is why it is a bound.
+- Window, verified: idle 84.94%, iowait 0.03%, loadavg 9.68/12.15/14.78, per-arm
+  `[9.59,12.05,14.72]` → `[9.51,11.94,14.66]`.
+
+**The general lesson, worth more than the number: pinning to one core to REDUCE noise added ~70% of
+it.** Before blaming a shared host for a ~1.5x swing, re-run unpinned — it is one flag and no build.
+
 ## Ready for the next window
 
 A fresh `headtohead` binary exists and is provenance-checked, so a genuinely quiet window needs no
