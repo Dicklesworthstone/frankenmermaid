@@ -21284,3 +21284,54 @@ source.
 window you intend to measure in. Measuring in this window was impossible regardless — the only
 binary was stale — so the window's best use was to produce a fresh one and leave the *next* window
 immediately usable. The build cost the host almost nothing: 7–9 CPUs over before, 8–9 after.
+
+## REFUSED: sequence_20 re-measurement under the CPU-pin fix — window not measurable (2026-08-17)
+
+**Attempted:** re-run the standing `sequence_20` A/B/B/A now that the pin fix (`52b72e34`) is in, so
+the row could carry the clock the ledger says the next measurement should carry. **No row was
+banked, and the standing 362.4x is unchanged.**
+
+**Why refused.** `scripts/window_check.sh` (landed by a peer this tick, bd-8557) reads count and idle
+from one sample set and returned **NOT MEASURABLE** twice: cpus over 20% busy sampled
+`64 64 64 17 17 13 14 15 64 64 64 64` — spread 51 against a threshold of 4 — with idle ranging
+**24.0%–86.8% across the same window** and loadavg 24.16/25.72/26.01. My orders for this tick
+described the window as "load 18, idle 76%, genuinely clean"; verified directly, it is not. A single
+sample at 76% idle is exactly what that tool exists to reject: *a window whose samples disagree is
+unmeasurable regardless of its best sample.* Load also rose monotonically through both brackets
+(27.9 → 32.7, then 37.1 → 39.98), so the fm and mermaid arms did not see the same machine state.
+
+**What the runs did produce, recorded because the comparison between them is the useful part.** Same
+ELF `ed83ad606289c1028ac4c4d83c2a6886266b3a029281b407bcdcae5668b909ab` (rev `b5f6987e`, built
+locally, provenance verified inside the ELF), same input sha `31c0dd6b…` (1,257 bytes, 1 revision),
+same unstable window, 43,368 SVG bytes emitted per observation (0.46 bytes/ns against the 512
+ceiling — real rendering, not a memo hit):
+
+| incumbent cpus | `incumbent_starved` | fm drift | mermaid A/A nulls | worst bound |
+|---|---|---|---|---|
+| 6 | **True** | 1.0177x | 0.954 CI [0.767, 1.125]; 1.018 CI [0.987, 1.050] | 447.8x |
+| 8 | False | 1.0566x | 1.007 CI [0.943, 1.071]; 1.014 CI [0.947, 1.085] | 373.1x |
+
+**STARVING THE INCUMBENT INFLATED THE RATIO 1.20x IN OUR OWN FAVOUR.** That is the finding. Nothing
+else differed — same binary, same input, same window, minutes apart. 447.8x is not a better number
+than 362.4x; it is the same measurement with the incumbent given six cores instead of eight. The
+unstarved 373.1x is consistent with the standing bound and is still not banked, because the window
+was unmeasurable for both.
+
+**Fixed as a consequence (`abba_render.py`):** the selector already computed `incumbent_starved`, the
+script already PRINTED it, and it quoted the ratio anyway — a guard that is computed and never read
+is the same as no guard, and this is the third member of that class in this project. It now refuses,
+with `--allow-starved-incumbent` as a stamped override so the gate cannot freeze the harness.
+
+**Also fixed, and it cost a whole invocation to find:** the script required `--corpus`, and the
+obvious in-repo file to pass, `.benchmarks/headtohead/corpus.json`, is a stale untracked artifact
+written when the schema field was `text`; the binary now requires `texts`. The fm arm returned
+`ns=None` and the work proof correctly refused. **The byte-level input preflight this ledger
+prescribes had already PASSED** — the `sequence_20` text was byte-identical to the live generator's
+at sha `31c0dd6b` — because only the CONTAINER had moved. A hash of the payload cannot see a schema
+change around it. The script now GENERATES the corpus from `corpus.mjs`, the same module the
+incumbent arm consumes, and prints its sha: the two arms can no longer disagree about bytes or shape
+by construction rather than by assertion.
+
+**Do-not-retry note:** do not re-attempt this certification on a converged-but-busy host. Converged
+load is not an idle host — 64/64 cpus were over 20% busy in every admitted run above while the
+1-minute loadavg looked acceptable. Run `scripts/window_check.sh` FIRST and believe its verdict.

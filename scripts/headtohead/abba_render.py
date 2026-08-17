@@ -43,11 +43,20 @@ on its own merits, not a reason to trust the counter above.
 
 USAGE
 -----
-    python3 scripts/headtohead/abba_render.py --fm-bin <path> --corpus <corpus.json>
+    python3 scripts/headtohead/abba_render.py --fm-bin <path>
 
 `--fm-bin` should be a binary you have PINNED BY CONTENT (copy it to `<exe>.<agent>.<sha8>` and pass
 that), because the shared build path can be rebuilt by a peer mid-run -- that has happened to this
 harness before.
+
+DO NOT PASS `--corpus`. It is still accepted, for deliberately pinning an input, but the default now
+GENERATES the case from `corpus.mjs` -- the same module the incumbent arm consumes -- and prints its
+sha256. The old usage line said `--corpus <corpus.json>`, and the obvious file to reach for,
+`.benchmarks/headtohead/corpus.json`, is a stale local artifact written when the schema field was
+`text`; the binary now requires `texts`. That combination cost a whole A/B/B/A invocation: the fm arm
+returned `ns=None`, and the byte-level preflight the ledger prescribes had already PASSED, because
+the text bytes were identical (sha 31c0dd6b) and only the CONTAINER had moved. Generating the corpus
+here removes both the staleness and the divergence by construction rather than by assertion.
 """
 
 from __future__ import annotations
@@ -59,9 +68,11 @@ import re
 import statistics
 import subprocess
 import sys
+import tempfile
 
 BENCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mermaid_bench.mjs")
 PICK_PINS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pick_pins.mjs")
+CORPUS_MJS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "corpus.mjs")
 
 # Physics ceiling from the work-proof gate: no single observed thread emits more than this.
 MAX_BYTES_PER_NS = 512.0
@@ -218,6 +229,51 @@ def check_elf_provenance(fm_bin: str, expected_rev: str | None) -> str | None:
     return None
 
 
+def build_corpus(case_id: str, dest: str) -> dict:
+    """Generate the fm arm's corpus from `corpus.mjs` -- the SAME module the incumbent arm uses.
+
+    THIS EXISTS BECAUSE A STALE CORPUS COST A MEASUREMENT INVOCATION, and it failed in the one way
+    the campaign's input-divergence rule does not catch. I passed `.benchmarks/headtohead/corpus.json`
+    -- the obvious in-repo candidate, and what this script's own usage line invites you to pass --
+    and preflighted it the way the ledger says to: I hashed its `sequence_20` text against the live
+    generator's and they were byte-IDENTICAL, sha 31c0dd6b. The check passed and the input was still
+    unusable, because the CONTAINER schema had moved: the file was written when the field was `text`
+    and the binary now requires `texts`. The arm produced `ns=None`, the work proof refused to quote a
+    ratio, and the whole A/B/B/A was spent finding that out.
+
+    So the fix is not another check on a supplied file; it is to stop supplying one. Generating here
+    means the two arms cannot consume different bytes OR different shapes, by construction rather
+    than by assertion -- the failure mode the ledger records as "two harnesses can fail to share an
+    INPUT, which is worse than disagreeing, because no null sees it".
+
+    Returns the item's provenance so the caller can print the input sha on the row. A row that cites
+    the input it measured can be re-derived; one that does not, cannot.
+    """
+    # `import(%s)` with a json-quoted file:// URL, NOT `import('%s')` -- json.dumps supplies its own
+    # quotes, and wrapping them again makes node resolve a package literally named `"`.
+    script = (
+        "import(%s).then(async m => {"
+        "  const fs = await import('node:fs');"
+        "  const item = m.CORPUS.find(i => i.id === %s);"
+        "  if (!item) { console.error('no such corpus case'); process.exit(3); }"
+        "  const gen = m.generate(item);"
+        "  const texts = Array.isArray(gen) ? gen : (gen.texts ?? [gen]);"
+        "  fs.writeFileSync(%s, JSON.stringify(["
+        "    { id: item.id, texts, reps: item.reps_rs, warmup: item.warmup_rs }"
+        "  ]));"
+        "  console.log(JSON.stringify({"
+        "    id: item.id, revisions: texts.length,"
+        "    sha256: texts.map(t => m.sha256(t)), bytes: texts.reduce((n, t) => n + t.length, 0),"
+        "    reps: item.reps_rs, warmup: item.warmup_rs"
+        "  }));"
+        "});"
+    ) % (json.dumps("file://" + CORPUS_MJS), json.dumps(case_id), json.dumps(dest))
+    out = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=False)
+    if out.returncode != 0:
+        raise SystemExit(f"corpus generation failed: {out.stderr.strip() or out.returncode}")
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
 def check_work_proof(arm: dict) -> str | None:
     """Refuse to quote a timing the arm did not earn.
 
@@ -246,7 +302,12 @@ def check_work_proof(arm: dict) -> str | None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fm-bin", required=True, help="content-pinned frankenmermaid h2h binary")
-    parser.add_argument("--corpus", required=True, help="corpus json consumed by --fm-bin")
+    parser.add_argument(
+        "--corpus",
+        help="corpus json for --fm-bin. OMIT IT: the default generates the case from corpus.mjs, "
+        "the same module the incumbent arm uses, so the two arms cannot consume different bytes "
+        "or a different schema. Pass a path only to measure an input you are pinning deliberately.",
+    )
     parser.add_argument("--case", default="sequence_20", help="corpus case id (default sequence_20)")
     parser.add_argument("--reps", type=int, default=9, help="mermaid reps per arm")
     parser.add_argument(
@@ -254,6 +315,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--no-pin", action="store_true", help="run both arms unpinned (the pre-bd-hmfi behaviour)"
+    )
+    parser.add_argument(
+        "--allow-starved-incumbent",
+        action="store_true",
+        help="quote a ratio even when the pin selector reports the incumbent starved; the row must "
+        "then say so, because the bias runs in our favour",
     )
     parser.add_argument(
         "--allow-stale-elf",
@@ -274,6 +341,21 @@ def main() -> int:
         print(f"PROVENANCE: binary embeds HEAD {rev[:8]}")
     else:
         print(f"PROVENANCE OVERRIDDEN: {provenance}")
+    if args.corpus:
+        corpus_path = args.corpus
+        print(f"CORPUS: supplied {corpus_path} -- its provenance is yours to state on the row")
+    else:
+        corpus_path = os.path.join(
+            tempfile.gettempdir(), f"fm-abba-corpus-{os.getpid()}-{args.case}.json"
+        )
+        info = build_corpus(args.case, corpus_path)
+        # The input sha belongs on the row: it is what makes the number re-derivable, and it is the
+        # one field that proves both arms were fed the same document.
+        print(
+            f"CORPUS: generated {args.case} from corpus.mjs -- {info['revisions']} revision(s), "
+            f"{info['bytes']} bytes, sha256 {', '.join(s[:16] for s in info['sha256'])}"
+        )
+
     pins = None if args.no_pin else pick_pins(args.incumbent_cpus)
     if pins is None:
         print("PINS: none -- both arms run unpinned (symmetric, but clocks uncontrolled)")
@@ -284,13 +366,34 @@ def main() -> int:
             f"slowest {pins['incumbent_min_mhz']} MHz, starved={pins['incumbent_starved']}; "
             f"host spread {pins['host_spread']}x, {pins['busy_cpus_over_20pct']}/{pins['total_cpus']} cpus busy"
         )
-    a1 = fm_arm(args.fm_bin, args.corpus, args.case, pins)
+    # A STARVED INCUMBENT INFLATES THE RATIO IN OUR FAVOUR, and until now this script computed that
+    # fact, printed it, and quoted the ratio anyway -- a guard that exists and is never read is the
+    # same as no guard. `mermaid_arm` already explains why the incumbent gets a cpuset rather than one
+    # core: "starving it would slow the INCUMBENT and inflate our ratio -- an over-claim in our own
+    # favour". The selector detects exactly that condition, so refusing on it is enforcing a rule this
+    # file already stated. Observed live: a run that returned 6 cpus for a requested 8 and flagged
+    # starved=True still printed a 447.8x bound.
+    #
+    # Refusable rather than fatal, and the override stamps the row, because a gate with no escape is
+    # how this campaign has repeatedly frozen itself.
+    if pins and pins.get("incumbent_starved") and not args.allow_starved_incumbent:
+        print()
+        print("REFUSING TO QUOTE A RATIO: the pin selector reports the incumbent arm STARVED")
+        print(
+            f"  it received {len(pins['incumbent_cpus'])} cpus, and a starved incumbent runs slower, "
+            "which inflates the ratio in our own favour"
+        )
+        print("  re-run in a window with more comparable idle cores, or pass")
+        print("  --allow-starved-incumbent and state the starvation on the row")
+        return 2
+
+    a1 = fm_arm(args.fm_bin, corpus_path, args.case, pins)
     print(f"A1 fm      ns={a1['ns']} work={a1['work']} load={a1['before']['loadavg']} mhz={a1['before']['mhz']}")
     b1 = mermaid_arm(args.case, args.reps, pins)
     print(f"B1 mermaid ns={b1['ns']} load={b1['before']['loadavg']} mhz={b1['before']['mhz']}")
     b2 = mermaid_arm(args.case, args.reps, pins)
     print(f"B2 mermaid ns={b2['ns']} load={b2['before']['loadavg']} mhz={b2['before']['mhz']}")
-    a2 = fm_arm(args.fm_bin, args.corpus, args.case, pins)
+    a2 = fm_arm(args.fm_bin, corpus_path, args.case, pins)
     print(f"A2 fm      ns={a2['ns']} work={a2['work']} load={a2['before']['loadavg']} mhz={a2['before']['mhz']}")
 
     for name, arm in (("A1", a1), ("A2", a2)):
