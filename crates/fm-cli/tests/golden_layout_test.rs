@@ -391,3 +391,67 @@ fn layout_golden_cases_are_deterministic_across_runs() {
         }
     }
 }
+
+/// WHY THE cycle_* GOLDENS MOVED, pinned as a mechanism rather than left to attribution (bd-38wq).
+///
+/// Those two goldens drifted with node positions, node/edge counts and both bounds byte-identical
+/// — only the edge geometry moved, by a uniform 6.0px laterally. Three separate readings of that
+/// signature were filed and two of them were wrong (it was read as a node-ordering change, then as
+/// a Sugiyama parallel-edge change), and the bless that finally cleared it cited a commit nobody
+/// had tied to these fixtures. The extent-only assertions in this file cannot see any of it: an
+/// edge fan preserves counts and bounds exactly.
+///
+/// So this test pins the CAUSE. 9f0fbf0a taught `force_build_edge_paths` to fan parallel edges
+/// (it hardcoded `parallel_offset: 0.0` before), and these two fixtures take the FORCE path — that
+/// pair of facts is the entire explanation of the drift, and each half is asserted here. 6.0px is
+/// `12.0 / 2`: the fan is symmetric about zero in 12px steps, so a duplicated pair lands at ∓6.
+///
+/// A future drift of the same shape now fails HERE, naming the mechanism, instead of arriving as
+/// an unexplained checksum.
+#[test]
+fn the_cycle_goldens_edge_offsets_come_from_the_force_parallel_fan() {
+    for case_id in ["cycle_braid", "cycle_ladder"] {
+        let input = fs::read_to_string(golden_dir().join(format!("{case_id}.mmd")))
+            .expect("read cycle golden input");
+        let traced = fm_layout::layout_diagram_traced(&parse(&input).ir);
+
+        // Half one: the fixture reaches the builder that does the fanning. If dispatch ever sends
+        // these to Sugiyama the attribution below stops holding, and that must be loud.
+        assert_eq!(
+            traced.trace.dispatch.selected,
+            fm_layout::LayoutAlgorithm::Force,
+            "{case_id} no longer dispatches to Force, so the force-fan attribution for its golden \
+             is void"
+        );
+
+        // Half two: the fan is actually applied, symmetrically, in 12px steps. `>= 2` because both
+        // fixtures declare the same unordered node pair twice (cycle_braid has M1-->B2 alongside
+        // B2-->M1); an implementation that keyed the fan on the ORDERED pair would find no
+        // duplicates and silently leave every offset at zero.
+        let mut offsets: Vec<f32> = traced
+            .layout
+            .edges
+            .iter()
+            .map(|edge| edge.parallel_offset)
+            .filter(|offset| offset.abs() > 0.01)
+            .collect();
+        assert!(
+            offsets.len() >= 2,
+            "{case_id} has no fanned parallel edges at all, so its blessed edge geometry is not \
+             the force fan this test claims explains it"
+        );
+        offsets.sort_by(f32::total_cmp);
+        assert!(
+            offsets
+                .iter()
+                .all(|offset| (offset.abs() - 6.0).abs() < 0.001),
+            "{case_id} fanned by something other than the 12px-step pair offset: {offsets:?}"
+        );
+        assert!(
+            offsets.first().is_some_and(|first| *first < 0.0)
+                && offsets.last().is_some_and(|last| *last > 0.0),
+            "the fan must be symmetric about the unfanned centre line, not a one-sided shift: \
+             {offsets:?}"
+        );
+    }
+}
