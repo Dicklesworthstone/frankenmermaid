@@ -53,7 +53,18 @@ export function selectPinnedCpu(records) {
 /// Returns the fastest `size` cores from the idle band, so both arms are drawn from the same
 /// population by the same rule and differ in count only because one is single-threaded and the other
 /// is a browser.
-export function selectPinnedCpuSet(records, size = 8) {
+/// ⚠️ SELECTING BY RANK MADE THE ARMS UNCOMPARABLE IN THE OTHER DIRECTION, and `targetMhz` is the
+/// fix. Taking the fastest N necessarily reaches DOWN as N grows: measured live, the single-core arm
+/// took 3433 MHz while the eight-core incumbent set spanned 1916-4292 MHz, a 1.79x internal range.
+/// A browser scheduled onto the slow member runs slower than it would UNPINNED, which inflates the
+/// ratio in our own favour -- the direction this function's own warning calls the worse error.
+///
+/// With `targetMhz` supplied the set is chosen by CLOSENESS to the measured arm's clock instead of by
+/// rank. That has no free parameter to argue about: the objective is "cores like the one our arm got",
+/// not "cores above some threshold I picked". Without it the old rank behaviour is kept, so existing
+/// callers are unaffected.
+///
+export function selectPinnedCpuSet(records, size = 8, targetMhz = null) {
   if (!Array.isArray(records) || records.length === 0) {
     throw new Error('selectPinnedCpuSet requires at least one cpu record');
   }
@@ -63,9 +74,13 @@ export function selectPinnedCpuSet(records, size = 8) {
   const busy = [...records].sort((a, b) => a.busy - b.busy);
   const quietest = busy[0].busy;
   const band = busy.filter((record) => record.busy <= quietest + 0.05);
-  const ranked = band.every((record) => typeof record.mhz === 'number' && record.mhz > 0)
-    ? [...band].sort((a, b) => b.mhz - a.mhz)
-    : band;
+  const clocked = band.every((record) => typeof record.mhz === 'number' && record.mhz > 0);
+  let ranked = band;
+  if (clocked) {
+    ranked = typeof targetMhz === 'number' && targetMhz > 0
+      ? [...band].sort((a, b) => Math.abs(a.mhz - targetMhz) - Math.abs(b.mhz - targetMhz))
+      : [...band].sort((a, b) => b.mhz - a.mhz);
+  }
   const chosen = ranked.slice(0, Math.min(size, ranked.length));
   return {
     cpus: chosen.map((record) => record.cpu),
@@ -77,6 +92,18 @@ export function selectPinnedCpuSet(records, size = 8) {
     min_mhz: chosen.length > 0 && typeof chosen[0].mhz === 'number'
       ? Math.min(...chosen.map((record) => record.mhz))
       : null,
-    rule: ranked === band ? 'idle_band_no_cpufreq' : 'fastest_clocks_in_idle_band',
+    // The widest clock gap inside the chosen set, so a row states how comparable its incumbent
+    // cores actually were instead of leaving it to be inferred from the rule name.
+    spread: chosen.length > 0 && clocked
+      ? Number(
+          (Math.max(...chosen.map((r) => r.mhz)) / Math.max(1, Math.min(...chosen.map((r) => r.mhz))))
+            .toFixed(3),
+        )
+      : null,
+    rule: !clocked
+      ? 'idle_band_no_cpufreq'
+      : typeof targetMhz === 'number' && targetMhz > 0
+        ? 'clocks_closest_to_measured_arm'
+        : 'fastest_clocks_in_idle_band',
   };
 }

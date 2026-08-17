@@ -56,7 +56,13 @@ for (const [cpu, first] of before) {
 
 const size = Number(process.argv[2] ?? 8);
 const single = selectPinnedCpu(records);
-const set = selectPinnedCpuSet(records, Number.isInteger(size) && size > 0 ? size : 8);
+// Target the clock our arm actually got, so the incumbent's cores are COMPARABLE to it rather than
+// merely fast. Selecting by rank let the set straddle 1916-4292 MHz while our arm sat at 3433.
+const set = selectPinnedCpuSet(
+  records,
+  Number.isInteger(size) && size > 0 ? size : 8,
+  single.chosen.mhz ?? null,
+);
 const clocks = records.map((r) => r.mhz).filter((m) => typeof m === 'number');
 
 console.log(
@@ -67,6 +73,7 @@ console.log(
     fm_rule: single.rule,
     incumbent_cpus: set.cpus,
     incumbent_min_mhz: set.min_mhz,
+    incumbent_spread: set.spread,
     incumbent_starved: set.starved,
     incumbent_rule: set.rule,
     band_size: single.band_size,
