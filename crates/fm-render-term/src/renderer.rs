@@ -1605,6 +1605,21 @@ impl TermRenderer {
                 continue;
             }
 
+            // REQUIREMENT rows reach the terminal too (bd-039t).
+            //
+            // Measured SVG vs terminal on the same IR: `requirement R { id: 1 / text: hello /
+            // risk: high }` drew `hello` and `high` in the SVG and NEITHER in the terminal. Same
+            // shape as bd-ekx2 — content attached to the node that the terminal never learned to
+            // draw, while it drew the node's label happily. `requirement_row_dimensions` already
+            // sizes the box for these rows (that is what bd-jnc1 and bd-f3tc are about), so the
+            // box has room and only the text was missing.
+            if let Some(node) = ir_node
+                && let Some(meta) = node.requirement_meta.as_deref()
+            {
+                self.overlay_requirement_rows(&mut lines, x, y, w, h, ir, node, meta, cell_width);
+                continue;
+            }
+
             let Some(label) = self.node_display_label(ir, ir_node, &node_box.node_id) else {
                 continue;
             };
@@ -2020,6 +2035,101 @@ impl TermRenderer {
     /// │ +eat()   │  ← methods with visibility
     /// └──────────┘
     /// ```
+    /// Draw a requirement node as a name header, a divider and one row per declared field (bd-039t).
+    ///
+    /// Mirrors `overlay_er_compartments`; the field set matches the rows fm-render-svg draws, so the
+    /// two renderers say the same thing about the same requirement.
+    #[allow(clippy::too_many_arguments)]
+    fn overlay_requirement_rows(
+        &self,
+        grid: &mut [Vec<char>],
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        ir: &MermaidDiagramIr,
+        node: &fm_core::IrNode,
+        meta: &fm_core::IrRequirementNodeMeta,
+        grid_width: usize,
+    ) {
+        let inner_w = w.saturating_sub(2);
+        let glyphs = &self.box_glyphs;
+
+        let write_text =
+            |grid: &mut [Vec<char>], row: usize, col: usize, text: &str, max_w: usize| {
+                if row >= grid.len() {
+                    return;
+                }
+                for (i, ch) in text.chars().take(max_w).enumerate() {
+                    let c = col + i;
+                    if c < grid_width && c < grid[row].len() {
+                        grid[row][c] = ch;
+                    }
+                }
+            };
+
+        let draw_separator = |grid: &mut [Vec<char>], row: usize| {
+            if row >= grid.len() {
+                return;
+            }
+            if x < grid_width && x < grid[row].len() {
+                grid[row][x] = glyphs.t_right;
+            }
+            for dx in 1..w.saturating_sub(1) {
+                let c = x + dx;
+                if c < grid_width && c < grid[row].len() {
+                    grid[row][c] = glyphs.horizontal;
+                }
+            }
+            let right = x + w.saturating_sub(1);
+            if right < grid_width && right < grid[row].len() {
+                grid[row][right] = glyphs.t_left;
+            }
+        };
+
+        let mut row = y + 1;
+        let max_content_row = if h >= 2 { y + h - 1 } else { y + h };
+
+        let name = node
+            .label
+            .and_then(|lid| ir.labels.get(lid.0))
+            .map(|l| l.text.as_str())
+            .unwrap_or(&node.id);
+        let name_text = self.truncate_label(name);
+        let name_chars = name_text.chars().count();
+        let name_x = x + 1 + inner_w.saturating_sub(name_chars) / 2;
+        if row < max_content_row {
+            write_text(grid, row, name_x, &name_text, inner_w);
+            row += 1;
+        }
+        if row < max_content_row {
+            draw_separator(grid, row);
+            row += 1;
+        }
+
+        // Field order matches the SVG's row order so the two renderers read alike.
+        let fields: [(&str, Option<&str>); 4] = [
+            ("id: ", meta.req_id.as_deref()),
+            ("text: ", meta.text.as_deref()),
+            ("risk: ", meta.risk.as_deref()),
+            ("verify: ", meta.verify_method.as_deref()),
+        ];
+        for (prefix, value) in fields {
+            let Some(value) = value.filter(|v| !v.is_empty()) else {
+                continue;
+            };
+            if row >= max_content_row {
+                // Out of box: stop rather than spill rows into whatever is laid out below.
+                break;
+            }
+            let mut text = String::with_capacity(prefix.len() + value.len());
+            text.push_str(prefix);
+            text.push_str(value);
+            write_text(grid, row, x + 1, &self.truncate_label(&text), inner_w);
+            row += 1;
+        }
+    }
+
     /// Draw an ER entity as a name header, a divider and one row per attribute (bd-ekx2).
     ///
     /// The row text mirrors fm-render-svg EXACTLY — `{key_prefix}{data_type} {name}`, plus the

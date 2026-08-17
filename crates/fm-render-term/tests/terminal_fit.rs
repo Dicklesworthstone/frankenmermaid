@@ -333,6 +333,57 @@ fn a_gantt_section_shows_its_name_in_terminal() {
     assert_eq!(out.matches("Zulu").count(), 1, "the section name was drawn more than once");
 }
 
+/// A requirement's declared FIELDS must reach terminal output (bd-039t).
+///
+/// Measured SVG vs terminal on the same IR: `requirement R { id: 1 / text: hello / risk: high }`
+/// drew `hello` and `high` in the SVG and NEITHER in the terminal. Same shape as bd-ekx2 — content
+/// attached to the node that the terminal never learned to draw.
+#[test]
+fn requirement_fields_reach_terminal_output() {
+    let ir = fm_parser::parse(
+        "requirementDiagram\n  requirement R {\n  id: 1\n  text: hello\n  risk: high\n  }\n",
+    )
+    .ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(out.contains('R'), "the requirement name is missing:\n{out}");
+    assert!(out.contains("hello"), "the `text:` field never reached the terminal:\n{out}");
+    assert!(out.contains("high"), "the `risk:` field never reached the terminal:\n{out}");
+}
+
+/// CONTROL: a requirement declaring NO optional fields still shows its name.
+///
+/// The branch is gated on `requirement_meta` being present, which it is even when every field is
+/// empty — so a bare requirement must still render its header rather than an empty box.
+#[test]
+fn requirement_without_optional_fields_still_shows_its_name() {
+    let ir = fm_parser::parse("requirementDiagram\n  requirement Alpha {\n  id: 7\n  text: t\n  }\n").ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(out.contains("Alpha"), "the requirement lost its name:\n{out}");
+}
+
+/// CONTROL: ER entities and class diagrams still render.
+///
+/// The requirement branch sits directly after the ER branch in the same loop. Ordering or guarding
+/// it wrongly could swallow either neighbour, and both carry their content in different fields.
+#[test]
+fn er_and_class_still_render_after_the_requirement_branch() {
+    let er = fm_parser::parse("erDiagram\n  A {\n    string name PK\n  }\n  A ||--o{ B : has\n").ir;
+    let er_out = render_term_with_config(&er, &TermRenderConfig::rich(), 200, 60).output;
+    assert!(
+        er_out.contains("name") && er_out.contains("PK"),
+        "ER attributes regressed:\n{er_out}"
+    );
+
+    let cls = fm_parser::parse("classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n").ir;
+    let cls_out = render_term_with_config(&cls, &TermRenderConfig::rich(), 200, 60).output;
+    assert!(
+        cls_out.contains("Alpha") && cls_out.contains("run"),
+        "class compartments regressed:\n{cls_out}"
+    );
+}
+
 /// Class CARDINALITIES must reach terminal output (bd-o2wf).
 ///
 /// They live in `IrEdgeExtras`, not in `edge.label`, and the terminal edge overlay drew the label
