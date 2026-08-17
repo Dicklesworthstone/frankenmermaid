@@ -223,6 +223,9 @@ impl Canvas2dRenderer {
         // Draw sequence activation bars.
         self.draw_activation_bars(layout, ctx, offset_x, offset_y);
 
+        // Draw sequence lifecycle markers (destroy crosses).
+        self.draw_sequence_lifecycle_markers(layout, ctx, offset_x, offset_y);
+
         // Draw sequence notes and fragments.
         self.draw_sequence_fragments(layout, ctx, offset_x, offset_y);
         self.draw_sequence_notes(layout, ctx, offset_x, offset_y, &mut labels_drawn);
@@ -827,6 +830,46 @@ impl Canvas2dRenderer {
             ctx.set_line_width(self.config.node_stroke_width);
             ctx.stroke_rect(x, y, w, h);
             self.draw_calls += 2;
+        }
+    }
+
+    /// Draw sequence lifecycle markers -- the X that terminates a destroyed participant's lifeline.
+    ///
+    /// `extensions.sequence_lifecycle_markers` is filled by the sequence layout arm and drawn by
+    /// fm-render-svg; this renderer referenced it nowhere (bd-t1jj). Canvas is not a dead surface --
+    /// fm-wasm renders the browser preview through `render_to_canvas_with_layout` -- so `destroy Bob`
+    /// produced a lifeline that simply stopped, with nothing marking that the participant was
+    /// destroyed rather than merely idle. Those are different diagrams.
+    ///
+    /// Geometry mirrors the SVG arm exactly: a cross of `size`, centred on `center`, so the two
+    /// backends cannot disagree about where a destroyed lifeline ends.
+    fn draw_sequence_lifecycle_markers<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) {
+        for marker in &layout.extensions.sequence_lifecycle_markers {
+            match marker.kind {
+                fm_layout::LayoutSequenceLifecycleMarkerKind::Destroy => {
+                    let half = f64::from(marker.size) * 0.5;
+                    if half <= 0.0 {
+                        continue;
+                    }
+                    let cx = f64::from(marker.center.x) + offset_x;
+                    let cy = f64::from(marker.center.y) + offset_y;
+                    ctx.set_stroke_style(&self.config.edge_stroke);
+                    ctx.set_line_width(1.5);
+                    ctx.begin_path();
+                    ctx.move_to(cx - half, cy - half);
+                    ctx.line_to(cx + half, cy + half);
+                    ctx.move_to(cx + half, cy - half);
+                    ctx.line_to(cx - half, cy + half);
+                    ctx.stroke();
+                    self.draw_calls += 1;
+                }
+            }
         }
     }
 
