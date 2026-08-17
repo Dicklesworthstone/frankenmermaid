@@ -120,3 +120,129 @@ fn styling_applies_only_to_the_named_node() {
          {fills:?}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// EDGES (bd-lvj3, second half).
+//
+// `draw_edges` passed `config.edge_stroke` to the path, both UML markers and every arrowhead
+// unconditionally, so `linkStyle` was discarded exactly as `style`/`classDef` was on nodes. The
+// SVG renderer honours `LinkDefault` at lib.rs:2868, so a coloured edge appeared in an export and
+// stayed grey in the canvas preview — the same two-outputs-disagree symptom as the node half.
+// ---------------------------------------------------------------------------------------------
+
+/// `linkStyle <n>` reaches the canvas.
+#[test]
+fn a_linkstyle_index_colours_its_edge() {
+    let ops = canvas_ops("flowchart TD\n  a[A] --> b[B]\n  linkStyle 0 stroke:#ff0000\n");
+    let strokes = stroke_styles(&ops);
+
+    assert!(
+        strokes.iter().any(|s| s.to_lowercase().contains("ff0000")),
+        "the declared edge stroke never reached the canvas: {strokes:?}"
+    );
+}
+
+/// `linkStyle default` reaches every edge.
+#[test]
+fn linkstyle_default_colours_all_edges() {
+    let ops = canvas_ops(
+        "flowchart TD\n  a[A] --> b[B]\n  b --> c[C]\n  linkStyle default stroke:#00ff00\n",
+    );
+    let strokes = stroke_styles(&ops);
+
+    let coloured = strokes.iter().filter(|s| s.to_lowercase().contains("00ff00")).count();
+    assert!(
+        coloured >= 2,
+        "only {coloured} stroke(s) took the default; both edges should have: {strokes:?}"
+    );
+}
+
+/// CONTROL: an indexed `linkStyle` OVERRIDES the default rather than losing to it.
+///
+/// This is the ordering the resolver exists to get right — merging `LinkDefault` after `Link(n)`
+/// would still pass both positive tests above while making a per-edge override impossible.
+#[test]
+fn an_indexed_linkstyle_beats_the_default() {
+    let ops = canvas_ops(
+        "flowchart TD\n  a[A] --> b[B]\n  b --> c[C]\n         \n  linkStyle default stroke:#00ff00\n  linkStyle 0 stroke:#ff0000\n",
+    );
+    let strokes = stroke_styles(&ops);
+
+    assert!(
+        strokes.iter().any(|s| s.to_lowercase().contains("ff0000")),
+        "the indexed override lost to the default: {strokes:?}"
+    );
+    assert!(
+        strokes.iter().any(|s| s.to_lowercase().contains("00ff00")),
+        "the override wiped out the default on the OTHER edge: {strokes:?}"
+    );
+}
+
+/// CONTROL: `linkStyle 0` styles edge 0 and leaves edge 1 alone.
+#[test]
+fn an_indexed_linkstyle_does_not_leak_to_other_edges() {
+    let ops = canvas_ops(
+        "flowchart TD\n  a[A] --> b[B]\n  b --> c[C]\n  linkStyle 0 stroke:#ff0000\n",
+    );
+    let strokes = stroke_styles(&ops);
+
+    let styled = strokes.iter().filter(|s| s.to_lowercase().contains("ff0000")).count();
+    let themed = strokes.iter().filter(|s| s.as_str() == "#475569").count();
+
+    assert!(styled >= 1, "the styled edge lost its colour: {strokes:?}");
+    assert!(
+        themed >= 1,
+        "the UNstyled edge did not keep the theme stroke, so the style leaked: {strokes:?}"
+    );
+}
+
+/// CONTROL: an unstyled diagram keeps the theme edge colour.
+///
+/// Guards the `None` return: a resolver that always produced some colour would satisfy every
+/// positive test above while repainting every edge in every diagram.
+#[test]
+fn an_unstyled_edge_keeps_the_theme_stroke() {
+    let ops = canvas_ops("flowchart TD\n  a[A] --> b[B]\n");
+    let strokes = stroke_styles(&ops);
+
+    assert!(!strokes.is_empty(), "nothing was stroked, so this control proves nothing");
+    assert!(
+        strokes.iter().any(|s| s.as_str() == "#475569"),
+        "the default edge stroke is missing: {strokes:?}"
+    );
+    assert!(
+        !strokes.iter().any(|s| s.to_lowercase().contains("ff0000")),
+        "an unstyled edge acquired a colour from nowhere: {strokes:?}"
+    );
+}
+
+/// CONTROL: a malformed `stroke-width` leaves the arrow-derived width standing.
+///
+/// The width parser filters non-finite and non-positive values on purpose. Without that, a
+/// declared `stroke-width:0` or a NaN would make the edge invisible — a styling directive must not
+/// be able to delete a line.
+#[test]
+fn a_malformed_stroke_width_keeps_the_arrow_derived_width() {
+    let ops = canvas_ops("flowchart TD\n  a[A] --> b[B]\n  linkStyle 0 stroke-width:banana\n");
+
+    let widths: Vec<f64> = {
+        let mut out = Vec::new();
+        let mut rest = ops.as_str();
+        while let Some(i) = rest.find("SetLineWidth(") {
+            rest = &rest[i + "SetLineWidth(".len()..];
+            if let Some(end) = rest.find(')') {
+                if let Ok(v) = rest[..end].trim().parse::<f64>() {
+                    out.push(v);
+                }
+                rest = &rest[end..];
+            }
+        }
+        out
+    };
+
+    assert!(!widths.is_empty(), "no line widths were set, so this control proves nothing");
+    assert!(
+        widths.iter().all(|w| w.is_finite() && *w > 0.0),
+        "a malformed stroke-width produced an unusable line width: {widths:?}"
+    );
+}

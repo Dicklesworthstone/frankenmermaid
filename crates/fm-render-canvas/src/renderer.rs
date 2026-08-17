@@ -837,6 +837,57 @@ impl Canvas2dRenderer {
     ///
     /// Returns `None` per channel when the author declared nothing, so the caller keeps the theme
     /// default rather than being handed a colour this function invented.
+    /// Resolve an edge's stroke colour and width from the author's own styling (bd-lvj3).
+    ///
+    /// The edge twin of [`Self::resolve_node_colors`]. Three channels, merged in the order mermaid
+    /// applies them — later wins:
+    ///   1. `linkStyle default stroke:#f00`  (`IrStyleTarget::LinkDefault`)
+    ///   2. `linkStyle 3 stroke:#f00`        (`IrStyleTarget::Link(index)`)
+    ///   3. the edge's own `inline_style`
+    ///
+    /// `LinkDefault` must be merged FIRST so a per-index `linkStyle` overrides it rather than the
+    /// other way round — that ordering is the whole point of having a default.
+    ///
+    /// Returns `None` per channel when nothing was declared, so the caller keeps the theme colour
+    /// and the arrow-derived width from `legacy_edge_stroke` instead of a value invented here.
+    fn resolve_edge_style(
+        &self,
+        ir: &MermaidDiagramIr,
+        edge_index: usize,
+    ) -> (Option<String>, Option<f64>) {
+        let mut merged: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+
+        for style_ref in &ir.style_refs {
+            if matches!(style_ref.target, fm_core::IrStyleTarget::LinkDefault) {
+                merged.extend(fm_core::parse_style_string(&style_ref.style).properties);
+            }
+        }
+
+        for style_ref in &ir.style_refs {
+            if let fm_core::IrStyleTarget::Link(target) = style_ref.target
+                && target == edge_index
+            {
+                merged.extend(fm_core::parse_style_string(&style_ref.style).properties);
+            }
+        }
+
+        if let Some(edge) = ir.edges.get(edge_index)
+            && let Some(inline) = edge.inline_style.as_ref()
+        {
+            merged.extend(inline.properties.clone());
+        }
+
+        // `stroke-width` arrives as CSS, so `2px` and `2` both have to parse. A malformed value
+        // yields `None` and the arrow-derived width stands — a declared style must never be able to
+        // make an edge vanish by giving it a width of NaN.
+        let width = merged.get("stroke-width").and_then(|raw| {
+            raw.trim().trim_end_matches("px").trim().parse::<f64>().ok().filter(|w| w.is_finite() && *w > 0.0)
+        });
+
+        (merged.get("stroke").cloned(), width)
+    }
+
     fn resolve_node_colors(
         &self,
         ir: &MermaidDiagramIr,
@@ -1452,11 +1503,21 @@ impl Canvas2dRenderer {
                 continue;
             }
 
-            // Set edge style
-            let (stroke_width, dash_pattern) =
+            // Set edge style, honouring `linkStyle` (bd-lvj3).
+            //
+            // Every site in this loop passed `config.edge_stroke` unconditionally, so `linkStyle`
+            // was discarded exactly the way `style`/`classDef` was on nodes before that half of the
+            // bead landed. The colour is resolved ONCE here and threaded through the path, the UML
+            // markers and the arrowheads below — an edge whose line obeyed the author while its
+            // arrowhead kept the theme colour would be a worse bug than the one being fixed.
+            let (declared_stroke, declared_width) =
+                self.resolve_edge_style(ir, edge_path.edge_index);
+            let (legacy_width, dash_pattern) =
                 legacy_edge_stroke(arrow, self.config.edge_stroke_width);
+            let stroke = declared_stroke.as_deref().unwrap_or(&self.config.edge_stroke);
+            let stroke_width = declared_width.unwrap_or(legacy_width);
 
-            ctx.set_stroke_style(&self.config.edge_stroke);
+            ctx.set_stroke_style(stroke);
             ctx.set_line_width(stroke_width);
             ctx.set_line_dash(dash_pattern);
 
@@ -1493,7 +1554,7 @@ impl Canvas2dRenderer {
                         sy,
                         angle,
                         &self.config.node_fill,
-                        &self.config.edge_stroke,
+                        stroke,
                     );
                     self.draw_calls += marker_calls;
                 }
@@ -1509,7 +1570,7 @@ impl Canvas2dRenderer {
                         ey,
                         angle,
                         &self.config.node_fill,
-                        &self.config.edge_stroke,
+                        stroke,
                     );
                     self.draw_calls += marker_calls;
                 }
@@ -1530,17 +1591,17 @@ impl Canvas2dRenderer {
                             ey,
                             4.0,
                             &self.config.node_fill,
-                            &self.config.edge_stroke,
+                            stroke,
                         );
                         self.draw_calls += 1;
                     }
                     ArrowType::Cross => {
-                        draw_cross_marker(ctx, ex, ey, 8.0, &self.config.edge_stroke);
+                        draw_cross_marker(ctx, ex, ey, 8.0, stroke);
                         self.draw_calls += 1;
                     }
                     // All other arrow types (half arrows, stick arrows, etc.) — render as standard arrowhead.
                     _ => {
-                        draw_arrowhead(ctx, ex, ey, angle, 10.0, &self.config.edge_stroke);
+                        draw_arrowhead(ctx, ex, ey, angle, 10.0, stroke);
                         self.draw_calls += 1;
                     }
                 }
@@ -1559,7 +1620,7 @@ impl Canvas2dRenderer {
                     let sx = f64::from(start.x) + offset_x;
                     let sy = f64::from(start.y) + offset_y;
 
-                    draw_arrowhead(ctx, sx, sy, start_angle, 10.0, &self.config.edge_stroke);
+                    draw_arrowhead(ctx, sx, sy, start_angle, 10.0, stroke);
                     self.draw_calls += 1;
                 }
             }
