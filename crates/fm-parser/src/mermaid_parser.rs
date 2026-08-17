@@ -8428,6 +8428,24 @@ fn parse_git_branch(
         return;
     }
 
+    // Re-declaring an existing branch must not be SILENT (bd-64h3).
+    //
+    // mermaid rejects it outright — its `createBranch` opens by throwing "Trying to create a branch
+    // which already exists" — so a user who writes `branch dev` twice, or `branch main` against the
+    // implicit default, is told. We warn instead of aborting because this parser is recovery-
+    // oriented by design: the empty-name case above warns rather than returning an error, and the
+    // CLI surfaces every warning. Silence was the defect; refusing to render is a bigger change
+    // than it justifies.
+    //
+    // This must be read BEFORE `intern_branch`, which returns the existing index for a known name
+    // and so cannot tell the two cases apart afterwards.
+    if state.branch_order.contains(&normalized) {
+        builder.add_warning(format!(
+            "Line {line_number}: branch '{normalized}' already exists; mermaid rejects a duplicate \
+             branch declaration"
+        ));
+    }
+
     // Track branch ordering for colour and lane assignment.
     state.intern_branch(&normalized);
 
@@ -18414,6 +18432,50 @@ Rel_Back(db, app, "Responds")"#,
     /// Every commit node carries a lane, and the lane matches the branch it was committed on
     /// (bd-5wbp). Layout turns these into columns; a missing entry silently means lane 0, which is
     /// how merge commits used to end up drawn in main's column with no branch attribution at all.
+    /// Re-declaring an existing branch must WARN, not pass in silence (bd-64h3).
+    ///
+    /// mermaid rejects a duplicate `branch` outright. We stay permissive and render, but the user
+    /// has to be told, because the alternative is a silently different picture.
+    #[test]
+    fn gitgraph_duplicate_branch_declaration_warns() {
+        let parsed =
+            parse_mermaid("gitGraph\n  commit\n  branch dev\n  commit\n  branch dev\n  commit\n");
+
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("branch 'dev' already exists")),
+            "a duplicate branch declaration passed in silence; warnings: {:?}",
+            parsed.warnings
+        );
+        // Permissive recovery: it must still render. A "fix" that dropped the diagram would trade
+        // the silence for a worse outcome than the defect.
+        assert!(
+            !parsed.ir.nodes.is_empty(),
+            "the duplicate branch aborted the parse instead of warning"
+        );
+    }
+
+    /// CONTROL: a FIRST declaration must not warn.
+    ///
+    /// Without this, a warning emitted unconditionally would satisfy the test above while crying
+    /// wolf on every correct diagram — the check has to distinguish the two cases, which is the
+    /// whole reason it reads `branch_order` before `intern_branch` folds them together.
+    #[test]
+    fn gitgraph_first_branch_declaration_does_not_warn() {
+        let parsed = parse_mermaid("gitGraph\n  commit\n  branch dev\n  commit\n");
+
+        assert!(
+            !parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("already exists")),
+            "a first-time branch declaration warned; warnings: {:?}",
+            parsed.warnings
+        );
+    }
+
     /// A bare `branch X` must SWITCH to X, so the next commit lands in X's lane (bd-6oz7).
     ///
     /// mermaid's `branch` creates and checks out: in the pinned 11.15.0 bundle, `createBranch`
