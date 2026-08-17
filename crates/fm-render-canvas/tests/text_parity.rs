@@ -45,6 +45,64 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ("flowchart_subgraph", "flowchart TD\n  subgraph Backend\n    a[Alpha]\n  end\n  a --> b[Beta]\n", &["Backend", "Alpha", "Beta"]),
 ];
 
+/// An ER entity's ATTRIBUTES must reach the CANVAS (bd-rk14).
+///
+/// Measured SVG vs canvas: `A { string name PK }` drew `name` and `PK` in the SVG and neither on
+/// the canvas, while `class_member` passed in the same probe — the canvas could already draw
+/// compartments and ER never got them. This is the canvas twin of bd-ekx2, the identical gap in the
+/// terminal.
+#[test]
+fn er_attributes_reach_the_canvas() {
+    let ir = fm_parser::parse(
+        "erDiagram\n  CUSTOMER {\n    string name PK\n    int age\n  }\n  CUSTOMER ||--o{ ORDER : places\n",
+    )
+    .ir;
+    let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+    render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let texts = drawn_text(&format!("{:?}", context.operations()));
+    let has = |want: &str| texts.iter().any(|t| t.contains(want));
+
+    assert!(has("CUSTOMER"), "the entity name is missing: {texts:?}");
+    assert!(has("name"), "attribute `name` never reached the canvas: {texts:?}");
+    assert!(has("age"), "attribute `age` never reached the canvas: {texts:?}");
+    assert!(has("PK"), "the PK key marker never reached the canvas: {texts:?}");
+}
+
+/// CONTROL: class compartments still render on the canvas.
+///
+/// The ER arm was inserted as an `else if` between the class arm and the standard single-label
+/// fallback. A mis-ordered guard would swallow class nodes, which carry their members in
+/// `class_meta` rather than `members`.
+#[test]
+fn class_compartments_still_render_on_the_canvas_after_the_er_arm() {
+    let ir = fm_parser::parse("classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n").ir;
+    let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+    render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let texts = drawn_text(&format!("{:?}", context.operations()));
+
+    assert!(
+        texts.iter().any(|t| t.contains("Alpha")) && texts.iter().any(|t| t.contains("run")),
+        "class compartments regressed: {texts:?}"
+    );
+}
+
+/// CONTROL: an ER entity with NO attributes still draws its name.
+///
+/// The arm is gated on `!members.is_empty()`, so a bare entity must fall through to the standard
+/// single-label path rather than losing its label to an empty compartment.
+#[test]
+fn bare_er_entity_still_draws_its_name_on_the_canvas() {
+    let ir = fm_parser::parse("erDiagram\n  CUSTOMER ||--o{ ORDER : places\n").ir;
+    let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+    render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let texts = drawn_text(&format!("{:?}", context.operations()));
+
+    assert!(
+        texts.iter().any(|t| t.contains("CUSTOMER")) && texts.iter().any(|t| t.contains("ORDER")),
+        "a bare ER entity lost its name: {texts:?}"
+    );
+}
+
 #[test]
 fn declared_text_reaches_the_canvas_for_every_diagram_type() {
     let mut failures: Vec<String> = Vec::new();
