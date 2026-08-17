@@ -364,6 +364,12 @@ def self_test() -> int:
         # Pinned to one core -- the artifact this gate exists to catch. Measured twice, independently.
         ("pinned bd-8557", [93454, 159599], 22, True),
         ("pinned bd-hmfi", [156370, 91043], 20, True),
+        # PINNED YET HEALTHY -- measured live on 2026-08-17 in a window the pin selector reported as
+        # 6/64 cpus busy, fm on cpu50. Pinning is a BET ON ONE CORE, and it only loses when that core
+        # is contended; unpinned, the scheduler migrates away from a competing tenant. This case is
+        # here to stop the gate being "simplified" into "refuse if pinned": the gate must key on the
+        # SYMPTOM (drift), which the batch tracks directly, not on the policy that sometimes causes it.
+        ("pinned but healthy", [90443, 92758], 38, False),
         # Unpinned brackets in the same windows, same ELF and input.
         ("no-pin bd-8557", [88899, 89739], 39, False),
         ("no-pin bd-hmfi 1st", [96557, 94654], 38, False),

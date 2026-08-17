@@ -287,6 +287,52 @@ is**, and that costs nothing.
 **The general lesson, worth more than the number: pinning to one core to REDUCE noise added ~70% of
 it.** Before blaming a shared host for a ~1.5x swing, re-run unpinned — it is one flag and no build.
 
+## REFINEMENT: pinning is a BET on one core, not a deterministic pathology
+
+Last note said pinning to one core "contributed ~70% of the noise". That was drawn from two pinned
+brackets (1.7078x and 1.7175x) against several unpinned ones. A **third pinned bracket, measured live
+on 2026-08-17, behaved perfectly**:
+
+```
+PINS: fm cpu50 @ 4195 MHz; incumbent 8 cpus, starved=False; 6/64 cpus busy
+A1 fm  90,443 ns  batch 38      A2 fm  92,758 ns  batch 33
+fm drift 1.0256x  ->  worst bound 374.1x
+```
+
+Pinning was genuinely applied, and the bracket still drifted only 2.6%. So the earlier claim needs
+narrowing: **pinning does not always produce the pathology.**
+
+### What separates the good pinned run from the bad ones
+
+The `batch` does, and it does so directly:
+
+| bracket | pinned? | cpus busy at pin time | batch | drift |
+|---|---|---:|---:|---:|
+| bd-8557 bad | yes | 19/64 | **22** | 1.7078x |
+| bd-hmfi bad | yes | — | **20** | 1.7175x |
+| this one | yes | **6/64** | **38 / 33** | 1.0256x |
+| unpinned rows | no | 16-20/64 | 37-39 | 1.0094-1.0481x |
+
+The coherent reading: pinning is a **bet on a single core**, and it loses when that core has a
+competing tenant. Unpinned, the scheduler simply migrates away from contention; pinned, the arm is
+stuck with whatever else wants that core. In a window with 6/64 busy the bet wins; at 19/64 it lost.
+
+### Why this strengthens the case for the gate over a policy change
+
+It vindicates leaving the pinning default alone and gating the **symptom** instead. A rule of
+"always pass `--no-pin`" would be superstition dressed as method — it would have rejected the
+374.1x bracket above, which is fine. The drift control keys on what actually went wrong, so it
+catches a bad bracket whether or not pinning caused it, and admits a good one whether or not it was
+pinned.
+
+That case is now pinned into the self-test as `("pinned but healthy", …, must_refuse=False)`
+specifically so nobody later "simplifies" the gate into *refuse if pinned*. The self-test therefore
+constrains the gate from both sides: it must refuse the two pathological brackets and admit a
+**pinned** one that was fine.
+
+⚠️ The `--no-pin` advice is still the right default action when a bracket DOES drift — it removes the
+bet entirely, and it costs one flag and no build. It is just not a diagnosis.
+
 ## Ready for the next window
 
 A fresh `headtohead` binary exists and is provenance-checked, so a genuinely quiet window needs no
