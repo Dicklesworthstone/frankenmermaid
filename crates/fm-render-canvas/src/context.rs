@@ -326,6 +326,10 @@ pub enum DrawOperation {
     FillRect(f64, f64, f64, f64),
     StrokeRect(f64, f64, f64, f64),
     ClearRect(f64, f64, f64, f64),
+    /// Recorded so tests can observe ALIGNMENT, not merely position. A label's correctness depends
+    /// on both -- a right-aligned label and a centred one at the same x are different pictures -- and
+    /// without this op the mock kept alignment in internal state where no assertion could reach it.
+    SetTextAlign(TextAlign),
     FillText(String, f64, f64),
     StrokeText(String, f64, f64),
     SetTransform(f64, f64, f64, f64, f64, f64),
@@ -450,6 +454,7 @@ impl Canvas2dContext for MockCanvas2dContext {
     }
 
     fn set_text_align(&mut self, align: TextAlign) {
+        self.operations.push(DrawOperation::SetTextAlign(align));
         self.current_state.text_align = align;
     }
 

@@ -1334,6 +1334,22 @@ impl Canvas2dRenderer {
         let mut count = 0;
         let mut class_compartment_fonts = None;
         let mut standard_label_font = None;
+        // Resolved gantt name placements, indexed by node. Built once and only when the diagram has
+        // any, so every other diagram type takes exactly the path it took before.
+        let gantt_label_by_node: Option<
+            std::collections::HashMap<usize, &fm_layout::LayoutGanttTaskLabel>,
+        > = if layout.extensions.gantt_task_labels.is_empty() {
+            None
+        } else {
+            Some(
+                layout
+                    .extensions
+                    .gantt_task_labels
+                    .iter()
+                    .map(|entry| (entry.node_index, entry))
+                    .collect(),
+            )
+        };
 
         for node_box in &layout.nodes {
             let ir_node = ir.nodes.get(node_box.node_index);
@@ -1447,14 +1463,41 @@ impl Canvas2dRenderer {
                     .unwrap_or("");
 
                 if !label_text.is_empty() {
-                    let cx = x + w / 2.0;
+                    // GANTT TASK NAMES honour the placement layout resolved for them (bd-t1jj).
+                    //
+                    // Centring a name on its bar is wrong for a gantt task whose name is wider than
+                    // the bar: it overflows, and when the bar sits near the right edge the overflow
+                    // leaves the canvas and the name is lost. `extensions.gantt_task_labels` already
+                    // solves this -- layout resolves each task to Inside / OutsideRight / OutsideLeft
+                    // and hands back an anchor, choosing OutsideLeft precisely when there is no room
+                    // to the right. fm-render-svg consumes it, the terminal consumes it since
+                    // b0c1ff1d, and canvas did not.
+                    //
+                    // The anchors map ONE-TO-ONE onto canvas text alignment, which is why this needs
+                    // no arithmetic of its own and cannot drift from the SVG arm: OutsideRight is
+                    // "start", OutsideLeft is "end", Inside is "middle" -- the exact three values the
+                    // SVG writer uses.
+                    let gantt = gantt_label_by_node
+                        .as_ref()
+                        .and_then(|map| map.get(&node_box.node_index));
+                    let (cx, align) = match gantt {
+                        Some(entry) => (
+                            f64::from(entry.x) + offset_x,
+                            match entry.placement {
+                                fm_layout::GanttLabelPlacement::OutsideRight => TextAlign::Left,
+                                fm_layout::GanttLabelPlacement::OutsideLeft => TextAlign::Right,
+                                fm_layout::GanttLabelPlacement::Inside => TextAlign::Center,
+                            },
+                        ),
+                        None => (x + w / 2.0, TextAlign::Center),
+                    };
                     let cy = y + h / 2.0;
 
                     ctx.set_fill_style(&self.config.label_color);
                     ctx.set_font(
                         standard_label_font.get_or_insert_with(|| standard_node_font(&self.config)),
                     );
-                    ctx.set_text_align(TextAlign::Center);
+                    ctx.set_text_align(align);
                     ctx.set_text_baseline(TextBaseline::Middle);
 
                     // The overwhelmingly common single-line label draws `label_text` directly and never
@@ -3255,6 +3298,117 @@ mod tests {
             _ => false,
         });
         assert!(!drew_note_text, "note text was drawn for a diagram with no note");
+    }
+
+
+    /// A gantt task name must honour its resolved placement on canvas too (bd-t1jj).
+    ///
+    /// Centring a name on its bar overflows when the name is wider than the bar, and when the bar sits
+    /// near the right edge the overflow leaves the canvas and the name is lost -- measured on the
+    /// terminal side in b0c1ff1d, where at 80 columns the right-edge task vanished entirely.
+    /// `extensions.gantt_task_labels` resolves each task to Inside / OutsideRight / OutsideLeft; SVG
+    /// and the terminal consume it, canvas did not.
+    ///
+    /// ASSERTED ON THE ALIGNMENT AND THE ANCHOR TOGETHER. Either alone can be right by accident: a
+    /// centred label at the correct x is still centred, and a right-aligned label at the wrong x is
+    /// still misplaced. The pair is what pins the SVG convention (OutsideLeft anchors the text's RIGHT
+    /// edge, hence Right alignment at the anchor x).
+    #[test]
+    fn canvas_honours_gantt_label_placement() {
+        let src = "gantt\n  title Roadmap\n  dateFormat  YYYY-MM-DD\n  section Core\n  \
+                   ReticulateTheSplinesThoroughly :a1, 2026-01-01, 1d\n  \
+                   Build :a2, after a1, 6d\n  \
+                   FinalIntegrationAndSignoffPhase :a3, after a2, 1d\n";
+        let ir = fm_parser::parse(src).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+
+        // NON-VACUITY: a task must actually resolve to OutsideLeft, or this fixture does not exercise
+        // the placement path at all.
+        let outside_left = layout
+            .extensions
+            .gantt_task_labels
+            .iter()
+            .find(|e| matches!(e.placement, fm_layout::GanttLabelPlacement::OutsideLeft))
+            .expect("CONTROL FAILED: no task resolved to OutsideLeft, so this proves nothing");
+
+        let mut ctx = MockCanvas2dContext::new(1400.0, 700.0);
+        let _ = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &CanvasRenderConfig::default());
+        let ops = ctx.operations().to_vec();
+
+        // The OutsideLeft label must be drawn RIGHT-aligned, at the anchor layout resolved.
+        // The Inside-placed task gives the canvas offset: its anchor and its drawn x differ by
+        // exactly offset_x, which is then used to check the OutsideLeft one.
+        let inside_anchor = layout
+            .extensions
+            .gantt_task_labels
+            .iter()
+            .find(|e| matches!(e.placement, fm_layout::GanttLabelPlacement::Inside))
+            .expect("CONTROL FAILED: no Inside-placed task, so the offset cannot be derived")
+            .x;
+        let mut inside_drawn_x: Option<f64> = None;
+        let mut align = TextAlign::Center;
+        let mut found = false;
+        for op in &ops {
+            match op {
+                DrawOperation::SetTextAlign(a) => align = *a,
+                DrawOperation::FillText(text, x, _) => {
+                    if text.contains("Build") {
+                        inside_drawn_x = Some(*x);
+                    }
+                    if text.contains("FinalIntegrationAndSignoffPhase") {
+                        assert_eq!(
+                            align,
+                            TextAlign::Right,
+                            "an OutsideLeft gantt label must be right-aligned; centring it is what \
+                             pushes it off the canvas"
+                        );
+                        // Compared DIFFERENTIALLY against another label's anchor, because the
+                        // rendered x carries the canvas offset while the layout anchor does not.
+                        // Comparing them directly fails by exactly offset_x -- which is the mistake
+                        // this assertion made on its first draft, and the same one the terminal
+                        // version of this test made before it.
+                        let offset = inside_drawn_x
+                            .expect("the Inside-placed task must be drawn before the OutsideLeft one")
+                            - f64::from(inside_anchor);
+                        assert!(
+                            (*x - (f64::from(outside_left.x) + offset)).abs() < 2.0,
+                            "label drawn at {x}; with offset {offset} the anchor {} implies {}",
+                            outside_left.x,
+                            f64::from(outside_left.x) + offset
+                        );
+                        found = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(found, "the right-edge task name was never drawn at all");
+    }
+
+    /// A flowchart keeps centred labels.
+    ///
+    /// Regression guard: the placement path must be inert for every diagram type that publishes no
+    /// gantt labels.
+    #[test]
+    fn canvas_flowchart_labels_stay_centred() {
+        let ir = fm_parser::parse("flowchart LR\n  A[Alpha] --> B[Beta]\n").ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        assert!(
+            layout.extensions.gantt_task_labels.is_empty(),
+            "CONTROL FAILED: a flowchart produced gantt labels"
+        );
+        let mut ctx = MockCanvas2dContext::new(800.0, 400.0);
+        let _ = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &CanvasRenderConfig::default());
+        let mut align = TextAlign::Left;
+        for op in ctx.operations() {
+            match op {
+                DrawOperation::SetTextAlign(a) => align = *a,
+                DrawOperation::FillText(text, _, _) if text.contains("Alpha") => {
+                    assert_eq!(align, TextAlign::Center, "a flowchart label lost its centring");
+                }
+                _ => {}
+            }
+        }
     }
 
 
