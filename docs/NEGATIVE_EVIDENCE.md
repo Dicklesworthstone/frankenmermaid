@@ -21352,6 +21352,44 @@ spread tolerance of 4 might be a gate set at the operating point, the failure th
 three times. It is not: run 1 reached spread 7, so the gate is approachable, and runs 2-4 are exactly
 the swing its docstring describes. The instrument is right and I was wrong to suspect it.
 
+**ADDENDUM 2026-08-17 (second): PINNING THE MEASURED ARM TO ONE CORE IS ITSELF A NOISE SOURCE.**
+A fourth attempt, in the best window yet (loadavg 11.9, idle 69.6-86.5%, iowait 0.00%, and loadavg
+FLAT across all four arms at 15.85/15.85/15.85/15.7 — the same-window requirement actually met),
+still produced nothing bankable, and this time the reason is the harness rather than the host.
+
+Two A/B/B/A brackets on ELF `105c52ba8ae0bc3705fc81ee47ca333ceefa109abd1430151b27be8746a616d1`
+(rev `dd19948f`, built locally, rev string verified inside the ELF), input sha `31c0dd6b`:
+
+| run | fm A1 | fm A2 | fm drift | worst bound |
+|---|---|---|---|---|
+| A | 149,974 ns | 92,576 ns | **1.6200x** | 223.4x |
+| B | 138,338 ns | 145,397 ns | 1.0510x | 242.1x |
+
+Run A fails the bracket's OWN internal control — its docstring says a large fm drift means the
+window was not stable and the ratio is not worth quoting — and both runs put our arm near 140,000 ns
+where every earlier run today gave ~93,000 ns, dragging the bound below the standing 362.4x.
+
+**THE 1.5x IS NOT A CODE REGRESSION, and it was checked rather than assumed.** bd-rrvr had just
+added a per-label byte scan to the parse path, which is exactly the kind of change that would show up
+here. Running the SAME pinned binary UNPINNED, six times in the same window:
+
+    87,406  94,995  93,196  102,803  91,735  103,985 ns   (batch 37-39, spread 1.19x)
+
+That is the old baseline. The parse change is exonerated.
+
+**THE TELL IS THE CALIBRATED BATCH.** Every slow observation carries `batch` 21-25; every fast one
+carries 37-39, including run A's own A2 at 92,576 ns with batch 37. The batch is calibrated to a
+3 ms target, so a contended core shrinks it AND raises per-op time together. Pinned to ONE core, a
+single interloping thread cannot be migrated away from; unpinned, the scheduler moves us. So the
+pinned arm's within-invocation spread (1.62x) is WORSE than the unpinned spread (1.19x) measured
+minutes apart in the same window.
+
+**This bears directly on bd-hmfi's open policy question** — "pin both and accept a different
+Chromium execution model" versus "pin neither and record the spread" — and it is the first evidence
+either way: single-core pinning buys clock comparability at the cost of scheduling fragility, and on
+this host the fragility is the larger term. I am NOT deciding it; that bead says the choice must not
+be made by the person whose row it unblocks, and that is still me.
+
 **Do-not-retry note:** do not re-attempt this certification on a converged-but-busy host. Converged
 load is not an idle host — 64/64 cpus were over 20% busy in every admitted run above while the
 1-minute loadavg looked acceptable. Run `scripts/window_check.sh` FIRST and believe its verdict.
