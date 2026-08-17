@@ -824,6 +824,52 @@ impl Canvas2dRenderer {
         draw(quad.y_axis_bottom.as_ref(), left - pad, bottom - pad, TextAlign::Right);
     }
 
+    /// Resolve a node's fill and stroke from the author's own styling (bd-lvj3).
+    ///
+    /// Three channels, merged in the order mermaid applies them — later wins:
+    ///   1. `classDef` definitions named by the node's `classes`
+    ///   2. `style <id> ...` directives targeting this node (`ir.style_refs`)
+    ///   3. the node's own `inline_style`
+    ///
+    /// fm-render-svg gets `classDef` support for free by emitting a CSS class and letting the
+    /// BROWSER cascade it. A canvas has no cascade, so the class must be resolved here — which is
+    /// why porting the SVG helper would not have worked: it returns CSS strings, not colours.
+    ///
+    /// Returns `None` per channel when the author declared nothing, so the caller keeps the theme
+    /// default rather than being handed a colour this function invented.
+    fn resolve_node_colors(
+        &self,
+        ir: &MermaidDiagramIr,
+        node_index: usize,
+    ) -> (Option<String>, Option<String>) {
+        let Some(node) = ir.nodes.get(node_index) else {
+            return (None, None);
+        };
+
+        let mut merged: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+
+        for class_name in &node.classes {
+            if let Some(def) = ir.style_defs.iter().find(|d| &d.name == class_name) {
+                merged.extend(def.properties.clone());
+            }
+        }
+
+        for style_ref in &ir.style_refs {
+            if let fm_core::IrStyleTarget::Node(target) = style_ref.target
+                && target == fm_core::IrNodeId(node_index)
+            {
+                merged.extend(fm_core::parse_style_string(&style_ref.style).properties);
+            }
+        }
+
+        if let Some(inline) = node.inline_style.as_ref() {
+            merged.extend(inline.properties.clone());
+        }
+
+        (merged.get("fill").cloned(), merged.get("stroke").cloned())
+    }
+
     fn draw_bands<C: Canvas2dContext>(
         &mut self,
         layout: &DiagramLayout,
@@ -1713,7 +1759,14 @@ impl Canvas2dRenderer {
             let w = f64::from(node_box.bounds.width);
             let h = f64::from(node_box.bounds.height);
 
-            // Draw shape
+            // Draw shape, honouring the author's own styling (bd-lvj3).
+            //
+            // This passed `config.node_fill`/`node_stroke` unconditionally, so `style a fill:#f00`,
+            // `classDef` and every other declared colour was discarded: measured, the canvas emitted
+            // only 3-4 distinct fills for an ENTIRE diagram no matter what the source said. Counted
+            // at the time — fm-render-svg reads `inline_style` 30 times, `classes` 19 and
+            // `style_refs` 11; this crate read all three ZERO times.
+            let (fill, stroke) = self.resolve_node_colors(ir, node_box.node_index);
             draw_shape(
                 ctx,
                 shape,
@@ -1721,8 +1774,8 @@ impl Canvas2dRenderer {
                 y,
                 w,
                 h,
-                &self.config.node_fill,
-                &self.config.node_stroke,
+                fill.as_deref().unwrap_or(&self.config.node_fill),
+                stroke.as_deref().unwrap_or(&self.config.node_stroke),
                 self.config.node_stroke_width,
             );
             self.draw_calls += 1;
