@@ -4005,6 +4005,31 @@ ms, a **1.136x** spread. The rise from 362.4x to 403.2x is the incumbent slowing
 `--render-once` figure the equivalence pass reports for the same case on the same machine (**86.6
 ms**), which includes cold start. Quoting that instead would roughly double the ratio.
 
+**QUALIFICATION ADDED 2026-08-17: both runs predate the CPU-pin fix, and the bias runs AGAINST this
+row.** Until `52b72e34`, `run.mjs`'s `pickIdleCpu()` sorted cores by busy fraction and took the
+MINIMUM. On per-core DVFS the least-busy core is the one parked at the frequency floor, so the rule
+did not trade speed for quiet — it selected the floor, for the one arm that gets pinned. Measured on
+this host against a single observation of all 64 cores:
+
+| rule | core | busy | clock |
+|---|---|---:|---:|
+| old (least busy) | cpu0 | 0.0% | **1429 MHz** — the DVFS floor |
+| new (fastest among idle) | cpu14 | 0.0% | **4164 MHz** |
+
+Both cores were equally idle; the gap is **2.914x** of clock, with 18 cores tied at 0.0% busy. The
+frankenmermaid arm therefore ran at roughly a third of available clock while the mermaid-js arm,
+which is not pinned at all, ran on cores its own load had boosted.
+
+Neither existing gate could see this. Busy fraction is OCCUPANCY, not speed — a core at 0% busy and
+1429 MHz passes the 20% quiescence veto comfortably. And each engine's A/A null is measured entirely
+inside its own phase at that phase's frequency, so a null containing 1.0 proves self-consistency, not
+comparable clocks between arms.
+
+The direction is what makes this safe to leave the number alone: the defect slowed OUR arm, so the
+true separation is wider than 362.4x, and the quoted bound remains conservative. It is recorded here
+rather than used to revise the figure upward, because a ratio corrected by an argument instead of a
+measurement is not evidence. bd-hmfi carries the detail; the next measurement will carry the clock.
+
 **What this does not claim.** `run.mjs`'s host-wide exclusivity gate — all 64 CPUs below 20% busy in
 one 1-second sample — was NEVER satisfied and has now refused nine consecutive windows. This is a
 replicated standing, not a gate-certified row, and it must not be cited as the latter. The
