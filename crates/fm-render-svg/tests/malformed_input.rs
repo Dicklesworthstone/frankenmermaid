@@ -39,33 +39,79 @@ fn a_well_formed_flowchart_edge_yields_two_clean_nodes() {
     );
 }
 
-/// ACCEPTANCE GATE for bd-rrvr.
+/// HALF OF bd-rrvr, now fixed: the SILENCE is gone.
 ///
-/// ⚠️ `#[ignore]` BECAUSE IT REPRODUCES A LIVE DEFECT, the standing this repo gives an acceptance
-/// test for an open bead. Run with `--ignored`; un-ignoring it is how bd-rrvr closes.
-///
-/// Measured today: one node labelled `A] ~~> b[B`, and `parse` returns no warning at all.
+/// Before: one node labelled `A] ~~> b[B` and NO warning at all. The user saw their own syntax in a
+/// box with no signal that anything was misread. Now the parser says so.
 #[test]
-#[ignore = "bd-rrvr: an unrecognised operator is swallowed into a node label as raw source"]
-fn an_unrecognised_operator_does_not_become_a_node_label() {
-    let source = "flowchart TD\n  a[A] ~~> b[B]\n";
-    let parsed = fm_parser::parse(source);
-    let labels = labels_of(source);
-
-    // Either the line parses as the user meant it, or they are told. Silence plus a garbage label
-    // is the outcome this bead exists to remove — so the assertion accepts EITHER remedy.
-    let told = !parsed.warnings.is_empty();
-    let parsed_cleanly = labels.len() == 2
-        && labels.iter().any(|l| l == "A")
-        && labels.iter().any(|l| l == "B");
+fn an_unrecognised_operator_is_no_longer_silent() {
+    let parsed = fm_parser::parse("flowchart TD\n  a[A] ~~> b[B]\n");
 
     assert!(
-        told || parsed_cleanly,
-        "the source neither parsed cleanly nor produced a warning; labels: {labels:?}"
+        !parsed.warnings.is_empty(),
+        "the source produced neither a clean parse nor a warning"
     );
-    // Whatever the remedy, a raw fragment of the user's syntax must never be shown as content.
+}
+
+/// THE OTHER HALF, still open: the raw fragment is STILL the node's label.
+///
+/// ⚠️ `#[ignore]` BECAUSE IT REPRODUCES A LIVE DEFECT. The fix landed for bd-rrvr was the WARNING,
+/// which removes the silence but not the garbage — `a[A] ~~> b[B]` still yields one node labelled
+/// `A] ~~> b[B`. Telling the user is strictly better than not telling them, but showing a fragment
+/// of their syntax AS THEIR CONTENT remains wrong.
+///
+/// Kept separate rather than folded into the passing test above, because a single assertion that
+/// accepted "warned OR parsed cleanly" would let this half disappear from view the moment the
+/// warning landed — which is exactly what nearly happened.
+#[test]
+#[ignore = "bd-rrvr: warned now, but the raw operator fragment is still the node label"]
+fn an_unrecognised_operator_does_not_become_a_node_label() {
+    let labels = labels_of("flowchart TD\n  a[A] ~~> b[B]\n");
+
     assert!(
         !labels.iter().any(|l| l.contains("~~>") || l.contains('[')),
         "a raw operator fragment reached a node label: {labels:?}"
+    );
+}
+
+/// CONTROL: a legitimate label containing BALANCED brackets must NOT warn.
+///
+/// The rule is unmatched-bracket only, precisely so that `a["x [y]"]` — valid and common — stays
+/// silent. The tempting rule ("warn when the label looks like it contains an arrow") would fire on
+/// legitimate labels containing `~` or `>`, and a false warning on correct input is worse than the
+/// silence it replaces. This is what stops the fix from being that rule by accident.
+#[test]
+fn a_balanced_bracket_in_a_label_does_not_warn() {
+    let parsed = fm_parser::parse("flowchart TD\n  a[\"x [y] z\"] --> b[B]\n");
+
+    assert!(
+        parsed.warnings.is_empty(),
+        "a legitimate bracketed label warned: {:?}",
+        parsed.warnings
+    );
+    // Non-vacuity: the source must actually have produced the two nodes, or the silence above is
+    // just a parse failure wearing a control's clothes.
+    assert_eq!(
+        parsed.ir.nodes.len(),
+        2,
+        "the control source did not parse into two nodes, so its silence proves nothing"
+    );
+}
+
+/// CONTROL: the warning names the line and quotes the label.
+///
+/// A warning a user cannot act on is barely better than silence, so this pins that the message
+/// carries both the location and the offending text.
+#[test]
+fn the_warning_identifies_the_line_and_the_label() {
+    let parsed = fm_parser::parse("flowchart TD\n  a[A] ~~> b[B]\n");
+
+    assert!(
+        parsed
+            .warnings
+            .iter()
+            .any(|w| w.contains("Line 2") && w.contains("A] ~~> b[B")),
+        "the warning does not identify the line and the label: {:?}",
+        parsed.warnings
     );
 }

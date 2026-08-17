@@ -2468,7 +2468,51 @@ fn add_node_to_active_groups(
     }
 }
 
+/// Warn when a node label still holds UNMATCHED bracket syntax (bd-rrvr).
+///
+/// An unrecognised edge operator does not fail, warn or drop the line — it collapses the whole line
+/// into one node whose label is a raw fragment of the user's own source. Measured:
+/// `a[A] ~~> b[B]` yields ONE node labelled `A] ~~> b[B`, and `Alpha ~~ Beta` one labelled
+/// `Alpha ~~ Beta`, both with no warning. The user sees a box containing their own syntax and gets
+/// no signal that anything was misread, which is worse than a dropped line because the diagram looks
+/// like it rendered.
+///
+/// THE RULE IS DELIBERATELY NARROW: an UNMATCHED `[` or `]` only. The tempting rule — "warn when the
+/// label looks like it contains an arrow" — is a heuristic that fires on legitimate labels
+/// containing `~` or `>`, and a false warning on correct input is worse than the silence it
+/// replaces. A balanced bracket is left alone precisely because `a["x [y]"]` is valid and common.
+///
+/// This warns rather than rejects: the parser is recovery-oriented (see the empty-branch-name and
+/// duplicate-branch cases), and refusing to render is a larger change than the silence justifies.
+fn warn_if_label_holds_unmatched_bracket(builder: &mut IrBuilder, label: &str, span: Span) {
+    let mut depth = 0_i32;
+    let mut unmatched_close = false;
+    for byte in label.bytes() {
+        match byte {
+            b'[' => depth += 1,
+            b']' => {
+                if depth == 0 {
+                    unmatched_close = true;
+                } else {
+                    depth -= 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth == 0 && !unmatched_close {
+        return;
+    }
+    builder.add_warning(format!(
+        "Line {}: unrecognised syntax was kept as a node label: {label:?}. A bracket is unmatched,          so an operator on this line was probably not understood.",
+        span.start.line
+    ));
+}
+
 fn intern_node_token(builder: &mut IrBuilder, node: &NodeToken, span: Span) -> Option<IrNodeId> {
+    if let Some(label) = node.label.as_ref() {
+        warn_if_label_holds_unmatched_bracket(builder, &label.text, span);
+    }
     let node_id = builder.intern_node_label(&node.id, node.label.as_ref(), node.shape, span)?;
     if let Some(icon) = node.icon.as_deref() {
         builder.set_node_icon(node_id, icon);
@@ -2481,6 +2525,9 @@ fn intern_flow_ast_node(
     node: &FlowAstNode,
     span: Span,
 ) -> Option<IrNodeId> {
+    if let Some(label) = node.label.as_ref() {
+        warn_if_label_holds_unmatched_bracket(builder, &label.text, span);
+    }
     let node_id = if is_dangling_placeholder_node_id(&node.id) {
         builder.intern_placeholder_node(&node.id, span)?
     } else {
