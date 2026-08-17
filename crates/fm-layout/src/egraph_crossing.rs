@@ -954,19 +954,68 @@ mod tests {
             "the counted budget was lifted so the CLOCK is what stops this run; a counted verdict \
              means the fixture no longer exercises the valve"
         );
-        // CONTROL for this case: the search must have gone somewhere before the clock fired,
-        // otherwise failing closed and extracting are the same answer and the assertion below is
-        // free.
-        assert!(
-            mid_search.egraph_nodes > wide_initial.order.len(),
-            "control failed: the valve fired before the search explored past the input \
-             ({} e-nodes), so this case cannot tell fail-closed from an empty e-graph",
-            mid_search.egraph_nodes
+        // CONTROL for this case, established WITHOUT the clock.
+        //
+        // ⚠️ This control used to read `mid_search.egraph_nodes > wide_initial.order.len()`, i.e. it
+        // required the search to have explored past the input WITHIN THE 20ms VALVE. That is a
+        // wall-clock assertion, and it is false on a loaded host: under `--test-threads=64` at
+        // loadavg 53 this test failed, and passed on the same binary at loadavg 23. A control that
+        // itself depends on host load cannot certify a test whose entire subject is that host load
+        // must not change the answer.
+        //
+        // The discriminating power is a property of the FIXTURE and the engine, not of how much CPU
+        // this particular run was given, so it is established with a COUNTED budget and a valve that
+        // cannot bind: a few iterations over nine fully-inverted nodes provably grow the e-graph
+        // past the input, which is what makes "failed closed" distinguishable from "explored
+        // nothing". The timed run below then asserts the invariant unconditionally.
+        let wide_counted = saturate_layer(
+            &wide_initial,
+            &wide_ctx,
+            &SaturationConfig {
+                node_limit: 1_000_000,
+                iter_limit: 3,
+                wall_clock_valve_ms: WALL_CLOCK_VALVE_MS,
+            },
         );
+        assert!(
+            wide_counted.egraph_nodes > wide_initial.order.len(),
+            "control failed: even with a counted budget this fixture never explores past the input \
+             ({} e-nodes), so fail-closed and an empty e-graph are indistinguishable here",
+            wide_counted.egraph_nodes
+        );
+        // THE INVARIANT, asserted regardless of how far this run got. It holds whether the clock
+        // fired after a thousand iterations or before the first one, which is precisely why it is
+        // safe to assert on a machine whose load we do not control.
         assert_eq!(
             mid_search.ordering.order, wide_initial.order,
             "a valve that fires MID-SEARCH must still return the input ordering; returning the \
              best-so-far is the defect, because how far the search got is a function of host load"
+        );
+
+        // THE STATE THE OLD CONTROL MISTOOK FOR A BROKEN TEST, pinned deterministically.
+        //
+        // A zero valve on the same wide fixture fires before anything is explored. That is exactly
+        // what a heavily loaded host produces inside a 20ms valve, and the old control treated it as
+        // "this test proves nothing" and panicked. It is not a broken test — it is a legitimate run
+        // in which the engine must STILL fail closed. A zero valve is clock-free in the sense that
+        // matters: it fires immediately no matter how fast or slow the machine is.
+        let wide_starved = saturate_layer(
+            &wide_initial,
+            &wide_ctx,
+            &SaturationConfig {
+                node_limit: 1_000_000,
+                iter_limit: 10_000,
+                wall_clock_valve_ms: 0,
+            },
+        );
+        assert_eq!(
+            verdict(&wide_starved),
+            Some(BudgetType::TimeLimit),
+            "a zero valve must report the wall-clock verdict on the wide fixture too"
+        );
+        assert_eq!(
+            wide_starved.ordering.order, wide_initial.order,
+            "a run that explored nothing must still fail closed to the input ordering"
         );
 
         // THE DEFECT, stated as the property that used to fail: across four orders of magnitude of
