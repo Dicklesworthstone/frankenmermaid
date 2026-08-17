@@ -18,13 +18,11 @@ use unicode_segmentation::UnicodeSegmentation;
 pub use dot_parser::{looks_like_dot, parse_dot};
 pub use mermaid_parser::first_significant_line;
 
-/// Normalize a Mermaid identifier by trimming, stripping quotes, and replacing
-/// unsafe characters with underscores.
+/// Normalize a Mermaid identifier by trimming, stripping quotes, and replacing unsafe characters
+/// with underscores -- BORROWING when the input already normalizes to itself.
 ///
-/// This ensures consistent node identity across the engine and safe identifiers
-/// for backend layout engines and rendering formats.
-#[must_use]
-/// Normalize an identifier, BORROWING when the input already normalizes to itself.
+/// This ensures consistent node identity across the engine and safe identifiers for backend layout
+/// engines and rendering formats.
 ///
 /// The ledger has carried this as a deferred lever since 2026-07-12: "`normalize_identifier`'s
 /// remaining self-time is its `to_owned()` alloc on the fast path -- a structural Cow/borrow lever

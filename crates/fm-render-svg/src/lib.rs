@@ -4280,7 +4280,7 @@ fn render_layout_to_svg(
                         Element::text()
                             .x(fx + 6.0)
                             .y(divider_y - 3.0)
-                            .content(&format!("[{}]", alternative.label))
+                            .content(format!("[{}]", alternative.label))
                             .attr_num("font-size", config.font_size * 0.75)
                             .attr("font-weight", "bold")
                             .font_family_unless_embedded_css(

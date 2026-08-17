@@ -3639,7 +3639,17 @@ fn parse_class_member(trimmed: &str) -> Option<fm_core::IrClassMember> {
 ///
 /// Returns the statement with each endpoint's tilde group removed, plus `(clean_name, generics)`
 /// for every endpoint that carried one, so the caller can record them the way the block form does.
-fn strip_class_relation_generics(statement: &str) -> Option<(String, Vec<(String, Vec<String>)>)> {
+/// One endpoint's clean class name and the generic parameters stripped from it.
+///
+/// Named because the inline form -- `Option<(String, Vec<(String, Vec<String>)>)>` -- is three
+/// nested collections deep, where the reader has to count brackets to work out that the inner
+/// `Vec<String>` is one endpoint's parameter list rather than a second list of endpoints.
+type ClassEndpointGenerics = (String, Vec<String>);
+
+/// A rewritten relation statement plus the generics recovered from each endpoint that carried them.
+type StrippedClassRelation = (String, Vec<ClassEndpointGenerics>);
+
+fn strip_class_relation_generics(statement: &str) -> Option<StrippedClassRelation> {
     if !statement.contains('~') {
         return None;
     }
@@ -11436,12 +11446,6 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
     }
 }
 
-/// Extract `accTitle` and `accDescr` accessibility directives.
-///
-/// Supported syntax:
-/// - `accTitle: My Title`
-/// - `accDescr: Single-line description`
-/// - `accDescr { multi-line description }`
 /// Promote a swallowed `title` directive into the diagram title (bd-193x sibling).
 ///
 /// bd-ij0f taught the flowchart statement loop to stop interning `title My Flow` as a node
@@ -11487,6 +11491,12 @@ fn extract_generic_diagram_title(input: &str, builder: &mut IrBuilder) {
     }
 }
 
+/// Extract `accTitle` and `accDescr` accessibility directives.
+///
+/// Supported syntax:
+/// - `accTitle: My Title`
+/// - `accDescr: Single-line description`
+/// - `accDescr { multi-line description }`
 fn extract_accessibility_directives(input: &str, builder: &mut IrBuilder) {
     // The only accessibility directives are `accTitle`/`accDescr`; if neither keyword
     // appears, bail before the per-line scan (run on every parse of every diagram type).
