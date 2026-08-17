@@ -363,6 +363,39 @@ fn gantt_section_name_is_truncated_to_the_band_width() {
     );
 }
 
+/// A sequence NOTE's text must reach terminal output (bd-59o4).
+///
+/// `render_subcell_mode` drew each note as a bare rectangle and no text, so `Note over Alice:
+/// Ponder` was an empty box. Measured across all three renderers: `Ponder` appeared in the SVG and
+/// on the CANVAS and not in the terminal — terminal-only, and the same geometry-without-text shape
+/// as bd-u3fo.
+#[test]
+fn sequence_note_text_reaches_terminal_output() {
+    let ir = fm_parser::parse("sequenceDiagram\n  Alice->>Bob: Hi\n  Note over Alice: Ponder\n").ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(out.contains("Ponder"), "the note text never reached the terminal:\n{out}");
+    // The messages must survive — note text drawn over the diagram would trade one dropped thing
+    // for another.
+    assert!(
+        out.contains("Alice") && out.contains("Hi"),
+        "the note text displaced the diagram's own content:\n{out}"
+    );
+}
+
+/// CONTROL: a sequence diagram with NO note gains no stray text.
+///
+/// The overlay runs for every note in the layout. Without this, a bug writing an empty or stray
+/// string would go unnoticed on the case above.
+#[test]
+fn sequence_without_notes_gains_no_note_text() {
+    let ir = fm_parser::parse("sequenceDiagram\n  Alice->>Bob: Hi\n").ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(out.contains("Alice") && out.contains("Hi"), "the messages are missing:\n{out}");
+    assert!(!out.contains("Ponder"), "note text appeared with no note declared:\n{out}");
+}
+
 /// A sequence FRAGMENT's label must reach terminal output (bd-039t).
 ///
 /// `render_subcell_mode` drew each fragment's rectangle and no text, so `loop Every day` came out

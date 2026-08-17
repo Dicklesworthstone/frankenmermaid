@@ -1499,6 +1499,61 @@ impl TermRenderer {
             }
         }
 
+        // Overlay SEQUENCE NOTE text (bd-59o4).
+        //
+        // `render_subcell_mode` draws each note as a bare RECTANGLE via `canvas.draw_rect` and no
+        // text, so `Note over Alice: Ponder` came out as an empty box. Measured SVG vs terminal vs
+        // canvas: `Ponder` appears in the SVG and on the CANVAS, and not in the terminal — so this
+        // is terminal-only, and the same geometry-without-text shape as bd-u3fo and the fragment
+        // labels below.
+        //
+        // Same placement discipline as those: interior rows only (the note's top row is its own
+        // border), blank cells preferred, and a fallback that writes anyway when no blank run
+        // exists — because an all-or-nothing guard silently drew NOTHING for the longer of two
+        // otherwise identical fragment labels, which is the bug that cost three builds on bd-039t.
+        for note in &layout.extensions.sequence_notes {
+            if note.text.is_empty() {
+                continue;
+            }
+            let (nx, ny, nw, nh) = self.bounds_to_cells(&note.bounds, scale_x, scale_y);
+            if nw < 3 || nh < 2 {
+                continue;
+            }
+            let text = self.truncate_label(&note.text);
+            let start = nx + 1;
+            let last_row = (ny + nh.saturating_sub(1)).min(lines.len());
+            let mut placed = false;
+            for line in lines.iter_mut().take(last_row).skip(ny + 1) {
+                let fits = text.chars().enumerate().all(|(offset, _)| {
+                    let col = start + offset;
+                    col < cell_width
+                        && line
+                            .get(col)
+                            .is_some_and(|cell| *cell == ' ' || *cell == '\u{2800}')
+                });
+                if !fits {
+                    continue;
+                }
+                for (offset, ch) in text.chars().enumerate() {
+                    line[start + offset] = ch;
+                }
+                placed = true;
+                break;
+            }
+            if !placed {
+                let row = ny + 1;
+                if row < lines.len() {
+                    for (offset, ch) in text.chars().enumerate() {
+                        let col = start + offset;
+                        if col >= cell_width {
+                            break;
+                        }
+                        lines[row][col] = ch;
+                    }
+                }
+            }
+        }
+
         // Overlay SEQUENCE FRAGMENT labels (bd-039t).
         //
         // `render_subcell_mode` draws each fragment's RECTANGLE via `canvas.draw_rect` and no text,

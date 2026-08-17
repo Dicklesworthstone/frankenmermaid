@@ -41,13 +41,43 @@ const CASES: &[(&str, &str, &str)] = &[
     ("gitgraph_branch", "gitGraph\n  commit\n  branch dev\n  commit\n", "dev"),
     ("state_note", "stateDiagram-v2\n  [*] --> A\n  note right of A : Waiting\n", "Waiting"),
     ("flowchart_subgraph", "flowchart TD\n  subgraph Backend\n    a[Alpha]\n  end\n  a --> b[Beta]\n", "Backend"),
+    // ── added after bd-59o4: this corpus was NARROWER THAN ITS OWN NAME. It claimed the three
+    // renderers agree while never exercising pie, xychart, quadrant, packet, c4, architecture or
+    // sequence notes — and two disagreements were hiding in exactly those types. A gate is only as
+    // wide as its case list.
+    ("pie_label", "pie title Share\n  \"Alpha\" : 60\n  \"Beta\" : 40\n", "Alpha"),
+    ("pie_title", "pie title Share\n  \"Alpha\" : 60\n", "Share"),
+    ("xychart_title", "xychart-beta\n  title Sales\n  x-axis [jan, feb]\n  bar [50, 60]\n", "Sales"),
+    ("xychart_axis", "xychart-beta\n  title Sales\n  x-axis [jan, feb]\n  bar [50, 60]\n", "jan"),
+    ("quadrant_title", "quadrantChart\n  title Reach\n  x-axis Low --> High\n  A: [0.3, 0.6]\n", "Reach"),
+    ("quadrant_point", "quadrantChart\n  title Reach\n  x-axis Low --> High\n  A: [0.3, 0.6]\n", "A"),
+    ("quadrant_axis", "quadrantChart\n  title Reach\n  x-axis Low --> High\n  A: [0.3, 0.6]\n", "Low"),
+    ("packet_field", "packet-beta\n  0-7: \"Alpha\"\n  8-15: \"Beta\"\n", "Alpha"),
+    ("c4_name", "C4Context\n  title Sys\n  Person(a, \"Alice\", \"A user\")\n", "Alice"),
+    ("arch_service", "architecture-beta\n  service db(database)[Database]\n", "Database"),
+    ("seq_message", "sequenceDiagram\n  Alice->>Bob: Hello\n", "Hello"),
+    ("seq_note", "sequenceDiagram\n  Alice->>Bob: Hi\n  Note over Alice: Ponder\n", "Ponder"),
+    ("timeline_event", "timeline\n  title Hist\n  2001 : Alpha\n", "Alpha"),
+    ("sankey_node", "sankey-beta\n\nAlpha,Beta,5\n", "Alpha"),
 ];
 
 /// `(case, renderer, bead)` — pairs known to disagree, each naming the bead that tracks it.
 ///
 /// An allowlist, not a silence: a NEW disagreement fails, and an entry that starts AGREEING fails
 /// too, so a fix cannot leave a permanent hole behind.
-const KNOWN_GAPS: &[(&str, &str, &str)] = &[(
+const KNOWN_GAPS: &[(&str, &str, &str)] = &[
+    (
+        "quadrant_axis",
+        "terminal",
+        "bd-59o4: both non-SVG renderers drop the quadrant axis label. Unlike every other member of \
+         this family it is a TWO-renderer gap, so one fix is not assumed to cover both.",
+    ),
+    (
+        "quadrant_axis",
+        "canvas",
+        "bd-59o4: see the terminal entry — the same label is missing from the canvas as well.",
+    ),
+    (
     "gantt_section",
     "terminal",
     "bd-039t: the band-label overlay caps a label at the band's own cell width, so a gantt section \
