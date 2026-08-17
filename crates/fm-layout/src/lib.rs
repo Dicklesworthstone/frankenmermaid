@@ -3650,6 +3650,27 @@ impl IncrementalLayoutEngine {
         if dirty.is_empty() {
             return None;
         }
+        // EVERY region dirty means there is no CLEAN region left to anchor against, and this path is
+        // built entirely around having one: each dirty region is relaid locally and then translated
+        // so that its centre lands back on its PREVIOUS bounds centre
+        // (`previous_bounds.center() - local_bounds.center()`, below). That translation is what keeps
+        // an incremental edit from shifting the untouched parts of the picture -- and it is only
+        // meaningful when some part is actually untouched.
+        //
+        // With nothing stable to anchor to, every region pins freshly computed geometry onto stale
+        // positions: a full recompute wearing an incremental hat, and one that produces a DIFFERENT
+        // picture than recomputing would (bd-8pna). Measured on this bead's own fixture, 62 of 64
+        // node boxes disagreed with a full recompute and the canvas came out 11920.0 tall against
+        // 11733.5, anchored to the previous topology's extent.
+        //
+        // This is a whole-set property, not a tuned threshold: one clean region is enough to make the
+        // anchoring meaningful, and zero is never enough. The single-edge-toggle edit that
+        // `incremental_layout_engine_selectively_relayouts_large_topology_change_with_stable_nodes`
+        // exercises dirties 1 of 2 regions and is provably identical to a full recompute, so it keeps
+        // the incremental path; this bead's fixture dirties 30 of 30 and now takes the correct one.
+        if dirty.regions.len() == current_graph.regions().len() {
+            return None;
+        }
 
         let node_sizes = compute_node_sizes(ir, &metrics);
         // The incremental path must resolve spacing the same way the full path does, or an edit would
@@ -26998,16 +27019,27 @@ mod tests {
             config.clone(),
             guardrails,
         );
-        // This test checks SURVIVABILITY, not the contract its name states. The layout returned
-        // here is measurably NOT the one a full recompute produces (bd-8pna), so the structural
-        // checks below are all that can pass today.
+        // THE NAME'S CONTRACT, asserted rather than described (bd-8pna). This test used to check
+        // only that 64 nodes came back with finite, positive bounds, under a comment calling the
+        // stale cache "a known limitation" -- so a layout built from the PREVIOUS edge topology
+        // satisfied a test named `..._triggers_full_recompute`. A test that accepts the defect it is
+        // named after actively defends it: whoever fixed invalidation would have seen no failure
+        // telling them it mattered, and any partial fix would look like a regression against nothing.
         //
-        // ⚠️ The comment that used to sit here called that "a known limitation" and moved on. That
-        // is the thing to avoid: a test named `..._triggers_full_recompute` whose body accepts a
-        // layout built from the PREVIOUS edge topology defends the defect it is named after, and
-        // leaves whoever eventually fixes invalidation with no failing assertion telling them it
-        // mattered. The contract now lives in `fault_stale_cache_matches_a_full_recompute` below,
-        // which is #[ignore]d because it REPRODUCES the defect rather than because it is unfinished.
+        // `ir_b` differs from the warmed `ir_a` in edge topology, which dirties every region, so the
+        // engine must decline the incremental path entirely. Equality with a full recompute is the
+        // stronger statement and lives in `fault_stale_cache_matches_a_full_recompute`; this asserts
+        // the PATH, so a future change that reached the same geometry incrementally would still be
+        // caught here as a contract change rather than passing silently.
+        assert!(
+            result_b
+                .trace
+                .incremental
+                .query_type
+                .starts_with("layout_full_recompute"),
+            "an edge-topology edit that dirties every region must take a full recompute, got {}",
+            result_b.trace.incremental.query_type
+        );
         assert_eq!(result_b.layout.nodes.len(), 64);
         // Verify structural validity: all nodes must have finite, positive-size bounds.
         for (i, node) in result_b.layout.nodes.iter().enumerate() {
@@ -27036,7 +27068,6 @@ mod tests {
     ///
     /// Same edge count, different geometry. Un-ignoring it is bd-8pna's acceptance gate.
     #[test]
-    #[ignore = "bd-8pna: reproduces a live stale-cache defect; un-ignore as the acceptance gate"]
     fn fault_stale_cache_matches_a_full_recompute() {
         let mut engine = IncrementalLayoutEngine::default();
         let ir_a = large_two_subgraph_ir(32);
