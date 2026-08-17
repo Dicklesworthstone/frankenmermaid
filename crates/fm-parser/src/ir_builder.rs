@@ -804,6 +804,19 @@ impl IrBuilder {
         self.enable_autonumber_with(1, 1);
     }
 
+    /// Turn sequence autonumbering OFF, as `autonumber off` does in mermaid.
+    ///
+    /// A distinct entry point rather than `enable_autonumber_with(0, 0)`: the start and increment are
+    /// meaningless when numbering is off, and writing zeroes into them would make a later bare
+    /// `autonumber` (which restores the default 1/1) indistinguishable from a corrupted state.
+    pub(crate) fn disable_autonumber(&mut self) {
+        let meta = self
+            .ir
+            .sequence_meta
+            .get_or_insert_with(IrSequenceMeta::default);
+        meta.autonumber = false;
+    }
+
     pub(crate) fn enable_autonumber_with(&mut self, start: u32, increment: u32) {
         let meta = self
             .ir

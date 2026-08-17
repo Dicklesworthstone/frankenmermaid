@@ -223,6 +223,11 @@ enum SequenceStatement {
         start: Option<u32>,
         increment: Option<u32>,
     },
+    /// `autonumber off`, which mermaid uses to STOP numbering. Distinct from `Autonumber` because
+    /// "off" is not a start value: it used to fail `"off".parse::<u32>()`, take the whole statement
+    /// to `None`, and fall through to the message parser, so the directive was silently discarded and
+    /// messages kept their numbers (bd-a8x7).
+    AutonumberOff,
     HideFootbox,
     Link {
         actor: String,
@@ -2755,6 +2760,18 @@ fn parse_sequence_autonumber(line: &str) -> Option<SequenceStatement> {
         });
     }
 
+    // `autonumber off` STOPS numbering; it is not a start value. Without this arm `"off".parse()`
+    // fails, `?` takes the whole statement to `None`, and the line falls through to the message
+    // parser -- so a directive the user wrote to turn something off was silently dropped and the
+    // messages stayed numbered. Same family as bd-ec1t and bd-yrxu: input the engine cannot
+    // interpret is reinterpreted as content instead of being honoured or reported.
+    //
+    // Matched case-insensitively because mermaid's own `autonumber` handling lowercases the keyword
+    // argument before comparing.
+    if rest.eq_ignore_ascii_case("off") {
+        return Some(SequenceStatement::AutonumberOff);
+    }
+
     let parts: Vec<&str> = rest.split_whitespace().collect();
     match parts.as_slice() {
         [start] => Some(SequenceStatement::Autonumber {
@@ -3225,6 +3242,9 @@ fn lower_sequence_statement(
         }
         SequenceStatement::Autonumber { start, increment } => {
             builder.enable_autonumber_with(start.unwrap_or(1), increment.unwrap_or(1));
+        }
+        SequenceStatement::AutonumberOff => {
+            builder.disable_autonumber();
         }
         SequenceStatement::HideFootbox => {
             builder.hide_sequence_footbox();
@@ -15468,6 +15488,93 @@ Rel_Back(db, app, "Responds")"#,
             ids.contains(&"flowchat".to_string()),
             "a later line must not be blanked too: {ids:?}"
         );
+    }
+
+    /// `autonumber off` must STOP numbering, not be silently discarded (bd-a8x7).
+    ///
+    /// `parse_sequence_autonumber` matched `autonumber` and then tried `"off".parse::<u32>()` as a
+    /// START value. That fails, `?` took the whole statement to `None`, and the line fell through to
+    /// the message parser — so a directive written to turn something OFF left numbering ON. Same
+    /// family as bd-ec1t and bd-yrxu: input the engine cannot interpret gets reinterpreted as content
+    /// instead of being honoured or reported.
+    ///
+    /// The CONTROL is the first assertion, and it is what makes the rest mean anything: a bare
+    /// `autonumber` must actually switch numbering ON for this fixture. Without it, "off yields
+    /// autonumber == false" would pass on a diagram that never numbered at all.
+    #[test]
+    fn autonumber_off_disables_numbering() {
+        let on = parse_mermaid("sequenceDiagram\n  autonumber\n  Alice->>Bob: Hi\n");
+        let on_meta = on
+            .ir
+            .sequence_meta
+            .as_ref()
+            .expect("a sequence diagram has sequence meta");
+        assert!(
+            on_meta.autonumber,
+            "CONTROL FAILED: a bare `autonumber` did not enable numbering, so the off case below \
+             would pass on a diagram that never numbered"
+        );
+
+        let off = parse_mermaid("sequenceDiagram\n  autonumber off\n  Alice->>Bob: Hi\n");
+        let off_meta = off
+            .ir
+            .sequence_meta
+            .as_ref()
+            .expect("a sequence diagram has sequence meta");
+        assert!(
+            !off_meta.autonumber,
+            "`autonumber off` left numbering enabled; the directive was swallowed"
+        );
+
+        // The line must not survive as CONTENT either. The old fall-through handed it to the message
+        // parser, which is how a dropped directive turns into a phantom participant or message.
+        assert_eq!(
+            off.ir.nodes.len(),
+            on.ir.nodes.len(),
+            "`autonumber off` changed the participant set: it was parsed as content, not a directive"
+        );
+        assert_eq!(
+            off.ir.edges.len(),
+            on.ir.edges.len(),
+            "`autonumber off` became an edge: it was parsed as a message, not a directive"
+        );
+    }
+
+    /// `autonumber off` must turn numbering off AFTER it was switched on, which is the real usage.
+    ///
+    /// Asserted separately because the single-directive case above would also pass if `off` merely
+    /// failed to enable numbering rather than actively disabling it — a distinction that only shows
+    /// when something has to be undone.
+    #[test]
+    fn autonumber_off_overrides_an_earlier_autonumber() {
+        let parsed = parse_mermaid("sequenceDiagram\n  autonumber 10 5\n  Alice->>Bob: Hi\n  autonumber off\n  Bob->>Alice: Bye\n");
+        let meta = parsed
+            .ir
+            .sequence_meta
+            .as_ref()
+            .expect("a sequence diagram has sequence meta");
+        assert!(
+            !meta.autonumber,
+            "a later `autonumber off` did not override the earlier `autonumber 10 5`"
+        );
+    }
+
+    /// The start/increment forms must keep working, and `off` must not have widened the match.
+    ///
+    /// This is the regression guard for the fix itself: an over-eager `off` check that swallowed
+    /// other arguments, or a prefix match that accepted `autonumberoff`, would break the forms the
+    /// parser already supported.
+    #[test]
+    fn autonumber_start_and_increment_still_parse() {
+        let parsed = parse_mermaid("sequenceDiagram\n  autonumber 10 5\n  Alice->>Bob: Hi\n");
+        let meta = parsed
+            .ir
+            .sequence_meta
+            .as_ref()
+            .expect("a sequence diagram has sequence meta");
+        assert!(meta.autonumber, "`autonumber 10 5` must enable numbering");
+        assert_eq!(meta.autonumber_start, 10, "start was not honoured");
+        assert_eq!(meta.autonumber_increment, 5, "increment was not honoured");
     }
 
     /// No ER relationship operator may carry an arrowhead; only its line style varies (bd-m0a9).
