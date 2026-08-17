@@ -125,6 +125,53 @@ Neither is a code change to the engines, and neither should be attempted while `
 reports NOT MEASURABLE — a longer arm on an oscillating host still needs the oscillation to be
 stationary for the duration of the run.
 
+## A run COMPLETED in the best window of the campaign, and its own A/A invalidates it (2026-08-17)
+
+The window was the calmest measured: per-CPU counts `8 9 10 13 15 19 18 8 11 11 10 9`, idle
+**82.2-89.0%** across the same samples, iowait 0.00%, loadavg 11.25/12.79/18.23. Binary rebuilt at
+`HEAD 816a781e` with the revision embedded, sha256 `289d0377…`; corpus `sequence_20` generated from
+`corpus.mjs`, 1257 bytes, sha256 `31c0dd6b…`.
+
+```
+A1 fm       93,454 ns     load [23.35, 16.10, 18.92]   mean 2918 MHz (spread 2.861x)
+B1 mermaid  37,600,000 ns load [23.35, 16.10, 18.92]   mean 2931 MHz (spread 2.833x)
+B2 mermaid  36,400,000 ns load [23.35, 16.10, 18.92]   mean 3008 MHz (spread 2.929x)
+A2 fm      159,599 ns     load [22.36, 16.02, 18.88]   mean 2605 MHz (spread 2.865x)
+```
+
+pins: fm on `cpu19 @ 4073 MHz` (fastest_clock_among_idle); incumbent 8 CPUs, slowest 2832 MHz,
+`starved=False`; 19/64 CPUs busy at the start.
+
+**THE RATIO IS NOT QUOTABLE, AND THE REASON IS IN THE ROW ITSELF.** Worst bound came out at 228.1x
+and headline 292.4x, but:
+
+| | drift between its two identical repeats |
+|---|---|
+| mermaid-js arm | **1.033x** |
+| frankenmermaid arm | **1.7078x** |
+
+**Our own arm varied by 71% between two runs of the same binary on the same input inside one
+invocation.** A ratio whose numerator moves 71% under repetition is not a measurement of an engine.
+The frankenmermaid drift IS the A/A null for our side, and 1.71x fails any threshold worth having —
+the incumbent's four-observation null (`0.939-1.122`) is comfortably tighter than our arm's
+two-observation drift.
+
+**The recorded CPU MHz rules out the obvious explanation.** A2 ran at mean 2605 MHz against A1's
+2918 MHz — 12% slower clocks — but took **71%** longer. Clock alone does not span that gap, so the
+extra time is interference the 9 ms arm happened to land in, not a slower core. This is exactly what
+the per-arm MHz recording is for, and it is the first row where it decided something.
+
+**This CONFIRMS the arm-duration prediction empirically**, with the harness's own numbers rather than
+by argument: an arm measuring ~9 ms against ~10 s of interference period is a lottery, and it came up
+badly here even though every host-level indicator said the window was quiet. The banked `sequence_20`
+row's much tighter drift (1.0204x, 1.0481x) is therefore better read as two lucky draws than as
+evidence of stability — which also means its ±9% A/A radius understates the true exposure.
+
+**What this run does NOT show.** It is not evidence that frankenmermaid is slower than previously
+recorded, and 228.1x must not be quoted as a competing figure: both numbers come from the same
+lottery, and this one simply drew worse. Nothing here changes what the engines do; it changes what
+the harness can currently prove.
+
 ## Ready for the next window
 
 A fresh `headtohead` binary exists and is provenance-checked, so a genuinely quiet window needs no
