@@ -1528,6 +1528,28 @@ impl Canvas2dRenderer {
                 ctx.set_font(class_fonts.0.as_str());
                 ctx.set_text_align(TextAlign::Center);
                 let mut cursor_y = y + line_h;
+
+                // STEREOTYPE above the name, where fm-render-svg puts it (bd-rk14).
+                //
+                // Measured SVG vs canvas: an `interface` stereotype drew in the SVG and not on the
+                // canvas. Same gap the terminal had (bd-039t) — the compartment path drew name,
+                // attributes and methods and skipped `meta.stereotype`. Mapping mirrors
+                // fm-render-svg, including Enum rendering as `enumeration` and a Custom stereotype
+                // written verbatim.
+                if let Some(stereotype) = &meta.stereotype {
+                    let stereo_text = match stereotype {
+                        fm_core::ClassStereotype::Interface => "<<interface>>",
+                        fm_core::ClassStereotype::Abstract => "<<abstract>>",
+                        fm_core::ClassStereotype::Enum => "<<enumeration>>",
+                        fm_core::ClassStereotype::Service => "<<service>>",
+                        fm_core::ClassStereotype::Custom(custom) => custom.as_str(),
+                    };
+                    ctx.fill_text(stereo_text, x + w / 2.0, cursor_y);
+                    self.draw_calls += 1;
+                    *labels_drawn += 1;
+                    cursor_y += line_h * 0.8;
+                }
+
                 ctx.fill_text(&display_name, x + w / 2.0, cursor_y);
                 self.draw_calls += 1;
                 *labels_drawn += 1;
@@ -1641,6 +1663,107 @@ impl Canvas2dRenderer {
                     if let Some(comment) = attr.comment.as_deref().filter(|c| !c.is_empty()) {
                         text.push(' ');
                         text.push_str(comment);
+                    }
+                    ctx.fill_text(&text, x + padding, cursor_y);
+                    self.draw_calls += 1;
+                    *labels_drawn += 1;
+                    cursor_y += member_font * 1.2;
+                }
+            } else if let Some((node, meta)) = ir_node
+                .and_then(|n| n.requirement_meta.as_deref().map(|m| (n, m)))
+            {
+                // REQUIREMENT rows (bd-rk14) — canvas twin of the terminal fix in bd-039t.
+                // Measured: `requirement R { id: 1 / text: hello }` drew `hello` in the SVG and not
+                // on the canvas. Field order matches the SVG's row order.
+                let line_h = self.config.font_size * 1.3;
+                let member_font = self.config.font_size * 0.9;
+                let padding = 6.0;
+
+                ctx.set_fill_style(&self.config.label_color);
+                ctx.set_text_baseline(TextBaseline::Middle);
+                let name = node
+                    .label
+                    .and_then(|lid| ir.labels.get(lid.0))
+                    .map(|l| l.text.as_str())
+                    .unwrap_or(&node.id);
+                let fonts = class_compartment_fonts
+                    .get_or_insert_with(|| class_compartment_font_css(&self.config));
+                ctx.set_font(fonts.0.as_str());
+                ctx.set_text_align(TextAlign::Center);
+                let mut cursor_y = y + line_h;
+                ctx.fill_text(name, x + w / 2.0, cursor_y);
+                self.draw_calls += 1;
+                *labels_drawn += 1;
+                cursor_y += line_h * 0.5;
+
+                ctx.begin_path();
+                ctx.move_to(x, cursor_y);
+                ctx.line_to(x + w, cursor_y);
+                ctx.stroke();
+                self.draw_calls += 1;
+                cursor_y += member_font * 0.5;
+
+                ctx.set_font(fonts.1.as_str());
+                ctx.set_text_align(TextAlign::Left);
+                for (prefix, value) in [
+                    ("id: ", meta.req_id.as_deref()),
+                    ("text: ", meta.text.as_deref()),
+                    ("risk: ", meta.risk.as_deref()),
+                    ("verify: ", meta.verify_method.as_deref()),
+                ] {
+                    let Some(value) = value.filter(|v| !v.is_empty()) else {
+                        continue;
+                    };
+                    if cursor_y > y + h - member_font * 0.5 {
+                        break;
+                    }
+                    ctx.fill_text(&format!("{prefix}{value}"), x + padding, cursor_y);
+                    self.draw_calls += 1;
+                    *labels_drawn += 1;
+                    cursor_y += member_font * 1.2;
+                }
+            } else if let Some((node, meta)) =
+                ir_node.and_then(|n| n.c4_meta.as_deref().map(|m| (n, m)))
+            {
+                // C4 type / technology / description (bd-rk14) — canvas twin of the bd-039t fix.
+                // Measured: `Person(a, "Alice", "A user")` drew `A user` in the SVG and not on the
+                // canvas. Decorations match fm-render-svg.
+                let line_h = self.config.font_size * 1.3;
+                let member_font = self.config.font_size * 0.9;
+                let padding = 6.0;
+
+                ctx.set_fill_style(&self.config.label_color);
+                ctx.set_text_baseline(TextBaseline::Middle);
+                let name = node
+                    .label
+                    .and_then(|lid| ir.labels.get(lid.0))
+                    .map(|l| l.text.as_str())
+                    .unwrap_or(&node.id);
+                let fonts = class_compartment_fonts
+                    .get_or_insert_with(|| class_compartment_font_css(&self.config));
+                ctx.set_font(fonts.0.as_str());
+                ctx.set_text_align(TextAlign::Center);
+                let mut cursor_y = y + line_h;
+                ctx.fill_text(name, x + w / 2.0, cursor_y);
+                self.draw_calls += 1;
+                *labels_drawn += 1;
+                cursor_y += line_h * 0.5;
+
+                ctx.set_font(fonts.1.as_str());
+                ctx.set_text_align(TextAlign::Left);
+                let mut rows: Vec<String> = Vec::with_capacity(3);
+                if !meta.element_type.is_empty() {
+                    rows.push(format!("<<{}>>", meta.element_type));
+                }
+                if let Some(technology) = meta.technology.as_deref().filter(|t| !t.is_empty()) {
+                    rows.push(format!("[{technology}]"));
+                }
+                if let Some(description) = meta.description.as_deref().filter(|d| !d.is_empty()) {
+                    rows.push(description.to_string());
+                }
+                for text in rows {
+                    if cursor_y > y + h - member_font * 0.5 {
+                        break;
                     }
                     ctx.fill_text(&text, x + padding, cursor_y);
                     self.draw_calls += 1;

@@ -45,6 +45,72 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ("flowchart_subgraph", "flowchart TD\n  subgraph Backend\n    a[Alpha]\n  end\n  a --> b[Beta]\n", &["Backend", "Alpha", "Beta"]),
 ];
 
+/// Canvas twins of three terminal fixes: stereotype, requirement rows, C4 details (bd-rk14).
+///
+/// All three were measured drawing in the SVG and absent from the canvas, and all three were
+/// already fixed in the TERMINAL under bd-039t — the canvas simply never got them.
+#[test]
+fn stereotype_requirement_and_c4_reach_the_canvas() {
+    let texts_for = |source: &str| {
+        let ir = fm_parser::parse(source).ir;
+        let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+        render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+        drawn_text(&format!("{:?}", context.operations()))
+    };
+
+    let stereo = texts_for(
+        "classDiagram\n  class Alpha {\n    +String name\n  }\n  <<interface>> Alpha\n",
+    );
+    assert!(
+        stereo.iter().any(|t| t.contains("interface")),
+        "the class stereotype never reached the canvas: {stereo:?}"
+    );
+    // The members must survive: the stereotype is drawn ABOVE the name in the same box, so a
+    // mis-advanced cursor would push the compartment rows out rather than fail loudly.
+    assert!(
+        stereo.iter().any(|t| t.contains("name")),
+        "the stereotype displaced the class members: {stereo:?}"
+    );
+
+    let req = texts_for("requirementDiagram\n  requirement R {\n  id: 1\n  text: hello\n  risk: high\n  }\n");
+    assert!(
+        req.iter().any(|t| t.contains("hello")),
+        "the requirement text never reached the canvas: {req:?}"
+    );
+    assert!(
+        req.iter().any(|t| t.contains("high")),
+        "the requirement risk never reached the canvas: {req:?}"
+    );
+
+    let c4 = texts_for("C4Context\n  title S\n  Person(alice, \"Alice\", \"A user\")\n");
+    assert!(
+        c4.iter().any(|t| t.contains("A user")),
+        "the C4 description never reached the canvas: {c4:?}"
+    );
+    assert!(
+        c4.iter().any(|t| t.contains("Person")),
+        "the C4 element type never reached the canvas: {c4:?}"
+    );
+}
+
+/// CONTROL: plain nodes still take the single-label path.
+///
+/// Three new `else if` arms were inserted before the standard fallback, each gated on a different
+/// meta field. A mis-guarded arm would capture ordinary flowchart nodes and silently change how
+/// every diagram renders.
+#[test]
+fn plain_nodes_still_take_the_single_label_path_on_the_canvas() {
+    let ir = fm_parser::parse("flowchart TD\n  a[Alpha] --> b[Beta]\n").ir;
+    let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+    render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let texts = drawn_text(&format!("{:?}", context.operations()));
+
+    assert!(
+        texts.iter().any(|t| t.contains("Alpha")) && texts.iter().any(|t| t.contains("Beta")),
+        "plain flowchart nodes regressed: {texts:?}"
+    );
+}
+
 /// An ER entity's ATTRIBUTES must reach the CANVAS (bd-rk14).
 ///
 /// Measured SVG vs canvas: `A { string name PK }` drew `name` and `PK` in the SVG and neither on
