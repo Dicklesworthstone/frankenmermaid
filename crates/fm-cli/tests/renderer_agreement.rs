@@ -59,6 +59,24 @@ const CASES: &[(&str, &str, &str)] = &[
     ("seq_note", "sequenceDiagram\n  Alice->>Bob: Hi\n  Note over Alice: Ponder\n", "Ponder"),
     ("timeline_event", "timeline\n  title Hist\n  2001 : Alpha\n", "Alpha"),
     ("sankey_node", "sankey-beta\n\nAlpha,Beta,5\n", "Alpha"),
+    // ── second widening: the types still absent after bd-59o4. All fourteen agreed on the first
+    // run, so this batch adds no known gap — it locks in a clean sweep rather than recording one.
+    // Worth having precisely because the PREVIOUS widening found two real defects in exactly the
+    // types it had been missing.
+    ("mindmap_root", "mindmap\n  root((Core))\n    Alpha\n", "Core"),
+    ("mindmap_child", "mindmap\n  root((Core))\n    Alpha\n", "Alpha"),
+    ("journey_task", "journey\n  title Day\n  section Morning\n    Wake: 5: Me\n", "Wake"),
+    ("journey_section", "journey\n  title Day\n  section Morning\n    Wake: 5: Me\n", "Morning"),
+    ("kanban_card", "kanban\n  Todo\n    t1[Write docs]\n", "Write docs"),
+    ("kanban_column", "kanban\n  Todo\n    t1[Write docs]\n", "Todo"),
+    ("block_label", "block-beta\n  columns 2\n  Alpha[\"Alpha\"] Beta[\"Beta\"]\n", "Alpha"),
+    ("gantt_task", "gantt\n  title P\n  section S\n    BuildStep : t1, 2024-01-01, 3d\n", "BuildStep"),
+    ("gantt_title", "gantt\n  title Plan\n  section S\n    T : t1, 2024-01-01, 3d\n", "Plan"),
+    ("state_composite", "stateDiagram-v2\n  state Outer {\n    A --> B\n  }\n", "Outer"),
+    ("er_relationship_label", "erDiagram\n  A ||--o{ B : places\n", "places"),
+    ("flowchart_edge_label", "flowchart TD\n  a[A] -->|yes| b[B]\n", "yes"),
+    ("class_method", "classDiagram\n  class Alpha {\n    +run()\n  }\n", "run"),
+    ("timeline_title", "timeline\n  title Hist\n  2001 : Alpha\n", "Hist"),
 ];
 
 /// `(case, renderer, bead)` — pairs known to disagree, each naming the bead that tracks it.
