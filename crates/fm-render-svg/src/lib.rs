@@ -188,6 +188,18 @@ pub struct SvgRenderConfig {
     pub include_source_spans: bool,
     /// How (or if) to emit node links.
     pub link_mode: MermaidLinkMode,
+    /// Today's date as `YYYY-MM-DD`, for the gantt `todayMarker` line (bd-j0va).
+    ///
+    /// INJECTED, never read from the clock inside the renderer, and defaulting to `None`. That is the
+    /// whole design: output bytes as a function of the wall clock is a defect class this project has
+    /// already been bitten by, and a renderer that called `now()` would make every gantt golden
+    /// time-dependent and every render irreproducible. With `None` no marker is drawn, so library
+    /// output and goldens are deterministic; the CLI supplies the real date so users get mermaid's
+    /// behaviour.
+    ///
+    /// A marker is drawn only when this parses as a real calendar date AND falls inside the charted
+    /// span AND the diagram did not say `todayMarker off`.
+    pub gantt_today: Option<String>,
 }
 
 impl SvgRenderConfig {
@@ -231,6 +243,7 @@ impl SvgRenderConfig {
 impl Default for SvgRenderConfig {
     fn default() -> Self {
         Self {
+            gantt_today: None,
             backend: SvgBackend::LegacyLayout,
             responsive: true,
             accessible: true,
@@ -5870,6 +5883,59 @@ fn render_gantt_svg(
             );
         }
         doc = doc.child(Element::raw_svg(ticks_svg));
+    }
+
+    // The `todayMarker` line (bd-j0va). mermaid draws a vertical line across the chart at the
+    // current date; `todayMarker off` disables it and a style string restyles it. We parsed the
+    // directive and read it NOWHERE, so both the default marker and the directive that turns it off
+    // were equally invisible.
+    //
+    // FOUR CONDITIONS, all required, and each one is a way this could have gone wrong:
+    //
+    //  1. `config.gantt_today` must be supplied. The renderer never calls the clock -- output bytes
+    //     as a function of wall time is a defect class this project has already been bitten by, and
+    //     it would make every gantt golden depend on the day it was blessed. The library default is
+    //     `None`, so goldens are stable; the CLI injects the real date.
+    //  2. It must parse as a real calendar date, via the SAME `parse_iso_day_number` the layout used
+    //     to place the bars -- not a second copy of that arithmetic in this crate.
+    //  3. Today must fall INSIDE the charted span. `x_for_day` returns `None` otherwise, which is
+    //     why every fixture with fixed past dates draws nothing and no golden moves.
+    //  4. `todayMarker off` must suppress it. mermaid treats the literal `off` as a disable, and a
+    //     directive the user wrote to turn something off has to actually turn it off.
+    if let (Some(today), Some(axis)) = (
+        config.gantt_today.as_deref(),
+        layout.extensions.gantt_day_axis,
+    ) {
+        let style = gantt_meta.today_marker_style.as_deref().unwrap_or("");
+        let disabled = style.trim().eq_ignore_ascii_case("off");
+        if !disabled
+            && let Some(day) = fm_layout::parse_iso_day_number(today)
+            && let Some(x) = axis.x_for_day(day)
+        {
+            use crate::attributes::{write_escaped_attr, write_number_into};
+            let x = x + offset_x;
+            let top = layout.bounds.y + offset_y + 12.0;
+            let bottom = layout.bounds.y + layout.bounds.height + offset_y;
+            let mut line = String::new();
+            line.push_str("<line x1=\"");
+            let _ = write_number_into(&mut line, x);
+            line.push_str("\" y1=\"");
+            let _ = write_number_into(&mut line, top);
+            line.push_str("\" x2=\"");
+            let _ = write_number_into(&mut line, x);
+            line.push_str("\" y2=\"");
+            let _ = write_number_into(&mut line, bottom);
+            // The declared style reaches the element's stroke attributes rather than being accepted
+            // and dropped. An empty directive falls back to mermaid's own red today line.
+            line.push_str("\" class=\"fm-gantt-today\" style=\"");
+            if style.is_empty() {
+                line.push_str("stroke:#ff0000;stroke-width:2px");
+            } else {
+                let _ = write_escaped_attr(&mut line, style);
+            }
+            line.push_str("\"/>");
+            doc = doc.child(Element::raw_svg(line));
+        }
     }
 
     // Task bars with type-based coloring.
@@ -15914,6 +15980,128 @@ mod tests {
         assert!(svg.contains("fill:#111"));
         assert!(svg.contains("fm-node-shape"));
         assert!(svg.contains("fm-node-label"));
+    }
+
+    /// The gantt `todayMarker` must be drawn, must be suppressible, and must not depend on the clock
+    /// (bd-j0va).
+    ///
+    /// `IrGanttMeta::today_marker_style` was populated by the parser and referenced by no consumer in
+    /// fm-layout, fm-render-svg, fm-render-canvas or fm-render-term, so both the default marker and
+    /// the `todayMarker off` directive that disables it were equally invisible.
+    ///
+    /// THE DATE IS INJECTED in every case here, through `gantt_today`. That is the design, not a
+    /// testing convenience: a renderer that called `now()` would make this test — and every gantt
+    /// golden — depend on the day it happened to run, which is a defect class this project has
+    /// already been bitten by.
+    #[test]
+    fn gantt_today_marker_is_drawn_suppressed_and_clock_independent() {
+        // (case, injected today, todayMarker directive, marker expected)
+        let cases = [
+            ("in span, no directive", Some("2026-01-02"), None, true),
+            (
+                "in span, styled",
+                Some("2026-01-02"),
+                Some("stroke:red,stroke-width:4px"),
+                true,
+            ),
+            ("in span, turned off", Some("2026-01-02"), Some("off"), false),
+            ("today AFTER the chart span", Some("2026-08-16"), None, false),
+            ("today BEFORE the chart span", Some("2020-01-01"), None, false),
+            ("no date injected at all", None, None, false),
+            ("not a real calendar date", Some("2026-02-31"), None, false),
+        ];
+
+        let source = "gantt\n  title Roadmap\n  dateFormat  YYYY-MM-DD\n  section Core\n  Design :a1, 2026-01-01, 3d\n  Build :a2, after a1, 4d\n";
+        for (name, today, directive, expect_marker) in cases {
+            let mut text = source.to_string();
+            if let Some(directive) = directive {
+                text.push_str("  todayMarker ");
+                text.push_str(directive);
+                text.push('\n');
+            }
+            let ir = fm_parser::parse(&text).ir;
+            let config = SvgRenderConfig {
+                gantt_today: today.map(str::to_string),
+                ..SvgRenderConfig::default()
+            };
+            let svg = render_svg_with_config(&ir, &config);
+            let drawn = svg.contains("fm-gantt-today");
+            assert_eq!(
+                drawn, expect_marker,
+                "case {name:?}: marker drawn={drawn}, expected {expect_marker}"
+            );
+            // A restyling directive must reach the element's attributes rather than being accepted
+            // and dropped, which is what "parsed and read by nothing" looked like.
+            if expect_marker && let Some(directive) = directive {
+                assert!(
+                    svg.contains(directive),
+                    "case {name:?}: the todayMarker style never reached the drawn element"
+                );
+            }
+        }
+    }
+
+    /// THE CONTROL that makes every "no marker" case above worth anything.
+    ///
+    /// All five suppression cases would also pass if the marker were simply never drawn, so this
+    /// pins the positive direction independently, and it pins bd-j0va's fourth negative case: the
+    /// marker x must be derived the way tick x is, or the today line and the axis disagree about
+    /// where today is.
+    ///
+    /// Asserted DIFFERENTIALLY, across two dates one day apart, rather than against an absolute
+    /// coordinate. My first version compared the rendered x against the layout's raw `x_for_day`
+    /// and failed with "marker x 140 disagrees with the axis position 68" — a difference of exactly
+    /// the canvas `offset_x`, i.e. the test was comparing a layout coordinate against a rendered
+    /// one. The differential form cancels the offset and asserts the thing that actually matters:
+    /// that the marker advances by the axis's own `day_width` per day.
+    #[test]
+    fn gantt_today_marker_advances_with_the_axis_day_width() {
+        let source = "gantt\n  title Roadmap\n  dateFormat  YYYY-MM-DD\n  section Core\n  Design :a1, 2026-01-01, 3d\n  Build :a2, after a1, 4d\n";
+        let ir = fm_parser::parse(source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let axis = layout
+            .extensions
+            .gantt_day_axis
+            .expect("a gantt layout must publish its day axis");
+
+        let marker_x = |today: &str| -> f32 {
+            let config = SvgRenderConfig {
+                gantt_today: Some(today.to_string()),
+                ..SvgRenderConfig::default()
+            };
+            let svg = render_svg_with_config(&ir, &config);
+            assert_eq!(
+                svg.matches("fm-gantt-today").count(),
+                1,
+                "exactly one today marker expected for {today}, once per chart not once per task"
+            );
+            let anchor = svg.find("fm-gantt-today").expect("marker present");
+            let element_start = svg[..anchor].rfind("<line").expect("marker is a line element");
+            svg[element_start..]
+                .split("x1=\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .and_then(|v| v.parse::<f32>().ok())
+                .expect("marker carries a numeric x1")
+        };
+
+        // NON-VACUITY: both dates must be inside the charted span, or the renders below draw
+        // nothing and the assertion is unreachable.
+        for date in ["2026-01-02", "2026-01-03"] {
+            let day = fm_layout::parse_iso_day_number(date).expect("a real calendar date");
+            assert!(
+                axis.x_for_day(day).is_some(),
+                "CONTROL FAILED: {date} falls outside this chart's span, so this test proves nothing"
+            );
+        }
+
+        let advance = marker_x("2026-01-03") - marker_x("2026-01-02");
+        assert!(
+            (advance - axis.day_width).abs() < 0.01,
+            "one day of today-marker movement was {advance}, but the axis places days \
+             {} apart -- the marker and the axis disagree about where a day is",
+            axis.day_width
+        );
     }
 
     #[test]

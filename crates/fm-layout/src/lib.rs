@@ -2079,6 +2079,8 @@ pub struct LayoutExtensions {
     pub node_centrality: Vec<NodeCentrality>,
     /// Gantt task-name placements. Empty for every other diagram type; when empty the renderer keeps
     /// its previous behaviour of centring the label on the bar.
+    /// The gantt day axis, when this layout has one. `None` for every other diagram type.
+    pub gantt_day_axis: Option<LayoutGanttDayAxis>,
     pub gantt_task_labels: Vec<LayoutGanttTaskLabel>,
     /// CONTINUATION boxes for packet-beta fields that cross a 32-bit row boundary. Empty for every
     /// other diagram type and for any packet whose fields are row-aligned; when empty the renderer
@@ -2195,6 +2197,39 @@ pub enum LayoutBandKind {
     Section,
     Lane,
     Column,
+}
+
+/// The gantt time axis as a day -> x mapping, published so a consumer can place an element at a DATE
+/// without re-deriving day positions (bd-j0va).
+///
+/// `write_gantt_axis_into` already warns that "re-deriving day positions here is how an axis and its
+/// bars come to disagree about where a day is". A today marker has exactly that hazard: it is drawn
+/// at a date, and if it computes its own x it will drift from the ticks. This carries the same
+/// `(day - first_day) * day_width + origin_x` the tick builder uses, so both land on one arithmetic.
+///
+/// `first_day` / `last_day` are inclusive epoch day numbers in the same space as
+/// [`parse_iso_day_number`], which is what makes "is this date inside the chart?" answerable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayoutGanttDayAxis {
+    pub first_day: i32,
+    pub last_day: i32,
+    pub day_width: f32,
+    pub origin_x: f32,
+}
+
+impl LayoutGanttDayAxis {
+    /// x for `day`, or `None` when the day falls outside the charted span.
+    ///
+    /// Returning `None` rather than an off-canvas x is deliberate: the caller's correct response to
+    /// "today is not in this chart" is to draw nothing, and an out-of-range x invites drawing it
+    /// anyway at the edge.
+    #[must_use]
+    pub fn x_for_day(self, day: i32) -> Option<f32> {
+        if day < self.first_day || day > self.last_day {
+            return None;
+        }
+        Some(((day - self.first_day) as f32).mul_add(self.day_width, self.origin_x))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -6287,6 +6322,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             stats,
             extensions: LayoutExtensions {
                 bands: lifeline_bands,
+                gantt_day_axis: None,
                 axis_ticks: Vec::new(),
                 cluster_dividers: Vec::new(),
                 activation_bars,
@@ -6850,6 +6886,14 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         label: format_gantt_axis_label(day, axis_format),
         position: ((day - min_start_day) as f32).mul_add(base_col_width, day_zero_x),
     };
+    // Publish the same mapping the ticks are built from, so anything placed at a DATE agrees with
+    // the axis by construction rather than by a second derivation (bd-j0va).
+    layout.extensions.gantt_day_axis = Some(LayoutGanttDayAxis {
+        first_day: min_start_day,
+        last_day: min_start_day.saturating_add(i32::try_from(total_span_days).unwrap_or(i32::MAX)),
+        day_width: base_col_width,
+        origin_x: day_zero_x,
+    });
     let mut axis_ticks: Vec<LayoutAxisTick> = (0..=total_span_days)
         .map(|day_offset| min_start_day.saturating_add(day_offset as i32))
         .filter(|&day| gantt_day_starts_interval(day, tick_interval, weekday_start))
@@ -7274,7 +7318,13 @@ fn xychart_value_to_y(value: f32, y_min: f32, y_max: f32, plot_bounds: LayoutRec
     plot_bounds.y + plot_bounds.height - (ratio * plot_bounds.height)
 }
 
-fn parse_iso_day_number(value: &str) -> Option<i32> {
+/// Epoch day number for an ISO `YYYY-MM-DD` date, or `None` if it is not a real calendar date.
+///
+/// Public because the renderer needs to place a marker at a date in the SAME day space the layout
+/// used; a second copy of this arithmetic in another crate is how the marker and the axis would come
+/// to disagree about which day is which (bd-j0va).
+#[must_use]
+pub fn parse_iso_day_number(value: &str) -> Option<i32> {
     let value = value.trim();
     let bytes = value.as_bytes();
     if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' || !value.is_ascii() {

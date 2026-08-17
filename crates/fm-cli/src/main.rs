@@ -3829,8 +3829,47 @@ fn apply_reduced_motion_setting(
     Ok(())
 }
 
+/// Today's date as `YYYY-MM-DD` in UTC, derived from the system clock without pulling in a date
+/// library (bd-j0va).
+///
+/// This is the ONE place the clock is read. The renderer takes the date as an input and defaults to
+/// `None`, so library output and every golden stay deterministic; the CLI supplies the real date so
+/// a user gets mermaid's behaviour. Civil-from-days is Howard Hinnant's algorithm, the same one
+/// `parse_iso_day_number` inverts, so the marker lands in the day space the layout used.
+fn today_utc_iso() -> Option<String> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let days = i64::try_from(secs / 86_400).ok()?;
+    Some(iso_date_from_epoch_day(days))
+}
+
+/// `YYYY-MM-DD` for an epoch day number, split out from [`today_utc_iso`] so the arithmetic is
+/// testable WITHOUT the clock.
+///
+/// Keeping the conversion clock-free is the point: a test that asserted "this returns today" would
+/// itself be time-dependent, which is the defect this whole change exists to avoid. Fixed epoch days
+/// with known answers test the same code path.
+fn iso_date_from_epoch_day(days: i64) -> String {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
 fn build_base_svg_render_config(config_file: &FrankenmermaidConfigFile) -> Result<SvgRenderConfig> {
     let mut config = SvgRenderConfig::default();
+    // Supply the date the gantt today-marker is drawn at. The renderer never reads the clock itself
+    // (bd-j0va); it is injected here so goldens and library callers stay deterministic.
+    config.gantt_today = today_utc_iso();
 
     if let Some(theme) = config_file.svg.theme.as_deref() {
         config.theme = theme
@@ -8675,6 +8714,43 @@ fn print_validate_text(result: &ValidateResult, fail_on: FailOnSeverity) {
         }
         if let Some(hint) = &diagnostic.payload.remediation_hint {
             println!("       remediation: {hint}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod today_iso_tests {
+    use super::iso_date_from_epoch_day;
+
+    /// The gantt today-marker date must be computed correctly, and provably WITHOUT the clock
+    /// (bd-j0va).
+    ///
+    /// Every case is a fixed epoch day with a known answer, so this test does not change meaning
+    /// tomorrow. Asserting "it returns today" would make the test itself wall-clock dependent, which
+    /// is the exact defect class the marker's inject-the-date design exists to avoid.
+    #[test]
+    fn epoch_days_convert_to_the_right_civil_date() {
+        for (day, expected) in [
+            (0_i64, "1970-01-01"),
+            (1, "1970-01-02"),
+            (-1, "1969-12-31"),
+            (19_000, "2022-01-08"),
+            (20_682, "2026-08-17"),
+            (20_683, "2026-08-18"),
+            // Leap-year boundaries, where a naive conversion goes wrong.
+            (19_051, "2022-02-28"),
+            (19_052, "2022-03-01"),
+            (19_782, "2024-02-29"),
+            (19_783, "2024-03-01"),
+            // Century rules: 2000 was a leap year, 1900 was not.
+            (11_016, "2000-02-29"),
+            (-25_508, "1900-03-01"),
+        ] {
+            assert_eq!(
+                iso_date_from_epoch_day(day),
+                expected,
+                "epoch day {day} converted wrongly"
+            );
         }
     }
 }
