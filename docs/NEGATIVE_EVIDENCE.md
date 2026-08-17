@@ -3628,6 +3628,53 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### COMPATIBILITY DIVERGENCE: `mirrorActors` defaults to FALSE here and TRUE in mermaid-js (2026-08-17)
+
+**Every sequence diagram we render omits the mirrored participant row that mermaid draws.** Not a
+backend gap -- an engine-wide default, so SVG, terminal and canvas are all affected identically.
+
+`crates/fm-layout/src/lib.rs`:
+
+```rust
+let mirror_actors_enabled = ir.meta.init.config.sequence_mirror_actors.unwrap_or(false)
+    && !ir.sequence_meta.as_ref().is_some_and(|meta| meta.hide_footbox);
+```
+
+`IrInitConfig::sequence_mirror_actors` is `Option<bool>` initialised to `None`
+(`crates/fm-core/src/lib.rs`), and the parser only sets it when a document says so explicitly
+(`mermaid_parser.rs:10381`). So `unwrap_or(false)` is the shipped behaviour for any diagram that does
+not carry `%%{init: {"sequence": {"mirrorActors": true}}}%%`. mermaid-js defaults the same option to
+**true**.
+
+**HOW IT WAS FOUND, which is the reusable part.** It was not found by comparing configs. It surfaced
+because a NON-VACUITY CONTROL refused to let a canvas test pass on a fixture that exercised nothing:
+the test asserted mirror headers are drawn, the control asserted the layout actually publishes some,
+and the control fired with "this sequence produced no mirror headers". Without that control the test
+would have passed against an empty extension list and certified a renderer path that never runs, and
+the divergence would still be invisible. The control was written to protect the test; it caught a
+compatibility defect instead.
+
+**NOT FIXED, deliberately.** Flipping the default adds a participant row to every sequence diagram in
+the corpus and moves goldens across all three backends. That is a compatibility decision with visible
+blast radius and an owner, not something to change inside an unrelated renderer fix. Recorded here so
+the next person comparing our output against mermaid finds the cause rather than re-deriving it from a
+diff of two pictures.
+
+**What a fix must carry**, so the work is not re-scoped from scratch:
+
+1. The default flip itself, in `mirror_actors_enabled`'s `unwrap_or`.
+2. A re-bless across SVG, terminal and canvas goldens, with the diff attributed to this change alone --
+   the layout-golden component checksums added in `36c702e6` will say whether nodes or edges moved, and
+   the SVG driver in `a32dc178` now names every stale case in one run.
+3. A control proving `hide_footbox` still suppresses the row, since that clause is the other half of
+   the condition and would otherwise be untested against the new default.
+4. A check that `mirrorActors: false` written explicitly still disables it -- the `Option` must keep
+   distinguishing "unset" from "set false", which is exactly what `unwrap_or` erases if someone
+   "simplifies" the field to a plain `bool` while changing the default.
+
+Filed on bd-t1jj. No measurement is involved and no ratio is affected.
+
+
 ### CLOSED: the exclusivity gate is UNSATISFIABLE on this host, and the holders are named (2026-08-17)
 
 Twenty-one consecutive certification refusals across a session in which loadavg ranged from **525
