@@ -415,7 +415,10 @@ def self_test() -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--fm-bin", required=True, help="content-pinned frankenmermaid h2h binary")
+    # NOT `required=True`: --self-test measures nothing and needs no binary, and a self-test that
+    # can only run by passing a fake path is a self-test CI will not run. Absence is checked below,
+    # after the self-test has had its chance to return.
+    parser.add_argument("--fm-bin", help="content-pinned frankenmermaid h2h binary")
     parser.add_argument(
         "--corpus",
         help="corpus json for --fm-bin. OMIT IT: the default generates the case from corpus.mjs, "
@@ -454,6 +457,9 @@ def main() -> int:
 
     if args.self_test:
         return self_test()
+
+    if not args.fm_bin:
+        parser.error("--fm-bin is required unless --self-test is given")
 
     print("=== A/B/B/A, one invocation, RENDER-scoped, UNCERTIFIED (no host-exclusivity gate) ===")
     rev = head_revision()
