@@ -499,3 +499,81 @@ fn declared_text_reaches_the_terminal_for_every_diagram_type() {
         failures.join("\n  ")
     );
 }
+
+/// A gantt chart must show its TIME AXIS in terminal output, not just its bars.
+///
+/// `layout.extensions.axis_ticks` is filled by the gantt layout arm and drawn by fm-render-svg, and
+/// nothing in the terminal renderer referenced it. bd-trsd established what that costs: before it,
+/// the entire text content of the shipped `gantt_basic.svg` was "Roadmap | Design | Build" — two
+/// bars whose lengths encode durations no reader could name. `-f term` still rendered exactly that.
+///
+/// The CONTROL is the first assertion. The task names must ALSO still be present: an axis overlay
+/// that wrote over the bars would trade one piece of dropped content for another, which is the
+/// failure bd-u3fo's kanban case warned about.
+#[test]
+fn a_gantt_shows_its_time_axis_in_terminal() {
+    let ir = fm_parser::parse(
+        "gantt\n  title Roadmap\n  dateFormat  YYYY-MM-DD\n  section Core\n  Design :a1, 2026-01-01, 3d\n  Build :a2, after a1, 4d\n",
+    )
+    .ir;
+    let layout = fm_layout::layout_diagram(&ir);
+
+    // NON-VACUITY: the layout must actually publish ticks, or this test asserts nothing about the
+    // renderer and would pass on a diagram that simply has no axis to draw.
+    assert!(
+        !layout.extensions.axis_ticks.is_empty(),
+        "CONTROL FAILED: this gantt produced no axis ticks, so the renderer has nothing to draw \
+         and this test cannot detect the defect it was written for"
+    );
+
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 120, 40).output;
+
+    // The task names must survive — the axis must not be drawn over the content.
+    assert!(
+        out.contains("Design"),
+        "the task name was displaced by the axis overlay:\n{out}"
+    );
+
+    // At least one tick label must reach the canvas. Asserted against the labels the LAYOUT
+    // produced rather than a hardcoded date, so the test pins the PROPERTY and not this fixture's
+    // particular axis format.
+    let drawn = layout
+        .extensions
+        .axis_ticks
+        .iter()
+        .filter(|tick| !tick.label.is_empty())
+        .any(|tick| out.contains(tick.label.as_str()));
+    assert!(
+        drawn,
+        "no axis tick label reached the terminal canvas; the chart shows bars with nothing to \
+         measure them against:\n{out}"
+    );
+}
+
+/// A diagram with NO axis must be unaffected, and its participants must not be disturbed.
+///
+/// This is the regression guard for the overlay itself: a sequence diagram publishes no
+/// `axis_ticks`, so the new loop must be inert for it. If this ever fails, the overlay has started
+/// drawing where no axis exists.
+#[test]
+fn a_sequence_diagram_is_unaffected_by_the_axis_overlay() {
+    let ir = fm_parser::parse("sequenceDiagram\n  participant Alice\n  participant Bob\n  Alice->>Bob: Hi\n").ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    assert!(
+        layout.extensions.axis_ticks.is_empty(),
+        "CONTROL FAILED: this sequence diagram produced axis ticks, so it cannot show the overlay \
+         is inert without one"
+    );
+
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 120, 40).output;
+    assert_eq!(
+        out.matches("Alice").count(),
+        1,
+        "a participant appears more than once, or was disturbed by the axis overlay:\n{out}"
+    );
+    assert_eq!(
+        out.matches("Bob").count(),
+        1,
+        "a participant appears more than once, or was disturbed by the axis overlay:\n{out}"
+    );
+}
