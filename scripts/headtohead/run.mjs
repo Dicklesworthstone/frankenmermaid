@@ -13,6 +13,7 @@
 // item is reported with `status: "error"`, never dropped from the table.
 
 import { execFileSync, spawnSync } from 'node:child_process';
+import { selectPinnedCpu } from './cpu_selection.mjs';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { cpus, hostname, loadavg, platform, release, tmpdir, totalmem } from 'node:os';
@@ -215,9 +216,72 @@ function validExclusiveHostClaim(value) {
  * removes migration jitter. It is also the *conservative* choice for the comparison: mermaid keeps
  * the whole machine and all of Chromium's threads, we take one core.
  */
+/// Observed clock of one core, in MHz. `null` when cpufreq is unavailable.
+function cpuMhz(cpu) {
+  const khz = readText(`/sys/devices/system/cpu/cpu${cpu}/cpufreq/scaling_cur_freq`);
+  const parsed = khz === null ? Number.NaN : Number.parseInt(khz, 10);
+  return Number.isFinite(parsed) ? Math.round(parsed / 1000) : null;
+}
+
+/// Observed clock of every core right now, for provenance.
+///
+/// The environment block already records `scaling_min_khz` / `scaling_max_khz`, but those are the
+/// governor's POLICY LIMITS, not what the cores did. On this host they are 1429 MHz and 4562 MHz --
+/// a 3.19x range -- and both ends are reachable within a single run, so the policy cannot
+/// distinguish an arm that ran at the floor from one that ran boosted (bd-hmfi).
+function cpuMhzSummary() {
+  const values = [];
+  for (const record of cpuTimeSnapshot()) {
+    const mhz = cpuMhz(record.cpu);
+    if (mhz !== null) values.push(mhz);
+  }
+  if (values.length === 0) return null;
+  const lo = Math.min(...values);
+  const hi = Math.max(...values);
+  return {
+    min_mhz: lo,
+    max_mhz: hi,
+    mean_mhz: Math.round(values.reduce((a, b) => a + b, 0) / values.length),
+    spread: lo > 0 ? Number((hi / lo).toFixed(3)) : null,
+    cores: values.length,
+  };
+}
+
+/// Choose the core to pin the measured arm to.
+///
+/// ⚠️ THIS USED TO TAKE THE LEAST-BUSY CORE, WHICH ON PER-CORE DVFS IS THE SLOWEST ONE (bd-hmfi).
+/// Idle cores are parked at the frequency floor -- measured live on this host, cpu10/15/24/27/28 sat
+/// at 1429 MHz while cpu34 ran at 3914 MHz, a 2.739x spread at the same instant. Sorting by busy
+/// fraction and taking the minimum therefore ACTIVELY PREFERRED the floor for our arm, while the
+/// mermaid-js arm runs unpinned across all cores and its own load boosts whichever it lands on.
+///
+/// Idleness is still a REQUIREMENT -- a core with a co-tenant makes the measurement meaningless, and
+/// that is what the busy fraction is for. But among cores that are adequately idle, the clock is what
+/// decides comparability, so the fastest is chosen rather than the emptiest. Busy fraction and clock
+/// answer different questions: occupancy is not speed, which is exactly why the 20% quiescence veto
+/// never caught this.
+///
+/// Falls back to the old rule when cpufreq is unreadable, so a host without per-core DVFS behaves as
+/// before rather than failing.
 function pickIdleCpu() {
   const busy = cpuBusy(300).sort((a, b) => a.busy - b.busy);
-  return { cpu: busy[0].cpu, busy_pct: Number((busy[0].busy * 100).toFixed(1)) };
+  const quietest = busy[0].busy;
+  // "Adequately idle" is anchored to the quietest core actually observed rather than an absolute
+  // constant, so this cannot start selecting a loaded core on a busy host: if every core is at 40%,
+  // the band is 40-45% and the run is refused by the quiescence gate regardless.
+  void quietest;
+  const observed = busy.map((record) => ({ ...record, mhz: cpuMhz(record.cpu) }));
+  const { chosen, band_size, rule } = selectPinnedCpu(observed);
+  return {
+    cpu: chosen.cpu,
+    busy_pct: Number((chosen.busy * 100).toFixed(1)),
+    // Recorded because it is the quantity that can move a cross-engine ratio by up to 2.7x and was
+    // previously written down nowhere.
+    mhz: chosen.mhz ?? null,
+    candidates_in_band: band_size,
+    host_mhz: cpuMhzSummary(),
+    selection_rule: rule,
+  };
 }
 
 function sh(cmd, args, opts = {}) {
@@ -2311,7 +2375,11 @@ if (threadSweep.length > 0 && pinArg !== 'off') {
 let pin = null;
 if (pinArg !== 'off') {
   pin = pinArg === 'auto' ? pickIdleCpu() : { cpu: Number(pinArg), busy_pct: null };
-  console.error(`[run] pinning frankenmermaid to cpu${pin.cpu}${pin.busy_pct === null ? '' : ` (busy ${pin.busy_pct}%)`}`);
+  const pinMhz = pin.mhz == null ? '' : `, ${pin.mhz} MHz`;
+  const pinSpread = pin.host_mhz?.spread == null ? '' : `, host spread ${pin.host_mhz.spread}x`;
+  console.error(
+    `[run] pinning frankenmermaid to cpu${pin.cpu}${pin.busy_pct === null ? '' : ` (busy ${pin.busy_pct}%${pinMhz}${pinSpread})`}`,
+  );
 }
 env.pinned_cpu = pin;
 
