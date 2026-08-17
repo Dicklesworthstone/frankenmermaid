@@ -52,7 +52,7 @@
     "cycle_braid": {
       "edge_count": 20,
       "layout_algorithm": "auto",
-      "layout_checksum": "9113ec9df4b9cada",
+      "layout_checksum": "b3a51f658db01a43",
       "layout_height": 458.45105,
       "layout_width": 488.648712,
       "node_count": 9
@@ -68,7 +68,7 @@
     "cycle_ladder": {
       "edge_count": 22,
       "layout_algorithm": "auto",
-      "layout_checksum": "53a77cf403465734",
+      "layout_checksum": "7f0d156b4e36d81d",
       "layout_height": 471.911987,
       "layout_width": 508.130096,
       "node_count": 10
