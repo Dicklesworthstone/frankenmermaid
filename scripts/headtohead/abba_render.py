@@ -19,6 +19,18 @@ Interleaved in a single process so both arms see the same machine state, and so 
 BOTH sides of the incumbent. The bracket yields a drift figure: if the two fm observations disagree
 by much, the window was not stable and the ratio is not worth quoting.
 
+⚠️ DRIFT IS NOT SUFFICIENT, and this paragraph used to imply it was. Drift compares the two fm arms
+against EACH OTHER, so it is blind whenever BOTH are degraded the same way. Measured: a run whose fm
+arms were 138,338 and 145,397 ns passed with drift 1.0510x and would have quoted a bound of 242.1x
+— while the same binary in the same window produced 91,000-96,000 ns whenever its arm was not
+contended. A sibling run caught the same contention only because it happened to hit ONE arm
+(149,974 vs 92,576, drift 1.6200x).
+
+The absolute tell is the CALIBRATED BATCH, which every record already carries. Calibration targets
+3 ms, so a contended core shrinks the batch and raises per-op time together: every contended
+observation ran at batch 20-25, every clean one at 37-39. Compare the batch against the clean norm
+before quoting, and treat a collapsed batch as "this arm was contended" no matter what drift says.
+
 WHY THE RATIO IS A BOUND, NOT A POINT ESTIMATE
 ----------------------------------------------
 It divides the FASTER mermaid observation by the SLOWER fm observation -- the worst bound either arm
