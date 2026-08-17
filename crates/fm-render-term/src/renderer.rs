@@ -389,6 +389,50 @@ impl TermRenderer {
             }
         }
 
+        // The gantt TODAY MARKER: a vertical line across the chart at the supplied date (bd-t1jj).
+        //
+        // `extensions.gantt_day_axis` is the only thing that answers "where is a given DATE on this
+        // chart", and this renderer referenced it nowhere — so a terminal gantt drew no today line
+        // while the same source exported to SVG drew one, and `todayMarker off`, which a user writes
+        // precisely to turn the line off, was equally invisible because there was nothing to turn
+        // off.
+        //
+        // Drawn on the CANVAS layer, not the text overlay below, deliberately: the overlay writes
+        // task names and axis dates, and a marker written there would erase one of them. That is the
+        // trade bd-u3fo's kanban case warned about — one piece of dropped content swapped for
+        // another — and a marker is worth less than the name it would cover.
+        //
+        // Four conditions, mirroring the SVG and canvas arms so no two backends disagree about
+        // whether a marker belongs: the date is supplied (never the clock, see the config field),
+        // it parses via the SAME `parse_iso_day_number` the layout used to place the bars, it falls
+        // inside the charted span, and `todayMarker off` suppresses it. The x comes from
+        // `axis.x_for_day` and is never re-derived here — `LayoutGanttDayAxis`'s own doc warns that
+        // re-deriving day positions is how a marker and its axis come to disagree about where a day
+        // is.
+        if let (Some(today), Some(axis)) = (
+            self.config.gantt_today.as_deref(),
+            layout.extensions.gantt_day_axis,
+        ) {
+            let disabled = ir
+                .gantt_meta
+                .as_ref()
+                .and_then(|meta| meta.today_marker_style.as_deref())
+                .is_some_and(|style| style.trim().eq_ignore_ascii_case("off"));
+            if !disabled
+                && let Some(day) = fm_layout::parse_iso_day_number(today)
+                && let Some(marker_x) = axis.x_for_day(day)
+            {
+                // `draw_line` takes `isize` and clips internally. Casting to `usize` here would wrap
+                // a negative coordinate into an enormous positive one and lose the marker entirely —
+                // the same mistake the state-note leader made in this file (1d7324f7).
+                let mx = (marker_x * pixel_scale_x) as isize + padding_x as isize;
+                let top = (layout.bounds.y * pixel_scale_y) as isize + padding_y as isize;
+                let bottom = ((layout.bounds.y + layout.bounds.height) * pixel_scale_y) as isize
+                    + padding_y as isize;
+                canvas.draw_line(mx, top, mx, bottom);
+            }
+        }
+
         // Render activation bars on sequence lifelines.
         for bar in &layout.extensions.activation_bars {
             let bx = (bar.bounds.x * pixel_scale_x) as usize + padding_x;

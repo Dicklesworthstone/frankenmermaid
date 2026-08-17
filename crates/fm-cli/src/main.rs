@@ -3917,7 +3917,14 @@ fn build_base_svg_render_config(config_file: &FrankenmermaidConfigFile) -> Resul
 fn build_base_term_render_config(
     config_file: &FrankenmermaidConfigFile,
 ) -> Result<TermRenderConfig> {
-    let mut config = TermRenderConfig::rich();
+    // Same injection as `build_base_svg_render_config`: the date the gantt today-marker is drawn at
+    // is supplied here, never read from the clock inside the renderer (bd-j0va), so library callers
+    // and snapshots stay deterministic. Injecting it in BOTH builders is what stops `-f svg` and
+    // `-f term` from disagreeing about whether today is on the chart (bd-t1jj).
+    let mut config = TermRenderConfig {
+        gantt_today: today_utc_iso(),
+        ..TermRenderConfig::rich()
+    };
 
     if let Some(tier) = config_file.term.tier.as_deref() {
         config.tier = parse_tier_name(tier)?;

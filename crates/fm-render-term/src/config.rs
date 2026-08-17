@@ -29,6 +29,14 @@ pub struct TermRenderConfig {
     pub padding: usize,
     /// Overlay a minimap onto the rendered terminal output.
     pub show_minimap: bool,
+    /// Today's date, as `YYYY-MM-DD`, for the gantt today marker. `None` draws no marker.
+    ///
+    /// SUPPLIED, NEVER READ FROM THE CLOCK, exactly as `SvgRenderConfig::gantt_today` and
+    /// `CanvasRenderConfig::gantt_today` are. Output that is a function of wall time is a defect
+    /// class this repo has already been bitten by three times; a renderer calling `now()` would make
+    /// every terminal snapshot depend on the day it ran. The default is `None`, so nothing about an
+    /// existing render changes; the CLI injects the real date.
+    pub gantt_today: Option<String>,
 }
 
 impl Default for TermRenderConfig {
@@ -46,6 +54,7 @@ impl Default for TermRenderConfig {
             diagonal_edges: true,
             padding: 1,
             show_minimap: false,
+            gantt_today: None,
         }
     }
 }
