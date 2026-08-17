@@ -1475,6 +1475,65 @@ pub struct IrEdgeExtras {
     /// Action on a state transition (e.g., `cleanup()`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<Box<str>>,
+    /// Declared source side of an architecture-beta edge: the `R` in `a:R --> L:b`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_side: Option<ArchitectureSide>,
+    /// Declared target side of an architecture-beta edge: the `L` in `a:R --> L:b`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_side: Option<ArchitectureSide>,
+}
+
+/// A declared edge side in an architecture-beta diagram (`a:R --> L:b`).
+///
+/// This is a PLACEMENT grammar, not an anchor hint: `a:R --> L:b` says b sits to the RIGHT of a.
+/// mermaid 11.15.0 models the same thing per edge as `sourceDir`/`targetDir`
+/// (`ArchitectureDirection`). Stored as a 1-byte copy enum rather than the `Box<str>` its sibling
+/// fields use because the alphabet is closed at four values — a heap allocation per edge would buy
+/// nothing, and an enum makes the layout's `match` total rather than a string compare with a
+/// silent `_` arm.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum ArchitectureSide {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl ArchitectureSide {
+    /// Parse the single-letter token mermaid uses (`L`/`R`/`T`/`B`); `None` for anything else.
+    #[must_use]
+    pub fn parse(token: &str) -> Option<Self> {
+        match token {
+            "L" => Some(Self::Left),
+            "R" => Some(Self::Right),
+            "T" => Some(Self::Top),
+            "B" => Some(Self::Bottom),
+            _ => None,
+        }
+    }
+
+    /// The token this side was written as, for round-tripping and diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Left => "L",
+            Self::Right => "R",
+            Self::Top => "T",
+            Self::Bottom => "B",
+        }
+    }
+
+    /// The side directly opposite. Used when an edge declares only ONE of its two sides: the other
+    /// end is then the facing side, which is what `a:R --> b` means to a reader.
+    #[must_use]
+    pub const fn opposite(self) -> Self {
+        match self {
+            Self::Left => Self::Right,
+            Self::Right => Self::Left,
+            Self::Top => Self::Bottom,
+            Self::Bottom => Self::Top,
+        }
+    }
 }
 
 impl IrEdge {
@@ -1506,6 +1565,16 @@ impl IrEdge {
     #[must_use]
     pub fn action(&self) -> Option<&str> {
         self.extras.as_ref().and_then(|e| e.action.as_deref())
+    }
+    /// Declared architecture-beta source side, if any.
+    #[must_use]
+    pub fn source_side(&self) -> Option<ArchitectureSide> {
+        self.extras.as_ref().and_then(|e| e.source_side)
+    }
+    /// Declared architecture-beta target side, if any.
+    #[must_use]
+    pub fn target_side(&self) -> Option<ArchitectureSide> {
+        self.extras.as_ref().and_then(|e| e.target_side)
     }
     /// Mutable access to the diagram-specific extras, allocating the box on first use.
     pub fn extras_mut(&mut self) -> &mut IrEdgeExtras {

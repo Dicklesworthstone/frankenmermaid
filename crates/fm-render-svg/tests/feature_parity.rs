@@ -78,8 +78,9 @@ const CASES: &[(&str, &str, &str)] = &[
     // ── architecture-beta ─────────────────────────────────────────────────────────────────────
     ("arch_group_membership", "architecture-beta\n  service a(cloud)[A]\n  service b(cloud)[B]\n", "architecture-beta\n  group g(cloud)[G]\n  service a(cloud)[A] in g\n  service b(cloud)[B]\n"),
     ("arch_edge", "architecture-beta\n  service a(cloud)[A]\n  service b(cloud)[B]\n", "architecture-beta\n  service a(cloud)[A]\n  service b(cloud)[B]\n  a:R --> L:b\n"),
-    // bd-zce4: the edge EXISTS either way; only the declared SIDES are ignored, so this pair
-    // differs solely in which sides were named.
+    // bd-zce4: the declared SIDES are a placement grammar, so this pair — identical but for which
+    // sides were named — must now render differently. It was a KNOWN_GAP until the
+    // direction-aware architecture layout landed.
     ("arch_edge_sides", "architecture-beta\n  service a(cloud)[A]\n  service b(cloud)[B]\n  a:R --> L:b\n", "architecture-beta\n  service a(cloud)[A]\n  service b(cloud)[B]\n  a:T --> B:b\n"),
     ("xychart_line_vs_bar", "xychart-beta\n  x-axis [a, b]\n  bar [50, 60]\n", "xychart-beta\n  x-axis [a, b]\n  line [50, 60]\n"),
 ];
@@ -88,16 +89,7 @@ const CASES: &[(&str, &str, &str)] = &[
 ///
 /// An allowlist, not a silence. A NEW collision still fails, and an entry that starts DIFFERING
 /// fails too (below), so a fixed defect cannot leave a permanent hole here.
-const KNOWN_GAPS: &[(&str, &str)] = &[
-    (
-        "arch_edge_sides",
-        "bd-zce4: architecture-beta drops per-edge side specs. `a:R --> L:b` and `a:T --> B:b` \
-         render identically because the parser creates NO ports at all (ir.ports is empty), so \
-         `IrPort.side_hint` is dead by construction. mermaid models sourceDir/targetDir per edge. \
-         Fixing it is a layout feature — ports must be created, then the endpoint anchored on the \
-         named side rather than by the centre-to-centre vector — so it is pinned, not patched.",
-    ),
-    (
+const KNOWN_GAPS: &[(&str, &str)] = &[(
     "mindmap_square",
     "bd-d9mw: a mindmap `A` and `A[A]` both parse to NodeShape::Rect. mermaid types DEFAULT:0 and \
      RECT:2 distinctly, but the visual difference was not observed directly, so no default was \

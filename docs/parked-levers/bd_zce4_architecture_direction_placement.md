@@ -1,9 +1,38 @@
-# PARKED, UNCOMPILED: architecture-beta direction-aware placement (bd-zce4)
+# LANDED (was parked, uncompiled): architecture-beta direction-aware placement (bd-zce4)
 
-**⚠️ THIS CODE HAS NEVER BEEN COMPILED.** It was written during a host throttle with builds
-forbidden (load 652, 78% iowait, 677 blocked processes). Treat every signature as a claim to verify,
-not a fact. It is parked rather than committed live precisely so an uncompiled lever cannot turn
-main red.
+**STATUS: SHIPPED.** The sketch below was written during a host throttle with builds forbidden
+(load 652, 78% iowait) and had never been compiled. It has now been implemented, compiled and
+gated; both `#[ignore]`d acceptance tests are un-ignored and pass, and the `arch_edge_sides`
+KNOWN_GAP entry is deleted from `feature_parity.rs`. Kept as the record of what the uncompiled
+sketch got right and what only a build could tell us.
+
+## What the build changed about the sketch
+
+1. **Sides are an enum, not `Option<Box<str>>`.** The alphabet is closed at four values, so
+   `fm_core::ArchitectureSide` costs no allocation and makes the layout `match` total instead of a
+   string compare with a silent `_` arm.
+2. **The no-side fallback moved to DISPATCH.** The sketch called `layout_diagram_general_traced`
+   from inside the architecture arm; deciding it in `preferred_layout_algorithm_with_config`
+   instead keeps the recorded `selected` algorithm equal to the one that actually ran.
+   `layout_diagram_general_traced` does not exist under that name — the sketch flagged it as
+   unverified, correctly.
+3. **The open decision was decided: collisions FAN OUT** along the axis perpendicular to the step,
+   with `architecture_colliding_targets_do_not_overlap` as its test.
+4. **A bug the sketch did not have and the first implementation did:** the fan-out axis must be
+   derived from the STEP, not from the absolute cell. Taking it from the cell makes a rightward
+   step landing on a non-zero column fan out *parallel* to itself.
+5. **The placement relation is symmetric.** A placed TARGET has to position its unplaced source
+   (`(None, Some(base))`), or an edge naming an already-placed node as its target loses its
+   direction to the unplaced-node sweep.
+
+The two traps the sketch identified — that `mark_reusable_prefix_edge_dirty` is mandatory, and that
+`<--` must swap the sides with the endpoints — were both real. The second now has its own negative
+test (`architecture_reverse_operator_swaps_the_sides_with_the_endpoints`), which a
+swap-endpoints-only implementation fails and every other test here misses.
+
+---
+
+## Original parked sketch
 
 The acceptance gate already exists and is executable:
 `crates/fm-render-svg/tests/architecture_placement.rs` — one control that passes today, and two

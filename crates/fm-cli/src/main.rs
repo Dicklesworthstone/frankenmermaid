@@ -3673,6 +3673,7 @@ fn parse_layout_algorithm_name(value: &str) -> Result<LayoutAlgorithm> {
         "quadrant" => Ok(LayoutAlgorithm::Quadrant),
         "gitgraph" => Ok(LayoutAlgorithm::GitGraph),
         "packet" => Ok(LayoutAlgorithm::Packet),
+        "architecture" => Ok(LayoutAlgorithm::Architecture),
         other => anyhow::bail!("unknown layout.algorithm '{other}'"),
     }
 }

@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 use chumsky::prelude::*;
 use fm_core::{
-    ArrowType, Diagnostic, DiagnosticCategory, DiagramType, GanttDate, GanttExclude, GanttTaskType,
-    GanttTickInterval, GraphDirection, IrAttributeKey, IrC4NodeMeta, IrGanttMeta, IrGanttSection,
-    IrGanttTask, IrLabelSegment, IrNodeId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind,
-    MermaidParseMode, MermaidSupportLevel, NodeShape, Span, is_safe_link_target,
-    parse_mermaid_js_config_value, to_init_parse,
+    ArchitectureSide, ArrowType, Diagnostic, DiagnosticCategory, DiagramType, GanttDate,
+    GanttExclude, GanttTaskType, GanttTickInterval, GraphDirection, IrAttributeKey, IrC4NodeMeta,
+    IrGanttMeta, IrGanttSection, IrGanttTask, IrLabelSegment, IrNodeId, IrXyAxis, IrXyChartMeta,
+    IrXySeries, IrXySeriesKind, MermaidParseMode, MermaidSupportLevel, NodeShape, Span,
+    is_safe_link_target, parse_mermaid_js_config_value, to_init_parse,
 };
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
@@ -7516,23 +7516,25 @@ fn parse_architecture(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        if let Some((from_id, to_id, arrow)) = parse_architecture_edge(trimmed) {
+        if let Some(edge) = parse_architecture_edge(trimmed) {
             let Some(from_node) =
-                builder.intern_node(&from_id, Some(&from_id), NodeShape::Rect, span)
+                builder.intern_node(&edge.from, Some(&edge.from), NodeShape::Rect, span)
             else {
                 builder.add_warning(format!(
                     "Line {line_number}: invalid architecture edge source: {trimmed}"
                 ));
                 continue;
             };
-            let Some(to_node) = builder.intern_node(&to_id, Some(&to_id), NodeShape::Rect, span)
+            let Some(to_node) =
+                builder.intern_node(&edge.to, Some(&edge.to), NodeShape::Rect, span)
             else {
                 builder.add_warning(format!(
                     "Line {line_number}: invalid architecture edge target: {trimmed}"
                 ));
                 continue;
             };
-            builder.push_edge(from_node, to_node, arrow, None, span);
+            builder.push_edge(from_node, to_node, edge.arrow, None, span);
+            builder.set_last_edge_architecture_sides(edge.from_side, edge.to_side);
             continue;
         }
 
@@ -11116,7 +11118,20 @@ fn add_node_to_architecture_parent(
     builder.add_node_to_subgraph(subgraph_index, node_id);
 }
 
-fn parse_architecture_edge(line: &str) -> Option<(String, String, ArrowType)> {
+/// Parsed architecture-beta edge: endpoints, arrow, and the DECLARED sides (bd-zce4).
+///
+/// The sides are the placement grammar of the diagram type — `a:R --> L:b` says b sits to the
+/// right of a — so dropping them, as this parser did until bd-zce4, made `a:R --> L:b` produce
+/// byte-identical output to `a:T --> B:b`.
+struct ArchitectureEdge {
+    from: String,
+    to: String,
+    arrow: ArrowType,
+    from_side: Option<ArchitectureSide>,
+    to_side: Option<ArchitectureSide>,
+}
+
+fn parse_architecture_edge(line: &str) -> Option<ArchitectureEdge> {
     // `<-->` is BIDIRECTIONAL and must keep an arrowhead on each end (bd-e29r's defect, second
     // family). Mapping it to `Line` dropped both, so an architecture edge that says "these two talk
     // in both directions" rendered as a bare undirected segment — indistinguishable from the plain
@@ -11135,12 +11150,27 @@ fn parse_architecture_edge(line: &str) -> Option<(String, String, ArrowType)> {
         if let Some(index) = line.find(operator) {
             let left = line[..index].trim();
             let right = line[index + operator.len()..].trim();
-            let from = parse_architecture_endpoint(left)?;
-            let to = parse_architecture_endpoint(right)?;
+            let (from, from_side) = parse_architecture_endpoint(left)?;
+            let (to, to_side) = parse_architecture_endpoint(right)?;
+            // `<--` swaps the ENDPOINTS, so it has to swap their SIDES with them. Reversing only
+            // the ids would hand the target's declared side to the source and draw the edge
+            // leaving the wrong face of the wrong box.
             return if reverse {
-                Some((to, from, arrow))
+                Some(ArchitectureEdge {
+                    from: to,
+                    to: from,
+                    arrow,
+                    from_side: to_side,
+                    to_side: from_side,
+                })
             } else {
-                Some((from, to, arrow))
+                Some(ArchitectureEdge {
+                    from,
+                    to,
+                    arrow,
+                    from_side,
+                    to_side,
+                })
             };
         }
     }
@@ -11148,7 +11178,11 @@ fn parse_architecture_edge(line: &str) -> Option<(String, String, ArrowType)> {
     None
 }
 
-fn parse_architecture_endpoint(raw: &str) -> Option<String> {
+/// Split an architecture endpoint into its id and its declared side, if it carries one.
+///
+/// The side may sit on either face of the colon — `a:R` for a source, `L:b` for a target — so both
+/// halves are probed. Returning the side rather than discarding it is the parse half of bd-zce4.
+fn parse_architecture_endpoint(raw: &str) -> Option<(String, Option<ArchitectureSide>)> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -11157,19 +11191,15 @@ fn parse_architecture_endpoint(raw: &str) -> Option<String> {
     if let Some((lhs, rhs)) = trimmed.split_once(':') {
         let left = lhs.trim();
         let right = rhs.trim();
-        if is_architecture_side_token(left) {
-            return clean_label(Some(right));
+        if let Some(side) = ArchitectureSide::parse(left) {
+            return clean_label(Some(right)).map(|id| (id, Some(side)));
         }
-        if is_architecture_side_token(right) {
-            return clean_label(Some(left));
+        if let Some(side) = ArchitectureSide::parse(right) {
+            return clean_label(Some(left)).map(|id| (id, Some(side)));
         }
     }
 
-    clean_label(Some(trimmed))
-}
-
-fn is_architecture_side_token(token: &str) -> bool {
-    matches!(token, "L" | "R" | "T" | "B")
+    clean_label(Some(trimmed)).map(|id| (id, None))
 }
 
 // See `split_statements`: keep the scalar `.iter().any(== b'%')`; `manual_contains` would swap in the

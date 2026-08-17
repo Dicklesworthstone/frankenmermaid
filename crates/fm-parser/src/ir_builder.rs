@@ -4,15 +4,15 @@ use std::collections::hash_map::Entry;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use fm_core::{
-    ArrowType, ClassMemberKind, ClassStereotype, Diagnostic, DiagnosticCategory, DiagramType,
-    FragmentAlternative, FragmentKind, GraphDirection, IrActivation, IrAttributeKey, IrC4NodeMeta,
-    IrClassMember, IrClassNodeMeta, IrCluster, IrClusterId, IrConstraint, IrEdge, IrEdgeKind,
-    IrEndpoint, IrEntityAttribute, IrGanttMeta, IrGraphCluster, IrGraphEdge, IrGraphNode, IrLabel,
-    IrLabelId, IrLabelSegment, IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup,
-    IrSequenceFragment, IrSequenceMeta, IrSequenceNote, IrStyleRef, IrStyleTarget, IrSubgraph,
-    IrSubgraphId, IrXyChartMeta, LifecycleEventKind, MermaidDiagramIr, MermaidError,
-    MermaidParseMode, MermaidSanitizeMode, MermaidWarning, MermaidWarningCode, NodeShape,
-    NotePosition, Span,
+    ArchitectureSide, ArrowType, ClassMemberKind, ClassStereotype, Diagnostic, DiagnosticCategory,
+    DiagramType, FragmentAlternative, FragmentKind, GraphDirection, IrActivation, IrAttributeKey,
+    IrC4NodeMeta, IrClassMember, IrClassNodeMeta, IrCluster, IrClusterId, IrConstraint, IrEdge,
+    IrEdgeKind, IrEndpoint, IrEntityAttribute, IrGanttMeta, IrGraphCluster, IrGraphEdge,
+    IrGraphNode, IrLabel, IrLabelId, IrLabelSegment, IrLifecycleEvent, IrNode, IrNodeId,
+    IrNodeKind, IrParticipantGroup, IrSequenceFragment, IrSequenceMeta, IrSequenceNote, IrStyleRef,
+    IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyChartMeta, LifecycleEventKind, MermaidDiagramIr,
+    MermaidError, MermaidParseMode, MermaidSanitizeMode, MermaidWarning, MermaidWarningCode,
+    NodeShape, NotePosition, Span,
 };
 
 use crate::mermaid_parser::trim_fast;
@@ -2228,6 +2228,32 @@ impl IrBuilder {
             }
             if let Some(t) = target {
                 edge.extras_mut().target_cardinality = Some(Box::from(t));
+            }
+        }
+    }
+
+    /// Set the declared architecture-beta placement sides on the most recently pushed edge.
+    ///
+    /// The `mark_reusable_prefix_edge_dirty` call is not decoration: every other edge mutator here
+    /// makes it, and without it an incremental reparse can serve the pre-edit edge — i.e. changing
+    /// `a:R --> L:b` to `a:B --> T:b` would leave the old direction in place.
+    pub(crate) fn set_last_edge_architecture_sides(
+        &mut self,
+        source: Option<ArchitectureSide>,
+        target: Option<ArchitectureSide>,
+    ) {
+        if source.is_none() && target.is_none() {
+            return;
+        }
+        if let Some(edge_index) = self.ir.edges.len().checked_sub(1) {
+            self.mark_reusable_prefix_edge_dirty(edge_index);
+        }
+        if let Some(edge) = self.ir.edges.last_mut() {
+            if source.is_some() {
+                edge.extras_mut().source_side = source;
+            }
+            if target.is_some() {
+                edge.extras_mut().target_side = target;
             }
         }
     }

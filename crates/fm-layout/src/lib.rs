@@ -37,14 +37,14 @@ use std::sync::Arc;
 use web_time::Instant;
 
 use fm_core::{
-    DiagramType, FxHashMap, FxHashSet, GanttDate, GanttExclude, GanttTaskType, GanttTickInterval,
-    GraphDirection, IrEndpoint, IrGanttMeta, IrNode, IrXyChartMeta, IrXySeriesKind,
-    MermaidBudgetLedger, MermaidComplexity, MermaidConfig, MermaidDecisionWeight, MermaidDiagramIr,
-    MermaidGuardReport, MermaidLayoutDecisionAlternative, MermaidLayoutDecisionExplanation,
-    MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidObservabilityIds,
-    MermaidPressureReport, MermaidPressureTier, MermaidSourceMap, MermaidSourceMapEntry,
-    MermaidSourceMapKind, Span, mermaid_cluster_element_id, mermaid_edge_element_id,
-    mermaid_node_element_id, mermaid_node_element_id_with_variant,
+    ArchitectureSide, DiagramType, FxHashMap, FxHashSet, GanttDate, GanttExclude, GanttTaskType,
+    GanttTickInterval, GraphDirection, IrEndpoint, IrGanttMeta, IrNode, IrXyChartMeta,
+    IrXySeriesKind, MermaidBudgetLedger, MermaidComplexity, MermaidConfig, MermaidDecisionWeight,
+    MermaidDiagramIr, MermaidGuardReport, MermaidLayoutDecisionAlternative,
+    MermaidLayoutDecisionExplanation, MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord,
+    MermaidObservabilityIds, MermaidPressureReport, MermaidPressureTier, MermaidSourceMap,
+    MermaidSourceMapEntry, MermaidSourceMapKind, Span, mermaid_cluster_element_id,
+    mermaid_edge_element_id, mermaid_node_element_id, mermaid_node_element_id_with_variant,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use good_lp::solvers::WithTimeLimit;
@@ -756,6 +756,7 @@ pub enum LayoutAlgorithm {
     Quadrant,
     GitGraph,
     Packet,
+    Architecture,
 }
 
 impl LayoutAlgorithm {
@@ -779,6 +780,7 @@ impl LayoutAlgorithm {
             Self::Quadrant => "quadrant",
             Self::GitGraph => "gitgraph",
             Self::Packet => "packet",
+            Self::Architecture => "architecture",
         }
     }
 }
@@ -3288,6 +3290,7 @@ fn compute_traced_layout_with_config_and_guardrails(
         LayoutAlgorithm::Pie => layout_diagram_pie_traced(ir),
         LayoutAlgorithm::Quadrant => layout_diagram_quadrant_traced(ir),
         LayoutAlgorithm::GitGraph => layout_diagram_gitgraph_traced(ir),
+        LayoutAlgorithm::Architecture => layout_diagram_architecture_traced(ir),
     };
     // State notes are attached HERE, after the dispatch match rather than inside one algorithm, for
     // two reasons: a state diagram can land on Sugiyama, Force, Tree or Radial depending on config
@@ -3992,6 +3995,9 @@ fn auto_selection_reason(ir: &MermaidDiagramIr, selected: LayoutAlgorithm) -> &'
         DiagramType::Sankey => return "auto_diagram_type_sankey",
         DiagramType::Journey | DiagramType::Kanban => return "auto_diagram_type_kanban",
         DiagramType::BlockBeta => return "auto_diagram_type_block_beta",
+        DiagramType::ArchitectureBeta if selected == LayoutAlgorithm::Architecture => {
+            return "auto_diagram_type_architecture";
+        }
         DiagramType::Sequence => return "auto_diagram_type_sequence",
         _ => {}
     }
@@ -4026,6 +4032,15 @@ fn preferred_layout_algorithm_with_config(
         DiagramType::QuadrantChart => LayoutAlgorithm::Quadrant,
         DiagramType::GitGraph => LayoutAlgorithm::GitGraph,
         DiagramType::PacketBeta => LayoutAlgorithm::Packet,
+        // The specialization is conditional ON THE INPUT, not on the diagram type alone: the
+        // direction-aware placement has nothing to honour when no edge declares a side, so an
+        // architecture-beta diagram written without `a:R --> L:b` keeps falling through to the
+        // general selector and its layout is byte-for-byte what it was before bd-zce4. Deciding
+        // this here rather than inside the algorithm keeps the dispatch trace honest — the
+        // recorded `selected` is the algorithm that actually ran.
+        DiagramType::ArchitectureBeta if architecture_declares_a_side(ir) => {
+            LayoutAlgorithm::Architecture
+        }
         _ => return select_general_graph_algorithm_with_config(ir, config),
     };
     LayoutDispatch {
@@ -4249,6 +4264,7 @@ const fn algorithm_available_for_diagram(
         LayoutAlgorithm::Quadrant => matches!(diagram_type, DiagramType::QuadrantChart),
         LayoutAlgorithm::GitGraph => matches!(diagram_type, DiagramType::GitGraph),
         LayoutAlgorithm::Packet => matches!(diagram_type, DiagramType::PacketBeta),
+        LayoutAlgorithm::Architecture => matches!(diagram_type, DiagramType::ArchitectureBeta),
     }
 }
 
@@ -4432,6 +4448,7 @@ fn estimate_layout_cost(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> La
         | LayoutAlgorithm::Pie
         | LayoutAlgorithm::Quadrant
         | LayoutAlgorithm::GitGraph
+        | LayoutAlgorithm::Architecture
         | LayoutAlgorithm::Packet => LayoutCostEstimate {
             time_ms: nodes
                 .saturating_mul(3)
@@ -8811,6 +8828,203 @@ fn layered_ranks(ir: &MermaidDiagramIr) -> Vec<usize> {
     }
 
     ranks
+}
+
+/// Does any edge in this IR declare an architecture-beta side?
+///
+/// The gate for dispatching to [`layout_diagram_architecture_traced`]: with no side anywhere there
+/// is no direction to honour, and imposing a grid on an undirected architecture diagram would
+/// change output that nobody asked to change.
+fn architecture_declares_a_side(ir: &MermaidDiagramIr) -> bool {
+    ir.edges
+        .iter()
+        .any(|edge| edge.source_side().is_some() || edge.target_side().is_some())
+}
+
+/// One grid step for a declared side. Screen coordinates put +y DOWN, so `T` is negative.
+const fn architecture_side_step(side: ArchitectureSide) -> (i32, i32) {
+    match side {
+        ArchitectureSide::Right => (1, 0),
+        ArchitectureSide::Left => (-1, 0),
+        ArchitectureSide::Bottom => (0, 1),
+        ArchitectureSide::Top => (0, -1),
+    }
+}
+
+/// The grid step this edge asks for, from whichever end declared one.
+///
+/// `a:R --> L:b` states the same fact twice, so either end alone determines it: the SOURCE side is
+/// the step directly (`R` ⇒ b one cell right of a), and a lone TARGET side is the step to its
+/// opposite (`a --> L:b` ⇒ the edge arrives at b's left face ⇒ b is right of a). Preferring the
+/// source when both are present matches mermaid, which resolves `sourceDir` first.
+fn architecture_edge_step(edge: &fm_core::IrEdge) -> Option<(i32, i32)> {
+    edge.source_side()
+        .or_else(|| edge.target_side().map(ArchitectureSide::opposite))
+        .map(architecture_side_step)
+}
+
+/// Claim a grid cell for `node`, fanning out if the wanted cell is already taken.
+///
+/// Two targets can be sent to the SAME cell (`a:R --> L:b` and `a:R --> L:c`). They fan out along
+/// the axis PERPENDICULAR to the step rather than the second one being dropped or stacked on the
+/// first: an architecture diagram that says a talks to two things on its right means both are on
+/// its right, and overlapping two boxes would render one of them unreadable. Deterministic and
+/// monotone — the k-th arrival sits k steps out — so the picture does not depend on iteration luck.
+fn architecture_place(
+    cell: &mut [Option<(i32, i32)>],
+    occupied: &mut BTreeMap<(i32, i32), usize>,
+    node: usize,
+    want: (i32, i32),
+    step: (i32, i32),
+) {
+    // Perpendicular to the STEP, not to the absolute cell. Deriving it from `want` was wrong and
+    // silently so: a rightward step landing on column 2 would have fanned out along x — parallel
+    // to its own direction — and pushed the collided service further right instead of beside it.
+    let perpendicular = if step.0 == 0 { (1, 0) } else { (0, 1) };
+    let mut target = want;
+    let mut step = 1_i32;
+    while occupied.contains_key(&target) {
+        target = (
+            want.0 + perpendicular.0 * step,
+            want.1 + perpendicular.1 * step,
+        );
+        step += 1;
+    }
+    occupied.insert(target, node);
+    cell[node] = Some(target);
+}
+
+/// Place architecture-beta services from their DECLARED edge directions (bd-zce4).
+///
+/// `a:R --> L:b` means b sits to the RIGHT of a — R/L/T/B are a placement grammar, which mermaid
+/// 11.15.0 models per edge as `sourceDir`/`targetDir`. Ranking these by edge instead (which is
+/// what the general Sugiyama path did) throws the grammar away and stacks every service
+/// vertically, so `a:R --> L:b` produced byte-identical output to `a:T --> B:b`.
+///
+/// Reached only when [`architecture_declares_a_side`] holds, so a side-less architecture diagram
+/// still takes the general path and is unchanged.
+fn layout_diagram_architecture_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    let mut trace = LayoutTrace::default();
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let node_sizes = compute_node_sizes(ir, &metrics);
+    let node_count = ir.nodes.len();
+    let spacing = LayoutSpacing::default();
+
+    // Integer grid first, pixels second: placement is a discrete relation between services, and
+    // deciding it in cell units keeps "b is right of a" exact rather than a float comparison that
+    // a wide label could flip.
+    let mut cell: Vec<Option<(i32, i32)>> = vec![None; node_count];
+    let mut occupied: BTreeMap<(i32, i32), usize> = BTreeMap::new();
+
+    // Fixed point, not a single pass: an edge may name a service before any edge has placed it,
+    // and `b:R --> L:c` written above `a:R --> L:b` must still chain off a.
+    loop {
+        let mut progressed = false;
+        for edge in &ir.edges {
+            let (Some(from), Some(to)) = (
+                endpoint_node_index(ir, edge.from),
+                endpoint_node_index(ir, edge.to),
+            ) else {
+                continue;
+            };
+            let Some(step) = architecture_edge_step(edge) else {
+                continue;
+            };
+            match (cell[from], cell[to]) {
+                (Some(base), None) => {
+                    architecture_place(
+                        &mut cell,
+                        &mut occupied,
+                        to,
+                        (base.0 + step.0, base.1 + step.1),
+                        step,
+                    );
+                    progressed = true;
+                }
+                // The relation is symmetric, so a placed TARGET positions its source too. Without
+                // this arm a diagram whose first edge names an already-placed b as its target
+                // would leave the source to the unplaced-node sweep and lose its direction.
+                (None, Some(base)) => {
+                    architecture_place(
+                        &mut cell,
+                        &mut occupied,
+                        from,
+                        (base.0 - step.0, base.1 - step.1),
+                        step,
+                    );
+                    progressed = true;
+                }
+                _ => {}
+            }
+        }
+        if progressed {
+            continue;
+        }
+        // Nothing moved: seed the next component. A diagram with two disconnected direction
+        // clusters gets a fresh origin per cluster instead of collapsing both onto (0, 0).
+        let seed = ir.edges.iter().find_map(|edge| {
+            let from = endpoint_node_index(ir, edge.from)?;
+            let to = endpoint_node_index(ir, edge.to)?;
+            architecture_edge_step(edge)?;
+            (cell[from].is_none() && cell[to].is_none()).then_some(from)
+        });
+        let Some(seed) = seed else { break };
+        let next_row = occupied.keys().map(|c| c.1).max().map_or(0, |row| row + 2);
+        // Vertical step ⇒ a second component that also wants this row spreads sideways.
+        architecture_place(&mut cell, &mut occupied, seed, (0, next_row), (0, 1));
+    }
+
+    // A service no directed edge touches (a bare `service x(cloud)[X]`, or one wired only by an
+    // edge with no side) still has to appear. It goes in a trailing row rather than being dropped
+    // or piled onto an occupied cell.
+    let trailing_row = occupied.keys().map(|c| c.1).max().map_or(0, |row| row + 2);
+    for node in 0..node_count {
+        if cell[node].is_none() {
+            architecture_place(&mut cell, &mut occupied, node, (0, trailing_row), (0, 1));
+        }
+    }
+
+    // Grid → pixels. One uniform cell size, sized by the widest and tallest service, so a column
+    // is a column no matter what the labels do; `finalize_specialized_layout` then translates the
+    // whole thing (cells are freely negative up to here) and builds the edge paths.
+    let cell_width =
+        node_sizes.iter().map(|(w, _)| *w).fold(0.0_f32, f32::max) + spacing.node_spacing;
+    let cell_height =
+        node_sizes.iter().map(|(_, h)| *h).fold(0.0_f32, f32::max) + spacing.rank_spacing;
+    let min_col = cell.iter().flatten().map(|c| c.0).min().unwrap_or(0);
+    let min_row = cell.iter().flatten().map(|c| c.1).min().unwrap_or(0);
+
+    let mut centers = vec![(0.0_f32, 0.0_f32); node_count];
+    let mut rank_by_node = vec![0_usize; node_count];
+    let mut order_by_node = vec![0_usize; node_count];
+    for (node, slot) in cell.iter().enumerate() {
+        let (col, row) = slot.unwrap_or((min_col, min_row));
+        centers[node] = (col as f32 * cell_width, row as f32 * cell_height);
+        // Rank/order are consumed as usize row/column indices, so they are rebased off the
+        // grid's own minimum rather than clamped — a diagram built entirely leftwards
+        // (`a:L --> R:b`) has negative columns and must not collapse them all to rank 0.
+        rank_by_node[node] = usize::try_from(row - min_row).unwrap_or(0);
+        order_by_node[node] = usize::try_from(col - min_col).unwrap_or(0);
+    }
+
+    push_snapshot(
+        &mut trace,
+        "architecture_direction_placement",
+        node_count,
+        ir.edges.len(),
+        0,
+        0,
+    );
+
+    finalize_specialized_layout(
+        ir,
+        &node_sizes,
+        &rank_by_node,
+        &order_by_node,
+        centers,
+        trace,
+        false,
+    )
 }
 
 fn finalize_specialized_layout(
@@ -16978,6 +17192,7 @@ fn layout_decision_confidence_permille(
                 | LayoutAlgorithm::Pie
                 | LayoutAlgorithm::Quadrant
                 | LayoutAlgorithm::GitGraph
+                | LayoutAlgorithm::Architecture
                 | LayoutAlgorithm::Packet => 900,
                 LayoutAlgorithm::Tree if metrics.is_tree_like => 880,
                 LayoutAlgorithm::Force if metrics.is_dense || metrics.back_edge_count > 0 => 760,
