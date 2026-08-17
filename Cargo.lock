@@ -646,6 +646,7 @@ version = "0.2.0"
 dependencies = [
  "fm-core",
  "fm-layout",
+ "fm-parser",
  "sha2",
 ]
 
