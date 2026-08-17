@@ -3866,10 +3866,12 @@ fn iso_date_from_epoch_day(days: i64) -> String {
 }
 
 fn build_base_svg_render_config(config_file: &FrankenmermaidConfigFile) -> Result<SvgRenderConfig> {
-    let mut config = SvgRenderConfig::default();
     // Supply the date the gantt today-marker is drawn at. The renderer never reads the clock itself
     // (bd-j0va); it is injected here so goldens and library callers stay deterministic.
-    config.gantt_today = today_utc_iso();
+    let mut config = SvgRenderConfig {
+        gantt_today: today_utc_iso(),
+        ..SvgRenderConfig::default()
+    };
 
     if let Some(theme) = config_file.svg.theme.as_deref() {
         config.theme = theme
