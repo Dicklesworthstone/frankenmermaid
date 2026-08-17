@@ -5,10 +5,11 @@
 //! The user then sees a box containing `A] ~~> b[B` with no signal that anything was misread, and
 //! the diagram looks like it rendered.
 //!
-//! `fm-parser` is under another agent's exclusive lease, so this file is the executable acceptance
-//! gate rather than the fix. The fix also deserves care: "warn when a line looks like it contains an
-//! unrecognised arrow" is a heuristic, and a careless one would warn on legitimate labels containing
-//! `~` or `>`.
+//! BOTH HALVES ARE NOW FIXED: the parser warns AND drops the node rather than drawing the fragment.
+//! The rule stayed deliberately narrow — an unmatched bracket only. "Warn when a line looks like it
+//! contains an unrecognised arrow" is the tempting heuristic and a bad one, because it fires on
+//! legitimate labels containing `~` or `>`, and a false warning on correct input is worse than the
+//! silence it replaces. The controls below are what hold that line.
 
 /// Node labels for a source, resolved through the label table.
 fn labels_of(source: &str) -> Vec<String> {
@@ -53,18 +54,16 @@ fn an_unrecognised_operator_is_no_longer_silent() {
     );
 }
 
-/// THE OTHER HALF, still open: the raw fragment is STILL the node's label.
+/// THE OTHER HALF, now closed: the raw fragment is no longer drawn as content.
 ///
-/// ⚠️ `#[ignore]` BECAUSE IT REPRODUCES A LIVE DEFECT. The fix landed for bd-rrvr was the WARNING,
-/// which removes the silence but not the garbage — `a[A] ~~> b[B]` still yields one node labelled
-/// `A] ~~> b[B`. Telling the user is strictly better than not telling them, but showing a fragment
-/// of their syntax AS THEIR CONTENT remains wrong.
+/// Was `#[ignore]`d while it reproduced the live defect — the warning removed the silence but not
+/// the garbage, and `a[A] ~~> b[B]` still yielded one node labelled `A] ~~> b[B`. The node is now
+/// DROPPED rather than drawn, and the warning says so.
 ///
-/// Kept separate rather than folded into the passing test above, because a single assertion that
-/// accepted "warned OR parsed cleanly" would let this half disappear from view the moment the
-/// warning landed — which is exactly what nearly happened.
+/// Kept separate rather than folded into the test above, because a single assertion that accepted
+/// "warned OR parsed cleanly" would have let this half disappear from view the moment the warning
+/// landed — which is exactly what nearly happened.
 #[test]
-#[ignore = "bd-rrvr: warned now, but the raw operator fragment is still the node label"]
 fn an_unrecognised_operator_does_not_become_a_node_label() {
     let labels = labels_of("flowchart TD\n  a[A] ~~> b[B]\n");
 
@@ -113,5 +112,53 @@ fn the_warning_identifies_the_line_and_the_label() {
             .any(|w| w.contains("Line 2") && w.contains("A] ~~> b[B")),
         "the warning does not identify the line and the label: {:?}",
         parsed.warnings
+    );
+}
+
+/// THE CASE THE INCUMBENT SETTLES, and the reason the rule drops rather than merely warns.
+///
+/// mermaid 11.15.0 (pinned bundle, evaluated in the same browserless `node:vm` sandbox
+/// `mermaid_bench.mjs` uses) THROWS on this source: `Parse error on line 2`. The incumbent refuses
+/// the line outright. We drew it as a box containing `Unclosed --> b[B` — the user's own syntax
+/// presented as their content, with the diagram looking like it rendered.
+///
+/// This is the measured half of the grounding. The `~~>` case above could NOT be settled the same
+/// way: mermaid's flowchart parse path reaches DOMPurify, which needs a DOM that sandbox
+/// deliberately withholds, so it reports DNF — and stubbing a DOM to get an answer is the trade
+/// that file's own comment warns against. Both cases take the same unmatched-bracket rule, so the
+/// policy rests on the one that was actually measured.
+#[test]
+fn an_unclosed_bracket_is_dropped_rather_than_drawn() {
+    let parsed = fm_parser::parse("flowchart TD\n  a[Unclosed --> b[B]\n");
+    let labels = labels_of("flowchart TD\n  a[Unclosed --> b[B]\n");
+
+    assert!(
+        !parsed.warnings.is_empty(),
+        "an unclosed bracket must warn; the incumbent errors outright on this source"
+    );
+    assert!(
+        !labels.iter().any(|l| l.contains('[') || l.contains("-->")),
+        "a raw source fragment reached a node label: {labels:?}"
+    );
+}
+
+/// NON-VACUITY FOR THE DROP RULE, and it is the assertion that stops this fix from being "drop
+/// everything". A malformed line must not take a WELL-FORMED neighbour down with it.
+///
+/// Without this, a rule that refused the whole diagram would satisfy every assertion above while
+/// destroying more content than the defect it fixes — trading a garbage label for a blank page.
+#[test]
+fn a_malformed_line_does_not_drop_its_well_formed_neighbours() {
+    let labels = labels_of("flowchart TD\n  a[A] --> b[B]\n  c[C] ~~> d[D]\n  e[E] --> f[F]\n");
+
+    for want in ["A", "B", "E", "F"] {
+        assert!(
+            labels.iter().any(|l| l == want),
+            "well-formed node {want:?} was dropped by a malformed neighbour: {labels:?}"
+        );
+    }
+    assert!(
+        !labels.iter().any(|l| l.contains("~~>")),
+        "the malformed line still reached a label: {labels:?}"
     );
 }

@@ -2482,9 +2482,24 @@ fn add_node_to_active_groups(
 /// containing `~` or `>`, and a false warning on correct input is worse than the silence it
 /// replaces. A balanced bracket is left alone precisely because `a["x [y]"]` is valid and common.
 ///
-/// This warns rather than rejects: the parser is recovery-oriented (see the empty-branch-name and
-/// duplicate-branch cases), and refusing to render is a larger change than the silence justifies.
-fn warn_if_label_holds_unmatched_bracket(builder: &mut IrBuilder, label: &str, span: Span) {
+/// IT NOW REJECTS THE NODE AS WELL AS WARNING, which is the second half of bd-rrvr. The warning
+/// removed the silence; it did not remove the garbage, and `a[A] ~~> b[B]` still drew a box
+/// containing `A] ~~> b[B` — a fragment of the user's own syntax presented as their content.
+///
+/// GROUNDED ON THE INCUMBENT, not on taste. mermaid 11.15.0 (pinned bundle, evaluated in the same
+/// browserless `node:vm` sandbox `mermaid_bench.mjs` uses) THROWS on this shape:
+/// `flowchart TD / a[Unclosed --> b[B]` gives `Parse error on line 2`. So the incumbent refuses the
+/// line; we drew it as content. Dropping the node and keeping the warning moves us toward that
+/// behaviour and is strictly more honest than a box full of syntax.
+///
+/// ⚠️ The flowchart `~~>` case could NOT be settled this way and I did not force it: mermaid's
+/// flowchart parse path reaches DOMPurify, which needs a DOM the sandbox deliberately does not
+/// provide, so it reports DNF. Stubbing a DOM to get an answer is the trade that file's comment
+/// explicitly warns against. The unmatched-bracket verdict above is what the evidence supports, and
+/// it is the same rule, so the fix rests on the case that WAS measured.
+///
+/// Returns `true` when the caller must NOT intern the node.
+fn warn_if_label_holds_unmatched_bracket(builder: &mut IrBuilder, label: &str, span: Span) -> bool {
     let mut depth = 0_i32;
     let mut unmatched_close = false;
     for byte in label.bytes() {
@@ -2501,17 +2516,21 @@ fn warn_if_label_holds_unmatched_bracket(builder: &mut IrBuilder, label: &str, s
         }
     }
     if depth == 0 && !unmatched_close {
-        return;
+        return false;
     }
     builder.add_warning(format!(
-        "Line {}: unrecognised syntax was kept as a node label: {label:?}. A bracket is unmatched,          so an operator on this line was probably not understood.",
+        "Line {}: unrecognised syntax was DROPPED rather than drawn as a node label: {label:?}. \
+         A bracket is unmatched, so an operator on this line was not understood.",
         span.start.line
     ));
+    true
 }
 
 fn intern_node_token(builder: &mut IrBuilder, node: &NodeToken, span: Span) -> Option<IrNodeId> {
-    if let Some(label) = node.label.as_ref() {
-        warn_if_label_holds_unmatched_bracket(builder, &label.text, span);
+    if let Some(label) = node.label.as_ref()
+        && warn_if_label_holds_unmatched_bracket(builder, &label.text, span)
+    {
+        return None;
     }
     let node_id = builder.intern_node_label(&node.id, node.label.as_ref(), node.shape, span)?;
     if let Some(icon) = node.icon.as_deref() {
@@ -2525,8 +2544,10 @@ fn intern_flow_ast_node(
     node: &FlowAstNode,
     span: Span,
 ) -> Option<IrNodeId> {
-    if let Some(label) = node.label.as_ref() {
-        warn_if_label_holds_unmatched_bracket(builder, &label.text, span);
+    if let Some(label) = node.label.as_ref()
+        && warn_if_label_holds_unmatched_bracket(builder, &label.text, span)
+    {
+        return None;
     }
     let node_id = if is_dangling_placeholder_node_id(&node.id) {
         builder.intern_placeholder_node(&node.id, span)?
