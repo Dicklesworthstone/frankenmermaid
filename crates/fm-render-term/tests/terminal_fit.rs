@@ -333,6 +333,51 @@ fn a_gantt_section_shows_its_name_in_terminal() {
     assert_eq!(out.matches("Zulu").count(), 1, "the section name was drawn more than once");
 }
 
+/// A kanban COLUMN's name must reach terminal output (bd-u3fo, the bead's headline case).
+///
+/// The gantt-section test above covers the renderer half. This covers the case the bead was
+/// actually filed for and it exercises BOTH halves at once, which neither existing test does:
+///
+///   * the layout half, because a kanban column band's label used to be the generated placeholder
+///     `lane 1` — so before that fix this test would have found `lane 1` on the canvas and the
+///     user's own name nowhere, which is a placeholder rendered confidently and worse than a blank;
+///   * the renderer half, because the band loop drew each kind's geometry and no text at all.
+///
+/// Measured in the bead with the shipping binary: SVG drew both `Alpha` and `Beta`, `-f term` drew
+/// `Beta` only, and the sole node id in the diagram is the card — so the column name had no other
+/// route into the picture.
+///
+/// ⚠️ `#[ignore]` BECAUSE IT REPRODUCES A LIVE DEFECT, not because it is unfinished — the same
+/// standing this repo gave bd-8pna's acceptance test. Run with `--ignored` and it FAILS on the
+/// FIRST assertion, and the defect is wider than the label: measured with the shipping binary,
+/// `-f term` on this fixture emits NO text at all — not the column name and not the card — at
+/// 100x40, 200x60 and 400x100 alike, so it is not the viewport ceiling of bd-8tsw. The same
+/// fixture through `-f svg` draws both `Alpha` and `Beta` and no `lane N` placeholder, which
+/// confirms the IR and the layout half are correct and puts the fault in the terminal path.
+#[test]
+#[ignore = "bd-u3fo: reproduces a live defect — kanban emits no text in terminal at any viewport"]
+fn a_kanban_column_shows_its_name_in_terminal() {
+    let ir = fm_parser::parse("kanban\n  Alpha\n    t1[Beta]\n").ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 100, 40).output;
+
+    assert!(
+        out.contains("Alpha"),
+        "the column name is missing from terminal output:\n{out}"
+    );
+    // The card must survive alongside it — a column label that overwrote its own card would trade
+    // one piece of dropped content for another.
+    assert!(
+        out.contains("Beta"),
+        "the card label was displaced by the column name:\n{out}"
+    );
+    // The placeholder must be absent. This is the assertion that fails if the LAYOUT half regresses
+    // while the renderer half keeps working: the band would still be labelled, just wrongly.
+    assert!(
+        !out.contains("lane 1"),
+        "a generated placeholder reached the canvas instead of the declared name:\n{out}"
+    );
+}
+
 /// CONTROL: the overlay must not invent a label or displace node text.
 #[test]
 fn band_label_overlay_does_not_invent_or_displace() {
