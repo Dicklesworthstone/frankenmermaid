@@ -11517,14 +11517,30 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                 if !style.is_empty() {
                     for target in targets.split(',') {
                         let target = target.trim();
-                        if !target.is_empty()
-                            && let Some(node_id) = builder.node_id_by_key(target)
-                        {
+                        if target.is_empty() {
+                            continue;
+                        }
+                        if let Some(node_id) = builder.node_id_by_key(target) {
                             builder.push_style_ref(
                                 fm_core::IrStyleTarget::Node(node_id),
                                 style.to_string(),
                                 span,
                             );
+                        } else {
+                            // A `style` target that resolves to nothing used to be discarded in
+                            // total silence (bd-xfmm). Two very different mistakes produced the
+                            // same nothing: a misspelled node id, and a SUBGRAPH id -- which is
+                            // not a node, is not in this index, and has no `IrStyleTarget`
+                            // variant to be recorded in even if it were found. The author could
+                            // not tell "you spelled it wrong" from "that is not supported", and
+                            // both looked identical to a diagram that simply ignored them.
+                            //
+                            // This does not colour anything. `style <subgraph>` still has no
+                            // effect; the point is that the failure stops being invisible.
+                            builder.add_warning(format!(
+                                "style directive target `{target}` is not a node id; the style was \
+                                 ignored (subgraph and cluster ids cannot be styled)"
+                            ));
                         }
                     }
                 }
@@ -18688,6 +18704,86 @@ Rel_Back(db, app, "Responds")"#,
     ///
     /// mermaid rejects a duplicate `branch` outright. We stay permissive and render, but the user
     /// has to be told, because the alternative is a silently different picture.
+    /// A `style` target that names no node warns instead of vanishing (bd-xfmm).
+    ///
+    /// A subgraph id is the motivating case: it is not a node, so `node_id_by_key` misses it, and
+    /// `IrStyleTarget` has no `Cluster` variant to hold it even if it did. The directive therefore
+    /// cannot work today — but silence made "not supported" indistinguishable from "you spelled it
+    /// wrong", which is the part being fixed.
+    #[test]
+    fn style_directive_on_a_subgraph_warns_instead_of_vanishing() {
+        let parsed = parse_mermaid(
+            "flowchart TD\n  subgraph one[One]\n    a[A]\n  end\n  style one fill:#ff0000\n",
+        );
+
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("`one`") && warning.contains("not a node id")),
+            "a style directive on a subgraph passed in silence; warnings: {:?}",
+            parsed.warnings
+        );
+    }
+
+    /// A misspelled node id warns for the same reason.
+    #[test]
+    fn style_directive_on_an_unknown_id_warns() {
+        let parsed = parse_mermaid("flowchart TD\n  a[A] --> b[B]\n  style aa fill:#ff0000\n");
+
+        assert!(
+            parsed.warnings.iter().any(|warning| warning.contains("`aa`")),
+            "a misspelled style target passed in silence; warnings: {:?}",
+            parsed.warnings
+        );
+    }
+
+    /// CONTROL: an ORDINARY valid `style` emits no warning, and still applies.
+    ///
+    /// This is the control that matters. A warning on every resolvable target would make the whole
+    /// corpus noisy and train readers to ignore the channel, which is worse than the silence being
+    /// replaced. Asserting the style ref survives as well guards the refactor from the `if let` to
+    /// the `if/else`: a version that warned correctly but stopped recording the style would satisfy
+    /// the two tests above.
+    #[test]
+    fn a_valid_style_directive_neither_warns_nor_loses_its_style() {
+        let parsed = parse_mermaid("flowchart TD\n  a[A] --> b[B]\n  style a fill:#ff0000\n");
+
+        assert!(
+            !parsed.warnings.iter().any(|warning| warning.contains("not a node id")),
+            "a valid style directive produced a spurious warning: {:?}",
+            parsed.warnings
+        );
+        assert!(
+            parsed
+                .ir
+                .style_refs
+                .iter()
+                .any(|style_ref| matches!(style_ref.target, fm_core::IrStyleTarget::Node(_))
+                    && style_ref.style.contains("ff0000")),
+            "the valid style stopped being recorded: {:?}",
+            parsed.ir.style_refs
+        );
+    }
+
+    /// CONTROL: a comma list warns ONLY for the members that miss.
+    #[test]
+    fn a_comma_list_warns_only_for_the_unresolved_member() {
+        let parsed =
+            parse_mermaid("flowchart TD\n  a[A] --> b[B]\n  style a,zz fill:#ff0000\n");
+
+        assert!(
+            parsed.warnings.iter().any(|warning| warning.contains("`zz`")),
+            "the unresolved member did not warn: {:?}",
+            parsed.warnings
+        );
+        assert!(
+            !parsed.warnings.iter().any(|warning| warning.contains("`a`")),
+            "the RESOLVED member warned as well, so the warning is not target-specific: {:?}",
+            parsed.warnings
+        );
+    }
+
     #[test]
     fn gitgraph_duplicate_branch_declaration_warns() {
         let parsed =
