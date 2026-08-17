@@ -10685,11 +10685,25 @@ fn er_attribute_row_width(
         fm_core::IrAttributeKey::Uk => "UK ",
         fm_core::IrAttributeKey::None => "",
     };
-    let mut row = String::with_capacity(prefix.len() + attr.data_type.len() + attr.name.len() + 1);
+    // Capacity covers the comment too (bd-jerh): the renderer appends ` {comment}` when present, and
+    // a row measured without it under-sizes the box by exactly the comment's width — which spills the
+    // widest row outside the entity rather than clipping it, per this fn's own contract above.
+    let comment = attr.comment.as_deref().filter(|text| !text.is_empty());
+    let mut row = String::with_capacity(
+        prefix.len()
+            + attr.data_type.len()
+            + attr.name.len()
+            + 1
+            + comment.map_or(0, |text| text.len() + 1),
+    );
     row.push_str(prefix);
     row.push_str(&attr.data_type);
     row.push(' ');
     row.push_str(&attr.name);
+    if let Some(text) = comment {
+        row.push(' ');
+        row.push_str(text);
+    }
     // `metrics` measures at its own font size; rows render at `attr_font_size`. Scale the estimate by
     // the ratio rather than assuming the nominal 0.8, so the clamp floor is honoured here too.
     let scale = if node_font_size > 0.0 {
@@ -10767,6 +10781,11 @@ fn node_size_cache_key(
         hash_str(&mut hash, &attr.data_type);
         hash_str(&mut hash, &attr.name);
         hash_u64(&mut hash, attr.key as u64);
+        // The comment became a DRAWN, MEASURED part of the row in bd-jerh, so it sizes the box and
+        // belongs in the key — exactly as `c4_meta.description` and the requirement strings below
+        // do. Without it, two entities differing only in a comment share a cached size and the
+        // second renders in the first's box.
+        hash_str(&mut hash, attr.comment.as_deref().unwrap_or_default());
     }
     // A C4 description feeds `compute_node_size` through `c4_description_height`, so editing it
     // without touching the node's label must not serve the pre-edit size (bd-9xjy) — the same
@@ -27957,6 +27976,90 @@ mod tests {
                 "Event {i} missing 'level': {event}"
             );
         }
+    }
+
+    /// An ER attribute COMMENT must widen the entity box (bd-jerh).
+    ///
+    /// The renderer appends the comment to the attribute row. If `er_attribute_row_width` does not
+    /// measure it, the widest row is wider than the box holding it — and per that fn's own contract,
+    /// under-sizing does not clip, it SPILLS the row into the diagram.
+    ///
+    /// The IR is hand-built because fm-parser is not a dependency of this crate. That is safe HERE,
+    /// unlike the kanban case in bd-u3fo: this exercises `compute_node_sizes`, a pure function of the
+    /// IR, not a dispatch decision a hand-built fixture could route around. The end-to-end claim —
+    /// that a parsed comment reaches the document — is asserted in fm-render-svg, which can parse.
+    #[test]
+    fn er_attribute_comment_widens_the_entity_box() {
+        let entity = |comment: Option<&str>| {
+            let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
+            ir.labels.push(IrLabel {
+                text: "A".to_string(),
+                ..IrLabel::default()
+            });
+            ir.nodes.push(IrNode {
+                id: "A".to_string(),
+                label: Some(IrLabelId(0)),
+                members: vec![fm_core::IrEntityAttribute {
+                    data_type: "string".to_string(),
+                    name: "name".to_string(),
+                    key: fm_core::IrAttributeKey::None,
+                    comment: comment.map(str::to_string),
+                }],
+                ..IrNode::default()
+            });
+            crate::compute_node_sizes(&ir, &fm_core::FontMetrics::default_metrics())[0].0
+        };
+
+        let bare = entity(None);
+        let commented = entity(Some("a considerably longer trailing comment"));
+
+        assert!(
+            commented > bare,
+            "the comment did not widen the box (bare={bare}, commented={commented}), so the drawn \
+             row is wider than the box that holds it"
+        );
+    }
+
+    /// CONTROL: the node-size CACHE must not serve one entity's size for another differing only in
+    /// its comment (bd-jerh).
+    ///
+    /// The coupling recorded for bd-090g, bd-9xjy and bd-jnc1: whatever `compute_node_size` READS
+    /// belongs in the cache key. Two entities identical but for comment length must get different
+    /// widths; a key blind to the comment collides them and the second renders in the first's box.
+    /// Both are sized in ONE call so they share a cache instance — sizing them separately would
+    /// pass even with a blind key, which is the mistake this control exists to catch.
+    #[test]
+    fn er_attribute_comment_participates_in_the_node_size_cache_key() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Er);
+        for (index, comment) in ["x", "a much longer comment than the other one"]
+            .into_iter()
+            .enumerate()
+        {
+            ir.labels.push(IrLabel {
+                text: "E".to_string(),
+                ..IrLabel::default()
+            });
+            ir.nodes.push(IrNode {
+                id: format!("E{index}"),
+                label: Some(IrLabelId(index)),
+                members: vec![fm_core::IrEntityAttribute {
+                    data_type: "string".to_string(),
+                    name: "name".to_string(),
+                    key: fm_core::IrAttributeKey::None,
+                    comment: Some(comment.to_string()),
+                }],
+                ..IrNode::default()
+            });
+        }
+
+        let sizes = crate::compute_node_sizes(&ir, &fm_core::FontMetrics::default_metrics());
+        assert!(
+            sizes[1].0 > sizes[0].0,
+            "entities differing only in comment length got widths {} and {}; a cache key blind to \
+             the comment would collide them",
+            sizes[0].0,
+            sizes[1].0
+        );
     }
 
     #[test]

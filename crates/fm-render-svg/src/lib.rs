@@ -7395,6 +7395,20 @@ fn write_er_entity_into(
         let _ = write_escaped_text(f, &attr.data_type);
         f.push(' ');
         let _ = write_escaped_text(f, &attr.name);
+        // The COMMENT was parsed and thrown away (bd-jerh). `IrEntityAttribute::comment` is
+        // populated by the parser and was read by no renderer and no layout code, so
+        // `A { string name "the name" }` rendered BYTE-IDENTICAL to the same entity without it.
+        // mermaid draws it: its ER renderer measures the comment into a text element classed
+        // `attribute-comment` and folds the width into the row.
+        //
+        // Appended to this row rather than given a column of its own, because this renderer draws
+        // one text run per attribute; a real fourth column would need the row split into measured
+        // cells, which is a larger change than the dropped content justifies. `er_attribute_row_width`
+        // measures the SAME concatenation, so the widest row still fits inside the box.
+        if let Some(comment) = attr.comment.as_deref().filter(|text| !text.is_empty()) {
+            f.push(' ');
+            let _ = write_escaped_text(f, comment);
+        }
         f.push_str("</text>");
         attr_y += attr_font_size * 1.3;
     }

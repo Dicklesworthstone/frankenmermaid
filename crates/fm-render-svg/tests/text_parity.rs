@@ -31,8 +31,11 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ),
     (
         "er",
-        "erDiagram\n  CUSTOMER {\n    string name\n    int age\n  }\n  CUSTOMER ||--o{ ORDER : places\n",
-        &["CUSTOMER", "ORDER", "places", "name", "age"],
+        // The quoted attribute COMMENT is load-bearing: it was parsed into
+        // `IrEntityAttribute::comment` and drawn by nothing, so this entity rendered byte-identical
+        // with and without it (bd-jerh). mermaid draws it as a fourth column.
+        "erDiagram\n  CUSTOMER {\n    string name \"who they are\"\n    int age\n  }\n  CUSTOMER ||--o{ ORDER : places\n",
+        &["CUSTOMER", "ORDER", "places", "name", "age", "who they are"],
     ),
     ("gantt", "gantt\n  title Plan\n  section Build\n    Task1 : t1, 2024-01-01, 3d\n", &["Plan", "Build", "Task1"]),
     ("pie", "pie title Share\n  \"Alpha\" : 60\n  \"Beta\" : 40\n", &["Share", "Alpha", "Beta"]),
