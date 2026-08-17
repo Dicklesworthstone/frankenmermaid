@@ -220,6 +220,9 @@ impl Canvas2dRenderer {
         // Draw layout bands (sequence lifelines, gantt sections, etc.)
         self.draw_bands(layout, ctx, offset_x, offset_y);
 
+        // Draw the time/category axis (gantt dates, xychart categories).
+        self.draw_axis_ticks(layout, ctx, offset_x, offset_y);
+
         // Draw sequence activation bars.
         self.draw_activation_bars(layout, ctx, offset_x, offset_y);
 
@@ -808,6 +811,42 @@ impl Canvas2dRenderer {
     }
 
     /// Draw sequence activation bars from layout extensions.
+    /// Draw axis tick labels -- gantt dates and xychart categories.
+    ///
+    /// `extensions.axis_ticks` is filled by the gantt and xychart layout arms and drawn by
+    /// fm-render-svg; this renderer referenced it nowhere (bd-t1jj). Canvas is the browser preview
+    /// surface -- fm-wasm renders through `render_to_canvas_with_layout` -- so a gantt showed bars
+    /// with nothing to measure them against, which is exactly the state bd-trsd fixed on the SVG side
+    /// and I fixed on the terminal side in 27a6aadd.
+    ///
+    /// Ticks are drawn at the TOP of the layout bounds, above the bars, for the same reason the
+    /// terminal draws them there: writing at the bar row would overwrite task names, trading one
+    /// piece of dropped content for another.
+    fn draw_axis_ticks<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) {
+        if layout.extensions.axis_ticks.is_empty() {
+            return;
+        }
+        let mut tick_font: Option<String> = None;
+        let y = f64::from(layout.bounds.y) + offset_y + 12.0;
+        for tick in &layout.extensions.axis_ticks {
+            if tick.label.is_empty() {
+                continue;
+            }
+            ctx.set_fill_style(&self.config.label_color);
+            ctx.set_font(tick_font.get_or_insert_with(|| {
+                format!("{}px {}", self.config.font_size * 0.75, self.config.font_family)
+            }));
+            ctx.fill_text(&tick.label, f64::from(tick.position) + offset_x, y);
+            self.draw_calls += 1;
+        }
+    }
+
     fn draw_activation_bars<C: Canvas2dContext>(
         &mut self,
         layout: &DiagramLayout,
@@ -2961,6 +3000,96 @@ mod tests {
         assert_eq!(
             diagonal_pairs, 0,
             "a destroy-cross-shaped diagonal was drawn for a diagram with no destroy"
+        );
+    }
+
+
+    /// A gantt must show its time axis on the canvas backend (bd-t1jj).
+    ///
+    /// `extensions.axis_ticks` is filled by the gantt layout arm and drawn by fm-render-svg; this
+    /// renderer referenced it nowhere. Canvas is the browser preview surface -- fm-wasm renders
+    /// through `render_to_canvas_with_layout` -- so a gantt showed bars with nothing to measure them
+    /// against, exactly the state bd-trsd fixed on the SVG side and 27a6aadd fixed on the terminal
+    /// side.
+    ///
+    /// The expected text is taken from the labels the LAYOUT produced rather than a hardcoded date,
+    /// so this pins the property and not the fixture's particular `axisFormat`.
+    #[test]
+    fn canvas_draws_gantt_axis_tick_labels() {
+        let ir = fm_parser::parse(
+            "gantt\n  title Roadmap\n  dateFormat  YYYY-MM-DD\n  section Core\n  Design :a1, 2026-01-01, 3d\n  Build :a2, after a1, 4d\n",
+        )
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+
+        // NON-VACUITY: the layout must actually publish ticks, or this asserts nothing about the
+        // renderer and would pass on a diagram with no axis to draw.
+        let expected = layout
+            .extensions
+            .axis_ticks
+            .iter()
+            .map(|tick| tick.label.clone())
+            .find(|label| !label.is_empty())
+            .expect(
+                "CONTROL FAILED: this gantt produced no axis tick labels, so the renderer has \
+                 nothing to draw and this test cannot detect the defect it was written for",
+            );
+
+        let mut ctx = MockCanvas2dContext::new(1400.0, 700.0);
+        let _ = crate::render_to_canvas_with_layout(
+            &ir,
+            &layout,
+            &mut ctx,
+            &CanvasRenderConfig::default(),
+        );
+        let drew_tick = ctx.operations().iter().any(|op| match op {
+            DrawOperation::FillText(text, _, _) => text == &expected,
+            _ => false,
+        });
+        assert!(
+            drew_tick,
+            "no axis tick label was drawn; the chart shows bars with nothing to measure them against"
+        );
+
+        // The task names must still be drawn -- an axis pass that overwrote the bars would trade one
+        // piece of dropped content for another.
+        let drew_task = ctx.operations().iter().any(|op| match op {
+            DrawOperation::FillText(text, _, _) => text.contains("Design"),
+            _ => false,
+        });
+        assert!(drew_task, "a task name was displaced by the axis pass");
+    }
+
+    /// A diagram with no axis must draw no tick.
+    ///
+    /// Regression guard: without it, a renderer that drew ticks unconditionally would satisfy the
+    /// claim above.
+    #[test]
+    fn canvas_draws_no_axis_for_a_diagram_without_one() {
+        let ir = fm_parser::parse("flowchart LR\n  A[Alpha] --> B[Beta]\n").ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        assert!(
+            layout.extensions.axis_ticks.is_empty(),
+            "CONTROL FAILED: a flowchart produced axis ticks, so it cannot show the pass is inert"
+        );
+
+        let mut ctx = MockCanvas2dContext::new(800.0, 400.0);
+        let _ = crate::render_to_canvas_with_layout(
+            &ir,
+            &layout,
+            &mut ctx,
+            &CanvasRenderConfig::default(),
+        );
+        // Node labels are still drawn; what must not appear is a second copy of them from an axis
+        // pass that ran when it should not have.
+        let alpha_draws = ctx
+            .operations()
+            .iter()
+            .filter(|op| matches!(op, DrawOperation::FillText(text, _, _) if text.contains("Alpha")))
+            .count();
+        assert_eq!(
+            alpha_draws, 1,
+            "a label was drawn more than once, suggesting the axis pass ran for a diagram with no axis"
         );
     }
 
