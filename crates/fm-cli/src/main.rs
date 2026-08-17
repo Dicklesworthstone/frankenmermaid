@@ -3987,8 +3987,26 @@ fn open_input_path(input: &str) -> Result<Option<std::fs::File>> {
     }
     match std::fs::File::open(input) {
         Ok(file) => Ok(Some(file)),
-        // Missing path: `exists()` was false, so the old code fell through to inline text.
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        // Missing path. The fallthrough to inline text is DELIBERATE -- the CLI accepts diagram
+        // source as a positional argument -- but it is the wrong default once the argument
+        // positively looks like a path (bd-dkbg). `render report.mmd` on a typo used to exit 0 and
+        // render a diagram whose entire content was the mistyped filename, which is the same family
+        // as bd-ec1t/bd-yrxu: input the engine cannot interpret is silently reinterpreted as
+        // content rather than reported. mermaid-cli errors here.
+        //
+        // The split is deliberately NARROWER than "every missing path errors". A bare word with no
+        // separator and no extension still falls through, because that is the shape a short inline
+        // document takes and the fallthrough exists to support it. Only an argument carrying a path
+        // separator or a file extension is treated as a stated intent to open a file -- inline
+        // mermaid source essentially never looks like that, and a mistyped path essentially always
+        // does.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if input_states_a_path(input) {
+                return Err(anyhow::Error::new(error))
+                    .context(format!("Failed to open file: {input}"));
+            }
+            Ok(None)
+        }
         Err(error) => {
             if Path::new(input).exists() {
                 Err(anyhow::Error::new(error)).context(format!("Failed to open file: {input}"))
@@ -3997,6 +4015,15 @@ fn open_input_path(input: &str) -> Result<Option<std::fs::File>> {
             }
         }
     }
+}
+
+/// Does the argument POSITIVELY state that it is a path, rather than merely not looking like mermaid?
+///
+/// `should_treat_input_as_path` also returns true for a bare word that simply contains no mermaid
+/// keyword, which is a far weaker signal -- it is the "I have no idea what this is" branch. Only the
+/// two positive signals below justify turning a missing file into an error (bd-dkbg).
+fn input_states_a_path(input: &str) -> bool {
+    input.contains('/') || input.contains('\\') || has_file_extension_hint(input)
 }
 
 fn should_treat_input_as_path(input: &str) -> bool {
@@ -8688,12 +8715,53 @@ mod load_input_tests {
         }
     }
 
-    /// A path-shaped argument that does not exist is inline diagram text, not an error. This is
-    /// the `Path::exists() == false` branch the single-walk open must keep reproducing.
+    /// A missing file the user clearly MEANT as a file must error, not become the diagram (bd-dkbg).
+    ///
+    /// ⚠️ This test previously asserted the opposite, under the name
+    /// `missing_path_falls_back_to_inline_text`, and its own doc comment described the behaviour as
+    /// something "the single-walk open must keep reproducing" -- so `render /some/typo.mmd` exited 0
+    /// and rendered a diagram whose entire content was the mistyped filename. It was written to
+    /// protect a performance refactor's behavioural equivalence, and it did that faithfully; it just
+    /// pinned a default that was wrong to begin with.
     #[test]
-    fn missing_path_falls_back_to_inline_text() {
-        let missing = "/nonexistent-dir-fm/nope.mmd";
-        assert_eq!(load_input(missing, MAX).expect("inline"), missing);
+    fn a_missing_file_that_states_a_path_is_an_error() {
+        for missing in [
+            "/nonexistent-dir-fm/nope.mmd", // path separator
+            "definitely-not-a-file.mmd",    // no separator, but a file extension
+        ] {
+            let error = load_input(missing, MAX)
+                .expect_err("a stated path that does not exist must not be read as inline source");
+            let rendered = format!("{error:#}");
+            assert!(
+                rendered.contains(missing),
+                "the error must name the path the user typed, got: {rendered}"
+            );
+        }
+    }
+
+    /// The CONTROL, and the reason the fix is narrow rather than "every missing path errors".
+    ///
+    /// A bare word with no separator and no extension is the shape a short inline document takes,
+    /// and the inline fallthrough exists to support exactly that. If this ever starts erroring, the
+    /// fix above has been over-tightened and the positional inline form is broken.
+    #[test]
+    fn a_bare_word_is_still_inline_source_not_a_missing_file() {
+        let bare = "notafile";
+        assert_eq!(
+            load_input(bare, MAX).expect("a bare word must still be inline diagram text"),
+            bare
+        );
+    }
+
+    /// Genuine inline mermaid source must be untouched by the path-shaped check -- negative case (1).
+    #[test]
+    fn inline_mermaid_source_survives_the_missing_file_check() {
+        for source in [
+            "flowchart LR\n  A --> B",
+            "sequenceDiagram\n  Alice->>Bob: Hi",
+        ] {
+            assert_eq!(load_input(source, MAX).expect("inline source"), source);
+        }
     }
 
     #[test]
