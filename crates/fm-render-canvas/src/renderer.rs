@@ -2864,4 +2864,105 @@ mod tests {
                 if text == "Backend" && (*x - 13.0).abs() < 0.001 && (*y - 14.0).abs() < 0.001)
         }));
     }
+    /// A destroyed participant's lifeline must be terminated with a CROSS on the canvas backend
+    /// (bd-t1jj).
+    ///
+    /// `extensions.sequence_lifecycle_markers` is filled by the sequence layout arm and drawn by
+    /// fm-render-svg; this renderer referenced it nowhere. Canvas is not a dead surface -- fm-wasm
+    /// renders the browser preview through `render_to_canvas_with_layout` -- so `destroy Bob` gave a
+    /// lifeline that simply stopped, with nothing distinguishing "destroyed" from "idle". Those are
+    /// different diagrams.
+    ///
+    /// ASSERTED BY GEOMETRY, NOT BY OP COUNT. The cross is two diagonals of `marker.size`, so the op
+    /// stream must contain a `MoveTo -> LineTo` with delta `(+size, +size)` and one with
+    /// `(-size, +size)`. Those deltas are independent of the canvas offsets, so this pins the SHAPE
+    /// the renderer draws rather than how many calls it happened to make -- an op-count assertion
+    /// would pass on any two lines drawn anywhere.
+    #[test]
+    fn canvas_draws_a_destroy_cross_for_a_destroyed_participant() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n  participant Alice\n  participant Bob\n  Alice->>Bob: Hi\n  destroy Bob\n  Bob->>Alice: Bye\n",
+        )
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+
+        // NON-VACUITY: the layout must actually publish a marker, or this test asserts nothing about
+        // the renderer and would pass on a diagram with nothing to draw.
+        let marker = layout
+            .extensions
+            .sequence_lifecycle_markers
+            .first()
+            .expect(
+                "CONTROL FAILED: this source produced no lifecycle marker, so the renderer has \
+                 nothing to draw and this test cannot detect the defect it was written for",
+            );
+        let size = f64::from(marker.size);
+        assert!(size > 0.0, "a zero-size marker cannot be drawn or detected");
+
+        let mut ctx = MockCanvas2dContext::new(1200.0, 800.0);
+        let _ = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &CanvasRenderConfig::default());
+        let ops = ctx.operations().to_vec();
+
+        let has_diagonal = |dx: f64, dy: f64| {
+            ops.windows(2).any(|pair| match (&pair[0], &pair[1]) {
+                (DrawOperation::MoveTo(x0, y0), DrawOperation::LineTo(x1, y1)) => {
+                    (x1 - x0 - dx).abs() < 0.01 && (y1 - y0 - dy).abs() < 0.01
+                }
+                _ => false,
+            })
+        };
+
+        assert!(
+            has_diagonal(size, size),
+            "the destroy cross is missing its first diagonal (delta +{size}, +{size})"
+        );
+        assert!(
+            has_diagonal(-size, size),
+            "the destroy cross is missing its second diagonal (delta -{size}, +{size}); one line \
+             alone is a slash, not a destroy marker"
+        );
+    }
+
+    /// A sequence with NO destroy must draw no cross.
+    ///
+    /// Regression guard: without it, a renderer that drew crosses unconditionally would satisfy the
+    /// test above. The same two diagonals are searched for, so this fails if the marker ever leaks
+    /// into a diagram that declares no lifecycle event.
+    #[test]
+    fn canvas_draws_no_destroy_cross_without_a_destroy() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n  participant Alice\n  participant Bob\n  Alice->>Bob: Hi\n  Bob->>Alice: Bye\n",
+        )
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        assert!(
+            layout.extensions.sequence_lifecycle_markers.is_empty(),
+            "CONTROL FAILED: this source produced a lifecycle marker, so it cannot show the \
+             renderer is inert without one"
+        );
+
+        let mut ctx = MockCanvas2dContext::new(1200.0, 800.0);
+        let _ = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &CanvasRenderConfig::default());
+        let ops = ctx.operations().to_vec();
+
+        // Any perfectly diagonal MoveTo -> LineTo pair with equal-magnitude dx and dy would be the
+        // shape the marker draws; there should be none.
+        let diagonal_pairs = ops
+            .windows(2)
+            .filter(|pair| match (&pair[0], &pair[1]) {
+                (DrawOperation::MoveTo(x0, y0), DrawOperation::LineTo(x1, y1)) => {
+                    let dx = (x1 - x0).abs();
+                    let dy = (y1 - y0).abs();
+                    dx > 0.5 && (dx - dy).abs() < 0.01
+                }
+                _ => false,
+            })
+            .count();
+        assert_eq!(
+            diagonal_pairs, 0,
+            "a destroy-cross-shaped diagonal was drawn for a diagram with no destroy"
+        );
+    }
+
+
 }
