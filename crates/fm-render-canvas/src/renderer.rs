@@ -2383,7 +2383,10 @@ fn fragment_kind_label(kind: fm_core::FragmentKind) -> &'static str {
 }
 
 #[inline]
-fn legacy_edge_stroke(arrow: ArrowType, default_width: f64) -> (f64, &'static [f64]) {
+/// `pub(crate)` so `gpu_plan` can carry the SAME width the Canvas2D pass strokes with. Forking this
+/// mapping was the alternative and a worse one: a duplicated helper drifts silently, and then the
+/// GPU plan claims a width the raster path never used.
+pub(crate) fn legacy_edge_stroke(arrow: ArrowType, default_width: f64) -> (f64, &'static [f64]) {
     match arrow {
         ArrowType::ThickArrow => (2.5, &[]),
         ArrowType::DottedArrow => (1.5, &LEGACY_DOTTED_EDGE_DASH),

@@ -65,6 +65,28 @@ pub struct GpuEdgeSegment {
     pub to: [f32; 2],
     /// Index back into `MermaidDiagramIr::edges`.
     pub edge_index: u32,
+    /// Stroke width in layout units, from the SAME `legacy_edge_stroke` rule the Canvas2D pass
+    /// uses — bd-2u0.2 calls for "instanced line strips with VARIABLE WIDTH", and a plan that
+    /// assumed one width could not draw a `==>` thick edge or a dotted one correctly.
+    pub width: f32,
+}
+
+/// One arrowhead for an instanced triangle pass.
+///
+/// bd-2u0.2: "Arrowheads as small triangle instances". Geometry mirrors the Canvas2D pass exactly —
+/// the END head sits on the last point with the angle of the final segment, and a BIDIRECTIONAL
+/// edge additionally gets a START head on the first point facing the other way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C)]
+pub struct GpuArrowheadInstance {
+    /// Tip position in layout coordinates.
+    pub position: [f32; 2],
+    /// Facing, in radians, matching `atan2` of the segment it terminates.
+    pub angle: f32,
+    /// Edge length of the head, in layout units.
+    pub size: f32,
+    /// Index back into `MermaidDiagramIr::edges`.
+    pub edge_index: u32,
 }
 
 /// Deterministic primitive buffers for a future WebGPU command encoder.
@@ -73,12 +95,33 @@ pub struct GpuRenderPlan {
     pub bounds: LayoutRect,
     pub node_instances: Vec<GpuNodeInstance>,
     pub edge_segments: Vec<GpuEdgeSegment>,
+    /// Triangle instances for edge arrowheads.
+    pub arrowheads: Vec<GpuArrowheadInstance>,
+}
+
+
+/// Whether this arrow type terminates in a head at the TARGET end.
+///
+/// `Line`, `DottedLine` and `ThickLine` are undirected — giving them a head would assert a direction
+/// the author did not write, which is the ER-notation defect bd-m0a9 fixed in the SVG renderer.
+const fn arrow_has_end_head(arrow: fm_core::ArrowType) -> bool {
+    !matches!(
+        arrow,
+        fm_core::ArrowType::Line | fm_core::ArrowType::DottedLine | fm_core::ArrowType::ThickLine
+    )
 }
 
 impl GpuRenderPlan {
     /// Build GPU-uploadable primitives without changing layout or render ordering.
+    ///
+    /// `edge_stroke_width` is the Canvas2D config's default, so a plan and a raster render of the
+    /// same diagram agree on stroke width rather than each inventing one.
     #[must_use]
-    pub fn from_layout(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> Self {
+    pub fn from_layout(
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        edge_stroke_width: f32,
+    ) -> Self {
         let mut node_instances = Vec::with_capacity(layout.nodes.len());
         for node in &layout.nodes {
             let shape = ir
@@ -103,7 +146,20 @@ impl GpuRenderPlan {
             .map(|edge| edge.points.len().saturating_sub(1))
             .sum();
         let mut edge_segments = Vec::with_capacity(segment_count);
+        let mut arrowheads = Vec::new();
         for edge in layout.edges.iter().filter(|edge| !edge.bundled) {
+            let arrow = ir
+                .edges
+                .get(edge.edge_index)
+                .map_or(fm_core::ArrowType::Arrow, |ir_edge| ir_edge.arrow);
+            // ONE source of truth with the raster pass: `legacy_edge_stroke` is the same function
+            // `draw_edges` strokes with, so a `==>` thick edge and a dotted edge carry the widths
+            // they are actually drawn at instead of a plan-local guess.
+            let (width, _dash) =
+                crate::renderer::legacy_edge_stroke(arrow, f64::from(edge_stroke_width));
+            let width = width as f32;
+            let edge_index = edge.edge_index.try_into().unwrap_or(u32::MAX);
+
             for points in edge.points.windows(2) {
                 let [from, to] = points else {
                     continue;
@@ -111,7 +167,33 @@ impl GpuRenderPlan {
                 edge_segments.push(GpuEdgeSegment {
                     from: [from.x, from.y],
                     to: [to.x, to.y],
-                    edge_index: edge.edge_index.try_into().unwrap_or(u32::MAX),
+                    edge_index,
+                    width,
+                });
+            }
+
+            // Arrowheads mirror the Canvas2D geometry exactly: the END head on the last point,
+            // angled along the final segment; a BIDIRECTIONAL edge also gets a START head on the
+            // first point, facing back the way it came.
+            const HEAD_SIZE: f32 = 10.0;
+            if edge.points.len() >= 2 && arrow_has_end_head(arrow) {
+                let last = edge.points[edge.points.len() - 1];
+                let prev = edge.points[edge.points.len() - 2];
+                arrowheads.push(GpuArrowheadInstance {
+                    position: [last.x, last.y],
+                    angle: (last.y - prev.y).atan2(last.x - prev.x),
+                    size: HEAD_SIZE,
+                    edge_index,
+                });
+            }
+            if edge.points.len() >= 2 && matches!(arrow, fm_core::ArrowType::DoubleArrow) {
+                let start = edge.points[0];
+                let next = edge.points[1];
+                arrowheads.push(GpuArrowheadInstance {
+                    position: [start.x, start.y],
+                    angle: (start.y - next.y).atan2(start.x - next.x),
+                    size: HEAD_SIZE,
+                    edge_index,
                 });
             }
         }
@@ -120,6 +202,7 @@ impl GpuRenderPlan {
             bounds: layout.bounds,
             node_instances,
             edge_segments,
+            arrowheads,
         }
     }
 }
@@ -222,7 +305,7 @@ mod tests {
             },
         ];
 
-        let plan = GpuRenderPlan::from_layout(&ir, &test_layout());
+        let plan = GpuRenderPlan::from_layout(&ir, &test_layout(), 1.25);
 
         assert_eq!(plan.node_instances.len(), 2);
         assert_eq!(plan.node_instances[0].center, [30.0, 35.0]);
@@ -237,7 +320,7 @@ mod tests {
     #[test]
     fn plan_expands_only_visible_edge_polylines_into_segments() {
         let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
-        let plan = GpuRenderPlan::from_layout(&ir, &test_layout());
+        let plan = GpuRenderPlan::from_layout(&ir, &test_layout(), 1.25);
 
         assert_eq!(plan.edge_segments.len(), 2);
         assert_eq!(plan.edge_segments[0].from, [50.0, 35.0]);
