@@ -642,3 +642,82 @@ fn a_state_diagram_without_notes_is_unaffected() {
         "a state appears more than once, or was disturbed by the note overlay:\n{out}"
     );
 }
+
+/// A gantt task name must survive even when its bar is short and sits at the right edge (bd-t1jj).
+///
+/// The generic node-label path centres a label on its node and lets an oversized one overflow to the
+/// RIGHT. A task whose name is wider than its bar and whose bar is near the right edge has nowhere to
+/// overflow, so the name was clipped at the canvas edge and LOST. `extensions.gantt_task_labels`
+/// already solved this — layout resolves each task to Inside / OutsideRight / OutsideLeft and hands
+/// back an anchor, choosing OutsideLeft precisely when there is no room to the right. fm-render-svg
+/// consumed it; the terminal did not.
+///
+/// MEASURED before the fix: at 80 columns `FinalIntegrationAndSignoffPhase` did not appear at all,
+/// while the same chart at 120 columns showed it. A name that survives only if the terminal happens
+/// to be wide enough is not a name a reader can rely on, which is why the narrow width is the case
+/// under test.
+#[test]
+fn a_gantt_task_name_survives_a_short_bar_at_the_right_edge() {
+    let src = "gantt\n  title Roadmap\n  dateFormat  YYYY-MM-DD\n  section Core\n  \
+               ReticulateTheSplinesThoroughly :a1, 2026-01-01, 1d\n  \
+               Build :a2, after a1, 6d\n  \
+               FinalIntegrationAndSignoffPhase :a3, after a2, 1d\n";
+    let ir = fm_parser::parse(src).ir;
+    let layout = fm_layout::layout_diagram(&ir);
+
+    // NON-VACUITY: layout must actually resolve the last task to OutsideLeft, or this test does not
+    // exercise the placement path and would pass on a chart whose names all fit.
+    let outside_left = layout
+        .extensions
+        .gantt_task_labels
+        .iter()
+        .any(|entry| matches!(entry.placement, fm_layout::GanttLabelPlacement::OutsideLeft));
+    assert!(
+        outside_left,
+        "CONTROL FAILED: no task resolved to OutsideLeft, so this fixture cannot detect the defect \
+         it was written for"
+    );
+
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 80, 40).output;
+    assert!(
+        out.contains("FinalIntegrationAndSignoffPhase"),
+        "the right-edge task name was clipped off the canvas:\n{out}"
+    );
+    // The other names must survive too — a placement fix that rescued one name by overwriting
+    // another would trade one piece of dropped content for another.
+    assert!(
+        out.contains("ReticulateTheSplinesThoroughly"),
+        "an earlier task name was displaced by the placement change:\n{out}"
+    );
+    assert!(
+        out.contains("Build"),
+        "the middle task name was displaced by the placement change:\n{out}"
+    );
+}
+
+/// A diagram with no gantt labels keeps the centred placement it always had.
+///
+/// Regression guard for the lookup: every non-gantt diagram must take exactly the path it took
+/// before, so this pins that a flowchart's node label is still centred and drawn exactly once.
+#[test]
+fn a_flowchart_label_is_unaffected_by_gantt_placement() {
+    let ir = fm_parser::parse("flowchart LR\n  A[Alpha] --> B[Beta]\n").ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    assert!(
+        layout.extensions.gantt_task_labels.is_empty(),
+        "CONTROL FAILED: a flowchart produced gantt task labels, so it cannot show the placement \
+         path is inert"
+    );
+
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 80, 30).output;
+    assert_eq!(
+        out.matches("Alpha").count(),
+        1,
+        "a flowchart label was duplicated or displaced:\n{out}"
+    );
+    assert_eq!(
+        out.matches("Beta").count(),
+        1,
+        "a flowchart label was duplicated or displaced:\n{out}"
+    );
+}

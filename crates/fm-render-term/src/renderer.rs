@@ -1499,6 +1499,23 @@ impl TermRenderer {
             }
         }
 
+        // Resolved gantt name placements, indexed by node. Built once rather than scanned per node,
+        // and only when the diagram actually has any -- every other diagram type leaves this `None`
+        // and takes exactly the path it took before.
+        let gantt_label_by_node: Option<std::collections::HashMap<usize, &fm_layout::LayoutGanttTaskLabel>> =
+            if layout.extensions.gantt_task_labels.is_empty() {
+                None
+            } else {
+                Some(
+                    layout
+                        .extensions
+                        .gantt_task_labels
+                        .iter()
+                        .map(|entry| (entry.node_index, entry))
+                        .collect(),
+                )
+            };
+
         // Overlay node labels.
         for node_box in &layout.nodes {
             let (x, y, w, h) = self.bounds_to_cells(&node_box.bounds, scale_x, scale_y);
@@ -1521,6 +1538,30 @@ impl TermRenderer {
                 continue;
             };
 
+            // GANTT TASK NAMES honour the placement layout resolved for them (bd-t1jj).
+            //
+            // The generic path below centres a label on its node and lets an oversized one overflow
+            // to the RIGHT. For a gantt bar that is wrong in one specific, measured way: a task whose
+            // name is wider than its bar AND whose bar sits near the right edge has nowhere to
+            // overflow, so the name is clipped at the canvas edge and LOST. Measured on a three-task
+            // chart at 80 columns, `FinalIntegrationAndSignoffPhase` did not appear at all, while the
+            // same chart at 120 columns showed it -- a name that survives only if the terminal is
+            // wide enough is not a name the reader can rely on.
+            //
+            // `extensions.gantt_task_labels` already solved this: layout resolves each task to
+            // Inside / OutsideRight / OutsideLeft and hands back the anchor x, choosing OutsideLeft
+            // precisely when there is no room to the right. fm-render-svg consumes it; the terminal
+            // did not.
+            //
+            // ANCHOR CONVENTION matches the SVG arm exactly, which is why the two backends cannot
+            // disagree about where a name sits: OutsideRight anchors the text's LEFT edge ("start"),
+            // OutsideLeft its RIGHT edge ("end"), Inside its CENTRE ("middle"). In cells the start
+            // column is therefore the anchor, the anchor minus the length, or the anchor minus half
+            // the length.
+            let gantt_anchor = gantt_label_by_node
+                .as_ref()
+                .and_then(|map| map.get(&node_box.node_index));
+
             let label_lines: Vec<&str> = label.lines().collect();
             let start_y = y + (h.saturating_sub(label_lines.len())) / 2;
 
@@ -1530,7 +1571,24 @@ impl TermRenderer {
                 // its `.len()` and then consume it sequentially. `chars().count()` gives the same width and
                 // `chars().enumerate()` the same `(j, ch)`. Byte-identical, no per-line allocation.
                 let label_len = line.chars().count();
-                let label_x = x + (w.saturating_sub(label_len)) / 2;
+                let label_x = match gantt_anchor {
+                    Some(entry) => {
+                        // Mirror `bounds_to_cells`' x arithmetic so the anchor lands in the same cell
+                        // space as every other overlay.
+                        let anchor = (entry.x * scale_x) as isize + self.config.padding as isize;
+                        let start = match entry.placement {
+                            fm_layout::GanttLabelPlacement::OutsideRight => anchor,
+                            fm_layout::GanttLabelPlacement::OutsideLeft => {
+                                anchor - isize::try_from(label_len).unwrap_or(0)
+                            }
+                            fm_layout::GanttLabelPlacement::Inside => {
+                                anchor - isize::try_from(label_len).unwrap_or(0) / 2
+                            }
+                        };
+                        usize::try_from(start.max(0)).unwrap_or(0)
+                    }
+                    None => x + (w.saturating_sub(label_len)) / 2,
+                };
                 let label_y = start_y + i;
 
                 if label_y < lines.len() {
