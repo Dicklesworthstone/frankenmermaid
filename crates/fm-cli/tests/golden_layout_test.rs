@@ -174,6 +174,30 @@ fn layout_golden_checksums_are_stable() {
         let parsed = parse(&input);
         let canonical = canonical_layout(&parsed.ir);
         let checksum = fnv_hex(&canonical);
+        // Section sub-checksums, computed ALWAYS and stored, not just printed on failure.
+        //
+        // A bare `layout_checksum` says "some geometry moved" and nothing more, and the signature it
+        // produces is genuinely ambiguous: identical node/edge counts and identical bounds with a
+        // moved checksum is what BOTH a node reshuffle inside a fixed extent AND a pure edge-routing
+        // change look like. bd-38wq read that signature as "NODE POSITIONS MOVED" and sent the
+        // investigation at barycenter/crossing-minimisation ordering; `canonical_layout` hashes edge
+        // polyline points too, so the inference never followed from the evidence.
+        //
+        // Printing the current components on failure was not enough either -- the STORED golden had
+        // none to compare against, so localising the drift still meant checking out the last-blessed
+        // commit and rebuilding. Storing them makes the next mismatch self-diagnosing.
+        let node_lines: String = canonical
+            .lines()
+            .filter(|line| line.starts_with("node:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let edge_lines: String = canonical
+            .lines()
+            .filter(|line| line.starts_with("edge:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let nodes_checksum = fnv_hex(&node_lines);
+        let edges_checksum = fnv_hex(&edge_lines);
 
         // Verify determinism: compute twice and compare.
         let canonical2 = canonical_layout(&parsed.ir);
@@ -187,6 +211,8 @@ fn layout_golden_checksums_are_stable() {
 
         let entry = json!({
             "layout_checksum": checksum,
+            "nodes_checksum": nodes_checksum,
+            "edges_checksum": edges_checksum,
             "layout_algorithm": "auto",
             "node_count": ir.nodes.len(),
             "edge_count": ir.edges.len(),
@@ -199,26 +225,31 @@ fn layout_golden_checksums_are_stable() {
         } else if let Some(expected) = checksums.get(case_id.as_str()) {
             let expected_checksum = expected["layout_checksum"].as_str().unwrap_or("");
             if checksum != expected_checksum {
-                // Localise the drift to nodes or edges. A bare checksum mismatch says only "some
-                // geometry moved", and recovering which half cost a worktree at the last-blessed
-                // commit plus two builds to answer (bd-38wq). The section sub-checksums make the
-                // next occurrence self-diagnosing: compare these two lines across revisions and the
-                // half that moved names itself.
-                let node_lines: String = canonical
-                    .lines()
-                    .filter(|line| line.starts_with("node:"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let edge_lines: String = canonical
-                    .lines()
-                    .filter(|line| line.starts_with("edge:"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                // Name the half that moved. Older goldens carry no component checksums, so an
+                // absent stored value is reported as unknown rather than silently treated as a
+                // match -- a missing field must never read as "this half is fine".
+                let stored_nodes = expected["nodes_checksum"].as_str();
+                let stored_edges = expected["edges_checksum"].as_str();
+                let verdict = match (stored_nodes, stored_edges) {
+                    (Some(n), Some(e)) => {
+                        match (n != nodes_checksum, e != edges_checksum) {
+                            (true, true) => "NODES AND EDGES BOTH MOVED",
+                            (true, false) => "NODE POSITIONS MOVED; edge geometry is unchanged",
+                            (false, true) => "EDGE GEOMETRY MOVED; node positions are unchanged",
+                            (false, false) => {
+                                "NEITHER component moved -- the drift is in bounds or stats"
+                            }
+                        }
+                    }
+                    _ => "UNKNOWN: this golden predates component checksums; re-bless to enable",
+                };
                 eprintln!(
-                    "LAYOUT CHECKSUM MISMATCH for {case_id}:\n  expected: {expected_checksum}\n  got:      {checksum}\n  nodes-only: {} ({} nodes)\n  edges-only: {} ({} edges)",
-                    fnv_hex(&node_lines),
+                    "LAYOUT CHECKSUM MISMATCH for {case_id}: {verdict}\n  expected: {expected_checksum}\n  got:      {checksum}\n  nodes:  stored {} -> now {} ({} nodes)\n  edges:  stored {} -> now {} ({} edges)",
+                    stored_nodes.unwrap_or("<none>"),
+                    nodes_checksum,
                     canonical.lines().filter(|l| l.starts_with("node:")).count(),
-                    fnv_hex(&edge_lines),
+                    stored_edges.unwrap_or("<none>"),
+                    edges_checksum,
                     canonical.lines().filter(|l| l.starts_with("edge:")).count(),
                 );
                 eprintln!("  Run with BLESS_LAYOUT=1 to update.");
