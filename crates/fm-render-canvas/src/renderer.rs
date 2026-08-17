@@ -247,6 +247,11 @@ impl Canvas2dRenderer {
             self.draw_pie_wedges(layout, ir, ctx, offset_x, offset_y, &mut labels_drawn);
         }
 
+        // Draw quadrant axis labels (bd-59o4).
+        if ir.diagram_type == DiagramType::QuadrantChart {
+            self.draw_quadrant_axis_labels(layout, ir, ctx, offset_x, offset_y, &mut labels_drawn);
+        }
+
         // Draw edges
         let edges_drawn = self.draw_edges(layout, ir, ctx, offset_x, offset_y, &mut labels_drawn);
 
@@ -754,6 +759,60 @@ impl Canvas2dRenderer {
     }
 
     /// Draw layout extension bands (sequence lifelines, gantt sections, etc.).
+    /// Draw a quadrant chart's four axis labels (bd-59o4).
+    ///
+    /// Measured: `x_axis_left` had ZERO references anywhere in this crate — against one in
+    /// fm-render-term and two in fm-render-svg — so the canvas never read the field at all. The
+    /// chart's TITLE and its data POINTS still appeared, because both come from the generic title
+    /// and node paths, which is why only the axes were missing and the chart looked almost right.
+    ///
+    /// That is a DIFFERENT cause from the terminal's, which drew these labels correctly but only on
+    /// a render path `TermRenderConfig::rich()` never takes. Keeping the two halves of bd-59o4
+    /// apart is what kept this one visible after the terminal was fixed.
+    ///
+    /// Placed at the layout bounds rather than at chart-relative margins: unlike fm-render-svg,
+    /// which computes `margin_left` from the label's own width, this renderer has no quadrant
+    /// geometry pass to borrow margins from, and an invented margin would drift from the axis it
+    /// labels.
+    fn draw_quadrant_axis_labels<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ir: &MermaidDiagramIr,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+        labels_drawn: &mut usize,
+    ) {
+        let Some(quad) = ir.quadrant_meta.as_ref() else {
+            return;
+        };
+
+        let left = f64::from(layout.bounds.x) + offset_x;
+        let right = f64::from(layout.bounds.x + layout.bounds.width) + offset_x;
+        let top = f64::from(layout.bounds.y) + offset_y;
+        let bottom = f64::from(layout.bounds.y + layout.bounds.height) + offset_y;
+        let pad = self.config.font_size;
+
+        ctx.set_fill_style(&self.config.label_color);
+        ctx.set_font(&secondary_label_font_css(&self.config));
+        ctx.set_text_baseline(TextBaseline::Middle);
+
+        let mut draw = |text: Option<&String>, x: f64, y: f64, align: TextAlign| {
+            let Some(text) = text.map(String::as_str).filter(|t| !t.is_empty()) else {
+                return;
+            };
+            ctx.set_text_align(align);
+            ctx.fill_text(text, x, y);
+            self.draw_calls += 1;
+            *labels_drawn += 1;
+        };
+
+        draw(quad.x_axis_left.as_ref(), left + pad, bottom + pad, TextAlign::Left);
+        draw(quad.x_axis_right.as_ref(), right - pad, bottom + pad, TextAlign::Right);
+        draw(quad.y_axis_top.as_ref(), left - pad, top + pad, TextAlign::Right);
+        draw(quad.y_axis_bottom.as_ref(), left - pad, bottom - pad, TextAlign::Right);
+    }
+
     fn draw_bands<C: Canvas2dContext>(
         &mut self,
         layout: &DiagramLayout,

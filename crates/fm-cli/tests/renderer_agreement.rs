@@ -67,14 +67,6 @@ const CASES: &[(&str, &str, &str)] = &[
 /// too, so a fix cannot leave a permanent hole behind.
 const KNOWN_GAPS: &[(&str, &str, &str)] = &[
     (
-        "quadrant_axis",
-        "canvas",
-        "bd-59o4: the canvas never reads `x_axis_left` at all — zero references in its sources, \
-         against one in the terminal and two in fm-render-svg. That is a DIFFERENT cause from the \
-         terminal's, which was a render-MODE bypass and is now fixed; keeping this entry separate \
-         is what stopped one fix from silently closing the other's record.",
-    ),
-    (
     "gantt_section",
     "terminal",
     "bd-039t: the band-label overlay caps a label at the band's own cell width, so a gantt section \

@@ -113,6 +113,61 @@ fn canvas_cardinality_does_not_displace_the_edge_label() {
     );
 }
 
+/// QUADRANT AXIS labels must reach the canvas (bd-59o4).
+///
+/// Measured: `x_axis_left` had ZERO references anywhere in this crate — against one in
+/// fm-render-term and two in fm-render-svg — so the canvas never read the field. The chart's title
+/// and data points still appeared, because both come from the generic title and node paths, which
+/// is why only the axes were missing and the chart looked almost right.
+#[test]
+fn quadrant_axis_labels_reach_the_canvas() {
+    let ir = fm_parser::parse(
+        "quadrantChart\n  title Reach\n  x-axis Low --> High\n  y-axis Bot --> Top\n  Alpha: [0.3, 0.6]\n",
+    )
+    .ir;
+    let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+    render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let texts = drawn_text(&format!("{:?}", context.operations()));
+    let has = |want: &str| texts.iter().any(|t| t.contains(want));
+
+    assert!(has("Low"), "the x-axis left label never reached the canvas: {texts:?}");
+    assert!(has("High"), "the x-axis right label never reached the canvas: {texts:?}");
+    assert!(has("Top"), "the y-axis top label never reached the canvas: {texts:?}");
+    // What already worked must keep working — these arrive by different paths entirely.
+    assert!(has("Reach"), "the chart title was displaced: {texts:?}");
+    assert!(has("Alpha"), "the data point label was displaced: {texts:?}");
+}
+
+/// CONTROL: a quadrant chart declaring NO axis labels gains none, and a NON-quadrant diagram is
+/// untouched.
+///
+/// The pass is gated on both the diagram type and each field's presence. Without this, an
+/// unconditional draw would put stray text on every diagram and go unnoticed above.
+#[test]
+fn quadrant_axis_pass_is_inert_without_labels_and_off_type() {
+    let bare = fm_parser::parse("quadrantChart\n  title Reach\n  Alpha: [0.3, 0.6]\n").ir;
+    let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+    render_to_canvas(&bare, &mut context, &CanvasRenderConfig::default());
+    let texts = drawn_text(&format!("{:?}", context.operations()));
+    assert!(
+        texts.iter().any(|t| t.contains("Reach")),
+        "the title is missing: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.contains("Low") || t.contains("High")),
+        "axis text appeared for a chart that declares none: {texts:?}"
+    );
+
+    let flow = fm_parser::parse("flowchart TD\n  a[Alpha] --> b[Beta]\n").ir;
+    let mut flow_ctx = MockCanvas2dContext::new(1200.0, 900.0);
+    render_to_canvas(&flow, &mut flow_ctx, &CanvasRenderConfig::default());
+    let flow_texts = drawn_text(&format!("{:?}", flow_ctx.operations()));
+    assert!(
+        flow_texts.iter().any(|t| t.contains("Alpha")) && flow_texts.len() >= 2,
+        "a flowchart regressed: {flow_texts:?}"
+    );
+}
+
 /// A gitGraph BRANCH NAME must reach the canvas (bd-rk14).
 ///
 /// Measured: the layout carries `[(Lane,"main"), (Lane,"dev")]` from bd-jgco and the canvas drew
