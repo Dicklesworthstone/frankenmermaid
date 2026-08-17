@@ -218,7 +218,7 @@ impl Canvas2dRenderer {
         let clusters_drawn = self.draw_clusters(layout, ir, ctx, offset_x, offset_y);
 
         // Draw layout bands (sequence lifelines, gantt sections, etc.)
-        self.draw_bands(layout, ctx, offset_x, offset_y);
+        self.draw_bands(layout, ir.diagram_type, ctx, offset_x, offset_y);
 
         // Draw the time/category axis (gantt dates, xychart categories).
         self.draw_axis_ticks(layout, ctx, offset_x, offset_y);
@@ -757,6 +757,7 @@ impl Canvas2dRenderer {
     fn draw_bands<C: Canvas2dContext>(
         &mut self,
         layout: &DiagramLayout,
+        diagram_type: fm_core::DiagramType,
         ctx: &mut C,
         offset_x: f64,
         offset_y: f64,
@@ -785,6 +786,46 @@ impl Canvas2dRenderer {
                     ctx.stroke();
                     ctx.set_line_dash(&[]);
                     self.draw_calls += 1;
+
+                    // A NAMED lane also draws its name (bd-rk14).
+                    //
+                    // This arm drew geometry and no text, while the Section arm below drew its
+                    // label — so a gitGraph branch band reached the canvas as a bare dashed line
+                    // and the branch name appeared nowhere. Measured: the layout carries
+                    // [(Lane,"main"), (Lane,"dev")] and the canvas drew only "commit_1"/"commit_2".
+                    //
+                    // NOT the same cause as the box-content drops in this bead, which is why it was
+                    // held back rather than lumped in with them: those needed new node arms, this is
+                    // a missing label inside a band arm that already existed. It is the canvas twin
+                    // of bd-u3fo.
+                    //
+                    // ⚠️ A NON-EMPTY LABEL IS NOT ENOUGH TO TELL THESE APART. I first gated on that
+                    // alone, assuming sequence lifelines were unlabelled — they are NOT: a lifeline
+                    // band carries its participant's name, so that version drew `Alice` a THIRD
+                    // time and `canvas_mirrors_sequence_participant_headers` failed on
+                    // `count("Alice") == 2`. The existing control caught the wrong assumption.
+                    //
+                    // `LayoutBandKind::Lane` is overloaded — sequence lifelines AND named lanes
+                    // (gitGraph branches, journey lanes) share it — so the discriminator has to come
+                    // from outside the band. A distinct kind in fm-layout would be the better fix;
+                    // that file is under another agent's exclusive lease, so this gates on the
+                    // diagram type instead, which is what actually decides the meaning: in a
+                    // sequence diagram a Lane IS a lifeline and its name is already drawn as a
+                    // head/foot header.
+                    if !band.label.is_empty() && diagram_type != fm_core::DiagramType::Sequence {
+                        ctx.set_fill_style(&self.config.label_color);
+                        ctx.set_font(section_label_font.get_or_insert_with(|| {
+                            format!(
+                                "bold {}px {}",
+                                self.config.font_size * 0.85,
+                                self.config.font_family
+                            )
+                        }));
+                        ctx.set_text_align(TextAlign::Left);
+                        ctx.set_text_baseline(TextBaseline::Top);
+                        ctx.fill_text(&band.label, x + 4.0, y + 2.0);
+                        self.draw_calls += 1;
+                    }
                 }
                 LayoutBandKind::Section => {
                     // Gantt section: light background band.

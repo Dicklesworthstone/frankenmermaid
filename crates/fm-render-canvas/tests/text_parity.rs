@@ -45,6 +45,53 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ("flowchart_subgraph", "flowchart TD\n  subgraph Backend\n    a[Alpha]\n  end\n  a --> b[Beta]\n", &["Backend", "Alpha", "Beta"]),
 ];
 
+/// A gitGraph BRANCH NAME must reach the canvas (bd-rk14).
+///
+/// Measured: the layout carries `[(Lane,"main"), (Lane,"dev")]` from bd-jgco and the canvas drew
+/// only `commit_1`/`commit_2`. Root cause was NOT the box-content gap the rest of this bead is
+/// about — the `Lane` arm of the canvas band loop drew a dashed lifeline and no text at all, while
+/// the `Section` arm beside it drew its label. The canvas twin of bd-u3fo.
+#[test]
+fn gitgraph_branch_names_reach_the_canvas() {
+    let ir = fm_parser::parse("gitGraph\n  commit\n  branch dev\n  commit\n").ir;
+    let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+    render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let texts = drawn_text(&format!("{:?}", context.operations()));
+
+    assert!(
+        texts.iter().any(|t| t.contains("main")),
+        "the `main` branch name never reached the canvas: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.contains("dev")),
+        "the `dev` branch name never reached the canvas: {texts:?}"
+    );
+}
+
+/// CONTROL: sequence lifelines must NOT gain a label from this.
+///
+/// `LayoutBandKind::Lane` is overloaded — sequence lifelines share it with named lanes — and a
+/// lifeline band carries its PARTICIPANT'S NAME, which is already drawn as a head/foot header. My
+/// first attempt gated on "label is non-empty" alone and drew `Alice` a third time; the crate's own
+/// `canvas_mirrors_sequence_participant_headers` caught it. This pins the same property from the
+/// integration side so the discriminator cannot be quietly dropped.
+#[test]
+fn sequence_lifelines_gain_no_band_label_on_the_canvas() {
+    let ir = fm_parser::parse(
+        "%%{init: {\"sequence\": {\"mirrorActors\": true}}}%%\nsequenceDiagram\n  participant Alice\n  participant Bob\n  Alice->>Bob: Hi\n",
+    )
+    .ir;
+    let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+    render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let texts = drawn_text(&format!("{:?}", context.operations()));
+
+    let alice = texts.iter().filter(|t| t.as_str() == "Alice").count();
+    assert_eq!(
+        alice, 2,
+        "Alice must be drawn exactly twice (head and foot); a band label would make it three: {texts:?}"
+    );
+}
+
 /// Canvas twins of three terminal fixes: stereotype, requirement rows, C4 details (bd-rk14).
 ///
 /// All three were measured drawing in the SVG and absent from the canvas, and all three were
