@@ -216,6 +216,27 @@ mod tests {
         LayoutRect, LayoutStats,
     };
 
+    /// An IR whose edge sits at index 7, matching `test_layout()`'s `edge_index`.
+    ///
+    /// The shared fixture uses 7 deliberately — it proves the index is carried through rather than
+    /// assumed to be 0. My first version of these tests put the edge at index 0, so the arrow lookup
+    /// missed and every edge silently fell back to `ArrowType::Arrow` at the default width. The
+    /// tests failed loudly, which is the only reason the mismatch did not become the "expected"
+    /// values baked into an assertion.
+    fn ir_with_edge_at_fixture_index(arrow: fm_core::ArrowType) -> MermaidDiagramIr {
+        let mut ir = MermaidDiagramIr::empty(fm_core::DiagramType::Flowchart);
+        for _ in 0..7 {
+            ir.edges.push(fm_core::IrEdge::default());
+        }
+        ir.edges.push(fm_core::IrEdge {
+            from: fm_core::IrEndpoint::Node(fm_core::IrNodeId(0)),
+            to: fm_core::IrEndpoint::Node(fm_core::IrNodeId(1)),
+            arrow,
+            ..fm_core::IrEdge::default()
+        });
+        ir
+    }
+
     fn test_layout() -> DiagramLayout {
         DiagramLayout {
             nodes: vec![
@@ -329,6 +350,92 @@ mod tests {
             plan.edge_segments
                 .iter()
                 .all(|segment| segment.edge_index == 7)
+        );
+    }
+
+    /// Edge width comes from the SAME rule the raster pass strokes with (bd-2u0.2).
+    ///
+    /// bd-2u0.2 asks for "instanced line strips with VARIABLE WIDTH". A plan that assumed one width
+    /// could not draw a `==>` thick edge or a dotted one correctly. The widths are not hard-coded
+    /// here — they are compared against `legacy_edge_stroke`, which is what `draw_edges` calls, so
+    /// this fails if the two ever diverge instead of quietly drifting.
+    #[test]
+    fn edge_segment_width_matches_the_raster_stroke_rule() {
+        const DEFAULT_WIDTH: f32 = 1.25;
+        for arrow in [
+            fm_core::ArrowType::Arrow,
+            fm_core::ArrowType::ThickArrow,
+            fm_core::ArrowType::DottedArrow,
+        ] {
+            let ir = ir_with_edge_at_fixture_index(arrow);
+            let plan = GpuRenderPlan::from_layout(&ir, &test_layout(), DEFAULT_WIDTH);
+            let (expected, _dash) =
+                crate::renderer::legacy_edge_stroke(arrow, f64::from(DEFAULT_WIDTH));
+
+            assert!(
+                !plan.edge_segments.is_empty(),
+                "{arrow:?}: no segments, so the width assertion would be vacuous"
+            );
+            for segment in &plan.edge_segments {
+                assert!(
+                    (f64::from(segment.width) - expected).abs() < 1e-6,
+                    "{arrow:?}: plan width {} does not match the raster rule {expected}",
+                    segment.width
+                );
+            }
+        }
+    }
+
+    /// A directed edge gets ONE head; a bidirectional edge gets TWO; an undirected line gets NONE.
+    ///
+    /// The last is the point of the `arrow_has_end_head` rule: giving `---` a head would assert a
+    /// direction the author never wrote, which is exactly the ER-notation defect bd-m0a9 fixed in
+    /// the SVG renderer.
+    #[test]
+    fn arrowhead_count_follows_the_arrow_type() {
+        for (arrow, expected) in [
+            (fm_core::ArrowType::Arrow, 1_usize),
+            (fm_core::ArrowType::DoubleArrow, 2),
+            (fm_core::ArrowType::Line, 0),
+            (fm_core::ArrowType::DottedLine, 0),
+        ] {
+            let ir = ir_with_edge_at_fixture_index(arrow);
+            let plan = GpuRenderPlan::from_layout(&ir, &test_layout(), 1.25);
+            assert_eq!(
+                plan.arrowheads.len(),
+                expected,
+                "{arrow:?} should produce {expected} arrowhead(s), got {:?}",
+                plan.arrowheads
+            );
+        }
+    }
+
+    /// The head sits on the edge's LAST point, angled along its final segment.
+    ///
+    /// Position and angle are compared against the layout's own points rather than to constants, so
+    /// the assertion still means something if the fixture's geometry changes.
+    #[test]
+    fn arrowhead_geometry_matches_the_final_segment() {
+        let ir = ir_with_edge_at_fixture_index(fm_core::ArrowType::Arrow);
+        let layout = test_layout();
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.25);
+        let head = plan.arrowheads.first().expect("a directed edge must have a head");
+
+        let points = &layout.edges[0].points;
+        let last = points[points.len() - 1];
+        let prev = points[points.len() - 2];
+
+        assert!(
+            (head.position[0] - last.x).abs() < 1e-6 && (head.position[1] - last.y).abs() < 1e-6,
+            "the head is not on the edge's last point: {head:?} vs ({}, {})",
+            last.x,
+            last.y
+        );
+        let expected_angle = (last.y - prev.y).atan2(last.x - prev.x);
+        assert!(
+            (head.angle - expected_angle).abs() < 1e-6,
+            "the head angle {} does not follow the final segment {expected_angle}",
+            head.angle
         );
     }
 }
