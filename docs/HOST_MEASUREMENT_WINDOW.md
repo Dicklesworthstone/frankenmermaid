@@ -36,6 +36,17 @@ period here is comparable to a single arm's duration. A single spot-check of loa
 even of the per-CPU count would have called this window acceptable at sample 7 and unacceptable at
 sample 1.
 
+**There is now a script: `scripts/window_check.sh [samples]`.** It exits 0 only when the samples
+AGREE and every CPU is under the ceiling, and prints the loadavg, per-sample idle range and CPU MHz
+to record on a banked row. Run it instead of eyeballing `uptime`.
+
+⚠️ **Its first version was wrong in an instructive way.** It took the count sequence first and the
+idle figure afterwards, then printed them together — so it reported "64 CPUs over the ceiling"
+beside "82.5% idle", which cannot describe the same second. Both numbers were real; they were from
+different instants. It now derives the count AND that sample's aggregate idle from the SAME `mpstat`
+call, and reports idle as a RANGE rather than a mean, because a mean of 40% across samples of 82%
+and 25% describes neither — which is exactly how a volatile window reads as acceptable.
+
 **So the pre-flight check is a SEQUENCE, not a reading.** Take several one-second samples and require
 them to agree; a window whose samples disagree is unmeasurable regardless of how good the best one
 looks. That is also why the standing rule not to build in the window you intend to measure in
