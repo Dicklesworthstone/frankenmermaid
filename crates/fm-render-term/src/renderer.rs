@@ -1408,8 +1408,23 @@ impl TermRenderer {
             // TRIED and reverted: writing along the row displaces content and breaks both
             // `band_label_overlay_does_not_invent_or_displace` and
             // `a_sequence_diagram_is_unaffected_by_the_axis_overlay`, and it did not even fix the
-            // gantt case. A real fix needs the label placed where there IS room, not merely allowed
-            // to overrun. Pinned by `gantt_section_name_is_truncated_to_the_band_width`.
+            // gantt case. Pinned by `gantt_section_name_is_truncated_to_the_band_width`.
+            //
+            // ⚠️ WHAT IS ACTUALLY IN THE WAY — corrected after reading the grid the pinned
+            // reproducer dumps, because the earlier note here named the wrong obstacle and would
+            // send the next attempt at the wrong thing. It said the cells past the band hold "the
+            // band's own horizontal rule". They do not. Row 2 of that dump is:
+            //
+            //     ⠀⠀Engi2026-01-01⠀⠀2026-01-02⠀⠀2026-01-03⠀⠀…
+            //
+            // `Engi` sits at columns 2-5 and the first AXIS TICK begins at column 6: the section
+            // label and the gantt date axis compete for THE SAME ROW. That is why lifting the cap
+            // broke the controls — it overwrote real content, not decoration — and why widening the
+            // budget alone cannot work, since it only moves the collision.
+            //
+            // A fix should DECONFLICT THE ROWS rather than widen the budget. In the same dump rows
+            // 3-5 are blank across the full width, between the tick row and the chart box top, and
+            // columns 0-5 are blank on every body row, so there is somewhere to go.
             let budget = w - 2;
             let label: String = self.truncate_label(&band.label).chars().take(budget).collect();
             for (offset, ch) in label.chars().enumerate() {
