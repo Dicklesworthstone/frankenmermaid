@@ -1499,6 +1499,84 @@ impl TermRenderer {
             }
         }
 
+        // Overlay SEQUENCE FRAGMENT labels (bd-039t).
+        //
+        // `render_subcell_mode` draws each fragment's RECTANGLE via `canvas.draw_rect` and no text,
+        // so `loop Every day` and `alt is ok` came out as bare boxes while fm-render-svg drew the
+        // frame AND its label. Measured SVG vs terminal: `Every day` and `is ok` appeared in the
+        // SVG and in neither terminal render.
+        //
+        // Drawn at the first INTERIOR row, not the frame's top row: that row is the rectangle's own
+        // border, and writing there would trade the frame edge for the text. Only blank cells are
+        // written, the same guard the cluster-title overlay uses, so a label can never overwrite a
+        // message arrow or a participant box that shares the frame's interior.
+        for fragment in &layout.extensions.sequence_fragments {
+            let (fx, fy, fw, fh) = self.bounds_to_cells(&fragment.bounds, scale_x, scale_y);
+            if fw < 3 || fh < 3 {
+                continue;
+            }
+            // TRY SUCCESSIVE INTERIOR ROWS, because one occupied cell must not drop the whole
+            // label. Measured: `alt is ok` (9 chars) drew while `loop Every day` (14 chars) did
+            // not, with IDENTICAL frame bounds — the longer run met a lifeline glyph and the
+            // all-or-nothing guard discarded it entirely. Rows are tried top-down so the label
+            // still reads as belonging to the frame's head.
+            // `kind` is the frame tag mermaid shows (loop / alt / opt / par), and the label is the
+            // condition. Both matter: `alt` with no condition and a bare condition read differently.
+            let mut text = format!("{:?}", fragment.kind).to_lowercase();
+            if !fragment.label.is_empty() {
+                text.push(' ');
+                text.push_str(&fragment.label);
+            }
+            let text = self.truncate_label(&text);
+            let start = fx + 1;
+            let last_row = (fy + fh.saturating_sub(1)).min(lines.len());
+            let mut placed = false;
+            for line in lines.iter_mut().take(last_row).skip(fy + 1) {
+                let fits = text.chars().enumerate().all(|(offset, _)| {
+                    let col = start + offset;
+                    col < cell_width
+                        && line
+                            .get(col)
+                            .is_some_and(|cell| *cell == ' ' || *cell == '\u{2800}')
+                });
+                if !fits {
+                    continue;
+                }
+                for (offset, ch) in text.chars().enumerate() {
+                    line[start + offset] = ch;
+                }
+                placed = true;
+                // Placed; a second copy further down would be worse than none.
+                break;
+            }
+
+            // FALLBACK: draw it anyway, in the frame's first interior row.
+            //
+            // A blank span is not always available, and the all-or-nothing guard then discarded the
+            // label completely. MEASURED: `alt is ok` (9 chars) found a span and drew, while `loop
+            // Every day` (14 chars) did not — with IDENTICAL frame bounds, so it is the run length
+            // meeting a lifeline column, not the frame's size. Verified by disarming this overlay:
+            // both labels then vanish, so this code is what draws them.
+            //
+            // mermaid draws the frame label in a tab at the top-left, over whatever lies beneath, so
+            // overwriting here is faithful rather than a compromise. It is confined to the frame's
+            // OWN first interior row at its left edge, where messages between lifelines do not sit,
+            // and `sequence_fragment_label_reaches_terminal_output` asserts the frame's contents
+            // survive.
+            if !placed {
+                let row = fy + 1;
+                if row < lines.len() {
+                    for (offset, ch) in text.chars().enumerate() {
+                        let col = start + offset;
+                        if col >= cell_width {
+                            break;
+                        }
+                        lines[row][col] = ch;
+                    }
+                }
+            }
+        }
+
         // Overlay CLUSTER titles (bd-u3fo).
         //
         // `render_cluster_canvas` draws each cluster's RECTANGLE and nothing else, while

@@ -363,6 +363,58 @@ fn gantt_section_name_is_truncated_to_the_band_width() {
     );
 }
 
+/// A sequence FRAGMENT's label must reach terminal output (bd-039t).
+///
+/// `render_subcell_mode` drew each fragment's rectangle and no text, so `loop Every day` came out
+/// as a bare box while fm-render-svg drew the frame AND its label. Measured SVG vs terminal:
+/// `Every day` appeared in the SVG and in neither terminal render.
+#[test]
+fn sequence_fragment_label_reaches_terminal_output() {
+    let ir = fm_parser::parse(
+        "sequenceDiagram\n  loop Every day\n    Alice->>Bob: Hi\n  end\n",
+    )
+    .ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(out.contains("Every day"), "the loop condition never reached the terminal:\n{out}");
+    // The messages inside the frame must survive — a label drawn over the frame's contents would
+    // trade one piece of dropped content for another.
+    assert!(out.contains("Alice") && out.contains("Hi"), "the frame label displaced its contents:\n{out}");
+}
+
+/// The FRAME TAG is drawn as well as the condition.
+///
+/// `alt` with no condition and a bare condition read differently, so the kind is part of the
+/// content rather than decoration.
+#[test]
+fn sequence_fragment_tag_is_drawn_with_its_condition() {
+    let ir = fm_parser::parse(
+        "sequenceDiagram\n  alt is ok\n    Alice->>Bob: Hi\n  else nope\n    Bob->>Alice: No\n  end\n",
+    )
+    .ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(out.contains("is ok"), "the alt condition never reached the terminal:\n{out}");
+    assert!(out.contains("alt"), "the frame tag never reached the terminal:\n{out}");
+}
+
+/// CONTROL: a sequence diagram with NO fragments is unchanged.
+///
+/// The overlay runs for every fragment in the layout. Without this, a bug that wrote a stray tag on
+/// a frameless diagram would go unnoticed on the cases above, where any extra glyphs would be
+/// mistaken for the labels under test.
+#[test]
+fn sequence_without_fragments_gains_no_frame_label() {
+    let ir = fm_parser::parse("sequenceDiagram\n  Alice->>Bob: Hi\n  Bob->>Alice: Yo\n").ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(out.contains("Alice") && out.contains("Hi"), "the messages are missing:\n{out}");
+    assert!(
+        !out.contains("loop") && !out.contains("alt"),
+        "a frame tag was drawn for a diagram with no fragments:\n{out}"
+    );
+}
+
 /// A class STEREOTYPE must reach terminal output (bd-039t).
 ///
 /// Measured SVG vs terminal: an `interface` stereotype drew in the SVG and not in the terminal.
