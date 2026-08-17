@@ -804,6 +804,27 @@ impl RenderExecutor {
         results
     }
 
+    /// Parse every revision, ALWAYS doing the work, never consulting the snapshot cache.
+    ///
+    /// `parse_all_versioned` exists so the RENDER arm measures rendering instead of re-parsing its
+    /// inputs on every iteration. Calling it from the PARSE arm inverts that: the first iteration
+    /// parses and caches, and every iteration after it hits `Arc::ptr_eq` and returns an
+    /// `Arc::clone`, so a calibrated batch performs ONE parse and N-1 pointer comparisons under a
+    /// mutex. Dividing the integrated time by the batch then reports the cost of a lock and a
+    /// refcount bump as if it were the cost of parsing.
+    ///
+    /// That is exactly what happened: `sequence_20` reported `parse_ns.p50 = 8` -- eight nanoseconds
+    /// for a 1,257-byte document, roughly 25 cycles -- from a batch of 348,849, which taken at face
+    /// value implies a 873,911x ratio against the incumbent (bd-8557). The snapshot is on by default
+    /// (`FM_H2H_DISABLE_PARSE_SNAPSHOT` unset), so every default-configured parse row was affected.
+    fn parse_all_uncached(&self, texts: &Arc<[String]>) -> Arc<[ParseResult]> {
+        texts
+            .iter()
+            .map(|text| parse(std::hint::black_box(text.as_str())))
+            .collect::<Vec<_>>()
+            .into()
+    }
+
     /// Render every revision in deterministic input order.
     ///
     /// Each worker owns one contiguous input interval, and shards are concatenated in worker order,
@@ -1351,7 +1372,9 @@ fn run_parse_batch(
 ) -> Arc<[ParseResult]> {
     let mut last = None;
     for _ in 0..batch {
-        let parsed = executor.parse_all_versioned(&item.texts, &item.revision_key);
+        // Uncached deliberately: this is the timed workload of the PARSE arm, so every iteration
+        // must actually parse. See `parse_all_uncached`.
+        let parsed = executor.parse_all_uncached(&item.texts);
         std::hint::black_box(&parsed);
         last = Some(parsed);
     }
@@ -1362,7 +1385,9 @@ fn calibrate_parse_batch(executor: &RenderExecutor, item: &CorpusItem) -> usize 
     let mut fastest_warmup = u64::MAX;
     for _ in 0..item.warmup.max(1) {
         let t0 = Instant::now();
-        std::hint::black_box(executor.parse_all_versioned(&item.texts, &item.revision_key));
+        // Calibration must size the batch against the SAME work the timed run does, or the batch is
+        // chosen from a memo hit and inflated to hundreds of thousands of iterations.
+        std::hint::black_box(executor.parse_all_uncached(&item.texts));
         fastest_warmup =
             fastest_warmup.min(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX));
     }
@@ -1415,7 +1440,7 @@ fn probe_parse_threads(executor: &RenderExecutor, item: &CorpusItem, batch: usiz
     let mut observed = HashSet::new();
     for _ in 0..batch {
         observed.insert(std::thread::current().id());
-        std::hint::black_box(executor.parse_all_versioned(&item.texts, &item.revision_key));
+        std::hint::black_box(executor.parse_all_uncached(&item.texts));
     }
     observed.len()
 }
@@ -2402,6 +2427,65 @@ mod tests {
             vec![0, 1, 2, 3, 8, 10, 11]
         );
         assert!(parse_cpu_list("4-2").is_err());
+    }
+
+    /// The PARSE arm must never be served from the render arm's snapshot cache (bd-8557).
+    ///
+    /// Asserted by POINTER IDENTITY rather than by timing. A wall-clock assertion here would be a
+    /// flake on a loaded host and, worse, could pass vacuously: the whole failure mode is that the
+    /// work takes no time, so "it was fast" is the symptom, not the diagnosis. Two batch runs that
+    /// return distinct allocations prove each run did the parse; two that return the same `Arc`
+    /// prove one of them was a refcount bump.
+    ///
+    /// The second half is the control WITHOUT WHICH THIS PROVES NOTHING: `parse_all_versioned` must
+    /// still return a pointer-identical `Arc` for the same revision key. That is what makes the
+    /// first half informative -- it shows the cache is present and working, so distinct pointers in
+    /// the parse arm mean it deliberately bypassed a live cache rather than that no cache exists.
+    #[test]
+    fn the_parse_arm_parses_instead_of_serving_a_memoized_snapshot() {
+        let item = CorpusItem {
+            id: "parse-arm-memo-probe".to_owned(),
+            texts: vec![
+                "flowchart LR\nA[First]-->B[Second]".to_owned(),
+                "sequenceDiagram\nAlice->>Bob: Hello".to_owned(),
+            ]
+            .into(),
+            revision_key: new_batch_revision_key(),
+            reps: 9,
+            warmup: 1,
+        };
+        let executor = RenderExecutor::new(1).expect("scalar executor");
+        assert!(
+            executor.persistent_parse_snapshot,
+            "CONTROL FAILED: the snapshot cache is off by default here, so this test cannot \
+             distinguish a bypass from an absent cache"
+        );
+
+        // THE CLAIM: every batch run does the parse, so no two runs share an allocation.
+        let first = run_parse_batch(&executor, &item, 2);
+        let second = run_parse_batch(&executor, &item, 2);
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "the parse arm returned a pointer-identical batch: it was served from the snapshot \
+             cache, so the timed loop measured an Arc clone and not a parse"
+        );
+
+        // ...and it must still be parsing the right thing, not skipping work to win the assertion.
+        assert_eq!(
+            parse_results_reference(&first).expect("first reference"),
+            parse_results_reference(&second).expect("second reference")
+        );
+        assert_eq!(first.len(), item.texts.len());
+
+        // CONTROL: the cache is real and still serves the RENDER arm, which is the only reason the
+        // assertion above is evidence of a deliberate bypass.
+        let cached_once = executor.parse_all_versioned(&item.texts, &item.revision_key);
+        let cached_twice = executor.parse_all_versioned(&item.texts, &item.revision_key);
+        assert!(
+            Arc::ptr_eq(&cached_once, &cached_twice),
+            "CONTROL FAILED: parse_all_versioned no longer memoizes, so the render arm lost its \
+             snapshot and the assertion above proves nothing"
+        );
     }
 
     #[test]
