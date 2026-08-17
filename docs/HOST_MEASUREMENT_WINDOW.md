@@ -333,6 +333,60 @@ constrains the gate from both sides: it must refuse the two pathological bracket
 ⚠️ The `--no-pin` advice is still the right default action when a bracket DOES drift — it removes the
 bet entirely, and it costs one flag and no build. It is just not a diagnosis.
 
+## The cross-core clock spread is WORST in the quiet windows we wait for — and it costs less than it looks
+
+Every A/B/B/A row this campaign has produced ends with the harness's caveat: *"a cross-core spread
+near 3x is why this is a bound and not an estimate."* Two things about that are worth recording,
+because they point in opposite directions.
+
+### 1. Waiting for a quiet window MAXIMISES the spread
+
+A peer's calibration (`ScarletMeadow`, 2026-08-16) measured every core at 3914-3917 MHz under load
+~42 — a spread of **1.001x** — and explained the mechanism: idle cores drop toward 1429 MHz while
+busy ones boost, so the spread is a function of how UNEVEN the load is, not a fixed property of the
+box. Pooling that with every spread this pane has recorded:
+
+| loadavg (1-min) | cross-core spread | source |
+|---:|---:|---|
+| 7.4 | 3.003x | banked run 3 |
+| 9.5 | 3.003x | unpinned bracket |
+| 11.2 | 2.922x | pinned bracket |
+| 13.7 | 2.881x | direct `/proc/cpuinfo` sample, 36/64 cores above 2500 MHz |
+| 23.4 | 2.861x | first pinned bracket |
+| ~42 | **1.001x** | peer calibration |
+
+So the campaign's core strategy — hold out for the quietest window before certifying — **puts every
+row in the regime where clocks are least uniform.** That is the opposite of the intuition the
+strategy runs on.
+
+⚠️ **Do not over-read the trend.** Five of the six points are mine and all sit in load 7-23, where
+the spread is essentially FLAT at 2.86-3.00x with only a slight decline. The collapse to 1.001x rests
+on a single borrowed observation, and **the range between load 23 and 42 is unmeasured.** The
+mechanism is coherent and both endpoints are real; the shape in between is not established, and a
+"certify under heavy load instead" recommendation would be running ahead of the evidence.
+
+### 2. The realised variation is ~30x smaller than the spread permits
+
+The more useful observation is that the spread is a bound on *potential* variation, not a measurement
+of realised variation — and the realised numbers are far tighter. In exactly those ~3x-spread quiet
+windows:
+
+| bracket | spread | fm drift between identical repeats |
+|---|---:|---:|
+| banked run 3 | 2.86-3.01x | **1.0415x** |
+| unpinned | 3.00x | **1.0094x** |
+| banked runs 1, 2 | ~3x | 1.0204x, 1.0481x |
+
+A 3x cross-core spread would permit enormous swing if an arm actually migrated between a 1429 MHz
+core and a 4300 MHz one mid-measurement. **It does not happen**: the same binary on the same input
+reproduces to within 1-4%. The scheduler evidently keeps a short arm on comparable cores, so the
+spread over-states the exposure by roughly an order of magnitude.
+
+**This is an argument for keeping the caveat, not dropping it.** It stays honest about a mechanism
+that COULD bite, and the cheap empirical check on whether it DID bite already exists and is now
+gated: the fm drift itself (`check_drift_control`, `ee930f50`). Spread says what the host could do to
+a row; drift says what it did. Quote both, and let the drift carry the weight.
+
 ## Ready for the next window
 
 A fresh `headtohead` binary exists and is provenance-checked, so a genuinely quiet window needs no
