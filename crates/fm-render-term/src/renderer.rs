@@ -1764,6 +1764,83 @@ impl TermRenderer {
                     }
                 }
             }
+
+            // CARDINALITIES reach the canvas too (bd-o2wf).
+            //
+            // `"1" --> "many"` lives in `IrEdgeExtras`, not in `edge.label`, and this overlay drew
+            // the label and nothing else — so a class diagram rendered BYTE-IDENTICAL in the
+            // terminal with and without its cardinalities while fm-render-svg drew both. Sits
+            // outside the label block on purpose: an edge may carry cardinality and no label.
+            //
+            // Each number goes by ITS OWN endpoint, since which end carries `1` and which carries
+            // `many` is the entire content. Written only into BLANK cells, the same guard the
+            // cluster-title overlay uses: a number that overwrote a node border or an existing
+            // label would trade one piece of dropped content for another.
+            if let Some(edge) = ir.edges.get(edge_path.edge_index) {
+                // Placed a short way ALONG the edge rather than exactly at the endpoint. The
+                // endpoint sits ON the node border, whose box glyph is never blank, so the
+                // blank-cell guard rejected every write and the first version of this fix drew
+                // NOTHING — caught by `class_cardinalities_reach_terminal_output` rather than
+                // shipped. `t` is small so the number still reads as belonging to its own end.
+                let mut place = |text: Option<&str>,
+                                 point: Option<&fm_layout::LayoutPoint>,
+                                 toward: Option<&fm_layout::LayoutPoint>| {
+                    let (Some(text), Some(point)) = (text.filter(|t| !t.is_empty()), point) else {
+                        return;
+                    };
+                    const T: f32 = 0.25;
+                    let anchor = toward.map_or(
+                        fm_layout::LayoutPoint {
+                            x: point.x,
+                            y: point.y,
+                        },
+                        |other| fm_layout::LayoutPoint {
+                            x: (other.x - point.x).mul_add(T, point.x),
+                            y: (other.y - point.y).mul_add(T, point.y),
+                        },
+                    );
+                    let (bx, by) = self.point_to_cells(&anchor, scale_x, scale_y);
+                    let text = self.truncate_label(text);
+                    let width = text.chars().count();
+
+                    // SEARCH BESIDE THE LINE. The anchor cell lies ON the edge itself, whose glyph
+                    // is never blank, so writing there is always rejected — measured: the first two
+                    // versions of this fix drew nothing at all, and only dumping the canvas showed
+                    // the run sitting on a column of `⢸`. The cells flanking the line are free, so
+                    // step perpendicular (then vertically) and take the first run that fits.
+                    const CANDIDATES: [(i32, i32); 6] =
+                        [(1, 0), (-1, 0), (2, 0), (-2, 0), (0, 1), (0, -1)];
+                    for (dx, dy) in CANDIDATES {
+                        let Some(cx) = bx.checked_add_signed(dx as isize) else {
+                            continue;
+                        };
+                        let Some(cy) = by.checked_add_signed(dy as isize) else {
+                            continue;
+                        };
+                        if cy >= lines.len() || cx + width > cell_width {
+                            continue;
+                        }
+                        let free = (0..width).all(|offset| {
+                            lines[cy]
+                                .get(cx + offset)
+                                .is_some_and(|cell| *cell == ' ' || *cell == '\u{2800}')
+                        });
+                        if !free {
+                            continue;
+                        }
+                        for (offset, ch) in text.chars().enumerate() {
+                            lines[cy][cx + offset] = ch;
+                        }
+                        // Placed; a second copy at another offset would be worse than none.
+                        break;
+                    }
+                };
+                // `get(1)` / second-to-last give the direction to step away from each endpoint.
+                let after_first = edge_path.points.get(1);
+                let before_last = edge_path.points.len().checked_sub(2).and_then(|i| edge_path.points.get(i));
+                place(edge.source_cardinality(), edge_path.points.first(), after_first);
+                place(edge.target_cardinality(), edge_path.points.last(), before_last);
+            }
         }
 
         if let Some(title) = generic_terminal_diagram_title(ir)

@@ -333,6 +333,53 @@ fn a_gantt_section_shows_its_name_in_terminal() {
     assert_eq!(out.matches("Zulu").count(), 1, "the section name was drawn more than once");
 }
 
+/// Class CARDINALITIES must reach terminal output (bd-o2wf).
+///
+/// They live in `IrEdgeExtras`, not in `edge.label`, and the terminal edge overlay drew the label
+/// and nothing else — so this diagram rendered byte-identical in the terminal with and without
+/// them, while fm-render-svg drew both.
+#[test]
+fn class_cardinalities_reach_terminal_output() {
+    let ir = fm_parser::parse("classDiagram\n  Alpha \"1\" --> \"many\" Beta\n").ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(out.contains("Alpha") && out.contains("Beta"), "the classes are missing:\n{out}");
+    assert!(out.contains('1'), "the source cardinality never reached the terminal:\n{out}");
+    assert!(out.contains("many"), "the target cardinality never reached the terminal:\n{out}");
+}
+
+/// CONTROL: an edge WITHOUT cardinalities is unaffected.
+///
+/// The overlay runs for every edge, outside the label block. Without this, a bug that wrote an
+/// empty or stray string at each endpoint would go unnoticed on the case above, where any extra
+/// glyphs would be mistaken for the numbers under test.
+#[test]
+fn class_edge_without_cardinality_is_unchanged() {
+    let plain = fm_parser::parse("classDiagram\n  Alpha --> Beta\n").ir;
+    let out = render_term_with_config(&plain, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(out.contains("Alpha") && out.contains("Beta"), "the classes are missing:\n{out}");
+    // `1` and `many` are the strings the fix introduces; neither may appear from nowhere.
+    assert!(
+        !out.contains("many"),
+        "a cardinality was drawn for an edge that declares none:\n{out}"
+    );
+}
+
+/// CONTROL: the cardinality must not displace an edge's own LABEL.
+///
+/// The numbers are written at the endpoints and the label at the midpoint, and the overlay only
+/// writes into blank cells — but the two are drawn by adjacent code paths, so this pins that
+/// adding one did not cost the other.
+#[test]
+fn class_cardinality_does_not_displace_the_edge_label() {
+    let ir = fm_parser::parse("classDiagram\n  Alpha \"1\" --> \"many\" Beta : uses\n").ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(out.contains("uses"), "the edge label was displaced by a cardinality:\n{out}");
+    assert!(out.contains("many"), "the cardinality is missing:\n{out}");
+}
+
 /// An ER entity's ATTRIBUTES must reach terminal output (bd-ekx2).
 ///
 /// Measured before the fix: `CUSTOMER { string name PK / int age }` parsed to an IR carrying 2
