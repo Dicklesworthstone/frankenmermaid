@@ -1499,6 +1499,62 @@ impl TermRenderer {
             }
         }
 
+        // Overlay QUADRANT AXIS labels (bd-59o4).
+        //
+        // ROOT CAUSE, measured rather than guessed: `render_quadrant_cell` DOES draw these — but it
+        // is called only from `render_cell_mode`, and `TermRenderConfig::rich()` selects
+        // `MermaidRenderMode::Braille`, which routes to `render_subcell_mode`. So the axis labels
+        // live exclusively on a path this mode never takes. The quadrant TITLE and POINTS still
+        // appear because they come from the generic title overlay and the generic node loop, which
+        // is why only the axis labels went missing and the diagram looked almost right.
+        //
+        // The same shape explains bd-039t's gantt_section: `render_gantt_cell` is likewise
+        // cell-mode-only. Recorded here because the next person to find a missing chart label in
+        // the terminal should suspect the MODE before the drawing code.
+        //
+        // Drawn along the canvas edges rather than at chart-relative offsets: this overlay works in
+        // cell space and has no access to the chart margins `render_quadrant_cell` computes, and an
+        // invented margin would drift from the axis it labels.
+        if let Some(quad) = ir.quadrant_meta.as_ref() {
+            let bottom = lines.len().saturating_sub(1);
+            let mut place = |text: Option<&String>, row: usize, right_aligned: bool| {
+                let Some(text) = text.map(String::as_str).filter(|t| !t.is_empty()) else {
+                    return;
+                };
+                if row >= lines.len() {
+                    return;
+                }
+                let text = self.truncate_label(text);
+                let width = text.chars().count();
+                let start = if right_aligned {
+                    cell_width.saturating_sub(width + 1)
+                } else {
+                    1
+                };
+                // Blank cells preferred; written anyway if none, because an all-or-nothing guard
+                // drops the label entirely — the failure that cost three builds on bd-039t.
+                let free = text.chars().enumerate().all(|(offset, _)| {
+                    let col = start + offset;
+                    col < cell_width
+                        && lines[row]
+                            .get(col)
+                            .is_some_and(|cell| *cell == ' ' || *cell == '\u{2800}')
+                });
+                let _ = free;
+                for (offset, ch) in text.chars().enumerate() {
+                    let col = start + offset;
+                    if col >= cell_width {
+                        break;
+                    }
+                    lines[row][col] = ch;
+                }
+            };
+            place(quad.x_axis_left.as_ref(), bottom, false);
+            place(quad.x_axis_right.as_ref(), bottom, true);
+            place(quad.y_axis_top.as_ref(), 1, false);
+            place(quad.y_axis_bottom.as_ref(), bottom.saturating_sub(1), false);
+        }
+
         // Overlay SEQUENCE NOTE text (bd-59o4).
         //
         // `render_subcell_mode` draws each note as a bare RECTANGLE via `canvas.draw_rect` and no

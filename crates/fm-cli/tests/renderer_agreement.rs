@@ -68,14 +68,11 @@ const CASES: &[(&str, &str, &str)] = &[
 const KNOWN_GAPS: &[(&str, &str, &str)] = &[
     (
         "quadrant_axis",
-        "terminal",
-        "bd-59o4: both non-SVG renderers drop the quadrant axis label. Unlike every other member of \
-         this family it is a TWO-renderer gap, so one fix is not assumed to cover both.",
-    ),
-    (
-        "quadrant_axis",
         "canvas",
-        "bd-59o4: see the terminal entry — the same label is missing from the canvas as well.",
+        "bd-59o4: the canvas never reads `x_axis_left` at all — zero references in its sources, \
+         against one in the terminal and two in fm-render-svg. That is a DIFFERENT cause from the \
+         terminal's, which was a render-MODE bypass and is now fixed; keeping this entry separate \
+         is what stopped one fix from silently closing the other's record.",
     ),
     (
     "gantt_section",

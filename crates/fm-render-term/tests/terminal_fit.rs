@@ -363,6 +363,45 @@ fn gantt_section_name_is_truncated_to_the_band_width() {
     );
 }
 
+/// QUADRANT AXIS labels must reach terminal output (bd-59o4).
+///
+/// ROOT CAUSE was the render MODE, not the drawing code: `render_quadrant_cell` draws these, but it
+/// is only reachable from `render_cell_mode`, and `TermRenderConfig::rich()` selects Braille, which
+/// routes to `render_subcell_mode`. The title and the points still appeared — they come from the
+/// generic title overlay and the generic node loop — so only the axis labels went missing and the
+/// chart looked almost right.
+#[test]
+fn quadrant_axis_labels_reach_terminal_output() {
+    let ir = fm_parser::parse(
+        "quadrantChart\n  title Reach\n  x-axis Low --> High\n  y-axis Bot --> Top\n  Alpha: [0.3, 0.6]\n",
+    )
+    .ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(out.contains("Low"), "the x-axis left label never reached the terminal:\n{out}");
+    assert!(out.contains("High"), "the x-axis right label never reached the terminal:\n{out}");
+    assert!(out.contains("Top"), "the y-axis top label never reached the terminal:\n{out}");
+    // What already worked must keep working: these come from different paths entirely.
+    assert!(out.contains("Reach"), "the chart title was displaced:\n{out}");
+    assert!(out.contains("Alpha"), "the data point label was displaced:\n{out}");
+}
+
+/// CONTROL: a quadrant chart declaring NO axis labels gains none.
+///
+/// Each label is drawn only when its field is present, so a chart without them must not acquire
+/// stray text at the canvas edges.
+#[test]
+fn quadrant_without_axis_labels_gains_none() {
+    let ir = fm_parser::parse("quadrantChart\n  title Reach\n  Alpha: [0.3, 0.6]\n").ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(out.contains("Reach"), "the title is missing:\n{out}");
+    assert!(
+        !out.contains("Low") && !out.contains("High"),
+        "axis text appeared for a chart that declares none:\n{out}"
+    );
+}
+
 /// A sequence NOTE's text must reach terminal output (bd-59o4).
 ///
 /// `render_subcell_mode` drew each note as a bare rectangle and no text, so `Note over Alice:
