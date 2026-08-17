@@ -21390,6 +21390,43 @@ either way: single-core pinning buys clock comparability at the cost of scheduli
 this host the fragility is the larger term. I am NOT deciding it; that bead says the choice must not
 be made by the person whose row it unblocks, and that is still me.
 
+**ADDENDUM 2026-08-17 (third): A/B/A ON THE PINNING POLICY ITSELF — it is decisive, and it
+CORROBORATES the standing figure without raising it.**
+
+The previous addendum inferred that single-core pinning was the noise source by comparing a pinned
+bracket against unpinned single-arm runs. That comparison was not like-for-like. This one is: three
+FULL brackets, same window, same ELF `105c52ba…`, same input sha `31c0dd6b`, unpinned brackets on
+BOTH sides of the pinned one so drift in the comparison itself is controlled. Loadavg was flat
+across all twelve arms (11.66 → 11.38 over the whole sequence); idle 68.2-85.2%; iowait 0.00%; host
+cross-core MHz spread 2.85-3.00x throughout.
+
+| bracket | fm A1 | fm A2 | fm drift | worst bound | headline |
+|---|---|---|---|---|---|
+| no-pin (1st) | 96,557 ns | 94,654 ns | **1.0201x** | 366.6x | 406.4x |
+| **pinned** | 156,370 ns | 91,043 ns | **1.7175x** | 227.7x | 291.8x |
+| no-pin (2nd) | 92,143 ns | 91,060 ns | **1.0119x** | 382.0x | 385.9x |
+
+The pinned bracket is the ONLY one that fails the harness's own drift control, and it is sandwiched
+between two that pass it comfortably, in the same quiet window with load flat. The calibrated batch
+agrees exactly: pinned A1 ran at batch 20, every other observation at 37-39.
+
+**A/A nulls, incumbent arm, same invocation, all six contain 1.0:** no-pin 1st `1.0242`
+CI [0.9562, 1.0744] and `0.9467` CI [0.8800, 1.0171]; pinned `1.0028` CI [0.9625, 1.1048] and
+`1.0167` CI [0.9862, 1.0258]; no-pin 2nd `0.9625` CI [0.9436, 1.0205] and `0.9718` CI [0.8903,
+1.0388].
+
+**THE STANDING 362.4x IS NOT RAISED, and that is deliberate.** Both unpinned bounds (366.6x, 382.0x)
+land above it, at a NEW revision (`dd19948f`) with a different pinning policy — which corroborates
+the standing row rather than replacing it. Raising the banked figure would require DISMISSING the
+pinned bracket's 227.7x, and the campaign convention quotes the WORST bound observed. Deciding that
+the pinned configuration does not count is precisely the pin-both-vs-pin-neither policy call that
+bd-hmfi says must not be made by the person whose row it unblocks. So the number stands and the
+evidence is recorded.
+
+Note also which way the temptation ran: unpinned gives the HIGHER ratio. The reason to prefer it
+here is that its drift control passes and the pinned one's fails — a criterion written into the
+harness's docstring long before these runs — not that the number is bigger.
+
 **Do-not-retry note:** do not re-attempt this certification on a converged-but-busy host. Converged
 load is not an idle host — 64/64 cpus were over 20% busy in every admitted run above while the
 1-minute loadavg looked acceptable. Run `scripts/window_check.sh` FIRST and believe its verdict.
