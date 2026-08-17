@@ -717,9 +717,27 @@ impl Canvas2dRenderer {
             let w = f64::from(cluster_box.bounds.width);
             let h = f64::from(cluster_box.bounds.height);
 
-            // Draw cluster background
-            ctx.set_fill_style(&self.config.cluster_fill);
-            ctx.set_stroke_style(&self.config.cluster_stroke);
+            // Draw cluster background, honouring a declared colour (bd-lvj3).
+            //
+            // The last row of that bead's measured table: `rect rgb(255,0,0)` in a sequence diagram
+            // rendered in SVG and NOT on the canvas. The colour was never far away -- it rides on the
+            // very `LayoutClusterBox` this loop already holds, and the fill was hardcoded to the
+            // theme colour anyway.
+            //
+            // `transparent` is mapped the way fm-render-svg maps it (lib.rs:4365): the FILL goes
+            // transparent but the border falls back to a visible default, because a subgraph that
+            // asked for a transparent body still needs an edge or it stops being a grouping.
+            let declared = cluster_box.color.as_deref().and_then(sanitize_canvas_paint);
+            let (fill, stroke) = match declared.as_deref() {
+                Some("transparent") => ("transparent", self.config.cluster_stroke.as_str()),
+                Some(color) => (color, color),
+                None => (
+                    self.config.cluster_fill.as_str(),
+                    self.config.cluster_stroke.as_str(),
+                ),
+            };
+            ctx.set_fill_style(fill);
+            ctx.set_stroke_style(stroke);
             ctx.set_line_width(1.0);
 
             ctx.begin_path();
@@ -1400,8 +1418,14 @@ impl Canvas2dRenderer {
             let w = f64::from(fragment.bounds.width);
             let h = f64::from(fragment.bounds.height);
 
-            // Semi-transparent background.
-            ctx.set_fill_style("rgba(226,232,240,0.2)");
+            // Semi-transparent background, or the author's own (bd-lvj3).
+            //
+            // `rect rgb(255,0,0)` in a sequence diagram becomes a FRAGMENT, not a cluster, and the
+            // fill here was a hardcoded literal while `fragment.color` sat unread on the very struct
+            // this loop iterates. This is the last row of that bead's measured table
+            // (seq_rect_color svg=true canvas=FALSE).
+            let declared = fragment.color.as_deref().and_then(sanitize_canvas_paint);
+            ctx.set_fill_style(declared.as_deref().unwrap_or("rgba(226,232,240,0.2)"));
             ctx.fill_rect(x, y, w, h);
 
             // Dashed border.
@@ -2500,6 +2524,53 @@ fn fragment_kind_label(kind: fm_core::FragmentKind) -> &'static str {
 /// `pub(crate)` so `gpu_plan` can carry the SAME width the Canvas2D pass strokes with. Forking this
 /// mapping was the alternative and a worse one: a duplicated helper drifts silently, and then the
 /// GPU plan claims a width the raster path never used.
+/// Accept a colour only if it is one this renderer can safely hand to a canvas context.
+///
+/// fm-render-svg has `sanitize_svg_paint`, but it is `pub(crate)` there and answers a different
+/// question -- what is safe inside an SVG attribute. A canvas `fillStyle` is not markup, so the risk
+/// is not injection but a malformed value silently blanking a shape: browsers ignore an unparsable
+/// fillStyle and keep the PREVIOUS colour, which would paint this cluster with whatever was drawn
+/// last. Refusing early and falling back to the theme colour is the visible failure, not the silent
+/// one.
+///
+/// Deliberately conservative: hex, the four functional notations, and bare keywords. Anything
+/// carrying a quote, semicolon, backslash, or control character is refused outright.
+fn sanitize_canvas_paint(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 64 {
+        return None;
+    }
+    if value
+        .bytes()
+        .any(|b| b < 0x20 || matches!(b, b'"' | b'\'' | b';' | b'\\' | b'<' | b'>'))
+    {
+        return None;
+    }
+
+    if let Some(hex) = value.strip_prefix('#') {
+        let ok = matches!(hex.len(), 3 | 4 | 6 | 8) && hex.bytes().all(|b| b.is_ascii_hexdigit());
+        return ok.then(|| value.to_ascii_lowercase());
+    }
+
+    for prefix in ["rgb(", "rgba(", "hsl(", "hsla("] {
+        if let Some(rest) = value.to_ascii_lowercase().strip_prefix(prefix) {
+            let Some(args) = rest.strip_suffix(')') else {
+                return None;
+            };
+            let ok = !args.is_empty()
+                && args
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || matches!(b, b',' | b'.' | b'%' | b' ' | b'-'));
+            return ok.then(|| value.to_ascii_lowercase());
+        }
+    }
+
+    value
+        .bytes()
+        .all(|b| b.is_ascii_alphabetic())
+        .then(|| value.to_ascii_lowercase())
+}
+
 pub(crate) fn legacy_edge_stroke(arrow: ArrowType, default_width: f64) -> (f64, &'static [f64]) {
     match arrow {
         ArrowType::ThickArrow => (2.5, &[]),
