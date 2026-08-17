@@ -21060,3 +21060,49 @@ mine to decide.
 **Per-arm MHz could not be recorded because neither arm ran** — the refusal precedes both phases, so
 there is no per-arm anything to report. Host-level at the time: CPU min 1429 MHz, max 4043 MHz,
 spread 2.829x.
+
+### PRE-FLIGHT DECLINES: the 20% ceiling stayed unsatisfiable across three windows, and the holders are now NAMED (2026-08-17)
+
+**These are DECLINES, not gate refusals — do not add them to the nine.** In each window I checked
+the host myself and declined to start `run.mjs` at all, so its host-wide exclusivity gate never ran
+and produced no refusal. They are banked because they measure the same conjunction the gate tests
+(all 64 CPUs under 20% busy simultaneously) and because the third one identifies WHO was holding the
+cores, which every earlier entry could only infer.
+
+**No ratio, no arms, no A/A null, and no per-arm loadavg or MHz — because neither arm ran.** The
+decline precedes both phases, so there is no per-arm anything to report. Recording that explicitly
+rather than leaving the fields blank: a row with no arms cannot carry arm-scoped provenance.
+
+Best-of-3 one-second samples, counting CPUs above 20% busy. The gate needs **zero**.
+
+| window | loadavg (1/5/15) | per-sample counts over 20% | best | disk free |
+|---|---|---|---|---:|
+| 1 | 22.80 / 30.36 / 24.42 | 25, 39, 32 | **25** | 166G |
+| 2 | 14.13 / 25.66 / 30.00 | 24, 19, 27 | **19** | 188G |
+| 3 | 15.93 / 24.80 / 27.41 | 18, 19, 23 | **18** | 185G |
+
+**Loadavg is a poor predictor at this resolution, again.** Window 2 had the lowest 1-minute load
+this session (14.13, low by this host's standards) and still left 19 CPUs over the ceiling. The best
+count moved 25 → 19 → 18 while load moved 22.8 → 14.1 → 15.9; the direction is loosely right and the
+magnitude is nowhere near what the gate needs. Nothing here contradicts the earlier finding that the
+conjunction is not reachable by waiting — it adds three more windows to it at lower load.
+
+**THE HOLDERS, observed directly.** Earlier entries could only infer "a specific long-running job
+pinned to an affinity set" from the repeated `cpu48`/`cpu51`/`cpu54`/`cpu55` signature. During the
+I/O saturation that followed window 3, `ps` showed the live non-frankenmermaid work directly:
+
+```
+rch exec -- cargo build -p ffs-core                    (frankenfs, via the remote-build fleet)
+cargo test -p mcp-agent-mail-db pool                   (mcp-agent-mail)
+```
+
+Neither is frankenmermaid. This is the first entry in this series that names cross-project builds
+rather than inferring an anonymous pinned job, and it matches the owner's own diagnosis that
+external builds were still running when the window looked briefly favourable — a single favourable
+sample taken while they ran is exactly the trap this table is evidence against.
+
+**Consequence, unchanged and now better supported.** `docs_site_50` and the sequence re-measurement
+are not obtainable on `thinkstation1` by waiting for a quiet window, because the quiet window is a
+function of other projects' build schedules and not of anything this project controls. It needs a
+`trj` exclusive booking, or an owner's decision on whether all-64-under-20% is the right rule for a
+shared box. Neither is mine to decide.
