@@ -303,6 +303,37 @@ impl TermRenderer {
             }
         }
 
+        // stateDiagram NOTES (bd-t1jj). `extensions.state_notes` is filled by the state layout arm
+        // and drawn by fm-render-svg; the terminal referenced it nowhere, so `note right of X : ...`
+        // produced a note that existed in the layout and appeared in no terminal output.
+        //
+        // Both the box AND the leader are drawn here, unlike the band and cluster overlays which only
+        // needed text: those had geometry already on the canvas to attach to, and a note has none. A
+        // bare string floating beside a state would read as another node's label rather than as an
+        // annotation of that state, which is a different wrong picture, not a smaller one.
+        for note in &layout.extensions.state_notes {
+            let x = (note.bounds.x * pixel_scale_x) as isize + padding_x as isize;
+            let y = (note.bounds.y * pixel_scale_y) as isize + padding_y as isize;
+            let w = (note.bounds.width * pixel_scale_x) as isize;
+            let h = (note.bounds.height * pixel_scale_y) as isize;
+            if w > 2 && h > 2 && x >= 0 && y >= 0 {
+                canvas.draw_rect(
+                    usize::try_from(x).unwrap_or(0),
+                    usize::try_from(y).unwrap_or(0),
+                    usize::try_from(w).unwrap_or(0),
+                    usize::try_from(h).unwrap_or(0),
+                );
+            }
+            // The leader is what makes the box an annotation OF something rather than a second node.
+            let lx0 = (note.leader_start.x * pixel_scale_x) as isize + padding_x as isize;
+            let ly0 = (note.leader_start.y * pixel_scale_y) as isize + padding_y as isize;
+            let lx1 = (note.leader_end.x * pixel_scale_x) as isize + padding_x as isize;
+            let ly1 = (note.leader_end.y * pixel_scale_y) as isize + padding_y as isize;
+            // `draw_line` takes isize and clips internally, so negatives are safe to pass and the
+            // guard would only drop leaders that are partly on-canvas.
+            canvas.draw_line(lx0, ly0, lx1, ly1);
+        }
+
         // Render layout bands based on their kind.
         for band in &layout.extensions.bands {
             use fm_layout::LayoutBandKind;
@@ -1363,6 +1394,41 @@ impl TermRenderer {
                 }
                 if written > 0 {
                     last_end = Some(x + written);
+                }
+            }
+        }
+
+        // stateDiagram NOTE TEXT (bd-t1jj). The box above is empty without it, and an empty box
+        // beside a state is arguably worse than nothing: it asserts an annotation exists and withholds
+        // it.
+        //
+        // Multi-line aware, because `note right of X … end note` is the form that carries more than a
+        // sentence and truncating it to one line would silently drop the rest. Lines that do not fit
+        // the box height are dropped rather than spilling onto the diagram below, and each line is
+        // clipped to the box width for the same reason.
+        for note in &layout.extensions.state_notes {
+            if note.text.is_empty() {
+                continue;
+            }
+            let (x, y, w, h) = self.bounds_to_cells(&note.bounds, scale_x, scale_y);
+            if w < 3 || h < 1 || y >= lines.len() {
+                continue;
+            }
+            let budget = w - 2;
+            for (row, line) in note.text.lines().enumerate() {
+                if row >= h {
+                    break;
+                }
+                let label_y = y + row;
+                if label_y >= lines.len() {
+                    break;
+                }
+                let clipped: String = self.truncate_label(line).chars().take(budget).collect();
+                for (offset, ch) in clipped.chars().enumerate() {
+                    let col = x + 1 + offset;
+                    if col < cell_width && col < lines[label_y].len() {
+                        lines[label_y][col] = ch;
+                    }
                 }
             }
         }

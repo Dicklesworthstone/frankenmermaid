@@ -577,3 +577,68 @@ fn a_sequence_diagram_is_unaffected_by_the_axis_overlay() {
         "a participant appears more than once, or was disturbed by the axis overlay:\n{out}"
     );
 }
+
+/// A stateDiagram note must reach terminal output (bd-t1jj).
+///
+/// `layout.extensions.state_notes` is filled by the state layout arm (bd-a6l4) and drawn by
+/// fm-render-svg. The terminal renderer referenced it NOWHERE, so `note right of X : ...` produced a
+/// note that existed in the layout, was hashed into the layout checksum, and appeared in no terminal
+/// output at any size.
+///
+/// The CONTROL is first: the layout must actually publish a note for this source, or the assertion
+/// below would pass on a diagram that has no note to draw.
+#[test]
+fn a_state_note_reaches_terminal_output() {
+    let ir = fm_parser::parse(
+        "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Running\n  note right of Idle : waiting for work\n",
+    )
+    .ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    assert!(
+        !layout.extensions.state_notes.is_empty(),
+        "CONTROL FAILED: this source produced no state note, so the renderer has nothing to draw \
+         and this test cannot detect the defect it was written for"
+    );
+
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 140, 44).output;
+    assert!(
+        out.contains("waiting"),
+        "the state note is missing from terminal output:\n{out}"
+    );
+    // The state it annotates must survive — a note drawn over its own subject trades one piece of
+    // dropped content for another, which is the failure bd-u3fo's kanban case warned about.
+    assert!(
+        out.contains("Idle"),
+        "the annotated state was displaced by its own note:\n{out}"
+    );
+    assert!(
+        out.contains("Running"),
+        "an unrelated state was displaced by the note overlay:\n{out}"
+    );
+}
+
+/// A state diagram with NO note must be untouched.
+///
+/// Regression guard for the overlay itself: if this ever fails, the note pass has started drawing
+/// where no note exists.
+#[test]
+fn a_state_diagram_without_notes_is_unaffected() {
+    let ir = fm_parser::parse("stateDiagram-v2\n  [*] --> Idle\n  Idle --> Running\n").ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    assert!(
+        layout.extensions.state_notes.is_empty(),
+        "CONTROL FAILED: this source produced a note, so it cannot show the overlay is inert"
+    );
+
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 140, 44).output;
+    assert_eq!(
+        out.matches("Idle").count(),
+        1,
+        "a state appears more than once, or was disturbed by the note overlay:\n{out}"
+    );
+    assert_eq!(
+        out.matches("Running").count(),
+        1,
+        "a state appears more than once, or was disturbed by the note overlay:\n{out}"
+    );
+}
