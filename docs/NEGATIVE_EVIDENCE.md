@@ -3628,7 +3628,14 @@
 
 ## Blocked/Invalid Evidence Attempts
 
-### PROVISIONAL MEASUREMENT: sequence_20 render, worst bound 362.4x vs mermaid-js 11.15.0 (2026-08-16)
+### PROMOTED TO A STANDING — see docs/PERF_LEDGER.md: sequence_20 render, worst bound 362.4x vs mermaid-js 11.15.0 (2026-08-16, promoted 2026-08-17)
+
+> **This entry is now HISTORY.** The row was replicated on a second independent binary and passed a
+> content-level cross-engine equivalence check, and is banked as a REPLICATED STANDING in
+> `docs/PERF_LEDGER.md` under "REPLICATED INCUMBENT WIN (STANDING)". Quote **362.4x** from there.
+> It is still NOT gate-certified — the host-wide exclusivity gate has now refused nine windows — so
+> it must not be cited as a certified row. What follows is the original provisional record, kept
+> because the reasoning that produced it is the reusable part.
 
 **Bead:** `bd-8557`. **UNCERTIFIED, and it must not be quoted as a certified row.** It is banked so
 the project has a number after three scoreboard windows with none, with every condition recorded so

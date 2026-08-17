@@ -3946,6 +3946,74 @@ itself.
 walk runs; or if the fixed-iteration harness or its A/A identity check changes. A retry is
 admissible only with the harness A/A at exactly 1.000000000 and distinct self-reported ELFs.
 
+## REPLICATED INCUMBENT WIN (STANDING): `sequence_20` render, worst bound **362.4x** vs mermaid-js 11.15.0 (2026-08-17)
+
+**Campaign result class:** replicated-standing. **NOT gate-certified** — see "What this does not claim".
+
+**Quoted figure: 362.4x**, the WORST bound either run produced, per the replicated-standing
+convention. Headlines (383.4x, 415.4x) are recorded below and are not the number to cite.
+
+**Legacy incumbent arm (same invocation as each measured arm):** name=mermaid-js version=11.15.0
+artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de
+securityLevel=strict, runtime Chrome/151.0.7922.108 via /usr/bin/chromium-browser, render mode.
+
+**Executing ELF SHA-256 (self-reported), two independent binaries at two revisions:**
+
+| run | ELF SHA-256 | rev | provenance |
+|---|---|---|---|
+| 1 | `76812d3c707557972cda813ca14298e3a94203979ac16e85b6c5df200024864a` | `ef52cfe0` | rev string verified inside the ELF |
+| 2 | `573b743f53b656206413d8ee6ce0a29ebe401110bc473e5eec85285e8f4b5d78` | `6ef585d0` | rev string verified inside the ELF |
+
+Each was copied to a content-addressed path and measured there, because the shared build path can be
+rebuilt by another agent mid-run — that has happened to this harness before.
+
+**What was measured.** A/B/B/A, arms interleaved in ONE invocation, via
+`scripts/headtohead/abba_render.py` (in-repo, so this row is re-derivable by anyone).
+
+| run | fm A1 | fm A2 | fm drift | mermaid B1 | mermaid B2 | worst bound | headline |
+|---|---|---|---|---|---|---|---|
+| 1 | 92,994 ns | 91,137 ns | 1.0204x | 33.7 ms | 36.9 ms | **362.4x** | 383.4x |
+| 2 | 93,746 ns | 89,441 ns | 1.0481x | 38.3 ms | 37.8 ms | 403.2x | 415.4x |
+
+**Counted work proof, in band, every observation:** 43,368 bytes of SVG emitted, `revisions` 1,
+`batch` 37-39. That is 0.47 bytes/ns against the 512 bytes/ns per-observed-thread ceiling — real
+rendering, not a memo hit.
+
+**Cross-engine equivalence, content-level, same pinned binary and bundle:** `PASS sequence_20: 1/1
+equivalent, 0 divergent, 0 unverified`, artifact
+`.benchmarks/headtohead/equivalence/equivalence-2f1e7801-1786929804311.json`. Method is SVG
+structural (text-token containment + rendered-path topology + class relationship semantics), not a
+pixel diff. This matters and is not a formality: the four observations also share an output BYTE
+COUNT, and a byte count is not content — three themes in this project once shared an identical
+length while differing in every byte.
+
+**A/A null (incumbent arm, same invocation):** run 1 medians 0.9922 CI [0.9415, 1.0482] and 1.0153 CI
+[0.9648, 1.0628]; run 2 medians 1.0068 CI [0.8947, 1.0831] and 0.9594 CI [0.9180, 1.0371]. All four
+contain 1.0. The widest radius, run 2's ±9%, puts the decision floor near 1.19x — cleared by more
+than two orders of magnitude.
+
+**Per-arm conditions.** Run 1: loadavg 11.48/18.12/20.35 and 11.36/17.99/20.29 and 11.41/17.89/20.25;
+CPU MHz 1429-4292, spread 2.882x-3.009x. Run 2: loadavg 14.90/17.34/21.11, 14.26/17.17/21.04 (both
+mermaid arms), 13.92/17.05/20.98; CPU MHz spread 2.864x / 2.953x / 3.007x / 1.680x.
+
+**The incumbent is the arm that moved, and the ratio should not be read as improvement.** Across both
+runs frankenmermaid produced 89,441 / 91,137 / 92,994 / 93,746 ns — a **1.048x** spread over four
+observations on two separately built binaries — while mermaid-js produced 33.7 / 36.9 / 37.8 / 38.3
+ms, a **1.136x** spread. The rise from 362.4x to 403.2x is the incumbent slowing down.
+
+**The incumbent is quoted at its most favourable.** The warm bench p50 (33.7-38.3 ms) is used, not the
+`--render-once` figure the equivalence pass reports for the same case on the same machine (**86.6
+ms**), which includes cold start. Quoting that instead would roughly double the ratio.
+
+**What this does not claim.** `run.mjs`'s host-wide exclusivity gate — all 64 CPUs below 20% busy in
+one 1-second sample — was NEVER satisfied and has now refused nine consecutive windows. This is a
+replicated standing, not a gate-certified row, and it must not be cited as the latter. The
+unaccounted confounder is the ~3x simultaneous cross-core MHz spread, which is why the figure is
+quoted as a BOUND rather than a point estimate. Notably the best window observed (loadavg
+15.27/15.37/18.78) still showed 16-19 of 64 CPUs at or above 20% busy across three samples:
+**converged load is not an idle host, and occupancy is what the gate reads.**
+
+
 ## INCUMBENT DID-NOT-COMPLETE: mermaid-js 11.15.0 cannot render 6 of 7 syntax families at 2,000+ nodes; frankenmermaid renders all 7 in 1.9-9.7 ms (2026-08-14)
 
 **Campaign result class:** incumbent-dnf
