@@ -63,21 +63,28 @@ const CASES: &[(&str, &str, &[&str])] = &[
         &["API", "Database"],
     ),
     ("c4", "C4Context\n  title Sys\n  Person(alice, \"Alice\", \"A user\")\n", &["Sys", "Alice"]),
-    // gitgraph's commit ids and tags DO reach the SVG; only the branch NAME does not. Listing the
-    // parts that work keeps this case honest rather than dropping the whole type from the gate.
-    ("gitgraph", "gitGraph\n  commit id: \"Alpha\"\n  branch dev\n  commit id: \"Beta\" tag: \"v1\"\n", &["Alpha", "Beta", "v1"]),
+    // `dev` is the BRANCH NAME — the drop this gate found (bd-jgco), now fixed by the branch bands
+    // in `layout_diagram_gitgraph_traced`. It stays asserted here rather than in a layout unit test
+    // because the user-visible claim is that the name reaches the rendered document.
+    (
+        "gitgraph",
+        // The explicit `checkout dev` is load-bearing, and it is NOT how a mermaid user would have
+        // to write this. mermaid's `branch` creates AND checks out — its `createBranch` ends by
+        // calling the same function its `checkout` uses, verified in the pinned 11.15.0 bundle —
+        // while our `parse_git_branch` never sets `current_branch`. Without the checkout, `Beta`
+        // lands on `main`, lane `dev` has no commits and therefore no band, and this case would
+        // fail for a reason with nothing to do with band labels. Tracked as bd-6oz7; when that
+        // lands the checkout line becomes redundant here but stays harmless.
+        "gitGraph\n  commit id: \"Alpha\"\n  branch dev\n  checkout dev\n  commit id: \"Beta\" tag: \"v1\"\n",
+        &["Alpha", "Beta", "v1", "dev"],
+    ),
 ];
 
 /// Declared text the renderer is KNOWN to drop, each entry naming the bead that tracks it.
 ///
 /// An allowlist, not a silence: a NEW drop still fails, and closing a bead means deleting its line
 /// here, so the gate cannot quietly stay satisfied by a defect. Entries are `(case, wanted text)`.
-const KNOWN_GAPS: &[(&str, &str, &str)] = &[(
-    "gitgraph",
-    "dev",
-    "bd-jgco: git_graph_meta.branches is read by no renderer, so branch names reach no output. \
-     mermaid 11.15.0 draws them (branch-label class, 78 branchLabelColor theme entries).",
-)];
+const KNOWN_GAPS: &[(&str, &str, &str)] = &[];
 
 #[test]
 fn declared_text_reaches_the_svg_for_every_diagram_type() {

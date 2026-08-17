@@ -8325,7 +8325,89 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     let edges = build_edge_paths(ir, &nodes, &BTreeSet::new(), EdgeRouting::default());
     let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
-    let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
+    let mut bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
+
+    // BRANCH NAMES REACH THE PICTURE (bd-jgco).
+    //
+    // `git_graph_meta.branches` was written by the parser and read by nothing — no renderer, no
+    // layout code — so a gitGraph branch name appeared in no output at all: not SVG, not terminal,
+    // not canvas. mermaid 11.15.0 draws them (a `branch-label` class and 78 `branchLabelColor`
+    // theme entries in the pinned bundle), so this was a user-visible divergence, not a style
+    // choice.
+    //
+    // One labelled band per lane is the whole fix: all three renderers already draw `band.label`
+    // (`write_layout_band_into`, the canvas band loop, and the terminal's `overlay_labels`), so no
+    // renderer needs to learn anything about gitGraph.
+    //
+    // The lane index IS the index into `branches` — the field's own doc says "a name's position is
+    // its lane index" — and each placed box already carries its lane in `order`, so the extent is
+    // read back from the boxes rather than recomputed from the lane arithmetic above. `.get(lane)`
+    // rather than indexing: a malformed meta with fewer names than lanes must drop the label, not
+    // panic on a user's input.
+    let mut bands: Vec<LayoutBand> = Vec::new();
+    if let Some(meta) = ir.git_graph_meta.as_ref()
+        && !meta.branches.is_empty()
+    {
+        // Accumulate each lane's extent in ONE pass over the placed boxes, keyed by `order` (the
+        // lane), mirroring how the kanban arm builds its rank bounds.
+        let mut lane_bounds: FxHashMap<usize, (f32, f32, f32, f32)> =
+            FxHashMap::with_capacity_and_hasher(nodes.len(), Default::default());
+        for node_box in &nodes {
+            let entry = lane_bounds.entry(node_box.order).or_insert((
+                f32::INFINITY,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+            ));
+            entry.0 = entry.0.min(node_box.bounds.x);
+            entry.1 = entry.1.min(node_box.bounds.y);
+            entry.2 = entry.2.max(node_box.bounds.x + node_box.bounds.width);
+            entry.3 = entry.3.max(node_box.bounds.y + node_box.bounds.height);
+        }
+
+        // The band opens a strip ABOVE its first commit and the label is drawn into it. Bands are
+        // background in every renderer, so a label placed over the lane's own content would be
+        // painted over by the first commit box and the name would still be invisible — the exact
+        // defect this fixes, reintroduced one layer down. `LABEL_STRIP` exceeds the renderers'
+        // label baseline offset (svg draws at band.y + 16) so the text clears the commit.
+        const LABEL_STRIP: f32 = 26.0;
+        const SIDE_PAD: f32 = 8.0;
+
+        // Sorted so band order is lane order and does not inherit the hash map's iteration order,
+        // which would make the emitted SVG differ run to run.
+        let mut lanes: Vec<usize> = lane_bounds.keys().copied().collect();
+        lanes.sort_unstable();
+        for lane in lanes {
+            let Some(name) = meta.branches.get(lane) else {
+                continue;
+            };
+            if name.is_empty() {
+                continue;
+            }
+            let (min_x, min_y, max_x, max_y) = lane_bounds[&lane];
+            let rect = LayoutRect {
+                x: min_x - SIDE_PAD,
+                y: min_y - LABEL_STRIP,
+                width: (max_x - min_x) + SIDE_PAD * 2.0,
+                height: (max_y - min_y) + LABEL_STRIP + SIDE_PAD,
+            };
+            // Bands are built AFTER `compute_bounds`, which sees only nodes/clusters/edges, so the
+            // label strip would sit outside the viewBox and be clipped away — drawn but unseeable.
+            // Union it in.
+            let right = bounds.x + bounds.width;
+            let bottom = bounds.y + bounds.height;
+            bounds.x = bounds.x.min(rect.x);
+            bounds.y = bounds.y.min(rect.y);
+            bounds.width = right.max(rect.x + rect.width) - bounds.x;
+            bounds.height = bottom.max(rect.y + rect.height) - bounds.y;
+
+            bands.push(LayoutBand {
+                kind: LayoutBandKind::Lane,
+                label: name.clone(),
+                bounds: rect,
+            });
+        }
+    }
 
     push_snapshot(
         &mut trace,
@@ -8348,7 +8430,10 @@ fn layout_diagram_gitgraph_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 edge_count: ir.edges.len(),
                 ..LayoutStats::default()
             },
-            extensions: LayoutExtensions::default(),
+            extensions: LayoutExtensions {
+                bands,
+                ..LayoutExtensions::default()
+            },
             dirty_regions: Vec::new(),
         }),
         trace,
