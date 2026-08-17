@@ -68,14 +68,13 @@ const CASES: &[(&str, &str, &[&str])] = &[
     // because the user-visible claim is that the name reaches the rendered document.
     (
         "gitgraph",
-        // The explicit `checkout dev` is load-bearing, and it is NOT how a mermaid user would have
-        // to write this. mermaid's `branch` creates AND checks out — its `createBranch` ends by
-        // calling the same function its `checkout` uses, verified in the pinned 11.15.0 bundle —
-        // while our `parse_git_branch` never sets `current_branch`. Without the checkout, `Beta`
-        // lands on `main`, lane `dev` has no commits and therefore no band, and this case would
-        // fail for a reason with nothing to do with band labels. Tracked as bd-6oz7; when that
-        // lands the checkout line becomes redundant here but stays harmless.
-        "gitGraph\n  commit id: \"Alpha\"\n  branch dev\n  checkout dev\n  commit id: \"Beta\" tag: \"v1\"\n",
+        // NO `checkout dev` — deliberately. mermaid's `branch` creates AND checks out, so this is
+        // how a mermaid user writes it, and it now works here too (bd-6oz7). This case therefore
+        // covers both fixes at once: `dev` only appears if the branch got a lane band (bd-jgco)
+        // AND the commit after the bare `branch` actually landed on that lane (bd-6oz7). An
+        // explicit checkout here would have hidden the second one, which is exactly how it hid in
+        // the golden corpus for so long.
+        "gitGraph\n  commit id: \"Alpha\"\n  branch dev\n  commit id: \"Beta\" tag: \"v1\"\n",
         &["Alpha", "Beta", "v1", "dev"],
     ),
 ];

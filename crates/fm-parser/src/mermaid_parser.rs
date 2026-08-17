@@ -8436,6 +8436,24 @@ fn parse_git_branch(
         state.set_head(&normalized, current_head);
     }
     // If no current head, the branch starts empty (first commit will set it)
+
+    // `branch` ALSO CHECKS OUT, exactly as `checkout` does (bd-6oz7).
+    //
+    // Without this, every commit after a bare `branch dev` was still recorded on `main`, so it was
+    // drawn in the wrong column — the one thing a gitGraph exists to communicate. Measured before
+    // the fix: `gitGraph / commit / branch dev / commit` produced `commit_lanes {0: 0, 1: 0}`, both
+    // commits on lane 0.
+    //
+    // This is mermaid's own semantics, not an invention: in the pinned 11.15.0 bundle its
+    // `createBranch` sets the new branch's head and then calls the SAME function `checkout` calls,
+    // which assigns `currBranch`. Head is deliberately left as `set_head` above put it, matching
+    // mermaid — its checkout re-reads the head from the branch it just pointed at the current
+    // commit, so the head does not move, only the current branch does.
+    //
+    // WHY THIS SURVIVED: the golden `gitgraph_basic.mmd` writes `branch develop` followed by an
+    // explicit `checkout develop`, which masks the defect entirely. Sources written the way
+    // mermaid's own docs show — relying on create-and-switch — were the ones that broke.
+    state.current_branch = normalized;
 }
 
 fn parse_git_checkout(
@@ -18396,6 +18414,115 @@ Rel_Back(db, app, "Responds")"#,
     /// Every commit node carries a lane, and the lane matches the branch it was committed on
     /// (bd-5wbp). Layout turns these into columns; a missing entry silently means lane 0, which is
     /// how merge commits used to end up drawn in main's column with no branch attribution at all.
+    /// A bare `branch X` must SWITCH to X, so the next commit lands in X's lane (bd-6oz7).
+    ///
+    /// mermaid's `branch` creates and checks out: in the pinned 11.15.0 bundle, `createBranch`
+    /// ends by calling the same function `checkout` calls, which assigns `currBranch`. Ours only
+    /// interned the branch, so every commit after a bare `branch dev` was still recorded on `main`
+    /// and drawn in the wrong column.
+    ///
+    /// NO `checkout` LINE HERE — that is the whole point. The existing lane test writes an explicit
+    /// `checkout dev`, which is exactly what masked this defect, so a test that also checks out
+    /// would pass before the fix and prove nothing.
+    #[test]
+    fn gitgraph_branch_switches_to_the_new_branch_without_an_explicit_checkout() {
+        let parsed = parse_mermaid("gitGraph\n  commit\n  branch dev\n  commit\n");
+        let meta = parsed
+            .ir
+            .git_graph_meta
+            .as_ref()
+            .expect("gitGraph should publish lane metadata");
+
+        assert_eq!(meta.branches, vec!["main".to_string(), "dev".to_string()]);
+        let dev_lane = meta
+            .branches
+            .iter()
+            .position(|branch| branch == "dev")
+            .expect("dev must have a lane");
+
+        assert_eq!(
+            meta.lane_of(0),
+            0,
+            "the commit BEFORE the branch belongs to main; lanes: {:?}",
+            meta.commit_lanes
+        );
+        assert_eq!(
+            meta.lane_of(1),
+            dev_lane,
+            "the commit after a bare `branch dev` must be on dev, not main; lanes: {:?}",
+            meta.commit_lanes
+        );
+        // The two commits must be in DIFFERENT lanes. Asserting only `lane_of(1) == dev_lane` would
+        // also pass if every lane collapsed to the same index.
+        assert_ne!(
+            meta.lane_of(0),
+            meta.lane_of(1),
+            "both commits landed in one lane, so the branch is not a separate column"
+        );
+    }
+
+    /// CONTROL: an explicit `checkout` still works, and `branch` does not steal commits that a
+    /// later `checkout` reassigns.
+    ///
+    /// The fix makes `branch` mutate `current_branch`, which is exactly the state `checkout` owns.
+    /// If it had been made to stick, a subsequent `checkout main` would be ignored and commits
+    /// would pile onto the branch — trading this defect for its mirror image.
+    #[test]
+    fn gitgraph_checkout_still_overrides_the_branch_that_created_it() {
+        let parsed =
+            parse_mermaid("gitGraph\n  commit\n  branch dev\n  commit\n  checkout main\n  commit\n");
+        let meta = parsed
+            .ir
+            .git_graph_meta
+            .as_ref()
+            .expect("gitGraph should publish lane metadata");
+
+        let dev_lane = meta
+            .branches
+            .iter()
+            .position(|branch| branch == "dev")
+            .expect("dev must have a lane");
+
+        assert_eq!(meta.lane_of(1), dev_lane, "commit 2 belongs to dev");
+        assert_eq!(
+            meta.lane_of(2),
+            0,
+            "`checkout main` must pull the third commit back to main; lanes: {:?}",
+            meta.commit_lanes
+        );
+    }
+
+    /// CONTROL: `branch` still makes the new branch inherit the current head.
+    ///
+    /// The fix appends to `parse_git_branch`, so the pre-existing `set_head` inheritance must be
+    /// untouched — a branch whose first commit lost its parent would silently disconnect the graph.
+    #[test]
+    fn gitgraph_branch_still_inherits_the_current_head_as_its_parent() {
+        let parsed = parse_mermaid("gitGraph\n  commit\n  branch dev\n  commit\n");
+
+        // Endpoints are `IrEndpoint`, so resolve each to the node it names and compare ids.
+        let node_id_at = |endpoint: fm_core::IrEndpoint| {
+            endpoint
+                .resolved_node_id(&parsed.ir.ports)
+                .and_then(|id| parsed.ir.nodes.get(id.0))
+                .map(|node| node.id.clone())
+        };
+        let pairs: Vec<(String, String)> = parsed
+            .ir
+            .edges
+            .iter()
+            .filter_map(|edge| Some((node_id_at(edge.from)?, node_id_at(edge.to)?)))
+            .collect();
+
+        assert!(
+            pairs
+                .iter()
+                .any(|(from, to)| from == "commit_1" && to == "commit_2"),
+            "the first commit on a new branch must descend from the head it branched off; edges: \
+             {pairs:?}"
+        );
+    }
+
     #[test]
     fn gitgraph_meta_assigns_a_lane_to_every_commit_including_merges() {
         let parsed = parse_mermaid(
