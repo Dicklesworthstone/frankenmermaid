@@ -840,6 +840,51 @@ impl Canvas2dRenderer {
         draw(quad.x_axis_right.as_ref(), right - pad, bottom + pad, TextAlign::Right);
         draw(quad.y_axis_top.as_ref(), left - pad, top + pad, TextAlign::Right);
         draw(quad.y_axis_bottom.as_ref(), left - pad, bottom - pad, TextAlign::Right);
+
+        // The quadrant NAMES, which this drew none of (bd-039t, third widening of
+        // `renderer_agreement.rs`). bd-59o4 fixed the four AXIS labels in both this renderer and
+        // the terminal and stopped there, so `quadrant-1 Do it` reached the SVG and neither of the
+        // other two. The chart still looked almost right — title, points and axes all present —
+        // which is why a three-renderer gate caught it and looking at it did not.
+        //
+        // `quadrant_labels` is documented index-ordered [Q1 top-right, Q2 top-left, Q3 bottom-left,
+        // Q4 bottom-right], so placement follows the INDEX rather than a guess. `.get()` rather
+        // than indexing: a chart may declare fewer than four.
+        //
+        // Centred in each quadrant, INSIDE the plot area — unlike the axis labels above, which sit
+        // outside it by design. A quadrant name belongs to the region it names, so anchoring it to
+        // the region's own centre is what makes it readable as that region's label.
+        let mid_x = f64::midpoint(left, right);
+        let mid_y = f64::midpoint(top, bottom);
+        let quarter_x_left = f64::midpoint(left, mid_x);
+        let quarter_x_right = f64::midpoint(mid_x, right);
+        let quarter_y_top = f64::midpoint(top, mid_y);
+        let quarter_y_bottom = f64::midpoint(mid_y, bottom);
+
+        draw(
+            quad.quadrant_labels.first(),
+            quarter_x_right,
+            quarter_y_top,
+            TextAlign::Center,
+        );
+        draw(
+            quad.quadrant_labels.get(1),
+            quarter_x_left,
+            quarter_y_top,
+            TextAlign::Center,
+        );
+        draw(
+            quad.quadrant_labels.get(2),
+            quarter_x_left,
+            quarter_y_bottom,
+            TextAlign::Center,
+        );
+        draw(
+            quad.quadrant_labels.get(3),
+            quarter_x_right,
+            quarter_y_bottom,
+            TextAlign::Center,
+        );
     }
 
     /// Resolve a node's fill and stroke from the author's own styling (bd-lvj3).
@@ -2554,9 +2599,7 @@ fn sanitize_canvas_paint(value: &str) -> Option<String> {
 
     for prefix in ["rgb(", "rgba(", "hsl(", "hsla("] {
         if let Some(rest) = value.to_ascii_lowercase().strip_prefix(prefix) {
-            let Some(args) = rest.strip_suffix(')') else {
-                return None;
-            };
+            let args = rest.strip_suffix(')')?;
             let ok = !args.is_empty()
                 && args
                     .bytes()

@@ -77,6 +77,34 @@ const CASES: &[(&str, &str, &str)] = &[
     ("flowchart_edge_label", "flowchart TD\n  a[A] -->|yes| b[B]\n", "yes"),
     ("class_method", "classDiagram\n  class Alpha {\n    +run()\n  }\n", "run"),
     ("timeline_title", "timeline\n  title Hist\n  2001 : Alpha\n", "Hist"),
+    // ── third widening: the corpus was broad across diagram TYPES and thin across CONTENT KINDS.
+    // Every type above is represented, but within a type only one or two of the things a user can
+    // write were checked — `seq_loop` but no other fragment, `gitgraph_branch` but not a tag,
+    // `quadrant_title`/`_point`/`_axis` but not the quadrant NAMES, `arch_service` but not a group.
+    // The two previous widenings each found real defects in exactly the places they had not looked,
+    // so the cheapest place to look next is the content a type declares that nothing asserts yet.
+    ("seq_alt", "sequenceDiagram\n  alt is ok\n    Alice->>Bob: Hi\n  end\n", "is ok"),
+    ("seq_opt", "sequenceDiagram\n  opt maybe\n    Alice->>Bob: Hi\n  end\n", "maybe"),
+    ("seq_par", "sequenceDiagram\n  par One\n    Alice->>Bob: Hi\n  end\n", "One"),
+    ("gitgraph_tag", "gitGraph\n  commit tag: \"v9\"\n", "v9"),
+    ("gitgraph_id", "gitGraph\n  commit id: \"Alpha\"\n", "Alpha"),
+    // `journey_actor` DELIBERATELY OMITTED, and the reason is a finding rather than a shrug: the
+    // parser records a journey actor as a CSS CLASS on the step node (`journey-actor-me`, via
+    // `add_journey_actor_classes`), not as text, so no renderer draws the name and even the SVG
+    // reference misses it. Whether an actor NAME should be drawn is a real question — mermaid shows
+    // actors as marks on the task — but it is a feature question about the journey renderer, not a
+    // three-way agreement question, and asserting it here would only report the SVG as broken.
+    ("quadrant_name", "quadrantChart\n  title Reach\n  x-axis Low --> High\n  quadrant-1 Do it\n  A: [0.3, 0.6]\n", "Do it"),
+    ("arch_group", "architecture-beta\n  group api(cloud)[API Layer]\n  service db(database)[Database] in api\n", "API Layer"),
+    ("c4_boundary", "C4Context\n  title S\n  System_Boundary(b, \"Internal\") {\n    Person(a, \"Alice\", \"A user\")\n  }\n", "Internal"),
+    // `req_element` DELIBERATELY OMITTED, and it is the defect this widening found: a requirement
+    // ELEMENT's `type:` reaches no renderer because it reaches no IR — `IrRequirementNodeMeta` has
+    // no field for it. All three renderers "agree" by drawing nothing, so this gate is blind to it
+    // by construction; only the SVG-reference assertion caught it. Filed as bd-qdmn with an
+    // #[ignore]d reproducer at crates/fm-render-svg/tests/requirement_element.rs. It belongs there,
+    // not here: this corpus compares BACKENDS, and the content never gets far enough to compare.
+    ("state_transition_label", "stateDiagram-v2\n  A --> B : go\n", "go"),
+    ("timeline_section", "timeline\n  title Hist\n  section Age\n    2001 : Alpha\n", "Age"),
 ];
 
 /// `(case, renderer, bead)` — pairs known to disagree, each naming the bead that tracks it.
@@ -84,6 +112,15 @@ const CASES: &[(&str, &str, &str)] = &[
 /// An allowlist, not a silence: a NEW disagreement fails, and an entry that starts AGREEING fails
 /// too, so a fix cannot leave a permanent hole behind.
 const KNOWN_GAPS: &[(&str, &str, &str)] = &[
+    (
+        "c4_boundary",
+        "terminal",
+        "bd-039t: a C4 `System_Boundary` name reaches the SVG and not the terminal. Found by the \
+         third widening. Distinct from the c4_desc/c4_name rows already fixed — those are NODE \
+         content and this is the enclosing BOUNDARY, which the terminal draws as a cluster, so it \
+         needs the cluster-title path rather than the node loop. Pinned rather than patched: \
+         guessing which path a label takes is how the gantt_section fix got reverted twice.",
+    ),
     (
     "gantt_section",
     "terminal",
@@ -96,6 +133,7 @@ const KNOWN_GAPS: &[(&str, &str, &str)] = &[
 fn the_three_renderers_agree_on_declared_text() {
     let mut disagreements: Vec<String> = Vec::new();
     let mut stale_gaps: Vec<String> = Vec::new();
+    let mut svg_misses: Vec<String> = Vec::new();
     let mut svg_hits = 0_usize;
 
     for (case, source, want) in CASES {
@@ -104,10 +142,18 @@ fn the_three_renderers_agree_on_declared_text() {
         let svg = fm_render_svg::render_svg(&ir);
         // The SVG is the REFERENCE: if it does not draw the text, this case says nothing about the
         // other two, and silently skipping would let the corpus rot into vacuity.
-        assert!(
-            svg.contains(want),
-            "{case}: the SVG does not draw {want:?}, so this case cannot compare renderers"
-        );
+        //
+        // COLLECTED, NOT ASSERTED IN PLACE. This was an `assert!`, which aborts the whole run on the
+        // first bad case — so ONE mis-specified case blinds every case after it. Measured: adding
+        // twelve cases at once, the first (`journey_actor`) tripped this and the other eleven never
+        // ran, which is exactly the failure mode this corpus exists to prevent in the renderers.
+        // Still loud and still fatal at the end; it just reports every offender in one run.
+        if !svg.contains(want) {
+            svg_misses.push(format!(
+                "{case}: the SVG does not draw {want:?}, so this case cannot compare renderers"
+            ));
+            continue;
+        }
         svg_hits += 1;
 
         let term = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
@@ -134,6 +180,14 @@ fn the_three_renderers_agree_on_declared_text() {
             }
         }
     }
+
+    // Reported before the non-vacuity count below, because a miss is the REASON the count is short
+    // and naming the offenders beats reporting an arithmetic shortfall.
+    assert!(
+        svg_misses.is_empty(),
+        "the SVG reference does not draw these, so they compare nothing:\n  {}",
+        svg_misses.join("\n  ")
+    );
 
     // NON-VACUITY: every case must have contributed an SVG hit, or the loop compared nothing.
     assert_eq!(

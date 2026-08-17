@@ -1189,3 +1189,68 @@ fn an_unwrapped_packet_gains_no_continuation() {
         "a field was duplicated although nothing wrapped:\n{out}"
     );
 }
+
+/// QUADRANT NAMES must reach terminal output (bd-039t, third widening of the agreement gate).
+///
+/// bd-59o4 fixed the four AXIS labels in the subcell overlay and stopped there, so `quadrant-1 Do
+/// it` reached the SVG and neither the terminal nor the canvas. The chart still looked almost
+/// right — title, points and axes were all present — which is exactly why a three-renderer
+/// agreement gate caught it and eyeballing did not.
+#[test]
+fn quadrant_names_reach_terminal_output() {
+    let source = "quadrantChart\n  title Reach\n  x-axis Low --> High\n  y-axis Bot --> Top\n  \
+                  quadrant-1 Do it\n  quadrant-2 Plan it\n  quadrant-3 Drop it\n  \
+                  quadrant-4 Delegate\n  Alpha: [0.3, 0.6]\n";
+    let ir = fm_parser::parse(source).ir;
+
+    // NON-VACUITY: the names must actually be parsed, or the assertions below would be testing the
+    // parser's silence rather than the renderer's output.
+    let declared = ir
+        .quadrant_meta
+        .as_ref()
+        .map(|meta| meta.quadrant_labels.len())
+        .unwrap_or(0);
+    assert_eq!(
+        declared, 4,
+        "CONTROL FAILED: the source declared four quadrant names and the IR holds {declared}"
+    );
+
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    for want in ["Do it", "Plan it", "Drop it", "Delegate"] {
+        assert!(
+            out.contains(want),
+            "quadrant name {want:?} never reached the terminal:\n{out}"
+        );
+    }
+
+    // The axis labels bd-59o4 fixed must SURVIVE. The names are placed on rows the axis labels do
+    // not use, and a placement that overwrote them would trade one dropped label for another —
+    // the trade this file's kanban case warns about.
+    for want in ["Low", "High", "Top", "Bot"] {
+        assert!(
+            out.contains(want),
+            "axis label {want:?} was displaced by the quadrant names:\n{out}"
+        );
+    }
+}
+
+/// INERT CASE: a quadrant chart that declares NO names must not gain any, and a non-quadrant
+/// diagram must be untouched. Without this, a renderer that invented labels would satisfy the test
+/// above.
+#[test]
+fn a_quadrant_chart_without_names_gains_none() {
+    let ir =
+        fm_parser::parse("quadrantChart\n  title Reach\n  x-axis Low --> High\n  A: [0.3, 0.6]\n")
+            .ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    for unwanted in ["Do it", "Plan it", "Drop it", "Delegate"] {
+        assert!(
+            !out.contains(unwanted),
+            "the renderer invented a quadrant name {unwanted:?} from nowhere:\n{out}"
+        );
+    }
+    // and it must still draw its own content
+    assert!(out.contains("Reach"), "the chart lost its title:\n{out}");
+}

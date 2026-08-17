@@ -1576,6 +1576,12 @@ impl TermRenderer {
         // invented margin would drift from the axis it labels.
         if let Some(quad) = ir.quadrant_meta.as_ref() {
             let bottom = lines.len().saturating_sub(1);
+            // Computed HERE, beside `bottom`, and not at the call sites below: `place` borrows
+            // `lines` mutably for the rest of the block, so reading `lines.len()` after it exists
+            // is a borrow error. Quarter heights keep the quadrant names clear of the axis labels,
+            // which occupy rows 1, `bottom - 1` and `bottom`.
+            let upper_quarter = (lines.len() / 4).max(1);
+            let lower_quarter = lines.len().saturating_mul(3) / 4;
             let mut place = |text: Option<&String>, row: usize, right_aligned: bool| {
                 let Some(text) = text.map(String::as_str).filter(|t| !t.is_empty()) else {
                     return;
@@ -1612,6 +1618,22 @@ impl TermRenderer {
             place(quad.x_axis_right.as_ref(), bottom, true);
             place(quad.y_axis_top.as_ref(), 1, false);
             place(quad.y_axis_bottom.as_ref(), bottom.saturating_sub(1), false);
+
+            // The quadrant NAMES, which this overlay drew none of (bd-039t, third widening of
+            // `renderer_agreement.rs`). bd-59o4 fixed the four AXIS labels here and stopped there,
+            // so `quadrant-1 Do it` reached the SVG and neither the terminal nor the canvas — and
+            // the chart still looked almost right, because the title, the points and the axes were
+            // all present. A quadrant chart whose quadrants are unnamed has lost the thing the
+            // four regions MEAN.
+            //
+            // `quadrant_labels` is documented index-ordered [Q1 top-right, Q2 top-left,
+            // Q3 bottom-left, Q4 bottom-right], so the placement follows the index rather than a
+            // guess; `.get()` rather than indexing, because a chart may declare fewer than four.
+            // Rows come from `upper_quarter`/`lower_quarter`, computed above beside `bottom`.
+            place(quad.quadrant_labels.first(), upper_quarter, true);
+            place(quad.quadrant_labels.get(1), upper_quarter, false);
+            place(quad.quadrant_labels.get(2), lower_quarter, false);
+            place(quad.quadrant_labels.get(3), lower_quarter, true);
         }
 
         // Overlay SEQUENCE NOTE text (bd-59o4).
