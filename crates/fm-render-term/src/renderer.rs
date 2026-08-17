@@ -446,15 +446,6 @@ impl TermRenderer {
         }
     }
 
-    /// Canvas size at the tier's preferred scale.
-    fn layout_to_cell_dimensions(
-        &self,
-        bounds: &fm_layout::LayoutRect,
-        direction: GraphDirection,
-    ) -> (usize, usize, f32, f32) {
-        self.cell_dimensions_scaled(bounds, direction, 1.0)
-    }
-
     /// Canvas size, growing toward the viewport only while nodes are still being lost.
     ///
     /// `base_scale` used to act as an absolute CEILING: the canvas was `bounds * base_scale` and the
@@ -1313,6 +1304,65 @@ impl TermRenderer {
                 let col = x + 1 + offset;
                 if col < cell_width {
                     lines[y][col] = ch;
+                }
+            }
+        }
+
+        // Overlay AXIS TICK labels (gantt dates, xychart categories).
+        //
+        // `layout.extensions.axis_ticks` is populated by the gantt and xychart layout arms and drawn
+        // by fm-render-svg, and NOTHING in the terminal renderer referenced it — not the geometry and
+        // not the labels. bd-trsd established what that costs: before it, the complete text content of
+        // the shipped `gantt_basic.svg` was "Roadmap | Design | Build", two bars whose lengths encode
+        // durations no reader could name. That is exactly what `-f term` still rendered for a gantt.
+        //
+        // Same one-cell placement discipline as the band and cluster overlays above: a tick is
+        // written at its own x, and a tick whose label would run past the canvas is CLIPPED rather
+        // than dropped, so a dense axis degrades to fewer readable dates instead of none.
+        //
+        // Ticks are drawn on the row ABOVE the diagram body where one exists, because the tick's own
+        // y in layout space is the top of the chart and the bars start below it; writing at the bar
+        // row would overwrite task names, which is the trade bd-u3fo's kanban case warned about —
+        // one piece of dropped content swapped for another.
+        if !layout.extensions.axis_ticks.is_empty() {
+            let mut last_end: Option<usize> = None;
+            for tick in &layout.extensions.axis_ticks {
+                if tick.label.is_empty() {
+                    continue;
+                }
+                let (x, y, _w, _h) = self.bounds_to_cells(
+                    &fm_layout::LayoutRect {
+                        x: tick.position,
+                        y: layout.bounds.y,
+                        width: 0.0,
+                        height: 0.0,
+                    },
+                    scale_x,
+                    scale_y,
+                );
+                if y >= lines.len() {
+                    continue;
+                }
+                // Never let two dates collide into an unreadable run: a tick that would start before
+                // the previous one ended is skipped, which thins a dense axis rather than corrupting
+                // it. The FIRST tick always survives, so an axis is never emptied by this rule.
+                if let Some(end) = last_end
+                    && x <= end
+                {
+                    continue;
+                }
+                let label: String = self.truncate_label(&tick.label).chars().collect();
+                let mut written = 0usize;
+                for (offset, ch) in label.chars().enumerate() {
+                    let col = x + offset;
+                    if col >= cell_width || col >= lines[y].len() {
+                        break;
+                    }
+                    lines[y][col] = ch;
+                    written = offset + 1;
+                }
+                if written > 0 {
+                    last_end = Some(x + written);
                 }
             }
         }
