@@ -8435,14 +8435,41 @@ fn layout_diagram_kanban_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             let (min_x, min_y, max_x, max_y) = *rank_bounds.get(&rank)?;
             Some(LayoutBand {
                 kind: LayoutBandKind::Lane,
-                // `format!("lane {}", rank + 1)` per lane went through the Formatter (~15% of
-                // journey/kanban layout: format_inner + fmt::write). Build it directly; byte-identical
-                // (`push_usize_decimal` == `usize`'s Display).
-                label: {
-                    let mut label = String::from("lane ");
-                    fm_core::push_usize_decimal(&mut label, rank + 1);
-                    label
-                },
+                // THE BAND CARRIES THE DECLARED COLUMN NAME, not a generated placeholder (bd-u3fo).
+                //
+                // This was unconditionally `lane 1`, `lane 2`, … so a kanban column the user named
+                // `Alpha` reached the band as `lane 1`. The name was not merely undrawn — it never
+                // arrived, so no renderer could recover it however carefully it read the band. That
+                // is why the visible symptom (terminal draws no column name) has a cause in layout.
+                //
+                // The kanban parser interns each column header as a SUBGRAPH carrying the declared
+                // name (`ensure_subgraph`) and every card in that column is a member, so the name is
+                // recoverable from any node in the rank: node -> innermost subgraph -> title label.
+                // `last()` takes the innermost enclosing subgraph, matching how ownership is
+                // resolved elsewhere in this file.
+                //
+                // The old placeholder is kept as the FALLBACK for a rank whose nodes sit outside any
+                // column, which is what a card declared before the first header looks like. That
+                // keeps such a band labelled rather than blank, so this cannot turn a missing name
+                // into a missing band. The fallback also preserves the `push_usize_decimal` build
+                // that replaced `format!` here for cost reasons — it is byte-identical to the old
+                // label and is still the only path that allocates a formatted string.
+                label: nodes_by_rank
+                    .get(rank)
+                    .and_then(|nodes| nodes.first().copied())
+                    .and_then(|node_index| ir.graph.nodes.get(node_index))
+                    .and_then(|graph_node| graph_node.subgraphs.last().copied())
+                    .and_then(|subgraph_id| ir.graph.subgraphs.get(subgraph_id.0))
+                    .and_then(|subgraph| subgraph.title)
+                    .and_then(|label_id| ir.labels.get(label_id.0))
+                    .map_or_else(
+                        || {
+                            let mut label = String::from("lane ");
+                            fm_core::push_usize_decimal(&mut label, rank + 1);
+                            label
+                        },
+                        |label| label.text.clone(),
+                    ),
                 bounds: LayoutRect {
                     x: min_x - 20.0,
                     y: min_y - 20.0,
@@ -19484,6 +19511,102 @@ mod tests {
     /// strictly worse than the no-axis state bd-trsd found, because a wrong axis is still read as
     /// authoritative. Ticks were emitted in raw day-space while the bars were normalized, so every
     /// tick was >= 20px left of the day it named.
+    /// A kanban lane band must carry the DECLARED column name, not a generated placeholder
+    /// (bd-u3fo).
+    ///
+    /// The label was unconditionally `lane 1`, `lane 2`, … so a column the user named `Alpha`
+    /// reached the band as `lane 1`. The name was not merely undrawn — it never arrived, so no
+    /// renderer could recover it. That is why a terminal-rendering symptom has its cause here.
+    ///
+    /// ⚠️ Note for anyone grepping: the bead describes this label as `column N`. That string is in
+    /// `layout_diagram_sankey_traced`, a different diagram type; the kanban placeholder is
+    /// `lane N`. I patched the sankey one first by mistake and reverted it — the two look alike and
+    /// only one is this bug.
+    #[test]
+    fn kanban_lane_bands_carry_the_declared_column_name() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Kanban);
+        for text in ["Alpha", "Beta", "Card1", "Card2"] {
+            ir.labels.push(IrLabel {
+                text: text.to_string(),
+                ..IrLabel::default()
+            });
+        }
+        for (node_id, label) in [("t1", IrLabelId(2)), ("t2", IrLabelId(3))] {
+            ir.nodes.push(IrNode {
+                id: node_id.to_string(),
+                label: Some(label),
+                ..IrNode::default()
+            });
+        }
+        // An edge separates the two cards into different RANKS; ranking here is edge-driven, so
+        // without it both land in rank 0 and only one band is produced.
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            ..IrEdge::default()
+        });
+        for subgraph_index in 0..2usize {
+            ir.graph.nodes.push(IrGraphNode {
+                subgraphs: vec![IrSubgraphId(subgraph_index)],
+                ..IrGraphNode::default()
+            });
+            ir.graph.subgraphs.push(IrSubgraph {
+                id: IrSubgraphId(subgraph_index),
+                key: format!("col{subgraph_index}"),
+                title: Some(IrLabelId(subgraph_index)),
+                members: vec![IrNodeId(subgraph_index)],
+                ..IrSubgraph::default()
+            });
+        }
+
+        let layout = crate::layout_diagram_kanban_traced(&ir).layout;
+        let labels: Vec<&str> = layout
+            .extensions
+            .bands
+            .iter()
+            .map(|band| band.label.as_str())
+            .collect();
+
+        assert!(
+            labels.contains(&"Alpha") && labels.contains(&"Beta"),
+            "lane bands lost their declared column names: {labels:?}"
+        );
+        // The placeholder must be GONE, not merely joined by the real names. Asserting only that
+        // "Alpha" appears would pass on a band labelled `lane 1` plus a second band that happened
+        // to carry it.
+        assert!(
+            !labels.iter().any(|label| label.starts_with("lane ")),
+            "a generated placeholder survived alongside the declared names: {labels:?}"
+        );
+    }
+
+    /// Control for the fallback: a card outside any column must still produce a LABELLED band.
+    /// Without this, the recovery above could be "fixed" by emitting an empty label whenever the
+    /// subgraph lookup misses, which trades a wrong name for a blank one.
+    #[test]
+    fn kanban_lane_band_falls_back_when_a_card_has_no_column() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Kanban);
+        ir.labels.push(IrLabel {
+            text: "Orphan".to_string(),
+            ..IrLabel::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "t1".to_string(),
+            label: Some(IrLabelId(0)),
+            ..IrNode::default()
+        });
+        ir.graph.nodes.push(IrGraphNode::default());
+
+        let layout = crate::layout_diagram_kanban_traced(&ir).layout;
+        for band in &layout.extensions.bands {
+            assert!(
+                !band.label.is_empty(),
+                "an uncolumned card produced a blank band label"
+            );
+        }
+    }
+
     #[test]
     fn gantt_axis_ticks_land_on_the_bars_they_index() {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Gantt);
