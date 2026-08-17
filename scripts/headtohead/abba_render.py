@@ -61,6 +61,7 @@ import subprocess
 import sys
 
 BENCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mermaid_bench.mjs")
+PICK_PINS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pick_pins.mjs")
 
 # Physics ceiling from the work-proof gate: no single observed thread emits more than this.
 MAX_BYTES_PER_NS = 512.0
@@ -103,6 +104,23 @@ def conditions() -> dict:
     return {"loadavg": loadavg(), "mhz": cpu_mhz()}
 
 
+def pick_pins(size: int = 8) -> dict | None:
+    """Cores for both arms, chosen by the SAME rule run.mjs uses.
+
+    Delegates to `pick_pins.mjs`, which imports `cpu_selection.mjs`, rather than reimplementing the
+    choice here. Two implementations of "which core" is precisely how the arms ended up under
+    different clock regimes (bd-hmfi): ours pinned to the 1429 MHz floor while the incumbent ran
+    unpinned on boosted cores.
+    """
+    try:
+        out = subprocess.run(
+            ["node", PICK_PINS, str(size)], capture_output=True, text=True, check=False
+        )
+        return json.loads(out.stdout.strip().splitlines()[-1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def _records(stdout: str, case_id: str):
     for line in stdout.splitlines():
         line = line.strip()
@@ -116,10 +134,13 @@ def _records(stdout: str, case_id: str):
             yield record
 
 
-def fm_arm(fm_bin: str, corpus: str, case_id: str) -> dict:
+def fm_arm(fm_bin: str, corpus: str, case_id: str, pins: dict | None = None) -> dict:
     """FrankenMermaid full pipeline, with the counted work proof read from the same record."""
     before = conditions()
-    proc = subprocess.run([fm_bin, corpus], capture_output=True, text=True, check=False)
+    argv = [fm_bin, corpus]
+    if pins and pins.get("fm_cpu") is not None:
+        argv = ["taskset", "-c", str(pins["fm_cpu"]), *argv]
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False)
     after = conditions()
     ns = None
     work = None
@@ -133,15 +154,15 @@ def fm_arm(fm_bin: str, corpus: str, case_id: str) -> dict:
     return {"ns": ns, "work": work, "before": before, "after": after, "code": proc.returncode}
 
 
-def mermaid_arm(case_id: str, reps: int) -> dict:
+def mermaid_arm(case_id: str, reps: int, pins: dict | None = None) -> dict:
     """Pinned mermaid-js render through chromium via CDP -- the same boundary as the fm arm."""
     before = conditions()
-    proc = subprocess.run(
-        ["node", BENCH, "--only", case_id, "--reps", str(reps)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    argv = ["node", BENCH, "--only", case_id, "--reps", str(reps)]
+    if pins and pins.get("incumbent_cpus"):
+        # A cpuset, not a single core: Chromium is multi-process, and starving it would slow the
+        # INCUMBENT and inflate our ratio -- an over-claim in our own favour.
+        argv = ["taskset", "-c", ",".join(str(c) for c in pins["incumbent_cpus"]), *argv]
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False)
     after = conditions()
     ns = None
     null_ci = None
@@ -187,16 +208,32 @@ def main() -> int:
     parser.add_argument("--corpus", required=True, help="corpus json consumed by --fm-bin")
     parser.add_argument("--case", default="sequence_20", help="corpus case id (default sequence_20)")
     parser.add_argument("--reps", type=int, default=9, help="mermaid reps per arm")
+    parser.add_argument(
+        "--incumbent-cpus", type=int, default=8, help="cpuset size for the incumbent arm"
+    )
+    parser.add_argument(
+        "--no-pin", action="store_true", help="run both arms unpinned (the pre-bd-hmfi behaviour)"
+    )
     args = parser.parse_args()
 
     print("=== A/B/B/A, one invocation, RENDER-scoped, UNCERTIFIED (no host-exclusivity gate) ===")
-    a1 = fm_arm(args.fm_bin, args.corpus, args.case)
+    pins = None if args.no_pin else pick_pins(args.incumbent_cpus)
+    if pins is None:
+        print("PINS: none -- both arms run unpinned (symmetric, but clocks uncontrolled)")
+    else:
+        print(
+            f"PINS: fm cpu{pins['fm_cpu']} @ {pins['fm_mhz']} MHz ({pins['fm_rule']}); "
+            f"incumbent {len(pins['incumbent_cpus'])} cpus {pins['incumbent_cpus']}, "
+            f"slowest {pins['incumbent_min_mhz']} MHz, starved={pins['incumbent_starved']}; "
+            f"host spread {pins['host_spread']}x, {pins['busy_cpus_over_20pct']}/{pins['total_cpus']} cpus busy"
+        )
+    a1 = fm_arm(args.fm_bin, args.corpus, args.case, pins)
     print(f"A1 fm      ns={a1['ns']} work={a1['work']} load={a1['before']['loadavg']} mhz={a1['before']['mhz']}")
-    b1 = mermaid_arm(args.case, args.reps)
+    b1 = mermaid_arm(args.case, args.reps, pins)
     print(f"B1 mermaid ns={b1['ns']} load={b1['before']['loadavg']} mhz={b1['before']['mhz']}")
-    b2 = mermaid_arm(args.case, args.reps)
+    b2 = mermaid_arm(args.case, args.reps, pins)
     print(f"B2 mermaid ns={b2['ns']} load={b2['before']['loadavg']} mhz={b2['before']['mhz']}")
-    a2 = fm_arm(args.fm_bin, args.corpus, args.case)
+    a2 = fm_arm(args.fm_bin, args.corpus, args.case, pins)
     print(f"A2 fm      ns={a2['ns']} work={a2['work']} load={a2['before']['loadavg']} mhz={a2['before']['mhz']}")
 
     for name, arm in (("A1", a1), ("A2", a2)):
