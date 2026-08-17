@@ -329,8 +329,38 @@ fn a_gantt_section_shows_its_name_in_terminal() {
     )
     .ir;
     let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 100, 40).output;
+    // ⚠️ `Zulu` IS EXACTLY 4 CHARACTERS, and that is why this passes. The band label is capped at
+    // the band's cell width (6 cells here), so any longer section name is truncated — see
+    // `gantt_section_name_is_truncated_to_the_band_width` (bd-039t). This test is kept because it
+    // still guards the label reaching the canvas at all and being drawn once, but it must NOT be
+    // read as evidence that section names render correctly.
     assert!(out.contains("Zulu"), "the section name is missing from terminal output");
     assert_eq!(out.matches("Zulu").count(), 1, "the section name was drawn more than once");
+}
+
+/// A gantt section name LONGER than the band is truncated (bd-039t).
+///
+/// Measured: the surviving prefix is 4 characters regardless of the name — `Build` draws as `Buil`,
+/// `Engineering` as `Engi` — because the band-label overlay caps the label at the band's own cell
+/// width and a gantt section band is 6 cells wide in subcell mode.
+///
+/// ⚠️ `#[ignore]` BECAUSE IT REPRODUCES A LIVE DEFECT. Removing the cap was tried and reverted: it
+/// displaced content and broke `band_label_overlay_does_not_invent_or_displace` and
+/// `a_sequence_diagram_is_unaffected_by_the_axis_overlay`, and it did not fix this case either. The
+/// cap is load-bearing; the fix has to place the label where there IS room.
+#[test]
+#[ignore = "bd-039t: gantt section names longer than the band are truncated to 4 characters"]
+fn gantt_section_name_is_truncated_to_the_band_width() {
+    let ir = fm_parser::parse(
+        "gantt\n  dateFormat YYYY-MM-DD\n  section Engineering\n  Task :a, 2026-01-01, 5d\n",
+    )
+    .ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 100, 40).output;
+
+    assert!(
+        out.contains("Engineering"),
+        "the section name is truncated in terminal output:\n{out}"
+    );
 }
 
 /// A requirement's declared FIELDS must reach terminal output (bd-039t).

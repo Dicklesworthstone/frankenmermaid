@@ -1352,6 +1352,20 @@ impl TermRenderer {
             // all-or-nothing guard silently discarded exactly the labels this fix exists to draw.
             // The band's own width is the budget, so a label can still never spill across a
             // neighbouring band's geometry.
+            // FIT the label to the band rather than dropping it. A gantt section band spans the
+            // whole chart and has room to spare; a kanban column band is one card wide, so an
+            // all-or-nothing guard silently discarded exactly the labels this fix exists to draw.
+            // The band's own width is the budget, so a label can still never spill across a
+            // neighbouring band's geometry.
+            //
+            // ⚠️ THE CAP IS LOAD-BEARING AND TRUNCATES (bd-039t). Measured: a gantt section band is
+            // SIX cells wide here, so `Build` draws as `Buil` and `Engineering` as `Engi` — the
+            // surviving prefix is 4 characters regardless of name length. Removing the cap was
+            // TRIED and reverted: writing along the row displaces content and breaks both
+            // `band_label_overlay_does_not_invent_or_displace` and
+            // `a_sequence_diagram_is_unaffected_by_the_axis_overlay`, and it did not even fix the
+            // gantt case. A real fix needs the label placed where there IS room, not merely allowed
+            // to overrun. Pinned by `gantt_section_name_is_truncated_to_the_band_width`.
             let budget = w - 2;
             let label: String = self.truncate_label(&band.label).chars().take(budget).collect();
             for (offset, ch) in label.chars().enumerate() {
