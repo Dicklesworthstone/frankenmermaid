@@ -226,6 +226,9 @@ impl Canvas2dRenderer {
         // Draw stateDiagram notes.
         self.draw_state_notes(layout, ctx, offset_x, offset_y);
 
+        // Draw the extra rows of packet fields that wrap across a 32-bit boundary.
+        self.draw_packet_field_continuations(layout, ir, ctx, offset_x, offset_y);
+
         // Draw sequence activation bars.
         self.draw_activation_bars(layout, ctx, offset_x, offset_y);
 
@@ -825,6 +828,64 @@ impl Canvas2dRenderer {
     /// Ticks are drawn at the TOP of the layout bounds, above the bars, for the same reason the
     /// terminal draws them there: writing at the bar row would overwrite task names, trading one
     /// piece of dropped content for another.
+    /// Draw the extra rows of a packet field that crosses a 32-bit boundary.
+    ///
+    /// `extensions.packet_field_continuations` gives one box per additional row a field occupies, and
+    /// fm-render-svg draws each with its label. This renderer drew only the primary box (bd-t1jj), so
+    /// on the terminal side the same omission rendered a 24-bit field with the extent of an 8-bit one:
+    /// primary at (768, 0, 256, 55), continuation at (0, 70, 512, 55), and only the 256-wide box drawn.
+    ///
+    /// That is not a missing decoration. A packet diagram exists to show how wide each field is, so
+    /// dropping most of a field's extent misstates the one thing the diagram is for. The label is
+    /// drawn on the continuation too, matching the SVG arm: a second box on a later row with no name
+    /// in it does not say WHICH field wrapped, which is the only thing a reader needs from it.
+    fn draw_packet_field_continuations<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ir: &MermaidDiagramIr,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) {
+        if layout.extensions.packet_field_continuations.is_empty() {
+            return;
+        }
+        let mut field_font: Option<String> = None;
+        for continuation in &layout.extensions.packet_field_continuations {
+            let x = f64::from(continuation.bounds.x) + offset_x;
+            let y = f64::from(continuation.bounds.y) + offset_y;
+            let w = f64::from(continuation.bounds.width);
+            let h = f64::from(continuation.bounds.height);
+            if w <= 0.0 || h <= 0.0 {
+                continue;
+            }
+
+            ctx.set_fill_style(&self.config.node_fill);
+            ctx.fill_rect(x, y, w, h);
+            ctx.set_stroke_style(&self.config.node_stroke);
+            ctx.set_line_width(self.config.node_stroke_width);
+            ctx.stroke_rect(x, y, w, h);
+            self.draw_calls += 2;
+
+            let Some(node) = ir.nodes.get(continuation.node_index) else {
+                continue;
+            };
+            let label = node
+                .label
+                .and_then(|label_id| ir.labels.get(label_id.0))
+                .map_or(node.id.as_str(), |label| label.text.as_str());
+            if label.is_empty() {
+                continue;
+            }
+            ctx.set_fill_style(&self.config.label_color);
+            ctx.set_font(field_font.get_or_insert_with(|| standard_node_font(&self.config)));
+            ctx.set_text_align(TextAlign::Center);
+            ctx.set_text_baseline(TextBaseline::Middle);
+            ctx.fill_text(label, x + w / 2.0, y + h / 2.0);
+            self.draw_calls += 1;
+        }
+    }
+
     fn draw_axis_ticks<C: Canvas2dContext>(
         &mut self,
         layout: &DiagramLayout,
@@ -3409,6 +3470,70 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+
+    /// A packet field that wraps across a 32-bit boundary must be drawn on BOTH rows (bd-t1jj).
+    ///
+    /// `extensions.packet_field_continuations` gives one box per extra row; this renderer drew only
+    /// the primary. On the terminal side the same omission rendered a 24-bit field with the extent of
+    /// an 8-bit one. A packet diagram exists to show how wide each field is, so dropping most of a
+    /// field's extent misstates the one thing the diagram is for.
+    ///
+    /// ASSERTED BY OCCURRENCE COUNT, which is what separates a drawn continuation from a drawn
+    /// primary: the wrapped field's name must be drawn TWICE, once per segment, while fields that do
+    /// not wrap are drawn once. A presence check would have PASSED before the fix, because the
+    /// primary box always carried the name -- the defect was extent, not presence.
+    #[test]
+    fn canvas_draws_a_wrapped_packet_field_on_both_rows() {
+        let src = "packet-beta\n  0-15: \"SourcePort\"\n  16-23: \"Flags\"\n  24-47: \"CrossingField\"\n  48-63: \"Checksum\"\n";
+        let ir = fm_parser::parse(src).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+
+        // NON-VACUITY: layout must actually emit a continuation for this fixture.
+        assert_eq!(
+            layout.extensions.packet_field_continuations.len(),
+            1,
+            "CONTROL FAILED: expected one continuation for a field crossing the 32-bit boundary"
+        );
+
+        let mut ctx = MockCanvas2dContext::new(1400.0, 700.0);
+        let _ = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &CanvasRenderConfig::default());
+        let count = |needle: &str| {
+            ctx.operations()
+                .iter()
+                .filter(|op| matches!(op, DrawOperation::FillText(t, _, _) if t.contains(needle)))
+                .count()
+        };
+        assert_eq!(
+            count("CrossingField"),
+            2,
+            "the wrapped field was drawn on one row only, so its extent is understated"
+        );
+        // Fields that do NOT wrap must still be drawn once -- a continuation pass that labelled every
+        // field twice would satisfy the assertion above while corrupting the rest of the packet.
+        assert_eq!(count("SourcePort"), 1, "an unwrapped field was duplicated");
+        assert_eq!(count("Checksum"), 1, "an unwrapped field was duplicated");
+    }
+
+    /// A packet whose fields all fit one row gains no continuation.
+    #[test]
+    fn canvas_unwrapped_packet_gains_no_continuation() {
+        let src = "packet-beta\n  0-15: \"SourcePort\"\n  16-31: \"DestPort\"\n";
+        let ir = fm_parser::parse(src).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        assert!(
+            layout.extensions.packet_field_continuations.is_empty(),
+            "CONTROL FAILED: this packet produced a continuation, so it cannot show the pass is inert"
+        );
+        let mut ctx = MockCanvas2dContext::new(1400.0, 700.0);
+        let _ = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &CanvasRenderConfig::default());
+        let drawn = ctx
+            .operations()
+            .iter()
+            .filter(|op| matches!(op, DrawOperation::FillText(t, _, _) if t.contains("SourcePort")))
+            .count();
+        assert_eq!(drawn, 1, "a field was duplicated although nothing wrapped");
     }
 
 
