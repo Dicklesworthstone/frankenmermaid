@@ -18432,6 +18432,53 @@ Rel_Back(db, app, "Responds")"#,
     /// Every commit node carries a lane, and the lane matches the branch it was committed on
     /// (bd-5wbp). Layout turns these into columns; a missing entry silently means lane 0, which is
     /// how merge commits used to end up drawn in main's column with no branch attribution at all.
+    /// The DECLARED `dateFormat` must SELECT the interpretation of an ambiguous literal.
+    ///
+    /// The existing coverage nearby pins the mismatch WARNING (a `DD-MM-YYYY` declaration with an
+    /// ISO date in the body) and a matching-format control. Neither pins the case where the literal
+    /// is valid under BOTH readings, which is the one that matters: `05-03-2024` is 5 March under
+    /// `DD-MM-YYYY` and 3 May under `MM-DD-YYYY`, and nothing about the string itself can decide
+    /// between them. Only the declaration can.
+    ///
+    /// That is exactly what a refactor to "sniff the format from the literal" would break, and
+    /// sniffing is the tempting shortcut because it works on every unambiguous date in the corpus.
+    /// It would produce a chart that is silently three weeks wrong, with no warning, because both
+    /// readings parse. Verified against the incumbent's semantics: mermaid parses gantt dates with
+    /// the declared format, not by inference.
+    #[test]
+    fn gantt_date_format_decides_an_ambiguous_literal() {
+        let start_of = |source: &str| {
+            parse_mermaid(source)
+                .ir
+                .gantt_meta
+                .as_ref()
+                .and_then(|meta| meta.tasks.first().and_then(|task| task.start.clone()))
+        };
+
+        let day_month =
+            start_of("gantt\n  dateFormat DD-MM-YYYY\n  section S\n    T : t1, 05-03-2024, 3d\n");
+        let month_day =
+            start_of("gantt\n  dateFormat MM-DD-YYYY\n  section S\n    T : t1, 05-03-2024, 3d\n");
+
+        assert_eq!(
+            day_month,
+            Some(GanttDate::Absolute("2024-03-05".to_string())),
+            "DD-MM-YYYY must read 05-03-2024 as 5 March"
+        );
+        assert_eq!(
+            month_day,
+            Some(GanttDate::Absolute("2024-05-03".to_string())),
+            "MM-DD-YYYY must read 05-03-2024 as 3 May"
+        );
+        // The whole point: the SAME literal must land on DIFFERENT dates. Asserting only the two
+        // values above would still pass if a future normalisation collapsed both to one of them
+        // and the expectations were updated to match.
+        assert_ne!(
+            day_month, month_day,
+            "the declared dateFormat is being ignored — one literal, one answer, so the format is              guessed rather than read"
+        );
+    }
+
     /// Re-declaring an existing branch must WARN, not pass in silence (bd-64h3).
     ///
     /// mermaid rejects a duplicate `branch` outright. We stay permissive and render, but the user
