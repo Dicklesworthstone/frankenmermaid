@@ -226,6 +226,9 @@ impl Canvas2dRenderer {
         // Draw stateDiagram notes.
         self.draw_state_notes(layout, ctx, offset_x, offset_y);
 
+        // Draw the mirrored participant headers at the foot of a sequence diagram.
+        self.draw_sequence_mirror_headers(layout, ir, ctx, offset_x, offset_y);
+
         // Draw the extra rows of packet fields that wrap across a 32-bit boundary.
         self.draw_packet_field_continuations(layout, ir, ctx, offset_x, offset_y);
 
@@ -828,6 +831,67 @@ impl Canvas2dRenderer {
     /// Ticks are drawn at the TOP of the layout bounds, above the bars, for the same reason the
     /// terminal draws them there: writing at the bar row would overwrite task names, trading one
     /// piece of dropped content for another.
+    /// Draw the participant headers mirrored at the FOOT of a sequence diagram.
+    ///
+    /// `extensions.sequence_mirror_headers` is a `Vec<LayoutNodeBox>` filled by the sequence layout
+    /// arm and rendered by fm-render-svg through the same node renderer it uses for the top row. This
+    /// renderer referenced it nowhere (bd-t1jj), and canvas is the browser preview surface that
+    /// fm-wasm renders through.
+    ///
+    /// mermaid draws that bottom row, and it is not ornamental: on a long sequence diagram the top
+    /// headers scroll out of view, and without the mirrored row the reader has no way to tell which
+    /// lifeline is which. Its absence is most costly exactly where the diagram is largest.
+    fn draw_sequence_mirror_headers<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ir: &MermaidDiagramIr,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) {
+        if layout.extensions.sequence_mirror_headers.is_empty() {
+            return;
+        }
+        let mut header_font: Option<String> = None;
+        for node_box in &layout.extensions.sequence_mirror_headers {
+            let x = f64::from(node_box.bounds.x) + offset_x;
+            let y = f64::from(node_box.bounds.y) + offset_y;
+            let w = f64::from(node_box.bounds.width);
+            let h = f64::from(node_box.bounds.height);
+            if w <= 0.0 || h <= 0.0 {
+                continue;
+            }
+
+            ctx.set_fill_style(&self.config.node_fill);
+            ctx.fill_rect(x, y, w, h);
+            ctx.set_stroke_style(&self.config.node_stroke);
+            ctx.set_line_width(self.config.node_stroke_width);
+            ctx.stroke_rect(x, y, w, h);
+            self.draw_calls += 2;
+
+            // The label comes from the IR node this header mirrors, so the foot row cannot drift from
+            // the head row: both name the same participant from the same source.
+            let label = ir
+                .nodes
+                .get(node_box.node_index)
+                .map(|node| {
+                    node.label
+                        .and_then(|label_id| ir.labels.get(label_id.0))
+                        .map_or(node.id.as_str(), |label| label.text.as_str())
+                })
+                .unwrap_or(node_box.node_id.as_str());
+            if label.is_empty() {
+                continue;
+            }
+            ctx.set_fill_style(&self.config.label_color);
+            ctx.set_font(header_font.get_or_insert_with(|| standard_node_font(&self.config)));
+            ctx.set_text_align(TextAlign::Center);
+            ctx.set_text_baseline(TextBaseline::Middle);
+            ctx.fill_text(label, x + w / 2.0, y + h / 2.0);
+            self.draw_calls += 1;
+        }
+    }
+
     /// Draw the extra rows of a packet field that crosses a 32-bit boundary.
     ///
     /// `extensions.packet_field_continuations` gives one box per additional row a field occupies, and
@@ -3534,6 +3598,66 @@ mod tests {
             .filter(|op| matches!(op, DrawOperation::FillText(t, _, _) if t.contains("SourcePort")))
             .count();
         assert_eq!(drawn, 1, "a field was duplicated although nothing wrapped");
+    }
+
+
+    /// A sequence diagram's participant headers must be mirrored at the FOOT on canvas (bd-t1jj).
+    ///
+    /// `extensions.sequence_mirror_headers` is filled by the sequence layout arm and rendered by
+    /// fm-render-svg through the same node renderer it uses for the top row; this renderer referenced
+    /// it nowhere. mermaid draws that bottom row, and it is not ornamental: on a long diagram the top
+    /// headers scroll out of view and the reader loses track of which lifeline is which.
+    ///
+    /// ASSERTED BY OCCURRENCE COUNT -- each participant must be drawn TWICE, head and foot. That is
+    /// the only signal that separates a drawn mirror header from the ordinary node that was always
+    /// there; a presence check passes on the unfixed renderer.
+    #[test]
+    fn canvas_mirrors_sequence_participant_headers() {
+        let ir = fm_parser::parse(
+            // `mirrorActors` must be enabled explicitly: this engine defaults it to FALSE, so a plain
+            // sequence diagram publishes no mirror headers and the fixture would test nothing.
+            // mermaid's own default is true -- a separate divergence, noted on bd-t1jj.
+            "%%{init: {\"sequence\": {\"mirrorActors\": true}}}%%\nsequenceDiagram\n  participant Alice\n  participant Bob\n  Alice->>Bob: Hi\n  Bob->>Alice: Bye\n",
+        )
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+
+        // NON-VACUITY: the layout must actually publish mirror headers for this source.
+        assert!(
+            !layout.extensions.sequence_mirror_headers.is_empty(),
+            "CONTROL FAILED: this sequence produced no mirror headers, so the renderer has nothing \
+             to draw and this test cannot detect the defect it was written for"
+        );
+
+        let mut ctx = MockCanvas2dContext::new(1200.0, 800.0);
+        let _ = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &CanvasRenderConfig::default());
+        let count = |needle: &str| {
+            ctx.operations()
+                .iter()
+                .filter(|op| matches!(op, DrawOperation::FillText(t, _, _) if t == needle))
+                .count()
+        };
+        assert_eq!(count("Alice"), 2, "Alice was not drawn at both head and foot");
+        assert_eq!(count("Bob"), 2, "Bob was not drawn at both head and foot");
+    }
+
+    /// A flowchart draws each node label once -- the mirror pass must be inert for it.
+    #[test]
+    fn canvas_flowchart_nodes_are_not_mirrored() {
+        let ir = fm_parser::parse("flowchart LR\n  A[Alpha] --> B[Beta]\n").ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        assert!(
+            layout.extensions.sequence_mirror_headers.is_empty(),
+            "CONTROL FAILED: a flowchart produced mirror headers"
+        );
+        let mut ctx = MockCanvas2dContext::new(800.0, 400.0);
+        let _ = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &CanvasRenderConfig::default());
+        let alpha = ctx
+            .operations()
+            .iter()
+            .filter(|op| matches!(op, DrawOperation::FillText(t, _, _) if t == "Alpha"))
+            .count();
+        assert_eq!(alpha, 1, "a flowchart label was mirrored");
     }
 
 
