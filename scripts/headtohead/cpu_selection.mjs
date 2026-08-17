@@ -107,3 +107,39 @@ export function selectPinnedCpuSet(records, size = 8, targetMhz = null) {
         : 'fastest_clocks_in_idle_band',
   };
 }
+
+/// How far below the host's peak clock the measured arm actually ran.
+///
+/// ⚠️ THIS IS A DISCLOSURE, NOT A FIX, and the distinction is the point. Our arm is pinned to an IDLE
+/// core, and under per-core DVFS idle cores are BY DEFINITION the parked ones -- measured live,
+/// 2397 MHz against a host maximum of 4217. So the measured arm systematically runs below the clock a
+/// busy, boosted core would give it, and every ratio we quote UNDERSTATES our engine. That direction
+/// is conservative, so no banked row is threatened, but until now the quantity appeared in no row at
+/// all.
+///
+/// Fixing it means either warming the target core before measuring or accepting the floor -- both
+/// judgements about method that belong to whoever owns the row, not to the code. Reporting it is
+/// neither: it just stops the number being invisible.
+///
+/// `ratio` is chosen/peak, so 1.0 means the arm got the fastest clock on the box and 0.57 means it
+/// ran at 57% of it. `at_peak` is true only when the arm is within 2% of the maximum, which is the
+/// case where the caveat can honestly be omitted from a row.
+export function clockHeadroom(chosenMhz, hostMaxMhz) {
+  if (
+    typeof chosenMhz !== 'number' ||
+    typeof hostMaxMhz !== 'number' ||
+    chosenMhz <= 0 ||
+    hostMaxMhz <= 0
+  ) {
+    return { ratio: null, at_peak: null, note: 'cpufreq unavailable, clock headroom unknown' };
+  }
+  const ratio = Number((chosenMhz / hostMaxMhz).toFixed(3));
+  const at_peak = ratio >= 0.98;
+  return {
+    ratio,
+    at_peak,
+    note: at_peak
+      ? 'measured arm ran at the host peak clock'
+      : `measured arm ran at ${Math.round(ratio * 100)}% of the host peak (${chosenMhz} of ${hostMaxMhz} MHz); the ratio understates this engine`,
+  };
+}

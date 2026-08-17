@@ -8,7 +8,7 @@
 //
 // Reads nothing but /proc/stat and cpufreq, runs no benchmark, and prints one JSON object.
 import { readFileSync } from 'node:fs';
-import { selectPinnedCpu, selectPinnedCpuSet } from './cpu_selection.mjs';
+import { clockHeadroom, selectPinnedCpu, selectPinnedCpuSet } from './cpu_selection.mjs';
 
 function snapshot() {
   const out = new Map();
@@ -80,6 +80,12 @@ console.log(
     host_min_mhz: clocks.length ? Math.min(...clocks) : null,
     host_max_mhz: clocks.length ? Math.max(...clocks) : null,
     host_spread: clocks.length ? Number((Math.max(...clocks) / Math.min(...clocks)).toFixed(3)) : null,
+    // How far below the host peak the MEASURED arm ran. Recorded because it is the direction in which
+    // every ratio we quote is conservative, and it appeared in no row before.
+    clock_headroom: clockHeadroom(
+      single.chosen.mhz ?? null,
+      clocks.length ? Math.max(...clocks) : null,
+    ),
     busy_cpus_over_20pct: records.filter((r) => r.busy >= 0.2).length,
     total_cpus: records.length,
   }),
