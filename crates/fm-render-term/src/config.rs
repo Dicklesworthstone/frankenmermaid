@@ -4,6 +4,21 @@ use fm_core::{MermaidGlyphMode, MermaidRenderMode, MermaidTier};
 
 /// Configuration for terminal diagram rendering.
 #[derive(Debug, Clone)]
+/// ⚠️ THERE IS NO COLOUR OPTION HERE, AND THAT IS THE ANSWER TO "why does the terminal ignore user
+/// styling" (bd-lvj3). The canvas backend was fixed to honour `style`, `classDef` and `inline_style`
+/// by resolving them to a stroke/fill it already had; the terminal has no such channel to resolve
+/// them INTO. Measured: `renderer.rs` emits no ANSI anywhere — its only `\u{1b}` is the INPUT of
+/// `strips_terminal_control_characters_from_labels`, which sanitises user-supplied escapes and says
+/// nothing about the renderer's own output — and the sole ANSI emitter in this crate is the minimap.
+///
+/// So the terminal half of bd-lvj3 is NOT a small follow-up to the canvas fix. It is a new
+/// capability: colour output, which must be OPT-IN because `-f term` is routinely piped to a file
+/// and escape bytes there are corruption, not colour. `MinimapConfig::use_color` (default `false`)
+/// is the precedent to copy if anyone builds it.
+///
+/// The one `classes` reader in this crate, `is_block_beta_space_node`, matches a STRUCTURAL marker
+/// class, not a style — so "the terminal reads `classes` only" describes a layout probe, not partial
+/// styling support.
 pub struct TermRenderConfig {
     /// Rendering fidelity tier (Compact/Normal/Rich/Auto).
     pub tier: MermaidTier,
