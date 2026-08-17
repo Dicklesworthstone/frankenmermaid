@@ -13,7 +13,7 @@
 // item is reported with `status: "error"`, never dropped from the table.
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { selectPinnedCpu } from './cpu_selection.mjs';
+import { selectPinnedCpu, selectPinnedCpuSet } from './cpu_selection.mjs';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { cpus, hostname, loadavg, platform, release, tmpdir, totalmem } from 'node:os';
@@ -2382,6 +2382,29 @@ if (pinArg !== 'off') {
   );
 }
 env.pinned_cpu = pin;
+// THE INCUMBENT GETS A CPUSET CHOSEN BY THE SAME RULE (bd-hmfi defect 1).
+//
+// Only the frankenmermaid arm was pinned; the mermaid-js arm ran under Chromium across every core.
+// The two arms were therefore not merely on different cores but under different CLOCK REGIMES --
+// ours parked at the DVFS floor by the old selection rule, theirs boosted by its own load. Pinning
+// our side alone removed half the asymmetry.
+//
+// ⚠️ SIZE ERRS UPWARD ON PURPOSE. Chromium is multi-process, so too small a set would slow the
+// INCUMBENT and inflate our ratio -- an over-claim in our favour, which is a worse failure than the
+// under-claim this replaces. `--incumbent-cpus` raises it; the default is deliberately generous, and
+// a set that could not be filled is reported as `starved` rather than left to be inferred.
+let incumbentCpuSet = null;
+if (pin) {
+  const requested = Number(arg('incumbent-cpus', '8'));
+  const observed = cpuBusy(300).map((record) => ({ ...record, mhz: cpuMhz(record.cpu) }));
+  incumbentCpuSet = selectPinnedCpuSet(observed, Number.isInteger(requested) && requested > 0 ? requested : 8);
+  console.error(
+    `[run] pinning mermaid-js to ${incumbentCpuSet.cpus.length} cpu(s) [${incumbentCpuSet.cpus.join(',')}]` +
+      `${incumbentCpuSet.min_mhz === null ? '' : `, slowest ${incumbentCpuSet.min_mhz} MHz`}` +
+      `${incumbentCpuSet.starved ? ' -- STARVED: fewer cores than requested, this biases the ratio IN OUR FAVOUR' : ''}`,
+  );
+}
+env.incumbent_cpuset = incumbentCpuSet;
 
 // The preflight output-proof gate lives further down, immediately after `provenanceBinary` is
 // declared and its build-revision gates have run. It is keyed by that ELF sha256, so it cannot be
@@ -2650,7 +2673,9 @@ if (repsScale !== 1) mjsArgs.push('--reps-scale', String(repsScale));
 if (budgetScale !== 1) mjsArgs.push('--js-budget-scale', String(budgetScale));
 const mjs = has('skip-mermaid')
   ? { records: [], code: 0 }
-  : timedPhase('mermaid-js', () => runJsonl('mermaid-js', process.execPath, mjsArgs));
+  : timedPhase('mermaid-js', () => (incumbentCpuSet && incumbentCpuSet.cpus.length > 0
+      ? runJsonl('mermaid-js', 'taskset', ['-c', incumbentCpuSet.cpus.join(','), process.execPath, ...mjsArgs])
+      : runJsonl('mermaid-js', process.execPath, mjsArgs)));
 const fmAfter = has('skip-mermaid')
   ? fmBefore
   // Mirror the before sweep around the incumbent phase. With the same order on both sides, t1

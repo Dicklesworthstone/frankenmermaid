@@ -36,3 +36,47 @@ export function selectPinnedCpu(records) {
   const chosen = withMhz.reduce((best, record) => (record.mhz > best.mhz ? record : best));
   return { chosen, band_size: band.length, rule: 'fastest_clock_among_idle' };
 }
+
+/// Cores to give the INCUMBENT arm, as a set.
+///
+/// Defect 1 of bd-hmfi: only the frankenmermaid arm was pinned. The mermaid-js arm ran under
+/// Chromium across all 64 cores, so the two arms were not merely on different cores, they were under
+/// different clock regimes — ours parked at the DVFS floor by the old selection rule, theirs boosted
+/// by its own load. Fixing our side alone (52b72e34) removed half the asymmetry.
+///
+/// ⚠️ THE SIZING ERROR HERE IS ASYMMETRIC AND ONLY ONE DIRECTION IS SAFE. Chromium is multi-process;
+/// constraining it to too few cores would SLOW THE INCUMBENT and inflate our ratio — an over-claim in
+/// our own favour, which is far worse than the under-claim the old code produced. So the set is
+/// generous by default and never smaller than `min(floor, band)`: when in doubt the incumbent gets
+/// more cores, not fewer.
+///
+/// Returns the fastest `size` cores from the idle band, so both arms are drawn from the same
+/// population by the same rule and differ in count only because one is single-threaded and the other
+/// is a browser.
+export function selectPinnedCpuSet(records, size = 8) {
+  if (!Array.isArray(records) || records.length === 0) {
+    throw new Error('selectPinnedCpuSet requires at least one cpu record');
+  }
+  if (!Number.isInteger(size) || size < 1) {
+    throw new Error('selectPinnedCpuSet size must be a positive integer');
+  }
+  const busy = [...records].sort((a, b) => a.busy - b.busy);
+  const quietest = busy[0].busy;
+  const band = busy.filter((record) => record.busy <= quietest + 0.05);
+  const ranked = band.every((record) => typeof record.mhz === 'number' && record.mhz > 0)
+    ? [...band].sort((a, b) => b.mhz - a.mhz)
+    : band;
+  const chosen = ranked.slice(0, Math.min(size, ranked.length));
+  return {
+    cpus: chosen.map((record) => record.cpu),
+    band_size: band.length,
+    requested: size,
+    // Recorded so a row states plainly whether the incumbent got the cores it asked for. A short set
+    // is the case that would bias in our favour, and it must be visible rather than inferred.
+    starved: chosen.length < size,
+    min_mhz: chosen.length > 0 && typeof chosen[0].mhz === 'number'
+      ? Math.min(...chosen.map((record) => record.mhz))
+      : null,
+    rule: ranked === band ? 'idle_band_no_cpufreq' : 'fastest_clocks_in_idle_band',
+  };
+}
