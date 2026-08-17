@@ -177,6 +177,47 @@ def mermaid_arm(case_id: str, reps: int, pins: dict | None = None) -> dict:
     return {"ns": ns, "null": null_ci, "before": before, "after": after, "code": proc.returncode}
 
 
+def head_revision() -> str | None:
+    """The checked-out revision, or None if this is not a git tree."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+        )
+        rev = out.stdout.strip()
+        return rev if len(rev) == 40 and all(c in "0123456789abcdef" for c in rev) else None
+    except OSError:
+        return None
+
+
+def check_elf_provenance(fm_bin: str, expected_rev: str | None) -> str | None:
+    """Refuse a binary that was not built from the checked-out revision.
+
+    THIS EXISTS BECAUSE ITS ABSENCE COST A CERTIFICATION. `run.mjs` enforces it -- "INVALID: benchmark
+    ELF build revision must match both --fm-build-base and checked-out HEAD" -- and this script did
+    not, so a row could be taken here with a binary built from a different revision and nothing would
+    say so. I hit exactly that: a binary at rev 07768c81 measured against a tree at 6b78da29, and only
+    the certified driver caught it.
+
+    Checked by searching the ELF for the revision string the build embeds, which is the same evidence
+    the provenance gate uses -- the rev must be IN the binary, not merely claimed beside it. An
+    unreadable binary or a non-git tree returns a reason rather than passing silently: a check that
+    cannot run must not report success.
+    """
+    if expected_rev is None:
+        return "cannot determine HEAD revision, so provenance cannot be established"
+    try:
+        with open(fm_bin, "rb") as handle:
+            blob = handle.read()
+    except OSError as error:
+        return f"cannot read {fm_bin}: {error}"
+    if expected_rev.encode("ascii") not in blob:
+        return (
+            f"the binary does not embed HEAD {expected_rev[:8]}; it was built from a different "
+            "revision, so any ratio it produces describes code that is not checked out"
+        )
+    return None
+
+
 def check_work_proof(arm: dict) -> str | None:
     """Refuse to quote a timing the arm did not earn.
 
@@ -214,9 +255,25 @@ def main() -> int:
     parser.add_argument(
         "--no-pin", action="store_true", help="run both arms unpinned (the pre-bd-hmfi behaviour)"
     )
+    parser.add_argument(
+        "--allow-stale-elf",
+        action="store_true",
+        help="measure a binary not built from HEAD; the row must then state which revision it was",
+    )
     args = parser.parse_args()
 
     print("=== A/B/B/A, one invocation, RENDER-scoped, UNCERTIFIED (no host-exclusivity gate) ===")
+    rev = head_revision()
+    provenance = check_elf_provenance(args.fm_bin, rev)
+    if provenance is not None and not args.allow_stale_elf:
+        print(f"REFUSING TO MEASURE: {provenance}")
+        print("Rebuild with FM_H2H_BUILD_GIT_REV=$(git rev-parse HEAD), or pass --allow-stale-elf")
+        print("if you are deliberately measuring an older revision and will say so in the row.")
+        return 2
+    if provenance is None:
+        print(f"PROVENANCE: binary embeds HEAD {rev[:8]}")
+    else:
+        print(f"PROVENANCE OVERRIDDEN: {provenance}")
     pins = None if args.no_pin else pick_pins(args.incumbent_cpus)
     if pins is None:
         print("PINS: none -- both arms run unpinned (symmetric, but clocks uncontrolled)")
