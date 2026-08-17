@@ -3961,6 +3961,12 @@ run 1 medians `0.9922` CI [0.9415, 1.0482] and `1.0153` CI [0.9648, 1.0628]; run
 magnitude. Per-arm loadavg and CPU MHz for every arm are under "Per-arm conditions"; the arms were
 interleaved A/B/B/A in ONE invocation, not compared across runs.
 
+**BOTH ARMS carry same-invocation A/A evidence, not just the incumbent.** The four nulls above are
+the incumbent measured against itself. The measured arm has its own: the `fm drift` column below is
+frankenmermaid's A1 against its A2 within the same interleave — **1.0204x** in run 1 and **1.0481x**
+in run 2. So neither engine's self-variation comes close to the separation being claimed, and the
+comparison does not rest on a null taken from only one side.
+
 **Legacy incumbent arm (same invocation as each measured arm):** name=mermaid-js version=11.15.0
 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de
 securityLevel=strict, runtime Chrome/151.0.7922.108 via /usr/bin/chromium-browser, render mode.
