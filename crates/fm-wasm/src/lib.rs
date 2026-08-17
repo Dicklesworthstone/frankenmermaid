@@ -870,6 +870,12 @@ fn align_canvas_typography_with_svg(
 ) -> CanvasRenderConfig {
     canvas.font_family.clone_from(&svg.font_family);
     canvas.font_size = f64::from(svg.font_size);
+    // The gantt today date rides along with the typography rather than being plumbed separately,
+    // because the requirement is the same one: the two backends must not disagree. A canvas preview
+    // that drew a today line on a different day from the SVG export -- or drew none while the export
+    // did -- would be a divergence between two views of the same diagram (bd-t1jj). Neither renderer
+    // ever reads the clock; the date is supplied, and `None` here means no marker in either.
+    canvas.gantt_today.clone_from(&svg.gantt_today);
     canvas
 }
 

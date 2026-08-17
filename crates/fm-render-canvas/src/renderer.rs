@@ -43,6 +43,13 @@ pub struct CanvasRenderConfig {
     pub label_color: String,
     /// Whether to auto-fit the diagram to the canvas.
     pub auto_fit: bool,
+    /// Today's date, as `YYYY-MM-DD`, for the gantt today marker. `None` draws no marker.
+    ///
+    /// SUPPLIED, NEVER READ FROM THE CLOCK, exactly as `SvgRenderConfig::gantt_today` is. Output
+    /// that is a function of wall time is a defect class this repo has already been bitten by three
+    /// times; a renderer that called `now()` would make every canvas op-stream test depend on the
+    /// day it ran. The default is `None`, so nothing about an existing render changes.
+    pub gantt_today: Option<String>,
 }
 
 impl CanvasRenderConfig {
@@ -79,6 +86,7 @@ impl Default for CanvasRenderConfig {
             cluster_stroke: String::from("rgba(148,163,184,0.78)"),
             label_color: String::from("#0f172a"),
             auto_fit: true,
+            gantt_today: None,
         }
     }
 }
@@ -222,6 +230,9 @@ impl Canvas2dRenderer {
 
         // Draw the time/category axis (gantt dates, xychart categories).
         self.draw_axis_ticks(layout, ctx, offset_x, offset_y);
+
+        // Draw the gantt today marker, on top of the bands and under the bars.
+        self.draw_gantt_today_marker(layout, ir, ctx, offset_x, offset_y);
 
         // Draw stateDiagram notes.
         self.draw_state_notes(layout, ctx, offset_x, offset_y);
@@ -1073,6 +1084,72 @@ impl Canvas2dRenderer {
             ctx.fill_text(&tick.label, f64::from(tick.position) + offset_x, y);
             self.draw_calls += 1;
         }
+    }
+
+    /// Draw the gantt today marker: a vertical line across the chart at the supplied date.
+    ///
+    /// `extensions.gantt_day_axis` was the last field this renderer referenced NOWHERE (bd-t1jj),
+    /// and it is the only thing that answers "where is a given DATE on this chart". So a canvas
+    /// gantt had no today line at all, while the same diagram rendered to SVG had one — and
+    /// `todayMarker off`, which a user writes precisely to turn the line off, was equally invisible
+    /// because there was nothing to turn off. Canvas is a shipping surface: fm-wasm renders the
+    /// browser preview through `render_to_canvas_with_layout`.
+    ///
+    /// FOUR CONDITIONS, mirroring the SVG arm one for one so the two backends cannot disagree about
+    /// whether a marker belongs:
+    ///  1. `config.gantt_today` is supplied. Never the clock — see the field's own doc.
+    ///  2. It parses as a real calendar date via `fm_layout::parse_iso_day_number`, the SAME
+    ///     function the layout used to place the bars, not a second copy of that arithmetic.
+    ///  3. Today falls INSIDE the charted span. `x_for_day` returns `None` otherwise, and drawing
+    ///     nothing is the correct response to "today is not in this chart".
+    ///  4. `todayMarker off` suppresses it.
+    ///
+    /// The x comes from `axis.x_for_day`, never re-derived here. `LayoutGanttDayAxis`'s own doc
+    /// warns that a marker computing its own x is how a today line and its axis come to disagree
+    /// about where a day is.
+    fn draw_gantt_today_marker<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ir: &MermaidDiagramIr,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) {
+        let (Some(today), Some(axis)) = (
+            self.config.gantt_today.as_deref(),
+            layout.extensions.gantt_day_axis,
+        ) else {
+            return;
+        };
+        let style = ir
+            .gantt_meta
+            .as_ref()
+            .and_then(|meta| meta.today_marker_style.as_deref())
+            .unwrap_or("");
+        if style.trim().eq_ignore_ascii_case("off") {
+            return;
+        }
+        let Some(day) = fm_layout::parse_iso_day_number(today) else {
+            return;
+        };
+        let Some(x) = axis.x_for_day(day) else {
+            return;
+        };
+
+        let x = f64::from(x) + offset_x;
+        let top = f64::from(layout.bounds.y) + offset_y + 12.0;
+        let bottom = f64::from(layout.bounds.y + layout.bounds.height) + offset_y;
+
+        // mermaid's own red today line, matching the SVG arm's fallback. A declared style string is
+        // CSS and has no canvas equivalent, so it is not half-applied here: honouring `off` and
+        // ignoring the colouring is a smaller divergence than inventing a CSS parser in this crate.
+        ctx.set_stroke_style("#ff0000");
+        ctx.set_line_width(2.0);
+        ctx.begin_path();
+        ctx.move_to(x, top);
+        ctx.line_to(x, bottom);
+        ctx.stroke();
+        self.draw_calls += 1;
     }
 
     /// Draw stateDiagram notes -- box, leader and text.
@@ -4003,5 +4080,174 @@ mod tests {
         assert_eq!(alpha, 1, "a flowchart label was mirrored");
     }
 
+    const GANTT_CHART: &str = "gantt\n  title Roadmap\n  dateFormat  YYYY-MM-DD\n  section Core\n  Design :a1, 2026-01-01, 3d\n  Build :a2, after a1, 4d\n";
 
+    /// Every vertical `MoveTo -> LineTo` segment in the op stream, as `(x, top, bottom)`.
+    fn vertical_segments(source: &str, today: Option<&str>) -> Vec<(f64, f64, f64)> {
+        let ir = fm_parser::parse(source).ir;
+        let config = CanvasRenderConfig {
+            gantt_today: today.map(str::to_string),
+            ..CanvasRenderConfig::default()
+        };
+        let mut ctx = MockCanvas2dContext::new(1200.0, 600.0);
+        let _ = crate::render_to_canvas(&ir, &mut ctx, &config);
+
+        ctx.operations()
+            .windows(2)
+            .filter_map(|pair| match (&pair[0], &pair[1]) {
+                (DrawOperation::MoveTo(x0, y0), DrawOperation::LineTo(x1, y1))
+                    if (x0 - x1).abs() < 0.001 && (y0 - y1).abs() > 0.001 =>
+                {
+                    Some((*x0, y0.min(*y1), y0.max(*y1)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The vertical segments a marked render has that the unmarked one does not.
+    ///
+    /// DIFFED AGAINST A BASELINE rather than counted: a gantt render emits many segments, so an
+    /// op-count assertion would pass on any extra line drawn anywhere. What is asserted here is the
+    /// segment the marker itself added.
+    fn segments_added_by_marker(source: &str, today: &str) -> Vec<(f64, f64, f64)> {
+        let baseline = vertical_segments(source, None);
+        vertical_segments(source, Some(today))
+            .into_iter()
+            .filter(|segment| {
+                !baseline.iter().any(|other| {
+                    (other.0 - segment.0).abs() < 0.001
+                        && (other.1 - segment.1).abs() < 0.001
+                        && (other.2 - segment.2).abs() < 0.001
+                })
+            })
+            .collect()
+    }
+
+    /// The gantt today marker reaches the canvas (bd-t1jj).
+    ///
+    /// `extensions.gantt_day_axis` was the last `LayoutExtensions` field this renderer referenced
+    /// nowhere, and it is the only thing that answers "where is a given DATE on this chart". So a
+    /// canvas gantt drew no today line while the same source rendered to SVG drew one.
+    #[test]
+    fn canvas_draws_the_gantt_today_marker() {
+        let ir = fm_parser::parse(GANTT_CHART).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let axis = layout
+            .extensions
+            .gantt_day_axis
+            .expect("a gantt layout must publish its day axis");
+
+        // NON-VACUITY: the date must be inside the charted span, or `x_for_day` returns None, the
+        // renderer correctly draws nothing, and this test asserts the absence it exists to rule out.
+        let day = fm_layout::parse_iso_day_number("2026-01-03").expect("a real calendar date");
+        assert!(
+            axis.x_for_day(day).is_some(),
+            "CONTROL FAILED: 2026-01-03 is outside this chart, so this test proves nothing"
+        );
+
+        let added = segments_added_by_marker(GANTT_CHART, "2026-01-03");
+        assert_eq!(
+            added.len(),
+            1,
+            "expected exactly one new vertical segment for the today marker, got {added:?}"
+        );
+
+        // It must cross the chart, not be a stub. The layout's own height is the yardstick.
+        let (_, top, bottom) = added[0];
+        assert!(
+            bottom - top > f64::from(layout.bounds.height) * 0.5,
+            "the today marker spans {} of a {} chart, which is not a line across it",
+            bottom - top,
+            layout.bounds.height
+        );
+    }
+
+    /// The marker's x comes from the AXIS, not from arithmetic of its own.
+    ///
+    /// Asserted DIFFERENTIALLY across two dates one day apart rather than against an absolute
+    /// coordinate: the rendered x carries the canvas offset, so comparing it against the layout's
+    /// raw `x_for_day` compares a rendered coordinate to a layout one. The difference cancels the
+    /// offset and pins what matters — the marker advances by the axis's own `day_width` per day, so
+    /// the line and the ticks cannot disagree about where a day is. `LayoutGanttDayAxis`'s own doc
+    /// warns that re-deriving day positions is exactly how they come to disagree.
+    #[test]
+    fn the_canvas_today_marker_advances_with_the_axis_day_width() {
+        let ir = fm_parser::parse(GANTT_CHART).ir;
+        let axis = fm_layout::layout_diagram(&ir)
+            .extensions
+            .gantt_day_axis
+            .expect("a gantt layout must publish its day axis");
+
+        for date in ["2026-01-02", "2026-01-03"] {
+            let day = fm_layout::parse_iso_day_number(date).expect("a real calendar date");
+            assert!(
+                axis.x_for_day(day).is_some(),
+                "CONTROL FAILED: {date} is outside this chart's span"
+            );
+        }
+
+        let x_at = |today: &str| -> f64 {
+            let added = segments_added_by_marker(GANTT_CHART, today);
+            assert_eq!(added.len(), 1, "expected one marker for {today}: {added:?}");
+            added[0].0
+        };
+
+        let advance = x_at("2026-01-03") - x_at("2026-01-02");
+        assert!(
+            (advance - f64::from(axis.day_width)).abs() < 0.01,
+            "one day of marker movement was {advance}, but the axis places days {} apart -- the \
+             marker and the axis disagree about where a day is",
+            axis.day_width
+        );
+    }
+
+    /// SUPPRESSION, four distinct routes to "no marker". A renderer that drew the line
+    /// unconditionally would satisfy the positive tests above and fail every one of these.
+    #[test]
+    fn the_canvas_today_marker_is_suppressed_when_it_should_be() {
+        // 1. No date supplied -- the library default, so this is also the proof that no existing
+        //    canvas render changed.
+        let unmarked = vertical_segments(GANTT_CHART, None);
+        let marked = vertical_segments(GANTT_CHART, Some("2026-01-03"));
+        assert_eq!(
+            marked.len(),
+            unmarked.len() + 1,
+            "supplying no date must draw strictly one segment fewer than supplying one"
+        );
+
+        // 2. `todayMarker off`. The directive exists to turn the line off, so it must -- and before
+        //    this bead it was equally invisible, because there was nothing to turn off.
+        let off = format!("{GANTT_CHART}  todayMarker off\n");
+        assert!(
+            segments_added_by_marker(&off, "2026-01-03").is_empty(),
+            "`todayMarker off` did not suppress the marker"
+        );
+
+        // 3. A date outside the charted span. Drawing nothing is the correct answer to "today is
+        //    not in this chart"; an off-canvas x invites drawing it at the edge, where it reads as
+        //    a real date that happens to sit there.
+        assert!(
+            segments_added_by_marker(GANTT_CHART, "2031-06-01").is_empty(),
+            "a date outside the chart drew a marker anyway"
+        );
+
+        // 4. A string that is not a date at all.
+        assert!(
+            segments_added_by_marker(GANTT_CHART, "not-a-date").is_empty(),
+            "an unparseable date drew a marker anyway"
+        );
+    }
+
+    /// INERT CASE: a non-gantt diagram publishes no day axis, so supplying a date changes nothing.
+    /// Without this, a marker drawn on every diagram type would pass everything above.
+    #[test]
+    fn a_non_gantt_canvas_render_is_untouched_by_a_supplied_date() {
+        let flowchart = "flowchart TD\n  a[Alpha] --> b[Beta]\n";
+        assert_eq!(
+            vertical_segments(flowchart, Some("2026-01-03")),
+            vertical_segments(flowchart, None),
+            "supplying a today date altered a flowchart render"
+        );
+    }
 }
