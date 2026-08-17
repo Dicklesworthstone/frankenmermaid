@@ -20918,3 +20918,49 @@ per-process `/proc/<pid>/stat` attribution during an admitted run.
 
 **Observed:** loadavg 12.94 17.69 25.84; host CPU min 1429 MHz, max 4292 MHz, spread 3.004x. No certification
 run attempted.
+
+### CLOSED QUESTION: the same four cores block admission at every load level (2026-08-17)
+
+Sixth `docs_site_50` attempt, at **load1 15.80** — the lowest of any attempt — and the first with a
+second independent observation of the persistent-core set. **No ratio; none claimed.** This retires
+"wait for a quieter window" as a strategy.
+
+Provenance re-verified at `80dd62a9`: ELF
+**`f99333dff534a400e1ce4e9aeaa3cd79c70ee360d3721c6c1cfd427029e4813d`**, path from
+`--message-format=json`; equivalence **PASS 50/50, 0 divergent, 0 unverified, er=4/4**.
+
+**Load does not predict admission.** Best of 900 samples, across three fully-spent windows:
+
+| window | load1 | best sample | quietest per-sample max |
+|---|---:|---:|---:|
+| second | 25.11 | 8 CPUs over | 61% |
+| third | 20.25 | 4 CPUs over | 62% |
+| sixth | **15.80** | **6 CPUs over** | **73%** |
+
+Load fell by 37% between the second and sixth windows and the best sample did not improve — it got
+marginally worse, and the quietest maximum rose. 747 of this run's 900 samples sat at the 12-CPU
+reporting cap.
+
+**The same cores are responsible both times, hours apart.** Frequency in the over-ceiling list:
+
+```
+sixth window (load 15.80):  cpu48 626   cpu51 625   cpu8 601   cpu54 570   cpu55 501   cpu47 467
+third window (load 20.25):  cpu54 699   cpu48 661   cpu51 591   cpu55 499   cpu23 450   cpu40 425
+```
+
+`cpu48`, `cpu51`, `cpu54` and `cpu55` are in the top set in BOTH runs, separated by hours and by a
+25% difference in ambient load. That is not diffuse fleet activity — it is a specific long-running
+job pinned to an affinity set, holding those cores at 100% continuously.
+
+**Consequence, and it is a decision rather than a measurement.** The gate requires all 64 affinity
+CPUs under 20% *simultaneously*. Four cores held at 100% by one continuous job make that conjunction
+unsatisfiable at any ambient load, which is what 5,400 refused samples across six windows show.
+`docs_site_50` is not obtainable on `thinkstation1` by waiting. It needs either a `trj` exclusive
+booking (`--exclusive-host-claim`, requested and unanswered) or an owner's decision on whether
+all-64-under-20% is the right rule for a shared box — for instance excluding cores held by a known
+long-running job from the measurement's affinity set, which changes what the gate asserts and is not
+mine to decide.
+
+**Per-arm MHz could not be recorded because neither arm ran** — the refusal precedes both phases, so
+there is no per-arm anything to report. Host-level at the time: CPU min 1429 MHz, max 4043 MHz,
+spread 2.829x.
