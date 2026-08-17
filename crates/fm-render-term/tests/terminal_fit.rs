@@ -363,6 +363,41 @@ fn gantt_section_name_is_truncated_to_the_band_width() {
     );
 }
 
+/// A C4 element's TYPE, TECHNOLOGY and DESCRIPTION must reach terminal output (bd-039t).
+///
+/// Measured SVG vs terminal: `Person(a, "Alice", "A user")` drew `A user` in the SVG and not in the
+/// terminal. Decorations mirror fm-render-svg, which writes the type in double angle brackets and
+/// the technology in square brackets.
+#[test]
+fn c4_element_details_reach_terminal_output() {
+    let ir = fm_parser::parse("C4Context\n  title S\n  Person(alice, \"Alice\", \"A user\")\n").ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(out.contains("Alice"), "the element name is missing:\n{out}");
+    assert!(out.contains("A user"), "the description never reached the terminal:\n{out}");
+    assert!(out.contains("Person"), "the element type never reached the terminal:\n{out}");
+}
+
+/// CONTROL: the neighbours in the same node loop still render.
+///
+/// The C4 branch sits after the requirement branch, which sits after the ER branch. Each is gated on
+/// a different field, and mis-ordering or mis-guarding any of them would swallow a neighbour.
+#[test]
+fn er_requirement_and_class_still_render_after_the_c4_branch() {
+    let er = fm_parser::parse("erDiagram\n  A {\n    string name PK\n  }\n  A ||--o{ B : has\n").ir;
+    let er_out = render_term_with_config(&er, &TermRenderConfig::rich(), 200, 60).output;
+    assert!(er_out.contains("name") && er_out.contains("PK"), "ER regressed:\n{er_out}");
+
+    let req =
+        fm_parser::parse("requirementDiagram\n  requirement R {\n  id: 1\n  text: hello\n  }\n").ir;
+    let req_out = render_term_with_config(&req, &TermRenderConfig::rich(), 200, 60).output;
+    assert!(req_out.contains("hello"), "requirement rows regressed:\n{req_out}");
+
+    let cls = fm_parser::parse("classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n").ir;
+    let cls_out = render_term_with_config(&cls, &TermRenderConfig::rich(), 200, 60).output;
+    assert!(cls_out.contains("run"), "class compartments regressed:\n{cls_out}");
+}
+
 /// A requirement's declared FIELDS must reach terminal output (bd-039t).
 ///
 /// Measured SVG vs terminal on the same IR: `requirement R { id: 1 / text: hello / risk: high }`

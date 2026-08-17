@@ -1634,6 +1634,18 @@ impl TermRenderer {
                 continue;
             }
 
+            // C4 element type, technology and description reach the terminal too (bd-039t).
+            //
+            // Measured SVG vs terminal: `Person(a, "Alice", "A user")` drew `A user` in the SVG and
+            // not in the terminal. Third member of the same class as bd-ekx2 and the requirement
+            // rows above — node-attached content the terminal never learned to draw.
+            if let Some(node) = ir_node
+                && let Some(meta) = node.c4_meta.as_deref()
+            {
+                self.overlay_c4_rows(&mut lines, x, y, w, h, ir, node, meta, cell_width);
+                continue;
+            }
+
             let Some(label) = self.node_display_label(ir, ir_node, &node_box.node_id) else {
                 continue;
             };
@@ -2049,6 +2061,99 @@ impl TermRenderer {
     /// │ +eat()   │  ← methods with visibility
     /// └──────────┘
     /// ```
+    /// Draw a C4 node as a name header, a divider, then its type, technology and description
+    /// (bd-039t).
+    ///
+    /// Decorations match fm-render-svg — `<<Person>>` and `[technology]` — so the two renderers say
+    /// the same thing about the same element.
+    #[allow(clippy::too_many_arguments)]
+    fn overlay_c4_rows(
+        &self,
+        grid: &mut [Vec<char>],
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        ir: &MermaidDiagramIr,
+        node: &fm_core::IrNode,
+        meta: &fm_core::IrC4NodeMeta,
+        grid_width: usize,
+    ) {
+        let inner_w = w.saturating_sub(2);
+        let glyphs = &self.box_glyphs;
+
+        let write_text =
+            |grid: &mut [Vec<char>], row: usize, col: usize, text: &str, max_w: usize| {
+                if row >= grid.len() {
+                    return;
+                }
+                for (i, ch) in text.chars().take(max_w).enumerate() {
+                    let c = col + i;
+                    if c < grid_width && c < grid[row].len() {
+                        grid[row][c] = ch;
+                    }
+                }
+            };
+
+        let draw_separator = |grid: &mut [Vec<char>], row: usize| {
+            if row >= grid.len() {
+                return;
+            }
+            if x < grid_width && x < grid[row].len() {
+                grid[row][x] = glyphs.t_right;
+            }
+            for dx in 1..w.saturating_sub(1) {
+                let c = x + dx;
+                if c < grid_width && c < grid[row].len() {
+                    grid[row][c] = glyphs.horizontal;
+                }
+            }
+            let right = x + w.saturating_sub(1);
+            if right < grid_width && right < grid[row].len() {
+                grid[row][right] = glyphs.t_left;
+            }
+        };
+
+        let mut row = y + 1;
+        let max_content_row = if h >= 2 { y + h - 1 } else { y + h };
+
+        let name = node
+            .label
+            .and_then(|lid| ir.labels.get(lid.0))
+            .map(|l| l.text.as_str())
+            .unwrap_or(&node.id);
+        let name_text = self.truncate_label(name);
+        let name_chars = name_text.chars().count();
+        let name_x = x + 1 + inner_w.saturating_sub(name_chars) / 2;
+        if row < max_content_row {
+            write_text(grid, row, name_x, &name_text, inner_w);
+            row += 1;
+        }
+        if row < max_content_row {
+            draw_separator(grid, row);
+            row += 1;
+        }
+
+        let mut rows: Vec<String> = Vec::with_capacity(3);
+        if !meta.element_type.is_empty() {
+            rows.push(format!("<<{}>>", meta.element_type));
+        }
+        if let Some(technology) = meta.technology.as_deref().filter(|t| !t.is_empty()) {
+            rows.push(format!("[{technology}]"));
+        }
+        if let Some(description) = meta.description.as_deref().filter(|d| !d.is_empty()) {
+            rows.push(description.to_string());
+        }
+        for text in rows {
+            if row >= max_content_row {
+                // Out of box: stop rather than spill rows into whatever is laid out below.
+                break;
+            }
+            write_text(grid, row, x + 1, &self.truncate_label(&text), inner_w);
+            row += 1;
+        }
+    }
+
     /// Draw a requirement node as a name header, a divider and one row per declared field (bd-039t).
     ///
     /// Mirrors `overlay_er_compartments`; the field set matches the rows fm-render-svg draws, so the
