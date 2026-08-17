@@ -3628,6 +3628,51 @@
 
 ## Blocked/Invalid Evidence Attempts
 
+### CLOSED: the exclusivity gate is UNSATISFIABLE on this host, and the holders are named (2026-08-17)
+
+Twenty-one consecutive certification refusals across a session in which loadavg ranged from **525
+down to 12.65** -- a 40x span -- with per-CPU occupancy **never once reaching zero**. This entry stops
+treating that as bad luck and measures the cause.
+
+**Attribution, by process, over a 3-second window at loadavg 16.94** (read from `/proc/<pid>/stat`
+utime+stime deltas; no build, no benchmark):
+
+| cores | process | whose |
+|---:|---|---|
+| 3.04 | `smartedgar` (three processes, ~1.00 each) | not this project |
+| 1.02 | `am` | agent-mail daemon |
+| 1.01 | `incumbent_cover` | not this project |
+| 1.01 | `rustc` | someone's build |
+| 1.00 | `sbh` | not this project |
+| 1.20 | `claude` (the whole agent fleet, including this pane) | ours, spread thin |
+
+Total consumed: **8.6 cores' worth**, of which roughly **7 sit at almost exactly 1.00 core each** --
+steady, single-threaded, CPU-bound, and continuous.
+
+**WHY THIS IS DISPOSITIVE.** `run.mjs`'s admission gate requires EVERY one of 64 CPUs to be below 20%
+busy in a single 1-second sample. Seven processes each pegging one core means at least seven CPUs are
+at ~100% at all times. No amount of waiting satisfies that predicate, because the blockers are not
+bursty load -- they are long-running jobs that hold a core apiece. The observed floor of 6-17 busy
+CPUs across every window this session is exactly this set, plus whatever the fleet is doing.
+
+**What this does NOT say.** It does not say any banked ratio is wrong, and it is not an argument for
+lowering the bar. The A/B/B/A rows in this file and the replicated standing in `docs/PERF_LEDGER.md`
+were taken WITHOUT the gate and are labelled as such; this entry explains why that labelling has been
+unavoidable rather than lazy.
+
+**The decision this hands back**, stated plainly because it is not the measuring agent's to make:
+
+1. **Rescope the gate to the run's own cpuset.** The measured arm is pinned to one core and the
+   incumbent to a cpuset (`52b72e34`, `8ba63755`); quiescence only has to hold on the cores the run
+   actually uses. This is the change the evidence supports, and `bd-kt8s` already asks whether the
+   host-wide predicate correlates with ratio error at all.
+2. **Or stop the holders for a window.** Seven identified processes, none of them frankenmermaid.
+3. **Or accept replicated-standing rows as the project's bar**, which is what the fleet convention
+   already describes and what the 362.4x row was banked under.
+
+Waiting is not on that list, and after twenty-one windows it should stop being proposed.
+
+
 ### SCREEN, not banked rows: sequence_20 is an OUTLIER worst cell, not one of a cluster (2026-08-17)
 
 Asked to take "the next worst cell" after the sequence_20 standing (362.4x), I first had to find out
