@@ -387,6 +387,57 @@ that COULD bite, and the cheap empirical check on whether it DID bite already ex
 gated: the fm drift itself (`check_drift_control`, `ee930f50`). Spread says what the host could do to
 a row; drift says what it did. Quote both, and let the drift carry the weight.
 
+## CORRECTION: the spread tracks CORE OCCUPANCY, not loadavg — and it is a single-core statistic
+
+Last note tabulated cross-core clock spread against **loadavg** and observed it collapsing to 1.001x
+at load ~42. I flagged load 23-42 as unmeasured. The host has now sat in that range and the
+prediction FAILED:
+
+```
+load=30.22  min=1429  max=4102  spread=2.871x  mean=2374   cores >2.5GHz: 28/64
+load=30.22  min=1429  max=4093  spread=2.864x  mean=2635   cores >2.5GHz: 34/64
+load=29.01  min=1429  max=4104  spread=2.872x  mean=2635   cores >2.5GHz: 30/64
+load=29.01  min=1429  max=4093  spread=2.864x  mean=2340   cores >2.5GHz: 25/64
+load=29.01  min=1429  max=4178  spread=2.923x  mean=3347   cores >2.5GHz: 61/64
+```
+
+At load ~30 the spread is **2.86-2.92x** — indistinguishable from the load 7-23 rows. There is no
+smooth decline toward the peer's 1.001x, so **loadavg was the wrong variable and my table was
+mis-framed.**
+
+### What the discriminating variable actually is
+
+The peer's load-42 observation had every core at **3914-3917 MHz** — a *minimum* of 3914, meaning no
+core was idle. Here at load 30 the minimum is 1429 MHz with only 25-34 of 64 cores above 2.5 GHz.
+Same loadavg range, completely different occupancy.
+
+The reason is that **loadavg counts runnable AND uninterruptibly-blocked tasks.** With three or four
+concurrent builds doing heavy I/O, most of that load is blocked in D-state, not occupying a core —
+which is exactly the high-load/high-idle pattern seen repeatedly this campaign (load 35 at 83% idle).
+So the right variable is **how many cores are actually occupied**, and `idle %` or a busy-core count
+measures it; loadavg does not.
+
+### The statistic is fragile in a way that matters more than the trend
+
+The fifth sample is the instructive one: **61 of 64 cores above 2.5 GHz, mean 3347 MHz, and the
+spread still 2.923x** — because a single core sat at 1429. `max/min` is a **worst-pair** statistic
+pinned by one idle core, so it barely moves until the very last core is occupied.
+
+That has a direct consequence for every row this campaign has banked. The harness caveat — *"a
+cross-core spread near 3x is why this is a bound and not an estimate"* — is computed from the two
+most extreme cores on the box, **not from the cores an arm ran on**. An arm pinned or scheduled onto
+busy cores can see a near-uniform 3.3-4.1 GHz while the reported spread reads 2.9x purely because one
+unrelated core is parked at its floor.
+
+This is the mechanism behind the previous note's other half: realised fm drift of 1.0094-1.0481x in
+windows reporting ~3x spread. The two numbers were never in tension. **The spread is not a property
+of the measurement; it is a property of the quietest core on the machine.**
+
+⚠️ Still do not act on this by deleting the caveat. A worst-pair bound that is usually loose is still
+a bound, and the honest fix is the one already in place: quote the spread as provenance, and let the
+**drift** — which is computed from the arms that actually ran, and is now gated — carry the verdict.
+What should change is the *reading*: a 3x spread is not evidence that a row is shaky.
+
 ## Ready for the next window
 
 A fresh `headtohead` binary exists and is provenance-checked, so a genuinely quiet window needs no
