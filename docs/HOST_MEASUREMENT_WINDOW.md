@@ -172,6 +172,63 @@ recorded, and 228.1x must not be quoted as a competing figure: both numbers come
 lottery, and this one simply drew worse. Nothing here changes what the engines do; it changes what
 the harness can currently prove.
 
+## The per-arm rep override is safe: what it costs, and why the work proof survives it
+
+Analysis only — `scripts/headtohead/abba_render.py` was leased by BeigeHill through 21:06Z and I
+did not touch it. This is the homework so the change can be made once, correctly.
+
+### `ns` is a per-rep MEDIAN, not an arm total (verified by reproduction)
+
+Not inferred from the field name — the reported figures are reproduced exactly from the raw
+per-arm values:
+
+```
+worst bound   36,400,000 / 159,599 = 228.06   (harness printed 228.1x)
+headline      37,000,000 / 126,526 = 292.44   (harness printed 292.4x)   [medians of each pair]
+```
+
+Both land on the printed values, so `ns` is the median of one render. That fixes the arm duration
+as `ns x reps`: **93.4 µs x 100 = ~9.3 ms** for frankenmermaid and **37.6 ms x 15 = ~0.56 s** for
+mermaid-js, confirming the arm-duration table above from the run's own numbers rather than from
+estimates.
+
+### The knob is one line, and it is in the corpus hand-off, not the timer
+
+`corpus.mjs:553` pins `sequence_20` at `reps_rs: 100` / `reps_js: 15`. The fm arm carries that value
+through the generated hand-off at `abba_render.py:262` (`reps: item.reps_rs`); `--reps` (line 312)
+is forwarded only to `mermaid_arm` (lines 392/394). So a `--fm-reps` override is a single
+substitution at line 262, independent of `--reps`, and needs no corpus edit — which matters,
+because re-pinning a case is a hard `exit 3` for every run and would move the baseline every banked
+row was measured against.
+
+### Cost, computed from the measured per-rep medians
+
+To put BOTH arms above the ~10 s interference period at ~30 s each:
+
+| arm | per-rep median | reps for ~30 s | flag |
+|---|---:|---:|---|
+| frankenmermaid | 93.4 µs | ~322,000 | `--fm-reps 322000` |
+| mermaid-js | 37.6 ms | ~800 | `--reps 800` |
+
+Four arms at ~30 s is **~2 minutes** of measurement per A/B/B/A. That is the whole point of
+splitting the knob: the single `--reps-scale` multiplier forces the incumbent to ~28 min/arm
+(~1.9 h per run) to buy the same coverage, because the two arms differ ~400x in per-rep cost.
+
+### The work proof stays valid under scaling — but it cannot police the new failure mode
+
+`check_work_proof` computes `rate = work.bytes / ns`. Measured: `43,368 / 93,454 = 0.46 bytes/ns`,
+comfortably under `MAX_BYTES_PER_NS`. Both terms are per-render, so **the rate is invariant under
+rep scaling** — a longer arm neither weakens nor trips the memo check, and the gate keeps doing its
+job.
+
+**What it does NOT cover, and this is the thing to watch.** The rate check is one-sided: it fails
+only when the rate is too HIGH. An arm that ran longer *without doing proportionally more work*
+drives the rate DOWN, straight into the passing region. So the gate cannot, by construction, catch
+a `--fm-reps` that inflated wall time without re-rendering. The counted proof that closes that hole
+is cheap and should land with the flag: assert the arm's total render COUNT equals the requested
+reps, rather than trusting that a bigger number was honoured. Raising or relaxing the rate ceiling
+would be the wrong repair — the same conclusion the ledger reached about this gate before.
+
 ## Ready for the next window
 
 A fresh `headtohead` binary exists and is provenance-checked, so a genuinely quiet window needs no
