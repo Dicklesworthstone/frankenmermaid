@@ -52,6 +52,54 @@ them to agree; a window whose samples disagree is unmeasurable regardless of how
 looks. That is also why the standing rule not to build in the window you intend to measure in
 matters: immediately after a `cargo build` here, the count read 64/64 for four consecutive seconds.
 
+## The interference is PERIODIC, and each arm is far shorter than its period
+
+Two sequences taken minutes apart both show the same shape rather than random noise — roughly three
+seconds quiet, then seven busy:
+
+```
+64 64 64 64 64 64 45 33 21 19     idle 22.5 -> 79.8%
+19 20 20 64 64 64 64 64 64 64     idle 82.8 -> 0.2%
+```
+
+So the interference has a period of about **ten seconds** and swings between ~84% and ~0.2% idle.
+Now compare that against how long an arm actually measures for, from the shipped corpus and harness
+defaults:
+
+| arm | reps | per rep | measured span | fraction of one noise period |
+|---|---:|---:|---:|---:|
+| frankenmermaid | 100 (`reps_rs`) | ~93 µs | **~9 ms** | ~1/1000 |
+| mermaid-js | 15 (`reps_js`) | ~35 ms | **~0.5 s** | ~1/20 |
+
+**Each arm therefore samples one instantaneous PHASE of a slow oscillation, not an average of it.**
+Landing in the quiet trough or the busy peak is luck, and A/B/B/A interleaving does not fix it: with
+each arm 20x to 1000x shorter than the period, the four arms are four point-samples of a
+slowly-varying signal, which may all fall in one phase or scatter across several.
+
+**The two arms are not even comparably exposed.** The frankenmermaid arm integrates over ~9 ms and
+the incumbent over ~500 ms, so the incumbent averages ~50x more of the interference than the arm it
+is being compared against. That asymmetry biases in whichever direction the phase happens to fall,
+and nothing in the current row records which.
+
+This is the most likely explanation for the residuals already visible on the banked `sequence_20`
+row: frankenmermaid drift of 1.0204x and 1.0481x across two runs, and A/A null radii up to ±9% on an
+arm compared against *itself*. Those are large for a pure timing repeat, and phase alignment accounts
+for them without needing any engine-side cause.
+
+### What would actually fix it
+
+Either of these, not both:
+
+1. **Make each arm span several periods.** At ~10 s, an arm of 30 s or more averages over three-plus
+   cycles. That means roughly `reps_rs` 322,000 (from 100) and `reps_js` 860 (from 15) — a large
+   change to the corpus, and it must be applied to BOTH arms or the asymmetry above gets worse.
+2. **Repeat the whole A/B/B/A many times and take medians across repeats**, so the phase is sampled
+   rather than fixed. Cheaper to run, but it needs enough repeats that the phases decorrelate.
+
+Neither is a code change to the engines, and neither should be attempted while `window_check.sh`
+reports NOT MEASURABLE — a longer arm on an oscillating host still needs the oscillation to be
+stationary for the duration of the run.
+
 ## Ready for the next window
 
 A fresh `headtohead` binary exists and is provenance-checked, so a genuinely quiet window needs no
