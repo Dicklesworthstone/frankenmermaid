@@ -3769,6 +3769,49 @@ a reader can judge it.
   scope it to the run's own cpuset. Nothing else is missing: build, provenance, pinned ELF,
   equivalence and work proof are all green and reproducible.
 
+#### THIRD OBSERVATION: first run with BOTH arms pinned -- and it exposes a new asymmetry (2026-08-17)
+
+First measurement taken after `52b72e34` and `8ba63755`, so both arms are pinned by the same rule
+instead of ours alone. ELF `c99c28575481a7ae4ffa2cd0eb53611da81b5d0fe061d1bc5dccaa7a035dec5e` at rev
+`07768c81`, pinned by content. **No build was run in the measurement window.**
+
+```
+PINS  fm cpu45 @ 3433 MHz (fastest_clock_among_idle)
+      incumbent 8 cpus [45,53,0,27,39,34,2,38], slowest 1916 MHz, starved=false
+A1 fm       90,714 ns   work {bytes 43368, batch 40, revisions 1}
+B1 mermaid  33,400,000 ns
+B2 mermaid  33,700,000 ns
+A2 fm       87,889 ns   work {bytes 43368, batch 39, revisions 1}
+fm drift 1.0321x    WORST BOUND 368.2x    headline 375.7x
+```
+
+- **Per-arm loadavg:** 13.27/11.66/13.90 for A1 and B1; 12.84/11.59/13.87 for B2 and A2.
+- **Per-arm CPU MHz:** host spread 3.003x, 2.916x, 3.003x, 3.003x; host range 1429-4292 throughout.
+- **A/A null (incumbent):** 0.9971 CI [0.9647, 1.0091] and 0.9766 CI [0.9588, **1.0000**]. Both
+  contain 1.0, but the second only just -- its upper bound IS 1.0, which is worth stating rather than
+  rounding past.
+- **Admission:** 11 of 64 CPUs at or above 20% busy at pin time; the gate needs zero.
+
+**THE QUOTED STANDING DOES NOT CHANGE. It stays 362.4x**, the worst bound across all three runs.
+368.2x lands inside the 362-403 band the first two established, which is the useful result: pinning
+both arms did not move the number outside its existing spread.
+
+**A NEW ASYMMETRY, IN OUR FAVOUR, INTRODUCED BY MY OWN FIX.** Our arm got cpu45 at **3433 MHz** --
+the fastest core in the idle band. The incumbent got eight cores whose **slowest member was 1916
+MHz**. `selectPinnedCpuSet` takes the fastest N in the band, so with N=8 the set necessarily reaches
+down into slower cores, while N=1 for our arm takes only the top. If Chromium schedules work onto the
+1916 MHz member it runs slower than it would unpinned, and the ratio inflates in our favour -- the
+exact direction `selectPinnedCpuSet`'s own doc comment warns is the worse error.
+
+So this row is better controlled than the first two in one respect (the incumbent is no longer free
+to roam onto boosted cores while ours is parked) and worse in another (its cpuset spans a 1.79x
+internal clock range while ours is a single fast core). It is recorded as a third observation, not as
+a correction, and the standing is left where the worst bound puts it.
+
+**What that argues for next**, left as an open item rather than acted on: the incumbent's set should
+be constrained to cores within some tolerance of the measured arm's clock, not merely "the fastest N
+available". Selecting by rank is what let the set straddle 1916-4292 MHz. Filed on bd-hmfi.
+
 #### REPLICATION, second independent run on a DIFFERENT binary (2026-08-17)
 
 Still **PROVISIONAL** — 16 of 64 CPUs were at or above 20% busy, so the exclusivity gate would have
@@ -21151,3 +21194,46 @@ are not obtainable on `thinkstation1` by waiting for a quiet window, because the
 function of other projects' build schedules and not of anything this project controls. It needs a
 `trj` exclusive booking, or an owner's decision on whether all-64-under-20% is the right rule for a
 shared box. Neither is mine to decide.
+
+### READY, NOT MEASURED: a fresh binary exists and a STALE SIBLING is a live trap (2026-08-17)
+
+**No ratio, no arms, no A/A null.** Nothing was measured. This entry exists so the next agent to get
+a quiet window does not spend it discovering what is recorded here.
+
+**The best host window of the session, and still not enough.** Load `10.91 / 11.33 / 14.09`, six
+consecutive one-second samples showing **7, 8, 9, 9, 7, 9** CPUs above 20% busy. That is roughly half
+the previous session best (14) and a quarter of the worst (39) — and the gate needs **zero**, so it
+would still refuse. Recorded because it is the closest this host has come, and because it again shows
+the count does not track loadavg: at load 10.91, seven cores were still busy.
+
+**PER-ARM LOADAVG AND MHz: none, because no arm ran.** Host-level at the time, after the build below:
+load `12.10 / 11.48 / 13.80`, 8–9 CPUs over, CPU **min 1429 MHz / max 4242 MHz, spread 2.97x**. A row
+with no arms cannot carry arm-scoped provenance, and leaving the fields blank would imply otherwise.
+
+**⚠️ THE TRAP: TWO `headtohead` BINARIES EXIST AT DIFFERENT PATHS, AND THE OBVIOUS ONE IS STALE.**
+
+```
+target/release/examples/headtohead        sha256 efa4c340e84b1734…   Aug 16 07:16   ← STALE
+target/local/release/examples/headtohead  sha256 1fca5719e6acf84b…   Aug 17 02:40   ← FRESH
+```
+
+The stale copy predates **24 commits** to the measured crates, including bd-jgco (gitGraph branch
+bands), bd-6oz7 (branch create-and-checkout) and bd-jerh (ER attribute comments) — all of which
+changed layout, parser and renderer output. Measuring with it yields a ratio for OLD SOURCE reported
+against current `HEAD`. That is the same false-provenance failure that previously produced a P1 whose
+"regression" was a guard the reporter had written themselves.
+
+`cargo build --message-format=json` reports the executable at the **`target/local/release`** path.
+Take the path from the JSON; do not assume `target/release`. The stale copy is left in place
+untouched — reclaim is the owner's call — so the trap stays live until someone removes it.
+
+**Freshness asserted, not assumed**, for the fresh binary against every measured crate: binary mtime
+`1786948855` is greater than the last-commit time of `fm-parser`, `fm-layout`, `fm-render-svg`,
+`fm-core` and `fm-cli`. Built at `HEAD` `c9ba373a`; `HEAD` then moved to `2a092089`, which is a
+docs-and-beads commit touching no measured crate, so the binary still corresponds to the measured
+source.
+
+**Why the build happened in a good window, deliberately.** The standing rule is not to build in the
+window you intend to measure in. Measuring in this window was impossible regardless — the only
+binary was stale — so the window's best use was to produce a fresh one and leave the *next* window
+immediately usable. The build cost the host almost nothing: 7–9 CPUs over before, 8–9 after.
