@@ -3670,18 +3670,49 @@ a reader can judge it.
   scope it to the run's own cpuset. Nothing else is missing: build, provenance, pinned ELF,
   equivalence and work proof are all green and reproducible.
 
-### DEFECT: the FM_H2H_MODE=parse arm reports a timing while accepting ZERO revisions (2026-08-16)
+### RETRACTED, and the retraction matters more than the claim: parse_accepted_revisions is NOT a work proof (2026-08-16)
 
-Found while attempting the above. `FM_H2H_MODE=parse` on `sequence_20` reports
-`parse_ns.p50 = 8` — eight nanoseconds for a 1,257-byte diagram, roughly 25 cycles — because it
-batches **348,849** iterations into a ~3 ms integrated sample and divides. The counted proof is in
-the same record: **`parse_accepted_revisions = 0`**. The arm parses nothing and still emits a
-number. Taken at face value it yields a ratio of **873,911x**, which is why it is recorded here
-rather than banked.
+**I filed this as "the parse arm accepts zero revisions, therefore it parses nothing". That was
+wrong, and the proposed fix would have been actively harmful.** Recording it in full because the
+mistake is the reusable part.
 
-Render mode on the identical corpus and binary is sound — `batch` 38, `revisions` 1, 43,368 output
-bytes — so the fault is specific to the parse boundary, not the harness or the corpus. Any parse-
-scoped row must gate on `parse_accepted_revisions > 0` before quoting a timing.
+WHAT I OBSERVED. `FM_H2H_MODE=parse` on `sequence_20` reports `parse_ns.p50 = 8` — eight nanoseconds
+for a 1,257-byte diagram — with **`parse_accepted_revisions = 0`** in the same record. I read the
+zero as proof that no parsing happened, and proposed that any parse-scoped row gate on
+`parse_accepted_revisions > 0`.
+
+WHAT IT ACTUALLY IS. `parse_accepted_revisions` is a parse-QUALITY counter, not a work counter. From
+`parse_results_reference` in `crates/fm-cli/examples/headtohead.rs`, a revision increments it only
+when the diagram type is not `unknown` **and** there are no errors **and** it did not recover **and**
+it emitted no warnings **and** `support_label() == "full"`. And in `crates/fm-core/src/lib.rs`:
+
+    Self::Sequence => "partial",
+
+Sequence is the ONLY diagram type labelled `partial`. So for any sequence diagram
+`unsupported_revisions` is incremented and `accepted_revisions` stays 0 **no matter how completely
+the parse succeeded**. The counter is structurally incapable of being nonzero for `sequence_20`. The
+arm was doing real work the whole time; I read a quality signal as a liveness signal.
+
+WHY THE PROPOSED GATE WOULD HAVE BEEN WORSE THAN THE BUG. Gating parse rows on
+`parse_accepted_revisions > 0` would have **silently refused every sequence row forever** — including
+`sequence_20`, which is the project's WORST measured vs-incumbent ratio and therefore the single
+workload we most need a number for. It would have looked like a principled work proof while
+quietly deleting the most important case, and nothing in the output would have said so. This is the
+same shape as the uniform-verdict trap already recorded here: a gate that refuses everything in a
+class is a broken instrument, not a strict one.
+
+WHAT REMAINS GENUINELY OPEN, stated narrowly so it is not over-claimed: **8 ns for a 1,257-byte parse
+is still not plausible** (~25 cycles), and it is reached by batching 348,849 iterations into a ~3 ms
+integrated sample and dividing. That is worth investigating on its own merits. But it is NOT
+evidenced by `parse_accepted_revisions = 0`, and the 873,911x figure it would imply must not be
+quoted while the timing is unexplained.
+
+THE REUSABLE LESSON. Before using a field as a work proof, read what INCREMENTS it. A counter whose
+name contains the word the argument needs (`accepted`) is not thereby a proof of that argument, and
+one that is identically zero for a whole diagram type will produce a confident, uniform, and entirely
+false verdict across every case in that class. `scripts/headtohead/abba_render.py` gates on emitted
+BYTES and a bytes-per-nanosecond ceiling instead, which are properties of the work rather than of its
+quality.
 
 
 ### ATTRIBUTION: layout_golden_checksums_are_stable fails BEFORE the parser Cow work, not because of it (2026-08-16)

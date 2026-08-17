@@ -28,11 +28,18 @@ but the bound is the number to quote. Per-core clocks on this host span ~1429-43
 
 RENDER MODE, NOT PARSE
 ----------------------
-`FM_H2H_MODE=parse` reports `parse_ns.p50 = 8` -- eight nanoseconds for a 1,257-byte diagram -- while
-`parse_accepted_revisions` is ZERO: it batches ~348,849 iterations, parses nothing, and still emits a
-number (873,911x if taken at face value). See the DEFECT entry in docs/NEGATIVE_EVIDENCE.md. Render
-mode on the same binary does counted work, so this script measures RENDER and asserts the work proof
-in band rather than trusting the timing.
+This measures RENDER and asserts its work proof in band rather than trusting the timing.
+
+Do NOT reach for `parse_accepted_revisions` as that work proof. It is a parse-QUALITY counter, not a
+liveness counter: it increments only when a revision has no errors, no recovery, no warnings, AND
+`support_label() == "full"` -- and `Sequence` is the one type labelled `partial`, so it is
+identically ZERO for every sequence diagram however well the parse ran. Gating on it would silently
+refuse every sequence row, including `sequence_20`, the project's worst measured ratio. See the
+RETRACTED entry in docs/NEGATIVE_EVIDENCE.md; I made exactly that mistake.
+
+Separately and still unexplained: `FM_H2H_MODE=parse` reports `parse_ns.p50 = 8` for a 1,257-byte
+diagram, which is ~25 cycles and not plausible. That is a reason to distrust the parse arm's timing
+on its own merits, not a reason to trust the counter above.
 
 USAGE
 -----
@@ -152,9 +159,11 @@ def mermaid_arm(case_id: str, reps: int) -> dict:
 def check_work_proof(arm: dict) -> str | None:
     """Refuse to quote a timing the arm did not earn.
 
-    A gate that only checks "did it produce a number" passes while the arm measures nothing. This
-    demands COUNTED evidence: bytes actually emitted, at least one accepted revision, and a
-    bytes-per-nanosecond rate below what one thread can physically sustain.
+    A gate that only checks "did it produce a number" passes while the arm measures nothing. The two
+    load-bearing checks here are properties of the WORK: bytes actually emitted, and a
+    bytes-per-nanosecond rate below what one thread can physically sustain. The `revisions` check is
+    only a malformed-record guard -- that field is the corpus item's revision count, so it says the
+    record is well formed, NOT that the engine did anything.
     """
     work = arm.get("work") or {}
     ns = arm.get("ns")
@@ -162,7 +171,7 @@ def check_work_proof(arm: dict) -> str | None:
         return "no timing"
     revisions = work.get("revisions")
     if not revisions:
-        return f"revisions={revisions!r} -- the arm accepted no work, so the timing is not of anything"
+        return f"revisions={revisions!r} -- malformed record, the corpus item claims no revisions"
     written = work.get("bytes")
     if not written:
         return f"bytes={written!r} -- nothing was emitted"
