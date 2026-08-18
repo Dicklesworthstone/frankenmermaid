@@ -668,12 +668,57 @@ pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig
         }
     }
 
+    // Strategy 4.9: a header the INCUMBENT supports and we do not.
+    //
+    // Found by reading mermaid 11.15.0's own bundle against our `DiagramType`: it ships `radar` and
+    // `treemap`, and we have neither. Today such a document falls through to Strategy 5 and is
+    // reported as "could not detect diagram type" — which sends the author to check their syntax,
+    // when their syntax is fine and the type is simply unimplemented here. Those are different
+    // problems with different fixes, and the generic message names the wrong one.
+    //
+    // Behaviour is otherwise UNCHANGED: same Flowchart fallback, same confidence, same
+    // `Fallback` method — so strict mode still refuses it exactly as before (see the
+    // `MermaidParseMode::Strict` check on `DetectionMethod::Fallback`). Only the message improves.
+    if let Some(kind) = unsupported_upstream_keyword(first_line) {
+        return DetectedType {
+            diagram_type: DiagramType::Flowchart,
+            confidence: 0.3,
+            method: DetectionMethod::Fallback,
+            warnings: vec![format!(
+                "'{kind}' is a mermaid diagram type this renderer does not implement yet; the \
+                 input was not misspelled. Rendering it as a flowchart will not be meaningful."
+            )],
+        };
+    }
+
     // Strategy 5: Fallback to flowchart
     DetectedType {
         diagram_type: DiagramType::Flowchart,
         confidence: 0.3,
         method: DetectionMethod::Fallback,
         warnings: vec!["Could not detect diagram type; assuming flowchart".to_string()],
+    }
+}
+
+/// Diagram headers that upstream mermaid supports and this renderer does not.
+///
+/// Deliberately SHORT and exact. Every entry is a header verified present in the pinned
+/// mermaid 11.15.0 bundle and absent from `DiagramType`; guessing at future names would produce a
+/// confident "not supported yet" for a typo, which is worse than the generic message it replaces.
+///
+/// Matched on the header token alone, so `radar-beta` and a `radar` block with a title both hit it.
+/// When one of these lands as a real `DiagramType`, DELETE its entry rather than leaving a message
+/// claiming the feature is missing.
+fn unsupported_upstream_keyword(first_line: &str) -> Option<&'static str> {
+    let head = first_line
+        .split(|c: char| c.is_whitespace() || c == '-')
+        .find(|token| !token.is_empty())?
+        .to_ascii_lowercase();
+
+    match head.as_str() {
+        "radar" => Some("radar"),
+        "treemap" => Some("treemap"),
+        _ => None,
     }
 }
 
@@ -2888,6 +2933,71 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             assert!(
                 node.href().is_none() || !node.href().unwrap().contains("javascript:"),
                 "javascript: URLs must be blocked"
+            );
+        }
+    }
+
+    /// A diagram type mermaid supports and we do not must SAY so.
+    ///
+    /// The old message ("could not detect diagram type") sends the author to check syntax that is
+    /// perfectly correct. Naming the type is the difference between "you typed it wrong" and "we
+    /// have not built this yet", which have different fixes.
+    #[test]
+    fn an_unimplemented_upstream_type_is_named_rather_than_blamed_on_syntax() {
+        for (source, expected) in [
+            ("radar\n  title Skills\n  ds1 [10, 20, 30]\n", "radar"),
+            ("radar-beta\n  axis a, b\n", "radar"),
+            ("treemap\n  root\n    child 5\n", "treemap"),
+        ] {
+            let detected = super::detect_type_with_confidence(source);
+            let joined = detected.warnings.join(" | ");
+            assert!(
+                joined.contains(expected),
+                "{source:?} should name {expected:?}; warnings were {joined:?}"
+            );
+            assert!(
+                !joined.contains("Could not detect"),
+                "{source:?} still reports the generic message: {joined:?}"
+            );
+        }
+    }
+
+    /// CONTROL: a genuine typo must STILL get the generic message.
+    ///
+    /// This is the assertion that keeps the feature honest. A table that matched loosely would
+    /// answer "not supported yet" for a misspelling, which is a confident lie and strictly worse
+    /// than the vague message it replaced -- the author would stop looking for their typo.
+    #[test]
+    fn a_typo_still_gets_the_generic_message() {
+        for source in ["flowchrt TD\n  a --> b\n", "radarr\n  x\n", "treemapp\n  y\n"] {
+            let detected = super::detect_type_with_confidence(source);
+            let joined = detected.warnings.join(" | ");
+            assert!(
+                !joined.contains("does not implement yet"),
+                "{source:?} was reported as unimplemented rather than as an unrecognised header: \
+                 {joined:?}"
+            );
+        }
+    }
+
+    /// CONTROL: a SUPPORTED type must be unaffected.
+    ///
+    /// The new check runs before the final fallback, so a header that already detects must never
+    /// reach it. If one did, this renderer would start calling its own supported diagrams
+    /// unsupported.
+    #[test]
+    fn supported_diagram_types_are_untouched_by_the_new_check() {
+        for (source, want) in [
+            ("flowchart TD\n  a --> b\n", fm_core::DiagramType::Flowchart),
+            ("sequenceDiagram\n  A->>B: hi\n", fm_core::DiagramType::Sequence),
+            ("mindmap\n  root\n", fm_core::DiagramType::Mindmap),
+            ("kanban\n  Todo\n", fm_core::DiagramType::Kanban),
+        ] {
+            let detected = super::detect_type_with_confidence(source);
+            assert_eq!(detected.diagram_type, want, "{source:?} changed detection");
+            assert!(
+                !detected.warnings.join(" ").contains("does not implement yet"),
+                "{source:?} was called unimplemented"
             );
         }
     }
