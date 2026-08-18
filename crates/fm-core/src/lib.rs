@@ -1544,7 +1544,7 @@ impl IrEdge {
         self.extras.as_ref().and_then(|e| e.er_notation.as_deref())
     }
 
-    /// The cardinality labels an ER notation declares, as `(source, target)` (bd-ercard2).
+    /// The cardinality labels an ER notation declares, as `(source, target)` (bd-2h3pp).
     ///
     /// `}o--o|` reads "zero or more" on the left and "zero or one" on the right, so this returns
     /// `("0..*", "0..1")`. Either side is `""` when the notation carries no marker there, which is
@@ -1870,7 +1870,7 @@ pub enum IrConstraint {
     },
 }
 
-/// One end of an ER notation as a human-readable cardinality (bd-ercard2).
+/// One end of an ER notation as a human-readable cardinality (bd-2h3pp).
 ///
 /// The fallbacks below the exact arms are deliberate: an unrecognised marker that still contains a
 /// crow's foot, a bar or a circle is reported as `*`, `1` or `0` rather than dropped, so a notation
