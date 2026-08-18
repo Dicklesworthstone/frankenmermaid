@@ -1824,6 +1824,12 @@ impl Canvas2dRenderer {
             // at the time — fm-render-svg reads `inline_style` 30 times, `classes` 19 and
             // `style_refs` 11; this crate read all three ZERO times.
             let (fill, stroke) = resolve_node_colors(ir, node_box.node_index);
+            // Resolved ONCE for the whole node: the four label sites below (plain label, class
+            // compartments, ER entity rows, requirement rows) all draw text belonging to THIS
+            // node, so they must agree about its colour. Resolving per-site would let a later
+            // branch silently keep the theme default.
+            let text_color = resolve_node_text_color(ir, node_box.node_index);
+            let label_fill = text_color.as_deref().unwrap_or(&self.config.label_color);
             draw_shape(
                 ctx,
                 shape,
@@ -1846,7 +1852,7 @@ impl Canvas2dRenderer {
                 let member_font = self.config.font_size * 0.9;
                 let padding = 6.0;
 
-                ctx.set_fill_style(&self.config.label_color);
+                ctx.set_fill_style(label_fill);
                 ctx.set_text_baseline(TextBaseline::Middle);
 
                 // Header: class name centered + bold.
@@ -1952,7 +1958,7 @@ impl Canvas2dRenderer {
                 let member_font = self.config.font_size * 0.9;
                 let padding = 6.0;
 
-                ctx.set_fill_style(&self.config.label_color);
+                ctx.set_fill_style(label_fill);
                 ctx.set_text_baseline(TextBaseline::Middle);
 
                 let entity_name = node
@@ -2017,7 +2023,7 @@ impl Canvas2dRenderer {
                 let member_font = self.config.font_size * 0.9;
                 let padding = 6.0;
 
-                ctx.set_fill_style(&self.config.label_color);
+                ctx.set_fill_style(label_fill);
                 ctx.set_text_baseline(TextBaseline::Middle);
                 let name = node
                     .label
@@ -2074,7 +2080,7 @@ impl Canvas2dRenderer {
                 let member_font = self.config.font_size * 0.9;
                 let padding = 6.0;
 
-                ctx.set_fill_style(&self.config.label_color);
+                ctx.set_fill_style(label_fill);
                 ctx.set_text_baseline(TextBaseline::Middle);
                 let name = node
                     .label
@@ -2620,15 +2626,20 @@ pub(crate) fn resolve_edge_style(
 /// answer (bd-2u0.2 requires fill and stroke ON each node instance). It never used `self`, and a
 /// forked second copy is the duplicated-helper trap this repo has paid for before: the two
 /// renderers would drift silently, and the disagreement would look like a GPU bug.
-pub(crate) fn resolve_node_colors(
+/// Every style declaration applying to this node, merged in the order mermaid applies them.
+///
+/// Factored out of `resolve_node_colors` so a second property can be read off the SAME chain
+/// without a second copy of the merge. Two copies drift the moment one learns about a new channel,
+/// and the ORDER is the part that carries meaning: classDef first, then `style` directives, then
+/// the node's own inline style, so the later declaration wins.
+fn merged_node_style(
     ir: &MermaidDiagramIr,
     node_index: usize,
-) -> (Option<String>, Option<String>) {
-    let Some(node) = ir.nodes.get(node_index) else {
-        return (None, None);
-    };
-
+) -> std::collections::BTreeMap<String, String> {
     let mut merged: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let Some(node) = ir.nodes.get(node_index) else {
+        return merged;
+    };
 
     for class_name in &node.classes {
         if let Some(def) = ir.style_defs.iter().find(|d| &d.name == class_name) {
@@ -2648,7 +2659,32 @@ pub(crate) fn resolve_node_colors(
         merged.extend(inline.properties.clone());
     }
 
+    merged
+}
+
+pub(crate) fn resolve_node_colors(
+    ir: &MermaidDiagramIr,
+    node_index: usize,
+) -> (Option<String>, Option<String>) {
+    let merged = merged_node_style(ir, node_index);
     (merged.get("fill").cloned(), merged.get("stroke").cloned())
+}
+
+/// The author's declared TEXT colour for this node, if any (bd-lvj3).
+///
+/// `style a color:#f00`, a `classDef` carrying `color:`, or an inline style all set the LABEL
+/// colour, and this renderer drew every label in `config.label_color` regardless - the same shape
+/// as the fill/stroke half of bd-lvj3, one channel later.
+///
+/// The property is `color`, and fm-render-svg maps it onto the text element's `fill`: in
+/// `split_style_properties`, `color` is the single TEXT_STYLE_PROPERTIES entry that gets RENAMED
+/// rather than passed through. A canvas has no cascade, so the same declaration has to be resolved
+/// here and handed to `set_fill_style` before the text is drawn.
+///
+/// Returns `None` when the author declared nothing, so the caller keeps the theme's `label_color`
+/// instead of a colour this function invented.
+pub(crate) fn resolve_node_text_color(ir: &MermaidDiagramIr, node_index: usize) -> Option<String> {
+    merged_node_style(ir, node_index).get("color").cloned()
 }
 
 pub(crate) fn legacy_edge_stroke(arrow: ArrowType, default_width: f64) -> (f64, &'static [f64]) {
