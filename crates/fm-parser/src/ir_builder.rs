@@ -2290,6 +2290,31 @@ impl IrBuilder {
     }
 
     /// Set cardinality labels on the most recently pushed edge.
+    /// Attach an inline style to the edge just pushed (bd-u9hcc).
+    ///
+    /// Mirrors `set_last_edge_cardinality`: the class path pushes the edge and then decorates it,
+    /// so this reaches back for the last one rather than threading an index through the AST.
+    ///
+    /// MERGES rather than replaces, because an edge can already carry a style from another channel
+    /// and silently discarding it would be the same class of drop this bead is about. Later keys
+    /// win, which is what a CSS declaration block already means.
+    pub(crate) fn set_last_edge_inline_style(&mut self, style: &str) {
+        let parsed = fm_core::parse_style_string(style);
+        if parsed.properties.is_empty() {
+            return;
+        }
+        let Some(edge_index) = self.ir.edges.len().checked_sub(1) else {
+            return;
+        };
+        self.mark_reusable_prefix_edge_dirty(edge_index);
+        if let Some(edge) = self.ir.edges.get_mut(edge_index) {
+            match edge.inline_style.as_mut() {
+                Some(existing) => existing.properties.extend(parsed.properties),
+                None => edge.inline_style = Some(Box::new(parsed)),
+            }
+        }
+    }
+
     pub(crate) fn set_last_edge_cardinality(&mut self, source: Option<&str>, target: Option<&str>) {
         if let Some(edge_index) = self.ir.edges.len().checked_sub(1) {
             self.mark_reusable_prefix_edge_dirty(edge_index);

@@ -81,18 +81,18 @@ const CLASS_OPERATORS: [(&str, ArrowType); 13] = [
     // statement was NOT A RELATION AT ALL: interface implementation, one of the most common lines
     // in a class diagram, drew no edge whatsoever (bd-u9hcc).
     //
-    // ⚠️ APPROXIMATION, stated because it is a real loss. UML realization is a dashed line with a
-    // hollow triangle; `Inheritance`/`InheritanceReverse` give the correct HEAD and the correct
-    // DIRECTION but a SOLID line, so a realization now renders indistinguishably from an
-    // inheritance. That is a smaller error than the current one — no edge at all says the classes
-    // are unrelated — but it is still an error, and it is not hidden here.
+    // ⚠️ THE HEAD COMES FROM HERE, THE DASH DOES NOT. These two variants give a realization the
+    // correct hollow triangle and the correct direction, but they draw a SOLID line — and UML
+    // realization is DASHED, which is the only thing distinguishing it from an inheritance.
     //
-    // The exact fix is a `Realization`/`RealizationReverse` pair, which means exhaustive matches in
-    // fm-core's `as_str`, fm-layout and all three renderers. Alternatively the dash alone could ride
-    // on the edge's `inline_style` — `stroke-dasharray` IS on fm-core's allowed-property list, and
-    // `resolve_edge_inline_style` reads `edge.inline_style` with every lean edge fast path gated on
-    // it being none — but that needs the operator threaded to the push site. Neither is a change to
-    // make unbuilt; both are recorded on the bead.
+    // The dash is applied separately, where the relation is lowered: the operator is matched again
+    // there and a `stroke-dasharray` inline style is attached to the edge just pushed. Doing it
+    // that way avoids a `Realization`/`RealizationReverse` pair, which would mean exhaustive
+    // matches in fm-core's `as_str`, fm-layout and all three renderers.
+    //
+    // So DO NOT read these arms as the whole mapping: changing them without the dash site, or the
+    // dash site without these, splits a realization back into something indistinguishable from an
+    // inheritance. `class_realization_is_dashed_but_inheritance_is_not` fails if they drift.
     ("..|>", ArrowType::InheritanceReverse),
     ("<|..", ArrowType::Inheritance),
     ("..>", ArrowType::DottedArrow),
@@ -309,6 +309,9 @@ enum ClassStatement {
     Stereotype(String, fm_core::ClassStereotype),
     /// Cardinality labels to attach to the most recently created edge.
     Cardinality(Option<String>, Option<String>),
+    /// An inline style for the most recently created edge — currently only the dashed line that
+    /// makes a UML REALIZATION distinguishable from an inheritance (bd-u9hcc).
+    EdgeInlineStyle(&'static str),
     /// `note for <class> "<text>"` — target name and note text (bd-1fw3).
     Note(String, String),
     End,
@@ -4093,8 +4096,26 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
             // them from the LEFT and RIGHT of the operator textually, so after the endpoints swap
             // the left-hand label belongs to the new TARGET. Moving the arrowhead while leaving the
             // labels attached to the original ends would trade one wrong picture for another.
-            let reversed_dependency = find_operator(edge_input, &CLASS_OPERATORS, CLASS_OP_GATE)
-                .is_some_and(|(_, operator, _)| operator == "<..");
+            let class_operator =
+                find_operator(edge_input, &CLASS_OPERATORS, CLASS_OP_GATE).map(|(_, op, _)| op);
+            let reversed_dependency = class_operator == Some("<..");
+            // UML REALIZATION is a DASHED line with a hollow triangle. bd-u9hcc gave `..|>`/`<|..`
+            // the correct head and direction by mapping them onto Inheritance/InheritanceReverse,
+            // and recorded the remaining loss honestly: without the dash a realization renders
+            // IDENTICALLY to an inheritance, so the diagram cannot express the difference at all.
+            //
+            // The dash rides on the edge's `inline_style` instead of a new `Realization` ArrowType,
+            // which would mean exhaustive matches in fm-core's `as_str`, fm-layout and all three
+            // renderers. The consumer chain was verified before writing this, not assumed:
+            // `stroke-dasharray` is on fm-core's allowed-property list (there is a test parsing
+            // it), `resolve_edge_inline_style` reads `edge.inline_style` FIRST, and all three lean
+            // edge fast paths in fm-render-svg are gated on that resolver returning none — so a
+            // dashed edge falls through to the general path that draws it.
+            //
+            // A single-number value is used deliberately: `stroke-dasharray:5` means equal 5-unit
+            // dash and gap, and avoids handing a comma-separated value to a style parser that also
+            // treats commas as declaration separators.
+            let is_realization = matches!(class_operator, Some("..|>" | "<|.."));
             for ast in asts {
                 let ast = if reversed_dependency {
                     swap_edge_endpoints(ast)
@@ -4107,6 +4128,9 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
                     None => ast,
                 };
                 statements.push(ClassStatement::Ast(ast));
+                if is_realization {
+                    statements.push(ClassStatement::EdgeInlineStyle("stroke-dasharray:5"));
+                }
                 // Attach cardinality to this edge in lower_class_statement. `stripped` is `Some`
                 // only when at least one cardinality was extracted, so no is_some() re-check.
                 if let Some((_, source_card, target_card)) = &stripped {
@@ -4218,6 +4242,9 @@ fn lower_class_statement(
         }
         ClassStatement::Cardinality(source, target) => {
             builder.set_last_edge_cardinality(source.as_deref(), target.as_deref());
+        }
+        ClassStatement::EdgeInlineStyle(style) => {
+            builder.set_last_edge_inline_style(style);
         }
         ClassStatement::Note(target, text) => {
             // Deliberately does NOT intern the target, unlike the state-diagram note path. A note
@@ -12578,6 +12605,46 @@ mod tests {
         let reverse = parse_mermaid("classDiagram\n  Interface <|.. Impl\n");
         assert_eq!(reverse.ir.edges.len(), 1, "`<|..` drew no edge");
         assert_eq!(reverse.ir.edges[0].arrow, ArrowType::Inheritance);
+    }
+
+    /// A REALIZATION IS DASHED and an inheritance is not (bd-u9hcc).
+    ///
+    /// bd-u9hcc landed the head and direction and recorded the missing dash as a real loss: without
+    /// it, `Impl ..|> Interface` renders identically to `Animal <|-- Dog`, so the diagram cannot
+    /// express the difference at all. The dash rides on the edge's `inline_style` rather than a new
+    /// `ArrowType`, which would have meant exhaustive matches across five crates.
+    ///
+    /// The INHERITANCE case is the discriminating control: a change that dashed every triangle
+    /// relation would satisfy the two realization assertions on their own.
+    #[test]
+    fn class_realization_is_dashed_but_inheritance_is_not() {
+        for source in [
+            "classDiagram\n  Impl ..|> Interface\n",
+            "classDiagram\n  Interface <|.. Impl\n",
+        ] {
+            let parsed = parse_mermaid(source);
+            let edge = &parsed.ir.edges[0];
+            let dash = edge
+                .inline_style
+                .as_ref()
+                .and_then(|style| style.properties.get("stroke-dasharray"));
+            assert!(
+                dash.is_some(),
+                "a realization drew a solid line, so it is indistinguishable from an inheritance: \
+                 {source}"
+            );
+        }
+
+        let inheritance = parse_mermaid("classDiagram\n  Animal <|-- Dog\n");
+        let dash = inheritance.ir.edges[0]
+            .inline_style
+            .as_ref()
+            .and_then(|style| style.properties.get("stroke-dasharray"));
+        assert!(
+            dash.is_none(),
+            "an ordinary inheritance was dashed, which erases the distinction the dash exists to \
+             draw: {dash:?}"
+        );
     }
 
     /// The plain dotted link `A .. B` also drew nothing. `DottedLine` is EXACT for this one.
