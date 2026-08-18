@@ -225,6 +225,59 @@ struct PressureConfigOverrides {
     worker_saturation_permille: Option<u16>,
 }
 
+/// Where a browser host should send a render (bd-2u0.6 scope item 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "target", rename_all = "camelCase")]
+pub enum CanvasTarget {
+    /// Render in the worker against a transferred `OffscreenCanvas`.
+    OffscreenInWorker,
+    /// Render in the worker to SVG text and hand the string back for the main thread to insert.
+    ///
+    /// The useful middle case, and the reason this is not a boolean: a browser without
+    /// `OffscreenCanvas` can still keep parse and layout off the main thread, which is where the
+    /// time goes on a large diagram. Falling straight back to a main-thread canvas would give up
+    /// the entire benefit over one missing API.
+    SvgInWorker,
+    /// Render on the main thread. The last resort.
+    MainThreadCanvas,
+}
+
+/// What the host observed about the environment it is running in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HostCapabilities {
+    /// `typeof OffscreenCanvas !== "undefined"`.
+    pub offscreen_canvas: bool,
+    /// `typeof Worker !== "undefined"`.
+    pub worker: bool,
+    /// Whether the canvas has already been transferred to the worker.
+    ///
+    /// Separate from `offscreen_canvas` on purpose: `transferControlToOffscreen` may be present and
+    /// still fail, and a canvas can be transferred only ONCE per element. A host that re-transfers
+    /// gets a DOM exception, so the decision has to see whether the transfer actually happened
+    /// rather than whether the API exists.
+    pub canvas_transferred: bool,
+}
+
+/// Choose a render target from what the host can actually do.
+///
+/// Ordered by how much work leaves the main thread, most first. Every step down is a real
+/// degradation rather than an equivalent alternative, so the decision is explicit and testable off
+/// the browser — the wasm paths themselves cannot be unit-tested here, which makes this the only
+/// part of the routing that can carry a proof.
+#[must_use]
+pub fn choose_canvas_target(capabilities: HostCapabilities) -> CanvasTarget {
+    if !capabilities.worker {
+        // No worker: nothing can leave the main thread, and an OffscreenCanvas on the main thread
+        // buys nothing because the work still blocks the same event loop.
+        return CanvasTarget::MainThreadCanvas;
+    }
+    if capabilities.offscreen_canvas && capabilities.canvas_transferred {
+        return CanvasTarget::OffscreenInWorker;
+    }
+    CanvasTarget::SvgInWorker
+}
+
 /// A structured-clone-safe request for the browser worker render path.
 ///
 /// Configuration stays JSON text so callers can forward the same payload to a
@@ -2825,6 +2878,118 @@ mod tests {
             payload["claims"]
                 .as_array()
                 .is_some_and(|claims| !claims.is_empty())
+        );
+    }
+
+    /// Every capability combination must route somewhere sensible (bd-2u0.6 item 3).
+    ///
+    /// Table-driven because the interesting content is the FALLBACK ladder, and a ladder is only
+    /// correct as a whole: asserting the happy path alone would let every degraded environment
+    /// collapse to the same answer without a test noticing.
+    #[test]
+    fn canvas_routing_degrades_one_step_at_a_time() {
+        use super::{CanvasTarget, HostCapabilities, choose_canvas_target};
+
+        let cases = [
+            (
+                HostCapabilities {
+                    offscreen_canvas: true,
+                    worker: true,
+                    canvas_transferred: true,
+                },
+                CanvasTarget::OffscreenInWorker,
+                "everything available",
+            ),
+            (
+                HostCapabilities {
+                    offscreen_canvas: true,
+                    worker: true,
+                    canvas_transferred: false,
+                },
+                CanvasTarget::SvgInWorker,
+                "OffscreenCanvas exists but the transfer did not happen",
+            ),
+            (
+                HostCapabilities {
+                    offscreen_canvas: false,
+                    worker: true,
+                    canvas_transferred: false,
+                },
+                CanvasTarget::SvgInWorker,
+                "no OffscreenCanvas, but parse and layout can still leave the main thread",
+            ),
+            (
+                HostCapabilities {
+                    offscreen_canvas: true,
+                    worker: false,
+                    canvas_transferred: true,
+                },
+                CanvasTarget::MainThreadCanvas,
+                "no worker: an offscreen canvas on the main thread blocks the same event loop",
+            ),
+            (
+                HostCapabilities::default(),
+                CanvasTarget::MainThreadCanvas,
+                "nothing available",
+            ),
+        ];
+
+        for (capabilities, expected, why) in cases {
+            assert_eq!(
+                choose_canvas_target(capabilities),
+                expected,
+                "{why}: {capabilities:?}"
+            );
+        }
+    }
+
+    /// CONTROL: a missing worker beats a present OffscreenCanvas.
+    ///
+    /// Stated separately because it is the one ordering a reasonable implementation gets wrong —
+    /// `offscreen_canvas` is the more specific-sounding capability, so checking it first is the
+    /// natural mistake, and it would route work to an offscreen canvas that still blocks the UI.
+    #[test]
+    fn a_missing_worker_outranks_a_present_offscreen_canvas() {
+        use super::{CanvasTarget, HostCapabilities, choose_canvas_target};
+
+        assert_eq!(
+            choose_canvas_target(HostCapabilities {
+                offscreen_canvas: true,
+                worker: false,
+                canvas_transferred: true,
+            }),
+            CanvasTarget::MainThreadCanvas
+        );
+    }
+
+    /// The routing decision must survive the wire, like every other worker type.
+    #[test]
+    fn capabilities_and_target_round_trip_as_json() {
+        use super::{CanvasTarget, HostCapabilities, choose_canvas_target};
+
+        let capabilities = HostCapabilities {
+            offscreen_canvas: true,
+            worker: true,
+            canvas_transferred: false,
+        };
+        let encoded = serde_json::to_string(&capabilities).expect("capabilities serialize");
+        assert!(
+            encoded.contains("offscreenCanvas") && encoded.contains("canvasTransferred"),
+            "capabilities are not camelCase on the wire: {encoded}"
+        );
+        let decoded: HostCapabilities =
+            serde_json::from_str(&encoded).expect("capabilities deserialize");
+        assert_eq!(decoded, capabilities);
+
+        let target = choose_canvas_target(capabilities);
+        let encoded = serde_json::to_string(&target).expect("target serialize");
+        assert!(
+            encoded.contains("svgInWorker"),
+            "target is not camelCase on the wire: {encoded}"
+        );
+        assert_eq!(
+            serde_json::from_str::<CanvasTarget>(&encoded).expect("target deserialize"),
+            target
         );
     }
 }

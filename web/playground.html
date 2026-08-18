@@ -1,0 +1,126 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>frankenmermaid — worker playground</title>
+<!--
+  Sample integration for bd-2u0.6 scope item 5.
+
+  It exists to demonstrate the three things the worker path is FOR, so each is visible rather than
+  described:
+
+    1. Typing does not block. Every keystroke posts a new request; the Rust coordinator supersedes
+       the in-flight one, and the log shows the superseded ids being dropped instead of rendered.
+    2. The target is chosen, not assumed. The capability probe below feeds the same decision the
+       Rust `choose_canvas_target` makes, and the chosen target is displayed.
+    3. Diagnostics and timings come back verbatim from the module, not re-derived in JS.
+
+  Serve this directory over HTTP; ES module workers and wasm do not load from file:// URLs.
+-->
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 0; display: grid; grid-template-columns: 1fr 1fr; height: 100vh; }
+  textarea { font: 13px/1.4 ui-monospace, monospace; border: 0; border-right: 1px solid #cbd5e1; padding: 12px; resize: none; }
+  #right { display: flex; flex-direction: column; min-width: 0; }
+  #status { padding: 8px 12px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; font-size: 12px; }
+  #out { flex: 1; overflow: auto; padding: 12px; }
+  #log { height: 30%; overflow: auto; border-top: 1px solid #e2e8f0; padding: 8px 12px; font: 12px ui-monospace, monospace; background: #0f172a; color: #e2e8f0; }
+  .warn { color: #fbbf24; }
+  .err { color: #f87171; }
+</style>
+
+<textarea id="src" spellcheck="false">flowchart TD
+  a[Alpha] --> b[Beta]
+  b --> c[Gamma]
+  c -.-> a</textarea>
+
+<div id="right">
+  <div id="status">starting…</div>
+  <div id="out"></div>
+  <div id="log"></div>
+</div>
+
+<script type="module">
+  const srcEl = document.getElementById("src");
+  const outEl = document.getElementById("out");
+  const logEl = document.getElementById("log");
+  const statusEl = document.getElementById("status");
+
+  const MODULE_URL = new URL("./pkg/fm_wasm.js", import.meta.url).href;
+
+  function log(text, cls) {
+    const line = document.createElement("div");
+    if (cls) line.className = cls;
+    line.textContent = text;
+    logEl.append(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // The same inputs `HostCapabilities` carries in Rust. Probed, never assumed: a browser can expose
+  // OffscreenCanvas and still refuse the transfer, and a canvas may be transferred only once.
+  const capabilities = {
+    offscreenCanvas: typeof OffscreenCanvas !== "undefined",
+    worker: typeof Worker !== "undefined",
+    canvasTransferred: false,
+  };
+
+  if (!capabilities.worker) {
+    // Deliberately explicit rather than a silent main-thread render: the whole point of the page is
+    // to show which path ran, and a quiet fallback would misrepresent the measurement.
+    statusEl.textContent = "no Worker support — this page cannot demonstrate the off-main-thread path";
+    log("Worker unavailable; a real app would fall back to a main-thread render here.", "warn");
+    throw new Error("worker unavailable");
+  }
+
+  const worker = new Worker(new URL("./fm-render.worker.js", import.meta.url), { type: "module" });
+
+  let nextRequestId = 1;
+  const started = new Map();
+
+  worker.onmessage = (event) => {
+    const msg = event.data;
+
+    if (msg.kind === "ready") {
+      statusEl.textContent = `worker ready — target: ${msg.target}`;
+      render();
+      return;
+    }
+
+    const startedAt = started.get(msg.requestId);
+    const roundTrip = startedAt === undefined ? null : Math.round(performance.now() - startedAt);
+    started.delete(msg.requestId);
+
+    switch (msg.kind) {
+      case "completed":
+        if (msg.svg) outEl.innerHTML = msg.svg;
+        log(
+          `#${msg.requestId} completed in ${roundTrip}ms` +
+            (msg.timings ? ` (parse ${msg.timings.parseMs}ms, layout ${msg.timings.layoutMs}ms, render ${msg.timings.renderMs}ms)` : "") +
+            (msg.nodeCount !== undefined ? ` — ${msg.nodeCount} nodes, ${msg.edgeCount} edges` : ""),
+        );
+        // Verbatim from the module: same severities, messages and spans the CLI prints.
+        for (const d of msg.diagnostics || []) log(`  ${d.severity}: ${d.message}`, "warn");
+        break;
+      case "noReply":
+        // The coordinator dropped it — superseded by a newer keystroke, or already cancelled.
+        log(`#${msg.requestId} superseded`, "warn");
+        break;
+      case "failed":
+        log(`#${msg.requestId} failed: ${msg.reason}`, "err");
+        break;
+      default:
+        log(`unexpected message: ${JSON.stringify(msg)}`, "err");
+    }
+  };
+
+  worker.onerror = (event) => log(`worker error: ${event.message}`, "err");
+
+  worker.postMessage({ kind: "init", moduleUrl: MODULE_URL });
+
+  function render() {
+    const requestId = nextRequestId++;
+    started.set(requestId, performance.now());
+    // No debounce, on purpose: superseding IS the feature, so the page exercises it rather than
+    // hiding it behind a timer. A production integration would still debounce.
+    worker.postMessage({ kind: "render", requestId, input: srcEl.value });
+  }
+
+  srcEl.addEventListener("input", render);
+</script>
