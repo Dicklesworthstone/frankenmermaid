@@ -4930,24 +4930,67 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
         }
         // Apply branch color class to all nodes.
         builder.add_class_to_node_id(node_id, MINDMAP_BRANCH_CLASSES[branch_index & 7]);
+
+        // MARK THE DEFAULT SHAPE (bd-d9mw). `A` and `A[A]` both parse to `NodeShape::Rect`, so they
+        // rendered BYTE-IDENTICALLY while mermaid types them distinctly. The incumbent's fix is not
+        // a different geometry but a different CLASS: it emits `node-bkg node-no-border` and lets
+        // CSS drop the border, which is why nothing here needs a new `NodeShape` variant - and a
+        // new variant would mean auditing 172 `NodeShape::` sites in fm-render-svg alone.
+        //
+        // The name mirrors mermaid's own shape name. It is deliberately free of the substrings the
+        // node-class keyword scan looks for (`active`, `dim`, `dashed-border`, `double-border`, ...);
+        // that scan is a SUBSTRING match, and this project has already been bitten by `inactive`
+        // matching `active`.
+        if mindmap_token_is_default_shaped(trimmed) {
+            builder.add_class_to_node_id(node_id, "mindmap-no-border");
+        }
     }
 }
 
 /// Parse a mindmap node token with mindmap-specific shapes.
 /// Mindmap supports: square [], rounded (), circle (()), bang ))((, cloud )(, hexagon {{}}
+/// The shape-bearing core of a mindmap token, with any `:::class1 class2` suffix stripped.
+///
+/// Extracted so `parse_mindmap_node_token` and `mindmap_token_is_default_shaped` cannot disagree
+/// about what the token IS. They are asked the same question one after another at the same call
+/// site, and two copies of this strip would silently mislabel any node whose class suffix contains
+/// a bracket.
+fn mindmap_token_core(trimmed: &str) -> &str {
+    // The `:::` split builds a substring searcher; guard it behind a cheap `memchr(':')` - the
+    // common mindmap node has no colon.
+    if trimmed.as_bytes().contains(&b':') {
+        trim_fast(find_triple_colon(trimmed).map_or(trimmed, |pos| &trimmed[..pos]))
+    } else {
+        trimmed
+    }
+}
+
+/// Does this mindmap token declare NO shape delimiter, i.e. mermaid's DEFAULT node type?
+///
+/// mermaid 11.15.0 maps its mindmap node types to shape NAMES: DEFAULT yields "no-border", RECT
+/// yields "rect", ROUNDED_RECT yields "rounded-rect", and so on, with `DEFAULT:0` and `NO_BORDER:0`
+/// sharing a value. So a bare `A` is BORDERLESS in the incumbent while `A[A]` is a rectangle; we
+/// drew both as a rectangle, which is bd-d9mw.
+///
+/// The predicate is the delimiter test `parse_mindmap_node_token` already uses as its fast path, so
+/// "took the default branch" and "has no delimiter" are the same question by construction rather
+/// than two rules that have to be kept in step.
+fn mindmap_token_is_default_shaped(trimmed: &str) -> bool {
+    let core = mindmap_token_core(trimmed);
+    !core.is_empty()
+        && !core
+            .as_bytes()
+            .iter()
+            .any(|&b| matches!(b, b'(' | b')' | b'[' | b']' | b'{' | b'}'))
+}
+
 fn parse_mindmap_node_token(raw: &str, config: &ParserConfig) -> Option<NodeToken> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
     }
 
-    // Strip class suffix (:::class1 class2) from the node definition. The `:::` split builds a
-    // substring searcher; guard it behind a cheap `memchr(':')` — the common mindmap node has no colon.
-    let core = if trimmed.as_bytes().contains(&b':') {
-        trim_fast(find_triple_colon(trimmed).map_or(trimmed, |pos| &trimmed[..pos]))
-    } else {
-        trimmed
-    };
+    let core = mindmap_token_core(trimmed);
     if core.is_empty() {
         return None;
     }

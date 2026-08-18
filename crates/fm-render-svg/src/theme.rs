@@ -540,6 +540,23 @@ svg {{
   {shadow_filter}
   transition: fill 200ms ease, stroke 200ms ease, filter 200ms ease;
 }}
+/* A mindmap node declared with no shape delimiter is BORDERLESS (bd-d9mw).
+
+   `A` and `A[A]` both parse to `NodeShape::Rect` and rendered byte-identically, while mermaid
+   11.15.0 types them distinctly: its mindmap switch maps DEFAULT to the shape name "no-border" and
+   RECT to "rect", with DEFAULT:0 and NO_BORDER:0 sharing an enum value. The incumbent draws the
+   difference in CSS rather than in geometry - it emits `node-bkg node-no-border` - which is why the
+   Rust side needs a marker class here and no new `NodeShape` variant.
+
+   Scoped under `.fm-node` so it can only affect a node that carries the marker, and placed after
+   the shape rule above so it overrides that rule's `stroke` rather than depending on specificity
+   alone. `fill` is deliberately left ALONE: mermaid's default node keeps its section fill and drops
+   only the border, so removing the fill here would be a second change nobody asked for. */
+.fm-node.mindmap-no-border rect,
+.fm-node.mindmap-no-border path,
+.fm-node.mindmap-no-border polygon {{
+  stroke: none;
+}}
 .fm-node line {{
   stroke: var(--fm-node-accent);
   stroke-width: 1.5;
