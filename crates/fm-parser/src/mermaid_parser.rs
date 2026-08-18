@@ -169,7 +169,26 @@ const PACKET_OPERATORS: [(&str, ArrowType); 4] = [
 // those glyphs; it renders cardinality as TEXT near each endpoint
 // (`write_er_cardinality_labels_into`). Under that model the faithful mapping is line style only,
 // with the cardinality carried by the labels that are already drawn.
-const ER_OPERATORS: [(&str, ArrowType); 14] = [
+/// ⚠️ THE CARDINALITY GRID MUST BE COMPLETE, because the `--` / `..` fallbacks at the bottom make an
+/// omission SILENT AND DESTRUCTIVE rather than merely unsupported.
+///
+/// `find_operator` for ER scans left to right and takes the longest operator matching AT each
+/// position. For a combination missing from this list — `A }o--o| B`, say — nothing matches at the
+/// `}`, so the scan walks on and matches the bare `--` in the middle. The endpoints are then split
+/// there: `left_raw` becomes `A }o` and `right_raw` becomes `o| B`, and
+/// `parse_node_token_with_config` normalises those into MANGLED ENTITY NAMES. The diagram gains
+/// entities the author never wrote, the real ones go unconnected, and the recorded er_notation is
+/// `--` with the cardinality gone.
+///
+/// mermaid's grammar is a product: LEFT in {`||`, `|o`, `}|`, `}o`} x LINE in {`--`, `..`} x
+/// RIGHT in {`||`, `o|`, `|{`, `o{`} = 32 operators. Twelve were listed and TWENTY-ONE were
+/// missing, every one of them PARSED by the pinned bundle (spot-checked `}o--o|`, `|o--|{`,
+/// `||--o|`, `}|--o{`, `|o..o{`, `||..o{`). The grid below is generated from that product, so
+/// adding a cardinality token means extending the sets, not hand-writing combinations.
+///
+/// `o|--|{` is kept although `o|` is not a left-hand token in mermaid's grammar: it predates this
+/// and removing it would be a behaviour change nobody asked for, not a fix.
+const ER_OPERATORS: [(&str, ArrowType); 35] = [
     ("||--o{", ArrowType::Line),
     ("||--|{", ArrowType::Line),
     ("}|--||", ArrowType::Line),
@@ -182,6 +201,28 @@ const ER_OPERATORS: [(&str, ArrowType); 14] = [
     ("}|--|{", ArrowType::Line),
     ("|o--||", ArrowType::Line),
     ("}o--o{", ArrowType::Line),
+    ("||--o|", ArrowType::Line),
+    ("|o--|{", ArrowType::Line),
+    ("|o--o{", ArrowType::Line),
+    ("}|--o|", ArrowType::Line),
+    ("}|--o{", ArrowType::Line),
+    ("}o--o|", ArrowType::Line),
+    ("}o--|{", ArrowType::Line),
+    ("||..o|", ArrowType::DottedLine),
+    ("||..|{", ArrowType::DottedLine),
+    ("||..o{", ArrowType::DottedLine),
+    ("|o..||", ArrowType::DottedLine),
+    ("|o..o|", ArrowType::DottedLine),
+    ("|o..|{", ArrowType::DottedLine),
+    ("|o..o{", ArrowType::DottedLine),
+    ("}|..||", ArrowType::DottedLine),
+    ("}|..o|", ArrowType::DottedLine),
+    ("}|..o{", ArrowType::DottedLine),
+    ("}o..||", ArrowType::DottedLine),
+    ("}o..o|", ArrowType::DottedLine),
+    ("}o..|{", ArrowType::DottedLine),
+    ("}o..o{", ArrowType::DottedLine),
+    // Bare fallbacks LAST. They match no cardinality and exist for `A -- B` / `A .. B`.
     ("--", ArrowType::Line),
     ("..", ArrowType::DottedLine),
 ];
@@ -19410,6 +19451,58 @@ Rel_Back(db, app, "Responds")"#,
     }
 
     // ── ER notation storage tests ──────────────────────────────────────
+
+    /// EVERY cardinality combination connects the two entities it names (bd-flznf).
+    ///
+    /// Generative over mermaid's own product — LEFT x LINE x RIGHT — rather than a handful of
+    /// spot-checks, because the defect was an omission: twelve of the thirty-two combinations were
+    /// listed and the rest fell through to the bare `--` fallback in the SAME table. That splits
+    /// `A }o--o| B` at the middle dashes, so the endpoints normalise into MANGLED entity names and
+    /// the real ones go unconnected. A test that enumerates the grid cannot miss the next omission
+    /// the way a list of examples can.
+    ///
+    /// The node-NAME assertion is the load-bearing one: a mangled parse still yields two nodes and
+    /// one edge, so counting alone would pass on the exact defect this covers.
+    #[test]
+    fn every_er_cardinality_pair_connects_the_named_entities() {
+        for left in ["||", "|o", "}|", "}o"] {
+            for line in ["--", ".."] {
+                for right in ["||", "o|", "|{", "o{"] {
+                    let operator = format!("{left}{line}{right}");
+                    let parsed =
+                        parse_mermaid(&format!("erDiagram\n  CUSTOMER {operator} ORDER : places\n"));
+
+                    let ids: Vec<&str> =
+                        parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+                    assert_eq!(
+                        ids,
+                        vec!["CUSTOMER", "ORDER"],
+                        "`{operator}` mangled the entity names"
+                    );
+                    assert_eq!(parsed.ir.edges.len(), 1, "`{operator}` drew no single edge");
+                    assert_eq!(
+                        parsed.ir.edges[0].er_notation(),
+                        Some(operator.as_str()),
+                        "`{operator}` lost its cardinality notation"
+                    );
+                }
+            }
+        }
+    }
+
+    /// CONTROL: the bare fallbacks still work and are still distinguishable. They are what the
+    /// missing combinations were wrongly falling through to, so they must keep matching only when
+    /// no cardinality is written.
+    #[test]
+    fn bare_er_relations_still_parse_without_cardinality() {
+        for (operator, expected) in [("--", ArrowType::Line), ("..", ArrowType::DottedLine)] {
+            let parsed =
+                parse_mermaid(&format!("erDiagram\n  CUSTOMER {operator} ORDER : places\n"));
+            let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+            assert_eq!(ids, vec!["CUSTOMER", "ORDER"]);
+            assert_eq!(parsed.ir.edges[0].arrow, expected);
+        }
+    }
 
     #[test]
     fn er_edge_stores_notation() {
