@@ -1001,9 +1001,20 @@ fn content_heuristics(input: &str) -> Option<DetectedType> {
         });
     }
 
-    // Sequence diagram patterns
+    // Sequence diagram patterns.
+    //
+    // Our parser accepts ten arrow forms; this tested three. The async arrows `-)` / `--)` and the
+    // bidirectional `<<->>` / `<<-->>` are sequence-only, so they are matched unguarded -- testing
+    // `-)` covers `--)` by substring, and `<<->>` covers `<<-->>`.
+    //
+    // `-x` and `--x` are EXCLUDED for the same reason `o--` is excluded from the class branch: a
+    // flowchart cross edge is spelled `A --x B`, and `-x` is a substring of it, so neither can be
+    // tested here without reclassifying flowcharts. The colon guard would not save it either --
+    // a headerless flowchart carrying any `fill:#f00` supplies the colon.
     if content.contains("->>")
         || content.contains("-->>")
+        || content.contains("-)")
+        || content.contains("<<->>")
         || content.contains("participant ")
         || content.contains("actor ")
         || content.contains("activate ")
@@ -3305,6 +3316,41 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
                 detected.diagram_type,
                 fm_core::DiagramType::Class,
                 "{source:?} was misread as a class diagram"
+            );
+        }
+    }
+
+    /// The sequence heuristic must recognise the async and bidirectional arrows.
+    ///
+    /// Our parser accepts ten arrow forms and the heuristic tested three, so a headerless exchange
+    /// using only `-)` or `<<->>` fell through to the flowchart fallback.
+    #[test]
+    fn the_sequence_heuristic_covers_async_and_bidirectional_arrows() {
+        for arrow in ["->>", "-->>", "-)", "--)", "<<->>", "<<-->>"] {
+            let source = format!("Alice {arrow} Bob: hello\n");
+            let detected = super::detect_type_with_confidence(&source);
+            assert_eq!(
+                detected.diagram_type,
+                fm_core::DiagramType::Sequence,
+                "{arrow} was not recognised as a sequence arrow"
+            );
+        }
+    }
+
+    /// CONTROL: a flowchart cross edge must NOT be read as a sequence diagram.
+    ///
+    /// `--x` is both a sequence dotted-cross and a flowchart cross edge, and `-x` is a substring of
+    /// it, so both are deliberately excluded. The second case is the one that matters: a headerless
+    /// flowchart carrying a `fill:#f00` supplies the colon that guards the `->` rule, so a
+    /// colon-guarded `-x` would still have misfired.
+    #[test]
+    fn flowchart_cross_edges_are_not_read_as_sequence() {
+        for source in ["A --x B\n", "A --x B\n  style A fill:#f00\n"] {
+            let detected = super::detect_type_with_confidence(source);
+            assert_ne!(
+                detected.diagram_type,
+                fm_core::DiagramType::Sequence,
+                "{source:?} was misread as a sequence diagram"
             );
         }
     }
