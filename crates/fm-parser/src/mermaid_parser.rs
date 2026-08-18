@@ -11655,23 +11655,87 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                 first_style_span = Some(span);
             }
             // linkStyle 0 stroke:#f00,...
+            //
+            // The index position is a LIST, not one number. Read out of the pinned mermaid 11.15.0
+            // bundle, the grammar hands `updateLink` an array and the function walks it:
+            //
+            //     updateLink(t, r) { t.forEach(i => {
+            //       if (typeof i == "number" && i >= this.edges.length)
+            //         throw new Error(`The index ${i} for linkStyle is out of bounds ...`);
+            //       ... }) }
+            //
+            // MEASURED, not inferred: the pinned bundle was loaded in a `node:vm` and asked to parse
+            // each form. `linkStyle 0` and `linkStyle 0,1` both PARSE, so the comma list is valid
+            // mermaid and our silent drop of it was a real gap.
+            //
+            // so `linkStyle 0,1,2 stroke:#f00` styles three edges. We parsed the whole position with
+            // a single `parse::<usize>()`, which fails on `0,1` — and there was NO else branch, so
+            // the directive vanished in total silence. Same class as the subgraph `style` drop
+            // (bd-xfmm): the author writes valid mermaid, the styling is simply absent, and nothing
+            // says why. The `class` directive immediately below has always split on commas; this is
+            // that same list handling, applied to the sibling that was missing it.
             let rest = rest.trim();
             if let Some((index_str, style)) = rest.split_once(' ') {
                 let index_str = index_str.trim();
                 let style = style.trim();
                 if !style.is_empty() {
-                    if index_str.eq_ignore_ascii_case("default") {
-                        builder.push_style_ref(
-                            fm_core::IrStyleTarget::LinkDefault,
-                            style.to_string(),
-                            span,
-                        );
-                    } else if let Ok(link_index) = index_str.parse::<usize>() {
-                        builder.push_style_ref(
-                            fm_core::IrStyleTarget::Link(link_index),
-                            style.to_string(),
-                            span,
-                        );
+                    for token in index_str.split(',') {
+                        let token = token.trim();
+                        if token.is_empty() {
+                            // A trailing or doubled comma. Skipped rather than reported: it changes
+                            // nothing about what the author asked for.
+                            continue;
+                        }
+                        if token.eq_ignore_ascii_case("default") {
+                            builder.push_style_ref(
+                                fm_core::IrStyleTarget::LinkDefault,
+                                style.to_string(),
+                                span,
+                            );
+                        } else if let Ok(link_index) = token.parse::<usize>() {
+                            // mermaid DIES on an out-of-range index, and worse than it means to.
+                            // The same probe fed it `linkStyle 9` against a one-edge diagram: it
+                            // does NOT reach the friendly "out of bounds" error quoted above, it
+                            // throws `Cannot set properties of undefined (setting 'style')`. The
+                            // guard is `typeof i == "number" && i >= this.edges.length`, and the
+                            // grammar hands it a STRING — so the check never fires and the code
+                            // walks off the end of `edges` instead. Their bounds message is dead.
+                            //
+                            // Throwing away the whole diagram over one bad number is not this
+                            // parser's contract — every other recovery here keeps going — so the
+                            // index is dropped and named. This is a DELIBERATE divergence from the
+                            // incumbent, in the direction of the one behaviour it meant to have.
+                            // Reported rather than silently pushed because a `Link(index)` ref that
+                            // matches no edge is exactly the invisible-nothing this commit is about.
+                            //
+                            // `edge_count()` is meaningful here: BOTH callers of this pass run it
+                            // after lowering (the flowchart one says so in a comment; the generic
+                            // one calls `edge_count()` itself ten lines later), so a zero here means
+                            // a diagram with no edges, not a pass that has not built them yet.
+                            let edge_count = builder.edge_count();
+                            if link_index >= edge_count {
+                                builder.add_warning(format!(
+                                    "linkStyle index {link_index} is out of bounds; the diagram has \
+                                     {edge_count} link(s), so valid indices are 0..{}",
+                                    edge_count.saturating_sub(1)
+                                ));
+                            } else {
+                                builder.push_style_ref(
+                                    fm_core::IrStyleTarget::Link(link_index),
+                                    style.to_string(),
+                                    span,
+                                );
+                            }
+                        } else {
+                            // mermaid rejects the whole document here (the probe's `linkStyle nope`
+                            // returned `Parse error on line 3`). Same divergence as above: the rest
+                            // of the diagram is still worth drawing, so this names the bad token and
+                            // carries on.
+                            builder.add_warning(format!(
+                                "linkStyle target `{token}` is not a link index or `default`; it \
+                                 was ignored"
+                            ));
+                        }
                     }
                 }
             }
@@ -18040,6 +18104,92 @@ Rel_Back(db, app, "Responds")"#,
             .iter()
             .any(|sr| sr.target == fm_core::IrStyleTarget::LinkDefault);
         assert!(has_default, "should have LinkDefault style ref");
+    }
+
+    /// `linkStyle 0,2 ...` styles BOTH named links — and ONLY those.
+    ///
+    /// The index position is a list in mermaid's grammar (`updateLink` forEach's over an array), but
+    /// this parser ran `parse::<usize>()` over the whole position. `"0,2"` is not a `usize`, the
+    /// parse failed, and there was no else branch — so the whole directive vanished silently.
+    ///
+    /// The `!has(1)` assertion is the one that matters: without it, a change that simply applied the
+    /// style to EVERY link would pass. That is the failure mode a list feature invites.
+    #[test]
+    fn linkstyle_applies_to_every_index_in_a_comma_list() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n  A --> B\n  B --> C\n  C --> D\n  linkStyle 0,2 stroke:#ff0000",
+        );
+
+        let has = |index: usize| {
+            parsed
+                .ir
+                .style_refs
+                .iter()
+                .any(|sr| sr.target == fm_core::IrStyleTarget::Link(index))
+        };
+        assert!(has(0) && has(2), "the comma list did not reach both links: {:?}", parsed.ir.style_refs);
+        assert!(
+            !has(1),
+            "an unnamed link was styled — the list is being ignored rather than parsed: {:?}",
+            parsed.ir.style_refs
+        );
+    }
+
+    /// CONTROL: the single-index form still works. The list split must not have replaced it.
+    #[test]
+    fn linkstyle_with_one_index_still_styles_that_link() {
+        let parsed =
+            parse_mermaid("flowchart LR\n  A --> B\n  B --> C\n  linkStyle 1 stroke:#00ff00");
+
+        let links: Vec<_> = parsed
+            .ir
+            .style_refs
+            .iter()
+            .filter(|sr| matches!(sr.target, fm_core::IrStyleTarget::Link(_)))
+            .map(|sr| sr.target.clone())
+            .collect();
+        assert_eq!(
+            links,
+            vec![fm_core::IrStyleTarget::Link(1)],
+            "the single-index form changed behaviour"
+        );
+    }
+
+    /// An out-of-range index is NAMED, not silently dropped.
+    ///
+    /// mermaid throws here. Throwing away the diagram over one bad number is not this parser's
+    /// contract, so the index is dropped — but pushing a `Link(9)` that matches no edge would be the
+    /// same invisible nothing this whole change is about, so it is reported instead.
+    #[test]
+    fn linkstyle_out_of_bounds_index_warns_and_styles_nothing() {
+        let parsed = parse_mermaid("flowchart LR\n  A --> B\n  linkStyle 9 stroke:#ff0000");
+
+        assert!(
+            !parsed
+                .ir
+                .style_refs
+                .iter()
+                .any(|sr| matches!(sr.target, fm_core::IrStyleTarget::Link(_))),
+            "an out-of-range index produced a style ref: {:?}",
+            parsed.ir.style_refs
+        );
+        assert!(
+            parsed.warnings.iter().any(|w| w.contains("out of bounds")),
+            "the out-of-range index was dropped in silence: {:?}",
+            parsed.warnings
+        );
+    }
+
+    /// A target that is neither a number nor `default` is reported rather than dropped.
+    #[test]
+    fn linkstyle_unparseable_target_warns() {
+        let parsed = parse_mermaid("flowchart LR\n  A --> B\n  linkStyle nope stroke:#ff0000");
+
+        assert!(
+            parsed.warnings.iter().any(|w| w.contains("`nope`")),
+            "an unparseable linkStyle target was dropped in silence: {:?}",
+            parsed.warnings
+        );
     }
 
     // ── Requirement metadata tests ─────────────────────────────────────
