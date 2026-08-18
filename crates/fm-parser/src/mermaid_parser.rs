@@ -11571,17 +11571,39 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
             if first_style_span.is_none() {
                 first_style_span = Some(span);
             }
-            // classDef className fill:#fff,stroke:#000,...
+            // classDef classNameA,classNameB fill:#fff,stroke:#000,...
+            //
+            // The NAME position is a comma list, exactly like `style` and `class` (and, since
+            // bd-34tu, `linkStyle`). Read out of the pinned mermaid 11.15.0 bundle, the flowchart
+            // db splits it itself:
+            //
+            //     addClass(t, r) { ... t.split(",").forEach(n => {
+            //       let a = this.classes.get(n);
+            //       a === void 0 && (a = { id: n, styles: [], textStyles: [] }); ... }) }
+            //
+            // We took the whole position as ONE name, so `classDef a,b fill:#f00` declared a single
+            // class literally called `a,b`. Nothing can ever reference it — a `class X a,b` line
+            // names one class per token — so the styling simply never appeared, with no diagnostic.
+            // Same silent-drop family as bd-34tu and bd-xfmm, and the last of the four directives in
+            // this function that was still missing list handling.
+            //
+            // Only the NAME position is split. The STYLE position is comma-separated CSS and is
+            // passed through whole; `rest.split_once(' ')` is what keeps the two apart, and the
+            // existing unsupported-property test (`fill:#fff,shadow:2px,...`) pins that.
             let rest = rest.trim();
-            if let Some((name, style)) = rest.split_once(' ') {
-                let name = name.trim();
+            if let Some((names, style)) = rest.split_once(' ') {
+                let names = names.trim();
                 let style = style.trim();
-                if !name.is_empty() && !style.is_empty() {
+                if !names.is_empty() && !style.is_empty() {
+                    // Rejections are a property of the STYLE, so this is computed and reported once
+                    // for the line rather than once per name — `classDef a,b <bad>` is one mistake,
+                    // and repeating the warning per class would just be noise. The message quotes
+                    // the position as written, which is what the author can search for.
                     let (_parsed, rejected) = fm_core::parse_style_string_with_rejections(style);
                     if !rejected.is_empty() {
                         let rejected_list = rejected.join(", ");
                         let message = format!(
-                            "classDef '{name}' includes unsupported or unsafe style properties (ignored): {rejected_list}"
+                            "classDef '{names}' includes unsupported or unsafe style properties (ignored): {rejected_list}"
                         );
                         builder.add_diagnostic(
                             Diagnostic::warning(message)
@@ -11590,11 +11612,17 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                                 .with_rule_id("classdef-unsupported-style"),
                         );
                     }
-                    builder.push_style_ref(
-                        fm_core::IrStyleTarget::Class(name.to_string()),
-                        style.to_string(),
-                        span,
-                    );
+                    for name in names.split(',') {
+                        let name = name.trim();
+                        if name.is_empty() {
+                            continue;
+                        }
+                        builder.push_style_ref(
+                            fm_core::IrStyleTarget::Class(name.to_string()),
+                            style.to_string(),
+                            span,
+                        );
+                    }
                 }
             }
         } else if let Some(rest) = line.strip_prefix("style ") {
@@ -18381,6 +18409,66 @@ Rel_Back(db, app, "Responds")"#,
                 .any(|warning| warning == STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE),
             "expected parse warning to surface in render logs"
         );
+    }
+
+    /// `classDef a,b fill:#f00` declares TWO classes (bd-34tu sibling).
+    ///
+    /// We took the whole name position as one string, so this declared a single class literally
+    /// called `a,b` — a name nothing can ever reference, because a `class X a` line names one class
+    /// per token. The styling silently never appeared.
+    ///
+    /// The `a,b` assertion is the load-bearing one: it fails on the old behaviour, which the two
+    /// positive assertions alone would not, since a parser that declared all three would pass them.
+    #[test]
+    fn classdef_declares_every_name_in_a_comma_list() {
+        let parsed = parse_mermaid("flowchart LR\n  A --> B\n  classDef a,b fill:#ff0000");
+
+        let declared = |name: &str| {
+            parsed.ir.style_refs.iter().any(
+                |sr| matches!(&sr.target, fm_core::IrStyleTarget::Class(n) if n == name),
+            )
+        };
+        assert!(declared("a") && declared("b"), "the comma list did not declare both classes: {:?}", parsed.ir.style_refs);
+        assert!(
+            !declared("a,b"),
+            "the name position is still being taken as one class name: {:?}",
+            parsed.ir.style_refs
+        );
+    }
+
+    /// And both names survive into the structured `style_defs` the renderers read, so the fix is
+    /// not merely cosmetic in `style_refs`.
+    #[test]
+    fn classdef_comma_list_reaches_style_defs() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n  A --> B\n  classDef a,b fill:#ff0000\n  class A a\n  class B b",
+        );
+
+        for name in ["a", "b"] {
+            assert!(
+                parsed.ir.style_defs.iter().any(|def| def.name == name),
+                "class `{name}` produced no style_def: {:?}",
+                parsed.ir.style_defs.iter().map(|d| &d.name).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// CONTROL: the single-name form is unchanged. A split that mangled ordinary names — by
+    /// trimming too much, or by dropping the last token — would satisfy the tests above.
+    #[test]
+    fn classdef_with_one_name_is_unchanged() {
+        let parsed = parse_mermaid("flowchart LR\n  A --> B\n  classDef solo fill:#00ff00");
+
+        let names: Vec<&str> = parsed
+            .ir
+            .style_refs
+            .iter()
+            .filter_map(|sr| match &sr.target {
+                fm_core::IrStyleTarget::Class(name) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["solo"], "the single-name form changed behaviour");
     }
 
     #[test]
