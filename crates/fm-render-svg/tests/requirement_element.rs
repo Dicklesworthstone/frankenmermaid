@@ -8,6 +8,16 @@
 //!
 //! Same family as bd-jerh and bd-ekx2: declared content with no home in the IR. A renderer-vs-
 //! renderer gate is blind to it by construction, since all three agree — on drawing nothing.
+//!
+//! ⚠️ AN INTEGRATION TEST DOES NOT COMPILE THE CRATE'S OWN `#[cfg(test)]` MODULE, and that cost a
+//! red main. Adding two fields to `IrRequirementNodeMeta` broke two EXHAUSTIVE struct literals that
+//! live in unit-test modules — `fm-layout/src/lib.rs` and `fm-render-svg/src/lib.rs` — while
+//! `cargo test -p fm-render-svg --test requirement_element` reported 5 passed, because `--test
+//! <name>` builds the lib for the INTEGRATION target and never the lib-test target that holds those
+//! literals. The green was real and it covered less than it looked like it did.
+//!
+//! Adding a field to a shared IR struct is a WORKSPACE-WIDE change: run `cargo test --workspace`,
+//! or at minimum `cargo check --workspace --all-targets`, before believing a targeted pass.
 
 /// CONTROL, and it must pass TODAY. A requirement's own rows DO render, so the reproducer below
 /// fails because the ELEMENT path drops its fields and not because requirement diagrams are broken

@@ -27899,6 +27899,8 @@ mod tests {
                 verify_method: verify.map(str::to_string),
                 req_id: req_id.map(str::to_string),
                 text: text.map(str::to_string),
+                element_type: None,
+                doc_ref: None,
             })),
             ..IrNode::default()
         });

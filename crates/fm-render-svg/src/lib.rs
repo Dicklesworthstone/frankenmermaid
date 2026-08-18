@@ -13788,6 +13788,8 @@ mod tests {
                 text: Some("Preserve rendered output".to_string()),
                 risk: Some("high".to_string()),
                 verify_method: Some("test".to_string()),
+                element_type: None,
+                doc_ref: None,
             })),
             ..Default::default()
         });
