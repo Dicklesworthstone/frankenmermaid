@@ -31,6 +31,11 @@ const CASES: &[(&str, &str, &str)] = &[
     ("er_attribute", "erDiagram\n  A {\n    string name PK\n  }\n", "name"),
     ("er_key", "erDiagram\n  A {\n    string name PK\n  }\n", "PK"),
     ("er_comment", "erDiagram\n  A {\n    string name \"who they are\"\n  }\n", "who they are"),
+    // Cardinality was drawn by the SVG ALONE until bd-2h3pp; the canvas and terminal drew the
+    // relationship line and no numbers. Gated here so that agreement is ENFORCED rather than
+    // incidental — the three surfaces reached it through different code (a shared fm-core mapping,
+    // then each surface's own existing label placement), and nothing else makes them stay together.
+    ("er_cardinality", "erDiagram\n  CUSTOMER }o--o| ORDER : places\n", "0..*"),
     ("class_member", "classDiagram\n  class Alpha {\n    +String name\n  }\n", "name"),
     ("class_stereotype", "classDiagram\n  class Alpha {\n    +String name\n  }\n  <<interface>> Alpha\n", "interface"),
     ("class_cardinality", "classDiagram\n  Alpha \"1\" --> \"many\" Beta\n", "many"),
