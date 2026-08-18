@@ -2176,7 +2176,14 @@ impl Canvas2dRenderer {
                     };
                     let cy = y + h / 2.0;
 
-                    ctx.set_fill_style(&self.config.label_color);
+                    // ⚠️ THE FIFTH SITE, and the one that mattered most. When bd-lvj3 bound
+                    // `label_fill` it converted the four COMPARTMENT label sites (class, ER,
+                    // requirement, C4) and missed this one — the PLAIN node label, i.e. every
+                    // ordinary flowchart node. The bounded edit asserted an exact count of four and
+                    // the count was honest; the SCOPE was wrong, so `style a color:#ff0000` and
+                    // `classDef … color:` resolved correctly and were then thrown away one line
+                    // before the text was drawn. Only compiling the tests found it.
+                    ctx.set_fill_style(label_fill);
                     ctx.set_font(
                         standard_label_font.get_or_insert_with(|| standard_node_font(&self.config)),
                     );

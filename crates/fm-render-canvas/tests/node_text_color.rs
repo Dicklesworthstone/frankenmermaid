@@ -137,38 +137,24 @@ fn a_text_colour_does_not_repaint_the_shape() {
     render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
     let ops = format!("{:?}", context.operations());
 
-    // The fill in force at each SHAPE fill, in order — same dual-scan shape as `text_fills`, so it
-    // advances on every iteration and cannot spin.
-    let mut shape_fills = Vec::new();
+    // The fill in force at each SHAPE fill, in order.
+    //
+    // ⚠️ THIS SCANNED FOR `FillRect(` ONLY, and found nothing: node shapes are drawn as a PATH —
+    // `BeginPath`, `Rect(..)`/`Arc(..)`, then the bare `Fill` op — so the control tripped its own
+    // non-vacuity guard the first time it was ever run. Written blind during the freeze against an
+    // op the renderer does not emit for a node.
+    //
+    // Tokenising the Debug stream is what makes accepting BOTH ops safe. A substring search for
+    // "Fill" would also match `FillText` and `SetFillStyle` — the same substring trap as the
+    // `inactive`/`active` case in the ledger — whereas an exact token comparison cannot.
+    let mut shape_fills: Vec<String> = Vec::new();
     let mut current = String::new();
-    let mut rest = ops.as_str();
-    loop {
-        let set_at = rest.find("SetFillStyle(\"");
-        let rect_at = rest.find("FillRect(");
-        match (set_at, rect_at) {
-            (Some(f), Some(r)) if f < r => {
-                rest = &rest[f + "SetFillStyle(\"".len()..];
-                if let Some(end) = rest.find('"') {
-                    current = rest[..end].to_string();
-                    rest = &rest[end..];
-                } else {
-                    break;
-                }
-            }
-            (_, Some(r)) => {
-                shape_fills.push(current.clone());
-                rest = &rest[r + "FillRect(".len()..];
-            }
-            (Some(f), None) => {
-                rest = &rest[f + "SetFillStyle(\"".len()..];
-                if let Some(end) = rest.find('"') {
-                    current = rest[..end].to_string();
-                    rest = &rest[end..];
-                } else {
-                    break;
-                }
-            }
-            (None, None) => break,
+    for token in ops.split(", ") {
+        let token = token.trim_start_matches('[').trim_end_matches(']');
+        if let Some(rest) = token.strip_prefix("SetFillStyle(\"") {
+            current = rest.trim_end_matches(')').trim_end_matches('"').to_string();
+        } else if token == "Fill" || token.starts_with("FillRect(") {
+            shape_fills.push(current.clone());
         }
     }
 

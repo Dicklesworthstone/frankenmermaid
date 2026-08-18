@@ -94,11 +94,29 @@ fn explicitly_shaped_mindmap_nodes_are_untouched() {
         "mindmap\n  root((R))\n    A)A(\n",
     ] {
         let svg = fm_render_svg::render_svg(&fm_parser::parse(source).ir);
-        // One appearance is the CSS rule itself; a MARKED node would add more.
-        assert_eq!(
-            svg.matches("mindmap-no-border").count(),
-            1,
+
+        // ⚠️ THIS ASSERTION USED TO BE `count() == 1`, "one appearance is the CSS rule itself", and
+        // it was WRONG THE MOMENT IT WAS FIRST COMPILED: the rule I added has THREE selectors
+        // (`rect`, `path`, `polygon`), so the stylesheet alone spells the class three times while
+        // zero nodes are marked. The renderer was right and the arithmetic was mine.
+        //
+        // Counting a magic number over the whole document couples this control to the CSS's
+        // formatting, which is not what it is testing. Excise the stylesheet and assert the class is
+        // ABSENT FROM THE MARKUP — that states the actual claim ("no node carries the marker") and
+        // survives any future edit to the rule.
+        let body = match (svg.find("<style"), svg.find("</style>")) {
+            (Some(start), Some(end)) => format!("{}{}", &svg[..start], &svg[end..]),
+            _ => svg.clone(),
+        };
+        assert!(
+            !body.contains("mindmap-no-border"),
             "an explicitly shaped node was marked borderless by:\n{source}"
+        );
+        // NON-VACUITY: the excision must not have eaten the document. Without this, a change that
+        // returned an empty body would pass the check above for the wrong reason.
+        assert!(
+            body.contains("<svg") && body.contains("fm-node"),
+            "the stylesheet excision removed the markup, so the check above proves nothing"
         );
     }
 }

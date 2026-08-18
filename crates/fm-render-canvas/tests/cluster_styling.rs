@@ -88,27 +88,32 @@ fn a_malformed_cluster_colour_falls_back_to_the_theme() {
     );
 }
 
-/// NOT TESTED HERE, deliberately: a flowchart `subgraph` + `style one fill:#f00` does not colour,
-/// and the cause is three layers upstream of this crate. The parser resolves a `style` target only
-/// via `node_id_by_key` (`mermaid_parser.rs:11521`), a subgraph key is not in the node index, and
-/// `IrStyleTarget` has no `Cluster` variant to record it in — so the colour is destroyed before any
-/// renderer sees it, and fm-render-svg is equally blind.
+/// A flowchart `subgraph` + `style one fill:#f00` NOW COLOURS THE CLUSTER (bd-xfmm).
 ///
-/// Filed as bd-xfmm with the full chain in `docs/parked-levers/bd_xfmm_cluster_style_channel.md`.
-/// A renderer test for it would fail for a reason in another crate, which is a broken gate rather
-/// than a reproducer.
+/// This test used to assert the opposite. It was written as a deliberate stale-detector while the
+/// gap was three layers upstream of this crate — the parser resolved a `style` target only through
+/// `node_id_by_key`, a subgraph key is not in the node index, and `IrStyleTarget` had no `Cluster`
+/// variant to record it in — with the instruction to INVERT it rather than delete it once the
+/// colour began arriving. That is what happened on the first build after the freeze, so the
+/// assertion is inverted here.
+///
+/// What closed it: `IrStyleTarget::Cluster`, plus `cluster_index_by_key` learning that a flowchart
+/// subgraph is keyed COMPOSITELY (`one@title:One`) and must be resolved through `IrSubgraph::key`.
 #[test]
-fn a_styled_subgraph_is_a_known_upstream_gap_not_a_renderer_bug() {
+fn a_styled_subgraph_colours_the_cluster() {
     let ops = canvas_ops(
         "flowchart TD\n  subgraph one[One]\n    a[A]\n  end\n  style one fill:#ff0000\n",
     );
     let fills = fill_styles(&ops);
 
-    // Asserting the CURRENT truth, so this test starts failing the moment bd-xfmm is fixed and the
-    // colour begins arriving — at which point the assertion below should be inverted, not deleted.
     assert!(
-        !fills.iter().any(|f| f.to_lowercase().contains("ff0000")),
-        "bd-xfmm appears to be FIXED — a subgraph colour now reaches the canvas. Invert this \
-         assertion and move the case into the positive set: {fills:?}"
+        fills.iter().any(|f| f.to_lowercase().contains("ff0000")),
+        "the declared subgraph colour stopped reaching the canvas: {fills:?}"
+    );
+    // NON-VACUITY: other fills must still be present, or "the colour is there" could hold for a
+    // render that drew nothing but the cluster.
+    assert!(
+        fills.len() > 1,
+        "only one fill was recorded, so this assertion proves little: {fills:?}"
     );
 }

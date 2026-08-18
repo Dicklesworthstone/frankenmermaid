@@ -89,17 +89,15 @@ const CASES: &[(&str, &str, &str)] = &[
 ///
 /// An allowlist, not a silence. A NEW collision still fails, and an entry that starts DIFFERING
 /// fails too (below), so a fixed defect cannot leave a permanent hole here.
-const KNOWN_GAPS: &[(&str, &str)] = &[(
-    "mindmap_square",
-    "bd-d9mw: FIXED, and this entry is EXPECTED TO GO STALE. `A` and `A[A]` both parsed to \
-     NodeShape::Rect and rendered byte-identically. mermaid 11.15.0 types them distinctly - its \
-     mindmap switch maps DEFAULT to the shape name \"no-border\" and RECT to \"rect\", with \
-     DEFAULT:0 and NO_BORDER:0 sharing a value - and it draws the difference in CSS, emitting \
-     `node-bkg node-no-border`, not in geometry. A default node now carries a `mindmap-no-border` \
-     marker class with a stylesheet rule that drops the stroke. This list is checked in BOTH \
-     directions, so the first build after the freeze should fail with a stale-gap error naming \
-     this entry; deleting it is the intended response. Kept only because it could not be verified \
-     unbuilt.",)];
+/// EMPTY, and that is the point: `mindmap_square` was the only entry and it has been deleted
+/// because the gate below caught it going stale on the first build after the freeze, exactly as its
+/// own note predicted. `A` and `A[A]` now render differently — a default mindmap node carries the
+/// `mindmap-no-border` marker class and a stylesheet rule that drops the stroke, matching how
+/// mermaid 11.15.0 draws the distinction (in CSS, not geometry).
+///
+/// A new entry needs a bead and a reason. An entry that starts DIFFERING fails the test below, so a
+/// fixed defect cannot leave a permanent hole here — which is the mechanism that just fired.
+const KNOWN_GAPS: &[(&str, &str)] = &[];
 
 #[test]
 fn no_declared_feature_renders_identically_to_its_absence() {
