@@ -1320,6 +1320,21 @@ impl IrBuilder {
         self.ir.nodes.len()
     }
 
+    /// The first edge running `from` -> `to`, if one exists (bd-ww46 follow-up).
+    ///
+    /// FIRST match, deliberately: mermaid's own `updateRelStyle` does
+    /// `edges.find(e => e.from === t && e.to === r)` and styles that one, so a diagram with two
+    /// relationships between the same pair styles the earlier one in both engines.
+    ///
+    /// Endpoints are compared through `matches!` rather than `==` so a `Port` endpoint can never
+    /// alias a `Node` with the same index.
+    pub(crate) fn edge_index_by_endpoints(&self, from: IrNodeId, to: IrNodeId) -> Option<usize> {
+        self.ir.edges.iter().position(|edge| {
+            matches!(edge.from, IrEndpoint::Node(id) if id == from)
+                && matches!(edge.to, IrEndpoint::Node(id) if id == to)
+        })
+    }
+
     pub(crate) const fn edge_count(&self) -> usize {
         self.ir.edges.len()
     }

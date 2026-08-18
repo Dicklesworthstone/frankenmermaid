@@ -7659,6 +7659,18 @@ fn parse_c4(input: &str, builder: &mut IrBuilder) {
             // `shape_style.is_none() && text_style.is_none()` — so a styled C4 node falls back to
             // the general `render_node` path that applies them. Without that gate this would have
             // been dead IR.
+            // `UpdateRelStyle(from, to, $textColor="blue", $lineColor="blue", …)` — the edge
+            // counterpart, landable for the same reason: `IrStyleTarget::Link(index)` is honoured by
+            // fm-render-svg, and all THREE lean edge fast paths are gated on
+            // `resolve_edge_inline_style(ir, edge_index).is_none()`, so a styled edge falls back to
+            // the general path that draws it. Checked, not assumed.
+            "UpdateRelStyle" => {
+                if !parse_c4_relationship_style(&arguments, span, builder) {
+                    builder.add_warning(format!(
+                        "Line {line_number}: malformed or unresolved C4 UpdateRelStyle: {trimmed}"
+                    ));
+                }
+            }
             "UpdateElementStyle" => {
                 if !parse_c4_element_style(&arguments, span, builder) {
                     builder.add_warning(format!(
@@ -7673,6 +7685,81 @@ fn parse_c4(input: &str, builder: &mut IrBuilder) {
             }
         }
     }
+}
+
+/// `UpdateRelStyle(from, to, $textColor="…", $lineColor="…", $offsetX="…", $offsetY="…")` (bd-ww46).
+///
+/// mermaid finds the relationship with `edges.find(e => e.from === t && e.to === r)` and sets
+/// `textColor` / `lineColor` on it; its renderer draws those as the label colour and the line
+/// colour. So the CSS mapping is colour / stroke, targeted at `IrStyleTarget::Link(index)`.
+///
+/// `$offsetX` and `$offsetY` nudge the label position in mermaid. We have no per-edge label offset
+/// to carry them, so they are NAMED as unapplied rather than silently swallowed.
+///
+/// Both endpoints resolve through the NON-interning `node_id_by_key`, so a misspelled alias cannot
+/// invent a node the way bd-xfmm's did.
+fn parse_c4_relationship_style(
+    arguments: &[String],
+    span: Span,
+    builder: &mut IrBuilder,
+) -> bool {
+    let (Some(from_alias), Some(to_alias)) = (
+        clean_label(arguments.first().map(String::as_str)),
+        clean_label(arguments.get(1).map(String::as_str)),
+    ) else {
+        return false;
+    };
+    let (Some(from_id), Some(to_id)) = (
+        builder.node_id_by_key(&from_alias),
+        builder.node_id_by_key(&to_alias),
+    ) else {
+        return false;
+    };
+    let Some(edge_index) = builder.edge_index_by_endpoints(from_id, to_id) else {
+        return false;
+    };
+
+    let mut css = String::new();
+    let mut unsupported: Vec<&str> = Vec::new();
+    for argument in arguments.iter().skip(2) {
+        let argument = trim_fast(argument);
+        let Some((key, value)) = argument.split_once('=') else {
+            continue;
+        };
+        let key = trim_fast(key).trim_start_matches('$');
+        let value = trim_fast(value).trim_matches('"');
+        if value.is_empty() {
+            continue;
+        }
+        let property = match key {
+            "lineColor" => "stroke",
+            "textColor" => "color",
+            _ => {
+                unsupported.push(key);
+                continue;
+            }
+        };
+        if !css.is_empty() {
+            css.push(';');
+        }
+        css.push_str(property);
+        css.push(':');
+        css.push_str(value);
+    }
+
+    if !unsupported.is_empty() {
+        builder.add_warning(format!(
+            "C4 UpdateRelStyle on `{from_alias}` -> `{to_alias}`: `{}` recognised but not applied; \
+             only $lineColor and $textColor reach the renderer",
+            unsupported.join("`, `")
+        ));
+    }
+
+    if css.is_empty() {
+        return false;
+    }
+    builder.push_style_ref(fm_core::IrStyleTarget::Link(edge_index), css, span);
+    true
 }
 
 /// `UpdateElementStyle(alias, $bgColor="…", $fontColor="…", $borderColor="…")` (bd-ww46).
@@ -17740,6 +17827,51 @@ Rel_Back(db, app, "Responds")"#,
         let input = "C4Deployment\n  Deployment_Node(server, \"Server\")";
         let parsed = parse_mermaid(input);
         assert_eq!(parsed.ir.diagram_type, DiagramType::C4Deployment);
+    }
+
+    /// `UpdateRelStyle` colours the relationship it names (bd-ww46).
+    ///
+    /// The edge counterpart of the element case, and landable for the same verified reason: all
+    /// three lean edge fast paths in fm-render-svg are gated on
+    /// `resolve_edge_inline_style(ir, edge_index).is_none()`, so a styled edge reaches the general
+    /// path that draws it.
+    #[test]
+    fn c4_update_rel_style_colours_the_named_relationship() {
+        let parsed = parse_mermaid(
+            "C4Context\n  Person(a, \"A\")\n  System(b, \"B\")\n  Rel(a, b, \"uses\")\n  UpdateRelStyle(a, b, $textColor=\"blue\", $lineColor=\"green\")",
+        );
+
+        let styled = parsed
+            .ir
+            .style_refs
+            .iter()
+            .find(|sr| sr.target == fm_core::IrStyleTarget::Link(0))
+            .unwrap_or_else(|| panic!("no style ref reached the relationship: {:?}", parsed.ir.style_refs));
+        assert!(styled.style.contains("color:blue"), "textColor lost: {}", styled.style);
+        assert!(styled.style.contains("stroke:green"), "lineColor lost: {}", styled.style);
+    }
+
+    /// CONTROL: a pair with no relationship between them styles nothing and says so. Without this,
+    /// an implementation that styled edge 0 regardless of the endpoints would pass the test above.
+    #[test]
+    fn c4_update_rel_style_on_an_unrelated_pair_styles_nothing() {
+        let parsed = parse_mermaid(
+            "C4Context\n  Person(a, \"A\")\n  System(b, \"B\")\n  Person(c, \"C\")\n  Rel(a, b, \"uses\")\n  UpdateRelStyle(c, b, $lineColor=\"green\")",
+        );
+
+        assert!(
+            !parsed
+                .ir
+                .style_refs
+                .iter()
+                .any(|sr| matches!(sr.target, fm_core::IrStyleTarget::Link(_))),
+            "a relationship that was never declared got styled: {:?}",
+            parsed.ir.style_refs
+        );
+        assert!(
+            !parsed.warnings.is_empty(),
+            "the unresolved relationship was dropped in silence"
+        );
     }
 
     /// `UpdateElementStyle` recolours the element it names (bd-ww46).
