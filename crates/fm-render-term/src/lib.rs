@@ -53,6 +53,7 @@ pub mod diff;
 pub mod glyphs;
 pub mod minimap;
 pub mod renderer;
+pub mod transform;
 
 // Re-exports for convenient access.
 pub use config::{ResolvedConfig, TermRenderConfig};
