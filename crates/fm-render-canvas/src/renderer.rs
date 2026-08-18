@@ -727,14 +727,32 @@ impl Canvas2dRenderer {
             // `transparent` is mapped the way fm-render-svg maps it (lib.rs:4365): the FILL goes
             // transparent but the border falls back to a visible default, because a subgraph that
             // asked for a transparent body still needs an edge or it stops being a grouping.
+            // The author's own `style mySubgraph fill:#f00` (bd-xfmm), resolved from the style
+            // refs rather than from the layout box. It takes precedence over `cluster_box.color`
+            // because the two come from DIFFERENT syntaxes: `color` carries a sequence `rect
+            // rgb(...)`, which is a property of the frame, while a `style` directive names this
+            // cluster explicitly. When an author does both, the one that named the target wins.
+            let (styled_fill, styled_stroke) = resolve_cluster_colors(ir, cluster_box.cluster_index);
+            let styled_fill = styled_fill.as_deref().and_then(sanitize_canvas_paint);
+            let styled_stroke = styled_stroke.as_deref().and_then(sanitize_canvas_paint);
+
             let declared = cluster_box.color.as_deref().and_then(sanitize_canvas_paint);
-            let (fill, stroke) = match declared.as_deref() {
-                Some("transparent") => ("transparent", self.config.cluster_stroke.as_str()),
-                Some(color) => (color, color),
-                None => (
-                    self.config.cluster_fill.as_str(),
-                    self.config.cluster_stroke.as_str(),
-                ),
+            let (fill, stroke) = if let Some(styled) = styled_fill.as_deref() {
+                // A declared stroke is honoured; without one the fill doubles as the border, which
+                // is what the `rect`/cluster path above already does for a declared colour.
+                (styled, styled_stroke.as_deref().unwrap_or(styled))
+            } else if let Some(styled) = styled_stroke.as_deref() {
+                // Stroke alone: keep the theme fill rather than painting the body a border colour.
+                (self.config.cluster_fill.as_str(), styled)
+            } else {
+                match declared.as_deref() {
+                    Some("transparent") => ("transparent", self.config.cluster_stroke.as_str()),
+                    Some(color) => (color, color),
+                    None => (
+                        self.config.cluster_fill.as_str(),
+                        self.config.cluster_stroke.as_str(),
+                    ),
+                }
             };
             ctx.set_fill_style(fill);
             ctx.set_stroke_style(stroke);
@@ -2567,6 +2585,35 @@ fn sanitize_canvas_paint(value: &str) -> Option<String> {
 ///
 /// Returns `None` per channel when nothing was declared, so the caller keeps the theme colour
 /// and the arrow-derived width from `legacy_edge_stroke` instead of a value invented here.
+/// A cluster's declared fill and stroke from `style mySubgraph fill:#f00` (bd-xfmm).
+///
+/// bd-xfmm could only WARN about a subgraph style, because `IrStyleTarget` had no `Cluster`
+/// variant. The variant landed with the SVG consumer; this is the canvas half, so the two backends
+/// stop disagreeing about a document the author styled.
+///
+/// Only `IrStyleTarget::Cluster` is consulted. A cluster has no `classes` and no `inline_style` of
+/// its own - the node resolver's other two channels do not exist here - so merging them would be
+/// inventing a cascade the IR does not have.
+///
+/// Returns `None` per channel when nothing was declared, so the caller keeps whatever it would
+/// otherwise have used rather than a colour resolved from an empty map.
+pub(crate) fn resolve_cluster_colors(
+    ir: &MermaidDiagramIr,
+    cluster_index: usize,
+) -> (Option<String>, Option<String>) {
+    let mut merged: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+
+    for style_ref in &ir.style_refs {
+        if let fm_core::IrStyleTarget::Cluster(target) = style_ref.target
+            && target == cluster_index
+        {
+            merged.extend(fm_core::parse_style_string(&style_ref.style).properties);
+        }
+    }
+
+    (merged.get("fill").cloned(), merged.get("stroke").cloned())
+}
+
 pub(crate) fn resolve_edge_style(
     ir: &MermaidDiagramIr,
     edge_index: usize,
