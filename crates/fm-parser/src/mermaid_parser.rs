@@ -1928,8 +1928,9 @@ fn parse_flowchart_statement_asts(
     if let Some(ast) = parse_class_assignment_ast(statement) {
         return Some(vec![ast]);
     }
-    if let Some(ast) = parse_click_directive_ast(statement, line_number, warnings) {
-        return Some(vec![ast]);
+    // Returns one `ClickDirective` PER NODE — `click A,B "url"` is two (bd-8mlk).
+    if let Some(asts) = parse_click_directive_ast(statement, line_number, warnings) {
+        return Some(asts);
     }
     if is_non_graph_statement(statement) {
         // Parse the style directive into IR style refs instead of discarding.
@@ -5540,28 +5541,59 @@ fn parse_click_directive_ast(
     statement: &str,
     line_number: usize,
     warnings: &mut Vec<String>,
-) -> Option<FlowAst> {
+) -> Option<Vec<FlowAst>> {
     let rest = statement.strip_prefix("click ")?;
 
-    let Some((node_token, after_node)) = take_token(rest) else {
+    // The node position is a COMMA LIST (bd-8mlk). `setLink` in the pinned bundle opens with
+    // `t.split(",").forEach(...)`, the same list handling `setClass` and `addClass` use, and the
+    // probe agrees for all three click forms: `click A,B "url"`, `click A,B href "url"` and
+    // `click A,B call cb()` all PARSE.
+    //
+    // We read ONE token here, and `normalize_identifier` breaks at a comma — so `click A,B "url"`
+    // linked only `A` and dropped `,B` without a word. (It does NOT invent a phantom node, which I
+    // checked rather than assumed: the break happens before `intern_node` ever sees the tail.)
+    //
+    // Whitespace is allowed around the separator — `click A, B "url"` parses in mermaid — so the
+    // list cannot be one whitespace-delimited token. Tokens are accumulated while the text so far
+    // ends in a comma, or the next one begins with one, which covers `A,B`, `A, B`, `A ,B` and
+    // `A , B` and stops at the target for an ordinary `click A "url"`.
+    let mut node_text = String::new();
+    let mut after_node = rest;
+    loop {
+        let Some((token, remaining)) = take_token(after_node) else {
+            break;
+        };
+        node_text.push_str(token);
+        after_node = remaining;
+        let list_continues = node_text.ends_with(',')
+            || take_token(after_node).is_some_and(|(next, _)| next.starts_with(','));
+        if !list_continues {
+            break;
+        }
+    }
+    if node_text.is_empty() {
         warnings.push(format!(
             "Line {line_number}: malformed click directive (missing node id): {statement}"
         ));
-        return Some(FlowAst::StyleOrLinkStyle);
-    };
-    let node = normalize_identifier(node_token);
-    if node.is_empty() {
+        return Some(vec![FlowAst::StyleOrLinkStyle]);
+    }
+    let nodes: Vec<String> = node_text
+        .split(',')
+        .map(normalize_identifier)
+        .filter(|node| !node.is_empty())
+        .collect();
+    if nodes.is_empty() {
         warnings.push(format!(
             "Line {line_number}: malformed click directive (invalid node id): {statement}"
         ));
-        return Some(FlowAst::StyleOrLinkStyle);
+        return Some(vec![FlowAst::StyleOrLinkStyle]);
     }
 
     let Some((target_token, after_target)) = take_token(after_node) else {
         warnings.push(format!(
             "Line {line_number}: malformed click directive (missing target): {statement}"
         ));
-        return Some(FlowAst::StyleOrLinkStyle);
+        return Some(vec![FlowAst::StyleOrLinkStyle]);
     };
 
     let (target, remaining) = if target_token.eq_ignore_ascii_case("href") {
@@ -5569,7 +5601,7 @@ fn parse_click_directive_ast(
             warnings.push(format!(
                 "Line {line_number}: malformed click directive (missing href target): {statement}"
             ));
-            return Some(FlowAst::StyleOrLinkStyle);
+            return Some(vec![FlowAst::StyleOrLinkStyle]);
         };
         (href_target.to_string(), remaining)
     } else if target_token.eq_ignore_ascii_case("call")
@@ -5580,7 +5612,7 @@ fn parse_click_directive_ast(
             warnings.push(format!(
                 "Line {line_number}: click callback directive missing function name: {statement}"
             ));
-            return Some(FlowAst::StyleOrLinkStyle);
+            return Some(vec![FlowAst::StyleOrLinkStyle]);
         };
         let tooltip = take_token(cb_remaining).map(|(tok, _)| {
             tok.trim_matches('"')
@@ -5588,12 +5620,17 @@ fn parse_click_directive_ast(
                 .trim_matches('`')
                 .to_string()
         });
-        return Some(FlowAst::ClickDirective {
-            node,
-            target: fn_name.to_string(),
-            tooltip,
-            is_callback: true,
-        });
+        return Some(
+            nodes
+                .into_iter()
+                .map(|node| FlowAst::ClickDirective {
+                    node,
+                    target: fn_name.to_string(),
+                    tooltip: tooltip.clone(),
+                    is_callback: true,
+                })
+                .collect(),
+        );
     } else {
         (target_token.to_string(), after_target)
     };
@@ -5635,12 +5672,17 @@ fn parse_click_directive_ast(
         None => None,
     };
 
-    Some(FlowAst::ClickDirective {
-        node,
-        target,
-        tooltip,
-        is_callback: false,
-    })
+    Some(
+        nodes
+            .into_iter()
+            .map(|node| FlowAst::ClickDirective {
+                node,
+                target: target.clone(),
+                tooltip: tooltip.clone(),
+                is_callback: false,
+            })
+            .collect(),
+    )
 }
 
 /// The four browser link targets mermaid lexes as keywords in a `click` directive.
@@ -18292,6 +18334,75 @@ Rel_Back(db, app, "Responds")"#,
             parsed.warnings.iter().any(|w| w.contains("out of bounds")),
             "the out-of-range index was dropped in silence: {:?}",
             parsed.warnings
+        );
+    }
+
+    /// `click A,B "url"` links BOTH nodes (bd-8mlk).
+    ///
+    /// We read one token and `normalize_identifier` breaks at the comma, so only `A` was linked and
+    /// `,B` was dropped without a word. `setLink` in mermaid splits its node position the same way
+    /// every other directive in that db does.
+    #[test]
+    fn click_links_every_node_in_a_comma_list() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n  A --> B\n  click A,B \"https://example.com\"\n",
+        );
+
+        for id in ["A", "B"] {
+            let node = parsed
+                .ir
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap_or_else(|| panic!("node {id} should exist"));
+            assert_eq!(
+                node.href(),
+                Some("https://example.com"),
+                "node {id} was not linked"
+            );
+        }
+    }
+
+    /// Whitespace around the separator is legal in mermaid (`click A, B "url"` parses), so the list
+    /// cannot be one whitespace-delimited token. This is the case that fails if the parser simply
+    /// splits the first token on commas.
+    #[test]
+    fn click_node_list_tolerates_spaces_around_the_comma() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n  A --> B\n  click A, B \"https://example.com\"\n",
+        );
+
+        for id in ["A", "B"] {
+            let node = parsed
+                .ir
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap_or_else(|| panic!("node {id} should exist"));
+            assert_eq!(node.href(), Some("https://example.com"), "node {id} was not linked");
+        }
+    }
+
+    /// CONTROL: a single-node click is unchanged, and the accumulator did not swallow the target.
+    /// If the loop over-consumed, the URL would become part of the node list and `A` would have no
+    /// href at all — so this pins the stop condition, not just the happy path.
+    #[test]
+    fn click_with_one_node_is_unchanged() {
+        let parsed =
+            parse_mermaid("flowchart LR\n  A --> B\n  click A \"https://example.com\"\n");
+
+        let node = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "A")
+            .expect("node A should exist");
+        assert_eq!(node.href(), Some("https://example.com"));
+        assert_eq!(
+            parsed.ir.nodes.len(),
+            2,
+            "the click directive invented nodes: {:?}",
+            parsed.ir.nodes.iter().map(|n| &n.id).collect::<Vec<_>>()
         );
     }
 
