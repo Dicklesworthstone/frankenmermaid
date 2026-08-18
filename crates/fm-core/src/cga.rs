@@ -979,11 +979,6 @@ impl TransformStack {
 }
 
 impl AffineMatrix2D {
-    /// Convert an affine matrix to a CGA rotor.
-    ///
-    /// This extracts rotation, scale, and translation components from the matrix
-    /// and composes them into a rotor.
-    #[must_use]
     /// Whether this matrix is a SIMILARITY: uniform scale, no shear.
     ///
     /// Exactly the class a rotor can represent. A conformal rotor encodes rotation, translation and
@@ -1033,6 +1028,14 @@ impl AffineMatrix2D {
         self.is_conformal().then(|| self.to_rotor())
     }
 
+    /// Convert an affine matrix to a CGA rotor.
+    ///
+    /// This extracts rotation, scale, and translation components from the matrix
+    /// and composes them into a rotor.
+    ///
+    /// ⚠️ Cannot represent anisotropy; see [`Self::try_to_rotor`], which refuses what this silently
+    /// approximates.
+    #[must_use]
     pub fn to_rotor(&self) -> Rotor {
         // Extract rotation angle from matrix
         let angle = self.c.atan2(self.a);
