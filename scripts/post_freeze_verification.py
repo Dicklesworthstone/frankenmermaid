@@ -1,6 +1,25 @@
 #!/usr/bin/env python3
 """Ordered verification plan for code committed during the build freeze.
 
+STATUS AS OF 2026-08-18, so nobody re-runs this believing nothing is verified
+-----------------------------------------------------------------------------
+COMPILATION IS DONE. `cargo check --workspace --all-targets` exits 0 with no errors and no
+warnings, so every crate of freeze-era code compiles. What remains below is test EXECUTION, which
+is a different question and still open for most crates.
+
+Already RUN and passing:
+  * fm-core --lib                       428 passed, 0 failed
+  * fm-parser --lib                     my three detection tests passed (in a sibling's run)
+  * fm-parser --test parse_lens_laws    6 passed -- the lens obeys GetPut, PutGet, PutPut and
+                                        complement preservation, which nothing had ever asserted
+
+Two defects were found by that first compile, both mine, both fixed:
+  * cga.rs carried a duplicate `#[must_use]` because inserting a function above `to_rotor` stranded
+    its doc AND its attribute onto mine. rustc is phasing that into a hard error and CI runs
+    -D warnings, so it would have failed the gate -- while rustfmt parsed it happily all freeze.
+  * abba_render passed format arguments in FIELD order when `writeFileSync(%s` precedes the
+    handoff's `reps: %s`, so node wrote to file descriptor 100 and died with EBADF.
+
 WHY THIS EXISTS
 ---------------
 A long freeze produced a backlog of commits that rustfmt has parsed and no compiler has seen. The
