@@ -230,6 +230,172 @@ pub struct GpuArrowheadInstance {
     pub edge_index: u32,
 }
 
+/// Theme label colour used for text quads: `#0f172a`, mirroring
+/// `CanvasRenderConfig::default().label_color`. Pinned by
+/// `gpu_theme_defaults_match_the_canvas_config`.
+pub const DEFAULT_LABEL_RGBA: [f32; 4] = [0.058_823_53, 0.090_196_08, 0.164_705_88, 1.0];
+
+/// Label font size in layout units, mirroring `CanvasRenderConfig::default().font_size`.
+pub const DEFAULT_FONT_SIZE_PX: f32 = 14.0;
+
+/// Advance width as a fraction of font size.
+///
+/// The SAME 0.57 the Canvas2D `measure_text` uses, so a glyph quad lands where the raster pass puts
+/// the character. A GPU pass that invented its own advance would drift text out of its box on long
+/// labels while looking correct on short ones — the worst kind of disagreement, because it is
+/// invisible on every small test fixture.
+pub const CHAR_ADVANCE_RATIO: f32 = 0.57;
+
+/// One glyph's cell in the atlas texture.
+///
+/// UVs are normalised, so the shader samples without knowing the texture size, and the browser side
+/// is free to rasterise at whatever device pixel ratio it likes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GlyphCell {
+    pub glyph: char,
+    pub uv_min: [f32; 2],
+    pub uv_max: [f32; 2],
+}
+
+/// A deterministic glyph atlas layout for one diagram (bd-2u0.2 component 3).
+///
+/// This plans the atlas; it does not rasterise. Rasterisation belongs on the browser side, where a
+/// 2D context can draw each glyph into the texture — the same split FrankenTUI uses. What must be
+/// decided HERE is which glyphs the diagram needs and where each one lives, because the quads in
+/// [`GpuRenderPlan::text_quads`] carry UVs into this layout and both have to agree.
+///
+/// Deterministic by construction: glyphs are collected into a `BTreeSet`, so the atlas for a given
+/// diagram is byte-identical across runs. A hash-ordered atlas would reshuffle UVs between two
+/// renders of the same document and make any golden comparison useless.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlyphAtlasPlan {
+    /// Side of one square cell, in texture pixels.
+    pub cell_px: u32,
+    /// Cells per row.
+    pub columns: u32,
+    /// Total rows used.
+    pub rows: u32,
+    /// Texture dimensions in pixels.
+    pub texture_px: [u32; 2],
+    /// Cells, sorted by `glyph` — binary-searchable and stable.
+    pub cells: Vec<GlyphCell>,
+}
+
+impl GlyphAtlasPlan {
+    /// Plan an atlas covering every glyph in `texts`.
+    ///
+    /// A square-ish grid rather than a tight shelf pack: every cell is the same size because every
+    /// glyph is rasterised at the same font size, so the packing problem a shelf packer solves does
+    /// not exist here, and a grid is exactly reproducible.
+    #[must_use]
+    pub fn for_texts<'a, I>(texts: I, cell_px: u32) -> Self
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut glyphs: std::collections::BTreeSet<char> = std::collections::BTreeSet::new();
+        for text in texts {
+            for glyph in text.chars() {
+                // Control characters have no raster; a newline is a layout instruction, not ink.
+                if !glyph.is_control() {
+                    glyphs.insert(glyph);
+                }
+            }
+        }
+
+        let count = u32::try_from(glyphs.len()).unwrap_or(u32::MAX);
+        if count == 0 || cell_px == 0 {
+            return Self {
+                cell_px,
+                columns: 0,
+                rows: 0,
+                texture_px: [0, 0],
+                cells: Vec::new(),
+            };
+        }
+
+        // Square-ish grid: ceil(sqrt(count)) columns.
+        let mut columns = 1_u32;
+        while columns * columns < count {
+            columns += 1;
+        }
+        let rows = count.div_ceil(columns);
+        let texture_px = [columns * cell_px, rows * cell_px];
+
+        let width = f32::from(u16::try_from(texture_px[0]).unwrap_or(u16::MAX));
+        let height = f32::from(u16::try_from(texture_px[1]).unwrap_or(u16::MAX));
+        let cell = f32::from(u16::try_from(cell_px).unwrap_or(u16::MAX));
+
+        let mut cells = Vec::with_capacity(glyphs.len());
+        for (index, glyph) in glyphs.into_iter().enumerate() {
+            let i = u32::try_from(index).unwrap_or(u32::MAX);
+            let col = f32::from(u16::try_from(i % columns).unwrap_or(u16::MAX));
+            let row = f32::from(u16::try_from(i / columns).unwrap_or(u16::MAX));
+            let x0 = (col * cell) / width;
+            let y0 = (row * cell) / height;
+            let x1 = ((col + 1.0) * cell) / width;
+            let y1 = ((row + 1.0) * cell) / height;
+            cells.push(GlyphCell {
+                glyph,
+                uv_min: [x0, y0],
+                uv_max: [x1, y1],
+            });
+        }
+
+        Self {
+            cell_px,
+            columns,
+            rows,
+            texture_px,
+            cells,
+        }
+    }
+
+    /// The cell for `glyph`, or `None` if the atlas does not carry it.
+    #[must_use]
+    pub fn cell(&self, glyph: char) -> Option<&GlyphCell> {
+        self.cells
+            .binary_search_by(|candidate| candidate.glyph.cmp(&glyph))
+            .ok()
+            .and_then(|index| self.cells.get(index))
+    }
+}
+
+/// One textured quad: a single glyph placed in layout space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C)]
+pub struct GpuTextQuad {
+    /// Centre of the glyph cell in layout coordinates.
+    pub center: [f32; 2],
+    /// Half extents in layout coordinates.
+    pub half_extent: [f32; 2],
+    pub uv_min: [f32; 2],
+    pub uv_max: [f32; 2],
+    pub color: [f32; 4],
+    /// Which [`GpuTextRun`] this glyph belongs to.
+    pub run_index: u32,
+}
+
+/// One drawn text run — the GPU counterpart of a single Canvas2D `fill_text` call.
+///
+/// Kept alongside the per-glyph quads because a run is the unit the raster pass draws in, so it is
+/// the unit an equivalence check can compare. Counting quads instead would compare glyphs against
+/// runs and never agree.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GpuTextRun {
+    /// Index back into `MermaidDiagramIr::nodes`.
+    pub node_index: u32,
+    /// Index of this run's first quad in [`GpuRenderPlan::text_quads`].
+    pub first_quad: u32,
+    /// How many quads belong to this run.
+    pub quad_count: u32,
+}
+
+/// Default glyph cell side in texture pixels.
+///
+/// 32 comfortably holds a 14px glyph with room for the antialiased fringe, and a power of two keeps
+/// the atlas texture friendly to every backend.
+pub const DEFAULT_GLYPH_CELL_PX: u32 = 32;
+
 /// Deterministic primitive buffers for a future WebGPU command encoder.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GpuRenderPlan {
@@ -238,6 +404,12 @@ pub struct GpuRenderPlan {
     pub edge_segments: Vec<GpuEdgeSegment>,
     /// Triangle instances for edge arrowheads.
     pub arrowheads: Vec<GpuArrowheadInstance>,
+    /// Per-glyph textured quads for the text pass.
+    pub text_quads: Vec<GpuTextQuad>,
+    /// One entry per drawn label — the unit the Canvas2D pass draws in.
+    pub text_runs: Vec<GpuTextRun>,
+    /// Where each glyph lives in the atlas the quads sample.
+    pub glyph_atlas: GlyphAtlasPlan,
 }
 
 /// Whether this arrow type terminates in a head at the TARGET end.
@@ -354,11 +526,82 @@ impl GpuRenderPlan {
             }
         }
 
+        // TEXT (bd-2u0.2 component 3). One run per node label, matching the raster pass, which
+        // issues exactly one fill_text per label — so the two are countable against each other.
+        //
+        // Two passes on purpose: the atlas has to know every glyph the diagram uses before any quad
+        // can be given a UV, and a quad built against a half-finished atlas would point at a cell
+        // that later moves.
+        let mut labelled: Vec<(u32, [f32; 2], &str)> = Vec::new();
+        for node in &layout.nodes {
+            if let Some(ir_node) = ir.nodes.get(node.node_index)
+                && let Some(label_id) = ir_node.label
+                && let Some(label) = ir.labels.get(label_id.0)
+                && !label.text.is_empty()
+            {
+                labelled.push((
+                    node.node_index.try_into().unwrap_or(u32::MAX),
+                    [
+                        node.bounds.x + (node.bounds.width * 0.5),
+                        node.bounds.y + (node.bounds.height * 0.5),
+                    ],
+                    label.text.as_str(),
+                ));
+            }
+        }
+
+        let glyph_atlas = GlyphAtlasPlan::for_texts(
+            labelled.iter().map(|(_, _, text)| *text),
+            DEFAULT_GLYPH_CELL_PX,
+        );
+
+        let advance = DEFAULT_FONT_SIZE_PX * CHAR_ADVANCE_RATIO;
+        let half_height = DEFAULT_FONT_SIZE_PX * 0.5;
+        let mut text_quads: Vec<GpuTextQuad> = Vec::new();
+        let mut text_runs: Vec<GpuTextRun> = Vec::with_capacity(labelled.len());
+
+        for (run_index, (node_index, center, text)) in labelled.iter().enumerate() {
+            let run_index_u32 = u32::try_from(run_index).unwrap_or(u32::MAX);
+            let first_quad = u32::try_from(text_quads.len()).unwrap_or(u32::MAX);
+
+            // Control characters carry no ink and are excluded from the atlas, so they must not
+            // consume an advance either — otherwise a label with a newline would render with a gap
+            // where nothing is drawn.
+            let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
+            let width = advance * u16::try_from(inked.len()).map_or(f32::from(u16::MAX), f32::from);
+            let start_x = center[0] - (width * 0.5) + (advance * 0.5);
+
+            for (offset, glyph) in inked.iter().enumerate() {
+                let Some(cell) = glyph_atlas.cell(*glyph) else {
+                    continue;
+                };
+                let step = u16::try_from(offset).map_or(f32::from(u16::MAX), f32::from);
+                text_quads.push(GpuTextQuad {
+                    center: [start_x + (step * advance), center[1]],
+                    half_extent: [advance * 0.5, half_height],
+                    uv_min: cell.uv_min,
+                    uv_max: cell.uv_max,
+                    color: DEFAULT_LABEL_RGBA,
+                    run_index: run_index_u32,
+                });
+            }
+
+            let quad_count = u32::try_from(text_quads.len()).unwrap_or(u32::MAX) - first_quad;
+            text_runs.push(GpuTextRun {
+                node_index: *node_index,
+                first_quad,
+                quad_count,
+            });
+        }
+
         Self {
             bounds: layout.bounds,
             node_instances,
             edge_segments,
             arrowheads,
+            text_quads,
+            text_runs,
+            glyph_atlas,
         }
     }
 }
@@ -506,6 +749,75 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     let out_rgb = (in.stroke.rgb * s + color.rgb * color.a * (1.0 - s)) / out_a;
     return vec4<f32>(out_rgb, out_a);
+}
+"#;
+
+/// WGSL for the glyph-atlas text pass (bd-2u0.2 component 3).
+///
+/// Textured quads sampling the alpha of a rasterised atlas. The atlas is drawn browser-side into a
+/// single texture; this pass only places and tints it, which is what keeps thousands of labels to
+/// one draw call.
+///
+/// The sampled value is used as COVERAGE, not colour: glyphs are tinted by the per-quad colour so
+/// one greyscale atlas serves every label colour in the diagram. Rasterising a coloured atlas
+/// instead would need one atlas per distinct label colour.
+pub const TEXT_ATLAS_WGSL: &str = r#"
+struct Camera {
+    transform: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(1) var atlas_texture: texture_2d<f32>;
+@group(0) @binding(2) var atlas_sampler: sampler;
+
+struct TextQuad {
+    @location(0) center: vec2<f32>,
+    @location(1) half_extent: vec2<f32>,
+    @location(2) uv_min: vec2<f32>,
+    @location(3) uv_max: vec2<f32>,
+    @location(4) color: vec4<f32>,
+    @location(5) run_index: u32,
+};
+
+struct VertexOut {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+var<private> QUAD: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>( 1.0, -1.0), vec2<f32>( 1.0,  1.0),
+    vec2<f32>(-1.0, -1.0), vec2<f32>( 1.0,  1.0), vec2<f32>(-1.0,  1.0),
+);
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32, quad: TextQuad) -> VertexOut {
+    let corner = QUAD[vertex_index];
+    let world = quad.center + corner * quad.half_extent;
+
+    // Corner in [-1,1] maps to the cell's UV rect. Y is flipped because texture space runs downward
+    // while the quad's local Y runs upward.
+    let t = (corner + vec2<f32>(1.0, 1.0)) * 0.5;
+    let uv = vec2<f32>(
+        mix(quad.uv_min.x, quad.uv_max.x, t.x),
+        mix(quad.uv_max.y, quad.uv_min.y, t.y),
+    );
+
+    var out: VertexOut;
+    out.clip_position = vec4<f32>(world * camera.transform.xy + camera.transform.zw, 0.0, 1.0);
+    out.uv = uv;
+    out.color = quad.color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    // Coverage, not colour: the atlas is greyscale so one texture serves every label tint.
+    let coverage = textureSample(atlas_texture, atlas_sampler, in.uv).r;
+    if (coverage <= 0.0) {
+        discard;
+    }
+    return vec4<f32>(in.color.rgb, in.color.a * coverage);
 }
 "#;
 
@@ -892,6 +1204,129 @@ mod tests {
             plain.stroke,
             super::DEFAULT_NODE_STROKE_RGBA,
             "an unstyled node did not keep the theme stroke"
+        );
+    }
+
+    /// The atlas must be deterministic for a given diagram.
+    ///
+    /// UVs that reshuffle between two renders of the same document would make every golden or
+    /// cross-render comparison meaningless, and the reshuffle would be invisible in a screenshot.
+    #[test]
+    fn the_glyph_atlas_is_deterministic_and_deduplicated() {
+        let first = super::GlyphAtlasPlan::for_texts(["Alpha", "Beta"], 32);
+        let second = super::GlyphAtlasPlan::for_texts(["Alpha", "Beta"], 32);
+        assert_eq!(
+            first, second,
+            "the same input produced two different atlases"
+        );
+
+        // 'a' appears in both words and twice in "Alpha"; the atlas carries one cell for it.
+        let distinct: std::collections::BTreeSet<char> =
+            "AlphaBeta".chars().filter(|c| !c.is_control()).collect();
+        assert_eq!(
+            first.cells.len(),
+            distinct.len(),
+            "the atlas did not deduplicate glyphs: {:?}",
+            first.cells
+        );
+
+        // Sorted, so `cell()` may binary search.
+        let mut sorted = first.cells.clone();
+        sorted.sort_by(|a, b| a.glyph.cmp(&b.glyph));
+        assert_eq!(first.cells, sorted, "cells are not sorted by glyph");
+    }
+
+    /// Every cell must be inside the texture and non-degenerate.
+    #[test]
+    fn glyph_cells_stay_inside_the_texture() {
+        let atlas = super::GlyphAtlasPlan::for_texts(["Gamma", "Delta", "Epsilon"], 32);
+        assert!(!atlas.cells.is_empty(), "no cells, so this proves nothing");
+        for cell in &atlas.cells {
+            assert!(
+                cell.uv_min[0] >= 0.0
+                    && cell.uv_min[1] >= 0.0
+                    && cell.uv_max[0] <= 1.0 + 1e-6
+                    && cell.uv_max[1] <= 1.0 + 1e-6,
+                "cell for {:?} leaves the texture: {cell:?}",
+                cell.glyph
+            );
+            assert!(
+                cell.uv_max[0] > cell.uv_min[0] && cell.uv_max[1] > cell.uv_min[1],
+                "cell for {:?} is degenerate: {cell:?}",
+                cell.glyph
+            );
+        }
+    }
+
+    /// CONTROL: an empty diagram produces an empty atlas rather than a 1x1 texture of nothing.
+    #[test]
+    fn an_atlas_with_no_glyphs_is_empty() {
+        let atlas = super::GlyphAtlasPlan::for_texts(std::iter::empty(), 32);
+        assert!(atlas.cells.is_empty());
+        assert_eq!(atlas.texture_px, [0, 0]);
+        assert!(atlas.cell('a').is_none());
+    }
+
+    /// A label becomes one run whose quads carry that label's glyphs.
+    #[test]
+    fn a_node_label_becomes_one_run_of_glyph_quads() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.labels.push(fm_core::IrLabel {
+            text: String::from("Alpha"),
+            span: Span::default(),
+        });
+        ir.nodes.push(IrNode {
+            label: Some(fm_core::IrLabelId(0)),
+            ..IrNode::default()
+        });
+        ir.nodes.push(IrNode::default());
+
+        let plan = GpuRenderPlan::from_layout(&ir, &test_layout(), 1.5);
+
+        assert_eq!(plan.text_runs.len(), 1, "one label should give one run");
+        let run = plan.text_runs[0];
+        assert_eq!(
+            run.quad_count, 5,
+            "Alpha has five glyphs; got {} quads",
+            run.quad_count
+        );
+        assert_eq!(
+            plan.text_quads.len(),
+            usize::try_from(run.quad_count).unwrap_or(0),
+            "quad buffer and run range disagree"
+        );
+
+        // Every quad's UV must be a real atlas cell, not a zeroed default.
+        for quad in &plan.text_quads {
+            assert!(
+                quad.uv_max[0] > quad.uv_min[0],
+                "a quad carries a degenerate UV: {quad:?}"
+            );
+        }
+
+        // Centred on the node: the run's midpoint should sit at the node centre.
+        let first = plan.text_quads.first().expect("a quad");
+        let last = plan.text_quads.last().expect("a quad");
+        let midpoint = (first.center[0] + last.center[0]) * 0.5;
+        let node_center = 10.0 + (40.0 * 0.5);
+        assert!(
+            (midpoint - node_center).abs() < 1e-3,
+            "the run is not centred on its node: midpoint {midpoint} vs {node_center}"
+        );
+    }
+
+    /// CONTROL: an unlabelled node contributes no run.
+    #[test]
+    fn an_unlabelled_node_contributes_no_text() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.nodes.push(IrNode::default());
+        ir.nodes.push(IrNode::default());
+
+        let plan = GpuRenderPlan::from_layout(&ir, &test_layout(), 1.5);
+
+        assert!(
+            plan.text_runs.is_empty() && plan.text_quads.is_empty(),
+            "an unlabelled diagram produced text"
         );
     }
 }

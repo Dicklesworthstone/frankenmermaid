@@ -9,9 +9,7 @@
 //! the geometry they assert it; where it CANNOT yet express something they record the size of the
 //! gap as a number, so the bead's remaining work is quantified rather than described.
 
-use fm_render_canvas::{
-    CanvasRenderConfig, GpuRenderPlan, MockCanvas2dContext, render_to_canvas,
-};
+use fm_render_canvas::{CanvasRenderConfig, GpuRenderPlan, MockCanvas2dContext, render_to_canvas};
 
 const DIAGRAM: &str = "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n  c -.-> a\n";
 
@@ -81,17 +79,18 @@ fn the_plan_carries_every_edge_segment_and_head() {
     );
 }
 
-/// THE GAP, MEASURED: the plan cannot express TEXT at all.
+/// The plan now carries text, and this asserts the RUN COUNT matches the raster pass.
 ///
-/// bd-2u0.2's architecture item 3 is a glyph atlas, and nothing of it exists. This test does not
-/// pretend that is fine — it quantifies the shortfall so the bead's remaining work has a number
-/// attached: the Canvas2D pass draws N text runs for this diagram, and the plan carries zero of
-/// them, so a WebGPU backend fed only this plan would render an unlabelled skeleton.
+/// This test previously asserted the ABSENCE of a text buffer and instructed its own replacement
+/// once the glyph atlas landed (bd-2u0.2 component 3). That has happened, so the shortfall
+/// assertion is gone and the comparison it named is here instead.
 ///
-/// It asserts the gap DELIBERATELY, so that when the atlas lands this test fails and forces its own
-/// rewrite rather than sitting here asserting a shortfall that no longer exists.
+/// RUNS, not glyphs, is the comparable unit: the raster pass issues one `fill_text` per label, so a
+/// glyph count would compare 24 against 3 and never agree. Each run carries its own quad range, so
+/// the glyph detail is still checked — by `a_node_label_becomes_one_run_of_glyph_quads` in the
+/// module's unit tests, where the fixture is small enough for an exact count to mean something.
 #[test]
-fn the_plan_cannot_yet_express_text_and_this_records_how_much() {
+fn the_plan_carries_one_text_run_per_drawn_label() {
     let ir = fm_parser::parse(DIAGRAM).ir;
     let layout = fm_layout::layout_diagram(&ir);
     let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.25);
@@ -105,20 +104,31 @@ fn the_plan_cannot_yet_express_text_and_this_records_how_much() {
         "the raster pass drew no text, so this comparison would be vacuous"
     );
 
-    // The plan has no text field of any kind — this is the whole of architecture item 3, absent.
-    // Expressed as a size check on the struct's own contents rather than a comment, so it cannot
-    // silently become untrue.
-    let plan_primitives = plan.node_instances.len() + plan.edge_segments.len() + plan.arrowheads.len();
-    assert!(
-        plan_primitives > 0,
-        "the plan is empty, so the text gap below is not the interesting fact"
+    assert_eq!(
+        plan.text_runs.len(),
+        drawn_text,
+        "the plan carries {} text runs against {drawn_text} the raster pass draws",
+        plan.text_runs.len()
     );
 
-    // When the glyph atlas lands, `GpuRenderPlan` gains a text buffer and this assertion must be
-    // replaced by one comparing it against `drawn_text`. Failing here is the intended signal.
-    assert_eq!(
-        drawn_text, 3,
-        "the raster pass draws {drawn_text} text runs for this diagram that the plan carries NONE \
-         of; if this number changed, re-measure the gap rather than adjusting the constant"
+    // Every run must actually carry glyphs, or the count above is satisfied by empty runs.
+    for run in &plan.text_runs {
+        assert!(
+            run.quad_count > 0,
+            "a text run carries no glyph quads: {run:?}"
+        );
+        let end = usize::try_from(run.first_quad + run.quad_count).unwrap_or(usize::MAX);
+        assert!(
+            end <= plan.text_quads.len(),
+            "run range {run:?} overruns the {} quads in the buffer",
+            plan.text_quads.len()
+        );
+    }
+
+    // And the atlas must cover them: a quad pointing at a cell the atlas does not have would sample
+    // whatever else happens to live at those UVs.
+    assert!(
+        !plan.glyph_atlas.cells.is_empty(),
+        "text quads exist but the atlas is empty"
     );
 }
