@@ -479,10 +479,11 @@ def main() -> int:
     parser.add_argument(
         "--fm-reps",
         type=int,
-        help="override the fm arm's reps (corpus reps_rs otherwise). The two arms differ ~400x in "
-        "per-rep cost, so ONE multiplier cannot lift both above the host's interference period; "
-        "this scales the short arm alone. An overridden row states the override and is not "
-        "comparable against a corpus-reps row.",
+        help="override the fm arm's reps (corpus reps_rs otherwise). COST: every rep runs one "
+        "calibrated ~3 ms batch, so arm wall time is about reps x 3 ms -- 10,000 reps is a ~30 s "
+        "arm and 100,000 is ~5 MINUTES per arm. It is NOT reps x the per-op median; that model is "
+        "out by the batch factor and is how a 100,000-rep run came to be mistaken for a 9-second "
+        "one. An overridden row states the override and is not comparable against a corpus-reps row.",
     )
     parser.add_argument(
         "--incumbent-cpus", type=int, default=8, help="cpuset size for the incumbent arm"

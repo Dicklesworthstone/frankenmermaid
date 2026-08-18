@@ -208,6 +208,10 @@ To put BOTH arms above the ~10 s interference period at ~30 s each:
 | arm | per-rep median | reps for ~30 s | flag |
 |---|---:|---:|---|
 | frankenmermaid | 93.4 µs | ~322,000 | `--fm-reps 322000` |
+
+⚠️ **THE REP FIGURES IN THIS TABLE ARE WRONG.** See "the rep cost model" below: an arm's wall time
+is `reps × the 3 ms calibration target`, not `reps × per-op ns`. A ~30 s arm is **~10,000 reps**;
+322,000 reps runs for roughly sixteen minutes per arm.
 | mermaid-js | 37.6 ms | ~800 | `--reps 800` |
 
 Four arms at ~30 s is **~2 minutes** of measurement per A/B/B/A. That is the whole point of
@@ -437,6 +441,47 @@ of the measurement; it is a property of the quietest core on the machine.**
 a bound, and the honest fix is the one already in place: quote the spread as provenance, and let the
 **drift** — which is computed from the arms that actually ran, and is now gated — carry the verdict.
 What should change is the *reading*: a 3x spread is not evidence that a row is shaky.
+
+## CORRECTION: the rep cost model was wrong by ~32x, and USING the flag is what showed it
+
+I published a cost table deriving rep counts from the measured per-op median — 93.4 µs per render,
+so ~322,000 reps for a ~30 s arm — and then built `--fm-reps` from it. The arithmetic is wrong, and
+I found out only by running the flag I had justified with it.
+
+`--fm-reps 100000` was expected to take about nine seconds per arm. It ran past **600 seconds** and
+had to be backgrounded.
+
+### What the harness actually does
+
+`rounds = item.reps` (`headtohead.rs:1886`, `:1987`) drives the measurement loop, and each round runs
+a CALIBRATED BATCH: `calibration_target_ns` is 3 ms, and `batch` is sized so one round takes about
+that long. The per-op median is what a batch REPORTS, not what a rep COSTS.
+
+```
+arm wall time  ~=  reps x 3 ms      correct
+arm wall time  ~=  reps x 93 us     what I published, out by the batch factor (~32x here)
+```
+
+| target arm | reps, correctly | reps, as published | what the published figure really costs |
+|---|---:|---:|---:|
+| 30 s | **~10,000** | 322,000 | ~16 minutes |
+| 60 s | ~20,000 | — | — |
+
+The corpus default of `reps_rs` 100 is therefore a **~0.3 s** arm, not the ~9 ms stated earlier in
+this document. That 9 ms was the per-op median times the rep count, which corresponds to nothing the
+harness does.
+
+### What survives the correction, and what does not
+
+The ARGUMENT for a per-arm override survives: at 0.3 s the fm arm is still far below the host's ~10 s
+interference period, so scaling the short arm alone is still the right lever. What does not survive
+is the number attached to it — someone following my table would have booked a quiet window for a run
+taking sixteen minutes an arm and concluded the harness had hung.
+
+⚠️ The lesson is NOT "check the arithmetic". The per-op median was correctly measured; I combined a
+real number with a wrong model of the loop it came from, and no amount of re-checking the
+multiplication would have exposed that. Reading `paired()` and `calibration_target_ns` would have,
+in about two minutes.
 
 ## Ready for the next window
 
