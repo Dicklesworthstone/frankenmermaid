@@ -71,9 +71,24 @@ fn the_marker_class_has_a_css_rule_behind_it() {
         .expect("the stylesheet is closed");
     let stylesheet = &svg[style_start..style_end];
 
+    // ⚠️ THIS USED TO CHECK FOR THE BARE `mindmap-no-border` AND PASSED ON A DEAD RULE. The
+    // renderer emits a user class with an `fm-node-user-` PREFIX, so the markup carries
+    // `fm-node-user-mindmap-no-border` while the stylesheet said `.fm-node.mindmap-no-border` — a
+    // selector that can never match. A substring check for the class NAME is satisfied by both
+    // spellings, so it certified a rule that changed nothing.
+    //
+    // Assert the SELECTOR AS THE MARKUP SPELLS IT, and prove the two agree by taking the token out
+    // of the rendered class attribute rather than hard-coding it twice.
+    let marker = svg
+        .split("class=\"")
+        .filter_map(|chunk| chunk.split('"').next())
+        .flat_map(str::split_whitespace)
+        .find(|token| token.ends_with("mindmap-no-border"))
+        .expect("a default mindmap node should carry the marker class");
     assert!(
-        stylesheet.contains("mindmap-no-border"),
-        "the marker class has no rule in the embedded stylesheet, so it cannot change the picture:\n{stylesheet}"
+        stylesheet.contains(&format!(".fm-node.{marker} ")),
+        "the stylesheet has no rule matching the class the markup actually carries ({marker:?}), \
+         so the marker cannot change the picture:\n{stylesheet}"
     );
     assert!(
         stylesheet.contains("stroke: none"),

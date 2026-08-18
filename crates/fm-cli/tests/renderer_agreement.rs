@@ -72,6 +72,12 @@ const CASES: &[(&str, &str, &str)] = &[
     ("block_label", "block-beta\n  columns 2\n  Alpha[\"Alpha\"] Beta[\"Beta\"]\n", "Alpha"),
     ("gantt_task", "gantt\n  title P\n  section S\n    BuildStep : t1, 2024-01-01, 3d\n", "BuildStep"),
     ("gantt_title", "gantt\n  title Plan\n  section S\n    T : t1, 2024-01-01, 3d\n", "Plan"),
+    // ⚠️ ADDED BECAUSE KNOWN_GAPS NAMED A CASE THAT DID NOT EXIST. `gantt_section` had an entry in
+    // the gap list and no matching entry here, so the gate never evaluated it: the "an entry that
+    // starts agreeing fails" half of this test cannot fire for a case it never renders, which made
+    // that entry a permanent hole rather than a tracked gap. The section name is now a real case,
+    // and the gap entry is gone because the terminal draws it (bd-039t).
+    ("gantt_section", "gantt\n  title P\n  section Engineering\n    T : t1, 2024-01-01, 3d\n", "Engineering"),
     ("state_composite", "stateDiagram-v2\n  state Outer {\n    A --> B\n  }\n", "Outer"),
     ("er_relationship_label", "erDiagram\n  A ||--o{ B : places\n", "places"),
     ("flowchart_edge_label", "flowchart TD\n  a[A] -->|yes| b[B]\n", "yes"),
@@ -110,33 +116,14 @@ const CASES: &[(&str, &str, &str)] = &[
 ///
 /// An allowlist, not a silence: a NEW disagreement fails, and an entry that starts AGREEING fails
 /// too, so a fix cannot leave a permanent hole behind.
-const KNOWN_GAPS: &[(&str, &str, &str)] = &[
-    (
-        "c4_boundary",
-        "terminal",
-        "bd-039t: ROOT CAUSE CORRECTED — it was never the cluster-title PATH. `parse_c4_boundary` \
-         built the title as `format!(\"{function_name}({key}, {label})\")`, so the boundary was \
-         captioned with the user's own C4 SYNTAX. The SVG only looked right because this gate \
-         substring-matches and the SVG does not truncate; the terminal truncates to the box width \
-         and lost the label inside the reconstructed call. The title is now the declared label \
-         (pinned mermaid 11.15.0 contains ZERO occurrences of `System_Boundary(`). THIS ENTRY IS \
-         EXPECTED TO GO STALE: with an 8-character title the terminal should now agree, and this \
-         list is checked in BOTH directions, so the first build after the freeze will fail with \
-         'now agrees — delete its KNOWN_GAPS entry'. That failure is the intended signal, not a \
-         regression. Kept only because it could not be verified unbuilt.",
-    ),
-    (
-    "gantt_section",
-    "terminal",
-    "bd-039t: the band-label overlay capped a label at the band's own cell width, so a gantt \
-     section name longer than 4 characters was clipped. TWO causes, not one: that row belongs to \
-     the date AXIS, and the band overlay runs BEFORE the tick overlay, so anything written there \
-     was overwritten later — which is why the two reverted attempts widened the budget and still \
-     saw nothing change. A SECTION label now goes on an interior row of its own band. THIS ENTRY \
-     IS EXPECTED TO GO STALE: the list is checked in BOTH directions, so the first build after the \
-     freeze should fail with 'now agrees — delete its KNOWN_GAPS entry'. That failure is the \
-     intended signal. Kept only because it could not be verified unbuilt.",
-)];
+/// EMPTY. Both entries were deleted on the first build after the freeze: `c4_boundary/terminal`
+/// because the gate reported it now AGREES, and `gantt_section/terminal` because it named a case
+/// that did not exist in `CASES` — so it was never evaluated at all. That case is now real.
+///
+/// An entry that starts agreeing fails the test below, which is what removed the first one. That
+/// mechanism only works for a case the gate actually renders, so an entry here MUST name a case
+/// above.
+const KNOWN_GAPS: &[(&str, &str, &str)] = &[];
 
 #[test]
 fn the_three_renderers_agree_on_declared_text() {

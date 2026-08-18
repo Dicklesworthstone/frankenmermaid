@@ -436,6 +436,25 @@ impl FontConfig {
     /// Write the `.fm-text` font block (and optional `@import`) directly into `css`. Byte-identical
     /// to [`Self::to_css`]; writes straight into the caller's buffer to avoid the temp `String` per
     /// declaration and the intermediate `String` + copy on the render path.
+    /// ⚠️ EVERY BYTE WRITTEN HERE SHIPS IN EVERY SVG. Explanations belong in Rust comments like
+    /// this one, never in a `/* … */` inside the emitted payload.
+    ///
+    /// bd-d9mw learned that the expensive way: its rationale for the `.fm-node.mindmap-no-border`
+    /// rule below was written as a CSS comment, so 931 bytes of prose were embedded in the
+    /// stylesheet of every diagram this renderer produced. It showed up as all 37 SVG goldens
+    /// changing at once, which is what a global output regression looks like — and it was working
+    /// directly against the output dead-weight levers this crate has already landed
+    /// (`strip_unused_theme_css`, CSS minification).
+    ///
+    /// The rationale it carried, kept here where it costs the user nothing: `A` and `A[A]` both
+    /// parse to `NodeShape::Rect` and used to render byte-identically, while mermaid 11.15.0 types
+    /// them distinctly — its mindmap switch maps DEFAULT to the shape name "no-border" and RECT to
+    /// "rect", with DEFAULT:0 and NO_BORDER:0 sharing an enum value. The incumbent draws the
+    /// difference in CSS rather than geometry (it emits `node-bkg node-no-border`), which is why
+    /// the Rust side needs a marker class and no new `NodeShape` variant. The rule is scoped under
+    /// `.fm-node` so it can only affect a node carrying the marker, and placed after the shape rule
+    /// so it overrides that rule's `stroke` rather than relying on specificity. `fill` is left
+    /// ALONE deliberately: mermaid's default node keeps its section fill and drops only the border.
     pub(crate) fn write_css(&self, css: &mut String) {
         // Embed web font if provided
         if let Some(url) = &self.web_font_url {
@@ -540,21 +559,9 @@ svg {{
   {shadow_filter}
   transition: fill 200ms ease, stroke 200ms ease, filter 200ms ease;
 }}
-/* A mindmap node declared with no shape delimiter is BORDERLESS (bd-d9mw).
-
-   `A` and `A[A]` both parse to `NodeShape::Rect` and rendered byte-identically, while mermaid
-   11.15.0 types them distinctly: its mindmap switch maps DEFAULT to the shape name "no-border" and
-   RECT to "rect", with DEFAULT:0 and NO_BORDER:0 sharing an enum value. The incumbent draws the
-   difference in CSS rather than in geometry - it emits `node-bkg node-no-border` - which is why the
-   Rust side needs a marker class here and no new `NodeShape` variant.
-
-   Scoped under `.fm-node` so it can only affect a node that carries the marker, and placed after
-   the shape rule above so it overrides that rule's `stroke` rather than depending on specificity
-   alone. `fill` is deliberately left ALONE: mermaid's default node keeps its section fill and drops
-   only the border, so removing the fill here would be a second change nobody asked for. */
-.fm-node.mindmap-no-border rect,
-.fm-node.mindmap-no-border path,
-.fm-node.mindmap-no-border polygon {{
+.fm-node.fm-node-user-mindmap-no-border rect,
+.fm-node.fm-node-user-mindmap-no-border path,
+.fm-node.fm-node-user-mindmap-no-border polygon {{
   stroke: none;
 }}
 .fm-node line {{
