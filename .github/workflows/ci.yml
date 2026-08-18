@@ -270,6 +270,10 @@ jobs:
           # brackets, including a PINNED-but-healthy one so the gate cannot be "simplified" into
           # refuse-if-pinned. Python, not node, and it needs no binary or host.
           python3 scripts/headtohead/abba_render.py --self-test
+          # harness_crosscheck decides whether two harnesses may be compared at all (bd-8bbq). Its
+          # unit rules are the load-bearing part: instructions are not a time, and a script that
+          # divided one into the other would invent a number nobody can interpret.
+          python3 scripts/harness_crosscheck.py --self-test
 
       # The corpus scan itself (`node scripts/golden_svg_health.mjs`, no flag) is NOT armed here
       # yet: it exits 1 today on the two committed gantt_basic.svg copies, which reference
