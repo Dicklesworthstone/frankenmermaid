@@ -11705,7 +11705,55 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
             let rest = rest.trim();
             if let Some((index_str, style)) = rest.split_once(' ') {
                 let index_str = index_str.trim();
-                let style = style.trim();
+                let mut style = style.trim();
+
+                // `linkStyle 0 interpolate basis stroke:#f00` — an OPTIONAL curve clause sits
+                // between the index list and the CSS, and it is not CSS. We had no concept of it at
+                // all, so the whole tail became the style string: the link was handed
+                // `"interpolate basis stroke:#f00"` as its declaration, which corrupts a
+                // declaration that was otherwise valid. Worse than dropping it.
+                //
+                // Probed against the pinned bundle rather than guessed, because the shape matters:
+                //   linkStyle 0 interpolate basis            PARSED
+                //   linkStyle 0 interpolate basis stroke:#f00 PARSED
+                //   linkStyle 0 stroke:#f00 interpolate basis ERROR   <- clause must come FIRST
+                //   linkStyle 0 INTERPOLATE basis            PARSED   <- keyword case-insensitive
+                //   linkStyle 0 interpolate                  ERROR    <- the curve is required
+                //   linkStyle 0 interpolate notacurve        PARSED   <- the NAME is not validated
+                //
+                // The curve is parsed off and REPORTED, not stored: nothing in the IR or either
+                // renderer can draw a curve family today, and a field no consumer reads is dead IR
+                // of exactly the kind the field sweep in docs/IR_FIELD_SWEEP.md exists to find.
+                // When an edge-curve consumer lands, this is where the value comes from.
+                let keyword_len = "interpolate".len();
+                if let Some(head) = style.get(..keyword_len)
+                    && head.eq_ignore_ascii_case("interpolate")
+                    && let Some(tail) = style.get(keyword_len..)
+                    && (tail.is_empty() || tail.starts_with(char::is_whitespace))
+                {
+                    let after_keyword = tail.trim_start();
+                    // A bare `interpolate` with no curve is a parse error in mermaid, so the whole
+                    // clause is meaningless here too — but the REST of the line is not, and there is
+                    // no rest in that case, so this only has to say so.
+                    let (curve, remaining_style) = match after_keyword.split_once(' ') {
+                        Some((curve, rest_of_line)) => (curve.trim(), rest_of_line.trim()),
+                        None => (after_keyword, ""),
+                    };
+                    if curve.is_empty() {
+                        builder.add_warning(
+                            "linkStyle `interpolate` needs a curve name (for example \
+                             `interpolate basis`); the clause was ignored"
+                                .to_string(),
+                        );
+                    } else {
+                        builder.add_warning(format!(
+                            "linkStyle `interpolate {curve}` is parsed but not applied; edge curve \
+                             families are not implemented, so the link keeps the default routing"
+                        ));
+                    }
+                    style = remaining_style;
+                }
+
                 if !style.is_empty() {
                     for token in index_str.split(',') {
                         let token = token.trim();
@@ -18204,6 +18252,88 @@ Rel_Back(db, app, "Responds")"#,
         assert!(
             parsed.warnings.iter().any(|w| w.contains("out of bounds")),
             "the out-of-range index was dropped in silence: {:?}",
+            parsed.warnings
+        );
+    }
+
+    /// An `interpolate <curve>` clause must not end up INSIDE the CSS declaration.
+    ///
+    /// We had no concept of the clause, so the whole tail became the style string and the link was
+    /// handed `"interpolate basis stroke:#ff0000"`. That corrupts a declaration that was otherwise
+    /// valid — worse than dropping it, because the author's colour silently stops working.
+    ///
+    /// The exact-equality assertion is the point: `contains("stroke")` would pass on the old
+    /// behaviour too.
+    #[test]
+    fn linkstyle_interpolate_clause_is_stripped_from_the_style() {
+        let parsed =
+            parse_mermaid("flowchart LR\n  A --> B\n  linkStyle 0 interpolate basis stroke:#ff0000");
+
+        let link = parsed
+            .ir
+            .style_refs
+            .iter()
+            .find(|sr| sr.target == fm_core::IrStyleTarget::Link(0))
+            .expect("the link should still be styled");
+        assert_eq!(
+            link.style, "stroke:#ff0000",
+            "the interpolate clause leaked into the CSS declaration"
+        );
+    }
+
+    /// The clause on its own leaves nothing to style, and says so rather than inventing a
+    /// declaration out of the curve name.
+    #[test]
+    fn linkstyle_interpolate_alone_styles_nothing_and_warns() {
+        let parsed = parse_mermaid("flowchart LR\n  A --> B\n  linkStyle 0 interpolate basis");
+
+        assert!(
+            !parsed
+                .ir
+                .style_refs
+                .iter()
+                .any(|sr| matches!(sr.target, fm_core::IrStyleTarget::Link(_))),
+            "a curve name was turned into a style declaration: {:?}",
+            parsed.ir.style_refs
+        );
+        assert!(
+            parsed.warnings.iter().any(|w| w.contains("interpolate")),
+            "the unimplemented curve was dropped in silence: {:?}",
+            parsed.warnings
+        );
+    }
+
+    /// The keyword is case-insensitive in mermaid (`INTERPOLATE basis` parses), so it is here.
+    #[test]
+    fn linkstyle_interpolate_keyword_is_case_insensitive() {
+        let parsed =
+            parse_mermaid("flowchart LR\n  A --> B\n  linkStyle 0 INTERPOLATE basis stroke:#00ff00");
+
+        let link = parsed
+            .ir
+            .style_refs
+            .iter()
+            .find(|sr| sr.target == fm_core::IrStyleTarget::Link(0))
+            .expect("the link should still be styled");
+        assert_eq!(link.style, "stroke:#00ff00");
+    }
+
+    /// CONTROL: an ordinary declaration is untouched. The clause is matched as a WHOLE WORD, so
+    /// this also pins that a property merely starting with those letters is not eaten.
+    #[test]
+    fn linkstyle_without_an_interpolate_clause_is_unchanged() {
+        let parsed = parse_mermaid("flowchart LR\n  A --> B\n  linkStyle 0 stroke:#ff0000");
+
+        let link = parsed
+            .ir
+            .style_refs
+            .iter()
+            .find(|sr| sr.target == fm_core::IrStyleTarget::Link(0))
+            .expect("the link should be styled");
+        assert_eq!(link.style, "stroke:#ff0000");
+        assert!(
+            !parsed.warnings.iter().any(|w| w.contains("interpolate")),
+            "an ordinary linkStyle produced a curve warning: {:?}",
             parsed.warnings
         );
     }
