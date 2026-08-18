@@ -383,7 +383,46 @@ pub fn parse_mermaid_with_detection(
     parse_mermaid_with_detection_and_config(input, detection, parse_mode, &ParserConfig::default())
 }
 
-/// Parse mermaid input with pre-computed detection results and explicit parser behavior config.
+/// The warning for a document that produced nothing, naming a REAL mermaid diagram type when the
+/// header is one this engine has not implemented (bd-8z4fk).
+///
+/// "No parseable nodes or edges were found" is true but misleading for these: the input is valid
+/// mermaid and the incumbent renders it. Telling an author their `treemap` has no parseable nodes
+/// invites them to go looking for a syntax error that is not there, when the honest answer is that
+/// we do not implement the type yet.
+///
+/// Only the types VERIFIED against the pinned bundle are listed — `treemap` and `treemap-beta`
+/// PARSE, and `radar-beta` and `ishikawa` are accepted by the grammar (they reach a DOM-dependent
+/// renderer, which is not a syntax verdict). `radar` WITHOUT the suffix is rejected by mermaid
+/// itself, so it is deliberately absent: claiming a type the incumbent does not accept would be its
+/// own kind of wrong.
+///
+/// Compared on the FIRST TOKEN, so `treemap-beta` cannot be shadowed by `treemap` and no ordering
+/// convention has to be maintained. Cold path — this only runs when a document produced nothing.
+fn empty_document_warning(input: &str) -> String {
+    const UNIMPLEMENTED: &[&str] = &["treemap", "treemap-beta", "radar-beta", "ishikawa"];
+
+    let header = input
+        .lines()
+        .map(trim_fast)
+        .find(|line| !line.is_empty() && !is_comment(line))
+        .unwrap_or_default();
+    let first_token = header.split_whitespace().next().unwrap_or_default();
+
+    if let Some(name) = UNIMPLEMENTED
+        .iter()
+        .find(|name| first_token.eq_ignore_ascii_case(name))
+    {
+        return format!(
+            "`{name}` is a valid mermaid diagram type that this engine does not implement yet, so \
+             nothing was drawn. This is not a syntax error in your diagram."
+        );
+    }
+
+    "No parseable nodes or edges were found".to_string()
+}
+
+/// Parse mermaid input with pre-computed detection results and explicit parser behavior config./// Parse mermaid input with pre-computed detection results and explicit parser behavior config.
 #[must_use]
 pub fn parse_mermaid_with_detection_and_config(
     input: &str,
@@ -467,7 +506,7 @@ pub fn parse_mermaid_with_detection_and_config(
     }
 
     if builder.node_count() == 0 && builder.edge_count() == 0 {
-        builder.add_warning("No parseable nodes or edges were found");
+        builder.add_warning(empty_document_warning(content));
     }
 
     builder.finish(detection.confidence, detection.method)
@@ -19506,6 +19545,50 @@ Rel_Back(db, app, "Responds")"#,
     }
 
     // ── ER notation storage tests ──────────────────────────────────────
+
+    /// An UNIMPLEMENTED but real mermaid type says so, instead of blaming the author (bd-8z4fk).
+    ///
+    /// `treemap` renders in the incumbent. "No parseable nodes or edges were found" is true here but
+    /// misleading — it invites the author to hunt for a syntax error that does not exist.
+    #[test]
+    fn an_unimplemented_diagram_type_is_named_rather_than_blamed() {
+        for header in ["treemap", "treemap-beta", "radar-beta", "ishikawa"] {
+            let parsed = parse_mermaid(&format!("{header}\n  \"A\": 1\n"));
+
+            assert!(
+                parsed
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains(header) && w.contains("does not implement")),
+                "`{header}` was not named as unimplemented: {:?}",
+                parsed.warnings
+            );
+            assert!(
+                !parsed
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("No parseable nodes")),
+                "`{header}` still reports the misleading generic message: {:?}",
+                parsed.warnings
+            );
+        }
+    }
+
+    /// CONTROL: a genuinely empty or unrecognisable document still gets the GENERIC message. The
+    /// new branch must not swallow the case it was carved out of.
+    #[test]
+    fn an_unrecognisable_document_still_reports_the_generic_message() {
+        let parsed = parse_mermaid("not a diagram at all\n");
+
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| w.contains("No parseable nodes")),
+            "the generic empty-document message was lost: {:?}",
+            parsed.warnings
+        );
+    }
 
     /// `branch dev order: 2` names the branch `dev` (bd-p6sgt).
     ///
