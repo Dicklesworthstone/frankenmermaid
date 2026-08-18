@@ -7649,6 +7649,23 @@ fn parse_c4(input: &str, builder: &mut IrBuilder) {
                 };
                 boundary_stack.push(boundary);
             }
+            // `UpdateElementStyle(alias, $bgColor="red", $fontColor="white", $borderColor="black")`
+            // recolours a declared element. It was reported as an unsupported directive and the
+            // colours were dropped (bd-ww46).
+            //
+            // Landable because the CONSUMER ALREADY EXISTS, which I verified rather than assumed:
+            // `IrStyleTarget::Node` refs are read by `collect_node_style_directives` in
+            // fm-render-svg, and the hand-written C4 fast-path fragment is gated on
+            // `shape_style.is_none() && text_style.is_none()` — so a styled C4 node falls back to
+            // the general `render_node` path that applies them. Without that gate this would have
+            // been dead IR.
+            "UpdateElementStyle" => {
+                if !parse_c4_element_style(&arguments, span, builder) {
+                    builder.add_warning(format!(
+                        "Line {line_number}: malformed or unresolved C4 UpdateElementStyle: {trimmed}"
+                    ));
+                }
+            }
             _ => {
                 builder.add_warning(format!(
                     "Line {line_number}: unsupported C4 directive '{function_name}'"
@@ -7656,6 +7673,75 @@ fn parse_c4(input: &str, builder: &mut IrBuilder) {
             }
         }
     }
+}
+
+/// `UpdateElementStyle(alias, $bgColor="…", $fontColor="…", $borderColor="…")` (bd-ww46).
+///
+/// mermaid stores these on the element and its renderer reads them as
+/// `t.bgColor ? t.bgColor : <default>` for the fill, `borderColor` for the stroke and `fontColor`
+/// for the text — so the mapping onto CSS is fill / stroke / color, which is exactly what an
+/// `IrStyleTarget::Node` ref already means to both of our renderers.
+///
+/// The alias is resolved with `node_id_by_key`, which does NOT intern. That matters: interning here
+/// would invent a phantom node for a misspelled alias, which is the defect bd-xfmm was filed for.
+/// An unresolved alias returns false so the caller can name it instead.
+///
+/// Returns false when nothing was applied, so a silent no-op is impossible.
+fn parse_c4_element_style(arguments: &[String], span: Span, builder: &mut IrBuilder) -> bool {
+    let Some(alias) = clean_label(arguments.first().map(String::as_str)) else {
+        return false;
+    };
+    // Same `clean_label` the element declaration used for its key, or the lookup could not match.
+    let Some(node_id) = builder.node_id_by_key(&alias) else {
+        return false;
+    };
+
+    let mut css = String::new();
+    let mut unsupported: Vec<&str> = Vec::new();
+    for argument in arguments.iter().skip(1) {
+        let argument = trim_fast(argument);
+        let Some((key, value)) = argument.split_once('=') else {
+            continue;
+        };
+        let key = trim_fast(key).trim_start_matches('$');
+        let value = trim_fast(value).trim_matches('"');
+        if value.is_empty() {
+            continue;
+        }
+        // Only the three COLOUR keys map onto something a renderer draws. `$shadowing`,
+        // `$legendText` and the sprite keys are recognised as real mermaid but named as unsupported
+        // rather than quietly ignored — the whole point of this change is that dropped styling
+        // should say so.
+        let property = match key {
+            "bgColor" => "fill",
+            "fontColor" => "color",
+            "borderColor" => "stroke",
+            _ => {
+                unsupported.push(key);
+                continue;
+            }
+        };
+        if !css.is_empty() {
+            css.push(';');
+        }
+        css.push_str(property);
+        css.push(':');
+        css.push_str(value);
+    }
+
+    if !unsupported.is_empty() {
+        builder.add_warning(format!(
+            "C4 UpdateElementStyle on `{alias}`: `{}` recognised but not applied; only $bgColor, \
+             $fontColor and $borderColor reach the renderer",
+            unsupported.join("`, `")
+        ));
+    }
+
+    if css.is_empty() {
+        return false;
+    }
+    builder.push_style_ref(fm_core::IrStyleTarget::Node(node_id), css, span);
+    true
 }
 
 fn parse_architecture(input: &str, builder: &mut IrBuilder) {
@@ -17654,6 +17740,79 @@ Rel_Back(db, app, "Responds")"#,
         let input = "C4Deployment\n  Deployment_Node(server, \"Server\")";
         let parsed = parse_mermaid(input);
         assert_eq!(parsed.ir.diagram_type, DiagramType::C4Deployment);
+    }
+
+    /// `UpdateElementStyle` recolours the element it names (bd-ww46).
+    ///
+    /// It was reported as an unsupported C4 directive and every colour was dropped. mermaid stores
+    /// these on the element and reads them as fill / stroke / text, which is exactly what an
+    /// `IrStyleTarget::Node` ref already means to both renderers.
+    #[test]
+    fn c4_update_element_style_applies_colours_to_the_named_node() {
+        let parsed = parse_mermaid(
+            "C4Context\n  Person(a, \"A\")\n  UpdateElementStyle(a, $bgColor=\"red\", $fontColor=\"white\", $borderColor=\"black\")",
+        );
+
+        let index = parsed
+            .ir
+            .nodes
+            .iter()
+            .position(|n| n.id == "a")
+            .expect("node a should exist");
+        let styled = parsed
+            .ir
+            .style_refs
+            .iter()
+            .find(|sr| sr.target == fm_core::IrStyleTarget::Node(fm_core::IrNodeId(index)))
+            .unwrap_or_else(|| panic!("no style ref reached node a: {:?}", parsed.ir.style_refs));
+
+        assert!(styled.style.contains("fill:red"), "bgColor lost: {}", styled.style);
+        assert!(styled.style.contains("color:white"), "fontColor lost: {}", styled.style);
+        assert!(styled.style.contains("stroke:black"), "borderColor lost: {}", styled.style);
+    }
+
+    /// ⚠️ AN UNKNOWN ALIAS MUST NOT INVENT A NODE. `add_class_to_node`-style interning is what drew a
+    /// phantom box in bd-xfmm; this path resolves with the NON-interning `node_id_by_key`, and the
+    /// node count is the assertion that keeps it that way.
+    #[test]
+    fn c4_update_element_style_on_an_unknown_alias_invents_nothing() {
+        let parsed = parse_mermaid(
+            "C4Context\n  Person(a, \"A\")\n  UpdateElementStyle(nosuch, $bgColor=\"red\")",
+        );
+
+        assert_eq!(
+            parsed.ir.nodes.len(),
+            1,
+            "a phantom node was interned for the unknown alias: {:?}",
+            parsed.ir.nodes.iter().map(|n| &n.id).collect::<Vec<_>>()
+        );
+        assert!(
+            !parsed.warnings.is_empty(),
+            "the unresolved alias was dropped in silence"
+        );
+    }
+
+    /// A recognised-but-undrawable option is NAMED, not quietly ignored — the whole point of the
+    /// change is that dropped styling should say so.
+    #[test]
+    fn c4_update_element_style_names_options_it_cannot_apply() {
+        let parsed = parse_mermaid(
+            "C4Context\n  Person(a, \"A\")\n  UpdateElementStyle(a, $bgColor=\"red\", $shadowing=\"true\")",
+        );
+
+        assert!(
+            parsed.warnings.iter().any(|w| w.contains("shadowing")),
+            "an unapplied option was dropped in silence: {:?}",
+            parsed.warnings
+        );
+        // CONTROL: the option it CAN apply still landed, so the warning is not covering a total drop.
+        let index = parsed.ir.nodes.iter().position(|n| n.id == "a").unwrap();
+        assert!(
+            parsed.ir.style_refs.iter().any(|sr| sr.target
+                == fm_core::IrStyleTarget::Node(fm_core::IrNodeId(index))
+                && sr.style.contains("fill:red")),
+            "the supported colour was lost alongside the unsupported one"
+        );
     }
 
     /// The LONG-FORM direction macros draw a relationship (bd-hebu).
