@@ -1369,7 +1369,32 @@ impl IrBuilder {
     /// miss an entry the insert created. Two different trim rules here would make a subgraph
     /// styleable or not depending on the author's whitespace.
     pub(crate) fn cluster_index_by_key(&self, key: &str) -> Option<usize> {
-        self.cluster_index_by_key.get(key.trim()).copied()
+        let key = key.trim();
+        if let Some(&index) = self.cluster_index_by_key.get(key) {
+            return Some(index);
+        }
+
+        // ⚠️ A FLOWCHART SUBGRAPH IS NOT KEYED BY ITS ID, which is what made every subgraph-styling
+        // test fail the moment they were first compiled. `flow_subgraph_lookup_key` builds a
+        // COMPOSITE key — `subgraph one[One]` is stored as `one@title:One`, so two subgraphs sharing
+        // an id but not a title stay distinct — and a `style one …` or `class one …` directive names
+        // only `one`. The direct map lookup above can never hit for those.
+        //
+        // `IrSubgraph` already carries both halves: `key` is the RAW public id and `cluster` is the
+        // cluster it created. So the id resolves without inventing a second index.
+        //
+        // Deliberately a SCAN rather than a new `FxHashMap` field. Two `clone_from` blocks in this
+        // file copy every index map into the reusable-prefix builder; a new map means remembering
+        // both, and forgetting one would be an incremental-parse bug that only shows up on a reused
+        // prefix. The list is subgraph-sized (tens), and this runs once per style DIRECTIVE line,
+        // never per node or per edge.
+        self.ir
+            .graph
+            .subgraphs
+            .iter()
+            .find(|subgraph| subgraph.key == key)
+            .and_then(|subgraph| subgraph.cluster)
+            .map(|cluster| cluster.0)
     }
 
     pub(crate) fn node_id_by_key(&self, key: &str) -> Option<IrNodeId> {

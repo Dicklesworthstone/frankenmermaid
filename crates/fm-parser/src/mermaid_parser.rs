@@ -1005,7 +1005,23 @@ fn lower_flow_ast(
         FlowAst::ClassAssign { nodes, class } => {
             for class_name in class.split(',').map(trim_fast).filter(|s| !s.is_empty()) {
                 for node_key in nodes {
-                    builder.add_class_to_node(node_key, class_name, span);
+                    // ⚠️ THE SECOND `class` PATH, and the one that actually drew the phantom box.
+                    // `class one big` on a SUBGRAPH id was guarded in `extract_style_directives`
+                    // (bd-xfmm), but that is a different code path: this one runs during LOWERING,
+                    // earlier, and `add_class_to_node` interns whatever key it is given — so the
+                    // phantom was created here and the later guard never got the chance to matter.
+                    // The fix only looked correct until it was first compiled.
+                    //
+                    // mermaid does not create a vertex here either: `setClass` reads
+                    // `let n = this.vertices.get(i); n && n.classes.push(r)` — a miss is a no-op.
+                    //
+                    // Skipping an unresolved key loses nothing, because `extract_style_directives`
+                    // re-reads every `class` line AFTER all lowering: a node declared later in the
+                    // document still gets its class there, and a SUBGRAPH id is resolved to its
+                    // cluster there. This path can therefore be strictly non-interning.
+                    if builder.node_id_by_key(node_key).is_some() {
+                        builder.add_class_to_node(node_key, class_name, span);
+                    }
                 }
             }
         }
