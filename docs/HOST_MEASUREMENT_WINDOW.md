@@ -483,6 +483,56 @@ real number with a wrong model of the loop it came from, and no amount of re-che
 multiplication would have exposed that. Reading `paired()` and `calibration_target_ns` would have,
 in about two minutes.
 
+## A ~30 s arm at load 90: the spread DOES collapse, and a longer arm did NOT steady the drift
+
+First bracket run with `--fm-reps` (10,000 reps, so ~30 s per fm arm under the corrected cost
+model). NOT BANKABLE: the ELF was several peer commits stale and the run carried
+`--allow-stale-elf`. Both arms used the same binary, so the arm-length and host observations below
+stand on their own; the ratio does not.
+
+```
+A1 fm  96,165 ns  batch 23  load [90.05, 52.00, 38.91]  MHz 3989-4013  spread 1.006x
+B1 mjs 36.100 ms            load [68.44, 64.09, 45.65]  MHz 1429-4091  spread 2.863x
+B2 mjs 36.500 ms            load [68.44, 64.09, 45.65]  MHz 2515-4069  spread 1.618x
+A2 fm  93,925 ns  batch 38  load [64.08, 63.26, 45.48]  MHz 1429-4292  spread 3.003x
+
+fm drift 1.0238x    worst bound 375.4x    headline 381.9x
+```
+
+### The high-load point I said was missing
+
+I flagged that the claim "spread collapses under heavy uniform load" rested on ONE borrowed
+observation, that load 23-42 was unmeasured, and that "certify under heavy load" was therefore
+unsupported. This bracket supplies my own point, and it is emphatic: **at loadavg 90 every core sat
+between 3989 and 4013 MHz — a spread of 1.006x.**
+
+Better still, it is a WITHIN-BRACKET contrast rather than a comparison across sessions. The same
+run, minutes apart, recorded spread **1.006x at load 90** and **3.003x at load 64**. That is the
+occupancy hypothesis holding on this host: when every core is occupied they boost together, and the
+worst-pair statistic has no parked core to anchor it.
+
+The calibrated batch tracked it exactly as documented — **23 under load 90, 38 under load 64** — the
+slow/fast bands that the harness records and never reads.
+
+### The longer arm did NOT reduce drift, and that is the point of running it
+
+| arm length | reps | fm drift | loadavg during the arms |
+|---|---:|---:|---|
+| ~0.3 s (banked run 4) | 100 | **1.0122x** | ~22 |
+| ~30 s (this run) | 10,000 | **1.0238x** | 64-90 |
+
+A hundredfold longer arm gave slightly WORSE reproducibility, not better. That is evidence against
+the premise `--fm-reps` was built on — that the fm arm's short duration is what limits its stability.
+
+⚠️ **CONFOUNDED, and not to be quoted as a refutation.** The two rows differ in load by 3-4x as well
+as in arm length, and the longer arm ran through a load spike from 38 to 90. A clean test needs both
+lengths in the same window. What can be said now is narrower and still useful: at ~30 s the arm is
+not obviously steadier, so the case for spending sixteen-minute arms on this is weaker than the
+original cost table implied.
+
+`FM REPS OVERRIDDEN: 10000 against the corpus value 100` printed as designed, so the row cannot be
+mistaken for a corpus-reps row.
+
 ## Ready for the next window
 
 A fresh `headtohead` binary exists and is provenance-checked, so a genuinely quiet window needs no
