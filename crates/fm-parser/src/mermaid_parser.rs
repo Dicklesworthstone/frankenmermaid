@@ -11500,10 +11500,24 @@ fn is_flowchart_header(line: &str) -> bool {
     matches_keyword_header(&lower, "flowchart") || matches_keyword_header(&lower, "graph")
 }
 
-const STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE: &str = "style directives (classDef/style/linkStyle) are parsed, but only SVG output currently \
-applies them; terminal/canvas renderers use theme defaults";
-const STYLE_DIRECTIVE_DIAGNOSTIC_SUGGESTION: &str = "Use --format svg for styled output or avoid style directives on terminal/canvas surfaces \
-until full support lands.";
+/// ⚠️ THIS TEXT WENT STALE AND BECAME A FALSE WARNING, which is worse than no warning: it told
+/// every author of a styled diagram to avoid the canvas surface, and the canvas is what fm-wasm
+/// renders the browser preview through. A false warning on correct input trains readers to ignore
+/// the channel — the same reason the unmatched-bracket rule (bd-rrvr) was kept deliberately narrow.
+///
+/// The canvas has honoured author styling since bd-lvj3: node fill/stroke and `classDef`
+/// (`27fb51ba`), edge colour and width from `linkStyle` (`72ac1f92`), sequence rect and cluster
+/// colour (`c4f2e02b`), node TEXT colour (`bcedf3b4`) and subgraph styling (`ce394058`). The
+/// `classDef` half was verified rather than assumed: the parser calls `populate_structured_styles`
+/// in `finalize`, which turns `IrStyleTarget::Class` refs into `ir.style_defs`, which is what the
+/// canvas node resolver reads.
+///
+/// The TERMINAL claim is still true and stays: that renderer emits no ANSI at all and
+/// `TermRenderConfig` has no colour field, so there is nothing for a declared colour to reach.
+const STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE: &str = "style directives (classDef/style/linkStyle) are applied by the SVG and canvas renderers; \
+terminal output has no colour channel and uses theme defaults";
+const STYLE_DIRECTIVE_DIAGNOSTIC_SUGGESTION: &str = "Use --format svg, or the canvas/browser preview, for styled output. Terminal output cannot \
+express colour.";
 
 fn is_non_graph_statement(line: &str) -> bool {
     let check = |line: &str, keyword: &str| {

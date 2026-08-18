@@ -8341,8 +8341,17 @@ fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> 
 fn collect_parse_diagnostics(parsed: &fm_parser::ParseResult) -> Vec<ValidationDiagnostic> {
     let mut diagnostics = Vec::new();
     const STYLE_DIRECTIVE_RULE_ID: &str = "classdef-not-applied";
-    const STYLE_DIRECTIVE_MESSAGE: &str = "style directives (classDef/style/linkStyle) are parsed, but only SVG output currently \
-applies them; terminal/canvas renderers use theme defaults";
+    // ⚠️ A FORKED COPY of `STYLE_DIRECTIVE_DIAGNOSTIC_MESSAGE` in
+    // `fm-parser/src/mermaid_parser.rs`. Both went stale together and both had to be corrected
+    // together: the canvas has honoured author styling since bd-lvj3, so telling users to avoid it
+    // was a false warning on correct input — and the canvas is what fm-wasm renders the browser
+    // preview through. Fixing only the parser's copy would have left this one still saying it.
+    //
+    // Kept as a copy rather than imported because the parser's constant is private to its module;
+    // if that ever becomes public, these two should collapse into it. Until then, EDIT BOTH — this
+    // project has been bitten by forked helpers drifting before.
+    const STYLE_DIRECTIVE_MESSAGE: &str = "style directives (classDef/style/linkStyle) are applied by the SVG and canvas renderers; \
+terminal output has no colour channel and uses theme defaults";
 
     for warning in &parsed.ir.meta.init.warnings {
         let payload = StructuredDiagnostic::from_warning(warning)
