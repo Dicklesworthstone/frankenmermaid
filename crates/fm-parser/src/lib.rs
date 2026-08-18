@@ -941,6 +941,47 @@ fn fuzzy_keyword_match(lower: &str, max_distance: usize) -> Option<DetectedType>
 }
 
 /// Content-based heuristics for detecting diagram type from patterns.
+/// Whether the content contains an ER relationship, recognised STRUCTURALLY.
+///
+/// This replaced four hardcoded spellings -- `||--o{`, `}|--||`, `||--|{`, `|o--o|` -- which is four
+/// of the thirty-two the grid actually admits, and none of the `..` non-identifying forms at all. A
+/// many-to-many `}o--o{`, the most common relationship anyone draws, was not detected.
+///
+/// An ER relationship is a LEFT cardinality token, a separator, then a RIGHT one. The two sides use
+/// different alphabets because the notation is mirrored: `}o` opens to the left, `o{` to the right.
+/// Checking the flanking pairs rather than whole spellings covers all thirty-two combinations and
+/// both separators without enumerating any of them.
+///
+/// Cheap and specific enough not to fire on other diagrams: a flowchart `-->` has a space and `>`
+/// around its `--`, a class dependency `..>` likewise, and neither pair is a cardinality token.
+fn looks_like_er_relationship(content: &str) -> bool {
+    // Lowercased upstream, so only these forms occur.
+    const LEFT: [&str; 4] = ["|o", "||", "}o", "}|"];
+    const RIGHT: [&str; 4] = ["o|", "||", "o{", "|{"];
+
+    for separator in ["--", ".."] {
+        let mut rest = content;
+        let mut base = 0_usize;
+        while let Some(offset) = rest.find(separator) {
+            let at = base + offset;
+            let after = at + separator.len();
+            let left_ok = at >= 2
+                && content
+                    .get(at - 2..at)
+                    .is_some_and(|pair| LEFT.contains(&pair));
+            let right_ok = content
+                .get(after..after + 2)
+                .is_some_and(|pair| RIGHT.contains(&pair));
+            if left_ok && right_ok {
+                return true;
+            }
+            base = at + separator.len();
+            rest = &content[base..];
+        }
+    }
+    false
+}
+
 fn content_heuristics(input: &str) -> Option<DetectedType> {
     // Strip comments to avoid false positives in metadata
     let lines: Vec<&str> = input
@@ -951,11 +992,7 @@ fn content_heuristics(input: &str) -> Option<DetectedType> {
     let content = lines.join("\n").to_lowercase();
 
     // ER diagram patterns
-    if content.contains("||--o{")
-        || content.contains("}|--||")
-        || content.contains("||--|{")
-        || content.contains("|o--o|")
-    {
+    if looks_like_er_relationship(&content) {
         return Some(DetectedType {
             diagram_type: DiagramType::Er,
             confidence: 0.8,
@@ -3175,6 +3212,48 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
                 detected.method,
                 super::DetectionMethod::ExactKeyword,
                 "{source:?} did not take the exact path"
+            );
+        }
+    }
+
+    /// The ER heuristic must cover the whole cardinality grid, not four spellings.
+    ///
+    /// The four it used to hardcode are included so the fix cannot regress the cases that already
+    /// worked; the rest are combinations it silently missed -- including `}o--o{`, a plain
+    /// many-to-many, and every `..` non-identifying form.
+    #[test]
+    fn the_er_heuristic_covers_the_cardinality_grid() {
+        for relationship in [
+            "||--o{", "}|--||", "||--|{", "|o--o|", // previously hardcoded
+            "}o--o{", "}o--|{", "|o--|{", "||--||", // missed
+            "}o..o{", "||..||", "|o..o|", "}|..|{", // non-identifying, all missed
+        ] {
+            let source = format!("CUSTOMER {relationship} ORDER : places\n");
+            assert!(
+                super::looks_like_er_relationship(&source.to_lowercase()),
+                "{relationship} was not recognised as an ER relationship"
+            );
+        }
+    }
+
+    /// CONTROL: other diagrams' operators must NOT read as ER.
+    ///
+    /// The check scans for `--` and `..`, which appear in flowchart links and class dependencies
+    /// too. It is the flanking cardinality pairs that make it specific, and without this control a
+    /// looser version would classify every flowchart as an ER diagram.
+    #[test]
+    fn ordinary_operators_are_not_mistaken_for_er() {
+        for source in [
+            "flowchart TD\n  a --> b\n",
+            "flowchart TD\n  a --- b\n",
+            "flowchart TD\n  a ==> b\n",
+            "classDiagram\n  A ..> B\n",
+            "classDiagram\n  A <|-- B\n",
+            "sequenceDiagram\n  A-->>B: hi\n",
+        ] {
+            assert!(
+                !super::looks_like_er_relationship(&source.to_lowercase()),
+                "{source:?} was misread as an ER relationship"
             );
         }
     }
