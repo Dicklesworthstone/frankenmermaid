@@ -4293,6 +4293,28 @@ fn parse_state_statements(line: &str, config: &ParserConfig) -> Option<Vec<State
             .map(|direction| vec![StateStatement::Direction(direction)]);
     }
 
+    // ⚠️ `hide empty description` DREW A STATE BOX. It is a real state-diagram directive, it was in
+    // no filter here, so it fell through to the node parser and `normalize_identifier` turned it
+    // into a state keyed `hide_empty_description` — a phantom box captioned with the author's own
+    // directive, sitting in the diagram. Same family as bd-xfmm's subgraph phantom, and worse than
+    // a silent drop because the reader sees text nobody wrote (bd-871ka).
+    //
+    // Recognised and IGNORED, and that is the CORRECT behaviour rather than a compromise: this
+    // renderer has no state-description compartment at all — there is no state meta and nothing in
+    // fm-render-svg draws one — so there is no empty description for the directive to hide. It is a
+    // genuine no-op for us. Deliberately NOT warned for the same reason: a warning on valid input
+    // that changes nothing would be the false-diagnostic trap bd-lvj3's stale message was.
+    //
+    // Case-insensitive and spacing-tolerant, matching its `hide footbox` sibling in the sequence
+    // parser; the probe confirms mermaid accepts `HIDE EMPTY DESCRIPTION` too.
+    //
+    // Kept LOCAL to the state parser instead of joining `is_non_node_directive_statement`: that
+    // predicate is shared with the flowchart and other paths, and swallowing a `hide …` line there
+    // would be the exact regression bd-ij0f caused when a widened filter ate eight click tests.
+    if is_state_hide_empty_description(line) {
+        return Some(Vec::new());
+    }
+
     // Note syntax: `note right of StateName : text` or `note left of StateName : text`
     if line.starts_with("note ")
         && let Some(note) = parse_state_note(line)
@@ -4424,6 +4446,22 @@ fn split_state_transition_label(statement: &str) -> (&str, Option<&str>) {
     }
 
     (statement, None)
+}
+
+/// `hide empty description`, in any casing and with any run of spaces between the words (bd-871ka).
+///
+/// Allocation-free: the words are compared in place rather than lowercased into a `String`, since
+/// this runs for every line of every state diagram.
+fn is_state_hide_empty_description(line: &str) -> bool {
+    let mut words = line.split_whitespace();
+    let (Some(hide), Some(empty), Some(description), None) =
+        (words.next(), words.next(), words.next(), words.next())
+    else {
+        return false;
+    };
+    hide.eq_ignore_ascii_case("hide")
+        && empty.eq_ignore_ascii_case("empty")
+        && description.eq_ignore_ascii_case("description")
 }
 
 fn parse_state_note(line: &str) -> Option<StateStatement> {
@@ -13486,6 +13524,48 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("unsupported class syntax"))
         );
+    }
+
+    /// `hide empty description` must not draw a STATE (bd-871ka).
+    ///
+    /// It was in no filter, so it fell through to the node parser and `normalize_identifier` turned
+    /// it into a state keyed `hide_empty_description` — a phantom box captioned with the author's
+    /// own directive. Worse than a silent drop: the reader sees text nobody wrote.
+    #[test]
+    fn state_hide_empty_description_draws_no_state() {
+        let parsed = parse_mermaid("stateDiagram-v2\n  hide empty description\n  [*] --> Alpha\n");
+
+        let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert!(
+            !ids.iter().any(|id| id.contains("hide")),
+            "the directive was drawn as a state: {ids:?}"
+        );
+        // NON-VACUITY: the real state must survive, or "no hide node" would also hold for a parse
+        // that produced nothing at all.
+        assert!(ids.contains(&"Alpha"), "the declared state vanished: {ids:?}");
+    }
+
+    /// The directive is case- and spacing-insensitive, as mermaid's is.
+    #[test]
+    fn state_hide_empty_description_is_case_insensitive() {
+        let parsed = parse_mermaid("stateDiagram-v2\n  HIDE  Empty   DESCRIPTION\n  [*] --> Alpha\n");
+
+        let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert!(
+            !ids.iter().any(|id| id.to_ascii_lowercase().contains("hide")),
+            "a differently-cased directive was drawn as a state: {ids:?}"
+        );
+        assert!(ids.contains(&"Alpha"), "the declared state vanished: {ids:?}");
+    }
+
+    /// CONTROL: the filter is exactly three words, so a state legitimately NAMED `hide` still
+    /// exists. A broader `hide …` guard would have swallowed it.
+    #[test]
+    fn a_state_named_hide_is_not_swallowed() {
+        let parsed = parse_mermaid("stateDiagram-v2\n  [*] --> hide\n  hide --> Alpha\n");
+
+        let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert!(ids.contains(&"hide"), "a state named `hide` was swallowed: {ids:?}");
     }
 
     #[test]
