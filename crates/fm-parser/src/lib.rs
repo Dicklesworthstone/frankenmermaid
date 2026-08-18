@@ -831,6 +831,19 @@ fn exact_diagram_type_with(
 }
 
 /// Known diagram keywords for fuzzy matching.
+///
+/// Kept in step with the exact-match chain above. It had drifted: block, packet, architecture and
+/// all five C4 headers were reachable exactly but had no fuzzy entry, so a typo in those eight was
+/// the only kind this parser could not offer to correct. Nothing documents that as deliberate and
+/// the exact chain lists them, so the omission reads as a table that stopped being updated as types
+/// were added.
+///
+/// ⚠️ ORDER IS SIGNIFICANT ON A TIE. `fuzzy_keyword_match` keeps the first candidate at the minimum
+/// distance (`distance < best_distance`, strictly), so two keywords equidistant from a typo resolve
+/// to whichever appears FIRST here. That is deterministic but arbitrary, and it matters most for the
+/// five C4 headers, which differ from each other by only a few characters. They are listed
+/// shortest-first so a tie favours the shorter, more general name rather than a longer one the
+/// author is less likely to have meant.
 const DIAGRAM_KEYWORDS: &[(&str, DiagramType)] = &[
     ("flowchart", DiagramType::Flowchart),
     ("graph", DiagramType::Flowchart),
@@ -849,6 +862,14 @@ const DIAGRAM_KEYWORDS: &[(&str, DiagramType)] = &[
     ("sankey", DiagramType::Sankey),
     ("xychart", DiagramType::XyChart),
     ("kanban", DiagramType::Kanban),
+    ("block", DiagramType::BlockBeta),
+    ("packet", DiagramType::PacketBeta),
+    ("architecture", DiagramType::ArchitectureBeta),
+    ("c4context", DiagramType::C4Context),
+    ("c4dynamic", DiagramType::C4Dynamic),
+    ("c4component", DiagramType::C4Component),
+    ("c4container", DiagramType::C4Container),
+    ("c4deployment", DiagramType::C4Deployment),
 ];
 
 pub(crate) fn is_sankey_header(line: &str) -> bool {
@@ -3085,6 +3106,76 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
         ] {
             let detected = super::detect_type_with_confidence(source);
             assert_eq!(detected.diagram_type, want, "{source:?} changed detection");
+        }
+    }
+
+    /// A typo in the eight newly-covered headers is now correctable.
+    ///
+    /// Before this, block/packet/architecture and the five C4 headers were the only types a
+    /// misspelling could never be corrected for -- they matched exactly or not at all.
+    #[test]
+    fn typos_in_the_late_added_types_are_corrected() {
+        let config = super::ParserConfig::default();
+        if config.fuzzy_keyword_distance == 0 {
+            return; // fuzzy correction disabled by default configuration; nothing to assert
+        }
+
+        for (source, want) in [
+            ("architectur\n  group a\n", fm_core::DiagramType::ArchitectureBeta),
+            ("packt\n  0-7: \"a\"\n", fm_core::DiagramType::PacketBeta),
+            ("kanbon\n  Todo\n", fm_core::DiagramType::Kanban),
+        ] {
+            let detected = super::detect_type_with_confidence(source);
+            assert_eq!(detected.diagram_type, want, "{source:?} was not corrected");
+        }
+    }
+
+    /// THE ONE THAT MATTERS: a C4 typo must correct to the RIGHT C4 variant.
+    ///
+    /// Adding five keywords that differ from each other by a few characters is exactly how a fuzzy
+    /// table starts cross-correcting. `c4contaner` is one edit from `c4container` and three from
+    /// `c4context`, so nearest-wins should hold -- but nothing enforced that before these entries
+    /// existed, and a tie would silently resolve to whichever is listed first.
+    #[test]
+    fn a_c4_typo_corrects_to_its_own_variant() {
+        let config = super::ParserConfig::default();
+        if config.fuzzy_keyword_distance == 0 {
+            return;
+        }
+
+        for (source, want) in [
+            ("c4contaner\n  Person(a, \"A\")\n", fm_core::DiagramType::C4Container),
+            ("c4contex\n  Person(a, \"A\")\n", fm_core::DiagramType::C4Context),
+            ("c4deploymnt\n  Person(a, \"A\")\n", fm_core::DiagramType::C4Deployment),
+        ] {
+            let detected = super::detect_type_with_confidence(source);
+            assert_eq!(
+                detected.diagram_type, want,
+                "{source:?} cross-corrected to another C4 variant"
+            );
+        }
+    }
+
+    /// CONTROL: an EXACT header must never be routed through fuzzy matching.
+    ///
+    /// The matcher requires distance > 0, so an exact spelling cannot be "corrected" to a
+    /// neighbour. Widening the table makes that guard load-bearing: `block` and `packet` are now
+    /// close enough to real words that a bug admitting distance 0 would start reclassifying valid
+    /// documents.
+    #[test]
+    fn exact_headers_are_never_fuzzy_corrected() {
+        for (source, want) in [
+            ("block-beta\n  a\n", fm_core::DiagramType::BlockBeta),
+            ("packet-beta\n  0-7: \"a\"\n", fm_core::DiagramType::PacketBeta),
+            ("c4context\n  Person(a, \"A\")\n", fm_core::DiagramType::C4Context),
+        ] {
+            let detected = super::detect_type_with_confidence(source);
+            assert_eq!(detected.diagram_type, want, "{source:?} was rerouted");
+            assert_eq!(
+                detected.method,
+                super::DetectionMethod::ExactKeyword,
+                "{source:?} did not take the exact path"
+            );
         }
     }
 }
