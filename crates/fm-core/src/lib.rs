@@ -2,6 +2,7 @@
 
 pub mod art;
 pub mod canary;
+pub mod reuse_proof;
 pub mod cga;
 pub mod constraints;
 pub mod epoch;
