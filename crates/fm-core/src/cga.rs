@@ -865,6 +865,22 @@ impl TransformStack {
         self.push_rotor(rotor);
     }
 
+    /// Push an affine matrix only if a rotor can actually represent it.
+    ///
+    /// Returns `false` and pushes NOTHING when the matrix is not a similarity, so a caller holding
+    /// an anisotropic transform finds out instead of receiving a silently-wrong composition.
+    /// [`Self::push_matrix`] cannot do this without changing its signature, and its one production
+    /// caller already guards, so the safe entry point is added beside it rather than in place of it.
+    pub fn try_push_matrix(&mut self, matrix: AffineMatrix2D) -> bool {
+        match matrix.try_to_rotor() {
+            Some(rotor) => {
+                self.push_rotor(rotor);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Pop the most recent transform from the stack.
     ///
     /// Returns `true` if a transform was popped, `false` if the stack was empty.
@@ -968,11 +984,68 @@ impl AffineMatrix2D {
     /// This extracts rotation, scale, and translation components from the matrix
     /// and composes them into a rotor.
     #[must_use]
+    /// Whether this matrix is a SIMILARITY: uniform scale, no shear.
+    ///
+    /// Exactly the class a rotor can represent. A conformal rotor encodes rotation, translation and
+    /// UNIFORM dilation; anisotropic scale (a squeeze) is not in the rotor subgroup at all, so no
+    /// amount of care in the conversion can carry it.
+    ///
+    /// Tested by comparing the two column norms and their orthogonality, which is what "similarity"
+    /// means in coordinates.
+    #[must_use]
+    pub fn is_conformal(&self) -> bool {
+        const RELATIVE_TOLERANCE: f64 = 1e-9;
+
+        if ![self.a, self.b, self.c, self.d, self.tx, self.ty]
+            .into_iter()
+            .all(f64::is_finite)
+        {
+            return false;
+        }
+
+        // Column norms: the x axis is (a, c) and the y axis is (b, d).
+        let x_axis_squared = self.a.mul_add(self.a, self.c * self.c);
+        let y_axis_squared = self.b.mul_add(self.b, self.d * self.d);
+        if x_axis_squared <= 0.0 || y_axis_squared <= 0.0 {
+            return false;
+        }
+
+        // Equal lengths (uniform scale) and perpendicular axes (no shear). Compared RELATIVELY, so
+        // the test means the same thing for a diagram measured in pixels and one in ems.
+        let scale = (x_axis_squared + y_axis_squared) * 0.5;
+        if (x_axis_squared - y_axis_squared).abs() > RELATIVE_TOLERANCE * scale {
+            return false;
+        }
+
+        let dot = self.a.mul_add(self.b, self.c * self.d);
+        dot.abs() <= RELATIVE_TOLERANCE * scale
+    }
+
+    /// Convert to a rotor, or `None` when this matrix is not a similarity.
+    ///
+    /// The honest counterpart to [`Self::to_rotor`], which cannot represent anisotropy and does not
+    /// say so. Callers that may hold a non-uniform transform — a terminal grid maps layout units to
+    /// character cells with DIFFERENT x and y factors, because cells are taller than they are wide —
+    /// must use this and handle the `None`, rather than receive a rotor that silently dropped one
+    /// of the two scales.
+    #[must_use]
+    pub fn try_to_rotor(&self) -> Option<Rotor> {
+        self.is_conformal().then(|| self.to_rotor())
+    }
+
     pub fn to_rotor(&self) -> Rotor {
         // Extract rotation angle from matrix
         let angle = self.c.atan2(self.a);
 
-        // Extract scale (assuming uniform scale for now)
+        // Scale is read from the X AXIS ALONE, which means an anisotropic matrix loses its y
+        // scale here without a word. That is not fixable in this function: a rotor represents
+        // rotation, translation and UNIFORM dilation, and a squeeze is not in the rotor subgroup,
+        // so there is no correct value to return for a non-similarity input.
+        //
+        // The live caller is guarded — `fm-render-svg`'s `try_render_transform_to_cga` checks
+        // `is_cga_similarity_transform` before pushing — so this is latent, not active. NEW callers
+        // must use `try_to_rotor`, which returns `None` instead of a quietly wrong rotor. The loss
+        // is pinned by `to_rotor_silently_drops_anisotropic_scale` so it cannot change unnoticed.
         let scale = (self.a * self.a + self.c * self.c).sqrt();
 
         // Build composed rotor: first rotate, then scale, then translate
@@ -2956,6 +3029,127 @@ mod rotor_fault_tests {
         assert!(
             (x - 5.0).abs() < 1e-6 && (y + 2.0).abs() < 1e-6,
             "rotor composed with its inverse moved (5,-2) to ({x}, {y})"
+        );
+    }
+
+    /// CHARACTERIZATION: `to_rotor` drops anisotropic scale, and this pins that it does.
+    ///
+    /// Not an endorsement — it records the current, load-bearing behaviour so it cannot change
+    /// unnoticed, and so the next person to reach for `to_rotor` on a non-uniform transform sees
+    /// the loss stated in executable form rather than in a comment. The existing round-trip tests
+    /// only ever used translation and rotation, so nothing held this down before.
+    ///
+    /// A rotor cannot carry a squeeze: it represents rotation, translation and UNIFORM dilation, so
+    /// there is no correct rotor for this input. The fix is to refuse, which `try_to_rotor` does.
+    #[test]
+    fn to_rotor_silently_drops_anisotropic_scale() {
+        let anisotropic = AffineMatrix2D {
+            a: 3.0,
+            b: 0.0,
+            c: 0.0,
+            d: 7.0,
+            tx: 0.0,
+            ty: 0.0,
+        };
+
+        let recovered = anisotropic.to_rotor().to_affine_matrix();
+
+        // The x scale survives; the y scale is replaced by it.
+        assert!(
+            (recovered.a - 3.0).abs() < 1e-9,
+            "x scale should survive: {}",
+            recovered.a
+        );
+        assert!(
+            (recovered.d - 3.0).abs() < 1e-9,
+            "the y scale of 7 is expected to have become 3; got {} — if this now round-trips, \
+             to_rotor has been fixed and this characterization should become a round-trip assertion",
+            recovered.d
+        );
+
+        // And the honest API refuses it outright.
+        assert!(!anisotropic.is_conformal(), "a 3x7 scale is not a similarity");
+        assert!(
+            anisotropic.try_to_rotor().is_none(),
+            "try_to_rotor must refuse what a rotor cannot represent"
+        );
+    }
+
+    /// The similarity test must ACCEPT what rotors really can represent.
+    ///
+    /// Without this the guard could be satisfied by refusing everything, which would silently
+    /// disable the CGA path rather than protect it.
+    #[test]
+    fn is_conformal_accepts_rotations_translations_and_uniform_scale() {
+        assert!(AffineMatrix2D::identity().is_conformal());
+        assert!(AffineMatrix2D::translation(5.0, -9.0).is_conformal());
+        assert!(AffineMatrix2D::rotation(std::f64::consts::FRAC_PI_3).is_conformal());
+
+        let uniform = AffineMatrix2D {
+            a: 2.5,
+            b: 0.0,
+            c: 0.0,
+            d: 2.5,
+            tx: 4.0,
+            ty: 8.0,
+        };
+        assert!(uniform.is_conformal(), "uniform scale is a similarity");
+        assert!(uniform.try_to_rotor().is_some());
+
+        // A rotation composed with a uniform scale is still a similarity: the columns stay equal in
+        // length and perpendicular.
+        let angle = 0.7_f64;
+        let (sin, cos) = angle.sin_cos();
+        let rotated_scale = AffineMatrix2D {
+            a: 2.0 * cos,
+            b: -2.0 * sin,
+            c: 2.0 * sin,
+            d: 2.0 * cos,
+            tx: 0.0,
+            ty: 0.0,
+        };
+        assert!(rotated_scale.is_conformal(), "rotation+uniform scale is a similarity");
+
+        // A SHEAR is not, even though both columns have equal length.
+        let shear = AffineMatrix2D {
+            a: 1.0,
+            b: 1.0,
+            c: 0.0,
+            d: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        };
+        assert!(!shear.is_conformal(), "a shear is not a similarity");
+    }
+
+    /// `try_push_matrix` refuses a non-similarity and leaves the stack untouched.
+    #[test]
+    fn try_push_matrix_refuses_anisotropy_without_disturbing_the_stack() {
+        let mut stack = TransformStack::new();
+        stack.push_translation(3.0, 4.0);
+        let before = stack.to_affine_matrix();
+
+        let refused = stack.try_push_matrix(AffineMatrix2D {
+            a: 3.0,
+            b: 0.0,
+            c: 0.0,
+            d: 7.0,
+            tx: 0.0,
+            ty: 0.0,
+        });
+
+        assert!(!refused, "an anisotropic matrix must be refused");
+        let after = stack.to_affine_matrix();
+        assert!(
+            (after.a - before.a).abs() < 1e-12
+                && (after.tx - before.tx).abs() < 1e-12
+                && (after.ty - before.ty).abs() < 1e-12,
+            "a refused push still modified the stack"
+        );
+
+        assert!(
+            stack.try_push_matrix(AffineMatrix2D::translation(1.0, 1.0)),
+            "a similarity must still be accepted"
         );
     }
 }
