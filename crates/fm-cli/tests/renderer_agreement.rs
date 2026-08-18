@@ -128,9 +128,14 @@ const KNOWN_GAPS: &[(&str, &str, &str)] = &[
     (
     "gantt_section",
     "terminal",
-    "bd-039t: the band-label overlay caps a label at the band's own cell width, so a gantt section \
-     name longer than 4 characters is truncated. Two attempts to lift the cap were reverted — it is \
-     load-bearing, and removing it displaces sequence content.",
+    "bd-039t: the band-label overlay capped a label at the band's own cell width, so a gantt \
+     section name longer than 4 characters was clipped. TWO causes, not one: that row belongs to \
+     the date AXIS, and the band overlay runs BEFORE the tick overlay, so anything written there \
+     was overwritten later — which is why the two reverted attempts widened the budget and still \
+     saw nothing change. A SECTION label now goes on an interior row of its own band. THIS ENTRY \
+     IS EXPECTED TO GO STALE: the list is checked in BOTH directions, so the first build after the \
+     freeze should fail with 'now agrees — delete its KNOWN_GAPS entry'. That failure is the \
+     intended signal. Kept only because it could not be verified unbuilt.",
 )];
 
 #[test]

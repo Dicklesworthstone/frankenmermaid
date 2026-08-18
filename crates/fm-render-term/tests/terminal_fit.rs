@@ -331,26 +331,26 @@ fn a_gantt_section_shows_its_name_in_terminal() {
     let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 100, 40).output;
     // ⚠️ `Zulu` IS EXACTLY 4 CHARACTERS, and that is why this passes. The band label is capped at
     // the band's cell width (6 cells here), so any longer section name is truncated — see
-    // `gantt_section_name_is_truncated_to_the_band_width` (bd-039t). This test is kept because it
+    // `a_gantt_section_name_is_drawn_in_full` (bd-039t). This test is kept because it
     // still guards the label reaching the canvas at all and being drawn once, but it must NOT be
     // read as evidence that section names render correctly.
     assert!(out.contains("Zulu"), "the section name is missing from terminal output");
     assert_eq!(out.matches("Zulu").count(), 1, "the section name was drawn more than once");
 }
 
-/// A gantt section name LONGER than the band is truncated (bd-039t).
+/// A gantt section name is drawn IN FULL, not clipped to the band width (bd-039t).
 ///
-/// Measured: the surviving prefix is 4 characters regardless of the name — `Build` draws as `Buil`,
-/// `Engineering` as `Engi` — because the band-label overlay caps the label at the band's own cell
-/// width and a gantt section band is 6 cells wide in subcell mode.
+/// Was `#[ignore]`d while it reproduced the defect: the surviving prefix was 4 characters whatever
+/// the name — `Build` drew as `Buil`, `Engineering` as `Engi` — because the overlay capped the label
+/// at the band's own cell width and a gantt section band is 6 cells wide in subcell mode. My
+/// Zulu-named fixture passed by coincidence, being exactly four characters.
 ///
-/// ⚠️ `#[ignore]` BECAUSE IT REPRODUCES A LIVE DEFECT. Removing the cap was tried and reverted: it
-/// displaced content and broke `band_label_overlay_does_not_invent_or_displace` and
-/// `a_sequence_diagram_is_unaffected_by_the_axis_overlay`, and it did not fix this case either. The
-/// cap is load-bearing; the fix has to place the label where there IS room.
+/// TWO REVERTED ATTEMPTS lifted the cap and wrote along the same row. That failed for two reasons,
+/// only the first of which was recorded at the time: the row belongs to the date AXIS, and the band
+/// overlay runs BEFORE the tick overlay, so anything written there is overwritten a few dozen lines
+/// later. The fix moves a SECTION label onto an interior row of its own band instead.
 #[test]
-#[ignore = "bd-039t: gantt section names longer than the band are truncated to 4 characters"]
-fn gantt_section_name_is_truncated_to_the_band_width() {
+fn a_gantt_section_name_is_drawn_in_full() {
     let ir = fm_parser::parse(
         "gantt\n  dateFormat YYYY-MM-DD\n  section Engineering\n  Task :a, 2026-01-01, 5d\n",
     )
@@ -360,6 +360,53 @@ fn gantt_section_name_is_truncated_to_the_band_width() {
     assert!(
         out.contains("Engineering"),
         "the section name is truncated in terminal output:\n{out}"
+    );
+}
+
+/// CONTROL FOR THE SECTION-NAME FIX: the date AXIS must survive it (bd-039t).
+///
+/// The section label and the axis ticks used to compete for the same row, and the band overlay runs
+/// BEFORE the tick overlay — so the ticks overwrote the label. The fix moves a SECTION label onto an
+/// interior row of its own band. This asserts the trade did not run the other way: both the full
+/// section name AND the dates must be present, or the fix has swapped one dropped label for another,
+/// which is the failure that got the two previous attempts reverted.
+#[test]
+fn the_gantt_section_name_and_its_date_axis_both_survive() {
+    let ir = fm_parser::parse(
+        "gantt\n  dateFormat YYYY-MM-DD\n  section Engineering\n  Task :a, 2026-01-01, 5d\n",
+    )
+    .ir;
+
+    // NON-VACUITY: the layout must actually publish ticks, or "the dates survived" is vacuous.
+    let layout = fm_layout::layout_diagram(&ir);
+    assert!(
+        !layout.extensions.axis_ticks.is_empty(),
+        "CONTROL FAILED: this source published no axis ticks, so the assertion below proves nothing"
+    );
+
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 100, 40).output;
+
+    assert!(
+        out.contains("Engineering"),
+        "the section name is missing:\n{out}"
+    );
+    assert!(
+        out.contains("2026-01-01"),
+        "the section name displaced the date axis:\n{out}"
+    );
+}
+
+/// INERT CASE: a KANBAN column band and a SEQUENCE lane band must be untouched by the section-only
+/// change. Without this, widening the placement for every band kind would satisfy the tests above
+/// while moving labels in two other diagram types.
+#[test]
+fn non_section_bands_are_unaffected_by_the_section_placement() {
+    let kanban = fm_parser::parse("kanban\n  Todo\n    t1[Write docs]\n").ir;
+    let out = render_term_with_config(&kanban, &TermRenderConfig::rich(), 100, 40).output;
+    assert!(out.contains("Todo"), "the kanban column name was lost:\n{out}");
+    assert!(
+        out.contains("Write docs"),
+        "the kanban card label was displaced:\n{out}"
     );
 }
 

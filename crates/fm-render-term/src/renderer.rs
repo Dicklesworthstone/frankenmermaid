@@ -1387,7 +1387,7 @@ impl TermRenderer {
             if band.label.is_empty() {
                 continue;
             }
-            let (x, y, w, _h) = self.bounds_to_cells(&band.bounds, scale_x, scale_y);
+            let (x, y, w, h) = self.bounds_to_cells(&band.bounds, scale_x, scale_y);
             if w < 3 || y >= lines.len() {
                 continue;
             }
@@ -1408,7 +1408,7 @@ impl TermRenderer {
             // TRIED and reverted: writing along the row displaces content and breaks both
             // `band_label_overlay_does_not_invent_or_displace` and
             // `a_sequence_diagram_is_unaffected_by_the_axis_overlay`, and it did not even fix the
-            // gantt case. Pinned by `gantt_section_name_is_truncated_to_the_band_width`.
+            // gantt case. Pinned by `a_gantt_section_name_is_drawn_in_full`.
             //
             // ⚠️ WHAT IS ACTUALLY IN THE WAY — corrected after reading the grid the pinned
             // reproducer dumps, because the earlier note here named the wrong obstacle and would
@@ -1425,12 +1425,58 @@ impl TermRenderer {
             // A fix should DECONFLICT THE ROWS rather than widen the budget. In the same dump rows
             // 3-5 are blank across the full width, between the tick row and the chart box top, and
             // columns 0-5 are blank on every body row, so there is somewhere to go.
-            let budget = w - 2;
-            let label: String = self.truncate_label(&band.label).chars().take(budget).collect();
-            for (offset, ch) in label.chars().enumerate() {
-                let col = x + 1 + offset;
-                if col < cell_width {
-                    lines[y][col] = ch;
+            // ⚠️ AND IT IS AN ORDERING COLLISION, not merely a spatial one. This band loop runs
+            // BEFORE the axis-tick overlay below, so a label written along the tick row is
+            // OVERWRITTEN by the ticks a few dozen lines later. That is the missing half of why the
+            // earlier attempt "did not even fix the gantt case": widening the budget wrote more
+            // characters that were then clobbered.
+            //
+            // So a SECTION band's label moves off the tick row entirely, onto an interior row of its
+            // own band — which is also where the incumbent puts it. mermaid draws gantt section
+            // titles from `vertLabels` at a fixed `x=10` inside its reserved `leftPadding: 75`
+            // gutter, vertically CENTRED on the section's rows and never truncated; centring on the
+            // band is the part of that we can reproduce without a layout gutter we do not have.
+            //
+            // Everything is gated on `Section` so lane and column bands keep byte-identical
+            // behaviour, and the wide write happens only when every target cell is blank — so this
+            // cannot displace content, which is what got the previous two attempts reverted. When
+            // the blank run is not there, it falls back to exactly the old truncated write, so the
+            // worst case is today's behaviour rather than a regression.
+            let is_section = matches!(band.kind, fm_layout::LayoutBandKind::Section);
+            let interior_row = y + h / 2;
+            let placed_wide = if is_section && h >= 3 && interior_row < lines.len() {
+                let start = x + 1;
+                let full: Vec<char> = self.truncate_label(&band.label).chars().collect();
+                // The canvas fills empty cells with the BLANK BRAILLE PATTERN, not a space, so a
+                // space-only check reads every empty cell as occupied — the same trap the cluster
+                // overlay documents.
+                let fits = !full.is_empty()
+                    && full.iter().enumerate().all(|(offset, _)| {
+                        let col = start + offset;
+                        col < cell_width
+                            && lines[interior_row]
+                                .get(col)
+                                .is_some_and(|cell| *cell == ' ' || *cell == '\u{2800}')
+                    });
+                if fits {
+                    for (offset, ch) in full.iter().enumerate() {
+                        lines[interior_row][start + offset] = *ch;
+                    }
+                }
+                fits
+            } else {
+                false
+            };
+
+            if !placed_wide {
+                let budget = w - 2;
+                let label: String =
+                    self.truncate_label(&band.label).chars().take(budget).collect();
+                for (offset, ch) in label.chars().enumerate() {
+                    let col = x + 1 + offset;
+                    if col < cell_width {
+                        lines[y][col] = ch;
+                    }
                 }
             }
         }
