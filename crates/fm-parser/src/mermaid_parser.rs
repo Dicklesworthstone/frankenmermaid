@@ -4747,13 +4747,22 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
 
             // `type` and `docRef` are an ELEMENT's fields, and their absence here was bd-qdmn: they
             // fell through this match, so the parser dropped them and no renderer could draw them.
-            // `docRef` is matched in BOTH casings because mermaid's grammar spells it camelCase and
-            // this match is on the raw field text — a lowercase-only arm would silently keep
-            // dropping every `docRef:` an author actually writes.
-            if let Some((
-                field @ ("id" | "text" | "risk" | "verifymethod" | "type" | "docRef" | "docref"),
-                rest,
-            )) = trimmed.split_once(':')
+            //
+            // ⚠️ THE CASING BUG THAT FIX ONLY HALF-CLOSED (bd-lzhm). This matched the RAW field
+            // text, so bd-qdmn special-cased `docRef` in both spellings and left every other field
+            // lowercase-only — including `verifyMethod`, which mermaid's own grammar and docs spell
+            // camelCase. An author writing the documented spelling had the field silently dropped,
+            // and `Text:` or `Risk:` at the start of a sentence went the same way.
+            //
+            // Probed rather than assumed: `verifyMethod:`, `verifymethod:` and `VerifyMethod:` ALL
+            // parse in the pinned bundle, so its requirement lexer is case-insensitive and matching
+            // one casing was never right for any of these fields.
+            //
+            // Canonicalised through a helper instead of adding more spellings to the pattern: an
+            // enumeration of casings can only ever be as complete as the next author's shift key.
+            // The helper allocates nothing, which keeps this off the parse path's allocation budget.
+            if let Some((field_raw, rest)) = trimmed.split_once(':')
+                && let Some(field) = requirement_field_key(trim_fast(field_raw))
                 && let Some(node_id) = current_req_node
                 && let Some(node) = builder.node_mut(node_id)
             {
@@ -4777,7 +4786,7 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
                     "risk" => meta.risk = Some(value),
                     "verifymethod" => meta.verify_method = Some(value),
                     "type" => meta.element_type = Some(value),
-                    "docRef" | "docref" => meta.doc_ref = Some(value),
+                    "docref" => meta.doc_ref = Some(value),
                     _ => unreachable!(),
                 }
                 continue;
@@ -5504,6 +5513,23 @@ fn parse_requirement_relation(
         }
         _ => false,
     }
+}
+
+/// Canonicalise a requirement block's field name, case-insensitively (bd-lzhm).
+///
+/// mermaid's requirement lexer is case-insensitive — `verifyMethod:`, `verifymethod:` and
+/// `VerifyMethod:` all parse against the pinned bundle — and it spells the field camelCase in its
+/// own grammar and documentation. Matching the raw text against one casing therefore dropped the
+/// spelling authors are told to write.
+///
+/// Returns the canonical LOWERCASE key so the caller's `match` stays a set of plain arms, and
+/// allocates nothing: `eq_ignore_ascii_case` compares in place, where a `to_ascii_lowercase()`
+/// would have put a `String` on the parse path for every field line.
+fn requirement_field_key(field: &str) -> Option<&'static str> {
+    const FIELDS: [&str; 6] = ["id", "text", "risk", "verifymethod", "type", "docref"];
+    FIELDS
+        .into_iter()
+        .find(|candidate| field.eq_ignore_ascii_case(candidate))
 }
 
 fn parse_class_assignment_ast(statement: &str) -> Option<FlowAst> {
@@ -18687,6 +18713,66 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(meta.text.as_deref(), Some("Must do X"));
         assert_eq!(meta.risk.as_deref(), Some("High"));
         assert_eq!(meta.verify_method.as_deref(), Some("Test"));
+    }
+
+    /// `verifyMethod:` — the spelling mermaid documents — must not be dropped (bd-lzhm).
+    ///
+    /// The field match ran against the RAW text with a lowercase-only arm, so the camelCase form
+    /// every author is told to write fell through and the value vanished. bd-qdmn had already hit
+    /// this for `docRef` and fixed it by listing both spellings, which left the same trap armed for
+    /// every other field.
+    #[test]
+    fn requirement_verify_method_is_matched_case_insensitively() {
+        let input = "requirementDiagram\n  requirement MyReq {\n    id: REQ-001\n    verifyMethod: Test\n  }";
+        let parsed = parse_mermaid(input);
+
+        let meta = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "MyReq")
+            .and_then(|n| n.requirement_meta.as_ref())
+            .expect("requirement_meta should be set");
+        assert_eq!(meta.verify_method.as_deref(), Some("Test"));
+    }
+
+    /// Every other field is case-insensitive too, which is the point of canonicalising rather than
+    /// enumerating spellings: a capitalised `Text:` at the start of a line is ordinary prose habit.
+    #[test]
+    fn requirement_fields_survive_arbitrary_casing() {
+        let input = "requirementDiagram\n  requirement MyReq {\n    ID: REQ-001\n    Text: hello\n    Risk: high\n    DocRef: spec.md\n  }";
+        let parsed = parse_mermaid(input);
+
+        let meta = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "MyReq")
+            .and_then(|n| n.requirement_meta.as_ref())
+            .expect("requirement_meta should be set");
+        assert_eq!(meta.req_id.as_deref(), Some("REQ-001"));
+        assert_eq!(meta.text.as_deref(), Some("hello"));
+        assert_eq!(meta.risk.as_deref(), Some("high"));
+        assert_eq!(meta.doc_ref.as_deref(), Some("spec.md"));
+    }
+
+    /// CONTROL: a field name that is not one of the six is still ignored. Case-insensitive matching
+    /// must not turn into matching anything — `notafield:` has to stay unrecognised, or the block
+    /// would start absorbing arbitrary lines.
+    #[test]
+    fn requirement_unknown_field_is_still_ignored() {
+        let input = "requirementDiagram\n  requirement MyReq {\n    id: REQ-001\n    notafield: nope\n  }";
+        let parsed = parse_mermaid(input);
+
+        let meta = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "MyReq")
+            .and_then(|n| n.requirement_meta.as_ref())
+            .expect("requirement_meta should be set");
+        assert_eq!(meta.req_id.as_deref(), Some("REQ-001"));
+        assert_eq!(meta.text, None, "an unknown field leaked into a known one");
     }
 
     // ── ER notation storage tests ──────────────────────────────────────
