@@ -1070,6 +1070,41 @@ impl RenderExecutor {
     /// `ThreadPoolBuilder::num_threads` is only a request. Recording the distinct Rayon worker
     /// indices that actually run diagram jobs proves operation-level participation on Linux and
     /// Apple Silicon without relying on ISA- or OS-specific thread APIs.
+    /// Whether this executor renders inline on the calling thread, with no shard pool at all.
+    fn is_scalar(&self) -> bool {
+        self.threads == 1 && self.pool.is_none()
+    }
+
+    /// Observed threads for a SCALAR run, proven on the exact workload and failing closed.
+    ///
+    /// bd-kn9b could not be requalified for a reason unrelated to its effect: an ordinary scalar
+    /// render leaves `FM_H2H_THREAD_PROBE` unset, so both timed brackets recorded
+    /// `requested=1, actual_observed=null`. A row that cannot state its OBSERVED thread count
+    /// cannot be scored by the bytes-per-nanosecond ceiling, which is scaled by observed threads
+    /// and never by requested ones -- requested is the number a memo-fed row could inflate for free.
+    ///
+    /// The probe is the SAME one the env var enables, run on the same workload; nothing is assumed
+    /// from `threads == 1`. It is affordable here precisely because the run is scalar: one complete
+    /// batch already assigns every shard, so the cost is one uncached batch outside the timed
+    /// region.
+    ///
+    /// FAILS CLOSED. A scalar executor that observes anything other than one worker has done
+    /// something this function cannot account for, so it returns `None` -- the row becomes
+    /// UNSTATEABLE rather than carrying a number nobody can explain.
+    ///
+    /// ⚠️ WHAT IT DOES NOT PROVE, stated because overclaiming here would be worse than not
+    /// probing: it observes the workers this harness itself dispatches to. A dependency that
+    /// spawned its own threads internally would not be counted. That direction is SAFE for the
+    /// gate, though: under-reporting threads makes the per-thread ceiling TIGHTER, so an
+    /// unaccounted thread can only cause a refusal, never admit a row that should have failed.
+    fn probe_scalar_threads(&self, texts: &Arc<[String]>, cfg: &Arc<SvgRenderConfig>) -> Option<usize> {
+        if !self.is_scalar() {
+            return None;
+        }
+        let observed = self.probe_operation_threads(texts, cfg);
+        (observed == 1).then_some(observed)
+    }
+
     fn probe_operation_threads(&self, texts: &Arc<[String]>, cfg: &Arc<SvgRenderConfig>) -> usize {
         let workers_seen: Arc<[AtomicBool]> = (0..self.threads)
             .map(|_| AtomicBool::new(false))
@@ -1941,9 +1976,14 @@ fn main() {
         }
 
         let batch = calibrate_batch(&executor, item, &default_cfg, &lean_cfg);
-        let thread_count_actually_used = executor
-            .thread_probe_enabled
-            .then(|| executor.probe_operation_threads(&item.texts, &default_cfg));
+        // The env-var probe stays authoritative when enabled. When it is not, a SCALAR run can
+        // still state its observed threads, and bd-kn9b is blocked on exactly that gap -- an
+        // ordinary scalar render recorded `actual_observed=null` and could not be scored.
+        let thread_count_actually_used = if executor.thread_probe_enabled {
+            Some(executor.probe_operation_threads(&item.texts, &default_cfg))
+        } else {
+            executor.probe_scalar_threads(&item.texts, &default_cfg)
+        };
         let rounds = item.reps.max(MIN_NULL_ROUNDS);
         let null_run = match paired(&executor, item, &default_cfg, &default_cfg, batch, rounds) {
             Ok(v) => v,
@@ -2041,6 +2081,13 @@ fn main() {
                     "caller_workers_observed": observed,
                     "portable_across_isa": true,
                     "inside_timed_region": false,
+                    // WHY the probe ran, so an auditor can tell a deliberately-requested probe from
+                    // the scalar fail-closed one without inferring it from the thread count.
+                    "trigger": if executor.thread_probe_enabled {
+                        "env_flag"
+                    } else {
+                        "scalar_fail_closed"
+                    },
                 })),
                 "available_parallelism": executor.available_parallelism,
                 "oversubscribed": executor.oversubscribed(),
