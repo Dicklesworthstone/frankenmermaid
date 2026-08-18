@@ -257,7 +257,24 @@ def check_elf_provenance(fm_bin: str, expected_rev: str | None) -> str | None:
     return None
 
 
-def build_corpus(case_id: str, dest: str) -> dict:
+def fm_reps_expression(fm_reps: int | None) -> str:
+    """The JS expression for the fm arm's rep count.
+
+    Returns the corpus lookup `item.reps_rs` when nothing is overridden, so the un-overridden path
+    reads its value from the corpus at run time and cannot drift from it by transcription. A
+    literal is substituted only when the caller asked for one.
+
+    Refuses a non-positive count rather than emitting `reps: 0`, which would time an arm that
+    rendered nothing and report it as a very fast engine.
+    """
+    if fm_reps is None:
+        return "item.reps_rs"
+    if int(fm_reps) < 1:
+        raise SystemExit(f"--fm-reps must be at least 1, got {fm_reps}")
+    return str(int(fm_reps))
+
+
+def build_corpus(case_id: str, dest: str, fm_reps: int | None = None) -> dict:
     """Generate the fm arm's corpus from `corpus.mjs` -- the SAME module the incumbent arm uses.
 
     THIS EXISTS BECAUSE A STALE CORPUS COST A MEASUREMENT INVOCATION, and it failed in the one way
@@ -277,6 +294,11 @@ def build_corpus(case_id: str, dest: str) -> dict:
     Returns the item's provenance so the caller can print the input sha on the row. A row that cites
     the input it measured can be re-derived; one that does not, cannot.
     """
+    # The fm arm's rep count is the CORPUS value unless overridden. Substituted as a JS EXPRESSION
+    # rather than a literal, so the un-overridden path still evaluates `item.reps_rs` and cannot
+    # drift from the corpus by transcription.
+    reps_expr = fm_reps_expression(fm_reps)
+
     # `import(%s)` with a json-quoted file:// URL, NOT `import('%s')` -- json.dumps supplies its own
     # quotes, and wrapping them again makes node resolve a package literally named `"`.
     script = (
@@ -287,15 +309,21 @@ def build_corpus(case_id: str, dest: str) -> dict:
         "  const gen = m.generate(item);"
         "  const texts = Array.isArray(gen) ? gen : (gen.texts ?? [gen]);"
         "  fs.writeFileSync(%s, JSON.stringify(["
-        "    { id: item.id, texts, reps: item.reps_rs, warmup: item.warmup_rs }"
+        "    { id: item.id, texts, reps: %s, warmup: item.warmup_rs }"
         "  ]));"
         "  console.log(JSON.stringify({"
         "    id: item.id, revisions: texts.length,"
         "    sha256: texts.map(t => m.sha256(t)), bytes: texts.reduce((n, t) => n + t.length, 0),"
-        "    reps: item.reps_rs, warmup: item.warmup_rs"
+        "    reps: %s, warmup: item.warmup_rs, corpus_reps: item.reps_rs"
         "  }));"
         "});"
-    ) % (json.dumps("file://" + CORPUS_MJS), json.dumps(case_id), json.dumps(dest))
+    ) % (
+        json.dumps("file://" + CORPUS_MJS),
+        json.dumps(case_id),
+        reps_expr,
+        json.dumps(dest),
+        reps_expr,
+    )
     out = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=False)
     if out.returncode != 0:
         raise SystemExit(f"corpus generation failed: {out.stderr.strip() or out.returncode}")
@@ -409,6 +437,23 @@ def self_test() -> int:
     else:
         print("  ok   the refusal reports the calibrated batch")
 
+    # The fm-reps substitution decides how much work the timed arm does; a silent change here
+    # changes every number the script produces.
+    for value, expected in [(None, "item.reps_rs"), (1, "1"), (322_000, "322000")]:
+        got = fm_reps_expression(value)
+        ok = got == expected
+        print(("  ok   " if ok else "  FAIL ") + f"fm_reps_expression({value!r}) -> {got!r}")
+        failures += 0 if ok else 1
+
+    for bad in (0, -1):
+        try:
+            fm_reps_expression(bad)
+        except SystemExit:
+            print(f"  ok   fm_reps_expression({bad}) refused")
+        else:
+            print(f"  FAIL fm_reps_expression({bad}) was accepted; a zero-rep arm renders nothing")
+            failures += 1
+
     print("self-test PASSED" if not failures else f"self-test FAILED ({failures})")
     return 1 if failures else 0
 
@@ -427,6 +472,14 @@ def main() -> int:
     )
     parser.add_argument("--case", default="sequence_20", help="corpus case id (default sequence_20)")
     parser.add_argument("--reps", type=int, default=9, help="mermaid reps per arm")
+    parser.add_argument(
+        "--fm-reps",
+        type=int,
+        help="override the fm arm's reps (corpus reps_rs otherwise). The two arms differ ~400x in "
+        "per-rep cost, so ONE multiplier cannot lift both above the host's interference period; "
+        "this scales the short arm alone. An overridden row states the override and is not "
+        "comparable against a corpus-reps row.",
+    )
     parser.add_argument(
         "--incumbent-cpus", type=int, default=8, help="cpuset size for the incumbent arm"
     )
@@ -480,13 +533,24 @@ def main() -> int:
         corpus_path = os.path.join(
             tempfile.gettempdir(), f"fm-abba-corpus-{os.getpid()}-{args.case}.json"
         )
-        info = build_corpus(args.case, corpus_path)
+        info = build_corpus(args.case, corpus_path, args.fm_reps)
         # The input sha belongs on the row: it is what makes the number re-derivable, and it is the
         # one field that proves both arms were fed the same document.
         print(
             f"CORPUS: generated {args.case} from corpus.mjs -- {info['revisions']} revision(s), "
             f"{info['bytes']} bytes, sha256 {', '.join(s[:16] for s in info['sha256'])}"
         )
+        # An overridden rep count MUST appear on the row. Two rows measured at different rep counts
+        # are not comparable, and the difference is otherwise invisible: same case, same input sha,
+        # same binary, different amount of work. Printed whenever it differs from the corpus rather
+        # than whenever the flag was passed, so `--fm-reps` set to the corpus value says nothing.
+        corpus_reps = info.get("corpus_reps")
+        if corpus_reps is not None and info.get("reps") != corpus_reps:
+            print(
+                f"FM REPS OVERRIDDEN: {info['reps']} against the corpus value {corpus_reps} -- "
+                "this row measured a different amount of work and may not be compared against a "
+                "row taken at the corpus reps"
+            )
 
     pins = None if args.no_pin else pick_pins(args.incumbent_cpus)
     if pins is None:
