@@ -3636,10 +3636,29 @@ if (summary.host_wide_exclusivity.verdict !== 'clear') {
 
 const stamp = `${env.git_rev?.slice(0, 8) ?? 'nogit'}-${Date.now()}`;
 const jsonlPath = join(outDir, `run-${stamp}.jsonl`);
+// Stamp phase AND provenance on every emitted row.
+//
+// bd-w91d needed to requalify 20 refused rows from the archive and could not, for a reason that is
+// nothing to do with the rows' effects: many stored rows carry no `elf_sha256` and no
+// `thread_count_requested`, so they cannot be grouped by "same binary, same width". Scoring
+// ci_batch_500 that way had to pool 47 rows spanning several configurations, which is why its
+// 0.000-4.008% bias range is wider than any single configuration's really is.
+//
+// A row that cannot say which binary produced it cannot be requalified from the archive at all, and
+// re-running it costs an exclusive host booking. Stamping is the cheap half of that fix.
+//
+// `??` throughout, never overwrite: a record that already carries its own value knows better than
+// this outer scope does — a per-arm thread width is not the run-wide requested width.
 const tagPhase = (records, phase) =>
   records.map((record) => ({
     ...record,
     harness_phase: record.harness_phase ?? phase,
+    harness: record.harness ?? HARNESS_ID,
+    elf_sha256: record.elf_sha256 ?? provenanceBinary?.elf_sha256,
+    // `build_git_revision`, not `build_git_rev`. The wrong name yields `undefined`, which
+    // JSON.stringify DROPS from the row -- a stamp that silently does nothing while reading as
+    // though it works. Checked against validBuildRevision at line 840.
+    fm_build_git_rev: record.fm_build_git_rev ?? provenanceBinary?.build_git_revision,
   }));
 const events = has('skip-mermaid')
   ? tagPhase(fmBefore.records, 'frankenmermaid-before')
