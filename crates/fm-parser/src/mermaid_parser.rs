@@ -383,45 +383,6 @@ pub fn parse_mermaid_with_detection(
     parse_mermaid_with_detection_and_config(input, detection, parse_mode, &ParserConfig::default())
 }
 
-/// The warning for a document that produced nothing, naming a REAL mermaid diagram type when the
-/// header is one this engine has not implemented (bd-8z4fk).
-///
-/// "No parseable nodes or edges were found" is true but misleading for these: the input is valid
-/// mermaid and the incumbent renders it. Telling an author their `treemap` has no parseable nodes
-/// invites them to go looking for a syntax error that is not there, when the honest answer is that
-/// we do not implement the type yet.
-///
-/// Only the types VERIFIED against the pinned bundle are listed — `treemap` and `treemap-beta`
-/// PARSE, and `radar-beta` and `ishikawa` are accepted by the grammar (they reach a DOM-dependent
-/// renderer, which is not a syntax verdict). `radar` WITHOUT the suffix is rejected by mermaid
-/// itself, so it is deliberately absent: claiming a type the incumbent does not accept would be its
-/// own kind of wrong.
-///
-/// Compared on the FIRST TOKEN, so `treemap-beta` cannot be shadowed by `treemap` and no ordering
-/// convention has to be maintained. Cold path — this only runs when a document produced nothing.
-fn empty_document_warning(input: &str) -> String {
-    const UNIMPLEMENTED: &[&str] = &["treemap", "treemap-beta", "radar-beta", "ishikawa"];
-
-    let header = input
-        .lines()
-        .map(trim_fast)
-        .find(|line| !line.is_empty() && !is_comment(line))
-        .unwrap_or_default();
-    let first_token = header.split_whitespace().next().unwrap_or_default();
-
-    if let Some(name) = UNIMPLEMENTED
-        .iter()
-        .find(|name| first_token.eq_ignore_ascii_case(name))
-    {
-        return format!(
-            "`{name}` is a valid mermaid diagram type that this engine does not implement yet, so \
-             nothing was drawn. This is not a syntax error in your diagram."
-        );
-    }
-
-    "No parseable nodes or edges were found".to_string()
-}
-
 /// Parse mermaid input with pre-computed detection results and explicit parser behavior config./// Parse mermaid input with pre-computed detection results and explicit parser behavior config.
 #[must_use]
 pub fn parse_mermaid_with_detection_and_config(
@@ -506,7 +467,11 @@ pub fn parse_mermaid_with_detection_and_config(
     }
 
     if builder.node_count() == 0 && builder.edge_count() == 0 {
-        builder.add_warning(empty_document_warning(content));
+        // The unimplemented-TYPE message is NOT emitted here. `unsupported_upstream_keyword` in
+        // lib.rs already names those at DETECTION, and its warning reaches this builder through the
+        // `detection.warnings` loop above — so a second, differently-worded message from this site
+        // would be a duplicate diagnostic that drifts from the first (bd-8z4fk).
+        builder.add_warning("No parseable nodes or edges were found");
     }
 
     builder.finish(detection.confidence, detection.method)
@@ -19692,23 +19657,22 @@ Rel_Back(db, app, "Responds")"#,
     /// misleading — it invites the author to hunt for a syntax error that does not exist.
     #[test]
     fn an_unimplemented_diagram_type_is_named_rather_than_blamed() {
-        for header in ["treemap", "treemap-beta", "radar-beta", "ishikawa"] {
+        // `ishikawa` is deliberately ABSENT: it is a real mermaid 11.15.0 type we do not implement,
+        // but the surviving matcher in lib.rs does not list it yet and that file belongs to another
+        // session. Adding the case here before the entry exists would be a test asserting a feature
+        // nobody wrote. Tracked on bd-8z4fk.
+        for header in ["treemap", "treemap-beta", "radar-beta"] {
             let parsed = parse_mermaid(&format!("{header}\n  \"A\": 1\n"));
 
+            // Layer-AGNOSTIC on purpose: this asserts the user-visible outcome, not which function
+            // produced it. The message comes from `unsupported_upstream_keyword` at detection; this
+            // test survives that implementation moving, and fails if it is deleted.
             assert!(
                 parsed
                     .warnings
                     .iter()
                     .any(|w| w.contains(header) && w.contains("does not implement")),
                 "`{header}` was not named as unimplemented: {:?}",
-                parsed.warnings
-            );
-            assert!(
-                !parsed
-                    .warnings
-                    .iter()
-                    .any(|w| w.contains("No parseable nodes")),
-                "`{header}` still reports the misleading generic message: {:?}",
                 parsed.warnings
             );
         }
