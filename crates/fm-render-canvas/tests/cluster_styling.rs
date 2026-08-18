@@ -117,3 +117,51 @@ fn a_styled_subgraph_colours_the_cluster() {
         "only one fill was recorded, so this assertion proves little: {fills:?}"
     );
 }
+
+/// ER cardinality reaches the canvas (bd-2h3pp).
+///
+/// `}o--o|` declares "0..*" and "0..1". fm-render-svg drew both and this surface drew neither, so an
+/// ER relationship arrived as a bare line with its cardinality missing — the bd-039t family, where
+/// one renderer omits content another draws.
+///
+/// Asserted through `FillText(` rather than a coordinate: the op NAME is the stable part of this
+/// Debug stream, and the two canvas tests I wrote against a guessed op earlier today both failed
+/// because they named one the renderer never emits. Position is deliberately not asserted — the
+/// labels are inset along the edge, and pinning where would fail on any future routing change
+/// without saying anything about whether the cardinality is drawn.
+#[test]
+fn er_cardinality_reaches_the_canvas() {
+    let ops = canvas_ops("erDiagram\n  CUSTOMER }o--o| ORDER : places\n");
+
+    assert!(
+        ops.contains("FillText(\"CUSTOMER\""),
+        "the entities were not drawn, so the assertions below prove nothing: {ops}"
+    );
+    assert!(
+        ops.contains("FillText(\"0..*\""),
+        "the source cardinality never reached the canvas: {ops}"
+    );
+    assert!(
+        ops.contains("FillText(\"0..1\""),
+        "the target cardinality never reached the canvas: {ops}"
+    );
+}
+
+/// CONTROL: a bare `--` relation declares no cardinality and must draw none.
+///
+/// The shared mapping returns `""` for a connector with no markers and the placement closure skips
+/// empty text. Without this, an implementation that emitted a default marker — or that drew the
+/// notation string itself — would pass the case above.
+#[test]
+fn a_bare_er_relation_draws_no_cardinality_on_the_canvas() {
+    let ops = canvas_ops("erDiagram\n  CUSTOMER -- ORDER : places\n");
+
+    assert!(
+        ops.contains("FillText(\"CUSTOMER\""),
+        "the entities were not drawn, so this control proves nothing: {ops}"
+    );
+    assert!(
+        !ops.contains("FillText(\"0.."),
+        "a relation with no declared cardinality drew one anyway: {ops}"
+    );
+}
