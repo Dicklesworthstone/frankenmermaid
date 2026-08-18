@@ -1446,27 +1446,48 @@ impl TermRenderer {
             // the blank run is not there, it falls back to exactly the old truncated write, so the
             // worst case is today's behaviour rather than a regression.
             let is_section = matches!(band.kind, fm_layout::LayoutBandKind::Section);
-            let interior_row = y + h / 2;
-            let placed_wide = if is_section && h >= 3 && interior_row < lines.len() {
+            // ⚠️ ONE CANDIDATE ROW WAS NOT ENOUGH, and betting on `y + h/2` was the bug. Measured on
+            // the failing reproducer: the Section band is 288 x 114.5 layout units — most of the
+            // chart, not the six-cell gutter I had assumed — so its middle row lands INSIDE the
+            // chart box, where the box's own left border occupies a cell within the label's span.
+            // The blank-run guard then correctly refused, and the fallback wrote on the tick row
+            // where the axis overlay later overwrote everything past the first four characters.
+            // That is why `Engineering` kept surfacing as `Engi`: never a budget truncation at all,
+            // but a CLOBBER, and the truncation story sent two earlier attempts at the wrong thing.
+            //
+            // So SCAN the band's rows instead of picking one. Ascending from just below the band's
+            // top, which is where a section header belongs and where the dump shows a full-width
+            // blank run between the tick row and the top of the chart box. The first row whose span
+            // is entirely blank wins; if none is, the old truncated write still runs, so the worst
+            // case remains today's behaviour rather than a regression.
+            let placed_wide = if is_section {
                 let start = x + 1;
                 let full: Vec<char> = self.truncate_label(&band.label).chars().collect();
                 // The canvas fills empty cells with the BLANK BRAILLE PATTERN, not a space, so a
                 // space-only check reads every empty cell as occupied — the same trap the cluster
                 // overlay documents.
-                let fits = !full.is_empty()
-                    && full.iter().enumerate().all(|(offset, _)| {
-                        let col = start + offset;
-                        col < cell_width
-                            && lines[interior_row]
-                                .get(col)
-                                .is_some_and(|cell| *cell == ' ' || *cell == '\u{2800}')
-                    });
-                if fits {
+                // The canvas fills empty cells with the BLANK BRAILLE PATTERN, not a space, so a
+                // space-only check reads every empty cell as occupied — the same trap the cluster
+                // overlay documents.
+                let row_is_clear = |row: usize, lines: &[Vec<char>]| {
+                    !full.is_empty()
+                        && full.iter().enumerate().all(|(offset, _)| {
+                            let col = start + offset;
+                            col < cell_width
+                                && lines[row]
+                                    .get(col)
+                                    .is_some_and(|cell| *cell == ' ' || *cell == '\u{2800}')
+                        })
+                };
+                // `y + 1` skips the band's own top rule, and the tick row when they coincide.
+                let last_row = (y + h).min(lines.len());
+                let target = (y + 1..last_row).find(|row| row_is_clear(*row, &lines));
+                if let Some(row) = target {
                     for (offset, ch) in full.iter().enumerate() {
-                        lines[interior_row][start + offset] = *ch;
+                        lines[row][start + offset] = *ch;
                     }
                 }
-                fits
+                target.is_some()
             } else {
                 false
             };

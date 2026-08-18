@@ -1301,3 +1301,4 @@ fn a_quadrant_chart_without_names_gains_none() {
     // and it must still draw its own content
     assert!(out.contains("Reach"), "the chart lost its title:\n{out}");
 }
+
