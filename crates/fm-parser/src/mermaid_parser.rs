@@ -11710,16 +11710,36 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                         // it only rejects ids starting with `style`/`classDef` — a phantom named
                         // after a real subgraph looks like an ordinary node.
                         //
-                        // The NODE lookup comes first and is non-interning, so a name shared by a
-                        // node and a subgraph resolves to the node — the same precedence `style`
-                        // uses, and mermaid's.
-                        if builder.node_id_by_key(node_key).is_none()
-                            && let Some(cluster_index) = builder.cluster_index_by_key(node_key)
-                        {
+                        // ⚠️ NO PRECEDENCE, and this is a CORRECTION to the first version of this
+                        // fix. I originally applied the class to the node OR the cluster, node
+                        // first, reasoning by analogy with `style`. Read out of the pinned
+                        // mermaid 11.15.0 bundle, `setClass` does no such thing:
+                        //
+                        //     setClass(t, r) { for (let i of t.split(",")) {
+                        //       let n = this.vertices.get(i);          n && n.classes.push(r);
+                        //       let a = this.edges.find(l => l.id===i); a && a.classes.push(r);
+                        //       let s = this.subGraphLookup.get(i);     s && s.classes.push(r); } }
+                        //
+                        // It pushes to EVERY match — node, edge and subgraph — so a name shared by
+                        // a node and a subgraph styles both. Matching that.
+                        //
+                        // The `style` directive is a DIFFERENT mermaid entry point and its
+                        // precedence is NOT evidenced here, so the node-first rule used for `style`
+                        // is deliberately left alone rather than changed by analogy in the opposite
+                        // direction — which is the mistake being corrected.
+                        //
+                        // `class <edgeId> cls` (mermaid's middle line above) is still unsupported:
+                        // there is no edge-id lookup to resolve it with. Noted rather than guessed.
+                        let cluster = builder.cluster_index_by_key(node_key);
+                        if let Some(cluster_index) = cluster {
                             cluster_classes.push((cluster_index, class_name.to_string(), span));
-                            continue;
                         }
-                        builder.add_class_to_node(node_key, class_name, span);
+                        // Applied to the node as well whenever one exists. When the key names
+                        // NEITHER, this still interns — unchanged legacy behaviour for an unknown
+                        // id, which is a separate question from the subgraph phantom fixed here.
+                        if cluster.is_none() || builder.node_id_by_key(node_key).is_some() {
+                            builder.add_class_to_node(node_key, class_name, span);
+                        }
                     }
                 }
             }
@@ -18901,6 +18921,36 @@ Rel_Back(db, app, "Responds")"#,
                 fm_core::IrStyleTarget::Cluster(_)
             ) && style_ref.style.contains("00ff00")),
             "a classDef declared after its class line was lost: {:?}",
+            parsed.ir.style_refs
+        );
+    }
+
+    /// A name shared by a NODE and a SUBGRAPH gets the class on BOTH (bd-xfmm).
+    ///
+    /// The first version of this fix applied it to one or the other, node first. mermaid's
+    /// `setClass` pushes to every match instead, so both are styled. Without this case the
+    /// either/or version passes every other test here.
+    #[test]
+    fn a_class_target_shared_by_a_node_and_a_subgraph_styles_both() {
+        let parsed = parse_mermaid(
+            "flowchart TD\n  subgraph dup[Dup]\n    dup[A]\n  end\n  classDef big fill:#ff0000\n  class dup big\n",
+        );
+
+        assert!(
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .any(|node| node.id == "dup" && node.classes.iter().any(|c| c == "big")),
+            "the shared name did not reach the node: {:?}",
+            parsed.ir.nodes.iter().map(|n| (&n.id, &n.classes)).collect::<Vec<_>>()
+        );
+        assert!(
+            parsed.ir.style_refs.iter().any(|style_ref| matches!(
+                style_ref.target,
+                fm_core::IrStyleTarget::Cluster(_)
+            )),
+            "the shared name did not reach the cluster: {:?}",
             parsed.ir.style_refs
         );
     }
