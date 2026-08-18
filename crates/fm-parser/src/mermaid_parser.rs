@@ -8711,6 +8711,18 @@ fn parse_gitgraph(input: &str, builder: &mut IrBuilder) {
         if let Some(command) = parse_gitgraph_command(trimmed) {
             match command {
                 Ok(command) => {
+                    // The NAME is now correct; the ORDER VALUE still is not applied, and saying so
+                    // is the point — a silently ignored lane order is the invisible-nothing this
+                    // change is about. Lane placement lives in fm-layout, not here, so honouring it
+                    // is a layout change rather than a parser one (bd-p6sgt).
+                    if matches!(command, GitGraphCommand::Branch(_))
+                        && let Some((_, order)) = split_git_branch_order(trimmed)
+                    {
+                        builder.add_warning(format!(
+                            "Line {line_number}: gitGraph branch order `{order}` is parsed but not \
+                             applied; branches keep declaration order"
+                        ));
+                    }
                     lower_gitgraph_command(command, line_number, line, &mut state, builder);
                 }
                 Err(message) => builder.add_warning(format!("Line {line_number}: {message}")),
@@ -8735,7 +8747,15 @@ fn parse_gitgraph_command(line: &str) -> Option<Result<GitGraphCommand, String>>
     }
 
     if let Some(rest) = strip_git_command(line, "branch") {
-        return Some(Ok(GitGraphCommand::Branch(rest.trim().to_string())));
+        // ⚠️ `branch dev order: 2` NAMED THE BRANCH `dev order: 2`. The whole remainder was taken as
+        // the name, so the lane was captioned with the author's own syntax and a later
+        // `checkout dev` matched NOTHING — it looked for a branch that, by our reckoning, did not
+        // exist. `order:` is a real gitGraph attribute and the pinned bundle parses it (bd-p6sgt).
+        //
+        // Only the ORDER CLAUSE is split off, and only when it is actually there: without it the
+        // remainder is passed through exactly as before, so no branch name that worked can change.
+        let name = split_git_branch_order(rest).map_or(rest.trim(), |(name, _)| name);
+        return Some(Ok(GitGraphCommand::Branch(name.to_string())));
     }
 
     if let Some(rest) = strip_git_command(line, "checkout") {
@@ -8934,6 +8954,23 @@ struct GitMergeOptions {
     branch: String,
     id: Option<String>,
     tag: Option<String>,
+}
+
+/// Split `dev order: 2` into the branch NAME and the order value (bd-p6sgt).
+///
+/// Returns `None` when there is no order clause, so the caller can pass the remainder through
+/// unchanged — a branch whose name merely CONTAINS the letters `order:` with no preceding space
+/// (`order:x`) is left alone, which is what the whitespace-boundary check is for.
+fn split_git_branch_order(rest: &str) -> Option<(&str, &str)> {
+    let index = rest.find("order:")?;
+    if index == 0 || !rest.as_bytes()[index - 1].is_ascii_whitespace() {
+        return None;
+    }
+    let name = rest[..index].trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some((name, rest[index + "order:".len()..].trim()))
 }
 
 fn parse_git_commit_options(rest: &str) -> GitCommitOptions {
@@ -19469,6 +19506,68 @@ Rel_Back(db, app, "Responds")"#,
     }
 
     // ── ER notation storage tests ──────────────────────────────────────
+
+    /// `branch dev order: 2` names the branch `dev` (bd-p6sgt).
+    ///
+    /// The whole remainder was taken as the name, so the branch was called `dev order: 2` — the
+    /// lane captioned with the author's own syntax, and a later `checkout dev` matching NOTHING
+    /// because by our reckoning that branch did not exist.
+    ///
+    /// The checkout assertion is the one that shows the real damage: a name-only check would pass
+    /// on a parse that still left the rest of the graph disconnected.
+    #[test]
+    fn gitgraph_branch_order_clause_is_not_part_of_the_name() {
+        let parsed = parse_mermaid(
+            "gitGraph\n  commit\n  branch dev order: 2\n  commit\n  checkout main\n  commit\n",
+        );
+
+        let branches = parsed
+            .ir
+            .git_graph_meta
+            .as_ref()
+            .map(|meta| meta.branches.clone())
+            .unwrap_or_default();
+        assert!(
+            branches.iter().any(|b| b == "dev"),
+            "the order clause leaked into the branch name: {branches:?}"
+        );
+        assert!(
+            !branches.iter().any(|b| b.contains("order")),
+            "a branch is still named after the directive text: {branches:?}"
+        );
+    }
+
+    /// The order VALUE is not applied, and says so rather than vanishing.
+    #[test]
+    fn gitgraph_branch_order_value_is_reported_as_unapplied() {
+        let parsed = parse_mermaid("gitGraph\n  commit\n  branch dev order: 2\n  commit\n");
+
+        assert!(
+            parsed.warnings.iter().any(|w| w.contains("branch order")),
+            "an unapplied lane order was dropped in silence: {:?}",
+            parsed.warnings
+        );
+    }
+
+    /// CONTROL: an ordinary branch is untouched, and raises no order warning. The clause is split
+    /// only when it is actually present, so no branch name that worked before can change.
+    #[test]
+    fn gitgraph_branch_without_an_order_clause_is_unchanged() {
+        let parsed = parse_mermaid("gitGraph\n  commit\n  branch dev\n  commit\n");
+
+        let branches = parsed
+            .ir
+            .git_graph_meta
+            .as_ref()
+            .map(|meta| meta.branches.clone())
+            .unwrap_or_default();
+        assert!(branches.iter().any(|b| b == "dev"), "{branches:?}");
+        assert!(
+            !parsed.warnings.iter().any(|w| w.contains("branch order")),
+            "an ordinary branch produced an order warning: {:?}",
+            parsed.warnings
+        );
+    }
 
     /// `topAxis` is a real gantt directive and must not be reported as unsupported (bd-c7ijh).
     ///
