@@ -7449,7 +7449,6 @@ fn parse_c4(input: &str, builder: &mut IrBuilder) {
                 }
 
                 let Some(boundary) = parse_c4_boundary(
-                    &function_name,
                     &arguments,
                     span,
                     boundary_stack
@@ -11083,8 +11082,15 @@ fn parse_c4_relationship(
     true
 }
 
+/// `function_name` is deliberately NOT a parameter any more: it was used for exactly one thing, the
+/// reconstructed `System_Boundary(alias, label)` title that bd-039t removed, so keeping it would be
+/// an unused argument.
+///
+/// ⚠️ FOLLOW-UP, stated because dropping it loses something real: the boundary KIND (System /
+/// Container / Enterprise / Deployment_Node) is now recorded nowhere in the IR. mermaid keeps it and
+/// uses it for STYLING rather than as text, so not drawing it matches the incumbent — but if we ever
+/// want that styling, the kind needs an IR field, not a resurrected title string.
 fn parse_c4_boundary(
-    function_name: &str,
     arguments: &[String],
     span: Span,
     parent_subgraph: Option<usize>,
@@ -11093,7 +11099,22 @@ fn parse_c4_boundary(
     let boundary_key = clean_label(arguments.first().map(String::as_str))?;
     let display_label =
         clean_label(arguments.get(1).map(String::as_str)).unwrap_or_else(|| boundary_key.clone());
-    let title = format!("{function_name}({boundary_key}, {display_label})");
+    // THE TITLE IS THE AUTHOR'S LABEL, not a reconstruction of the source syntax (bd-039t).
+    //
+    // This used to be `format!("{function_name}({boundary_key}, {display_label})")`, so
+    // `System_Boundary(bank, "Banking System")` drew a box captioned
+    // `System_Boundary(bank, Banking System)` — the user's own C4 syntax presented as the
+    // boundary's name. The variable was already called `display_label` and was then wrapped in the
+    // call it came from.
+    //
+    // GROUNDED ON THE INCUMBENT: the pinned mermaid 11.15.0 bundle contains ZERO occurrences of the
+    // string `System_Boundary(`. It parses the keyword as a grammar token and draws the boundary's
+    // label, so it never builds a display string of that shape at all.
+    //
+    // The second argument is the label and the first is the alias, which is why `boundary_key`
+    // stays the cluster's KEY while the label becomes its title; when no label is given,
+    // `display_label` already falls back to the alias, which is what mermaid shows too.
+    let title = display_label;
     let cluster_index = builder.ensure_cluster(&boundary_key, Some(&title), span)?;
     let subgraph_index = builder.ensure_subgraph(
         &boundary_key,
@@ -14316,7 +14337,9 @@ Rel(customer, core, "Uses", "HTTPS")"#,
             .title
             .and_then(|label_id| parsed.ir.labels.get(label_id.0))
             .map(|label| label.text.as_str());
-        assert_eq!(cluster_title, Some("System_Boundary(bank, Banking System)"));
+        // Was `Some("System_Boundary(bank, Banking System)")` — the reconstructed source syntax,
+        // which this test pinned as correct for as long as it was wrong (bd-039t).
+        assert_eq!(cluster_title, Some("Banking System"));
 
         let edge_label = parsed.ir.edges[0]
             .label

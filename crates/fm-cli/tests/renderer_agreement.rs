@@ -114,11 +114,16 @@ const KNOWN_GAPS: &[(&str, &str, &str)] = &[
     (
         "c4_boundary",
         "terminal",
-        "bd-039t: a C4 `System_Boundary` name reaches the SVG and not the terminal. Found by the \
-         third widening. Distinct from the c4_desc/c4_name rows already fixed — those are NODE \
-         content and this is the enclosing BOUNDARY, which the terminal draws as a cluster, so it \
-         needs the cluster-title path rather than the node loop. Pinned rather than patched: \
-         guessing which path a label takes is how the gantt_section fix got reverted twice.",
+        "bd-039t: ROOT CAUSE CORRECTED — it was never the cluster-title PATH. `parse_c4_boundary` \
+         built the title as `format!(\"{function_name}({key}, {label})\")`, so the boundary was \
+         captioned with the user's own C4 SYNTAX. The SVG only looked right because this gate \
+         substring-matches and the SVG does not truncate; the terminal truncates to the box width \
+         and lost the label inside the reconstructed call. The title is now the declared label \
+         (pinned mermaid 11.15.0 contains ZERO occurrences of `System_Boundary(`). THIS ENTRY IS \
+         EXPECTED TO GO STALE: with an 8-character title the terminal should now agree, and this \
+         list is checked in BOTH directions, so the first build after the freeze will fail with \
+         'now agrees — delete its KNOWN_GAPS entry'. That failure is the intended signal, not a \
+         regression. Kept only because it could not be verified unbuilt.",
     ),
     (
     "gantt_section",
