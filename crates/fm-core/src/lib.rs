@@ -1543,6 +1543,37 @@ impl IrEdge {
     pub fn er_notation(&self) -> Option<&str> {
         self.extras.as_ref().and_then(|e| e.er_notation.as_deref())
     }
+
+    /// The cardinality labels an ER notation declares, as `(source, target)` (bd-ercard2).
+    ///
+    /// `}o--o|` reads "zero or more" on the left and "zero or one" on the right, so this returns
+    /// `("0..*", "0..1")`. Either side is `""` when the notation carries no marker there, which is
+    /// what a bare `--` or `..` relationship gives.
+    ///
+    /// ⚠️ LIVES HERE BECAUSE IT IS SHARED, and it did not used to be: fm-render-svg has carried a
+    /// private copy of this mapping (`parse_er_cardinality` / `er_marker_to_label`) and is the only
+    /// surface that draws cardinality at all. Adding a second copy to fm-render-canvas is exactly
+    /// the forked-helper drift this repo has been bitten by, so the shared logic moves to the IR —
+    /// which is where it belongs anyway, since it is a fact about the notation, not about drawing.
+    /// The SVG copy should be collapsed into this one; it is left in place for now only because it
+    /// cannot be compiled and re-verified under the current build throttle.
+    ///
+    /// The marker table is symmetric on purpose: `|o` and `o|` are the same cardinality written for
+    /// the left or right end, and the grid completed in bd-flznf produces all four tokens on both
+    /// sides.
+    #[must_use]
+    pub fn er_cardinality_labels(&self) -> Option<(&'static str, &'static str)> {
+        let notation = self.er_notation()?;
+        let connector = notation
+            .find("--")
+            .or_else(|| notation.find(".."))
+            .or_else(|| notation.find("=="))?;
+
+        Some((
+            er_marker_label(notation[..connector].trim()),
+            er_marker_label(notation[connector + 2..].trim()),
+        ))
+    }
     /// Source-side cardinality label, if any.
     #[must_use]
     pub fn source_cardinality(&self) -> Option<&str> {
@@ -1837,6 +1868,24 @@ pub enum IrConstraint {
         node_ids: Vec<String>,
         span: Span,
     },
+}
+
+/// One end of an ER notation as a human-readable cardinality (bd-ercard2).
+///
+/// The fallbacks below the exact arms are deliberate: an unrecognised marker that still contains a
+/// crow's foot, a bar or a circle is reported as `*`, `1` or `0` rather than dropped, so a notation
+/// this table has not seen degrades to something approximately right instead of to silence.
+fn er_marker_label(marker: &str) -> &'static str {
+    match marker {
+        "||" => "1",
+        "o|" | "|o" => "0..1",
+        "o{" | "}o" => "0..*",
+        "|{" | "}|" => "1..*",
+        _ if marker.contains('{') || marker.contains('}') => "*",
+        _ if marker.contains('|') => "1",
+        _ if marker.contains('o') => "0",
+        _ => "",
+    }
 }
 
 /// Target of a style reference — what gets styled.
