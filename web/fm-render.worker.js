@@ -35,12 +35,28 @@ self.onmessage = async (event) => {
   try {
     if (message.kind === "init") {
       await ensureModule(message.moduleUrl);
-      if (message.canvas) {
-        // OffscreenCanvas path: the canvas was transferred, so pixels never cross the boundary.
+
+      // THE DECISION IS MADE IN RUST, not here. `chooseCanvasTarget` is the same function the
+      // native tests cover; re-deriving the ladder in JavaScript would drift from it, and the drift
+      // would only appear in degraded environments — the ones nobody tests in.
+      const capabilities = message.capabilities || {
+        offscreenCanvas: false,
+        worker: true,
+        canvasTransferred: false,
+      };
+      const decision = JSON.parse(wasm.chooseCanvasTarget(JSON.stringify(capabilities)));
+
+      if (decision.target === "offscreenInWorker" && message.canvas) {
+        // The canvas was transferred by the page, so pixels never cross postMessage again.
         offscreenDiagram = wasm.Diagram.fromOffscreenCanvas(message.canvas, message.config);
       }
+
+      // Report what was actually set up, not what was asked for: if the transfer arrived but the
+      // decision said otherwise, or vice versa, the page must see the truth rather than its request
+      // echoed back.
       self.postMessage({
         kind: "ready",
+        requested: decision.target,
         target: offscreenDiagram ? "offscreenInWorker" : "svgInWorker",
       });
       return;

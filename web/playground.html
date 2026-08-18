@@ -33,7 +33,7 @@
 
 <div id="right">
   <div id="status">starting…</div>
-  <div id="out"></div>
+  <div id="out"><canvas id="canvas" width="1200" height="900"></canvas></div>
   <div id="log"></div>
 </div>
 
@@ -61,6 +61,22 @@
     canvasTransferred: false,
   };
 
+  // ATTEMPT the transfer rather than inferring it from feature detection. `transferControlToOffscreen`
+  // can exist and still throw, and a canvas may be transferred only ONCE per element — so whether
+  // the transfer HAPPENED is a different fact from whether the API is present, and it is the fact
+  // the Rust decision actually consumes.
+  const canvasEl = document.getElementById("canvas");
+  let transferred = null;
+  if (capabilities.offscreenCanvas && typeof canvasEl.transferControlToOffscreen === "function") {
+    try {
+      transferred = canvasEl.transferControlToOffscreen();
+      capabilities.canvasTransferred = true;
+    } catch (error) {
+      // Not fatal: the worker still runs parse and layout, which is most of the win.
+      log(`transferControlToOffscreen failed, falling back to SVG in worker: ${error}`, "warn");
+    }
+  }
+
   if (!capabilities.worker) {
     // Deliberately explicit rather than a silent main-thread render: the whole point of the page is
     // to show which path ran, and a quiet fallback would misrepresent the measurement.
@@ -78,7 +94,12 @@
     const msg = event.data;
 
     if (msg.kind === "ready") {
-      statusEl.textContent = `worker ready — target: ${msg.target}`;
+      statusEl.textContent =
+        `worker ready — chose ${msg.requested}, running ${msg.target}` +
+        (msg.requested === msg.target ? "" : " (the transfer did not match the decision)");
+      // Once the canvas is transferred the page may no longer touch it, so the SVG sink is removed
+      // rather than left to be overwritten — writing innerHTML over a transferred canvas throws.
+      if (msg.target !== "offscreenInWorker") canvasEl.remove();
       render();
       return;
     }
@@ -89,6 +110,7 @@
 
     switch (msg.kind) {
       case "completed":
+        // Only the SVG path writes into the page; the offscreen path has already drawn itself.
         if (msg.svg) outEl.innerHTML = msg.svg;
         log(
           `#${msg.requestId} completed in ${roundTrip}ms` +
@@ -112,7 +134,12 @@
 
   worker.onerror = (event) => log(`worker error: ${event.message}`, "err");
 
-  worker.postMessage({ kind: "init", moduleUrl: MODULE_URL });
+  // The canvas is a TRANSFERABLE: it must be listed in the second argument or it is structured-
+  // cloned instead of moved, and the worker would draw into a copy nobody can see.
+  worker.postMessage(
+    { kind: "init", moduleUrl: MODULE_URL, capabilities, canvas: transferred },
+    transferred ? [transferred] : [],
+  );
 
   function render() {
     const requestId = nextRequestId++;

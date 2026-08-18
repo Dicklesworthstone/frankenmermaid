@@ -1282,6 +1282,26 @@ pub fn render_svg_js(input: &str, config: Option<JsValue>) -> Result<String, JsV
     Ok(svg)
 }
 
+/// Choose a render target from probed host capabilities (bd-2u0.6 item 3).
+///
+/// JSON text in and out, exactly like [`worker_handle_message_js`], so the same call works from the
+/// main thread, from inside the worker, and from a native test — and so the DECISION HAS ONE
+/// IMPLEMENTATION. A host that re-derived the ladder in JavaScript would drift from this one, and
+/// the drift would show up only in degraded environments, which are precisely the ones nobody
+/// tests in.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = chooseCanvasTarget))]
+pub fn choose_canvas_target_js(capabilities_json: &str) -> Result<String, JsValue> {
+    let capabilities: HostCapabilities =
+        serde_json::from_str(capabilities_json).map_err(|error| {
+            js_error(format!(
+                "invalid host capabilities: {error}; expected {{\"offscreenCanvas\":bool,\"worker\":bool,\"canvasTransferred\":bool}}"
+            ))
+        })?;
+
+    serde_json::to_string(&choose_canvas_target(capabilities))
+        .map_err(|error| js_error(format!("failed to encode canvas target: {error}")))
+}
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = detectType))]
 pub fn detect_type_js(input: &str) -> Result<JsValue, JsValue> {
     let detected = detect_type_with_confidence(input);
@@ -2990,6 +3010,32 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CanvasTarget>(&encoded).expect("target deserialize"),
             target
+        );
+    }
+
+    /// The JS-facing wrapper must agree with the Rust decision and reject junk.
+    ///
+    /// The wrapper is where a second implementation would creep in, so it is pinned to the same
+    /// function rather than to a restated expectation.
+    #[test]
+    fn the_exported_target_chooser_matches_the_rust_decision() {
+        use super::{HostCapabilities, choose_canvas_target, choose_canvas_target_js};
+
+        for capabilities in [
+            HostCapabilities { offscreen_canvas: true, worker: true, canvas_transferred: true },
+            HostCapabilities { offscreen_canvas: true, worker: true, canvas_transferred: false },
+            HostCapabilities { offscreen_canvas: false, worker: true, canvas_transferred: false },
+            HostCapabilities::default(),
+        ] {
+            let json = serde_json::to_string(&capabilities).expect("serialize");
+            let exported = choose_canvas_target_js(&json).expect("the wrapper should accept it");
+            let expected = serde_json::to_string(&choose_canvas_target(capabilities)).expect("expected");
+            assert_eq!(exported, expected, "wrapper disagreed for {capabilities:?}");
+        }
+
+        assert!(
+            choose_canvas_target_js("not json").is_err(),
+            "the wrapper accepted malformed capabilities instead of reporting them"
         );
     }
 }
