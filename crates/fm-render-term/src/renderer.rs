@@ -64,9 +64,13 @@ fn count_occluded_nodes(
     for node in nodes.iter().rev() {
         let x0 = (node.bounds.x * scale_x).floor().max(0.0) as usize;
         let y0 = (node.bounds.y * scale_y).floor().max(0.0) as usize;
-        let x1 = (((node.bounds.x + node.bounds.width) * scale_x).ceil().max(0.0) as usize)
+        let x1 = (((node.bounds.x + node.bounds.width) * scale_x)
+            .ceil()
+            .max(0.0) as usize)
             .min(cell_width);
-        let y1 = (((node.bounds.y + node.bounds.height) * scale_y).ceil().max(0.0) as usize)
+        let y1 = (((node.bounds.y + node.bounds.height) * scale_y)
+            .ceil()
+            .max(0.0) as usize)
             .min(cell_height);
 
         // Entirely off-canvas: nothing was drawn, so the reader cannot see it either.
@@ -419,9 +423,7 @@ impl TermRenderer {
                 .as_ref()
                 .and_then(|meta| meta.today_marker_style.as_deref())
                 .is_some_and(|style| style.trim().eq_ignore_ascii_case("off"));
-            if !disabled
-                && let Some(marker_x) = axis.x_for_day(day)
-            {
+            if !disabled && let Some(marker_x) = axis.x_for_day(day) {
                 // `draw_line` takes `isize` and clips internally. Casting to `usize` here would wrap
                 // a negative coordinate into an enormous positive one and lose the marker entirely —
                 // the same mistake the state-note leader made in this file (1d7324f7).
@@ -562,7 +564,8 @@ impl TermRenderer {
         nodes: &[fm_layout::LayoutNodeBox],
     ) -> (usize, usize, f32, f32) {
         let base = self.cell_dimensions_scaled(bounds, direction, 1.0);
-        let occluded = |d: (usize, usize, f32, f32)| count_occluded_nodes(nodes, d.2, d.3, d.0, d.1);
+        let occluded =
+            |d: (usize, usize, f32, f32)| count_occluded_nodes(nodes, d.2, d.3, d.0, d.1);
         if occluded(base) == 0 {
             return base;
         }
@@ -1470,8 +1473,11 @@ impl TermRenderer {
 
             if !placed_wide {
                 let budget = w - 2;
-                let label: String =
-                    self.truncate_label(&band.label).chars().take(budget).collect();
+                let label: String = self
+                    .truncate_label(&band.label)
+                    .chars()
+                    .take(budget)
+                    .collect();
                 for (offset, ch) in label.chars().enumerate() {
                     let col = x + 1 + offset;
                     if col < cell_width {
@@ -1884,19 +1890,20 @@ impl TermRenderer {
         // Resolved gantt name placements, indexed by node. Built once rather than scanned per node,
         // and only when the diagram actually has any -- every other diagram type leaves this `None`
         // and takes exactly the path it took before.
-        let gantt_label_by_node: Option<std::collections::HashMap<usize, &fm_layout::LayoutGanttTaskLabel>> =
-            if layout.extensions.gantt_task_labels.is_empty() {
-                None
-            } else {
-                Some(
-                    layout
-                        .extensions
-                        .gantt_task_labels
-                        .iter()
-                        .map(|entry| (entry.node_index, entry))
-                        .collect(),
-                )
-            };
+        let gantt_label_by_node: Option<
+            std::collections::HashMap<usize, &fm_layout::LayoutGanttTaskLabel>,
+        > = if layout.extensions.gantt_task_labels.is_empty() {
+            None
+        } else {
+            Some(
+                layout
+                    .extensions
+                    .gantt_task_labels
+                    .iter()
+                    .map(|entry| (entry.node_index, entry))
+                    .collect(),
+            )
+        };
 
         // Overlay node labels.
         for node_box in &layout.nodes {
@@ -2139,64 +2146,78 @@ impl TermRenderer {
                 // blank-cell guard rejected every write and the first version of this fix drew
                 // NOTHING — caught by `class_cardinalities_reach_terminal_output` rather than
                 // shipped. `t` is small so the number still reads as belonging to its own end.
-                let mut place = |text: Option<&str>,
-                                 point: Option<&fm_layout::LayoutPoint>,
-                                 toward: Option<&fm_layout::LayoutPoint>| {
-                    let (Some(text), Some(point)) = (text.filter(|t| !t.is_empty()), point) else {
-                        return;
-                    };
-                    const T: f32 = 0.25;
-                    let anchor = toward.map_or(
-                        fm_layout::LayoutPoint {
-                            x: point.x,
-                            y: point.y,
-                        },
-                        |other| fm_layout::LayoutPoint {
-                            x: (other.x - point.x).mul_add(T, point.x),
-                            y: (other.y - point.y).mul_add(T, point.y),
-                        },
-                    );
-                    let (bx, by) = self.point_to_cells(&anchor, scale_x, scale_y);
-                    let text = self.truncate_label(text);
-                    let width = text.chars().count();
+                let mut place =
+                    |text: Option<&str>,
+                     point: Option<&fm_layout::LayoutPoint>,
+                     toward: Option<&fm_layout::LayoutPoint>| {
+                        let (Some(text), Some(point)) = (text.filter(|t| !t.is_empty()), point)
+                        else {
+                            return;
+                        };
+                        const T: f32 = 0.25;
+                        let anchor = toward.map_or(
+                            fm_layout::LayoutPoint {
+                                x: point.x,
+                                y: point.y,
+                            },
+                            |other| fm_layout::LayoutPoint {
+                                x: (other.x - point.x).mul_add(T, point.x),
+                                y: (other.y - point.y).mul_add(T, point.y),
+                            },
+                        );
+                        let (bx, by) = self.point_to_cells(&anchor, scale_x, scale_y);
+                        let text = self.truncate_label(text);
+                        let width = text.chars().count();
 
-                    // SEARCH BESIDE THE LINE. The anchor cell lies ON the edge itself, whose glyph
-                    // is never blank, so writing there is always rejected — measured: the first two
-                    // versions of this fix drew nothing at all, and only dumping the canvas showed
-                    // the run sitting on a column of `⢸`. The cells flanking the line are free, so
-                    // step perpendicular (then vertically) and take the first run that fits.
-                    const CANDIDATES: [(i32, i32); 6] =
-                        [(1, 0), (-1, 0), (2, 0), (-2, 0), (0, 1), (0, -1)];
-                    for (dx, dy) in CANDIDATES {
-                        let Some(cx) = bx.checked_add_signed(dx as isize) else {
-                            continue;
-                        };
-                        let Some(cy) = by.checked_add_signed(dy as isize) else {
-                            continue;
-                        };
-                        if cy >= lines.len() || cx + width > cell_width {
-                            continue;
+                        // SEARCH BESIDE THE LINE. The anchor cell lies ON the edge itself, whose glyph
+                        // is never blank, so writing there is always rejected — measured: the first two
+                        // versions of this fix drew nothing at all, and only dumping the canvas showed
+                        // the run sitting on a column of `⢸`. The cells flanking the line are free, so
+                        // step perpendicular (then vertically) and take the first run that fits.
+                        const CANDIDATES: [(i32, i32); 6] =
+                            [(1, 0), (-1, 0), (2, 0), (-2, 0), (0, 1), (0, -1)];
+                        for (dx, dy) in CANDIDATES {
+                            let Some(cx) = bx.checked_add_signed(dx as isize) else {
+                                continue;
+                            };
+                            let Some(cy) = by.checked_add_signed(dy as isize) else {
+                                continue;
+                            };
+                            if cy >= lines.len() || cx + width > cell_width {
+                                continue;
+                            }
+                            let free = (0..width).all(|offset| {
+                                lines[cy]
+                                    .get(cx + offset)
+                                    .is_some_and(|cell| *cell == ' ' || *cell == '\u{2800}')
+                            });
+                            if !free {
+                                continue;
+                            }
+                            for (offset, ch) in text.chars().enumerate() {
+                                lines[cy][cx + offset] = ch;
+                            }
+                            // Placed; a second copy at another offset would be worse than none.
+                            break;
                         }
-                        let free = (0..width).all(|offset| {
-                            lines[cy]
-                                .get(cx + offset)
-                                .is_some_and(|cell| *cell == ' ' || *cell == '\u{2800}')
-                        });
-                        if !free {
-                            continue;
-                        }
-                        for (offset, ch) in text.chars().enumerate() {
-                            lines[cy][cx + offset] = ch;
-                        }
-                        // Placed; a second copy at another offset would be worse than none.
-                        break;
-                    }
-                };
+                    };
                 // `get(1)` / second-to-last give the direction to step away from each endpoint.
                 let after_first = edge_path.points.get(1);
-                let before_last = edge_path.points.len().checked_sub(2).and_then(|i| edge_path.points.get(i));
-                place(edge.source_cardinality(), edge_path.points.first(), after_first);
-                place(edge.target_cardinality(), edge_path.points.last(), before_last);
+                let before_last = edge_path
+                    .points
+                    .len()
+                    .checked_sub(2)
+                    .and_then(|i| edge_path.points.get(i));
+                place(
+                    edge.source_cardinality(),
+                    edge_path.points.first(),
+                    after_first,
+                );
+                place(
+                    edge.target_cardinality(),
+                    edge_path.points.last(),
+                    before_last,
+                );
             }
         }
 
@@ -2657,8 +2678,9 @@ impl TermRenderer {
                 fm_core::IrAttributeKey::Uk => "UK ",
                 fm_core::IrAttributeKey::None => "",
             };
-            let mut text =
-                String::with_capacity(key_prefix.len() + attr.data_type.len() + attr.name.len() + 1);
+            let mut text = String::with_capacity(
+                key_prefix.len() + attr.data_type.len() + attr.name.len() + 1,
+            );
             text.push_str(key_prefix);
             text.push_str(&attr.data_type);
             text.push(' ');
