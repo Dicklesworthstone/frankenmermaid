@@ -2162,6 +2162,18 @@ impl TermRenderer {
             // cluster-title overlay uses: a number that overwrote a node border or an existing
             // label would trade one piece of dropped content for another.
             if let Some(edge) = ir.edges.get(edge_path.edge_index) {
+                // ER notation feeds the SAME placement (bd-2h3pp). `}o--o|` declares "0..*" and
+                // "0..1" exactly as `"1" --> "many"` declares a class cardinality, and fm-render-svg
+                // drew both while this surface drew only the class one — so an ER diagram lost its
+                // cardinality here for the same reason a class diagram used to.
+                //
+                // Reusing this block rather than adding an overlay is the whole point: the candidate
+                // search below is the MEASURED part, and the two attempts that failed on the gantt
+                // band label (bd-039t) both failed by guessing at placement instead of reusing
+                // something already proven on this grid.
+                //
+                // Resolved once per edge because both ends read it and it parses the notation.
+                let er_labels = edge.er_cardinality_labels();
                 // Placed a short way ALONG the edge rather than exactly at the endpoint. The
                 // endpoint sits ON the node border, whose box glyph is never blank, so the
                 // blank-cell guard rejected every write and the first version of this fix drew
@@ -2230,12 +2242,14 @@ impl TermRenderer {
                     .checked_sub(2)
                     .and_then(|i| edge_path.points.get(i));
                 place(
-                    edge.source_cardinality(),
+                    edge.source_cardinality()
+                        .or_else(|| er_labels.map(|(source, _)| source)),
                     edge_path.points.first(),
                     after_first,
                 );
                 place(
-                    edge.target_cardinality(),
+                    edge.target_cardinality()
+                        .or_else(|| er_labels.map(|(_, target)| target)),
                     edge_path.points.last(),
                     before_last,
                 );
