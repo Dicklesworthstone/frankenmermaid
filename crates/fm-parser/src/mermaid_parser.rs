@@ -6811,6 +6811,24 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        // `topAxis` moves the date axis above the chart. It reached the fallthrough below and was
+        // reported as "unsupported gantt syntax" — a FALSE warning on valid input, which is the
+        // failure mode that trains readers to ignore the channel.
+        //
+        // Recognised and IGNORED because it is already what we draw: fm-render-svg puts the ticks at
+        // `layout.bounds.y - 12.0` and the terminal overlay puts them on the row ABOVE the diagram
+        // body, so this directive asks for the layout we already produce. Storing a flag no renderer
+        // reads would be dead IR.
+        //
+        // ⚠️ THE INVERSE IS A REAL DIVERGENCE AND IS FILED, NOT FIXED HERE (bd-c7ijh): the pinned
+        // bundle's gantt config reads `topAxis:!1`, so mermaid's DEFAULT is the axis at the BOTTOM
+        // and `topAxis` is what moves it up. We draw it on top unconditionally, which means a gantt
+        // WITHOUT this directive is the one that differs. Correcting that needs an IR field plus
+        // placement in all three renderers, so it is not a parser change.
+        if trimmed.eq_ignore_ascii_case("topAxis") {
+            continue;
+        }
+
         if let Some(weekday) = trimmed.strip_prefix("weekday ") {
             gantt_meta.weekday_start = parse_gantt_weekday(weekday);
             if gantt_meta.weekday_start.is_none() {
@@ -19451,6 +19469,55 @@ Rel_Back(db, app, "Responds")"#,
     }
 
     // ── ER notation storage tests ──────────────────────────────────────
+
+    /// `topAxis` is a real gantt directive and must not be reported as unsupported (bd-c7ijh).
+    ///
+    /// It reached the fallthrough and produced "unsupported gantt syntax" — a false warning on
+    /// valid input. It is recognised and ignored because it already describes what we draw: the SVG
+    /// puts ticks above the diagram bounds and the terminal puts them on the row above the body.
+    #[test]
+    fn gantt_top_axis_directive_is_not_reported_as_unsupported() {
+        let parsed = parse_mermaid(
+            "gantt\n  dateFormat YYYY-MM-DD\n  topAxis\n  section S\n  T :a, 2026-01-01, 5d\n",
+        );
+
+        assert!(
+            !parsed
+                .warnings
+                .iter()
+                .any(|w| w.contains("unsupported gantt syntax")),
+            "a valid directive was reported as unsupported: {:?}",
+            parsed.warnings
+        );
+        // NON-VACUITY: the chart must still parse, or "no warning" would also hold for a source that
+        // produced nothing at all.
+        assert!(
+            parsed
+                .ir
+                .gantt_meta
+                .as_ref()
+                .is_some_and(|meta| !meta.sections.is_empty()),
+            "the gantt chart did not parse, so the assertion above proves nothing"
+        );
+    }
+
+    /// CONTROL: genuinely unsupported gantt syntax is STILL reported. Recognising one directive must
+    /// not turn the fallthrough warning off for everything else.
+    #[test]
+    fn unknown_gantt_syntax_is_still_reported() {
+        let parsed = parse_mermaid(
+            "gantt\n  dateFormat YYYY-MM-DD\n  notADirective\n  section S\n  T :a, 2026-01-01, 5d\n",
+        );
+
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| w.contains("unsupported gantt syntax")),
+            "an unknown directive stopped being reported: {:?}",
+            parsed.warnings
+        );
+    }
 
     /// EVERY cardinality combination connects the two entities it names (bd-flznf).
     ///
