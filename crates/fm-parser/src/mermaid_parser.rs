@@ -72,9 +72,29 @@ const SEQUENCE_OPERATORS: [(&str, ArrowType); 26] = [
 // prefix, so they must precede the bare `--` or it matches first and swallows the trailing marker
 // byte into the endpoint — which is exactly the bd-92b6 defect: `C3 o-- C4` matched `--` at the `-`,
 // leaving `C3 o` as the source and normalizing it into the phantom node `C3-o`.
-const CLASS_OPERATORS: [(&str, ArrowType); 10] = [
+const CLASS_OPERATORS: [(&str, ArrowType); 13] = [
     ("<|--", ArrowType::Inheritance),
     ("--|>", ArrowType::InheritanceReverse),
+    // UML REALIZATION — `Impl ..|> Interface` / `Interface <|.. Impl`. No operator in this table
+    // matched either spelling, and neither is a superstring of one that did (`..|>` does not
+    // contain `..>`; `<|..` does not contain `<..`), so `find_operator` returned None and the
+    // statement was NOT A RELATION AT ALL: interface implementation, one of the most common lines
+    // in a class diagram, drew no edge whatsoever (bd-u9hcc).
+    //
+    // ⚠️ APPROXIMATION, stated because it is a real loss. UML realization is a dashed line with a
+    // hollow triangle; `Inheritance`/`InheritanceReverse` give the correct HEAD and the correct
+    // DIRECTION but a SOLID line, so a realization now renders indistinguishably from an
+    // inheritance. That is a smaller error than the current one — no edge at all says the classes
+    // are unrelated — but it is still an error, and it is not hidden here.
+    //
+    // The exact fix is a `Realization`/`RealizationReverse` pair, which means exhaustive matches in
+    // fm-core's `as_str`, fm-layout and all three renderers. Alternatively the dash alone could ride
+    // on the edge's `inline_style` — `stroke-dasharray` IS on fm-core's allowed-property list, and
+    // `resolve_edge_inline_style` reads `edge.inline_style` with every lean edge fast path gated on
+    // it being none — but that needs the operator threaded to the push site. Neither is a change to
+    // make unbuilt; both are recorded on the bead.
+    ("..|>", ArrowType::InheritanceReverse),
+    ("<|..", ArrowType::Inheritance),
     ("..>", ArrowType::DottedArrow),
     ("<..", ArrowType::DottedArrow),
     ("o--", ArrowType::Aggregation),
@@ -82,7 +102,25 @@ const CLASS_OPERATORS: [(&str, ArrowType); 10] = [
     ("--o", ArrowType::AggregationReverse),
     ("--*", ArrowType::CompositionReverse),
     ("-->", ArrowType::Arrow),
+    // The plain DOTTED LINK `A .. B`, which was also unmatched and also drew nothing. `DottedLine`
+    // is exact for this one — dashed, no head — so unlike the two above it loses nothing.
+    //
+    // ⚠️ MUST BE LAST IN THE TABLE, and for TWO separate reasons — the second one is not covered by
+    // any existing test and is why this entry sits below `--` rather than above it.
+    //
+    // 1. PREFIX. `..>` and `..|>` both start with `..`, so a `..` placed above them would swallow
+    //    their first two bytes and demote a dependency or a realization to a bare dotted line.
+    //    `operator_tables_are_longest_prefix_first` enforces this one.
+    //
+    // 2. LABEL AND CARDINALITY TEXT. `find_operator` scans the table IN ORDER and returns the first
+    //    operator found ANYWHERE in the statement, not the leftmost one. UML multiplicity is
+    //    written `"0..*"`, so `Customer "1" -- "0..*" Order` contains `..` inside a QUOTED
+    //    cardinality that this parser already supports via `set_last_edge_cardinality`. With `..`
+    //    above `--` that statement splits at the multiplicity instead of the relation. Placing it
+    //    last means every real operator is tried first and only a statement with no other operator
+    //    can reach it.
     ("--", ArrowType::Line),
+    ("..", ArrowType::DottedLine),
 ];
 
 // `==` is a THICK LINE, not a thick arrow. The other three entries already follow the rule the
@@ -12504,6 +12542,67 @@ mod tests {
         assert_eq!(arrow_for(&PACKET_OPERATORS, "-->"), ArrowType::Arrow);
         assert_eq!(arrow_for(&PACKET_OPERATORS, "->"), ArrowType::Arrow);
         assert_eq!(arrow_for(&PACKET_OPERATORS, "--"), ArrowType::Line);
+    }
+
+    /// UML REALIZATION draws an edge at all (bd-u9hcc).
+    ///
+    /// Neither spelling matched any operator — `..|>` does not contain `..>`, `<|..` does not
+    /// contain `<..` — so `find_operator` returned None and interface implementation, one of the
+    /// most common lines in a class diagram, produced NO EDGE.
+    ///
+    /// The arrow asserted here is an approximation: realization is a DASHED line with a hollow
+    /// triangle and these variants draw a SOLID one. The direction and the head are right, and the
+    /// remaining loss is recorded on the bead rather than hidden behind a passing test.
+    #[test]
+    fn class_realization_operators_produce_an_edge() {
+        let forward = parse_mermaid("classDiagram\n  Impl ..|> Interface\n");
+        assert_eq!(forward.ir.edges.len(), 1, "`..|>` drew no edge");
+        assert_eq!(forward.ir.edges[0].arrow, ArrowType::InheritanceReverse);
+
+        let reverse = parse_mermaid("classDiagram\n  Interface <|.. Impl\n");
+        assert_eq!(reverse.ir.edges.len(), 1, "`<|..` drew no edge");
+        assert_eq!(reverse.ir.edges[0].arrow, ArrowType::Inheritance);
+    }
+
+    /// The plain dotted link `A .. B` also drew nothing. `DottedLine` is EXACT for this one.
+    #[test]
+    fn class_dotted_link_produces_a_dotted_line() {
+        let parsed = parse_mermaid("classDiagram\n  Alpha .. Beta\n");
+
+        assert_eq!(parsed.ir.edges.len(), 1, "`..` drew no edge");
+        assert_eq!(parsed.ir.edges[0].arrow, ArrowType::DottedLine);
+    }
+
+    /// ⚠️ THE ORDERING CONTROL, and the reason `..` sits at the end of the table.
+    ///
+    /// `..>` and `..|>` both START WITH `..`. A `..` entry placed above them would match their
+    /// first two bytes and silently demote a dependency or a realization to a bare dotted line —
+    /// the edge would still exist, so only an arrow-type assertion catches it.
+    #[test]
+    fn the_dotted_link_operator_does_not_swallow_its_longer_siblings() {
+        let dependency = parse_mermaid("classDiagram\n  Alpha ..> Beta\n");
+        assert_eq!(dependency.ir.edges[0].arrow, ArrowType::DottedArrow);
+
+        let realization = parse_mermaid("classDiagram\n  Alpha ..|> Beta\n");
+        assert_eq!(realization.ir.edges[0].arrow, ArrowType::InheritanceReverse);
+    }
+
+    /// CONTROL: the pre-existing solid relations are untouched by three new table entries.
+    #[test]
+    fn class_solid_relations_are_unchanged() {
+        for (source, expected) in [
+            ("classDiagram\n  Animal <|-- Dog\n", ArrowType::Inheritance),
+            ("classDiagram\n  Whole *-- Part\n", ArrowType::Composition),
+            ("classDiagram\n  Club o-- Member\n", ArrowType::Aggregation),
+            ("classDiagram\n  Alpha --> Beta\n", ArrowType::Arrow),
+            ("classDiagram\n  Alpha -- Beta\n", ArrowType::Line),
+        ] {
+            let parsed = parse_mermaid(source);
+            assert_eq!(
+                parsed.ir.edges[0].arrow, expected,
+                "relation changed for: {source}"
+            );
+        }
     }
 
     #[test]
