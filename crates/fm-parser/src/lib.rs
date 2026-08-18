@@ -702,9 +702,15 @@ pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig
 
 /// Diagram headers that upstream mermaid supports and this renderer does not.
 ///
-/// Deliberately SHORT and exact. Every entry is a header verified present in the pinned
-/// mermaid 11.15.0 bundle and absent from `DiagramType`; guessing at future names would produce a
-/// confident "not supported yet" for a typo, which is worse than the generic message it replaces.
+/// Every entry is taken from the incumbent's OWN detector table, not from guesswork: the pinned
+/// 11.15.0 bundle carries 31 start-anchored detectors, and these are the ones with no `DiagramType`
+/// behind them. Guessing at plausible names would produce a confident "not implemented yet" for a
+/// typo, which is worse than the generic message this replaces.
+///
+/// ⚠️ Extract that table with a pattern that tolerates OPTIONAL SUFFIXES. My first pass matched
+/// only `/^\s*name/` and returned 23 detectors, silently missing every
+/// `/^\s*name(-beta)?\b/` form -- including `ishikawa`, which I then had to be told about. The
+/// widened pattern found 31, and the eight it added were all real.
 ///
 /// Matched on the header TOKEN, splitting on whitespace or `-`, so `radar-beta` and `treemap-beta`
 /// reach the same entries as their bare spellings without needing four rows.
@@ -735,6 +741,14 @@ fn unsupported_upstream_keyword(first_line: &str) -> Option<&'static str> {
         // bundle before adding, because an entry added on trust would produce a confident
         // "not implemented yet" for a type that may simply not exist.
         "ishikawa" => Some("ishikawa"),
+        // The remainder of the incumbent's detector table that we implement nothing for. The
+        // `-beta` suffixes are stripped by the token split above, so one entry covers both
+        // spellings where mermaid accepts both.
+        "eventmodeling" => Some("eventmodeling"),
+        "info" => Some("info"),
+        "treeview" => Some("treeView"),
+        "venn" => Some("venn"),
+        "wardley" => Some("wardley"),
         _ => None,
     }
 }
@@ -2966,6 +2980,11 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             ("radar-beta\n  axis a, b\n", "radar"),
             ("treemap\n  root\n    child 5\n", "treemap"),
             ("ishikawa\n  Problem\n", "ishikawa"),
+            ("eventmodeling\n  x\n", "eventmodeling"),
+            ("info\n", "info"),
+            ("treeView-beta\n  root\n", "treeView"),
+            ("venn-beta\n  a\n", "venn"),
+            ("wardley-beta\n  a\n", "wardley"),
         ] {
             let detected = super::detect_type_with_confidence(source);
             let joined = detected.warnings.join(" | ");
