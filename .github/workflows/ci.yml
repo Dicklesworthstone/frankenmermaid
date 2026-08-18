@@ -274,6 +274,11 @@ jobs:
           # unit rules are the load-bearing part: instructions are not a time, and a script that
           # divided one into the other would invent a number nobody can interpret.
           python3 scripts/harness_crosscheck.py --self-test
+          # clause3_repeat_scorer reports how many of a configuration's stored repeats exceed the
+          # 2% null-median rule. Its self-test pins the two-sidedness of the statistic and that a
+          # configuration below the repeat floor is EXCLUDED rather than scored as if decisive --
+          # scoring a 2-repeat group would be the single-observation mistake it exists to avoid.
+          python3 scripts/clause3_repeat_scorer.py --self-test
 
       # The corpus scan itself (`node scripts/golden_svg_health.mjs`, no flag) is NOT armed here
       # yet: it exits 1 today on the two committed gantt_basic.svg copies, which reference
