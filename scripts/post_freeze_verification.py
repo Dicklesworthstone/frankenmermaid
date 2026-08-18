@@ -122,6 +122,43 @@ def free_gib(path: str = "/data") -> float:
     return (stat.f_bavail * stat.f_frsize) / (1024**3)
 
 
+def project_build_running() -> str | None:
+    """Whether THIS project already has a cargo build in flight.
+
+    NOT `pgrep -x cargo`. That matches the cargo binary by exact name, which has two failure modes
+    and I hit both within one minute:
+
+      * FALSE POSITIVE -- it matches cargo builds belonging to OTHER projects on this shared host,
+        so it reports the slot taken when this project's slot is free.
+      * FALSE NEGATIVE, the dangerous one -- a sibling pane running its build through a shell
+        wrapper does not appear as a process named exactly `cargo`, so `-x` reports the slot FREE
+        while this project is mid-build. Acting on that starts the second concurrent build the
+        one-build-per-project rule exists to prevent.
+
+    Matching the full command line against this repository's path answers the question actually
+    being asked: is anyone building THIS project.
+    """
+    result = subprocess.run(
+        ["pgrep", "-a", "-f", "cargo"], capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if REPO in line and "pgrep" not in line:
+            return line.strip()
+    return None
+
+
+def guard_build_slot() -> None:
+    holder = project_build_running()
+    if holder:
+        raise SystemExit(
+            "REFUSING TO BUILD: this project already has a build in flight.\n"
+            f"  {holder[:160]}\n"
+            "One build per project. Wait for it rather than starting a second."
+        )
+
+
 def guard_disk() -> None:
     free = free_gib()
     if free < MIN_FREE_GIB:
@@ -147,10 +184,12 @@ def show(execute: bool) -> int:
         return 0
 
     guard_disk()
+    guard_build_slot()
     for index, (name, argv, _why) in enumerate(PLAN, start=1):
         # Re-checked before EVERY step, not once at the start: earlier steps write target artifacts,
         # and this campaign has watched the volume fall 6 GiB inside one turn.
         guard_disk()
+        guard_build_slot()
         print(f"\n--- [{index}/{len(PLAN)}] {name}: {' '.join(argv)}")
         result = subprocess.run(argv, cwd=REPO, check=False)
         if result.returncode != 0:
@@ -214,6 +253,16 @@ def self_test() -> int:
     # rubber stamp, and the failure mode is a filled volume rather than a wrong number.
     ok = MIN_FREE_GIB == 42
     print(("  ok   " if ok else "  FAIL ") + f"the disk floor is the standing 42 GiB (is {MIN_FREE_GIB})")
+    failures += 0 if ok else 1
+
+    # The slot probe must not be `pgrep -x cargo`. That is the check that reported the slot FREE
+    # while a sibling was mid-build behind a shell wrapper, and reported it TAKEN because of other
+    # projects entirely.
+    import inspect
+
+    source = inspect.getsource(project_build_running)
+    ok = '"-f"' in source and REPO in str(REPO) and "-x" not in source.split('"""')[-1]
+    print(("  ok   " if ok else "  FAIL ") + "the slot probe matches full command lines, not the binary name")
     failures += 0 if ok else 1
 
     print("self-test PASSED" if not failures else f"self-test FAILED ({failures})")
