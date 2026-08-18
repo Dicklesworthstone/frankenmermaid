@@ -1325,6 +1325,29 @@ impl IrBuilder {
     }
 
     /// Look up a node ID by its string key (as used in the diagram source).
+    /// The CSS a `classDef` declared for `class_name`, joined in declaration order.
+    ///
+    /// Reads the SAME store `push_style_ref` writes, so a lookup cannot disagree with what was
+    /// recorded. Joined with `;` rather than last-wins-by-key because that is what a CSS declaration
+    /// block already means: a later property of the same name overrides an earlier one, and joining
+    /// preserves that without this function having to reimplement the cascade.
+    ///
+    /// Returns `None` when no `classDef` of that name was seen, so a caller can tell "no such class"
+    /// from "a class that declared nothing".
+    pub(crate) fn class_style_css(&self, class_name: &str) -> Option<String> {
+        let joined = self
+            .ir
+            .style_refs
+            .iter()
+            .filter(|style_ref| {
+                matches!(&style_ref.target, IrStyleTarget::Class(name) if name == class_name)
+            })
+            .map(|style_ref| style_ref.style.as_str())
+            .collect::<Vec<_>>()
+            .join(";");
+        (!joined.is_empty()).then_some(joined)
+    }
+
     /// The cluster a `style`/`class` target names, if it names one (bd-xfmm).
     ///
     /// The same normalisation `ensure_cluster` applies when it INSERTS the key, so a lookup cannot

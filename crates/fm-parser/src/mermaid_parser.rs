@@ -11523,6 +11523,13 @@ fn is_non_graph_statement(line: &str) -> bool {
 /// to rendering output. A compatibility warning is emitted for each directive
 /// to inform users that their styles will not be applied.
 fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
+    // `class mySubgraph big` cannot be resolved where it is READ: the `classDef` that names its CSS
+    // may appear later in the document, and this pass walks lines in order. So cluster class
+    // assignments are collected here and resolved after the loop, when every `classDef` has been
+    // seen. Nodes do not need this because they carry the class NAME and the renderers resolve it;
+    // a cluster has no `classes` field to carry one, and adding it would mean patching ten
+    // exhaustive `IrCluster` literals blind under the build freeze.
+    let mut cluster_classes: Vec<(usize, String, Span)> = Vec::new();
     // Every style-directive line starts with `classDef`/`style`/`linkStyle`/`class`; if
     // none of those substrings occur anywhere, there is nothing to extract and the whole
     // per-line scan (which computes a span_for/char-count for every line) is pure waste —
@@ -11677,12 +11684,45 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                 if !class_name.is_empty() {
                     for node_key in nodes_raw.split(',') {
                         let node_key = node_key.trim();
-                        if !node_key.is_empty() {
-                            builder.add_class_to_node(node_key, class_name, span);
+                        if node_key.is_empty() {
+                            continue;
                         }
+                        // ⚠️ A SUBGRAPH TARGET USED TO INVENT A NODE. `add_class_to_node` calls
+                        // `intern_node`, which CREATES the key when it does not exist, so
+                        // `class mySubgraph big` drew a phantom empty box beside the subgraph it
+                        // meant to style. That is worse than the silence `style mySubgraph` used to
+                        // give (bd-xfmm): a dropped directive shows nothing, this one showed
+                        // something the author never wrote. `no_phantom` did not catch it because
+                        // it only rejects ids starting with `style`/`classDef` — a phantom named
+                        // after a real subgraph looks like an ordinary node.
+                        //
+                        // The NODE lookup comes first and is non-interning, so a name shared by a
+                        // node and a subgraph resolves to the node — the same precedence `style`
+                        // uses, and mermaid's.
+                        if builder.node_id_by_key(node_key).is_none()
+                            && let Some(cluster_index) = builder.cluster_index_by_key(node_key)
+                        {
+                            cluster_classes.push((cluster_index, class_name.to_string(), span));
+                            continue;
+                        }
+                        builder.add_class_to_node(node_key, class_name, span);
                     }
                 }
             }
+        }
+    }
+
+    // Resolved LAST, so a `classDef` declared after the `class` line still applies. Each becomes an
+    // ordinary `IrStyleTarget::Cluster` ref, which is the form fm-render-svg and fm-render-canvas
+    // already honour — so this needed no new consumer and no new IR field.
+    for (cluster_index, class_name, span) in cluster_classes {
+        if let Some(css) = builder.class_style_css(&class_name) {
+            builder.push_style_ref(fm_core::IrStyleTarget::Cluster(cluster_index), css, span);
+        } else {
+            builder.add_warning(format!(
+                "class directive references `{class_name}`, which no classDef declares; the class \
+                 was ignored"
+            ));
         }
     }
 
@@ -18789,6 +18829,87 @@ Rel_Back(db, app, "Responds")"#,
     ///
     /// mermaid rejects a duplicate `branch` outright. We stay permissive and render, but the user
     /// has to be told, because the alternative is a silently different picture.
+    /// `class mySubgraph big` must not INVENT A NODE (bd-xfmm).
+    ///
+    /// `add_class_to_node` calls `intern_node`, which creates the key when it does not exist, so a
+    /// subgraph target drew a phantom empty box beside the subgraph it meant to style. That is
+    /// worse than the silence `style mySubgraph` used to give: a dropped directive shows nothing,
+    /// this one showed something the author never wrote.
+    ///
+    /// The existing `no_phantom` helper could not catch it — it only rejects ids beginning with
+    /// `style` or `classDef`, and a phantom named after a real subgraph looks like an ordinary node.
+    #[test]
+    fn a_class_directive_on_a_subgraph_invents_no_node() {
+        let parsed = parse_mermaid(
+            "flowchart TD\n  subgraph one[One]\n    a[A]\n  end\n  classDef big fill:#ff0000\n  class one big\n",
+        );
+
+        let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert!(
+            !ids.contains(&"one"),
+            "a phantom node was invented for the subgraph target: {ids:?}"
+        );
+        // NON-VACUITY: the real node must still be there, or "no phantom" would also be satisfied
+        // by a parse that produced nothing at all.
+        assert!(ids.contains(&"a"), "the declared node vanished: {ids:?}");
+    }
+
+    /// And the class is APPLIED, not merely refused — recorded against the cluster.
+    #[test]
+    fn a_class_directive_on_a_subgraph_styles_the_cluster() {
+        let parsed = parse_mermaid(
+            "flowchart TD\n  subgraph one[One]\n    a[A]\n  end\n  classDef big fill:#ff0000\n  class one big\n",
+        );
+
+        assert!(
+            parsed.ir.style_refs.iter().any(|style_ref| matches!(
+                style_ref.target,
+                fm_core::IrStyleTarget::Cluster(_)
+            ) && style_ref.style.contains("ff0000")),
+            "the class was not resolved onto the cluster: {:?}",
+            parsed.ir.style_refs
+        );
+    }
+
+    /// THE ORDERING CASE, and it is why the resolution is deferred to the end of the pass: a
+    /// `classDef` declared AFTER the `class` line must still apply. Resolving where the `class` is
+    /// read would silently drop this, and the test above — which declares them in the other order —
+    /// would not notice.
+    #[test]
+    fn a_classdef_declared_after_the_class_line_still_reaches_the_cluster() {
+        let parsed = parse_mermaid(
+            "flowchart TD\n  subgraph one[One]\n    a[A]\n  end\n  class one big\n  classDef big fill:#00ff00\n",
+        );
+
+        assert!(
+            parsed.ir.style_refs.iter().any(|style_ref| matches!(
+                style_ref.target,
+                fm_core::IrStyleTarget::Cluster(_)
+            ) && style_ref.style.contains("00ff00")),
+            "a classDef declared after its class line was lost: {:?}",
+            parsed.ir.style_refs
+        );
+    }
+
+    /// CONTROL: an ordinary node class is untouched by the cluster branch. A change that routed
+    /// every `class` target through the cluster lookup would satisfy the cases above.
+    #[test]
+    fn a_class_directive_on_a_node_still_applies_to_the_node() {
+        let parsed = parse_mermaid(
+            "flowchart TD\n  a[A] --> b[B]\n  classDef big fill:#ff0000\n  class a big\n",
+        );
+
+        assert!(
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .any(|node| node.id == "a" && node.classes.iter().any(|c| c == "big")),
+            "an ordinary node class stopped being recorded on the node: {:?}",
+            parsed.ir.nodes.iter().map(|n| (&n.id, &n.classes)).collect::<Vec<_>>()
+        );
+    }
+
     /// A `style` on a SUBGRAPH is now honoured, not merely reported (bd-xfmm).
     ///
     /// bd-xfmm could only warn here: a subgraph id is not a node, so `node_id_by_key` misses it,
