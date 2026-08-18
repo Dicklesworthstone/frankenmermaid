@@ -7553,18 +7553,37 @@ fn parse_c4(input: &str, builder: &mut IrBuilder) {
                     ));
                 }
             }
-            "Rel" | "BiRel" | "Rel_Back" | "Rel_L" | "Rel_R" | "Rel_U" | "Rel_D" => {
+            // ⚠️ THE LONG SPELLINGS WERE MISSING AND THE RELATIONSHIP WAS DROPPED. mermaid's C4
+            // lexer accepts BOTH forms of every direction macro — `/^(?:Rel_Up\b)/` sits directly
+            // beside `/^(?:Rel_U\b)/`, and likewise for Down/D, Left/L, Right/R — but only the
+            // short forms were listed here, so `Rel_Up(a, b, "uses")` fell to the default arm,
+            // warned "unsupported C4 directive" and drew NO EDGE at all.
+            //
+            // They are pure aliases for us: direction is not consumed anywhere below (every arm
+            // except `BiRel` and `Rel_Back` falls through to the same `(from, to, Arrow)`), so the
+            // long spelling can only ever mean what the short one already means. That is exactly
+            // why the omission was invisible — nothing downstream needed changing to fix it.
+            "Rel" | "BiRel" | "Rel_Back" | "Rel_L" | "Rel_R" | "Rel_U" | "Rel_D" | "Rel_Left"
+            | "Rel_Right" | "Rel_Up" | "Rel_Down" => {
                 if !parse_c4_relationship(&function_name, &arguments, span, builder) {
                     builder.add_warning(format!(
                         "Line {line_number}: malformed C4 relationship declaration: {trimmed}"
                     ));
                 }
             }
+            // `Node`, `Node_L` and `Node_R` are mermaid's short spellings of `Deployment_Node`
+            // (its lexer lists all four), and they behave identically here: the trailing `_L`/`_R`
+            // is a layout hint we do not consume, the same way the `Rel_*` directions above are not
+            // consumed. Without them a C4 deployment diagram written in the short form lost every
+            // container AND everything nested inside it, since the block never opened.
             "System_Boundary"
             | "Container_Boundary"
             | "Enterprise_Boundary"
             | "Boundary"
-            | "Deployment_Node" => {
+            | "Deployment_Node"
+            | "Node"
+            | "Node_L"
+            | "Node_R" => {
                 if !opens_block {
                     builder.add_warning(format!(
                         "Line {line_number}: C4 boundary should open a block with '{{': {trimmed}"
@@ -17528,6 +17547,91 @@ Rel_Back(db, app, "Responds")"#,
         let input = "C4Deployment\n  Deployment_Node(server, \"Server\")";
         let parsed = parse_mermaid(input);
         assert_eq!(parsed.ir.diagram_type, DiagramType::C4Deployment);
+    }
+
+    /// The LONG-FORM direction macros draw a relationship (bd-hebu).
+    ///
+    /// mermaid's C4 lexer lists `Rel_Up` beside `Rel_U`, `Rel_Down` beside `Rel_D` and so on. We
+    /// listed only the short forms, so every long-form relationship hit the default arm, warned
+    /// "unsupported C4 directive" and drew NO EDGE — the relationship vanished from the diagram.
+    ///
+    /// Asserting the absence of that warning as well as the edge count matters: a future change
+    /// that drew the edge but still warned would leave a false diagnostic on valid input.
+    #[test]
+    fn c4_long_form_direction_macros_draw_relationships() {
+        for macro_name in ["Rel_Up", "Rel_Down", "Rel_Left", "Rel_Right"] {
+            let input = format!(
+                "C4Context\n  Person(a, \"A\")\n  System(b, \"B\")\n  {macro_name}(a, b, \"uses\")"
+            );
+            let parsed = parse_mermaid(&input);
+            assert_eq!(
+                parsed.ir.edges.len(),
+                1,
+                "{macro_name} drew no relationship: {:?}",
+                parsed.warnings
+            );
+            assert!(
+                !parsed
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("unsupported C4 directive")),
+                "{macro_name} is supported but still warns: {:?}",
+                parsed.warnings
+            );
+        }
+    }
+
+    /// CONTROL: the SHORT forms are unchanged. They were the only ones that worked before, so a
+    /// change that swapped one spelling for the other would pass the test above.
+    #[test]
+    fn c4_short_form_direction_macros_still_draw_relationships() {
+        for macro_name in ["Rel_U", "Rel_D", "Rel_L", "Rel_R"] {
+            let input = format!(
+                "C4Context\n  Person(a, \"A\")\n  System(b, \"B\")\n  {macro_name}(a, b, \"uses\")"
+            );
+            let parsed = parse_mermaid(&input);
+            assert_eq!(parsed.ir.edges.len(), 1, "{macro_name} stopped working");
+        }
+    }
+
+    /// `Node(...) { … }` is mermaid's short spelling of `Deployment_Node` and must open a boundary.
+    ///
+    /// Without it the block never opened, so the container AND everything nested inside it were
+    /// lost — not just the one line.
+    #[test]
+    fn c4_node_is_an_alias_for_deployment_node() {
+        let parsed = parse_mermaid(
+            "C4Deployment\n  Node(server, \"Server\") {\n    Container(api, \"API\", \"Go\")\n  }",
+        );
+
+        assert!(
+            !parsed
+                .warnings
+                .iter()
+                .any(|w| w.contains("unsupported C4 directive")),
+            "Node is supported but still warns: {:?}",
+            parsed.warnings
+        );
+        assert!(
+            parsed.ir.nodes.iter().any(|n| n.id == "api"),
+            "the nested container was lost: {:?}",
+            parsed.ir.nodes.iter().map(|n| &n.id).collect::<Vec<_>>()
+        );
+        assert!(
+            !parsed.ir.clusters.is_empty(),
+            "the Node block opened no boundary"
+        );
+    }
+
+    /// CONTROL: `Deployment_Node` itself is unchanged by the alias.
+    #[test]
+    fn c4_deployment_node_block_still_opens_a_boundary() {
+        let parsed = parse_mermaid(
+            "C4Deployment\n  Deployment_Node(server, \"Server\") {\n    Container(api, \"API\", \"Go\")\n  }",
+        );
+
+        assert!(parsed.ir.nodes.iter().any(|n| n.id == "api"));
+        assert!(!parsed.ir.clusters.is_empty());
     }
 
     // --- Error recovery tests ---
