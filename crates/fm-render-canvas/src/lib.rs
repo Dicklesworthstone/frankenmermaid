@@ -26,9 +26,9 @@ pub use context::{
     TextMetrics,
 };
 pub use gpu_plan::{
-    GlyphAtlasPlan, GlyphCell, GpuArrowheadInstance, GpuEdgeSegment, GpuNodeInstance,
-    GpuNodeShape, GpuRenderPlan, GpuTextQuad, GpuTextRun, NODE_SDF_WGSL, TEXT_ATLAS_WGSL,
-    parse_paint_rgba,
+    ARROWHEAD_WGSL, EDGE_WGSL, GlyphAtlasPlan, GlyphCell, GpuArrowheadInstance, GpuEdgeSegment,
+    GpuNodeInstance, GpuNodeShape, GpuRenderPlan, GpuTextQuad, GpuTextRun, NODE_SDF_WGSL,
+    TEXT_ATLAS_WGSL, parse_paint_rgba,
 };
 pub use renderer::{Canvas2dRenderer, CanvasRenderConfig, CanvasRenderResult};
 pub use viewport::{Viewport, ViewportTransform};

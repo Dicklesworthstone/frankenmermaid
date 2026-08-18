@@ -206,6 +206,14 @@ pub struct GpuEdgeSegment {
     pub to: [f32; 2],
     /// Index back into `MermaidDiagramIr::edges`.
     pub edge_index: u32,
+    /// Linear RGBA stroke, resolved from `linkStyle` through the same helper the raster pass uses.
+    pub color: [f32; 4],
+    /// Dash pattern as `[on, off]` in layout units; `[0.0, 0.0]` means solid.
+    ///
+    /// Carried because a dotted edge is a SEMANTIC distinction in mermaid, not decoration: `-.->`
+    /// and `-->` mean different things to a reader. The plan previously discarded the dash that
+    /// `legacy_edge_stroke` returns, so every dotted edge would have reached the GPU solid.
+    pub dash: [f32; 2],
     /// Stroke width in layout units, from the SAME `legacy_edge_stroke` rule the Canvas2D pass
     /// uses — bd-2u0.2 calls for "instanced line strips with VARIABLE WIDTH", and a plan that
     /// assumed one width could not draw a `==>` thick edge or a dotted one correctly.
@@ -228,7 +236,17 @@ pub struct GpuArrowheadInstance {
     pub size: f32,
     /// Index back into `MermaidDiagramIr::edges`.
     pub edge_index: u32,
+    /// Linear RGBA, matching the segment it terminates.
+    ///
+    /// A head that kept the theme colour while its line took the author's would be a worse bug than
+    /// no colour support at all, because it looks deliberate.
+    pub color: [f32; 4],
 }
+
+/// Theme edge stroke used when no `linkStyle` applies: `#475569`, mirroring
+/// `CanvasRenderConfig::default().edge_stroke`. Pinned by
+/// `gpu_theme_defaults_match_the_canvas_config`.
+pub const DEFAULT_EDGE_STROKE_RGBA: [f32; 4] = [0.278_431_4, 0.333_333_34, 0.411_764_7, 1.0];
 
 /// Theme label colour used for text quads: `#0f172a`, mirroring
 /// `CanvasRenderConfig::default().label_color`. Pinned by
@@ -483,10 +501,29 @@ impl GpuRenderPlan {
             // ONE source of truth with the raster pass: `legacy_edge_stroke` is the same function
             // `draw_edges` strokes with, so a `==>` thick edge and a dotted edge carry the widths
             // they are actually drawn at instead of a plan-local guess.
-            let (width, _dash) =
+            let (width, dash_pattern) =
                 crate::renderer::legacy_edge_stroke(arrow, f64::from(edge_stroke_width));
             let width = width as f32;
             let edge_index = edge.edge_index.try_into().unwrap_or(u32::MAX);
+
+            // `linkStyle` resolved through the raster pass's own helper, so a GPU render and a
+            // Canvas2D render cannot disagree about what the author declared. A declared width
+            // overrides the arrow-derived one exactly as it does in `draw_edges`.
+            let (declared_stroke, declared_width) =
+                crate::renderer::resolve_edge_style(ir, edge.edge_index);
+            let color = declared_stroke
+                .as_deref()
+                .and_then(parse_paint_rgba)
+                .unwrap_or(DEFAULT_EDGE_STROKE_RGBA);
+            let width = declared_width.map_or(width, |declared| declared as f32);
+
+            // The dash the arrow type carries. Only `[on, off]` patterns exist today; a longer
+            // pattern would need a different encoding, so it is truncated deliberately rather than
+            // silently taking its first two entries as if they were the whole thing.
+            let dash = match dash_pattern {
+                [on, off] => [*on as f32, *off as f32],
+                _ => [0.0, 0.0],
+            };
 
             for points in edge.points.windows(2) {
                 let [from, to] = points else {
@@ -496,6 +533,8 @@ impl GpuRenderPlan {
                     from: [from.x, from.y],
                     to: [to.x, to.y],
                     edge_index,
+                    color,
+                    dash,
                     width,
                 });
             }
@@ -512,6 +551,7 @@ impl GpuRenderPlan {
                     angle: (last.y - prev.y).atan2(last.x - prev.x),
                     size: HEAD_SIZE,
                     edge_index,
+                    color,
                 });
             }
             if edge.points.len() >= 2 && matches!(arrow, fm_core::ArrowType::DoubleArrow) {
@@ -522,6 +562,7 @@ impl GpuRenderPlan {
                     angle: (start.y - next.y).atan2(start.x - next.x),
                     size: HEAD_SIZE,
                     edge_index,
+                    color,
                 });
             }
         }
@@ -818,6 +859,143 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         discard;
     }
     return vec4<f32>(in.color.rgb, in.color.a * coverage);
+}
+"#;
+
+/// WGSL for the instanced edge pass (bd-2u0.2 component 2).
+///
+/// Each segment is expanded to a screen-aligned quad in the vertex stage: a line of finite width is
+/// a rectangle, so no geometry shader and no CPU-side triangulation is needed. One instanced draw
+/// covers every segment of every edge.
+///
+/// Dashes are evaluated from ARC LENGTH along the segment rather than from a texture, which keeps a
+/// dotted edge dotted at any zoom and needs no per-pattern resources. `dash = [0, 0]` means solid,
+/// and that is the common case, so the branch is cheap and predictable.
+pub const EDGE_WGSL: &str = r#"
+struct Camera {
+    transform: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> camera: Camera;
+
+struct EdgeSegment {
+    @location(0) from_point: vec2<f32>,
+    @location(1) to_point: vec2<f32>,
+    @location(2) edge_index: u32,
+    @location(3) color: vec4<f32>,
+    @location(4) dash: vec2<f32>,
+    @location(5) width: f32,
+};
+
+struct VertexOut {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+    @location(1) @interpolate(flat) dash: vec2<f32>,
+    // Distance travelled along the segment, in layout units, for dash evaluation.
+    @location(2) arc_length: f32,
+    // Signed distance across the ribbon, in half-width units, for the antialiased edge.
+    @location(3) across: f32,
+};
+
+// Two triangles over the segment's ribbon: (start left, start right, end right), (…, end left).
+var<private> RIBBON: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
+    vec2<f32>(0.0, -1.0), vec2<f32>(0.0,  1.0), vec2<f32>(1.0,  1.0),
+    vec2<f32>(0.0, -1.0), vec2<f32>(1.0,  1.0), vec2<f32>(1.0, -1.0),
+);
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32, seg: EdgeSegment) -> VertexOut {
+    let corner = RIBBON[vertex_index];
+    let delta = seg.to_point - seg.from_point;
+    let length_units = max(length(delta), 0.0001);
+    let direction = delta / length_units;
+    let normal = vec2<f32>(-direction.y, direction.x);
+
+    let half_width = max(seg.width, 0.0001) * 0.5;
+    let world = seg.from_point
+        + direction * (corner.x * length_units)
+        + normal * (corner.y * half_width);
+
+    var out: VertexOut;
+    out.clip_position = vec4<f32>(world * camera.transform.xy + camera.transform.zw, 0.0, 1.0);
+    out.color = seg.color;
+    out.dash = seg.dash;
+    out.arc_length = corner.x * length_units;
+    out.across = corner.y;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    let period = in.dash.x + in.dash.y;
+    if (period > 0.0) {
+        // Position within one on/off cycle. Discarding in the gap is what makes a dotted edge read
+        // as dotted rather than as a lighter solid line.
+        let phase = in.arc_length - period * floor(in.arc_length / period);
+        if (phase > in.dash.x) {
+            discard;
+        }
+    }
+
+    // One-pixel antialiased edge across the ribbon, from the derivative of the across coordinate.
+    let aa = max(fwidth(in.across), 0.0001);
+    let coverage = 1.0 - smoothstep(1.0 - aa, 1.0, abs(in.across));
+    if (coverage <= 0.0) {
+        discard;
+    }
+    return vec4<f32>(in.color.rgb, in.color.a * coverage);
+}
+"#;
+
+/// WGSL for the instanced arrowhead pass (bd-2u0.2 component 2, "arrowheads as triangle instances").
+///
+/// A separate pipeline from [`EDGE_WGSL`] because it draws triangles, not ribbons, and because a
+/// head must be drawn AFTER its line so the line does not overdraw the tip.
+pub const ARROWHEAD_WGSL: &str = r#"
+struct Camera {
+    transform: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> camera: Camera;
+
+struct Arrowhead {
+    @location(0) position: vec2<f32>,
+    @location(1) angle: f32,
+    @location(2) size: f32,
+    @location(3) edge_index: u32,
+    @location(4) color: vec4<f32>,
+};
+
+struct VertexOut {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+// Tip at the origin, tail swept back along -x. Matches the Canvas2D head: the tip sits ON the
+// endpoint and the barbs trail behind it, so the head points where the segment was going.
+var<private> HEAD: array<vec2<f32>, 3> = array<vec2<f32>, 3>(
+    vec2<f32>( 0.0,  0.0),
+    vec2<f32>(-1.0,  0.4),
+    vec2<f32>(-1.0, -0.4),
+);
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32, head: Arrowhead) -> VertexOut {
+    let local = HEAD[vertex_index] * head.size;
+    let c = cos(head.angle);
+    let s = sin(head.angle);
+    let rotated = vec2<f32>(local.x * c - local.y * s, local.x * s + local.y * c);
+    let world = head.position + rotated;
+
+    var out: VertexOut;
+    out.clip_position = vec4<f32>(world * camera.transform.xy + camera.transform.zw, 0.0, 1.0);
+    out.color = head.color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    return in.color;
 }
 "#;
 
@@ -1327,6 +1505,107 @@ mod tests {
         assert!(
             plan.text_runs.is_empty() && plan.text_quads.is_empty(),
             "an unlabelled diagram produced text"
+        );
+    }
+
+    /// A dotted arrow must carry its dash to the GPU.
+    ///
+    /// `-.->` and `-->` mean different things to a reader, so a dash dropped in the plan is a
+    /// semantic loss, not a cosmetic one — the GPU would draw a solid line asserting a relationship
+    /// the author did not write.
+    #[test]
+    fn a_dotted_arrow_carries_its_dash_pattern() {
+        let ir = ir_with_edge_at_fixture_index(fm_core::ArrowType::DottedArrow);
+        let plan = GpuRenderPlan::from_layout(&ir, &test_layout(), 1.25);
+
+        let segment = plan.edge_segments.first().expect("a segment");
+        assert!(
+            segment.dash[0] > 0.0 && segment.dash[1] > 0.0,
+            "the dotted arrow reached the plan solid: {:?}",
+            segment.dash
+        );
+    }
+
+    /// CONTROL: a solid arrow carries NO dash.
+    ///
+    /// Without this, a bug that stamped the dotted pattern on everything would satisfy the test
+    /// above and dot the entire diagram.
+    #[test]
+    fn a_solid_arrow_carries_no_dash() {
+        let ir = ir_with_edge_at_fixture_index(fm_core::ArrowType::Arrow);
+        let plan = GpuRenderPlan::from_layout(&ir, &test_layout(), 1.25);
+
+        let segment = plan.edge_segments.first().expect("a segment");
+        assert_eq!(
+            segment.dash,
+            [0.0, 0.0],
+            "a solid arrow acquired a dash pattern"
+        );
+    }
+
+    /// A declared `linkStyle` colour reaches both the segment AND its arrowhead.
+    #[test]
+    fn a_declared_link_colour_reaches_the_segment_and_its_head() {
+        let mut ir = ir_with_edge_at_fixture_index(fm_core::ArrowType::Arrow);
+        ir.style_refs.push(fm_core::IrStyleRef {
+            target: fm_core::IrStyleTarget::Link(7),
+            style: String::from("stroke:#ff0000"),
+            span: Span::default(),
+        });
+
+        let plan = GpuRenderPlan::from_layout(&ir, &test_layout(), 1.25);
+        let segment = plan.edge_segments.first().expect("a segment");
+
+        assert!(
+            (segment.color[0] - 1.0).abs() < 1e-4
+                && segment.color[1].abs() < 1e-4
+                && segment.color[2].abs() < 1e-4,
+            "the declared link colour never reached the segment: {:?}",
+            segment.color
+        );
+
+        if let Some(head) = plan.arrowheads.first() {
+            assert_eq!(
+                head.color, segment.color,
+                "the arrowhead kept a different colour from the line it terminates"
+            );
+        }
+    }
+
+    /// CONTROL: an unstyled edge keeps the theme stroke.
+    #[test]
+    fn an_unstyled_edge_keeps_the_theme_stroke() {
+        let ir = ir_with_edge_at_fixture_index(fm_core::ArrowType::Arrow);
+        let plan = GpuRenderPlan::from_layout(&ir, &test_layout(), 1.25);
+
+        let segment = plan.edge_segments.first().expect("a segment");
+        assert_eq!(
+            segment.color,
+            super::DEFAULT_EDGE_STROKE_RGBA,
+            "an unstyled edge did not keep the theme stroke"
+        );
+    }
+
+    /// Every shader the plan ships must declare attributes matching its instance struct.
+    ///
+    /// Same silent-drift risk as the shape switch: a WGSL location that does not match the Rust
+    /// field order still compiles and simply reads the wrong bytes, so the picture is wrong rather
+    /// than the build being broken.
+    #[test]
+    fn the_edge_shaders_declare_the_fields_the_buffers_carry() {
+        assert!(
+            super::EDGE_WGSL.contains("@location(3) color")
+                && super::EDGE_WGSL.contains("@location(4) dash")
+                && super::EDGE_WGSL.contains("@location(5) width"),
+            "the edge shader attributes do not match GpuEdgeSegment's field order"
+        );
+        assert!(
+            super::ARROWHEAD_WGSL.contains("@location(4) color"),
+            "the arrowhead shader does not read the colour the instance carries"
+        );
+        assert!(
+            super::EDGE_WGSL.contains("discard"),
+            "the edge shader never discards, so the dash gap would render as a solid line"
         );
     }
 }

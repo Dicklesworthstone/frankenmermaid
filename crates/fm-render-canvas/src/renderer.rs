@@ -836,10 +836,30 @@ impl Canvas2dRenderer {
             *labels_drawn += 1;
         };
 
-        draw(quad.x_axis_left.as_ref(), left + pad, bottom + pad, TextAlign::Left);
-        draw(quad.x_axis_right.as_ref(), right - pad, bottom + pad, TextAlign::Right);
-        draw(quad.y_axis_top.as_ref(), left - pad, top + pad, TextAlign::Right);
-        draw(quad.y_axis_bottom.as_ref(), left - pad, bottom - pad, TextAlign::Right);
+        draw(
+            quad.x_axis_left.as_ref(),
+            left + pad,
+            bottom + pad,
+            TextAlign::Left,
+        );
+        draw(
+            quad.x_axis_right.as_ref(),
+            right - pad,
+            bottom + pad,
+            TextAlign::Right,
+        );
+        draw(
+            quad.y_axis_top.as_ref(),
+            left - pad,
+            top + pad,
+            TextAlign::Right,
+        );
+        draw(
+            quad.y_axis_bottom.as_ref(),
+            left - pad,
+            bottom - pad,
+            TextAlign::Right,
+        );
 
         // The quadrant NAMES, which this drew none of (bd-039t, third widening of
         // `renderer_agreement.rs`). bd-59o4 fixed the four AXIS labels in both this renderer and
@@ -885,57 +905,6 @@ impl Canvas2dRenderer {
             quarter_y_bottom,
             TextAlign::Center,
         );
-    }
-
-    /// Resolve an edge's stroke colour and width from the author's own styling (bd-lvj3).
-    ///
-    /// The edge twin of [`resolve_node_colors`]. Three channels, merged in the order mermaid
-    /// applies them — later wins:
-    ///   1. `linkStyle default stroke:#f00`  (`IrStyleTarget::LinkDefault`)
-    ///   2. `linkStyle 3 stroke:#f00`        (`IrStyleTarget::Link(index)`)
-    ///   3. the edge's own `inline_style`
-    ///
-    /// `LinkDefault` must be merged FIRST so a per-index `linkStyle` overrides it rather than the
-    /// other way round — that ordering is the whole point of having a default.
-    ///
-    /// Returns `None` per channel when nothing was declared, so the caller keeps the theme colour
-    /// and the arrow-derived width from `legacy_edge_stroke` instead of a value invented here.
-    fn resolve_edge_style(
-        &self,
-        ir: &MermaidDiagramIr,
-        edge_index: usize,
-    ) -> (Option<String>, Option<f64>) {
-        let mut merged: std::collections::BTreeMap<String, String> =
-            std::collections::BTreeMap::new();
-
-        for style_ref in &ir.style_refs {
-            if matches!(style_ref.target, fm_core::IrStyleTarget::LinkDefault) {
-                merged.extend(fm_core::parse_style_string(&style_ref.style).properties);
-            }
-        }
-
-        for style_ref in &ir.style_refs {
-            if let fm_core::IrStyleTarget::Link(target) = style_ref.target
-                && target == edge_index
-            {
-                merged.extend(fm_core::parse_style_string(&style_ref.style).properties);
-            }
-        }
-
-        if let Some(edge) = ir.edges.get(edge_index)
-            && let Some(inline) = edge.inline_style.as_ref()
-        {
-            merged.extend(inline.properties.clone());
-        }
-
-        // `stroke-width` arrives as CSS, so `2px` and `2` both have to parse. A malformed value
-        // yields `None` and the arrow-derived width stands — a declared style must never be able to
-        // make an edge vanish by giving it a width of NaN.
-        let width = merged.get("stroke-width").and_then(|raw| {
-            raw.trim().trim_end_matches("px").trim().parse::<f64>().ok().filter(|w| w.is_finite() && *w > 0.0)
-        });
-
-        (merged.get("stroke").cloned(), width)
     }
 
     fn draw_bands<C: Canvas2dContext>(
@@ -1193,7 +1162,11 @@ impl Canvas2dRenderer {
             }
             ctx.set_fill_style(&self.config.label_color);
             ctx.set_font(tick_font.get_or_insert_with(|| {
-                format!("{}px {}", self.config.font_size * 0.75, self.config.font_family)
+                format!(
+                    "{}px {}",
+                    self.config.font_size * 0.75,
+                    self.config.font_family
+                )
             }));
             ctx.fill_text(&tick.label, f64::from(tick.position) + offset_x, y);
             self.draw_calls += 1;
@@ -1319,7 +1292,11 @@ impl Canvas2dRenderer {
             if !note.text.is_empty() {
                 ctx.set_fill_style(&self.config.label_color);
                 ctx.set_font(note_font.get_or_insert_with(|| {
-                    format!("{}px {}", self.config.font_size * 0.8, self.config.font_family)
+                    format!(
+                        "{}px {}",
+                        self.config.font_size * 0.8,
+                        self.config.font_family
+                    )
                 }));
                 // Multi-line aware: `note right of X … end note` is the form that carries more than a
                 // sentence, and drawing only the first line would silently drop the rest.
@@ -1533,11 +1510,12 @@ impl Canvas2dRenderer {
             // bead landed. The colour is resolved ONCE here and threaded through the path, the UML
             // markers and the arrowheads below — an edge whose line obeyed the author while its
             // arrowhead kept the theme colour would be a worse bug than the one being fixed.
-            let (declared_stroke, declared_width) =
-                self.resolve_edge_style(ir, edge_path.edge_index);
+            let (declared_stroke, declared_width) = resolve_edge_style(ir, edge_path.edge_index);
             let (legacy_width, dash_pattern) =
                 legacy_edge_stroke(arrow, self.config.edge_stroke_width);
-            let stroke = declared_stroke.as_deref().unwrap_or(&self.config.edge_stroke);
+            let stroke = declared_stroke
+                .as_deref()
+                .unwrap_or(&self.config.edge_stroke);
             let stroke_width = declared_width.unwrap_or(legacy_width);
 
             ctx.set_stroke_style(stroke);
@@ -1608,14 +1586,7 @@ impl Canvas2dRenderer {
                 match arrow {
                     ArrowType::Line => {}
                     ArrowType::Circle => {
-                        draw_circle_marker(
-                            ctx,
-                            ex,
-                            ey,
-                            4.0,
-                            &self.config.node_fill,
-                            stroke,
-                        );
+                        draw_circle_marker(ctx, ex, ey, 4.0, &self.config.node_fill, stroke);
                         self.draw_calls += 1;
                     }
                     ArrowType::Cross => {
@@ -1661,19 +1632,21 @@ impl Canvas2dRenderer {
             // Unlike the terminal, this needs no blank-cell search: the canvas has real coordinates
             // rather than a character grid, so the numbers are simply inset along the edge — the
             // same approach fm-render-svg takes.
-            if let Some(edge) = ir_edge.filter(|e| {
-                e.source_cardinality().is_some() || e.target_cardinality().is_some()
-            }) && points.len() >= 2
+            if let Some(edge) = ir_edge
+                .filter(|e| e.source_cardinality().is_some() || e.target_cardinality().is_some())
+                && points.len() >= 2
             {
                 let inset = self.config.font_size * 1.2;
-                let font = edge_label_font
-                    .get_or_insert_with(|| secondary_label_font_css(&self.config));
+                let font =
+                    edge_label_font.get_or_insert_with(|| secondary_label_font_css(&self.config));
                 ctx.set_font(font.as_str());
                 ctx.set_fill_style(&self.config.label_color);
                 ctx.set_text_align(TextAlign::Center);
                 ctx.set_text_baseline(TextBaseline::Middle);
 
-                let mut place = |text: Option<&str>, from: &fm_layout::LayoutPoint, toward: &fm_layout::LayoutPoint| {
+                let mut place = |text: Option<&str>,
+                                 from: &fm_layout::LayoutPoint,
+                                 toward: &fm_layout::LayoutPoint| {
                     let Some(text) = text.filter(|t| !t.is_empty()) else {
                         return;
                     };
@@ -1682,12 +1655,12 @@ impl Canvas2dRenderer {
                     let (dx, dy) = (tx - fx, ty - fy);
                     let len = dx.hypot(dy);
                     // A zero-length segment has no direction to inset along; draw at the point.
-                    let (ux, uy) = if len > 0.0 { (dx / len, dy / len) } else { (0.0, 0.0) };
-                    ctx.fill_text(
-                        text,
-                        fx + ux * inset + offset_x,
-                        fy + uy * inset + offset_y,
-                    );
+                    let (ux, uy) = if len > 0.0 {
+                        (dx / len, dy / len)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    ctx.fill_text(text, fx + ux * inset + offset_x, fy + uy * inset + offset_y);
                     self.draw_calls += 1;
                 };
 
@@ -2034,8 +2007,8 @@ impl Canvas2dRenderer {
                     *labels_drawn += 1;
                     cursor_y += member_font * 1.2;
                 }
-            } else if let Some((node, meta)) = ir_node
-                .and_then(|n| n.requirement_meta.as_deref().map(|m| (n, m)))
+            } else if let Some((node, meta)) =
+                ir_node.and_then(|n| n.requirement_meta.as_deref().map(|m| (n, m)))
             {
                 // REQUIREMENT rows (bd-rk14) — canvas twin of the terminal fix in bd-039t.
                 // Measured: `requirement R { id: 1 / text: hello }` drew `hello` in the SVG and not
@@ -2570,6 +2543,63 @@ fn sanitize_canvas_paint(value: &str) -> Option<String> {
         .bytes()
         .all(|b| b.is_ascii_alphabetic())
         .then(|| value.to_ascii_lowercase())
+}
+
+/// Resolve an edge's stroke colour and width from the author's own styling (bd-lvj3).
+///
+/// The edge twin of [`resolve_node_colors`], and a free function for the same reason: the
+/// WebGPU plan needs the identical answer for its segment buffer.
+///
+/// The edge twin of [`resolve_node_colors`]. Three channels, merged in the order mermaid
+/// applies them — later wins:
+///   1. `linkStyle default stroke:#f00`  (`IrStyleTarget::LinkDefault`)
+///   2. `linkStyle 3 stroke:#f00`        (`IrStyleTarget::Link(index)`)
+///   3. the edge's own `inline_style`
+///
+/// `LinkDefault` must be merged FIRST so a per-index `linkStyle` overrides it rather than the
+/// other way round — that ordering is the whole point of having a default.
+///
+/// Returns `None` per channel when nothing was declared, so the caller keeps the theme colour
+/// and the arrow-derived width from `legacy_edge_stroke` instead of a value invented here.
+pub(crate) fn resolve_edge_style(
+    ir: &MermaidDiagramIr,
+    edge_index: usize,
+) -> (Option<String>, Option<f64>) {
+    let mut merged: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+
+    for style_ref in &ir.style_refs {
+        if matches!(style_ref.target, fm_core::IrStyleTarget::LinkDefault) {
+            merged.extend(fm_core::parse_style_string(&style_ref.style).properties);
+        }
+    }
+
+    for style_ref in &ir.style_refs {
+        if let fm_core::IrStyleTarget::Link(target) = style_ref.target
+            && target == edge_index
+        {
+            merged.extend(fm_core::parse_style_string(&style_ref.style).properties);
+        }
+    }
+
+    if let Some(edge) = ir.edges.get(edge_index)
+        && let Some(inline) = edge.inline_style.as_ref()
+    {
+        merged.extend(inline.properties.clone());
+    }
+
+    // `stroke-width` arrives as CSS, so `2px` and `2` both have to parse. A malformed value
+    // yields `None` and the arrow-derived width stands — a declared style must never be able to
+    // make an edge vanish by giving it a width of NaN.
+    let width = merged.get("stroke-width").and_then(|raw| {
+        raw.trim()
+            .trim_end_matches("px")
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|w| w.is_finite() && *w > 0.0)
+    });
+
+    (merged.get("stroke").cloned(), width)
 }
 
 /// Resolve a node's fill and stroke from the author's own styling (bd-lvj3).
@@ -3826,19 +3856,20 @@ mod tests {
 
         // NON-VACUITY: the layout must actually publish a marker, or this test asserts nothing about
         // the renderer and would pass on a diagram with nothing to draw.
-        let marker = layout
-            .extensions
-            .sequence_lifecycle_markers
-            .first()
-            .expect(
-                "CONTROL FAILED: this source produced no lifecycle marker, so the renderer has \
+        let marker = layout.extensions.sequence_lifecycle_markers.first().expect(
+            "CONTROL FAILED: this source produced no lifecycle marker, so the renderer has \
                  nothing to draw and this test cannot detect the defect it was written for",
-            );
+        );
         let size = f64::from(marker.size);
         assert!(size > 0.0, "a zero-size marker cannot be drawn or detected");
 
         let mut ctx = MockCanvas2dContext::new(1200.0, 800.0);
-        let _ = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &CanvasRenderConfig::default());
+        let _ = crate::render_to_canvas_with_layout(
+            &ir,
+            &layout,
+            &mut ctx,
+            &CanvasRenderConfig::default(),
+        );
         let ops = ctx.operations().to_vec();
 
         let has_diagonal = |dx: f64, dy: f64| {
@@ -3880,7 +3911,12 @@ mod tests {
         );
 
         let mut ctx = MockCanvas2dContext::new(1200.0, 800.0);
-        let _ = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &CanvasRenderConfig::default());
+        let _ = crate::render_to_canvas_with_layout(
+            &ir,
+            &layout,
+            &mut ctx,
+            &CanvasRenderConfig::default(),
+        );
         let ops = ctx.operations().to_vec();
 
         // Any perfectly diagonal MoveTo -> LineTo pair with equal-magnitude dx and dy would be the
@@ -3901,7 +3937,6 @@ mod tests {
             "a destroy-cross-shaped diagonal was drawn for a diagram with no destroy"
         );
     }
-
 
     /// A gantt must show its time axis on the canvas backend (bd-t1jj).
     ///
@@ -3984,14 +4019,15 @@ mod tests {
         let alpha_draws = ctx
             .operations()
             .iter()
-            .filter(|op| matches!(op, DrawOperation::FillText(text, _, _) if text.contains("Alpha")))
+            .filter(
+                |op| matches!(op, DrawOperation::FillText(text, _, _) if text.contains("Alpha")),
+            )
             .count();
         assert_eq!(
             alpha_draws, 1,
             "a label was drawn more than once, suggesting the axis pass ran for a diagram with no axis"
         );
     }
-
 
     /// A stateDiagram note must appear in the browser preview (bd-t1jj).
     ///
@@ -4010,14 +4046,10 @@ mod tests {
 
         // NON-VACUITY: the layout must actually publish a note, or this asserts nothing about the
         // renderer and would pass on a diagram with nothing to draw.
-        let note = layout
-            .extensions
-            .state_notes
-            .first()
-            .expect(
-                "CONTROL FAILED: this source produced no state note, so the renderer has nothing to \
+        let note = layout.extensions.state_notes.first().expect(
+            "CONTROL FAILED: this source produced no state note, so the renderer has nothing to \
                  draw and this test cannot detect the defect it was written for",
-            );
+        );
         assert!(!note.text.is_empty(), "an empty note cannot be detected");
 
         let mut ctx = MockCanvas2dContext::new(1200.0, 800.0);
@@ -4080,9 +4112,11 @@ mod tests {
             DrawOperation::FillText(text, _, _) => text.contains("waiting"),
             _ => false,
         });
-        assert!(!drew_note_text, "note text was drawn for a diagram with no note");
+        assert!(
+            !drew_note_text,
+            "note text was drawn for a diagram with no note"
+        );
     }
-
 
     /// A gantt task name must honour its resolved placement on canvas too (bd-t1jj).
     ///
@@ -4115,7 +4149,12 @@ mod tests {
             .expect("CONTROL FAILED: no task resolved to OutsideLeft, so this proves nothing");
 
         let mut ctx = MockCanvas2dContext::new(1400.0, 700.0);
-        let _ = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &CanvasRenderConfig::default());
+        let _ = crate::render_to_canvas_with_layout(
+            &ir,
+            &layout,
+            &mut ctx,
+            &CanvasRenderConfig::default(),
+        );
         let ops = ctx.operations().to_vec();
 
         // The OutsideLeft label must be drawn RIGHT-aligned, at the anchor layout resolved.
@@ -4150,9 +4189,9 @@ mod tests {
                         // Comparing them directly fails by exactly offset_x -- which is the mistake
                         // this assertion made on its first draft, and the same one the terminal
                         // version of this test made before it.
-                        let offset = inside_drawn_x
-                            .expect("the Inside-placed task must be drawn before the OutsideLeft one")
-                            - f64::from(inside_anchor);
+                        let offset = inside_drawn_x.expect(
+                            "the Inside-placed task must be drawn before the OutsideLeft one",
+                        ) - f64::from(inside_anchor);
                         assert!(
                             (*x - (f64::from(outside_left.x) + offset)).abs() < 2.0,
                             "label drawn at {x}; with offset {offset} the anchor {} implies {}",
@@ -4181,19 +4220,27 @@ mod tests {
             "CONTROL FAILED: a flowchart produced gantt labels"
         );
         let mut ctx = MockCanvas2dContext::new(800.0, 400.0);
-        let _ = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &CanvasRenderConfig::default());
+        let _ = crate::render_to_canvas_with_layout(
+            &ir,
+            &layout,
+            &mut ctx,
+            &CanvasRenderConfig::default(),
+        );
         let mut align = TextAlign::Left;
         for op in ctx.operations() {
             match op {
                 DrawOperation::SetTextAlign(a) => align = *a,
                 DrawOperation::FillText(text, _, _) if text.contains("Alpha") => {
-                    assert_eq!(align, TextAlign::Center, "a flowchart label lost its centring");
+                    assert_eq!(
+                        align,
+                        TextAlign::Center,
+                        "a flowchart label lost its centring"
+                    );
                 }
                 _ => {}
             }
         }
     }
-
 
     /// A packet field that wraps across a 32-bit boundary must be drawn on BOTH rows (bd-t1jj).
     ///
@@ -4220,7 +4267,12 @@ mod tests {
         );
 
         let mut ctx = MockCanvas2dContext::new(1400.0, 700.0);
-        let _ = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &CanvasRenderConfig::default());
+        let _ = crate::render_to_canvas_with_layout(
+            &ir,
+            &layout,
+            &mut ctx,
+            &CanvasRenderConfig::default(),
+        );
         let count = |needle: &str| {
             ctx.operations()
                 .iter()
@@ -4249,7 +4301,12 @@ mod tests {
             "CONTROL FAILED: this packet produced a continuation, so it cannot show the pass is inert"
         );
         let mut ctx = MockCanvas2dContext::new(1400.0, 700.0);
-        let _ = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &CanvasRenderConfig::default());
+        let _ = crate::render_to_canvas_with_layout(
+            &ir,
+            &layout,
+            &mut ctx,
+            &CanvasRenderConfig::default(),
+        );
         let drawn = ctx
             .operations()
             .iter()
@@ -4257,7 +4314,6 @@ mod tests {
             .count();
         assert_eq!(drawn, 1, "a field was duplicated although nothing wrapped");
     }
-
 
     /// A sequence diagram's participant headers must be mirrored at the FOOT on canvas (bd-t1jj).
     ///
@@ -4288,14 +4344,23 @@ mod tests {
         );
 
         let mut ctx = MockCanvas2dContext::new(1200.0, 800.0);
-        let _ = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &CanvasRenderConfig::default());
+        let _ = crate::render_to_canvas_with_layout(
+            &ir,
+            &layout,
+            &mut ctx,
+            &CanvasRenderConfig::default(),
+        );
         let count = |needle: &str| {
             ctx.operations()
                 .iter()
                 .filter(|op| matches!(op, DrawOperation::FillText(t, _, _) if t == needle))
                 .count()
         };
-        assert_eq!(count("Alice"), 2, "Alice was not drawn at both head and foot");
+        assert_eq!(
+            count("Alice"),
+            2,
+            "Alice was not drawn at both head and foot"
+        );
         assert_eq!(count("Bob"), 2, "Bob was not drawn at both head and foot");
     }
 
@@ -4309,7 +4374,12 @@ mod tests {
             "CONTROL FAILED: a flowchart produced mirror headers"
         );
         let mut ctx = MockCanvas2dContext::new(800.0, 400.0);
-        let _ = crate::render_to_canvas_with_layout(&ir, &layout, &mut ctx, &CanvasRenderConfig::default());
+        let _ = crate::render_to_canvas_with_layout(
+            &ir,
+            &layout,
+            &mut ctx,
+            &CanvasRenderConfig::default(),
+        );
         let alpha = ctx
             .operations()
             .iter()
