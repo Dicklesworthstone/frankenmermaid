@@ -1849,6 +1849,17 @@ pub enum IrStyleTarget {
     Link(usize),
     /// `linkStyle default stroke:#f00` — default style for all edges.
     LinkDefault,
+    /// `style mySubgraph fill:#f00` — applies CSS to a CLUSTER by index (bd-xfmm).
+    ///
+    /// bd-xfmm taught the parser to WARN when a `style` target resolved to nothing, and named the
+    /// two causes it could not tell apart: a misspelled node id, and a SUBGRAPH id, "which is not a
+    /// node, is not in this index, and has no `IrStyleTarget` variant to be recorded in even if it
+    /// were found". This is that missing variant, so the second cause now has somewhere to go.
+    ///
+    /// Carries the cluster INDEX, matching `IrCluster.cluster_index` and
+    /// `mermaid_cluster_element_id`, so a consumer resolves it the same way it resolves any other
+    /// cluster reference.
+    Cluster(usize),
 }
 
 /// A style reference from a `classDef`, `style`, or `linkStyle` directive.

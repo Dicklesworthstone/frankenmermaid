@@ -2852,6 +2852,33 @@ fn resolve_node_inline_styles(
 }
 
 /// Resolve inline style for an edge based on `linkStyle` directives.
+/// The CSS a `style mySubgraph fill:#f00` declares for this cluster, if any (bd-xfmm).
+///
+/// bd-xfmm could only warn about a subgraph style, because `IrStyleTarget` had no `Cluster`
+/// variant. It has one now, and this is the half that makes the directive visible: without a
+/// consumer the variant would be one more parsed-stored-drawn-by-nothing field, which is the exact
+/// class bd-jgco, bd-jerh and bd-bk7h all belong to.
+///
+/// Returns `None` when nothing was declared, so the caller keeps the theme fill rather than a
+/// colour resolved from an empty map.
+fn resolve_cluster_inline_style(ir: &MermaidDiagramIr, cluster_index: usize) -> Option<String> {
+    use fm_core::IrStyleTarget;
+    if ir.style_refs.is_empty() {
+        return None;
+    }
+
+    let mut merged = BTreeMap::new();
+    for sr in &ir.style_refs {
+        if let IrStyleTarget::Cluster(target) = sr.target
+            && target == cluster_index
+        {
+            merged.extend(fm_core::parse_style_string(&sr.style).properties);
+        }
+    }
+
+    style_map_to_css(&merged)
+}
+
 fn resolve_edge_inline_style(ir: &MermaidDiagramIr, edge_index: usize) -> Option<String> {
     use fm_core::{IrStyleTarget, parse_style_string};
     if let Some(edge) = ir.edges.get(edge_index)
@@ -4407,6 +4434,14 @@ fn render_layout_to_svg(
 
         if let Some(dasharray) = stroke_style {
             rect = rect.stroke_dasharray(dasharray);
+        }
+
+        // The author's own `style mySubgraph ...` (bd-xfmm). Applied LAST of the colour sources so
+        // a declared value wins over the theme fill/stroke set on the builder above - which is what
+        // "the author styled it" has to mean - and as a `style` ATTRIBUTE, matching how an edge's
+        // resolved style is applied a few thousand lines below.
+        if let Some(declared) = resolve_cluster_inline_style(ir, cluster.cluster_index) {
+            rect = rect.attr("style", &declared);
         }
 
         if is_c4_boundary {

@@ -11599,20 +11599,30 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                                 style.to_string(),
                                 span,
                             );
+                        } else if let Some(cluster_index) = builder.cluster_index_by_key(target) {
+                            // A SUBGRAPH id. bd-xfmm identified this as one of the two causes of a
+                            // silently-dropped `style`, and could only WARN about it because there
+                            // was no `IrStyleTarget` variant to record it in: "subgraph and cluster
+                            // ids cannot be styled". There is one now, so the directive is honoured
+                            // instead of merely reported.
+                            //
+                            // Tried AFTER the node lookup, never before: a node and a subgraph can
+                            // share a name, and mermaid resolves `style X` to the NODE in that case.
+                            // Reversing the order would silently retarget existing diagrams.
+                            builder.push_style_ref(
+                                fm_core::IrStyleTarget::Cluster(cluster_index),
+                                style.to_string(),
+                                span,
+                            );
                         } else {
                             // A `style` target that resolves to nothing used to be discarded in
                             // total silence (bd-xfmm). Two very different mistakes produced the
-                            // same nothing: a misspelled node id, and a SUBGRAPH id -- which is
-                            // not a node, is not in this index, and has no `IrStyleTarget`
-                            // variant to be recorded in even if it were found. The author could
-                            // not tell "you spelled it wrong" from "that is not supported", and
-                            // both looked identical to a diagram that simply ignored them.
-                            //
-                            // This does not colour anything. `style <subgraph>` still has no
-                            // effect; the point is that the failure stops being invisible.
+                            // same nothing: a misspelled node id, and a SUBGRAPH id. The subgraph
+                            // half is handled above now, so what reaches here is the misspelling —
+                            // and the message says so rather than blaming an unsupported feature.
                             builder.add_warning(format!(
-                                "style directive target `{target}` is not a node id; the style was \
-                                 ignored (subgraph and cluster ids cannot be styled)"
+                                "style directive target `{target}` matches no node or subgraph id; \
+                                 the style was ignored"
                             ));
                         }
                     }
@@ -18779,25 +18789,55 @@ Rel_Back(db, app, "Responds")"#,
     ///
     /// mermaid rejects a duplicate `branch` outright. We stay permissive and render, but the user
     /// has to be told, because the alternative is a silently different picture.
-    /// A `style` target that names no node warns instead of vanishing (bd-xfmm).
+    /// A `style` on a SUBGRAPH is now honoured, not merely reported (bd-xfmm).
     ///
-    /// A subgraph id is the motivating case: it is not a node, so `node_id_by_key` misses it, and
-    /// `IrStyleTarget` has no `Cluster` variant to hold it even if it did. The directive therefore
-    /// cannot work today — but silence made "not supported" indistinguishable from "you spelled it
-    /// wrong", which is the part being fixed.
+    /// bd-xfmm could only warn here: a subgraph id is not a node, so `node_id_by_key` misses it,
+    /// and `IrStyleTarget` had no `Cluster` variant to hold it even if it were found. This test
+    /// used to assert that warning. The variant exists now, so the directive is RECORDED against
+    /// the cluster and the warning is gone — asserting the warning would pin the old limitation as
+    /// if it were the requirement.
     #[test]
-    fn style_directive_on_a_subgraph_warns_instead_of_vanishing() {
+    fn style_directive_on_a_subgraph_is_recorded_against_the_cluster() {
         let parsed = parse_mermaid(
             "flowchart TD\n  subgraph one[One]\n    a[A]\n  end\n  style one fill:#ff0000\n",
         );
 
         assert!(
-            parsed
+            parsed.ir.style_refs.iter().any(|style_ref| matches!(
+                style_ref.target,
+                fm_core::IrStyleTarget::Cluster(_)
+            ) && style_ref.style.contains("ff0000")),
+            "a subgraph style was not recorded against a cluster: {:?}",
+            parsed.ir.style_refs
+        );
+        assert!(
+            !parsed
                 .warnings
                 .iter()
-                .any(|warning| warning.contains("`one`") && warning.contains("not a node id")),
-            "a style directive on a subgraph passed in silence; warnings: {:?}",
+                .any(|warning| warning.contains("`one`")),
+            "a subgraph style is supported now and must not warn: {:?}",
             parsed.warnings
+        );
+    }
+
+    /// CONTROL: a node and a subgraph may share a name, and mermaid resolves `style X` to the NODE.
+    ///
+    /// The cluster lookup runs AFTER the node lookup for exactly this reason. Reversing the two
+    /// would silently retarget every existing diagram that names both, and no other test here would
+    /// notice — both orders record a style ref, just against different things.
+    #[test]
+    fn a_style_target_shared_by_a_node_and_a_subgraph_resolves_to_the_node() {
+        let parsed = parse_mermaid(
+            "flowchart TD\n  subgraph dup[Dup]\n    dup[A]\n  end\n  style dup fill:#ff0000\n",
+        );
+
+        assert!(
+            parsed.ir.style_refs.iter().any(|style_ref| matches!(
+                style_ref.target,
+                fm_core::IrStyleTarget::Node(_)
+            )),
+            "a name shared by a node and a subgraph resolved to the cluster: {:?}",
+            parsed.ir.style_refs
         );
     }
 

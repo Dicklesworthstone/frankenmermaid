@@ -1325,6 +1325,15 @@ impl IrBuilder {
     }
 
     /// Look up a node ID by its string key (as used in the diagram source).
+    /// The cluster a `style`/`class` target names, if it names one (bd-xfmm).
+    ///
+    /// The same normalisation `ensure_cluster` applies when it INSERTS the key, so a lookup cannot
+    /// miss an entry the insert created. Two different trim rules here would make a subgraph
+    /// styleable or not depending on the author's whitespace.
+    pub(crate) fn cluster_index_by_key(&self, key: &str) -> Option<usize> {
+        self.cluster_index_by_key.get(key.trim()).copied()
+    }
+
     pub(crate) fn node_id_by_key(&self, key: &str) -> Option<IrNodeId> {
         self.node_id_index.get(key, &self.ir.nodes)
     }
