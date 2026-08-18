@@ -7488,7 +7488,7 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
         // `0.3, 0.6] radius: 10, color: #ff0000`, so the split on `,` gave a y of
         // `0.6] radius: 10` — which fails to parse and fell through `unwrap_or(0.5)` to the MIDDLE
         // of the chart. In a quadrant chart the position IS the content, so the reader saw a point
-        // confidently placed somewhere the author never put it, with no diagnostic (bd-qdstyle).
+        // confidently placed somewhere the author never put it, with no diagnostic (bd-8dk0m).
         //
         // Taking the text BETWEEN the brackets fixes that. The no-bracket fallback below is kept
         // byte-for-byte, so a bare `A: 0.3, 0.6` behaves exactly as before.
@@ -7557,7 +7557,7 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
         if lower.starts_with("xychart") {
             // `xychart-beta horizontal` swaps the axes. The whole header line was skipped, so the
             // orientation was dropped in SILENCE and the reader got a vertical chart with no hint
-            // that the directive had been seen — the chart simply looked wrong (bd-xyhorz).
+            // that the directive had been seen — the chart simply looked wrong (bd-8dk0m).
             //
             // NAMED rather than stored: `IrXyChartMeta` has no orientation field and no renderer
             // reads one, so a flag here would be dead IR of the kind docs/IR_FIELD_SWEEP.md exists
@@ -19587,6 +19587,104 @@ Rel_Back(db, app, "Responds")"#,
     }
 
     // ── ER notation storage tests ──────────────────────────────────────
+
+    /// A styled quadrant point lands where it was WRITTEN (bd-8dk0m).
+    ///
+    /// Everything after the first colon was taken as coordinate text, so
+    /// `A: [0.3, 0.6] radius: 10` split on the comma into a y of `0.6] radius: 10`, which fails to
+    /// parse and fell through `unwrap_or(0.5)` to the middle of the chart. In a quadrant chart the
+    /// POSITION IS THE CONTENT, so the point was drawn confidently somewhere the author never put
+    /// it, with no diagnostic.
+    #[test]
+    fn a_styled_quadrant_point_keeps_its_coordinates() {
+        let parsed = parse_mermaid(
+            "quadrantChart\n  x-axis Low --> High\n  A: [0.3, 0.6] radius: 10, color: #ff0000\n",
+        );
+
+        let points = parsed
+            .ir
+            .quadrant_meta
+            .as_ref()
+            .map(|meta| meta.points.clone())
+            .unwrap_or_default();
+        let point = points
+            .iter()
+            .find(|p| p.label == "A")
+            .unwrap_or_else(|| panic!("point A was lost: {points:?}"));
+        assert!(
+            (point.x - 0.3).abs() < 1e-6 && (point.y - 0.6).abs() < 1e-6,
+            "the styling clause moved the point: {point:?}"
+        );
+        assert!(
+            parsed.warnings.iter().any(|w| w.contains("point styling")),
+            "the unapplied styling was dropped in silence: {:?}",
+            parsed.warnings
+        );
+    }
+
+    /// CONTROL: an UNSTYLED point is unchanged and raises no warning — including the bracket-less
+    /// spelling, whose fallback path this fix deliberately left byte-for-byte.
+    #[test]
+    fn unstyled_quadrant_points_are_unchanged() {
+        for source in [
+            "quadrantChart\n  x-axis Low --> High\n  A: [0.3, 0.6]\n",
+            "quadrantChart\n  x-axis Low --> High\n  A: 0.3, 0.6\n",
+        ] {
+            let parsed = parse_mermaid(source);
+            let points = parsed
+                .ir
+                .quadrant_meta
+                .as_ref()
+                .map(|meta| meta.points.clone())
+                .unwrap_or_default();
+            let point = points
+                .iter()
+                .find(|p| p.label == "A")
+                .unwrap_or_else(|| panic!("point A was lost for {source}: {points:?}"));
+            assert!(
+                (point.x - 0.3).abs() < 1e-6 && (point.y - 0.6).abs() < 1e-6,
+                "an unstyled point moved: {point:?} for {source}"
+            );
+            assert!(
+                !parsed.warnings.iter().any(|w| w.contains("point styling")),
+                "an unstyled point produced a styling warning: {:?}",
+                parsed.warnings
+            );
+        }
+    }
+
+    /// `xychart-beta horizontal` swaps the axes and we draw vertically — say so (bd-8dk0m).
+    #[test]
+    fn xychart_horizontal_orientation_is_reported_as_unapplied() {
+        let parsed = parse_mermaid("xychart-beta horizontal\n  x-axis [a, b]\n  bar [1, 2]\n");
+
+        assert!(
+            parsed.warnings.iter().any(|w| w.contains("horizontal")),
+            "the orientation was dropped in silence: {:?}",
+            parsed.warnings
+        );
+        // NON-VACUITY: the chart itself must still parse, or the warning is all there is.
+        assert!(
+            parsed
+                .ir
+                .xy_chart_meta
+                .as_ref()
+                .is_some_and(|meta| !meta.series.is_empty()),
+            "the chart did not parse, so the assertion above proves little"
+        );
+    }
+
+    /// CONTROL: an ordinary vertical chart raises no orientation warning.
+    #[test]
+    fn xychart_without_an_orientation_is_silent() {
+        let parsed = parse_mermaid("xychart-beta\n  x-axis [a, b]\n  bar [1, 2]\n");
+
+        assert!(
+            !parsed.warnings.iter().any(|w| w.contains("horizontal")),
+            "an ordinary chart produced an orientation warning: {:?}",
+            parsed.warnings
+        );
+    }
 
     /// An UNIMPLEMENTED but real mermaid type says so, instead of blaming the author (bd-8z4fk).
     ///
