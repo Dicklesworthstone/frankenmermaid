@@ -8538,6 +8538,7 @@ fn render_node_into(
         && node.menu_links.is_empty()
         && node.href().is_none()
         && node.callback().is_none()
+        && node.tooltip().is_none()
     {
         write_requirement_node_fragment_into::<true>(
             out,
@@ -8584,6 +8585,7 @@ fn render_node_into(
         && node.menu_links.is_empty()
         && node.href().is_none()
         && node.callback().is_none()
+        && node.tooltip().is_none()
     {
         write_requirement_node_fragment_into::<false>(
             out,
@@ -8637,6 +8639,7 @@ fn render_node_into(
         && node.menu_links.is_empty()
         && node.href().is_none()
         && node.callback().is_none()
+        && node.tooltip().is_none()
         && let Some(user_classes) = simple_class_node_user_suffix(node)
     {
         write_class_node_fragment_into::<true>(
@@ -8680,6 +8683,7 @@ fn render_node_into(
         && node.menu_links.is_empty()
         && node.href().is_none()
         && node.callback().is_none()
+        && node.tooltip().is_none()
         && let Some(user_classes) = simple_class_node_user_suffix(node)
     {
         write_class_node_fragment_into::<false>(
@@ -8733,6 +8737,7 @@ fn render_node_into(
         && node.menu_links.is_empty()
         && node.href().is_none()
         && node.callback().is_none()
+        && node.tooltip().is_none()
         && c4_meta.description.as_ref().is_none_or(|d| {
             wrap_text_to_lines(d, (w - 20.0).max(32.0), config.avg_char_width * 0.92).len() <= 1
         })
@@ -8794,6 +8799,7 @@ fn render_node_into(
         && node.menu_links.is_empty()
         && node.href().is_none()
         && node.callback().is_none()
+        && node.tooltip().is_none()
         && let Some(user_classes) = simple_class_node_user_suffix(node)
     {
         write_er_node_fragment_into::<true>(
@@ -8840,6 +8846,7 @@ fn render_node_into(
         && node.menu_links.is_empty()
         && node.href().is_none()
         && node.callback().is_none()
+        && node.tooltip().is_none()
         && let Some(user_classes) = simple_class_node_user_suffix(node)
     {
         write_er_node_fragment_into::<false>(
@@ -8891,6 +8898,7 @@ fn render_node_into(
         && node.menu_links.is_empty()
         && node.href().is_none()
         && node.callback().is_none()
+        && node.tooltip().is_none()
     {
         write_subroutine_node_fragment_into(
             out,
@@ -8952,6 +8960,7 @@ fn render_node_into(
         && node.menu_links.is_empty()
         && node.href().is_none()
         && node.callback().is_none()
+        && node.tooltip().is_none()
     {
         let write = if matches!(uniform_a11y(&config.a11y), Some(true)) {
             write_common_node_fragment_into::<true>
@@ -9123,6 +9132,7 @@ fn render_node(
         && node.menu_links.is_empty()
         && node.href().is_none()
         && node.callback().is_none()
+        && node.tooltip().is_none()
     {
         let build = if matches!(uniform_a11y(&config.a11y), Some(true)) {
             build_common_node_fragment::<true>
@@ -10268,6 +10278,27 @@ fn render_node(
             .attr("data-callback", callback)
             .attr("style", "cursor: pointer;")
             .class("fm-node-has-callback");
+    }
+
+    // `click a "url" "some tooltip"` (bd-bk7h). `IrNodeInteraction.tooltip` was parsed, stored, and
+    // rendered by NOTHING: fm-render-svg and fm-render-canvas referenced it zero times, and the
+    // terminal's only uses are in `diff.rs`, which reports that it CHANGED without ever drawing it.
+    // That is the dead-IR-field class this project has already found twice (bd-jgco branch names,
+    // bd-jerh attribute comments).
+    //
+    // A `title` ATTRIBUTE, not a `<title>` child, because that is what the incumbent emits:
+    // mermaid 11.15.0 does `t.tooltip && n.attr("title", t.tooltip)`. The `<title>Node: ...`
+    // children elsewhere in this file are the a11y name for the shape; a tooltip is the author's
+    // own text and belongs where a browser will show it on hover.
+    //
+    // It sits on the same decoration path as href and callback, so the fast paths above already
+    // had to learn to refuse it - hence the `node.tooltip().is_none()` clause added to each of
+    // them. Without that clause a tooltip-bearing node would take a streaming path and never reach
+    // this line, which is exactly how the field came to be dead in the first place.
+    if let Some(node) = ir_node
+        && let Some(tooltip) = node.tooltip()
+    {
+        group = group.attr("title", tooltip);
     }
 
     group
