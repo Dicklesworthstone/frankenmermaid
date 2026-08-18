@@ -3245,7 +3245,7 @@ fn is_css_named_color(value: &str) -> bool {
     )
 }
 
-/// Parse fragment start keywords: loop, alt, opt, par, critical, break, rect.
+/// Parse fragment start keywords: loop, alt, opt, par, par_over, critical, break, rect.
 fn parse_sequence_fragment_start(line: &str) -> Option<SequenceStatement> {
     let (kind, rest) = if let Some(r) = line.strip_prefix("loop") {
         (fm_core::FragmentKind::Loop, r)
@@ -3253,6 +3253,23 @@ fn parse_sequence_fragment_start(line: &str) -> Option<SequenceStatement> {
         (fm_core::FragmentKind::Alt, r)
     } else if let Some(r) = line.strip_prefix("opt") {
         (fm_core::FragmentKind::Opt, r)
+    // ⚠️ MUST BE TESTED BEFORE `par`, and this chain is an if/else so there is no second chance.
+    // `par_over Group` hits `strip_prefix("par")` first, leaves `_over Group`, fails the keyword
+    // boundary check below and returns None for the WHOLE function — it does not fall through to a
+    // later arm. So an arm placed after `par` would be dead code (bd-5k7a).
+    //
+    // What that cost is worse than one missing box: the fragment never opened, so its `end` had no
+    // matching start and the diagram ALSO gained a spurious "end without matching block group"
+    // warning. A dropped feature that additionally accuses the author's valid source of being
+    // unbalanced.
+    //
+    // Mapped onto `Par` rather than given its own `FragmentKind`. mermaid draws `par_over` as an
+    // OVERLAPPING parallel block where `par` stacks its sections, so this loses that nuance and
+    // renders an ordinary parallel box — the tag reads `par`. That is a deliberate trade: a new
+    // variant means exhaustive matches in fm-core, fm-parser, fm-render-svg and fm-render-canvas,
+    // and the honest fix for the nuance is a renderer change, not an enum with nothing behind it.
+    } else if let Some(r) = line.strip_prefix("par_over") {
+        (fm_core::FragmentKind::Par, r)
     } else if let Some(r) = line.strip_prefix("par") {
         (fm_core::FragmentKind::Par, r)
     } else if let Some(r) = line.strip_prefix("critical") {
@@ -15484,6 +15501,70 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(meta.fragments.len(), 1);
         assert_eq!(meta.fragments[0].kind, fm_core::FragmentKind::Loop);
         assert_eq!(meta.fragments[0].label, "Every minute");
+    }
+
+    /// `par_over` opens a fragment, and its `end` is no longer orphaned (bd-5k7a).
+    ///
+    /// `strip_prefix("par")` matched first, left `_over Group`, failed the keyword-boundary check
+    /// and returned None for the whole function — so the fragment never opened AND the diagram
+    /// gained a spurious "end without matching block group" warning, accusing valid source of being
+    /// unbalanced. The warning assertion is the half that catches the second symptom.
+    ///
+    /// This test also pins the ARM ORDER: the chain is if/else, so a `par_over` arm placed after
+    /// `par` would be unreachable and the fragment count would be zero again.
+    #[test]
+    fn sequence_par_over_opens_a_fragment() {
+        let input = "sequenceDiagram\n  participant Alice\n  participant Bob\n  par_over Group\n    Alice->>Bob: a\n  and\n    Alice->>Bob: b\n  end";
+        let parsed = parse_mermaid(input);
+
+        let meta = parsed
+            .ir
+            .sequence_meta
+            .as_ref()
+            .expect("sequence_meta should be set");
+        assert_eq!(meta.fragments.len(), 1, "par_over opened no fragment");
+        assert_eq!(meta.fragments[0].kind, fm_core::FragmentKind::Par);
+        assert_eq!(meta.fragments[0].label, "Group");
+        assert!(
+            !parsed
+                .warnings
+                .iter()
+                .any(|w| w.contains("end without matching block group")),
+            "the unmatched-end warning survived: {:?}",
+            parsed.warnings
+        );
+    }
+
+    /// CONTROL: plain `par` is unchanged. Inserting an arm ahead of it in the chain is exactly the
+    /// kind of edit that can shadow the arm below, and `par Group` must still parse as `Par`.
+    #[test]
+    fn sequence_par_fragment_is_unaffected_by_the_par_over_arm() {
+        let input = "sequenceDiagram\n  participant Alice\n  participant Bob\n  par Group\n    Alice->>Bob: a\n  end";
+        let parsed = parse_mermaid(input);
+
+        let meta = parsed
+            .ir
+            .sequence_meta
+            .as_ref()
+            .expect("sequence_meta should be set");
+        assert_eq!(meta.fragments.len(), 1);
+        assert_eq!(meta.fragments[0].kind, fm_core::FragmentKind::Par);
+        assert_eq!(meta.fragments[0].label, "Group");
+    }
+
+    /// CONTROL: the keyword boundary still holds. `parallel Group` is not a fragment keyword, and
+    /// the new arm must not have widened `par` into a prefix match.
+    #[test]
+    fn sequence_par_prefixed_word_is_not_a_fragment() {
+        let input = "sequenceDiagram\n  participant Alice\n  participant Bob\n  parallel Group\n    Alice->>Bob: a";
+        let parsed = parse_mermaid(input);
+
+        let fragments = parsed
+            .ir
+            .sequence_meta
+            .as_ref()
+            .map_or(0, |meta| meta.fragments.len());
+        assert_eq!(fragments, 0, "`parallel` was treated as a fragment keyword");
     }
 
     #[test]
