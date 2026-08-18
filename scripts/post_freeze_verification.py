@@ -143,8 +143,33 @@ def project_build_running() -> str | None:
     )
     if result.returncode != 0:
         return None
+
+    # Exclude OUR OWN process tree. The caller's shell command line usually contains both the repo
+    # path and the word "cargo" -- the guard invocation itself, or the very build being authorised --
+    # so a naive match reports the slot taken by the caller. Measured: this probe said SLOT TAKEN
+    # while nothing but my own wrapper was running, which is a false positive that would stall work
+    # forever rather than prevent a collision.
+    mine = {os.getpid(), os.getppid()}
+    try:
+        mine.add(int(open(f"/proc/{os.getppid()}/stat", encoding="utf-8").read().split()[3]))
+    except (OSError, ValueError, IndexError):
+        pass
+
     for line in result.stdout.splitlines():
-        if REPO in line and "pgrep" not in line:
+        pid_text, _, command = line.partition(" ")
+        if not pid_text.isdigit() or int(pid_text) in mine:
+            continue
+        # Require an actual cargo BUILD subcommand, not merely the word "cargo" beside the repo
+        # path. Without this the probe fires on any sibling shell whose command line happens to
+        # mention cargo -- a grep, a log tail, or a finished wrapper -- and reports a slot that
+        # nothing is using. Measured: it flagged a zsh wrapper while no cargo process for this
+        # project existed at all.
+        if "pgrep" in command or REPO not in command:
+            continue
+        if any(
+            f"cargo {sub}" in command
+            for sub in ("test", "check", "build", "bench", "clippy", "run", "rustc")
+        ):
             return line.strip()
     return None
 
