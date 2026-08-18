@@ -790,7 +790,14 @@ fn exact_diagram_type_with(
         Some(DiagramType::GitGraph)
     } else if matches(line, "journey") {
         Some(DiagramType::Journey)
-    } else if matches(line, "requirementdiagram") {
+    // Bare `requirement`, `packet` and `architecture` are accepted by the incumbent -- its detector
+    // table spells them `/^\s*requirement(Diagram)?/`, `/^\s*packet(-beta)?/` and
+    // `/^\s*architecture/`. Our matcher requires the LINE to be at least as long as the keyword, so
+    // a keyword of `requirementdiagram` cannot match a line of `requirement`; the bare spellings
+    // were undetectable and fell through to the flowchart fallback. The reverse direction already
+    // worked, which is why this was easy to miss: `sankey` matches `sankey-beta` because the
+    // matcher accepts a following `-`.
+    } else if matches(line, "requirementdiagram") || matches(line, "requirement") {
         Some(DiagramType::Requirement)
     } else if matches(line, "timeline") {
         Some(DiagramType::Timeline)
@@ -802,9 +809,9 @@ fn exact_diagram_type_with(
         Some(DiagramType::XyChart)
     } else if matches(line, "block-beta") || matches(line, "block") {
         Some(DiagramType::BlockBeta)
-    } else if matches(line, "packet-beta") {
+    } else if matches(line, "packet-beta") || matches(line, "packet") {
         Some(DiagramType::PacketBeta)
-    } else if matches(line, "architecture-beta") {
+    } else if matches(line, "architecture-beta") || matches(line, "architecture") {
         Some(DiagramType::ArchitectureBeta)
     } else if matches(line, "c4context") {
         Some(DiagramType::C4Context)
@@ -3041,6 +3048,43 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
                 !detected.warnings.join(" ").contains("does not implement yet"),
                 "{source:?} was called unimplemented"
             );
+        }
+    }
+
+    /// The bare spellings the incumbent accepts must detect as their own type.
+    ///
+    /// `requirement`, `packet` and `architecture` are all valid mermaid headers -- its detectors are
+    /// `/^\\s*requirement(Diagram)?/`, `/^\\s*packet(-beta)?/` and `/^\\s*architecture/`. Our matcher
+    /// needs the LINE to be at least as long as the keyword, so `packet-beta` as a keyword could
+    /// never match a line reading `packet`, and these fell through to the flowchart fallback.
+    #[test]
+    fn bare_spellings_the_incumbent_accepts_are_detected() {
+        for (source, want) in [
+            ("requirement\n  requirement r {\n  }\n", fm_core::DiagramType::Requirement),
+            ("packet\n  0-7: \"a\"\n", fm_core::DiagramType::PacketBeta),
+            ("architecture\n  group a\n", fm_core::DiagramType::ArchitectureBeta),
+        ] {
+            let detected = super::detect_type_with_confidence(source);
+            assert_eq!(detected.diagram_type, want, "{source:?} was not detected");
+        }
+    }
+
+    /// CONTROL: the suffixed spellings must keep working.
+    ///
+    /// Widening a keyword chain is exactly where an existing arm gets shadowed -- `packet` placed
+    /// before `packet-beta` would still match, but a careless reorder elsewhere could route a
+    /// suffixed header to the wrong type, and nothing else in this file would notice.
+    #[test]
+    fn suffixed_spellings_still_detect_as_before() {
+        for (source, want) in [
+            ("requirementDiagram\n  requirement r {\n  }\n", fm_core::DiagramType::Requirement),
+            ("packet-beta\n  0-7: \"a\"\n", fm_core::DiagramType::PacketBeta),
+            ("architecture-beta\n  group a\n", fm_core::DiagramType::ArchitectureBeta),
+            ("sankey-beta\n  a,b,1\n", fm_core::DiagramType::Sankey),
+            ("xychart-beta\n  bar [1,2]\n", fm_core::DiagramType::XyChart),
+        ] {
+            let detected = super::detect_type_with_confidence(source);
+            assert_eq!(detected.diagram_type, want, "{source:?} changed detection");
         }
     }
 }
