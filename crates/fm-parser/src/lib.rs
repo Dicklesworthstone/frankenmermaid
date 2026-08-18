@@ -1018,9 +1018,25 @@ fn content_heuristics(input: &str) -> Option<DetectedType> {
         });
     }
 
-    // Class diagram patterns
+    // Class diagram patterns.
+    //
+    // Our own parser accepts ten class relations -- *--, --*, --o, --|>, ..>, ..|>, <.., <|--,
+    // <|.., o-- -- and this heuristic recognised two of them. A diagram whose only relation was a
+    // composition (`Order *-- LineItem`) was not detected, so an unheaded document fell through to
+    // the flowchart fallback.
+    //
+    // `o--` and `--o` are deliberately EXCLUDED despite being class relations: a flowchart circle
+    // edge is spelled `A --o B` and `A o--o B`, so matching them here would reclassify flowcharts.
+    // They are the two the parser can only disambiguate from a header, and guessing from content
+    // would trade a missed class diagram for a corrupted flowchart.
     if content.contains("<|--")
         || content.contains("--|>")
+        || content.contains("<|..")
+        || content.contains("..|>")
+        || content.contains("*--")
+        || content.contains("--*")
+        || content.contains("..>")
+        || content.contains("<..")
         || (content.contains("class ") && content.contains('{'))
     {
         return Some(DetectedType {
@@ -3254,6 +3270,41 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             assert!(
                 !super::looks_like_er_relationship(&source.to_lowercase()),
                 "{source:?} was misread as an ER relationship"
+            );
+        }
+    }
+
+    /// The class heuristic must recognise the relations our own parser accepts.
+    ///
+    /// It knew two of ten. A diagram whose only relation is a composition or a realization was
+    /// invisible to it, and an unheaded document then fell through to the flowchart fallback.
+    #[test]
+    fn the_class_heuristic_covers_the_relations_the_parser_accepts() {
+        for relation in ["<|--", "--|>", "<|..", "..|>", "*--", "--*", "..>", "<.."] {
+            let source = format!("Order {relation} LineItem\n");
+            let detected = super::detect_type_with_confidence(&source);
+            assert_eq!(
+                detected.diagram_type,
+                fm_core::DiagramType::Class,
+                "{relation} was not recognised as a class relation"
+            );
+        }
+    }
+
+    /// CONTROL: a flowchart circle edge must NOT be read as a class diagram.
+    ///
+    /// `o--` and `--o` are class relations AND flowchart circle edges, so they are excluded from
+    /// the heuristic on purpose. This pins that decision: without it, someone completing the list
+    /// "for consistency" would trade a missed class diagram for a corrupted flowchart, which is the
+    /// worse direction -- the flowchart renders, just as the wrong type.
+    #[test]
+    fn flowchart_circle_edges_are_not_read_as_class_relations() {
+        for source in ["A --o B\n", "A o--o B\n", "flowchart TD\n  A --o B\n"] {
+            let detected = super::detect_type_with_confidence(source);
+            assert_ne!(
+                detected.diagram_type,
+                fm_core::DiagramType::Class,
+                "{source:?} was misread as a class diagram"
             );
         }
     }
