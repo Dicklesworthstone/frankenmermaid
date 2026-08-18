@@ -3989,6 +3989,25 @@ rebuilt by another agent mid-run — that has happened to this harness before.
 | 1 | 92,994 ns | 91,137 ns | 1.0204x | 33.7 ms | 36.9 ms | **362.4x** | 383.4x |
 | 2 | 93,746 ns | 89,441 ns | 1.0481x | 38.3 ms | 37.8 ms | 403.2x | 415.4x |
 | 3 | 88,165 ns | 91,824 ns | 1.0415x | 34.8 ms | 34.9 ms | 379.0x | 387.2x |
+| 4 | 94,337 ns | 93,202 ns | 1.0122x | 35.3 ms | 34.9 ms | 370.0x | 374.3x |
+
+**Run 4 (2026-08-18) is the first row taken under a BUSY host, and the first to pass the drift
+control as a gate rather than as a printed number.** ELF `578d99d6…` rebuilt at HEAD
+`1989390c` with the revision verified present in the binary; `--no-pin`; batch 38. Per-arm loadavg
+`[22.18,25.17,22.29]` / `[21.85,25.05,22.27]` / `[20.74,24.76,22.19]`; per-arm mean MHz
+2280 / 3033 / 3142, cross-core spread 2.835-3.003x. Idle was ~70% with 18.7% of it `nice` from other
+panes' builds.
+
+That matters because it tests the pinning finding rather than restating it: at loadavg ~22 the
+unpinned fm arm still reproduced itself to **1.22%**, where a PINNED arm on a contended core drifted
+71%. Host load is not what moves this measurement; core placement is.
+
+`check_drift_control` (landed `ee930f50`) admitted this row at 1.0122x against its 1.10x ceiling —
+the first time that gate has run on a live bracket rather than on its self-test.
+
+The quoted figure is UNCHANGED at 362.4x. Run 4 at 370.0x lands inside the existing spread, which is
+what corroboration looks like; a bound that rose every time a new run came in slightly higher would
+not be a bound.
 
 **Run 3 (2026-08-17, added later) is the first row in this campaign with UNBROKEN PROVENANCE**: the
 harness reported `binary embeds HEAD 3a84be6a` rather than accepting a stale-ELF override, ELF sha256

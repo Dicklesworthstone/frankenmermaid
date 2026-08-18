@@ -317,11 +317,15 @@ def build_corpus(case_id: str, dest: str, fm_reps: int | None = None) -> dict:
         "    reps: %s, warmup: item.warmup_rs, corpus_reps: item.reps_rs"
         "  }));"
         "});"
+    # ORDER MUST MATCH THE PLACEHOLDERS IN SOURCE ORDER, and they are not in the order the fields
+    # read: `writeFileSync(%s` (line 311) comes BEFORE the handoff's `reps: %s` (line 312). Passing
+    # reps ahead of dest made node call writeFileSync(100, ...) -- writing to file descriptor 100 --
+    # which fails as EBADF rather than as a type error, so nothing points at the real cause.
     ) % (
         json.dumps("file://" + CORPUS_MJS),
         json.dumps(case_id),
-        reps_expr,
         json.dumps(dest),
+        reps_expr,
         reps_expr,
     )
     out = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=False)
