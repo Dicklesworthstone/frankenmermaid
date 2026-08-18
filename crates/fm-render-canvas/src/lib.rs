@@ -16,6 +16,7 @@
 //! - `web`: Enables actual Canvas2D rendering via web-sys (WASM target)
 
 mod context;
+mod gpu_layout;
 mod gpu_plan;
 mod renderer;
 mod shapes;
@@ -24,6 +25,10 @@ mod viewport;
 pub use context::{
     Canvas2dContext, Color, LineCap, LineJoin, MockCanvas2dContext, Point, TextAlign, TextBaseline,
     TextMetrics,
+};
+pub use gpu_layout::{
+    GpuBufferLayout, GpuVertexAttribute, GpuVertexFormat, arrowhead_buffer_layout,
+    edge_buffer_layout, node_buffer_layout, text_buffer_layout,
 };
 pub use gpu_plan::{
     ARROWHEAD_WGSL, EDGE_WGSL, GlyphAtlasPlan, GlyphCell, GpuArrowheadInstance, GpuEdgeSegment,

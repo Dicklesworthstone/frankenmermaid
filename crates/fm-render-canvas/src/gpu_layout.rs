@@ -1,0 +1,401 @@
+//! Vertex-buffer layouts for the WebGPU passes (bd-2u0.2).
+//!
+//! A backend has to tell the device three things about every instance buffer: its stride, and for
+//! each attribute a byte offset, a format, and a shader location. Those three descriptions live in
+//! three different places — the `#[repr(C)]` struct in `gpu_plan`, the `@location` list in the WGSL,
+//! and the pipeline descriptor — and NOTHING makes them agree. A wrong offset does not fail to
+//! compile and does not fail to run: the shader reads the bytes that happen to be there, so a
+//! diagram renders with its colours in its coordinates. That is the single most expensive bug
+//! available in this area, and it is invisible to every test that only checks the plan's contents.
+//!
+//! This module is that missing third description, expressed as data, with tests that derive the
+//! offsets from the structs themselves via `offset_of!` rather than restating them. It deliberately
+//! does NOT depend on `wgpu`: the crate has no such dependency today, and a plain description a
+//! backend maps onto `wgpu::VertexBufferLayout` is both testable here and cheap to consume there.
+
+use core::mem::{align_of, offset_of, size_of};
+
+use crate::gpu_plan::{GpuArrowheadInstance, GpuEdgeSegment, GpuNodeInstance, GpuTextQuad};
+
+/// The vertex formats these buffers use.
+///
+/// A deliberately tiny set: every field in every instance struct is one of these three, and a format
+/// this layer cannot describe is a field a shader could not read anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuVertexFormat {
+    Float32,
+    Float32x2,
+    Float32x4,
+    Uint32,
+}
+
+impl GpuVertexFormat {
+    /// Size in bytes, which must equal the size of the Rust field it describes.
+    #[must_use]
+    pub const fn size_bytes(self) -> usize {
+        match self {
+            Self::Float32 => 4,
+            Self::Float32x2 => 8,
+            Self::Float32x4 => 16,
+            Self::Uint32 => 4,
+        }
+    }
+
+    /// The `wgpu::VertexFormat` variant name a backend maps this to.
+    ///
+    /// A string rather than the enum itself, because taking the dependency here would pull a
+    /// graphics stack into a crate that otherwise renders to a 2D canvas.
+    #[must_use]
+    pub const fn wgpu_name(self) -> &'static str {
+        match self {
+            Self::Float32 => "Float32",
+            Self::Float32x2 => "Float32x2",
+            Self::Float32x4 => "Float32x4",
+            Self::Uint32 => "Uint32",
+        }
+    }
+}
+
+/// One attribute: where it sits, what it is, and which `@location` reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuVertexAttribute {
+    /// The `@location(N)` in the WGSL that consumes this attribute.
+    pub shader_location: u32,
+    /// Byte offset from the start of the instance.
+    pub offset: usize,
+    pub format: GpuVertexFormat,
+    /// Field name, carried for diagnostics — a mismatch reported as "offset 24" is far harder to
+    /// act on than one reported as "half_extent".
+    pub field: &'static str,
+}
+
+/// A whole instance buffer: stride plus attributes, stepped per instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuBufferLayout {
+    /// Bytes between consecutive instances. Always the struct's own size.
+    pub stride: usize,
+    /// Alignment the struct requires, which a backend needs when suballocating.
+    pub align: usize,
+    pub attributes: &'static [GpuVertexAttribute],
+}
+
+const NODE_ATTRIBUTES: &[GpuVertexAttribute] = &[
+    GpuVertexAttribute {
+        shader_location: 0,
+        offset: offset_of!(GpuNodeInstance, center),
+        format: GpuVertexFormat::Float32x2,
+        field: "center",
+    },
+    GpuVertexAttribute {
+        shader_location: 1,
+        offset: offset_of!(GpuNodeInstance, half_extent),
+        format: GpuVertexFormat::Float32x2,
+        field: "half_extent",
+    },
+    GpuVertexAttribute {
+        shader_location: 2,
+        offset: offset_of!(GpuNodeInstance, fill),
+        format: GpuVertexFormat::Float32x4,
+        field: "fill",
+    },
+    GpuVertexAttribute {
+        shader_location: 3,
+        offset: offset_of!(GpuNodeInstance, stroke),
+        format: GpuVertexFormat::Float32x4,
+        field: "stroke",
+    },
+    GpuVertexAttribute {
+        shader_location: 4,
+        offset: offset_of!(GpuNodeInstance, shape),
+        format: GpuVertexFormat::Uint32,
+        field: "shape",
+    },
+    GpuVertexAttribute {
+        shader_location: 5,
+        offset: offset_of!(GpuNodeInstance, node_index),
+        format: GpuVertexFormat::Uint32,
+        field: "node_index",
+    },
+];
+
+const EDGE_ATTRIBUTES: &[GpuVertexAttribute] = &[
+    GpuVertexAttribute {
+        shader_location: 0,
+        offset: offset_of!(GpuEdgeSegment, from),
+        format: GpuVertexFormat::Float32x2,
+        field: "from",
+    },
+    GpuVertexAttribute {
+        shader_location: 1,
+        offset: offset_of!(GpuEdgeSegment, to),
+        format: GpuVertexFormat::Float32x2,
+        field: "to",
+    },
+    GpuVertexAttribute {
+        shader_location: 2,
+        offset: offset_of!(GpuEdgeSegment, edge_index),
+        format: GpuVertexFormat::Uint32,
+        field: "edge_index",
+    },
+    GpuVertexAttribute {
+        shader_location: 3,
+        offset: offset_of!(GpuEdgeSegment, color),
+        format: GpuVertexFormat::Float32x4,
+        field: "color",
+    },
+    GpuVertexAttribute {
+        shader_location: 4,
+        offset: offset_of!(GpuEdgeSegment, dash),
+        format: GpuVertexFormat::Float32x2,
+        field: "dash",
+    },
+    GpuVertexAttribute {
+        shader_location: 5,
+        offset: offset_of!(GpuEdgeSegment, width),
+        format: GpuVertexFormat::Float32,
+        field: "width",
+    },
+];
+
+const ARROWHEAD_ATTRIBUTES: &[GpuVertexAttribute] = &[
+    GpuVertexAttribute {
+        shader_location: 0,
+        offset: offset_of!(GpuArrowheadInstance, position),
+        format: GpuVertexFormat::Float32x2,
+        field: "position",
+    },
+    GpuVertexAttribute {
+        shader_location: 1,
+        offset: offset_of!(GpuArrowheadInstance, angle),
+        format: GpuVertexFormat::Float32,
+        field: "angle",
+    },
+    GpuVertexAttribute {
+        shader_location: 2,
+        offset: offset_of!(GpuArrowheadInstance, size),
+        format: GpuVertexFormat::Float32,
+        field: "size",
+    },
+    GpuVertexAttribute {
+        shader_location: 3,
+        offset: offset_of!(GpuArrowheadInstance, edge_index),
+        format: GpuVertexFormat::Uint32,
+        field: "edge_index",
+    },
+    GpuVertexAttribute {
+        shader_location: 4,
+        offset: offset_of!(GpuArrowheadInstance, color),
+        format: GpuVertexFormat::Float32x4,
+        field: "color",
+    },
+];
+
+const TEXT_ATTRIBUTES: &[GpuVertexAttribute] = &[
+    GpuVertexAttribute {
+        shader_location: 0,
+        offset: offset_of!(GpuTextQuad, center),
+        format: GpuVertexFormat::Float32x2,
+        field: "center",
+    },
+    GpuVertexAttribute {
+        shader_location: 1,
+        offset: offset_of!(GpuTextQuad, half_extent),
+        format: GpuVertexFormat::Float32x2,
+        field: "half_extent",
+    },
+    GpuVertexAttribute {
+        shader_location: 2,
+        offset: offset_of!(GpuTextQuad, uv_min),
+        format: GpuVertexFormat::Float32x2,
+        field: "uv_min",
+    },
+    GpuVertexAttribute {
+        shader_location: 3,
+        offset: offset_of!(GpuTextQuad, uv_max),
+        format: GpuVertexFormat::Float32x2,
+        field: "uv_max",
+    },
+    GpuVertexAttribute {
+        shader_location: 4,
+        offset: offset_of!(GpuTextQuad, color),
+        format: GpuVertexFormat::Float32x4,
+        field: "color",
+    },
+    GpuVertexAttribute {
+        shader_location: 5,
+        offset: offset_of!(GpuTextQuad, run_index),
+        format: GpuVertexFormat::Uint32,
+        field: "run_index",
+    },
+];
+
+/// Layout of the node instance buffer consumed by `NODE_SDF_WGSL`.
+#[must_use]
+pub const fn node_buffer_layout() -> GpuBufferLayout {
+    GpuBufferLayout {
+        stride: size_of::<GpuNodeInstance>(),
+        align: align_of::<GpuNodeInstance>(),
+        attributes: NODE_ATTRIBUTES,
+    }
+}
+
+/// Layout of the edge segment buffer consumed by `EDGE_WGSL`.
+#[must_use]
+pub const fn edge_buffer_layout() -> GpuBufferLayout {
+    GpuBufferLayout {
+        stride: size_of::<GpuEdgeSegment>(),
+        align: align_of::<GpuEdgeSegment>(),
+        attributes: EDGE_ATTRIBUTES,
+    }
+}
+
+/// Layout of the arrowhead buffer consumed by `ARROWHEAD_WGSL`.
+#[must_use]
+pub const fn arrowhead_buffer_layout() -> GpuBufferLayout {
+    GpuBufferLayout {
+        stride: size_of::<GpuArrowheadInstance>(),
+        align: align_of::<GpuArrowheadInstance>(),
+        attributes: ARROWHEAD_ATTRIBUTES,
+    }
+}
+
+/// Layout of the text quad buffer consumed by `TEXT_ATLAS_WGSL`.
+#[must_use]
+pub const fn text_buffer_layout() -> GpuBufferLayout {
+    GpuBufferLayout {
+        stride: size_of::<GpuTextQuad>(),
+        align: align_of::<GpuTextQuad>(),
+        attributes: TEXT_ATTRIBUTES,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        GpuBufferLayout, arrowhead_buffer_layout, edge_buffer_layout, node_buffer_layout,
+        text_buffer_layout,
+    };
+    use crate::gpu_plan::{ARROWHEAD_WGSL, EDGE_WGSL, NODE_SDF_WGSL, TEXT_ATLAS_WGSL};
+
+    /// Every attribute must fit inside the instance it describes.
+    ///
+    /// An attribute running past the stride makes the device read the NEXT instance's bytes, which
+    /// renders a diagram whose every element is shifted by one — a picture wrong in a way that looks
+    /// like a layout bug rather than a buffer bug.
+    fn assert_attributes_fit(layout: GpuBufferLayout, name: &str) {
+        assert!(layout.stride > 0, "{name}: zero stride");
+        for attribute in layout.attributes {
+            let end = attribute.offset + attribute.format.size_bytes();
+            assert!(
+                end <= layout.stride,
+                "{name}: attribute {} ends at {end}, past the {} byte stride",
+                attribute.field,
+                layout.stride
+            );
+        }
+    }
+
+    /// No two attributes may overlap.
+    ///
+    /// Overlap means two shader locations read the same bytes, so one of them is silently wrong.
+    /// Checked by sorting on offset rather than by trusting declaration order.
+    fn assert_no_overlap(layout: GpuBufferLayout, name: &str) {
+        let mut spans: Vec<(usize, usize, &str)> = layout
+            .attributes
+            .iter()
+            .map(|a| (a.offset, a.offset + a.format.size_bytes(), a.field))
+            .collect();
+        spans.sort_unstable();
+        for pair in spans.windows(2) {
+            let [(_, prev_end, prev_field), (next_start, _, next_field)] = pair else {
+                continue;
+            };
+            assert!(
+                prev_end <= next_start,
+                "{name}: {prev_field} overlaps {next_field} ({prev_end} > {next_start})"
+            );
+        }
+    }
+
+    /// Shader locations must be unique and contiguous from zero.
+    ///
+    /// A gap is not a compile error in WGSL; it is a location nothing writes, so the shader reads
+    /// undefined data for that attribute.
+    fn assert_locations_dense(layout: GpuBufferLayout, name: &str) {
+        let mut locations: Vec<u32> = layout
+            .attributes
+            .iter()
+            .map(|a| a.shader_location)
+            .collect();
+        locations.sort_unstable();
+        for (index, location) in locations.iter().enumerate() {
+            let expected = u32::try_from(index).unwrap_or(u32::MAX);
+            assert_eq!(
+                *location, expected,
+                "{name}: shader locations are not dense from 0: {locations:?}"
+            );
+        }
+    }
+
+    /// Each declared location must actually appear in the shader that consumes the buffer.
+    ///
+    /// This is the join the whole module exists for: the Rust struct, this descriptor and the WGSL
+    /// are three independent statements of one layout, and nothing else compares them.
+    fn assert_shader_declares_locations(layout: GpuBufferLayout, wgsl: &str, name: &str) {
+        for attribute in layout.attributes {
+            let needle = format!("@location({})", attribute.shader_location);
+            assert!(
+                wgsl.contains(&needle),
+                "{name}: the shader has no {needle} for attribute {}",
+                attribute.field
+            );
+        }
+    }
+
+    #[test]
+    fn every_buffer_layout_is_internally_consistent() {
+        for (layout, wgsl, name) in [
+            (node_buffer_layout(), NODE_SDF_WGSL, "node"),
+            (edge_buffer_layout(), EDGE_WGSL, "edge"),
+            (arrowhead_buffer_layout(), ARROWHEAD_WGSL, "arrowhead"),
+            (text_buffer_layout(), TEXT_ATLAS_WGSL, "text"),
+        ] {
+            assert_attributes_fit(layout, name);
+            assert_no_overlap(layout, name);
+            assert_locations_dense(layout, name);
+            assert_shader_declares_locations(layout, wgsl, name);
+        }
+    }
+
+    /// The declared attributes must account for the whole instance, give or take tail padding.
+    ///
+    /// Catches a field ADDED to an instance struct and never described here: the struct grows, the
+    /// descriptor does not, and the new field is simply never uploaded. Nothing else would notice —
+    /// the code compiles, the buffer uploads, and the shader reads a field it was never given.
+    #[test]
+    fn the_attributes_cover_the_whole_instance() {
+        for (layout, name) in [
+            (node_buffer_layout(), "node"),
+            (edge_buffer_layout(), "edge"),
+            (arrowhead_buffer_layout(), "arrowhead"),
+            (text_buffer_layout(), "text"),
+        ] {
+            let described: usize = layout
+                .attributes
+                .iter()
+                .map(|a| a.format.size_bytes())
+                .sum();
+            assert!(
+                described + layout.align > layout.stride,
+                "{name}: attributes describe {described} of {} bytes — a field is missing from the \
+                 descriptor and would never reach the GPU",
+                layout.stride
+            );
+            assert!(
+                described <= layout.stride,
+                "{name}: attributes describe {described} bytes, more than the {} byte instance",
+                layout.stride
+            );
+        }
+    }
+}
