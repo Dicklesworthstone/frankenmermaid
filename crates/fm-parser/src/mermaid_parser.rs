@@ -5598,13 +5598,42 @@ fn parse_click_directive_ast(
         (target_token.to_string(), after_target)
     };
 
-    // Optional tooltip: `click nodeId "url" "tooltip"`
-    let tooltip = take_token(remaining).map(|(tok, _)| {
-        tok.trim_matches('"')
-            .trim_matches('\'')
-            .trim_matches('`')
-            .to_string()
-    });
+    // Optional tooltip: `click nodeId "url" "tooltip"`, and optional LINK TARGET after it.
+    //
+    // ⚠️ `click A "url" _blank` PUT `_blank` IN THE TOOLTIP. The third position is either a tooltip
+    // or a link target, and we assumed tooltip unconditionally — so the browser-target keyword was
+    // rendered to the reader as a `<title>_blank</title>` hover. A wrong tooltip is not a silent
+    // drop; it is visible text the author never wrote, the same severity as the phantom node in
+    // bd-xfmm.
+    //
+    // mermaid lexes these as dedicated tokens (`/^(?:_self\b)/`, `_blank`, `_parent`, `_top`) and
+    // `setLink(t, r, i)` stores `i` as `linkTarget`, separate from the tooltip that `setTooltip`
+    // holds. The probe agrees: `click A "https://x.com" _blank` PARSES.
+    //
+    // Matched on the RAW token, before quote stripping, which is what makes the distinction sound:
+    // `take_token` keeps the quotes it found, so a deliberately quoted `"_blank"` is still a
+    // tooltip and only the bare keyword is a target.
+    //
+    // The target is recognised and dropped rather than stored: no IrNode field carries a link
+    // target today, and inventing one with no renderer reading it would be dead IR. Dropping it
+    // loses only the browser tab choice; keeping it in the tooltip corrupted the diagram's text.
+    let tooltip = match take_token(remaining) {
+        Some((token, _)) if is_link_target_keyword(token) => {
+            warnings.push(format!(
+                "Line {line_number}: click link target `{token}` is recognised but not applied; \
+                 the link opens in the same frame"
+            ));
+            None
+        }
+        Some((token, _)) => Some(
+            token
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim_matches('`')
+                .to_string(),
+        ),
+        None => None,
+    };
 
     Some(FlowAst::ClickDirective {
         node,
@@ -5612,6 +5641,16 @@ fn parse_click_directive_ast(
         tooltip,
         is_callback: false,
     })
+}
+
+/// The four browser link targets mermaid lexes as keywords in a `click` directive.
+///
+/// Compared against the RAW token so that a quoted `"_blank"` — which the author can only have
+/// meant as tooltip text — is not mistaken for one. Only the `click … "url"` form is guarded:
+/// `setLink` is the sole function that takes a target, and there is no evidence a callback
+/// directive accepts one, so that branch is deliberately left alone.
+fn is_link_target_keyword(token: &str) -> bool {
+    matches!(token.trim(), "_self" | "_blank" | "_parent" | "_top")
 }
 
 fn take_token(input: &str) -> Option<(&str, &str)> {
@@ -18254,6 +18293,72 @@ Rel_Back(db, app, "Responds")"#,
             "the out-of-range index was dropped in silence: {:?}",
             parsed.warnings
         );
+    }
+
+    /// `click A "url" _blank` must not put the BROWSER TARGET in the tooltip.
+    ///
+    /// The third position is either a tooltip or a link target. We assumed tooltip, so `_blank` was
+    /// rendered to the reader as hover text — visible text the author never wrote, not a silent
+    /// drop. mermaid lexes `_self`/`_blank`/`_parent`/`_top` as keywords and stores the value as
+    /// `linkTarget`, separate from the tooltip.
+    ///
+    /// The href assertion is the non-vacuity control: without it, a click line that failed to parse
+    /// at all would also leave the tooltip empty and pass.
+    #[test]
+    fn click_link_target_is_not_mistaken_for_a_tooltip() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n  A --> B\n  click A \"https://example.com\" _blank\n",
+        );
+
+        let node = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "A")
+            .expect("node A should exist");
+        assert_eq!(
+            node.href(),
+            Some("https://example.com"),
+            "the click directive did not take effect at all"
+        );
+        assert_eq!(
+            node.tooltip(),
+            None,
+            "the browser link target was rendered as tooltip text"
+        );
+    }
+
+    /// CONTROL: a real tooltip in that position still lands. A fix that simply dropped the third
+    /// token would pass the test above.
+    #[test]
+    fn click_tooltip_in_the_third_position_still_lands() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n  A --> B\n  click A \"https://example.com\" \"open the thing\"\n",
+        );
+
+        let node = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "A")
+            .expect("node A should exist");
+        assert_eq!(node.tooltip(), Some("open the thing"));
+    }
+
+    /// A QUOTED `"_blank"` is tooltip text, because that is the only thing the author can have
+    /// meant by quoting it. This is why the keyword is matched before quote stripping.
+    #[test]
+    fn click_quoted_blank_is_still_a_tooltip() {
+        let parsed =
+            parse_mermaid("flowchart LR\n  A --> B\n  click A \"https://example.com\" \"_blank\"\n");
+
+        let node = parsed
+            .ir
+            .nodes
+            .iter()
+            .find(|n| n.id == "A")
+            .expect("node A should exist");
+        assert_eq!(node.tooltip(), Some("_blank"));
     }
 
     /// An `interpolate <curve>` clause must not end up INSIDE the CSS declaration.
