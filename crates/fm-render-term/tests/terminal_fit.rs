@@ -685,6 +685,54 @@ fn class_cardinalities_reach_terminal_output() {
     assert!(out.contains("many"), "the target cardinality never reached the terminal:\n{out}");
 }
 
+/// ER cardinality reaches the terminal through the SAME placement (bd-2h3pp).
+///
+/// `}o--o|` declares "0..*" and "0..1" exactly as `"1" --> "many"` declares a class cardinality.
+/// fm-render-svg drew both kinds; this surface drew only the class one, so an ER diagram lost its
+/// cardinality here for the reason a class diagram used to.
+///
+/// Asserted on the RENDERED TEXT rather than on draw calls: the terminal's output is a string, so
+/// this cannot go stale against an internal representation the way an operation-stream assertion
+/// can. Both ends are checked because which end carries which number is the entire content.
+#[test]
+fn er_cardinalities_reach_terminal_output() {
+    let ir = fm_parser::parse("erDiagram\n  CUSTOMER }o--o| ORDER : places\n").ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(
+        out.contains("CUSTOMER") && out.contains("ORDER"),
+        "the entities are missing, so the cardinality assertions below prove nothing:\n{out}"
+    );
+    assert!(
+        out.contains("0..*"),
+        "the source cardinality never reached the terminal:\n{out}"
+    );
+    assert!(
+        out.contains("0..1"),
+        "the target cardinality never reached the terminal:\n{out}"
+    );
+}
+
+/// CONTROL: an ER relationship with NO cardinality markers adds no numbers.
+///
+/// `--` is a real ER connector and parses, but declares nothing at either end. The shared mapping
+/// returns `""` there and the placement closure skips empty text; without this control, a version
+/// that emitted a default or a stray marker would pass the test above.
+#[test]
+fn a_bare_er_relation_draws_no_cardinality() {
+    let ir = fm_parser::parse("erDiagram\n  CUSTOMER -- ORDER : places\n").ir;
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+
+    assert!(
+        out.contains("CUSTOMER") && out.contains("ORDER"),
+        "the entities are missing, so this control proves nothing:\n{out}"
+    );
+    assert!(
+        !out.contains("0..") && !out.contains("1..*"),
+        "a relation with no declared cardinality drew one anyway:\n{out}"
+    );
+}
+
 /// CONTROL: an edge WITHOUT cardinalities is unaffected.
 ///
 /// The overlay runs for every edge, outside the label block. Without this, a bug that wrote an
