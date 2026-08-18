@@ -7481,8 +7481,37 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
         }
 
         // Parse "[x, y]" after the colon.
-        let coords = trimmed.split_once(':').map_or("", |(_, v)| v.trim());
-        let coords = coords.trim_start_matches('[').trim_end_matches(']').trim();
+        //
+        // ⚠️ A TRAILING STYLE CLAUSE SILENTLY MOVED THE POINT. mermaid allows
+        // `A: [0.3, 0.6] radius: 10, color: #ff0000`, and this took EVERYTHING after the first
+        // colon as the coordinate text. Stripping a leading `[` and a trailing `]` then left
+        // `0.3, 0.6] radius: 10, color: #ff0000`, so the split on `,` gave a y of
+        // `0.6] radius: 10` — which fails to parse and fell through `unwrap_or(0.5)` to the MIDDLE
+        // of the chart. In a quadrant chart the position IS the content, so the reader saw a point
+        // confidently placed somewhere the author never put it, with no diagnostic (bd-qdstyle).
+        //
+        // Taking the text BETWEEN the brackets fixes that. The no-bracket fallback below is kept
+        // byte-for-byte, so a bare `A: 0.3, 0.6` behaves exactly as before.
+        let after_colon = trimmed.split_once(':').map_or("", |(_, v)| v.trim());
+        let (coords, point_style) = match (after_colon.find('['), after_colon.find(']')) {
+            (Some(open), Some(close)) if close > open => (
+                after_colon[open + 1..close].trim(),
+                after_colon[close + 1..].trim(),
+            ),
+            _ => (
+                after_colon.trim_start_matches('[').trim_end_matches(']').trim(),
+                "",
+            ),
+        };
+        if !point_style.is_empty() {
+            // NAMED, not swallowed: per-point radius/colour/stroke have nowhere to go —
+            // `IrQuadrantPoint` carries a label and a position and nothing else — so a field here
+            // would be dead IR. What matters is that the point now lands where it was written.
+            builder.add_warning(format!(
+                "Line {line_number}: quadrant point styling `{point_style}` is parsed but not \
+                 applied; the point keeps the theme's appearance"
+            ));
+        }
         let (x, y) = if let Some((xs, ys)) = coords.split_once(',') {
             (
                 xs.trim().parse::<f32>().unwrap_or(0.5),
@@ -7526,6 +7555,19 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
 
         let lower = trimmed.to_ascii_lowercase();
         if lower.starts_with("xychart") {
+            // `xychart-beta horizontal` swaps the axes. The whole header line was skipped, so the
+            // orientation was dropped in SILENCE and the reader got a vertical chart with no hint
+            // that the directive had been seen — the chart simply looked wrong (bd-xyhorz).
+            //
+            // NAMED rather than stored: `IrXyChartMeta` has no orientation field and no renderer
+            // reads one, so a flag here would be dead IR of the kind docs/IR_FIELD_SWEEP.md exists
+            // to catch. Drawing it horizontally is a renderer change, not a parser one.
+            if lower.split_whitespace().any(|token| token == "horizontal") {
+                builder.add_warning(
+                    "xychart `horizontal` orientation is parsed but not applied; the chart is \
+                     drawn vertically",
+                );
+            }
             continue;
         }
 
