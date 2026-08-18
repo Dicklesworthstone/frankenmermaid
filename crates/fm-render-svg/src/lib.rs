@@ -5270,7 +5270,11 @@ fn write_er_cardinality_labels_into(
             && let Some(notation) = ir_edge.er_notation()
             && edge_path.points.len() >= 2
         {
-            let (left_label, right_label) = parse_er_cardinality(notation);
+            // Shared with fm-render-canvas via fm-core (bd-2h3pp). This crate carried the only
+            // copy of the mapping while it was the only surface drawing cardinality; a second copy
+            // in the canvas would have been the forked-helper drift this repo keeps getting bitten
+            // by, so the logic moved to the IR — it is a fact about the notation, not about drawing.
+            let (left_label, right_label) = fm_core::parse_er_cardinality(notation);
             let font_size = config.font_size * 0.7;
             if !left_label.is_empty() {
                 let p = &edge_path.points[0];
@@ -5393,36 +5397,6 @@ fn write_cardinality_text_into(
     out.push_str("</text>");
 }
 
-fn parse_er_cardinality(notation: &str) -> (&str, &str) {
-    // Find the connector: `--`, `..`, or `==`.
-    let connector_idx = notation
-        .find("--")
-        .or_else(|| notation.find(".."))
-        .or_else(|| notation.find("=="));
-
-    let Some(idx) = connector_idx else {
-        return ("", "");
-    };
-
-    let connector_len = 2;
-    let left = notation[..idx].trim();
-    let right = notation[idx + connector_len..].trim();
-
-    (er_marker_to_label(left), er_marker_to_label(right))
-}
-
-fn er_marker_to_label(marker: &str) -> &str {
-    match marker {
-        "||" => "1",
-        "o|" | "|o" => "0..1",
-        "o{" | "}o" => "0..*",
-        "|{" | "}|" => "1..*",
-        _ if marker.contains('{') || marker.contains('}') => "*",
-        _ if marker.contains('|') => "1",
-        _ if marker.contains('o') => "0",
-        _ => "",
-    }
-}
 
 #[allow(clippy::too_many_arguments)]
 fn render_quadrant_svg(
@@ -18941,35 +18915,35 @@ marker#arrow-open path {
 
     #[test]
     fn er_cardinality_one_to_many() {
-        let (left, right) = parse_er_cardinality("||--o{");
+        let (left, right) = fm_core::parse_er_cardinality("||--o{");
         assert_eq!(left, "1");
         assert_eq!(right, "0..*");
     }
 
     #[test]
     fn er_cardinality_many_to_one() {
-        let (left, right) = parse_er_cardinality("}|--||");
+        let (left, right) = fm_core::parse_er_cardinality("}|--||");
         assert_eq!(left, "1..*");
         assert_eq!(right, "1");
     }
 
     #[test]
     fn er_cardinality_one_to_one() {
-        let (left, right) = parse_er_cardinality("||--||");
+        let (left, right) = fm_core::parse_er_cardinality("||--||");
         assert_eq!(left, "1");
         assert_eq!(right, "1");
     }
 
     #[test]
     fn er_cardinality_dotted() {
-        let (left, right) = parse_er_cardinality("}|..|{");
+        let (left, right) = fm_core::parse_er_cardinality("}|..|{");
         assert_eq!(left, "1..*");
         assert_eq!(right, "1..*");
     }
 
     #[test]
     fn er_cardinality_no_connector() {
-        let (left, right) = parse_er_cardinality("unknown");
+        let (left, right) = fm_core::parse_er_cardinality("unknown");
         assert_eq!(left, "");
         assert_eq!(right, "");
     }

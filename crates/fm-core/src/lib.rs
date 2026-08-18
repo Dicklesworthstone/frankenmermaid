@@ -1544,35 +1544,13 @@ impl IrEdge {
         self.extras.as_ref().and_then(|e| e.er_notation.as_deref())
     }
 
-    /// The cardinality labels an ER notation declares, as `(source, target)` (bd-2h3pp).
+    /// The cardinality labels this edge's ER notation declares, as `(source, target)` (bd-2h3pp).
     ///
-    /// `}o--o|` reads "zero or more" on the left and "zero or one" on the right, so this returns
-    /// `("0..*", "0..1")`. Either side is `""` when the notation carries no marker there, which is
-    /// what a bare `--` or `..` relationship gives.
-    ///
-    /// ⚠️ LIVES HERE BECAUSE IT IS SHARED, and it did not used to be: fm-render-svg has carried a
-    /// private copy of this mapping (`parse_er_cardinality` / `er_marker_to_label`) and is the only
-    /// surface that draws cardinality at all. Adding a second copy to fm-render-canvas is exactly
-    /// the forked-helper drift this repo has been bitten by, so the shared logic moves to the IR —
-    /// which is where it belongs anyway, since it is a fact about the notation, not about drawing.
-    /// The SVG copy should be collapsed into this one; it is left in place for now only because it
-    /// cannot be compiled and re-verified under the current build throttle.
-    ///
-    /// The marker table is symmetric on purpose: `|o` and `o|` are the same cardinality written for
-    /// the left or right end, and the grid completed in bd-flznf produces all four tokens on both
-    /// sides.
+    /// `None` only when the edge carries no notation at all. A notation with no marker on a side —
+    /// a bare `--` or `..` — yields `""` there, which every caller already treats as "draw nothing".
     #[must_use]
     pub fn er_cardinality_labels(&self) -> Option<(&'static str, &'static str)> {
-        let notation = self.er_notation()?;
-        let connector = notation
-            .find("--")
-            .or_else(|| notation.find(".."))
-            .or_else(|| notation.find("=="))?;
-
-        Some((
-            er_marker_label(notation[..connector].trim()),
-            er_marker_label(notation[connector + 2..].trim()),
-        ))
+        self.er_notation().map(parse_er_cardinality)
     }
     /// Source-side cardinality label, if any.
     #[must_use]
@@ -1868,6 +1846,31 @@ pub enum IrConstraint {
         node_ids: Vec<String>,
         span: Span,
     },
+}
+
+/// Split an ER notation into its two cardinality labels (bd-2h3pp).
+///
+/// `}o--o|` reads "zero or more" on the left and "zero or one" on the right, so this returns
+/// `("0..*", "0..1")`. A side with no marker — a bare `--` or `..` — yields `""`, and so does a
+/// notation with no connector at all.
+///
+/// ⚠️ PUBLIC AND FREE, not just a method on `IrEdge`, because the tests that pin this mapping test
+/// a STRING, not an edge: fm-render-svg has five of them and making them build an `IrEdge` to ask
+/// about `"||--o{"` would be worse than the fork it is replacing. The method above delegates here.
+#[must_use]
+pub fn parse_er_cardinality(notation: &str) -> (&'static str, &'static str) {
+    let Some(connector) = notation
+        .find("--")
+        .or_else(|| notation.find(".."))
+        .or_else(|| notation.find("=="))
+    else {
+        return ("", "");
+    };
+
+    (
+        er_marker_label(notation[..connector].trim()),
+        er_marker_label(notation[connector + 2..].trim()),
+    )
 }
 
 /// One end of an ER notation as a human-readable cardinality (bd-2h3pp).
