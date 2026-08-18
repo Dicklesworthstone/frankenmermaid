@@ -685,8 +685,8 @@ pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig
             confidence: 0.3,
             method: DetectionMethod::Fallback,
             warnings: vec![format!(
-                "'{kind}' is a mermaid diagram type this renderer does not implement yet; the \
-                 input was not misspelled. Rendering it as a flowchart will not be meaningful."
+                "'{kind}' is a mermaid diagram type this renderer does not implement yet. \
+                 Rendering it as a flowchart will not be meaningful."
             )],
         };
     }
@@ -706,8 +706,20 @@ pub fn detect_type_with_confidence_and_config(input: &str, config: &ParserConfig
 /// mermaid 11.15.0 bundle and absent from `DiagramType`; guessing at future names would produce a
 /// confident "not supported yet" for a typo, which is worse than the generic message it replaces.
 ///
-/// Matched on the header token alone, so `radar-beta` and a `radar` block with a title both hit it.
-/// When one of these lands as a real `DiagramType`, DELETE its entry rather than leaving a message
+/// Matched on the header TOKEN, splitting on whitespace or `-`, so `radar-beta` and `treemap-beta`
+/// reach the same entries as their bare spellings without needing four rows.
+///
+/// ⚠️ Matching a bare spelling does NOT mean upstream accepts it. Measured against the pinned
+/// 11.15.0 grammar (BeigeHill, cross-checked with two different bodies): `radar-beta` parses and a
+/// bare `radar` is a SYNTAX ERROR. An earlier version of this comment claimed the bare form worked,
+/// which is exactly the sort of sentence a later reader treats as verified.
+///
+/// That is also why the warning below no longer tells the author their input "was not misspelled".
+/// For `radar-beta` that is true; for a bare `radar` it is false, because mermaid rejects it too —
+/// and confidently absolving a malformed document is worse than the generic message this replaced.
+/// The message now says only what is certain: this renderer does not implement the type.
+///
+/// When one of these lands as a real `DiagramType`, DELETE its entry rather than leave a message
 /// claiming the feature is missing.
 fn unsupported_upstream_keyword(first_line: &str) -> Option<&'static str> {
     let head = first_line
@@ -718,6 +730,11 @@ fn unsupported_upstream_keyword(first_line: &str) -> Option<&'static str> {
     match head.as_str() {
         "radar" => Some("radar"),
         "treemap" => Some("treemap"),
+        // 62 occurrences in the pinned 11.15.0 bundle, with its own config block and grammar, and
+        // the pinned parser accepts `ishikawa`. Reported by BeigeHill and verified here against the
+        // bundle before adding, because an entry added on trust would produce a confident
+        // "not implemented yet" for a type that may simply not exist.
+        "ishikawa" => Some("ishikawa"),
         _ => None,
     }
 }
@@ -2948,6 +2965,7 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             ("radar\n  title Skills\n  ds1 [10, 20, 30]\n", "radar"),
             ("radar-beta\n  axis a, b\n", "radar"),
             ("treemap\n  root\n    child 5\n", "treemap"),
+            ("ishikawa\n  Problem\n", "ishikawa"),
         ] {
             let detected = super::detect_type_with_confidence(source);
             let joined = detected.warnings.join(" | ");
@@ -2969,7 +2987,12 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
     /// than the vague message it replaced -- the author would stop looking for their typo.
     #[test]
     fn a_typo_still_gets_the_generic_message() {
-        for source in ["flowchrt TD\n  a --> b\n", "radarr\n  x\n", "treemapp\n  y\n"] {
+        for source in [
+            "flowchrt TD\n  a --> b\n",
+            "radarr\n  x\n",
+            "treemapp\n  y\n",
+            "ishikawaa\n  x\n",
+        ] {
             let detected = super::detect_type_with_confidence(source);
             let joined = detected.warnings.join(" | ");
             assert!(
