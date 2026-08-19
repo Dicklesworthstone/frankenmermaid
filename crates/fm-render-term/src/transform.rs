@@ -56,8 +56,16 @@ impl TermTransform {
             return None;
         }
 
-        let mut stack = TransformStack::new();
-        stack.push_scale(sx);
+        // ⚠️ THE SCALE IS DELIBERATELY NOT PUSHED HERE (bd-2q3f.2). `TransformStack::apply` goes
+        // through `Rotor::to_affine_matrix`, which decomposes the canonical `M = T * S * R` and
+        // nothing else. Pushing the scale first made every later `translate` build `S * T`, whose
+        // translation the decomposition reads back scaled by `1/s` instead of `s` — an `s^2` error,
+        // silent, in the plausible-looking direction. `viewport.rs` in fm-render-canvas records
+        // being caught by exactly this and pushes translation first for the same reason.
+        //
+        // The stack therefore holds TRANSLATIONS ONLY, and the scale is composed on at the end by
+        // `rotor_part`, which is the canonical order the decomposition can read.
+        let stack = TransformStack::new();
 
         Some(Self {
             stack,
@@ -70,8 +78,15 @@ impl TermTransform {
     ///
     /// Pushed onto the rotor stack, so panning composes with everything already there instead of
     /// being tracked as a separate pair of offsets.
+    ///
+    /// Stored in DEVICE units — `dx * uniform` — because the stack is composed before the scale.
+    /// Translating by `t` in layout space and then scaling is the same map as scaling and then
+    /// translating by `s * t`, and the second form is the one `to_affine_matrix` can decompose. The
+    /// caller's units are unchanged: this is an internal representation, and `translate(10.0, 20.0)`
+    /// still means ten layout units.
     pub fn translate(&mut self, dx: f32, dy: f32) {
-        self.stack.push_translation(f64::from(dx), f64::from(dy));
+        self.stack
+            .push_translation(f64::from(dx) * self.uniform, f64::from(dy) * self.uniform);
     }
 
     /// Undo the most recent pushed transform. `false` when nothing was pushed.
@@ -107,7 +122,7 @@ impl TermTransform {
     /// terminal's aspect belongs to the DEVICE, so it is applied in device space.
     #[must_use]
     pub fn apply(&self, x: f32, y: f32) -> (f32, f32) {
-        let (rx, ry) = self.stack.apply(f64::from(x), f64::from(y));
+        let (rx, ry) = self.rotor_part().to_affine_matrix().apply(f64::from(x), f64::from(y));
         // The grid is f32 throughout and the f64 rotor is only an intermediate. No #[expect] here:
         // the crate already allows cast_possible_truncation at the top of lib.rs, so an expectation
         // would go UNFULFILLED, and an unfulfilled expectation is itself a warning that CI turns
@@ -122,7 +137,13 @@ impl TermTransform {
     /// that distinction matters for the current grid.
     #[must_use]
     pub fn rotor_part(&self) -> fm_core::cga::Rotor {
-        self.stack.rotor()
+        // Translations (already in device units) FIRST, uniform scale composed on last: the
+        // canonical `T * S` that `to_affine_matrix` decomposes. Building it here rather than
+        // keeping the scale on the stack is what stops a later `translate` from producing `S * T`
+        // — see the note in `new`.
+        self.stack
+            .rotor()
+            .compose(fm_core::cga::Rotor::scale(self.uniform))
     }
 }
 

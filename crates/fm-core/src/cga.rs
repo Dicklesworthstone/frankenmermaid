@@ -3180,4 +3180,43 @@ mod rotor_fault_tests {
             "a similarity must still be accepted"
         );
     }
+
+    /// PUSH ORDER IS PART OF THE CONTRACT: translation first, scale second.
+    ///
+    /// `TransformStack::apply` goes through `Rotor::to_affine_matrix`, which decomposes the
+    /// CANONICAL composite `M = T * S * R` and nothing else -- it divides the raw translation
+    /// components by the half-dilation to recover `t`, which is only the inverse of how they were
+    /// built when the translation was composed first.
+    ///
+    /// Push scale first and the stack holds `S * T`, whose translation part the decomposition reads
+    /// back scaled by `1/s` instead of `s` -- an error of `s^2`, silent, and in the direction that
+    /// looks plausible. `viewport.rs` records having been caught by this; `TermTransform` was
+    /// shipping it (bd-2q3f.2), which is what this test now pins.
+    ///
+    /// Asserted numerically rather than described, because "the decomposition cannot read that
+    /// order back" in a doc comment is what the previous two callers each read and then did anyway.
+    #[test]
+    fn only_translation_before_scale_survives_the_affine_decomposition() {
+        let mut canonical = TransformStack::new();
+        canonical.push_translation(10.0, 20.0);
+        canonical.push_scale(2.0);
+        let (x, y) = canonical.apply(3.0, 5.0);
+        assert!(
+            (x - 16.0).abs() < 1e-9 && (y - 30.0).abs() < 1e-9,
+            "T then S must give s*p + t = (16, 30), got ({x}, {y})"
+        );
+
+        // The unsupported order, pinned so a change in `to_affine_matrix` that fixed it would fail
+        // here and prompt an update rather than passing unnoticed.
+        let mut reversed = TransformStack::new();
+        reversed.push_scale(2.0);
+        reversed.push_translation(10.0, 20.0);
+        let (rx, ry) = reversed.apply(3.0, 5.0);
+        assert!(
+            (rx - 11.0).abs() < 1e-9 && (ry - 20.0).abs() < 1e-9,
+            "S then T is the unsupported order and currently yields s*p + t/s = (11, 20); \
+             got ({rx}, {ry}). If this changed, the decomposition learned the other order -- \
+             update this test and TermTransform's comment together"
+        );
+    }
 }
