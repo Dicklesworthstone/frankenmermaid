@@ -727,6 +727,16 @@ def main() -> int:
         "state the drift, because the margin is then arithmetic on noise",
     )
     parser.add_argument(
+        "--top-consumers",
+        type=float,
+        metavar="SECONDS",
+        help="print the heaviest CPU consumers over an interval and exit, measuring nothing else. "
+        "Exists so window_check.sh can answer 'who is eating the machine' with THIS implementation "
+        "rather than a second copy of it -- two /proc parsers would drift the moment one learned "
+        "about a new field, and the answer would differ between the tool that refuses a window and "
+        "the tool that records one",
+    )
+    parser.add_argument(
         "--allow-unslotted",
         action="store_true",
         help="measure without holding the fleet-wide build slot, or while another agent holds one; "
@@ -748,6 +758,18 @@ def main() -> int:
 
     if args.self_test:
         return self_test()
+
+    if args.top_consumers is not None:
+        # Placed before every other gate: this mode measures nothing, needs no binary and no slot,
+        # and its whole purpose is to be runnable on exactly the contended host where a measurement
+        # is refused.
+        import time
+
+        before = conditions()
+        time.sleep(max(args.top_consumers, 0.1))
+        after = conditions()
+        print(top_cpu_during({"before": before, "after": after}, limit=5))
+        return 0
 
     if not args.fm_bin:
         parser.error("--fm-bin is required unless --self-test is given")

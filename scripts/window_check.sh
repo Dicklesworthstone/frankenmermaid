@@ -89,6 +89,18 @@ for r in "${runq_samples[@]}"; do
   (( r > runq_hi )) && runq_hi=$r
 done
 echo "  runq (procs_running): ${runq_samples[*]}  -> ${runq_lo}-${runq_hi} of $(nproc) cpus"
+
+# WHO is eating the machine, not just how much of it. A refusal that says "spread 32" tells you to
+# wait; one that also says "frankenpandas python:31.9c" tells you WHAT to wait for, and whether it
+# is a peer benchmark you could coordinate with rather than weather.
+#
+# Delegated to abba_render.py --top-consumers rather than reimplemented here: a second /proc parser
+# would drift from the first the moment one learned about a new field, and then the tool that
+# REFUSES a window and the tool that RECORDS one would disagree about what was running in it.
+TOP_HELPER="$(dirname "$0")/headtohead/abba_render.py"
+if [[ -r "$TOP_HELPER" ]]; then
+  echo "  $(python3 "$TOP_HELPER" --top-consumers 1 2>/dev/null || echo 'top=unavailable')"
+fi
 echo
 echo "RECORD THESE ON ANY BANKED ROW: loadavg, idle%, per-arm cpu MHz."
 
