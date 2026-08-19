@@ -230,3 +230,127 @@ fn a_numeric_font_weight_is_accepted() {
         "a numeric font weight was rejected; label drawn in {font:?}"
     );
 }
+
+/// A declared `font-style` reaches the canvas (bd-lvj3).
+#[test]
+fn a_declared_font_style_reaches_the_canvas() {
+    let ops = canvas_ops("flowchart TD\n  a[Alpha]\n  style a font-style:italic\n");
+
+    let font = font_when_text_drawn(&ops, "Alpha").expect("the node label was never drawn");
+    assert!(
+        font.starts_with("italic "),
+        "the declared font style never reached the canvas; label drawn in {font:?}"
+    );
+}
+
+/// A declared `font-family` reaches the canvas (bd-lvj3).
+#[test]
+fn a_declared_font_family_reaches_the_canvas() {
+    let ops = canvas_ops("flowchart TD\n  a[Alpha]\n  style a font-family:Courier\n");
+
+    let font = font_when_text_drawn(&ops, "Alpha").expect("the node label was never drawn");
+    assert!(
+        font.ends_with(" Courier"),
+        "the declared font family never reached the canvas; label drawn in {font:?}"
+    );
+}
+
+/// All four components compose in CSS SHORTHAND ORDER.
+///
+/// Order is not free: a canvas PARSES this string, and `style weight size family` is the only
+/// arrangement it accepts. Getting it wrong makes the assignment unparsable, which is silently
+/// equivalent to setting no font at all — the label then draws in whatever the last draw left.
+#[test]
+fn every_font_component_composes_in_shorthand_order() {
+    let ops = canvas_ops(
+        "flowchart TD\n  a[Alpha]\n  style a font-style:italic,font-weight:bold,font-size:32px,font-family:Courier\n",
+    );
+
+    let font = font_when_text_drawn(&ops, "Alpha").expect("the node label was never drawn");
+    assert_eq!(
+        font, "italic bold 32px Courier",
+        "the four declarations did not compose in CSS shorthand order"
+    );
+}
+
+/// A quoted multi-word family stack survives, because that is what real declarations look like.
+#[test]
+fn a_quoted_font_family_stack_is_accepted() {
+    let ops = canvas_ops(
+        "flowchart TD\n  a[Alpha]\n  style a font-family:'Fira Code', monospace\n",
+    );
+
+    let font = font_when_text_drawn(&ops, "Alpha").expect("the node label was never drawn");
+    assert!(
+        font.contains("Fira Code") && font.contains("monospace"),
+        "a quoted multi-word family stack was rejected; label drawn in {font:?}"
+    );
+}
+
+/// CONTROL: a family carrying font-string punctuation is REFUSED.
+///
+/// The family lands in a string the canvas PARSES, so a stray brace or backslash does not merely
+/// look wrong — it makes the WHOLE assignment unparsable and the label is drawn in whatever font
+/// the last draw left behind, silently and position-dependently. Same reasoning as the paint
+/// sanitiser, one grammar over.
+#[test]
+fn a_font_family_with_punctuation_is_refused() {
+    let config = CanvasRenderConfig::default();
+
+    for declared in ["Courier{}", "Courier<b>", "Courier()", "Courier!"] {
+        let source = format!("flowchart TD\n  a[Alpha]\n  style a font-family:{declared}\n");
+        let ops = canvas_ops(&source);
+        let font = font_when_text_drawn(&ops, "Alpha")
+            .unwrap_or_else(|| panic!("{declared}: the label was never drawn"));
+
+        assert_eq!(
+            font,
+            format!("{}px {}", config.font_size, config.font_family),
+            "font-family:{declared} was not refused"
+        );
+    }
+}
+
+/// A SEMICOLON CANNOT REACH THIS SANITISER, and my first draft of the test above wrongly assumed
+/// it could.
+///
+/// `;` is the PROPERTY SEPARATOR in a mermaid style string, so `parse_style_string` consumes it
+/// before a value exists: `font-family:Courier;` yields the family `Courier`, an ordinary
+/// declaration that is correctly accepted. Measured, not assumed — the earlier version of this
+/// file asserted a theme fallback here and failed with `left: "14px Courier"`.
+///
+/// Worth pinning rather than deleting, because it records that the most obvious injection
+/// character for a canvas font string is structurally unable to get there. If the style grammar
+/// ever changes so a raw `;` survives into a value, this flips to failing and says so.
+#[test]
+fn a_semicolon_is_consumed_by_the_style_grammar_not_by_the_sanitiser() {
+    let config = CanvasRenderConfig::default();
+    let ops = canvas_ops("flowchart TD\n  a[Alpha]\n  style a font-family:Courier;\n");
+
+    let font = font_when_text_drawn(&ops, "Alpha").expect("the node label was never drawn");
+    assert_eq!(
+        font,
+        format!("{}px Courier", config.font_size),
+        "a trailing semicolon changed how the family was read"
+    );
+    assert!(
+        !font.contains(';'),
+        "a semicolon reached the canvas font string ({font:?})"
+    );
+}
+
+/// CONTROL: a malformed STYLE does not discard a valid size beside it.
+#[test]
+fn a_malformed_font_style_does_not_discard_a_valid_size() {
+    let config = CanvasRenderConfig::default();
+    let ops = canvas_ops(
+        "flowchart TD\n  a[Alpha]\n  style a font-style:slanty,font-size:32px\n",
+    );
+
+    let font = font_when_text_drawn(&ops, "Alpha").expect("the node label was never drawn");
+    assert_eq!(
+        font,
+        format!("32px {}", config.font_family),
+        "a malformed font style took the valid size down with it"
+    );
+}

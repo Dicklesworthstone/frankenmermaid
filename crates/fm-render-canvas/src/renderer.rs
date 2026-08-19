@@ -3152,6 +3152,41 @@ fn sanitize_font_weight(value: &str) -> Option<&'static str> {
     }
 }
 
+/// A CSS `font-style` this renderer is willing to put in a canvas font string.
+///
+/// Closed set, for the reason `sanitize_font_weight` documents: an unparsable font string makes a
+/// canvas ignore the WHOLE assignment and keep the previous font, so one junk component discards
+/// the valid ones beside it.
+fn sanitize_font_style(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "normal" => Some("normal"),
+        "italic" => Some("italic"),
+        "oblique" => Some("oblique"),
+        _ => None,
+    }
+}
+
+/// A CSS `font-family` this renderer is willing to put in a canvas font string.
+///
+/// Cannot be a closed set — a family name is arbitrary — so this is a CHARACTER allowlist plus a
+/// length bound. Permitted: letters, digits, spaces, `,`, `-`, `_`, `.` and quotes, which covers
+/// every real declaration including quoted multi-word stacks like `'Inter', Arial`.
+///
+/// ⚠️ THE REJECTED CHARACTERS ARE THE POINT. The family lands in a font string that a canvas
+/// PARSES, so a stray `;` or brace does not merely look wrong — it makes the whole assignment
+/// unparsable and the label is drawn in whatever font the last draw left behind, silently. The
+/// same reasoning as `sanitize_canvas_paint`, one grammar over.
+fn sanitize_font_family(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 128 {
+        return None;
+    }
+    let permitted = value.chars().all(|c| {
+        c.is_ascii_alphanumeric() || matches!(c, ' ' | ',' | '-' | '_' | '.' | '\'' | '"')
+    });
+    permitted.then(|| value.to_string())
+}
+
 /// The author's declared node FONT, as a canvas font string, if anything was declared (bd-lvj3).
 ///
 /// Returns `None` when neither `font-size` nor `font-weight` was declared, which is what keeps the
@@ -3168,16 +3203,35 @@ fn resolve_node_font(
         .get("font-weight")
         .map(String::as_str)
         .and_then(sanitize_font_weight);
+    let style = merged
+        .get("font-style")
+        .map(String::as_str)
+        .and_then(sanitize_font_style);
+    let family = merged
+        .get("font-family")
+        .map(String::as_str)
+        .and_then(sanitize_font_family);
 
-    if size.is_none() && weight.is_none() {
+    if size.is_none() && weight.is_none() && style.is_none() && family.is_none() {
         return None;
     }
 
+    // CSS shorthand ORDER IS NOT FREE: style, then weight, then size, then family. A canvas parses
+    // this string, and components in the wrong order make it unparsable — which is silently
+    // equivalent to setting no font at all.
     let size = size.unwrap_or(config.font_size);
-    Some(match weight {
-        Some(weight) => format!("{weight} {size}px {}", config.font_family),
-        None => format!("{size}px {}", config.font_family),
-    })
+    let family = family.unwrap_or_else(|| config.font_family.clone());
+    let mut font = String::new();
+    if let Some(style) = style {
+        font.push_str(style);
+        font.push(' ');
+    }
+    if let Some(weight) = weight {
+        font.push_str(weight);
+        font.push(' ');
+    }
+    font.push_str(&format!("{size}px {family}"));
+    Some(font)
 }
 
 pub(crate) fn resolve_node_stroke_dasharray(

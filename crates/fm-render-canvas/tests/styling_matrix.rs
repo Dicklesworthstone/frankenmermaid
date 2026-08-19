@@ -71,10 +71,10 @@ fn cases() -> Vec<Case> {
         Case { surface: "node", property: "opacity", expected: Honoured,
             source: "flowchart TD\n  a[Alpha]\n  style a opacity:0.5\n",
             needle: "SetGlobalAlpha(0.5)" },
-        Case { surface: "node", property: "font-style", expected: KnownGap,
+        Case { surface: "node", property: "font-style", expected: Honoured,
             source: "flowchart TD\n  a[Alpha]\n  style a font-style:italic\n",
             needle: "italic" },
-        Case { surface: "node", property: "font-family", expected: KnownGap,
+        Case { surface: "node", property: "font-family", expected: Honoured,
             source: "flowchart TD\n  a[Alpha]\n  style a font-family:Courier\n",
             needle: "Courier" },
 
