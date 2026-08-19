@@ -26531,6 +26531,13 @@ mod tests {
     /// With a global subscriber installed, no thread is ever subscriber-less, so `never` is never
     /// cached. It is always-enabled and has no layers, so it costs a filter check and drops
     /// everything; the per-test `with_default` still overrides it on the capturing thread.
+    ///
+    /// WORKSPACE SWEEP, so nobody repeats it: the four tests in this module are the only exposed
+    /// sites. The one other `with_default` in the workspace, `fm-cli/tests/debug_test.rs`, asserts
+    /// NOTHING — it prints for a human and is the sole test in its binary — so it cannot flake on
+    /// this. And no other `set_global_default` exists anywhere, which matters because only the
+    /// first caller in a process wins: a competing install would silently turn this `Once` into a
+    /// no-op and the protection would be gone with nothing to show for it.
     fn install_global_always_enabled_subscriber() {
         use tracing_subscriber::layer::SubscriberExt;
         static ONCE: std::sync::Once = std::sync::Once::new();
