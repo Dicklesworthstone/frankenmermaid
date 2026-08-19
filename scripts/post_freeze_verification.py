@@ -294,8 +294,17 @@ def classify_step_output(output: str, returncode: int) -> str:
     Extracted from the runner so `--self-test` can pin the ORDERING: a refusal carrying exit 0 must
     not read as a pass, and an inline `if` cannot be tested without running cargo.
     """
+    # Anchored on `refusing local fallback` and NOT on the parenthetical reason, which VARIES:
+    # `(no admissible workers: critical_pressure=1,insufficient_slots=1,...)` and
+    # `(selection error: queue_timeout)` were both collected on this host within minutes of each
+    # other. A matcher keyed on the reason, or on the slot counters, would have silently stopped
+    # matching when the fleet state changed. The prefix is the stable part.
     if "refusing local fallback" in output:
         return "refusal"
+    # ALSO CATCHES A COMPILE ERROR, and that is the case most likely to bite: a failed build
+    # produces a LONG log with no `test result:` line, so a size heuristic reads it as a real run
+    # and the exit status reads it as "tests failed". Neither is true — the suite never ran — and
+    # those two reports send a reader to different places. Length cannot separate them; evidence can.
     if "test result:" not in output:
         return "no-evidence"
     if returncode != 0:
@@ -372,6 +381,25 @@ def self_test() -> int:
     for label, got, want in (
         ("a refusal with exit 0 is not a pass", classify_step_output(refusal, 0), "refusal"),
         ("a refusal with exit 103 is a refusal", classify_step_output(refusal, 103), "refusal"),
+        # A DIFFERENT REASON STRING, same class. Both spellings were observed on this host minutes
+        # apart; the parenthetical is not stable and must not be matched on.
+        (
+            "a refusal with a different reason is still a refusal",
+            classify_step_output(
+                "[RCH] remote required; refusing local fallback (selection error: queue_timeout)"
+                " — retryable",
+                0,
+            ),
+            "refusal",
+        ),
+        # A COMPILE ERROR is not a test failure: long log, no suite, exit non-zero.
+        (
+            "a compile error is no-evidence, not a failure",
+            classify_step_output(
+                "error[E0308]: mismatched types\nerror: could not compile `fm-parser`", 101
+            ),
+            "no-evidence",
+        ),
         ("silence with exit 0 is not a pass", classify_step_output("", 0), "no-evidence"),
         (
             "a real suite that passed is a pass",
