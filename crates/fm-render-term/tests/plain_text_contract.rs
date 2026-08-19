@@ -116,3 +116,39 @@ fn styling_does_not_perturb_the_rendered_body() {
          ignore these channels, not react to them"
     );
 }
+
+/// A click TOOLTIP is not drawn into the terminal body (bd-bk7h).
+///
+/// `click a "url" "some tooltip"` populates `IrNodeInteraction.tooltip`, and fm-render-svg emits it
+/// as a `title` attribute — which is what the incumbent does (`t.tooltip && n.attr("title", ...)`)
+/// and what a browser shows ON HOVER.
+///
+/// ⚠️ A TERMINAL HAS NO HOVER, and that makes "render it as visible text" a DIVERGENCE rather than
+/// the missing half of the feature. mermaid never shows a tooltip until the user points at the
+/// node; a terminal that printed it unconditionally would display text the incumbent does not, in
+/// every diagram that uses `click`, forever. The bead recorded this as a product decision rather
+/// than an omission and did not take it. This pins the decision so it cannot be "fixed" by
+/// accident.
+///
+/// Note the terminal DIFF is a separate surface and legitimately reports `TooltipChanged`:
+/// comparing two IRs is not rendering one.
+#[test]
+fn a_click_tooltip_is_not_drawn_into_the_terminal_body() {
+    let source =
+        "flowchart TD\n  a[Alpha] --> b[Beta]\n  click a \"https://example.com\" \"HOVERTEXT\"\n";
+    let output = render_term(&ir(source));
+
+    assert!(
+        output.contains("Alpha") && output.contains("Beta"),
+        "the diagram did not render, so this proves nothing: {output}"
+    );
+    assert!(
+        !output.contains("HOVERTEXT"),
+        "a click tooltip was printed into the terminal body; the incumbent shows it on HOVER \
+         only, so printing it unconditionally shows text mermaid never shows: {output}"
+    );
+    assert!(
+        !output.contains("example.com"),
+        "a click URL was printed into the terminal body: {output}"
+    );
+}
