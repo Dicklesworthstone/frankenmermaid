@@ -5,7 +5,7 @@
 //! for instanced line-segment rendering. Text remains a separate glyph-atlas pass.
 
 use fm_core::{MermaidDiagramIr, NodeShape};
-use fm_layout::{DiagramLayout, LayoutRect};
+use fm_layout::{DiagramLayout, LayoutPoint, LayoutRect};
 
 /// Shape discriminator consumed by an SDF node shader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -428,6 +428,48 @@ pub struct GpuTextQuad {
 /// Kept alongside the per-glyph quads because a run is the unit the raster pass draws in, so it is
 /// the unit an equivalence check can compare. Counting quads instead would compare glyphs against
 /// runs and never agree.
+/// An edge's label text, or `None` when it has none (bd-qj46q).
+///
+/// ONE lookup used by BOTH the atlas fill and the quad pass. Two copies of "which edges have text"
+/// is precisely how a glyph ends up missing from the atlas and its label silently emits zero quads,
+/// which is the trap already flagged where the atlas is built.
+fn edge_label_text<'a>(
+    ir: &'a MermaidDiagramIr,
+    edge: &fm_layout::LayoutEdgePath,
+) -> Option<&'a str> {
+    ir.edges
+        .get(edge.edge_index)
+        .and_then(|ir_edge| ir_edge.label)
+        .and_then(|id| ir.labels.get(id.0))
+        .map(|label| label.text.as_str())
+}
+
+/// Where the raster pass anchors an edge label, duplicated rather than approximated (bd-qj46q).
+///
+/// `draw_edges` picks the anchor by POINT COUNT, not by a general midpoint: a 4-point route uses the
+/// middle of its two interior points, a straight 2-point edge the middle of the whole span, and any
+/// other route the middle POINT itself. Approximating all three as "halfway along the polyline"
+/// would put the label somewhere the raster pass never draws it on exactly the routes that bend,
+/// which is most of them. Both surfaces then lift it by the same `font_size * 0.8`.
+fn edge_label_anchor(points: &[LayoutPoint], label_offset: f32) -> Option<(f32, f32)> {
+    let (x, y) = match points.len() {
+        0 | 1 => return None,
+        2 => (
+            f32::midpoint(points[0].x, points[1].x),
+            f32::midpoint(points[0].y, points[1].y),
+        ),
+        4 => (
+            f32::midpoint(points[1].x, points[2].x),
+            f32::midpoint(points[1].y, points[2].y),
+        ),
+        len => {
+            let mid = &points[len / 2];
+            (mid.x, mid.y)
+        }
+    };
+    Some((x, y - label_offset))
+}
+
 /// A cluster's title, resolved the same way the Canvas2D pass resolves it (bd-dh6cy).
 ///
 /// Two sources, in the raster path's order: the layout box carries one for diagram types that place
@@ -453,6 +495,7 @@ fn cluster_title<'a>(
 pub enum GpuTextSource {
     Node,
     Cluster,
+    Edge,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -461,7 +504,7 @@ pub struct GpuTextRun {
     /// claims to be: a cluster title's run carries a CLUSTER index, and a consumer resolving it
     /// against `ir.nodes` would silently read an unrelated node or none at all.
     pub source: GpuTextSource,
-    /// Index back into `MermaidDiagramIr::nodes`, or `::clusters` when `source` says so.
+    /// Index back into `MermaidDiagramIr::nodes`, or `::clusters` / `::edges` when `source` says so.
     pub node_index: u32,
     /// Index of this run's first quad in [`GpuRenderPlan::text_quads`].
     pub first_quad: u32,
@@ -480,9 +523,10 @@ pub const DEFAULT_GLYPH_CELL_PX: u32 = 32;
 /// Subgraph containers ARE planned as of bd-dh6cy (`cluster_instances`), with their fill, stroke,
 /// border width and opacity resolved through the same helpers the Canvas2D pass uses.
 ///
-/// ⚠️ CLUSTER LABELS ARE STILL ABSENT. The text pass plans node labels only, so a subgraph gets its
-/// box and not its title. That is the remaining half of bd-dh6cy and it is named here because the
-/// type is where a reader looks to find out what a plan covers.
+/// The text pass plans NODE labels, CLUSTER titles and EDGE labels, each tagged by `GpuTextSource`
+/// so a consumer can tell which collection `node_index` indexes. This note is where a reader looks
+/// to find out what a plan covers, so it is kept current: it claimed cluster titles were absent for
+/// a while after they landed, which is worse than saying nothing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GpuRenderPlan {
     pub bounds: LayoutRect,
@@ -686,8 +730,8 @@ impl GpuRenderPlan {
                     dash,
                     width,
                 });
-                let dx = (to.x - from.x) as f32;
-                let dy = (to.y - from.y) as f32;
+                let dx = to.x - from.x;
+                let dy = to.y - from.y;
                 dash_phase += (dx * dx + dy * dy).sqrt();
             }
 
@@ -771,7 +815,7 @@ impl GpuRenderPlan {
             .clamp(DEFAULT_GLYPH_CELL_PX as f32, 256.0) as u32;
 
         let glyph_atlas =
-            // ⚠️ CLUSTER TITLES MUST BE IN THE ATLAS OR THEY VANISH WITHOUT A TRACE. The quad loop
+            // ⚠️ CLUSTER TITLES AND EDGE LABELS MUST BE IN THE ATLAS OR THEY VANISH WITHOUT A TRACE. The quad loop
             // does `let Some(cell) = glyph_atlas.cell(glyph) else { continue }`, so a glyph the
             // atlas never saw is skipped silently — the title would emit zero quads and the plan
             // would look correct. Feeding both sets in is what makes the titles renderable at all.
@@ -779,7 +823,14 @@ impl GpuRenderPlan {
                 labelled
                     .iter()
                     .map(|(_, _, text)| *text)
-                    .chain(layout.clusters.iter().filter_map(|c| cluster_title(ir, c))),
+                    .chain(layout.clusters.iter().filter_map(|c| cluster_title(ir, c)))
+                    .chain(
+                        layout
+                            .edges
+                            .iter()
+                            .filter(|edge| !edge.bundled)
+                            .filter_map(|edge| edge_label_text(ir, edge)),
+                    ),
                 cell_px,
             );
         let mut text_quads: Vec<GpuTextQuad> = Vec::new();
@@ -882,6 +933,60 @@ impl GpuRenderPlan {
                 text_runs.push(GpuTextRun {
                     source: GpuTextSource::Cluster,
                     node_index: u32::try_from(cluster.cluster_index).unwrap_or(u32::MAX),
+                    first_quad,
+                    quad_count,
+                });
+            }
+        }
+
+        // EDGE LABELS (bd-qj46q). `draw_edges` draws one `fill_text` per labelled edge, so without
+        // this pass a `A -->|yes| B` flowchart planned its edge and dropped the word on it -- the
+        // same defect class as the subgraph titles that were missing before bd-dh6cy.
+        //
+        // Centred on the anchor, unlike a cluster title: the raster pass fills a label plate
+        // CENTRED at the anchor and draws the text into it, so a left-inset run would sit half a
+        // label to the right of where the other surface puts it.
+        for edge in layout.edges.iter().filter(|edge| !edge.bundled) {
+            let Some(text) = edge_label_text(ir, edge) else {
+                continue;
+            };
+            let Some((anchor_x, anchor_y)) =
+                edge_label_anchor(&edge.points, DEFAULT_FONT_SIZE_PX * 0.8)
+            else {
+                continue;
+            };
+            let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
+            if inked.is_empty() {
+                continue;
+            }
+            let first_quad = u32::try_from(text_quads.len()).unwrap_or(u32::MAX);
+            let advance = DEFAULT_FONT_SIZE_PX * CHAR_ADVANCE_RATIO;
+            let half_height = DEFAULT_FONT_SIZE_PX * 0.5;
+            let run_width = u16::try_from(inked.len()).map_or(f32::from(u16::MAX), f32::from) * advance;
+            let start_x = anchor_x - (run_width * 0.5) + (advance * 0.5);
+            let colour = crate::renderer::resolve_edge_label_color(ir, edge.edge_index)
+                .as_deref()
+                .and_then(parse_paint_rgba)
+                .unwrap_or(DEFAULT_LABEL_RGBA);
+            for (offset, glyph) in inked.iter().enumerate() {
+                let Some(cell) = glyph_atlas.cell(*glyph) else {
+                    continue;
+                };
+                let step = u16::try_from(offset).map_or(f32::from(u16::MAX), f32::from);
+                text_quads.push(GpuTextQuad {
+                    center: [start_x + (step * advance), anchor_y],
+                    half_extent: [advance * 0.5, half_height],
+                    uv_min: cell.uv_min,
+                    uv_max: cell.uv_max,
+                    color: colour,
+                    run_index: u32::try_from(text_runs.len()).unwrap_or(u32::MAX),
+                });
+            }
+            let quad_count = u32::try_from(text_quads.len()).unwrap_or(u32::MAX) - first_quad;
+            if quad_count > 0 {
+                text_runs.push(GpuTextRun {
+                    source: GpuTextSource::Edge,
+                    node_index: u32::try_from(edge.edge_index).unwrap_or(u32::MAX),
                     first_quad,
                     quad_count,
                 });
@@ -1409,6 +1514,80 @@ mod tests {
             plan.edge_segments
                 .iter()
                 .all(|segment| segment.edge_index == 7)
+        );
+    }
+
+    /// A labelled edge reaches the GPU plan WITH its label (bd-qj46q).
+    ///
+    /// `draw_edges` emits one `fill_text` per labelled edge. The plan's text pass covered nodes and
+    /// cluster titles only, so `A -->|yes| B` planned the line and silently dropped the word on it.
+    /// The anchor is checked, not just the run's existence: a run placed somewhere the raster pass
+    /// never draws is still a wrong picture, and the point-count rule is the part most likely to be
+    /// "simplified" into a plain polyline midpoint by a later reader.
+    #[test]
+    fn a_labelled_edge_reaches_the_gpu_plan_with_its_text() {
+        let mut ir = ir_with_edge_at_fixture_index(fm_core::ArrowType::Arrow);
+        ir.labels.push(fm_core::IrLabel {
+            text: "yes".to_string(),
+            span: Default::default(),
+        });
+        ir.edges[7].label = Some(fm_core::IrLabelId(0));
+
+        let plan = super::GpuRenderPlan::from_layout(&ir, &test_layout(), 1.25);
+
+        let runs: Vec<_> = plan
+            .text_runs
+            .iter()
+            .filter(|run| run.source == super::GpuTextSource::Edge)
+            .collect();
+        assert_eq!(runs.len(), 1, "one labelled, unbundled edge means one run");
+        assert_eq!(runs[0].node_index, 7, "the run must index ir.edges");
+        assert_eq!(runs[0].quad_count, 3, "three inked glyphs in \"yes\"");
+
+        // The fixture edge has THREE points, so the raster rule anchors on the middle POINT
+        // (70.0, 35.0) -- not on the midpoint of the whole span, which would be 70.0 but at a
+        // different y, and not on interior-pair midpoints, which is the 4-point branch.
+        let quads = &plan.text_quads[runs[0].first_quad as usize..][..runs[0].quad_count as usize];
+        let mean_x = quads.iter().map(|q| q.center[0]).sum::<f32>() / 3.0;
+        assert!(
+            (mean_x - 70.0).abs() < 0.01,
+            "the run must be CENTRED on the anchor, not inset from it: {mean_x}"
+        );
+        for quad in quads {
+            assert!(
+                (quad.center[1] - (35.0 - super::DEFAULT_FONT_SIZE_PX * 0.8)).abs() < 0.01,
+                "the label must be lifted off the line by the raster pass's own offset"
+            );
+        }
+    }
+
+    /// The anchor follows POINT COUNT, the way `draw_edges` does (bd-qj46q).
+    #[test]
+    fn the_edge_label_anchor_follows_the_raster_point_count_rule() {
+        let p = |x: f32, y: f32| super::LayoutPoint { x, y };
+
+        assert_eq!(super::edge_label_anchor(&[], 0.0), None);
+        assert_eq!(super::edge_label_anchor(&[p(1.0, 1.0)], 0.0), None);
+
+        // Two points: the middle of the whole span.
+        assert_eq!(
+            super::edge_label_anchor(&[p(0.0, 0.0), p(10.0, 20.0)], 0.0),
+            Some((5.0, 10.0))
+        );
+        // Four points: the middle of the INTERIOR pair, which is not the middle of the span.
+        assert_eq!(
+            super::edge_label_anchor(&[p(0.0, 0.0), p(2.0, 4.0), p(6.0, 8.0), p(100.0, 0.0)], 0.0),
+            Some((4.0, 6.0))
+        );
+        // Anything else: the middle POINT itself.
+        assert_eq!(
+            super::edge_label_anchor(&[p(0.0, 0.0), p(3.0, 7.0), p(50.0, 50.0)], 0.0),
+            Some((3.0, 7.0))
+        );
+        // The lift applies to every branch.
+        assert_eq!(
+            super::edge_label_anchor(&[p(0.0, 0.0), p(10.0, 20.0)], 4.0),
+            Some((5.0, 6.0))
         );
     }
 
