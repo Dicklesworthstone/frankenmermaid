@@ -107,10 +107,18 @@ fn no_operation_carries_a_broken_float() {
         }
         for terminator in [',', ')', ' '] {
             let needle = format!("-0.0{terminator}");
+            // Name the OPERATION, not just the needle. "somewhere in this diagram there is a
+            // negative zero" sends the reader back to the renderer to search by hand; the op tells
+            // them which call produced it, which is the whole question when the value could have
+            // come from layout or from this crate's own arithmetic.
+            let culprit = ops
+                .split("), ")
+                .find(|op| op.contains(&needle))
+                .unwrap_or("<not found in any single op>");
             assert!(
                 !ops.contains(&needle),
                 "{name}: an operation carries negative zero ({needle:?}), which no numeric \
-                 assertion can distinguish from 0.0"
+                 assertion can distinguish from 0.0 -- in: {culprit}"
             );
         }
     }

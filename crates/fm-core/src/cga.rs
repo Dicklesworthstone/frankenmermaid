@@ -540,15 +540,40 @@ impl Rotor {
         let tx = raw_tx.mul_add(cos_half, raw_ty * sin_half);
         let ty = raw_ty.mul_add(cos_half, -(raw_tx * sin_half));
 
+        // CANONICALIZE THE SIGN OF ZERO (bd-1s1g.6). `b` is a negated sine, so an unrotated
+        // transform -- by far the commonest one -- produced `-0.0 * scale` = `-0.0`, and the
+        // identity matrix came out carrying a negative zero. It reached the canvas op stream as
+        // `SetTransform(1.0, 0.0, -0.0, 1.0, ...)`.
+        //
+        // The sign of a zero has NO geometric meaning in an affine matrix: `-0.0 == 0.0` is true,
+        // so it changes no rendering and no numeric assertion can see it. What it does change is
+        // the BITS, and this bead's subject is bit-identical output across targets. It also hides
+        // asymmetrically -- fm-render-svg's `write_number_into` takes an integer fast path
+        // (`let i = n as i32; if i as f32 == n`) which prints `-0.0` as "0", so the SVG normalises
+        // it by accident while the canvas records it faithfully. Fixed HERE, where it is produced,
+        // rather than at either formatter: normalising at the canvas would have made the last
+        // instrument that can see it blind too.
         AffineMatrix2D {
-            a: cos_theta * scale_factor,
-            b: -sin_theta * scale_factor,
-            tx,
-            c: sin_theta * scale_factor,
-            d: cos_theta * scale_factor,
-            ty,
+            a: canonical_zero(cos_theta * scale_factor),
+            b: canonical_zero(-sin_theta * scale_factor),
+            tx: canonical_zero(tx),
+            c: canonical_zero(sin_theta * scale_factor),
+            d: canonical_zero(cos_theta * scale_factor),
+            ty: canonical_zero(ty),
         }
     }
+}
+
+/// Map `-0.0` to `+0.0`, leaving every other value untouched.
+///
+/// `value == 0.0` is true for BOTH zeros, so this is total and branch-predictable: it returns the
+/// positive zero for either sign and the input otherwise. NaN compares false and passes through
+/// unchanged, which is deliberate -- a NaN reaching a transform is a separate defect and must stay
+/// visible rather than being quietly turned into a zero here.
+#[inline]
+#[must_use]
+fn canonical_zero(value: f64) -> f64 {
+    if value == 0.0 { 0.0 } else { value }
 }
 
 #[cfg(test)]
