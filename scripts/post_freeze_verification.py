@@ -235,8 +235,47 @@ def show(execute: bool) -> int:
         guard_disk()
         guard_build_slot()
         print(f"\n--- [{index}/{len(PLAN)}] {name}: {' '.join(argv)}")
-        result = subprocess.run(argv, cwd=REPO, check=False)
+        result = subprocess.run(argv, cwd=REPO, check=False, capture_output=True, text=True)
+        output = (result.stdout or "") + (result.stderr or "")
+
+        # ⚠️ EXIT STATUS ALONE CANNOT TELL A PASS FROM A RUN THAT NEVER HAPPENED, which is fatal for
+        # a script whose whole job is verification. `cargo` here is an rch shim, and its admission
+        # refusal was MEASURED (2026-08-18, by another agent on this repo) to report:
+        #
+        #     foregrounded: exit 103    backgrounded: exit 0, with a 154-byte log
+        #
+        # So "103 means admission refusal", which this project had written down, is not sufficient:
+        # under the background wrapper a refusal is indistinguishable from a pass on status alone.
+        # This loop would have printed "All steps passed" having compiled and run nothing.
+        #
+        # Judged on POSITIVE EVIDENCE instead, in this order: a refusal is recognised first because
+        # it can carry exit 0; then the step must prove it ran; only then does the status decide.
+        verdict = classify_step_output(output, result.returncode)
+        if verdict == "refusal":
+            print(output)
+            print(
+                f"\nSTOPPED at {name}: rch ADMISSION REFUSAL, not a test result (exit "
+                f"{result.returncode} — a refusal reports 0 when backgrounded). Nothing was "
+                "verified. Retry when workers are admissible, or re-run with "
+                "RCH_CARGO_WRAPPER_BYPASS=1 to build locally."
+            )
+            return 103
+
+        if verdict == "no-evidence":
+            print(output)
+            print(
+                f"\nSTOPPED at {name}: the step exited {result.returncode} but produced NO "
+                "`test result:` line, so it did not run a test suite. Treat this as a broken "
+                "invocation, never as a pass — that is the whole reason this check exists."
+            )
+            return result.returncode or 1
+
+        for line in output.splitlines():
+            if line.startswith("test result:") or " FAILED" in line:
+                print(line)
+
         if result.returncode != 0:
+            print(output)
             print(
                 f"\nSTOPPED at {name} (exit {result.returncode}). Later steps are not run: a failure "
                 "here makes their output untrustworthy. Check the expected-failure notes above "
@@ -245,6 +284,23 @@ def show(execute: bool) -> int:
             return result.returncode
     print("\nAll steps passed.")
     return 0
+
+
+def classify_step_output(output: str, returncode: int) -> str:
+    """Judge one verification step on EVIDENCE first and exit status last.
+
+    Returns one of `refusal`, `no-evidence`, `failed`, `passed`.
+
+    Extracted from the runner so `--self-test` can pin the ORDERING: a refusal carrying exit 0 must
+    not read as a pass, and an inline `if` cannot be tested without running cargo.
+    """
+    if "refusing local fallback" in output:
+        return "refusal"
+    if "test result:" not in output:
+        return "no-evidence"
+    if returncode != 0:
+        return "failed"
+    return "passed"
 
 
 def self_test() -> int:
@@ -308,6 +364,29 @@ def self_test() -> int:
     ok = '"-f"' in source and REPO in str(REPO) and "-x" not in source.split('"""')[-1]
     print(("  ok   " if ok else "  FAIL ") + "the slot probe matches full command lines, not the binary name")
     failures += 0 if ok else 1
+
+    # A BACKGROUNDED rch refusal reports exit 0 with a ~154-byte log; the SAME refusal foregrounded
+    # reports 103 (measured on this repo, 2026-08-18). So exit status alone cannot separate a pass
+    # from a run that never happened, and this runner judges on evidence first.
+    refusal = "[RCH] remote required; refusing local fallback (no admissible workers) — retryable"
+    for label, got, want in (
+        ("a refusal with exit 0 is not a pass", classify_step_output(refusal, 0), "refusal"),
+        ("a refusal with exit 103 is a refusal", classify_step_output(refusal, 103), "refusal"),
+        ("silence with exit 0 is not a pass", classify_step_output("", 0), "no-evidence"),
+        (
+            "a real suite that passed is a pass",
+            classify_step_output("test result: ok. 12 passed; 0 failed", 0),
+            "passed",
+        ),
+        (
+            "a real suite that failed is a failure",
+            classify_step_output("test result: FAILED. 1 passed; 1 failed", 101),
+            "failed",
+        ),
+    ):
+        ok = got == want
+        print(("  ok   " if ok else "  FAIL ") + f"{label} (got {got})")
+        failures += 0 if ok else 1
 
     print("self-test PASSED" if not failures else f"self-test FAILED ({failures})")
     return 1 if failures else 0
