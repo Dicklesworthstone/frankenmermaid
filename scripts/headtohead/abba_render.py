@@ -107,6 +107,25 @@ MAX_FM_DRIFT = 1.10
 # Worst per-arm iowait an A/B/B/A may carry and still quote a ratio. See the refusal in `main`.
 MAX_ARM_IOWAIT_PCT = 5.0
 
+# The fleet's hard disk brake. A timed run writes corpus and record artifacts, and a host that runs
+# out mid-invocation produces a half-written record that looks like a measurement.
+MIN_FREE_GIB = 42.0
+
+
+def free_gib(path: str = "/data") -> float | None:
+    """Space actually available to this user, or `None` if the path cannot be stat'd.
+
+    ⚠️ `f_bavail`, NOT `shutil.disk_usage().free`. The latter counts the root-reserved blocks an
+    unprivileged writer cannot touch: measured on this host once at 126.7 GiB free while `df`
+    reported 20G, which is the difference between "plenty" and "about to fail". The two agree when
+    the reserve is not in play, so the bug is invisible until exactly the moment it matters.
+    """
+    try:
+        stat = os.statvfs(path)
+    except OSError:
+        return None
+    return stat.f_bavail * stat.f_frsize / (1024**3)
+
 
 AGENT_MAIL_PROJECTS = os.path.expanduser("~/.mcp_agent_mail_git_mailbox_repo/projects")
 
@@ -850,6 +869,20 @@ def main() -> int:
         )
         print("  re-run in a window with more comparable idle cores, or pass")
         print("  --allow-starved-incumbent and state the starvation on the row")
+        return 2
+
+    # DISK BRAKE, checked before anything is written or timed. Observed 2026-08-19: free space fell
+    # 227 -> 211 -> 190 -> 149 GiB inside about ten minutes while four peer builds ran, i.e. faster
+    # than a single A/B/B/A invocation takes. A `df` taken when the run was queued is not evidence
+    # about the run, which is why this is here and not in the operator's head.
+    free = free_gib()
+    if free is None:
+        print("NOTE: could not stat /data, so the disk brake cannot be checked here")
+    elif free < MIN_FREE_GIB:
+        print()
+        print(f"REFUSING TO MEASURE: {free:.1f} GiB free, under the {MIN_FREE_GIB} GiB brake")
+        print("  a run that fills the disk mid-invocation leaves a half-written record, which is")
+        print("  worse than no record: it looks like a measurement")
         return 2
 
     # FLEET SERIALISATION (one timed run at a time, across ALL projects).
