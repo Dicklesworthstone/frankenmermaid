@@ -491,14 +491,18 @@ def mermaid_arm(case_id: str, reps: int, pins: dict | None = None) -> dict:
 def head_revision() -> str | None:
     """The checked-out revision, or None if this is not a git tree."""
     try:
+        # Bounded like everything else here. `git rev-parse` is not a plausible hang, but an
+        # unbounded call in a file whose point is that unbounded calls cost afternoons is an
+        # invitation to copy it.
+        #
+        # The comment sits ABOVE the call rather than inside the arguments so the options stay
+        # compact: the self-test looks for the bound within a few lines of the call, and a tight
+        # window is a stronger check than one widened to accommodate prose.
         out = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
             check=False,
-            # Bounded like everything else here. `git rev-parse` is not a plausible hang, but an
-            # unbounded call in a file whose point is that unbounded calls cost afternoons is an
-            # invitation to copy it.
             timeout=PROBE_TIMEOUT_S,
         )
         rev = out.stdout.strip()
@@ -768,6 +772,43 @@ def self_test() -> int:
         for label, ok in cases:
             print(f"  {'ok  ' if ok else 'FAIL'} {label}")
             failures += 0 if ok else 1
+
+
+    # Every child spawn in this harness pair must carry a deadline (see `run_bounded`). This scans
+    # for the call shapes and requires a bound near each one.
+    #
+    # ⚠️ THE NEEDLES ARE ASSEMBLED, NOT WRITTEN, and that is not decoration. The include_str! gate
+    # in gpu_plan.rs passed while checking nothing because it scanned a file containing its own
+    # search terms; a checker whose source contains the pattern it hunts finds itself and reports
+    # clean. Building them from fragments keeps this file free of the literals.
+    py_call = "subprocess" + ".run("
+    js_calls = ("spawn" + "Sync(", "execFile" + "Sync(")
+    unbounded: list[str] = []
+    for path, needles, bound in (
+        (os.path.abspath(__file__), (py_call,), "timeout="),
+        (os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.mjs"), js_calls, "timeout:"),
+    ):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                lines = handle.read().splitlines()
+        except OSError:
+            continue
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("#") or stripped.startswith("//"):
+                continue
+            if not any(needle in line for needle in needles):
+                continue
+            # The bound may sit on the call line or in the options that follow it.
+            window = "\n".join(lines[index : index + 8])
+            if bound not in window:
+                unbounded.append(f"{os.path.basename(path)}:{index + 1}: {stripped[:70]}")
+
+    print(f"  {'ok  ' if not unbounded else 'FAIL'} every child spawn carries a deadline")
+    if unbounded:
+        for site in unbounded:
+            print(f"       unbounded: {site}")
+        failures += len(unbounded)
 
     print("self-test PASSED" if not failures else f"self-test FAILED ({failures})")
     return 1 if failures else 0
