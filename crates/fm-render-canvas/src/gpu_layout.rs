@@ -272,10 +272,125 @@ pub const fn text_buffer_layout() -> GpuBufferLayout {
 #[cfg(test)]
 mod tests {
     use super::{
-        GpuBufferLayout, arrowhead_buffer_layout, edge_buffer_layout, node_buffer_layout,
-        text_buffer_layout,
+        GpuBufferLayout, GpuVertexFormat, arrowhead_buffer_layout, edge_buffer_layout,
+        node_buffer_layout, text_buffer_layout,
     };
     use crate::gpu_plan::{ARROWHEAD_WGSL, EDGE_WGSL, NODE_SDF_WGSL, TEXT_ATLAS_WGSL};
+
+    // WGSL / layout ABI agreement (bd-2u0.2).
+    //
+    // `offset_of!` keeps the Rust side honest with itself, but the SHADER is a second hand-written
+    // description of the same interface in another language, and nothing compared the two. A
+    // `@location` added to one and not the other is invisible to the compiler and to every test on
+    // this host: there is no GPU here and no `naga`. It would surface as a shader reading a stroke
+    // colour out of the bytes of a shape enum -- confidently wrong pixels, not an error.
+    //
+    // These live INSIDE the crate rather than in `tests/` because `gpu_layout` and `gpu_plan` are
+    // private modules; publishing them to give an integration test access would widen the crate's
+    // API to serve a test, which is the wrong trade.
+
+    /// Pull `(location, name, wgsl_type)` out of the named WGSL struct.
+    ///
+    /// Deliberately scoped to ONE struct rather than scanning the whole source: `VertexOut` in the same
+    /// shader also numbers its members from `@location(0)`, and a whole-file scan would match those and
+    /// report a mismatch that does not exist. The vertex-INPUT struct is the only one describing the
+    /// buffer ABI.
+    fn wgsl_struct_locations(source: &str, struct_name: &str) -> Vec<(u32, String, String)> {
+        let header = format!("struct {struct_name} {{");
+        let start = source
+            .find(&header)
+            .unwrap_or_else(|| panic!("{struct_name} is not in the shader source"))
+            + header.len();
+        let body = &source[start..];
+        let end = body.find('}').expect("unterminated struct");
+
+        let mut out = Vec::new();
+        for line in body[..end].lines() {
+            let line = line.trim().trim_end_matches(',');
+            let Some(rest) = line.strip_prefix("@location(") else {
+                continue;
+            };
+            let (location, rest) = rest.split_once(')').expect("malformed @location");
+            let (name, ty) = rest.split_once(':').expect("malformed member");
+            out.push((
+                location.trim().parse::<u32>().expect("location is a number"),
+                name.trim().to_string(),
+                ty.trim().to_string(),
+            ));
+        }
+        out
+    }
+
+    /// The WGSL type a given vertex format must be declared as.
+    fn expected_wgsl_type(format: GpuVertexFormat) -> &'static str {
+        match format {
+            super::GpuVertexFormat::Float32 => "f32",
+            super::GpuVertexFormat::Float32x2 => "vec2<f32>",
+            super::GpuVertexFormat::Float32x4 => "vec4<f32>",
+            super::GpuVertexFormat::Uint32 => "u32",
+        }
+    }
+
+    #[test]
+    fn the_node_shader_and_the_node_buffer_layout_agree() {
+        let shader = wgsl_struct_locations(NODE_SDF_WGSL, "NodeInstance");
+        let layout = node_buffer_layout();
+
+        assert!(
+            !shader.is_empty(),
+            "no @location members were parsed out of NodeInstance, so this test proves nothing"
+        );
+        assert_eq!(
+            shader.len(),
+            layout.attributes.len(),
+            "the shader declares {} instance members and the layout describes {}: {shader:?}",
+            shader.len(),
+            layout.attributes.len()
+        );
+
+        for attribute in layout.attributes {
+            let (_, name, ty) = shader
+                .iter()
+                .find(|(location, _, _)| *location == attribute.shader_location)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the layout has @location({}) and the shader does not: {shader:?}",
+                        attribute.shader_location
+                    )
+                });
+            assert_eq!(
+                ty,
+                expected_wgsl_type(attribute.format),
+                "@location({}) `{name}` is `{ty}` in the shader but {:?} in the layout",
+                attribute.shader_location,
+                attribute.format
+            );
+        }
+    }
+
+    /// CONTROL: the parser finds what is actually there, and is not fooled by the OTHER struct.
+    ///
+    /// If `wgsl_struct_locations` silently returned an empty list -- a renamed struct, a reformatted
+    /// source -- the test above would still pass its per-attribute loop while checking nothing, which is
+    /// the vacuous-gate failure this project has hit repeatedly. Pinning the known members makes that
+    /// impossible, and pinning `VertexOut` separately proves the scoping works: it also starts at
+    /// `@location(0)` and would corrupt a whole-file scan.
+    #[test]
+    fn the_wgsl_parser_reads_the_struct_it_was_asked_for() {
+        let instance = wgsl_struct_locations(NODE_SDF_WGSL, "NodeInstance");
+        let names: Vec<&str> = instance.iter().map(|(_, name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["center", "half_extent", "fill", "stroke", "shape", "node_index"],
+            "the NodeInstance members moved; update the layout table with them"
+        );
+
+        let vertex_out = wgsl_struct_locations(NODE_SDF_WGSL, "VertexOut");
+        assert!(
+            vertex_out.iter().any(|(location, _, _)| *location == 0),
+            "VertexOut also numbers from @location(0), which is exactly why the scan is struct-scoped"
+        );
+    }
 
     /// Every attribute must fit inside the instance it describes.
     ///
