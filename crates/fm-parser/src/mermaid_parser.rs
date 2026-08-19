@@ -2031,7 +2031,16 @@ fn parse_flowchart_statement_asts(
                 && !statement.starts_with("linkStyle ")
                 && !statement.starts_with("classDef ")
     );
-    if !chumsky_would_fail {
+    // ⚠️ THE THIRD DOOR TO A NODE ID (bd-6s6sx). `fast_path_cannot_classify_run` guards the two
+    // hand-written fast paths, but the CHUMSKY grammar is a third way in and it is tried first:
+    // its `ident` accepts `-` and `.` as identifier bytes, so `A---xB` and `A-.-B` are perfectly
+    // good node names to it. It answered `FlowAst::Node` before the full operator matcher ever saw
+    // the statement, which is why the deferral looked inert on both the statement and document
+    // paths even with both fast-path guards in place.
+    //
+    // Same predicate, same rule, one more door — rather than teaching the chumsky grammar about
+    // runs, which would put the rule in two places.
+    if !chumsky_would_fail && !fast_path_cannot_classify_run(statement) {
         let (ast, errors) = flow_statement_parser()
             .parse(statement)
             .into_output_errors();
@@ -2380,6 +2389,67 @@ fn parse_flowchart_node_metadata(
     }))
 }
 
+/// Does this statement carry a dash/dot run the FAST tables cannot classify (bd-6s6sx)?
+///
+/// The fast path has its own 9-entry operator table and no run logic, so any run longer than those
+/// literals belongs to the full matcher. Deferring is always safe: it costs a fast path, never a
+/// wrong answer.
+///
+/// ⚠️ THIS MUST BE CHECKED ON THE NODE PATH, NOT ONLY THE EDGE PATH, and that is the whole reason
+/// it is a named predicate instead of an early return. The first version of this guard lived inside
+/// the edge matcher and returned `None` meaning "defer to the full matcher" — but `None` from the
+/// edge matcher means "not an edge" to its callers, which then hand the SAME text to the fast node
+/// parser. `-`, `o` and `x` are all identifier bytes, so `A---xB` was claimed as a node id and the
+/// full matcher was never reached: the deferral was swallowed one line below where it was written.
+/// Diagnosed by BeigeHill against a built binary after the throttle lifted.
+///
+/// There are TWO node entry points — the `or_else` in `parse_fast_simple_flowchart_statement_ast`
+/// and the document loop's direct call to `parse_fast_simple_flowchart_node_borrowed` — so the
+/// check sits at the shared chokepoint each of them passes through, not at either caller.
+fn fast_path_cannot_classify_run(statement: &str) -> bool {
+    let bytes = statement.as_bytes();
+    let mut i = 0_usize;
+    while i < bytes.len() {
+        if bytes[i] != b'-' {
+            i += 1;
+            continue;
+        }
+
+        if bytes.get(i + 1) == Some(&b'.') {
+            // Dotted family. A dotted LINK is `-` `.`+ `-`; a bare `-.` with no closing dash is
+            // just text (a node id like `v1-.2`) and must stay on the fast path. Of the real link
+            // spellings the fast table carries exactly `-.->`, so every other one defers.
+            let mut j = i + 1;
+            while bytes.get(j) == Some(&b'.') {
+                j += 1;
+            }
+            if bytes.get(j) == Some(&b'-') {
+                let is_fast_dotted_arrow = j == i + 2 && bytes.get(j + 1) == Some(&b'>');
+                if !is_fast_dotted_arrow {
+                    return true;
+                }
+                i = j + 2;
+                continue;
+            }
+            i = j;
+            continue;
+        }
+
+        let mut j = i;
+        while bytes.get(j) == Some(&b'-') {
+            j += 1;
+        }
+        // A run ending in `>` needs no help: `>` is not an identifier byte, so the node path
+        // rejects it and the full matcher gets the statement anyway. `o` and `x` ARE identifier
+        // bytes, and that is precisely the defect.
+        if j - i >= 3 && matches!(bytes.get(j), Some(b'o' | b'x')) {
+            return true;
+        }
+        i = j;
+    }
+    false
+}
+
 fn parse_fast_simple_flowchart_statement_ast(statement: &str) -> Option<FlowAst> {
     parse_fast_simple_flowchart_edge_ast(statement)
         .or_else(|| parse_fast_simple_flowchart_node_ast(statement).map(FlowAst::Node))
@@ -2425,6 +2495,11 @@ fn parse_fast_simple_flowchart_edge_parts(statement: &str) -> Option<(&str, Arro
     // top `trim_ascii` was a no-op. Use `statement` directly. (`left`/`right` around the operator are
     // still trimmed below, where whitespace like `N0 --> N1` IS possible.)
     let trimmed = statement;
+    // A run the fast table cannot classify belongs to the full matcher (bd-6s6sx); see
+    // `fast_path_cannot_classify_run` for why the NODE path checks the same predicate.
+    if fast_path_cannot_classify_run(trimmed) {
+        return None;
+    }
     if trimmed.is_empty() || trimmed.bytes().any(|byte| FAST_EDGE_REJECT[byte as usize]) {
         return None;
     }
@@ -2463,24 +2538,6 @@ fn parse_fast_simple_flowchart_edge_parts(statement: &str) -> Option<(&str, Arro
     }
 
     let (operator_index, operator, arrow) = matched?;
-
-    // DEFER A LONG RUN TO THE FULL MATCHER (bd-6s6sx). `---` is the only fast operator whose run
-    // can continue, and the spaced forms already fall out of this path because the right side fails
-    // `is_fast_flow_identifier`. The unspaced ones do NOT: `A---xB` would be read here as a plain
-    // line to a node called `xB`, while `extend_operator_run` reads it as a cross edge to `B` -- and
-    // `A---oranges` as a circle edge to `ranges`, which is what mermaid's own `--+[-xo(gt)]` lexes.
-    //
-    // A fast path that disagrees with the path it shortcuts is the defect class that silently
-    // dropped journey and kanban fill, so this REJECTS rather than duplicating the run logic: one
-    // implementation of the rule, and the slow path owns it.
-    if operator == "---"
-        && matches!(
-            trimmed.as_bytes().get(operator_index + operator.len()),
-            Some(b'-' | b'>' | b'o' | b'x')
-        )
-    {
-        return None;
-    }
 
     let left = trimmed.get(..operator_index)?.trim_ascii();
     let right = trimmed.get(operator_index + operator.len()..)?.trim_ascii();
@@ -2524,6 +2581,12 @@ fn parse_fast_simple_flowchart_node_borrowed(
     // `parse_fast_simple_flowchart_edge_parts`), so the top `trim_ascii` was a no-op — use `statement`
     // directly. The `id` before `[` is still trimmed below (`N0 [x]` has interior whitespace).
     let trimmed = statement;
+    // THE CHECK THAT MATTERS (bd-6s6sx). Refusing the run on the edge path alone is inert: `None`
+    // there means "not an edge", and both callers then offer the same text here, where `-`, `o` and
+    // `x` are all valid identifier bytes. `A---xB` became a node id and the full matcher never ran.
+    if fast_path_cannot_classify_run(trimmed) {
+        return None;
+    }
     if trimmed.is_empty() {
         return None;
     }
@@ -13015,12 +13078,69 @@ mod tests {
     /// no error: the shape that silently dropped journey and kanban fill.
     #[test]
     fn the_fast_flow_path_defers_an_unspaced_long_run() {
-        let parsed = parse_mermaid("flowchart LR\n  A---xB\n");
+        for (source, expected) in [
+            ("flowchart LR\n  A---xB\n", ArrowType::Cross),
+            ("flowchart LR\n  A---oB\n", ArrowType::Circle),
+            ("flowchart LR\n  A-----xB\n", ArrowType::Cross),
+        ] {
+            let parsed = parse_mermaid(source);
+            assert_eq!(parsed.ir.edges.len(), 1, "no edge for: {source}");
+            assert_eq!(parsed.ir.edges[0].arrow, expected, "wrong head for: {source}");
+            let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+            assert_eq!(ids, vec!["A", "B"], "the fast path invented a node: {source}");
+        }
+    }
 
-        assert_eq!(parsed.ir.edges.len(), 1);
-        assert_eq!(parsed.ir.edges[0].arrow, ArrowType::Cross);
+    /// The same swallow, one layer up: the DOCUMENT loop has its own edge-then-node pair.
+    ///
+    /// `parse_fast_simple_flowchart_node_borrowed` is called directly there, bypassing
+    /// `parse_fast_simple_flowchart_statement_ast` entirely, so a guard placed in the statement
+    /// function would have been inert on this path while looking correct. The predicate sits at the
+    /// shared chokepoint instead. This case exercises the document loop by giving it a whole
+    /// flowchart of simple statements, which is what routes it there.
+    #[test]
+    fn the_document_fast_path_defers_an_unspaced_long_run() {
+        let parsed = parse_mermaid("flowchart LR\n  A---xB\n  C-->D\n  E[Plain]\n");
+
         let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
-        assert_eq!(ids, vec!["A", "B"], "the fast path invented a node");
+        assert!(
+            !ids.iter().any(|id| id.contains('-')),
+            "a long run survived as a node id on the document path: {ids:?}"
+        );
+        assert_eq!(parsed.ir.edges.len(), 2, "expected the A-x-B and C-D edges");
+    }
+
+    /// An unspaced DOTTED link is an edge too, not a node id.
+    ///
+    /// Same swallow, different family: `.` and `-` are both identifier bytes, so `A-.-B` was claimed
+    /// as a node id by the fast path — the fast table carries `-.->` and nothing else dotted. Found
+    /// while fixing the dash case rather than reported, and fixed with it because leaving the
+    /// identical hole open would be the knowingly-partial correctness this bead already rejected.
+    #[test]
+    fn an_unspaced_dotted_link_is_an_edge() {
+        for (source, expected) in [
+            ("flowchart LR\n  A-.-B\n", ArrowType::DottedLine),
+            ("flowchart LR\n  A-..-B\n", ArrowType::DottedLine),
+            ("flowchart LR\n  A-.->B\n", ArrowType::DottedArrow),
+        ] {
+            let parsed = parse_mermaid(source);
+            assert_eq!(parsed.ir.edges.len(), 1, "no edge for: {source}");
+            assert_eq!(parsed.ir.edges[0].arrow, expected, "wrong style for: {source}");
+        }
+    }
+
+    /// CONTROL: a bare `-.` inside an id is NOT a dotted link, and must stay on the fast path.
+    ///
+    /// A dotted link is `-` `.`+ `-`; without the closing dash the text is just an identifier. The
+    /// predicate checks for that closing dash for this reason — deferring every `-.` would turn ids
+    /// like `v1-.2` into edges, which is a worse trade than the bug being fixed.
+    #[test]
+    fn a_bare_dot_dash_in_an_id_is_not_a_link() {
+        let parsed = parse_mermaid("flowchart LR\n  v1-.2\n");
+
+        assert_eq!(parsed.ir.edges.len(), 0, "an id became an edge");
+        let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["v1-.2"], "the id was split");
     }
 
     /// CONTROL: class parsing is untouched by the run extension.
