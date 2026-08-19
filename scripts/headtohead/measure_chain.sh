@@ -43,6 +43,7 @@ DRY_RUN=0
 MIN_FREE_GB=42
 WAIT_SECONDS=0
 POLL_SECONDS=30
+ALLOW_UNSLOTTED=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -51,6 +52,7 @@ while [ $# -gt 0 ]; do
     --attempts) ATTEMPTS="$2"; shift 2 ;;
     --dry-run)  DRY_RUN=1; shift ;;
     --wait)     WAIT_SECONDS="$2"; shift 2 ;;
+    --allow-unslotted) ALLOW_UNSLOTTED=1; shift ;;
     *) echo "[chain] unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -93,9 +95,34 @@ WINDOW_EXIT=0
 window_check() {
   WINDOW_EXIT=0
 
+  # ⚠️ `--help` AND `--version` ARE EXCLUDED, and that came from a measured false positive rather
+  # than from imagination: this check refused once on
+  #
+  #     99.9 ./target/release/perf_spsolve --help
+  #
+  # A help invocation is not a measurement, and it briefly pegs a core while the binary loads. The
+  # very next tick it refused on `collection_reload_headtohead.py --competitive`, which IS a peer's
+  # benchmark. One of each in consecutive ticks is what made the distinction worth encoding: a gate
+  # that cries wolf on `--help` teaches people to pass over it, and then it is not a gate.
+  # ⚠️ MATCHED ON THE EXECUTABLE AND ITS FIRST ARGUMENT, NOT THE WHOLE COMMAND LINE. Matching the
+  # full line matched CONTENT rather than identity, and refused on:
+  #
+  #     br comments add fr78g SECOND OBSERVATION, RainyPrairie ...
+  #
+  # -- a peer agent writing a bead comment whose PROSE mentions benchmarking. Same defect family as
+  # grepping a report for a severity word and matching the report's own header. argv0 plus argv1 is
+  # enough to name the program: it still sees `python3 .../collection_reload_headtohead.py` and
+  # `./target/release/perf_spsolve`, and cannot see what any of them wrote afterwards.
   local busy_bench
-  busy_bench=$(ps -eo pcpu,args --no-headers | grep -E 'bench|harness|perf_|criterion|vs_pandas|vs_scipy|headtohead' | grep -vE 'measure_chain|/rustc |/rustfmt |/cargo |/ld |cc1plus' | while read -r pcpu rest; do
-    if [ "${pcpu%%.*}" -gt 50 ]; then printf '    %s %.100s\n' "$pcpu" "$rest"; fi
+  busy_bench=$(ps -eo pcpu,args --no-headers | while read -r pcpu argv0 argv1 _tail; do
+    [ "${pcpu%%.*}" -gt 50 ] || continue
+    case "$argv0 $argv1" in
+      *measure_chain*|*rustc*|*rustfmt*|*cargo*|*cc1plus*|*--help*|*--version*) continue ;;
+    esac
+    case "$argv0 $argv1" in
+      *bench*|*harness*|*perf_*|*criterion*|*vs_pandas*|*vs_scipy*|*headtohead*)
+        printf '    %s %.100s\n' "$pcpu" "$argv0 $argv1" ;;
+    esac
   done)
   if [ -n "$busy_bench" ]; then
     echo "[chain] another benchmark is running on this host:"
@@ -228,8 +255,22 @@ while [ "$attempt" -le "$ATTEMPTS" ]; do
     continue
   fi
 
+  # ⚠️ --allow-unslotted IS NOT A WAY ROUND THE RULE. run.mjs refuses without a fleet build slot,
+  # and its own refusal says that when `acquire_build_slot` answers "Build slots are disabled" the
+  # refusal is UNSATISFIABLE and the flag is the sanctioned path -- on condition that serialisation
+  # is recorded as UNAVAILABLE rather than skipped. Passing it therefore obliges the caller to say
+  # so on the row. This script prints that obligation rather than letting the flag pass quietly.
+  slot_args=()
+  if [ "$ALLOW_UNSLOTTED" -eq 1 ]; then
+    echo "[chain] ⚠️ running WITHOUT a fleet build slot, because acquire_build_slot is disabled"
+    echo "[chain] on this host. Any row from this run MUST record that fleet serialisation was"
+    echo "[chain] UNAVAILABLE -- not that it was skipped. The prechecks above are a stand-in: they"
+    echo "[chain] prove no peer benchmark was running AT THE START, not that none began mid-run."
+    slot_args=(--allow-unslotted)
+  fi
+
   node scripts/headtohead/run.mjs \
-    --mode "$MODE" --only "$ONLY" --fm-bin "$BIN" --fm-build-base "$REV"
+    --mode "$MODE" --only "$ONLY" --fm-bin "$BIN" --fm-build-base "$REV" "${slot_args[@]}"
   echo "[chain] completed at ${REV}"
   exit 0
 done
