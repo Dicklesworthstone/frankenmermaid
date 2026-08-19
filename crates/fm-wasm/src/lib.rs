@@ -3055,4 +3055,72 @@ mod tests {
             "the wrapper accepted malformed capabilities instead of reporting them"
         );
     }
+
+    /// CROSS-TARGET DETERMINISM: x86_64 must render byte-identically to wasm32 (bd-1s1g.6).
+    ///
+    /// The bead asks for layout output compared ACROSS targets. Every determinism test in this
+    /// project until now ran on ONE machine and said so, because there was no runner for a second
+    /// target. There is one: `pkg/` is a real wasm32-unknown-unknown build of THIS crate, and node
+    /// can drive it.
+    ///
+    /// ⚠️ BOTH SIDES MUST CALL `render_svg_js`, AND THAT IS NOT INTERCHANGEABLE WITH `render`.
+    /// `render` reads the runtime config directly; `render_svg_js` merges an optional override and
+    /// a theme. Digesting one against the other would compare two FUNCTIONS and report the
+    /// difference as a cross-target divergence — a false positive of exactly the kind this bead
+    /// must not manufacture. The JS side calls `renderSvg(source)` with no config argument, which
+    /// reaches the same default path as `None` here.
+    ///
+    /// The constants come from `scripts/wasm_cross_target_digest.mjs` run against the wasm bundle.
+    /// FNV-1a over the UTF-8 bytes, not `DefaultHasher`: std's hasher is not stable across versions
+    /// or targets, so a cross-target golden built on it would differ for reasons unrelated to
+    /// floating point.
+    ///
+    /// WHAT A FAILURE MEANS, in order of likelihood: the wasm bundle in `pkg/` is stale relative to
+    /// HEAD (rebuild it with `build-wasm.sh`), a config default diverged between the two entry
+    /// points, or — the case this bead is actually about — the two targets genuinely disagree about
+    /// floating point. Check them in that order; only the third is a determinism defect.
+    #[test]
+    fn x86_64_and_wasm32_render_the_same_bytes() {
+        const EXPECTED: &[(&str, &str, u64)] = &[
+            (
+                "flowchart",
+                "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n  c -.--> a\n  b --> d[Delta]\n",
+                0x8835_c1df_81b8_f371,
+            ),
+            (
+                "sequence",
+                "sequenceDiagram\n  participant A\n  participant B\n  A->>B: hello\n  B-->>A: reply\n",
+                0x47ce_5122_edae_647b,
+            ),
+            (
+                "class",
+                "classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n  Alpha <|-- Beta\n",
+                0x0f7f_f683_1988_915d,
+            ),
+            (
+                "state",
+                "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy: start\n  Busy --> Idle: done\n",
+                0x65fd_f22d_fa9f_8fcc,
+            ),
+        ];
+
+        for (name, source, wasm_digest) in EXPECTED {
+            let svg = render_svg_js(source, None).expect("renderSvg should succeed natively");
+            let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+            for byte in svg.as_bytes() {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            assert!(
+                svg.len() > 1000,
+                "{name}: rendered only {} bytes, so this comparison is vacuous",
+                svg.len()
+            );
+            assert_eq!(
+                hash, *wasm_digest,
+                "{name}: x86_64 rendered {hash:#018x}, wasm32 rendered {wasm_digest:#018x} \
+                 (stale pkg/? config default? or a real cross-target divergence)"
+            );
+        }
+    }
 }
