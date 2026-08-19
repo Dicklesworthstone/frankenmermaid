@@ -923,7 +923,18 @@ def main() -> int:
             print("  or pass --allow-unslotted and state it on the row")
             return 2
         held = ", ".join(f"{s.get('project')}/{s.get('slot')}" for s in mine) or "none"
-        print(f"FLEET SLOT: held by {me or 'unknown'} -- {held}; no other agent holds one")
+        if not mine:
+            # Reached only via --allow-unslotted. The old wording here was
+            # "FLEET SLOT: held by BlackThrush -- none", which reads as a slot report and is worse
+            # than silence: a row banked from it would look serialised. Say the actual state, so the
+            # line copied onto a ledger row says what it means.
+            print(
+                "FLEET SLOT: NOT HELD -- serialisation BYPASSED via --allow-unslotted. "
+                "Record on the row whether it was unavailable (acquire_build_slot disabled) or "
+                "merely skipped; the per-arm `top=` consumers are the substitute evidence."
+            )
+        else:
+            print(f"FLEET SLOT: held by {me or 'unknown'} -- {held}; no other agent holds one")
 
     a1 = fm_arm(args.fm_bin, corpus_path, args.case, pins)
     print(f"A1 fm      ns={a1['ns']} work={a1['work']} load={a1['before']['loadavg']} {io_note(a1)} {top_cpu_during(a1)} mhz={a1['before']['mhz']}")

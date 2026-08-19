@@ -4002,6 +4002,42 @@ same minute. That is a direct same-window replication of what bd-hmfi and bd-ecj
 **calibrated batch is what identifies it**: 20–25 is a contended arm and 37–39 a clean one, an
 absolute reference that drift cannot supply because drift is blind when both arms degrade together.
 
+**FIFTH REPLICATION (2026-08-19 08:45Z, BlackThrush) — BEST WINDOW OF THE CAMPAIGN, WEAKEST
+INCUMBENT NULL. DO NOT USE IT TO STRENGTHEN THE STANDING.** Binary embeds HEAD `3de3bd01`, same
+corpus sha `31c0dd6bc24b571c`, unpinned. Conditions were the quietest measured across ~45 window
+sweeps: busy-cpu spread **6** (both earlier valid brackets were taken at spread 8), idle 86.9–90.9%,
+runq 5–9, iowait 0.00%, 5.5 cores of external load and all of it small daemons.
+
+| arm | ns | batch | iowait | runq | loadavg | top consumers | cross-core MHz |
+|---|---|---|---|---|---|---|---|
+| A1 fm | 88,106 | 39 | 0.02% | 9/8 | 10.72 / 56.17 / 74.58 | rustc 2.3c (8.6c total) | 1429–4258 (2.980x) |
+| B1 mermaid | 36,400,000 | — | 0.36% | 10/12 | 10.74 / 55.42 / 74.24 | 5.2c total | 1429–4299 (3.008x) |
+| B2 mermaid | 35,600,000 | — | 0.42% | 13/13 | 10.74 / 55.42 / 74.24 | fr_command 7.0c (12.3c total) | 1429–4265 (2.985x) |
+| A2 fm | 89,949 | 38 | 0.01% | 14/14 | 10.92 / 54.72 / 73.91 | fr_command 6.1c (11.2c total) | 1429–4142 (2.899x) |
+
+fm A/A drift **1.0209x**, batches 38/39 (clean band). Worst bound 395.8x, headline 404.4x.
+
+**⚠️ THE INCUMBENT NULL FAILS CLAUSE 3, AND THAT IS WHY THIS ROW IS EVIDENCE OF A LIMIT RATHER THAN
+OF A RATIO.** The two incumbent A/A nulls are `1.0286` CI [1.0027, 1.0617] and `0.9971` CI [0.9738,
+1.0412]. The first carries a **+2.86% median bias**, over the 2% bound `run.mjs`'s median-CI gate
+applies, and its CI does not contain 1.0 (telemetry only — the straddle veto was removed fleet-wide
+for refusing 20 rows while making none newly decidable). So a certification run would have refused
+this row on clause 3.
+
+**What that buys is a real result: window quietness did not deliver a better null.** This was the
+tightest window of the campaign by every host metric and its incumbent self-consistency is the
+WORST of the five replications — the four earlier rows all had both nulls containing 1.0. Chasing a
+quieter host is therefore not the path to certifying `sequence_20`; the incumbent arm's own
+variability is, and it is not something a quieter host fixes. That is worth more than a fifth number
+agreeing with the previous four.
+
+**362.4x still stands unchanged** as the quoted bound. Five replications now read 362.4x, 387.1x,
+424.3x, 395.8x and the convention quotes the worst.
+
+**FLEET SERIALISATION UNAVAILABLE, not skipped.** `acquire_build_slot` answers "Build slots are
+disabled. Enable WORKTREES_ENABLED" on this host, so `--allow-unslotted` was required and the
+per-arm consumer tables above are the substitute evidence for what else was running.
+
 **FOURTH REPLICATION (2026-08-19 06:18Z, BlackThrush) — FIRST ROW WITH PER-ARM IOWAIT.** Binary
 embeds HEAD `2a439a22`, same corpus sha `31c0dd6bc24b571c`, unpinned:
 
