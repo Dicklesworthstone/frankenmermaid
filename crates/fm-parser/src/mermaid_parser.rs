@@ -12890,10 +12890,12 @@ mod tests {
     ///
     /// Kept as an ignored reproducer rather than a comment because the length is UNBOUNDED in the
     /// grammar, so the fix must match the RUN and cannot be a longer operator table — and the
-    /// matcher is shared with class parsing, where `..` and `--` mean different things. Un-ignore it
-    /// with the fix; it states the whole contract.
+    /// matcher is shared with class parsing, where `..` and `--` mean different things.
+    ///
+    /// `extend_operator_run` is that fix, so the `#[ignore]` is lifted here. ⚠️ IT HAS NOT BEEN RUN:
+    /// the disk throttle forbids cargo, and this un-ignore is a claim about unbuilt code. If it is
+    /// red on the first build, the fix is wrong and this test is right — do not re-ignore it.
     #[test]
-    #[ignore = "bd-6s6sx: reproduces the defect — long arrows lose their head"]
     fn arrow_length_does_not_change_the_arrow_type() {
         for (source, expected) in [
             ("flowchart LR\n  A --> B\n", ArrowType::Arrow),
@@ -12932,6 +12934,66 @@ mod tests {
             assert_eq!(parsed.ir.edges.len(), 1, "expected one edge for: {source}");
             assert_eq!(parsed.ir.edges[0].arrow, expected, "changed for: {source}");
         }
+    }
+
+    /// A long run keeps its CIRCLE or CROSS terminator too, not just its arrowhead (bd-6s6sx).
+    ///
+    /// mermaid's link terminator set is `[-xo(gt)]`, so length applies to all three heads. The
+    /// dotted family is here for the same reason: its unbounded part is the DOT run, `-..-(gt)`,
+    /// which the table cannot enumerate either.
+    #[test]
+    fn arrow_length_keeps_circle_cross_and_dotted_heads() {
+        for (source, expected) in [
+            ("flowchart LR\n  A ---o B\n", ArrowType::Circle),
+            ("flowchart LR\n  A -----o B\n", ArrowType::Circle),
+            ("flowchart LR\n  A ---x B\n", ArrowType::Cross),
+            ("flowchart LR\n  A -..-> B\n", ArrowType::DottedArrow),
+            ("flowchart LR\n  A -...- B\n", ArrowType::DottedLine),
+        ] {
+            let parsed = parse_mermaid(source);
+            assert_eq!(parsed.ir.edges.len(), 1, "expected one edge for: {source}");
+            assert_eq!(parsed.ir.edges[0].arrow, expected, "wrong head for: {source}");
+            let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+            assert_eq!(ids, vec!["A", "B"], "endpoints changed for: {source}");
+        }
+    }
+
+    /// THE FAST PATH MUST AGREE WITH THE FULL MATCHER on an unspaced long run.
+    ///
+    /// `try_fast_flow_edge` carries its own 9-entry operator table, and its right-hand side check
+    /// (`is_fast_flow_identifier`) rejects the SPACED long forms for free — but `x`, `o` and `-` are
+    /// all identifier bytes, so `A---xB` matched `---` there and produced a plain line to a node
+    /// called `xB`, which the full matcher now reads as a cross edge to `B`. Two paths, two answers,
+    /// no error: the shape that silently dropped journey and kanban fill.
+    #[test]
+    fn the_fast_flow_path_defers_an_unspaced_long_run() {
+        let parsed = parse_mermaid("flowchart LR\n  A---xB\n");
+
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert_eq!(parsed.ir.edges[0].arrow, ArrowType::Cross);
+        let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["A", "B"], "the fast path invented a node");
+    }
+
+    /// CONTROL: class parsing is untouched by the run extension.
+    ///
+    /// The extension is gated on the matched TOKEN, and `---` is absent from `CLASS_OPERATORS` — a
+    /// class relation matches `--`, which the gate excludes — so class behaviour should be identical
+    /// by construction. Asserted DIFFERENTIALLY, against the two-dash spelling rather than against a
+    /// named `ArrowType`: the claim being defended is "this commit changed nothing here", and an
+    /// absolute assertion would additionally be claiming the pre-existing answer is the right one,
+    /// which is a separate question this commit did not investigate.
+    #[test]
+    fn a_long_class_relation_is_unchanged_by_the_run_extension() {
+        let long = parse_mermaid("classDiagram\n  A ---> B\n");
+        let short = parse_mermaid("classDiagram\n  A -- B\n");
+
+        assert_eq!(long.ir.edges.len(), short.ir.edges.len());
+        assert_eq!(
+            long.ir.edges.first().map(|e| e.arrow),
+            short.ir.edges.first().map(|e| e.arrow),
+            "the run extension reached the class table"
+        );
     }
 
     /// A REALIZATION IS DASHED and an inheritance is not (bd-u9hcc).
