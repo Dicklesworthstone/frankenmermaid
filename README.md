@@ -246,7 +246,7 @@ Default builds remain FNX-free and crates.io-clean. As of 2026-04-21 the formerl
 
 ### Crates.io status
 
-The workspace is at version `0.2.0`. Per [`CRATES_IO_PUBLISHING.md`](CRATES_IO_PUBLISHING.md), the publish order is:
+The workspace is at version `0.2.0`. Per [`docs/CRATES_IO_PUBLISHING.md`](docs/CRATES_IO_PUBLISHING.md), the publish order is:
 
 ```
 fm-core → fm-parser → fm-layout → fm-render-svg → fm-render-term →
@@ -2064,7 +2064,7 @@ A --> B
 - [`AGENTS.md`](AGENTS.md) — Guidelines for AI coding agents working in this codebase
 - [`CHANGELOG.md`](CHANGELOG.md) — Chronological capability-wave changelog with commit links
 - [`FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) — Authoritative parity status vs the FrankenTUI reference
-- [`CRATES_IO_PUBLISHING.md`](CRATES_IO_PUBLISHING.md) — Publishing strategy and blocker resolution plan
+- [`docs/CRATES_IO_PUBLISHING.md`](docs/CRATES_IO_PUBLISHING.md) — Publishing strategy and blocker resolution plan
 - [`docs/FNX_INTEGRATION.md`](docs/FNX_INTEGRATION.md) — Authoritative FNX architecture contract
 - [`docs/FNX_USER_GUIDE.md`](docs/FNX_USER_GUIDE.md) — When/how to use graph intelligence features
 - [`docs/FNX_MIGRATION.md`](docs/FNX_MIGRATION.md) — Risk-tiered adoption guide with validation checklists
@@ -2669,7 +2669,7 @@ The exhaustive backlog lives in [`.beads/`](.beads/). The largest pieces of in-f
 | **Web Worker / OffscreenCanvas path** (`bd-2u0.6`) | Planned | Off-main-thread rendering for large in-browser diagrams |
 | **LP/MIP solver backend for constraint layout** (`bd-1fef.2`) | Partial | Constraint-based layout exists; the LP/MIP backend would replace the heuristic solver for hard constraints |
 | **`@frankenmermaid/core` npm publish** | CI wired, awaiting tag | The npm-publish CI job exists (`bd-hye0`) and is gated to `refs/tags/v*`. The first `v0.2.0` tag publishes to npm automatically; the job idempotently no-ops if the version is already on npm |
-| **Crates.io publish** | Blocker-clear | Per `CRATES_IO_PUBLISHING.md`, all blockers are resolved as of 2026-04-21 (`franken-kernel` migrated). Awaiting publish-order execution |
+| **Crates.io publish** | Blocker-clear | Per `docs/CRATES_IO_PUBLISHING.md`, all blockers are resolved as of 2026-04-21 (`franken-kernel` migrated). Awaiting publish-order execution |
 | **Swiss Tables for node/edge maps** (`bd-2gr9`) | Planned | Replace `BTreeMap` hot paths with deterministic hash-based maps; needs a determinism story |
 | **Triage UBS warning baseline** (`bd-tp4z`) | In progress | Bringing the UBS scanner output to zero |
 

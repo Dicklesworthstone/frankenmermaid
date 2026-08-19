@@ -11,7 +11,7 @@ All notable changes to **frankenmermaid** are documented here.
 
 The first tagged release is **`v0.2.0`** — the workspace is at version `0.2.0`
 across all crates and crates.io publishing is being prepared (see
-[`CRATES_IO_PUBLISHING.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/CRATES_IO_PUBLISHING.md)).
+[`docs/CRATES_IO_PUBLISHING.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/docs/CRATES_IO_PUBLISHING.md)).
 The sections below are organized chronologically and grouped by capability
 area. Every commit link points to the canonical GitHub history. Beads issue
 identifiers (`bd-XXXX`) reference the dependency-aware task tracker in
@@ -156,7 +156,7 @@ to crates.io are now consumed from crates.io rather than pinned to git.
   `franken-kernel` provides `Budget`, `Cx`, `DecisionId`, `NoCaps`, `PolicyId`,
   `SchemaVersion`, and `TraceId` to `fm-core`; moving it off git removes the
   primary blocker called out in
-  [`CRATES_IO_PUBLISHING.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/CRATES_IO_PUBLISHING.md).
+  [`docs/CRATES_IO_PUBLISHING.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/docs/CRATES_IO_PUBLISHING.md).
 - Bump `asupersync` from `0.3.0` to `0.3.1`
   ([fe575e2](https://github.com/Dicklesworthstone/frankenmermaid/commit/fe575e2))
 - Drop the broken `legacy_mermaid_code/mermaid` gitlink and ignore the path
