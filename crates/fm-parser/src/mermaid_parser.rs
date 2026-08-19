@@ -2094,7 +2094,7 @@ fn parse_flowchart_statement_asts(
     }
     // `id@{ shape: …, label: … }` before the generic node token parse (bd-9x8r): otherwise the whole
     // directive is interned as one node whose displayed name is the directive text.
-    if let Some(handled) = parse_flowchart_node_metadata(statement, config) {
+    if let Some(handled) = parse_flowchart_node_metadata(statement, config, warnings) {
         // `Some(None)` = recognised as `@{…}` metadata but describing no node, so nothing is
         // declared. Returning an empty statement list is what stops the generic fallback below
         // from interning the directive text (bd-yrxu).
@@ -2276,9 +2276,52 @@ fn split_metadata_pairs(body: &str) -> Vec<&str> {
 ///
 /// Returns `None` for anything that is not this exact form, so every other statement falls through
 /// to the existing node/edge parsing untouched.
+/// mermaid 11 shape names MEASURED as present in the pinned 11.15.0 bundle and absent from
+/// [`flowchart_metadata_shape`] (bd-laocw).
+///
+/// This list exists to split one message into two, because the two say different things to an
+/// author: a name in here means "your syntax is right, we have not built this shape", and a name
+/// not in here means "check the spelling". Collapsing them would send half the readers to the wrong
+/// fix. Same reasoning as `unsupported_upstream_keyword` in the detection layer.
+///
+/// ⚠️ A NAME ADDED TO `flowchart_metadata_shape` MUST BE REMOVED FROM HERE, or implementing a shape
+/// leaves behind a warning claiming it is unimplemented. The `every_unimplemented_shape_is_really
+/// _unimplemented` test enforces exactly that, so the two lists cannot drift apart silently.
+const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 12] = [
+    "bolt",
+    "bow-rect",
+    "brace",
+    "curv-trap",
+    "delay",
+    "div-rect",
+    "flag",
+    "hourglass",
+    "lin-cyl",
+    "notch-rect",
+    "sl-rect",
+    "tag-rect",
+];
+
+/// Message for a `shape:` name that [`flowchart_metadata_shape`] does not map.
+///
+/// Both arms name the shape and both state the CONSEQUENCE -- that the node kept its previous
+/// shape -- because the consequence is the part the author cannot see: the diagram still renders,
+/// just as the wrong shape.
+fn unimplemented_shape_warning(name: &str) -> String {
+    if UNIMPLEMENTED_UPSTREAM_SHAPES.contains(&name) {
+        format!(
+            "shape '{name}' is a mermaid 11 shape this renderer does not implement yet; \
+             the node kept its previous shape"
+        )
+    } else {
+        format!("shape '{name}' is not a recognised shape name; the node kept its previous shape")
+    }
+}
+
 fn parse_flowchart_node_metadata(
     statement: &str,
     config: &ParserConfig,
+    warnings: &mut Vec<String>,
 ) -> Option<Option<FlowAstNode>> {
     let at_pos = statement.find("@{")?;
     let close = statement.rfind('}')?;
@@ -2305,11 +2348,16 @@ fn parse_flowchart_node_metadata(
         };
         let value = trim_fast(value).trim_matches('"').trim_matches('\'');
         match trim_fast(key).to_ascii_lowercase().as_str() {
-            // An unrecognised shape name leaves the shape alone rather than inventing one.
+            // An unrecognised shape name leaves the shape alone rather than inventing one -- and
+            // now SAYS SO (bd-laocw). Falling back silently meant an author who wrote valid
+            // mermaid 11 got a plain rectangle with nothing pointing at why.
             "shape" => {
                 saw_node_key = true;
-                if let Some(mapped) = flowchart_metadata_shape(&value.to_ascii_lowercase()) {
+                let lowered = value.to_ascii_lowercase();
+                if let Some(mapped) = flowchart_metadata_shape(&lowered) {
                     shape = mapped;
+                } else if !lowered.is_empty() {
+                    warnings.push(unimplemented_shape_warning(&lowered));
                 }
             }
             "label" | "title" => {
@@ -17802,6 +17850,78 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(title, Some("one"), "the cluster carries no title");
     }
 
+    /// An unimplemented mermaid 11 shape name WARNS instead of silently changing shape (bd-laocw).
+    ///
+    /// `flowchart_metadata_shape` returns None for a name it does not know and the caller keeps the
+    /// node's existing shape, so `A@{ shape: notch-rect }` rendered as a plain rectangle with
+    /// nothing pointing at why. Every other unrecognised-input path in this parser already warns.
+    #[test]
+    fn an_unimplemented_shape_name_warns_and_keeps_the_shape() {
+        let parsed = parse_mermaid("flowchart LR\n  A@{ shape: notch-rect }\n  B[Plain]\n");
+
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("notch-rect") && warning.contains("not implement")),
+            "an unimplemented shape passed in silence; warnings: {:?}",
+            parsed.warnings
+        );
+        // Permissive recovery: the node is still declared, under its own id.
+        let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["A", "B"], "the warning cost us the node");
+    }
+
+    /// A misspelled name gets a DIFFERENT message than an unimplemented one.
+    ///
+    /// The two send the author to different fixes -- correct the spelling, or wait for the shape --
+    /// and one message for both would send half of them to the wrong one.
+    #[test]
+    fn a_misspelled_shape_name_is_reported_as_unrecognised() {
+        let parsed = parse_mermaid("flowchart LR\n  A@{ shape: rectangl }\n");
+
+        assert!(
+            parsed.warnings.iter().any(|warning| {
+                warning.contains("rectangl") && warning.contains("not a recognised shape name")
+            }),
+            "a misspelled shape was reported as unimplemented, or not at all; warnings: {:?}",
+            parsed.warnings
+        );
+    }
+
+    /// CONTROL: a RECOGNISED shape name must not warn.
+    ///
+    /// The bead asked for this one by name. A warning that fired on `rounded` would train readers
+    /// to ignore the channel, which costs more than the silence it replaced.
+    #[test]
+    fn a_recognised_shape_name_does_not_warn() {
+        for name in ["rect", "rounded", "cyl", "stadium", "hex", "circle"] {
+            let source = format!("flowchart LR\n  A@{{ shape: {name} }}\n");
+            let parsed = parse_mermaid(&source);
+            assert!(
+                !parsed.warnings.iter().any(|w| w.contains("shape '")),
+                "recognised shape {name} warned: {:?}",
+                parsed.warnings
+            );
+        }
+    }
+
+    /// The two shape lists cannot drift apart.
+    ///
+    /// `UNIMPLEMENTED_UPSTREAM_SHAPES` is a claim about `flowchart_metadata_shape`, and a claim
+    /// about another list rots the moment someone implements one of the shapes: the warning would
+    /// go on calling it unimplemented. This is the check that a table naming a nonexistent case
+    /// is a permanent hole nobody sees.
+    #[test]
+    fn every_unimplemented_shape_is_really_unimplemented() {
+        for name in super::UNIMPLEMENTED_UPSTREAM_SHAPES {
+            assert!(
+                super::flowchart_metadata_shape(name).is_none(),
+                "{name} is implemented but still listed as unimplemented"
+            );
+        }
+    }
+
     /// bd-9x8r: `A@{ shape: rect, label: "Shaped" }` must declare node A, not a node named after
     /// the directive.
     ///
@@ -19904,11 +20024,21 @@ Rel_Back(db, app, "Responds")"#,
     /// misleading — it invites the author to hunt for a syntax error that does not exist.
     #[test]
     fn an_unimplemented_diagram_type_is_named_rather_than_blamed() {
+        // ⚠️ THE MESSAGE NAMES THE CANONICAL TYPE, NOT THE HEADER AS WRITTEN, which is why these are
+        // PAIRS. `unsupported_upstream_keyword` splits the header on whitespace or `-` and matches
+        // the first token, so `treemap-beta` reports `treemap`. My first version asserted the
+        // message contained the header verbatim and failed on exactly that — the implementation is
+        // right and the expectation was mine.
+        //
         // `ishikawa` is deliberately ABSENT: it is a real mermaid 11.15.0 type we do not implement,
         // but the surviving matcher in lib.rs does not list it yet and that file belongs to another
         // session. Adding the case here before the entry exists would be a test asserting a feature
         // nobody wrote. Tracked on bd-8z4fk.
-        for header in ["treemap", "treemap-beta", "radar-beta"] {
+        for (header, canonical) in [
+            ("treemap", "treemap"),
+            ("treemap-beta", "treemap"),
+            ("radar-beta", "radar"),
+        ] {
             let parsed = parse_mermaid(&format!("{header}\n  \"A\": 1\n"));
 
             // Layer-AGNOSTIC on purpose: this asserts the user-visible outcome, not which function
@@ -19918,25 +20048,34 @@ Rel_Back(db, app, "Responds")"#,
                 parsed
                     .warnings
                     .iter()
-                    .any(|w| w.contains(header) && w.contains("does not implement")),
+                    .any(|w| w.contains(canonical) && w.contains("does not implement")),
                 "`{header}` was not named as unimplemented: {:?}",
                 parsed.warnings
             );
         }
     }
 
-    /// CONTROL: a genuinely empty or unrecognisable document still gets the GENERIC message. The
-    /// new branch must not swallow the case it was carved out of.
+    /// CONTROL: an unrecognisable document is NOT claimed as an unimplemented upstream type.
+    ///
+    /// ⚠️ THIS ASSERTED THE WRONG THING FIRST. It demanded the generic "No parseable nodes" message,
+    /// which never fires for this input: `not a diagram at all` is detected as a flowchart and its
+    /// words are interned as a node, so the document is not empty and the warning is
+    /// "Could not detect diagram type; assuming flowchart" instead. The expectation was mine and the
+    /// parser was right.
+    ///
+    /// What actually needs guarding is the OVER-CLAIM: a typo must not be reported as a real mermaid
+    /// type we have not built, because that tells the author to stop looking for their own mistake.
+    /// That is the failure mode the unimplemented-type message introduces, and it is what this pins.
     #[test]
-    fn an_unrecognisable_document_still_reports_the_generic_message() {
+    fn an_unrecognisable_document_is_not_claimed_as_an_unimplemented_type() {
         let parsed = parse_mermaid("not a diagram at all\n");
 
         assert!(
-            parsed
+            !parsed
                 .warnings
                 .iter()
-                .any(|w| w.contains("No parseable nodes")),
-            "the generic empty-document message was lost: {:?}",
+                .any(|w| w.contains("does not implement")),
+            "a typo was reported as an unimplemented upstream type: {:?}",
             parsed.warnings
         );
     }
