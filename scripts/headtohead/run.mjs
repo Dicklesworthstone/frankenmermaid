@@ -15,8 +15,8 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { selectPinnedCpu, selectPinnedCpuSet } from './cpu_selection.mjs';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { cpus, hostname, loadavg, platform, release, tmpdir, totalmem } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { cpus, homedir, hostname, loadavg, platform, release, tmpdir, totalmem } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CORPUS, generateAll } from './corpus.mjs';
@@ -2169,6 +2169,77 @@ if (has('self-test')) {
     cv_gate: 'never',
   }));
   process.exit(0);
+}
+
+// ------------------------------------------------------- fleet serialisation
+
+/**
+ * Every unexpired exclusive build slot across ALL projects, or `null` when the store is absent.
+ *
+ * Measurements are one-at-a-time FLEET-WIDE. Nine projects benchmarking simultaneously took this
+ * host to run queue 122, and every ratio taken in that window was a contention artifact.
+ *
+ * ⚠️ THIS IS NOT REDUNDANT WITH THE HOST-EXCLUSIVITY GATE, which is why it is worth its own check.
+ * That gate measures the SYMPTOM — cpus over 20% busy — and reports "64 cpus busy", which is true
+ * of a host running anything at all. This reports the CAUSE, by name: which agent is benchmarking,
+ * in which project, until when. The difference is between "wait and retry forever" and "wait for
+ * that lease to expire", and only the second tells a reader whether waiting will help.
+ *
+ * Scans every project: a slot held by another repo contends for the same cpus as one held here.
+ *
+ * `null` (store missing) is deliberately distinct from `[]` (verified nobody holds one). Refusing
+ * on a store that cannot be read would make this harness unusable wherever agent-mail is not
+ * installed, which is a worse failure than the one it prevents.
+ */
+function liveBuildSlots(root = join(homedir(), '.mcp_agent_mail_git_mailbox_repo', 'projects')) {
+  if (!existsSync(root)) return null;
+  // Nanosecond stamps (`...388083894+00:00`) are not parseable by Date, and every stamp in the
+  // store is UTC with identical zero-padded formatting, so lexical order is chronological order
+  // here. Compare as strings rather than adding a parse that can fail.
+  const nowIso = `${new Date().toISOString().replace(/\.\d+Z$/, '')}.000000000+00:00`;
+  const slots = [];
+  for (const project of readdirSync(root)) {
+    const slotsDir = join(root, project, 'build_slots');
+    if (!existsSync(slotsDir)) continue;
+    const stack = [slotsDir];
+    while (stack.length > 0) {
+      const dir = stack.pop();
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) { stack.push(full); continue; }
+        if (!entry.name.endsWith('.json')) continue;
+        try {
+          const record = JSON.parse(readFileSync(full, 'utf8'));
+          const expires = String(record.expires_ts ?? '');
+          if (record.exclusive && expires && expires > nowIso) slots.push({ ...record, project });
+        } catch { /* a malformed or half-written record is not a held slot */ }
+      }
+    }
+  }
+  return slots;
+}
+
+const fleetSlots = liveBuildSlots();
+if (fleetSlots === null) {
+  console.error('[run] agent-mail store not found; fleet serialisation cannot be verified here');
+} else {
+  const me = process.env.AGENT_NAME ?? '';
+  const others = fleetSlots.filter((slot) => slot.agent !== me);
+  const mine = fleetSlots.filter((slot) => slot.agent === me);
+  if (others.length > 0 && !has('allow-unslotted')) {
+    for (const slot of others.slice(0, 5)) {
+      console.error(`[run] ${slot.agent} holds ${slot.project}/${slot.slot} until ${slot.expires_ts}`);
+    }
+    console.error('[run] REFUSING: measurements are ONE AT A TIME FLEET-WIDE. Wait for release, or');
+    console.error('[run] pass --allow-unslotted and state the contention on the row.');
+    process.exit(6);
+  }
+  if (mine.length === 0 && !has('allow-unslotted')) {
+    console.error(`[run] REFUSING: no build slot held by ${me || '(AGENT_NAME unset)'}.`);
+    console.error('[run] acquire_build_slot first, then re-run; or pass --allow-unslotted.');
+    process.exit(6);
+  }
+  console.error(`[run] fleet slot ok: ${mine.length} held by ${me}, 0 held by others`);
 }
 
 // ---------------------------------------------------------------- corpus
