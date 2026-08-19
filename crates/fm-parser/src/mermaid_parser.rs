@@ -11973,11 +11973,21 @@ fn parse_c4_relationship(
 /// incumbent does not write its type either and our behaviour matches. That is the same conclusion
 /// the note above reaches for the boundary KIND, arrived at independently.
 ///
-/// STILL NOT PROVEN: I have not confirmed from the minified bundle that `Deployment_Node` routes to
-/// `drawBoundary` rather than to the shape drawer, and a source read cannot settle it the way a
-/// rendered comparison would. Treat this as "probably parity, one Chromium render from certain"
-/// rather than as a defect waiting to be fixed — filing it as a gap on the strength of the field
-/// probe alone would have been wrong.
+/// ROUTING NOW CONFIRMED, which was the missing half. `addDeploymentNode` in the bundle is boundary
+/// machinery and nothing else:
+///
+///     u.nodeType = e, u.parentBoundary = Xa, u.wrap = Wh(), gl = Xa, Xa = t, Vh.push(gl)
+///
+/// It pushes onto the same boundary parse stack `Vh` that `popBoundaryParseStack` pops, and sets
+/// `parentBoundary`. So a `Deployment_Node` is stored as a BOUNDARY and drawn by `drawBoundary` —
+/// the drawer that emits no bracketed field. Both halves agree: the incumbent does not write a
+/// Deployment_Node's type as text, and neither do we.
+///
+/// PARITY, then, not a gap. The only stronger evidence would be a Chromium render, and it would be
+/// confirming something the source now says unambiguously on both the routing and the drawing side.
+/// Recorded at length because the field probe that raised it produced a table with a single ✗ in
+/// it, which is exactly the shape that gets filed as a defect without anyone checking the
+/// reference.
 fn parse_c4_boundary(
     arguments: &[String],
     span: Span,
