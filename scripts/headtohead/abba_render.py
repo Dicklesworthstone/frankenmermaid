@@ -848,6 +848,13 @@ def main() -> int:
         if not mine and not args.allow_unslotted:
             print()
             print("REFUSING TO MEASURE: this agent holds no build slot")
+            print("  ⚠️ IF acquire_build_slot ANSWERS 'Build slots are disabled. Enable")
+            print("     WORKTREES_ENABLED', this refusal is UNSATISFIABLE on this host: the slot")
+            print("     cannot be taken at all. Observed 2026-08-19, and it is also why peers were")
+            print("     measuring unslotted rather than ignoring the rule. In that state the honest")
+            print("     options are source work, or --allow-unslotted with the row recording that")
+            print("     serialisation was UNAVAILABLE rather than skipped -- the per-arm `top=`")
+            print("     consumers being the only evidence of what else ran that survives afterwards.")
             print(f"  acquire_build_slot first (AGENT_NAME={me or 'unset'}), then re-run")
             print("  or pass --allow-unslotted and state it on the row")
             return 2

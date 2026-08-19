@@ -2237,6 +2237,13 @@ if (fleetSlots === null) {
   if (mine.length === 0 && !has('allow-unslotted')) {
     console.error(`[run] REFUSING: no build slot held by ${me || '(AGENT_NAME unset)'}.`);
     console.error('[run] acquire_build_slot first, then re-run; or pass --allow-unslotted.');
+    // A refusal that instructs an impossible action is a trap, and this one can be. On 2026-08-19
+    // acquire_build_slot answered "Build slots are disabled. Enable WORKTREES_ENABLED" — which is
+    // also why peers were measuring unslotted rather than ignoring the rule. Say so here instead of
+    // leaving the next reader to discover it by trying.
+    console.error('[run] NOTE: if acquire_build_slot answers "Build slots are disabled", this');
+    console.error('[run] refusal is UNSATISFIABLE here. Do source work, or use --allow-unslotted');
+    console.error('[run] and record that serialisation was UNAVAILABLE rather than skipped.');
     process.exit(6);
   }
   console.error(`[run] fleet slot ok: ${mine.length} held by ${me}, 0 held by others`);
