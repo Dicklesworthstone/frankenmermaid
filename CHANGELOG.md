@@ -2,6 +2,15 @@
 
 All notable changes to **frankenmermaid** are documented here.
 
+Scope window: project inception through HEAD on 2026-08-19.
+
+## Version Timeline
+
+| Version | Kind | Date | Summary |
+|---------|------|------|---------|
+| Unreleased | commits on `main` | 2026-07-11 → 2026-08-19 | Equivalence-clean corpora, concurrent CLI, GPU plan, janitor docs-reorg |
+| [`v0.2.0`](https://github.com/Dicklesworthstone/frankenmermaid/releases/tag/v0.2.0) | Release | 2026-07-11 | First tagged GitHub Release |
+
 > frankenmermaid is a Rust-first, Mermaid-compatible diagram engine with
 > intent-aware parsing, 15 layout algorithms, and SVG / terminal / Canvas2D /
 > WASM rendering from a single intermediate representation.
@@ -23,6 +32,24 @@ identifiers (`bd-XXXX`) reference the dependency-aware task tracker in
 ## Unreleased — 2026-07-11 → 2026-08-19
 
 Post-`v0.2.0` work on `main`. The v0.2.0 campaign's remaining structural-equivalence blockers (class members, UML markers, subgraph/cluster paint) were closed far enough that the 2,000- and 5,000-diagram CI jobs could be recorded as equivalence-clean. A concurrent multi-diagram CLI path and a shared-subgraph batch parser were certified. A GPU plan backend started emitting real instance buffers. Canvas/GPU declared-style gaps became a matrix instead of a list. The 2026-08-19 janitor pass moved remaining root planning docs.
+
+### Delivered capability
+
+- 2,000- and 5,000-diagram CI jobs recorded as equivalence-clean against mermaid-js.
+- Concurrent multi-diagram `render-batch` plus shared-subgraph batch parse.
+- GPU plan backend emitting real instance buffers; Canvas/GPU declared-style matrix.
+- Root planning docs relocated (`FEATURE_PARITY.md` → `docs/planning/`; `CRATES_IO_PUBLISHING.md` → `docs/`).
+
+### Closed workstreams
+
+- Tracker: [`.beads/issues.jsonl`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/.beads/issues.jsonl).
+
+### Representative commits
+
+- [`4649bc9a`](https://github.com/Dicklesworthstone/frankenmermaid/commit/4649bc9a) — class-node member sizing / UML marker alignment.
+- [`2309a385`](https://github.com/Dicklesworthstone/frankenmermaid/commit/2309a385) — concurrent `render-batch`.
+- [`f5769ac8`](https://github.com/Dicklesworthstone/frankenmermaid/commit/f5769ac8) — GPU plan backend.
+- [`7b43c1fb`](https://github.com/Dicklesworthstone/frankenmermaid/commit/7b43c1fbfb2414b8672070790905316aa4e25a82) — move `CRATES_IO_PUBLISHING.md` into `docs/`.
 
 ### Equivalence-clean corpora and UML marker semantics (late July 2026)
 
