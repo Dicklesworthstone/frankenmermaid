@@ -226,6 +226,66 @@ def proc_stat() -> dict:
     }
 
 
+def proc_cpu_snapshot() -> dict[int, tuple[str, int]]:
+    """`pid -> (comm, utime+stime jiffies)` for every readable process.
+
+    THE FLEET SLOT CANNOT SEE AN UNSLOTTED PEER, which is the gap this fills. The slot check refuses
+    when another agent DECLARES a benchmark; it is blind when one simply runs. Observed on this host:
+    run queue 109 with a frankenpandas python at 3195% CPU and a frankenscipy one at 778%, neither
+    holding a slot. A row measured in that window is a contention artifact, and nothing in the row
+    would have said so afterwards.
+
+    Captured before and after each arm so the DIFFERENCE attributes CPU time to the interval the arm
+    actually ran in, rather than sampling whatever happened to be scheduled at one instant.
+    """
+    snapshot: dict[int, tuple[str, int]] = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", encoding="utf-8") as handle:
+                fields = handle.read().rsplit(") ", 1)
+            comm = fields[0].split("(", 1)[1] if "(" in fields[0] else "?"
+            rest = fields[1].split()
+            # `man 5 proc`: after the trailing ')' the fields are state, ppid, ... and utime/stime
+            # are the 12th and 13th of that remainder.
+            snapshot[int(entry)] = (comm, int(rest[11]) + int(rest[12]))
+        except (OSError, ValueError, IndexError):
+            continue
+    return snapshot
+
+
+def top_cpu_during(arm: dict, limit: int = 3) -> str:
+    """The heaviest CPU consumers during this arm, in cores, excluding this process tree.
+
+    Reported in CORES rather than percent-of-one-cpu because "3195%" needs dividing by 100 before it
+    means anything on a 64-core box, and the number that matters is how much of the machine was gone.
+    """
+    before = (arm.get("before") or {}).get("procs")
+    after = (arm.get("after") or {}).get("procs")
+    total_before = ((arm.get("before") or {}).get("stat") or {}).get("total_jiffies")
+    total_after = ((arm.get("after") or {}).get("stat") or {}).get("total_jiffies")
+    if not before or not after or total_before is None or total_after is None:
+        return "top=n/a"
+    total_delta = total_after - total_before
+    if total_delta <= 0:
+        return "top=n/a"
+    cores = len(os.sched_getaffinity(0)) or 1
+    per_core = total_delta / cores
+    mine = {os.getpid(), os.getppid()}
+    deltas = []
+    for pid, (comm, ticks) in after.items():
+        if pid in mine or pid not in before:
+            continue
+        used = ticks - before[pid][1]
+        if used > 0 and per_core > 0:
+            deltas.append((used / per_core, comm))
+    deltas.sort(reverse=True)
+    if not deltas:
+        return "top=none"
+    return "top=" + ",".join(f"{comm}:{cores_used:.1f}c" for cores_used, comm in deltas[:limit])
+
+
 def arm_iowait_pct(arm: dict) -> float | None:
     """Percentage of CPU time the host spent in iowait DURING this arm.
 
@@ -270,7 +330,7 @@ def io_note(arm: dict) -> str:
 
 
 def conditions() -> dict:
-    return {"loadavg": loadavg(), "mhz": cpu_mhz(), "stat": proc_stat()}
+    return {"loadavg": loadavg(), "mhz": cpu_mhz(), "stat": proc_stat(), "procs": proc_cpu_snapshot()}
 
 
 def pick_pins(size: int = 8) -> dict | None:
@@ -795,13 +855,13 @@ def main() -> int:
         print(f"FLEET SLOT: held by {me or 'unknown'} -- {held}; no other agent holds one")
 
     a1 = fm_arm(args.fm_bin, corpus_path, args.case, pins)
-    print(f"A1 fm      ns={a1['ns']} work={a1['work']} load={a1['before']['loadavg']} {io_note(a1)} mhz={a1['before']['mhz']}")
+    print(f"A1 fm      ns={a1['ns']} work={a1['work']} load={a1['before']['loadavg']} {io_note(a1)} {top_cpu_during(a1)} mhz={a1['before']['mhz']}")
     b1 = mermaid_arm(args.case, args.reps, pins)
-    print(f"B1 mermaid ns={b1['ns']} load={b1['before']['loadavg']} {io_note(b1)} mhz={b1['before']['mhz']}")
+    print(f"B1 mermaid ns={b1['ns']} load={b1['before']['loadavg']} {io_note(b1)} {top_cpu_during(b1)} mhz={b1['before']['mhz']}")
     b2 = mermaid_arm(args.case, args.reps, pins)
-    print(f"B2 mermaid ns={b2['ns']} load={b2['before']['loadavg']} {io_note(b2)} mhz={b2['before']['mhz']}")
+    print(f"B2 mermaid ns={b2['ns']} load={b2['before']['loadavg']} {io_note(b2)} {top_cpu_during(b2)} mhz={b2['before']['mhz']}")
     a2 = fm_arm(args.fm_bin, corpus_path, args.case, pins)
-    print(f"A2 fm      ns={a2['ns']} work={a2['work']} load={a2['before']['loadavg']} {io_note(a2)} mhz={a2['before']['mhz']}")
+    print(f"A2 fm      ns={a2['ns']} work={a2['work']} load={a2['before']['loadavg']} {io_note(a2)} {top_cpu_during(a2)} mhz={a2['before']['mhz']}")
 
     # IO SATURATION REFUSAL. A disk-bound host does not slow the two engines equally -- the arm that
     # happens to straddle a flush pays for it -- so a timing taken while the machine is waiting on
