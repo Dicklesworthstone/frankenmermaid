@@ -63,6 +63,17 @@ iowait=$(mpstat 1 2 2>/dev/null | awk '/^Average:/ {print $(NF-3)}')
 loadavg=$(awk '{print $1" / "$2" / "$3}' /proc/loadavg)
 mhz=$(awk '/cpu MHz/ {print $4}' /proc/cpuinfo | sort -n | awk 'NR==1{lo=$1} {hi=$1} END {printf "%.0f-%.0f MHz (spread %.2fx)", lo, hi, hi/lo}')
 
+# ⚠️ A SHORT SWEEP IS OPTIMISTICALLY BIASED, ALWAYS IN THE SAME DIRECTION. Spread is an observed
+# RANGE, and a range can only grow with more samples — so fewer samples systematically understates
+# it. Measured three times on 2026-08-19: a 6-sample run agreed (spread <= 4) and the 12-sample run
+# minutes later refused at spread 20, then 12, then 12. Every disagreement favoured measuring.
+#
+# Said loudly because the short form is the tempting one when a window looks good, and acting on it
+# is how a run gets started in a window the standard sweep would have refused.
+if (( SAMPLES < 12 )); then
+  echo "⚠️  ${SAMPLES}-sample sweep: spread is UNDERSTATED against the 12-sample standard."
+  echo "    Short sweeps have never been pessimistic here. Do NOT use this for a go/no-go."
+fi
 echo "samples (cpus over ${CEILING_PCT}% busy): ${counts[*]}"
 echo "  min=$min max=$max spread=$spread mean=$mean"
 echo "  idle=${idle}% (range across the SAME samples)  iowait=${iowait}%  loadavg=${loadavg}"
