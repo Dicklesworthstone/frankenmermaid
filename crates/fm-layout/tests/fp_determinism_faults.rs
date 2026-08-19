@@ -132,6 +132,87 @@ fn no_shape_emits_subnormal_coordinates() {
     }
 }
 
+/// The flush-to-zero is DEFINED behaviour, not an accident of the formulas.
+///
+/// The test above asserts only that no subnormal escapes, which a lucky rearrangement of arithmetic
+/// could satisfy by coincidence and then lose again on the next edit. This one pins the actual
+/// contract `node_path` now makes: an extent below the normal-scaling bound is treated as exactly
+/// zero, so x86_64 and a flush-to-zero ARM agree by construction rather than by luck.
+///
+/// `+0.0` specifically, checked through `to_bits`: `-0.0 == 0.0` is true in f32 comparison, so an
+/// equality assertion would pass on a sign this bead's bit-identical-output subject cares about.
+///
+/// ⚠️ THE CONTRACT IS NOT "every coordinate is zero", and my first draft of this test asserted that
+/// and failed: `Cylinder` emits `2.0` for a degenerate box because its neck is an ABSOLUTE constant
+/// rather than a fraction of the extent. An absolute constant is perfectly portable — it is the
+/// same bits on every target — so the contract is that each coordinate is either exactly `+0.0` or
+/// a NORMAL number, never subnormal. `Rect`, the shape that reported the defect, is checked for the
+/// stronger all-zero property separately, because its geometry is entirely extent-scaled.
+#[test]
+fn a_degenerate_extent_is_defined_to_be_exactly_zero() {
+    let degenerate = LayoutRect {
+        x: 0.0,
+        y: 0.0,
+        width: f32::MIN_POSITIVE,
+        height: f32::MIN_POSITIVE,
+    };
+
+    for &shape in SHAPES {
+        for value in coordinates(&node_path(degenerate, shape)) {
+            assert!(
+                value == 0.0 || value.is_normal(),
+                "{shape:?} emitted {value:e} for a degenerate box; the contract is +0.0 or normal"
+            );
+        }
+    }
+
+    for value in coordinates(&node_path(degenerate, NodeShape::Rect)) {
+        assert_eq!(
+            value.to_bits(),
+            0.0_f32.to_bits(),
+            "Rect is entirely extent-scaled, so a degenerate box must give exactly +0.0, got {value:e}"
+        );
+    }
+}
+
+/// CONTROL: realistic geometry is NOT snapped.
+///
+/// The threshold has to be far enough below real diagram geometry that nothing observable is
+/// rounded away. Without this, widening the bound until the failing case passed would look like a
+/// fix while quietly flattening small nodes.
+#[test]
+fn ordinary_geometry_is_left_alone_by_the_flush() {
+    let ordinary = LayoutRect {
+        x: 10.0,
+        y: 20.0,
+        width: 120.0,
+        height: 40.0,
+    };
+
+    let path = node_path(ordinary, NodeShape::Rect);
+    let values = coordinates(&path);
+    assert!(!values.is_empty(), "no coordinates, so this control proves nothing");
+    assert!(
+        values.iter().any(|v| *v != 0.0),
+        "ordinary geometry was flattened to zero: {values:?}"
+    );
+    // The smallest extent a diagram can plausibly carry is still orders of magnitude above the
+    // bound, so a 1e-30 box must survive as nonzero too — it is in the `tiny` array above and must
+    // not be silently snapped by a future widening of the threshold.
+    let small = LayoutRect {
+        x: 0.0,
+        y: 0.0,
+        width: 1e-30,
+        height: 1e-30,
+    };
+    assert!(
+        coordinates(&node_path(small, NodeShape::Diamond))
+            .iter()
+            .any(|v| *v != 0.0),
+        "a 1e-30 box was flushed; the threshold has been widened past real geometry"
+    );
+}
+
 /// Extreme magnitudes must not produce NaN or infinity.
 ///
 /// One extreme-magnitude property test in this project previously exposed three latent NaN and

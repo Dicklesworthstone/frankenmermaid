@@ -2,8 +2,60 @@ use crate::{LayoutRect, PathCmd};
 use fm_core::NodeShape;
 use std::f32::consts::PI;
 
+/// The smallest extent these formulas can scale without landing in the subnormal range (bd-1s1g.6).
+///
+/// Some ARM configurations FLUSH SUBNORMALS TO ZERO while x86_64 keeps them, so a geometry path
+/// that produces a subnormal renders differently on the two platforms — and the divergence is
+/// invisible on x86_64, which is where it gets tested. `Rect` reached one the direct way: a box of
+/// `f32::MIN_POSITIVE` is a normal number, but its own half is not, so `width / 2.0` produced
+/// `5.877472e-39` for a perfectly finite input.
+///
+/// The bead offers two acceptable outcomes — no subnormal results, or explicit flush-to-zero
+/// EVERYWHERE — and this takes the second: below this threshold an extent is defined to be exactly
+/// zero on every target, rather than left to the platform's subnormal policy.
+///
+/// The 1024 is not arbitrary. The smallest coefficient any shape here applies to an extent is well
+/// above 1/1024 (the tightest are the hexagon and trapezoid insets at ~0.2, and corner radii which
+/// are absolute, not scaled), so an extent at or above this bound cannot be scaled into the
+/// subnormal range by any of them. Anything below it is 30-plus orders of magnitude smaller than
+/// the smallest geometry a diagram can produce, so nothing real is being rounded away.
+const MIN_NORMAL_EXTENT: f32 = f32::MIN_POSITIVE * 1024.0;
+
+/// Flush a degenerate coordinate to exactly `+0.0` so every target agrees on it.
+///
+/// Returns `+0.0` for both signs of a tiny magnitude: `-0.0` and `+0.0` compare equal but are not
+/// bit-identical, and this bead's whole subject is bit-identical output across targets.
+#[inline]
+fn canonical_extent(value: f32) -> f32 {
+    if value.abs() < MIN_NORMAL_EXTENT {
+        0.0
+    } else {
+        value
+    }
+}
+
+/// Canonicalize a box once per path, rather than every coordinate it emits.
+///
+/// Four comparisons per node against a path of dozens of coordinates — the check is at the entry
+/// point precisely so it does not sit inside the emit loops. It is NOT free, and it has not been
+/// measured; it is claimed only to be cheap relative to allocating and filling the `Vec<PathCmd>`
+/// it guards.
+#[inline]
+fn canonical_bounds(bounds: LayoutRect) -> LayoutRect {
+    LayoutRect {
+        x: canonical_extent(bounds.x),
+        y: canonical_extent(bounds.y),
+        width: canonical_extent(bounds.width),
+        height: canonical_extent(bounds.height),
+    }
+}
+
 #[must_use]
 pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
+    // Every shape dispatches from here, so one canonicalization covers all of them. Putting it in
+    // the individual builders would be the same rule written fifteen times, and a sixteenth shape
+    // added later would silently miss it.
+    let bounds = canonical_bounds(bounds);
     match shape {
         NodeShape::Rect => rounded_rect_path(bounds, 5.0),
         NodeShape::Rounded => rounded_rect_path(bounds, 10.0),
