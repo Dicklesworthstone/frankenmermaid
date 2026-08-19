@@ -53,6 +53,10 @@ pub const DEFAULT_NODE_FILL_RGBA: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 /// Theme stroke used when the author declared none: `#94a3b8`.
 pub const DEFAULT_NODE_STROKE_RGBA: [f32; 4] = [0.580_392_2, 0.639_215_7, 0.721_568_6, 1.0];
+/// Border width used when the author declared none. Matches `CanvasRenderConfig::node_stroke_width`
+/// and the value the shader previously hard-coded, so an undeclared node renders identically to
+/// before this became per-instance.
+pub const DEFAULT_NODE_STROKE_WIDTH: f32 = 1.5;
 
 /// One node instance for a WebGPU SDF shape pass.
 ///
@@ -75,6 +79,17 @@ pub struct GpuNodeInstance {
     pub fill: [f32; 4],
     /// Linear RGBA stroke, same resolution rule as [`Self::fill`].
     pub stroke: [f32; 4],
+    /// Border width in LAYOUT units, resolved from the author's own styling (bd-lvj3, bd-2u0.2).
+    ///
+    /// The same units the Canvas2D pass uses: the shader's former `STROKE_WIDTH` constant was
+    /// `1.5`, which is exactly `CanvasRenderConfig::node_stroke_width`, so the SDF band is already
+    /// measured in the coordinates `half_extent` is in. A declared `stroke-width:4px` therefore
+    /// travels here unscaled and the two renderers draw the same border.
+    ///
+    /// Placed with the floats rather than after `shape` so the vector members stay contiguous, per
+    /// the note above; `offset_of!` derives the attribute offset either way, so this is about
+    /// padding rather than correctness.
+    pub stroke_width: f32,
     /// [`GpuNodeShape`] encoded as a shader-friendly integer.
     pub shape: u32,
     /// Index back into `MermaidDiagramIr::nodes` for labels.
@@ -472,6 +487,12 @@ impl GpuRenderPlan {
                 .as_deref()
                 .and_then(parse_paint_rgba)
                 .unwrap_or(DEFAULT_NODE_STROKE_RGBA);
+            // Same resolver the Canvas2D pass uses, so a `classDef stroke-width` reaches the GPU
+            // exactly as it reaches the raster path instead of the GPU inventing a second rule.
+            let stroke_width = crate::renderer::resolve_node_stroke_width(ir, node.node_index)
+                .map(|width| width as f32)
+                .filter(|width| width.is_finite() && *width > 0.0)
+                .unwrap_or(DEFAULT_NODE_STROKE_WIDTH);
             node_instances.push(GpuNodeInstance {
                 center: [
                     node.bounds.x + (node.bounds.width * 0.5),
@@ -480,6 +501,7 @@ impl GpuRenderPlan {
                 half_extent: [node.bounds.width * 0.5, node.bounds.height * 0.5],
                 fill,
                 stroke,
+                stroke_width,
                 shape: shape as u32,
                 node_index: node.node_index.try_into().unwrap_or(u32::MAX),
             });
@@ -675,6 +697,7 @@ struct NodeInstance {
     @location(3) stroke: vec4<f32>,
     @location(4) shape: u32,
     @location(5) node_index: u32,
+    @location(6) stroke_width: f32,
 };
 
 struct VertexOut {
@@ -684,6 +707,7 @@ struct VertexOut {
     @location(2) fill: vec4<f32>,
     @location(3) stroke: vec4<f32>,
     @location(4) @interpolate(flat) shape: u32,
+    @location(5) @interpolate(flat) stroke_width: f32,
 };
 
 // A unit quad, expanded per instance. Two triangles, corners in [-1, 1].
@@ -707,6 +731,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, instance: NodeInstance) -> 
     out.half_extent = instance.half_extent;
     out.fill = instance.fill;
     out.stroke = instance.stroke;
+    out.stroke_width = instance.stroke_width;
     out.shape = instance.shape;
     return out;
 }
@@ -767,7 +792,6 @@ fn shape_distance(shape: u32, p: vec2<f32>, b: vec2<f32>) -> f32 {
     }
 }
 
-const STROKE_WIDTH: f32 = 1.5;
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
@@ -778,7 +802,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let aa = max(fwidth(dist), 0.0001);
 
     let fill_alpha = 1.0 - smoothstep(-aa, aa, dist);
-    let stroke_alpha = 1.0 - smoothstep(STROKE_WIDTH - aa, STROKE_WIDTH + aa, abs(dist));
+    // Per-instance rather than the former global constant: a declared `stroke-width` now reaches
+    // the shader (bd-lvj3). The default the plan substitutes is the same 1.5 this used to hard-code,
+    // so an undeclared node is byte-identical to before.
+    let half_stroke = in.stroke_width * 0.5;
+    let stroke_alpha = 1.0 - smoothstep(half_stroke - aa, half_stroke + aa, abs(dist));
 
     // Stroke composited over fill, both premultiplied by their own coverage.
     var color = in.fill;
@@ -1606,6 +1634,46 @@ mod tests {
         assert!(
             super::EDGE_WGSL.contains("discard"),
             "the edge shader never discards, so the dash gap would render as a solid line"
+        );
+    }
+
+    /// A declared `stroke-width` reaches the GPU instance, and an undeclared one gets the default.
+    ///
+    /// The ABI guard in `gpu_layout` proves the struct, the attribute table and the WGSL agree about
+    /// where this field IS. It says nothing about whether anything ever puts a value there, which is
+    /// the difference between a wired feature and a field of zeroes the shader faithfully reads.
+    ///
+    /// Parses REAL mermaid source rather than hand-building IR, for the reason this crate's
+    /// dev-dependency note records: a hand-built fixture is how a kanban fix came to pass its own
+    /// tests while being unreachable from parser output.
+    #[test]
+    fn a_declared_stroke_width_reaches_the_gpu_instance() {
+        let declared = fm_parser::parse(
+            "flowchart TD\n  a[A]\n  classDef thick stroke-width:6\n  class a thick\n",
+        )
+        .ir;
+        let layout = fm_layout::layout_diagram(&declared);
+        let plan = GpuRenderPlan::from_layout(&declared, &layout, 1.0);
+        assert!(!plan.node_instances.is_empty(), "no instances, so this proves nothing");
+        assert!(
+            plan.node_instances.iter().any(|i| (i.stroke_width - 6.0).abs() < f32::EPSILON),
+            "the declared width never reached an instance: {:?}",
+            plan.node_instances.iter().map(|i| i.stroke_width).collect::<Vec<_>>()
+        );
+
+        // CONTROL: without a declaration the instance carries the theme default, NOT zero. A zero
+        // would make the shader's smoothstep band collapse and the border vanish, which is the
+        // silent-wrong-output failure this whole bead family is about.
+        let plain = fm_parser::parse("flowchart TD\n  a[A]\n").ir;
+        let plain_layout = fm_layout::layout_diagram(&plain);
+        let plain_plan = GpuRenderPlan::from_layout(&plain, &plain_layout, 1.0);
+        assert!(
+            plain_plan
+                .node_instances
+                .iter()
+                .all(|i| (i.stroke_width - super::DEFAULT_NODE_STROKE_WIDTH).abs() < f32::EPSILON),
+            "an undeclared node did not get the default width: {:?}",
+            plain_plan.node_instances.iter().map(|i| i.stroke_width).collect::<Vec<_>>()
         );
     }
 }

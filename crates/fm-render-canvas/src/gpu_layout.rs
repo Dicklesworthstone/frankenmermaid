@@ -116,6 +116,16 @@ const NODE_ATTRIBUTES: &[GpuVertexAttribute] = &[
         format: GpuVertexFormat::Uint32,
         field: "node_index",
     },
+    GpuVertexAttribute {
+        // Per-instance border width (bd-lvj3 / bd-2u0.2). Appended as location 6 rather than
+        // inserted next to `stroke`, because renumbering the existing locations would require the
+        // shader to move in lockstep for no gain -- and `offset_of!` means the ORDER of the struct
+        // fields and the ORDER of these entries are independent.
+        shader_location: 6,
+        offset: offset_of!(GpuNodeInstance, stroke_width),
+        format: GpuVertexFormat::Float32,
+        field: "stroke_width",
+    },
 ];
 
 const EDGE_ATTRIBUTES: &[GpuVertexAttribute] = &[
@@ -381,7 +391,7 @@ mod tests {
         let names: Vec<&str> = instance.iter().map(|(_, name, _)| name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["center", "half_extent", "fill", "stroke", "shape", "node_index"],
+            vec!["center", "half_extent", "fill", "stroke", "shape", "node_index", "stroke_width"],
             "the NodeInstance members moved; update the layout table with them"
         );
 
