@@ -52,6 +52,22 @@
 //! `draw_state_notes` uses `config.edge_stroke`) or from a hardcoded palette (`draw_pie_wedges`
 //! picks from an `accent_colors` array). A config read is a theme, not an author's declaration.
 //!
+//! ⚠️ BUT AN UNSTYLED SURFACE IS NOT AUTOMATICALLY A DEFECT, and reading the earlier note as a
+//! sixteen-item backlog would be wrong. This bead is about the canvas ignoring styling THE SVG ARM
+//! HONOURS. Where both engines are theme-only, they agree, and there is nothing to fix. Two spot
+//! checks against `fm-render-svg`:
+//!
+//!   pie wedges    both engines take `accent_colors[i % len]` from the same hardcoded palette.
+//!                 Identical behaviour — a shared limitation, not a canvas gap.
+//!   state notes   the SVG emits CSS classes (`fm-state-note`) styled by the theme sheet and
+//!                 consults `style_refs` / `inline_style` / `classes` ZERO times for notes.
+//!                 Theme-only on both sides.
+//!
+//! So the honest frontier is smaller than "sixteen surfaces". THE REMAINING SURFACES ARE UNCHECKED
+//! — I verified two, not fifteen — and each needs the same question asked before it is called a
+//! defect: does the SVG arm honour a user DECLARATION here, or is it theme-only there too? That
+//! check is what separates a parity bug from a feature neither engine has.
+//!
 //! ⚠️ The first version of that audit reported `draw_pie_wedges` as consulting EVERY resolver. It
 //! was an artifact: the scan ran past the end of the `impl` block and swept in the free `resolve_*`
 //! functions defined below it. Bounded to the impl, pie wedges consult none. Recorded because the
