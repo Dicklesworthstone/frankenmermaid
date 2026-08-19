@@ -121,6 +121,28 @@ fn coordinate_digest(values: &[f32]) -> u64 {
 /// constants from the failure message and say in the commit which fixtures moved and why. Do not
 /// relax it to a range — a tolerance would make it blind to exactly the one-ULP divergences it
 /// exists to catch.
+///
+/// # Target status (bd-1s1g.6)
+///
+/// - **x86_64** — this file, and `x86_64_and_wasm32_render_the_same_bytes` in fm-wasm.
+/// - **wasm32** — DONE. That test digests the shipped `pkg/` bundle driven from node against the
+///   native render of the same entry point; all four fixtures agree byte for byte.
+/// - **aarch64** — COMPILES, does not run here. Verified 2026-08-19:
+///
+///   ```text
+///   env -u CARGO_TARGET_DIR cargo check --target aarch64-unknown-linux-gnu -p fm-core -p fm-layout
+///   ```
+///
+///   clean, 0 errors, including `highs-sys` through cmake/bindgen. So no `target_arch` assumption,
+///   x86-only intrinsic or width-dependent cast blocks the port — which is a real result, and is
+///   NOT cross-target determinism evidence. It says the code builds; the question this bead asks is
+///   whether the float results MATCH, and that needs execution. There is no `qemu-aarch64` on this
+///   host, so the digests above cannot be taken for it.
+///
+/// ⚠️ IF YOU RE-RUN THAT CHECK, do not confirm it by looking in
+/// `target/local/aarch64-unknown-linux-gnu/debug/deps` — it is EMPTY under this configuration and
+/// looks exactly like a build that never happened. The artifacts land under `build/<crate>/<hash>/out`
+/// and `incremental/`; `find target -path '*aarch64*' -name '*.rmeta'` is the check that answers.
 #[test]
 fn layout_coordinates_match_their_cross_target_digest() {
     // Derived on x86_64-unknown-linux-gnu at 7d7ec0aa, target-cpu=x86-64-v2 (see .cargo/config.toml
