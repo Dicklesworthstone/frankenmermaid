@@ -37,9 +37,20 @@
 //!                        draw_bands, draw_axis_ticks, draw_cluster_dividers, draw_marker,
 //!                        draw_path_markers, draw_generic_diagram_title
 //!
-//! So a sequence fragment, a pie wedge, a gantt marker or a state note cannot honour a declared
-//! anything — there is no code path from the merge chain to those surfaces at all. The three
-//! surfaces this table covers are the three that were wired; the other sixteen were never asked.
+//! So a pie wedge, a gantt marker or a state note cannot honour a declared anything — there is no
+//! code path from the merge chain to those surfaces at all. The three surfaces this table covers
+//! are the three that were wired; the others were never asked.
+//!
+//! ⚠️ ONE CORRECTION TO THAT COUNT, because `resolve_*` usage is not the same question as "honours
+//! styling". `draw_sequence_fragments` consults no resolver and DOES honour user styling: it reads
+//! `fragment.color` straight off the IR and sanitises it, which is how a sequence `rect rgb(...)`
+//! reaches the canvas. So the honest tally is THREE surfaces on the merge chain plus ONE honouring
+//! a single channel by a direct field read.
+//!
+//! The rest genuinely have nothing: their colours come from `self.config` (checked — `draw_bands`
+//! uses `config.node_stroke`, `draw_gantt_today_marker` uses `config.gantt_today`,
+//! `draw_state_notes` uses `config.edge_stroke`) or from a hardcoded palette (`draw_pie_wedges`
+//! picks from an `accent_colors` array). A config read is a theme, not an author's declaration.
 //!
 //! ⚠️ The first version of that audit reported `draw_pie_wedges` as consulting EVERY resolver. It
 //! was an artifact: the scan ran past the end of the `impl` block and swept in the free `resolve_*`
