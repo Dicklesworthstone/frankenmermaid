@@ -132,6 +132,19 @@ elif (( second_mean * 3 > first_mean * 4 )); then
 else
   trend="STEADY (busy $first_mean -> $second_mean)"
 fi
+
+# ⚠️ AGREEMENT IS NECESSARY, NOT SUFFICIENT, and these two lines were briefly able to imply
+# otherwise. A uniformly SATURATED host is perfectly stable: measured here at 06:51, all twelve
+# samples reported 64 of 64 cpus busy, so spread was 0, the agreeing run was 12 of 12 and the trend
+# was STEADY — three reassuring numbers describing a window in which nothing can be measured. The
+# level has to travel with the agreement or a reader skimming the diagnostics gets a green light
+# from a red window.
+cores=$(nproc)
+if (( mean * 10 >= cores * 9 )); then
+  trend="$trend — AT SATURATION ($mean of $cores busy); stability here means uniformly BUSY"
+elif (( mean * 2 >= cores )); then
+  trend="$trend — heavily loaded ($mean of $cores busy)"
+fi
 echo "  longest agreeing run: $best_run of $SAMPLES samples   trend: $trend"
 # The single number a spot check would have produced, next to what the sweep saw. This is the
 # disagreement that keeps sending callers to the wrong conclusion: the quietest sample is a real
