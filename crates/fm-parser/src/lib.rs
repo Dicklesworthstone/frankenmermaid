@@ -1020,6 +1020,45 @@ fn has_sequence_message_separator(content: &str) -> bool {
     })
 }
 
+/// Is `[*]` used here as a state START/END MARKER rather than as a node label?
+///
+/// `[*]` is decisive for state diagrams -- no other mermaid type uses it -- but only when it sits
+/// next to a transition arrow. `A[*]` on its own is a flowchart node whose label is `*`.
+///
+/// The existing checks were the literal strings `"[*] -->"` and `"--> [*]"`, which are
+/// SPACE-SENSITIVE: mermaid accepts `[*]-->Idle` with no space at all, and that spelling fell
+/// through to the flowchart fallback. Scanning around the marker instead of matching a literal is
+/// the same fix applied to the operator tables -- match the shape, not one of its spellings.
+fn looks_like_state_transition(content: &str) -> bool {
+    let bytes = content.as_bytes();
+    let mut from = 0_usize;
+    while let Some(offset) = content[from..].find("[*]") {
+        let at = from + offset;
+        let after = at + 3;
+
+        // `[*]-->` / `[*] --> `
+        let mut ahead = after;
+        while matches!(bytes.get(ahead), Some(b' ' | b'\t')) {
+            ahead += 1;
+        }
+        if bytes.get(ahead) == Some(&b'-') {
+            return true;
+        }
+
+        // `-->[*]` / `--> [*]`
+        let mut behind = at;
+        while behind > 0 && matches!(bytes[behind - 1], b' ' | b'\t') {
+            behind -= 1;
+        }
+        if behind > 0 && matches!(bytes[behind - 1], b'>' | b'-') {
+            return true;
+        }
+
+        from = after;
+    }
+    false
+}
+
 fn content_heuristics(input: &str) -> Option<DetectedType> {
     // Strip comments to avoid false positives in metadata
     let lines: Vec<&str> = input
@@ -1036,6 +1075,24 @@ fn content_heuristics(input: &str) -> Option<DetectedType> {
             confidence: 0.8,
             method: DetectionMethod::ContentHeuristic,
             warnings: vec!["Detected ER relationship patterns".to_string()],
+        });
+    }
+
+    // State transitions come BEFORE the sequence arm, and the ordering is the whole point.
+    //
+    // `[*]` is mermaid's start/end state marker and appears in no other diagram type, so a line
+    // carrying it next to an arrow is decisive. But a labelled transition -- `[*] --> Idle: boot` --
+    // is also an arrow followed by a colon, which is exactly what the sequence arm matches, and the
+    // sequence arm ran first. Every headerless state diagram with labelled transitions was reported
+    // as a sequence diagram. Tightening the sequence rule to a real message separator did not fix
+    // this and could not: the state line genuinely IS arrow-then-colon. Only precedence decides it,
+    // and the decisive marker must get to speak first.
+    if looks_like_state_transition(&content) {
+        return Some(DetectedType {
+            diagram_type: DiagramType::State,
+            confidence: 0.8,
+            method: DetectionMethod::ContentHeuristic,
+            warnings: vec!["Detected state diagram patterns".to_string()],
         });
     }
 
@@ -3472,6 +3529,61 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
                 "{source:?} stopped being detected as a sequence diagram"
             );
         }
+    }
+
+    /// A LABELLED state transition is a state diagram, not a sequence diagram.
+    ///
+    /// `[*] --> Idle: boot` is an arrow followed by a colon on one line, which is exactly the shape
+    /// the sequence arm matches — and the sequence arm ran first, so every headerless state diagram
+    /// with labelled transitions was reported as a sequence. No tightening of the sequence rule can
+    /// fix this, because the state line genuinely IS arrow-then-colon. Only precedence decides it.
+    #[test]
+    fn a_labelled_state_transition_is_not_a_sequence_diagram() {
+        for source in [
+            "[*] --> Idle: boot\n  Idle --> Busy: work\n",
+            "[*] --> Idle\n",
+            "Idle --> [*]\n",
+        ] {
+            let detected = super::detect_type_with_confidence(source);
+            assert_eq!(
+                detected.diagram_type,
+                fm_core::DiagramType::State,
+                "{source:?} was not read as a state diagram"
+            );
+        }
+    }
+
+    /// The state marker is recognised WITHOUT surrounding spaces.
+    ///
+    /// The checks were the literals `"[*] -->"` and `"--> [*]"`; mermaid accepts `[*]-->Idle`, which
+    /// matched neither and fell through to the flowchart fallback — the same
+    /// literal-instead-of-shape drift as the operator tables.
+    #[test]
+    fn the_state_marker_does_not_require_spaces() {
+        for source in ["[*]-->Idle\n", "Idle-->[*]\n", "[*]\t--> Idle\n"] {
+            let detected = super::detect_type_with_confidence(source);
+            assert_eq!(
+                detected.diagram_type,
+                fm_core::DiagramType::State,
+                "{source:?} was not read as a state diagram"
+            );
+        }
+    }
+
+    /// CONTROL: a bare `[*]` with no arrow is NOT a state diagram.
+    ///
+    /// `A[*]` is a flowchart node whose label is `*`. Treating the marker as decisive wherever it
+    /// appears would reclassify that, which is why the scan looks for an adjacent arrow rather than
+    /// for the marker alone.
+    #[test]
+    fn a_bracketed_star_label_alone_is_not_a_state_diagram() {
+        let detected = super::detect_type_with_confidence("a[*]\n  b[Plain]\n");
+
+        assert_ne!(
+            detected.diagram_type,
+            fm_core::DiagramType::State,
+            "a node labelled `*` was misread as a state marker"
+        );
     }
 
     /// CONTROL: a headerless flowchart with a colon anywhere is NOT a sequence diagram.
