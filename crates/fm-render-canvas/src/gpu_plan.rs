@@ -656,12 +656,23 @@ pub struct GpuRenderPlan {
     /// this one by hand.
     ///
     /// `node_index` on these instances refers to the CLUSTER index, not a node. It is the label
-    /// back-reference the text pass uses, and cluster labels are not yet planned -- see the bead.
+    /// back-reference the text pass uses -- cluster titles ARE planned now, tagged
+    /// `GpuTextSource::Cluster`.
     pub cluster_instances: Vec<GpuNodeInstance>,
-    pub node_instances: Vec<GpuNodeInstance>,
     pub edge_segments: Vec<GpuEdgeSegment>,
     /// Triangle instances for edge arrowheads.
     pub arrowheads: Vec<GpuArrowheadInstance>,
+    /// ⚠️ AFTER THE EDGES, BECAUSE THE RASTER PASS DRAWS NODES LAST (bd-adabx).
+    ///
+    /// `render` calls `draw_edges` and THEN `draw_nodes`, so an opaque node fill covers any edge
+    /// routed under it. This field sat before `edge_segments`, which -- under the submit-in-field-
+    /// order contract the cluster field documents -- paints the edges ON TOP of the nodes instead.
+    /// Every route that passes under a node, every self-loop, and every arrowhead meeting a node
+    /// boundary renders differently between the two surfaces under that order.
+    ///
+    /// Pinned by `the_plan_field_order_matches_the_raster_draw_order`, which reads the call order
+    /// out of renderer.rs rather than trusting this comment to stay true.
+    pub node_instances: Vec<GpuNodeInstance>,
     /// Per-glyph textured quads for the text pass.
     pub text_quads: Vec<GpuTextQuad>,
     /// One entry per drawn label — the unit the Canvas2D pass draws in.
@@ -1113,9 +1124,9 @@ impl GpuRenderPlan {
         Self {
             bounds: layout.bounds,
             cluster_instances,
-            node_instances,
             edge_segments,
             arrowheads,
+            node_instances,
             text_quads,
             text_runs,
             glyph_atlas,
@@ -2437,6 +2448,80 @@ mod tests {
     ///
     /// KNOWN GAPS ARE NAMED, NOT SILENT. `resolve_node_stroke_dasharray` is exempt with its bead
     /// id, because a dashed SDF border needs perimeter arc length the shader does not have. An
+    /// The plan's FIELD ORDER is the raster pass's DRAW ORDER (bd-adabx).
+    ///
+    /// The plan documents field order as submit order -- "a consumer that submits these buffers in
+    /// field order gets the right picture". That makes the declaration order a contract, and it was
+    /// wrong: `node_instances` sat before `edge_segments` while `render` calls `draw_edges` and THEN
+    /// `draw_nodes`, so the canvas covers an under-routed edge with the node's opaque fill and a
+    /// consumer following the plan would have drawn that edge on top.
+    ///
+    /// Both orders are READ FROM SOURCE. A comment asserting "these match" is exactly what already
+    /// went stale here, so this compares the field positions in this file against the call
+    /// positions in renderer.rs, and either side moving alone fails.
+    #[test]
+    fn the_plan_field_order_matches_the_raster_draw_order() {
+        const RENDERER_SRC: &str = include_str!("renderer.rs");
+        const GPU_FULL_SRC: &str = include_str!("gpu_plan.rs");
+        // Production half only: the struct fields are declared there, and this test's own prose
+        // names every field and every draw call, which would satisfy a naive search of the whole
+        // file. That vacuity bit the resolver gate once already.
+        let gpu_src: &str = GPU_FULL_SRC
+            .split_once("#[cfg(test)]")
+            .map_or(GPU_FULL_SRC, |(production, _tests)| production);
+        let struct_src = gpu_src
+            .split_once("pub struct GpuRenderPlan {")
+            .expect("the plan struct must be declared in the production half")
+            .1;
+
+        // (plan field, the raster call that produces it), in the order both must agree on.
+        const PAIRS: &[(&str, &str)] = &[
+            ("pub cluster_instances:", "self.draw_clusters("),
+            ("pub edge_segments:", "self.draw_edges("),
+            ("pub node_instances:", "self.draw_nodes("),
+        ];
+
+        let mut field_positions = Vec::new();
+        let mut call_positions = Vec::new();
+        for (field, call) in PAIRS {
+            field_positions.push((
+                *field,
+                struct_src
+                    .find(field)
+                    .unwrap_or_else(|| panic!("plan field {field} not found -- renamed?")),
+            ));
+            call_positions.push((
+                *call,
+                RENDERER_SRC
+                    .find(call)
+                    .unwrap_or_else(|| panic!("raster call {call} not found -- renamed?")),
+            ));
+        }
+
+        let ordered = |positions: &[(&str, usize)]| -> Vec<String> {
+            let mut sorted = positions.to_vec();
+            sorted.sort_by_key(|(_, at)| *at);
+            sorted.iter().map(|(name, _)| (*name).to_string()).collect()
+        };
+        let fields = ordered(&field_positions);
+        let calls = ordered(&call_positions);
+
+        let field_rank: Vec<usize> = fields
+            .iter()
+            .map(|name| PAIRS.iter().position(|(f, _)| f == name).unwrap())
+            .collect();
+        let call_rank: Vec<usize> = calls
+            .iter()
+            .map(|name| PAIRS.iter().position(|(_, c)| c == name).unwrap())
+            .collect();
+        assert_eq!(
+            field_rank, call_rank,
+            "plan field order {fields:?} does not match the raster draw order {calls:?} -- a \
+             consumer submitting buffers in field order would paint them in a different order \
+             than the Canvas2D pass does"
+        );
+    }
+
     /// Every raster draw source is CLASSIFIED against the GPU plan (bd-adabx).
     ///
     /// The plan mirrors three of renderer.rs's nineteen `draw_*` entry points. The other sixteen
