@@ -12749,6 +12749,65 @@ mod tests {
         assert_eq!(reverse.ir.edges[0].arrow, ArrowType::Inheritance);
     }
 
+    /// ARROW LENGTH KEEPS THE ARROWHEAD (bd-6s6sx). ⚠️ `#[ignore]`d: THIS REPRODUCES THE DEFECT.
+    ///
+    /// mermaid lexes a flowchart link as `/^(?:\s*[xo<]?--+[-xo>]\s*)/` — an optional head, TWO OR
+    /// MORE dashes, then one terminator from `[-xo>]` — so extra dashes are a rank-distance hint and
+    /// `A ---> B` is an ordinary arrow drawn longer.
+    ///
+    /// Here `find_operator` returns the first table match at a position, `--->` is not in the table,
+    /// and `---` is: the edge is built as `Line` and THE ARROWHEAD DISAPPEARS. The `>` is then
+    /// dropped by `normalize_identifier` (with `out` empty the break arm does not fire), so the
+    /// endpoint id survives as `B` — which is why this is an arrow-TYPE assertion and not a node-id
+    /// one. The `==` family fails the same way: `====>` matches `==` and a thick ARROW becomes a
+    /// thick LINE.
+    ///
+    /// Kept as an ignored reproducer rather than a comment because the length is UNBOUNDED in the
+    /// grammar, so the fix must match the RUN and cannot be a longer operator table — and the
+    /// matcher is shared with class parsing, where `..` and `--` mean different things. Un-ignore it
+    /// with the fix; it states the whole contract.
+    #[test]
+    #[ignore = "bd-6s6sx: reproduces the defect — long arrows lose their head"]
+    fn arrow_length_does_not_change_the_arrow_type() {
+        for (source, expected) in [
+            ("flowchart LR\n  A --> B\n", ArrowType::Arrow),
+            ("flowchart LR\n  A ---> B\n", ArrowType::Arrow),
+            ("flowchart LR\n  A -----> B\n", ArrowType::Arrow),
+            ("flowchart LR\n  A ==> B\n", ArrowType::ThickArrow),
+            ("flowchart LR\n  A ====> B\n", ArrowType::ThickArrow),
+        ] {
+            let parsed = parse_mermaid(source);
+            assert_eq!(
+                parsed.ir.edges.len(),
+                1,
+                "expected exactly one edge for: {source}"
+            );
+            assert_eq!(
+                parsed.ir.edges[0].arrow, expected,
+                "arrow length changed the arrow type for: {source}"
+            );
+            // The endpoints must survive the longer run too — a fix that repaired the arrow by
+            // consuming a character of the target would pass the assertion above.
+            let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+            assert_eq!(ids, vec!["A", "B"], "endpoints changed for: {source}");
+        }
+    }
+
+    /// CONTROL for the case above, and NOT ignored: the LINE forms already work, so a fix must not
+    /// regress them. `---` is two dashes plus a `-` terminator and `====` is two equals plus `=`,
+    /// which is why these already resolve correctly while their arrow siblings do not.
+    #[test]
+    fn arrow_length_line_forms_are_already_correct() {
+        for (source, expected) in [
+            ("flowchart LR\n  A --- B\n", ArrowType::Line),
+            ("flowchart LR\n  A == B\n", ArrowType::ThickLine),
+        ] {
+            let parsed = parse_mermaid(source);
+            assert_eq!(parsed.ir.edges.len(), 1, "expected one edge for: {source}");
+            assert_eq!(parsed.ir.edges[0].arrow, expected, "changed for: {source}");
+        }
+    }
+
     /// A REALIZATION IS DASHED and an inheritance is not (bd-u9hcc).
     ///
     /// bd-u9hcc landed the head and direction and recorded the missing dash as a real loss: without
