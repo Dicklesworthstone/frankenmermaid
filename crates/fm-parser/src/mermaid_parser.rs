@@ -623,6 +623,9 @@ enum FlowAst {
         node: String,
         target: String,
         tooltip: Option<String>,
+        /// Browser target from `click A "url" _blank` (bd-vn7s). `None` means the author declared
+        /// none, which every renderer treats as `_blank` — mermaid's default and ours.
+        link_target: Option<String>,
         is_callback: bool,
     },
     StyleOrLinkStyle,
@@ -949,6 +952,9 @@ fn flow_statement_parser<'a>()
                     node: node_id.to_string(),
                     target: callback,
                     tooltip,
+                    // This grammar requires a QUOTED tooltip and closes with `end()`, so a bare
+                    // `_blank` never parses here — it falls through to the hand-written path.
+                    link_target: None,
                     is_callback: true,
                 }
             },
@@ -977,6 +983,7 @@ fn flow_statement_parser<'a>()
                     node: node_id.to_string(),
                     target,
                     tooltip,
+                    link_target: None,
                     is_callback: false,
                 }
             },
@@ -1077,6 +1084,7 @@ fn lower_flow_ast(
             node,
             target,
             tooltip,
+            link_target,
             is_callback,
         } => {
             let cleaned = target
@@ -1111,6 +1119,13 @@ fn lower_flow_ast(
             } else {
                 builder.add_class_to_node(node, "has-link", span);
                 builder.set_node_link(node, cleaned, span);
+                // The declared browser target, if any (bd-vn7s). Applied only on the LINK branch:
+                // `setLink` is the only mermaid function that takes one, and a callback has no
+                // frame to open in. Runs after `set_node_link` so the node is guaranteed to exist,
+                // which is why the setter can be non-interning.
+                if let Some(link_target) = link_target {
+                    builder.set_node_link_target(node, link_target);
+                }
                 if let Some(tip) = tooltip {
                     let tip_cleaned = tip
                         .trim()
@@ -2400,6 +2415,25 @@ fn parse_fast_simple_flowchart_edge_parts(statement: &str) -> Option<(&str, Arro
     }
 
     let (operator_index, operator, arrow) = matched?;
+
+    // DEFER A LONG RUN TO THE FULL MATCHER (bd-6s6sx). `---` is the only fast operator whose run
+    // can continue, and the spaced forms already fall out of this path because the right side fails
+    // `is_fast_flow_identifier`. The unspaced ones do NOT: `A---xB` would be read here as a plain
+    // line to a node called `xB`, while `extend_operator_run` reads it as a cross edge to `B` -- and
+    // `A---oranges` as a circle edge to `ranges`, which is what mermaid's own `--+[-xo(gt)]` lexes.
+    //
+    // A fast path that disagrees with the path it shortcuts is the defect class that silently
+    // dropped journey and kanban fill, so this REJECTS rather than duplicating the run logic: one
+    // implementation of the rule, and the slow path owns it.
+    if operator == "---"
+        && matches!(
+            trimmed.as_bytes().get(operator_index + operator.len()),
+            Some(b'-' | b'>' | b'o' | b'x')
+        )
+    {
+        return None;
+    }
+
     let left = trimmed.get(..operator_index)?.trim_ascii();
     let right = trimmed.get(operator_index + operator.len()..)?.trim_ascii();
     if !is_fast_flow_identifier(left) || !is_fast_flow_identifier(right) {
@@ -5834,6 +5868,9 @@ fn parse_click_directive_ast(
                     node,
                     target: fn_name.to_string(),
                     tooltip: tooltip.clone(),
+                    // mermaid has no target on a CALLBACK; `setLink` is the only function that
+                    // takes one.
+                    link_target: None,
                     is_callback: true,
                 })
                 .collect(),
@@ -5861,23 +5898,27 @@ fn parse_click_directive_ast(
     // The target is recognised and dropped rather than stored: no IrNode field carries a link
     // target today, and inventing one with no renderer reading it would be dead IR. Dropping it
     // loses only the browser tab choice; keeping it in the tooltip corrupted the diagram's text.
-    let tooltip = match take_token(remaining) {
-        Some((token, _)) if is_link_target_keyword(token) => {
-            warnings.push(format!(
-                "Line {line_number}: click link target `{token}` is recognised but not applied; \
-                 the link opens in the same frame"
-            ));
-            None
+    // Both trailing positions are consumed, in EITHER order. mermaid writes
+    // `click A "url" "tooltip" _blank`, so the target can sit after the tooltip — an earlier version
+    // of this only looked at the FIRST trailing token and therefore saw the target only when no
+    // tooltip was written. Extras beyond one of each are ignored rather than guessed at.
+    let mut tooltip = None;
+    let mut link_target = None;
+    let mut cursor = remaining;
+    while let Some((token, rest)) = take_token(cursor) {
+        if is_link_target_keyword(token) {
+            link_target = Some(token.trim().to_string());
+        } else if tooltip.is_none() {
+            tooltip = Some(
+                token
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .trim_matches('`')
+                    .to_string(),
+            );
         }
-        Some((token, _)) => Some(
-            token
-                .trim_matches('"')
-                .trim_matches('\'')
-                .trim_matches('`')
-                .to_string(),
-        ),
-        None => None,
-    };
+        cursor = rest;
+    }
 
     Some(
         nodes
@@ -5886,6 +5927,7 @@ fn parse_click_directive_ast(
                 node,
                 target: target.clone(),
                 tooltip: tooltip.clone(),
+                link_target: link_target.clone(),
                 is_callback: false,
             })
             .collect(),
@@ -10096,7 +10138,7 @@ fn parse_edge_statement_with_nodes(
 }
 
 fn find_operator<'a>(
-    statement: &str,
+    statement: &'a str,
     operators: &'a [(&'a str, ArrowType)],
     gate: u128,
 ) -> Option<(usize, &'a str, ArrowType)> {
@@ -10104,7 +10146,7 @@ fn find_operator<'a>(
 }
 
 fn find_operator_from_index<'a>(
-    statement: &str,
+    statement: &'a str,
     start_index: usize,
     operators: &'a [(&'a str, ArrowType)],
     gate: u128,
@@ -10123,8 +10165,86 @@ fn find_operator_from_index<'a>(
 /// positions × operators). Operator tables must put a token before every shorter prefix of that
 /// token, so the first match is also the longest match. Byte-identical: the gate only skips positions
 /// the loop would reject, and table-order ties retain their existing priority.
+/// Extend a matched flow operator over an arbitrarily long dash / equals / dot run (bd-6s6sx).
+///
+/// mermaid lexes a flowchart link as `/^(?:\s*[xo<]?--+[-xo(gt)]\s*)/` (reading `(gt)` for the
+/// closing angle): an optional head, a run of TWO OR MORE dashes, then one terminator. The run is
+/// UNBOUNDED, which is why this is a matcher change rather than four new table entries -- any fixed
+/// table is a bound the grammar does not have, so a six-dash arrow would still lose its head while
+/// looking like a supported case.
+///
+/// The table already covers every two-character run, so a longer one lands on the longest literal
+/// PREFIX and this walks the rest. `A ---(gt) B` matches `---`, and without this the edge is built
+/// as `ArrowType::Line`: the arrowhead silently disappears and the diagram still looks well-formed.
+///
+/// GATED ON THE MATCHED TOKEN, not on the caller. The tokens that reach here -- `---`, `==`, `-.`
+/// and `-.-` -- are all absent from `CLASS_OPERATORS`, which carries only `--` and `..`, so a long
+/// class relation still matches `--` and is untouched. That is the cross-diagram gate this needed.
+/// `==` IS shared with `PACKET_OPERATORS`, where the extension is a strict refinement: a packet
+/// `A === B` currently matches `==` and leaves a stray `=` for the endpoint parser to skip.
+///
+/// Gating by table IDENTITY was considered and is UNSOUND: `FLOW_OPERATORS` is a `const`, so every
+/// use site may materialise its own temporary and `ptr::eq` against it can be false. That version
+/// would have compiled and silently never fired.
+///
+/// Returns `None` when nothing extends, so the table's own answer stands unchanged.
+fn extend_operator_run(statement: &str, index: usize, matched: &str) -> Option<(usize, ArrowType)> {
+    let dotted = matches!(matched, "-." | "-.-");
+    let thick = matched == "==";
+    if !dotted && !thick && matched != "---" {
+        return None;
+    }
+
+    let bytes = statement.as_bytes();
+
+    // The body is the run itself, without its terminator.
+    let body_len = if dotted {
+        // `-` `.`+ `-` -- for a dotted link it is the DOT run that is unbounded.
+        let mut dots = 0_usize;
+        while bytes.get(index + 1 + dots) == Some(&b'.') {
+            dots += 1;
+        }
+        if dots == 0 || bytes.get(index + 1 + dots) != Some(&b'-') {
+            return None;
+        }
+        dots + 2
+    } else {
+        let fill = if thick { b'=' } else { b'-' };
+        let mut run = 0_usize;
+        while bytes.get(index + run) == Some(&fill) {
+            run += 1;
+        }
+        run
+    };
+
+    let terminator = bytes.get(index + body_len).copied();
+    let arrow = match terminator {
+        Some(b'>') if dotted => ArrowType::DottedArrow,
+        Some(b'>') if thick => ArrowType::ThickArrow,
+        Some(b'>') => ArrowType::Arrow,
+        Some(b'x') if dotted => ArrowType::DottedCross,
+        // `==o`, `==x` and `-.-o` have NO `ArrowType`: there is no thick circle, no thick cross and
+        // no dotted circle. Refusing them leaves the table's existing answer -- honestly wrong and
+        // already shipping -- rather than inventing a mapping that drops either the stroke or the
+        // head. Adding those variants is a separate change across fm-core and three renderers.
+        Some(b'x' | b'o') if thick => return None,
+        Some(b'o') if dotted => return None,
+        Some(b'x') => ArrowType::Cross,
+        Some(b'o') => ArrowType::Circle,
+        _ if dotted => ArrowType::DottedLine,
+        _ if thick => ArrowType::ThickLine,
+        _ => ArrowType::Line,
+    };
+
+    let len = body_len + usize::from(matches!(terminator, Some(b'>' | b'x' | b'o')));
+
+    // Nothing longer than the literal the table already matched: leave it entirely alone. This is
+    // what keeps `A --- B` a Line and `A == B` a ThickLine.
+    (len != matched.len()).then_some((len, arrow))
+}
+
 fn find_operator_core<'a>(
-    statement: &str,
+    statement: &'a str,
     start_index: usize,
     operators: &'a [(&'a str, ArrowType)],
     op_first_byte: u128,
@@ -10208,6 +10328,12 @@ fn find_operator_core<'a>(
         let tail = &statement[idx..];
         for (operator, arrow) in operators {
             if tail.starts_with(operator) {
+                // A longer run reclassifies the match; see `extend_operator_run` (bd-6s6sx). The
+                // token returned then borrows the STATEMENT rather than the table, which is why
+                // `statement` is bound to `'a`.
+                if let Some((run_len, run_arrow)) = extend_operator_run(statement, idx, operator) {
+                    return Some((idx, &statement[idx..idx + run_len], run_arrow));
+                }
                 return Some((idx, operator, *arrow));
             }
         }
@@ -12749,7 +12875,7 @@ mod tests {
         assert_eq!(reverse.ir.edges[0].arrow, ArrowType::Inheritance);
     }
 
-    /// ARROW LENGTH KEEPS THE ARROWHEAD (bd-6s6sx). ⚠️ `#[ignore]`d: THIS REPRODUCES THE DEFECT.
+    /// ARROW LENGTH KEEPS THE ARROWHEAD (bd-6s6sx). UN-IGNORED WITH THE FIX, AND NOT YET RUN.
     ///
     /// mermaid lexes a flowchart link as `/^(?:\s*[xo<]?--+[-xo>]\s*)/` — an optional head, TWO OR
     /// MORE dashes, then one terminator from `[-xo>]` — so extra dashes are a rank-distance hint and

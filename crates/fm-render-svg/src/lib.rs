@@ -10262,9 +10262,19 @@ fn render_node(
     {
         match config.link_mode {
             MermaidLinkMode::Inline => {
+                // ⚠️ `target` WAS HARDCODED `_blank`, so `click A "url" _self` opened a new tab
+                // anyway — the author's declared frame was parsed and then ignored (bd-vn7s).
+                //
+                // `None` still means `_blank`: that is mermaid's own default (its `setLink` reads
+                // `typeof i == "string" ? i : "_blank"`), so an ordinary link is byte-identical to
+                // before and only an explicitly declared target changes anything.
+                //
+                // `rel` is kept unconditionally. It matters for `_blank`, and on a same-frame
+                // target it is inert rather than wrong — dropping it per-target would be a security
+                // regression for the sake of tidiness.
                 let mut a = Element::new(crate::element::ElementKind::A)
                     .attr("href", href)
-                    .attr("target", "_blank")
+                    .attr("target", node.link_target().unwrap_or("_blank"))
                     .attr("rel", "noopener noreferrer");
 
                 group = group.attr("style", "cursor: pointer;");

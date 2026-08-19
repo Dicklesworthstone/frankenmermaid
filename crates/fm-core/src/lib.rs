@@ -1356,6 +1356,14 @@ pub struct IrNodeInteraction {
     /// `click nodeId href "url"` target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub href: Option<String>,
+    /// Browser link target from `click nodeId "url" _blank` — one of `_self`, `_blank`, `_parent`,
+    /// `_top` (bd-vn7s).
+    ///
+    /// `None` means the author declared none, NOT that there is no target: mermaid defaults a link
+    /// to `_blank`, and so does fm-render-svg. The field exists for the case an author asks for
+    /// something else, which was previously parsed and thrown away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_target: Option<String>,
     /// JavaScript callback function name from `click nodeId call functionName`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callback: Option<String>,
@@ -1374,6 +1382,16 @@ impl IrNode {
     #[must_use]
     pub fn href(&self) -> Option<&str> {
         self.interaction.as_ref().and_then(|i| i.href.as_deref())
+    }
+    /// The browser target this node's link declared, if the author declared one (bd-vn7s).
+    ///
+    /// A renderer should treat `None` as `_blank`, which is both mermaid's default and what
+    /// fm-render-svg emitted unconditionally before this field existed.
+    #[must_use]
+    pub fn link_target(&self) -> Option<&str> {
+        self.interaction
+            .as_ref()
+            .and_then(|i| i.link_target.as_deref())
     }
     /// `click` callback function name, if any.
     #[must_use]

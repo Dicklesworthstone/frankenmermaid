@@ -2152,6 +2152,27 @@ impl IrBuilder {
         }
     }
 
+    /// Record the browser target a `click` directive declared for this node (bd-vn7s).
+    ///
+    /// Deliberately does NOT intern: this only ever runs directly after `set_node_link` for the
+    /// same key, so the node exists, and interning here would give a misspelled alias a phantom
+    /// node the way bd-xfmm did.
+    pub(crate) fn set_node_link_target(&mut self, node_key: &str, link_target: &str) {
+        let link_target = link_target.trim();
+        if link_target.is_empty() {
+            return;
+        }
+
+        let Some(node_id) = self.node_id_by_key(node_key) else {
+            return;
+        };
+
+        self.mark_reusable_prefix_node_dirty(node_id);
+        if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
+            node.interaction_mut().link_target = Some(link_target.to_string());
+        }
+    }
+
     pub(crate) fn set_node_callback(&mut self, node_key: &str, callback: &str, span: Span) {
         let callback = callback.trim();
         if callback.is_empty() {
