@@ -2203,4 +2203,69 @@ mod tests {
         // wrong-lookup-key defect, which is what `source` exists to prevent.
         assert_eq!(title_runs[0].node_index, cluster.cluster_index as u32);
     }
+
+    /// The Canvas2D pass and the GPU plan must AGREE on a declared value, not merely each honour it.
+    ///
+    /// Five channels reached the GPU one at a time (stroke width a3157251, label colour 58564713,
+    /// opacity a2b268c5, font size 54d5f637, cluster styling f5769ac8), and each has its own test
+    /// asserting that surface carries the declaration. None of them compares the two surfaces, so
+    /// both could honour the same `style` directive and still disagree — different default, different
+    /// parse, different clamp — and every existing test would pass. That is exactly how bd-lvj3
+    /// started: two renderers, each locally correct by its own tests, disagreeing about one document.
+    ///
+    /// The structural gate above asks whether the GPU plan MENTIONS each resolver. This asks whether
+    /// the two surfaces produce the same ANSWER, which is the stronger claim and the one a user sees.
+    #[test]
+    fn the_canvas_and_the_gpu_plan_agree_on_a_declared_fill() {
+        let ir =
+            fm_parser::parse("flowchart TD\n  a[Alpha]\n  style a fill:#ff0000\n").ir;
+        let layout = fm_layout::layout_diagram(&ir);
+
+        // GPU side: the instance's fill, as linear RGBA.
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+        let gpu_fill = plan
+            .node_instances
+            .first()
+            .map(|instance| instance.fill)
+            .expect("no node instance, so this comparison has nothing to compare");
+
+        // Raster side: the fill styles the canvas actually set, parsed through the SAME helper the
+        // plan uses. Comparing the STRING to the floats would compare spellings rather than colours
+        // and would fail on `#ff0000` against `rgb(255,0,0)` while both are correct.
+        let mut context = crate::MockCanvas2dContext::new(1200.0, 900.0);
+        crate::render_to_canvas(&ir, &mut context, &crate::CanvasRenderConfig::default());
+        let ops = format!("{:?}", context.operations());
+        let mut canvas_fills = Vec::new();
+        let mut rest = ops.as_str();
+        while let Some(at) = rest.find("SetFillStyle(\"") {
+            rest = &rest[at + "SetFillStyle(\"".len()..];
+            if let Some(end) = rest.find('"') {
+                if let Some(rgba) = super::parse_paint_rgba(&rest[..end]) {
+                    canvas_fills.push(rgba);
+                }
+                rest = &rest[end..];
+            }
+        }
+
+        assert!(
+            !canvas_fills.is_empty(),
+            "the canvas set no parseable fill, so this proves nothing about agreement"
+        );
+        assert!(
+            canvas_fills.iter().any(|fill| {
+                fill.iter()
+                    .zip(gpu_fill.iter())
+                    .all(|(a, b)| (a - b).abs() < 0.001)
+            }),
+            "no canvas fill matches the GPU instance fill {gpu_fill:?}; the two surfaces honour the \
+             same declaration differently"
+        );
+
+        // CONTROL: the agreement must be on the DECLARED colour, not on a shared default. Without
+        // this, two surfaces that both ignored the directive would agree perfectly on white.
+        assert!(
+            gpu_fill[0] > 0.9 && gpu_fill[1] < 0.1 && gpu_fill[2] < 0.1,
+            "the agreed colour is not the declared red: {gpu_fill:?}"
+        );
+    }
 }
