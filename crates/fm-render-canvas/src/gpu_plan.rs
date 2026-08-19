@@ -420,9 +420,40 @@ pub struct GpuTextQuad {
 /// Kept alongside the per-glyph quads because a run is the unit the raster pass draws in, so it is
 /// the unit an equivalence check can compare. Counting quads instead would compare glyphs against
 /// runs and never agree.
+/// A cluster's title, resolved the same way the Canvas2D pass resolves it (bd-dh6cy).
+///
+/// Two sources, in the raster path's order: the layout box carries one for diagram types that place
+/// it there, and otherwise it comes from the IR cluster's label id. Duplicating that order rather
+/// than picking one is what keeps the two surfaces titling the same subgraphs — reading only
+/// `LayoutClusterBox::title` would silently drop every flowchart subgraph, whose title lives in the
+/// IR.
+fn cluster_title<'a>(
+    ir: &'a MermaidDiagramIr,
+    cluster: &'a fm_layout::LayoutClusterBox,
+) -> Option<&'a str> {
+    cluster.title.as_deref().or_else(|| {
+        ir.clusters
+            .get(cluster.cluster_index)
+            .and_then(|ir_cluster| ir_cluster.title)
+            .and_then(|title_id| ir.labels.get(title_id.0))
+            .map(|label| label.text.as_str())
+    })
+}
+
+/// Which collection a [`GpuTextRun`]'s index refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuTextSource {
+    Node,
+    Cluster,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GpuTextRun {
-    /// Index back into `MermaidDiagramIr::nodes`.
+    /// What `node_index` indexes. Without this the field is a lookup key that is NOT the id it
+    /// claims to be: a cluster title's run carries a CLUSTER index, and a consumer resolving it
+    /// against `ir.nodes` would silently read an unrelated node or none at all.
+    pub source: GpuTextSource,
+    /// Index back into `MermaidDiagramIr::nodes`, or `::clusters` when `source` says so.
     pub node_index: u32,
     /// Index of this run's first quad in [`GpuRenderPlan::text_quads`].
     pub first_quad: u32,
@@ -724,7 +755,17 @@ impl GpuRenderPlan {
             .clamp(DEFAULT_GLYPH_CELL_PX as f32, 256.0) as u32;
 
         let glyph_atlas =
-            GlyphAtlasPlan::for_texts(labelled.iter().map(|(_, _, text)| *text), cell_px);
+            // ⚠️ CLUSTER TITLES MUST BE IN THE ATLAS OR THEY VANISH WITHOUT A TRACE. The quad loop
+            // does `let Some(cell) = glyph_atlas.cell(glyph) else { continue }`, so a glyph the
+            // atlas never saw is skipped silently — the title would emit zero quads and the plan
+            // would look correct. Feeding both sets in is what makes the titles renderable at all.
+            GlyphAtlasPlan::for_texts(
+                labelled
+                    .iter()
+                    .map(|(_, _, text)| *text)
+                    .chain(layout.clusters.iter().filter_map(|c| cluster_title(ir, c))),
+                cell_px,
+            );
         let mut text_quads: Vec<GpuTextQuad> = Vec::new();
         let mut text_runs: Vec<GpuTextRun> = Vec::with_capacity(labelled.len());
 
@@ -773,10 +814,62 @@ impl GpuRenderPlan {
 
             let quad_count = u32::try_from(text_quads.len()).unwrap_or(u32::MAX) - first_quad;
             text_runs.push(GpuTextRun {
+                source: GpuTextSource::Node,
                 node_index: *node_index,
                 first_quad,
                 quad_count,
             });
+        }
+
+        // CLUSTER TITLES (bd-dh6cy). Containers were planned without their titles; this is the
+        // other half.
+        //
+        // ⚠️ LEFT-ALIGNED AT THE TOP-LEFT INSET, NOT CENTRED. The Canvas2D pass draws a subgraph
+        // title with `fill_text(title, x + 8.0, y + 4.0)` — a corner label, not a centred one — so
+        // centring these the way node labels are centred would put every subgraph title in the
+        // middle of its own box, on top of the nodes it contains. The first glyph's CENTRE is half
+        // an advance right of the inset because a quad is centred on its cell.
+        for cluster in &layout.clusters {
+            let Some(title) = cluster_title(ir, cluster) else {
+                continue;
+            };
+            let inked: Vec<char> = title.chars().filter(|c| !c.is_control()).collect();
+            if inked.is_empty() {
+                continue;
+            }
+            let first_quad = u32::try_from(text_quads.len()).unwrap_or(u32::MAX);
+            let advance = DEFAULT_FONT_SIZE_PX * CHAR_ADVANCE_RATIO;
+            let half_height = DEFAULT_FONT_SIZE_PX * 0.5;
+            let colour = crate::renderer::resolve_cluster_text_color(ir, cluster.cluster_index)
+                .as_deref()
+                .and_then(parse_paint_rgba)
+                .unwrap_or(DEFAULT_LABEL_RGBA);
+            for (offset, glyph) in inked.iter().enumerate() {
+                let Some(cell) = glyph_atlas.cell(*glyph) else {
+                    continue;
+                };
+                let step = u16::try_from(offset).map_or(f32::from(u16::MAX), f32::from);
+                text_quads.push(GpuTextQuad {
+                    center: [
+                        cluster.bounds.x + 8.0 + (advance * 0.5) + (step * advance),
+                        cluster.bounds.y + 4.0 + half_height,
+                    ],
+                    half_extent: [advance * 0.5, half_height],
+                    uv_min: cell.uv_min,
+                    uv_max: cell.uv_max,
+                    color: colour,
+                    run_index: u32::try_from(text_runs.len()).unwrap_or(u32::MAX),
+                });
+            }
+            let quad_count = u32::try_from(text_quads.len()).unwrap_or(u32::MAX) - first_quad;
+            if quad_count > 0 {
+                text_runs.push(GpuTextRun {
+                    source: GpuTextSource::Cluster,
+                    node_index: u32::try_from(cluster.cluster_index).unwrap_or(u32::MAX),
+                    first_quad,
+                    quad_count,
+                });
+            }
         }
 
         Self {
@@ -2060,5 +2153,54 @@ mod tests {
             "cluster_instances must be declared BEFORE node_instances: the field order is the \
              submit order, and a subgraph drawn after its nodes covers them"
         );
+    }
+
+    /// A subgraph TITLE reaches the GPU plan, at the corner rather than the centre (bd-dh6cy).
+    ///
+    /// ⚠️ THE FAILURE MODE HERE IS SILENT, which is why this asserts a quad COUNT first. The glyph
+    /// loop does `let Some(cell) = glyph_atlas.cell(glyph) else { continue }`, so if the atlas were
+    /// still built from node labels alone, every title glyph would be skipped and the plan would
+    /// carry a tidy zero-quad run that looks like a title nobody typed.
+    #[test]
+    fn a_subgraph_title_reaches_the_gpu_plan_at_its_corner() {
+        let ir = fm_parser::parse(
+            "flowchart TD\n  subgraph one[Group One]\n    a[A]\n    b[B]\n  end\n  a --- b\n",
+        )
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+
+        let title_runs: Vec<&super::GpuTextRun> = plan
+            .text_runs
+            .iter()
+            .filter(|run| run.source == super::GpuTextSource::Cluster)
+            .collect();
+        assert_eq!(title_runs.len(), 1, "expected exactly one cluster title run");
+        assert!(
+            title_runs[0].quad_count >= 5,
+            "the title emitted {} quads for 'Group One'; a glyph missing from the atlas is skipped \
+             silently, so a low count here means the title is not renderable",
+            title_runs[0].quad_count
+        );
+
+        // CORNER, NOT CENTRE. Centring a subgraph title the way node labels are centred puts it in
+        // the middle of its own box, on top of the nodes it contains — right text, wrong picture,
+        // and a count-only assertion would never notice.
+        let cluster = &layout.clusters[0];
+        let first = &plan.text_quads[title_runs[0].first_quad as usize];
+        let cluster_centre_x = cluster.bounds.x + (cluster.bounds.width * 0.5);
+        assert!(
+            first.center[0] < cluster_centre_x,
+            "the title starts at {} which is not left of the cluster centre {cluster_centre_x}",
+            first.center[0]
+        );
+        assert!(
+            first.center[1] < cluster.bounds.y + (cluster.bounds.height * 0.5),
+            "the title sits below the cluster's vertical midpoint; it belongs at the top"
+        );
+
+        // The run's index means a CLUSTER here. Resolving it against ir.nodes would be the
+        // wrong-lookup-key defect, which is what `source` exists to prevent.
+        assert_eq!(title_runs[0].node_index, cluster.cluster_index as u32);
     }
 }
