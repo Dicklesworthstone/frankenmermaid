@@ -44,6 +44,7 @@ MIN_FREE_GB=42
 WAIT_SECONDS=0
 POLL_SECONDS=30
 ALLOW_UNSLOTTED=0
+PIDFILE=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -53,6 +54,7 @@ while [ $# -gt 0 ]; do
     --dry-run)  DRY_RUN=1; shift ;;
     --wait)     WAIT_SECONDS="$2"; shift 2 ;;
     --allow-unslotted) ALLOW_UNSLOTTED=1; shift ;;
+    --pidfile)  PIDFILE="$2"; shift 2 ;;
     *) echo "[chain] unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -63,6 +65,27 @@ if [ -z "$ONLY" ]; then
 fi
 
 cd "$(git rev-parse --show-toplevel)"
+
+# -- --pidfile: give watchers something safe to poll --------------------------------------------
+# ⚠️ A WATCHER MUST NOT POLL THIS SCRIPT BY CMDLINE PATTERN. `pgrep -f measure_chain` and
+# `pkill -f measure_chain` MATCH THEIR OWN COMMAND LINE, because the pattern appears in the argv of
+# the process doing the searching. That is not hypothetical: a `pkill -f measure_chain.sh` here
+# killed its own shell and returned 144 while the chain kept running, and the follow-up `pgrep`
+# then reported the WATCHER as "still active". A loop polling on that never exits, and the producer
+# it waits for may already be dead.
+#
+# A run that will be watched should be started with `--pidfile PATH`, and the watcher should use
+#
+#     kill -0 "$(cat PATH)"     # liveness by pid: no pattern, cannot match itself
+#
+# plus its own deadline, and should READ THIS SCRIPT'S OUTPUT when that check fails rather than
+# assuming a clean finish. The chain exits non-zero for several distinct reasons (3 disk, 4
+# competing benchmark, 5 HEAD kept moving, 6 disk-bound) and each is a different next step.
+if [ -n "$PIDFILE" ]; then
+  printf '%s\n' "$$" | tee "$PIDFILE" > /dev/null
+  trap 'rm -f "$PIDFILE"' EXIT
+  echo "[chain] pid $$ recorded in ${PIDFILE}; watch with kill -0, never with a cmdline pattern"
+fi
 
 # -- precheck 1: disk --------------------------------------------------------------------------
 free_gb=$(df -BG --output=avail /data | tail -1 | tr -dc '0-9')
