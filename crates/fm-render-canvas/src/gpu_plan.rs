@@ -1923,4 +1923,66 @@ mod tests {
              the GPU cannot."
         );
     }
+
+    /// A REAL subgraph fixture, so "implemented" and "still empty" can be told apart (bd-dh6cy).
+    ///
+    /// The GPU plan carries no cluster primitive: a diagram with subgraphs plans its contents and
+    /// not their containers. The reason that gap has no failing test is that the only cluster
+    /// mention in this file is `clusters: Vec::new()` in a hand-built layout — every existing GPU
+    /// plan test runs against a diagram with ZERO subgraphs, so none of them could fail on it and
+    /// none of them will start passing when it is fixed either.
+    ///
+    /// This is the missing half: a fixture PARSED from real mermaid source that genuinely produces
+    /// clusters. It asserts the fixture is real, then pins the current behaviour — no cluster
+    /// primitive reaches the plan.
+    ///
+    /// ⚠️ WHEN bd-dh6cy LANDS, INVERT THE SECOND ASSERTION rather than deleting this test. The
+    /// arrow-length reproducer (bd-6s6sx) was landed the same way, `#[ignore]`d with instructions
+    /// to flip it, and flipping it is what proved the fix reached the behaviour rather than merely
+    /// compiling. A stale-detector deleted on the day of the fix proves nothing.
+    #[test]
+    fn a_subgraph_fixture_reaches_layout_and_not_the_gpu_plan() {
+        let ir = fm_parser::parse(
+            "flowchart TD\n  subgraph one[Group One]\n    a[A]\n    b[B]\n  end\n  a --- b\n",
+        )
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+
+        // NON-VACUITY: this is the assertion the existing `clusters: Vec::new()` fixture cannot
+        // make. If the parser or layout stopped producing clusters for this source, the pin below
+        // would pass for the wrong reason and the gap would look closed.
+        assert!(
+            !layout.clusters.is_empty(),
+            "the fixture produced no clusters, so it cannot detect whether the GPU plan drops them"
+        );
+
+        let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+        assert!(
+            !plan.node_instances.is_empty(),
+            "no node instances, so the plan is empty for an unrelated reason"
+        );
+
+        // CURRENT BEHAVIOUR, pinned at the SOURCE because no runtime value can express it.
+        //
+        // ⚠️ MY FIRST VERSION PINNED `plan.node_instances.len() == layout.nodes.len()` and that
+        // assertion CANNOT DETECT THE FIX: cluster instances would live in their own field, so the
+        // node count would still match and this test would still pass. It would have sat here
+        // reading like a stale-detector while detecting nothing — the exact defect this file's
+        // other gates were written to catch.
+        //
+        // The declaration is the thing that changes, so that is what is asserted. When bd-dh6cy
+        // adds the field this fails, which is the signal to invert the test rather than delete it.
+        const GPU_FULL_SRC: &str = include_str!("gpu_plan.rs");
+        let declaration = GPU_FULL_SRC
+            .split_once("pub struct GpuRenderPlan {")
+            .and_then(|(_, rest)| rest.split_once('}'))
+            .map(|(fields, _)| fields)
+            .expect("GpuRenderPlan declaration not found; this scan is not reading what it thinks");
+        assert!(
+            !declaration.contains("cluster"),
+            "GpuRenderPlan now declares a cluster field — bd-dh6cy is landing. INVERT this test \
+             (assert the plan carries the subgraph) rather than deleting it: a stale-detector \
+             removed on the day of the fix proves nothing about the fix."
+        );
+    }
 }
