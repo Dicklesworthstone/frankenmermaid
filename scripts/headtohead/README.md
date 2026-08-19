@@ -6,6 +6,37 @@ same-invocation noise floor.
 Only a measured mermaid-js/frankenmermaid ratio produced by one driver invocation can be classified
 as an incumbent win. Internal frankenmermaid before/after ratios are maintenance self-speedups.
 
+## Two prechecks worth running first
+
+```bash
+scripts/headtohead/measure_chain.sh --only sequence_20 --dry-run   # is the host fit to measure on?
+scripts/ci_backlog.sh                                              # is CI producing verdicts?
+```
+
+**`measure_chain.sh`** drives build -> equivalence -> `run.mjs` at ONE pinned revision. It exists
+because those three steps and the equivalence artifact must all name the same commit, and on a
+shared main that is a race lost silently: the `INVALID: benchmark ELF build revision must match
+both --fm-build-base and checked-out HEAD` arrives only AFTER the build and a ~90s equivalence run
+have completed, saying nothing about the peer commit that caused it. Measured on this repo, the
+median gap between commits to main is 272s (minimum 8) against a chain of roughly two minutes. It
+re-checks HEAD before every step and aborts at the cheapest point instead of the most expensive one.
+
+It also refuses while another project on this host is benchmarking, or while the host is disk-bound
+above the 5% iowait ceiling `abba_render.py` already enforces per arm. `--wait SECONDS` polls for a
+window rather than refusing on the first look, because windows here are real but brief — iowait was
+observed moving 0.31% -> 9.2% -> 10.5% inside one minute, and a peer's benchmark started and
+finished between two checks.
+
+> The exclusivity check is a STAND-IN, not a substitute, for the fleet-wide `acquire_build_slot`
+> lease. That tool currently refuses with *"Build slots are disabled. Enable WORKTREES_ENABLED"*, so
+> there is no lease to take. A `ps` scan cannot stop a peer STARTING mid-run, which a lease could.
+
+**`ci_backlog.sh`** answers whether CI is producing verdicts at all, because several beads defer
+questions to "CI will answer this" and that is only sound if CI runs. Measured 2026-08-19: 0 of the
+last 30 CI runs had a conclusion, the oldest queued for 106 minutes. During that window main sat RED
+on `layout_golden_checksums_are_stable` — four C4 fixtures added without golden entries — and
+nothing reported it. A queued gate is not a passing gate.
+
 ## Run it
 
 ```bash
