@@ -230,6 +230,14 @@ pub struct GpuEdgeSegment {
     pub edge_index: u32,
     /// Linear RGBA stroke, resolved from `linkStyle` through the same helper the raster pass uses.
     pub color: [f32; 4],
+    /// Distance along the whole edge at which this segment STARTS, in layout units (bd-f7ctn).
+    ///
+    /// A routed edge becomes one segment per `points.windows(2)` pair, and each fragment computes
+    /// its dash phase from its distance along ITS OWN segment. Without this offset every segment
+    /// restarts the pattern at zero, so a dotted edge with bends shows the dashes jumping at each
+    /// vertex while the SVG and Canvas2D paths draw one continuous `stroke-dasharray` around the
+    /// corners. Carrying the accumulated length makes the pattern march unbroken across the joins.
+    pub dash_phase: f32,
     /// Dash pattern as `[on, off]` in layout units; `[0.0, 0.0]` means solid.
     ///
     /// Carried because a dotted edge is a SEMANTIC distinction in mermaid, not decoration: `-.->`
@@ -661,6 +669,10 @@ impl GpuRenderPlan {
                 _ => [0.0, 0.0],
             };
 
+            // The dash pattern belongs to the EDGE, not to a segment of it, so each segment records
+            // how far along the edge it begins and the shader offsets its phase by that. Accumulated
+            // in the same order the segments are emitted, which is the order the points were routed.
+            let mut dash_phase = 0.0f32;
             for points in edge.points.windows(2) {
                 let [from, to] = points else {
                     continue;
@@ -670,9 +682,13 @@ impl GpuRenderPlan {
                     to: [to.x, to.y],
                     edge_index,
                     color,
+                    dash_phase,
                     dash,
                     width,
                 });
+                let dx = (to.x - from.x) as f32;
+                let dy = (to.y - from.y) as f32;
+                dash_phase += (dx * dx + dy * dy).sqrt();
             }
 
             // Arrowheads mirror the Canvas2D geometry exactly: the END head on the last point,
@@ -1129,6 +1145,7 @@ struct EdgeSegment {
     @location(3) color: vec4<f32>,
     @location(4) dash: vec2<f32>,
     @location(5) width: f32,
+    @location(6) dash_phase: f32,
 };
 
 struct VertexOut {
@@ -1137,6 +1154,8 @@ struct VertexOut {
     @location(1) @interpolate(flat) dash: vec2<f32>,
     // Distance travelled along the segment, in layout units, for dash evaluation.
     @location(2) arc_length: f32,
+    // Where this segment starts along the whole edge, so the pattern continues across joins.
+    @location(4) @interpolate(flat) dash_phase: f32,
     // Signed distance across the ribbon, in half-width units, for the antialiased edge.
     @location(3) across: f32,
 };
@@ -1165,6 +1184,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, seg: EdgeSegment) -> Vertex
     out.color = seg.color;
     out.dash = seg.dash;
     out.arc_length = corner.x * length_units;
+    out.dash_phase = instance.dash_phase;
     out.across = corner.y;
     return out;
 }
@@ -1175,7 +1195,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if (period > 0.0) {
         // Position within one on/off cycle. Discarding in the gap is what makes a dotted edge read
         // as dotted rather than as a lighter solid line.
-        let phase = in.arc_length - period * floor(in.arc_length / period);
+        // Offset by where this segment began along the edge (bd-f7ctn), so a bend does not
+        // restart the pattern.
+        let along = in.arc_length + in.dash_phase;
+        let phase = along - period * floor(along / period);
         if (phase > in.dash.x) {
             discard;
         }
@@ -1386,6 +1409,46 @@ mod tests {
             plan.edge_segments
                 .iter()
                 .all(|segment| segment.edge_index == 7)
+        );
+    }
+
+    /// A dash pattern runs along the WHOLE edge, not restarting at every bend (bd-f7ctn).
+    ///
+    /// A routed edge is emitted as one segment per point pair, and the fragment shader derives its
+    /// dash phase from the distance along the segment it is in. With no carried offset, every
+    /// segment restarted the pattern at zero, so a dotted edge with bends showed the dashes
+    /// snapping back at each vertex while SVG and Canvas2D draw one continuous `stroke-dasharray`
+    /// through the corners. The shader arithmetic cannot be executed here (no device, no naga), but
+    /// the data it reads can: each segment must carry the summed length of the segments before it.
+    ///
+    /// The multi-segment assertion is not decoration. The accumulator is trivially "correct" on an
+    /// edge with one segment — every phase is 0.0 — so a fixture that never bends would pass this
+    /// test with the field deleted.
+    #[test]
+    fn a_bent_edge_carries_its_dash_phase_across_the_joins() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let plan = GpuRenderPlan::from_layout(&ir, &test_layout(), 1.25);
+
+        assert!(
+            plan.edge_segments.len() >= 2,
+            "fixture must produce a BENT edge or this test proves nothing"
+        );
+
+        let mut expected = 0.0f32;
+        for (index, segment) in plan.edge_segments.iter().enumerate() {
+            assert!(
+                (segment.dash_phase - expected).abs() < 1e-3,
+                "segment {index} starts at {} along the edge, expected {expected}",
+                segment.dash_phase
+            );
+            let dx = segment.to[0] - segment.from[0];
+            let dy = segment.to[1] - segment.from[1];
+            expected += (dx * dx + dy * dy).sqrt();
+        }
+
+        assert!(
+            plan.edge_segments[1].dash_phase > 0.0,
+            "the second segment must begin PAST the start of the edge"
         );
     }
 

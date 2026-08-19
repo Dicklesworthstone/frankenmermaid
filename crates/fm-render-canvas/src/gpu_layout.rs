@@ -165,6 +165,12 @@ const EDGE_ATTRIBUTES: &[GpuVertexAttribute] = &[
         format: GpuVertexFormat::Float32,
         field: "width",
     },
+    GpuVertexAttribute {
+        shader_location: 6,
+        offset: offset_of!(GpuEdgeSegment, dash_phase),
+        format: GpuVertexFormat::Float32,
+        field: "dash_phase",
+    },
 ];
 
 const ARROWHEAD_ATTRIBUTES: &[GpuVertexAttribute] = &[
