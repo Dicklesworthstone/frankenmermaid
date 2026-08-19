@@ -26516,6 +26516,25 @@ mod tests {
     /// - `layout.guardrail.*`: algorithm, reason
     /// - `layout.cycle_removal`: strategy
     /// - `layout.crossing_minimization`: `crossings_after_barycenter`
+    /// ⚠️ FOUR CANDIDATE MECHANISMS FOR THE bd-ryxg FLAKE HAVE BEEN TESTED AND REFUTED. Recorded
+    /// here so the next person does not re-run them; each cost a probe and none is the cause.
+    ///
+    /// 1. "the event is emitted from a worker thread the thread-local subscriber cannot see" —
+    ///    REFUTED. fm-layout contains ZERO occurrences of rayon, par_iter, thread::spawn or scope.
+    ///    There is no parallel path, so `with_default` always covers the emitting thread.
+    /// 2. "tracing's GLOBAL callsite interest cache is poisoned by an unsubscribed hit" — REFUTED
+    ///    by probe: hitting `layout_diagram_traced` with no subscriber and THEN capturing still
+    ///    yields the dispatch event.
+    /// 3. "an incremental cache hit returns a layout without dispatching, so nothing is emitted" —
+    ///    REFUTED by probe: a second layout of the same IR still reports `cache_hit=false` and
+    ///    still emits.
+    /// 4. "the JSON event is split across several writer calls, so `contains(\"layout.dispatch\")`
+    ///    misses it" — REFUTED: each captured chunk is a complete JSON object, three events, one
+    ///    write per event.
+    ///
+    /// What remains unexplained is why it fails only under whole-workspace load. Everything above
+    /// is deterministic in-process, so the next hypothesis has to involve something that differs
+    /// ACROSS test binaries rather than within one.
     #[test]
     fn tracing_dispatch_event_contains_mandatory_fields() {
         use tracing_subscriber::layer::SubscriberExt;
