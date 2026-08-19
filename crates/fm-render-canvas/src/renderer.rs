@@ -1961,8 +1961,7 @@ impl Canvas2dRenderer {
             // again, so a dashed node would leave every later shape dashed too. Set only when the
             // author declared one, and cleared immediately after, so an undeclared node is drawn
             // under exactly the state it was drawn under before this existed.
-            let declared_font = resolve_node_font_size(ir, node_box.node_index)
-                .map(|size| format!("{}px {}", size, self.config.font_family));
+            let declared_font = resolve_node_font(ir, node_box.node_index, &self.config);
             let dash = resolve_node_stroke_dasharray(ir, node_box.node_index);
             if let Some(ref pattern) = dash {
                 ctx.set_line_dash(pattern);
@@ -3032,17 +3031,69 @@ fn parse_dash_array(raw: Option<&str>) -> Option<Vec<f64>> {
 /// non-finite or absurd font size draws nothing at all, which is worse than ignoring the
 /// declaration. The upper bound is deliberately generous — it exists to stop a typo'd `font-size:
 /// 100000` from producing an invisible diagram, not to second-guess a legitimately large heading.
-pub(crate) fn resolve_node_font_size(ir: &MermaidDiagramIr, node_index: usize) -> Option<f64> {
-    merged_node_style(ir, node_index)
-        .get("font-size")
-        .and_then(|raw| {
-            raw.trim()
-                .trim_end_matches("px")
-                .trim()
-                .parse::<f64>()
-                .ok()
-                .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
-        })
+fn parse_declared_font_size(raw: Option<&str>) -> Option<f64> {
+    raw.and_then(|raw| {
+        raw.trim()
+            .trim_end_matches("px")
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
+    })
+}
+
+/// A CSS `font-weight` this renderer is willing to put in a canvas font string.
+///
+/// ⚠️ VALIDATED AGAINST A CLOSED SET RATHER THAN PASSED THROUGH, and the reason is the same one
+/// that makes an unchecked `fillStyle` dangerous, one property over: a canvas given an UNPARSABLE
+/// FONT STRING ignores the whole assignment and keeps the PREVIOUS font. One junk weight would
+/// therefore silently discard the SIZE beside it too, and draw the label in whatever font the last
+/// draw happened to leave behind. The failure is position-dependent and invisible in the output.
+fn sanitize_font_weight(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "normal" => Some("normal"),
+        "bold" => Some("bold"),
+        "bolder" => Some("bolder"),
+        "lighter" => Some("lighter"),
+        "100" => Some("100"),
+        "200" => Some("200"),
+        "300" => Some("300"),
+        "400" => Some("400"),
+        "500" => Some("500"),
+        "600" => Some("600"),
+        "700" => Some("700"),
+        "800" => Some("800"),
+        "900" => Some("900"),
+        _ => None,
+    }
+}
+
+/// The author's declared node FONT, as a canvas font string, if anything was declared (bd-lvj3).
+///
+/// Returns `None` when neither `font-size` nor `font-weight` was declared, which is what keeps the
+/// hoisted `standard_label_font` on the common path. When only one of the two is present the other
+/// comes from the theme, because a canvas font string has no way to say "inherit this component".
+fn resolve_node_font(
+    ir: &MermaidDiagramIr,
+    node_index: usize,
+    config: &CanvasRenderConfig,
+) -> Option<String> {
+    let merged = merged_node_style(ir, node_index);
+    let size = parse_declared_font_size(merged.get("font-size").map(String::as_str));
+    let weight = merged
+        .get("font-weight")
+        .map(String::as_str)
+        .and_then(sanitize_font_weight);
+
+    if size.is_none() && weight.is_none() {
+        return None;
+    }
+
+    let size = size.unwrap_or(config.font_size);
+    Some(match weight {
+        Some(weight) => format!("{weight} {size}px {}", config.font_family),
+        None => format!("{size}px {}", config.font_family),
+    })
 }
 
 pub(crate) fn resolve_node_stroke_dasharray(

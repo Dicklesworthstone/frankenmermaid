@@ -133,3 +133,100 @@ fn a_malformed_font_size_falls_back_to_the_theme() {
         );
     }
 }
+
+/// A declared `font-weight` reaches the canvas (bd-lvj3).
+///
+/// Confirmed on both sides before implementing: SVG emits `font-weight:bold` for
+/// `style a font-weight:bold`, and the canvas drew every label at the theme weight.
+#[test]
+fn a_declared_font_weight_reaches_the_canvas() {
+    let ops = canvas_ops("flowchart TD\n  a[Alpha]\n  style a font-weight:bold\n");
+
+    let font = font_when_text_drawn(&ops, "Alpha").expect("the node label was never drawn");
+    assert!(
+        font.starts_with("bold "),
+        "the declared font weight never reached the canvas; label drawn in {font:?}"
+    );
+}
+
+/// Weight alone keeps the THEME size, since a canvas font string cannot say "inherit the size".
+#[test]
+fn a_weight_without_a_size_keeps_the_theme_size() {
+    let config = CanvasRenderConfig::default();
+    let ops = canvas_ops("flowchart TD\n  a[Alpha]\n  style a font-weight:bold\n");
+
+    let font = font_when_text_drawn(&ops, "Alpha").expect("the node label was never drawn");
+    assert_eq!(
+        font,
+        format!("bold {}px {}", config.font_size, config.font_family),
+        "declaring only a weight changed the size as well"
+    );
+}
+
+/// Both properties compose into one font string.
+#[test]
+fn a_weight_and_a_size_compose() {
+    let config = CanvasRenderConfig::default();
+    let ops = canvas_ops(
+        "flowchart TD\n  a[Alpha]\n  style a font-weight:bold,font-size:32px\n",
+    );
+
+    let font = font_when_text_drawn(&ops, "Alpha").expect("the node label was never drawn");
+    assert_eq!(
+        font,
+        format!("bold 32px {}", config.font_family),
+        "the two declarations did not compose into one canvas font string"
+    );
+}
+
+/// CONTROL, and the one that carries the real risk: a junk WEIGHT must not discard a valid SIZE.
+///
+/// A canvas given an unparsable font string ignores the WHOLE assignment and keeps the previous
+/// font. So passing `font-weight:heavyish` straight through would not merely lose the weight — it
+/// would lose the 32px beside it and draw the label in whatever the last draw left behind. The
+/// weight is validated against a closed set for exactly this reason, and this asserts the size
+/// survives its rejection.
+#[test]
+fn a_malformed_weight_does_not_discard_a_valid_size() {
+    let config = CanvasRenderConfig::default();
+    let ops = canvas_ops(
+        "flowchart TD\n  a[Alpha]\n  style a font-weight:heavyish,font-size:32px\n",
+    );
+
+    let font = font_when_text_drawn(&ops, "Alpha").expect("the node label was never drawn");
+    assert_eq!(
+        font,
+        format!("32px {}", config.font_family),
+        "a malformed weight took the valid size down with it"
+    );
+    assert!(
+        !font.contains("heavyish"),
+        "a malformed weight was forwarded into the canvas font string ({font:?})"
+    );
+}
+
+/// CONTROL: a malformed weight alone leaves the theme font untouched.
+#[test]
+fn a_malformed_weight_alone_falls_back_to_the_theme_font() {
+    let config = CanvasRenderConfig::default();
+    let ops = canvas_ops("flowchart TD\n  a[Alpha]\n  style a font-weight:heavyish\n");
+
+    let font = font_when_text_drawn(&ops, "Alpha").expect("the node label was never drawn");
+    assert_eq!(
+        font,
+        format!("{}px {}", config.font_size, config.font_family),
+        "a malformed weight alone did not fall back to the theme font"
+    );
+}
+
+/// Numeric weights are accepted, since `font-weight: 700` is as ordinary as `bold`.
+#[test]
+fn a_numeric_font_weight_is_accepted() {
+    let ops = canvas_ops("flowchart TD\n  a[Alpha]\n  style a font-weight:700\n");
+
+    let font = font_when_text_drawn(&ops, "Alpha").expect("the node label was never drawn");
+    assert!(
+        font.starts_with("700 "),
+        "a numeric font weight was rejected; label drawn in {font:?}"
+    );
+}
