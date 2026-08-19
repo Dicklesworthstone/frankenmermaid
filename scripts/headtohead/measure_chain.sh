@@ -25,6 +25,14 @@
 # Usage:
 #   scripts/headtohead/measure_chain.sh --only sequence_20 [--mode render|parse] [--attempts 3]
 #   scripts/headtohead/measure_chain.sh --only sequence_20 --dry-run
+#   scripts/headtohead/measure_chain.sh --only sequence_20 --wait 1200
+#
+# --wait SECONDS polls for a clear window instead of refusing on the first look. Windows on this
+# host are REAL BUT BRIEF -- observed iowait moving 0.31% -> 9.2% -> 10.5% inside a minute, and a
+# fleet peer's benchmark starting and finishing between two ticks. A single sample therefore misses
+# windows that exist, which is why seven consecutive attempts here found the host busy while the
+# reported aggregates looked fine. The wait is BOUNDED and prints every poll: no unbounded loop, and
+# a refusal after the deadline is a result, not a hang.
 
 set -euo pipefail
 
@@ -33,6 +41,8 @@ ONLY=""
 ATTEMPTS=3
 DRY_RUN=0
 MIN_FREE_GB=42
+WAIT_SECONDS=0
+POLL_SECONDS=30
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -40,6 +50,7 @@ while [ $# -gt 0 ]; do
     --mode)     MODE="$2"; shift 2 ;;
     --attempts) ATTEMPTS="$2"; shift 2 ;;
     --dry-run)  DRY_RUN=1; shift ;;
+    --wait)     WAIT_SECONDS="$2"; shift 2 ;;
     *) echo "[chain] unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -70,92 +81,113 @@ echo "[chain] disk ${free_gb}G free"
 # refused on `rustc` and `rustfmt`, because a crate name or a source path routinely contains the
 # substring "bench" -- so the check contradicted the comment directly above it and would have
 # blocked every measurement taken while any project in the fleet was compiling anything.
-busy_bench=$(ps -eo pcpu,args --no-headers | grep -E 'bench|harness|perf_|criterion|vs_pandas|vs_scipy|headtohead' | grep -vE 'measure_chain|/rustc |/rustfmt |/cargo |/ld |cc1plus' | while read -r pcpu rest; do
-  if [ "${pcpu%%.*}" -gt 50 ]; then printf '    %s %.100s\n' "$pcpu" "$rest"; fi
-done)
-if [ -n "$busy_bench" ]; then
-  echo "[chain] REFUSING: another benchmark is running on this host:" >&2
-  echo "$busy_bench" >&2
-  echo "[chain] measuring now would be a contention artifact and would corrupt theirs too." >&2
-  exit 4
-fi
-echo "[chain] no competing benchmark detected"
-
-# -- precheck 3: host busyness, the harness's own criterion (cpus over 20% busy) ----------------
-# Two /proc/stat snapshots compared in shell, so a refusal here explains a refusal there.
-#
-# The aggregate `cpu` line is captured too, for IOWAIT. abba_render.py refuses any arm over
-# MAX_ARM_IOWAIT_PCT = 5.0 because a disk-bound host does not slow the two engines equally, so a
-# ratio measured through it is an artifact of the disk rather than of the code. The same ceiling is
-# used here DELIBERATELY: two instruments refusing the same window for different numbers is how
-# they drift, and then a row refused by one gets banked by the other.
 MAX_IOWAIT_PCT=5
-declare -A cpu_total cpu_idle
-agg_total_before=0
-agg_iowait_before=0
-while read -r name rest; do
-  case "$name" in
-    cpu) set -- $rest
-         for field in "$@"; do agg_total_before=$((agg_total_before + field)); done
-         agg_iowait_before=$5
-         continue ;;
-    cpu[0-9]*) ;;
-    *) continue ;;
-  esac
-  set -- $rest
-  total=0
-  for field in "$@"; do total=$((total + field)); done
-  cpu_total["$name"]=$total
-  cpu_idle["$name"]=$(($4 + $5))
-done < /proc/stat
 
-sleep 3
+# `window_check` prints its own findings and returns 0 only when the host is fit to measure on.
+# It is a FUNCTION rather than straight-line code so that --wait can re-run it; with --wait 0 the
+# behaviour is identical to refusing on the first look.
+#
+# WINDOW_EXIT carries which precheck refused, so the caller exits with the same code it would have
+# without --wait: 4 for a competing benchmark, 6 for a disk-bound host.
+WINDOW_EXIT=0
+window_check() {
+  WINDOW_EXIT=0
 
-busy_cpus=0
-total_cpus=0
-agg_total_after=0
-agg_iowait_after=0
-while read -r name rest; do
-  case "$name" in
-    cpu) set -- $rest
-         for field in "$@"; do agg_total_after=$((agg_total_after + field)); done
-         agg_iowait_after=$5
-         continue ;;
-    cpu[0-9]*) ;;
-    *) continue ;;
-  esac
-  set -- $rest
-  total=0
-  for field in "$@"; do total=$((total + field)); done
-  idle=$(($4 + $5))
-  delta_total=$((total - ${cpu_total["$name"]:-0}))
-  delta_idle=$((idle - ${cpu_idle["$name"]:-0}))
-  total_cpus=$((total_cpus + 1))
-  if [ "$delta_total" -gt 0 ] && [ $(((delta_total - delta_idle) * 100 / delta_total)) -gt 20 ]; then
-    busy_cpus=$((busy_cpus + 1))
+  local busy_bench
+  busy_bench=$(ps -eo pcpu,args --no-headers | grep -E 'bench|harness|perf_|criterion|vs_pandas|vs_scipy|headtohead' | grep -vE 'measure_chain|/rustc |/rustfmt |/cargo |/ld |cc1plus' | while read -r pcpu rest; do
+    if [ "${pcpu%%.*}" -gt 50 ]; then printf '    %s %.100s\n' "$pcpu" "$rest"; fi
+  done)
+  if [ -n "$busy_bench" ]; then
+    echo "[chain] another benchmark is running on this host:"
+    echo "$busy_bench"
+    WINDOW_EXIT=4
+    return 1
   fi
-done < /proc/stat
 
-agg_delta=$((agg_total_after - agg_total_before))
-# ⚠️ TENTHS, NOT WHOLE PERCENT. Integer division made the first version of this gate LOOSER than
-# the ceiling it claims to enforce: 5.9% iowait truncates to 5, which is not `> 5`, so a window
-# abba_render.py would refuse passed here. Shell has no floats, so the comparison is done in
-# tenths against 50 and only the display is decimal.
-iowait_tenths=0
-if [ "$agg_delta" -gt 0 ]; then
-  iowait_tenths=$(((agg_iowait_after - agg_iowait_before) * 1000 / agg_delta))
-fi
+  local -A cpu_total cpu_idle
+  local agg_total_before=0 agg_iowait_before=0 name rest total field
+  while read -r name rest; do
+    case "$name" in
+      cpu) set -- $rest
+           for field in "$@"; do agg_total_before=$((agg_total_before + field)); done
+           agg_iowait_before=$5
+           continue ;;
+      cpu[0-9]*) ;;
+      *) continue ;;
+    esac
+    set -- $rest
+    total=0
+    for field in "$@"; do total=$((total + field)); done
+    cpu_total["$name"]=$total
+    cpu_idle["$name"]=$(($4 + $5))
+  done < /proc/stat
 
-# Printed on every run, not only on refusal: a row banked from a clean window has to be able to
-# SHOW it was clean, and "iowait was fine" is not something a reader can verify after the fact.
-echo "[chain] ${busy_cpus} of ${total_cpus} cpus over 20% busy; iowait $((iowait_tenths / 10)).$((iowait_tenths % 10))%; loadavg $(cut -d' ' -f1-3 /proc/loadavg)"
+  sleep 3
 
-if [ "$iowait_tenths" -gt $((MAX_IOWAIT_PCT * 10)) ]; then
-  echo "[chain] REFUSING: host is disk-bound at $((iowait_tenths / 10)).$((iowait_tenths % 10))% iowait, over the ${MAX_IOWAIT_PCT}% ceiling" >&2
-  echo "[chain] A disk-bound host does not slow the two engines equally, so the ratio would be an" >&2
-  echo "[chain] artifact of the disk. Same ceiling abba_render.py refuses arms on." >&2
-  exit 6
-fi
+  local busy_cpus=0 total_cpus=0 agg_total_after=0 agg_iowait_after=0 idle delta_total delta_idle
+  while read -r name rest; do
+    case "$name" in
+      cpu) set -- $rest
+           for field in "$@"; do agg_total_after=$((agg_total_after + field)); done
+           agg_iowait_after=$5
+           continue ;;
+      cpu[0-9]*) ;;
+      *) continue ;;
+    esac
+    set -- $rest
+    total=0
+    for field in "$@"; do total=$((total + field)); done
+    idle=$(($4 + $5))
+    delta_total=$((total - ${cpu_total["$name"]:-0}))
+    delta_idle=$((idle - ${cpu_idle["$name"]:-0}))
+    total_cpus=$((total_cpus + 1))
+    if [ "$delta_total" -gt 0 ] && [ $(((delta_total - delta_idle) * 100 / delta_total)) -gt 20 ]; then
+      busy_cpus=$((busy_cpus + 1))
+    fi
+  done < /proc/stat
+
+  local agg_delta=$((agg_total_after - agg_total_before))
+  # TENTHS, NOT WHOLE PERCENT. Integer division made the first version of this gate LOOSER than the
+  # ceiling it claims to enforce: 5.9% truncates to 5, which is not `> 5`, so a window
+  # abba_render.py would refuse passed here. Shell has no floats, so the comparison runs in tenths
+  # against 50 and only the display is decimal.
+  IOWAIT_TENTHS=0
+  if [ "$agg_delta" -gt 0 ]; then
+    IOWAIT_TENTHS=$(((agg_iowait_after - agg_iowait_before) * 1000 / agg_delta))
+  fi
+
+  # Printed on every poll, not only on refusal: a row banked from a clean window has to be able to
+  # SHOW it was clean, and "iowait was fine" is not something a reader can verify after the fact.
+  echo "[chain] ${busy_cpus} of ${total_cpus} cpus over 20% busy; iowait $((IOWAIT_TENTHS / 10)).$((IOWAIT_TENTHS % 10))%; loadavg $(cut -d' ' -f1-3 /proc/loadavg)"
+
+  if [ "$IOWAIT_TENTHS" -gt $((MAX_IOWAIT_PCT * 10)) ]; then
+    echo "[chain] host is disk-bound at $((IOWAIT_TENTHS / 10)).$((IOWAIT_TENTHS % 10))% iowait, over the ${MAX_IOWAIT_PCT}% ceiling"
+    echo "[chain] A disk-bound host does not slow the two engines equally, so the ratio would be an"
+    echo "[chain] artifact of the disk. Same ceiling abba_render.py refuses arms on."
+    WINDOW_EXIT=6
+    return 1
+  fi
+
+  return 0
+}
+
+# BOUNDED wait. With --wait 0 (the default) this exits on the first refusal, exactly as before.
+window_deadline=$((SECONDS + WAIT_SECONDS))
+while true; do
+  if window_check; then
+    break
+  fi
+  if [ "$SECONDS" -ge "$window_deadline" ]; then
+    echo "[chain] REFUSING: the host was not fit to measure on." >&2
+    if [ "$WAIT_SECONDS" -gt 0 ]; then
+      echo "[chain] Waited ${WAIT_SECONDS}s. A window that never opened in that time is a finding" >&2
+      echo "[chain] about fleet contention, not a reason to raise --wait." >&2
+    fi
+    exit "$WINDOW_EXIT"
+  fi
+  echo "[chain] not fit yet; polling again in ${POLL_SECONDS}s ($((window_deadline - SECONDS))s of budget left)"
+  sleep "$POLL_SECONDS"
+done
 
 REV=$(git rev-parse HEAD)
 echo "[chain] pinning revision ${REV}"
