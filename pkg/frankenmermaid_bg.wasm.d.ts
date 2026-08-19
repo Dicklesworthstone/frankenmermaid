@@ -6,6 +6,7 @@ export const applyLensEdit: (a: number, b: number, c: number, d: number, e: numb
 export const applyParseLensDelete: (a: number, b: number, c: number, d: number, e: number) => void;
 export const applyParseLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
 export const applyParseLensInsertLineAfter: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+export const chooseCanvasTarget: (a: number, b: number, c: number) => void;
 export const describeDiagram: (a: number, b: number, c: number) => void;
 export const detectType: (a: number, b: number, c: number) => void;
 export const diagramLens: (a: number, b: number, c: number) => void;

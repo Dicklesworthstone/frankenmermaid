@@ -56,6 +56,17 @@ export function applyParseLensEdit(input: string, element_id: string, replacemen
  */
 export function applyParseLensInsertLineAfter(input: string, element_id: string, text: string): any;
 
+/**
+ * Choose a render target from probed host capabilities (bd-2u0.6 item 3).
+ *
+ * JSON text in and out, exactly like [`worker_handle_message_js`], so the same call works from the
+ * main thread, from inside the worker, and from a native test — and so the DECISION HAS ONE
+ * IMPLEMENTATION. A host that re-derived the ladder in JavaScript would drift from this one, and
+ * the drift would show up only in degraded environments, which are precisely the ones nobody
+ * tests in.
+ */
+export function chooseCanvasTarget(capabilities_json: string): string;
+
 export function describeDiagram(input: string): string;
 
 export function detectType(input: string): any;
@@ -90,6 +101,7 @@ export interface InitOutput {
     readonly applyParseLensDelete: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly applyParseLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly applyParseLensInsertLineAfter: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+    readonly chooseCanvasTarget: (a: number, b: number, c: number) => void;
     readonly describeDiagram: (a: number, b: number, c: number) => void;
     readonly detectType: (a: number, b: number, c: number) => void;
     readonly diagramLens: (a: number, b: number, c: number) => void;
