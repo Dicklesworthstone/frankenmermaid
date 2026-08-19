@@ -312,6 +312,17 @@ pub enum DrawOperation {
     SetFillStyle(String),
     SetStrokeStyle(String),
     SetLineWidth(f64),
+    /// The dash pattern, recorded so a DASHED stroke can be told from a solid one (bd-dgnm4).
+    ///
+    /// `MockCanvas2dContext::set_line_dash` used to be a silent no-op, which made every dashed
+    /// thing this renderer draws UNASSERTABLE: the state concurrency divider, a dotted flowchart
+    /// edge, and the sequence lifeline all look identical to a solid line in the recorded stream.
+    /// A test could only have checked that SOME line was stroked, which is the assertion that
+    /// passes whether or not the feature works.
+    ///
+    /// An empty pattern is the RESET to solid and is recorded too — dropping it would let a reader
+    /// conclude that everything after the first dashed shape is also dashed.
+    SetLineDash(Vec<f64>),
     BeginPath,
     ClosePath,
     MoveTo(f64, f64),
@@ -443,7 +454,10 @@ impl Canvas2dContext for MockCanvas2dContext {
 
     fn set_line_cap(&mut self, _cap: LineCap) {}
     fn set_line_join(&mut self, _join: LineJoin) {}
-    fn set_line_dash(&mut self, _pattern: &[f64]) {}
+    fn set_line_dash(&mut self, pattern: &[f64]) {
+        self.operations
+            .push(DrawOperation::SetLineDash(pattern.to_vec()));
+    }
 
     fn set_global_alpha(&mut self, alpha: f64) {
         self.current_state.global_alpha = alpha;

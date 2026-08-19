@@ -118,6 +118,40 @@ fn a_styled_subgraph_colours_the_cluster() {
     );
 }
 
+/// The `--` concurrency separator is DRAWN, and drawn dashed (bd-dgnm4).
+///
+/// `state Big { A --> B  --  C --> D }` declares two parallel regions. fm-render-svg drew the
+/// boundary and this surface drew nothing, so the regions ran together into one box.
+///
+/// Asserted on the DASH PATTERN, which is what distinguishes a region boundary from an ordinary
+/// cluster edge — and which was unassertable until `MockCanvas2dContext::set_line_dash` stopped
+/// being a silent no-op. Before that, the strongest available claim was "some line was stroked",
+/// which passes whether or not the feature works.
+#[test]
+fn a_state_concurrency_divider_is_drawn_dashed() {
+    let ops = canvas_ops("stateDiagram-v2\n  state Big {\n    A --> B\n    --\n    C --> D\n  }\n");
+
+    assert!(
+        ops.contains("SetLineDash([6.0, 4.0])"),
+        "no dashed stroke was recorded, so the region divider was not drawn: {ops}"
+    );
+}
+
+/// CONTROL: the same composite state WITHOUT the separator draws no dashed divider.
+///
+/// This is the assertion that makes the one above mean something. A state diagram still draws a
+/// cluster box, edges and labels either way, so "a line was stroked" cannot separate the two —
+/// only the dash can, and only if it is absent when the syntax is absent.
+#[test]
+fn a_composite_state_without_a_separator_draws_no_divider() {
+    let ops = canvas_ops("stateDiagram-v2\n  state Big {\n    A --> B\n    C --> D\n  }\n");
+
+    assert!(
+        !ops.contains("SetLineDash([6.0, 4.0])"),
+        "a dashed divider was drawn for a state with no `--` separator: {ops}"
+    );
+}
+
 /// ER cardinality reaches the canvas (bd-2h3pp).
 ///
 /// `}o--o|` declares "0..*" and "0..1". fm-render-svg drew both and this surface drew neither, so an
