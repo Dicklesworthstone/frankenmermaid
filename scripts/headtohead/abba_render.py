@@ -108,6 +108,61 @@ MAX_FM_DRIFT = 1.10
 MAX_ARM_IOWAIT_PCT = 5.0
 
 
+AGENT_MAIL_PROJECTS = os.path.expanduser("~/.mcp_agent_mail_git_mailbox_repo/projects")
+
+
+def live_build_slots(root: str = AGENT_MAIL_PROJECTS, now: str | None = None) -> list[dict] | None:
+    """Every unexpired exclusive build slot across ALL projects, or `None` if the store is absent.
+
+    MEASUREMENTS ARE ONE-AT-A-TIME FLEET-WIDE, and this is what makes that checkable rather than
+    remembered. Nine projects benchmarking simultaneously took this host to run queue 122, and every
+    ratio measured in that window was a contention artifact -- indistinguishable, from inside a
+    single invocation, from a real result.
+
+    Scans EVERY project, not just this one. A slot held by frankenlibc contends for the same 64 cpus
+    as one held here, so a per-project check would enforce nothing about the fleet.
+
+    Returns `None` when the store does not exist, which is deliberately different from returning an
+    empty list: absent means "cannot enforce", empty means "verified nobody holds one". The caller
+    treats them differently -- refusing on the strength of a store you cannot read would brick the
+    harness on any host without agent-mail.
+    """
+    if not os.path.isdir(root):
+        return None
+    now_ts = now or _utc_now_iso()
+    slots: list[dict] = []
+    for project in sorted(os.listdir(root)):
+        slots_dir = os.path.join(root, project, "build_slots")
+        if not os.path.isdir(slots_dir):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(slots_dir):
+            for filename in filenames:
+                if not filename.endswith(".json"):
+                    continue
+                try:
+                    with open(os.path.join(dirpath, filename), encoding="utf-8") as handle:
+                        record = json.load(handle)
+                except (OSError, ValueError):
+                    continue
+                expires = str(record.get("expires_ts") or "")
+                if record.get("exclusive") and expires and expires > now_ts:
+                    slots.append({**record, "project": project})
+    return slots
+
+
+def _utc_now_iso() -> str:
+    """Current UTC instant in the store's timestamp format, for string comparison.
+
+    Compared as STRINGS on purpose. The stored stamps carry nanosecond precision
+    (`...388083894+00:00`) which `datetime.fromisoformat` rejects, and every stamp in the store is
+    UTC with the same `+00:00` suffix and zero-padded fields, so lexical order IS chronological
+    order for this set. Parsing them would add a failure mode to a comparison that does not need one.
+    """
+    import time
+
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000000000+00:00"
+
+
 def loadavg() -> list[float]:
     with open("/proc/loadavg", encoding="utf-8") as handle:
         return [float(x) for x in handle.read().split()[:3]]
@@ -533,6 +588,36 @@ def self_test() -> int:
             print(f"  FAIL fm_reps_expression({bad}) was accepted; a zero-rep arm renders nothing")
             failures += 1
 
+    # Fleet-slot scanner, against a SYNTHETIC store. Testing the predicate rather than the refusal
+    # path because the refusal sits behind the pin and ELF gates, so an end-to-end check would
+    # exercise those instead and pass for the wrong reason.
+    with tempfile.TemporaryDirectory() as root:
+        def _write(project: str, name: str, record: dict) -> None:
+            slot_dir = os.path.join(root, project, "build_slots", "host")
+            os.makedirs(slot_dir, exist_ok=True)
+            with open(os.path.join(slot_dir, f"{name}.json"), "w", encoding="utf-8") as handle:
+                json.dump(record, handle)
+
+        far_future = "2999-01-01T00:00:00.000000000+00:00"
+        long_past = "2000-01-01T00:00:00.000000000+00:00"
+        _write("proj-a", "peer", {"agent": "Peer", "slot": "s1", "exclusive": True, "expires_ts": far_future})
+        _write("proj-b", "stale", {"agent": "Peer", "slot": "s2", "exclusive": True, "expires_ts": long_past})
+        _write("proj-c", "shared", {"agent": "Peer", "slot": "s3", "exclusive": False, "expires_ts": far_future})
+        _write("proj-d", "junk", {"agent": "Peer"})
+
+        found = live_build_slots(root=root)
+        cases = [
+            ("an absent store is None, not empty", live_build_slots(root="/nonexistent") is None),
+            ("a live exclusive slot is found", any(s["slot"] == "s1" for s in found or [])),
+            ("an EXPIRED slot is ignored", not any(s["slot"] == "s2" for s in found or [])),
+            ("a NON-exclusive slot is ignored", not any(s["slot"] == "s3" for s in found or [])),
+            ("a record with no expiry is ignored", len(found or []) == 1),
+            ("the project is recorded with the slot", (found or [{}])[0].get("project") == "proj-a"),
+        ]
+        for label, ok in cases:
+            print(f"  {'ok  ' if ok else 'FAIL'} {label}")
+            failures += 0 if ok else 1
+
     print("self-test PASSED" if not failures else f"self-test FAILED ({failures})")
     return 1 if failures else 0
 
@@ -580,6 +665,13 @@ def main() -> int:
         action="store_true",
         help="quote a ratio even when the fm bracket fails its own drift control; the row must then "
         "state the drift, because the margin is then arithmetic on noise",
+    )
+    parser.add_argument(
+        "--allow-unslotted",
+        action="store_true",
+        help="measure without holding the fleet-wide build slot, or while another agent holds one; "
+        "the row must then state it, because concurrent benchmarks on this host produced run queue "
+        "122 and every ratio taken in that window was a contention artifact",
     )
     parser.add_argument(
         "--allow-io-saturation",
@@ -668,6 +760,39 @@ def main() -> int:
         print("  re-run in a window with more comparable idle cores, or pass")
         print("  --allow-starved-incumbent and state the starvation on the row")
         return 2
+
+    # FLEET SERIALISATION (one timed run at a time, across ALL projects).
+    #
+    # Nine projects benchmarking at once took this host to run queue 122, and every ratio taken in
+    # that window was a contention artifact — which from inside one invocation looks exactly like a
+    # result. The A/A null does not save you either: both fm arms are degraded together, so drift
+    # stays small while both numbers are wrong, which is the failure mode bd-ecjg documents.
+    #
+    # Verified against the agent-mail store rather than asserted by a flag: a self-declared "I hold
+    # the slot" is worth nothing, and the records carry agent, exclusivity and expiry.
+    slots = live_build_slots()
+    if slots is None:
+        print("NOTE: agent-mail store not found, so fleet serialisation cannot be verified here")
+    else:
+        me = os.environ.get("AGENT_NAME", "")
+        mine = [s for s in slots if s.get("agent") == me]
+        others = [s for s in slots if s.get("agent") != me]
+        if others and not args.allow_unslotted:
+            print()
+            print("REFUSING TO MEASURE: another agent holds an exclusive build slot")
+            for slot in others[:5]:
+                print(f"  {slot.get('agent')} holds {slot.get('project')}/{slot.get('slot')} until {slot.get('expires_ts')}")
+            print("  measurements are ONE AT A TIME FLEET-WIDE; wait for release, or pass")
+            print("  --allow-unslotted and state the contention on the row")
+            return 2
+        if not mine and not args.allow_unslotted:
+            print()
+            print("REFUSING TO MEASURE: this agent holds no build slot")
+            print(f"  acquire_build_slot first (AGENT_NAME={me or 'unset'}), then re-run")
+            print("  or pass --allow-unslotted and state it on the row")
+            return 2
+        held = ", ".join(f"{s.get('project')}/{s.get('slot')}" for s in mine) or "none"
+        print(f"FLEET SLOT: held by {me or 'unknown'} -- {held}; no other agent holds one")
 
     a1 = fm_arm(args.fm_bin, corpus_path, args.case, pins)
     print(f"A1 fm      ns={a1['ns']} work={a1['work']} load={a1['before']['loadavg']} {io_note(a1)} mhz={a1['before']['mhz']}")
