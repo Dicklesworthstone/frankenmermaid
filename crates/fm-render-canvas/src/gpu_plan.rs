@@ -428,6 +428,27 @@ pub struct GpuTextQuad {
 /// Kept alongside the per-glyph quads because a run is the unit the raster pass draws in, so it is
 /// the unit an equivalence check can compare. Counting quads instead would compare glyphs against
 /// runs and never agree.
+/// The name in a sequence foot-row header, resolved from the node it mirrors (bd-adabx).
+///
+/// The head row and the foot row name the same participant, so both read the IR node: its label if
+/// it has one, else its id, and only then the layout box's own id as a last resort. Resolving them
+/// from one source is what stops the foot row drifting from the head.
+///
+/// ONE helper for the atlas fill and the quad pass, for the reason recorded on bd-qj46q: a glyph
+/// that never reached the atlas emits no quad and the run vanishes silently.
+fn mirror_header_label<'a>(
+    ir: &'a MermaidDiagramIr,
+    node_box: &'a fm_layout::LayoutNodeBox,
+) -> &'a str {
+    ir.nodes
+        .get(node_box.node_index)
+        .map_or(node_box.node_id.as_str(), |node| {
+            node.label
+                .and_then(|label_id| ir.labels.get(label_id.0))
+                .map_or(node.id.as_str(), |label| label.text.as_str())
+        })
+}
+
 /// A cardinality's anchor: inset from its OWN endpoint, along the edge (bd-2ogh5, the GPU twin of the raster bead bd-rk14).
 ///
 /// Each number goes by the end it belongs to, since which end carries `1` and which carries `many`
@@ -606,6 +627,11 @@ pub enum GpuTextSource {
     EdgeSourceCardinality,
     /// A class/ER cardinality at the edge's TARGET end.
     EdgeTargetCardinality,
+    /// The participant name repeated in a sequence diagram's foot row.
+    ///
+    /// `node_index` is the participant's index in `ir.nodes`, the same node the head row names --
+    /// the two rows resolve their text from ONE source so the foot cannot drift from the head.
+    MirrorHeader,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -659,6 +685,12 @@ pub struct GpuRenderPlan {
     /// back-reference the text pass uses -- cluster titles ARE planned now, tagged
     /// `GpuTextSource::Cluster`.
     pub cluster_instances: Vec<GpuNodeInstance>,
+    /// Sequence foot-row participant headers, as rect instances (bd-adabx).
+    ///
+    /// Before the activation bars because `render` draws them first (call order: draw_clusters,
+    /// draw_sequence_mirror_headers, draw_activation_bars, draw_edges, draw_nodes). Their labels
+    /// are planned too, tagged `GpuTextSource::MirrorHeader`.
+    pub mirror_header_instances: Vec<GpuNodeInstance>,
     /// Sequence activation bars, as rect instances (bd-adabx).
     ///
     /// Between the clusters and the edges because that is where `render` draws them (call order:
@@ -745,6 +777,28 @@ impl GpuRenderPlan {
                 stroke_width,
                 shape: GpuNodeShape::Rect as u32,
                 node_index: u32::try_from(cluster.cluster_index).unwrap_or(u32::MAX),
+            });
+        }
+
+        // SEQUENCE FOOT-ROW HEADERS (bd-adabx). Same rect the participant's head row is, drawn
+        // with the node fill, stroke and width, and carrying the participant's name.
+        let mut mirror_header_instances =
+            Vec::with_capacity(layout.extensions.sequence_mirror_headers.len());
+        for node_box in &layout.extensions.sequence_mirror_headers {
+            if node_box.bounds.width <= 0.0 || node_box.bounds.height <= 0.0 {
+                continue;
+            }
+            mirror_header_instances.push(GpuNodeInstance {
+                center: [
+                    node_box.bounds.x + (node_box.bounds.width * 0.5),
+                    node_box.bounds.y + (node_box.bounds.height * 0.5),
+                ],
+                half_extent: [node_box.bounds.width * 0.5, node_box.bounds.height * 0.5],
+                fill: DEFAULT_NODE_FILL_RGBA,
+                stroke: DEFAULT_NODE_STROKE_RGBA,
+                stroke_width: DEFAULT_NODE_STROKE_WIDTH,
+                shape: GpuNodeShape::Rect as u32,
+                node_index: u32::try_from(node_box.node_index).unwrap_or(u32::MAX),
             });
         }
 
@@ -1000,6 +1054,14 @@ impl GpuRenderPlan {
                                 [source, target]
                             })
                             .flatten(),
+                    )
+                    // FOOT-ROW NAMES GO IN THE ATLAS TOO -- same silent-vanish trap.
+                    .chain(
+                        layout
+                            .extensions
+                            .sequence_mirror_headers
+                            .iter()
+                            .map(|node_box| mirror_header_label(ir, node_box)),
                     ),
                 cell_px,
             );
@@ -1157,9 +1219,29 @@ impl GpuRenderPlan {
             }
         }
 
+        // FOOT-ROW LABELS (bd-adabx). Centred in the box, exactly as draw_sequence_mirror_headers
+        // centres them, and skipped when the box is degenerate or the name is empty -- the raster
+        // pass draws neither.
+        for node_box in &layout.extensions.sequence_mirror_headers {
+            if node_box.bounds.width <= 0.0 || node_box.bounds.height <= 0.0 {
+                continue;
+            }
+            sink.push_centred(
+                mirror_header_label(ir, node_box),
+                (
+                    node_box.bounds.x + (node_box.bounds.width * 0.5),
+                    node_box.bounds.y + (node_box.bounds.height * 0.5),
+                ),
+                DEFAULT_LABEL_RGBA,
+                GpuTextSource::MirrorHeader,
+                node_box.node_index,
+            );
+        }
+
         Self {
             bounds: layout.bounds,
             cluster_instances,
+            mirror_header_instances,
             activation_instances,
             edge_segments,
             arrowheads,
@@ -2536,6 +2618,73 @@ mod tests {
         assert!(empty.activation_instances.is_empty());
     }
 
+    /// A sequence foot row reaches the plan as a box AND a name (bd-adabx).
+    ///
+    /// The label is the half that can vanish silently, so it is asserted by CONTENT: the run must
+    /// carry as many quads as the mirrored participant's label has glyphs, which fails both if the
+    /// text never reached the atlas and if the wrong source was resolved. A foot row naming the
+    /// wrong participant, or naming nothing, is a different diagram.
+    #[test]
+    fn a_sequence_foot_row_reaches_the_plan_as_a_box_and_a_name() {
+        // THE PARTICIPANT MUST NOT BE ONE OF THE LAID-OUT NODES, or this test cannot see the
+        // atlas half at all. The foot row resolves its name from the SAME ir node the node-label
+        // pass draws, so a mirrored participant that is also a drawn node has its glyphs in the
+        // atlas via that pass -- and the first version of this test passed with the foot-row atlas
+        // feed DELETED. Node index 2 is referenced only by the header, so "Zephyr" reaches the
+        // atlas only if this source feeds it.
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Sequence);
+        for id in ["a", "b"] {
+            ir.nodes.push(fm_core::IrNode {
+                id: id.into(),
+                ..fm_core::IrNode::default()
+            });
+        }
+        ir.nodes.push(fm_core::IrNode {
+            id: "zeph".into(),
+            ..fm_core::IrNode::default()
+        });
+        ir.labels.push(fm_core::IrLabel {
+            text: "Zephyr".to_string(),
+            span: Default::default(),
+        });
+        ir.nodes[2].label = Some(fm_core::IrLabelId(0));
+
+        let mut layout = test_layout();
+        layout.extensions.sequence_mirror_headers = vec![LayoutNodeBox {
+            node_index: 2,
+            node_id: String::from("zeph"),
+            rank: 0,
+            order: 0,
+            span: Span::default(),
+            bounds: LayoutRect { x: 20.0, y: 200.0, width: 60.0, height: 30.0 },
+        }];
+
+        let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.25);
+
+        assert_eq!(plan.mirror_header_instances.len(), 1);
+        let box_instance = plan.mirror_header_instances[0];
+        assert_eq!(box_instance.center, [50.0, 215.0]);
+        assert_eq!(box_instance.half_extent, [30.0, 15.0]);
+        assert_eq!(box_instance.node_index, 2);
+
+        let run = plan
+            .text_runs
+            .iter()
+            .find(|run| run.source == super::GpuTextSource::MirrorHeader)
+            .expect("the foot row must carry the participant's name");
+        assert_eq!(
+            run.quad_count, 6,
+            "\"Zephyr\" is six glyphs -- a smaller count means the atlas never saw them"
+        );
+        assert_eq!(run.node_index, 2, "the run indexes the participant node");
+
+        // Centred in the box, like the raster pass centres it.
+        let quads = &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
+        let mean_x = quads.iter().map(|q| q.center[0]).sum::<f32>() / 6.0;
+        assert!((mean_x - 50.0).abs() < 0.01, "name not centred: {mean_x}");
+        assert!((quads[0].center[1] - 215.0).abs() < 0.01);
+    }
+
     /// The plan's FIELD ORDER is the raster pass's DRAW ORDER (bd-adabx).
     ///
     /// The plan documents field order as submit order -- "a consumer that submits these buffers in
@@ -2565,6 +2714,7 @@ mod tests {
         // (plan field, the raster call that produces it), in the order both must agree on.
         const PAIRS: &[(&str, &str)] = &[
             ("pub cluster_instances:", "self.draw_clusters("),
+            ("pub mirror_header_instances:", "self.draw_sequence_mirror_headers("),
             ("pub activation_instances:", "self.draw_activation_bars("),
             ("pub edge_segments:", "self.draw_edges("),
             ("pub node_instances:", "self.draw_nodes("),
@@ -2630,6 +2780,7 @@ mod tests {
         // Mirrored by the plan today.
         const PLANNED: &[&str] = &[
             "draw_activation_bars",
+            "draw_sequence_mirror_headers",
             "draw_clusters",
             "draw_edges",
             "draw_nodes",
@@ -2643,7 +2794,6 @@ mod tests {
             ("draw_marker", "bd-adabx: RenderScene path pipeline, not the layout pipeline"),
             ("draw_quadrant_axis_labels", "bd-adabx: quadrant furniture"),
             ("draw_bands", "bd-adabx: journey/kanban band furniture"),
-            ("draw_sequence_mirror_headers", "bd-adabx: sequence furniture"),
             ("draw_packet_field_continuations", "bd-adabx: packet furniture"),
             ("draw_axis_ticks", "bd-adabx: axis furniture"),
             ("draw_gantt_today_marker", "bd-adabx: gantt furniture"),
