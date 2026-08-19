@@ -27,6 +27,10 @@ reports/
 artifacts/
 .agent-mail.yaml
 
+# Ephemeral agent/skill scratch (repo-janitor 2026-06-04)
+.skill-loop-progress.md
+.skill-loop-progress-*.md
+
 # Parser test output garbage (files created by malformed diagram parsing)
 B*nend*
 B\[*
