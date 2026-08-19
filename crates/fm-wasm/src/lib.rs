@@ -2871,8 +2871,28 @@ mod tests {
         assert!(!config.shadows);
     }
 
+    /// Serialises every test that reads or writes `RUNTIME_CONFIG` (bd-vca5l).
+    ///
+    /// The config is a process-wide `RwLock` and cargo runs tests in PARALLEL, so a test that
+    /// installs a non-default config is visible to every concurrent test that reads one. The
+    /// mutator below already restores the original through an RAII guard, which is careful and
+    /// still insufficient: the exposure is the INTERVAL it holds the lock for, not what it leaves
+    /// behind afterwards.
+    ///
+    /// Poison-tolerant on purpose. A `Mutex` poisoned by one failing test would otherwise make
+    /// every other test in this set report a poisoned lock instead of its own result, turning one
+    /// real failure into a screenful of noise that hides it.
+    static CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn config_guard() -> std::sync::MutexGuard<'static, ()> {
+        CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn render_svg_js_uses_same_font_metrics_layout_path_as_render() {
+        let _serial = config_guard();
         struct RuntimeConfigGuard(RuntimeConfig);
 
         impl Drop for RuntimeConfigGuard {
@@ -3079,33 +3099,25 @@ mod tests {
     /// HEAD (rebuild it with `build-wasm.sh`), a config default diverged between the two entry
     /// points, or — the case this bead is actually about — the two targets genuinely disagree about
     /// floating point. Check them in that order; only the third is a determinism defect.
-    /// ⚠️ `#[ignore]`d, AND THE REASON IS A REAL PROPERTY OF THIS MODULE, NOT A WEAK TEST.
+    /// ⚠️ TAKES `config_guard()`, AND WITHOUT IT THIS TEST IS A FALSE-POSITIVE GENERATOR.
     ///
-    /// `render_svg_js` reads `RUNTIME_CONFIG`, a process-wide `RwLock` that five other tests in
-    /// this module WRITE, and cargo runs them in parallel. So the ambient config during this test
-    /// is whatever a sibling last left, and the digest moves with it: run alone this passes, run in
-    /// the suite it produced `0xf9c38140c62e9ffa` against the bundle's `0x8835c1df81b8f371`. That is
-    /// a global-state leak wearing the costume of a cross-target divergence — the exact false
-    /// positive this bead must not manufacture.
+    /// `render_svg_js` reads `RUNTIME_CONFIG`. While the font-metrics test holds a non-default
+    /// config, this one renders under it: run alone it passes, run in the suite it produced
+    /// `0xf9c38140c62e9ffa` against the bundle's `0x8835c1df81b8f371`. A global-state leak wearing
+    /// the costume of a cross-target divergence — the exact false positive this bead must not
+    /// manufacture. Resetting the config from here instead was tried and broke the other test, which
+    /// renders twice and compares; the lock is what fixes both directions (bd-vca5l).
     ///
-    /// Resetting the config here is NOT the fix and I tried it: writing the default from this test
-    /// raced `render_svg_js_uses_same_font_metrics_layout_path_as_render`, which renders twice and
-    /// compares, and it saw `detail-tier="normal"` against `"rich"`. Fixing one order dependence by
-    /// adding another is not progress.
-    ///
-    /// RUN IT DELIBERATELY, single-threaded, after rebuilding the bundle:
+    /// THE BUNDLE IS THE OTHER HALF OF THIS TEST AND IT IS NOT REBUILT AUTOMATICALLY. `pkg/` is a
+    /// committed artifact; if it drifts from source these digests describe an older revision:
     ///
     /// ```text
     /// env -u CARGO_TARGET_DIR bash build-wasm.sh
     /// node scripts/wasm_cross_target_digest.mjs
-    /// cargo test -p fm-wasm --lib x86_64_and_wasm32 -- --ignored --test-threads=1
     /// ```
-    ///
-    /// The proper fix is a shared serialisation guard across every test that touches
-    /// `RUNTIME_CONFIG`; that means editing tests I did not write, so it is filed rather than done.
     #[test]
-    #[ignore = "shares the global RUNTIME_CONFIG with parallel tests; run with --test-threads=1"]
     fn x86_64_and_wasm32_render_the_same_bytes() {
+        let _serial = config_guard();
         const EXPECTED: &[(&str, &str, u64)] = &[
             (
                 "flowchart",
