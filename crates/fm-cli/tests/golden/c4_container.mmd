@@ -1,0 +1,13 @@
+C4Container
+    title Container diagram for the Internet Banking System
+    Person(customer, "Banking Customer", "A customer of the bank")
+    Container_Boundary(banking, "Internet Banking") {
+        Container(spa, "Single-Page App", "JavaScript", "Delivers static content")
+        ContainerDb(db, "Database", "SQL Database", "Stores user registration")
+        ContainerQueue(queue, "Event Queue", "Kafka", "Buffers domain events")
+    }
+    System_Ext(mainframe, "Mainframe Banking System", "Stores core accounts")
+    Rel(customer, spa, "Uses", "HTTPS")
+    Rel_D(spa, db, "Reads from and writes to", "SQL/TCP")
+    Rel_U(db, queue, "Publishes changes to")
+    Rel_R(queue, mainframe, "Forwards events to", "XML/HTTPS")

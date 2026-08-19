@@ -39,6 +39,17 @@ const CASE_IDS: &[&str] = &[
     "all_edge_types",
     "requirement_basic",
     "c4_basic",
+    // The other four C4 diagram types (bd-g2g1). All five headers funnel into `parse_c4` and one
+    // render branch, so the SCAFFOLDING was already covered by c4_basic; what had no golden was the
+    // per-variant ELEMENT MACRO vocabulary. c4_basic exercises 4 of the 21 macros the parser
+    // recognises, and these four fixtures were written to cover the rest — every Container* and
+    // Component* form, Deployment_Node nesting, all four directional Rel_*, BiRel, Rel_Back, and
+    // the Boundary forms. A macro with no golden is a macro whose box sizing nobody has checked,
+    // which is how bd-9xjy shipped C4 descriptions rendering up to 220px outside their box.
+    "c4_container",
+    "c4_component",
+    "c4_dynamic",
+    "c4_deployment",
     "stress_120_nodes",
     "empty_diagram",
     "single_node",

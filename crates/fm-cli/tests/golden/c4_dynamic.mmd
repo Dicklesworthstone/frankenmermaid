@@ -1,0 +1,10 @@
+C4Dynamic
+    title Dynamic diagram for the Sign In feature
+    Person(customer, "Banking Customer", "A customer of the bank")
+    Container(spa, "Single-Page App", "JavaScript", "Delivers static content")
+    Component(signin, "Sign In Controller", "MVC Controller", "Allows users to sign in")
+    ComponentDb(store, "Credential Store", "JDBC", "Holds hashed credentials")
+    Rel(customer, spa, "Submits credentials to")
+    Rel(spa, signin, "Calls /signin on")
+    Rel(signin, store, "select * from users where username = ?")
+    Rel_Back(store, signin, "Returns the stored hash")

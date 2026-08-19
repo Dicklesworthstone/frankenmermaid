@@ -1,0 +1,10 @@
+C4Component
+    title Component diagram for the API Application
+    Container(spa, "Single-Page App", "JavaScript", "Delivers static content")
+    Component(signin, "Sign In Controller", "MVC Controller", "Allows users to sign in")
+    Component(security, "Security Component", "Spring Bean", "Provides authentication")
+    ComponentDb(store, "Credential Store", "JDBC", "Holds hashed credentials")
+    Rel(spa, signin, "Makes API calls to", "JSON/HTTPS")
+    Rel_L(signin, security, "Uses")
+    Rel_D(security, store, "Reads credentials from", "JDBC")
+    BiRel(signin, store, "Audits")

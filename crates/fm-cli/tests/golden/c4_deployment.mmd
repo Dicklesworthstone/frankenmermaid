@@ -1,0 +1,15 @@
+C4Deployment
+    title Deployment diagram for the Internet Banking System
+    Deployment_Node(customer_device, "Customer's Computer", "Windows or macOS") {
+        Deployment_Node(browser, "Web Browser", "Chrome, Firefox, Safari") {
+            Container(spa, "Single-Page App", "JavaScript", "Delivers static content")
+        }
+    }
+    Deployment_Node(datacentre, "Big Bank plc Datacentre", "Ubuntu 24.04 LTS") {
+        Deployment_Node(api_host, "API Host", "JVM 21") {
+            Container(api, "API Application", "Java and Spring MVC", "Provides banking functionality")
+        }
+        ContainerDb(db, "Database", "Oracle 19c", "Stores user registration")
+    }
+    Rel(spa, api, "Makes API calls to", "JSON/HTTPS")
+    Rel_D(api, db, "Reads from and writes to", "SQL/TCP")
