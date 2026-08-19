@@ -50,6 +50,13 @@ impl From<NodeShape> for GpuNodeShape {
 /// `gpu_theme_defaults_match_the_canvas_config`, because a GPU pass that quietly disagreed with the
 /// raster pass about the DEFAULT colour would repaint every unstyled diagram.
 pub const DEFAULT_NODE_FILL_RGBA: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+/// Subgraph container fill when the author declared none (bd-dh6cy).
+///
+/// The linear-RGBA form of `CanvasRenderConfig::cluster_fill` (`rgba(226,232,240,0.44)`), so an
+/// undeclared subgraph is the same translucent slate on both surfaces. Taken from the raster
+/// default rather than invented, because two renderers disagreeing about an UNDECLARED colour is
+/// the same defect class as disagreeing about a declared one -- it just has nobody to report it.
+pub const DEFAULT_CLUSTER_FILL_RGBA: [f32; 4] = [0.886_274_5, 0.909_803_9, 0.941_176_5, 0.44];
 
 /// Theme stroke used when the author declared none: `#94a3b8`.
 pub const DEFAULT_NODE_STROKE_RGBA: [f32; 4] = [0.580_392_2, 0.639_215_7, 0.721_568_6, 1.0];
@@ -431,18 +438,33 @@ pub const DEFAULT_GLYPH_CELL_PX: u32 = 32;
 
 /// Deterministic primitive buffers for a future WebGPU command encoder.
 ///
-/// ⚠️ NO CLUSTER PRIMITIVE EXISTS (bd-dh6cy). A diagram with subgraphs plans its nodes and edges
-/// and NOT their containers — no box, no border, no cluster label. That is a silent absence rather
-/// than a regression (this pass has never drawn them), and it is recorded here because the type
-/// itself is where a reader looks to find out what a plan covers.
+/// Subgraph containers ARE planned as of bd-dh6cy (`cluster_instances`), with their fill, stroke,
+/// border width and opacity resolved through the same helpers the Canvas2D pass uses.
 ///
-/// It also survives the structural gate below: `every_per_node_resolver_is_consumed_by_the_gpu_plan`
-/// scans `resolve_node_*` only, so the five `resolve_cluster_*` resolvers the Canvas2D pass uses are
-/// invisible to it. Extending that scan belongs WITH the fix, not before it — otherwise it fails
-/// loudly with nothing to consume.
+/// ⚠️ CLUSTER LABELS ARE STILL ABSENT. The text pass plans node labels only, so a subgraph gets its
+/// box and not its title. That is the remaining half of bd-dh6cy and it is named here because the
+/// type is where a reader looks to find out what a plan covers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GpuRenderPlan {
     pub bounds: LayoutRect,
+    /// Subgraph containers, as rect instances (bd-dh6cy).
+    ///
+    /// ⚠️ DECLARED BEFORE `node_instances` BECAUSE THAT IS THE DRAW ORDER. A container painted after
+    /// its contents covers them, and the Canvas2D pass draws clusters first for exactly this
+    /// reason -- the peer who added cluster opacity there had to restore `globalAlpha` afterwards
+    /// so it did not fade the nodes drawn inside. A consumer that submits these buffers in field
+    /// order gets the right picture; one that reorders them gets subgraphs painted over their own
+    /// nodes.
+    ///
+    /// Reuses `GpuNodeInstance` rather than introducing a cluster type: a subgraph box IS a rect
+    /// with a fill, a stroke, a border width and an opacity, which is exactly this struct, and the
+    /// SDF shader already draws that shape. A parallel type would have needed its own attribute
+    /// table and its own WGSL for no expressive gain, and would have had to be kept in step with
+    /// this one by hand.
+    ///
+    /// `node_index` on these instances refers to the CLUSTER index, not a node. It is the label
+    /// back-reference the text pass uses, and cluster labels are not yet planned -- see the bead.
+    pub cluster_instances: Vec<GpuNodeInstance>,
     pub node_instances: Vec<GpuNodeInstance>,
     pub edge_segments: Vec<GpuEdgeSegment>,
     /// Triangle instances for edge arrowheads.
@@ -477,6 +499,41 @@ impl GpuRenderPlan {
         layout: &DiagramLayout,
         edge_stroke_width: f32,
     ) -> Self {
+        // Clusters first, so the buffer order is the draw order.
+        let mut cluster_instances = Vec::with_capacity(layout.clusters.len());
+        for cluster in &layout.clusters {
+            let (declared_fill, declared_stroke) =
+                crate::renderer::resolve_cluster_colors(ir, cluster.cluster_index);
+            let opacity = crate::renderer::resolve_cluster_opacity(ir, cluster.cluster_index)
+                .map(|value| value.clamp(0.0, 1.0) as f32)
+                .unwrap_or(1.0);
+            let fill = declared_fill
+                .as_deref()
+                .and_then(parse_paint_rgba)
+                .unwrap_or(DEFAULT_CLUSTER_FILL_RGBA);
+            let stroke = declared_stroke
+                .as_deref()
+                .and_then(parse_paint_rgba)
+                .unwrap_or(DEFAULT_NODE_STROKE_RGBA);
+            let stroke_width =
+                crate::renderer::resolve_cluster_stroke_width(ir, cluster.cluster_index)
+                    .map(|width| width as f32)
+                    .filter(|width| width.is_finite() && *width > 0.0)
+                    .unwrap_or(DEFAULT_NODE_STROKE_WIDTH);
+            cluster_instances.push(GpuNodeInstance {
+                center: [
+                    cluster.bounds.x + (cluster.bounds.width * 0.5),
+                    cluster.bounds.y + (cluster.bounds.height * 0.5),
+                ],
+                half_extent: [cluster.bounds.width * 0.5, cluster.bounds.height * 0.5],
+                fill: [fill[0], fill[1], fill[2], fill[3] * opacity],
+                stroke: [stroke[0], stroke[1], stroke[2], stroke[3] * opacity],
+                stroke_width,
+                shape: GpuNodeShape::Rect as u32,
+                node_index: u32::try_from(cluster.cluster_index).unwrap_or(u32::MAX),
+            });
+        }
+
         let mut node_instances = Vec::with_capacity(layout.nodes.len());
         for node in &layout.nodes {
             let shape = ir
@@ -724,6 +781,7 @@ impl GpuRenderPlan {
 
         Self {
             bounds: layout.bounds,
+            cluster_instances,
             node_instances,
             edge_segments,
             arrowheads,
@@ -1881,7 +1939,18 @@ mod tests {
             .split_once("#[cfg(test)]")
             .map_or(GPU_FULL_SRC, |(production, _tests)| production);
         // (resolver, why it is exempt) — an entry here must cite a bead.
-        const EXEMPT: &[(&str, &str)] = &[(
+        const EXEMPT: &[(&str, &str)] = &[
+            (
+                "resolve_cluster_dash_array",
+                "bd-l3nsf: a dashed border needs perimeter arc length the SDF does not carry, and a \
+                 cluster border is the same rect the node case is",
+            ),
+            (
+                "resolve_cluster_text_color",
+                "bd-dh6cy: cluster LABELS are not planned yet -- containers are, titles are not, so \
+                 there is no text run whose colour this could set",
+            ),
+            (
             "resolve_node_stroke_dasharray",
             "bd-l3nsf: a dashed SDF border needs perimeter arc length, which shape_distance does \
              not provide; the field is trivial and the shader is not",
@@ -1895,7 +1964,7 @@ mod tests {
                 .chars()
                 .take_while(|c| c.is_alphanumeric() || *c == '_')
                 .collect();
-            if name.contains("node") {
+            if name.contains("node") || name.contains("cluster") {
                 resolvers.push(name);
             }
         }
@@ -1905,7 +1974,7 @@ mod tests {
         // NON-VACUITY: a rename or a visibility change that made this scan find nothing would
         // otherwise leave the loop below asserting over an empty set and passing forever.
         assert!(
-            resolvers.len() >= 5,
+            resolvers.len() >= 9,
             "found only {} per-node resolvers, so this scan is not reading the source it thinks \
              it is: {resolvers:?}",
             resolvers.len()
@@ -1924,65 +1993,72 @@ mod tests {
         );
     }
 
-    /// A REAL subgraph fixture, so "implemented" and "still empty" can be told apart (bd-dh6cy).
+    /// A subgraph now reaches the GPU plan as a container instance (bd-dh6cy).
     ///
-    /// The GPU plan carries no cluster primitive: a diagram with subgraphs plans its contents and
-    /// not their containers. The reason that gap has no failing test is that the only cluster
-    /// mention in this file is `clusters: Vec::new()` in a hand-built layout — every existing GPU
-    /// plan test runs against a diagram with ZERO subgraphs, so none of them could fail on it and
-    /// none of them will start passing when it is fixed either.
-    ///
-    /// This is the missing half: a fixture PARSED from real mermaid source that genuinely produces
-    /// clusters. It asserts the fixture is real, then pins the current behaviour — no cluster
-    /// primitive reaches the plan.
-    ///
-    /// ⚠️ WHEN bd-dh6cy LANDS, INVERT THE SECOND ASSERTION rather than deleting this test. The
-    /// arrow-length reproducer (bd-6s6sx) was landed the same way, `#[ignore]`d with instructions
-    /// to flip it, and flipping it is what proved the fix reached the behaviour rather than merely
-    /// compiling. A stale-detector deleted on the day of the fix proves nothing.
+    /// INVERTED from the stale-detector it started as, which is why it still exists. It was landed
+    /// asserting the opposite — that `GpuRenderPlan` declared no cluster field — with instructions
+    /// to flip rather than delete it, and it fired on exactly the commit that added the field. A
+    /// detector deleted on the day of the fix proves nothing about the fix; this one proved the
+    /// change reached the behaviour, and now guards the behaviour it proved.
     #[test]
-    fn a_subgraph_fixture_reaches_layout_and_not_the_gpu_plan() {
+    fn a_subgraph_reaches_the_gpu_plan_as_a_container() {
         let ir = fm_parser::parse(
             "flowchart TD\n  subgraph one[Group One]\n    a[A]\n    b[B]\n  end\n  a --- b\n",
         )
         .ir;
         let layout = fm_layout::layout_diagram(&ir);
 
-        // NON-VACUITY: this is the assertion the existing `clusters: Vec::new()` fixture cannot
-        // make. If the parser or layout stopped producing clusters for this source, the pin below
-        // would pass for the wrong reason and the gap would look closed.
+        // NON-VACUITY, and the assertion the old hand-built `clusters: Vec::new()` fixture could
+        // never make: if the parser or layout stopped producing clusters, everything below would
+        // pass against two empty lists.
         assert!(
             !layout.clusters.is_empty(),
-            "the fixture produced no clusters, so it cannot detect whether the GPU plan drops them"
+            "the fixture produced no clusters, so it cannot detect whether the plan drops them"
         );
 
         let plan = GpuRenderPlan::from_layout(&ir, &layout, 1.0);
-        assert!(
-            !plan.node_instances.is_empty(),
-            "no node instances, so the plan is empty for an unrelated reason"
+        assert_eq!(
+            plan.cluster_instances.len(),
+            layout.clusters.len(),
+            "the plan does not carry one container instance per laid-out cluster"
         );
 
-        // CURRENT BEHAVIOUR, pinned at the SOURCE because no runtime value can express it.
-        //
-        // ⚠️ MY FIRST VERSION PINNED `plan.node_instances.len() == layout.nodes.len()` and that
-        // assertion CANNOT DETECT THE FIX: cluster instances would live in their own field, so the
-        // node count would still match and this test would still pass. It would have sat here
-        // reading like a stale-detector while detecting nothing — the exact defect this file's
-        // other gates were written to catch.
-        //
-        // The declaration is the thing that changes, so that is what is asserted. When bd-dh6cy
-        // adds the field this fails, which is the signal to invert the test rather than delete it.
+        // The container must actually cover its contents, not sit at the origin with zero size --
+        // a plan that emitted the right COUNT of empty rects would satisfy a count check alone.
+        let container = &plan.cluster_instances[0];
+        let cluster = &layout.clusters[0];
+        assert!(
+            (container.half_extent[0] - cluster.bounds.width * 0.5).abs() < 0.001
+                && (container.half_extent[1] - cluster.bounds.height * 0.5).abs() < 0.001,
+            "container half-extent {:?} does not match the cluster bounds {}x{}",
+            container.half_extent,
+            cluster.bounds.width,
+            cluster.bounds.height
+        );
+        assert!(
+            container.half_extent[0] > 0.0 && container.half_extent[1] > 0.0,
+            "the container has no area"
+        );
+
+        // ⚠️ DRAW ORDER IS THE DECLARATION ORDER, and it is load-bearing: a container submitted
+        // after its contents paints over them. Asserted on the source because no runtime value
+        // expresses it -- both fields are plain Vecs and a consumer reads them in field order.
         const GPU_FULL_SRC: &str = include_str!("gpu_plan.rs");
         let declaration = GPU_FULL_SRC
             .split_once("pub struct GpuRenderPlan {")
             .and_then(|(_, rest)| rest.split_once('}'))
             .map(|(fields, _)| fields)
             .expect("GpuRenderPlan declaration not found; this scan is not reading what it thinks");
+        let cluster_at = declaration
+            .find("pub cluster_instances")
+            .expect("cluster_instances field not found in the declaration");
+        let nodes_at = declaration
+            .find("pub node_instances")
+            .expect("node_instances field not found in the declaration");
         assert!(
-            !declaration.contains("cluster"),
-            "GpuRenderPlan now declares a cluster field — bd-dh6cy is landing. INVERT this test \
-             (assert the plan carries the subgraph) rather than deleting it: a stale-detector \
-             removed on the day of the fix proves nothing about the fix."
+            cluster_at < nodes_at,
+            "cluster_instances must be declared BEFORE node_instances: the field order is the \
+             submit order, and a subgraph drawn after its nodes covers them"
         );
     }
 }
