@@ -759,7 +759,19 @@ impl Canvas2dRenderer {
             };
             ctx.set_fill_style(fill);
             ctx.set_stroke_style(stroke);
-            ctx.set_line_width(1.0);
+            // The border WIDTH and DASH were the two channels this surface still discarded: the
+            // width was hardcoded to 1.0 and no dash was ever set, while the SVG arm emits both
+            // (`stroke-width:5px`, `stroke-dasharray:9 4`). `unwrap_or(1.0)` keeps the previous
+            // constant when nothing was declared, so an unstyled cluster is drawn exactly as before.
+            ctx.set_line_width(
+                resolve_cluster_stroke_width(ir, cluster_box.cluster_index).unwrap_or(1.0),
+            );
+            // Set only when declared and cleared after the stroke, because `lineDash` is canvas
+            // STATE — a dashed cluster would otherwise dash every shape drawn after it.
+            let cluster_dash = resolve_cluster_dash_array(ir, cluster_box.cluster_index);
+            if let Some(ref pattern) = cluster_dash {
+                ctx.set_line_dash(pattern);
+            }
 
             ctx.begin_path();
             // Rounded rectangle for cluster
@@ -776,6 +788,9 @@ impl Canvas2dRenderer {
             ctx.close_path();
             ctx.fill();
             ctx.stroke();
+            if cluster_dash.is_some() {
+                ctx.set_line_dash(&[]);
+            }
             self.draw_calls += 2;
 
             // Draw cluster label if present
@@ -2793,6 +2808,36 @@ pub(crate) fn resolve_cluster_text_color(
     cluster_index: usize,
 ) -> Option<String> {
     merged_cluster_style(ir, cluster_index).get("color").cloned()
+}
+
+/// The author's declared cluster BORDER WIDTH, if any (bd-lvj3).
+///
+/// The cluster draw hardcoded `set_line_width(1.0)`, so `style one stroke-width:5px` was discarded
+/// while the SVG arm emits it. Reads the same merge the cluster's colours already use.
+pub(crate) fn resolve_cluster_stroke_width(
+    ir: &MermaidDiagramIr,
+    cluster_index: usize,
+) -> Option<f64> {
+    parse_stroke_width(
+        merged_cluster_style(ir, cluster_index)
+            .get("stroke-width")
+            .map(String::as_str),
+    )
+}
+
+/// The author's declared cluster BORDER DASH, if any (bd-lvj3).
+///
+/// Third surface to learn `stroke-dasharray`, after nodes and edges, and it reuses their parser so
+/// all three share one set of refusals rather than drifting.
+pub(crate) fn resolve_cluster_dash_array(
+    ir: &MermaidDiagramIr,
+    cluster_index: usize,
+) -> Option<Vec<f64>> {
+    parse_dash_array(
+        merged_cluster_style(ir, cluster_index)
+            .get("stroke-dasharray")
+            .map(String::as_str),
+    )
 }
 
 pub(crate) fn resolve_cluster_colors(
