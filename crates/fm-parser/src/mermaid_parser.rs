@@ -11961,9 +11961,23 @@ fn parse_c4_relationship(
 /// `parse_c4_boundary`, which takes `(alias, label)` and ignores the rest. That is consistent with
 /// treating it as a boundary and inconsistent with `Container`, which renders the same argument.
 ///
-/// NOT VERIFIED AGAINST THE INCUMBENT: whether mermaid draws a Deployment_Node's type. Settling it
-/// needs a rendered comparison through the Chromium equivalence harness, not a source read, and it
-/// is the difference between "a divergence" and "a deliberate boundary simplification".
+/// EVIDENCE SINCE GATHERED, and it points AWAY from this being a divergence. mermaid 11.15.0 has
+/// two draw paths, and only one of them writes a type as text:
+///
+///   * the C4 SHAPE drawer writes the bold label, then `"[" + type + "]"`, then `"[" + techn + "]"`
+///     — this is what puts `[Java]` under a Container, and matches what we already render
+///   * the BOUNDARY drawer (`drawBoundary`) references `.type` six times and emits NO bracketed
+///     field at all; its `.type` uses are styling and shape selection, not text
+///
+/// A `Deployment_Node` contains children and is drawn as a boundary, so on this reading the
+/// incumbent does not write its type either and our behaviour matches. That is the same conclusion
+/// the note above reaches for the boundary KIND, arrived at independently.
+///
+/// STILL NOT PROVEN: I have not confirmed from the minified bundle that `Deployment_Node` routes to
+/// `drawBoundary` rather than to the shape drawer, and a source read cannot settle it the way a
+/// rendered comparison would. Treat this as "probably parity, one Chromium render from certain"
+/// rather than as a defect waiting to be fixed — filing it as a gap on the strength of the field
+/// probe alone would have been wrong.
 fn parse_c4_boundary(
     arguments: &[String],
     span: Span,
