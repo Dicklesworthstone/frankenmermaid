@@ -1291,15 +1291,31 @@ pub fn render_svg_js(input: &str, config: Option<JsValue>) -> Result<String, JsV
 /// tests in.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = chooseCanvasTarget))]
 pub fn choose_canvas_target_js(capabilities_json: &str) -> Result<String, JsValue> {
+    choose_canvas_target_result(capabilities_json).map_err(js_error)
+}
+
+/// The decision and the rejection, with a PLAIN STRING error so the host can run it.
+///
+/// ⚠️ SPLIT OUT BECAUSE THE TEST COULD NOT RUN. `JsValue` is not constructible off wasm32 —
+/// `JsValue::from_str` panics with "function not implemented on non-wasm32 targets" — so the
+/// wrapper's ERROR path aborted the whole `fm-wasm --lib` binary the moment a test fed it junk.
+/// An aborted binary emits no `test result:` line and no `FAILED` line either, so the workspace
+/// summary read "0 failed" while a target was dying; only the exit status and a lone
+/// `error: test failed` line said otherwise.
+///
+/// The wrapper above is now a single `map_err`, which is a stronger version of what the test was
+/// reaching for: pinning it against a re-derived expectation is unnecessary when the JS boundary
+/// has nothing left to re-derive.
+pub(crate) fn choose_canvas_target_result(capabilities_json: &str) -> Result<String, String> {
     let capabilities: HostCapabilities =
         serde_json::from_str(capabilities_json).map_err(|error| {
-            js_error(format!(
+            format!(
                 "invalid host capabilities: {error}; expected {{\"offscreenCanvas\":bool,\"worker\":bool,\"canvasTransferred\":bool}}"
-            ))
+            )
         })?;
 
     serde_json::to_string(&choose_canvas_target(capabilities))
-        .map_err(|error| js_error(format!("failed to encode canvas target: {error}")))
+        .map_err(|error| format!("failed to encode canvas target: {error}"))
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = detectType))]
@@ -3019,7 +3035,7 @@ mod tests {
     /// function rather than to a restated expectation.
     #[test]
     fn the_exported_target_chooser_matches_the_rust_decision() {
-        use super::{HostCapabilities, choose_canvas_target, choose_canvas_target_js};
+        use super::{HostCapabilities, choose_canvas_target, choose_canvas_target_result};
 
         for capabilities in [
             HostCapabilities { offscreen_canvas: true, worker: true, canvas_transferred: true },
@@ -3028,13 +3044,14 @@ mod tests {
             HostCapabilities::default(),
         ] {
             let json = serde_json::to_string(&capabilities).expect("serialize");
-            let exported = choose_canvas_target_js(&json).expect("the wrapper should accept it");
+            let exported =
+                choose_canvas_target_result(&json).expect("the wrapper should accept it");
             let expected = serde_json::to_string(&choose_canvas_target(capabilities)).expect("expected");
             assert_eq!(exported, expected, "wrapper disagreed for {capabilities:?}");
         }
 
         assert!(
-            choose_canvas_target_js("not json").is_err(),
+            choose_canvas_target_result("not json").is_err(),
             "the wrapper accepted malformed capabilities instead of reporting them"
         );
     }
