@@ -3040,6 +3040,32 @@ struct DeterminismManifestCase {
     /// comparison catches a one-ULP FMA, subnormal, or rounding-mode difference.
     layout_f32_bits_sha256: String,
     layout_sha256: String,
+    /// Size in bytes of the rendered SVG document.
+    ///
+    /// Carried alongside the digest purely so a cross-target MISMATCH IS DIAGNOSABLE. Two unequal
+    /// SHA-256 strings say only "these differ"; a byte count says whether the difference is a
+    /// reshaped document or a handful of digits inside otherwise identical markup.
+    render_svg_bytes: usize,
+    /// SHA-256 of the SVG rendered FROM THE LAYOUT DIGESTED ABOVE.
+    ///
+    /// The two layout digests answer "do the coordinates agree across targets". They cannot answer
+    /// "does the DOCUMENT agree", because the renderer does arithmetic of its own after layout
+    /// hands over, and the result of that arithmetic reaches the file without passing through any
+    /// value this manifest previously recorded.
+    ///
+    /// The concrete uncovered path is pie: `fm-render-svg` computes slice arc endpoints and label
+    /// positions with `sin`/`cos` at RENDER time, then writes them with `write!("{x} {y}")` --
+    /// full-precision `Display`, with no rounding step to absorb a low-order difference. `sqrt` and
+    /// `powi` are exact under IEEE-754, but the transcendentals are NOT correctly-rounded and are
+    /// free to differ in the last ULP between glibc on x86_64, glibc on aarch64, and the `libm`
+    /// used for wasm. Such a difference would rewrite the pie SVG on one target and every existing
+    /// gate would stay green, because `pie_basic`'s slice geometry exists ONLY in the rendered
+    /// document -- it is not in the layout, so it is not in the layout digest.
+    ///
+    /// Rendered from the same `layout` rather than re-laid-out, so a mismatch here isolates the
+    /// RENDERER: if the layout digests agree and this does not, the divergence is downstream of
+    /// layout by construction.
+    render_svg_sha256: String,
 }
 
 const DETERMINISM_CASES: [(&str, &str); 10] = [
@@ -4489,14 +4515,18 @@ fn build_determinism_manifest() -> DeterminismManifest {
         .iter()
         .map(|case| {
             format!(
-                "{}:{}:{}",
-                case.case_id, case.layout_f32_bits_sha256, case.layout_sha256
+                "{}:{}:{}:{}",
+                case.case_id,
+                case.layout_f32_bits_sha256,
+                case.layout_sha256,
+                case.render_svg_sha256
             )
         })
         .collect::<Vec<_>>()
         .join("\n");
     DeterminismManifest {
-        version: 2,
+        // 3: cases carry a RENDERED-DOCUMENT digest, not just layout digests.
+        version: 3,
         target_arch: std::env::consts::ARCH,
         target_os: std::env::consts::OS,
         target_env: option_env!("CARGO_CFG_TARGET_ENV").unwrap_or("unknown"),
@@ -4512,6 +4542,10 @@ fn determinism_manifest_case(case_id: &'static str, input: &str) -> DeterminismM
     let canonical = canonical_layout(&layout);
     let exact_bits = canonical_layout_f32_bits(&layout);
     let (non_finite_value_count, subnormal_value_count) = layout_float_anomalies(&layout);
+    // `default()` deliberately, not the golden harness's config: the manifest asks whether ONE
+    // configuration renders identically on three targets, and the only requirement on that
+    // configuration is that it is reached the same way everywhere, which a compile-time default is.
+    let svg = render_svg_with_layout(&parsed.ir, &layout, &SvgRenderConfig::default());
     DeterminismManifestCase {
         case_id,
         diagram_type: parsed.ir.diagram_type.as_str().to_string(),
@@ -4523,6 +4557,8 @@ fn determinism_manifest_case(case_id: &'static str, input: &str) -> DeterminismM
         subnormal_value_count,
         layout_f32_bits_sha256: sha256_hex(exact_bits.as_bytes()),
         layout_sha256: sha256_hex(canonical.as_bytes()),
+        render_svg_bytes: svg.len(),
+        render_svg_sha256: sha256_hex(svg.as_bytes()),
     }
 }
 

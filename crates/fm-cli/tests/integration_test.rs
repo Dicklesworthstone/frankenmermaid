@@ -3062,7 +3062,7 @@ fn determinism_manifest_cli_is_stable_and_finite() {
     assert!(!cases.is_empty(), "manifest should include golden cases");
     assert_eq!(
         first["version"].as_u64(),
-        Some(2),
+        Some(3),
         "manifest version must identify the exact-bit digest format"
     );
     for case in cases {
@@ -3083,7 +3083,35 @@ fn determinism_manifest_cli_is_stable_and_finite() {
                 .is_some_and(|value| value.len() == 64),
             "exact f32-bit layout SHA-256 digest missing or malformed: {case:?}"
         );
+        assert!(
+            case["render_svg_sha256"]
+                .as_str()
+                .is_some_and(|value| value.len() == 64),
+            "rendered-SVG SHA-256 digest missing or malformed: {case:?}"
+        );
+        // NON-VACUITY. A digest is 64 hex characters whether it summarises a real document or an
+        // empty string, so the length check above passes for a case that rendered NOTHING -- and a
+        // manifest of empty renders would compare equal across all three targets forever. The byte
+        // count is what distinguishes "these agree" from "there was nothing to disagree about".
+        assert!(
+            case["render_svg_bytes"].as_u64().unwrap_or_default() > 200,
+            "case rendered too little SVG for its digest to mean anything: {case:?}"
+        );
     }
+
+    // NON-VACUITY, corpus level: the digests must actually DISCRIMINATE. If the renderer returned
+    // the same document for every input -- a stub, an error page, an empty string -- every
+    // assertion above would still hold and the cross-target compare would be structurally unable
+    // to fail. Ten distinct diagrams must produce ten distinct documents.
+    let svg_digests: std::collections::BTreeSet<&str> = cases
+        .iter()
+        .filter_map(|case| case["render_svg_sha256"].as_str())
+        .collect();
+    assert_eq!(
+        svg_digests.len(),
+        cases.len(),
+        "distinct diagrams produced duplicate SVG digests, so the render digest does not          discriminate between them"
+    );
 }
 
 #[test]
