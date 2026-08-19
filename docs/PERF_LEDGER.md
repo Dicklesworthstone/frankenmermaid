@@ -4002,8 +4002,30 @@ same minute. That is a direct same-window replication of what bd-hmfi and bd-ecj
 **calibrated batch is what identifies it**: 20–25 is a contended arm and 37–39 a clean one, an
 absolute reference that drift cannot supply because drift is blind when both arms degrade together.
 
-**⚠️ THIS ROW CARRIES NO PER-ARM IOWAIT, AND THAT IS A GAP IN THE INSTRUMENT, NOT AN OVERSIGHT IN
-THE WINDOW.** `abba_render.py` recorded loadavg and CPU MHz per arm and did not record iowait at
+**FOURTH REPLICATION (2026-08-19 06:18Z, BlackThrush) — FIRST ROW WITH PER-ARM IOWAIT.** Binary
+embeds HEAD `2a439a22`, same corpus sha `31c0dd6bc24b571c`, unpinned:
+
+| arm | ns | batch | iowait | procs_blocked | loadavg | cross-core MHz |
+|---|---|---|---|---|---|---|
+| A1 fm | 90,316 | 39 | 0.00% | 1 | 12.40 / 9.30 / 6.82 | 1429–4292 (3.003x) |
+| B1 mermaid | 38,900,000 | — | 0.36% | 0 | 12.40 / 9.30 / 6.82 | 1429–4248 (2.973x) |
+| B2 mermaid | 39,800,000 | — | 0.46% | 0 | 12.85 / 9.44 / 6.88 | 2434–4169 (1.713x) |
+| A2 fm | 91,678 | 38 | 0.00% | 0 | 12.85 / 9.44 / 6.88 | 1429–4147 (2.902x) |
+
+**fm A/A drift 1.0151x.** Incumbent nulls `0.9661` CI [0.9439, 1.0394] and `1.0026` CI [0.9684,
+1.0398] — both contain 1.0. Worst bound **424.3x**, headline 432.4x. Every arm under 0.5% iowait
+against the harness's 5% ceiling, so this row can SHOW it was not disk-bound rather than inferring
+it from adjacent samples.
+
+**AGAIN: 424.3x IS NOT THE HEADLINE.** Three replications have now come out at 362.4x, 387.1x and
+424.3x, and the convention quotes the WORST — 362.4x stands. The spread across them is worth more
+than any single figure, and it points at the incumbent, not at us: fm measured 91,455/90,051 ns then
+90,316/91,678 ns — within 1.5% across two sessions — while mermaid moved from 35.4–36.3 ms to
+38.9–39.8 ms, about 10%. The ratio rose because THE INCUMBENT ARM VARIES MORE THAN OURS, which is an
+argument for quoting the worst bound and not for celebrating the best one.
+
+**⚠️ THE 2026-08-19 03:03Z ROW ABOVE CARRIES NO PER-ARM IOWAIT, AND THAT IS A GAP IN THE INSTRUMENT,
+NOT AN OVERSIGHT IN THE WINDOW.** `abba_render.py` recorded loadavg and CPU MHz per arm and did not record iowait at
 all, so no row banked before 2026-08-19 can prove the host was not disk-bound while it ran. What
 exists for this row is adjacent, not contemporaneous: `window_check.sh` reported `iowait=0.00%` at
 23:53:24, 23:53:45 and 23:54:20, and the bracket completed at 23:56:08. Three clean samples in the
