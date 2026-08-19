@@ -65,6 +65,13 @@ pub const DEFAULT_NODE_STROKE_RGBA: [f32; 4] = [0.580_392_2, 0.639_215_7, 0.721_
 /// before this became per-instance.
 pub const DEFAULT_NODE_STROKE_WIDTH: f32 = 1.5;
 
+/// Border width of a sequence note, which is NOT the node stroke width (bd-adabx).
+///
+/// `draw_sequence_notes` sets `line_width(1.0)` literally rather than reading
+/// `config.node_stroke_width`, so a note's border is thinner than a node's. Planning it with the
+/// node width would be a plausible-looking guess that renders a heavier box than the canvas draws.
+pub const SEQUENCE_NOTE_STROKE_WIDTH: f32 = 1.0;
+
 /// One node instance for a WebGPU SDF shape pass.
 ///
 /// Field ORDER is the vertex-attribute order a shader declares, so the two `u32` discriminators sit
@@ -627,6 +634,12 @@ pub enum GpuTextSource {
     EdgeSourceCardinality,
     /// A class/ER cardinality at the edge's TARGET end.
     EdgeTargetCardinality,
+    /// The body of a sequence note.
+    ///
+    /// `node_index` here indexes `layout.extensions.sequence_notes`, NOT `ir.nodes`: a note has no
+    /// node of its own, and pointing this at an unrelated node would be exactly the wrong-key
+    /// defect the discriminator exists to prevent.
+    SequenceNote,
     /// The participant name repeated in a sequence diagram's foot row.
     ///
     /// `node_index` is the participant's index in `ir.nodes`, the same node the head row names --
@@ -701,6 +714,11 @@ pub struct GpuRenderPlan {
     /// `node_index` here is the PARTICIPANT node index the bar sits on, which is a genuine index
     /// into `ir.nodes` -- unlike the cluster instances, where it indexes clusters.
     pub activation_instances: Vec<GpuNodeInstance>,
+    /// Sequence notes, as rect instances (bd-adabx).
+    ///
+    /// After the activation bars and before the edges, matching the raster call order. Their text
+    /// is planned too, tagged `GpuTextSource::SequenceNote`.
+    pub sequence_note_instances: Vec<GpuNodeInstance>,
     pub edge_segments: Vec<GpuEdgeSegment>,
     /// Triangle instances for edge arrowheads.
     pub arrowheads: Vec<GpuArrowheadInstance>,
@@ -825,6 +843,30 @@ impl GpuRenderPlan {
                 stroke_width: DEFAULT_NODE_STROKE_WIDTH,
                 shape: GpuNodeShape::Rect as u32,
                 node_index: u32::try_from(bar.participant_index).unwrap_or(u32::MAX),
+            });
+        }
+
+        // SEQUENCE NOTES (bd-adabx). Rect plus centred body text.
+        //
+        // NO degenerate-size skip here, deliberately: unlike draw_activation_bars and
+        // draw_sequence_mirror_headers, draw_sequence_notes has no such guard and draws whatever
+        // bounds it is given. Adding one would make the plan disagree with the canvas on the very
+        // case the guard is about, so the two surfaces stay identical instead of the plan being
+        // independently "tidier".
+        let mut sequence_note_instances =
+            Vec::with_capacity(layout.extensions.sequence_notes.len());
+        for note in &layout.extensions.sequence_notes {
+            sequence_note_instances.push(GpuNodeInstance {
+                center: [
+                    note.bounds.x + (note.bounds.width * 0.5),
+                    note.bounds.y + (note.bounds.height * 0.5),
+                ],
+                half_extent: [note.bounds.width * 0.5, note.bounds.height * 0.5],
+                fill: DEFAULT_NODE_FILL_RGBA,
+                stroke: DEFAULT_NODE_STROKE_RGBA,
+                stroke_width: SEQUENCE_NOTE_STROKE_WIDTH,
+                shape: GpuNodeShape::Rect as u32,
+                node_index: u32::try_from(sequence_note_instances.len()).unwrap_or(u32::MAX),
             });
         }
 
@@ -1062,6 +1104,14 @@ impl GpuRenderPlan {
                             .sequence_mirror_headers
                             .iter()
                             .map(|node_box| mirror_header_label(ir, node_box)),
+                    )
+                    // NOTE BODIES GO IN THE ATLAS TOO -- same silent-vanish trap.
+                    .chain(
+                        layout
+                            .extensions
+                            .sequence_notes
+                            .iter()
+                            .map(|note| note.text.as_str()),
                     ),
                 cell_px,
             );
@@ -1238,11 +1288,30 @@ impl GpuRenderPlan {
             );
         }
 
+        // NOTE BODIES (bd-adabx). Centred in the box exactly as draw_sequence_notes centres them,
+        // and skipped when empty, which is the one case that pass also skips.
+        for (index, note) in layout.extensions.sequence_notes.iter().enumerate() {
+            if note.text.is_empty() {
+                continue;
+            }
+            sink.push_centred(
+                note.text.as_str(),
+                (
+                    note.bounds.x + (note.bounds.width * 0.5),
+                    note.bounds.y + (note.bounds.height * 0.5),
+                ),
+                DEFAULT_LABEL_RGBA,
+                GpuTextSource::SequenceNote,
+                index,
+            );
+        }
+
         Self {
             bounds: layout.bounds,
             cluster_instances,
             mirror_header_instances,
             activation_instances,
+            sequence_note_instances,
             edge_segments,
             arrowheads,
             node_instances,
@@ -2685,6 +2754,68 @@ mod tests {
         assert!((quads[0].center[1] - 215.0).abs() < 0.01);
     }
 
+    /// Sequence notes reach the plan as a box and a body (bd-adabx).
+    ///
+    /// Two details are pinned because both are easy to "improve" into a disagreement with the
+    /// canvas: the border is 1.0 wide, NOT the node stroke width, and a zero-area note is still
+    /// planned because `draw_sequence_notes` still draws one. The empty-TEXT note is the only case
+    /// that pass skips, so it is the only case skipped here.
+    ///
+    /// The body text uses glyphs no other label in the fixture carries, so the atlas feed for this
+    /// source is the only path to them -- the foot-row test taught that a shared path makes this
+    /// assertion vacuous.
+    #[test]
+    fn sequence_notes_reach_the_plan_as_a_box_and_a_body() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Sequence);
+        let mut layout = test_layout();
+        layout.extensions.sequence_notes = vec![
+            fm_layout::LayoutSequenceNote {
+                position: fm_core::NotePosition::Over,
+                text: "Wqkj".to_string(),
+                bounds: LayoutRect { x: 100.0, y: 50.0, width: 80.0, height: 40.0 },
+            },
+            fm_layout::LayoutSequenceNote {
+                position: fm_core::NotePosition::Over,
+                text: String::new(),
+                bounds: LayoutRect { x: 100.0, y: 120.0, width: 0.0, height: 0.0 },
+            },
+        ];
+
+        let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.25);
+
+        assert_eq!(
+            plan.sequence_note_instances.len(),
+            2,
+            "the zero-area note is still drawn by the raster pass, so it is still planned"
+        );
+        let note = plan.sequence_note_instances[0];
+        assert_eq!(note.center, [140.0, 70.0]);
+        assert_eq!(note.half_extent, [40.0, 20.0]);
+        assert_eq!(
+            note.stroke_width,
+            super::SEQUENCE_NOTE_STROKE_WIDTH,
+            "a note border is 1.0, not the node stroke width"
+        );
+        assert!(
+            (note.stroke_width - super::DEFAULT_NODE_STROKE_WIDTH).abs() > f32::EPSILON,
+            "this assertion is pointless if the two widths are ever made equal"
+        );
+
+        let runs: Vec<_> = plan
+            .text_runs
+            .iter()
+            .filter(|run| run.source == super::GpuTextSource::SequenceNote)
+            .collect();
+        assert_eq!(runs.len(), 1, "the empty note contributes no run");
+        assert_eq!(runs[0].quad_count, 4, "\"Wqkj\" is four glyphs");
+        assert_eq!(runs[0].node_index, 0, "node_index indexes the notes, not ir.nodes");
+
+        let quads = &plan.text_quads[runs[0].first_quad as usize..][..4];
+        let mean_x = quads.iter().map(|q| q.center[0]).sum::<f32>() / 4.0;
+        assert!((mean_x - 140.0).abs() < 0.01, "body not centred: {mean_x}");
+        assert!((quads[0].center[1] - 70.0).abs() < 0.01);
+    }
+
     /// The plan's FIELD ORDER is the raster pass's DRAW ORDER (bd-adabx).
     ///
     /// The plan documents field order as submit order -- "a consumer that submits these buffers in
@@ -2716,6 +2847,7 @@ mod tests {
             ("pub cluster_instances:", "self.draw_clusters("),
             ("pub mirror_header_instances:", "self.draw_sequence_mirror_headers("),
             ("pub activation_instances:", "self.draw_activation_bars("),
+            ("pub sequence_note_instances:", "self.draw_sequence_notes("),
             ("pub edge_segments:", "self.draw_edges("),
             ("pub node_instances:", "self.draw_nodes("),
         ];
@@ -2781,6 +2913,7 @@ mod tests {
         const PLANNED: &[&str] = &[
             "draw_activation_bars",
             "draw_sequence_mirror_headers",
+            "draw_sequence_notes",
             "draw_clusters",
             "draw_edges",
             "draw_nodes",
@@ -2800,8 +2933,13 @@ mod tests {
             ("draw_cluster_dividers", "bd-adabx: cluster divider rules"),
             ("draw_state_notes", "bd-adabx: state furniture"),
             ("draw_sequence_lifecycle_markers", "bd-adabx: sequence furniture"),
-            ("draw_sequence_fragments", "bd-adabx: sequence furniture"),
-            ("draw_sequence_notes", "bd-adabx: sequence furniture"),
+            (
+                "draw_sequence_fragments",
+                "bd-l3nsf, NOT merely unplanned: a fragment box has a DASHED border \
+                 (set_line_dash([4,4])) and the SDF carries no perimeter arc length, so planning \
+                 it as a plain rect instance would draw a solid border where the canvas draws a \
+                 dashed one -- a wrong picture, not a missing one",
+            ),
             ("draw_pie_wedges", "bd-adabx: pie geometry"),
         ];
 
