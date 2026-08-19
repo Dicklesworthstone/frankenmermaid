@@ -180,7 +180,7 @@ frankenmermaid isn't a drop-in replacement for Graphviz or PlantUML — the trad
 | `kanban` | Implemented |
 <!-- END GENERATED: supported-diagram-types -->
 
-The authoritative parity matrix against the FrankenTUI reference implementation lives in [`FEATURE_PARITY.md`](FEATURE_PARITY.md). Every diagram family has dedicated detection, parser, layout dispatch, and SVG/terminal/canvas rendering. The "Partial" rows in the generated table above reflect the conformance-fixture status; in practice, every diagram type renders end-to-end through `fm-cli render`.
+The authoritative parity matrix against the FrankenTUI reference implementation lives in [`FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md). Every diagram family has dedicated detection, parser, layout dispatch, and SVG/terminal/canvas rendering. The "Partial" rows in the generated table above reflect the conformance-fixture status; in practice, every diagram type renders end-to-end through `fm-cli render`.
 
 ## Installation
 
@@ -1771,7 +1771,7 @@ Every render emits enough structured evidence to be auditable in CI:
 - **Golden SVG snapshots** with `BLESS=1 cargo test -p frankenmermaid-cli --test golden_svg_test` for regression safety. The harness emits structured JSON evidence per scenario (input hash, output artifact hash, dimensions, timings, degradation tier, pass/fail reason).
 - **Golden layout checksums** verify byte-identical layout output across commits.
 - **Property-based tests** (proptest) on parser totality, IR serde round-trip, layout determinism (random chain graphs × 5 directions), non-overlapping nodes, non-negative layout stats, SVG totality (always valid), and terminal bounds enforcement.
-- **Conformance harness** — `frankentui_conformance_test.rs` drives ~26 fixture-backed cases against the FrankenTUI reference implementation, with coverage tracking in [`FEATURE_PARITY.md`](FEATURE_PARITY.md).
+- **Conformance harness** — `frankentui_conformance_test.rs` drives ~26 fixture-backed cases against the FrankenTUI reference implementation, with coverage tracking in [`FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md).
 - **Regression harness** — `fm-regression-harness` ingests a real-world Mermaid corpus and emits an HTML thumbnail-grid report with per-case pass/fail and timing.
 - **Fuzz targets** — cargo-fuzz harnesses for the parser and the full pipeline (in `fuzz/`).
 - **Adversarial / DoS** — FxHash collision corpus, comment-obfuscated style sanitization, brace-adjacent DOT headers, symbol-only DOT identifiers, deep cyclic graphs (stack-overflow regression), E-graph memory-explosion fault tests.
@@ -2063,7 +2063,7 @@ A --> B
 
 - [`AGENTS.md`](AGENTS.md) — Guidelines for AI coding agents working in this codebase
 - [`CHANGELOG.md`](CHANGELOG.md) — Chronological capability-wave changelog with commit links
-- [`FEATURE_PARITY.md`](FEATURE_PARITY.md) — Authoritative parity status vs the FrankenTUI reference
+- [`FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) — Authoritative parity status vs the FrankenTUI reference
 - [`CRATES_IO_PUBLISHING.md`](CRATES_IO_PUBLISHING.md) — Publishing strategy and blocker resolution plan
 - [`docs/FNX_INTEGRATION.md`](docs/FNX_INTEGRATION.md) — Authoritative FNX architecture contract
 - [`docs/FNX_USER_GUIDE.md`](docs/FNX_USER_GUIDE.md) — When/how to use graph intelligence features
@@ -2965,7 +2965,7 @@ The build enforces a 500 KB gzip ceiling on the `.wasm` artifact (`MAX_GZIP_BYTE
 - An expected-structure section describing what the IR must contain (node count, presence of specific shapes, edge cardinalities, …) and what the SVG must contain (specific marker IDs, specific CSS classes, etc.).
 - Optional notes documenting deliberate behavioral differences from upstream mermaid-js (these are surfaced through the `Compatibility` diagnostic category at runtime).
 
-Adding a new conformance case takes one JSON entry; the harness picks it up automatically. The coverage matrix in [`FEATURE_PARITY.md`](FEATURE_PARITY.md) tracks which surfaces have fixture-backed coverage vs implementation-only coverage.
+Adding a new conformance case takes one JSON entry; the harness picks it up automatically. The coverage matrix in [`FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) tracks which surfaces have fixture-backed coverage vs implementation-only coverage.
 
 ---
 
