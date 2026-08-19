@@ -982,6 +982,44 @@ fn looks_like_er_relationship(content: &str) -> bool {
     false
 }
 
+/// Does this content carry an actual sequence MESSAGE -- an arrow followed by its `:` separator?
+///
+/// The sequence arm used to fire on "contains an arrow" AND "contains a colon" as two independent
+/// facts about the whole document, which is a much weaker claim than it looks. A flowchart arrow
+/// `-->` contains `->`, and a colon appears in any `style a fill:#f00`, so a headerless flowchart
+/// with one style line was read as a sequence diagram -- and because the sequence arm runs BEFORE
+/// the flowchart arm, widening the flowchart table could not rescue it.
+///
+/// A mermaid sequence message is `A->>B: text`: the colon is a SEPARATOR that follows the arrow on
+/// the same line. Requiring that shape is not a heuristic tightening so much as reading the grammar
+/// the two facts were standing in for.
+///
+/// Bracket depth is tracked so a flowchart label supplies neither half: in `A[Start] --> B[Step: two]`
+/// the colon is inside a node label, and in `A[a->b] --> C` the arrow is. Both are depth 1, and only
+/// a depth-0 arrow followed by a depth-0 colon counts.
+fn has_sequence_message_separator(content: &str) -> bool {
+    content.lines().any(|line| {
+        let bytes = line.as_bytes();
+        let mut depth = 0_usize;
+        let mut seen_arrow = false;
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'[' | b'(' | b'{' => depth += 1,
+                b']' | b')' | b'}' => depth = depth.saturating_sub(1),
+                b'-' if depth == 0 && bytes.get(i + 1) == Some(&b'>') => {
+                    seen_arrow = true;
+                    i += 1;
+                }
+                b':' if depth == 0 && seen_arrow => return true,
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    })
+}
+
 fn content_heuristics(input: &str) -> Option<DetectedType> {
     // Strip comments to avoid false positives in metadata
     let lines: Vec<&str> = input
@@ -1019,7 +1057,7 @@ fn content_heuristics(input: &str) -> Option<DetectedType> {
         || content.contains("actor ")
         || content.contains("activate ")
         || content.contains("note ")
-        || (content.contains("->") && content.contains(':'))
+        || has_sequence_message_separator(&content)
     {
         return Some(DetectedType {
             diagram_type: DiagramType::Sequence,
@@ -3421,5 +3459,40 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             "the unimplemented-type message was replaced: {:?}",
             detected.warnings
         );
+    }
+
+    /// A headerless sequence message is still detected through the plain arrow.
+    #[test]
+    fn a_plain_arrow_message_is_still_a_sequence_diagram() {
+        for source in ["alice->bob: hello\n", "alice -> bob : hello\n", "a-->b: hi\n"] {
+            let detected = super::detect_type_with_confidence(source);
+            assert_eq!(
+                detected.diagram_type,
+                fm_core::DiagramType::Sequence,
+                "{source:?} stopped being detected as a sequence diagram"
+            );
+        }
+    }
+
+    /// CONTROL: a headerless flowchart with a colon anywhere is NOT a sequence diagram.
+    ///
+    /// This is the ordering defect the message-separator rule exists for. The sequence arm runs
+    /// before the flowchart arm and used to fire on "some arrow" AND "some colon" as two independent
+    /// facts about the whole document, so one `style` line reclassified the diagram. Widening the
+    /// flowchart table could not have fixed it -- control never reached that arm.
+    #[test]
+    fn a_flowchart_with_a_style_colon_is_not_a_sequence_diagram() {
+        for source in [
+            "a --> b\n  style a fill:#f00\n",
+            "a[start] --> b[step: two]\n",
+            "a[a->b] --> c\n  style a fill:#f00\n",
+        ] {
+            let detected = super::detect_type_with_confidence(source);
+            assert_eq!(
+                detected.diagram_type,
+                fm_core::DiagramType::Flowchart,
+                "{source:?} was misread as a sequence diagram"
+            );
+        }
     }
 }
