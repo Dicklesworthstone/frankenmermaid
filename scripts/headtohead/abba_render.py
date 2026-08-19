@@ -430,7 +430,19 @@ def mermaid_arm(case_id: str, reps: int, pins: dict | None = None) -> dict:
         # measured at the same boundary or the ratio compares two different quantities.
         ns = (record.get("render_ns") or {}).get("p50")
         null = record.get("null_control") or {}
-        null_ci = (null.get("median"), null.get("ci95_lo"), null.get("ci95_hi"))
+        # `n` IS THE SAMPLE COUNT THE NULL WAS ACTUALLY COMPUTED FROM, and it was missing here,
+        # which cost a conclusion. A 4x-reps experiment was run to test whether the incumbent null
+        # bias shrinks with more samples; `nullReps` derives from `reps`
+        # (mermaid_bench.mjs:1532) so it SHOULD have risen -- but a budget clamp at :1664 can reset
+        # it to MIN_NULL_ROUNDS = 9, and without `n` in the row there is no way to tell whether the
+        # experiment raised the count or silently ran the floor. The refuted-hypothesis row in
+        # PERF_LEDGER.md carries that caveat because of this omission.
+        null_ci = (
+            null.get("median"),
+            null.get("ci95_lo"),
+            null.get("ci95_hi"),
+            null.get("n"),
+        )
     return {"ns": ns, "null": null_ci, "before": before, "after": after, "code": proc.returncode}
 
 
@@ -1000,7 +1012,16 @@ def main() -> int:
     # Worst bound: slower fm against faster mermaid.
     print(f"WORST-BOUND RATIO: {min(mj_vals) / max(fm_vals):.1f}x")
     print(f"headline (median/median): {statistics.median(mj_vals) / statistics.median(fm_vals):.1f}x")
-    print(f"mermaid A/A null: {b1['null']}  {b2['null']}")
+    # Printed as (median, lo, hi, n). The n is what makes a null comparable ACROSS runs: a median
+    # from 9 pairs and one from 60 are different measurements wearing the same shape, and the row
+    # cannot say which it was unless the count travels with it.
+    print(f"mermaid A/A null (median, lo, hi, n): {b1['null']}  {b2['null']}")
+    for label, arm in (("B1", b1), ("B2", b2)):
+        null = arm.get("null") or ()
+        if len(null) == 4 and null[3] is not None and null[0] is not None:
+            bias_pct = (null[0] - 1.0) * 100
+            note = " ⚠️ over the 2% clause-3 bound" if abs(bias_pct) > 2.0 else ""
+            print(f"  {label} null bias {bias_pct:+.2f}% from n={null[3]} pairs{note}")
     print(f"conditions at end: load={loadavg()} mhz={cpu_mhz()}")
     print()
     print("PROVISIONAL. Quote the worst bound, cite the executing ELF sha, and record per-arm loadavg")

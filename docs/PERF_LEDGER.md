@@ -4054,9 +4054,20 @@ nulls exceeded the bound where the default-rep set exceeded it 30% of the time. 
 hypothesis predicted shrinkage; the observation is the opposite direction.
 
 **⚠️ n = 2 at high reps.** Two nulls cannot establish a distribution, and this could be an unlucky
-pair — a second high-rep run is the obvious follow-up. What it does do is remove the cheap
-explanation: if the bias were simply an under-sampled median, 4× the samples should have moved it
-toward 1.0, and it did not.
+pair — a second high-rep run is the obvious follow-up.
+
+**⚠️⚠️ AND THE EXPERIMENT MAY NOT HAVE RAISED THE NULL'S SAMPLE COUNT AT ALL, which weakens the
+refutation further than the small n does.** Reading the harness afterwards: `nullReps` derives from
+`reps` (`mermaid_bench.mjs:1532`, `max(MIN_NULL_ROUNDS, item.null_reps_js ?? reps)`), so `--reps 60`
+*should* have raised it from 15 to 60 pairs. But a budget clamp at `:1664` resets `nullReps` to
+`MIN_NULL_ROUNDS = 9` whenever the remaining time cannot afford `2 * nullReps + 1` samples — and
+`abba_render.py` did not record the null's `n`, so THE ROW CANNOT SAY WHICH HAPPENED. The run may
+have used 60 pairs, or 9, which is fewer than the default 15.
+
+So the honest status is: the estimator-noise hypothesis is **not refuted, it is untested**, and the
+observation above is two nulls of unknown sample size. `n` is now recorded per arm (median, lo, hi,
+n) with the bias and a clause-3 flag printed alongside, so the re-run answers this on its face. A
+conclusion this cheap to invalidate should not have been drawn without the count in the row.
 
 **Our own arm is not the problem, and this run is the sharpest evidence of that.** fm A/A drift
 **1.0041x** — the tightest of the campaign, against a previous best of 1.0119x — with batches 39/40.
