@@ -83,9 +83,22 @@ echo "[chain] no competing benchmark detected"
 
 # -- precheck 3: host busyness, the harness's own criterion (cpus over 20% busy) ----------------
 # Two /proc/stat snapshots compared in shell, so a refusal here explains a refusal there.
+#
+# The aggregate `cpu` line is captured too, for IOWAIT. abba_render.py refuses any arm over
+# MAX_ARM_IOWAIT_PCT = 5.0 because a disk-bound host does not slow the two engines equally, so a
+# ratio measured through it is an artifact of the disk rather than of the code. The same ceiling is
+# used here DELIBERATELY: two instruments refusing the same window for different numbers is how
+# they drift, and then a row refused by one gets banked by the other.
+MAX_IOWAIT_PCT=5
 declare -A cpu_total cpu_idle
+agg_total_before=0
+agg_iowait_before=0
 while read -r name rest; do
   case "$name" in
+    cpu) set -- $rest
+         for field in "$@"; do agg_total_before=$((agg_total_before + field)); done
+         agg_iowait_before=$5
+         continue ;;
     cpu[0-9]*) ;;
     *) continue ;;
   esac
@@ -100,8 +113,14 @@ sleep 3
 
 busy_cpus=0
 total_cpus=0
+agg_total_after=0
+agg_iowait_after=0
 while read -r name rest; do
   case "$name" in
+    cpu) set -- $rest
+         for field in "$@"; do agg_total_after=$((agg_total_after + field)); done
+         agg_iowait_after=$5
+         continue ;;
     cpu[0-9]*) ;;
     *) continue ;;
   esac
@@ -116,7 +135,27 @@ while read -r name rest; do
     busy_cpus=$((busy_cpus + 1))
   fi
 done < /proc/stat
-echo "[chain] ${busy_cpus} of ${total_cpus} cpus over 20% busy; loadavg $(cut -d' ' -f1-3 /proc/loadavg)"
+
+agg_delta=$((agg_total_after - agg_total_before))
+# ⚠️ TENTHS, NOT WHOLE PERCENT. Integer division made the first version of this gate LOOSER than
+# the ceiling it claims to enforce: 5.9% iowait truncates to 5, which is not `> 5`, so a window
+# abba_render.py would refuse passed here. Shell has no floats, so the comparison is done in
+# tenths against 50 and only the display is decimal.
+iowait_tenths=0
+if [ "$agg_delta" -gt 0 ]; then
+  iowait_tenths=$(((agg_iowait_after - agg_iowait_before) * 1000 / agg_delta))
+fi
+
+# Printed on every run, not only on refusal: a row banked from a clean window has to be able to
+# SHOW it was clean, and "iowait was fine" is not something a reader can verify after the fact.
+echo "[chain] ${busy_cpus} of ${total_cpus} cpus over 20% busy; iowait $((iowait_tenths / 10)).$((iowait_tenths % 10))%; loadavg $(cut -d' ' -f1-3 /proc/loadavg)"
+
+if [ "$iowait_tenths" -gt $((MAX_IOWAIT_PCT * 10)) ]; then
+  echo "[chain] REFUSING: host is disk-bound at $((iowait_tenths / 10)).$((iowait_tenths % 10))% iowait, over the ${MAX_IOWAIT_PCT}% ceiling" >&2
+  echo "[chain] A disk-bound host does not slow the two engines equally, so the ratio would be an" >&2
+  echo "[chain] artifact of the disk. Same ceiling abba_render.py refuses arms on." >&2
+  exit 6
+fi
 
 REV=$(git rev-parse HEAD)
 echo "[chain] pinning revision ${REV}"
