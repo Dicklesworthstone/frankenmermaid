@@ -1515,7 +1515,7 @@ mod tests {
     #[test]
     fn fault_fallback_within_time_budget() {
         // Verify that even worst-case graphs complete within reasonable time
-        use std::time::Instant;
+        use std::time::{Duration, Instant};
 
         let (upper, lower, edges) = generate_bipartite(20, 20);
         let ctx = CrossingContext {
@@ -1530,15 +1530,33 @@ mod tests {
             wall_clock_valve_ms: WALL_CLOCK_VALVE_MS,
         };
 
-        let start = Instant::now();
-        let result = saturate_with_fallback(&upper, &ctx, &config);
-        let elapsed = start.elapsed();
+        // ⚠️ MIN OVER A GROUP, not a single sample. This assertion failed at 831ms on a host with a
+        // run queue in the twenties while the code was unchanged — a SINGLE wall-clock sample
+        // measures the machine as much as the algorithm, and on a shared build box it measures the
+        // machine more.
+        //
+        // The minimum is the right statistic because interference is ONE-SIDED: contention can only
+        // make a run slower, never faster. So the fastest of several observations is the closest
+        // estimate of the real cost, and a budget applied to it still fails loudly if the algorithm
+        // itself regresses — which is what this test is for. Raising the budget instead would have
+        // traded the flake for a blunter guard, and the next person would have raised it again.
+        //
+        // Deliberately not a two-arm ratio: there is no natural same-invocation baseline here whose
+        // own noise would not have to be controlled in turn.
+        const RUNS: usize = 5;
+        let mut fastest = Duration::MAX;
+        let mut result = saturate_with_fallback(&upper, &ctx, &config);
+        for _ in 0..RUNS {
+            let start = Instant::now();
+            result = saturate_with_fallback(&upper, &ctx, &config);
+            fastest = fastest.min(start.elapsed());
+        }
 
         // Should complete within 500ms even on slow hardware
         assert!(
-            elapsed.as_millis() < 500,
-            "Fallback took too long: {:?}",
-            elapsed
+            fastest.as_millis() < 500,
+            "Fallback took too long: {fastest:?} (fastest of {RUNS} runs, so this is not \
+             host noise)"
         );
 
         // Result should still be valid
