@@ -3347,8 +3347,8 @@ fn sanitize_font_family(value: &str) -> Option<String> {
 /// FLAT and independently, and each undeclared one keeps that site's own default. Composing per
 /// site from components is the only way to reproduce that.
 #[derive(Default)]
-struct DeclaredNodeFont {
-    size: Option<f64>,
+pub(crate) struct DeclaredNodeFont {
+    pub(crate) size: Option<f64>,
     weight: Option<&'static str>,
     style: Option<&'static str>,
     family: Option<String>,
@@ -3386,7 +3386,7 @@ impl DeclaredNodeFont {
     }
 }
 
-fn resolve_declared_node_font(ir: &MermaidDiagramIr, node_index: usize) -> DeclaredNodeFont {
+pub(crate) fn resolve_declared_node_font(ir: &MermaidDiagramIr, node_index: usize) -> DeclaredNodeFont {
     let merged = merged_node_style(ir, node_index);
     DeclaredNodeFont {
         size: parse_declared_font_size(merged.get("font-size").map(String::as_str)),

@@ -629,18 +629,43 @@ impl GpuRenderPlan {
             }
         }
 
-        let glyph_atlas = GlyphAtlasPlan::for_texts(
-            labelled.iter().map(|(_, _, text)| *text),
-            DEFAULT_GLYPH_CELL_PX,
-        );
+        // PER-RUN FONT SIZE (bd-eudpo). Resolved from the node, exactly like fill, stroke, stroke
+        // width and opacity -- NOT from the layout text primitive, whose `font_size` is a hardcoded
+        // 14.0/12.0 in every branch of `build_render_scene` and would have delivered nothing.
+        let run_font_px: Vec<f32> = labelled
+            .iter()
+            .map(|(node_index, _, _)| {
+                crate::renderer::resolve_declared_node_font(
+                    ir,
+                    usize::try_from(*node_index).unwrap_or(usize::MAX),
+                )
+                .size
+                .map(|size| size as f32)
+                .filter(|size| size.is_finite() && *size > 0.0)
+                .unwrap_or(DEFAULT_FONT_SIZE_PX)
+            })
+            .collect();
 
-        let advance = DEFAULT_FONT_SIZE_PX * CHAR_ADVANCE_RATIO;
-        let half_height = DEFAULT_FONT_SIZE_PX * 0.5;
+        // ⚠️ THE ATLAS MUST GROW WITH THE LARGEST LABEL, or this renders BLURRY rather than wrong --
+        // a failure that survives review because the geometry is right and only the raster is soft.
+        // The default cell is 32px for a 14px glyph, so the headroom ratio is what scales; smaller
+        // labels then sample DOWN from a sharp cell, which is the harmless direction. Capped so a
+        // pathological declaration cannot ask a backend for an enormous texture.
+        let max_font_px = run_font_px.iter().copied().fold(DEFAULT_FONT_SIZE_PX, f32::max);
+        let cell_px = ((DEFAULT_GLYPH_CELL_PX as f32) * (max_font_px / DEFAULT_FONT_SIZE_PX))
+            .ceil()
+            .clamp(DEFAULT_GLYPH_CELL_PX as f32, 256.0) as u32;
+
+        let glyph_atlas =
+            GlyphAtlasPlan::for_texts(labelled.iter().map(|(_, _, text)| *text), cell_px);
         let mut text_quads: Vec<GpuTextQuad> = Vec::new();
         let mut text_runs: Vec<GpuTextRun> = Vec::with_capacity(labelled.len());
 
         for (run_index, (node_index, center, text)) in labelled.iter().enumerate() {
             let run_index_u32 = u32::try_from(run_index).unwrap_or(u32::MAX);
+            let font_px = run_font_px.get(run_index).copied().unwrap_or(DEFAULT_FONT_SIZE_PX);
+            let advance = font_px * CHAR_ADVANCE_RATIO;
+            let half_height = font_px * 0.5;
             let first_quad = u32::try_from(text_quads.len()).unwrap_or(u32::MAX);
 
             // Control characters carry no ink and are excluded from the atlas, so they must not
@@ -1774,5 +1799,41 @@ mod tests {
             "an undeclared node was faded: {:?}",
             plain_plan.node_instances.iter().map(|i| i.fill[3]).collect::<Vec<_>>()
         );
+    }
+
+    /// A declared font size sizes the GPU quads AND the glyph atlas (bd-eudpo).
+    ///
+    /// Resolved from the NODE, not from the layout text primitive: every `font_size` in
+    /// `build_render_scene` is a hardcoded 14.0 or 12.0, so routing through the scene -- which is
+    /// what this bead originally recommended -- would have delivered nothing at all.
+    #[test]
+    fn a_declared_font_size_sizes_the_quads_and_the_atlas() {
+        let big = fm_parser::parse("flowchart TD\n  a[Alpha]\n  style a font-size:32px\n").ir;
+        let big_plan = GpuRenderPlan::from_layout(&big, &fm_layout::layout_diagram(&big), 1.0);
+        let plain = fm_parser::parse("flowchart TD\n  a[Alpha]\n").ir;
+        let plain_plan =
+            GpuRenderPlan::from_layout(&plain, &fm_layout::layout_diagram(&plain), 1.0);
+
+        let big_h = big_plan.text_quads.first().map(|q| q.half_extent[1]).unwrap_or(0.0);
+        let plain_h = plain_plan.text_quads.first().map(|q| q.half_extent[1]).unwrap_or(0.0);
+        assert!(big_h > 0.0 && plain_h > 0.0, "no glyphs, so this proves nothing");
+        assert!(
+            big_h > plain_h * 1.5,
+            "a 32px declaration did not enlarge the quad: {big_h} vs default {plain_h}"
+        );
+
+        // ⚠️ THE GEOMETRY ALONE IS NOT THE FIX. Enlarged quads sampling a 32px cell would render
+        // blurry -- right shape, soft raster, and it survives review because nothing is misplaced.
+        // The atlas has to grow with the largest label.
+        assert!(
+            big_plan.glyph_atlas.cell_px > plain_plan.glyph_atlas.cell_px,
+            "the atlas cell did not grow with the label: {} vs {}",
+            big_plan.glyph_atlas.cell_px,
+            plain_plan.glyph_atlas.cell_px
+        );
+
+        // CONTROL: an undeclared diagram keeps the default cell, so the atlas is not enlarged for
+        // every diagram on the strength of one styled node.
+        assert_eq!(plain_plan.glyph_atlas.cell_px, super::DEFAULT_GLYPH_CELL_PX);
     }
 }
