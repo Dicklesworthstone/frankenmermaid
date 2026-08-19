@@ -208,3 +208,92 @@ fn the_three_renderers_agree_on_declared_text() {
         disagreements.join("\n  ")
     );
 }
+
+/// The renderers must also agree on DECLARED STYLING, not just declared text (bd-lvj3).
+///
+/// That bead was filed from a measured table -- `style` statements, `classDef` fill, `classDef`
+/// stroke and a sequence `rect rgb(...)` each rendered by the SVG and DROPPED by the canvas, which
+/// read none of the three styling channels. Every one of those channels now has its own canvas
+/// test, and this is the gate those individual tests cannot be: it asks whether the two engines
+/// AGREE, which is the question a user hits when the browser preview and the exported SVG disagree
+/// about the same document.
+///
+/// ⚠️ COMPARED ON A NORMALISED COLOUR, NOT ON BYTES. The two engines legitimately spell the same
+/// colour differently -- an SVG may carry `#ff0000` in a CSS rule while the canvas records
+/// `SetFillStyle("#ff0000")` or an `rgb(255,0,0)` -- so a byte comparison would fail on correct
+/// output. Both spellings of each declared colour are accepted on either side.
+///
+/// The SVG side is checked FIRST and treated as the reference, exactly as the text gate above does:
+/// if the SVG did not honour a declaration then the case cannot compare renderers, and saying so is
+/// more useful than reporting a canvas miss for a colour nobody drew.
+#[test]
+fn the_renderers_agree_on_declared_styling() {
+    // (case, source, colour as hex, colour as rgb) -- the four rows of bd-lvj3's own table.
+    let cases: &[(&str, &str, &str, &str)] = &[
+        (
+            "style_stmt",
+            "flowchart TD\n  a[A]\n  style a fill:#ff0000\n",
+            "#ff0000",
+            "rgb(255,0,0)",
+        ),
+        (
+            "classdef_fill",
+            "flowchart TD\n  a[A]\n  classDef hot fill:#ff0000\n  class a hot\n",
+            "#ff0000",
+            "rgb(255,0,0)",
+        ),
+        (
+            "classdef_stroke",
+            "flowchart TD\n  a[A]\n  classDef hot stroke:#00ff00\n  class a hot\n",
+            "#00ff00",
+            "rgb(0,255,0)",
+        ),
+        (
+            "seq_rect_color",
+            "sequenceDiagram\n  participant A\n  participant B\n  rect rgb(255,0,0)\n  A->>B: hi\n  end\n",
+            "#ff0000",
+            "rgb(255,0,0)",
+        ),
+    ];
+
+    let mut svg_misses = Vec::new();
+    let mut canvas_misses = Vec::new();
+    let mut compared = 0_usize;
+
+    for (case, source, hex, rgb) in cases {
+        let ir = fm_parser::parse(source).ir;
+        let svg = fm_render_svg::render_svg(&ir).to_ascii_lowercase().replace(' ', "");
+        let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+        render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+        let canvas = format!("{:?}", context.operations())
+            .to_ascii_lowercase()
+            .replace(' ', "");
+
+        let carries = |haystack: &str| haystack.contains(*hex) || haystack.contains(*rgb);
+
+        if !carries(&svg) {
+            svg_misses.push(format!(
+                "{case}: the SVG does not carry {hex} or {rgb}, so this case cannot compare renderers"
+            ));
+            continue;
+        }
+        compared += 1;
+        if !carries(&canvas) {
+            canvas_misses.push(format!("{case}: SVG carries {hex}, the canvas does not"));
+        }
+    }
+
+    // NON-VACUITY, and it is the assertion that matters most here: if the SVG stopped honouring
+    // every declaration, the loop above would report zero canvas misses while comparing nothing.
+    assert!(
+        compared == cases.len(),
+        "only {compared} of {} cases were comparable; the SVG reference itself regressed:\n  {}",
+        cases.len(),
+        svg_misses.join("\n  ")
+    );
+    assert!(
+        canvas_misses.is_empty(),
+        "the canvas dropped styling the SVG honoured (bd-lvj3):\n  {}",
+        canvas_misses.join("\n  ")
+    );
+}
