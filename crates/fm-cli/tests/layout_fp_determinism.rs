@@ -77,6 +77,95 @@ fn coordinates(layout: &fm_layout::DiagramLayout) -> Vec<f32> {
     out
 }
 
+/// FNV-1a over the BIT PATTERN of every coordinate, in the fixed order `coordinates` emits.
+///
+/// ⚠️ NOT `DefaultHasher`, and the reason is the entire point of this file. `std`'s default hasher
+/// is explicitly not guaranteed stable across Rust versions, and it is randomly seeded per process
+/// for HashMap; a "cross-platform golden" built on it would differ between targets for reasons that
+/// have nothing to do with floating point, which is precisely the false positive this bead must not
+/// produce. FNV-1a is a fixed algorithm over fixed bytes: same input bits, same digest, on any
+/// target and any toolchain.
+///
+/// Hashing `to_bits()` rather than the float: `-0.0 == 0.0` compares true, so a value-based digest
+/// would be blind to the exact sign-of-zero divergence that `Rotor::to_affine_matrix` was shipping
+/// until bd-1s1g.6 (it built the identity matrix with a `-0.0` in it). Subnormals likewise differ
+/// in bits while comparing equal to nothing else in particular.
+fn coordinate_digest(values: &[f32]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for value in values {
+        for byte in value.to_bits().to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
+}
+
+/// The cross-target comparison artifact the bead asks for (bd-1s1g.6, implementation steps 1-3).
+///
+/// ⚠️ WHAT THIS TEST DOES AND DOES NOT PROVE, stated because the distinction is the whole reason
+/// the bead is still open. Running on x86_64 alone it proves only that these four layouts have not
+/// changed. It CANNOT observe aarch64 or wasm32 from here, and a test that claimed to would be
+/// worthless — the sibling file in fm-layout makes the same point about its own scope.
+///
+/// What it does is make step 3 mechanical rather than a project. The digests below are a property
+/// of the coordinates, not of this machine, so running this same test under another target is a
+/// direct comparison: a target whose floating point diverges fails HERE, on the fixture that
+/// diverged, with no bespoke harness and nothing to diff by hand.
+///
+/// PER-FIXTURE, not one digest for the set. A single combined constant tells you only that
+/// something moved; the project has already learned that lesson the expensive way, where 37 goldens
+/// changing at once carried no information about which change caused it. These localise it.
+///
+/// WHEN THIS FAILS ON x86_64 after a deliberate layout change, that is expected: re-derive the
+/// constants from the failure message and say in the commit which fixtures moved and why. Do not
+/// relax it to a range — a tolerance would make it blind to exactly the one-ULP divergences it
+/// exists to catch.
+#[test]
+fn layout_coordinates_match_their_cross_target_digest() {
+    // Derived on x86_64-unknown-linux-gnu at 7d7ec0aa, target-cpu=x86-64-v2 (see .cargo/config.toml
+    // — the microarchitecture level is part of what these pin, since it changes which float ops
+    // lower to hardware instructions).
+    const EXPECTED: &[(&str, u64)] = &[
+        ("flowchart", 0x19c8_0a8c_3608_67ca),
+        ("sequence", 0x0372_54aa_adab_2295),
+        ("class", 0x3123_9435_760e_03d5),
+        ("state", 0xa519_e199_b43f_131e),
+    ];
+
+    let mut actual = Vec::new();
+    for (name, source) in DIAGRAMS {
+        let ir = fm_parser::parse(source).ir;
+        let digest = coordinate_digest(&coordinates(&layout_diagram(&ir)));
+        actual.push((*name, digest));
+    }
+
+    // Emitted unconditionally so a run on another target prints its own table even when it passes,
+    // which is what makes a cross-target comparison a copy-paste rather than an investigation.
+    for (name, digest) in &actual {
+        println!("cross-target digest {name} = {digest:#018x}");
+    }
+
+    let placeholder = EXPECTED.iter().all(|(_, digest)| *digest == 0);
+    assert!(
+        !placeholder,
+        "the expected digests are still placeholders; fill them in from the table above:\n{}",
+        actual
+            .iter()
+            .map(|(name, digest)| format!("        (\"{name}\", {digest:#018x}),"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    for ((name, expected), (actual_name, actual_digest)) in EXPECTED.iter().zip(&actual) {
+        assert_eq!(name, actual_name, "fixture order changed");
+        assert_eq!(
+            expected, actual_digest,
+            "{name}: layout coordinates changed (or this target's floating point diverges)"
+        );
+    }
+}
+
 /// Laying out the same IR twice must give BIT-identical coordinates.
 ///
 /// Compared through `to_bits`, not `==`: f32 equality says `-0.0 == 0.0`, but the two serialise
