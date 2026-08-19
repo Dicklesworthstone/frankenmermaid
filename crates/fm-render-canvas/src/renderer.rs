@@ -788,7 +788,11 @@ impl Canvas2dRenderer {
             });
 
             if let Some(title_text) = title_text {
-                ctx.set_fill_style(&self.config.label_color);
+                let declared_title_color = resolve_cluster_text_color(ir, cluster_box.cluster_index);
+                let title_color = declared_title_color
+                    .as_deref()
+                    .and_then(sanitize_canvas_paint);
+                ctx.set_fill_style(title_color.as_deref().unwrap_or(&self.config.label_color));
                 ctx.set_font(cluster_label_font.get_or_insert_with(|| {
                     format!(
                         "{}px {}",
@@ -1585,7 +1589,10 @@ impl Canvas2dRenderer {
             // they must agree about its colour. Resolving per site is how one branch silently
             // keeps the theme default.
             let declared_label_color = resolve_edge_label_color(ir, edge_path.edge_index);
-            let edge_label_fill = declared_label_color
+            let sanitised_label_color = declared_label_color
+                .as_deref()
+                .and_then(sanitize_canvas_paint);
+            let edge_label_fill = sanitised_label_color
                 .as_deref()
                 .unwrap_or(&self.config.label_color);
             let (legacy_width, dash_pattern) =
@@ -1933,7 +1940,15 @@ impl Canvas2dRenderer {
             // compartments, ER entity rows, requirement rows) all draw text belonging to THIS
             // node, so they must agree about its colour. Resolving per-site would let a later
             // branch silently keep the theme default.
-            let text_color = resolve_node_text_color(ir, node_box.node_index);
+            // SANITISED, like every other paint this renderer forwards. A canvas silently IGNORES
+            // an unparsable `fillStyle` and keeps the PREVIOUS colour, so forwarding junk paints
+            // the text in whatever was drawn last — a position-dependent wrong colour rather than
+            // a visible failure. The cluster SHAPE path has sanitised since it landed; the label
+            // paths did not, which is the same asymmetric-sibling shape as the properties above.
+            let declared_text_color = resolve_node_text_color(ir, node_box.node_index);
+            let text_color = declared_text_color
+                .as_deref()
+                .and_then(sanitize_canvas_paint);
             let label_fill = text_color.as_deref().unwrap_or(&self.config.label_color);
             // The border WIDTH is the third channel of the same declaration and was the last one
             // still discarded here: the edge resolver has read `stroke-width` since bd-lvj3's edge
@@ -2709,10 +2724,16 @@ fn sanitize_canvas_paint(value: &str) -> Option<String> {
 ///
 /// Returns `None` per channel when nothing was declared, so the caller keeps whatever it would
 /// otherwise have used rather than a colour resolved from an empty map.
-pub(crate) fn resolve_cluster_colors(
+/// The merged `style` declaration for one cluster.
+///
+/// Factored out of [`resolve_cluster_colors`] so a second property reads off the SAME chain, the
+/// shape `merged_node_style` and `merged_edge_style` already have. Only `IrStyleTarget::Cluster`
+/// is consulted: a cluster has no `classes` and no `inline_style`, so merging those would invent a
+/// cascade the IR does not have.
+fn merged_cluster_style(
     ir: &MermaidDiagramIr,
     cluster_index: usize,
-) -> (Option<String>, Option<String>) {
+) -> std::collections::BTreeMap<String, String> {
     let mut merged: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
 
     for style_ref in &ir.style_refs {
@@ -2722,6 +2743,27 @@ pub(crate) fn resolve_cluster_colors(
             merged.extend(fm_core::parse_style_string(&style_ref.style).properties);
         }
     }
+
+    merged
+}
+
+/// The author's declared cluster LABEL colour, if any (bd-lvj3).
+///
+/// The third surface to learn `color`, after nodes and edges. Measured against the SVG arm, which
+/// emits the declaration for `style one color:#ff00ff`, this renderer drew every subgraph title in
+/// `config.label_color` regardless.
+pub(crate) fn resolve_cluster_text_color(
+    ir: &MermaidDiagramIr,
+    cluster_index: usize,
+) -> Option<String> {
+    merged_cluster_style(ir, cluster_index).get("color").cloned()
+}
+
+pub(crate) fn resolve_cluster_colors(
+    ir: &MermaidDiagramIr,
+    cluster_index: usize,
+) -> (Option<String>, Option<String>) {
+    let merged = merged_cluster_style(ir, cluster_index);
 
     (merged.get("fill").cloned(), merged.get("stroke").cloned())
 }
