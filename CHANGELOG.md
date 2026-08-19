@@ -9,13 +9,39 @@ All notable changes to **frankenmermaid** are documented here.
 > Repository: <https://github.com/Dicklesworthstone/frankenmermaid>
 > Live demo: <https://dicklesworthstone.github.io/frankenmermaid/>
 
-The first tagged release is **`v0.2.0`** — the workspace is at version `0.2.0`
+The first tagged release is **[`v0.2.0`](https://github.com/Dicklesworthstone/frankenmermaid/releases/tag/v0.2.0)** (GitHub Release, 2026-07-11) — the workspace is at version `0.2.0`
 across all crates and crates.io publishing is being prepared (see
 [`docs/CRATES_IO_PUBLISHING.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/docs/CRATES_IO_PUBLISHING.md)).
+No later tag or GitHub Release exists; **1,512 commits** on [`main`](https://github.com/Dicklesworthstone/frankenmermaid/compare/v0.2.0...main) after `v0.2.0` are summarized under Unreleased below (through 2026-08-19, HEAD [`7b43c1fb`](https://github.com/Dicklesworthstone/frankenmermaid/commit/7b43c1fbfb2414b8672070790905316aa4e25a82)).
 The sections below are organized chronologically and grouped by capability
 area. Every commit link points to the canonical GitHub history. Beads issue
 identifiers (`bd-XXXX`) reference the dependency-aware task tracker in
 [`.beads/`](https://github.com/Dicklesworthstone/frankenmermaid/tree/main/.beads).
+
+---
+
+## Unreleased — 2026-07-11 → 2026-08-19
+
+Post-`v0.2.0` work on `main`. The v0.2.0 campaign's remaining structural-equivalence blockers (class members, UML markers, subgraph/cluster paint) were closed far enough that the 2,000- and 5,000-diagram CI jobs could be recorded as equivalence-clean. A concurrent multi-diagram CLI path and a shared-subgraph batch parser were certified. A GPU plan backend started emitting real instance buffers. Canvas/GPU declared-style gaps became a matrix instead of a list. The 2026-08-19 janitor pass moved remaining root planning docs.
+
+### Equivalence-clean corpora and UML marker semantics (late July 2026)
+
+Class nodes now size for their members instead of silently truncating them ([`4649bc9a`](https://github.com/Dicklesworthstone/frankenmermaid/commit/4649bc9a)). Inheritance triangles, UML relationship markers, and reciprocal rendered edges were aligned with the mermaid-js oracle so `ci_docs_2000` and `ci_docs_5000` could be recorded as 2000/2000 and 5000/5000 equivalence-clean.
+
+### Concurrent CLI + shared-subgraph batch (2026-07-31)
+
+The CLI shipped concurrent multi-diagram `render-batch` and reused renders across identical sources ([`2309a385`](https://github.com/Dicklesworthstone/frankenmermaid/commit/2309a385)). Shared flowchart prefixes compile once per batch (`FlowchartBatchParsePlan`). Certified in this window: the concurrent incumbent win ([`dffc3e03`](https://github.com/Dicklesworthstone/frankenmermaid/commit/dffc3e03)) and the shared-subgraph batch win ([`87bb0a23`](https://github.com/Dicklesworthstone/frankenmermaid/commit/87bb0a23)).
+
+### GPU plan backend and declared-style matrix (August 2026)
+
+`feat(gpu)` grew a real plan: SDF shape shaders, glyph atlas/text quads, edge colour/dash/arrowheads, per-instance stroke width, subgraph containers and titles, sequence activation bars/notes, and class/ER cardinalities at edge ends ([`f5769ac8`](https://github.com/Dicklesworthstone/frankenmermaid/commit/f5769ac8)). Canvas and GPU now have to *agree* on a declared value, not merely honour a subset. State-diagram transition labels keep their guard and action ([`9a4d5f5d`](https://github.com/Dicklesworthstone/frankenmermaid/commit/9a4d5f5d)). Head-to-head gained `--pidfile`, child deadlines, and disk-bound/exclusivity refusals so a peer's benchmark cannot silently share the machine.
+
+### Janitor docs-reorg wave (2026-08-19)
+
+- [`d33f9a68`](https://github.com/Dicklesworthstone/frankenmermaid/commit/d33f9a68ea50aaf2d614b000b2d222c7cb080d83) — untrack skill-loop scratch; move `PROPOSED_ARCHITECTURE.md` and the FrankenTUI port plan into `docs/planning/`.
+- [`23921dc1`](https://github.com/Dicklesworthstone/frankenmermaid/commit/23921dc15db39d8ea06eb0c82305c432d13fade1) — drop the unused JPEG illustration and beads recovery snapshots.
+- [`1228089e`](https://github.com/Dicklesworthstone/frankenmermaid/commit/1228089ec7cf7fbdb8fd930dcccaf972c9b48a32) — relocate `FEATURE_PARITY.md`, `UPGRADE_LOG.md`, and `EXISTING_FRANKENTUI_MERMAID_STRUCTURE.md` into `docs/planning/`; move `update_evidence.rs` into `scripts/`.
+- [`7b43c1fb`](https://github.com/Dicklesworthstone/frankenmermaid/commit/7b43c1fbfb2414b8672070790905316aa4e25a82) — move `CRATES_IO_PUBLISHING.md` to [`docs/CRATES_IO_PUBLISHING.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/docs/CRATES_IO_PUBLISHING.md).
 
 ---
 
@@ -192,7 +218,7 @@ The fnx-* crates remain git-pinned because they back an optional
 - **Fixture-backed FrankenTUI conformance suite** with coverage tracking,
   driven by `crates/fm-cli/tests/frankentui_conformance_cases.json` and
   documented in
-  [`FEATURE_PARITY.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/FEATURE_PARITY.md)
+  [`docs/planning/FEATURE_PARITY.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/docs/planning/FEATURE_PARITY.md)
   ([3921135](https://github.com/Dicklesworthstone/frankenmermaid/commit/3921135),
   [d639df0](https://github.com/Dicklesworthstone/frankenmermaid/commit/d639df0),
   [1ce6609](https://github.com/Dicklesworthstone/frankenmermaid/commit/1ce6609),
