@@ -428,6 +428,107 @@ pub struct GpuTextQuad {
 /// Kept alongside the per-glyph quads because a run is the unit the raster pass draws in, so it is
 /// the unit an equivalence check can compare. Counting quads instead would compare glyphs against
 /// runs and never agree.
+/// A cardinality's anchor: inset from its OWN endpoint, along the edge (bd-2ogh5, the GPU twin of the raster bead bd-rk14).
+///
+/// Each number goes by the end it belongs to, since which end carries `1` and which carries `many`
+/// is the entire content. A zero-length first segment has no direction to inset along, so the text
+/// sits on the point rather than being pushed to NaN by a divide by zero.
+fn cardinality_anchor(from: LayoutPoint, toward: LayoutPoint, inset: f32) -> (f32, f32) {
+    let (dx, dy) = (toward.x - from.x, toward.y - from.y);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len > 0.0 {
+        (from.x + (dx / len) * inset, from.y + (dy / len) * inset)
+    } else {
+        (from.x, from.y)
+    }
+}
+
+/// Emit one centred text run, or nothing if it would be empty (bd-qj46q, bd-2ogh5).
+///
+/// ONE place where a glyph missing from the atlas is handled, because that is the failure that does
+/// not announce itself: the loop skips uncelled glyphs, so a run whose text never reached
+/// `GlyphAtlasPlan::for_texts` emits zero quads and the plan looks structurally correct while
+/// rendering nothing. Three callers now share this, and every one of them must also have fed its
+/// text into the atlas chain.
+///
+/// Centred on the anchor because that is what the raster pass does for both edge labels (a centred
+/// label plate) and cardinalities (`TextAlign::Center` with a `Middle` baseline).
+struct TextSink<'a> {
+    atlas: &'a GlyphAtlasPlan,
+    quads: &'a mut Vec<GpuTextQuad>,
+    runs: &'a mut Vec<GpuTextRun>,
+}
+
+impl TextSink<'_> {
+    fn push_centred(
+        &mut self,
+        text: &str,
+        center: (f32, f32),
+        color: [f32; 4],
+        source: GpuTextSource,
+        index: usize,
+    ) {
+        let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
+        if inked.is_empty() {
+            return;
+        }
+        let first_quad = u32::try_from(self.quads.len()).unwrap_or(u32::MAX);
+        let advance = DEFAULT_FONT_SIZE_PX * CHAR_ADVANCE_RATIO;
+        let half_height = DEFAULT_FONT_SIZE_PX * 0.5;
+        let run_width = u16::try_from(inked.len()).map_or(f32::from(u16::MAX), f32::from) * advance;
+        let start_x = center.0 - (run_width * 0.5) + (advance * 0.5);
+        let run_index = u32::try_from(self.runs.len()).unwrap_or(u32::MAX);
+        for (offset, glyph) in inked.iter().enumerate() {
+            let Some(cell) = self.atlas.cell(*glyph) else {
+                continue;
+            };
+            let step = u16::try_from(offset).map_or(f32::from(u16::MAX), f32::from);
+            self.quads.push(GpuTextQuad {
+                center: [start_x + (step * advance), center.1],
+                half_extent: [advance * 0.5, half_height],
+                uv_min: cell.uv_min,
+                uv_max: cell.uv_max,
+                color,
+                run_index,
+            });
+        }
+        let quad_count = u32::try_from(self.quads.len()).unwrap_or(u32::MAX) - first_quad;
+        if quad_count > 0 {
+            self.runs.push(GpuTextRun {
+                source,
+                node_index: u32::try_from(index).unwrap_or(u32::MAX),
+                first_quad,
+                quad_count,
+            });
+        }
+    }
+}
+
+/// The cardinality texts at an edge's two ends, source first (bd-2ogh5, the GPU twin of the raster bead bd-rk14).
+///
+/// Class values take precedence over ER exactly as the raster pass has it: in practice an edge
+/// carries one or the other, since `er_notation` is set by the ER path and `*_cardinality` by the
+/// class one, but the precedence is duplicated rather than assumed so the two surfaces cannot
+/// disagree if both ever appear.
+fn edge_cardinality_texts<'a>(
+    ir: &'a MermaidDiagramIr,
+    edge: &fm_layout::LayoutEdgePath,
+) -> (Option<&'a str>, Option<&'a str>) {
+    let Some(ir_edge) = ir.edges.get(edge.edge_index) else {
+        return (None, None);
+    };
+    let er = ir_edge.er_cardinality_labels();
+    let source = ir_edge
+        .source_cardinality()
+        .or_else(|| er.map(|(source, _)| source))
+        .filter(|text| !text.is_empty());
+    let target = ir_edge
+        .target_cardinality()
+        .or_else(|| er.map(|(_, target)| target))
+        .filter(|text| !text.is_empty());
+    (source, target)
+}
+
 /// An edge's label text, or `None` when it has none (bd-qj46q).
 ///
 /// ONE lookup used by BOTH the atlas fill and the quad pass. Two copies of "which edges have text"
@@ -496,6 +597,15 @@ pub enum GpuTextSource {
     Node,
     Cluster,
     Edge,
+    /// A class/ER cardinality at the edge's SOURCE end (`"1" --> "many"`, `}o--o|`).
+    ///
+    /// Split from `EdgeTargetCardinality` rather than sharing one variant with `node_index`: both
+    /// ends of one edge carry the same edge index, so a single variant would emit two runs a
+    /// consumer could not tell apart, and WHICH end carries `1` and which carries `many` is the
+    /// entire content of a cardinality.
+    EdgeSourceCardinality,
+    /// A class/ER cardinality at the edge's TARGET end.
+    EdgeTargetCardinality,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -830,6 +940,19 @@ impl GpuRenderPlan {
                             .iter()
                             .filter(|edge| !edge.bundled)
                             .filter_map(|edge| edge_label_text(ir, edge)),
+                    )
+                    // CARDINALITIES GO IN THE ATLAS TOO. Same trap: a `1` that never reached the
+                    // atlas emits no quad and the run vanishes without an error anywhere.
+                    .chain(
+                        layout
+                            .edges
+                            .iter()
+                            .filter(|edge| !edge.bundled)
+                            .flat_map(|edge| {
+                                let (source, target) = edge_cardinality_texts(ir, edge);
+                                [source, target]
+                            })
+                            .flatten(),
                     ),
                 cell_px,
             );
@@ -939,57 +1062,51 @@ impl GpuRenderPlan {
             }
         }
 
-        // EDGE LABELS (bd-qj46q). `draw_edges` draws one `fill_text` per labelled edge, so without
-        // this pass a `A -->|yes| B` flowchart planned its edge and dropped the word on it -- the
-        // same defect class as the subgraph titles that were missing before bd-dh6cy.
+        // EDGE LABELS AND CARDINALITIES (bd-qj46q, bd-2ogh5). `draw_edges` emits a fill_text for a
+        // labelled edge and one PER END for a class/ER cardinality, so without this pass a
+        // `A -->|yes| B` flowchart planned its edge and dropped the word on it, and a class diagram
+        // planned a relationship with no `1` or `many` at either end.
         //
-        // Centred on the anchor, unlike a cluster title: the raster pass fills a label plate
-        // CENTRED at the anchor and draws the text into it, so a left-inset run would sit half a
-        // label to the right of where the other surface puts it.
+        // Cardinalities are placed OUTSIDE the label branch on purpose, mirroring the raster pass:
+        // an edge may carry cardinality and no label at all.
+        let mut sink = TextSink {
+            atlas: &glyph_atlas,
+            quads: &mut text_quads,
+            runs: &mut text_runs,
+        };
         for edge in layout.edges.iter().filter(|edge| !edge.bundled) {
-            let Some(text) = edge_label_text(ir, edge) else {
-                continue;
-            };
-            let Some((anchor_x, anchor_y)) =
-                edge_label_anchor(&edge.points, DEFAULT_FONT_SIZE_PX * 0.8)
-            else {
-                continue;
-            };
-            let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
-            if inked.is_empty() {
-                continue;
-            }
-            let first_quad = u32::try_from(text_quads.len()).unwrap_or(u32::MAX);
-            let advance = DEFAULT_FONT_SIZE_PX * CHAR_ADVANCE_RATIO;
-            let half_height = DEFAULT_FONT_SIZE_PX * 0.5;
-            let run_width = u16::try_from(inked.len()).map_or(f32::from(u16::MAX), f32::from) * advance;
-            let start_x = anchor_x - (run_width * 0.5) + (advance * 0.5);
             let colour = crate::renderer::resolve_edge_label_color(ir, edge.edge_index)
                 .as_deref()
                 .and_then(parse_paint_rgba)
                 .unwrap_or(DEFAULT_LABEL_RGBA);
-            for (offset, glyph) in inked.iter().enumerate() {
-                let Some(cell) = glyph_atlas.cell(*glyph) else {
-                    continue;
-                };
-                let step = u16::try_from(offset).map_or(f32::from(u16::MAX), f32::from);
-                text_quads.push(GpuTextQuad {
-                    center: [start_x + (step * advance), anchor_y],
-                    half_extent: [advance * 0.5, half_height],
-                    uv_min: cell.uv_min,
-                    uv_max: cell.uv_max,
-                    color: colour,
-                    run_index: u32::try_from(text_runs.len()).unwrap_or(u32::MAX),
-                });
+
+            if let Some(text) = edge_label_text(ir, edge)
+                && let Some(anchor) = edge_label_anchor(&edge.points, DEFAULT_FONT_SIZE_PX * 0.8)
+            {
+                sink.push_centred(text, anchor, colour, GpuTextSource::Edge, edge.edge_index);
             }
-            let quad_count = u32::try_from(text_quads.len()).unwrap_or(u32::MAX) - first_quad;
-            if quad_count > 0 {
-                text_runs.push(GpuTextRun {
-                    source: GpuTextSource::Edge,
-                    node_index: u32::try_from(edge.edge_index).unwrap_or(u32::MAX),
-                    first_quad,
-                    quad_count,
-                });
+
+            let (source_text, target_text) = edge_cardinality_texts(ir, edge);
+            if (source_text.is_some() || target_text.is_some()) && edge.points.len() >= 2 {
+                let last = edge.points.len() - 1;
+                let ends = [
+                    (source_text, 0, 1, GpuTextSource::EdgeSourceCardinality),
+                    (target_text, last, last - 1, GpuTextSource::EdgeTargetCardinality),
+                ];
+                for (text, from_idx, toward_idx, source) in ends {
+                    let Some(text) = text else {
+                        continue;
+                    };
+                    let from = edge.points[from_idx];
+                    let toward = edge.points[toward_idx];
+                    sink.push_centred(
+                        text,
+                        cardinality_anchor(from, toward, DEFAULT_FONT_SIZE_PX * 1.2),
+                        colour,
+                        source,
+                        edge.edge_index,
+                    );
+                }
             }
         }
 
@@ -1589,6 +1706,66 @@ mod tests {
             super::edge_label_anchor(&[p(0.0, 0.0), p(10.0, 20.0)], 4.0),
             Some((5.0, 6.0))
         );
+    }
+
+    /// Class/ER cardinalities reach the GPU plan at THEIR OWN ends (bd-2ogh5, the GPU twin of the raster bead bd-rk14).
+    ///
+    /// `"1" --> "many"` lives in `IrEdgeExtras`, not `edge.label`, so the edge-label pass does not
+    /// see it and a class diagram planned its relationship lines with no numbers at either end.
+    /// The two ends are checked separately and against independently computed anchors: a run that
+    /// exists but sits at the wrong end inverts the meaning of the diagram, which is a worse
+    /// failure than drawing nothing.
+    #[test]
+    fn edge_cardinalities_reach_the_gpu_plan_at_both_ends() {
+        let mut ir = ir_with_edge_at_fixture_index(fm_core::ArrowType::Arrow);
+        ir.edges[7].extras = Some(Box::new(fm_core::IrEdgeExtras {
+            source_cardinality: Some("1".into()),
+            target_cardinality: Some("many".into()),
+            ..Default::default()
+        }));
+
+        let plan = super::GpuRenderPlan::from_layout(&ir, &test_layout(), 1.25);
+        let run_at = |source: super::GpuTextSource| {
+            plan.text_runs
+                .iter()
+                .find(|run| run.source == source)
+                .copied()
+                .unwrap_or_else(|| panic!("no run for {source:?}"))
+        };
+
+        let source_run = run_at(super::GpuTextSource::EdgeSourceCardinality);
+        let target_run = run_at(super::GpuTextSource::EdgeTargetCardinality);
+        assert_eq!(source_run.quad_count, 1, "\"1\" is one glyph");
+        assert_eq!(target_run.quad_count, 4, "\"many\" is four glyphs");
+        assert_eq!(source_run.node_index, 7);
+        assert_eq!(target_run.node_index, 7);
+
+        // Independently computed, NOT read back from cardinality_anchor, or this would assert the
+        // implementation against itself. The fixture edge runs (50,35) -> (70,35) -> (90,30), and
+        // the inset is DEFAULT_FONT_SIZE_PX * 1.2 = 16.8 along each end's own first segment.
+        let centre_of = |run: super::GpuTextRun| {
+            let quads =
+                &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
+            let x = quads.iter().map(|q| q.center[0]).sum::<f32>() / quads.len() as f32;
+            (x, quads[0].center[1])
+        };
+        let (sx, sy) = centre_of(source_run);
+        assert!((sx - 66.8).abs() < 0.01 && (sy - 35.0).abs() < 0.01, "source at ({sx}, {sy})");
+        let (tx, ty) = centre_of(target_run);
+        assert!((tx - 73.702).abs() < 0.01 && (ty - 34.075).abs() < 0.01, "target at ({tx}, {ty})");
+    }
+
+    /// A degenerate first segment must not push the text to NaN (bd-2ogh5, the GPU twin of the raster bead bd-rk14).
+    #[test]
+    fn a_zero_length_segment_anchors_a_cardinality_on_the_point() {
+        let p = |x: f32, y: f32| super::LayoutPoint { x, y };
+        let (x, y) = super::cardinality_anchor(p(12.0, 8.0), p(12.0, 8.0), 16.8);
+        assert!(x.is_finite() && y.is_finite(), "a zero-length segment divided by zero");
+        assert_eq!((x, y), (12.0, 8.0));
+
+        // And a normal segment insets along it, so the guard did not flatten the real case.
+        let (x, y) = super::cardinality_anchor(p(0.0, 0.0), p(10.0, 0.0), 4.0);
+        assert_eq!((x, y), (4.0, 0.0));
     }
 
     /// A dash pattern runs along the WHOLE edge, not restarting at every bend (bd-f7ctn).
