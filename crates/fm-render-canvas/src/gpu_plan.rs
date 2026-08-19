@@ -630,6 +630,20 @@ impl GpuRenderPlan {
             // Control characters carry no ink and are excluded from the atlas, so they must not
             // consume an advance either — otherwise a label with a newline would render with a gap
             // where nothing is drawn.
+            // The author's declared label colour, resolved through the SAME helper the Canvas2D
+            // pass uses (bd-lvj3). This quad carried DEFAULT_LABEL_RGBA unconditionally, so
+            // `style a color:#f00` and a `classDef` carrying `color:` reached the raster path and
+            // stopped here -- the field existed and was populated with a constant, which is the
+            // failure an ABI check cannot see and a plan test can.
+            //
+            // Resolved once per RUN rather than per glyph: every glyph of one label belongs to one
+            // node, so resolving inside the glyph loop would repeat the lookup for each character
+            // and could not produce a different answer.
+            let label_rgba = crate::renderer::resolve_node_text_color(ir, usize::try_from(*node_index).unwrap_or(usize::MAX))
+                .as_deref()
+                .and_then(parse_paint_rgba)
+                .unwrap_or(DEFAULT_LABEL_RGBA);
+
             let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
             let width = advance * u16::try_from(inked.len()).map_or(f32::from(u16::MAX), f32::from);
             let start_x = center[0] - (width * 0.5) + (advance * 0.5);
@@ -644,7 +658,7 @@ impl GpuRenderPlan {
                     half_extent: [advance * 0.5, half_height],
                     uv_min: cell.uv_min,
                     uv_max: cell.uv_max,
-                    color: DEFAULT_LABEL_RGBA,
+                    color: label_rgba,
                     run_index: run_index_u32,
                 });
             }
@@ -1674,6 +1688,40 @@ mod tests {
                 .all(|i| (i.stroke_width - super::DEFAULT_NODE_STROKE_WIDTH).abs() < f32::EPSILON),
             "an undeclared node did not get the default width: {:?}",
             plain_plan.node_instances.iter().map(|i| i.stroke_width).collect::<Vec<_>>()
+        );
+    }
+
+    /// A declared label colour reaches the GPU text quads (bd-lvj3).
+    ///
+    /// `GpuTextQuad::color` existed and was filled with `DEFAULT_LABEL_RGBA` for every glyph, so the
+    /// field looked wired from every angle an ABI or struct check can see. Only a test that asks
+    /// what VALUE arrives can tell a resolved colour from a constant.
+    #[test]
+    fn a_declared_label_colour_reaches_the_gpu_text_quads() {
+        let declared =
+            fm_parser::parse("flowchart TD\n  a[Alpha]\n  style a color:#ff0000\n").ir;
+        let layout = fm_layout::layout_diagram(&declared);
+        let plan = GpuRenderPlan::from_layout(&declared, &layout, 1.0);
+
+        assert!(!plan.text_quads.is_empty(), "no glyphs, so this proves nothing");
+        assert!(
+            plan.text_quads
+                .iter()
+                .any(|q| q.color[0] > 0.9 && q.color[1] < 0.1 && q.color[2] < 0.1),
+            "no glyph carries the declared red: {:?}",
+            plan.text_quads.iter().map(|q| q.color).take(4).collect::<Vec<_>>()
+        );
+
+        // CONTROL: an undeclared label keeps the theme default. Without this, returning red for
+        // everything would satisfy the assertion above while repainting every label in every
+        // diagram -- the same shape as the malformed-colour controls on the raster path.
+        let plain = fm_parser::parse("flowchart TD\n  a[Alpha]\n").ir;
+        let plain_layout = fm_layout::layout_diagram(&plain);
+        let plain_plan = GpuRenderPlan::from_layout(&plain, &plain_layout, 1.0);
+        assert!(
+            plain_plan.text_quads.iter().all(|q| q.color == super::DEFAULT_LABEL_RGBA),
+            "an undeclared label did not keep the theme colour: {:?}",
+            plain_plan.text_quads.iter().map(|q| q.color).take(4).collect::<Vec<_>>()
         );
     }
 }
