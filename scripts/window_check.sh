@@ -68,6 +68,27 @@ echo "  min=$min max=$max spread=$spread mean=$mean"
 echo "  idle=${idle}% (range across the SAME samples)  iowait=${iowait}%  loadavg=${loadavg}"
 echo "  per-sample idle: ${idles[*]}"
 echo "  cpu $mhz"
+# RUN QUEUE, sampled across the same sweep. `procs_running` counts RUNNABLE tasks, which is a
+# different question from "how many cpus are busy": a core can read as busy under one task, while a
+# runq of 47 on 64 cpus means 47 tasks contending for cache and memory bandwidth whatever the
+# per-cpu percentages say. Observed on this host at 06:23 -- runq 47 while a spot check reported
+# 82% idle.
+#
+# ⚠️ REPORTED, NOT GATED. A threshold needs a calibrated separation between runq values that spoil a
+# measurement and ones that do not, and this host has not yet produced paired runq-versus-drift
+# evidence. The iowait ceiling in abba_render.py could be justified because clean windows read 0.00%
+# and a saturated one read 53%; inventing a runq bound without the equivalent would be the elastic
+# threshold bd-ecjg exists to warn about. Recording it is what makes the calibration possible.
+runq_samples=()
+for (( k = 0; k < 5; k++ )); do
+  runq_samples+=("$(awk '/^procs_running/ {print $2}' /proc/stat)")
+done
+runq_lo=${runq_samples[0]}; runq_hi=${runq_samples[0]}
+for r in "${runq_samples[@]}"; do
+  (( r < runq_lo )) && runq_lo=$r
+  (( r > runq_hi )) && runq_hi=$r
+done
+echo "  runq (procs_running): ${runq_samples[*]}  -> ${runq_lo}-${runq_hi} of $(nproc) cpus"
 echo
 echo "RECORD THESE ON ANY BANKED ROW: loadavg, idle%, per-arm cpu MHz."
 

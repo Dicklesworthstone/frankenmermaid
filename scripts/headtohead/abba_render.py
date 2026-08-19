@@ -152,7 +152,7 @@ def proc_stat() -> dict:
     `procs_blocked` is the kernel's own count of tasks in uninterruptible sleep — the D-state number
     — and it comes free from the same read.
     """
-    iowait = total = blocked = 0
+    iowait = total = blocked = running = 0
     with open("/proc/stat", encoding="utf-8") as handle:
         for line in handle:
             if line.startswith("cpu "):
@@ -161,7 +161,14 @@ def proc_stat() -> dict:
                 iowait = fields[4] if len(fields) > 4 else 0
             elif line.startswith("procs_blocked"):
                 blocked = int(line.split()[1])
-    return {"iowait_jiffies": iowait, "total_jiffies": total, "procs_blocked": blocked}
+            elif line.startswith("procs_running"):
+                running = int(line.split()[1])
+    return {
+        "iowait_jiffies": iowait,
+        "total_jiffies": total,
+        "procs_blocked": blocked,
+        "procs_running": running,
+    }
 
 
 def arm_iowait_pct(arm: dict) -> float | None:
@@ -187,10 +194,24 @@ def io_note(arm: dict) -> str:
     show it was clean, and 'iowait was fine' is not something a reader can verify after the fact.
     """
     pct = arm_iowait_pct(arm)
-    blocked = ((arm.get("after") or {}).get("stat") or {}).get("procs_blocked")
+    before_stat = (arm.get("before") or {}).get("stat") or {}
+    after_stat = (arm.get("after") or {}).get("stat") or {}
+    blocked = after_stat.get("procs_blocked")
+    # RUN QUEUE, reported as the pair straddling the arm rather than one number. `procs_running` is
+    # an INSTANT, not an average, so a single reading beside a 100 ms arm describes a moment; two
+    # readings at least bound it, and a wide pair is itself the signal that the host was moving.
+    #
+    # ⚠️ RECORDED, NOT GATED, and the distinction is deliberate. A threshold needs a calibrated
+    # separation between runq values that spoil a measurement and ones that do not, and I do not
+    # have one: the iowait ceiling could be justified because clean windows read 0.00% and a
+    # saturated host read 53%, an order of magnitude apart. For runq I have observations (47 while
+    # the sample sweep spread 51; 12-20 busy cpus on windows that produced clean brackets) but no
+    # paired runq-versus-drift evidence, and inventing a bound would be the elastic-threshold
+    # mistake bd-ecjg already documents. Record it now so the calibration becomes possible.
+    runq = f"{before_stat.get('procs_running')}/{after_stat.get('procs_running')}"
     if pct is None:
-        return "iowait=n/a"
-    return f"iowait={pct:.2f}% blocked={blocked}"
+        return f"iowait=n/a runq={runq}"
+    return f"iowait={pct:.2f}% blocked={blocked} runq={runq}"
 
 
 def conditions() -> dict:
