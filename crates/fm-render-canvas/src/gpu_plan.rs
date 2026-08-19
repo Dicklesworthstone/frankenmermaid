@@ -430,6 +430,16 @@ pub struct GpuTextRun {
 pub const DEFAULT_GLYPH_CELL_PX: u32 = 32;
 
 /// Deterministic primitive buffers for a future WebGPU command encoder.
+///
+/// ⚠️ NO CLUSTER PRIMITIVE EXISTS (bd-dh6cy). A diagram with subgraphs plans its nodes and edges
+/// and NOT their containers — no box, no border, no cluster label. That is a silent absence rather
+/// than a regression (this pass has never drawn them), and it is recorded here because the type
+/// itself is where a reader looks to find out what a plan covers.
+///
+/// It also survives the structural gate below: `every_per_node_resolver_is_consumed_by_the_gpu_plan`
+/// scans `resolve_node_*` only, so the five `resolve_cluster_*` resolvers the Canvas2D pass uses are
+/// invisible to it. Extending that scan belongs WITH the fix, not before it — otherwise it fails
+/// loudly with nothing to consume.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GpuRenderPlan {
     pub bounds: LayoutRect,
