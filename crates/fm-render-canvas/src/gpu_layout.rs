@@ -341,6 +341,59 @@ mod tests {
         }
     }
 
+    /// ⚠️ EVERY buffer/shader PAIR, not just the node one.
+    ///
+    /// This gate covered `NodeInstance` alone for three days while three other pairs -- edge,
+    /// arrowhead, text -- went unchecked. A gate that covers one member of a family and READS as
+    /// covering the family is its own hazard: it is green, it is named after the general property,
+    /// and the uncovered members look guarded. The same shape as the resolver gate that scanned
+    /// `resolve_node_*` while the cluster resolvers sat unconsumed.
+    ///
+    /// Driven from a table so adding a fifth pipeline means adding a row, not remembering to write
+    /// a fourth copy of the assertions.
+    #[test]
+    fn every_shader_and_its_buffer_layout_agree() {
+        let pairs: &[(&str, &str, GpuBufferLayout, &str)] = &[
+            (NODE_SDF_WGSL, "NodeInstance", node_buffer_layout(), "node"),
+            (EDGE_WGSL, "EdgeSegment", edge_buffer_layout(), "edge"),
+            (ARROWHEAD_WGSL, "Arrowhead", arrowhead_buffer_layout(), "arrowhead"),
+            (TEXT_ATLAS_WGSL, "TextQuad", text_buffer_layout(), "text"),
+        ];
+
+        for (source, struct_name, layout, label) in pairs {
+            let shader = wgsl_struct_locations(source, struct_name);
+            assert!(
+                !shader.is_empty(),
+                "{label}: no @location members parsed out of {struct_name}, so this pair is unchecked"
+            );
+            assert_eq!(
+                shader.len(),
+                layout.attributes.len(),
+                "{label}: shader declares {} instance members, layout describes {}: {shader:?}",
+                shader.len(),
+                layout.attributes.len()
+            );
+            for attribute in layout.attributes {
+                let (_, name, ty) = shader
+                    .iter()
+                    .find(|(location, _, _)| *location == attribute.shader_location)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{label}: layout has @location({}) and the shader does not: {shader:?}",
+                            attribute.shader_location
+                        )
+                    });
+                assert_eq!(
+                    ty,
+                    expected_wgsl_type(attribute.format),
+                    "{label}: @location({}) `{name}` is `{ty}` in the shader but {:?} in the layout",
+                    attribute.shader_location,
+                    attribute.format
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_node_shader_and_the_node_buffer_layout_agree() {
         let shader = wgsl_struct_locations(NODE_SDF_WGSL, "NodeInstance");
