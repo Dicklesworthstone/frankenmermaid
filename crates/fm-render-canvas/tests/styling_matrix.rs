@@ -30,6 +30,13 @@ enum Support {
     Honoured,
     /// It does not. Confirmed against the SVG arm, which emits it — so this is a real
     /// disagreement between the two renderers, not a property nobody supports.
+    ///
+    /// Currently unconstructed, because every row is `Honoured`. KEPT DELIBERATELY: this variant
+    /// is the vocabulary for recording the next gap someone finds, and the bidirectional check in
+    /// `the_styling_matrix_matches_the_table` is built around it. Deleting it to silence a
+    /// dead-code warning would mean the next person has to rebuild the mechanism before they can
+    /// record a fact — which is how a gap ends up in a commit message instead of a gate.
+    #[allow(dead_code)]
     KnownGap,
 }
 
@@ -44,7 +51,7 @@ struct Case {
 const SUBGRAPH_HEAD: &str = "flowchart TD\n  subgraph one[One]\n    a[Alpha]\n  end\n";
 
 fn cases() -> Vec<Case> {
-    use Support::{Honoured, KnownGap};
+    use Support::Honoured;
     vec![
         // ── node ──────────────────────────────────────────────────────────────────────────
         Case { surface: "node", property: "fill", expected: Honoured,
@@ -122,7 +129,7 @@ fn cases() -> Vec<Case> {
         // The compartment labels derive their own smaller fonts and are not rescaled, so a
         // font-size on a class node disagrees with the SVG arm, which cascades it to the whole
         // element. Recorded when the node font-size landed, deliberately not half-fixed there.
-        Case { surface: "compartment", property: "font-size", expected: KnownGap,
+        Case { surface: "compartment", property: "font-size", expected: Honoured,
             source: "classDiagram\n  class A {\n    +int x\n  }\n  style A font-size:30px\n",
             needle: "SetFont(\"30px" },
     ]
@@ -209,9 +216,22 @@ fn the_table_covers_every_surface_without_duplicates() {
             "the matrix has no rows for the {surface} surface"
         );
     }
+    // THIS ASSERTION USED TO REQUIRE A `KnownGap` ROW, and it fired when the last one closed —
+    // which is exactly what it was for: "either this bead is closeable or the table rotted, and
+    // both deserve a human look". It was the first, so the check is replaced rather than deleted.
+    //
+    // What guards the table now is its SIZE. Every row is `Honoured`, so the bidirectional check
+    // has only one direction left to catch, and a table that silently lost rows would pass
+    // everything while asserting less and less. A floor makes shrinkage a failure.
     assert!(
-        all.iter().any(|c| c.expected == Support::KnownGap),
-        "no KnownGap rows remain — if that is real, this bead is closeable; if not, the table rotted"
+        all.len() >= 23,
+        "the styling matrix shrank to {} rows; rows may be removed only when the property itself \
+         is gone, never to make a failure go away",
+        all.len()
+    );
+    assert!(
+        all.iter().all(|c| c.expected == Support::Honoured),
+        "a KnownGap row reappeared — record why in the bead before letting this stand"
     );
 }
 

@@ -2041,6 +2041,28 @@ impl Canvas2dRenderer {
                 ctx.set_global_alpha(alpha);
             }
             let declared_font = resolve_node_font(ir, node_box.node_index, &self.config);
+            // The COMPARTMENT fonts derive different defaults from the plain label — the heading is
+            // bold at the theme size, the member rows are 0.9x — so they are composed separately
+            // from the same declared components. Only built when the author declared something, so
+            // an undeclared node still uses the hoisted pair and costs nothing.
+            let declared_parts = resolve_declared_node_font(ir, node_box.node_index);
+            let (declared_heading_font, declared_member_font) = if declared_parts.declares_anything()
+            {
+                (
+                    Some(declared_parts.compose(
+                        self.config.font_size,
+                        Some("bold"),
+                        &self.config.font_family,
+                    )),
+                    Some(declared_parts.compose(
+                        self.config.font_size * 0.9,
+                        None,
+                        &self.config.font_family,
+                    )),
+                )
+            } else {
+                (None, None)
+            };
             let dash = resolve_node_stroke_dasharray(ir, node_box.node_index);
             if let Some(ref pattern) = dash {
                 ctx.set_line_dash(pattern);
@@ -2087,7 +2109,10 @@ impl Canvas2dRenderer {
 
                 let class_fonts = class_compartment_fonts
                     .get_or_insert_with(|| class_compartment_font_css(&self.config));
-                ctx.set_font(class_fonts.0.as_str());
+                match declared_heading_font.as_deref() {
+                    Some(font) => ctx.set_font(font),
+                    None => ctx.set_font(class_fonts.0.as_str()),
+                }
                 ctx.set_text_align(TextAlign::Center);
                 let mut cursor_y = y + line_h;
 
@@ -2126,7 +2151,10 @@ impl Canvas2dRenderer {
                 cursor_y += member_font * 0.5;
 
                 // Attributes.
-                ctx.set_font(class_fonts.1.as_str());
+                match declared_member_font.as_deref() {
+                    Some(font) => ctx.set_font(font),
+                    None => ctx.set_font(class_fonts.1.as_str()),
+                }
                 ctx.set_text_align(TextAlign::Left);
                 for attr in &meta.attributes {
                     if cursor_y > y + h - line_h * 0.5 {
@@ -2187,7 +2215,10 @@ impl Canvas2dRenderer {
 
                 let class_fonts = class_compartment_fonts
                     .get_or_insert_with(|| class_compartment_font_css(&self.config));
-                ctx.set_font(class_fonts.0.as_str());
+                match declared_heading_font.as_deref() {
+                    Some(font) => ctx.set_font(font),
+                    None => ctx.set_font(class_fonts.0.as_str()),
+                }
                 ctx.set_text_align(TextAlign::Center);
                 let mut cursor_y = y + line_h;
                 ctx.fill_text(entity_name, x + w / 2.0, cursor_y);
@@ -2202,7 +2233,10 @@ impl Canvas2dRenderer {
                 self.draw_calls += 1;
                 cursor_y += member_font * 0.5;
 
-                ctx.set_font(class_fonts.1.as_str());
+                match declared_member_font.as_deref() {
+                    Some(font) => ctx.set_font(font),
+                    None => ctx.set_font(class_fonts.1.as_str()),
+                }
                 ctx.set_text_align(TextAlign::Left);
                 for attr in &node.members {
                     if cursor_y > y + h - member_font * 0.5 {
@@ -2250,7 +2284,10 @@ impl Canvas2dRenderer {
                     .unwrap_or(&node.id);
                 let fonts = class_compartment_fonts
                     .get_or_insert_with(|| class_compartment_font_css(&self.config));
-                ctx.set_font(fonts.0.as_str());
+                match declared_heading_font.as_deref() {
+                    Some(font) => ctx.set_font(font),
+                    None => ctx.set_font(fonts.0.as_str()),
+                }
                 ctx.set_text_align(TextAlign::Center);
                 let mut cursor_y = y + line_h;
                 ctx.fill_text(name, x + w / 2.0, cursor_y);
@@ -2265,7 +2302,10 @@ impl Canvas2dRenderer {
                 self.draw_calls += 1;
                 cursor_y += member_font * 0.5;
 
-                ctx.set_font(fonts.1.as_str());
+                match declared_member_font.as_deref() {
+                    Some(font) => ctx.set_font(font),
+                    None => ctx.set_font(fonts.1.as_str()),
+                }
                 ctx.set_text_align(TextAlign::Left);
                 // `type`/`doc` are an ELEMENT's fields (bd-qdmn), in the SVG's row order so all
                 // three backends read alike — ID, Text, Type, Doc, then Risk and Verify.
@@ -2307,7 +2347,10 @@ impl Canvas2dRenderer {
                     .unwrap_or(&node.id);
                 let fonts = class_compartment_fonts
                     .get_or_insert_with(|| class_compartment_font_css(&self.config));
-                ctx.set_font(fonts.0.as_str());
+                match declared_heading_font.as_deref() {
+                    Some(font) => ctx.set_font(font),
+                    None => ctx.set_font(fonts.0.as_str()),
+                }
                 ctx.set_text_align(TextAlign::Center);
                 let mut cursor_y = y + line_h;
                 ctx.fill_text(name, x + w / 2.0, cursor_y);
@@ -2315,7 +2358,10 @@ impl Canvas2dRenderer {
                 *labels_drawn += 1;
                 cursor_y += line_h * 0.5;
 
-                ctx.set_font(fonts.1.as_str());
+                match declared_member_font.as_deref() {
+                    Some(font) => ctx.set_font(font),
+                    None => ctx.set_font(fonts.1.as_str()),
+                }
                 ctx.set_text_align(TextAlign::Left);
                 let mut rows: Vec<String> = Vec::with_capacity(3);
                 if !meta.element_type.is_empty() {
@@ -3285,6 +3331,80 @@ fn sanitize_font_family(value: &str) -> Option<String> {
     permitted.then(|| value.to_string())
 }
 
+/// The font components an author declared on a node, before any fallback is applied.
+///
+/// ⚠️ COMPONENTS, NOT A FINISHED STRING, and that distinction is the whole reason this type exists.
+/// The plain label, the compartment HEADING and the compartment MEMBER rows each derive a
+/// DIFFERENT default size (`font_size`, `font_size`, `font_size * 0.9`) and the heading is bold.
+/// Handing all three one pre-composed string would force the label's size onto the compartments
+/// whenever the author declared only, say, a weight.
+///
+/// That is not what the reference does. Measured on the SVG arm for
+/// `class A { +int member }` + `style A font-size:30px`, BOTH texts carry `style="font-size:30px"`
+/// beside their own `font-size="13.80"` / `font-size="12.42"` presentation attributes — and an
+/// inline style beats a presentation attribute, so both render at 30px. Declare a weight instead
+/// and only the weight is emitted; the derived sizes stand. So each declared property applies
+/// FLAT and independently, and each undeclared one keeps that site's own default. Composing per
+/// site from components is the only way to reproduce that.
+#[derive(Default)]
+struct DeclaredNodeFont {
+    size: Option<f64>,
+    weight: Option<&'static str>,
+    style: Option<&'static str>,
+    family: Option<String>,
+}
+
+impl DeclaredNodeFont {
+    const fn declares_anything(&self) -> bool {
+        self.size.is_some()
+            || self.weight.is_some()
+            || self.style.is_some()
+            || self.family.is_some()
+    }
+
+    /// Compose a canvas font string, taking each undeclared component from this site's default.
+    ///
+    /// CSS shorthand order is not free — style, weight, size, family. A canvas parses this string,
+    /// and a wrong arrangement makes it unparsable, which is silently equivalent to setting no
+    /// font at all.
+    fn compose(&self, size: f64, weight: Option<&str>, family: &str) -> String {
+        let mut font = String::new();
+        if let Some(style) = self.style {
+            font.push_str(style);
+            font.push(' ');
+        }
+        if let Some(weight) = self.weight.or(weight) {
+            font.push_str(weight);
+            font.push(' ');
+        }
+        font.push_str(&format!(
+            "{}px {}",
+            self.size.unwrap_or(size),
+            self.family.as_deref().unwrap_or(family)
+        ));
+        font
+    }
+}
+
+fn resolve_declared_node_font(ir: &MermaidDiagramIr, node_index: usize) -> DeclaredNodeFont {
+    let merged = merged_node_style(ir, node_index);
+    DeclaredNodeFont {
+        size: parse_declared_font_size(merged.get("font-size").map(String::as_str)),
+        weight: merged
+            .get("font-weight")
+            .map(String::as_str)
+            .and_then(sanitize_font_weight),
+        style: merged
+            .get("font-style")
+            .map(String::as_str)
+            .and_then(sanitize_font_style),
+        family: merged
+            .get("font-family")
+            .map(String::as_str)
+            .and_then(sanitize_font_family),
+    }
+}
+
 /// The author's declared node FONT, as a canvas font string, if anything was declared (bd-lvj3).
 ///
 /// Returns `None` when neither `font-size` nor `font-weight` was declared, which is what keeps the
@@ -3295,41 +3415,10 @@ fn resolve_node_font(
     node_index: usize,
     config: &CanvasRenderConfig,
 ) -> Option<String> {
-    let merged = merged_node_style(ir, node_index);
-    let size = parse_declared_font_size(merged.get("font-size").map(String::as_str));
-    let weight = merged
-        .get("font-weight")
-        .map(String::as_str)
-        .and_then(sanitize_font_weight);
-    let style = merged
-        .get("font-style")
-        .map(String::as_str)
-        .and_then(sanitize_font_style);
-    let family = merged
-        .get("font-family")
-        .map(String::as_str)
-        .and_then(sanitize_font_family);
-
-    if size.is_none() && weight.is_none() && style.is_none() && family.is_none() {
-        return None;
-    }
-
-    // CSS shorthand ORDER IS NOT FREE: style, then weight, then size, then family. A canvas parses
-    // this string, and components in the wrong order make it unparsable — which is silently
-    // equivalent to setting no font at all.
-    let size = size.unwrap_or(config.font_size);
-    let family = family.unwrap_or_else(|| config.font_family.clone());
-    let mut font = String::new();
-    if let Some(style) = style {
-        font.push_str(style);
-        font.push(' ');
-    }
-    if let Some(weight) = weight {
-        font.push_str(weight);
-        font.push(' ');
-    }
-    font.push_str(&format!("{size}px {family}"));
-    Some(font)
+    let declared = resolve_declared_node_font(ir, node_index);
+    declared
+        .declares_anything()
+        .then(|| declared.compose(config.font_size, None, &config.font_family))
 }
 
 pub(crate) fn resolve_node_stroke_dasharray(

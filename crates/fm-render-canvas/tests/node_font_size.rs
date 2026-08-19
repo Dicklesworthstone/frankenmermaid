@@ -354,3 +354,76 @@ fn a_malformed_font_style_does_not_discard_a_valid_size() {
         "a malformed font style took the valid size down with it"
     );
 }
+
+/// A declared font-size reaches the class-diagram COMPARTMENT labels (bd-lvj3).
+///
+/// The last matrix row, and the only one that was a design question rather than plumbing. Settled
+/// by reading the reference: for `class A { +int member }` with `style A font-size:30px`, the SVG
+/// arm puts `style="font-size:30px"` on BOTH the title and the member row, beside their own
+/// `font-size="13.80"` / `"12.42"` presentation attributes. An inline style beats a presentation
+/// attribute, so a browser renders both at 30px. The declared size applies FLAT — it does not
+/// rescale the derived sizes proportionally.
+#[test]
+fn a_declared_font_size_reaches_the_compartment_labels() {
+    let ops = canvas_ops(
+        "classDiagram\n  class Alpha {\n    +int member\n  }\n  style Alpha font-size:30px\n",
+    );
+
+    for text in ["Alpha", "+int member"] {
+        let font = font_when_text_drawn(&ops, text)
+            .unwrap_or_else(|| panic!("compartment text {text:?} was never drawn"));
+        assert!(
+            font.contains("30px"),
+            "compartment text {text:?} was drawn in {font:?}, not the declared size"
+        );
+    }
+}
+
+/// CONTROL, and the one the whole component-wise design exists for: declaring only a WEIGHT must
+/// not change the compartment SIZES.
+///
+/// The reference emits only what was declared — a `font-weight` leaves the derived `font-size`
+/// presentation attributes standing, so the member row keeps its smaller size and merely turns
+/// bold. An implementation that composed one finished font string for the node and reused it here
+/// would force the label's size onto both compartments, silently resizing every class diagram
+/// that declares a weight.
+#[test]
+fn a_declared_weight_leaves_the_compartment_sizes_alone() {
+    let config = CanvasRenderConfig::default();
+    let ops = canvas_ops(
+        "classDiagram\n  class Alpha {\n    +int member\n  }\n  style Alpha font-weight:bold\n",
+    );
+
+    let member = font_when_text_drawn(&ops, "+int member")
+        .expect("the compartment member row was never drawn");
+    assert!(
+        member.contains(&format!("{}px", config.font_size * 0.9)),
+        "declaring a weight resized the member row; drawn in {member:?}"
+    );
+    assert!(
+        member.starts_with("bold "),
+        "the declared weight did not reach the member row; drawn in {member:?}"
+    );
+}
+
+/// CONTROL: an undeclared class diagram keeps both derived compartment fonts exactly.
+#[test]
+fn an_undeclared_class_diagram_keeps_its_derived_compartment_fonts() {
+    let config = CanvasRenderConfig::default();
+    let ops = canvas_ops("classDiagram\n  class Alpha {\n    +int member\n  }\n");
+
+    let heading = font_when_text_drawn(&ops, "Alpha").expect("the class heading was never drawn");
+    let member =
+        font_when_text_drawn(&ops, "+int member").expect("the member row was never drawn");
+
+    assert_eq!(
+        heading,
+        format!("bold {}px {}", config.font_size, config.font_family),
+        "the derived compartment heading font changed"
+    );
+    assert_eq!(
+        member,
+        format!("{}px {}", config.font_size * 0.9, config.font_family),
+        "the derived compartment member font changed"
+    );
+}
