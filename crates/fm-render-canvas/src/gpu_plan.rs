@@ -487,6 +487,22 @@ impl GpuRenderPlan {
                 .as_deref()
                 .and_then(parse_paint_rgba)
                 .unwrap_or(DEFAULT_NODE_STROKE_RGBA);
+            // A declared `opacity` multiplies BOTH alphas, which is what the property means: CSS
+            // `opacity` applies to the whole element, and the Canvas2D pass implements it with
+            // `globalAlpha` around the shape. Folding it into the instance alphas is the shader
+            // equivalent -- fs_main already composites stroke over fill using those alphas, so a
+            // half-transparent node comes out half-transparent as a unit rather than as two
+            // independently faded layers.
+            //
+            // Fourth field in this struct resolved from the author's styling, and the fourth time
+            // the field ALREADY EXISTED while nothing wrote the declared value into it: alpha rode
+            // in on the colour and the separate `opacity` declaration was dropped.
+            let opacity = crate::renderer::resolve_node_opacity(ir, node.node_index)
+                .map(|value| value.clamp(0.0, 1.0) as f32)
+                .unwrap_or(1.0);
+            let fill = [fill[0], fill[1], fill[2], fill[3] * opacity];
+            let stroke = [stroke[0], stroke[1], stroke[2], stroke[3] * opacity];
+
             // Same resolver the Canvas2D pass uses, so a `classDef stroke-width` reaches the GPU
             // exactly as it reaches the raster path instead of the GPU inventing a second rule.
             let stroke_width = crate::renderer::resolve_node_stroke_width(ir, node.node_index)
@@ -1722,6 +1738,41 @@ mod tests {
             plain_plan.text_quads.iter().all(|q| q.color == super::DEFAULT_LABEL_RGBA),
             "an undeclared label did not keep the theme colour: {:?}",
             plain_plan.text_quads.iter().map(|q| q.color).take(4).collect::<Vec<_>>()
+        );
+    }
+
+    /// A declared `opacity` reaches the GPU instance alphas (bd-lvj3, bd-2u0.2).
+    ///
+    /// The alpha channel was never missing -- it arrived on the colour -- so the field looked
+    /// populated. What was dropped is the separate `opacity` DECLARATION, which the Canvas2D pass
+    /// applies with `globalAlpha` and the GPU pass ignored entirely.
+    #[test]
+    fn a_declared_opacity_reaches_the_gpu_instance() {
+        let declared = fm_parser::parse("flowchart TD\n  a[A]\n  style a opacity:0.5\n").ir;
+        let layout = fm_layout::layout_diagram(&declared);
+        let plan = GpuRenderPlan::from_layout(&declared, &layout, 1.0);
+        assert!(!plan.node_instances.is_empty(), "no instances, so this proves nothing");
+        assert!(
+            plan.node_instances
+                .iter()
+                .any(|i| (i.fill[3] - 0.5).abs() < 0.01 && (i.stroke[3] - 0.5).abs() < 0.01),
+            "the declared opacity reached neither alpha: {:?}",
+            plan.node_instances.iter().map(|i| (i.fill[3], i.stroke[3])).collect::<Vec<_>>()
+        );
+
+        // CONTROL: an undeclared node stays fully opaque. Without this, multiplying by a stray 0.5
+        // everywhere would satisfy the assertion above while fading every diagram -- and a uniform
+        // fade is exactly the kind of wrong that looks like a theme choice rather than a defect.
+        let plain = fm_parser::parse("flowchart TD\n  a[A]\n").ir;
+        let plain_layout = fm_layout::layout_diagram(&plain);
+        let plain_plan = GpuRenderPlan::from_layout(&plain, &plain_layout, 1.0);
+        assert!(
+            plain_plan
+                .node_instances
+                .iter()
+                .all(|i| (i.fill[3] - 1.0).abs() < f32::EPSILON),
+            "an undeclared node was faded: {:?}",
+            plain_plan.node_instances.iter().map(|i| i.fill[3]).collect::<Vec<_>>()
         );
     }
 }
