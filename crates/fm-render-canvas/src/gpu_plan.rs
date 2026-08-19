@@ -659,6 +659,16 @@ pub struct GpuRenderPlan {
     /// back-reference the text pass uses -- cluster titles ARE planned now, tagged
     /// `GpuTextSource::Cluster`.
     pub cluster_instances: Vec<GpuNodeInstance>,
+    /// Sequence activation bars, as rect instances (bd-adabx).
+    ///
+    /// Between the clusters and the edges because that is where `render` draws them (call order:
+    /// draw_clusters, draw_activation_bars, draw_edges, draw_nodes). Reuses `GpuNodeInstance` for
+    /// the same reason the clusters do: an activation bar IS a filled, stroked rect, which is
+    /// exactly this struct and a shape the SDF shader already draws.
+    ///
+    /// `node_index` here is the PARTICIPANT node index the bar sits on, which is a genuine index
+    /// into `ir.nodes` -- unlike the cluster instances, where it indexes clusters.
+    pub activation_instances: Vec<GpuNodeInstance>,
     pub edge_segments: Vec<GpuEdgeSegment>,
     /// Triangle instances for edge arrowheads.
     pub arrowheads: Vec<GpuArrowheadInstance>,
@@ -735,6 +745,32 @@ impl GpuRenderPlan {
                 stroke_width,
                 shape: GpuNodeShape::Rect as u32,
                 node_index: u32::try_from(cluster.cluster_index).unwrap_or(u32::MAX),
+            });
+        }
+
+        // SEQUENCE ACTIVATION BARS (bd-adabx). Plain rects on a participant's lifeline, drawn by
+        // the raster pass with the node fill, node stroke and node stroke width -- so they are
+        // planned with the same three, not with a bar-specific guess.
+        //
+        // The degenerate-size skip mirrors `draw_activation_bars`: a zero-width or zero-height bar
+        // is not drawn there, and planning one would put a rect with no area in the buffer for a
+        // consumer to rasterise into nothing.
+        let mut activation_instances = Vec::with_capacity(layout.extensions.activation_bars.len());
+        for bar in &layout.extensions.activation_bars {
+            if bar.bounds.width <= 0.0 || bar.bounds.height <= 0.0 {
+                continue;
+            }
+            activation_instances.push(GpuNodeInstance {
+                center: [
+                    bar.bounds.x + (bar.bounds.width * 0.5),
+                    bar.bounds.y + (bar.bounds.height * 0.5),
+                ],
+                half_extent: [bar.bounds.width * 0.5, bar.bounds.height * 0.5],
+                fill: DEFAULT_NODE_FILL_RGBA,
+                stroke: DEFAULT_NODE_STROKE_RGBA,
+                stroke_width: DEFAULT_NODE_STROKE_WIDTH,
+                shape: GpuNodeShape::Rect as u32,
+                node_index: u32::try_from(bar.participant_index).unwrap_or(u32::MAX),
             });
         }
 
@@ -1124,6 +1160,7 @@ impl GpuRenderPlan {
         Self {
             bounds: layout.bounds,
             cluster_instances,
+            activation_instances,
             edge_segments,
             arrowheads,
             node_instances,
@@ -2448,6 +2485,57 @@ mod tests {
     ///
     /// KNOWN GAPS ARE NAMED, NOT SILENT. `resolve_node_stroke_dasharray` is exempt with its bead
     /// id, because a dashed SDF border needs perimeter arc length the shader does not have. An
+    /// Sequence activation bars reach the plan as rects (bd-adabx).
+    ///
+    /// First of the sixteen unplanned raster draw sources to be closed. A bar is a filled, stroked
+    /// rect on a participant's lifeline, so it needs no new instance type and no new shader -- the
+    /// same reuse the cluster containers made.
+    ///
+    /// The degenerate case is pinned alongside the real one because `draw_activation_bars` skips a
+    /// zero-area bar, and a plan that emitted it would hand a consumer a rect that rasterises to
+    /// nothing while still counting as an instance.
+    #[test]
+    fn activation_bars_reach_the_gpu_plan_as_rects() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let mut layout = test_layout();
+        layout.extensions.activation_bars = vec![
+            fm_layout::LayoutActivationBar {
+                participant_index: 1,
+                depth: 0,
+                bounds: LayoutRect { x: 40.0, y: 10.0, width: 8.0, height: 60.0 },
+            },
+            // Zero height: drawn by nobody, so planned by nobody.
+            fm_layout::LayoutActivationBar {
+                participant_index: 1,
+                depth: 1,
+                bounds: LayoutRect { x: 40.0, y: 90.0, width: 8.0, height: 0.0 },
+            },
+        ];
+
+        let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.25);
+
+        assert_eq!(
+            plan.activation_instances.len(),
+            1,
+            "the zero-height bar must be skipped the way the raster pass skips it"
+        );
+        let bar = plan.activation_instances[0];
+        assert_eq!(bar.center, [44.0, 40.0], "centre of x40..48, y10..70");
+        assert_eq!(bar.half_extent, [4.0, 30.0]);
+        assert_eq!(bar.shape, super::GpuNodeShape::Rect as u32);
+        assert_eq!(
+            bar.node_index, 1,
+            "node_index on a bar is the PARTICIPANT node it sits on"
+        );
+        assert_eq!(bar.fill, super::DEFAULT_NODE_FILL_RGBA);
+        assert_eq!(bar.stroke, super::DEFAULT_NODE_STROKE_RGBA);
+        assert_eq!(bar.stroke_width, super::DEFAULT_NODE_STROKE_WIDTH);
+
+        // A diagram with no bars must not gain any: the plan is shared by every diagram type.
+        let empty = super::GpuRenderPlan::from_layout(&ir, &test_layout(), 1.25);
+        assert!(empty.activation_instances.is_empty());
+    }
+
     /// The plan's FIELD ORDER is the raster pass's DRAW ORDER (bd-adabx).
     ///
     /// The plan documents field order as submit order -- "a consumer that submits these buffers in
@@ -2477,6 +2565,7 @@ mod tests {
         // (plan field, the raster call that produces it), in the order both must agree on.
         const PAIRS: &[(&str, &str)] = &[
             ("pub cluster_instances:", "self.draw_clusters("),
+            ("pub activation_instances:", "self.draw_activation_bars("),
             ("pub edge_segments:", "self.draw_edges("),
             ("pub node_instances:", "self.draw_nodes("),
         ];
@@ -2539,7 +2628,12 @@ mod tests {
         const RENDERER_SRC: &str = include_str!("renderer.rs");
 
         // Mirrored by the plan today.
-        const PLANNED: &[&str] = &["draw_clusters", "draw_edges", "draw_nodes"];
+        const PLANNED: &[&str] = &[
+            "draw_activation_bars",
+            "draw_clusters",
+            "draw_edges",
+            "draw_nodes",
+        ];
 
         // (draw source, why the plan does not carry it) -- every entry cites bd-adabx, which holds
         // the coverage map, so a reader lands on the decision rather than on this list.
@@ -2555,7 +2649,6 @@ mod tests {
             ("draw_gantt_today_marker", "bd-adabx: gantt furniture"),
             ("draw_cluster_dividers", "bd-adabx: cluster divider rules"),
             ("draw_state_notes", "bd-adabx: state furniture"),
-            ("draw_activation_bars", "bd-adabx: sequence furniture"),
             ("draw_sequence_lifecycle_markers", "bd-adabx: sequence furniture"),
             ("draw_sequence_fragments", "bd-adabx: sequence furniture"),
             ("draw_sequence_notes", "bd-adabx: sequence furniture"),
