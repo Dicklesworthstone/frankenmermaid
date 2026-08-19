@@ -26668,6 +26668,7 @@ mod tests {
 
     #[test]
     fn tracing_cycle_removal_event_contains_strategy() {
+        install_global_always_enabled_subscriber();
         use tracing_subscriber::layer::SubscriberExt;
 
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -26712,6 +26713,7 @@ mod tests {
 
     #[test]
     fn tracing_guardrail_event_contains_algorithm_and_reason() {
+        install_global_always_enabled_subscriber();
         use tracing_subscriber::layer::SubscriberExt;
 
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -28216,6 +28218,7 @@ mod tests {
 
     #[test]
     fn tracing_events_are_valid_jsonl() {
+        install_global_always_enabled_subscriber();
         use tracing_subscriber::layer::SubscriberExt;
 
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
