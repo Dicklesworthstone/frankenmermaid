@@ -1961,6 +1961,18 @@ impl Canvas2dRenderer {
             // again, so a dashed node would leave every later shape dashed too. Set only when the
             // author declared one, and cleared immediately after, so an undeclared node is drawn
             // under exactly the state it was drawn under before this existed.
+            // OPACITY wraps the WHOLE node — shape and every label — because that is what the
+            // SVG arm does: `opacity` on an element fades the element, not just its outline. So
+            // this is set BEFORE the shape and restored at the END of the iteration, after the
+            // compartment and label branches below have drawn.
+            //
+            // `globalAlpha` is canvas STATE, like `lineDash`. Left set, it fades every subsequent
+            // node, edge and label in the diagram — so the restore is not optional, and the
+            // control that matters asserts a later node is NOT faded.
+            let declared_opacity = resolve_node_opacity(ir, node_box.node_index);
+            if let Some(alpha) = declared_opacity {
+                ctx.set_global_alpha(alpha);
+            }
             let declared_font = resolve_node_font(ir, node_box.node_index, &self.config);
             let dash = resolve_node_stroke_dasharray(ir, node_box.node_index);
             if let Some(ref pattern) = dash {
@@ -2348,6 +2360,13 @@ impl Canvas2dRenderer {
                         }
                     }
                 }
+            }
+
+            // Restore before the next node. Only when this node set it, so an undeclared diagram
+            // emits no alpha operations at all and is drawn under exactly the state it was drawn
+            // under before this feature existed.
+            if declared_opacity.is_some() {
+                ctx.set_global_alpha(1.0);
             }
 
             count += 1;
@@ -3040,6 +3059,26 @@ fn parse_declared_font_size(raw: Option<&str>) -> Option<f64> {
             .ok()
             .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
     })
+}
+
+/// The author's declared node OPACITY, if any (bd-lvj3).
+///
+/// Measured against the SVG arm, which emits `opacity:0.5` for `style a opacity:0.5` and lets the
+/// browser apply it to the whole element, while this renderer drew every node fully opaque.
+///
+/// `0.0` is ACCEPTED rather than treated as junk: a fully transparent node is a thing an author
+/// can legitimately ask for, and SVG honours it. Anything outside `0..=1` or non-finite is
+/// refused, because `globalAlpha` outside that range is ignored by a canvas — which would leave
+/// the PREVIOUS alpha in force and fade whatever came next instead.
+pub(crate) fn resolve_node_opacity(ir: &MermaidDiagramIr, node_index: usize) -> Option<f64> {
+    merged_node_style(ir, node_index)
+        .get("opacity")
+        .and_then(|raw| {
+            raw.trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|alpha| alpha.is_finite() && (0.0..=1.0).contains(alpha))
+        })
 }
 
 /// A CSS `font-weight` this renderer is willing to put in a canvas font string.

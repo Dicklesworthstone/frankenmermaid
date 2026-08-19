@@ -330,6 +330,14 @@ pub enum DrawOperation {
     /// and therefore unassertable — a test could see WHICH text was drawn and never in what font.
     /// `set_text_align` beside it has always done both.
     SetFont(String),
+    /// The global alpha in force for subsequent drawing.
+    ///
+    /// Recorded for the same reason `SetFont` and `SetLineDash` are: `set_global_alpha` updated
+    /// `current_state` and pushed NOTHING, so nothing downstream could observe that a node was
+    /// drawn faded. That is the third silent no-op found in this mock, and the pattern is now
+    /// explicit — a context method that only writes `current_state` makes every assertion about
+    /// its property vacuous, and vacuous assertions pass.
+    SetGlobalAlpha(f64),
     BeginPath,
     ClosePath,
     MoveTo(f64, f64),
@@ -467,6 +475,7 @@ impl Canvas2dContext for MockCanvas2dContext {
     }
 
     fn set_global_alpha(&mut self, alpha: f64) {
+        self.operations.push(DrawOperation::SetGlobalAlpha(alpha));
         self.current_state.global_alpha = alpha;
     }
 
