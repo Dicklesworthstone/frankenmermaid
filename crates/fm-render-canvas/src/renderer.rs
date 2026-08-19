@@ -1579,6 +1579,15 @@ impl Canvas2dRenderer {
             // markers and the arrowheads below — an edge whose line obeyed the author while its
             // arrowhead kept the theme colour would be a worse bug than the one being fixed.
             let (declared_stroke, declared_width) = resolve_edge_style(ir, edge_path.edge_index);
+            // The LABEL colour of this edge, resolved once for the same reason the stroke is: the
+            // three label sites in this loop (the `|text|` label, its wrapped continuation lines,
+            // and the `"1" --> "many"` secondary labels) all draw text belonging to THIS edge, so
+            // they must agree about its colour. Resolving per site is how one branch silently
+            // keeps the theme default.
+            let declared_label_color = resolve_edge_label_color(ir, edge_path.edge_index);
+            let edge_label_fill = declared_label_color
+                .as_deref()
+                .unwrap_or(&self.config.label_color);
             let (legacy_width, dash_pattern) =
                 legacy_edge_stroke(arrow, self.config.edge_stroke_width);
             let stroke = declared_stroke
@@ -1721,7 +1730,7 @@ impl Canvas2dRenderer {
                 let font =
                     edge_label_font.get_or_insert_with(|| secondary_label_font_css(&self.config));
                 ctx.set_font(font.as_str());
-                ctx.set_fill_style(&self.config.label_color);
+                ctx.set_fill_style(edge_label_fill);
                 ctx.set_text_align(TextAlign::Center);
                 ctx.set_text_baseline(TextBaseline::Middle);
 
@@ -1816,7 +1825,7 @@ impl Canvas2dRenderer {
                     );
                     self.draw_calls += 1;
 
-                    ctx.set_fill_style(&self.config.label_color);
+                    ctx.set_fill_style(edge_label_fill);
                     ctx.set_font(edge_label_font.as_str());
                     ctx.set_text_align(TextAlign::Center);
                     ctx.set_text_baseline(TextBaseline::Middle);
@@ -1846,7 +1855,7 @@ impl Canvas2dRenderer {
                     self.draw_calls += 1;
 
                     // Label text
-                    ctx.set_fill_style(&self.config.label_color);
+                    ctx.set_fill_style(edge_label_fill);
                     ctx.set_font(edge_label_font.as_str());
                     ctx.set_text_align(TextAlign::Center);
                     ctx.set_text_baseline(TextBaseline::Middle);
@@ -2712,10 +2721,16 @@ pub(crate) fn resolve_cluster_colors(
     (merged.get("fill").cloned(), merged.get("stroke").cloned())
 }
 
-pub(crate) fn resolve_edge_style(
+/// The merged `linkStyle`/inline declaration for one edge.
+///
+/// Factored out of [`resolve_edge_style`] so a second property reads off the SAME chain rather
+/// than a second copy of it — the shape `merged_node_style` already has on the node side.
+/// [`resolve_edge_style`] keeps its exact signature, which matters because `gpu_plan.rs` calls it
+/// and must get the identical answer for its segment buffer.
+fn merged_edge_style(
     ir: &MermaidDiagramIr,
     edge_index: usize,
-) -> (Option<String>, Option<f64>) {
+) -> std::collections::BTreeMap<String, String> {
     let mut merged: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
 
     for style_ref in &ir.style_refs {
@@ -2738,6 +2753,30 @@ pub(crate) fn resolve_edge_style(
         merged.extend(inline.properties.clone());
     }
 
+    merged
+}
+
+/// The author's declared EDGE LABEL colour, if any (bd-lvj3).
+///
+/// `linkStyle 0 color:#f00` sets the colour of the edge's LABEL, not of its line — `stroke` is the
+/// line. Measured against the SVG arm, which emits the declaration and lets the browser cascade
+/// it, this renderer drew every edge label in `config.label_color` regardless.
+///
+/// The node twin is `resolve_node_text_color`, and `color` is the same property there: in
+/// fm-render-svg's `split_style_properties` it is the single TEXT_STYLE_PROPERTIES entry that gets
+/// RENAMED onto the text element's `fill` rather than passed through. A canvas has no cascade, so
+/// it has to be resolved here and handed to `set_fill_style` before the text is drawn.
+///
+/// Returns `None` when nothing was declared, so the caller keeps the theme's `label_color`.
+pub(crate) fn resolve_edge_label_color(ir: &MermaidDiagramIr, edge_index: usize) -> Option<String> {
+    merged_edge_style(ir, edge_index).get("color").cloned()
+}
+
+pub(crate) fn resolve_edge_style(
+    ir: &MermaidDiagramIr,
+    edge_index: usize,
+) -> (Option<String>, Option<f64>) {
+    let merged = merged_edge_style(ir, edge_index);
     let width = parse_stroke_width(merged.get("stroke-width").map(String::as_str));
 
     (merged.get("stroke").cloned(), width)
