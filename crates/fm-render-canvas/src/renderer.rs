@@ -1594,10 +1594,15 @@ impl Canvas2dRenderer {
                 .as_deref()
                 .unwrap_or(&self.config.edge_stroke);
             let stroke_width = declared_width.unwrap_or(legacy_width);
+            // A declared dash OVERRIDES the arrow-derived one: `legacy_edge_stroke` infers a
+            // pattern from the arrow glyph (`-.->` is dotted), and an explicit `stroke-dasharray`
+            // is the author answering the same question more specifically.
+            let declared_dash = resolve_edge_dash_array(ir, edge_path.edge_index);
+            let dash: &[f64] = declared_dash.as_deref().unwrap_or(dash_pattern);
 
             ctx.set_stroke_style(stroke);
             ctx.set_line_width(stroke_width);
-            ctx.set_line_dash(dash_pattern);
+            ctx.set_line_dash(dash);
 
             // Draw edge path
             ctx.begin_path();
@@ -2770,6 +2775,25 @@ fn merged_edge_style(
 /// Returns `None` when nothing was declared, so the caller keeps the theme's `label_color`.
 pub(crate) fn resolve_edge_label_color(ir: &MermaidDiagramIr, edge_index: usize) -> Option<String> {
     merged_edge_style(ir, edge_index).get("color").cloned()
+}
+
+/// The author's declared EDGE DASH, if any (bd-lvj3).
+///
+/// The edge twin of `resolve_node_stroke_dasharray`, and the last dash channel. Measured against
+/// the SVG arm, which emits `stroke-dasharray:7 3` for `linkStyle 0 stroke-dasharray:7 3`, this
+/// renderer used the ARROW-DERIVED pattern from `legacy_edge_stroke` regardless — so a solid
+/// `-->` the author asked to be dashed stayed solid, and a `-.->` the author asked to be solid
+/// stayed dotted.
+///
+/// The declared pattern OVERRIDES the arrow-derived one rather than merging with it: they are two
+/// answers to the same question, and an explicit `stroke-dasharray` is the author being more
+/// specific than the arrow glyph. Same precedence `stroke` and `stroke-width` already use here.
+pub(crate) fn resolve_edge_dash_array(ir: &MermaidDiagramIr, edge_index: usize) -> Option<Vec<f64>> {
+    parse_dash_array(
+        merged_edge_style(ir, edge_index)
+            .get("stroke-dasharray")
+            .map(String::as_str),
+    )
 }
 
 pub(crate) fn resolve_edge_style(
