@@ -51,6 +51,46 @@
       "node_count": 3,
       "nodes_checksum": "0a61aa2613b3895c"
     },
+    "c4_component": {
+      "edge_count": 4,
+      "edges_checksum": "445cced711ea2bc5",
+      "layout_algorithm": "auto",
+      "layout_checksum": "3f819ebbbaa5e525",
+      "layout_height": 909.850037,
+      "layout_width": 307.174988,
+      "node_count": 4,
+      "nodes_checksum": "746f81a8dc278aaa"
+    },
+    "c4_container": {
+      "edge_count": 4,
+      "edges_checksum": "ea71695d51ff34ef",
+      "layout_algorithm": "auto",
+      "layout_checksum": "160bf2afe4b0f5ab",
+      "layout_height": 1096.350098,
+      "layout_width": 405.375,
+      "node_count": 5,
+      "nodes_checksum": "b4619bb6aefa942b"
+    },
+    "c4_deployment": {
+      "edge_count": 2,
+      "edges_checksum": "606889706c60f996",
+      "layout_algorithm": "auto",
+      "layout_checksum": "e4f2368d2cda1e12",
+      "layout_height": 827.350037,
+      "layout_width": 389.725006,
+      "node_count": 3,
+      "nodes_checksum": "0d6965e68c5c1d3b"
+    },
+    "c4_dynamic": {
+      "edge_count": 4,
+      "edges_checksum": "0ab63c8b8f7c231f",
+      "layout_algorithm": "auto",
+      "layout_checksum": "7a954bf86869cbad",
+      "layout_height": 909.850037,
+      "layout_width": 293.975006,
+      "node_count": 4,
+      "nodes_checksum": "cd971673b0b9eaa4"
+    },
     "class_basic": {
       "edge_count": 1,
       "edges_checksum": "121abedfd64a9b82",
