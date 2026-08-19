@@ -1068,8 +1068,36 @@ fn content_heuristics(input: &str) -> Option<DetectedType> {
         });
     }
 
-    // Flowchart patterns (broad, lower confidence)
-    if content.contains("-->") || content.contains("---") || content.contains("==>") {
+    // Flowchart patterns (broad, lower confidence).
+    //
+    // FLOW_OPERATORS has fourteen entries and this tested three. The miss is quieter here than in the
+    // branches above, which is why it survived: this arm is last, so a flowchart that fails it still
+    // REACHES `DiagramType::Flowchart` through the Strategy 5 fallback. What changes is `method` --
+    // `ContentHeuristic` becomes `Fallback` -- and strict mode REFUSES `Fallback` (see the
+    // `MermaidParseMode::Strict` check on the detection method). So today a headerless `A --x B` is
+    // rejected outright while `A --> B` parses, for no reason an author could infer.
+    //
+    // Testing `-.-` covers the dotted arrow `-.->` and the bidirectional `<-.->` by substring, as
+    // `-->` already covers `<-->` and `==>` covers `<==>`.
+    //
+    // `--o` and `--x` belong HERE, and they are the completing half of a decision made in the two
+    // branches above: both were excluded from the class and sequence arms precisely so that a
+    // flowchart circle or cross edge would not be reclassified. Excluding them there while never
+    // matching them here left them belonging to no branch at all.
+    //
+    // The remaining four -- `--`, `==`, `-.`, `..` -- are deliberately NOT tested. Each is a
+    // two-character sequence that occurs inside ordinary prose and inside diagram types this
+    // function cannot detect, and matching them would shadow the unsupported-upstream-keyword
+    // message in Strategy 4.9: a `radar` document containing an ellipsis would be reported as a
+    // detected flowchart instead of as an unimplemented type. A missed heuristic costs confidence;
+    // a shadowed diagnostic costs the author the one message that tells them the truth.
+    if content.contains("-->")
+        || content.contains("---")
+        || content.contains("==>")
+        || content.contains("-.-")
+        || content.contains("--o")
+        || content.contains("--x")
+    {
         return Some(DetectedType {
             diagram_type: DiagramType::Flowchart,
             confidence: 0.6,
@@ -3353,5 +3381,45 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
                 "{source:?} was misread as a sequence diagram"
             );
         }
+    }
+
+    /// The flowchart heuristic must recognise dotted, circle and cross edges.
+    ///
+    /// Asserted on `method`, not on `diagram_type`: this arm is last, so BOTH the heuristic and the
+    /// Strategy 5 fallback yield `Flowchart` and a type assertion here would pass without the fix.
+    /// The observable difference is that strict mode refuses `Fallback`.
+    #[test]
+    fn the_flowchart_heuristic_covers_dotted_circle_and_cross_edges() {
+        for edge in ["-.->", "<-.->", "-.-", "--o", "--x", "-->", "<-->", "---", "==>", "<==>"] {
+            let source = format!("A {edge} B\n");
+            let detected = super::detect_type_with_confidence(&source);
+            assert_eq!(
+                detected.diagram_type,
+                fm_core::DiagramType::Flowchart,
+                "{edge} was not read as a flowchart edge"
+            );
+            assert_eq!(
+                detected.method,
+                super::DetectionMethod::ContentHeuristic,
+                "{edge} reached Flowchart only through the fallback, which strict mode refuses"
+            );
+        }
+    }
+
+    /// CONTROL: the two-character forms must NOT shadow the unsupported-type diagnostic.
+    ///
+    /// `--`, `==`, `-.` and `..` are real flow operators that this heuristic deliberately declines,
+    /// because they occur in prose. A `radar` document carrying an ellipsis must still report that
+    /// radar is unimplemented rather than claim a flowchart was detected.
+    #[test]
+    fn prose_punctuation_does_not_shadow_the_unsupported_type_warning() {
+        let detected = super::detect_type_with_confidence("radar\n  title Scores...\n");
+
+        assert_eq!(detected.method, super::DetectionMethod::Fallback);
+        assert!(
+            detected.warnings.iter().any(|w| w.contains("does not implement")),
+            "the unimplemented-type message was replaced: {:?}",
+            detected.warnings
+        );
     }
 }
