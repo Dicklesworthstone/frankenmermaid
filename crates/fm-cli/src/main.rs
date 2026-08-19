@@ -3066,6 +3066,40 @@ struct DeterminismManifestCase {
     /// RENDERER: if the layout digests agree and this does not, the divergence is downstream of
     /// layout by construction.
     render_svg_sha256: String,
+    /// The layout algorithm dispatch ASKED for, before any guardrail intervened.
+    layout_initial_algorithm: &'static str,
+    /// The layout algorithm that actually RAN.
+    ///
+    /// Recorded because a cross-target digest mismatch has two completely different causes and no
+    /// way to tell them apart from the digest alone: the floats diverged, or A DIFFERENT ALGORITHM
+    /// RAN. The second is not hypothetical here -- `crates/fm-layout/Cargo.toml` gates `nalgebra`
+    /// and `good_lp` on `cfg(not(target_arch = "wasm32"))`, so the spectral and LP-backed paths do
+    /// not exist on wasm32 and must fall back. A case that selects one of them natively will
+    /// therefore produce different coordinates on wasm32 for a reason that is not a float bug, and
+    /// a comparison without this field would send someone hunting an ULP difference that is not
+    /// there.
+    layout_selected_algorithm: &'static str,
+    /// Whether a guardrail overrode the initial choice, and why.
+    ///
+    /// Separate from the two algorithm names because they can agree while the guardrail still
+    /// fired, and because the guardrail is the component most likely to differ across targets: it
+    /// selects on estimated cost, and the estimate is a function of the graph, not of the host.
+    /// If that assumption is ever wrong -- bd-ryxg records a suspicion that layout dispatch may be
+    /// wall-time sensitive -- a dispatch that flips under load would land here as a labelled
+    /// difference instead of masquerading as a floating-point divergence.
+    layout_guard_fallback_applied: bool,
+    layout_guard_reason: &'static str,
+    /// Declared IR constraints, which is the trigger for the ONE code path known to be absent on
+    /// wasm32.
+    ///
+    /// `apply_constraint_solver` returns immediately when this is zero, so a zero here is positive
+    /// evidence that the case never reaches `solve_constraint_coordinates` -- whose wasm32 twin is
+    /// a stub returning `Err("constraint solver is unavailable on wasm32 builds and falls back to
+    /// heuristic layout")`. That stub is exactly the "a different algorithm ran" hazard, and this
+    /// field is how the comparison shows its work instead of asserting good faith: while every
+    /// case reports zero, the wasm32 arm is comparable to the native arms by construction, and if
+    /// a future corpus case declares constraints the number moves and says so.
+    ir_constraint_count: usize,
 }
 
 const DETERMINISM_CASES: [(&str, &str); 10] = [
@@ -4515,18 +4549,20 @@ fn build_determinism_manifest() -> DeterminismManifest {
         .iter()
         .map(|case| {
             format!(
-                "{}:{}:{}:{}",
+                "{}:{}:{}:{}:{}",
                 case.case_id,
                 case.layout_f32_bits_sha256,
                 case.layout_sha256,
-                case.render_svg_sha256
+                case.render_svg_sha256,
+                case.layout_selected_algorithm
             )
         })
         .collect::<Vec<_>>()
         .join("\n");
     DeterminismManifest {
         // 3: cases carry a RENDERED-DOCUMENT digest, not just layout digests.
-        version: 3,
+        // 4: cases name the layout algorithm that ran, so a mismatch says WHICH question it is.
+        version: 4,
         target_arch: std::env::consts::ARCH,
         target_os: std::env::consts::OS,
         target_env: option_env!("CARGO_CFG_TARGET_ENV").unwrap_or("unknown"),
@@ -4538,14 +4574,19 @@ fn build_determinism_manifest() -> DeterminismManifest {
 
 fn determinism_manifest_case(case_id: &'static str, input: &str) -> DeterminismManifestCase {
     let parsed = parse_with_mode(input, MermaidParseMode::Compat);
-    let layout = fm_layout::layout_diagram(&parsed.ir);
-    let canonical = canonical_layout(&layout);
-    let exact_bits = canonical_layout_f32_bits(&layout);
-    let (non_finite_value_count, subnormal_value_count) = layout_float_anomalies(&layout);
+    // The traced entry point, for the trace only: `layout_diagram` IS
+    // `Arc::unwrap_or_clone(layout_diagram_traced(ir).layout)`, so the geometry digested below is
+    // byte-for-byte what the untraced call produced. Nothing about the measurement changes.
+    let traced = fm_layout::layout_diagram_traced(&parsed.ir);
+    let layout = traced.layout.as_ref();
+    let guard = &traced.trace.guard;
+    let canonical = canonical_layout(layout);
+    let exact_bits = canonical_layout_f32_bits(layout);
+    let (non_finite_value_count, subnormal_value_count) = layout_float_anomalies(layout);
     // `default()` deliberately, not the golden harness's config: the manifest asks whether ONE
     // configuration renders identically on three targets, and the only requirement on that
     // configuration is that it is reached the same way everywhere, which a compile-time default is.
-    let svg = render_svg_with_layout(&parsed.ir, &layout, &SvgRenderConfig::default());
+    let svg = render_svg_with_layout(&parsed.ir, layout, &SvgRenderConfig::default());
     DeterminismManifestCase {
         case_id,
         diagram_type: parsed.ir.diagram_type.as_str().to_string(),
@@ -4559,6 +4600,11 @@ fn determinism_manifest_case(case_id: &'static str, input: &str) -> DeterminismM
         layout_sha256: sha256_hex(canonical.as_bytes()),
         render_svg_bytes: svg.len(),
         render_svg_sha256: sha256_hex(svg.as_bytes()),
+        layout_initial_algorithm: guard.initial_algorithm.as_str(),
+        layout_selected_algorithm: guard.selected_algorithm.as_str(),
+        layout_guard_fallback_applied: guard.fallback_applied,
+        layout_guard_reason: guard.reason,
+        ir_constraint_count: parsed.ir.constraints.len(),
     }
 }
 

@@ -3062,7 +3062,7 @@ fn determinism_manifest_cli_is_stable_and_finite() {
     assert!(!cases.is_empty(), "manifest should include golden cases");
     assert_eq!(
         first["version"].as_u64(),
-        Some(3),
+        Some(4),
         "manifest version must identify the exact-bit digest format"
     );
     for case in cases {
@@ -3089,6 +3089,25 @@ fn determinism_manifest_cli_is_stable_and_finite() {
                 .is_some_and(|value| value.len() == 64),
             "rendered-SVG SHA-256 digest missing or malformed: {case:?}"
         );
+        // The dispatch labels are what make a cross-target mismatch DIAGNOSABLE rather than just
+        // alarming: they separate "the floats diverged" from "a different algorithm ran", which is
+        // a live possibility on wasm32 where nalgebra and good_lp are compiled out.
+        assert!(
+            case["layout_selected_algorithm"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
+            "case does not name the layout algorithm that ran: {case:?}"
+        );
+        // `auto` is the REQUEST, never an outcome. If it survives into the selected slot the field
+        // is recording the caller's wish rather than the dispatch, and would read identically on
+        // every target no matter which algorithm each one actually ran -- the exact ambiguity this
+        // field exists to remove.
+        assert_ne!(
+            case["layout_selected_algorithm"].as_str(),
+            Some("auto"),
+            "selected algorithm is still the unresolved request: {case:?}"
+        );
+
         // NON-VACUITY. A digest is 64 hex characters whether it summarises a real document or an
         // empty string, so the length check above passes for a case that rendered NOTHING -- and a
         // manifest of empty renders would compare equal across all three targets forever. The byte
