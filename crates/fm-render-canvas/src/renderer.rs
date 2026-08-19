@@ -234,6 +234,9 @@ impl Canvas2dRenderer {
         // Draw the gantt today marker, on top of the bands and under the bars.
         self.draw_gantt_today_marker(layout, ir, ctx, offset_x, offset_y);
 
+        // Draw the concurrency-region dividers inside a composite state.
+        self.draw_cluster_dividers(layout, ctx, offset_x, offset_y);
+
         // Draw stateDiagram notes.
         self.draw_state_notes(layout, ctx, offset_x, offset_y);
 
@@ -1259,6 +1262,53 @@ impl Canvas2dRenderer {
 
     /// Draw stateDiagram notes -- box, leader and text.
     ///
+    /// The `--` CONCURRENCY SEPARATOR inside a composite state, which only the SVG drew (bd-dgnm4).
+    ///
+    /// `state Big { A --> B  --  C --> D }` declares two regions running in parallel. The layout
+    /// records the boundary between them in `extensions.cluster_dividers` — built by
+    /// `build_state_cluster_dividers`, keyed on the `__state_region_` subgraphs the `--` creates —
+    /// and fm-render-svg draws a dashed line for each. This surface referenced that extension
+    /// nowhere, so the two regions ran together into one box and a reader could not tell there were
+    /// two. The separator is SYNTAX the author wrote, not decoration.
+    ///
+    /// Found by diffing which LAYOUT EXTENSIONS each renderer consumes, which is the comparison that
+    /// works: an earlier pass compared the CONFIG FIELD `sequence_mirror_actors` and wrongly flagged
+    /// the canvas, because layout had already applied the flag and the canvas consumes the derived
+    /// `sequence_mirror_headers` instead. Compare what a renderer READS, not what it is configured by.
+    ///
+    /// Dashed to match the SVG, whose `stroke-dasharray("6,4")` is the thing distinguishing a region
+    /// boundary from an ordinary cluster edge. The dash is reset afterwards so nothing drawn later
+    /// inherits it.
+    fn draw_cluster_dividers<C: Canvas2dContext>(
+        &mut self,
+        layout: &DiagramLayout,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) {
+        if layout.extensions.cluster_dividers.is_empty() {
+            return;
+        }
+
+        ctx.set_stroke_style(&self.config.cluster_stroke);
+        ctx.set_line_width(1.0);
+        ctx.set_line_dash(&[6.0, 4.0]);
+        for divider in &layout.extensions.cluster_dividers {
+            ctx.begin_path();
+            ctx.move_to(
+                f64::from(divider.start.x) + offset_x,
+                f64::from(divider.start.y) + offset_y,
+            );
+            ctx.line_to(
+                f64::from(divider.end.x) + offset_x,
+                f64::from(divider.end.y) + offset_y,
+            );
+            ctx.stroke();
+            self.draw_calls += 1;
+        }
+        ctx.set_line_dash(&[]);
+    }
+
     /// `extensions.state_notes` is filled by the state layout arm (bd-a6l4) and drawn by
     /// fm-render-svg; this renderer referenced it nowhere (bd-t1jj). Canvas is the browser preview
     /// surface -- fm-wasm renders through `render_to_canvas_with_layout` -- so `note right of X : ...`
