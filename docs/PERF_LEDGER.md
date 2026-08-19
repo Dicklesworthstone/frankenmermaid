@@ -3967,6 +3967,41 @@ frankenmermaid's A1 against its A2 within the same interleave — **1.0204x** in
 in run 2. So neither engine's self-variation comes close to the separation being claimed, and the
 comparison does not rest on a null taken from only one side.
 
+**THIRD REPLICATION (2026-08-19, BlackThrush) — CONFIRMS THE STANDING; THE QUOTED FIGURE DOES NOT
+MOVE.** A fresh A/B/B/A on `sequence_20`, binary embedding HEAD `16474a75`, corpus generated from
+`corpus.mjs` (1 revision, 1257 bytes, sha256 `31c0dd6bc24b571c` — the same input sha as the banked
+runs, so this is a replication and not a different question):
+
+| arm | ns | calibrated batch | loadavg | cross-core MHz |
+|---|---|---|---|---|
+| A1 fm | 91,455 | 38 | 14.45 / 19.92 / 25.07 | 1429–4276 (2.992x) |
+| B1 mermaid | 36,300,000 | — | 14.45 / 19.92 / 25.07 | 1429–4217 (2.951x) |
+| B2 mermaid | 35,400,000 | — | 14.33 / 19.80 / 25.00 | 1429–4100 (2.869x) |
+| A2 fm | 90,051 | 39 | 14.06 / 19.66 / 24.93 | 1429–4297 (3.007x) |
+
+**fm A/A drift 1.0156x** (A1 vs A2, same binary, same input, same invocation). Incumbent A/A nulls
+`0.9847` CI [0.9427, 1.0030] and `0.9848` CI [0.9330, 1.0417] — both contain 1.0. Worst bound
+**387.1x**, headline 395.0x.
+
+**387.1x IS NOT THE NEW HEADLINE AND MUST NOT BE QUOTED AS ONE.** The replicated-standing convention
+quotes the WORST bound any run produced, and 362.4x is still that. A run that comes out higher
+confirms the standing; it does not raise it, and swapping in the friendlier number would be
+cherry-picking across replications — the same error as quoting a headline over a bound.
+
+**UNCERTIFIED, and by a wider margin than the phrasing above suggests:** `scripts/window_check.sh`
+REFUSED this window (busy-cpu spread 8 against a tolerance of 4, idle 85.7–89.7%, 14/64 busy at
+start). `run.mjs`'s host-exclusivity gate — all 64 CPUs under 20% busy — was never satisfied on this
+host at any point during the session. This row is provisional evidence taken in a stable-but-not-quiet
+window, recorded with its conditions so a reader can discount it, exactly as `abba_render.py` prescribes.
+
+**⚠️ PINNING WAS THE NOISE SOURCE, REPLICATED IN THE SAME WINDOW MINUTES APART.** The first attempt
+of this run was PINNED (`fm cpu19 @ 4230 MHz`, incumbent 8 cpus, `starved=False`) and REFUSED at
+**fm drift 1.6544x** — arms at 146,961 and 88,833 ns with calibrated batches **23 and 38**. The
+unpinned re-run above drifts 1.0156x with batches 38 and 39. Same binary, same input, same window,
+same minute. That is a direct same-window replication of what bd-hmfi and bd-ecjg record, and the
+**calibrated batch is what identifies it**: 20–25 is a contended arm and 37–39 a clean one, an
+absolute reference that drift cannot supply because drift is blind when both arms degrade together.
+
 **Legacy incumbent arm (same invocation as each measured arm):** name=mermaid-js version=11.15.0
 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de
 securityLevel=strict, runtime Chrome/151.0.7922.108 via /usr/bin/chromium-browser, render mode.
