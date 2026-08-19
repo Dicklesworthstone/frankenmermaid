@@ -26509,6 +26509,38 @@ mod tests {
 
     // ── Logging spec enforcement tests (bd-gy4.12) ────────────────────
 
+    /// Install a process-global, always-enabled subscriber exactly once (bd-ryxg).
+    ///
+    /// ⚠️ THIS IS WHAT STOPS THE FLAKE, and the mechanism is not obvious. `tracing` caches a
+    /// callsite's `Interest` GLOBALLY. This binary runs 300+ tests in parallel and many of them
+    /// call `layout_diagram_traced` with NO subscriber on their thread, so the `layout.dispatch`
+    /// callsite can be evaluated against a subscriber-less thread and cached as `Interest::never`.
+    /// A test that then installs a thread-local capturing subscriber sees the callsite already
+    /// disabled and captures NOTHING — not "the dispatch event is missing", but zero events.
+    ///
+    /// Measured, 8 threads laying out concurrently while a capturing thread sampled 4000 times per
+    /// run, three runs per arm:
+    ///
+    ///     as-is                                    3 misses / 12000
+    ///     rebuild_interest_cache() inside the run  2 misses / 12000   (loses the same race)
+    ///     global always-enabled subscriber         0 misses / 12000
+    ///
+    /// On every miss the engine-side trace read `cache_hit=false query=layout_full_recompute`, so
+    /// the layout really did dispatch — the event was emitted and the callsite was off.
+    ///
+    /// With a global subscriber installed, no thread is ever subscriber-less, so `never` is never
+    /// cached. It is always-enabled and has no layers, so it costs a filter check and drops
+    /// everything; the per-test `with_default` still overrides it on the capturing thread.
+    fn install_global_always_enabled_subscriber() {
+        use tracing_subscriber::layer::SubscriberExt;
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let global = tracing_subscriber::registry()
+                .with(tracing_subscriber::filter::LevelFilter::TRACE);
+            let _ = tracing::subscriber::set_global_default(global);
+        });
+    }
+
     /// Capture tracing events emitted during layout and verify mandatory fields.
     ///
     /// Mandatory fields for layout tracing events:
@@ -26516,8 +26548,9 @@ mod tests {
     /// - `layout.guardrail.*`: algorithm, reason
     /// - `layout.cycle_removal`: strategy
     /// - `layout.crossing_minimization`: `crossings_after_barycenter`
-    /// ⚠️ FOUR CANDIDATE MECHANISMS FOR THE bd-ryxg FLAKE HAVE BEEN TESTED AND REFUTED. Recorded
-    /// here so the next person does not re-run them; each cost a probe and none is the cause.
+    ///
+    /// ⚠️ FOUR CANDIDATE MECHANISMS FOR THE bd-ryxg FLAKE WERE TESTED AND REFUTED, and a fifth
+    /// turned out to be the cause. Recorded so the next person does not re-run them.
     ///
     /// 1. "the event is emitted from a worker thread the thread-local subscriber cannot see" —
     ///    REFUTED. fm-layout contains ZERO occurrences of rayon, par_iter, thread::spawn or scope.
@@ -26537,6 +26570,7 @@ mod tests {
     /// ACROSS test binaries rather than within one.
     #[test]
     fn tracing_dispatch_event_contains_mandatory_fields() {
+        install_global_always_enabled_subscriber();
         use tracing_subscriber::layer::SubscriberExt;
 
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
