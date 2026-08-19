@@ -1961,6 +1961,8 @@ impl Canvas2dRenderer {
             // again, so a dashed node would leave every later shape dashed too. Set only when the
             // author declared one, and cleared immediately after, so an undeclared node is drawn
             // under exactly the state it was drawn under before this existed.
+            let declared_font = resolve_node_font_size(ir, node_box.node_index)
+                .map(|size| format!("{}px {}", size, self.config.font_family));
             let dash = resolve_node_stroke_dasharray(ir, node_box.node_index);
             if let Some(ref pattern) = dash {
                 ctx.set_line_dash(pattern);
@@ -2304,9 +2306,25 @@ impl Canvas2dRenderer {
                     // `classDef … color:` resolved correctly and were then thrown away one line
                     // before the text was drawn. Only compiling the tests found it.
                     ctx.set_fill_style(label_fill);
-                    ctx.set_font(
-                        standard_label_font.get_or_insert_with(|| standard_node_font(&self.config)),
-                    );
+                    // A declared `font-size` is applied HERE ONLY, and the hoist is preserved for
+                    // everyone else. `standard_label_font` is formatted once for the whole diagram
+                    // (a landed lever — the invariant `format!` used to run per node), and a
+                    // per-node font string would undo that for every diagram to serve the rare one
+                    // that declares a size. So the declaration takes a side path and an undeclared
+                    // node still draws under the identical hoisted string.
+                    //
+                    // ⚠️ SCOPE, stated because the last bounded edit on this very line got it
+                    // wrong: this is the PLAIN node label only. The class/ER/requirement/C4
+                    // COMPARTMENT labels derive their own smaller fonts and are NOT rescaled, so a
+                    // `font-size` on a class node still disagrees with the SVG arm, which cascades
+                    // it to the whole element. That is recorded as open rather than half-fixed.
+                    match declared_font.as_deref() {
+                        Some(font) => ctx.set_font(font),
+                        None => ctx.set_font(
+                            standard_label_font
+                                .get_or_insert_with(|| standard_node_font(&self.config)),
+                        ),
+                    }
                     ctx.set_text_align(align);
                     ctx.set_text_baseline(TextBaseline::Middle);
 
@@ -3005,6 +3023,28 @@ fn parse_dash_array(raw: Option<&str>) -> Option<Vec<f64>> {
 /// Same asymmetric-sibling shape as `stroke-width`: the EDGE path has drawn dashes since the edge
 /// half landed (`with_canvas_dash_f64` beside `legacy_edge_stroke`), and the node path never
 /// learned the property.
+/// The author's declared node FONT SIZE in px, if any (bd-lvj3).
+///
+/// Measured against the SVG arm, which emits `font-size:32px` for `style a font-size:32px` and
+/// lets the browser apply it, while this renderer drew every label at `config.font_size`.
+///
+/// Refuses what it cannot use, for the same reason `parse_stroke_width` does: a canvas given a
+/// non-finite or absurd font size draws nothing at all, which is worse than ignoring the
+/// declaration. The upper bound is deliberately generous — it exists to stop a typo'd `font-size:
+/// 100000` from producing an invisible diagram, not to second-guess a legitimately large heading.
+pub(crate) fn resolve_node_font_size(ir: &MermaidDiagramIr, node_index: usize) -> Option<f64> {
+    merged_node_style(ir, node_index)
+        .get("font-size")
+        .and_then(|raw| {
+            raw.trim()
+                .trim_end_matches("px")
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|size| size.is_finite() && *size > 0.0 && *size <= 512.0)
+        })
+}
+
 pub(crate) fn resolve_node_stroke_dasharray(
     ir: &MermaidDiagramIr,
     node_index: usize,

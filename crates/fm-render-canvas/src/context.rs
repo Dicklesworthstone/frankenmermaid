@@ -323,6 +323,13 @@ pub enum DrawOperation {
     /// An empty pattern is the RESET to solid and is recorded too — dropping it would let a reader
     /// conclude that everything after the first dashed shape is also dashed.
     SetLineDash(Vec<f64>),
+    /// The font in force for subsequent text.
+    ///
+    /// Recorded for the same reason `SetLineDash` is: `set_font` used to update `current_state`
+    /// and push NOTHING, so the font a label was drawn in was invisible in the operation stream
+    /// and therefore unassertable — a test could see WHICH text was drawn and never in what font.
+    /// `set_text_align` beside it has always done both.
+    SetFont(String),
     BeginPath,
     ClosePath,
     MoveTo(f64, f64),
@@ -464,6 +471,7 @@ impl Canvas2dContext for MockCanvas2dContext {
     }
 
     fn set_font(&mut self, font: &str) {
+        self.operations.push(DrawOperation::SetFont(font.to_string()));
         self.current_state.font = font.to_string();
     }
 
