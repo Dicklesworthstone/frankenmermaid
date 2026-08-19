@@ -21,6 +21,31 @@
 //!
 //! Each case declares EXACTLY ONE property, which is what makes a shared needle unambiguous — if
 //! only `color` is declared, a `SetFillStyle("#ff00ff")` can only have come from the text.
+//!
+//! ⚠️ HOW MUCH OF THE RENDERER THIS TABLE ACTUALLY COVERS — read this before concluding from a
+//! green run that canvas styling is finished. Every row is `Honoured`, and that means every pair
+//! ENUMERATED here works. It does not mean the renderer honours styling.
+//!
+//! Measured by auditing which `draw_*` method in `renderer.rs` consults any `resolve_*` helper:
+//! THREE of NINETEEN do.
+//!
+//!     consults styling   draw_nodes, draw_edges, draw_clusters
+//!     consults none      draw_pie_wedges, draw_sequence_fragments, draw_sequence_notes,
+//!                        draw_sequence_mirror_headers, draw_sequence_lifecycle_markers,
+//!                        draw_activation_bars, draw_state_notes, draw_gantt_today_marker,
+//!                        draw_quadrant_axis_labels, draw_packet_field_continuations,
+//!                        draw_bands, draw_axis_ticks, draw_cluster_dividers, draw_marker,
+//!                        draw_path_markers, draw_generic_diagram_title
+//!
+//! So a sequence fragment, a pie wedge, a gantt marker or a state note cannot honour a declared
+//! anything — there is no code path from the merge chain to those surfaces at all. The three
+//! surfaces this table covers are the three that were wired; the other sixteen were never asked.
+//!
+//! ⚠️ The first version of that audit reported `draw_pie_wedges` as consulting EVERY resolver. It
+//! was an artifact: the scan ran past the end of the `impl` block and swept in the free `resolve_*`
+//! functions defined below it. Bounded to the impl, pie wedges consult none. Recorded because the
+//! wrong answer was the flattering one, and it would have shrunk this list by the single most
+//! interesting entry.
 
 use fm_render_canvas::{CanvasRenderConfig, MockCanvas2dContext, render_to_canvas};
 
