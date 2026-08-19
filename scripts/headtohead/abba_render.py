@@ -283,7 +283,16 @@ def top_cpu_during(arm: dict, limit: int = 3) -> str:
     deltas.sort(reverse=True)
     if not deltas:
         return "top=none"
-    return "top=" + ",".join(f"{comm}:{cores_used:.1f}c" for cores_used, comm in deltas[:limit])
+
+    # ⚠️ THE TOP N UNDERSELLS A SWARM, and this line exists because it did. Observed 2026-08-19:
+    # run queue 79-86 on a 64-cpu host while the top five processes accounted for ~7 cores between
+    # them — the load was many small processes, not one hog, and a reader seeing only the top five
+    # would have concluded the machine was nearly free. The total and the count are what separate
+    # "one peer benchmark is holding 44 cores" from "eighty things are each holding one".
+    total_cores = sum(cores_used for cores_used, _ in deltas)
+    busy_procs = sum(1 for cores_used, _ in deltas if cores_used >= 0.25)
+    head = ",".join(f"{comm}:{cores_used:.1f}c" for cores_used, comm in deltas[:limit])
+    return f"top={head} (total {total_cores:.1f}c across {busy_procs} procs over 0.25c)"
 
 
 def arm_iowait_pct(arm: dict) -> float | None:
