@@ -199,3 +199,63 @@ fn a_bare_er_relation_draws_no_cardinality_on_the_canvas() {
         "a relation with no declared cardinality drew one anyway: {ops}"
     );
 }
+
+/// A declared node BORDER WIDTH reaches the canvas (bd-lvj3).
+///
+/// The edge half of this bead has read `stroke-width` off its merge chain since it landed; the node
+/// half never did, so every node border was drawn at `config.node_stroke_width` however the author
+/// declared it. Same three channels, same merge order, one property later.
+#[test]
+fn a_declared_node_stroke_width_reaches_the_canvas() {
+    let ops = canvas_ops("flowchart TD\n  a[A]\n  style a stroke-width:4px\n");
+
+    assert!(
+        ops.contains("SetLineWidth(4.0)"),
+        "the declared border width never reached the canvas: {ops}"
+    );
+}
+
+/// The same declaration through `classDef`, which is the channel a canvas cannot get for free.
+///
+/// fm-render-svg emits a CSS class and lets the BROWSER cascade it; a canvas has no cascade, so a
+/// `classDef` width that works in SVG is silently dropped here unless it is resolved explicitly.
+#[test]
+fn a_classdef_stroke_width_reaches_the_canvas() {
+    let ops = canvas_ops(
+        "flowchart TD\n  a[A]\n  classDef thick stroke-width:6\n  class a thick\n",
+    );
+
+    assert!(
+        ops.contains("SetLineWidth(6.0)"),
+        "a classDef border width was dropped: {ops}"
+    );
+}
+
+/// CONTROL: a malformed width is REFUSED, and the theme default stands.
+///
+/// This is the one that matters. A canvas silently ignores a draw call carrying NaN or a negative
+/// line width, so forwarding a junk value would make the border simply not be there, with nothing
+/// in the output to say why -- strictly worse than ignoring the declaration. Both spellings are
+/// checked because they fail differently: `wide` does not parse at all, `-2px` parses fine and is
+/// then rejected on sign.
+#[test]
+fn a_malformed_node_stroke_width_falls_back_to_the_theme() {
+    for source in [
+        "flowchart TD\n  a[A]\n  style a stroke-width:wide\n",
+        "flowchart TD\n  a[A]\n  style a stroke-width:-2px\n",
+    ] {
+        let ops = canvas_ops(source);
+        assert!(
+            ops.contains("SetLineWidth(1.5)"),
+            "{source:?} did not fall back to the theme width: {ops}"
+        );
+        assert!(
+            !ops.contains("SetLineWidth(-"),
+            "{source:?} forwarded a negative width to the canvas: {ops}"
+        );
+        assert!(
+            !ops.contains("NaN"),
+            "{source:?} forwarded NaN to the canvas: {ops}"
+        );
+    }
+}

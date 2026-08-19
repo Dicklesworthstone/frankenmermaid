@@ -1921,6 +1921,12 @@ impl Canvas2dRenderer {
             // branch silently keep the theme default.
             let text_color = resolve_node_text_color(ir, node_box.node_index);
             let label_fill = text_color.as_deref().unwrap_or(&self.config.label_color);
+            // The border WIDTH is the third channel of the same declaration and was the last one
+            // still discarded here: the edge resolver has read `stroke-width` since bd-lvj3's edge
+            // half landed, while every node border was drawn at the config width whatever the
+            // author wrote. `unwrap_or` keeps the theme default when nothing was declared.
+            let stroke_width =
+                resolve_node_stroke_width(ir, node_box.node_index).unwrap_or(self.config.node_stroke_width);
             draw_shape(
                 ctx,
                 shape,
@@ -1930,7 +1936,7 @@ impl Canvas2dRenderer {
                 h,
                 fill.as_deref().unwrap_or(&self.config.node_fill),
                 stroke.as_deref().unwrap_or(&self.config.node_stroke),
-                self.config.node_stroke_width,
+                stroke_width,
             );
             self.draw_calls += 1;
 
@@ -2720,19 +2726,33 @@ pub(crate) fn resolve_edge_style(
         merged.extend(inline.properties.clone());
     }
 
-    // `stroke-width` arrives as CSS, so `2px` and `2` both have to parse. A malformed value
-    // yields `None` and the arrow-derived width stands — a declared style must never be able to
-    // make an edge vanish by giving it a width of NaN.
-    let width = merged.get("stroke-width").and_then(|raw| {
+    let width = parse_stroke_width(merged.get("stroke-width").map(String::as_str));
+
+    (merged.get("stroke").cloned(), width)
+}
+
+/// Parse a CSS `stroke-width` declaration into a device width.
+///
+/// `2px` and a bare `2` must both parse, because both are valid in a mermaid `style` directive.
+///
+/// A malformed, non-finite or non-positive value yields `None` so the CALLER'S default stands. That
+/// is deliberate and load-bearing in both directions: a declared style must never be able to make a
+/// border vanish, and `NaN` or a negative reaching `set_line_width` is a draw call a canvas ignores
+/// silently — the element would simply not be there, with nothing in the output to say why.
+///
+/// Shared by the edge and node resolvers rather than written twice. The two differ only in which
+/// merge chain they read, and a forked copy is the duplicated-helper trap this repo has paid for
+/// before: the first one to learn about a new unit would leave the other behind, and nobody would
+/// see it until an edge and a node disagreed about the same declaration.
+fn parse_stroke_width(raw: Option<&str>) -> Option<f64> {
+    raw.and_then(|raw| {
         raw.trim()
             .trim_end_matches("px")
             .trim()
             .parse::<f64>()
             .ok()
             .filter(|w| w.is_finite() && *w > 0.0)
-    });
-
-    (merged.get("stroke").cloned(), width)
+    })
 }
 
 /// Resolve a node's fill and stroke from the author's own styling (bd-lvj3).
@@ -2812,6 +2832,24 @@ pub(crate) fn resolve_node_colors(
 /// instead of a colour this function invented.
 pub(crate) fn resolve_node_text_color(ir: &MermaidDiagramIr, node_index: usize) -> Option<String> {
     merged_node_style(ir, node_index).get("color").cloned()
+}
+
+/// The author's declared node BORDER WIDTH, if any (bd-lvj3).
+///
+/// The edge half of this bead already reads `stroke-width` off its merge chain; the node half did
+/// not, so `style a stroke-width:4px` and a `classDef` carrying one were both discarded and every
+/// node border was drawn at `config.node_stroke_width` regardless. Same three channels, same merge
+/// order, one property later — the asymmetric-sibling shape, where two halves of one feature were
+/// written at different times and only one learned the property.
+///
+/// fm-render-svg needs no equivalent: it emits the declaration as CSS and the browser applies it.
+/// A canvas has no cascade, which is why every one of these channels has to be resolved here.
+pub(crate) fn resolve_node_stroke_width(ir: &MermaidDiagramIr, node_index: usize) -> Option<f64> {
+    parse_stroke_width(
+        merged_node_style(ir, node_index)
+            .get("stroke-width")
+            .map(String::as_str),
+    )
 }
 
 pub(crate) fn legacy_edge_stroke(arrow: ArrowType, default_width: f64) -> (f64, &'static [f64]) {
