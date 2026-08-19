@@ -4372,3 +4372,44 @@ linter refuses a `measured_ratio` on this class.
 changes, if any `*_xl_*` corpus hash in `pins.json` changes, or if `maxEdges`/`maxTextSize` in the
 pin change — those limits are already raised above mermaid's defaults so the inputs render at all,
 and lowering them would turn a render failure into a guardrail refusal, which is a different result.
+
+## THE REPS QUESTION NO LONGER NEEDS TWO WINDOWS (2026-08-19)
+
+The standing open question is whether the incumbent's A/A null bias — over the 2% clause-3 bound in
+3 of 10 banked observations — is a real property of mermaid-js, or is estimator noise that a
+9-round median cannot resolve. Those have opposite consequences. The first blocks certification
+outright; the second is a config change.
+
+**The experiment as designed could not be run here.** "Run once at default reps, once at 4x, compare"
+needs two COMPARABLE windows, and the window gate has refused every sweep for weeks — most recently
+at spread 13 with 0.00% iowait and no peer benchmark running at all, just ~6.6 cores of ambient
+daemon churn. Waiting for two quiet windows was waiting for something this host does not offer.
+
+**Subsampling one run's own rounds needs no second window and is a better control anyway.** The
+per-round null ratios were being aggregated to (median, ci95, n) and discarded. They are now retained
+in the record (`mermaid_bench.mjs` `nullControl`) and laddered by `null_reps_report` in
+`abba_render.py`: random subsets of size k, reporting the bias a k-round run would have reported.
+Every draw comes from the same window, process and ELF, so sample count is the only difference —
+cleaner than two runs could ever be, because two runs also differ in everything else.
+
+The discriminator is sharp, and it is enforced in the self-test rather than demonstrated once.
+Against synthetic inputs with known answers:
+
+| input | k=4 | k=36 | over2pct at k=4 → k=36 |
+|---|---|---|---|
+| pure noise centred on 1.0 | 1.19% | 0.28% | 22.8% → 0.0% |
+| real +3% offset | 2.96% | 3.00% | 100% → 100% |
+
+Estimator noise collapses; a real offset sits still. A ladder that reported the same shape for both
+would let noise be recorded as incumbent instability, which is precisely the conclusion this exists
+to prevent, so `--self-test` fails if noise does not at least halve or if the offset moves by more
+than 0.5 points.
+
+The ladder also prints first-half against last-half bias. That is a confound check, not decoration:
+random subsets destroy round order, so a warmup or thermal trend would be averaged over silently.
+When the halves disagree by more than a point the row says ORDER EFFECT and the ladder is not to be
+trusted alone.
+
+**Status: still untested, but now testable in ONE run.** The banked observations predate the change
+and carry no ratios, so nothing can be re-analysed retroactively — the answer arrives with the next
+run that completes, whatever its window quality, since the comparison is internal to it.

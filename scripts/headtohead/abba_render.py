@@ -76,6 +76,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import re
 import statistics
 import subprocess
@@ -462,9 +463,17 @@ def mermaid_arm(case_id: str, reps: int, pins: dict | None = None) -> dict:
     proc = run_bounded(argv, ARM_TIMEOUT_S, "the mermaid arm")
     after = conditions()
     if proc is None:
-        return {"ns": None, "null": None, "before": before, "after": after, "code": None}
+        return {
+            "ns": None,
+            "null": None,
+            "null_ratios": [],
+            "before": before,
+            "after": after,
+            "code": None,
+        }
     ns = None
     null_ci = None
+    null_ratios: list[float] = []
     for record in _records(proc.stdout, case_id):
         if record.get("status") != "ok":
             continue
@@ -485,7 +494,67 @@ def mermaid_arm(case_id: str, reps: int, pins: dict | None = None) -> dict:
             null.get("ci95_hi"),
             null.get("n"),
         )
-    return {"ns": ns, "null": null_ci, "before": before, "after": after, "code": proc.returncode}
+        # The RAW per-round ratios, kept alongside the summary. A summary cannot be re-analysed;
+        # these can, and the reps question is answered by subsampling them rather than by running
+        # twice in two windows that this host has not offered in weeks.
+        null_ratios = null.get("ratios") or []
+    return {
+        "ns": ns,
+        "null": null_ci,
+        "null_ratios": null_ratios,
+        "before": before,
+        "after": after,
+        "code": proc.returncode,
+    }
+
+
+def null_reps_report(ratios: list[float], label: str) -> list[str]:
+    """Does the incumbent's null bias shrink with SAMPLE COUNT, from one run's own observations.
+
+    THE QUESTION THIS SETTLES. The incumbent's A/A null has exceeded the 2% clause-3 bound in 3 of
+    10 banked observations, which either means the incumbent genuinely does not repeat itself, or
+    means a 9-round median is too noisy an estimator and more rounds would settle it. Those two have
+    opposite consequences -- the first blocks certification, the second is fixed by a config change
+    -- and they were never separated because the test on offer was "run twice with different reps
+    and compare", which needs two comparable windows.
+
+    Subsampling one run's own rounds needs none. Every draw comes from the SAME window, process and
+    ELF, so sample count is the only thing that differs, which is a cleaner control than two runs
+    could ever be.
+
+    HOW TO READ IT. Random subsets of size k, so `typical` is the bias a k-round run would have
+    reported. If the bias is estimator noise it falls roughly as 1/sqrt(k) and `over2pct` collapses
+    toward zero; if it is a real offset the median sits still while k rises and only the spread
+    narrows around it.
+
+    The prefix/suffix line is a CONFOUND CHECK, not decoration: random subsets deliberately destroy
+    round order, so if early rounds differ from late ones (JIT warmup, thermal drift) the subsets
+    average over a real trend and the ladder would understate. When those two halves disagree, the
+    ladder is not trustworthy on its own and the row must say so.
+    """
+    n = len(ratios)
+    if n < 8:
+        return []
+    lines = [f"  {label} null reps ladder from n={n} rounds (random subsets, seed fixed):"]
+    rng = random.Random(20260819)
+    draws = 400
+    for k in sorted({k for k in (4, 9, 18, 27, 36, n) if k <= n}):
+        biases = []
+        for _ in range(draws):
+            subset = rng.sample(ratios, k)
+            biases.append(abs(statistics.median(subset) - 1.0) * 100)
+        typical = statistics.median(biases)
+        over = sum(1 for b in biases if b > 2.0) / draws * 100
+        lines.append(f"    k={k:>3}  typical |bias| {typical:5.2f}%   over2pct {over:5.1f}%")
+    half = n // 2
+    first = (statistics.median(ratios[:half]) - 1.0) * 100
+    last = (statistics.median(ratios[half:]) - 1.0) * 100
+    drift = abs(first - last)
+    verdict = "ORDER EFFECT — ladder understates" if drift > 1.0 else "no order effect"
+    lines.append(
+        f"    first-half bias {first:+.2f}%  last-half {last:+.2f}%  ({verdict})"
+    )
+    return lines
 
 
 def head_revision() -> str | None:
@@ -810,6 +879,47 @@ def self_test() -> int:
             print(f"       unbounded: {site}")
         failures += len(unbounded)
 
+    # THE REPS LADDER MUST TELL THE TWO HYPOTHESES APART, or it is a decoration that will be read
+    # as evidence. Synthetic inputs with KNOWN answers: pure noise centred on 1.0 (where more
+    # samples must shrink the reported bias) and a real 3% offset (where they must not). A ladder
+    # that reported the same shape for both would let estimator noise be recorded as incumbent
+    # instability, which is the exact conclusion this analysis exists to prevent.
+    ladder_rng = random.Random(11)
+    noise = [1.0 + ladder_rng.gauss(0, 0.04) for _ in range(40)]
+    offset = [1.03 + ladder_rng.gauss(0, 0.004) for _ in range(40)]
+
+    def typical_at(rows: list[str], k: int) -> float | None:
+        for row in rows:
+            if row.strip().startswith(f"k={k:>3}".strip()) and "typical" in row:
+                return float(row.split("typical |bias|")[1].split("%")[0])
+        return None
+
+    noise_rows = null_reps_report(noise, "T")
+    offset_rows = null_reps_report(offset, "T")
+    noise_lo, noise_hi = typical_at(noise_rows, 4), typical_at(noise_rows, 36)
+    offset_lo, offset_hi = typical_at(offset_rows, 4), typical_at(offset_rows, 36)
+    if noise_lo is None or noise_hi is None or offset_lo is None or offset_hi is None:
+        print("  FAIL reps ladder did not report the k values it was asked for")
+        failures += 1
+    elif not noise_hi < noise_lo / 2:
+        print(f"  FAIL reps ladder: pure noise did not shrink ({noise_lo:.2f}% -> {noise_hi:.2f}%)")
+        failures += 1
+    elif abs(offset_hi - offset_lo) > 0.5:
+        print(f"  FAIL reps ladder: a real offset moved ({offset_lo:.2f}% -> {offset_hi:.2f}%)")
+        failures += 1
+    else:
+        print(
+            f"  ok   reps ladder separates noise ({noise_lo:.2f}->{noise_hi:.2f}%) "
+            f"from a real offset ({offset_lo:.2f}->{offset_hi:.2f}%)"
+        )
+
+    # Too few rounds to say anything must produce NOTHING, not a ladder built from 3 numbers.
+    if null_reps_report([1.0, 1.01, 1.02], "T"):
+        print("  FAIL reps ladder reported from a sample too small to subset")
+        failures += 1
+    else:
+        print("  ok   reps ladder stays silent below the minimum sample")
+
     print("self-test PASSED" if not failures else f"self-test FAILED ({failures})")
     return 1 if failures else 0
 
@@ -1114,6 +1224,9 @@ def main() -> int:
             bias_pct = (null[0] - 1.0) * 100
             note = " ⚠️ over the 2% clause-3 bound" if abs(bias_pct) > 2.0 else ""
             print(f"  {label} null bias {bias_pct:+.2f}% from n={null[3]} pairs{note}")
+    for label, arm in (("B1", b1), ("B2", b2)):
+        for line in null_reps_report(arm.get("null_ratios") or [], label):
+            print(line)
     print(f"conditions at end: load={loadavg()} mhz={cpu_mhz()}")
     print()
     print("PROVISIONAL. Quote the worst bound, cite the executing ELF sha, and record per-arm loadavg")

@@ -502,6 +502,19 @@ function nullControl(ratios, checksumBytes) {
     cv_pct: Number((mean === 0 ? 0 : (sd / mean) * 100).toFixed(2)),
     mad_pct: Number((ratioMedian === 0 ? 0 : (mad / ratioMedian) * 100).toFixed(2)),
     cv_gate: 'never',
+    // THE RAW PER-ROUND RATIOS, not just their summary (bd-tbd).
+    //
+    // Every A/A null observation the harness has ever banked was aggregated on the way out, so the
+    // standing question -- is the incumbent's null bias real, or is it estimator noise that more
+    // samples would shrink? -- could only be attacked by running twice and comparing runs. On this
+    // host that means two COMPARABLE windows, and the window gate has refused for weeks; the
+    // comparison was never made. With the ratios retained, ONE run answers it by subsampling its
+    // own observations, which is perfectly paired by construction: same window, same process,
+    // same ELF, so nothing differs between the compared configurations except the sample count.
+    //
+    // Rounded to 6 places: these are ratios near 1.0, so 6 places is well past the noise floor and
+    // keeps the record from carrying 17 digits of float dust per round.
+    ratios: ratios.map((r) => Number(r.toFixed(6))),
     checksum_bytes: checksumBytes,
   };
 }
