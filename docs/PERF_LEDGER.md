@@ -4002,6 +4002,43 @@ same minute. That is a direct same-window replication of what bd-hmfi and bd-ecj
 **calibrated batch is what identifies it**: 20–25 is a contended arm and 37–39 a clean one, an
 absolute reference that drift cannot supply because drift is blind when both arms degrade together.
 
+### ⚠️ WHAT BLOCKS CERTIFICATION IS THE INCUMBENT ARM'S OWN VARIANCE, NOT THE HOST (2026-08-19)
+
+Pooling every incumbent A/A null recorded across all five replications of this standing — two per
+run, ten in total:
+
+| run | null medians | bias |
+|---|---|---|
+| run 1 (banked) | 0.9922, 1.0153 | −0.78%, +1.53% |
+| run 2 (banked) | 1.0068, 0.9594 | +0.68%, **−4.06%** |
+| 03:03Z | 0.9847, 0.9848 | −1.53%, −1.52% |
+| 06:18Z | 0.9661, 1.0026 | **−3.39%**, +0.26% |
+| 08:45Z | 1.0286, 0.9971 | **+2.86%**, −0.29% |
+
+**3 of 10 nulls (30%) exceed the 2% median-bias bound clause 3 applies**, worst 4.06%, mean absolute
+bias 1.69%. With two nulls per run, **3 of the 5 runs carry at least one null that clause 3 would
+refuse.**
+
+The failures do not track the host. They come from run 2 (a different session entirely), from 06:18Z,
+and from 08:45Z — which was the QUIETEST window measured in roughly 45 sweeps: busy-cpu spread 6,
+idle 86.9–90.9%, iowait 0.00%, 5.5 cores of external load. The tightest window produced the second
+worst null in the set.
+
+**So "wait for a quiet host" is not a route to certifying `sequence_20`, and roughly forty refused
+windows were spent on the assumption that it was.** The incumbent arm's self-consistency is the
+binding constraint, and host quiescence does not improve it.
+
+**NOT PROPOSED: relaxing clause 3.** Nothing here shows the 2% bound is mis-scaled — it shows the
+incumbent arm cannot reliably meet it at the current sample count, which is a different problem with
+a different fix. Retuning a fleet-wide constant on ten observations would move every verdict in this
+ledger, the same objection bd-ecjg raises against widening an elastic floor.
+
+**What the evidence does point at:** more incumbent observations per run, so each null's own median
+is estimated more tightly, rather than a quieter host or a looser bound. That is a harness change
+(`--reps` on the mermaid arm) with a measurable prediction — if the bias is estimator noise the
+spread should shrink with reps; if it survives, the incumbent genuinely varies at this scale and
+clause 3 can never pass for it. Either answer is worth more than a sixth replication.
+
 **FIFTH REPLICATION (2026-08-19 08:45Z, BlackThrush) — BEST WINDOW OF THE CAMPAIGN, WEAKEST
 INCUMBENT NULL. DO NOT USE IT TO STRENGTHEN THE STANDING.** Binary embeds HEAD `3de3bd01`, same
 corpus sha `31c0dd6bc24b571c`, unpinned. Conditions were the quietest measured across ~45 window
