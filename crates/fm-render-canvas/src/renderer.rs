@@ -1927,6 +1927,15 @@ impl Canvas2dRenderer {
             // author wrote. `unwrap_or` keeps the theme default when nothing was declared.
             let stroke_width =
                 resolve_node_stroke_width(ir, node_box.node_index).unwrap_or(self.config.node_stroke_width);
+            // The BORDER DASH is the fourth channel, and the only one that has to be UNDONE.
+            // `lineDash` is canvas STATE, not a draw argument: it persists until something sets it
+            // again, so a dashed node would leave every later shape dashed too. Set only when the
+            // author declared one, and cleared immediately after, so an undeclared node is drawn
+            // under exactly the state it was drawn under before this existed.
+            let dash = resolve_node_stroke_dasharray(ir, node_box.node_index);
+            if let Some(ref pattern) = dash {
+                ctx.set_line_dash(pattern);
+            }
             draw_shape(
                 ctx,
                 shape,
@@ -1938,6 +1947,9 @@ impl Canvas2dRenderer {
                 stroke.as_deref().unwrap_or(&self.config.node_stroke),
                 stroke_width,
             );
+            if dash.is_some() {
+                ctx.set_line_dash(&[]);
+            }
             self.draw_calls += 1;
 
             // Check for class diagram three-compartment rendering.
@@ -2844,6 +2856,61 @@ pub(crate) fn resolve_node_text_color(ir: &MermaidDiagramIr, node_index: usize) 
 ///
 /// fm-render-svg needs no equivalent: it emits the declaration as CSS and the browser applies it.
 /// A canvas has no cascade, which is why every one of these channels has to be resolved here.
+/// Parse an SVG `stroke-dasharray` into a canvas dash pattern.
+///
+/// SVG accepts commas, whitespace, or both as separators (`5 5`, `5,5`, `5, 5`), so both are
+/// treated as separators rather than guessing one. `none` is SVG's explicit "solid" and returns
+/// `None`, which is the same answer as "nothing declared" and correctly means "keep the default".
+///
+/// Rejected rather than forwarded: any component that does not parse, is negative, or is
+/// non-finite, and an ALL-ZERO pattern. The last one matters because `[0, 0]` is not a no-op on a
+/// canvas — the specification makes a zero-length dash pattern render as though no dash were set
+/// on some paths and can stall rasterisation on others, so a junk declaration would be strictly
+/// worse than ignoring it. This mirrors `parse_stroke_width`, which refuses for the same reason.
+fn parse_dash_array(raw: Option<&str>) -> Option<Vec<f64>> {
+    let raw = raw?.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("none") {
+        return None;
+    }
+
+    let mut pattern = Vec::new();
+    for part in raw.split([',', ' ', '\t']).filter(|part| !part.is_empty()) {
+        let value = part
+            .trim()
+            .trim_end_matches("px")
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite() && *value >= 0.0)?;
+        pattern.push(value);
+    }
+
+    if pattern.is_empty() || pattern.iter().all(|value| *value == 0.0) {
+        return None;
+    }
+    Some(pattern)
+}
+
+/// The author's declared node BORDER DASH, if any (bd-lvj3).
+///
+/// The fourth channel of the same declaration. `style a stroke-dasharray:5 5` and a `classDef`
+/// carrying one reached fm-render-svg — measured, it emits `stroke-dasharray:5 5` — and were
+/// dropped here, so a node the author asked to be dashed drew a solid border.
+///
+/// Same asymmetric-sibling shape as `stroke-width`: the EDGE path has drawn dashes since the edge
+/// half landed (`with_canvas_dash_f64` beside `legacy_edge_stroke`), and the node path never
+/// learned the property.
+pub(crate) fn resolve_node_stroke_dasharray(
+    ir: &MermaidDiagramIr,
+    node_index: usize,
+) -> Option<Vec<f64>> {
+    parse_dash_array(
+        merged_node_style(ir, node_index)
+            .get("stroke-dasharray")
+            .map(String::as_str),
+    )
+}
+
 pub(crate) fn resolve_node_stroke_width(ir: &MermaidDiagramIr, node_index: usize) -> Option<f64> {
     parse_stroke_width(
         merged_node_style(ir, node_index)
