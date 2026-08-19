@@ -1836,4 +1836,81 @@ mod tests {
         // every diagram on the strength of one styled node.
         assert_eq!(plain_plan.glyph_atlas.cell_px, super::DEFAULT_GLYPH_CELL_PX);
     }
+
+    /// Every per-node style resolver the raster path has must be CONSUMED by the GPU plan.
+    ///
+    /// This gate exists because the same defect happened five times, and each one was found by
+    /// hand, months apart, by noticing a neighbouring field:
+    ///
+    ///   stroke width  a3157251   label colour  58564713   opacity  a2b268c5
+    ///   font size     54d5f637   border dash   bd-l3nsf (open)
+    ///
+    /// Every one had the same shape: a resolver existed for the Canvas2D pass, `node_index` was
+    /// already in scope where the GPU plan is built, and nothing called it. The field was often
+    /// present and populated with a CONSTANT, so struct checks, the ABI guard and the compiler all
+    /// passed. Only a test that asks what value ARRIVES catches it — and only per channel, which is
+    /// why five separate tests exist and did not prevent the sixth.
+    ///
+    /// So this asks the structural question instead: does the GPU plan MENTION every resolver? It
+    /// is a weaker claim than "uses it correctly" — mention is not use — but it is the claim that
+    /// scales, and it fails the moment someone adds a sixth channel to the raster path alone.
+    ///
+    /// KNOWN GAPS ARE NAMED, NOT SILENT. `resolve_node_stroke_dasharray` is exempt with its bead
+    /// id, because a dashed SDF border needs perimeter arc length the shader does not have. An
+    /// exemption without a bead would turn this gate into a place to hide gaps.
+    #[test]
+    fn every_per_node_resolver_is_consumed_by_the_gpu_plan() {
+        const RENDERER_SRC: &str = include_str!("renderer.rs");
+        // ⚠️ THE PRODUCTION HALF ONLY, AND THIS TEST FAILED TO FAIL WITHOUT IT. `include_str!`
+        // pulls in THIS FILE, tests included, so `GPU_SRC.contains(name)` was satisfied by the
+        // resolver names appearing in the EXEMPT list and in this very doc comment. The gate passed
+        // while consuming nothing — it was reading its own text as evidence. Caught by breaking the
+        // exemption on purpose and watching it stay green.
+        const GPU_FULL_SRC: &str = include_str!("gpu_plan.rs");
+        let gpu_src: &str = GPU_FULL_SRC
+            .split_once("#[cfg(test)]")
+            .map_or(GPU_FULL_SRC, |(production, _tests)| production);
+        // (resolver, why it is exempt) — an entry here must cite a bead.
+        const EXEMPT: &[(&str, &str)] = &[(
+            "resolve_node_stroke_dasharray",
+            "bd-l3nsf: a dashed SDF border needs perimeter arc length, which shape_distance does \
+             not provide; the field is trivial and the shader is not",
+        )];
+
+        let mut resolvers = Vec::new();
+        let mut rest = RENDERER_SRC;
+        while let Some(at) = rest.find("pub(crate) fn resolve_") {
+            rest = &rest[at + "pub(crate) fn ".len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if name.contains("node") {
+                resolvers.push(name);
+            }
+        }
+        resolvers.sort();
+        resolvers.dedup();
+
+        // NON-VACUITY: a rename or a visibility change that made this scan find nothing would
+        // otherwise leave the loop below asserting over an empty set and passing forever.
+        assert!(
+            resolvers.len() >= 5,
+            "found only {} per-node resolvers, so this scan is not reading the source it thinks \
+             it is: {resolvers:?}",
+            resolvers.len()
+        );
+
+        let missing: Vec<&String> = resolvers
+            .iter()
+            .filter(|name| !gpu_src.contains(name.as_str()))
+            .filter(|name| !EXEMPT.iter().any(|(exempt, _)| *exempt == name.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the raster path resolves these per node and the GPU plan never mentions them: \
+             {missing:?}\nEither consume them, or add an EXEMPT entry citing a bead that says why \
+             the GPU cannot."
+        );
+    }
 }
