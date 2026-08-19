@@ -122,7 +122,7 @@ def free_gib(path: str = "/data") -> float | None:
     """
     try:
         stat = os.statvfs(path)
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return None
     return stat.f_bavail * stat.f_frsize / (1024**3)
 
@@ -180,6 +180,42 @@ def _utc_now_iso() -> str:
     import time
 
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000000000+00:00"
+
+
+# EVERY CHILD GETS A DEADLINE. A measurement harness that blocks forever on a wedged child is worse
+# than one that fails: it holds the machine, produces nothing, and looks like a long run. The fleet
+# has already lost 3h38m to an unbounded wait elsewhere, and until now every subprocess.run here was
+# unbounded -- a hung node or a hung fm binary would have hung the invocation with no upper bound.
+#
+# Bounds are per-KIND, sized to the work rather than one global number: a pin probe that takes
+# milliseconds and a measured arm that legitimately runs minutes need different deadlines, and a
+# single generous timeout would make the fast ones useless as guards.
+PROBE_TIMEOUT_S = 120.0
+ARM_TIMEOUT_S = 1800.0
+
+
+def run_bounded(argv: list[str], timeout: float, what: str) -> subprocess.CompletedProcess | None:
+    """Run a child with a deadline, and on expiry REPORT WHAT IT MANAGED TO SAY.
+
+    Returns `None` when the child was killed by the deadline. The partial stdout/stderr is printed
+    rather than discarded: a child that wedged after emitting a diagnostic is telling you why, and
+    `TimeoutExpired` carries that output. Throwing it away turns a diagnosable hang into a bare
+    timeout message, which is how a wait failure becomes an afternoon.
+    """
+    try:
+        return subprocess.run(
+            argv, capture_output=True, text=True, check=False, timeout=timeout
+        )
+    except subprocess.TimeoutExpired as expired:
+        print(f"REFUSING TO MEASURE: {what} exceeded its {timeout:.0f}s deadline and was killed")
+        for stream_name, blob in (("stdout", expired.stdout), ("stderr", expired.stderr)):
+            text = blob.decode("utf-8", "replace") if isinstance(blob, bytes) else (blob or "")
+            tail = text.strip().splitlines()[-5:]
+            if tail:
+                print(f"  last {stream_name} from the child before it died:")
+                for line in tail:
+                    print(f"    {line}")
+        return None
 
 
 def loadavg() -> list[float]:
@@ -370,9 +406,9 @@ def pick_pins(size: int = 8) -> dict | None:
     unpinned on boosted cores.
     """
     try:
-        out = subprocess.run(
-            ["node", PICK_PINS, str(size)], capture_output=True, text=True, check=False
-        )
+        out = run_bounded(["node", PICK_PINS, str(size)], PROBE_TIMEOUT_S, "the pin selector")
+        if out is None:
+            return None
         return json.loads(out.stdout.strip().splitlines()[-1])
     except (OSError, ValueError, IndexError):
         return None
@@ -397,8 +433,12 @@ def fm_arm(fm_bin: str, corpus: str, case_id: str, pins: dict | None = None) -> 
     argv = [fm_bin, corpus]
     if pins and pins.get("fm_cpu") is not None:
         argv = ["taskset", "-c", str(pins["fm_cpu"]), *argv]
-    proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+    proc = run_bounded(argv, ARM_TIMEOUT_S, "the fm arm")
     after = conditions()
+    if proc is None:
+        # Same shape an unparseable record yields, so the caller's existing "INCOMPLETE" path
+        # reports it rather than this raising through the middle of a bracket.
+        return {"ns": None, "work": None, "before": before, "after": after, "code": None}
     ns = None
     work = None
     for record in _records(proc.stdout, case_id):
@@ -419,8 +459,10 @@ def mermaid_arm(case_id: str, reps: int, pins: dict | None = None) -> dict:
         # A cpuset, not a single core: Chromium is multi-process, and starving it would slow the
         # INCUMBENT and inflate our ratio -- an over-claim in our own favour.
         argv = ["taskset", "-c", ",".join(str(c) for c in pins["incumbent_cpus"]), *argv]
-    proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+    proc = run_bounded(argv, ARM_TIMEOUT_S, "the mermaid arm")
     after = conditions()
+    if proc is None:
+        return {"ns": None, "null": None, "before": before, "after": after, "code": None}
     ns = None
     null_ci = None
     for record in _records(proc.stdout, case_id):
@@ -450,7 +492,14 @@ def head_revision() -> str | None:
     """The checked-out revision, or None if this is not a git tree."""
     try:
         out = subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            # Bounded like everything else here. `git rev-parse` is not a plausible hang, but an
+            # unbounded call in a file whose point is that unbounded calls cost afternoons is an
+            # invitation to copy it.
+            timeout=PROBE_TIMEOUT_S,
         )
         rev = out.stdout.strip()
         return rev if len(rev) == 40 and all(c in "0123456789abcdef" for c in rev) else None
@@ -558,7 +607,9 @@ def build_corpus(case_id: str, dest: str, fm_reps: int | None = None) -> dict:
         reps_expr,
         reps_expr,
     )
-    out = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=False)
+    out = run_bounded(["node", "-e", script], PROBE_TIMEOUT_S, "corpus generation")
+    if out is None:
+        sys.exit("corpus generation timed out; refusing to measure against an unknown input")
     if out.returncode != 0:
         raise SystemExit(f"corpus generation failed: {out.stderr.strip() or out.returncode}")
     return json.loads(out.stdout.strip().splitlines()[-1])
