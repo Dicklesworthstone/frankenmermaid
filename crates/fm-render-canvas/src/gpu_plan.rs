@@ -2437,6 +2437,91 @@ mod tests {
     ///
     /// KNOWN GAPS ARE NAMED, NOT SILENT. `resolve_node_stroke_dasharray` is exempt with its bead
     /// id, because a dashed SDF border needs perimeter arc length the shader does not have. An
+    /// Every raster draw source is CLASSIFIED against the GPU plan (bd-adabx).
+    ///
+    /// The plan mirrors three of renderer.rs's nineteen `draw_*` entry points. The other sixteen
+    /// have no GPU counterpart, so a sequence, gantt, pie, quadrant, packet or state diagram plans
+    /// its nodes and edges and none of the furniture that makes it that diagram type. Nothing
+    /// failed over this, because a plan that omits a draw source is indistinguishable from a plan
+    /// for a diagram that never had one.
+    ///
+    /// FAILS BOTH WAYS, which is the whole point. A new `draw_*` that nobody classified fails here
+    /// until someone decides whether the plan covers it; and a classification naming a `draw_*` that
+    /// no longer exists ALSO fails, so the list cannot rot into the permanent hole an allowlist
+    /// becomes when its entries stop matching reality.
+    #[test]
+    fn every_raster_draw_source_is_accounted_for_in_the_gpu_plan() {
+        const RENDERER_SRC: &str = include_str!("renderer.rs");
+
+        // Mirrored by the plan today.
+        const PLANNED: &[&str] = &["draw_clusters", "draw_edges", "draw_nodes"];
+
+        // (draw source, why the plan does not carry it) -- every entry cites bd-adabx, which holds
+        // the coverage map, so a reader lands on the decision rather than on this list.
+        const NOT_PLANNED: &[(&str, &str)] = &[
+            ("draw_generic_diagram_title", "bd-adabx: diagram title text"),
+            ("draw_path_markers", "bd-adabx: RenderScene path pipeline, not the layout pipeline"),
+            ("draw_marker", "bd-adabx: RenderScene path pipeline, not the layout pipeline"),
+            ("draw_quadrant_axis_labels", "bd-adabx: quadrant furniture"),
+            ("draw_bands", "bd-adabx: journey/kanban band furniture"),
+            ("draw_sequence_mirror_headers", "bd-adabx: sequence furniture"),
+            ("draw_packet_field_continuations", "bd-adabx: packet furniture"),
+            ("draw_axis_ticks", "bd-adabx: axis furniture"),
+            ("draw_gantt_today_marker", "bd-adabx: gantt furniture"),
+            ("draw_cluster_dividers", "bd-adabx: cluster divider rules"),
+            ("draw_state_notes", "bd-adabx: state furniture"),
+            ("draw_activation_bars", "bd-adabx: sequence furniture"),
+            ("draw_sequence_lifecycle_markers", "bd-adabx: sequence furniture"),
+            ("draw_sequence_fragments", "bd-adabx: sequence furniture"),
+            ("draw_sequence_notes", "bd-adabx: sequence furniture"),
+            ("draw_pie_wedges", "bd-adabx: pie geometry"),
+        ];
+
+        let mut found = Vec::new();
+        let mut rest = RENDERER_SRC;
+        while let Some(at) = rest.find("    fn draw_") {
+            rest = &rest[at + "    fn ".len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            found.push(name);
+        }
+        found.sort();
+        found.dedup();
+
+        // NON-VACUITY: a rename of the `fn draw_` idiom would leave every assertion below iterating
+        // over nothing and passing forever.
+        assert!(
+            found.len() >= 15,
+            "found only {} draw sources, so this scan is not reading renderer.rs: {found:?}",
+            found.len()
+        );
+
+        let unclassified: Vec<&String> = found
+            .iter()
+            .filter(|name| !PLANNED.contains(&name.as_str()))
+            .filter(|name| !NOT_PLANNED.iter().any(|(known, _)| known == &name.as_str()))
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "new raster draw source(s) with no GPU-plan decision: {unclassified:?} -- add to \
+             PLANNED if the plan carries it, or to NOT_PLANNED citing a bead"
+        );
+
+        let stale: Vec<&str> = PLANNED
+            .iter()
+            .copied()
+            .chain(NOT_PLANNED.iter().map(|(name, _)| *name))
+            .filter(|name| !found.iter().any(|seen| seen == name))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "classified draw source(s) that no longer exist in renderer.rs: {stale:?} -- a list \
+             entry naming nothing is a permanent hole, not a harmless leftover"
+        );
+    }
+
     /// exemption without a bead would turn this gate into a place to hide gaps.
     #[test]
     fn every_per_node_resolver_is_consumed_by_the_gpu_plan() {
@@ -2456,11 +2541,6 @@ mod tests {
                 "resolve_cluster_dash_array",
                 "bd-l3nsf: a dashed border needs perimeter arc length the SDF does not carry, and a \
                  cluster border is the same rect the node case is",
-            ),
-            (
-                "resolve_cluster_text_color",
-                "bd-dh6cy: cluster LABELS are not planned yet -- containers are, titles are not, so \
-                 there is no text run whose colour this could set",
             ),
             (
             "resolve_node_stroke_dasharray",
@@ -2490,6 +2570,22 @@ mod tests {
             "found only {} per-node resolvers, so this scan is not reading the source it thinks \
              it is: {resolvers:?}",
             resolvers.len()
+        );
+
+        // AN EXEMPTION THAT IS NO LONGER TRUE IS A HOLE, NOT A LEFTOVER. resolve_cluster_text_color
+        // sat here claiming "cluster labels are not planned yet" for a while after cluster titles
+        // landed and started consuming it -- harmless on that day, but the same entry would have
+        // silently excused the resolver being DROPPED again later. Every exemption must still name
+        // a resolver the plan genuinely does not consume.
+        let obsolete: Vec<&str> = EXEMPT
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| gpu_src.contains(name))
+            .collect();
+        assert!(
+            obsolete.is_empty(),
+            "exemption(s) for resolver(s) the plan now DOES consume: {obsolete:?} -- delete the \
+             entry so the resolver is covered by the check again"
         );
 
         let missing: Vec<&String> = resolvers
