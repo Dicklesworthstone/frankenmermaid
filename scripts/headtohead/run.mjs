@@ -288,9 +288,27 @@ function pickIdleCpu() {
   };
 }
 
+// Deadlines for every child this harness starts. Unbounded waits cost the fleet 3h38m elsewhere,
+// and until now BOTH spawn sites here were unbounded — including the one that runs the measured
+// engines. A certification harness that hangs holds the machine, produces nothing, and is
+// indistinguishable from a long run while it does it.
+//
+// Split by kind rather than one number: a topology probe answers in milliseconds and a measured arm
+// can legitimately run for many minutes, so a single generous bound would make the probes useless
+// as guards.
+const PROBE_TIMEOUT_MS = 120_000;
+const ARM_TIMEOUT_MS = 1_800_000;
+
 function sh(cmd, args, opts = {}) {
   try {
-    return execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], ...opts }).trim();
+    // A probe that wedges returns null here, which every caller already treats as "unknown" — the
+    // timeout is what stops it wedging the whole invocation first.
+    return execFileSync(cmd, args, {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: PROBE_TIMEOUT_MS,
+      ...opts,
+    }).trim();
   } catch {
     return null;
   }
@@ -2388,7 +2406,20 @@ function runJsonl(label, cmd, args, extraEnv = {}) {
     maxBuffer: 256 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'inherit'],
     env: { ...process.env, ...extraEnv },
+    timeout: ARM_TIMEOUT_MS,
   });
+  // READ WHAT IT MANAGED TO SAY. On a deadline kill spawnSync sets `error` and leaves the partial
+  // stdout in place; a child that wedged after emitting records is telling you where it got to, and
+  // discarding that turns a diagnosable hang into a bare timeout. stderr is inherited, so it is
+  // already on the console above this line.
+  if (res.error) {
+    const partial = (res.stdout ?? '').trim().split('\n').slice(-3);
+    console.error(`[run] ${label}: child died — ${res.error.code ?? res.error.message}`);
+    if (partial.length > 0 && partial[0] !== '') {
+      console.error('[run] last stdout before it died:');
+      for (const line of partial) console.error(`[run]   ${line.slice(0, 200)}`);
+    }
+  }
   const records = (res.stdout ?? '')
     .split('\n')
     .filter((l) => l.trim().startsWith('{'))
