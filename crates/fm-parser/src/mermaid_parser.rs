@@ -4856,9 +4856,24 @@ fn lower_state_flow_ast(
                 builder.attach_state_node(f);
                 builder.attach_state_node(t);
 
-                // Extract guard [condition] and action / action() from label.
-                let (clean_label, guard, action) = extract_state_guard_action(label.as_deref());
-                builder.push_edge(f, t, *arrow, clean_label.as_deref(), span);
+                // Extract guard [condition] and action / action() into STRUCTURED fields, and
+                // still label the edge with the author's FULL text.
+                //
+                // ⚠️ THE STRIPPED LABEL WAS DROPPING TEXT THE INCUMBENT DRAWS. Measured:
+                // `A --> B: ZZEVENT [ZZGUARD] / ZZACTION` rendered as just `ZZEVENT` in both SVG
+                // and terminal, while the IR held `guard: "ZZGUARD"` and `action: "ZZACTION"` that
+                // NO renderer reads (`edge.guard()` and `edge.action()` have zero call sites
+                // outside this crate).
+                //
+                // mermaid 11.15.0 has no guard/action concept for state diagrams at all — its only
+                // `guardCondition` occurrences are Langium parser-generator internals — so it
+                // renders the whole post-`:` description verbatim. Stripping it lost author text
+                // that the reference shows.
+                //
+                // The structured fields stay: they are the right shape for a consumer that wants
+                // the parts, and keeping them costs nothing now that the label is whole.
+                let (_clean_label, guard, action) = extract_state_guard_action(label.as_deref());
+                builder.push_edge(f, t, *arrow, label.as_deref(), span);
                 if (guard.is_some() || action.is_some())
                     && let Some(edge) = builder.ir_mut().edges.last_mut()
                 {
@@ -20909,6 +20924,32 @@ Rel_Back(db, app, "Responds")"#,
         let edge = &parsed.ir.edges[0];
         assert!(edge.guard().is_none());
         assert!(edge.action().is_none());
+    }
+
+    #[test]
+    fn a_state_transition_label_keeps_the_guard_and_action_text() {
+        // The rendered label must be the author's whole description, because mermaid has no
+        // guard/action concept and draws the text verbatim. The structured fields are extracted
+        // as well, not instead.
+        let parsed = parse_mermaid("stateDiagram-v2\n  A --> B: complete [isValid] / cleanup()");
+        let edge = parsed.ir.edges.first().expect("no edge parsed");
+
+        let label = edge
+            .label
+            .and_then(|id| parsed.ir.labels.get(id.0))
+            .map(|l| l.text.as_str())
+            .expect("edge has no label");
+        assert!(
+            label.contains("isValid") && label.contains("cleanup()"),
+            "the guard and action were stripped out of the rendered label: {label:?}"
+        );
+
+        assert_eq!(edge.guard(), Some("isValid"), "the structured guard was lost");
+        assert_eq!(
+            edge.action(),
+            Some("cleanup()"),
+            "the structured action was lost"
+        );
     }
 
     #[test]
