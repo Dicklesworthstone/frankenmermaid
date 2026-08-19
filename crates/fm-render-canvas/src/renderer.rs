@@ -757,6 +757,14 @@ impl Canvas2dRenderer {
                     ),
                 }
             };
+            // OPACITY wraps the whole cluster — box and title — as `opacity` does on an SVG
+            // element. `globalAlpha` is canvas STATE, so it is restored at the end of the
+            // iteration; left set, it would fade every node drawn inside this subgraph, which are
+            // drawn after their container.
+            let cluster_opacity = resolve_cluster_opacity(ir, cluster_box.cluster_index);
+            if let Some(alpha) = cluster_opacity {
+                ctx.set_global_alpha(alpha);
+            }
             ctx.set_fill_style(fill);
             ctx.set_stroke_style(stroke);
             // The border WIDTH and DASH were the two channels this surface still discarded: the
@@ -819,6 +827,10 @@ impl Canvas2dRenderer {
                 ctx.set_text_baseline(TextBaseline::Top);
                 ctx.fill_text(title_text, x + 8.0, y + 4.0);
                 self.draw_calls += 1;
+            }
+
+            if cluster_opacity.is_some() {
+                ctx.set_global_alpha(1.0);
             }
 
             count += 1;
@@ -1622,6 +1634,15 @@ impl Canvas2dRenderer {
             let declared_dash = resolve_edge_dash_array(ir, edge_path.edge_index);
             let dash: &[f64] = declared_dash.as_deref().unwrap_or(dash_pattern);
 
+            // OPACITY wraps the whole edge — line, markers and label — as it does on an SVG
+            // element. Restored beside the dash reset at the end of this iteration for the same
+            // reason: `globalAlpha` is canvas STATE and would otherwise fade the rest of the
+            // diagram.
+            let edge_opacity = resolve_edge_opacity(ir, edge_path.edge_index);
+            if let Some(alpha) = edge_opacity {
+                ctx.set_global_alpha(alpha);
+            }
+
             ctx.set_stroke_style(stroke);
             ctx.set_line_width(stroke_width);
             ctx.set_line_dash(dash);
@@ -1828,9 +1849,19 @@ impl Canvas2dRenderer {
                     )
                 };
 
-                let edge_label_font =
-                    edge_label_font.get_or_insert_with(|| secondary_label_font_css(&self.config));
-                ctx.set_font(edge_label_font.as_str());
+                // A declared `font-size` takes a side path so the hoisted secondary-label font
+                // is still what every undeclared edge draws under — same reasoning as the node
+                // label, where the invariant `format!` is a landed lever.
+                let declared_label_font =
+                    resolve_edge_label_font(ir, edge_path.edge_index, &self.config);
+                match declared_label_font.as_deref() {
+                    Some(font) => ctx.set_font(font),
+                    None => {
+                        let edge_label_font = edge_label_font
+                            .get_or_insert_with(|| secondary_label_font_css(&self.config));
+                        ctx.set_font(edge_label_font.as_str());
+                    }
+                }
 
                 let line_height = self.config.font_size * 1.2;
 
@@ -1853,7 +1884,16 @@ impl Canvas2dRenderer {
                     self.draw_calls += 1;
 
                     ctx.set_fill_style(edge_label_fill);
-                    ctx.set_font(edge_label_font.as_str());
+                    // Same choice as the site above: declared font, else the hoisted one. All
+                    // three label sites in this branch belong to ONE edge and must agree.
+                    match declared_label_font.as_deref() {
+                        Some(font) => ctx.set_font(font),
+                        None => {
+                            let hoisted = edge_label_font
+                                .get_or_insert_with(|| secondary_label_font_css(&self.config));
+                            ctx.set_font(hoisted.as_str());
+                        }
+                    }
                     ctx.set_text_align(TextAlign::Center);
                     ctx.set_text_baseline(TextBaseline::Middle);
                     ctx.fill_text(&label.text, lx, ly);
@@ -1883,7 +1923,16 @@ impl Canvas2dRenderer {
 
                     // Label text
                     ctx.set_fill_style(edge_label_fill);
-                    ctx.set_font(edge_label_font.as_str());
+                    // Same choice as the site above: declared font, else the hoisted one. All
+                    // three label sites in this branch belong to ONE edge and must agree.
+                    match declared_label_font.as_deref() {
+                        Some(font) => ctx.set_font(font),
+                        None => {
+                            let hoisted = edge_label_font
+                                .get_or_insert_with(|| secondary_label_font_css(&self.config));
+                            ctx.set_font(hoisted.as_str());
+                        }
+                    }
                     ctx.set_text_align(TextAlign::Center);
                     ctx.set_text_baseline(TextBaseline::Middle);
 
@@ -1898,6 +1947,9 @@ impl Canvas2dRenderer {
 
             // Reset dash pattern
             ctx.set_line_dash(&[]);
+            if edge_opacity.is_some() {
+                ctx.set_global_alpha(1.0);
+            }
             count += 1;
         }
 
@@ -3115,15 +3167,61 @@ fn parse_declared_font_size(raw: Option<&str>) -> Option<f64> {
 /// can legitimately ask for, and SVG honours it. Anything outside `0..=1` or non-finite is
 /// refused, because `globalAlpha` outside that range is ignored by a canvas — which would leave
 /// the PREVIOUS alpha in force and fade whatever came next instead.
+/// Parse a CSS `opacity` into a canvas `globalAlpha`.
+///
+/// Shared by the node, edge and cluster resolvers so all three refuse the same things rather than
+/// drifting apart — the same reason `parse_dash_array` is shared.
+///
+/// `0.0` is ACCEPTED: a fully transparent element is something an author can legitimately ask for,
+/// and SVG honours it. Anything outside `0..=1` or non-finite is refused, because `globalAlpha`
+/// outside that range is IGNORED by a canvas — which leaves the PREVIOUS alpha in force and fades
+/// whatever comes next instead.
+fn parse_opacity(raw: Option<&str>) -> Option<f64> {
+    raw.and_then(|raw| {
+        raw.trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|alpha| alpha.is_finite() && (0.0..=1.0).contains(alpha))
+    })
+}
+
 pub(crate) fn resolve_node_opacity(ir: &MermaidDiagramIr, node_index: usize) -> Option<f64> {
-    merged_node_style(ir, node_index)
-        .get("opacity")
-        .and_then(|raw| {
-            raw.trim()
-                .parse::<f64>()
-                .ok()
-                .filter(|alpha| alpha.is_finite() && (0.0..=1.0).contains(alpha))
-        })
+    parse_opacity(merged_node_style(ir, node_index).get("opacity").map(String::as_str))
+}
+
+/// The author's declared EDGE opacity, if any (bd-lvj3).
+pub(crate) fn resolve_edge_opacity(ir: &MermaidDiagramIr, edge_index: usize) -> Option<f64> {
+    parse_opacity(merged_edge_style(ir, edge_index).get("opacity").map(String::as_str))
+}
+
+/// The author's declared CLUSTER opacity, if any (bd-lvj3).
+pub(crate) fn resolve_cluster_opacity(ir: &MermaidDiagramIr, cluster_index: usize) -> Option<f64> {
+    parse_opacity(
+        merged_cluster_style(ir, cluster_index)
+            .get("opacity")
+            .map(String::as_str),
+    )
+}
+
+/// The author's declared EDGE LABEL font, if any (bd-lvj3).
+///
+/// The edge twin of `resolve_node_font`, but only `font-size` is read: the edge label has no
+/// weight/style/family channel in the SVG arm either, so reading more here would invent a
+/// disagreement rather than close one.
+///
+/// The declared size is used AS DECLARED, not scaled by the 0.85 the theme applies to secondary
+/// labels — the author asking for 22px means 22px, exactly as the SVG arm passes it through.
+fn resolve_edge_label_font(
+    ir: &MermaidDiagramIr,
+    edge_index: usize,
+    config: &CanvasRenderConfig,
+) -> Option<String> {
+    parse_declared_font_size(
+        merged_edge_style(ir, edge_index)
+            .get("font-size")
+            .map(String::as_str),
+    )
+    .map(|size| format!("{size}px {}", config.font_family))
 }
 
 /// A CSS `font-weight` this renderer is willing to put in a canvas font string.

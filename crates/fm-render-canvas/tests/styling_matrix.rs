@@ -91,10 +91,10 @@ fn cases() -> Vec<Case> {
         Case { surface: "edge", property: "color", expected: Honoured,
             source: "flowchart TD\n  a[A] -->|hi| b[B]\n  linkStyle 0 color:#ff00ff\n",
             needle: "SetFillStyle(\"#ff00ff\")" },
-        Case { surface: "edge", property: "opacity", expected: KnownGap,
+        Case { surface: "edge", property: "opacity", expected: Honoured,
             source: "flowchart TD\n  a[A] --> b[B]\n  linkStyle 0 opacity:0.5\n",
             needle: "SetGlobalAlpha(0.5)" },
-        Case { surface: "edge", property: "font-size", expected: KnownGap,
+        Case { surface: "edge", property: "font-size", expected: Honoured,
             source: "flowchart TD\n  a[A] -->|hi| b[B]\n  linkStyle 0 font-size:22px\n",
             needle: "SetFont(\"22px" },
 
@@ -114,7 +114,7 @@ fn cases() -> Vec<Case> {
         Case { surface: "cluster", property: "color", expected: Honoured,
             source: "flowchart TD\n  subgraph one[One]\n    a[Alpha]\n  end\n  style one color:#ff00ff\n",
             needle: "SetFillStyle(\"#ff00ff\")" },
-        Case { surface: "cluster", property: "opacity", expected: KnownGap,
+        Case { surface: "cluster", property: "opacity", expected: Honoured,
             source: "flowchart TD\n  subgraph one[One]\n    a[Alpha]\n  end\n  style one opacity:0.5\n",
             needle: "SetGlobalAlpha(0.5)" },
 
