@@ -95,17 +95,58 @@ fn no_output_contains_nan_infinity_or_negative_zero() {
             );
         }
 
-        // `-0` immediately followed by a DELIMITER, which is the only shape that means the
-        // number itself was negative zero. Written as explicit substrings rather than a clever
-        // scan: a convoluted detector that false-fails once gets relaxed by the next person, and a
-        // relaxed detector for this is worth nothing, since -0 is invisible to every other test.
-        for terminator in ['"', ' ', ',', ')', ';'] {
-            let needle = format!("-0{terminator}");
-            assert!(
-                !svg.contains(&needle),
-                "{name}: serialised negative zero ({needle:?}); it compares EQUAL to 0 so no \
-                 numeric assertion can catch it, and it rewrites every diff it appears in"
-            );
+        // ⚠️ A TRAILING DELIMITER IS NOT ENOUGH, and this assertion FAILED ON ITS OWN FIXTURE for
+        // that reason. The comment here used to say `-0` followed by a delimiter "is the only shape
+        // that means the number itself was negative zero". It is not: measured on the `flowchart`
+        // fixture, `-0"` occurs 11 times and NONE of them is a number —
+        //
+        //     data-fm-source-span="2:1-2:22@0-0"   the byte RANGE separator, 9 of them
+        //     id="fm-edge-0"  id="fm-node-a-0"     an index SUFFIX on an identifier, 2 of them
+        //
+        // A number needs a delimiter on BOTH sides: something must end before it starts. With the
+        // leading delimiter required, the same fixture matches ZERO times, so the check keeps its
+        // teeth and loses the false failure.
+        //
+        // This is the same trap the `inf` check above already documents — a bare `contains("inf")`
+        // firing on "info" — and it is worth noticing that the author saw it for one needle and not
+        // for the neighbouring one. Explicit substrings are still the right style here; they just
+        // have to spell the whole shape.
+        for start in ['"', ' ', ',', '(', ':'] {
+            for terminator in ['"', ' ', ',', ')', ';'] {
+                let needle = format!("{start}-0{terminator}");
+                assert!(
+                    !svg.contains(&needle),
+                    "{name}: serialised negative zero ({needle:?}); it compares EQUAL to 0 so no \
+                     numeric assertion can catch it, and it rewrites every diff it appears in"
+                );
+            }
+        }
+
+        // PATH DATA NEEDS ITS OWN PASS, because there a number may abut a command letter with no
+        // delimiter between them: this renderer emits `d="M0 0 L8 3.50 Z"`, so a negative zero
+        // would appear as `M-0`, which the both-sides rule above cannot see.
+        //
+        // Adding the command letters to the `start` set instead would have reintroduced the very
+        // false positive that rule exists to remove — `a` is a path command AND the last letter of
+        // `id="fm-node-a-0"`. Scanning only INSIDE `d="…"` keeps the two questions apart: no
+        // identifier appears there, so a leading letter is unambiguously a command.
+        // ⚠️ SPLIT ON ` d="`, WITH THE LEADING SPACE. `d="` alone also matches the tail of `id="`,
+        // and my first version of this loop duly "found" negative zeros in `id="fm-edge-0"` and
+        // `id="fm-node-a-0"` — the same false positive, one layer down, in the code written to
+        // remove it. Anchoring on the attribute boundary takes it to zero on this fixture.
+        for path in svg.split(" d=\"").skip(1).filter_map(|rest| rest.split('"').next()) {
+            for (index, _) in path.match_indices("-0") {
+                let after = path[index + 2..].chars().next();
+                // The `-0` is a WHOLE number only if nothing numeric follows it; `-0.5` and
+                // `-05` are ordinary values that happen to start this way.
+                let is_bare_negative_zero =
+                    !matches!(after, Some(c) if c.is_ascii_digit() || c == '.');
+                assert!(
+                    !is_bare_negative_zero,
+                    "{name}: serialised negative zero in path data ({path:?}); it compares EQUAL \
+                     to 0 so no numeric assertion can catch it"
+                );
+            }
         }
     }
 }
