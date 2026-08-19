@@ -733,22 +733,43 @@ fn unsupported_upstream_keyword(first_line: &str) -> Option<&'static str> {
         .find(|token| !token.is_empty())?
         .to_ascii_lowercase();
 
+    // ⚠️ THE RETURNED NAME IS THE SPELLING THE INCUMBENT ACCEPTS, WHICH IS NOT ALWAYS THE ONE THE
+    // AUTHOR TYPED. The `-` split above means `venn-beta` and `venn` both arrive here as `venn`, so
+    // matching is spelling-agnostic — but the string returned goes into a message telling the
+    // author this is real mermaid, and naming a spelling mermaid REJECTS teaches them a syntax
+    // error. Every name below was probed against the pinned 11.15.0 bundle with
+    // `scripts/headtohead/parse_probe.mjs`:
+    //
+    //   header          bare        with content   `-beta`
+    //   ishikawa        rejected    ACCEPTED       --
+    //   treemap         PARSED      --             PARSED
+    //   info            PARSED      --             --
+    //   eventmodeling   PARSED      --             --
+    //   radar           rejected    rejected       ACCEPTED
+    //   venn            rejected    rejected       PARSED
+    //   wardley         rejected    rejected       PARSED
+    //   treeView        rejected    rejected       PARSED
+    //
+    // ⚠️ PROBE WITH CONTENT, NOT A BARE HEADER, and this nearly cost a correct entry. A bare header
+    // conflates "this type does not exist" with "this type exists and a header alone is not a valid
+    // document": bare `ishikawa` reports "grammar rejected" and `ishikawa` plus one line reports
+    // "grammar ACCEPTED" (the execution throw after it is a missing DOMPurify shim, not a parse
+    // failure). Reading the bare result alone, I concluded ishikawa was fictional and was about to
+    // delete it. `notatypeatall` is rejected in both forms, which is the control that says the probe
+    // discriminates at all.
     match head.as_str() {
-        "radar" => Some("radar"),
+        // Accepted bare AND with `-beta`, so the bare spelling is the honest name.
         "treemap" => Some("treemap"),
-        // 62 occurrences in the pinned 11.15.0 bundle, with its own config block and grammar, and
-        // the pinned parser accepts `ishikawa`. Reported by BeigeHill and verified here against the
-        // bundle before adding, because an entry added on trust would produce a confident
-        // "not implemented yet" for a type that may simply not exist.
-        "ishikawa" => Some("ishikawa"),
-        // The remainder of the incumbent's detector table that we implement nothing for. The
-        // `-beta` suffixes are stripped by the token split above, so one entry covers both
-        // spellings where mermaid accepts both.
-        "eventmodeling" => Some("eventmodeling"),
         "info" => Some("info"),
-        "treeview" => Some("treeView"),
-        "venn" => Some("venn"),
-        "wardley" => Some("wardley"),
+        "eventmodeling" => Some("eventmodeling"),
+        // Accepted bare only, once it has content. Reported by BeigeHill and re-verified here.
+        "ishikawa" => Some("ishikawa"),
+        // ONLY the `-beta` spelling is real mermaid. Naming the bare form here would tell an author
+        // that `radar` is a diagram type they can use, and the incumbent rejects it.
+        "radar" => Some("radar-beta"),
+        "venn" => Some("venn-beta"),
+        "wardley" => Some("wardley-beta"),
+        "treeview" => Some("treeView-beta"),
         _ => None,
     }
 }
@@ -3606,5 +3627,47 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
                 "{source:?} was misread as a sequence diagram"
             );
         }
+    }
+
+    /// The unimplemented-type message must name a spelling the INCUMBENT ACCEPTS.
+    ///
+    /// The point of this message is to tell an author their syntax is fine and the renderer is
+    /// behind. Naming a spelling mermaid rejects inverts that: it teaches a syntax error while
+    /// sounding authoritative. Probed against the pinned 11.15.0 bundle -- `radar`, `venn`,
+    /// `wardley` and `treeView` are rejected bare AND with content, and only their `-beta` forms
+    /// parse, while `treemap`, `info`, `eventmodeling` and `ishikawa` are accepted bare.
+    #[test]
+    fn the_unimplemented_type_message_names_a_spelling_mermaid_accepts() {
+        for (source, expected) in [
+            ("radar-beta\n  Item\n", "radar-beta"),
+            ("radar\n  Item\n", "radar-beta"),
+            ("venn-beta\n  Item\n", "venn-beta"),
+            ("wardley-beta\n  Item\n", "wardley-beta"),
+            ("treeView-beta\n  Item\n", "treeView-beta"),
+            ("treemap\n  Item\n", "treemap"),
+            ("ishikawa\n  Item\n", "ishikawa"),
+        ] {
+            let detected = super::detect_type_with_confidence(source);
+            assert!(
+                detected.warnings.iter().any(|w| w.contains(expected)),
+                "{source:?} should name {expected:?}; warnings: {:?}",
+                detected.warnings
+            );
+        }
+    }
+
+    /// CONTROL: the bare spelling is NOT offered back for a `-beta`-only type.
+    ///
+    /// Without this, returning the author's own input would satisfy the test above for every case
+    /// and the correction would be untested. `radar` typed bare must still be answered with
+    /// `radar-beta` -- which the case above asserts -- and must never be echoed as `'radar'`.
+    #[test]
+    fn a_beta_only_type_is_never_named_by_its_bare_spelling() {
+        let detected = super::detect_type_with_confidence("radar\n  Item\n");
+        assert!(
+            !detected.warnings.iter().any(|w| w.contains("'radar'")),
+            "the bare spelling was offered back to the author: {:?}",
+            detected.warnings
+        );
     }
 }
