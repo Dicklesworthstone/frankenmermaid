@@ -166,7 +166,7 @@ fn a_text_colour_does_not_repaint_the_shape() {
     assert!(
         !shape_fills
             .iter()
-            .any(|f| f.to_ascii_lowercase() == "#ff0000"),
+            .any(|f| f.eq_ignore_ascii_case("#ff0000")),
         "a TEXT colour was used to fill a shape: {shape_fills:?}"
     );
 }

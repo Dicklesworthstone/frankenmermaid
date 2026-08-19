@@ -5911,10 +5911,9 @@ fn parse_click_directive_ast(
     // `A , B` and stops at the target for an ordinary `click A "url"`.
     let mut node_text = String::new();
     let mut after_node = rest;
-    loop {
-        let Some((token, remaining)) = take_token(after_node) else {
-            break;
-        };
+    // `while let` rather than `loop` + let-else: clippy::while_let_loop is DENIED by CI, and this
+    // exact loop failed that gate — the freeze meant it was written without one ever running.
+    while let Some((token, remaining)) = take_token(after_node) {
         node_text.push_str(token);
         after_node = remaining;
         let list_continues = node_text.ends_with(',')

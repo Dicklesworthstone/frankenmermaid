@@ -1410,7 +1410,7 @@ mod tests {
 
         // Sorted, so `cell()` may binary search.
         let mut sorted = first.cells.clone();
-        sorted.sort_by(|a, b| a.glyph.cmp(&b.glyph));
+        sorted.sort_by_key(|cell| cell.glyph);
         assert_eq!(first.cells, sorted, "cells are not sorted by glyph");
     }
 

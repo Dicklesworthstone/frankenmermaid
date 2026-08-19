@@ -38,7 +38,7 @@ fn a_subgraph_style_reaches_the_canvas() {
     let fills = fill_styles(STYLED);
 
     assert!(
-        fills.iter().any(|f| f.to_ascii_lowercase() == "#ff0000"),
+        fills.iter().any(|f| f.eq_ignore_ascii_case("#ff0000")),
         "the subgraph's declared fill never reached the canvas: {fills:?}"
     );
 }
@@ -55,7 +55,7 @@ fn an_unstyled_subgraph_keeps_the_theme_fill() {
         "the cluster was not drawn with the theme fill: {fills:?}"
     );
     assert!(
-        !fills.iter().any(|f| f.to_ascii_lowercase() == "#ff0000"),
+        !fills.iter().any(|f| f.eq_ignore_ascii_case("#ff0000")),
         "an unstyled subgraph gained a colour from nowhere: {fills:?}"
     );
 }
@@ -73,7 +73,7 @@ fn the_styled_fill_wins_over_the_theme_default() {
     let fills = fill_styles(STYLED);
     let theme = CanvasRenderConfig::default().cluster_fill.to_ascii_lowercase();
 
-    let styled_at = fills.iter().position(|f| f.to_ascii_lowercase() == "#ff0000");
+    let styled_at = fills.iter().position(|f| f.eq_ignore_ascii_case("#ff0000"));
     assert!(
         styled_at.is_some(),
         "the declared fill is absent, so precedence cannot be judged: {fills:?}"
