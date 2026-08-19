@@ -11946,6 +11946,24 @@ fn parse_c4_relationship(
 /// Container / Enterprise / Deployment_Node) is now recorded nowhere in the IR. mermaid keeps it and
 /// uses it for STYLING rather than as text, so not drawing it matches the incumbent — but if we ever
 /// want that styling, the kind needs an IR field, not a resurrected title string.
+///
+/// MEASURED FIELD COVERAGE for the C4 element macros, so the follow-up above has numbers next to
+/// it. One macro per diagram, unique sentinel per field, checked against the rendered SVG:
+///
+///     Person, System                 label ✓  desc ✓                (no type argument)
+///     Container, ContainerDb,
+///     Component                      label ✓  type ✓  desc ✓
+///     Rel                            label ✓  type ✓
+///     Deployment_Node                label ✓  type ✗                <- its type is dropped
+///
+/// All 22 macros the parser recognises DO render their label — none is dead. `Deployment_Node` is
+/// the one element whose type argument reaches nothing, and it is the one element routed through
+/// `parse_c4_boundary`, which takes `(alias, label)` and ignores the rest. That is consistent with
+/// treating it as a boundary and inconsistent with `Container`, which renders the same argument.
+///
+/// NOT VERIFIED AGAINST THE INCUMBENT: whether mermaid draws a Deployment_Node's type. Settling it
+/// needs a rendered comparison through the Chromium equivalence harness, not a source read, and it
+/// is the difference between "a divergence" and "a deliberate boundary simplification".
 fn parse_c4_boundary(
     arguments: &[String],
     span: Span,
