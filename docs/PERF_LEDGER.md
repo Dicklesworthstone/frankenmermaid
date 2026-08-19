@@ -4039,6 +4039,32 @@ is estimated more tightly, rather than a quieter host or a looser bound. That is
 spread should shrink with reps; if it survives, the incumbent genuinely varies at this scale and
 clause 3 can never pass for it. Either answer is worth more than a sixth replication.
 
+#### THAT PREDICTION WAS TESTED AND REFUTED, 2026-08-19 11:24Z
+
+Same corpus, same binary provenance (HEAD `1526b97d`), unpinned, window spread 5 — **4× the
+incumbent reps** (60 against the corpus default `reps_js: 15`), which is the only variable changed.
+
+| | null medians | bias | over 2% |
+|---|---|---|---|
+| default reps (10 nulls, 5 runs) | — | mean \|bias\| 1.69%, worst 4.06% | 3 of 10 |
+| **4× reps (this run)** | 1.0380, 0.9524 | **+3.80%, −4.76%** | **2 of 2** |
+
+More samples did not tighten the null. Mean absolute bias went from 1.69% to **4.28%**, and both
+nulls exceeded the bound where the default-rep set exceeded it 30% of the time. The estimator-noise
+hypothesis predicted shrinkage; the observation is the opposite direction.
+
+**⚠️ n = 2 at high reps.** Two nulls cannot establish a distribution, and this could be an unlucky
+pair — a second high-rep run is the obvious follow-up. What it does do is remove the cheap
+explanation: if the bias were simply an under-sampled median, 4× the samples should have moved it
+toward 1.0, and it did not.
+
+**Our own arm is not the problem, and this run is the sharpest evidence of that.** fm A/A drift
+**1.0041x** — the tightest of the campaign, against a previous best of 1.0119x — with batches 39/40.
+Same invocation, same host, same seconds. One engine's self-measurement is stable to 0.4% while the
+other's swings 4–5%, which is the asymmetry the certification gate is actually running into.
+
+Row: worst bound **403.9x**, headline unchanged in kind. `362.4x` still stands as the quoted figure.
+
 **FIFTH REPLICATION (2026-08-19 08:45Z, BlackThrush) — BEST WINDOW OF THE CAMPAIGN, WEAKEST
 INCUMBENT NULL. DO NOT USE IT TO STRENGTHEN THE STANDING.** Binary embeds HEAD `3de3bd01`, same
 corpus sha `31c0dd6bc24b571c`, unpinned. Conditions were the quietest measured across ~45 window
