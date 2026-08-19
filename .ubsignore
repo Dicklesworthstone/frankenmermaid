@@ -4,3 +4,16 @@ benches/**
 **/tests/**
 **/benches/**
 pkg/**
+
+# ⚠️ THESE GLOBS CANNOT REACH THIS PROJECT'S UNIT TESTS, and that is why the warning baseline is
+# large (bd-tp4z). Tests live INSIDE the source files, not under tests/:
+#
+#   fm-layout/src/lib.rs             28525 lines, trailing test module 10985 (38%)
+#   fm-parser/src/mermaid_parser.rs  21867 lines, trailing test module  9022 (41%)
+#   fm-render-svg/src/lib.rs         20060 lines, trailing test module  6719 (33%)
+#   fm-cli/src/main.rs               11099 lines, trailing test module  1500 (13%)
+#
+# The ignore mechanism is PATH-based and the problem is CFG-based, so refining these globs cannot
+# close it. Before spending time on glob policy, establish whether ubs can filter on #[cfg(test)];
+# if it cannot, the honest reading of the baseline is that production warnings are a minority of
+# the total and the total cannot currently be reduced to them.
