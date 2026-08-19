@@ -27,6 +27,10 @@ const PINS_PATH = join(HERE, 'pins.json');
 const PINS = JSON.parse(readFileSync(PINS_PATH, 'utf8'));
 
 const MIN_CLAIM_RATIO = 1.01;
+// Worst per-arm coefficient of variation a Rust bracket may carry and still be DECIDED (bd-ecjg).
+// Derived from the five archived flowchart_small_10 rows: the four with mutually inconsistent
+// verdicts sit at 11.84-21.93% and the one self-consistent row at 4.66%. See `fmBracket`.
+const BRACKET_MAX_CV_PCT = 8;
 const MIN_EFFECT_SAMPLES = 9;
 const EFFECT_BOOTSTRAP_RESAMPLES = 10_000;
 // Clause 3 of the corrected A/A null gate: max |null median - 1|. Bounds arm-order bias without
@@ -1336,13 +1340,62 @@ function fmBracket(before, after) {
     return {
       verdict: 'fail',
       rule: 'rust_pre_post_drift_inside_aa_median_ci_floor',
-      cv_gate: 'never',
+      cv_gate: BRACKET_MAX_CV_PCT,
       reason: 'missing or insufficient bracketed Rust A/A measurement',
       before_p50_ns: beforeTiming?.p50 ?? null,
       after_p50_ns: afterTiming?.p50 ?? null,
       selected: null,
       drift_ratio: null,
       drift_magnitude: null,
+      max_decidable_2x: null,
+    };
+  }
+
+  // PRECISION PRECONDITION (bd-ecjg). Refuse to decide a bracket whose own arms are too noisy to
+  // be decided, INSTEAD of deciding it against a threshold computed from that same noise.
+  //
+  // The audit that motivates this is in docs/parked-levers/bd_ecjg_bracket_floor_is_elastic.md.
+  // `maxDecidable` below is `1 + 2 * nullRadius`, so THE ALLOWANCE GROWS WITH THE RUN'S OWN A/A
+  // NOISE: a noisier run is granted a wider floor, and for any drift there is a noise level that
+  // admits it. Recomputed from the archive, the bead's own two rows are that effect --
+  //   cpu12 drift 1.050140 vs floor 1.024400  FAIL   (null half-width 0.0122)
+  //   cpu13 drift 1.013775 vs floor 1.036200  PASS   (null half-width 0.0181, 1.5x noisier)
+  // -- one noisy population thresholded against a limit derived from itself. The pass is the row
+  // with the widest floor in the set, not the row with the steadiest arms.
+  //
+  // THE BOUND IS DERIVED FROM THAT TABLE, not chosen for roundness. Taking max(cv_before,
+  // cv_after) across the five archived rows: the four rows whose verdicts are mutually
+  // inconsistent sit at 11.84, 16.27, 16.46 and 21.93 percent; the one self-consistent row sits at
+  // 4.66. 8% is inside that gap with margin on both sides (1.7x above the clean row, 1.5x below
+  // the noisiest refused one), so it is not knife-edge in either direction.
+  //
+  // LOSS-ONLY BY CONSTRUCTION, which this bead requires: a refusal can only move a row from
+  // pass/fail to undecidable and can never manufacture a pass, so no banked claim can be inflated
+  // by it. `medianCiGate` is untouched -- this sits before the verdict, not inside the median CI.
+  //
+  // ⚠️ AND IT IS ONLY LOSS-ONLY BECAUSE THE SUMMARY FILTER COUNTS `!== 'pass'`. Filtering
+  // `=== 'fail'` (what it said before) would have let an undecidable row escape
+  // `fm_bracket_gate_failures` and the exit-5 path entirely, turning a refusal into a silent
+  // acceptance -- the exact inversion this control exists to prevent.
+  //
+  // NOT gated on the null half-width as well. It would refuse the same four rows on this evidence,
+  // so it adds a second knob and no discrimination; `cv_pct` is the tell here. (`batch` is NOT --
+  // it discriminated on sequence_20 and does not here, because it is calibrated to a 3 ms target
+  // and is comparable only WITHIN a case.)
+  const cvPcts = [before?.cv_pct, after?.cv_pct].filter((cv) => Number.isFinite(cv));
+  const worstCv = cvPcts.length > 0 ? Math.max(...cvPcts) : null;
+  if (worstCv !== null && worstCv > BRACKET_MAX_CV_PCT) {
+    return {
+      verdict: 'undecidable',
+      rule: 'rust_pre_post_drift_inside_aa_median_ci_floor',
+      cv_gate: BRACKET_MAX_CV_PCT,
+      reason: `Rust bracket arms too noisy to decide (worst cv ${worstCv.toFixed(2)}% > ${BRACKET_MAX_CV_PCT}%)`,
+      before_p50_ns: beforeTiming.p50,
+      after_p50_ns: afterTiming.p50,
+      selected: null,
+      drift_ratio: null,
+      drift_magnitude: null,
+      worst_cv_pct: worstCv,
       max_decidable_2x: null,
     };
   }
@@ -1357,7 +1410,7 @@ function fmBracket(before, after) {
   return {
     verdict: driftMagnitude <= maxDecidable ? 'pass' : 'fail',
     rule: 'rust_pre_post_drift_inside_aa_median_ci_floor',
-    cv_gate: 'never',
+    cv_gate: BRACKET_MAX_CV_PCT,
     reason: driftMagnitude <= maxDecidable ? null : 'Rust phase drift clears its A/A median-CI floor',
     before_p50_ns: beforeP50,
     after_p50_ns: afterP50,
@@ -2031,9 +2084,10 @@ if (has('self-test')) {
       throw new Error('equivalence artifact provenance must fail closed on unprovable binding');
     }
   }
-  const bracketRecord = (p50, nullControl = perfect) => ({
+  const bracketRecord = (p50, nullControl = perfect, cvPct = undefined) => ({
     status: 'ok',
     ...(measurementMode === 'parse' ? { parse_ns: { p50 } } : { pipeline_ns: { p50 } }),
+    ...(cvPct === undefined ? {} : { cv_pct: cvPct }),
     null_control: nullControl,
   });
   const bracketCases = [
@@ -2041,6 +2095,20 @@ if (has('self-test')) {
     [bracketRecord(100), bracketRecord(104, noisy), 'pass'],
     [bracketRecord(100), bracketRecord(105, noisy), 'fail'],
     [bracketRecord(100), bracketRecord(101, null), 'fail'],
+    // bd-ecjg precision precondition. A noisy arm is UNDECIDABLE, not a pass and not a fail --
+    // asserted on both sides of the bound and in both arm positions, because a precondition read
+    // off only one arm is the half-a-guard shape this project keeps finding.
+    [bracketRecord(100, perfect, 8.01), bracketRecord(101), 'undecidable'],
+    [bracketRecord(100), bracketRecord(101, perfect, 8.01), 'undecidable'],
+    [bracketRecord(100), bracketRecord(101, perfect, 8), 'pass'],
+    // The refusal must outrank a drift that would otherwise PASS, or a noisy run could still bank
+    // a claim by being noisy in a direction that happens to look stable.
+    [bracketRecord(100, perfect, 20), bracketRecord(100), 'undecidable'],
+    // ...and a drift that would otherwise FAIL is still reported, never softened into a pass.
+    [bracketRecord(100, perfect, 20), bracketRecord(200), 'undecidable'],
+    // Absent cv (an older record) must still decide, or this gate would retroactively refuse every
+    // archived row that predates the field.
+    [bracketRecord(100), bracketRecord(101), 'pass'],
   ];
   for (const [before, after, want] of bracketCases) {
     const got = fmBracket(before, after).verdict;
@@ -3588,8 +3656,22 @@ const summary = {
     + '1 + 2 * max(per-engine A/A CI radius)); every null median stays within 2% of 1.0',
   measurement_order: measurementOrder,
   fm_bracket_gate_rule: 'Rust pre/post drift magnitude <= max(1.01, 1 + 2 * Rust A/A CI radius)',
+  // Added rather than folded into `cv_gate` above, which still reports 'never' for the median-CI
+  // lineage it describes. The bracket alone now refuses to DECIDE a run whose own arms are too
+  // noisy, because its floor is computed from that same noise (bd-ecjg).
+  fm_bracket_precision_precondition: {
+    rule: 'refuse to decide when max(cv_pct) exceeds the bound; undecidable is never a pass',
+    max_cv_pct: BRACKET_MAX_CV_PCT,
+    loss_only: true,
+  },
+  fm_bracket_undecidable: ok
+    .filter((r) => r.fm_bracket.verdict === 'undecidable')
+    .map(rowLabel),
+  // `!== 'pass'` rather than `=== 'fail'`: identical for the two verdicts that existed before
+  // bd-ecjg, and it is what keeps the new `undecidable` verdict inside the exit-5 path instead of
+  // letting a refusal pass silently. A precision refusal must never be cheaper than a failure.
   fm_bracket_gate_failures: ok
-    .filter((r) => r.fm_bracket.verdict === 'fail')
+    .filter((r) => r.fm_bracket.verdict !== 'pass')
     .map(rowLabel),
   thread_sweep: threadSweep.length > 0
     ? {
