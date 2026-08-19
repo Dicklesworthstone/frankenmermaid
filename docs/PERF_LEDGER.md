@@ -4002,6 +4002,39 @@ same minute. That is a direct same-window replication of what bd-hmfi and bd-ecj
 **calibrated batch is what identifies it**: 20–25 is a contended arm and 37–39 a clean one, an
 absolute reference that drift cannot supply because drift is blind when both arms degrade together.
 
+### ⚠️ WHY NO WINDOW QUALIFIES: A PEER TEST SUITE, NOT AMBIENT NOISE (2026-08-19, measured)
+
+Roughly fifty window sweeps have refused. The assumption behind waiting was that the host is
+generally busy. It is not — and the actual cause changes what would fix it.
+
+Two consecutive 12-sample sweeps each contained **exactly one** sample at 64/64 busy while every
+other sample sat at 5–16, with runq 7–9 and ~6 cores of daemon load. One spike per sweep is what
+refuses the gate: spread is a RANGE, so a single 64 against a floor of 5 gives spread 59 however
+quiet the other eleven seconds were.
+
+Hunting it took two attempts and the first was a **negative** result worth keeping: a 45-second probe
+at 0.4 s resolution, thresholded at ≥40/64 busy, caught **nothing**. That refuted the "periodic
+system event" story I had started to form — if a spike recurred every ~12 s, four should have
+appeared. Widening to 75 s and ≥22/64 caught 33 of them, all inside one burst window, and attributed
+every one to a single process:
+
+```
+SPIKE at +72.3s  busy=64/64  top: python3[2270601]:2717j, am:97j, smartedgar:50j …
+  /proc/2270601/cmdline → python3 -m pytest tests/python -q -p no:randomly -p no:cacheprovider
+  cwd → /data/tmp/.../franken-networkx/.../scratchpad/gate      192 threads, 158s elapsed
+```
+
+**It is a peer's TEST SUITE, not a benchmark.** 192 threads across 64 cores, quiet for a minute, then
+saturating. Nobody is misbehaving: running tests is ordinary work.
+
+**⚠️ AND THAT MEANS FLEET SERIALISATION WOULD NOT HAVE PREVENTED IT.** The one-at-a-time rule
+serialises *measurements* via `acquire_build_slot`; a pytest run neither takes a slot nor should.
+Re-enabling `WORKTREES_ENABLED` would stop two benchmarks colliding — worth doing, since the slot
+check is currently an unsatisfiable gate — but it would not have cleared any of the windows refused
+today. What would: measuring against a host-wide signal (which `window_check.sh` already provides and
+which correctly refused every one of these), or accepting that a shared 64-core box running several
+projects' test suites cannot supply a certification-grade window on demand.
+
 ### ⚠️ WHAT BLOCKS CERTIFICATION IS THE INCUMBENT ARM'S OWN VARIANCE, NOT THE HOST (2026-08-19)
 
 Pooling every incumbent A/A null recorded across all five replications of this standing — two per
