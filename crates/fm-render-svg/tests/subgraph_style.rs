@@ -76,3 +76,88 @@ fn a_node_style_still_applies() {
         ir.style_refs
     );
 }
+
+/// A DECLARED cluster fill is not dimmed by the theme's cluster fill-opacity (bd-xfmm).
+///
+/// `cluster_fill_opacity: 0.08` exists so an UNSTYLED subgraph is a faint tint behind its
+/// contents. Applied to a colour the author asked for, it rendered `style one fill:#ff0000` as a
+/// barely visible pink wash.
+///
+/// Measured before changing it, and it disagreed in two directions at once: fm-render-canvas
+/// paints the same declaration at full strength, so the two backends disagreed about a document
+/// the author styled; and the incumbent has no cluster dimming at all — mermaid 11.15.0's only
+/// `fill-opacity` values are `1.0`, a curve opacity and a graticule opacity.
+#[test]
+fn a_declared_cluster_fill_is_not_dimmed_by_the_theme_opacity() {
+    let svg = fm_render_svg::render_svg(&fm_parser::parse(STYLED).ir);
+
+    let rect = cluster_rect(&svg).expect("no cluster rect was emitted");
+    assert!(
+        rect.contains("fill:#ff0000"),
+        "the declared cluster fill did not reach the rect: {rect}"
+    );
+    assert!(
+        !rect.contains("fill-opacity"),
+        "the declared cluster fill was dimmed by the theme's cluster fill-opacity, so the author's \
+         colour renders at 8%: {rect}"
+    );
+}
+
+/// CONTROL: an UNSTYLED subgraph keeps the theme's faint tint.
+///
+/// This is what stops the fix above from being "delete the opacity". The subtle container look is
+/// deliberate and applies whenever the author has not asked for something else.
+#[test]
+fn an_undeclared_cluster_keeps_the_theme_fill_opacity() {
+    let svg = fm_render_svg::render_svg(
+        &fm_parser::parse("flowchart TD\n  subgraph one[One]\n    a[A]\n  end\n").ir,
+    );
+
+    let rect = cluster_rect(&svg).expect("no cluster rect was emitted");
+    assert!(
+        rect.contains("fill-opacity"),
+        "an unstyled cluster lost the theme's fill-opacity, which is the subtle container look: \
+         {rect}"
+    );
+}
+
+/// CONTROL: a declared STROKE alone does not remove the fill opacity.
+///
+/// Only a declared FILL competes with the fill-opacity. A subgraph whose border was recoloured
+/// still wants the faint body, and an implementation keying off "any declared style" would flatten
+/// it.
+#[test]
+fn a_declared_cluster_stroke_alone_keeps_the_fill_opacity() {
+    let svg = fm_render_svg::render_svg(
+        &fm_parser::parse(
+            "flowchart TD\n  subgraph one[One]\n    a[A]\n  end\n  style one stroke:#00ff00\n",
+        )
+        .ir,
+    );
+
+    let rect = cluster_rect(&svg).expect("no cluster rect was emitted");
+    assert!(
+        rect.contains("stroke:#00ff00"),
+        "the declared stroke did not reach the rect: {rect}"
+    );
+    assert!(
+        rect.contains("fill-opacity"),
+        "declaring only a stroke removed the fill opacity: {rect}"
+    );
+}
+
+/// The rect element carrying `class="fm-cluster"`, if any.
+///
+/// ⚠️ `.skip(1)` IS LOad-BEARING. `split("<rect")` yields everything BEFORE the first rect as
+/// chunk 0, and that chunk contains the `<style>` block — which mentions `--fm-cluster-fill`. My
+/// first version matched that chunk, found no `>`-terminated element in it, and returned `None`,
+/// so all three tests failed at their `expect` while the code under test was correct. Matching the
+/// stylesheet instead of the element is the same content-versus-identity mistake as grepping a
+/// report for a severity word.
+fn cluster_rect(svg: &str) -> Option<String> {
+    svg.split("<rect")
+        .skip(1)
+        .map(|chunk| chunk.split('>').next().unwrap_or(chunk))
+        .find(|element| element.contains("fm-cluster"))
+        .map(|element| format!("<rect{element}>"))
+}

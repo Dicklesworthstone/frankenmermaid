@@ -4425,7 +4425,26 @@ fn render_layout_to_svg(
                 config.rounded_corners
             })
             .class("fm-cluster");
-        if config.cluster_fill_opacity < 0.999 {
+        // Resolved BEFORE the theme's fill-opacity, because whether the author declared a fill
+        // decides whether that opacity applies at all.
+        let declared_cluster_style = resolve_cluster_inline_style(ir, cluster.cluster_index);
+        // ⚠️ THE THEME'S CLUSTER FILL-OPACITY IS NOT APPLIED TO A DECLARED FILL. `0.08` exists to
+        // make an UNSTYLED container a faint tint behind its contents. Applying it to a colour the
+        // author asked for renders that colour at 8% -- `style one fill:#ff0000` came out as a
+        // barely visible pink wash, which is not what anyone means by it.
+        //
+        // Measured, and it disagreed in two directions at once:
+        //   * the CANVAS paints the same declaration at full strength, so the two backends
+        //     disagreed about a document the author styled -- the bd-lvj3 family again
+        //   * the incumbent has no cluster dimming at all: mermaid 11.15.0's only `fill-opacity`
+        //     values are `1.0`, a curve opacity and a graticule opacity
+        //
+        // So the declared case follows the canvas and the incumbent, and the undeclared case keeps
+        // the theme exactly as it was.
+        let declares_cluster_fill = declared_cluster_style
+            .as_deref()
+            .is_some_and(|style| style.contains("fill:"));
+        if config.cluster_fill_opacity < 0.999 && !declares_cluster_fill {
             rect = rect.attr_num(
                 "fill-opacity",
                 clamp_unit_interval(config.cluster_fill_opacity),
@@ -4440,7 +4459,7 @@ fn render_layout_to_svg(
         // a declared value wins over the theme fill/stroke set on the builder above - which is what
         // "the author styled it" has to mean - and as a `style` ATTRIBUTE, matching how an edge's
         // resolved style is applied a few thousand lines below.
-        if let Some(declared) = resolve_cluster_inline_style(ir, cluster.cluster_index) {
+        if let Some(declared) = declared_cluster_style {
             rect = rect.attr("style", &declared);
         }
 
