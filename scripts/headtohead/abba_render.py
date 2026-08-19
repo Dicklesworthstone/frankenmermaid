@@ -104,6 +104,8 @@ MAX_BYTES_PER_NS = 512.0
 # makes it a separator and not a tuned filter; if an honest bracket ever lands near it, widen only
 # with the measurement that justifies it, and record the new observation in this table.
 MAX_FM_DRIFT = 1.10
+# Worst per-arm iowait an A/B/B/A may carry and still quote a ratio. See the refusal in `main`.
+MAX_ARM_IOWAIT_PCT = 5.0
 
 
 def loadavg() -> list[float]:
@@ -139,8 +141,60 @@ def cpu_mhz() -> dict | None:
     }
 
 
+def proc_stat() -> dict:
+    """Cumulative CPU jiffies plus the instantaneous D-state count, from ONE read of `/proc/stat`.
+
+    Cumulative rather than a rate on purpose: each arm already captures conditions before and after
+    itself, so the DIFFERENCE across those two reads is the iowait accrued during that arm and
+    nothing else. A spot rate (`mpstat 1 1`) would cost a second per capture and would still sample
+    a moment rather than the arm.
+
+    `procs_blocked` is the kernel's own count of tasks in uninterruptible sleep — the D-state number
+    — and it comes free from the same read.
+    """
+    iowait = total = blocked = 0
+    with open("/proc/stat", encoding="utf-8") as handle:
+        for line in handle:
+            if line.startswith("cpu "):
+                fields = [int(x) for x in line.split()[1:]]
+                total = sum(fields)
+                iowait = fields[4] if len(fields) > 4 else 0
+            elif line.startswith("procs_blocked"):
+                blocked = int(line.split()[1])
+    return {"iowait_jiffies": iowait, "total_jiffies": total, "procs_blocked": blocked}
+
+
+def arm_iowait_pct(arm: dict) -> float | None:
+    """Percentage of CPU time the host spent in iowait DURING this arm.
+
+    Returns `None` when either capture is missing, so an older record decides as it always did
+    rather than being retroactively refused by a field it never carried.
+    """
+    before = (arm.get("before") or {}).get("stat")
+    after = (arm.get("after") or {}).get("stat")
+    if not before or not after:
+        return None
+    delta_total = after["total_jiffies"] - before["total_jiffies"]
+    if delta_total <= 0:
+        return None
+    return 100.0 * (after["iowait_jiffies"] - before["iowait_jiffies"]) / delta_total
+
+
+def io_note(arm: dict) -> str:
+    """Per-arm iowait and D-state count, formatted for the arm's printed row.
+
+    Printed on EVERY arm, not only on refusal: a row banked from a clean window has to be able to
+    show it was clean, and 'iowait was fine' is not something a reader can verify after the fact.
+    """
+    pct = arm_iowait_pct(arm)
+    blocked = ((arm.get("after") or {}).get("stat") or {}).get("procs_blocked")
+    if pct is None:
+        return "iowait=n/a"
+    return f"iowait={pct:.2f}% blocked={blocked}"
+
+
 def conditions() -> dict:
-    return {"loadavg": loadavg(), "mhz": cpu_mhz()}
+    return {"loadavg": loadavg(), "mhz": cpu_mhz(), "stat": proc_stat()}
 
 
 def pick_pins(size: int = 8) -> dict | None:
@@ -507,6 +561,12 @@ def main() -> int:
         "state the drift, because the margin is then arithmetic on noise",
     )
     parser.add_argument(
+        "--allow-io-saturation",
+        action="store_true",
+        help="quote a ratio even when an arm ran while the host was waiting on storage; the row must "
+        "then state the per-arm iowait, because a disk-bound host does not slow both engines equally",
+    )
+    parser.add_argument(
         "--allow-stale-elf",
         action="store_true",
         help="measure a binary not built from HEAD; the row must then state which revision it was",
@@ -589,13 +649,37 @@ def main() -> int:
         return 2
 
     a1 = fm_arm(args.fm_bin, corpus_path, args.case, pins)
-    print(f"A1 fm      ns={a1['ns']} work={a1['work']} load={a1['before']['loadavg']} mhz={a1['before']['mhz']}")
+    print(f"A1 fm      ns={a1['ns']} work={a1['work']} load={a1['before']['loadavg']} {io_note(a1)} mhz={a1['before']['mhz']}")
     b1 = mermaid_arm(args.case, args.reps, pins)
-    print(f"B1 mermaid ns={b1['ns']} load={b1['before']['loadavg']} mhz={b1['before']['mhz']}")
+    print(f"B1 mermaid ns={b1['ns']} load={b1['before']['loadavg']} {io_note(b1)} mhz={b1['before']['mhz']}")
     b2 = mermaid_arm(args.case, args.reps, pins)
-    print(f"B2 mermaid ns={b2['ns']} load={b2['before']['loadavg']} mhz={b2['before']['mhz']}")
+    print(f"B2 mermaid ns={b2['ns']} load={b2['before']['loadavg']} {io_note(b2)} mhz={b2['before']['mhz']}")
     a2 = fm_arm(args.fm_bin, corpus_path, args.case, pins)
-    print(f"A2 fm      ns={a2['ns']} work={a2['work']} load={a2['before']['loadavg']} mhz={a2['before']['mhz']}")
+    print(f"A2 fm      ns={a2['ns']} work={a2['work']} load={a2['before']['loadavg']} {io_note(a2)} mhz={a2['before']['mhz']}")
+
+    # IO SATURATION REFUSAL. A disk-bound host does not slow the two engines equally -- the arm that
+    # happens to straddle a flush pays for it -- so a timing taken while the machine is waiting on
+    # storage compares queue depth, not code. Observed on this host: 0.00% iowait through every
+    # clean window all session, then 53% with 37 tasks in D-state. 5% is an order of magnitude above
+    # the clean observation and an order below the saturated one, so it is not knife-edge.
+    #
+    # Measured as a DELTA across each arm's own before/after captures, which is the iowait accrued
+    # during that arm rather than a spot sample taken next to it. An arm with no captures returns
+    # None and decides as before, so this cannot retroactively refuse an older record.
+    io_offenders = [
+        (name, pct)
+        for name, arm in (("A1", a1), ("B1", b1), ("B2", b2), ("A2", a2))
+        for pct in [arm_iowait_pct(arm)]
+        if pct is not None and pct > MAX_ARM_IOWAIT_PCT
+    ]
+    if io_offenders and not args.allow_io_saturation:
+        print()
+        print("REFUSING TO QUOTE A RATIO: the host was waiting on storage during a measured arm")
+        for name, pct in io_offenders:
+            print(f"  {name} ran at {pct:.1f}% iowait, over the {MAX_ARM_IOWAIT_PCT}% ceiling")
+        print("  a disk-bound host does not slow both engines equally, so this compares queue depth")
+        print("  re-run in a quiet window, or pass --allow-io-saturation and state it on the row")
+        return 2
 
     for name, arm in (("A1", a1), ("A2", a2)):
         why = check_work_proof(arm)

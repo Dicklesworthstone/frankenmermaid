@@ -4002,6 +4002,21 @@ same minute. That is a direct same-window replication of what bd-hmfi and bd-ecj
 **calibrated batch is what identifies it**: 20–25 is a contended arm and 37–39 a clean one, an
 absolute reference that drift cannot supply because drift is blind when both arms degrade together.
 
+**⚠️ THIS ROW CARRIES NO PER-ARM IOWAIT, AND THAT IS A GAP IN THE INSTRUMENT, NOT AN OVERSIGHT IN
+THE WINDOW.** `abba_render.py` recorded loadavg and CPU MHz per arm and did not record iowait at
+all, so no row banked before 2026-08-19 can prove the host was not disk-bound while it ran. What
+exists for this row is adjacent, not contemporaneous: `window_check.sh` reported `iowait=0.00%` at
+23:53:24, 23:53:45 and 23:54:20, and the bracket completed at 23:56:08. Three clean samples in the
+two minutes before a ~10-second run is strong evidence and is not the same thing as a measurement of
+the run itself — an IO saturation reported on this host at 01:37 (53% iowait, 37 tasks in D-state)
+is exactly the condition that would invalidate a timing, and it arrived ~100 minutes after this one.
+
+The instrument now closes that gap: each arm's iowait is computed as a DELTA across its own
+before/after `/proc/stat` captures — iowait accrued *during* that arm rather than a spot sample
+beside it — and printed on every row alongside the D-state count, with a refusal above 5%. Rows
+banked from 2026-08-19 onward can show they were clean; this one can only show the window around it
+was.
+
 **Legacy incumbent arm (same invocation as each measured arm):** name=mermaid-js version=11.15.0
 artifact_sha256=70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de
 securityLevel=strict, runtime Chrome/151.0.7922.108 via /usr/bin/chromium-browser, render mode.
