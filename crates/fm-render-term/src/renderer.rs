@@ -361,6 +361,34 @@ impl TermRenderer {
             canvas.draw_line(lx0, ly0, lx1, ly1);
         }
 
+        // STATE CONCURRENCY-REGION DIVIDERS (bd-dgnm4). `state Big { A --> B  --  C --> D }`
+        // declares two regions running in parallel, and the `--` separator is SYNTAX the author
+        // wrote, not decoration. The layout records each boundary in
+        // `extensions.cluster_dividers` (built by `build_state_cluster_dividers`, keyed on the
+        // `__state_region_` subgraphs the `--` creates); fm-render-svg drew one dashed line per
+        // divider and fm-render-canvas now does too, but this surface referenced that extension
+        // NOWHERE — so the two regions ran together into one box and a terminal reader could not
+        // tell there were two.
+        //
+        // Drawn on the CANVAS layer rather than the text overlay for the reason the gantt today
+        // marker gives above: the overlay carries state names, and a rule written there would erase
+        // one. A divider is worth less than the label it would cover.
+        //
+        // DASHED, at the same 3-pixel cadence the sequence lifeline already uses on this canvas,
+        // because a SOLID rule here is indistinguishable from the cluster's own border —
+        // `render_cluster_canvas` draws that border with `draw_rect`, which is solid. The dash is
+        // what carries "region boundary" rather than "another box", exactly as the SVG's
+        // `stroke-dasharray("6,4")` does there. It survives sub-cell quantisation: braille packs 2
+        // pixels per column, so a 3-on/3-off run alternates set and clear cells rather than filling
+        // every one.
+        for divider in &layout.extensions.cluster_dividers {
+            let x0 = (divider.start.x * pixel_scale_x) as isize + padding_x as isize;
+            let y0 = (divider.start.y * pixel_scale_y) as isize + padding_y as isize;
+            let x1 = (divider.end.x * pixel_scale_x) as isize + padding_x as isize;
+            let y1 = (divider.end.y * pixel_scale_y) as isize + padding_y as isize;
+            Self::draw_dashed_segment(&mut canvas, x0, y0, x1, y1);
+        }
+
         // Render layout bands based on their kind.
         for band in &layout.extensions.bands {
             use fm_layout::LayoutBandKind;
@@ -1124,6 +1152,45 @@ impl TermRenderer {
                     buffer.set(x + w.saturating_sub(1), y + dy, glyphs.vertical);
                 }
             }
+        }
+    }
+
+    /// Draw a DASHED segment on the pixel canvas, in the 3-on/3-off cadence the sequence lifeline
+    /// already uses here (bd-dgnm4).
+    ///
+    /// Written parametrically rather than as a horizontal special case even though every divider
+    /// `build_state_cluster_dividers` emits today is horizontal (it sets `start.y == end.y`). The
+    /// geometry it consumes is a general `LayoutPoint` pair, and a horizontal-only implementation
+    /// would silently draw a future vertical or diagonal divider in the wrong place instead of
+    /// failing — the same shape as the state-note leader bug that cast a negative coordinate to
+    /// `usize` and lost the line entirely.
+    ///
+    /// `draw_line` takes `isize` and clips internally, so off-canvas dashes are dropped rather than
+    /// wrapped.
+    fn draw_dashed_segment(canvas: &mut Canvas, x0: isize, y0: isize, x1: isize, y1: isize) {
+        /// Pixels drawn, then pixels skipped. Matches the lifeline dash on this canvas.
+        const DASH: isize = 3;
+
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let steps = dx.abs().max(dy.abs());
+        if steps == 0 {
+            canvas.draw_line(x0, y0, x0, y0);
+            return;
+        }
+
+        let mut step = 0_isize;
+        while step <= steps {
+            let end = (step + DASH - 1).min(steps);
+            // Endpoints of this dash, interpolated along the segment. Integer arithmetic keeps the
+            // result deterministic across platforms, which the terminal output determinism test
+            // depends on.
+            let ax = x0 + dx * step / steps;
+            let ay = y0 + dy * step / steps;
+            let bx = x0 + dx * end / steps;
+            let by = y0 + dy * end / steps;
+            canvas.draw_line(ax, ay, bx, by);
+            step += DASH * 2;
         }
     }
 
