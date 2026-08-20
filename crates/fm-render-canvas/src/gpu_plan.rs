@@ -79,6 +79,20 @@ pub const SEQUENCE_NOTE_STROKE_WIDTH: f32 = 1.0;
 /// its own constant, and no test asserts the two differ, because they do not.
 pub const LIFECYCLE_MARKER_STROKE_WIDTH: f32 = 1.5;
 
+/// Default subgraph border, which is NOT the node border (bd-adabx).
+///
+/// `config.cluster_stroke` is `rgba(148,163,184,0.78)` and `config.node_stroke` is `#94a3b8`. Same
+/// RGB, DIFFERENT ALPHA -- and the cluster instances fell back to the node stroke, so the plan drew
+/// subgraph borders fully opaque where the canvas draws them at 78%. Identical RGB is exactly why
+/// that went unnoticed: every channel a reader would spot-check matched.
+pub const DEFAULT_CLUSTER_STROKE_RGBA: [f32; 4] = [0.580_392_2, 0.639_215_7, 0.721_568_6, 0.78];
+
+/// Dash pattern of a subgraph divider, in layout units.
+pub const CLUSTER_DIVIDER_DASH: [f32; 2] = [6.0, 4.0];
+
+/// Stroke width of a subgraph divider: `draw_cluster_dividers` sets `line_width(1.0)`.
+pub const CLUSTER_DIVIDER_STROKE_WIDTH: f32 = 1.0;
+
 /// `edge_index` on a segment that is NOT an edge.
 ///
 /// A cross, a divider or a leader line is a line without an edge behind it, and `GpuEdgeSegment`
@@ -714,6 +728,13 @@ pub struct GpuRenderPlan {
     /// back-reference the text pass uses -- cluster titles ARE planned now, tagged
     /// `GpuTextSource::Cluster`.
     pub cluster_instances: Vec<GpuNodeInstance>,
+    /// Subgraph dividers, as dashed line segments (bd-adabx).
+    ///
+    /// Directly after the clusters, matching the raster call order. A dashed LINE is expressible
+    /// where a dashed BORDER is not: `GpuEdgeSegment` carries a real dash pattern, while the rect
+    /// SDF has no perimeter arc length to phase one along (bd-l3nsf). `edge_index` is
+    /// [`NO_EDGE_INDEX`] -- a divider is not an edge.
+    pub cluster_divider_segments: Vec<GpuEdgeSegment>,
     /// Sequence foot-row participant headers, as rect instances (bd-adabx).
     ///
     /// Before the activation bars because `render` draws them first (call order: draw_clusters,
@@ -804,7 +825,7 @@ impl GpuRenderPlan {
             let stroke = declared_stroke
                 .as_deref()
                 .and_then(parse_paint_rgba)
-                .unwrap_or(DEFAULT_NODE_STROKE_RGBA);
+                .unwrap_or(DEFAULT_CLUSTER_STROKE_RGBA);
             let stroke_width =
                 crate::renderer::resolve_cluster_stroke_width(ir, cluster.cluster_index)
                     .map(|width| width as f32)
@@ -821,6 +842,21 @@ impl GpuRenderPlan {
                 stroke_width,
                 shape: GpuNodeShape::Rect as u32,
                 node_index: u32::try_from(cluster.cluster_index).unwrap_or(u32::MAX),
+            });
+        }
+
+        // SUBGRAPH DIVIDERS (bd-adabx). One dashed segment each, in the cluster stroke.
+        let mut cluster_divider_segments =
+            Vec::with_capacity(layout.extensions.cluster_dividers.len());
+        for divider in &layout.extensions.cluster_dividers {
+            cluster_divider_segments.push(GpuEdgeSegment {
+                from: [divider.start.x, divider.start.y],
+                to: [divider.end.x, divider.end.y],
+                edge_index: NO_EDGE_INDEX,
+                color: DEFAULT_CLUSTER_STROKE_RGBA,
+                dash_phase: 0.0,
+                dash: CLUSTER_DIVIDER_DASH,
+                width: CLUSTER_DIVIDER_STROKE_WIDTH,
             });
         }
 
@@ -1368,6 +1404,7 @@ impl GpuRenderPlan {
         Self {
             bounds: layout.bounds,
             cluster_instances,
+            cluster_divider_segments,
             mirror_header_instances,
             activation_instances,
             lifecycle_marker_segments,
@@ -2946,6 +2983,77 @@ mod tests {
         );
     }
 
+    /// Subgraph dividers reach the plan as dashed segments, and the border alpha is right
+    /// (bd-adabx).
+    ///
+    /// A dashed LINE is expressible where a dashed BORDER is not, so a divider carries a real dash
+    /// pattern rather than being deferred to bd-l3nsf with the fragment boxes.
+    ///
+    /// The alpha assertion is here because it caught a live defect. `config.cluster_stroke` is
+    /// `rgba(148,163,184,0.78)` and `config.node_stroke` is `#94a3b8` -- SAME RGB, different alpha
+    /// -- and the cluster instances fell back to the node stroke, so the plan drew subgraph borders
+    /// fully opaque against the canvas's 78%. Identical RGB is why it survived: every channel a
+    /// reader would spot-check agreed.
+    #[test]
+    fn subgraph_dividers_are_dashed_and_the_cluster_border_keeps_its_alpha() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let mut layout = test_layout();
+        layout.extensions.cluster_dividers = vec![fm_layout::LayoutClusterDivider {
+            cluster_index: 0,
+            start: super::LayoutPoint { x: 10.0, y: 50.0 },
+            end: super::LayoutPoint { x: 210.0, y: 50.0 },
+        }];
+
+        let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.25);
+
+        assert_eq!(plan.cluster_divider_segments.len(), 1);
+        let divider = plan.cluster_divider_segments[0];
+        assert_eq!(divider.from, [10.0, 50.0]);
+        assert_eq!(divider.to, [210.0, 50.0]);
+        assert_eq!(
+            divider.dash,
+            super::CLUSTER_DIVIDER_DASH,
+            "a divider is dashed; a solid one is a different rule on the page"
+        );
+        assert_eq!(divider.width, super::CLUSTER_DIVIDER_STROKE_WIDTH);
+        assert_eq!(
+            divider.edge_index,
+            super::NO_EDGE_INDEX,
+            "a divider is not an edge"
+        );
+
+        // THE DEFECT THIS TEST EXISTS FOR, asserted on a REAL PLANNED CLUSTER and not only on the
+        // constants -- the constants can be right while the cluster loop still reaches for the node
+        // stroke, which is exactly what it was doing.
+        let cluster_ir = fm_parser::parse(
+            "flowchart TD\n  subgraph one[Group One]\n    a[A]\n  end\n",
+        )
+        .ir;
+        let cluster_layout = fm_layout::layout_diagram(&cluster_ir);
+        assert!(
+            !cluster_layout.clusters.is_empty(),
+            "fixture produced no cluster, so the border assertion below proves nothing"
+        );
+        let cluster_plan = super::GpuRenderPlan::from_layout(&cluster_ir, &cluster_layout, 1.0);
+        assert!(
+            (cluster_plan.cluster_instances[0].stroke[3] - 0.78).abs() < 1e-6,
+            "an undeclared subgraph border must keep the cluster alpha 0.78, not the node \
+             stroke's 1.0; got {:?}",
+            cluster_plan.cluster_instances[0].stroke
+        );
+
+        assert!(
+            (super::DEFAULT_CLUSTER_STROKE_RGBA[3] - 0.78).abs() < 1e-6,
+            "the cluster stroke is rgba(148,163,184,0.78)"
+        );
+        assert!(
+            (super::DEFAULT_NODE_STROKE_RGBA[3] - 1.0).abs() < 1e-6
+                && super::DEFAULT_CLUSTER_STROKE_RGBA[..3] == super::DEFAULT_NODE_STROKE_RGBA[..3],
+            "same RGB, different alpha -- if that ever stops being true this test is checking \
+             nothing and the two constants should be merged deliberately"
+        );
+    }
+
     /// The plan's FIELD ORDER is the raster pass's DRAW ORDER (bd-adabx).
     ///
     /// The plan documents field order as submit order -- "a consumer that submits these buffers in
@@ -2975,6 +3083,7 @@ mod tests {
         // (plan field, the raster call that produces it), in the order both must agree on.
         const PAIRS: &[(&str, &str)] = &[
             ("pub cluster_instances:", "self.draw_clusters("),
+            ("pub cluster_divider_segments:", "self.draw_cluster_dividers("),
             ("pub mirror_header_instances:", "self.draw_sequence_mirror_headers("),
             ("pub activation_instances:", "self.draw_activation_bars("),
             ("pub lifecycle_marker_segments:", "self.draw_sequence_lifecycle_markers("),
@@ -3044,6 +3153,7 @@ mod tests {
         const PLANNED: &[&str] = &[
             "draw_activation_bars",
             "draw_sequence_mirror_headers",
+            "draw_cluster_dividers",
             "draw_sequence_lifecycle_markers",
             "draw_sequence_notes",
             "draw_clusters",
@@ -3062,7 +3172,6 @@ mod tests {
             ("draw_packet_field_continuations", "bd-adabx: packet furniture"),
             ("draw_axis_ticks", "bd-adabx: axis furniture"),
             ("draw_gantt_today_marker", "bd-adabx: gantt furniture"),
-            ("draw_cluster_dividers", "bd-adabx: cluster divider rules"),
             ("draw_state_notes", "bd-adabx: state furniture"),
             (
                 "draw_sequence_fragments",
