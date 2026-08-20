@@ -72,6 +72,22 @@ pub const DEFAULT_NODE_STROKE_WIDTH: f32 = 1.5;
 /// node width would be a plausible-looking guess that renders a heavier box than the canvas draws.
 pub const SEQUENCE_NOTE_STROKE_WIDTH: f32 = 1.0;
 
+/// Stroke width of a destroy marker's cross.
+///
+/// `draw_sequence_lifecycle_markers` sets `line_width(1.5)` literally. That happens to EQUAL
+/// `DEFAULT_NODE_STROKE_WIDTH` today, which is a coincidence and not a shared source -- so this is
+/// its own constant, and no test asserts the two differ, because they do not.
+pub const LIFECYCLE_MARKER_STROKE_WIDTH: f32 = 1.5;
+
+/// `edge_index` on a segment that is NOT an edge.
+///
+/// A cross, a divider or a leader line is a line without an edge behind it, and `GpuEdgeSegment`
+/// exists to describe lines. Reusing it means one shader and one vertex layout instead of a
+/// parallel type -- but the `edge_index` field would then be a lookup key pointing at an unrelated
+/// edge, which is the exact defect the text runs' `GpuTextSource` discriminator was added to
+/// prevent. The sentinel makes "no edge" explicit and unresolvable rather than plausible.
+pub const NO_EDGE_INDEX: u32 = u32::MAX;
+
 /// One node instance for a WebGPU SDF shape pass.
 ///
 /// Field ORDER is the vertex-attribute order a shader declares, so the two `u32` discriminators sit
@@ -714,6 +730,16 @@ pub struct GpuRenderPlan {
     /// `node_index` here is the PARTICIPANT node index the bar sits on, which is a genuine index
     /// into `ir.nodes` -- unlike the cluster instances, where it indexes clusters.
     pub activation_instances: Vec<GpuNodeInstance>,
+    /// Destroy-marker crosses, as line segments (bd-adabx).
+    ///
+    /// Two segments per marker. Reuses `GpuEdgeSegment` because a cross is two lines and that is
+    /// what the type describes -- their `edge_index` is [`NO_EDGE_INDEX`], since no edge produced
+    /// them.
+    ///
+    /// Its own field rather than a shared "decorations" buffer: the remaining line sources (cluster
+    /// dividers, axis ticks, state-note leaders) are drawn at DIFFERENT points in the raster pass,
+    /// and one buffer submitted at one point cannot match several positions in the draw order.
+    pub lifecycle_marker_segments: Vec<GpuEdgeSegment>,
     /// Sequence notes, as rect instances (bd-adabx).
     ///
     /// After the activation bars and before the edges, matching the raster call order. Their text
@@ -844,6 +870,39 @@ impl GpuRenderPlan {
                 shape: GpuNodeShape::Rect as u32,
                 node_index: u32::try_from(bar.participant_index).unwrap_or(u32::MAX),
             });
+        }
+
+        // DESTROY MARKERS (bd-adabx). The X that terminates a destroyed participant's lifeline:
+        // two crossing segments through `center`, half a `size` in each direction.
+        //
+        // The zero-size skip mirrors the raster pass, which bails when `half <= 0.0` -- a cross
+        // with no extent is drawn by nobody.
+        let mut lifecycle_marker_segments =
+            Vec::with_capacity(layout.extensions.sequence_lifecycle_markers.len() * 2);
+        for marker in &layout.extensions.sequence_lifecycle_markers {
+            match marker.kind {
+                fm_layout::LayoutSequenceLifecycleMarkerKind::Destroy => {
+                    let half = marker.size * 0.5;
+                    if half <= 0.0 {
+                        continue;
+                    }
+                    let (cx, cy) = (marker.center.x, marker.center.y);
+                    for (from, to) in [
+                        ([cx - half, cy - half], [cx + half, cy + half]),
+                        ([cx + half, cy - half], [cx - half, cy + half]),
+                    ] {
+                        lifecycle_marker_segments.push(GpuEdgeSegment {
+                            from,
+                            to,
+                            edge_index: NO_EDGE_INDEX,
+                            color: DEFAULT_EDGE_STROKE_RGBA,
+                            dash_phase: 0.0,
+                            dash: [0.0, 0.0],
+                            width: LIFECYCLE_MARKER_STROKE_WIDTH,
+                        });
+                    }
+                }
+            }
         }
 
         // SEQUENCE NOTES (bd-adabx). Rect plus centred body text.
@@ -1311,6 +1370,7 @@ impl GpuRenderPlan {
             cluster_instances,
             mirror_header_instances,
             activation_instances,
+            lifecycle_marker_segments,
             sequence_note_instances,
             edge_segments,
             arrowheads,
@@ -2816,6 +2876,76 @@ mod tests {
         assert!((quads[0].center[1] - 70.0).abs() < 0.01);
     }
 
+    /// A destroyed participant's cross reaches the plan as two segments (bd-adabx).
+    ///
+    /// First line source that is NOT an edge. The `edge_index` sentinel is asserted explicitly:
+    /// a consumer resolving it against `ir.edges` must fail loudly rather than read an unrelated
+    /// edge's style, which is the wrong-key defect this file has hit before.
+    ///
+    /// The two diagonals are checked as a SET, not by position, because their order is an internal
+    /// detail -- but both must be present, since one diagonal is a slash, not a cross.
+    #[test]
+    fn a_destroy_marker_reaches_the_plan_as_two_crossing_segments() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Sequence);
+        let mut layout = test_layout();
+        layout.extensions.sequence_lifecycle_markers = vec![
+            fm_layout::LayoutSequenceLifecycleMarker {
+                participant_index: 0,
+                kind: fm_layout::LayoutSequenceLifecycleMarkerKind::Destroy,
+                center: super::LayoutPoint { x: 100.0, y: 200.0 },
+                size: 10.0,
+            },
+            // Zero size: the raster pass bails on `half <= 0.0`, so nothing is planned either.
+            fm_layout::LayoutSequenceLifecycleMarker {
+                participant_index: 1,
+                kind: fm_layout::LayoutSequenceLifecycleMarkerKind::Destroy,
+                center: super::LayoutPoint { x: 300.0, y: 200.0 },
+                size: 0.0,
+            },
+        ];
+
+        let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.25);
+
+        assert_eq!(
+            plan.lifecycle_marker_segments.len(),
+            2,
+            "one cross is two segments, and the zero-size marker adds none"
+        );
+        let ends: Vec<([f32; 2], [f32; 2])> = plan
+            .lifecycle_marker_segments
+            .iter()
+            .map(|segment| (segment.from, segment.to))
+            .collect();
+        assert!(
+            ends.contains(&([95.0, 195.0], [105.0, 205.0])),
+            "missing the top-left to bottom-right diagonal: {ends:?}"
+        );
+        assert!(
+            ends.contains(&([105.0, 195.0], [95.0, 205.0])),
+            "missing the top-right to bottom-left diagonal: {ends:?}"
+        );
+
+        for segment in &plan.lifecycle_marker_segments {
+            assert_eq!(
+                segment.edge_index,
+                super::NO_EDGE_INDEX,
+                "a cross has no edge behind it, and must not claim one"
+            );
+            assert_eq!(segment.dash, [0.0, 0.0], "the cross is solid");
+            assert_eq!(segment.width, super::LIFECYCLE_MARKER_STROKE_WIDTH);
+            assert_eq!(segment.color, super::DEFAULT_EDGE_STROKE_RGBA);
+        }
+
+        // The real edges must NOT have been given the sentinel, or the assertion above is trivially
+        // satisfiable by breaking every edge in the plan.
+        assert!(
+            plan.edge_segments
+                .iter()
+                .all(|segment| segment.edge_index != super::NO_EDGE_INDEX),
+            "a real edge must still resolve to its own index"
+        );
+    }
+
     /// The plan's FIELD ORDER is the raster pass's DRAW ORDER (bd-adabx).
     ///
     /// The plan documents field order as submit order -- "a consumer that submits these buffers in
@@ -2847,6 +2977,7 @@ mod tests {
             ("pub cluster_instances:", "self.draw_clusters("),
             ("pub mirror_header_instances:", "self.draw_sequence_mirror_headers("),
             ("pub activation_instances:", "self.draw_activation_bars("),
+            ("pub lifecycle_marker_segments:", "self.draw_sequence_lifecycle_markers("),
             ("pub sequence_note_instances:", "self.draw_sequence_notes("),
             ("pub edge_segments:", "self.draw_edges("),
             ("pub node_instances:", "self.draw_nodes("),
@@ -2913,6 +3044,7 @@ mod tests {
         const PLANNED: &[&str] = &[
             "draw_activation_bars",
             "draw_sequence_mirror_headers",
+            "draw_sequence_lifecycle_markers",
             "draw_sequence_notes",
             "draw_clusters",
             "draw_edges",
@@ -2932,7 +3064,6 @@ mod tests {
             ("draw_gantt_today_marker", "bd-adabx: gantt furniture"),
             ("draw_cluster_dividers", "bd-adabx: cluster divider rules"),
             ("draw_state_notes", "bd-adabx: state furniture"),
-            ("draw_sequence_lifecycle_markers", "bd-adabx: sequence furniture"),
             (
                 "draw_sequence_fragments",
                 "bd-l3nsf, NOT merely unplanned: a fragment box has a DASHED border \
