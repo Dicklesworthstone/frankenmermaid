@@ -1207,26 +1207,52 @@ impl Canvas2dRenderer {
             return;
         }
         let mut tick_font: Option<String> = None;
-        let y = f64::from(layout.bounds.y) + offset_y + 12.0;
+        // ⚠️ MINUS TWELVE, matching fm-render-svg (bd-4n5j2). This read `+ 12.0` and put every axis
+        // label TWENTY-FOUR units below where the SVG arm puts it. Measured against the checked-in
+        // golden gantt_basic.svg, whose viewBox is `0 0 520 369.1`: the SVG writes its labels at
+        // y=89 with tick marks spanning 93..105 and the first task bar at 129, so the canvas was
+        // dropping the labels to 113 -- into the gap between the axis and the bars, detached from
+        // tick marks it did not draw at all.
+        let y = f64::from(layout.bounds.y) + offset_y - 12.0;
         for tick in &layout.extensions.axis_ticks {
             if tick.label.is_empty() {
                 continue;
             }
+
+            // THE TICK MARK ITSELF, which this surface never drew (bd-4n5j2). fm-render-svg emits
+            // `<line y1=y+4 y2=y+16>` per tick; the canvas drew the label alone, so a gantt axis
+            // rendered as floating dates with nothing tying them to a column. That is the
+            // bd-039t/bd-t1jj family: declared content one renderer draws and another omits.
+            let tick_x = f64::from(tick.position) + offset_x;
+            ctx.set_stroke_style(&self.config.edge_stroke);
+            ctx.set_line_width(1.0);
+            ctx.begin_path();
+            ctx.move_to(tick_x, y + 4.0);
+            ctx.line_to(tick_x, y + 16.0);
+            ctx.stroke();
+
             ctx.set_fill_style(&self.config.label_color);
-            // Set explicitly for the same reason as the state notes (bd-4n5j2): this ran after
-            // draw_clusters and draw_bands, either of which may or may not have set these,
-            // depending on whether the diagram had a titled cluster or a labelled band.
+            // Set explicitly, not inherited (bd-4n5j2): this runs after draw_clusters and
+            // draw_bands, either of which may or may not have set these depending on whether the
+            // diagram had a titled cluster or a labelled band.
+            //
+            // ALPHABETIC, not Top. The SVG tick text carries `text-anchor="start"` and NO
+            // `dominant-baseline`, so its y IS the alphabetic baseline -- which is what makes y=89
+            // in the golden the baseline rather than the top of the glyphs. An earlier pass here
+            // set Top, which was deterministic but disagreed with the reference arm by an ascent.
             ctx.set_text_align(TextAlign::Left);
-            ctx.set_text_baseline(TextBaseline::Top);
+            ctx.set_text_baseline(TextBaseline::Alphabetic);
             ctx.set_font(tick_font.get_or_insert_with(|| {
                 format!(
                     "{}px {}",
-                    self.config.font_size * 0.75,
+                    self.config.font_size * 0.72,
                     self.config.font_family
                 )
             }));
-            ctx.fill_text(&tick.label, f64::from(tick.position) + offset_x, y);
-            self.draw_calls += 1;
+            // `x + 3.0`, as the SVG writes it: the label sits just right of its tick mark rather
+            // than centred on it.
+            ctx.fill_text(&tick.label, tick_x + 3.0, y);
+            self.draw_calls += 2;
         }
     }
 
@@ -4937,6 +4963,105 @@ mod tests {
     /// centred label at the correct x is still centred, and a right-aligned label at the wrong x is
     /// still misplaced. The pair is what pins the SVG convention (OutsideLeft anchors the text's RIGHT
     /// edge, hence Right alignment at the anchor x).
+    /// The canvas gantt axis agrees with the SVG arm, tick marks included (bd-4n5j2).
+    ///
+    /// Pinned against the CHECKED-IN GOLDEN rather than against the canvas's own arithmetic. The
+    /// same source renders through fm-render-svg to `crates/fm-cli/tests/golden/gantt_basic.svg`,
+    /// whose axis line for the tick at x=92 spans y1=93 to y2=105 with its label at x=95, y=89.
+    /// This surface computed `bounds.y + 12` where the SVG computes `bounds.y - 12`, so every
+    /// label sat TWENTY-FOUR units low, and it drew no tick marks at all.
+    ///
+    /// Deriving the expected y from `layout.bounds.y` rather than hard-coding 89 keeps the test
+    /// honest if the layout moves: what is asserted is the RELATIONSHIP the SVG encodes -- label on
+    /// the axis line, mark straddling it -- which is the thing that was wrong.
+    #[test]
+    fn the_canvas_gantt_axis_matches_the_svg_arm() {
+        let src = "gantt\n  title Roadmap\n  dateFormat  YYYY-MM-DD\n  section Core\n  \
+                   Design :a1, 2026-01-01, 3d\n  Build :a2, after a1, 4d\n";
+        let ir = fm_parser::parse(src).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+
+        // NON-VACUITY: no ticks means every assertion below is skipped silently.
+        assert!(
+            !layout.extensions.axis_ticks.is_empty(),
+            "CONTROL FAILED: the gantt fixture produced no axis ticks"
+        );
+
+        let mut ctx = MockCanvas2dContext::new(1200.0, 800.0);
+        let _ = crate::render_to_canvas_with_layout(
+            &ir,
+            &layout,
+            &mut ctx,
+            &CanvasRenderConfig::default(),
+        );
+
+        let first = &layout.extensions.axis_ticks[0];
+        let mut label_pos = None;
+        let mut baseline = TextBaseline::Alphabetic;
+        let mut label_baseline = None;
+        for op in ctx.operations() {
+            match op {
+                DrawOperation::SetTextBaseline(value) => baseline = *value,
+                DrawOperation::FillText(text, x, y) if *text == first.label => {
+                    label_pos = Some((*x, *y));
+                    label_baseline = Some(baseline);
+                }
+                _ => {}
+            }
+        }
+        let (label_x, label_y) = label_pos.expect("the first axis label was never drawn");
+
+        // The axis line the SVG straddles: bounds.y - 12, before any auto-fit offset.
+        let axis_y = f64::from(layout.bounds.y) - 12.0;
+        let offset_y = label_y - axis_y;
+        assert!(
+            offset_y.abs() < 40.0,
+            "the axis label is {offset_y} from the SVG's axis line, which is not a plausible \
+             auto-fit offset -- the +12/-12 sign error puts it 24 units low"
+        );
+        assert_eq!(
+            label_baseline,
+            Some(TextBaseline::Alphabetic),
+            "the SVG tick text carries no dominant-baseline, so its y IS the alphabetic baseline; \
+             Top disagrees with the reference arm by an ascent"
+        );
+        // The label sits just RIGHT of its mark, as the SVG writes it (x + 3).
+        let offset_x = label_x - (f64::from(first.position) + 3.0);
+
+        // THE TICK MARK, which this surface used to omit entirely: one 12-unit vertical line per
+        // tick, starting 4 below the axis line the label sits on.
+        let mut marks = 0;
+        let mut from = None;
+        for op in ctx.operations() {
+            match op {
+                DrawOperation::MoveTo(x, y) => from = Some((*x, *y)),
+                DrawOperation::LineTo(x, y) => {
+                    if let Some((fx, fy)) = from
+                        && (fx - x).abs() < 0.001
+                        && (*y - fy - 12.0).abs() < 0.001
+                        && (fy - (axis_y + offset_y + 4.0)).abs() < 0.5
+                    {
+                        marks += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            marks,
+            layout.extensions.axis_ticks.len(),
+            "every axis tick needs its MARK, not just its label: the SVG draws one 12-unit \
+             vertical line per tick and this surface drew none"
+        );
+
+        // Every tick label shares one x offset with its mark, so a single tick agreeing is not
+        // enough to call the axis right.
+        assert!(
+            offset_x.abs() < 40.0,
+            "label x offset {offset_x} is not a plausible auto-fit offset"
+        );
+    }
+
     /// A state note's text state is SET, not inherited (bd-4n5j2).
     ///
     /// Every draw source shares one save()/restore(), and draw_state_notes used to call fill_text
