@@ -118,6 +118,17 @@ pub struct Canvas2dRenderer {
 const DENSE_SOURCE_INDEX_LIMIT: usize = 65_536;
 const LEGACY_DOTTED_EDGE_DASH: [f64; 2] = [5.0, 5.0];
 
+/// Horizontal inset of a state note's text, mirroring fm-layout's `STATE_NOTE_PAD_X`.
+///
+/// The layout sizes the note box as `text * 0.8 + 2 * PAD`, so the text must start AT the padding
+/// the box reserved. fm-render-svg writes `nx + 10.0` for the same reason. These are duplicated
+/// rather than imported because the fm-layout constants are private; if they move, the state-note
+/// agreement test is what catches the drift.
+const STATE_NOTE_PAD_X: f64 = 10.0;
+
+/// Vertical inset of a state note's first line, mirroring fm-layout's `STATE_NOTE_PAD_Y`.
+const STATE_NOTE_PAD_Y: f64 = 8.0;
+
 #[derive(Debug, Default)]
 struct SourceIndexSet {
     words: Vec<u64>,
@@ -1443,13 +1454,29 @@ impl Canvas2dRenderer {
                 }));
                 // Multi-line aware: `note right of X … end note` is the form that carries more than a
                 // sentence, and drawing only the first line would silently drop the rest.
+                //
+                // ⚠️ THE INSETS ARE THE LAYOUT'S OWN PADDING, NOT A LOCAL GUESS (bd-4n5j2).
+                // fm-layout sizes this box as `text * 0.8 + 2 * PAD`, with STATE_NOTE_PAD_X = 10.0
+                // and STATE_NOTE_PAD_Y = 8.0, and fm-render-svg draws the text at exactly
+                // `nx + 10, ny + 8` to match. This surface used `x + 4` and started the first line a
+                // whole line-height down, so it ignored the padding the box was measured for: text
+                // began 6 left of its reserved margin and 8.8 below it, pushing the last line toward
+                // an overflow the box was never sized to hold.
+                //
+                // Line SPACING was already right, by coincidence of two different formulas: the SVG
+                // uses `font_size * 0.8 * line_height(1.5)` and this uses `font_size * 1.2`, both
+                // 16.8 at the default 14. Left alone rather than "unified" -- they agree, and the
+                // two configs are not shared.
                 let line_height = self.config.font_size * 1.2;
                 for (row, line) in note.text.lines().enumerate() {
-                    let line_y = y + line_height * (row as f64 + 1.0);
+                    let line_y = y + STATE_NOTE_PAD_Y + line_height * row as f64;
+                    // The layout sized the box to fit, so this guard is unreachable for a note the
+                    // layout measured; it stays as a bound against drawing outside the box, which is
+                    // the one case where matching the SVG would be worse than differing from it.
                     if line_y > y + h {
                         break;
                     }
-                    ctx.fill_text(line, x + 4.0, line_y);
+                    ctx.fill_text(line, x + STATE_NOTE_PAD_X, line_y);
                 }
             }
             self.draw_calls += 3;
@@ -4963,6 +4990,101 @@ mod tests {
     /// centred label at the correct x is still centred, and a right-aligned label at the wrong x is
     /// still misplaced. The pair is what pins the SVG convention (OutsideLeft anchors the text's RIGHT
     /// edge, hence Right alignment at the anchor x).
+    /// A state note's text starts at the padding the LAYOUT reserved (bd-4n5j2).
+    ///
+    /// Not "matches the SVG" as a matter of taste: fm-layout sizes the note box as
+    /// `text * 0.8 + 2 * PAD` with STATE_NOTE_PAD_X = 10 and STATE_NOTE_PAD_Y = 8, so those pads
+    /// are the box's own definition of where its text goes. fm-render-svg writes `nx + 10, ny + 8`.
+    /// This surface used `x + 4` and started the first line a full line-height down, ignoring the
+    /// margins the box was measured for.
+    ///
+    /// Asserted against the note's OWN bounds rather than absolute coordinates, so the test tracks
+    /// the relationship rather than a snapshot of today's layout.
+    #[test]
+    fn a_state_note_draws_its_text_at_the_reserved_padding() {
+        let src = "stateDiagram-v2\n  A --| B\n  note right of A\n    alpha line\n                       beta line\n  end note\n"
+            .replace("--|", "-->");
+        let ir = fm_parser::parse(&src).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+
+        let note = layout
+            .extensions
+            .state_notes
+            .first()
+            .expect("CONTROL FAILED: the fixture laid out no state note");
+        // NON-VACUITY: a single-line note would leave the spacing assertion untested.
+        assert!(
+            note.text.contains('\n'),
+            "CONTROL FAILED: the note is not multi-line, so line spacing proves nothing: {:?}",
+            note.text
+        );
+
+        let mut ctx = MockCanvas2dContext::new(1200.0, 900.0);
+        let _ = crate::render_to_canvas_with_layout(
+            &ir,
+            &layout,
+            &mut ctx,
+            &CanvasRenderConfig::default(),
+        );
+
+        let mut lines: Vec<(f64, f64)> = Vec::new();
+        for op in ctx.operations() {
+            if let DrawOperation::FillText(text, x, y) = op
+                && note.text.lines().any(|line| line == text)
+            {
+                lines.push((*x, *y));
+            }
+        }
+        assert!(
+            lines.len() >= 2,
+            "expected every note line to be drawn, got {}",
+            lines.len()
+        );
+
+        // THE AUTO-FIT OFFSET COMES FROM THE BOX, NOT FROM AN INSET UNDER TEST. Deriving it from
+        // the text's own x made an x error surface as a y failure: the bad inset was absorbed into
+        // the offset and the vertical assertion took the blame. The note's rect is drawn at
+        // `bounds + offset`, so it yields both offsets independently of anything asserted below.
+        let note_rect = ctx
+            .operations()
+            .iter()
+            .find_map(|op| match op {
+                DrawOperation::FillRect(rx, ry, rw, rh)
+                    if (*rw - f64::from(note.bounds.width)).abs() < 0.001
+                        && (*rh - f64::from(note.bounds.height)).abs() < 0.001 =>
+                {
+                    Some((*rx, *ry))
+                }
+                _ => None,
+            })
+            .expect("the note's own box was never filled, so no offset can be derived");
+        let (box_x, box_y) = note_rect;
+
+        let (first_x, first_y) = lines[0];
+        let (second_x, second_y) = lines[1];
+        assert!(
+            (second_x - first_x).abs() < 0.001,
+            "note lines must share one left margin: {first_x} then {second_x}"
+        );
+        assert!(
+            (first_x - box_x - STATE_NOTE_PAD_X).abs() < 0.001,
+            "the text must start at the reserved HORIZONTAL padding: box at {box_x}, text at \
+             {first_x}, expected {}",
+            box_x + STATE_NOTE_PAD_X
+        );
+        assert!(
+            (first_y - box_y - STATE_NOTE_PAD_Y).abs() < 0.001,
+            "the first line must start at the reserved VERTICAL padding, not a line-height down: \
+             box at {box_y}, text at {first_y}, expected {}",
+            box_y + STATE_NOTE_PAD_Y
+        );
+        assert!(
+            (second_y - first_y - 16.8).abs() < 0.01,
+            "line spacing must stay at the SVG's 16.8 (font_size * 0.8 * 1.5): got {}",
+            second_y - first_y
+        );
+    }
+
     /// The canvas gantt axis agrees with the SVG arm, tick marks included (bd-4n5j2).
     ///
     /// Pinned against the CHECKED-IN GOLDEN rather than against the canvas's own arithmetic. The
