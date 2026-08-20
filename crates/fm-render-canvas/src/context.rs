@@ -356,6 +356,13 @@ pub enum DrawOperation {
     /// on both -- a right-aligned label and a centred one at the same x are different pictures -- and
     /// without this op the mock kept alignment in internal state where no assertion could reach it.
     SetTextAlign(TextAlign),
+    /// Recorded as an OPERATION, not just folded into the current state (bd-4n5j2).
+    ///
+    /// The baseline was stored and never emitted, so a test scanning the operation stream could see
+    /// WHERE text was aligned but not what it hung from. That is precisely the axis on which
+    /// draw_state_notes was inheriting its placement from whichever source ran before it, and the
+    /// gap is why no test could witness it.
+    SetTextBaseline(TextBaseline),
     FillText(String, f64, f64),
     StrokeText(String, f64, f64),
     SetTransform(f64, f64, f64, f64, f64, f64),
@@ -491,6 +498,7 @@ impl Canvas2dContext for MockCanvas2dContext {
 
     fn set_text_baseline(&mut self, baseline: TextBaseline) {
         self.current_state.text_baseline = baseline;
+        self.operations.push(DrawOperation::SetTextBaseline(baseline));
     }
 
     fn begin_path(&mut self) {

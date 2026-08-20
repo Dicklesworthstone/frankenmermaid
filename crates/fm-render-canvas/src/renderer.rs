@@ -1213,6 +1213,11 @@ impl Canvas2dRenderer {
                 continue;
             }
             ctx.set_fill_style(&self.config.label_color);
+            // Set explicitly for the same reason as the state notes (bd-4n5j2): this ran after
+            // draw_clusters and draw_bands, either of which may or may not have set these,
+            // depending on whether the diagram had a titled cluster or a labelled band.
+            ctx.set_text_align(TextAlign::Left);
+            ctx.set_text_baseline(TextBaseline::Top);
             ctx.set_font(tick_font.get_or_insert_with(|| {
                 format!(
                     "{}px {}",
@@ -1390,6 +1395,19 @@ impl Canvas2dRenderer {
 
             if !note.text.is_empty() {
                 ctx.set_fill_style(&self.config.label_color);
+                // ⚠️ SET EXPLICITLY, NOT INHERITED (bd-4n5j2). Every draw source runs inside one
+                // save()/restore(), and this one used to call fill_text without touching either,
+                // so it took whatever the last source to set them left behind. draw_clusters sets
+                // Left/Top only when it draws a cluster TITLE -- so the same note landed at a
+                // different vertical position depending on whether the diagram also happened to
+                // contain a composite state. Two state diagrams with identical notes rendered them
+                // differently.
+                //
+                // Start/Hanging is what fm-render-svg uses for this text (TextAnchor::Start,
+                // DominantBaseline::Hanging), so pinning it here also moves the canvas toward the
+                // fuller arm instead of merely making the accident deterministic.
+                ctx.set_text_align(TextAlign::Left);
+                ctx.set_text_baseline(TextBaseline::Top);
                 ctx.set_font(note_font.get_or_insert_with(|| {
                     format!(
                         "{}px {}",
@@ -4919,6 +4937,74 @@ mod tests {
     /// centred label at the correct x is still centred, and a right-aligned label at the wrong x is
     /// still misplaced. The pair is what pins the SVG convention (OutsideLeft anchors the text's RIGHT
     /// edge, hence Right alignment at the anchor x).
+    /// A state note's text state is SET, not inherited (bd-4n5j2).
+    ///
+    /// Every draw source shares one save()/restore(), and draw_state_notes used to call fill_text
+    /// without setting align or baseline -- so it took whatever the previous source left. The
+    /// previous source that sets them is draw_clusters, and only when it draws a cluster TITLE, so
+    /// the note's vertical anchor depended on whether the diagram ALSO contained a composite state.
+    ///
+    /// TWO FIXTURES, and that is the whole test: the same note is rendered in a diagram with a
+    /// composite state and in one without. Asserting Top in a single fixture would have passed
+    /// before the fix, because that fixture's cluster title had already set it.
+    #[test]
+    fn a_state_note_does_not_inherit_its_text_state_from_the_rest_of_the_diagram() {
+        // With a composite state: draw_clusters draws a title and sets Left/Top before the note.
+        let with_cluster = "stateDiagram-v2\n  state Outer {\n    A --> B\n  }\n                              note right of Outer : watched\n";
+        // Without: nothing before the note sets either, so it used the fresh-canvas default.
+        let without_cluster = "stateDiagram-v2\n  A --> B\n  note right of A : watched\n";
+
+        for (label, src) in [("with composite", with_cluster), ("bare", without_cluster)] {
+            let ir = fm_parser::parse(src).ir;
+            let layout = fm_layout::layout_diagram(&ir);
+
+            // NON-VACUITY: no note laid out means the loop below never sees the text at all.
+            assert!(
+                !layout.extensions.state_notes.is_empty(),
+                "CONTROL FAILED ({label}): the fixture laid out no state note"
+            );
+
+            let mut ctx = MockCanvas2dContext::new(1200.0, 800.0);
+            let _ = crate::render_to_canvas_with_layout(
+                &ir,
+                &layout,
+                &mut ctx,
+                &CanvasRenderConfig::default(),
+            );
+
+            // SEEDED WITH THE MOCK'S OWN INITIAL STATE, so what this tracks is genuinely what the
+            // context would be in, not an arbitrary starting guess that makes the failure message
+            // claim an inherited value nobody set.
+            let mut align = TextAlign::Left;
+            let mut baseline = TextBaseline::Alphabetic;
+            let mut seen = false;
+            for op in ctx.operations() {
+                match op {
+                    DrawOperation::SetTextAlign(value) => align = *value,
+                    DrawOperation::SetTextBaseline(value) => baseline = *value,
+                    DrawOperation::FillText(text, _, _) if text.contains("watched") => {
+                        assert_eq!(
+                            align,
+                            TextAlign::Left,
+                            "({label}) note text must be left-aligned, like the SVG arm's \
+                             TextAnchor::Start"
+                        );
+                        assert_eq!(
+                            baseline,
+                            TextBaseline::Top,
+                            "({label}) note text must hang from the top, like the SVG arm's \
+                             DominantBaseline::Hanging -- inheriting the alphabetic default drops \
+                             it by an ascent and can cross the note's own border"
+                        );
+                        seen = true;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(seen, "({label}) the note text was never drawn");
+        }
+    }
+
     #[test]
     fn canvas_honours_gantt_label_placement() {
         let src = "gantt\n  title Roadmap\n  dateFormat  YYYY-MM-DD\n  section Core\n  \
