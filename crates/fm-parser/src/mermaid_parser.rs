@@ -4440,6 +4440,42 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
     (!statements.is_empty() || handled_non_node_statement).then_some(statements)
 }
 
+/// True for a class-diagram `linkStyle <targets> <styles>` directive (bd-9gmvp).
+///
+/// `linkStyle 0 stroke:#f00` was drawn as a CLASS BOX captioned with the directive.
+/// `keyword("link")` in the caller does NOT cover it — that helper requires the token to stand
+/// alone, which is what keeps a class named `linkage` safe, and is exactly why the omission was
+/// invisible: the list already looked like it handled the `link` family. The SHARED sibling
+/// predicate, `is_non_node_directive_statement`, has covered `linkStyle` all along; this is the
+/// same asymmetry bd-yfcfv found between two predicates meant to say the same thing.
+///
+/// ⚠️ NOT a bare `keyword("linkStyle")`, and the difference is a regression I caught with my own
+/// control rather than reasoning: a class may legitimately be NAMED `linkStyle`, and
+/// `linkStyle --> B` is then a RELATION. The bare keyword swallowed it and silently dropped the
+/// edge — the bd-ij0f shape, where widening a filter eats valid input.
+///
+/// The targets position is what disambiguates, because mermaid's own grammar constrains it: an
+/// index, a comma list of indices, or `default`. A relation can never look like that, and a real
+/// directive always does — so this needs no guess about arrow spellings and cannot be defeated by a
+/// CSS value that happens to contain `--` (`stroke:var(--x)` would defeat a contains-`--` bail).
+fn is_class_link_style_directive(statement: &str) -> bool {
+    let Some(rest) = statement.strip_prefix("linkStyle") else {
+        return false;
+    };
+    let Some(targets) = rest
+        .strip_prefix(char::is_whitespace)
+        .map(str::trim_start)
+        .and_then(|rest| rest.split_whitespace().next())
+    else {
+        return false;
+    };
+    targets.eq_ignore_ascii_case("default")
+        || (!targets.is_empty()
+            && targets
+                .split(',')
+                .all(|index| !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())))
+}
+
 /// Statements that carry class-diagram metadata or interactivity rather than declaring a class.
 ///
 /// Their data is either extracted globally (`accTitle`, `accDescr`, `style`, `classDef`) or not
@@ -4464,6 +4500,7 @@ fn is_class_non_node_statement(statement: &str) -> bool {
         || accessibility("accDescr")
         || keyword("title")
         || keyword("style")
+        || is_class_link_style_directive(statement)
         || keyword("classDef")
         || keyword("cssClass")
         || keyword("click")
