@@ -104,6 +104,9 @@ pub const BAND_STROKE_WIDTH: f32 = 1.0;
 pub const BAND_LANE_DASH: [f32; 2] = [6.0, 4.0];
 pub const BAND_LABEL_FONT_SIZE_PX: f32 = DEFAULT_FONT_SIZE_PX * 0.85;
 
+/// Quadrant-chart axis and region labels use the Canvas2D secondary-label font.
+pub const QUADRANT_LABEL_FONT_SIZE_PX: f32 = DEFAULT_FONT_SIZE_PX * 0.85;
+
 /// Default subgraph border, which is NOT the node border (bd-adabx).
 ///
 /// `config.cluster_stroke` is `rgba(148,163,184,0.78)` and `config.node_stroke` is `#94a3b8`. Same
@@ -551,13 +554,26 @@ impl TextSink<'_> {
         source: GpuTextSource,
         index: usize,
     ) {
+        self.push_centred_with_font(text, center, DEFAULT_FONT_SIZE_PX, color, source, index);
+    }
+
+    /// Emit one centred text run with an explicit raster font size.
+    fn push_centred_with_font(
+        &mut self,
+        text: &str,
+        center: (f32, f32),
+        font_px: f32,
+        color: [f32; 4],
+        source: GpuTextSource,
+        index: usize,
+    ) {
         let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
         if inked.is_empty() {
             return;
         }
         let first_quad = u32::try_from(self.quads.len()).unwrap_or(u32::MAX);
-        let advance = DEFAULT_FONT_SIZE_PX * CHAR_ADVANCE_RATIO;
-        let half_height = DEFAULT_FONT_SIZE_PX * 0.5;
+        let advance = font_px * CHAR_ADVANCE_RATIO;
+        let half_height = font_px * 0.5;
         let run_width = u16::try_from(inked.len()).map_or(f32::from(u16::MAX), f32::from) * advance;
         let start_x = center.0 - (run_width * 0.5) + (advance * 0.5);
         let run_index = u32::try_from(self.runs.len()).unwrap_or(u32::MAX);
@@ -611,6 +627,51 @@ impl TextSink<'_> {
             let step = u16::try_from(offset).map_or(f32::from(u16::MAX), f32::from);
             self.quads.push(GpuTextQuad {
                 center: [anchor.0 + (advance * 0.5) + (step * advance), anchor.1],
+                half_extent: [advance * 0.5, half_height],
+                uv_min: cell.uv_min,
+                uv_max: cell.uv_max,
+                color,
+                run_index,
+            });
+        }
+        let quad_count = u32::try_from(self.quads.len()).unwrap_or(u32::MAX) - first_quad;
+        if quad_count > 0 {
+            self.runs.push(GpuTextRun {
+                source,
+                node_index: u32::try_from(index).unwrap_or(u32::MAX),
+                first_quad,
+                quad_count,
+            });
+        }
+    }
+
+    /// Emit one right-aligned text run at the raster pass's anchor point.
+    fn push_right(
+        &mut self,
+        text: &str,
+        anchor: (f32, f32),
+        font_px: f32,
+        color: [f32; 4],
+        source: GpuTextSource,
+        index: usize,
+    ) {
+        let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
+        if inked.is_empty() {
+            return;
+        }
+        let first_quad = u32::try_from(self.quads.len()).unwrap_or(u32::MAX);
+        let advance = font_px * CHAR_ADVANCE_RATIO;
+        let half_height = font_px * 0.5;
+        let run_width = u16::try_from(inked.len()).map_or(f32::from(u16::MAX), f32::from) * advance;
+        let start_x = anchor.0 - run_width + (advance * 0.5);
+        let run_index = u32::try_from(self.runs.len()).unwrap_or(u32::MAX);
+        for (offset, glyph) in inked.iter().enumerate() {
+            let Some(cell) = self.atlas.cell(*glyph) else {
+                continue;
+            };
+            let step = u16::try_from(offset).map_or(f32::from(u16::MAX), f32::from);
+            self.quads.push(GpuTextQuad {
+                center: [start_x + (step * advance), anchor.1],
                 half_extent: [advance * 0.5, half_height],
                 uv_min: cell.uv_min,
                 uv_max: cell.uv_max,
@@ -812,6 +873,14 @@ pub enum GpuTextSource {
     ///
     /// `node_index` is the packet field node index carried by the continuation extension.
     PacketFieldContinuation,
+    /// One of the four labels that annotate a quadrant chart's axes.
+    ///
+    /// `node_index` is the fixed axis-label position: left x, right x, top y, then bottom y.
+    QuadrantAxis,
+    /// One of the four region names in a quadrant chart.
+    ///
+    /// `node_index` is the documented `quadrant_labels` index: Q1, Q2, Q3, then Q4.
+    QuadrantLabel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1543,6 +1612,27 @@ impl GpuRenderPlan {
                                         label.text.split('\n').next()
                                     })
                             }),
+                    )
+                    // QUADRANT FURNITURE GOES IN THE ATLAS TOO. The Canvas2D pass emits both
+                    // axis labels and region names from the IR metadata; omitting either here
+                    // would make their planned runs silently lose every glyph.
+                    .chain(ir.quadrant_meta.iter().flat_map(|quad| {
+                        [
+                            quad.x_axis_left.as_deref(),
+                            quad.x_axis_right.as_deref(),
+                            quad.y_axis_top.as_deref(),
+                            quad.y_axis_bottom.as_deref(),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .filter(|label| !label.is_empty())
+                    }))
+                    .chain(
+                        ir.quadrant_meta
+                            .iter()
+                            .flat_map(|quad| quad.quadrant_labels.iter())
+                            .map(String::as_str)
+                            .filter(|label| !label.is_empty()),
                     ),
                 cell_px,
             );
@@ -1815,6 +1905,81 @@ impl GpuRenderPlan {
                 GpuTextSource::PacketFieldContinuation,
                 continuation.node_index,
             );
+        }
+
+        // QUADRANT FURNITURE (bd-adabx). This duplicates the Canvas2D positions, not SVG's
+        // chart-relative margins: the canvas deliberately anchors its text to layout bounds.
+        // Axis labels use the secondary font and their actual left/right alignment; region names
+        // are centred in their documented Q1/Q2/Q3/Q4 order.
+        if let Some(quad) = ir.quadrant_meta.as_ref() {
+            let left = layout.bounds.x;
+            let right = layout.bounds.x + layout.bounds.width;
+            let top = layout.bounds.y;
+            let bottom = layout.bounds.y + layout.bounds.height;
+            let pad = DEFAULT_FONT_SIZE_PX;
+            let axis_labels = [
+                (
+                    quad.x_axis_left.as_deref(),
+                    (left + pad, bottom + pad),
+                    false,
+                ),
+                (
+                    quad.x_axis_right.as_deref(),
+                    (right - pad, bottom + pad),
+                    true,
+                ),
+                (quad.y_axis_top.as_deref(), (left - pad, top + pad), true),
+                (
+                    quad.y_axis_bottom.as_deref(),
+                    (left - pad, bottom - pad),
+                    true,
+                ),
+            ];
+            for (index, (label, anchor, right_aligned)) in axis_labels.into_iter().enumerate() {
+                let Some(label) = label.filter(|label| !label.is_empty()) else {
+                    continue;
+                };
+                if right_aligned {
+                    sink.push_right(
+                        label,
+                        anchor,
+                        QUADRANT_LABEL_FONT_SIZE_PX,
+                        DEFAULT_LABEL_RGBA,
+                        GpuTextSource::QuadrantAxis,
+                        index,
+                    );
+                } else {
+                    sink.push_left(
+                        label,
+                        anchor,
+                        QUADRANT_LABEL_FONT_SIZE_PX,
+                        DEFAULT_LABEL_RGBA,
+                        GpuTextSource::QuadrantAxis,
+                        index,
+                    );
+                }
+            }
+
+            let mid_x = f32::midpoint(left, right);
+            let mid_y = f32::midpoint(top, bottom);
+            let label_centres = [
+                (f32::midpoint(mid_x, right), f32::midpoint(top, mid_y)),
+                (f32::midpoint(left, mid_x), f32::midpoint(top, mid_y)),
+                (f32::midpoint(left, mid_x), f32::midpoint(mid_y, bottom)),
+                (f32::midpoint(mid_x, right), f32::midpoint(mid_y, bottom)),
+            ];
+            for (index, (label, centre)) in
+                quad.quadrant_labels.iter().zip(label_centres).enumerate()
+            {
+                sink.push_centred_with_font(
+                    label,
+                    centre,
+                    QUADRANT_LABEL_FONT_SIZE_PX,
+                    DEFAULT_LABEL_RGBA,
+                    GpuTextSource::QuadrantLabel,
+                    index,
+                );
+            }
         }
 
         Self {
@@ -2125,7 +2290,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, seg: EdgeSegment) -> Vertex
     out.color = seg.color;
     out.dash = seg.dash;
     out.arc_length = corner.x * length_units;
-    out.dash_phase = instance.dash_phase;
+    out.dash_phase = seg.dash_phase;
     out.across = corner.y;
     return out;
 }
@@ -3639,6 +3804,127 @@ mod tests {
         assert_eq!(run.quad_count, 13, "Wrapped field is thirteen glyphs");
     }
 
+    /// Quadrant labels are a real Canvas2D draw source, and the plan must keep all of the same
+    /// fixture's IR-backed text products that SVG emits (bd-adabx).
+    #[test]
+    fn quadrant_text_gpu_plan_matches_svg_backend_for_the_same_ir() {
+        let ir = fm_parser::parse(include_str!(
+            "../../fm-cli/tests/fixtures/frankentui_conformance/quadrant_basic.mmd"
+        ))
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let quad = ir
+            .quadrant_meta
+            .as_ref()
+            .expect("CONTROL FAILED: divergent corpus fixture produced no quadrant metadata");
+        let axis_labels = [
+            quad.x_axis_left.as_deref(),
+            quad.x_axis_right.as_deref(),
+            quad.y_axis_top.as_deref(),
+            quad.y_axis_bottom.as_deref(),
+        ];
+        assert!(
+            axis_labels
+                .iter()
+                .all(|label| label.is_some_and(|label| !label.is_empty())),
+            "CONTROL FAILED: divergent corpus fixture needs all four axis labels"
+        );
+        assert_eq!(
+            quad.quadrant_labels.len(),
+            4,
+            "CONTROL FAILED: divergent corpus fixture needs all four quadrant names"
+        );
+
+        let svg = fm_render_svg::render_svg_with_layout(
+            &ir,
+            &layout,
+            &fm_render_svg::SvgRenderConfig::default(),
+        );
+        for expected in ["fm-quadrant-axis-label", "fm-quadrant-label"]
+            .into_iter()
+            .chain(axis_labels.into_iter().flatten())
+            .chain(quad.quadrant_labels.iter().map(String::as_str))
+        {
+            assert!(
+                svg.contains(expected),
+                "SVG golden reference omitted {expected:?}:\n{svg}"
+            );
+        }
+
+        let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+        let advance = super::QUADRANT_LABEL_FONT_SIZE_PX * super::CHAR_ADVANCE_RATIO;
+        let left = layout.bounds.x;
+        let right = layout.bounds.x + layout.bounds.width;
+        let top = layout.bounds.y;
+        let bottom = layout.bounds.y + layout.bounds.height;
+        let pad = super::DEFAULT_FONT_SIZE_PX;
+        let axis_anchors = [
+            (left + pad, bottom + pad, false),
+            (right - pad, bottom + pad, true),
+            (left - pad, top + pad, true),
+            (left - pad, bottom - pad, true),
+        ];
+        for (index, (anchor_x, anchor_y, right_aligned)) in axis_anchors.into_iter().enumerate() {
+            let run = plan
+                .text_runs
+                .iter()
+                .find(|run| {
+                    run.source == super::GpuTextSource::QuadrantAxis
+                        && run.node_index == u32::try_from(index).unwrap_or(u32::MAX)
+                })
+                .expect("each SVG axis label needs one GPU text run");
+            let glyphs = &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
+            let x = if right_aligned {
+                glyphs.last().expect("axis run has a glyph").center[0]
+            } else {
+                glyphs.first().expect("axis run has a glyph").center[0]
+            };
+            let expected_x = if right_aligned {
+                anchor_x - (advance * 0.5)
+            } else {
+                anchor_x + (advance * 0.5)
+            };
+            assert!(
+                (x - expected_x).abs() < 0.01,
+                "axis {index} alignment drifted"
+            );
+            assert!(
+                (glyphs[0].center[1] - anchor_y).abs() < 0.01,
+                "axis {index} baseline drifted"
+            );
+        }
+
+        let mid_x = f32::midpoint(left, right);
+        let mid_y = f32::midpoint(top, bottom);
+        let centres = [
+            (f32::midpoint(mid_x, right), f32::midpoint(top, mid_y)),
+            (f32::midpoint(left, mid_x), f32::midpoint(top, mid_y)),
+            (f32::midpoint(left, mid_x), f32::midpoint(mid_y, bottom)),
+            (f32::midpoint(mid_x, right), f32::midpoint(mid_y, bottom)),
+        ];
+        for (index, expected) in centres.into_iter().enumerate() {
+            let run = plan
+                .text_runs
+                .iter()
+                .find(|run| {
+                    run.source == super::GpuTextSource::QuadrantLabel
+                        && run.node_index == u32::try_from(index).unwrap_or(u32::MAX)
+                })
+                .expect("each SVG quadrant label needs one GPU text run");
+            let glyphs = &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
+            let mean_x =
+                glyphs.iter().map(|glyph| glyph.center[0]).sum::<f32>() / (glyphs.len() as f32);
+            assert!(
+                (mean_x - expected.0).abs() < 0.01,
+                "quadrant {index} not centred"
+            );
+            assert!(
+                (glyphs[0].center[1] - expected.1).abs() < 0.01,
+                "quadrant {index} vertical placement drifted"
+            );
+        }
+    }
+
     /// A destroyed participant's cross reaches the plan as two segments (bd-adabx).
     ///
     /// First line source that is NOT an edge. The `edge_index` sentinel is asserted explicitly:
@@ -3887,6 +4173,7 @@ mod tests {
             "draw_bands",
             "draw_axis_ticks",
             "draw_packet_field_continuations",
+            "draw_quadrant_axis_labels",
             "draw_clusters",
             "draw_edges",
             "draw_nodes",
@@ -3898,7 +4185,6 @@ mod tests {
             ("draw_generic_diagram_title", "bd-adabx: diagram title text"),
             ("draw_path_markers", "bd-adabx: RenderScene path pipeline, not the layout pipeline"),
             ("draw_marker", "bd-adabx: RenderScene path pipeline, not the layout pipeline"),
-            ("draw_quadrant_axis_labels", "bd-adabx: quadrant furniture"),
             ("draw_gantt_today_marker", "bd-adabx: gantt furniture"),
             (
                 "draw_sequence_fragments",

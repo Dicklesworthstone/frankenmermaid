@@ -233,6 +233,11 @@ fn the_shaders_this_crate_ships_compile_on_a_real_device() {
     };
     for (name, wgsl) in [
         ("NODE_SDF_WGSL", fm_render_canvas::NODE_SDF_WGSL),
+        // EDGE joined this list when bd-s7ond was fixed. It had shipped reading an identifier that
+        // existed in no scope, and nothing noticed because the layout gate parses `@location` lines
+        // and never reads the body. This list is now the whole set: any shader this crate ships and
+        // does not compile here is a hole.
+        ("EDGE_WGSL", fm_render_canvas::EDGE_WGSL),
         ("ARROWHEAD_WGSL", fm_render_canvas::ARROWHEAD_WGSL),
         ("TEXT_ATLAS_WGSL", fm_render_canvas::TEXT_ATLAS_WGSL),
     ] {
@@ -240,35 +245,6 @@ fn the_shaders_this_crate_ships_compile_on_a_real_device() {
             panic!("{name} does not compile: {error}");
         }
     }
-}
-
-/// ⚠️ A KNOWN DEFECT, PINNED SO IT CANNOT BE FORGOTTEN: `EDGE_WGSL` does not compile.
-///
-/// Its vertex entry point takes `seg: EdgeSegment` and then reads `instance.dash_phase`, an
-/// identifier that exists in no scope. The constant has shipped in this state because nothing ever
-/// built a shader module from it — the layout tests only parse `@location` lines. The first device
-/// pass to try it failed instantly with:
-///
-///   Shader 'fm-edge' parsing error: no definition in scope for identifier: `instance`
-///
-/// The fix is one word, `instance.dash_phase` -> `seg.dash_phase`, but it lives in `gpu_plan.rs`,
-/// which another agent holds exclusively, so it is reported rather than reached into.
-///
-/// THIS TEST FAILS WHEN THE SHADER IS FIXED, deliberately. That is the signal to move `EDGE_WGSL`
-/// into the compiling set above, delete this case, and land the edge device pass — which is written
-/// and blocked only on this. Omitting the shader from the list instead would have left a silent hole.
-#[test]
-fn edge_wgsl_is_still_broken_and_this_test_should_be_deleted_when_it_is_fixed() {
-    let Some(gpu) = device_or_skip() else {
-        return;
-    };
-    let result = gpu.validate_shader("EDGE_WGSL", fm_render_canvas::EDGE_WGSL);
-    assert!(
-        result.is_err(),
-        "EDGE_WGSL now COMPILES. That is good news, not a regression: add it to \
-         `the_shaders_this_crate_ships_compile_on_a_real_device`, delete this test, and enable the \
-         edge device pass."
-    );
 }
 
 /// The edge serialiser must round-trip through the DECLARED offsets, and this family is the one
@@ -447,12 +423,82 @@ fn an_undirected_link_plans_no_arrowhead() {
     );
 }
 
-// THE EDGE DEVICE PASS IS WRITTEN BUT NOT LANDED: `EDGE_WGSL` does not compile, so no edge pipeline
-// can be created on any device. See
-// `edge_wgsl_is_still_broken_and_this_test_should_be_deleted_when_it_is_fixed` above for the exact
-// defect and the one-word fix. The edge SERIALISER is exercised by
-// `the_serialised_edge_segment_round_trips_through_the_declared_offsets`, which needs no device, so
-// the half that can be proven today is proven today.
+/// SAME-IR COMPARISON FOR EDGES: the GPU paints along each routed segment, and the SVG draws a path
+/// for that same edge id. Unblocked by the bd-s7ond shader fix.
+///
+/// Sampled at each segment's MIDPOINT, not its endpoints: an endpoint sits under the node box that
+/// terminates it and on the antialiased tip of the ribbon, so it is the pixel most likely to be
+/// transparent for reasons that are not defects.
+#[test]
+fn the_edge_pipeline_paints_along_every_segment_the_svg_backend_draws() {
+    let Some(gpu) = device_or_skip() else {
+        return;
+    };
+
+    let ir = fm_parser::parse(
+        "flowchart LR\n  A[Alpha] --> B[Beta]\n  B -.-> C{Gamma}\n  C ==> D((Delta))\n",
+    )
+    .ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let plan = GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+    assert!(
+        !plan.edge_segments.is_empty(),
+        "CONTROL FAILED: nothing to draw"
+    );
+
+    let pass = InstancePass::new(&gpu, &edge_pipeline());
+    let bytes = edge_instance_bytes(&plan.edge_segments);
+    let count = u32::try_from(plan.edge_segments.len()).expect("fits u32");
+    let image =
+        render_instances(&gpu, &pass, &plan.bounds, &bytes, count, 512, 512).expect("render");
+
+    let painted = image
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|p| p[3] > 0)
+        .count();
+    assert!(
+        painted > 0,
+        "the edge pass produced a fully transparent image: nothing was rasterised"
+    );
+
+    // Per EDGE, not per segment: a dotted edge legitimately has gaps, so an individual segment's
+    // midpoint may land in an "off" span of the dash pattern. An entire edge going unpainted is a
+    // real defect.
+    for index in 0..u32::try_from(ir.edges.len()).expect("fits u32") {
+        let segments: Vec<_> = plan
+            .edge_segments
+            .iter()
+            .filter(|s| s.edge_index == index)
+            .collect();
+        assert!(
+            !segments.is_empty(),
+            "edge {index} has no segment in the plan"
+        );
+        let any_painted = segments.iter().any(|segment| {
+            let mid_x = (segment.from[0] + segment.to[0]) * 0.5;
+            let mid_y = (segment.from[1] + segment.to[1]) * 0.5;
+            let (x, y) = image.pixel_for(&plan.bounds, mid_x, mid_y);
+            image.pixel(x, y).is_some_and(|pixel| pixel[3] > 0)
+        });
+        assert!(
+            any_painted,
+            "edge {index} was planned but nothing was painted along any of its {} segments",
+            segments.len()
+        );
+    }
+
+    // THE REFERENCE ARM, joined on the same id the plan uses.
+    let svg = fm_render_svg::render_svg(&ir);
+    for index in 0..ir.edges.len() {
+        assert!(
+            svg.contains(&format!("data-fm-edge-id=\"{index}\"")),
+            "the SVG backend drew no path for edge {index}"
+        );
+    }
+}
 /// The camera must not flip the diagram. Layout space grows downward, clip space grows upward, so
 /// the Y scale is negative; getting that wrong renders every diagram upside down, which reads as a
 /// layout bug rather than a camera bug.
