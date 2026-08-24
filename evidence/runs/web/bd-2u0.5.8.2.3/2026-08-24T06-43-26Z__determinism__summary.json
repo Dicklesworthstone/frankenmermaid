@@ -1,0 +1,382 @@
+{
+  "ok": true,
+  "base_url": "http://127.0.0.1:59009",
+  "serve_root": "/data/projects/frankenmermaid",
+  "route_prefix": "/web",
+  "surface": "web",
+  "host_kind": "static-web",
+  "repeat": 5,
+  "profiles": [
+    "desktop-default",
+    "desktop-reduced-motion",
+    "mobile-narrow"
+  ],
+  "scenarios": [
+    "static-web-presenter-tour"
+  ],
+  "results": [
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "url": "http://127.0.0.1:59009/web?tour=main-demo&tour_step=1",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-default/2026-08-24T06-41-47Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-default/2026-08-24T06-41-47Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:371e39b6967cffcf61249c152bf893749727974608871eb0cfa40d92dbf624df",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-default-run1"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-default",
+      "run_index": 2,
+      "url": "http://127.0.0.1:59009/web?tour=main-demo&tour_step=1",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-default/2026-08-24T06-41-53Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-default/2026-08-24T06-41-53Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:18a839de0bc4715b08b4b797d0317a8e13e70ed12b14d7c690a9e0b447f9223f",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-default-run2"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-default",
+      "run_index": 3,
+      "url": "http://127.0.0.1:59009/web?tour=main-demo&tour_step=1",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-default/2026-08-24T06-41-59Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-default/2026-08-24T06-41-59Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:52c67f5cb6acfa7739a73f053505a50f677e68e22da4e079699c0ca7564620d0",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-default-run3"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-default",
+      "run_index": 4,
+      "url": "http://127.0.0.1:59009/web?tour=main-demo&tour_step=1",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-default/2026-08-24T06-42-05Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-default/2026-08-24T06-42-05Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:919c35381f25a40f38cd68f6d1c0a6ed25cc7a31ba0d24fe56bd766ab0888df5",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-default-run4"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-default",
+      "run_index": 5,
+      "url": "http://127.0.0.1:59009/web?tour=main-demo&tour_step=1",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-default/2026-08-24T06-42-11Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-default/2026-08-24T06-42-11Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:413e102314139088beb8051835e311c61ed2377c62459e047efc50e114e1bd3e",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-default-run5"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-reduced-motion",
+      "run_index": 1,
+      "url": "http://127.0.0.1:59009/web?tour=main-demo&tour_step=1",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-reduced-motion/2026-08-24T06-42-20Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-reduced-motion/2026-08-24T06-42-20Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:055724ebc405f00f1c7577a558bec1249d26df8276680ee584d1a32d4a244792",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-reduced-motion-run1"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-reduced-motion",
+      "run_index": 2,
+      "url": "http://127.0.0.1:59009/web?tour=main-demo&tour_step=1",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-reduced-motion/2026-08-24T06-42-29Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-reduced-motion/2026-08-24T06-42-29Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:94d2d042b8c752d1e51bae75270f4725c1e424b802363bc2100f52b3b22d3417",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-reduced-motion-run2"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-reduced-motion",
+      "run_index": 3,
+      "url": "http://127.0.0.1:59009/web?tour=main-demo&tour_step=1",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-reduced-motion/2026-08-24T06-42-38Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-reduced-motion/2026-08-24T06-42-38Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:204f1f30119b528456b9f75987ab4551f728c1faaa8c0ab1af9f37c50ea71996",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-reduced-motion-run3"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-reduced-motion",
+      "run_index": 4,
+      "url": "http://127.0.0.1:59009/web?tour=main-demo&tour_step=1",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-reduced-motion/2026-08-24T06-42-47Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-reduced-motion/2026-08-24T06-42-47Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:c35eec6ded24e75b3ad8ae045661df78acd87f5d1401129b33f45a088285321e",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-reduced-motion-run4"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-reduced-motion",
+      "run_index": 5,
+      "url": "http://127.0.0.1:59009/web?tour=main-demo&tour_step=1",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-reduced-motion/2026-08-24T06-42-56Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-reduced-motion/2026-08-24T06-42-56Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:21ab8bb676969c765c90e32d5c8a4ccfd97f910e5838e63275ea50d08f6d41b0",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-reduced-motion-run5"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "mobile-narrow",
+      "run_index": 1,
+      "url": "http://127.0.0.1:59009/web?tour=main-demo&tour_step=1",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/mobile-narrow/2026-08-24T06-43-02Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/mobile-narrow/2026-08-24T06-43-02Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:a54d3213c9255d2432fe07a0670be38bf6caf25191261106a21407bf591bd05a",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-mobile-narrow-run1"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "mobile-narrow",
+      "run_index": 2,
+      "url": "http://127.0.0.1:59009/web?tour=main-demo&tour_step=1",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/mobile-narrow/2026-08-24T06-43-08Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/mobile-narrow/2026-08-24T06-43-08Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:531a0d20e81688a57c4aaa5050476217e8206a753d0f2a02f47caf4ec8886efa",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-mobile-narrow-run2"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "mobile-narrow",
+      "run_index": 3,
+      "url": "http://127.0.0.1:59009/web?tour=main-demo&tour_step=1",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/mobile-narrow/2026-08-24T06-43-14Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/mobile-narrow/2026-08-24T06-43-14Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:03904146cf6e397faadd1294f72b08fedd711538d80f6f4c7f5ca3f3aa842d8a",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-mobile-narrow-run3"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "mobile-narrow",
+      "run_index": 4,
+      "url": "http://127.0.0.1:59009/web?tour=main-demo&tour_step=1",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/mobile-narrow/2026-08-24T06-43-20Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/mobile-narrow/2026-08-24T06-43-20Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:4b57fa8bda80b51907af818095b77cf286da8487b625f9e915574b9dda62be75",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-mobile-narrow-run4"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "mobile-narrow",
+      "run_index": 5,
+      "url": "http://127.0.0.1:59009/web?tour=main-demo&tour_step=1",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/mobile-narrow/2026-08-24T06-43-26Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/mobile-narrow/2026-08-24T06-43-26Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:25e08f3ee9343b9ce29177fac6e8617de3c778adb7474eaecdbb0bd8a58079ac",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-mobile-narrow-run5"
+    }
+  ],
+  "determinism": [
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-default",
+      "runs": 5,
+      "stable_output_hash": false,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:371e39b6967cffcf61249c152bf893749727974608871eb0cfa40d92dbf624df",
+        "sha256:18a839de0bc4715b08b4b797d0317a8e13e70ed12b14d7c690a9e0b447f9223f",
+        "sha256:52c67f5cb6acfa7739a73f053505a50f677e68e22da4e079699c0ca7564620d0",
+        "sha256:919c35381f25a40f38cd68f6d1c0a6ed25cc7a31ba0d24fe56bd766ab0888df5",
+        "sha256:413e102314139088beb8051835e311c61ed2377c62459e047efc50e114e1bd3e"
+      ]
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-reduced-motion",
+      "runs": 5,
+      "stable_output_hash": false,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:055724ebc405f00f1c7577a558bec1249d26df8276680ee584d1a32d4a244792",
+        "sha256:94d2d042b8c752d1e51bae75270f4725c1e424b802363bc2100f52b3b22d3417",
+        "sha256:204f1f30119b528456b9f75987ab4551f728c1faaa8c0ab1af9f37c50ea71996",
+        "sha256:c35eec6ded24e75b3ad8ae045661df78acd87f5d1401129b33f45a088285321e",
+        "sha256:21ab8bb676969c765c90e32d5c8a4ccfd97f910e5838e63275ea50d08f6d41b0"
+      ]
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "mobile-narrow",
+      "runs": 5,
+      "stable_output_hash": false,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:a54d3213c9255d2432fe07a0670be38bf6caf25191261106a21407bf591bd05a",
+        "sha256:531a0d20e81688a57c4aaa5050476217e8206a753d0f2a02f47caf4ec8886efa",
+        "sha256:03904146cf6e397faadd1294f72b08fedd711538d80f6f4c7f5ca3f3aa842d8a",
+        "sha256:4b57fa8bda80b51907af818095b77cf286da8487b625f9e915574b9dda62be75",
+        "sha256:25e08f3ee9343b9ce29177fac6e8617de3c778adb7474eaecdbb0bd8a58079ac"
+      ]
+    }
+  ],
+  "differential": [],
+  "trace_index": [
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-default-run1",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-default/2026-08-24T06-41-47Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-default",
+      "run_index": 2,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-default-run2",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-default/2026-08-24T06-41-53Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-default",
+      "run_index": 3,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-default-run3",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-default/2026-08-24T06-41-59Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-default",
+      "run_index": 4,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-default-run4",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-default/2026-08-24T06-42-05Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-default",
+      "run_index": 5,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-default-run5",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-default/2026-08-24T06-42-11Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-reduced-motion",
+      "run_index": 1,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-reduced-motion-run1",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-reduced-motion/2026-08-24T06-42-20Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-reduced-motion",
+      "run_index": 2,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-reduced-motion-run2",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-reduced-motion/2026-08-24T06-42-29Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-reduced-motion",
+      "run_index": 3,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-reduced-motion-run3",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-reduced-motion/2026-08-24T06-42-38Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-reduced-motion",
+      "run_index": 4,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-reduced-motion-run4",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-reduced-motion/2026-08-24T06-42-47Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "desktop-reduced-motion",
+      "run_index": 5,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-desktop-reduced-motion-run5",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/desktop-reduced-motion/2026-08-24T06-42-56Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "mobile-narrow",
+      "run_index": 1,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-mobile-narrow-run1",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/mobile-narrow/2026-08-24T06-43-02Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "mobile-narrow",
+      "run_index": 2,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-mobile-narrow-run2",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/mobile-narrow/2026-08-24T06-43-08Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "mobile-narrow",
+      "run_index": 3,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-mobile-narrow-run3",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/mobile-narrow/2026-08-24T06-43-14Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "mobile-narrow",
+      "run_index": 4,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-mobile-narrow-run4",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/mobile-narrow/2026-08-24T06-43-20Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-presenter-tour",
+      "profile": "mobile-narrow",
+      "run_index": 5,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-presenter-tour-mobile-narrow-run5",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-presenter-tour/mobile-narrow/2026-08-24T06-43-26Z__e2e__log.json"
+    }
+  ],
+  "summary_path": "evidence/runs/web/bd-2u0.5.8.2.3/2026-08-24T06-43-26Z__determinism__summary.json"
+}

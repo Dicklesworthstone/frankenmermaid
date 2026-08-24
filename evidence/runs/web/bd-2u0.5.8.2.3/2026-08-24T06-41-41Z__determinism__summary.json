@@ -1,0 +1,382 @@
+{
+  "ok": true,
+  "base_url": "http://127.0.0.1:49711",
+  "serve_root": "/data/projects/frankenmermaid",
+  "route_prefix": "/web",
+  "surface": "web",
+  "host_kind": "static-web",
+  "repeat": 5,
+  "profiles": [
+    "desktop-default",
+    "desktop-reduced-motion",
+    "mobile-narrow"
+  ],
+  "scenarios": [
+    "static-web-determinism-check"
+  ],
+  "results": [
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "url": "http://127.0.0.1:49711/web?sample=flowchart-1-incident-response-escalation&det=5",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-default/2026-08-24T06-40-03Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-default/2026-08-24T06-40-03Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:2c7bc9e95b363cce56671403da560d77c46754249d3561006b0235c1e5ead88e",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-default-run1"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-default",
+      "run_index": 2,
+      "url": "http://127.0.0.1:49711/web?sample=flowchart-1-incident-response-escalation&det=5",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-default/2026-08-24T06-40-09Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-default/2026-08-24T06-40-09Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:5980f7c8ec7093f01728c8094c3ce8c033c88e7070a45a00aba3cfdff53cd361",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-default-run2"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-default",
+      "run_index": 3,
+      "url": "http://127.0.0.1:49711/web?sample=flowchart-1-incident-response-escalation&det=5",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-default/2026-08-24T06-40-15Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-default/2026-08-24T06-40-15Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:7d9fb44b2b3f5d6cac7385dbdfb807799801e8a075ebb3558da4ee91d7acef17",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-default-run3"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-default",
+      "run_index": 4,
+      "url": "http://127.0.0.1:49711/web?sample=flowchart-1-incident-response-escalation&det=5",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-default/2026-08-24T06-40-21Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-default/2026-08-24T06-40-21Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:250d8d099b8dca26568f7f0c9c1230a5e2055ba90ada2f804de78ae814853b8c",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-default-run4"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-default",
+      "run_index": 5,
+      "url": "http://127.0.0.1:49711/web?sample=flowchart-1-incident-response-escalation&det=5",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-default/2026-08-24T06-40-27Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-default/2026-08-24T06-40-27Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:79d8250e37314d4ce57b7cfd7faf02313d84a4876feb3cce5df963b428babe1d",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-default-run5"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-reduced-motion",
+      "run_index": 1,
+      "url": "http://127.0.0.1:49711/web?sample=flowchart-1-incident-response-escalation&det=5",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-reduced-motion/2026-08-24T06-40-36Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-reduced-motion/2026-08-24T06-40-36Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:08a96f3d54e8e883a718721fd1ff360b5f9e4d3ed76ffa73ee2919ff106d7b44",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-reduced-motion-run1"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-reduced-motion",
+      "run_index": 2,
+      "url": "http://127.0.0.1:49711/web?sample=flowchart-1-incident-response-escalation&det=5",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-reduced-motion/2026-08-24T06-40-45Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-reduced-motion/2026-08-24T06-40-45Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:18c69045a264757f185b063f4d482b45ef3f5e8e20d511d7bde5a279340dc895",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-reduced-motion-run2"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-reduced-motion",
+      "run_index": 3,
+      "url": "http://127.0.0.1:49711/web?sample=flowchart-1-incident-response-escalation&det=5",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-reduced-motion/2026-08-24T06-40-53Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-reduced-motion/2026-08-24T06-40-53Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:50fcf67f0c93bf0781f763e26696a559fae0aa1dea512608d5366553786c41ed",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-reduced-motion-run3"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-reduced-motion",
+      "run_index": 4,
+      "url": "http://127.0.0.1:49711/web?sample=flowchart-1-incident-response-escalation&det=5",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-reduced-motion/2026-08-24T06-41-03Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-reduced-motion/2026-08-24T06-41-03Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:aefe6edab233ef08472e2c694a44198a161827d333445ead6d155f8aff8d8fec",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-reduced-motion-run4"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-reduced-motion",
+      "run_index": 5,
+      "url": "http://127.0.0.1:49711/web?sample=flowchart-1-incident-response-escalation&det=5",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-reduced-motion/2026-08-24T06-41-11Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-reduced-motion/2026-08-24T06-41-11Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:a17419251ce617340efb2d2bf49d0a4e9aa7bd68f99c02847e06d894e0994550",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-reduced-motion-run5"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "mobile-narrow",
+      "run_index": 1,
+      "url": "http://127.0.0.1:49711/web?sample=flowchart-1-incident-response-escalation&det=5",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/mobile-narrow/2026-08-24T06-41-17Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/mobile-narrow/2026-08-24T06-41-17Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:297b17e24480b4cb7bde4d12407e3c20178a8c9620888d6737a2191aeb2bd85d",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-mobile-narrow-run1"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "mobile-narrow",
+      "run_index": 2,
+      "url": "http://127.0.0.1:49711/web?sample=flowchart-1-incident-response-escalation&det=5",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/mobile-narrow/2026-08-24T06-41-23Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/mobile-narrow/2026-08-24T06-41-23Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:6f680e61bd786f9485ea6ba7245cda97be8d8a71b239f4f09c6038ac2ed24ec5",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-mobile-narrow-run2"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "mobile-narrow",
+      "run_index": 3,
+      "url": "http://127.0.0.1:49711/web?sample=flowchart-1-incident-response-escalation&det=5",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/mobile-narrow/2026-08-24T06-41-29Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/mobile-narrow/2026-08-24T06-41-29Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:37717c5f9497ec62b57822ef7b34651ad0b32a9f1f7d52f65d2bd300b3c10b60",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-mobile-narrow-run3"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "mobile-narrow",
+      "run_index": 4,
+      "url": "http://127.0.0.1:49711/web?sample=flowchart-1-incident-response-escalation&det=5",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/mobile-narrow/2026-08-24T06-41-35Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/mobile-narrow/2026-08-24T06-41-35Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:e95e506b6e907e120443fce4e65d9869356964b9967541bc0f1368730eab71e0",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-mobile-narrow-run4"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "mobile-narrow",
+      "run_index": 5,
+      "url": "http://127.0.0.1:49711/web?sample=flowchart-1-incident-response-escalation&det=5",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/mobile-narrow/2026-08-24T06-41-41Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/mobile-narrow/2026-08-24T06-41-41Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:7aecd0689d4b282170775c11540bb207f855463e0d21057773e2fa1d9af11f48",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-mobile-narrow-run5"
+    }
+  ],
+  "determinism": [
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-default",
+      "runs": 5,
+      "stable_output_hash": false,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:2c7bc9e95b363cce56671403da560d77c46754249d3561006b0235c1e5ead88e",
+        "sha256:5980f7c8ec7093f01728c8094c3ce8c033c88e7070a45a00aba3cfdff53cd361",
+        "sha256:7d9fb44b2b3f5d6cac7385dbdfb807799801e8a075ebb3558da4ee91d7acef17",
+        "sha256:250d8d099b8dca26568f7f0c9c1230a5e2055ba90ada2f804de78ae814853b8c",
+        "sha256:79d8250e37314d4ce57b7cfd7faf02313d84a4876feb3cce5df963b428babe1d"
+      ]
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-reduced-motion",
+      "runs": 5,
+      "stable_output_hash": false,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:08a96f3d54e8e883a718721fd1ff360b5f9e4d3ed76ffa73ee2919ff106d7b44",
+        "sha256:18c69045a264757f185b063f4d482b45ef3f5e8e20d511d7bde5a279340dc895",
+        "sha256:50fcf67f0c93bf0781f763e26696a559fae0aa1dea512608d5366553786c41ed",
+        "sha256:aefe6edab233ef08472e2c694a44198a161827d333445ead6d155f8aff8d8fec",
+        "sha256:a17419251ce617340efb2d2bf49d0a4e9aa7bd68f99c02847e06d894e0994550"
+      ]
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "mobile-narrow",
+      "runs": 5,
+      "stable_output_hash": false,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:297b17e24480b4cb7bde4d12407e3c20178a8c9620888d6737a2191aeb2bd85d",
+        "sha256:6f680e61bd786f9485ea6ba7245cda97be8d8a71b239f4f09c6038ac2ed24ec5",
+        "sha256:37717c5f9497ec62b57822ef7b34651ad0b32a9f1f7d52f65d2bd300b3c10b60",
+        "sha256:e95e506b6e907e120443fce4e65d9869356964b9967541bc0f1368730eab71e0",
+        "sha256:7aecd0689d4b282170775c11540bb207f855463e0d21057773e2fa1d9af11f48"
+      ]
+    }
+  ],
+  "differential": [],
+  "trace_index": [
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-default-run1",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-default/2026-08-24T06-40-03Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-default",
+      "run_index": 2,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-default-run2",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-default/2026-08-24T06-40-09Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-default",
+      "run_index": 3,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-default-run3",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-default/2026-08-24T06-40-15Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-default",
+      "run_index": 4,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-default-run4",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-default/2026-08-24T06-40-21Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-default",
+      "run_index": 5,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-default-run5",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-default/2026-08-24T06-40-27Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-reduced-motion",
+      "run_index": 1,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-reduced-motion-run1",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-reduced-motion/2026-08-24T06-40-36Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-reduced-motion",
+      "run_index": 2,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-reduced-motion-run2",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-reduced-motion/2026-08-24T06-40-45Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-reduced-motion",
+      "run_index": 3,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-reduced-motion-run3",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-reduced-motion/2026-08-24T06-40-53Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-reduced-motion",
+      "run_index": 4,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-reduced-motion-run4",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-reduced-motion/2026-08-24T06-41-03Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "desktop-reduced-motion",
+      "run_index": 5,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-desktop-reduced-motion-run5",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/desktop-reduced-motion/2026-08-24T06-41-11Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "mobile-narrow",
+      "run_index": 1,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-mobile-narrow-run1",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/mobile-narrow/2026-08-24T06-41-17Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "mobile-narrow",
+      "run_index": 2,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-mobile-narrow-run2",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/mobile-narrow/2026-08-24T06-41-23Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "mobile-narrow",
+      "run_index": 3,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-mobile-narrow-run3",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/mobile-narrow/2026-08-24T06-41-29Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "mobile-narrow",
+      "run_index": 4,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-mobile-narrow-run4",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/mobile-narrow/2026-08-24T06-41-35Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-determinism-check",
+      "profile": "mobile-narrow",
+      "run_index": 5,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-determinism-check-mobile-narrow-run5",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-determinism-check/mobile-narrow/2026-08-24T06-41-41Z__e2e__log.json"
+    }
+  ],
+  "summary_path": "evidence/runs/web/bd-2u0.5.8.2.3/2026-08-24T06-41-41Z__determinism__summary.json"
+}
