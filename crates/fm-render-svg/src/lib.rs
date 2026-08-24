@@ -15664,6 +15664,23 @@ mod tests {
         assert!(svg.contains("id=\"arrow-end\""));
     }
 
+    /// Regression fixture shared with `scripts/headtohead/corpus.mjs`: Mermaid 11.15.0 renders
+    /// `class e1 alert` as a red, 4px `e1@` edge. The parser resolves that class to Link(0), and
+    /// this consumer must carry both declarations into the rendered path.
+    #[test]
+    fn class_directive_on_an_edge_id_reaches_the_svg_path() {
+        let parsed = fm_parser::parse(
+            "flowchart LR\n  Animal e1@--> Dog\n  classDef alert stroke:#ff0000,stroke-width:4px\n  class e1 alert\n",
+        );
+        let svg = render_svg(&parsed.ir);
+
+        assert!(svg.contains("stroke:#ff0000"), "edge class stroke was lost: {svg}");
+        assert!(
+            svg.contains("stroke-width:4px"),
+            "edge class width was lost: {svg}"
+        );
+    }
+
     #[test]
     fn includes_half_arrow_marker_defs() {
         // Sequence half/stick arrowheads still render through their markers; the reference-gated

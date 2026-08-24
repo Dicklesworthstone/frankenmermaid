@@ -79,6 +79,15 @@ function classDiagram(n) {
   return lines.join('\n');
 }
 
+function classEdgeId() {
+  return [
+    'flowchart LR',
+    '  Animal e1@--> Dog',
+    '  classDef alert stroke:#ff0000,stroke-width:4px',
+    '  class e1 alert',
+  ].join('\n');
+}
+
 function stateDiagram(n) {
   const lines = ['stateDiagram-v2'];
   lines.push('  [*] --> S0');
@@ -532,6 +541,7 @@ const GENERATORS = {
   dense_dag: (p) => [denseDag(p.n, p.fanout)],
   sequence: (p) => [sequence(p.n)],
   class: (p) => [classDiagram(p.n)],
+  class_edge_id: () => [classEdgeId()],
   state: (p) => [stateDiagram(p.n)],
   er: (p) => [erDiagram(p.n)],
   gantt_top_axis: () => [ganttTopAxis()],
@@ -566,6 +576,7 @@ export const CORPUS = [
   { id: 'cyclic_scc_100',       gen: 'cyclic',    params: { n: 100, ring: 5 },       reps_js: 12, warmup_js: 2, reps_rs: 80,  warmup_rs: 8 },
   { id: 'sequence_20',          gen: 'sequence',  params: { n: 20 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
   { id: 'class_50',             gen: 'class',     params: { n: 50 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
+  { id: 'class_edge_id',        gen: 'class_edge_id', params: {},                    reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
   { id: 'state_40',             gen: 'state',     params: { n: 40 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
   { id: 'er_40',                gen: 'er',        params: { n: 40 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
   { id: 'gantt_top_axis',       gen: 'gantt_top_axis', params: {},                    reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },

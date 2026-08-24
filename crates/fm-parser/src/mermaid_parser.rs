@@ -613,6 +613,7 @@ enum FlowAst {
         from: FlowAstNode,
         arrow: ArrowType,
         label: Option<String>,
+        edge_id: Option<String>,
         to: FlowAstNode,
     },
     ClassAssign {
@@ -895,6 +896,7 @@ fn flow_statement_parser<'a>()
             from,
             arrow: arrow_type,
             label: label_opt.flatten(),
+            edge_id: None,
             to,
         });
 
@@ -1047,6 +1049,7 @@ fn lower_flow_ast(
             from,
             arrow,
             label,
+            edge_id,
             to,
         } => {
             let from_id = intern_flow_ast_node(builder, from, span);
@@ -1055,6 +1058,9 @@ fn lower_flow_ast(
                 add_node_to_active_groups(builder, active_clusters, active_subgraphs, f);
                 add_node_to_active_groups(builder, active_clusters, active_subgraphs, t);
                 builder.push_edge(f, t, *arrow, label.as_deref(), span);
+                if let Some(edge_id) = edge_id {
+                    builder.set_last_edge_id(edge_id);
+                }
             }
         }
         FlowAst::ClassAssign { nodes, class } => {
@@ -2210,21 +2216,25 @@ fn flowchart_accessibility_directive(statement: &str) -> Option<&str> {
 /// other endpoint: a bare `A@` (no left neighbour) is left alone, so a node whose id genuinely ends
 /// in `@` is not mangled.
 ///
-/// The id itself is discarded. The IR has no edge-id concept, and inventing one here would be a
-/// bigger change than the defect warrants — bd-yrxu records that the `e1@{…}` metadata form still
-/// cannot be tied back to its edge.
+/// The identifier is returned separately by [`trailing_edge_id`] where a parser surface needs to
+/// retain it for a subsequent directive. Most diagram types still only need the stripped endpoint.
 fn strip_trailing_edge_id(left: &str) -> &str {
+    trailing_edge_id(left).map_or(left, |(head, _)| head)
+}
+
+/// Split `A edgeId@` into its endpoint text and Mermaid edge ID.
+fn trailing_edge_id(left: &str) -> Option<(&str, &str)> {
     let Some((head, last)) = left.rsplit_once(char::is_whitespace) else {
-        return left;
+        return None;
     };
     let Some(id) = last.strip_suffix('@') else {
-        return left;
+        return None;
     };
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-        return left;
+        return None;
     }
     let head = trim_end_fast(head);
-    if head.is_empty() { left } else { head }
+    (!head.is_empty()).then_some((head, id))
 }
 
 /// Map a mermaid 11 `shape:` name onto the `NodeShape` its bracket spelling produces (bd-9x8r).
@@ -2456,6 +2466,12 @@ fn parse_fast_simple_flowchart_statement_ast(statement: &str) -> Option<FlowAst>
 }
 
 fn parse_fast_simple_flowchart_edge_ast(statement: &str) -> Option<FlowAst> {
+    // Mermaid 11 edge IDs are written on the left endpoint as `A edgeId@--> B`. The fast parser
+    // only has plain endpoint tokens, so accepting `@` here turns the ID into part of a phantom
+    // node. Defer to the full parser, which splits and retains the ID for `class edgeId name`.
+    if statement.as_bytes().contains(&b'@') {
+        return None;
+    }
     let (left, arrow, right) = parse_fast_simple_flowchart_edge_parts(statement)?;
     Some(FlowAst::Edge {
         from: FlowAstNode {
@@ -2466,6 +2482,7 @@ fn parse_fast_simple_flowchart_edge_ast(statement: &str) -> Option<FlowAst> {
         },
         arrow,
         label: None,
+        edge_id: None,
         to: FlowAstNode {
             id: right.to_string(),
             label: None,
@@ -4068,11 +4085,13 @@ fn with_edge_label(ast: FlowAst, label: &str) -> FlowAst {
             from,
             arrow,
             label: existing,
+            edge_id,
             to,
         } => FlowAst::Edge {
             from,
             arrow,
             label: existing.or_else(|| Some(label.to_string())),
+            edge_id,
             to,
         },
         other => other,
@@ -4089,11 +4108,13 @@ fn swap_edge_endpoints(ast: FlowAst) -> FlowAst {
             from,
             arrow,
             label,
+            edge_id,
             to,
         } => FlowAst::Edge {
             from: to,
             arrow,
             label,
+            edge_id,
             to: from,
         },
         other => other,
@@ -4639,11 +4660,13 @@ fn parse_state_statements(line: &str, config: &ParserConfig) -> Option<Vec<State
                             from,
                             arrow,
                             label,
+                            edge_id,
                             to,
                         } => FlowAst::Edge {
                             from,
                             arrow,
                             label: label.or_else(|| Some(text.to_string())),
+                            edge_id,
                             to,
                         },
                         other => other,
@@ -4833,6 +4856,7 @@ fn lower_state_flow_ast(
             from,
             arrow,
             label,
+            edge_id,
             to,
         } => {
             let scope = builder.state_scope_key().map(str::to_string);
@@ -4874,6 +4898,9 @@ fn lower_state_flow_ast(
                 // the parts, and keeping them costs nothing now that the label is whole.
                 let (_clean_label, guard, action) = extract_state_guard_action(label.as_deref());
                 builder.push_edge(f, t, *arrow, label.as_deref(), span);
+                if let Some(edge_id) = edge_id {
+                    builder.set_last_edge_id(edge_id);
+                }
                 if (guard.is_some() || action.is_some())
                     && let Some(edge) = builder.ir_mut().edges.last_mut()
                 {
@@ -9929,7 +9956,9 @@ fn parse_edge_statement_asts(
 ) -> Option<Vec<FlowAst>> {
     let (first_operator_idx, first_operator, first_arrow) =
         find_operator(statement, operators, gate)?;
-    let left_raw = strip_trailing_edge_id(trim_fast(&statement[..first_operator_idx]));
+    let left_source = trim_fast(&statement[..first_operator_idx]);
+    let edge_id = trailing_edge_id(left_source).map(|(_, edge_id)| edge_id.to_string());
+    let left_raw = strip_trailing_edge_id(left_source);
     if left_raw.is_empty() {
         return None;
     }
@@ -9975,11 +10004,12 @@ fn parse_edge_statement_asts(
                     return (!asts.is_empty()).then_some(asts);
                 }
                 let placeholder = dangling_placeholder_node(line_number, placeholder_index);
-                for from_node in &from_nodes {
+                for (edge_position, from_node) in from_nodes.iter().enumerate() {
                     asts.push(FlowAst::Edge {
                         from: from_node.clone().into(),
                         arrow,
                         label: None,
+                        edge_id: (asts.is_empty() && edge_position == 0).then(|| edge_id.clone()).flatten(),
                         to: placeholder.clone().into(),
                     });
                 }
@@ -10012,6 +10042,7 @@ fn parse_edge_statement_asts(
                     from: from_node.clone().into(),
                     arrow: current_arrow,
                     label: edge_label.clone(),
+                    edge_id: asts.is_empty().then(|| edge_id.clone()).flatten(),
                     to: to_node.clone().into(),
                 });
             }
@@ -12408,6 +12439,7 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
     // a cluster has no `classes` field to carry one, and adding it would mean patching ten
     // exhaustive `IrCluster` literals blind under the build freeze.
     let mut cluster_classes: Vec<(usize, String, Span)> = Vec::new();
+    let mut edge_classes: Vec<(usize, String, Span)> = Vec::new();
     // Every style-directive line starts with `classDef`/`style`/`linkStyle`/`class`; if
     // none of those substrings occur anywhere, there is nothing to extract and the whole
     // per-line scan (which computes a span_for/char-count for every line) is pure waste —
@@ -12732,16 +12764,16 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
                         // is deliberately left alone rather than changed by analogy in the opposite
                         // direction — which is the mistake being corrected.
                         //
-                        // `class <edgeId> cls` (mermaid's middle line above) is still unsupported:
-                        // there is no edge-id lookup to resolve it with. Noted rather than guessed.
+                        if let Some(edge_index) = builder.edge_index_by_id(node_key) {
+                            edge_classes.push((edge_index, class_name.to_string(), span));
+                        }
                         let cluster = builder.cluster_index_by_key(node_key);
                         if let Some(cluster_index) = cluster {
                             cluster_classes.push((cluster_index, class_name.to_string(), span));
                         }
-                        // Applied to the node as well whenever one exists. When the key names
-                        // NEITHER, this still interns — unchanged legacy behaviour for an unknown
-                        // id, which is a separate question from the subgraph phantom fixed here.
-                        if cluster.is_none() || builder.node_id_by_key(node_key).is_some() {
+                        // `setClass` only mutates an existing vertex. An unknown target (including
+                        // an edge ID) must not be interned as a phantom node.
+                        if builder.node_id_by_key(node_key).is_some() {
                             builder.add_class_to_node(node_key, class_name, span);
                         }
                     }
@@ -12756,6 +12788,17 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
     for (cluster_index, class_name, span) in cluster_classes {
         if let Some(css) = builder.class_style_css(&class_name) {
             builder.push_style_ref(fm_core::IrStyleTarget::Cluster(cluster_index), css, span);
+        } else {
+            builder.add_warning(format!(
+                "class directive references `{class_name}`, which no classDef declares; the class \
+                 was ignored"
+            ));
+        }
+    }
+
+    for (edge_index, class_name, span) in edge_classes {
+        if let Some(css) = builder.class_style_css(&class_name) {
+            builder.push_style_ref(fm_core::IrStyleTarget::Link(edge_index), css, span);
         } else {
             builder.add_warning(format!(
                 "class directive references `{class_name}`, which no classDef declares; the class \
@@ -17853,6 +17896,24 @@ Rel_Back(db, app, "Responds")"#,
             ("A".to_string(), "B".to_string()),
             "the edge must connect the declared nodes, not a phantom"
         );
+    }
+
+    /// Mermaid's `class <edgeId> <className>` styles the identified edge, not a node named after
+    /// that id. The corpus/reference fixture uses this exact spelling and Mermaid 11.15.0 emits a
+    /// red, 4px edge for it.
+    #[test]
+    fn class_directive_styles_a_mermaid_edge_id_without_a_phantom_node() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n  Animal e1@--> Dog\n  classDef alert stroke:#ff0000,stroke-width:4px\n  class e1 alert\n",
+        );
+
+        let ids: Vec<&str> = parsed.ir.nodes.iter().map(|node| node.id.as_str()).collect();
+        assert_eq!(ids, vec!["Animal", "Dog"]);
+        assert!(parsed.ir.style_refs.iter().any(|style_ref| {
+            matches!(style_ref.target, fm_core::IrStyleTarget::Link(0))
+                && style_ref.style.contains("stroke:#ff0000")
+                && style_ref.style.contains("stroke-width:4px")
+        }));
     }
 
     /// NEGATIVE CASES from bd-yrxu.

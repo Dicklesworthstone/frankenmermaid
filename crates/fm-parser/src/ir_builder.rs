@@ -194,6 +194,9 @@ pub struct IrBuilder {
     // map is both faster and determinism-safe — IR output order comes from the `ir`
     // vectors, not from map iteration.
     node_id_index: NodeIdIndex,
+    /// Mermaid edge IDs are lookup keys for directives such as `class edgeId alert`.
+    /// Store the first match because Mermaid's `setClass` uses `edges.find(...)`.
+    edge_index_by_id: FxHashMap<String, usize>,
     cluster_index_by_key: FxHashMap<String, usize>,
     subgraph_index_by_key: FxHashMap<String, usize>,
     /// O(1) membership dedup for `(cluster_index, node_id)` / `(subgraph_index, node_id)` — the
@@ -478,6 +481,7 @@ impl IrBuilder {
         self.node_id_index
             .buckets
             .clone_from(&source.node_id_index.buckets);
+        self.edge_index_by_id.clone_from(&source.edge_index_by_id);
         self.cluster_index_by_key
             .clone_from(&source.cluster_index_by_key);
         self.subgraph_index_by_key
@@ -507,6 +511,7 @@ impl IrBuilder {
         self.node_id_index
             .buckets
             .clone_from(&source.node_id_index.buckets);
+        self.edge_index_by_id.clone_from(&source.edge_index_by_id);
         self.cluster_index_by_key
             .clone_from(&source.cluster_index_by_key);
         self.subgraph_index_by_key
@@ -535,6 +540,7 @@ impl IrBuilder {
         Self {
             ir: MermaidDiagramIr::empty(diagram_type),
             node_id_index: NodeIdIndex::default(),
+            edge_index_by_id: FxHashMap::default(),
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
             cluster_member_set: FxHashSet::default(),
@@ -581,6 +587,7 @@ impl IrBuilder {
         Self {
             ir,
             node_id_index: NodeIdIndex::with_capacity(estimated_nodes),
+            edge_index_by_id: FxHashMap::default(),
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
             cluster_member_set: FxHashSet::default(),
@@ -1359,6 +1366,11 @@ impl IrBuilder {
             matches!(edge.from, IrEndpoint::Node(id) if id == from)
                 && matches!(edge.to, IrEndpoint::Node(id) if id == to)
         })
+    }
+
+    /// The first edge carrying Mermaid's source-level `edgeId@` prefix.
+    pub(crate) fn edge_index_by_id(&self, edge_id: &str) -> Option<usize> {
+        self.edge_index_by_id.get(edge_id).copied()
     }
 
     pub(crate) const fn edge_count(&self) -> usize {
@@ -2324,6 +2336,16 @@ impl IrBuilder {
             to: IrEndpoint::Node(to),
             span,
         });
+    }
+
+    /// Associate a source-level Mermaid edge ID with the edge just lowered.
+    pub(crate) fn set_last_edge_id(&mut self, edge_id: &str) {
+        let Some(edge_index) = self.ir.edges.len().checked_sub(1) else {
+            return;
+        };
+        self.edge_index_by_id
+            .entry(edge_id.to_string())
+            .or_insert(edge_index);
     }
 
     /// Set the ER cardinality notation on the last-pushed edge.
