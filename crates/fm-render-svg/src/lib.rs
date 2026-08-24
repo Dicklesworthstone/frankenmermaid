@@ -5648,6 +5648,11 @@ fn render_quadrant_svg(
                 .get(i)
                 .map(|p| p.label.as_str())
                 .unwrap_or(&node_box.node_id);
+            let accessible_name = quad_meta
+                .points
+                .get(i)
+                .filter(|_| config.a11y.text_alternatives)
+                .map(|point| quadrant_point_accessible_name(point, &quad_meta.quadrant_labels));
             write_quadrant_point_into(
                 &mut points_svg,
                 cx,
@@ -5659,6 +5664,7 @@ fn render_quadrant_svg(
                 config.font_size * 0.75,
                 &theme.colors.text,
                 label,
+                accessible_name.as_deref(),
             );
         }
         if !points_svg.is_empty() {
@@ -5671,16 +5677,26 @@ fn render_quadrant_svg(
         let cx = node_box.bounds.x + node_box.bounds.width / 2.0 + offset_x;
         let cy = node_box.bounds.y + node_box.bounds.height / 2.0 + offset_y;
         let color = accent_colors[i % accent_colors.len()];
-        doc = doc.child(
-            Element::circle()
-                .cx(cx)
-                .cy(cy)
-                .r(6.0)
-                .fill(color)
-                .stroke(&theme.colors.background)
-                .stroke_width(1.5)
-                .class("fm-quadrant-point"),
-        );
+        let point_circle = Element::circle()
+            .cx(cx)
+            .cy(cy)
+            .r(6.0)
+            .fill(color)
+            .stroke(&theme.colors.background)
+            .stroke_width(1.5)
+            .class("fm-quadrant-point");
+        // Same accessible name the streaming path emits (bd-0eoa6); this is the non-embedded-CSS
+        // export, and the two must not disagree about what a point is called.
+        let point_circle = match quad_meta
+            .points
+            .get(i)
+            .filter(|_| config.a11y.text_alternatives)
+            .map(|point| quadrant_point_accessible_name(point, &quad_meta.quadrant_labels))
+        {
+            Some(name) => point_circle.child(Element::title(&name)),
+            None => point_circle,
+        };
+        doc = doc.child(point_circle);
         // Point label from quadrant metadata or node ID.
         let label = quad_meta
             .points
@@ -5703,6 +5719,32 @@ fn render_quadrant_svg(
     doc
 }
 
+/// The accessible name for one quadrant data point (bd-0eoa6).
+///
+/// The point's visible label already names it, so what a screen reader is missing is the thing the
+/// POSITION conveys: which quadrant it landed in. `"Alpha: Do first"` when that quadrant is named,
+/// otherwise `"Alpha: x 0.90, y 0.90"` — the coordinates, which is all the position says when the
+/// author declared no quadrant labels.
+///
+/// ⚠️ THE QUADRANT INDEX IS MEASURED, NOT ASSUMED. Announcing the wrong quadrant is worse than
+/// announcing none, so the mapping was verified against real output before being written: a point at
+/// `[0.9, 0.9]` renders at the TOP right (canvas y 138 against the `quadrant-1` label's 186), so a
+/// HIGH data `y` is the TOP half even though canvas y grows downward. The order matches
+/// `label_positions` above — 0 top-right, 1 top-left, 2 bottom-left, 3 bottom-right — which is
+/// mermaid's `quadrant-1..4`.
+fn quadrant_point_accessible_name(point: &fm_core::IrQuadrantPoint, labels: &[String]) -> String {
+    let index = match (point.x >= 0.5, point.y >= 0.5) {
+        (true, true) => 0,
+        (false, true) => 1,
+        (false, false) => 2,
+        (true, false) => 3,
+    };
+    match labels.get(index).filter(|label| !label.trim().is_empty()) {
+        Some(quadrant) => format!("{}: {quadrant}", point.label),
+        None => format!("{}: x {:.2}, y {:.2}", point.label, point.x, point.y),
+    }
+}
+
 /// Stream a quadrant data point (`<circle>` + `<text>` label) byte-identical to the slow path's
 /// `Element`s under embedded CSS (the label's `font-family` is CSS-driven, so absent inline). `r="6"` /
 /// `stroke-width="1.50"` are the fixed `r(6.0)`/`stroke_width(1.5)` serializations. Skips the two per-point
@@ -5719,6 +5761,7 @@ fn write_quadrant_point_into(
     label_font_size: f32,
     text_fill: &str,
     label: &str,
+    accessible_name: Option<&str>,
 ) {
     use crate::attributes::{write_escaped_attr, write_escaped_text};
     f.push_str("<circle cx=\"");
@@ -5729,7 +5772,16 @@ fn write_quadrant_point_into(
     let _ = write_escaped_attr(f, color);
     f.push_str("\" stroke=\"");
     let _ = write_escaped_attr(f, bg);
-    f.push_str("\" stroke-width=\"1.50\" class=\"fm-quadrant-point\"/><text x=\"");
+    f.push_str("\" stroke-width=\"1.50\" class=\"fm-quadrant-point\"");
+    match accessible_name {
+        Some(name) => {
+            f.push_str("><title>");
+            let _ = write_escaped_text(f, name);
+            f.push_str("</title></circle>");
+        }
+        None => f.push_str("/>"),
+    }
+    f.push_str("<text x=\"");
     let _ = crate::attributes::write_number_into(f, label_x);
     f.push_str("\" y=\"");
     let _ = crate::attributes::write_number_into(f, label_y);
