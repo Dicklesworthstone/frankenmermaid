@@ -91,6 +91,12 @@ pub const STATE_NOTE_FONT_SIZE_PX: f32 = DEFAULT_FONT_SIZE_PX * 0.8;
 /// Distance between state-note text baselines, matching the Canvas2D pass.
 pub const STATE_NOTE_LINE_HEIGHT: f32 = DEFAULT_FONT_SIZE_PX * 1.2;
 
+/// Axis tick marks use the fixed one-unit stroke from the Canvas2D and SVG passes.
+pub const AXIS_TICK_STROKE_WIDTH: f32 = 1.0;
+
+/// Axis labels use 72% of the default text size, matching `draw_axis_ticks`.
+pub const AXIS_TICK_FONT_SIZE_PX: f32 = DEFAULT_FONT_SIZE_PX * 0.72;
+
 /// Default subgraph border, which is NOT the node border (bd-adabx).
 ///
 /// `config.cluster_stroke` is `rgba(148,163,184,0.78)` and `config.node_stroke` is `#94a3b8`. Same
@@ -573,6 +579,49 @@ impl TextSink<'_> {
         }
     }
 
+    /// Emit one left-aligned text run at the raster pass's anchor point.
+    fn push_left(
+        &mut self,
+        text: &str,
+        anchor: (f32, f32),
+        font_px: f32,
+        color: [f32; 4],
+        source: GpuTextSource,
+        index: usize,
+    ) {
+        let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
+        if inked.is_empty() {
+            return;
+        }
+        let first_quad = u32::try_from(self.quads.len()).unwrap_or(u32::MAX);
+        let advance = font_px * CHAR_ADVANCE_RATIO;
+        let half_height = font_px * 0.5;
+        let run_index = u32::try_from(self.runs.len()).unwrap_or(u32::MAX);
+        for (offset, glyph) in inked.iter().enumerate() {
+            let Some(cell) = self.atlas.cell(*glyph) else {
+                continue;
+            };
+            let step = u16::try_from(offset).map_or(f32::from(u16::MAX), f32::from);
+            self.quads.push(GpuTextQuad {
+                center: [anchor.0 + (advance * 0.5) + (step * advance), anchor.1],
+                half_extent: [advance * 0.5, half_height],
+                uv_min: cell.uv_min,
+                uv_max: cell.uv_max,
+                color,
+                run_index,
+            });
+        }
+        let quad_count = u32::try_from(self.quads.len()).unwrap_or(u32::MAX) - first_quad;
+        if quad_count > 0 {
+            self.runs.push(GpuTextRun {
+                source,
+                node_index: u32::try_from(index).unwrap_or(u32::MAX),
+                first_quad,
+                quad_count,
+            });
+        }
+    }
+
     /// Emit source lines at a top-left text inset, matching state-note rendering.
     fn push_left_multiline(
         &mut self,
@@ -742,6 +791,11 @@ pub enum GpuTextSource {
     /// `node_index` indexes `layout.extensions.state_notes`, not `ir.nodes`: the annotated state
     /// is a different object from the note being drawn.
     StateNote,
+    /// A gantt or xychart axis label.
+    ///
+    /// `node_index` indexes `layout.extensions.axis_ticks`: ticks are layout furniture, not IR
+    /// nodes, so resolving this as a node index would attach a date to an unrelated shape.
+    AxisTick,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -795,6 +849,11 @@ pub struct GpuRenderPlan {
     /// back-reference the text pass uses -- cluster titles ARE planned now, tagged
     /// `GpuTextSource::Cluster`.
     pub cluster_instances: Vec<GpuNodeInstance>,
+    /// Gantt and xychart axis tick marks, as non-edge line segments (bd-adabx).
+    ///
+    /// The Canvas2D pass draws these after bands and before the other extension furniture. They
+    /// use [`NO_EDGE_INDEX`] because a tick marks a layout coordinate rather than an IR edge.
+    pub axis_tick_segments: Vec<GpuEdgeSegment>,
     /// Subgraph dividers, as dashed line segments (bd-adabx).
     ///
     /// Directly after the clusters, matching the raster call order. A dashed LINE is expressible
@@ -917,6 +976,26 @@ impl GpuRenderPlan {
                 stroke_width,
                 shape: GpuNodeShape::Rect as u32,
                 node_index: u32::try_from(cluster.cluster_index).unwrap_or(u32::MAX),
+            });
+        }
+
+        // AXIS TICKS (bd-adabx). The same extension drives the gantt date row and xychart
+        // categories. A blank label is not drawn by Canvas2D, so it must not leave a line in the
+        // GPU plan either.
+        let axis_tick_y = layout.bounds.y - 12.0;
+        let mut axis_tick_segments = Vec::with_capacity(layout.extensions.axis_ticks.len());
+        for tick in &layout.extensions.axis_ticks {
+            if tick.label.is_empty() {
+                continue;
+            }
+            axis_tick_segments.push(GpuEdgeSegment {
+                from: [tick.position, axis_tick_y + 4.0],
+                to: [tick.position, axis_tick_y + 16.0],
+                edge_index: NO_EDGE_INDEX,
+                color: DEFAULT_EDGE_STROKE_RGBA,
+                dash_phase: 0.0,
+                dash: [0.0, 0.0],
+                width: AXIS_TICK_STROKE_WIDTH,
             });
         }
 
@@ -1326,6 +1405,17 @@ impl GpuRenderPlan {
                             .state_notes
                             .iter()
                             .flat_map(|note| note.text.lines()),
+                    )
+                    // AXIS LABELS GO IN THE ATLAS TOO. Tick segments without their dates or
+                    // categories are geometry with no scale, which is the same missing-source
+                    // failure as an entirely absent axis.
+                    .chain(
+                        layout
+                            .extensions
+                            .axis_ticks
+                            .iter()
+                            .filter(|tick| !tick.label.is_empty())
+                            .map(|tick| tick.label.as_str()),
                     ),
                 cell_px,
             );
@@ -1539,9 +1629,27 @@ impl GpuRenderPlan {
             );
         }
 
+        // AXIS LABELS (bd-adabx). `draw_axis_ticks` places each label three units to the right of
+        // its own tick at the axis baseline. Axis ticks are not nodes, so their extension index is
+        // preserved in the run discriminator rather than borrowing an unrelated node index.
+        for (index, tick) in layout.extensions.axis_ticks.iter().enumerate() {
+            if tick.label.is_empty() {
+                continue;
+            }
+            sink.push_left(
+                tick.label.as_str(),
+                (tick.position + 3.0, axis_tick_y),
+                AXIS_TICK_FONT_SIZE_PX,
+                DEFAULT_LABEL_RGBA,
+                GpuTextSource::AxisTick,
+                index,
+            );
+        }
+
         Self {
             bounds: layout.bounds,
             cluster_instances,
+            axis_tick_segments,
             cluster_divider_segments,
             state_note_leader_segments,
             state_note_instances,
@@ -3147,6 +3255,76 @@ mod tests {
         );
     }
 
+    /// Gantt and xychart ticks reach the GPU plan with the same extension-backed products the SVG
+    /// backend renders (bd-adabx).
+    #[test]
+    fn axis_tick_gpu_plan_matches_svg_backend_for_the_same_ir() {
+        let ir = fm_parser::parse(include_str!(
+            "../../fm-cli/tests/fixtures/frankentui_conformance/gantt_project.mmd"
+        ))
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let ticks: Vec<_> = layout
+            .extensions
+            .axis_ticks
+            .iter()
+            .enumerate()
+            .filter(|(_, tick)| !tick.label.is_empty())
+            .collect();
+        assert!(
+            !ticks.is_empty(),
+            "CONTROL FAILED: divergent gantt fixture produced no labelled axis ticks"
+        );
+
+        let svg = fm_render_svg::render_svg_with_layout(
+            &ir,
+            &layout,
+            &fm_render_svg::SvgRenderConfig::default(),
+        );
+        assert!(
+            svg.contains("fm-axis-tick"),
+            "SVG reference omitted the axis tick group:\n{svg}"
+        );
+        for (_, tick) in &ticks {
+            assert!(
+                svg.contains(&format!("fm-axis-tick-label\">{}<", tick.label)),
+                "SVG reference omitted the tick label {:?}:\n{svg}",
+                tick.label
+            );
+        }
+
+        let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+        assert_eq!(plan.axis_tick_segments.len(), ticks.len());
+        let expected_y = layout.bounds.y - 12.0;
+        for ((tick_index, tick), segment) in ticks.iter().zip(&plan.axis_tick_segments) {
+            assert_eq!(segment.from, [tick.position, expected_y + 4.0]);
+            assert_eq!(segment.to, [tick.position, expected_y + 16.0]);
+            assert_eq!(segment.edge_index, super::NO_EDGE_INDEX);
+            assert_eq!(segment.color, super::DEFAULT_EDGE_STROKE_RGBA);
+            assert_eq!(segment.width, super::AXIS_TICK_STROKE_WIDTH);
+
+            let run = plan
+                .text_runs
+                .iter()
+                .find(|run| {
+                    run.source == super::GpuTextSource::AxisTick
+                        && run.node_index == u32::try_from(*tick_index).unwrap_or(u32::MAX)
+                })
+                .expect("each planned tick line must keep its SVG label");
+            assert!(run.quad_count > 0, "tick {:?} emitted no text quads", tick.label);
+            let first_quad = &plan.text_quads[run.first_quad as usize];
+            assert!(
+                (first_quad.center[0]
+                    - (tick.position
+                        + 3.0
+                        + (super::AXIS_TICK_FONT_SIZE_PX * super::CHAR_ADVANCE_RATIO * 0.5)))
+                    .abs()
+                    < 0.01
+            );
+            assert!((first_quad.center[1] - expected_y).abs() < 0.01);
+        }
+    }
+
     /// A destroyed participant's cross reaches the plan as two segments (bd-adabx).
     ///
     /// First line source that is NOT an edge. The `edge_index` sentinel is asserted explicitly:
@@ -3317,6 +3495,7 @@ mod tests {
         // (plan field, the raster call that produces it), in the order both must agree on.
         const PAIRS: &[(&str, &str)] = &[
             ("pub cluster_instances:", "self.draw_clusters("),
+            ("pub axis_tick_segments:", "self.draw_axis_ticks("),
             ("pub cluster_divider_segments:", "self.draw_cluster_dividers("),
             ("pub state_note_leader_segments:", "self.draw_state_notes("),
             ("pub mirror_header_instances:", "self.draw_sequence_mirror_headers("),
@@ -3370,11 +3549,8 @@ mod tests {
 
     /// Every raster draw source is CLASSIFIED against the GPU plan (bd-adabx).
     ///
-    /// The plan mirrors three of renderer.rs's nineteen `draw_*` entry points. The other sixteen
-    /// have no GPU counterpart, so a sequence, gantt, pie, quadrant, packet or state diagram plans
-    /// its nodes and edges and none of the furniture that makes it that diagram type. Nothing
-    /// failed over this, because a plan that omits a draw source is indistinguishable from a plan
-    /// for a diagram that never had one.
+    /// The plan mirrors a growing subset of renderer.rs's nineteen `draw_*` entry points. An
+    /// unplanned source is otherwise indistinguishable from a diagram that never had its furniture.
     ///
     /// FAILS BOTH WAYS, which is the whole point. A new `draw_*` that nobody classified fails here
     /// until someone decides whether the plan covers it; and a classification naming a `draw_*` that
@@ -3392,6 +3568,7 @@ mod tests {
             "draw_sequence_lifecycle_markers",
             "draw_sequence_notes",
             "draw_state_notes",
+            "draw_axis_ticks",
             "draw_clusters",
             "draw_edges",
             "draw_nodes",
@@ -3406,7 +3583,6 @@ mod tests {
             ("draw_quadrant_axis_labels", "bd-adabx: quadrant furniture"),
             ("draw_bands", "bd-adabx: journey/kanban band furniture"),
             ("draw_packet_field_continuations", "bd-adabx: packet furniture"),
-            ("draw_axis_ticks", "bd-adabx: axis furniture"),
             ("draw_gantt_today_marker", "bd-adabx: gantt furniture"),
             (
                 "draw_sequence_fragments",
