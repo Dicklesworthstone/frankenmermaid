@@ -1367,6 +1367,84 @@ pub fn plan_webgpu_js(input: &str, config: Option<JsValue>) -> Result<JsValue, J
     to_js_value(&WebGpuPlanSummary::from(&planned.plan))
 }
 
+/// Rasterise a diagram through the WebGPU device pass and return the RGBA pixels.
+///
+/// The half `planWebGpu` deliberately stopped short of. That call ends with primitive buffers and a
+/// summary; this one acquires a device, builds every pipeline, draws all four families in ONE
+/// submission, and reads the image back. It reuses `build_webgpu_plan`, so the parse, the
+/// typography-aware layout and the primitive extraction are the same code the plan call runs —
+/// there is no second pipeline here to drift from that one.
+///
+/// ASYNC, and it has to be: `requestAdapter`, `requestDevice` and `mapAsync` are all resolved by the
+/// browser's event loop, so the blocking native helpers would hang a tab rather than fail. The
+/// device layer shares one async implementation between this and the native path for exactly that
+/// reason.
+///
+/// Returns raw `Rgba8Unorm` bytes, `width * height * 4`, which a caller hands to `ImageData` or
+/// uploads as a texture. Returning pixels rather than drawing onto a passed-in canvas keeps this
+/// callable from a worker, where there is no DOM canvas to draw onto.
+///
+/// # Errors
+/// Returns the device or readback failure as a JS error.
+#[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+#[wasm_bindgen(js_name = renderWebGpuToRgba)]
+pub async fn render_webgpu_to_rgba_js(
+    input: String,
+    width: u32,
+    height: u32,
+    config: Option<JsValue>,
+) -> Result<js_sys::Uint8Array, JsValue> {
+    let planned = build_webgpu_plan(&input, config).map_err(js_error)?;
+    let pixels = render_webgpu_pixels(&planned.plan, width, height)
+        .await
+        .map_err(js_error)?;
+    Ok(js_sys::Uint8Array::from(pixels.as_slice()))
+}
+
+/// Draw a planned diagram and return its pixels.
+///
+/// Split from the `wasm_bindgen` wrapper with a PLAIN STRING error for the same reason
+/// `choose_canvas_target_result` was: `JsValue` is not constructible off wasm32, so a wrapper that
+/// built one would abort the whole `--lib` test binary the moment a native test touched its error
+/// path. This half is compiled and exercised on both targets.
+///
+/// # Errors
+/// Returns the device or readback failure.
+#[cfg(feature = "webgpu")]
+// Unused in a NATIVE non-test build, and deliberately so: its only production caller is the
+// wasm32-gated `renderWebGpuToRgba`, while the native test suite is what proves it works. Making it
+// wasm-only would put the browser render path beyond the reach of every test that can run here,
+// which is the trade this whole split exists to avoid.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn render_webgpu_pixels(
+    plan: &GpuRenderPlan,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, String> {
+    use fm_render_canvas::gpu_device::{
+        DiagramPipelines, GlyphAtlasTexture, GpuDevice, render_diagram_async,
+    };
+
+    let gpu = GpuDevice::request().await.map_err(|e| e.to_string())?;
+    let pipelines = DiagramPipelines::new(&gpu);
+
+    // The atlas is required exactly when there is text to draw. `solid_coverage` is the placeholder
+    // the device tests use; a browser caller that wants readable labels supplies a rasterised atlas
+    // through `glyph_raster`, which needs a font this crate deliberately does not ship.
+    let atlas = (!plan.text_quads.is_empty()).then(|| {
+        GlyphAtlasTexture::new(
+            &gpu,
+            &plan.glyph_atlas,
+            &fm_render_canvas::gpu_device::solid_coverage(&plan.glyph_atlas),
+        )
+    });
+
+    let image = render_diagram_async(&gpu, &pipelines, plan, atlas.as_ref(), width, height)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(image.rgba)
+}
+
 /// Acquire the browser's `GPUCanvasContext` for a canvas.
 ///
 /// `web-sys` keeps the WebGPU DOM types behind unstable API flags, so this intentionally returns
@@ -3170,15 +3248,28 @@ mod tests {
         use super::{HostCapabilities, choose_canvas_target, choose_canvas_target_result};
 
         for capabilities in [
-            HostCapabilities { offscreen_canvas: true, worker: true, canvas_transferred: true },
-            HostCapabilities { offscreen_canvas: true, worker: true, canvas_transferred: false },
-            HostCapabilities { offscreen_canvas: false, worker: true, canvas_transferred: false },
+            HostCapabilities {
+                offscreen_canvas: true,
+                worker: true,
+                canvas_transferred: true,
+            },
+            HostCapabilities {
+                offscreen_canvas: true,
+                worker: true,
+                canvas_transferred: false,
+            },
+            HostCapabilities {
+                offscreen_canvas: false,
+                worker: true,
+                canvas_transferred: false,
+            },
             HostCapabilities::default(),
         ] {
             let json = serde_json::to_string(&capabilities).expect("serialize");
             let exported =
                 choose_canvas_target_result(&json).expect("the wrapper should accept it");
-            let expected = serde_json::to_string(&choose_canvas_target(capabilities)).expect("expected");
+            let expected =
+                serde_json::to_string(&choose_canvas_target(capabilities)).expect("expected");
             assert_eq!(exported, expected, "wrapper disagreed for {capabilities:?}");
         }
 
@@ -3290,6 +3381,77 @@ mod tests {
                 instance.node_index
             );
         }
+    }
+
+    /// THE BROWSER ENTRY POINT'S OWN PATH, exercised natively (bd-2u0.2).
+    ///
+    /// `renderWebGpuToRgba` is `async` and wasm-only, but the half that does the work —
+    /// `render_webgpu_pixels` — is compiled on both targets precisely so it can be tested here. What
+    /// this proves is that the browser export is not a separate renderer: it plans through
+    /// `build_webgpu_plan`, the same call `planWebGpu` uses, and draws every family in one
+    /// submission through the shared device pass.
+    ///
+    /// The test above renders NODES ONLY, through the per-family path. This renders the WHOLE
+    /// diagram, which is what a browser caller receives, and asserts the difference is real: the
+    /// composed image must contain strictly more ink than the node pass alone, or the families are
+    /// not composing and the browser would get a picture missing its edges and labels.
+    #[cfg(feature = "webgpu")]
+    #[test]
+    fn the_browser_render_path_composes_every_family_for_the_corpus_flowchart() {
+        const FLOWCHART: &str =
+            include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/flowchart_basic.mmd");
+        let planned = build_webgpu_plan(FLOWCHART, None).expect("plan corpus flowchart");
+
+        // CONTROLS: a "whole diagram" claim is empty unless the fixture has more than one family.
+        assert!(
+            !planned.plan.node_instances.is_empty(),
+            "CONTROL FAILED: no nodes"
+        );
+        assert!(
+            !planned.plan.edge_segments.is_empty(),
+            "CONTROL FAILED: no edges"
+        );
+        assert!(
+            !planned.plan.text_quads.is_empty(),
+            "CONTROL FAILED: no text"
+        );
+
+        let rgba = pollster::block_on(super::render_webgpu_pixels(&planned.plan, 512, 512))
+            .unwrap_or_else(|error| panic!("browser render path failed: {error}"));
+        assert_eq!(
+            rgba.len(),
+            512 * 512 * 4,
+            "the browser path must return width*height*4 RGBA bytes"
+        );
+
+        let composed_ink = rgba.as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count();
+        assert!(composed_ink > 0, "the browser path returned a blank image");
+
+        // The node family alone, for comparison, through the per-family path in the same run.
+        let gpu = GpuDevice::headless().expect("adapter");
+        let pass = InstancePass::new(&gpu, &node_pipeline());
+        let bytes = node_instance_bytes(&planned.plan.node_instances);
+        let draw = InstanceDraw {
+            bounds: &planned.plan.bounds,
+            instance_bytes: &bytes,
+            instance_count: u32::try_from(planned.plan.node_instances.len()).expect("fits u32"),
+            atlas: None,
+        };
+        let nodes_only = render_instances(&gpu, &pass, &draw, 512, 512).expect("rasterise nodes");
+        let nodes_ink = nodes_only
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[3] > 0)
+            .count();
+
+        eprintln!("[wasm-gpu] composed={composed_ink}px nodes_only={nodes_ink}px");
+        assert!(
+            composed_ink > nodes_ink,
+            "the browser path painted {composed_ink} pixels and the node pass alone painted \
+             {nodes_ink}; a browser caller would be getting nodes without their edges or labels"
+        );
     }
 
     /// CROSS-TARGET DETERMINISM: x86_64 must render byte-identically to wasm32 (bd-1s1g.6).

@@ -9,6 +9,7 @@ use fm_layout::{DiagramLayout, LayoutClusterBox, LayoutEdgePath, LayoutNodeBox, 
 use crate::canvas::Canvas;
 use crate::config::{ResolvedConfig, TermRenderConfig};
 use crate::glyphs::{BoxGlyphs, ClusterGlyphs, EdgeGlyphs};
+use crate::transform::TermTransform;
 
 /// Result of terminal rendering.
 #[derive(Debug, Clone)]
@@ -2397,12 +2398,11 @@ impl TermRenderer {
         scale_x: f32,
         scale_y: f32,
     ) -> (usize, usize, usize, usize) {
-        let x = (bounds.x * scale_x) as usize + self.config.padding;
-        let y = (bounds.y * scale_y) as usize + self.config.padding;
+        let (x, y) = self.layout_point_to_cells(bounds.x, bounds.y, scale_x, scale_y);
         let w = ((bounds.width * scale_x) as usize).max(3);
         let h = ((bounds.height * scale_y) as usize).max(2);
 
-        (x, y, w, h)
+        (x + self.config.padding, y + self.config.padding, w, h)
     }
 
     fn point_to_cells(
@@ -2411,10 +2411,27 @@ impl TermRenderer {
         scale_x: f32,
         scale_y: f32,
     ) -> (usize, usize) {
-        let x = (point.x * scale_x) as usize + self.config.padding;
-        let y = (point.y * scale_y) as usize + self.config.padding;
+        let (x, y) = self.layout_point_to_cells(point.x, point.y, scale_x, scale_y);
 
-        (x, y)
+        (x + self.config.padding, y + self.config.padding)
+    }
+
+    /// Convert one layout-space point into terminal cell space through the CGA-backed transform.
+    ///
+    /// The direct arithmetic fallback preserves the established degenerate-scale behavior. Normal
+    /// rendering obtains positive finite scales from `fit_cell_dimensions`, so it takes the rotor
+    /// path; keeping the fallback makes this low-level conversion total for direct unit callers.
+    fn layout_point_to_cells(
+        &self,
+        x: f32,
+        y: f32,
+        scale_x: f32,
+        scale_y: f32,
+    ) -> (usize, usize) {
+        let (x, y) = TermTransform::new(scale_x, scale_y)
+            .map(|transform| transform.apply(x, y))
+            .unwrap_or((x * scale_x, y * scale_y));
+        (x as usize, y as usize)
     }
 
     fn truncate_label(&self, text: &str) -> String {
@@ -3576,6 +3593,28 @@ mod tests {
         assert_eq!(result.node_count, 2);
         assert_eq!(result.edge_count, 1);
         assert!(!result.output.is_empty());
+    }
+
+    #[test]
+    fn cell_geometry_uses_the_cga_transform_without_moving_cells() {
+        let config = TermRenderConfig {
+            padding: 2,
+            ..Default::default()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 24));
+        let point = fm_layout::LayoutPoint { x: 2.5, y: 1.5 };
+        let bounds = LayoutRect {
+            x: point.x,
+            y: point.y,
+            width: 3.0,
+            height: 2.0,
+        };
+
+        // Baseline contract: the cell renderer has always mapped points with x * scale_x and
+        // y * scale_y, then added its padding. The CGA rotor plus explicit aspect must preserve
+        // that exact cell placement for the anisotropic terminal grid.
+        assert_eq!(renderer.point_to_cells(&point, 2.0, 4.0), (7, 8));
+        assert_eq!(renderer.bounds_to_cells(&bounds, 2.0, 4.0), (7, 8, 6, 8));
     }
 
     #[test]

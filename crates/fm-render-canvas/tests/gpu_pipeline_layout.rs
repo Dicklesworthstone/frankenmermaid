@@ -368,10 +368,12 @@ fn the_edge_batch_is_submitted_before_the_node_batch() {
             PrimitiveFamily::Edge,
             PrimitiveFamily::Arrowhead,
             PrimitiveFamily::Node,
+            PrimitiveFamily::NodeBorder,
             PrimitiveFamily::Text
         ],
-        "pipeline order must stay edges -> arrowheads -> nodes -> text, matching GpuRenderPlan's \
-         own field order: heads ride with their edges, boxes paint over both, labels over the boxes"
+        "pipeline order must stay edges -> arrowheads -> nodes -> node borders -> text, matching \
+         GpuRenderPlan's own field order: heads ride with their edges, boxes paint over both, a \
+         dashed border sits on top of the box it outlines, labels over everything"
     );
 }
 
@@ -481,6 +483,122 @@ fn the_gpu_run_width_equals_the_metric_layout_sized_the_box_with() {
         wide > narrow * 1.5,
         "CONTROL FAILED: 'WWWWW' ({wide}) is not meaningfully wider than 'iiiii' ({narrow}), so \
          this test cannot tell a proportional model from a flat one"
+    );
+}
+
+/// SAME-IR COMPARISON FOR DASHED NODE BORDERS: what the SVG expresses as `stroke-dasharray`, the GPU
+/// plans as dashed border segments (bd-l3nsf).
+///
+/// The SDF pass cannot dash a border at all — `shape_distance` is a distance field and a dash needs
+/// arc length — so a dashed node is planned with NO SDF border and its outline emitted as edge-style
+/// segments, which already carry `dash` and the accumulated `dash_phase`.
+///
+/// Four things are asserted, and the first two are the ones that catch the plausible wrong answers:
+/// the segments carry the AUTHOR'S pattern rather than some default; the node's SDF stroke is
+/// suppressed so the dashes are not drawn over a solid border; the phase accumulates across corners
+/// so the pattern does not restart on each side; and the SVG says `stroke-dasharray` for the same
+/// node, so the two backends agree that this border is dashed at all.
+#[test]
+fn a_dashed_node_border_reaches_the_gpu_as_dashed_segments_and_the_svg_as_stroke_dasharray() {
+    // `style <id>` rather than `:::class`. The two are NOT interchangeable here: `:::` reaches the
+    // SVG as a CSS RULE (`.fm-node-user-dashy .fm-node-shape { stroke-dasharray: … }`) and never
+    // enters the per-node style map the resolvers read, so a fixture using it would test nothing on
+    // any raster backend. `node_dash.rs` uses `style` and `class` for the same reason.
+    let source = "flowchart LR\n  A[Alpha] --> B[Beta]\n  style A stroke-dasharray:5 3\n";
+    let ir = fm_parser::parse(source).ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let plan = fm_render_canvas::GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+
+    // CONTROL ON THE REFERENCE ARM FIRST: if the SVG does not dash it, the style never applied and
+    // every GPU assertion below would be about a diagram with no dashed border in it.
+    //
+    // The PATTERN is matched, not the property name: the emitted stylesheet contains
+    // `stroke-dasharray: none` as a theme default, so `contains("stroke-dasharray")` is satisfied by
+    // every diagram ever rendered and would make this control worthless.
+    let svg = fm_render_svg::render_svg(&ir);
+    assert!(
+        svg.contains("stroke-dasharray:5 3") || svg.contains("stroke-dasharray: 5 3"),
+        "CONTROL FAILED: the SVG backend never emitted the `5 3` pattern, so the style did not \
+         apply and this fixture cannot test dashing"
+    );
+
+    assert!(
+        !plan.node_border_segments.is_empty(),
+        "a dashed node planned no border segments, so its border would not be drawn at all"
+    );
+
+    // THE AUTHOR'S PATTERN, not a default. A backend that dashed everything with a house pattern
+    // would satisfy "is it dashed?" and still ignore what the diagram asked for.
+    for segment in &plan.node_border_segments {
+        assert_eq!(
+            segment.dash,
+            [5.0, 3.0],
+            "border segment carries {:?}, not the classDef's `5 3`",
+            segment.dash
+        );
+        assert!(
+            segment.width > 0.0,
+            "a border segment with no width draws nothing"
+        );
+    }
+
+    // THE PHASE ACCUMULATES. Without it every side restarts the pattern at its own corner and the
+    // dashes visibly jump at all four — the exact defect `dash_phase` exists to prevent on edges.
+    let phases: Vec<f32> = plan
+        .node_border_segments
+        .iter()
+        .map(|s| s.dash_phase)
+        .collect();
+    assert!(
+        phases.windows(2).any(|pair| pair[1] > pair[0]),
+        "every border segment starts at the same dash phase {phases:?}; the pattern restarts at \
+         each corner instead of marching around the border"
+    );
+
+    // THE SDF BORDER IS SUPPRESSED for the dashed node, or the dashes sit on top of a solid line.
+    let dashed_node = plan
+        .node_border_segments
+        .first()
+        .expect("checked non-empty")
+        .edge_index;
+    let instance = plan
+        .node_instances
+        .iter()
+        .find(|n| n.node_index == dashed_node)
+        .expect("the dashed border belongs to a planned node");
+    assert_eq!(
+        instance.stroke_width, 0.0,
+        "the dashed node still draws an SDF border, so its dashes would lie on a solid one"
+    );
+
+    // AND THE UNDASHED NODE IS UNTOUCHED — a backend that zeroed every border would pass the
+    // assertion above while erasing every solid outline in the diagram.
+    let plain = plan
+        .node_instances
+        .iter()
+        .find(|n| n.node_index != dashed_node)
+        .expect("the fixture has a second, undashed node");
+    assert!(
+        plain.stroke_width > 0.0,
+        "the undashed node lost its border too; borders are being zeroed unconditionally"
+    );
+}
+
+/// A diagram with no `stroke-dasharray` must plan NO border segments, or the test above would pass
+/// on a backend that emitted them for everything.
+#[test]
+fn an_undashed_diagram_plans_no_node_border_segments() {
+    let ir = fm_parser::parse("flowchart LR\n  A[Alpha] --> B[Beta]\n").ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let plan = fm_render_canvas::GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+    assert!(
+        plan.node_border_segments.is_empty(),
+        "an undashed diagram planned {} border segments",
+        plan.node_border_segments.len()
+    );
+    assert!(
+        plan.node_instances.iter().all(|n| n.stroke_width > 0.0),
+        "an undashed node lost its SDF border"
     );
 }
 

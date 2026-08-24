@@ -103,6 +103,12 @@ pub enum PrimitiveFamily {
     Edge,
     /// Arrowheads, drawn as instanced TRIANGLES — three vertices, not six.
     Arrowhead,
+    /// Dashed node borders, drawn with the EDGE pipeline but after the nodes (bd-l3nsf).
+    ///
+    /// A separate family rather than more `Edge` instances because the two occupy different slots in
+    /// the draw order: edges go under the boxes they connect, a border goes on top of the box it
+    /// outlines. Same shader, same layout, different moment.
+    NodeBorder,
     /// Glyph quads sampled from the text atlas.
     Text,
 }
@@ -402,13 +408,28 @@ pub const fn text_pipeline() -> PipelineDescriptor {
 /// the box that carries it. A caller iterating this slice gets the right picture without having to
 /// know why.
 #[must_use]
-pub const fn pipelines() -> [PipelineDescriptor; 4] {
+pub const fn pipelines() -> [PipelineDescriptor; 5] {
     [
         edge_pipeline(),
         arrowhead_pipeline(),
         node_pipeline(),
+        node_border_pipeline(),
         text_pipeline(),
     ]
+}
+
+/// The dashed-node-border pipeline: the EDGE pipeline, drawn in a later slot.
+///
+/// Shares `edge_pipeline`'s layout and shader exactly — a border segment IS an edge segment, and
+/// giving it its own copy would be a second place for the dash binding to drift. Only the family and
+/// the label differ, and the family is what puts it after the nodes.
+#[must_use]
+pub const fn node_border_pipeline() -> PipelineDescriptor {
+    PipelineDescriptor {
+        family: PrimitiveFamily::NodeBorder,
+        label: "fm-node-border",
+        ..edge_pipeline()
+    }
 }
 
 /// Width of a text run at `font_px`, in layout units.
@@ -469,6 +490,14 @@ pub fn draw_batches(plan: &GpuRenderPlan) -> Vec<DrawBatch> {
         batches.push(DrawBatch {
             family: PrimitiveFamily::Node,
             instance_count: u32::try_from(plan.node_instances.len()).unwrap_or(u32::MAX),
+            vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
+        });
+    }
+    // Dashed borders after their nodes: a border sits on top of the fill it outlines (bd-l3nsf).
+    if !plan.node_border_segments.is_empty() {
+        batches.push(DrawBatch {
+            family: PrimitiveFamily::NodeBorder,
+            instance_count: u32::try_from(plan.node_border_segments.len()).unwrap_or(u32::MAX),
             vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
         });
     }

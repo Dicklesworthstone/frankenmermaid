@@ -372,6 +372,90 @@ pub const DEFAULT_FONT_SIZE_PX: f32 = 14.0;
 /// invisible on every small test fixture.
 pub const CHAR_ADVANCE_RATIO: f32 = 0.57;
 
+/// Collapse an SVG `stroke-dasharray` to the `[on, off]` pair the edge shader takes.
+///
+/// A dasharray may have any number of entries; the GPU dash is a two-value pattern, so a longer list
+/// is reduced rather than rejected. `[4]` means 4 on, 4 off in SVG, so a single value doubles.
+///
+/// Returns `None` for a pattern that is entirely zero or negative: that is a solid border, not a
+/// dashed one, and a zero-length dash would be divided by in the shader.
+#[must_use]
+fn dash_pair(pattern: &[f64]) -> Option<[f32; 2]> {
+    let on = *pattern.first()? as f32;
+    let off = pattern.get(1).map_or(on, |value| *value as f32);
+    if !on.is_finite() || !off.is_finite() || on <= 0.0 || off < 0.0 {
+        return None;
+    }
+    Some([on, off])
+}
+
+/// Emit a node's border as dashed segments, carrying arc length across the joins (bd-l3nsf).
+///
+/// Each segment records the distance at which it STARTS, which is the whole reason this reuses
+/// `GpuEdgeSegment`: without that accumulated phase every side would restart the pattern at its own
+/// corner and the dashes would visibly jump at all four.
+///
+/// Curved shapes are approximated by the polyline rather than given their own arc-length function. A
+/// node border at diagram scale is a few dozen pixels around, so the chord error of a 32-step
+/// approximation is below the width of the stroke drawing it — and it keeps ONE dash implementation
+/// for every shape instead of six that can each be wrong differently.
+fn push_dashed_border(
+    out: &mut Vec<GpuEdgeSegment>,
+    bounds: fm_layout::LayoutRect,
+    shape: GpuNodeShape,
+    stroke: [f32; 4],
+    width: f32,
+    dash: [f32; 2],
+    node_index: usize,
+) {
+    let points = border_polyline(bounds, shape);
+    if points.len() < 2 {
+        return;
+    }
+    let mut phase = 0.0_f32;
+    for pair in points.windows(2) {
+        let (from, to) = (pair[0], pair[1]);
+        out.push(GpuEdgeSegment {
+            from,
+            to,
+            // Indexes NODES here, not edges. The collection it lives in is what says so.
+            edge_index: u32::try_from(node_index).unwrap_or(u32::MAX),
+            color: stroke,
+            dash_phase: phase,
+            dash,
+            width,
+        });
+        phase += (to[0] - from[0]).hypot(to[1] - from[1]);
+    }
+}
+
+/// The closed border of a shape as a polyline, first point repeated last.
+fn border_polyline(bounds: fm_layout::LayoutRect, shape: GpuNodeShape) -> Vec<[f32; 2]> {
+    let (x, y) = (bounds.x, bounds.y);
+    let (w, h) = (bounds.width, bounds.height);
+    let (cx, cy) = (x + w * 0.5, y + h * 0.5);
+    let (rx, ry) = (w * 0.5, h * 0.5);
+
+    match shape {
+        // The four axis extremes.
+        GpuNodeShape::Diamond => vec![[cx, y], [x + w, cy], [cx, y + h], [x, cy], [cx, y]],
+        // Round shapes as a polygon; 32 steps keeps the chord error under a stroke width at the
+        // sizes diagrams actually use.
+        GpuNodeShape::Circle | GpuNodeShape::Cylinder => {
+            const STEPS: usize = 32;
+            let mut points = Vec::with_capacity(STEPS + 1);
+            for step in 0..=STEPS {
+                let angle = (step as f32) / (STEPS as f32) * std::f32::consts::TAU;
+                points.push([angle.cos().mul_add(rx, cx), angle.sin().mul_add(ry, cy)]);
+            }
+            points
+        }
+        // Everything else is a rectangle's perimeter. A rounded rect's corner radius is a smaller
+        // deviation than the stroke width, so it shares this path rather than earning its own.
+        _ => vec![[x, y], [x + w, y], [x + w, y + h], [x, y + h], [x, y]],
+    }
+}
+
 /// Horizontal advance for one glyph at `font_px`, using the SAME model `fm-layout` sized the box
 /// with (bd-2u0.2).
 ///
@@ -1107,6 +1191,17 @@ pub struct GpuRenderPlan {
     /// Pinned by `the_plan_field_order_matches_the_raster_draw_order`, which reads the call order
     /// out of renderer.rs rather than trusting this comment to stay true.
     pub node_instances: Vec<GpuNodeInstance>,
+    /// Dashed node borders, as edge segments (bd-l3nsf).
+    ///
+    /// ⚠️ DECLARED AFTER `node_instances` BECAUSE THAT IS THE DRAW ORDER: a border sits on top of the
+    /// fill it outlines. A node with a dashed border is planned with `stroke_width: 0.0` so the SDF
+    /// draws no border of its own — these segments ARE its border, and a solid one underneath would
+    /// show the dashes lying on a continuous line.
+    ///
+    /// They are `GpuEdgeSegment` because the edge pipeline already carries `dash` and the accumulated
+    /// `dash_phase` that makes a pattern march unbroken across corners, which is exactly the arc
+    /// length `shape_distance` cannot supply. `edge_index` on these indexes NODES.
+    pub node_border_segments: Vec<GpuEdgeSegment>,
     /// Per-glyph textured quads for the text pass.
     pub text_quads: Vec<GpuTextQuad>,
     /// One entry per drawn label — the unit the Canvas2D pass draws in.
@@ -1425,6 +1520,9 @@ impl GpuRenderPlan {
         }
 
         let mut node_instances = Vec::with_capacity(layout.nodes.len());
+        // Empty for every diagram whose nodes carry no `stroke-dasharray`, which is nearly all of
+        // them, so this costs an unused Vec and no allocation.
+        let mut node_border_segments: Vec<GpuEdgeSegment> = Vec::new();
         for node in &layout.nodes {
             let shape = ir
                 .nodes
@@ -1466,6 +1564,32 @@ impl GpuRenderPlan {
                 .map(|width| width as f32)
                 .filter(|width| width.is_finite() && *width > 0.0)
                 .unwrap_or(DEFAULT_NODE_STROKE_WIDTH);
+            // DASHED BORDERS ARE DRAWN AS SEGMENTS, NOT BY THE SDF (bd-l3nsf).
+            //
+            // `shape_distance` is a signed DISTANCE field: it says how far a fragment is from the
+            // border and nothing about where along it. A dash needs arc length, and for the shapes
+            // this pass draws there is no cheap closed form the SDF could use. The edge pipeline
+            // already solves exactly this — `dash` plus the accumulated `dash_phase` — so a dashed
+            // border reuses that working implementation instead of hand-rolling six arc-length
+            // parameterisations in WGSL that nothing here can visually verify.
+            //
+            // The alternative is screen-space dashing keyed on fragment coordinates: cheap, and
+            // wrong in the way that matters. The pattern would not follow the border, it would look
+            // like a hatch showing through it, and it would satisfy any test asserting only that
+            // "some dash is present".
+            let dash = crate::renderer::resolve_node_stroke_dasharray(ir, node.node_index)
+                .and_then(|pattern| dash_pair(&pattern));
+            if let Some(dash) = dash {
+                push_dashed_border(
+                    &mut node_border_segments,
+                    node.bounds,
+                    shape,
+                    stroke,
+                    stroke_width,
+                    dash,
+                    node.node_index,
+                );
+            }
             node_instances.push(GpuNodeInstance {
                 center: [
                     node.bounds.x + (node.bounds.width * 0.5),
@@ -1474,7 +1598,9 @@ impl GpuRenderPlan {
                 half_extent: [node.bounds.width * 0.5, node.bounds.height * 0.5],
                 fill,
                 stroke,
-                stroke_width,
+                // A dashed node draws NO SDF border: the segments above are its border, and leaving
+                // a solid one underneath would show the dashes sitting on a continuous line.
+                stroke_width: if dash.is_some() { 0.0 } else { stroke_width },
                 shape: shape as u32,
                 node_index: node.node_index.try_into().unwrap_or(u32::MAX),
             });
@@ -2173,6 +2299,7 @@ impl GpuRenderPlan {
             arrowheads,
             pie_wedges,
             node_instances,
+            node_border_segments,
             text_quads,
             text_runs,
             glyph_atlas,
@@ -4502,16 +4629,11 @@ mod tests {
             .split_once("#[cfg(test)]")
             .map_or(GPU_FULL_SRC, |(production, _tests)| production);
         // (resolver, why it is exempt) — an entry here must cite a bead.
-        const EXEMPT: &[(&str, &str)] = &[
-            (
-                "resolve_cluster_dash_array",
-                "bd-l3nsf: a dashed border needs perimeter arc length the SDF does not carry, and a \
-                 cluster border is the same rect the node case is",
-            ),
-            (
-            "resolve_node_stroke_dasharray",
-            "bd-l3nsf: a dashed SDF border needs perimeter arc length, which shape_distance does \
-             not provide; the field is trivial and the shader is not",
+        const EXEMPT: &[(&str, &str)] = &[(
+            "resolve_cluster_dash_array",
+            "bd-l3nsf: NODE borders are now dashed as edge-style segments, which supplies the arc \
+             length the SDF lacks. A cluster border is the same rect and can follow the same route; \
+             it is not done here only because that bead scoped itself to nodes",
         )];
 
         let mut resolvers = Vec::new();
