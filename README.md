@@ -1858,13 +1858,13 @@ Both deployment paths include automated smoke checks (HTTP 200 on root page + WA
 ### Rollback
 
 ```bash
-# GitHub Pages: re-run the workflow on a known-good commit
-gh workflow run "Deploy GitHub Pages" --ref <known-good-sha>
+# Cloudflare Pages deployment:
+wrangler pages deploy dist/site --project-name frankenmermaid --branch main
 
-# Or revert + push
-git revert HEAD && git push origin main
-
-# Cloudflare Pages: select a previous deployment in the dashboard (all versions retained)
+# Or rollback via Cloudflare dashboard or re-deploying a prior build:
+# Select a previous deployment in Cloudflare dashboard (all versions retained)
+# Or revert commit and redeploy:
+git revert HEAD && git push origin main && wrangler pages deploy dist/site --project-name frankenmermaid --branch main
 
 # WASM bundle: rebuild from a known-good commit
 git checkout <known-good-sha>

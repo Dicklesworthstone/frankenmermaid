@@ -58,8 +58,34 @@ renderer that drops an edge or mislays a subgraph is not faster, it is wrong.
 **NEVER EVER EVER USE GITHUB ACTIONS FOR ANY REASON.**
 - GitHub Actions workflows are NOT used in this repository.
 - We use `/dsr` for releases ONLY.
-- GitHub Pages is deployed directly from the `main` branch root (`/` with `index.html`), NEVER via GitHub Actions workflows.
 - Never trigger, rely on, write, or wait on GitHub Actions workflows (`gh run ...`, `gh workflow ...`, etc.).
+
+---
+
+## DEMO SITE DEPLOYMENT: CLOUDFLARE PAGES (WRANGLER)
+
+**The live showcase and demo site is hosted on Cloudflare Pages at: <https://frankenmermaid.pages.dev/>**
+
+Whenever any changes are made to the showcase, web assets, or WASM build, you **MUST** deploy the updated distribution to Cloudflare Pages using Wrangler:
+
+```bash
+# 1. Assemble static distribution bundle
+mkdir -p dist/site/pkg dist/site/web dist/site/web_react
+cp index.html dist/site/
+cp frankenmermaid_demo_showcase.html dist/site/
+cp web/_headers dist/site/
+cp web/index.html dist/site/web/
+cp web_react/index.html dist/site/web_react/
+cp pkg/* dist/site/pkg/
+cp frankenmermaid_illustration.webp dist/site/
+
+# 2. Deploy directly to Cloudflare Pages via Wrangler
+wrangler pages deploy dist/site --project-name frankenmermaid --branch main
+```
+
+- **Project Name:** `frankenmermaid`
+- **Live URL:** `https://frankenmermaid.pages.dev/`
+- Always verify the deployment with `curl -sI https://frankenmermaid.pages.dev/` after deploying.
 
 ---
 
