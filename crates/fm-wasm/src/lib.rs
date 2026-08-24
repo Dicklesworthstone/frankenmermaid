@@ -213,7 +213,20 @@ struct PlannedWebGpuDiagram {
     plan: GpuRenderPlan,
 }
 
-fn build_webgpu_plan(input: &str, config: Option<JsValue>) -> Result<PlannedWebGpuDiagram, String> {
+/// A parsed diagram and the geometry every raster surface reads from it.
+///
+/// Extracted so the WebGPU plan and the hit regions cannot be computed from two different layouts.
+/// They must agree about where a node landed — that is the whole content of a hit region — and the
+/// layout depends on the resolved font metrics, so recomputing it from a separately-merged config
+/// would make the regions drift from the picture whenever a theme or a font override moved.
+struct DiagramGeometry {
+    ir: fm_core::MermaidDiagramIr,
+    layout: fm_layout::DiagramLayout,
+    canvas: CanvasRenderConfig,
+}
+
+/// Resolve the runtime config, parse, and lay the diagram out — the step before any raster backend.
+fn build_diagram_geometry(input: &str, config: Option<JsValue>) -> Result<DiagramGeometry, String> {
     let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
     let runtime = read_runtime_config();
     let requested_theme = requested_theme_preset(&overrides)?;
@@ -234,11 +247,25 @@ fn build_webgpu_plan(input: &str, config: Option<JsValue>) -> Result<PlannedWebG
             ..Default::default()
         },
     );
-    let plan = GpuRenderPlan::from_layout(&parsed.ir, &layout, canvas.edge_stroke_width as f32);
+
+    Ok(DiagramGeometry {
+        ir: parsed.ir,
+        layout,
+        canvas,
+    })
+}
+
+fn build_webgpu_plan(input: &str, config: Option<JsValue>) -> Result<PlannedWebGpuDiagram, String> {
+    let geometry = build_diagram_geometry(input, config)?;
+    let plan = GpuRenderPlan::from_layout(
+        &geometry.ir,
+        &geometry.layout,
+        geometry.canvas.edge_stroke_width as f32,
+    );
 
     Ok(PlannedWebGpuDiagram {
         #[cfg(test)]
-        ir: parsed.ir,
+        ir: geometry.ir,
         plan,
     })
 }
@@ -1367,6 +1394,79 @@ pub fn plan_webgpu_js(input: &str, config: Option<JsValue>) -> Result<JsValue, J
     to_js_value(&WebGpuPlanSummary::from(&planned.plan))
 }
 
+/// One interactive node's clickable area, as a browser host receives it.
+///
+/// Mirrors `fm_render_canvas::HitRegion` rather than re-exporting it: the wasm boundary needs a
+/// `Serialize` shape with camelCase keys, and the renderer type carries a `LayoutRect` that has no
+/// business being part of this crate's published JSON contract.
+///
+/// `bounds` is `[x, y, width, height]` in LAYOUT coordinates — the same space `planWebGpu` reports
+/// its bounds in, and the space the renderer draws in. The host applies the SAME viewport transform
+/// it already uses for drawing. Baking one in here would assume a viewport this crate cannot see,
+/// and the regions would drift from the picture the moment the user panned or zoomed.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WasmHitRegion {
+    /// The author's node id — the same string the SVG backend puts in `data-id`.
+    node_id: String,
+    /// `[x, y, width, height]`, layout coordinates.
+    bounds: [f32; 4],
+    /// `click <id> href "url"`, when the author wrote one.
+    href: Option<String>,
+    /// `_self` / `_blank` / …, exactly as written. `null` means the author declared none, NOT that
+    /// there is no target: a link defaults to `_blank`, and the host applies that default.
+    link_target: Option<String>,
+    /// `click <id> call fn()`.
+    callback: Option<String>,
+    /// The hover text.
+    tooltip: Option<String>,
+}
+
+impl From<&fm_render_canvas::HitRegion> for WasmHitRegion {
+    fn from(region: &fm_render_canvas::HitRegion) -> Self {
+        Self {
+            node_id: region.node_id.clone(),
+            bounds: [
+                region.bounds.x,
+                region.bounds.y,
+                region.bounds.width,
+                region.bounds.height,
+            ],
+            href: region.href.clone(),
+            link_target: region.link_target.clone(),
+            callback: region.callback.clone(),
+            tooltip: region.tooltip.clone(),
+        }
+    }
+}
+
+/// The clickable areas of a diagram, for a host driving a canvas or WebGPU surface.
+///
+/// SVG carries `click` in the document itself — a `title=` and, in link mode, an `<a href>` — so a
+/// browser resolves a pointer against it with no help from us. A raster surface has no element to
+/// hang an attribute on, so before this the whole `click` family was unreachable from every
+/// non-SVG browser path: `renderWebGpuToRgba` returns pixels, and pixels cannot tell a host that
+/// the box at (x, y) carries a URL.
+///
+/// The host owns the pointer. This returns WHERE each interactive node landed and WHAT the author
+/// attached to it, once per render; hit-testing a point against those rectangles is a few lines of
+/// JS and does not need to cross the wasm boundary on every `mousemove`.
+///
+/// Only nodes that actually carry an interaction are returned — a region per node would report the
+/// whole diagram as clickable and push the filtering back onto the caller.
+///
+/// # Errors
+/// Returns a JS error when the runtime config cannot be resolved.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = hitRegions))]
+pub fn hit_regions_js(input: &str, config: Option<JsValue>) -> Result<JsValue, JsValue> {
+    let geometry = build_diagram_geometry(input, config).map_err(js_error)?;
+    let regions: Vec<WasmHitRegion> = fm_render_canvas::hit_regions(&geometry.ir, &geometry.layout)
+        .iter()
+        .map(WasmHitRegion::from)
+        .collect();
+    to_js_value(&regions)
+}
+
 /// Rasterise a diagram through the WebGPU device pass and return the RGBA pixels.
 ///
 /// The half `planWebGpu` deliberately stopped short of. That call ends with primitive buffers and a
@@ -2179,14 +2279,14 @@ impl Diagram {
 mod tests {
     use super::{
         CanvasConfigOverrides, LayoutRuntimeSummary, PressureConfigOverrides, RuntimeConfig,
-        RuntimeInitConfig, SvgConfigOverrides, ThemePreset, WebGpuPlanSummary, WebRendererKind,
-        WorkerRenderAction, WorkerRenderCoordinator, WorkerRenderMessage, WorkerRenderRequest,
-        WorkerRenderResponse, align_canvas_typography_with_svg, apply_budget_svg_simplifications,
-        apply_canvas_theme_preset, build_webgpu_plan, canvas_font_size_px, collect_source_spans,
-        handle_worker_message, hit_test_layout_edge, hit_test_layout_node, merge_canvas_config,
-        merge_pressure_config, merge_renderer_kind, merge_svg_config, read_runtime_config, render,
-        render_svg_js, render_worker_request, requested_theme_preset, resolve_renderer,
-        write_runtime_config,
+        RuntimeInitConfig, SvgConfigOverrides, ThemePreset, WasmHitRegion, WebGpuPlanSummary,
+        WebRendererKind, WorkerRenderAction, WorkerRenderCoordinator, WorkerRenderMessage,
+        WorkerRenderRequest, WorkerRenderResponse, align_canvas_typography_with_svg,
+        apply_budget_svg_simplifications, apply_canvas_theme_preset, build_diagram_geometry,
+        build_webgpu_plan, canvas_font_size_px, collect_source_spans, handle_worker_message,
+        hit_test_layout_edge, hit_test_layout_node, merge_canvas_config, merge_pressure_config,
+        merge_renderer_kind, merge_svg_config, read_runtime_config, render, render_svg_js,
+        render_worker_request, requested_theme_preset, resolve_renderer, write_runtime_config,
     };
     use fm_core::{
         MermaidBudgetLedger, MermaidGuardReport, MermaidLensBinding, MermaidLensEdit,
@@ -3304,6 +3404,119 @@ mod tests {
             summary.node_instances,
             planned.ir.nodes.len(),
             "WebGPU plan and SVG source disagree about the corpus node set"
+        );
+    }
+
+    /// SAME-IR COMPARISON: the regions the wasm surface publishes must describe the same
+    /// interactive nodes the SVG backend decorates, joined on the id both arms use.
+    ///
+    /// Before this export, `href`, `callback` and `tooltip` appeared NOWHERE in this crate: a
+    /// browser host on the canvas or WebGPU path could not reach `click` at all, while the SVG path
+    /// got it for free from the document. That is the same parsed-stored-reachable-by-nobody shape
+    /// bd-bk7h found one layer down, and it is invisible unless the two arms are compared.
+    #[test]
+    fn the_wasm_hit_regions_describe_the_same_interactive_nodes_as_the_svg() {
+        let _serial = config_guard();
+        const SOURCE: &str = "flowchart LR\n  A[Alpha] --> B[Beta]\n  B --> C[Gamma]\n  \
+                              click A \"https://example.com\" \"Alpha tip\"\n  \
+                              click B call doThing() \"Beta tip\"\n";
+
+        // Through the same path `hitRegions` takes, stopping just short of the `JsValue` wrapper:
+        // wasm-bindgen's `JsValue` traps outside wasm, so — as with every other export in this
+        // crate — a native test drives the inner call. The `Serialize` impl asserted here is
+        // literally the one `to_js_value` hands to serde-wasm-bindgen in the browser, so the JSON
+        // contract below is the contract a JS host sees.
+        let geometry = build_diagram_geometry(SOURCE, None).expect("lay the diagram out");
+        let exported: Vec<WasmHitRegion> =
+            fm_render_canvas::hit_regions(&geometry.ir, &geometry.layout)
+                .iter()
+                .map(WasmHitRegion::from)
+                .collect();
+        let json = serde_json::to_value(&exported).expect("regions serialize");
+        let regions = json.as_array().expect("an array of regions").clone();
+
+        let svg = fm_render_svg::render_svg(&geometry.ir);
+
+        // CONTROL ON THE REFERENCE ARM: if the SVG emitted no tooltips then `click` never reached
+        // the IR, and every assertion below would hold vacuously for the wrong reason.
+        for tip in ["Alpha tip", "Beta tip"] {
+            assert!(
+                svg.contains(&format!("title=\"{tip}\"")),
+                "CONTROL FAILED: SVG emitted no title={tip:?}, so this fixture cannot compare arms"
+            );
+        }
+
+        assert_eq!(
+            regions.len(),
+            2,
+            "expected exactly the two interactive nodes, got {regions:?}"
+        );
+
+        let alpha = regions
+            .iter()
+            .find(|r| r["nodeId"] == "A")
+            .expect("A is interactive in both arms");
+        assert_eq!(alpha["href"], "https://example.com");
+        assert_eq!(alpha["tooltip"], "Alpha tip");
+        assert!(
+            alpha["callback"].is_null(),
+            "A declared an href, not a callback"
+        );
+        // camelCase, not snake_case: this is the published JSON contract a browser host reads.
+        assert!(
+            alpha.get("linkTarget").is_some() && alpha.get("link_target").is_none(),
+            "the JSON contract must be camelCase for a JS host, got {alpha:?}"
+        );
+
+        let beta = regions
+            .iter()
+            .find(|r| r["nodeId"] == "B")
+            .expect("B is interactive in both arms");
+        assert_eq!(beta["tooltip"], "Beta tip");
+        assert!(
+            !beta["callback"].is_null(),
+            "B declared `call doThing()` and the callback was dropped crossing the boundary"
+        );
+
+        // C has no `click`, so it must not be reported — otherwise a host sees the whole diagram as
+        // clickable and the filtering this export exists to do lands back on the caller.
+        assert!(
+            !regions.iter().any(|r| r["nodeId"] == "C"),
+            "a node with no `click` was given a region"
+        );
+        assert!(
+            !svg.contains("title=\"Gamma"),
+            "CONTROL FAILED: the SVG gave C a tooltip, so C is not the negative case assumed here"
+        );
+
+        // The bounds must be the LAYOUT's, not a re-derivation: a region in the wrong place is a
+        // defect with no visible symptom until somebody clicks.
+        let placed = geometry
+            .layout
+            .nodes
+            .iter()
+            .find(|n| geometry.ir.nodes[n.node_index].id.as_str() == "A")
+            .expect("A was placed");
+        let bounds = alpha["bounds"].as_array().expect("bounds is an array");
+        assert_eq!(bounds.len(), 4, "bounds is [x, y, width, height]");
+        for (index, expected) in [
+            placed.bounds.x,
+            placed.bounds.y,
+            placed.bounds.width,
+            placed.bounds.height,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let actual = bounds[index].as_f64().expect("a number") as f32;
+            assert!(
+                (actual - expected).abs() < f32::EPSILON,
+                "bounds[{index}] was {actual}, the layout placed A at {expected}"
+            );
+        }
+        assert!(
+            placed.bounds.width > 0.0 && placed.bounds.height > 0.0,
+            "CONTROL FAILED: A has a degenerate box, so matching it proves nothing"
         );
     }
 
