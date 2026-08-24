@@ -78,6 +78,43 @@ fn every_tooltip_the_svg_emits_has_a_hit_region_with_the_same_text() {
     );
 }
 
+/// THE RENDER RESULT CARRIES THE REGIONS, and they describe the layout that was actually drawn.
+///
+/// A host can call `hit_regions` itself — it is public — but nothing then stops it passing a layout
+/// other than the one on screen, and the regions would sit where the nodes used to be. That is a
+/// defect with no visible symptom until somebody clicks. Returning them from the render is what makes
+/// the mismatch unrepresentable, so this asserts the coupling rather than the function.
+#[test]
+fn the_render_result_carries_regions_for_the_layout_it_drew() {
+    let source =
+        "flowchart LR\n  A[Alpha] --> B[Beta]\n  click A \"https://example.com\" \"tip\"\n";
+    let (ir, layout) = plan(source);
+
+    let mut ctx = fm_render_canvas::MockCanvas2dContext::new(1200.0, 800.0);
+    let result = fm_render_canvas::render_to_canvas_with_layout(
+        &ir,
+        &layout,
+        &mut ctx,
+        &fm_render_canvas::CanvasRenderConfig::default(),
+    );
+
+    // NON-VACUITY: the render must actually have drawn something, or "the regions match what was
+    // drawn" is a statement about an empty picture.
+    assert!(
+        result.nodes_drawn > 0,
+        "CONTROL FAILED: the renderer drew no nodes"
+    );
+
+    assert_eq!(
+        result.hit_regions,
+        hit_regions(&ir, &layout),
+        "the result's regions differ from the ones this exact layout produces"
+    );
+    assert_eq!(result.hit_regions.len(), 1, "only A declared a click");
+    assert_eq!(result.hit_regions[0].node_id, "A");
+    assert_eq!(result.hit_regions[0].tooltip.as_deref(), Some("tip"));
+}
+
 /// A diagram with no `click` at all must export NO regions.
 #[test]
 fn a_diagram_without_click_exports_no_regions() {

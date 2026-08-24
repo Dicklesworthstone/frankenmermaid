@@ -106,6 +106,18 @@ pub struct CanvasRenderResult {
     pub labels_drawn: usize,
     /// The viewport used for rendering.
     pub viewport: Viewport,
+    /// Clickable areas for the interactive nodes IN THE LAYOUT THAT WAS JUST DRAWN (bd-2u0.2).
+    ///
+    /// ⚠️ CARRIED ON THE RESULT RATHER THAN LEFT TO A SECOND CALL, and that is the whole point.
+    /// `interaction::hit_regions(ir, layout)` is public and a host could call it itself — but then
+    /// nothing stops it passing a DIFFERENT layout than the one on screen, and the regions would sit
+    /// where the nodes used to be. A pointer landing on the wrong node after a re-layout is a defect
+    /// with no visible symptom until a user clicks. Returning them from the render makes that
+    /// mismatch unrepresentable.
+    ///
+    /// Empty for a diagram with no `click`, and empty from [`Canvas2dRenderer::render_scene`] —
+    /// see the note there.
+    pub hit_regions: Vec<crate::interaction::HitRegion>,
 }
 
 /// Canvas2D diagram renderer.
@@ -295,6 +307,9 @@ impl Canvas2dRenderer {
             clusters_drawn,
             labels_drawn,
             viewport,
+            // From the SAME `ir` and `layout` this call just drew, so the regions cannot
+            // describe a different picture than the one on screen.
+            hit_regions: crate::interaction::hit_regions(ir, layout),
         }
     }
 
@@ -382,6 +397,12 @@ impl Canvas2dRenderer {
             clusters_drawn: stats.cluster_sources.len(),
             labels_drawn: stats.labels_drawn,
             viewport,
+            // EMPTY, and not an oversight. A `RenderScene` carries drawable geometry and no
+            // `MermaidDiagramIr`, so there is no `click` declaration here to export — the
+            // interaction data was dropped upstream when the scene was built. Synthesising
+            // regions from the geometry alone would invent clickable areas the author never
+            // declared; a caller that needs them must render through `render`, which has the IR.
+            hit_regions: Vec::new(),
         }
     }
 

@@ -105,6 +105,10 @@ pub fn render_canvas(ir: &MermaidDiagramIr) -> CanvasRenderResult {
         clusters_drawn: layout.clusters.len(),
         labels_drawn: 0,
         viewport: Viewport::default(),
+        // From the layout this function just computed — the same one every other number here
+        // describes. It draws nothing, so these regions are as hypothetical as its `draw_calls`,
+        // and consistent with them.
+        hit_regions: interaction::hit_regions(ir, &layout),
     }
 }
 
