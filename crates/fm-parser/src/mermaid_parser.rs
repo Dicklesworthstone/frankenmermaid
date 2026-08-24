@@ -20952,6 +20952,72 @@ Rel_Back(db, app, "Responds")"#,
         );
     }
 
+    /// bd-yq3k, pinned on the function that IS the fix rather than only through a whole parse.
+    ///
+    /// `split_state_transition_label` is what stops a transition label reaching the generic
+    /// FLOWCHART edge parser as node-token syntax, and it was covered only by an fm-cli integration
+    /// test — one crate away from the code that can break it. A refactor here would be caught by a
+    /// test in a different crate's suite or not at all, and `cargo test -p fm-parser` (this repo's
+    /// crate-scoped gate) would stay green while the contract was gone.
+    ///
+    /// These cases are the function's own documented contract, not a restatement of the corpus
+    /// findings: the split happens only AFTER an edge operator, the first TOP-LEVEL colon wins, and
+    /// quote/bracket nesting suppresses it.
+    #[test]
+    fn split_state_transition_label_splits_only_after_an_operator_at_the_first_top_level_colon() {
+        // The five label forms the ci_docs equivalence run proved divergent. The point is that the
+        // punctuation survives INSIDE the label and never reaches the edge text.
+        for label in [
+            "Retry & backoff",
+            "Parse <config>",
+            "Rate limit (429)",
+            "Diff & merge",
+            "Sign & upload",
+        ] {
+            let statement = format!("S0 --> S1: {label}");
+            let (edge_text, got) = super::split_state_transition_label(&statement);
+            assert_eq!(
+                edge_text, "S0 --> S1",
+                "label {label:?} leaked into the edge text, which is what the flowchart edge \
+                 parser then read as endpoint syntax (bd-yq3k)"
+            );
+            assert_eq!(
+                got,
+                Some(label),
+                "label {label:?} was not recovered whole (bd-yq3k)"
+            );
+        }
+
+        // CONTROL, and the reason the split is gated on an operator at all: `S1: text` with no
+        // operator is mermaid's state-DESCRIPTION syntax, which sets the state's own label. Splitting
+        // it would silently turn every description into an edge label.
+        let (edge_text, label) = super::split_state_transition_label("S1: a description");
+        assert_eq!(edge_text, "S1: a description");
+        assert_eq!(label, None, "a state description was split as a transition");
+
+        // The FIRST top-level colon wins, so a label may itself contain colons.
+        let (edge_text, label) = super::split_state_transition_label("S0 --> S1: Rate limit: 429");
+        assert_eq!(edge_text, "S0 --> S1");
+        assert_eq!(label, Some("Rate limit: 429"));
+
+        // Nesting suppresses the colon: quoted and bracketed colons are not separators. Without
+        // this the scan would split inside a node token and hand the parser a truncated endpoint.
+        let (edge_text, label) = super::split_state_transition_label("S0 --> \"S1: x\"");
+        assert_eq!(edge_text, "S0 --> \"S1: x\"");
+        assert_eq!(label, None, "a colon inside quotes was treated as a separator");
+        let (edge_text, label) = super::split_state_transition_label("S0 --> S1[a:b]");
+        assert_eq!(edge_text, "S0 --> S1[a:b]");
+        assert_eq!(
+            label, None,
+            "a colon inside square brackets was treated as a separator"
+        );
+
+        // An empty suffix carries no label, rather than an empty-string one.
+        let (edge_text, label) = super::split_state_transition_label("S0 --> S1:");
+        assert_eq!(edge_text, "S0 --> S1");
+        assert_eq!(label, None, "an empty suffix produced an empty label");
+    }
+
     #[test]
     fn extract_guard_action_both() {
         let (label, guard, action) =

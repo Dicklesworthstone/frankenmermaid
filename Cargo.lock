@@ -647,6 +647,7 @@ dependencies = [
  "fm-core",
  "fm-layout",
  "fm-parser",
+ "fm-render-svg",
  "sha2",
 ]
 
