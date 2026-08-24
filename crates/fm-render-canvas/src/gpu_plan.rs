@@ -3445,7 +3445,7 @@ mod tests {
                 fm_layout::LayoutBandKind::Lane,
             ),
             (
-                include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/kanban_basic.mmd"),
+                include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/sankey_links.mmd"),
                 "fm-band-column",
                 fm_layout::LayoutBandKind::Column,
             ),
