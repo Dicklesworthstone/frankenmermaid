@@ -13936,10 +13936,6 @@ fn egraph_optimized_order_for_rank(
     rank: usize,
 ) -> Option<(usize, crate::egraph_ordering::LayerOptimizationResult)> {
     let current_order = ordering_by_rank.get(&rank)?.clone();
-    if current_order.len() < 2 || !crate::egraph_ordering::should_use_egraph(current_order.len()) {
-        return None;
-    }
-
     let current = crate::egraph_ordering::LayerOrdering::new(current_order);
 
     let upper_ordering = rank.checked_sub(1).and_then(|upper_rank| {
@@ -13963,6 +13959,14 @@ fn egraph_optimized_order_for_rank(
         .and_then(|lower_rank| layer_edges.get(&(rank, lower_rank)));
 
     if upper_edges.is_none() && lower_edges.is_none() {
+        return None;
+    }
+
+    if !crate::egraph_ordering::should_optimize_egraph_layer(
+        &current,
+        upper_ordering.as_ref().zip(upper_edges),
+        lower_ordering.as_ref().zip(lower_edges),
+    ) {
         return None;
     }
 
