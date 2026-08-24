@@ -5,7 +5,10 @@
 //! for instanced line-segment rendering. Text remains a separate glyph-atlas pass.
 
 use fm_core::{MermaidDiagramIr, NodeShape};
-use fm_layout::{DiagramLayout, LayoutPoint, LayoutRect};
+use fm_layout::{
+    DiagramLayout, LayoutPoint, LayoutRect, MarkerKind, PathCmd, RenderGroup, RenderItem,
+    RenderScene,
+};
 
 /// Shape discriminator consumed by an SDF node shader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,11 +318,47 @@ pub struct GpuEdgeSegment {
     pub width: f32,
 }
 
-/// One arrowhead for an instanced triangle pass.
+/// Shape of a path-end marker consumed by the marker shader.
 ///
-/// bd-2u0.2: "Arrowheads as small triangle instances". Geometry mirrors the Canvas2D pass exactly —
-/// the END head sits on the last point with the angle of the final segment, and a BIDIRECTIONAL
-/// edge additionally gets a START head on the first point facing the other way.
+/// These values intentionally mirror [`MarkerKind`].  The GPU plan receives a render scene, not
+/// just semantic edges, so retaining the scene marker kind is the only way to distinguish a UML
+/// aggregation diamond from an ordinary arrow without guessing from an edge index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum GpuMarkerKind {
+    Arrow = 0,
+    Circle = 1,
+    Cross = 2,
+    Diamond = 3,
+    DiamondOpen = 4,
+    TriangleOpen = 5,
+}
+
+impl From<MarkerKind> for GpuMarkerKind {
+    fn from(value: MarkerKind) -> Self {
+        match value {
+            MarkerKind::Circle => Self::Circle,
+            MarkerKind::Cross => Self::Cross,
+            MarkerKind::Diamond => Self::Diamond,
+            MarkerKind::DiamondOpen => Self::DiamondOpen,
+            MarkerKind::TriangleOpen | MarkerKind::TriangleOpenStart => Self::TriangleOpen,
+            MarkerKind::None
+            | MarkerKind::Arrow
+            | MarkerKind::HalfArrowTop
+            | MarkerKind::HalfArrowBottom
+            | MarkerKind::StickArrowTop
+            | MarkerKind::StickArrowBottom
+            | MarkerKind::ThickArrow
+            | MarkerKind::DottedArrow
+            | MarkerKind::Open => Self::Arrow,
+        }
+    }
+}
+
+/// One path-end marker for an instanced marker pass.
+///
+/// The endpoint sits on the path tangent the Canvas2D pass uses. Scene-aware construction selects
+/// the marker shape instead of flattening every relation to a triangle.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct GpuArrowheadInstance {
@@ -331,11 +370,15 @@ pub struct GpuArrowheadInstance {
     pub size: f32,
     /// Index back into `MermaidDiagramIr::edges`.
     pub edge_index: u32,
+    /// [`GpuMarkerKind`] selected from the scene path, never inferred from an edge decoration.
+    pub kind: u32,
     /// Linear RGBA, matching the segment it terminates.
     ///
     /// A head that kept the theme colour while its line took the author's would be a worse bug than
     /// no colour support at all, because it looks deliberate.
     pub color: [f32; 4],
+    /// Fill used by hollow versus filled marker forms.
+    pub fill: [f32; 4],
 }
 
 /// One filled sector from Canvas2D's pie-chart pass.
@@ -1681,7 +1724,9 @@ impl GpuRenderPlan {
                     angle: (last.y - prev.y).atan2(last.x - prev.x),
                     size: HEAD_SIZE,
                     edge_index,
+                    kind: GpuMarkerKind::Arrow as u32,
                     color,
+                    fill: color,
                 });
             }
             if edge.points.len() >= 2 && matches!(arrow, fm_core::ArrowType::DoubleArrow) {
@@ -1692,7 +1737,9 @@ impl GpuRenderPlan {
                     angle: (start.y - next.y).atan2(start.x - next.x),
                     size: HEAD_SIZE,
                     edge_index,
+                    kind: GpuMarkerKind::Arrow as u32,
                     color,
+                    fill: color,
                 });
             }
         }
@@ -2326,6 +2373,156 @@ impl GpuRenderPlan {
             glyph_atlas,
         }
     }
+
+    /// Build a GPU plan whose path-end markers come from the exact render scene SVG consumes.
+    ///
+    /// `from_layout` remains available to callers that only have layout geometry.  Browser WebGPU
+    /// rendering has the shared [`RenderScene`], however, and must use this entrypoint: relation
+    /// markers such as `o--`, `*--`, and `<|--` are scene primitives whose shape and endpoint
+    /// tangent are not recoverable from a layout edge alone.
+    #[must_use]
+    pub fn from_layout_and_scene(
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        scene: &RenderScene,
+        edge_stroke_width: f32,
+    ) -> Self {
+        let mut plan = Self::from_layout(ir, layout, edge_stroke_width);
+        plan.arrowheads = scene_marker_instances(&scene.root);
+        plan
+    }
+}
+
+fn scene_marker_instances(group: &RenderGroup) -> Vec<GpuArrowheadInstance> {
+    let mut markers = Vec::new();
+    collect_scene_markers(group, &mut markers);
+    markers
+}
+
+fn collect_scene_markers(group: &RenderGroup, markers: &mut Vec<GpuArrowheadInstance>) {
+    for item in &group.children {
+        match item {
+            RenderItem::Group(child) => collect_scene_markers(child, markers),
+            RenderItem::Path(path) => {
+                let color = path
+                    .stroke
+                    .as_ref()
+                    .and_then(|stroke| parse_paint_rgba(&stroke.color))
+                    .unwrap_or(DEFAULT_EDGE_STROKE_RGBA);
+                if path.marker_start != MarkerKind::None
+                    && let Some((position, angle)) = path_marker_start(&path.commands)
+                {
+                    markers.push(scene_marker_instance(
+                        path.marker_start,
+                        position,
+                        angle,
+                        color,
+                    ));
+                }
+                if path.marker_end != MarkerKind::None
+                    && let Some((position, angle)) = path_marker_end(&path.commands)
+                {
+                    let angle = if path.marker_end == MarkerKind::TriangleOpenStart {
+                        angle + core::f32::consts::PI
+                    } else {
+                        angle
+                    };
+                    markers.push(scene_marker_instance(
+                        path.marker_end,
+                        position,
+                        angle,
+                        color,
+                    ));
+                }
+            }
+            RenderItem::Text(_) => {}
+        }
+    }
+}
+
+fn scene_marker_instance(
+    marker: MarkerKind,
+    position: [f32; 2],
+    angle: f32,
+    color: [f32; 4],
+) -> GpuArrowheadInstance {
+    let fill = match marker {
+        MarkerKind::Circle
+        | MarkerKind::DiamondOpen
+        | MarkerKind::TriangleOpen
+        | MarkerKind::TriangleOpenStart => DEFAULT_NODE_FILL_RGBA,
+        _ => color,
+    };
+    GpuArrowheadInstance {
+        position,
+        angle,
+        size: 10.0,
+        edge_index: NO_EDGE_INDEX,
+        kind: GpuMarkerKind::from(marker) as u32,
+        color,
+        fill,
+    }
+}
+
+fn path_marker_start(commands: &[PathCmd]) -> Option<([f32; 2], f32)> {
+    let mut current = None;
+    for command in commands {
+        match *command {
+            PathCmd::MoveTo { x, y } => current = Some([x, y]),
+            PathCmd::LineTo { x, y } => {
+                let start = current?;
+                return Some((start, (y - start[1]).atan2(x - start[0])));
+            }
+            PathCmd::QuadTo { cx, cy, x, y } => {
+                let start = current?;
+                let control = if [cx, cy] == start { [x, y] } else { [cx, cy] };
+                return Some((start, (control[1] - start[1]).atan2(control[0] - start[0])));
+            }
+            PathCmd::CubicTo { c1x, c1y, x, y, .. } => {
+                let start = current?;
+                let control = if [c1x, c1y] == start {
+                    [x, y]
+                } else {
+                    [c1x, c1y]
+                };
+                return Some((start, (control[1] - start[1]).atan2(control[0] - start[0])));
+            }
+            PathCmd::Close => {}
+        }
+    }
+    None
+}
+
+fn path_marker_end(commands: &[PathCmd]) -> Option<([f32; 2], f32)> {
+    let mut current = None;
+    let mut last = None;
+    for command in commands {
+        match *command {
+            PathCmd::MoveTo { x, y } => current = Some([x, y]),
+            PathCmd::LineTo { x, y } => {
+                let start = current?;
+                let end = [x, y];
+                last = Some((end, (end[1] - start[1]).atan2(end[0] - start[0])));
+                current = Some(end);
+            }
+            PathCmd::QuadTo { cx, cy, x, y } => {
+                let start = current?;
+                let end = [x, y];
+                let control = if [cx, cy] == end { start } else { [cx, cy] };
+                last = Some((end, (end[1] - control[1]).atan2(end[0] - control[0])));
+                current = Some(end);
+            }
+            PathCmd::CubicTo { c2x, c2y, x, y, .. } => {
+                let start = current?;
+                let end = [x, y];
+                let control = if [c2x, c2y] == end { start } else { [c2x, c2y] };
+                last = Some((end, (end[1] - control[1]).atan2(end[0] - control[0])));
+                current = Some(end);
+            }
+            PathCmd::Close => {}
+        }
+    }
+    last
 }
 
 /// WGSL for the instanced SDF node pass (bd-2u0.2 component 4).
@@ -2641,10 +2838,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// WGSL for the instanced arrowhead pass (bd-2u0.2 component 2, "arrowheads as triangle instances").
+/// WGSL for the instanced path-marker pass.
 ///
-/// A separate pipeline from [`EDGE_WGSL`] because it draws triangles, not ribbons, and because a
-/// head must be drawn AFTER its line so the line does not overdraw the tip.
+/// A marker is a small SDF-like quad rather than a hard-coded triangle: the render scene contains
+/// circles, crosses, filled/hollow diamonds and hollow inheritance triangles in addition to
+/// ordinary arrowheads.  It still draws after its path, before node boxes.
 pub const ARROWHEAD_WGSL: &str = r#"
 struct Camera {
     transform: vec4<f32>,
@@ -2657,25 +2855,29 @@ struct Arrowhead {
     @location(1) angle: f32,
     @location(2) size: f32,
     @location(3) edge_index: u32,
-    @location(4) color: vec4<f32>,
+    @location(4) kind: u32,
+    @location(5) color: vec4<f32>,
+    @location(6) fill: vec4<f32>,
 };
 
 struct VertexOut {
     @builtin(position) clip_position: vec4<f32>,
-    @location(0) color: vec4<f32>,
+    @location(0) local: vec2<f32>,
+    @location(1) @interpolate(flat) kind: u32,
+    @location(2) color: vec4<f32>,
+    @location(3) fill: vec4<f32>,
 };
 
-// Tip at the origin, tail swept back along -x. Matches the Canvas2D head: the tip sits ON the
-// endpoint and the barbs trail behind it, so the head points where the segment was going.
-var<private> HEAD: array<vec2<f32>, 3> = array<vec2<f32>, 3>(
-    vec2<f32>( 0.0,  0.0),
-    vec2<f32>(-1.0,  0.4),
-    vec2<f32>(-1.0, -0.4),
+// The local origin is the path endpoint. Arrow tips sit there while circles, crosses and UML forms
+// occupy the same surrounding marker box.
+var<private> QUAD: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>( 1.0, -1.0), vec2<f32>( 1.0,  1.0),
+    vec2<f32>(-1.0, -1.0), vec2<f32>( 1.0,  1.0), vec2<f32>(-1.0,  1.0),
 );
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32, head: Arrowhead) -> VertexOut {
-    let local = HEAD[vertex_index] * head.size;
+    let local = QUAD[vertex_index] * head.size;
     let c = cos(head.angle);
     let s = sin(head.angle);
     let rotated = vec2<f32>(local.x * c - local.y * s, local.x * s + local.y * c);
@@ -2683,12 +2885,42 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, head: Arrowhead) -> VertexO
 
     var out: VertexOut;
     out.clip_position = vec4<f32>(world * camera.transform.xy + camera.transform.zw, 0.0, 1.0);
+    out.local = QUAD[vertex_index];
+    out.kind = head.kind;
     out.color = head.color;
+    out.fill = head.fill;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    let p = in.local;
+    let triangle = p.x <= 0.0 && p.x >= -1.0 && abs(p.y) <= (p.x + 1.0) * 0.4;
+    let diamond_distance = abs(p.x) + abs(p.y) * 2.5;
+    let circle_distance = length(p * vec2<f32>(1.0, 2.5));
+    let cross = (abs(p.x) <= 0.12 && abs(p.y) <= 0.5) || (abs(p.x) <= 0.5 && abs(p.y) <= 0.12);
+    if in.kind == 1u {
+        if circle_distance > 0.4 { discard; }
+        return in.fill;
+    }
+    if in.kind == 2u {
+        if !cross { discard; }
+        return in.color;
+    }
+    if in.kind == 3u {
+        if diamond_distance > 0.5 { discard; }
+        return in.fill;
+    }
+    if in.kind == 4u {
+        if diamond_distance > 0.5 || diamond_distance < 0.34 { discard; }
+        return in.color;
+    }
+    if in.kind == 5u {
+        let edge_distance = abs(abs(p.y) - (p.x + 1.0) * 0.4);
+        if !triangle || (p.x < -0.14 && edge_distance > 0.1) { discard; }
+        return in.color;
+    }
+    if !triangle { discard; }
     return in.color;
 }
 "#;
@@ -3496,8 +3728,10 @@ mod tests {
             "the edge shader attributes do not match GpuEdgeSegment's field order"
         );
         assert!(
-            super::ARROWHEAD_WGSL.contains("@location(4) color"),
-            "the arrowhead shader does not read the colour the instance carries"
+            super::ARROWHEAD_WGSL.contains("@location(4) kind")
+                && super::ARROWHEAD_WGSL.contains("@location(5) color")
+                && super::ARROWHEAD_WGSL.contains("@location(6) fill"),
+            "the marker shader does not read the kind and paints the instance carries"
         );
         assert!(
             super::EDGE_WGSL.contains("discard"),
@@ -5048,5 +5282,32 @@ mod tests {
             gpu_fill[0] > 0.9 && gpu_fill[1] < 0.1 && gpu_fill[2] < 0.1,
             "the agreed colour is not the declared red: {gpu_fill:?}"
         );
+    }
+
+    /// Scene path markers carry the same UML endpoint shape that the SVG backend renders.
+    #[test]
+    fn scene_path_markers_match_the_svg_reference_output() {
+        let ir = fm_parser::parse(
+            "classDiagram\n  class Owner\n  class Part\n  Owner o-- Part : owns\n",
+        )
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let scene = fm_layout::build_render_scene(&ir, &layout);
+        let svg =
+            fm_render_svg::render_scene_to_svg(&scene, &fm_render_svg::SvgRenderConfig::default());
+        assert!(
+            svg.contains("marker-start=\"url(#arrow-diamond-open)\""),
+            "SVG reference did not render the aggregation marker:\n{svg}"
+        );
+
+        let plan = GpuRenderPlan::from_layout_and_scene(&ir, &layout, &scene, 1.0);
+        let marker = plan
+            .arrowheads
+            .iter()
+            .find(|marker| marker.kind == super::GpuMarkerKind::DiamondOpen as u32)
+            .expect("GPU plan omitted the SVG aggregation marker");
+        assert_eq!(marker.edge_index, super::NO_EDGE_INDEX);
+        assert_eq!(marker.fill, super::DEFAULT_NODE_FILL_RGBA);
+        assert!(marker.size > 0.0);
     }
 }

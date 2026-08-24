@@ -950,8 +950,8 @@ pub fn render_instances(
             render.set_pipeline(&pass.pipeline);
             render.set_bind_group(0, &camera_bind, &[]);
             render.set_vertex_buffer(0, instance_buffer.slice(..));
-            // Vertex count FROM THE PASS, not a literal 6: an arrowhead is a three-vertex triangle
-            // and a hardcoded quad would draw two phantom vertices per head.
+            // Vertex count comes FROM THE PASS: marker shapes are shader-expanded quads, and a
+            // literal here would silently diverge when a new marker form changes the pipeline.
             render.draw(0..pass.vertices_per_instance, 0..instance_count);
         }
     }
@@ -1215,8 +1215,16 @@ pub fn arrowhead_instance_bytes(heads: &[crate::gpu_plan::GpuArrowheadInstance])
             &head.edge_index.to_ne_bytes(),
         );
         put(
+            core::mem::offset_of!(GpuArrowheadInstance, kind),
+            &head.kind.to_ne_bytes(),
+        );
+        put(
             core::mem::offset_of!(GpuArrowheadInstance, color),
             &head.color.map(f32::to_ne_bytes).concat(),
+        );
+        put(
+            core::mem::offset_of!(GpuArrowheadInstance, fill),
+            &head.fill.map(f32::to_ne_bytes).concat(),
         );
     }
     out

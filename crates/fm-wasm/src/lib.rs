@@ -257,9 +257,11 @@ fn build_diagram_geometry(input: &str, config: Option<JsValue>) -> Result<Diagra
 
 fn build_webgpu_plan(input: &str, config: Option<JsValue>) -> Result<PlannedWebGpuDiagram, String> {
     let geometry = build_diagram_geometry(input, config)?;
-    let plan = GpuRenderPlan::from_layout(
+    let scene = fm_layout::build_render_scene(&geometry.ir, &geometry.layout);
+    let plan = GpuRenderPlan::from_layout_and_scene(
         &geometry.ir,
         &geometry.layout,
+        &scene,
         geometry.canvas.edge_stroke_width as f32,
     );
 

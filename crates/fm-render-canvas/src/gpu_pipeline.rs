@@ -101,7 +101,7 @@ pub enum PrimitiveFamily {
     Node,
     /// Edge segments, drawn as instanced quads expanded across the line's width.
     Edge,
-    /// Arrowheads, drawn as instanced TRIANGLES — three vertices, not six.
+    /// Path-end markers, drawn as instanced quads so the shader can represent UML endpoint forms.
     Arrowhead,
     /// Dashed node borders, drawn with the EDGE pipeline but after the nodes (bd-l3nsf).
     ///
@@ -276,13 +276,6 @@ pub const fn edge_pipeline() -> PipelineDescriptor {
     }
 }
 
-/// Vertices in one arrowhead: a single TRIANGLE, matching `HEAD` in `ARROWHEAD_WGSL`.
-///
-/// Separate from [`QUAD_VERTICES_PER_INSTANCE`] and not a copy of it. Every other family expands a
-/// six-vertex quad, so a device layer that hardcoded six would draw two phantom vertices per head —
-/// reading `HEAD[3]` and `HEAD[4]` out of a three-element array.
-pub const TRIANGLE_VERTICES_PER_INSTANCE: u32 = 3;
-
 /// Arrowhead instance layout.
 const ARROWHEAD_ATTRIBUTES: &[VertexAttribute] = &[
     VertexAttribute {
@@ -311,9 +304,21 @@ const ARROWHEAD_ATTRIBUTES: &[VertexAttribute] = &[
     },
     VertexAttribute {
         shader_location: 4,
+        offset: core::mem::offset_of!(GpuArrowheadInstance, kind) as u64,
+        format: VertexFormat::Uint32,
+        name: "kind",
+    },
+    VertexAttribute {
+        shader_location: 5,
         offset: core::mem::offset_of!(GpuArrowheadInstance, color) as u64,
         format: VertexFormat::Float32x4,
         name: "color",
+    },
+    VertexAttribute {
+        shader_location: 6,
+        offset: core::mem::offset_of!(GpuArrowheadInstance, fill) as u64,
+        format: VertexFormat::Float32x4,
+        name: "fill",
     },
 ];
 
@@ -329,7 +334,7 @@ pub const fn arrowhead_pipeline() -> PipelineDescriptor {
             array_stride: size_of::<GpuArrowheadInstance>() as u64,
             attributes: ARROWHEAD_ATTRIBUTES,
         },
-        vertices_per_instance: TRIANGLE_VERTICES_PER_INSTANCE,
+        vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
     }
 }
 
@@ -483,7 +488,7 @@ pub fn draw_batches(plan: &GpuRenderPlan) -> Vec<DrawBatch> {
         batches.push(DrawBatch {
             family: PrimitiveFamily::Arrowhead,
             instance_count: u32::try_from(plan.arrowheads.len()).unwrap_or(u32::MAX),
-            vertices_per_instance: TRIANGLE_VERTICES_PER_INSTANCE,
+            vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
         });
     }
     if !plan.node_instances.is_empty() {
