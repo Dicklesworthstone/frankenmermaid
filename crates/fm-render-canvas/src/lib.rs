@@ -16,17 +16,17 @@
 //! - `web`: Enables actual Canvas2D rendering via web-sys (WASM target)
 
 mod context;
-mod gpu_layout;
-mod gpu_plan;
-/// The wgpu device layer (bd-2u0.2). Behind the `webgpu` feature so the Canvas2D path — and the
-/// size-optimised WASM bundle this crate ships in — never pays for a GPU backend it does not use.
-#[cfg(feature = "webgpu")]
-pub mod gpu_device;
 /// Glyph rasterisation into the text atlas (bd-2u0.2). Device-free — it produces a plain R8 coverage
 /// bitmap — but gated with `webgpu` because that is its only consumer today.
 #[cfg(feature = "webgpu")]
 pub mod glyph_raster;
+/// The wgpu device layer (bd-2u0.2). Behind the `webgpu` feature so the Canvas2D path — and the
+/// size-optimised WASM bundle this crate ships in — never pays for a GPU backend it does not use.
+#[cfg(feature = "webgpu")]
+pub mod gpu_device;
+mod gpu_layout;
 pub mod gpu_pipeline;
+mod gpu_plan;
 mod renderer;
 mod shapes;
 mod viewport;

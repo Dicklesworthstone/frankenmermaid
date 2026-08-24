@@ -2224,12 +2224,8 @@ fn strip_trailing_edge_id(left: &str) -> &str {
 
 /// Split `A edgeId@` into its endpoint text and Mermaid edge ID.
 fn trailing_edge_id(left: &str) -> Option<(&str, &str)> {
-    let Some((head, last)) = left.rsplit_once(char::is_whitespace) else {
-        return None;
-    };
-    let Some(id) = last.strip_suffix('@') else {
-        return None;
-    };
+    let (head, last) = left.rsplit_once(char::is_whitespace)?;
+    let id = last.strip_suffix('@')?;
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
         return None;
     }
@@ -6930,14 +6926,16 @@ enum PendingGanttDependency {
 }
 
 fn parse_gantt(input: &str, builder: &mut IrBuilder) {
-    let mut gantt_meta = IrGanttMeta::default();
-    gantt_meta.top_axis = builder
-        .ir()
-        .meta
-        .init
-        .config
-        .gantt_top_axis
-        .unwrap_or(false);
+    let mut gantt_meta = IrGanttMeta {
+        top_axis: builder
+            .ir()
+            .meta
+            .init
+            .config
+            .gantt_top_axis
+            .unwrap_or(false),
+        ..Default::default()
+    };
     let mut current_section_idx = 0_usize;
     // Lookup-only (dependency resolution `get`s below); iteration order is never used — the resolved
     // edges come from `pending_dependencies` in insertion order — so an FxHashMap replaces the BTreeMap's
@@ -15356,7 +15354,7 @@ mod tests {
     #[test]
     fn constraints_directive_emits_a_non_overlap_ir_constraint() {
         let parsed = parse_mermaid(
-            "%%{constraints: {nonOverlap: {nodes: [A, B], gap: 12}}}%%\nflowchart TB\nA-->B",
+            "%%{constraints: {nonOverlap: {nodes: ['A', 'B'], gap: 12}}}%%\nflowchart TB\nA-->B",
         );
 
         assert_eq!(
@@ -15367,7 +15365,7 @@ mod tests {
         );
         assert!(matches!(
             &parsed.ir.constraints[0],
-            IrConstraint::NonOverlap { node_ids, gap, .. }
+            fm_core::IrConstraint::NonOverlap { node_ids, gap, .. }
                 if node_ids == &["A".to_string(), "B".to_string()] && (*gap - 12.0).abs() < f64::EPSILON
         ));
         assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
@@ -15376,7 +15374,7 @@ mod tests {
     #[test]
     fn constraints_non_overlap_rejects_a_single_node_selection() {
         let parsed =
-            parse_mermaid("%%{constraints: {nonOverlap: {nodes: [A]}}}%%\nflowchart TB\nA-->B");
+            parse_mermaid("%%{constraints: {nonOverlap: {nodes: ['A']}}}%%\nflowchart TB\nA-->B");
 
         assert!(parsed.ir.constraints.is_empty());
         assert!(

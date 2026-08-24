@@ -746,7 +746,8 @@ impl Canvas2dRenderer {
             // because the two come from DIFFERENT syntaxes: `color` carries a sequence `rect
             // rgb(...)`, which is a property of the frame, while a `style` directive names this
             // cluster explicitly. When an author does both, the one that named the target wins.
-            let (styled_fill, styled_stroke) = resolve_cluster_colors(ir, cluster_box.cluster_index);
+            let (styled_fill, styled_stroke) =
+                resolve_cluster_colors(ir, cluster_box.cluster_index);
             let styled_fill = styled_fill.as_deref().and_then(sanitize_canvas_paint);
             let styled_stroke = styled_stroke.as_deref().and_then(sanitize_canvas_paint);
 
@@ -822,7 +823,8 @@ impl Canvas2dRenderer {
             });
 
             if let Some(title_text) = title_text {
-                let declared_title_color = resolve_cluster_text_color(ir, cluster_box.cluster_index);
+                let declared_title_color =
+                    resolve_cluster_text_color(ir, cluster_box.cluster_index);
                 let title_color = declared_title_color
                     .as_deref()
                     .and_then(sanitize_canvas_paint);
@@ -1232,44 +1234,44 @@ impl Canvas2dRenderer {
         };
         for y in axis_rows {
             for tick in &layout.extensions.axis_ticks {
-            if tick.label.is_empty() {
-                continue;
-            }
+                if tick.label.is_empty() {
+                    continue;
+                }
 
-            // THE TICK MARK ITSELF, which this surface never drew (bd-4n5j2). fm-render-svg emits
-            // `<line y1=y+4 y2=y+16>` per tick; the canvas drew the label alone, so a gantt axis
-            // rendered as floating dates with nothing tying them to a column. That is the
-            // bd-039t/bd-t1jj family: declared content one renderer draws and another omits.
-            let tick_x = f64::from(tick.position) + offset_x;
-            ctx.set_stroke_style(&self.config.edge_stroke);
-            ctx.set_line_width(1.0);
-            ctx.begin_path();
-            ctx.move_to(tick_x, y + 4.0);
-            ctx.line_to(tick_x, y + 16.0);
-            ctx.stroke();
+                // THE TICK MARK ITSELF, which this surface never drew (bd-4n5j2). fm-render-svg emits
+                // `<line y1=y+4 y2=y+16>` per tick; the canvas drew the label alone, so a gantt axis
+                // rendered as floating dates with nothing tying them to a column. That is the
+                // bd-039t/bd-t1jj family: declared content one renderer draws and another omits.
+                let tick_x = f64::from(tick.position) + offset_x;
+                ctx.set_stroke_style(&self.config.edge_stroke);
+                ctx.set_line_width(1.0);
+                ctx.begin_path();
+                ctx.move_to(tick_x, y + 4.0);
+                ctx.line_to(tick_x, y + 16.0);
+                ctx.stroke();
 
-            ctx.set_fill_style(&self.config.label_color);
-            // Set explicitly, not inherited (bd-4n5j2): this runs after draw_clusters and
-            // draw_bands, either of which may or may not have set these depending on whether the
-            // diagram had a titled cluster or a labelled band.
-            //
-            // ALPHABETIC, not Top. The SVG tick text carries `text-anchor="start"` and NO
-            // `dominant-baseline`, so its y IS the alphabetic baseline -- which is what makes y=89
-            // in the golden the baseline rather than the top of the glyphs. An earlier pass here
-            // set Top, which was deterministic but disagreed with the reference arm by an ascent.
-            ctx.set_text_align(TextAlign::Left);
-            ctx.set_text_baseline(TextBaseline::Alphabetic);
-            ctx.set_font(tick_font.get_or_insert_with(|| {
-                format!(
-                    "{}px {}",
-                    self.config.font_size * 0.72,
-                    self.config.font_family
-                )
-            }));
-            // `x + 3.0`, as the SVG writes it: the label sits just right of its tick mark rather
-            // than centred on it.
-            ctx.fill_text(&tick.label, tick_x + 3.0, y);
-            self.draw_calls += 2;
+                ctx.set_fill_style(&self.config.label_color);
+                // Set explicitly, not inherited (bd-4n5j2): this runs after draw_clusters and
+                // draw_bands, either of which may or may not have set these depending on whether the
+                // diagram had a titled cluster or a labelled band.
+                //
+                // ALPHABETIC, not Top. The SVG tick text carries `text-anchor="start"` and NO
+                // `dominant-baseline`, so its y IS the alphabetic baseline -- which is what makes y=89
+                // in the golden the baseline rather than the top of the glyphs. An earlier pass here
+                // set Top, which was deterministic but disagreed with the reference arm by an ascent.
+                ctx.set_text_align(TextAlign::Left);
+                ctx.set_text_baseline(TextBaseline::Alphabetic);
+                ctx.set_font(tick_font.get_or_insert_with(|| {
+                    format!(
+                        "{}px {}",
+                        self.config.font_size * 0.72,
+                        self.config.font_family
+                    )
+                }));
+                // `x + 3.0`, as the SVG writes it: the label sits just right of its tick mark rather
+                // than centred on it.
+                ctx.fill_text(&tick.label, tick_x + 3.0, y);
+                self.draw_calls += 2;
             }
         }
     }
@@ -2099,8 +2101,8 @@ impl Canvas2dRenderer {
             // still discarded here: the edge resolver has read `stroke-width` since bd-lvj3's edge
             // half landed, while every node border was drawn at the config width whatever the
             // author wrote. `unwrap_or` keeps the theme default when nothing was declared.
-            let stroke_width =
-                resolve_node_stroke_width(ir, node_box.node_index).unwrap_or(self.config.node_stroke_width);
+            let stroke_width = resolve_node_stroke_width(ir, node_box.node_index)
+                .unwrap_or(self.config.node_stroke_width);
             // The BORDER DASH is the fourth channel, and the only one that has to be UNDONE.
             // `lineDash` is canvas STATE, not a draw argument: it persists until something sets it
             // again, so a dashed node would leave every later shape dashed too. Set only when the
@@ -2124,23 +2126,23 @@ impl Canvas2dRenderer {
             // from the same declared components. Only built when the author declared something, so
             // an undeclared node still uses the hoisted pair and costs nothing.
             let declared_parts = resolve_declared_node_font(ir, node_box.node_index);
-            let (declared_heading_font, declared_member_font) = if declared_parts.declares_anything()
-            {
-                (
-                    Some(declared_parts.compose(
-                        self.config.font_size,
-                        Some("bold"),
-                        &self.config.font_family,
-                    )),
-                    Some(declared_parts.compose(
-                        self.config.font_size * 0.9,
-                        None,
-                        &self.config.font_family,
-                    )),
-                )
-            } else {
-                (None, None)
-            };
+            let (declared_heading_font, declared_member_font) =
+                if declared_parts.declares_anything() {
+                    (
+                        Some(declared_parts.compose(
+                            self.config.font_size,
+                            Some("bold"),
+                            &self.config.font_family,
+                        )),
+                        Some(declared_parts.compose(
+                            self.config.font_size * 0.9,
+                            None,
+                            &self.config.font_family,
+                        )),
+                    )
+                } else {
+                    (None, None)
+                };
             let dash = resolve_node_stroke_dasharray(ir, node_box.node_index);
             if let Some(ref pattern) = dash {
                 ctx.set_line_dash(pattern);
@@ -2983,7 +2985,9 @@ pub(crate) fn resolve_cluster_text_color(
     ir: &MermaidDiagramIr,
     cluster_index: usize,
 ) -> Option<String> {
-    merged_cluster_style(ir, cluster_index).get("color").cloned()
+    merged_cluster_style(ir, cluster_index)
+        .get("color")
+        .cloned()
 }
 
 /// The author's declared cluster BORDER WIDTH, if any (bd-lvj3).
@@ -3087,7 +3091,10 @@ pub(crate) fn resolve_edge_label_color(ir: &MermaidDiagramIr, edge_index: usize)
 /// The declared pattern OVERRIDES the arrow-derived one rather than merging with it: they are two
 /// answers to the same question, and an explicit `stroke-dasharray` is the author being more
 /// specific than the arrow glyph. Same precedence `stroke` and `stroke-width` already use here.
-pub(crate) fn resolve_edge_dash_array(ir: &MermaidDiagramIr, edge_index: usize) -> Option<Vec<f64>> {
+pub(crate) fn resolve_edge_dash_array(
+    ir: &MermaidDiagramIr,
+    edge_index: usize,
+) -> Option<Vec<f64>> {
     parse_dash_array(
         merged_edge_style(ir, edge_index)
             .get("stroke-dasharray")
@@ -3310,12 +3317,20 @@ fn parse_opacity(raw: Option<&str>) -> Option<f64> {
 }
 
 pub(crate) fn resolve_node_opacity(ir: &MermaidDiagramIr, node_index: usize) -> Option<f64> {
-    parse_opacity(merged_node_style(ir, node_index).get("opacity").map(String::as_str))
+    parse_opacity(
+        merged_node_style(ir, node_index)
+            .get("opacity")
+            .map(String::as_str),
+    )
 }
 
 /// The author's declared EDGE opacity, if any (bd-lvj3).
 pub(crate) fn resolve_edge_opacity(ir: &MermaidDiagramIr, edge_index: usize) -> Option<f64> {
-    parse_opacity(merged_edge_style(ir, edge_index).get("opacity").map(String::as_str))
+    parse_opacity(
+        merged_edge_style(ir, edge_index)
+            .get("opacity")
+            .map(String::as_str),
+    )
 }
 
 /// The author's declared CLUSTER opacity, if any (bd-lvj3).
@@ -3464,7 +3479,10 @@ impl DeclaredNodeFont {
     }
 }
 
-pub(crate) fn resolve_declared_node_font(ir: &MermaidDiagramIr, node_index: usize) -> DeclaredNodeFont {
+pub(crate) fn resolve_declared_node_font(
+    ir: &MermaidDiagramIr,
+    node_index: usize,
+) -> DeclaredNodeFont {
     let merged = merged_node_style(ir, node_index);
     DeclaredNodeFont {
         size: parse_declared_font_size(merged.get("font-size").map(String::as_str)),
@@ -5142,7 +5160,11 @@ mod tests {
                 _ => {}
             }
         }
-        assert_eq!(label_positions.len(), 2, "each published axis row needs the first label");
+        assert_eq!(
+            label_positions.len(),
+            2,
+            "each published axis row needs the first label"
+        );
         assert!(
             label_baselines
                 .iter()
@@ -5177,9 +5199,11 @@ mod tests {
                     if let Some((fx, fy)) = from
                         && (fx - x).abs() < 0.001
                         && (*y - fy - 12.0).abs() < 0.001
-                        && layout.extensions.gantt_axis_rows.iter().any(|axis| {
-                            (fy - (f64::from(axis.y) + offset_y + 4.0)).abs() < 0.5
-                        })
+                        && layout
+                            .extensions
+                            .gantt_axis_rows
+                            .iter()
+                            .any(|axis| (fy - (f64::from(axis.y) + offset_y + 4.0)).abs() < 0.5)
                     {
                         marks += 1;
                     }

@@ -311,16 +311,14 @@ fn layout_golden_checksums_are_stable() {
                 let stored_nodes = expected["nodes_checksum"].as_str();
                 let stored_edges = expected["edges_checksum"].as_str();
                 let verdict = match (stored_nodes, stored_edges) {
-                    (Some(n), Some(e)) => {
-                        match (n != nodes_checksum, e != edges_checksum) {
-                            (true, true) => "NODES AND EDGES BOTH MOVED",
-                            (true, false) => "NODE POSITIONS MOVED; edge geometry is unchanged",
-                            (false, true) => "EDGE GEOMETRY MOVED; node positions are unchanged",
-                            (false, false) => {
-                                "NEITHER component moved -- the drift is in bounds or stats"
-                            }
+                    (Some(n), Some(e)) => match (n != nodes_checksum, e != edges_checksum) {
+                        (true, true) => "NODES AND EDGES BOTH MOVED",
+                        (true, false) => "NODE POSITIONS MOVED; edge geometry is unchanged",
+                        (false, true) => "EDGE GEOMETRY MOVED; node positions are unchanged",
+                        (false, false) => {
+                            "NEITHER component moved -- the drift is in bounds or stats"
                         }
-                    }
+                    },
                     _ => "UNKNOWN: this golden predates component checksums; re-bless to enable",
                 };
                 eprintln!(

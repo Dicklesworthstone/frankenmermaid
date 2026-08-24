@@ -65,22 +65,46 @@ fn defs_blocks(svg: &str) -> String {
 }
 
 const CASES: &[(&str, &str)] = &[
-    ("flowchart_arrows", "flowchart TD\n  a[A] --> b[B]\n  b -.-> c[C]\n  c ==> d[D]\n  d --o e[E]\n  e --x f[F]\n"),
+    (
+        "flowchart_arrows",
+        "flowchart TD\n  a[A] --> b[B]\n  b -.-> c[C]\n  c ==> d[D]\n  d --o e[E]\n  e --x f[F]\n",
+    ),
     ("flowchart_plain", "flowchart TD\n  a[A] --> b[B]\n"),
-    ("sequence", "sequenceDiagram\n  Alice->>Bob: Hi\n  Bob-->>Alice: Yo\n  Alice-)Bob: Async\n"),
-    ("class", "classDiagram\n  A <|-- B\n  C *-- D\n  E o-- F\n  G <.. H\n"),
+    (
+        "sequence",
+        "sequenceDiagram\n  Alice->>Bob: Hi\n  Bob-->>Alice: Yo\n  Alice-)Bob: Async\n",
+    ),
+    (
+        "class",
+        "classDiagram\n  A <|-- B\n  C *-- D\n  E o-- F\n  G <.. H\n",
+    ),
     ("state", "stateDiagram-v2\n  [*] --> A\n  A --> [*]\n"),
     ("er", "erDiagram\n  A ||--o{ B : has\n  C }|..|{ D : rel\n"),
-    ("gantt", "gantt\n  title T\n  section S\n    X : a1, 2024-01-01, 3d\n"),
-    ("journey", "journey\n  title J\n  section S\n    Task: 5: Me\n"),
+    (
+        "gantt",
+        "gantt\n  title T\n  section S\n    X : a1, 2024-01-01, 3d\n",
+    ),
+    (
+        "journey",
+        "journey\n  title J\n  section S\n    Task: 5: Me\n",
+    ),
     ("mindmap", "mindmap\n  root((R))\n    A\n    B\n"),
     ("gitgraph", "gitGraph\n  commit\n  branch dev\n  commit\n"),
     ("pie", "pie title P\n  \"A\" : 60\n  \"B\" : 40\n"),
-    ("quadrant", "quadrantChart\n  title Q\n  x-axis L --> H\n  y-axis B --> T\n  A: [0.3, 0.6]\n"),
-    ("xychart", "xychart-beta\n  title X\n  x-axis [a, b]\n  y-axis \"y\" 0 --> 100\n  bar [50, 60]\n"),
+    (
+        "quadrant",
+        "quadrantChart\n  title Q\n  x-axis L --> H\n  y-axis B --> T\n  A: [0.3, 0.6]\n",
+    ),
+    (
+        "xychart",
+        "xychart-beta\n  title X\n  x-axis [a, b]\n  y-axis \"y\" 0 --> 100\n  bar [50, 60]\n",
+    ),
     ("block", "block-beta\n  columns 2\n  A[\"A\"] B[\"B\"]\n"),
     ("c4", "C4Context\n  title C\n  Person(a, \"A\", \"d\")\n"),
-    ("requirement", "requirementDiagram\n  requirement R {\n  id: 1\n  text: t\n  }\n"),
+    (
+        "requirement",
+        "requirementDiagram\n  requirement R {\n  id: 1\n  text: t\n  }\n",
+    ),
     ("sankey", "sankey-beta\n\nA,B,5\n"),
     ("kanban", "kanban\n  Col\n    t1[Card]\n"),
     ("timeline", "timeline\n  title T\n  2001 : A\n"),
@@ -108,7 +132,10 @@ fn every_url_reference_resolves_and_every_defs_id_is_used() {
         if !dangling.is_empty() {
             dangling_report.push(format!("{name}: {dangling:?}"));
         }
-        let dead: Vec<&str> = declared.difference(&referenced).map(String::as_str).collect();
+        let dead: Vec<&str> = declared
+            .difference(&referenced)
+            .map(String::as_str)
+            .collect();
         if !dead.is_empty() {
             dead_report.push(format!("{name}: {dead:?}"));
         }

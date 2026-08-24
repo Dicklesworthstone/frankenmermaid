@@ -24561,7 +24561,7 @@ mod tests {
 
         for edge in super::oriented_edges(&ir, &cycles.reversed_edge_indexes) {
             assert!(
-                relaxed[&edge.target] >= relaxed[&edge.source] + 1,
+                relaxed[&edge.target] > relaxed[&edge.source],
                 "LP assigned edge {} -> {} to non-increasing layers: {} -> {}",
                 edge.source,
                 edge.target,
@@ -27118,8 +27118,8 @@ mod tests {
         use tracing_subscriber::layer::SubscriberExt;
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let global = tracing_subscriber::registry()
-                .with(tracing_subscriber::filter::LevelFilter::TRACE);
+            let global =
+                tracing_subscriber::registry().with(tracing_subscriber::filter::LevelFilter::TRACE);
             let _ = tracing::subscriber::set_global_default(global);
         });
     }

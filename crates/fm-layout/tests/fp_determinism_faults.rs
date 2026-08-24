@@ -191,7 +191,10 @@ fn ordinary_geometry_is_left_alone_by_the_flush() {
 
     let path = node_path(ordinary, NodeShape::Rect);
     let values = coordinates(&path);
-    assert!(!values.is_empty(), "no coordinates, so this control proves nothing");
+    assert!(
+        !values.is_empty(),
+        "no coordinates, so this control proves nothing"
+    );
     assert!(
         values.iter().any(|v| *v != 0.0),
         "ordinary geometry was flattened to zero: {values:?}"

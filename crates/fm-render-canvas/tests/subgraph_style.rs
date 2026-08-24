@@ -48,7 +48,9 @@ fn a_subgraph_style_reaches_the_canvas() {
 #[test]
 fn an_unstyled_subgraph_keeps_the_theme_fill() {
     let fills = fill_styles("flowchart TD\n  subgraph one[One]\n    a[A]\n  end\n");
-    let theme = CanvasRenderConfig::default().cluster_fill.to_ascii_lowercase();
+    let theme = CanvasRenderConfig::default()
+        .cluster_fill
+        .to_ascii_lowercase();
 
     assert!(
         fills.iter().any(|f| f.to_ascii_lowercase() == theme),
@@ -71,7 +73,9 @@ fn an_unstyled_subgraph_keeps_the_theme_fill() {
 #[test]
 fn the_styled_fill_wins_over_the_theme_default() {
     let fills = fill_styles(STYLED);
-    let theme = CanvasRenderConfig::default().cluster_fill.to_ascii_lowercase();
+    let theme = CanvasRenderConfig::default()
+        .cluster_fill
+        .to_ascii_lowercase();
 
     let styled_at = fills.iter().position(|f| f.eq_ignore_ascii_case("#ff0000"));
     assert!(

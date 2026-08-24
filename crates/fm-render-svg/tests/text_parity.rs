@@ -13,7 +13,11 @@
 /// cheap and keeps it free of false alarms, and anything it DOES report is a real drop. Use the
 /// cross-engine equivalence oracle, not this, for a strict comparison.
 const CASES: &[(&str, &str, &[&str])] = &[
-    ("flowchart", "flowchart TD\n  a[Alpha] -->|yes| b[Beta]\n", &["Alpha", "Beta", "yes"]),
+    (
+        "flowchart",
+        "flowchart TD\n  a[Alpha] -->|yes| b[Beta]\n",
+        &["Alpha", "Beta", "yes"],
+    ),
     (
         "sequence",
         "sequenceDiagram\n  participant Al as Alpha\n  Al->>Bob: Hello\n  Note over Al: Ponder\n",
@@ -37,10 +41,26 @@ const CASES: &[(&str, &str, &[&str])] = &[
         "erDiagram\n  CUSTOMER {\n    string name \"who they are\"\n    int age\n  }\n  CUSTOMER ||--o{ ORDER : places\n",
         &["CUSTOMER", "ORDER", "places", "name", "age", "who they are"],
     ),
-    ("gantt", "gantt\n  title Plan\n  section Build\n    Task1 : t1, 2024-01-01, 3d\n", &["Plan", "Build", "Task1"]),
-    ("pie", "pie title Share\n  \"Alpha\" : 60\n  \"Beta\" : 40\n", &["Share", "Alpha", "Beta"]),
-    ("timeline", "timeline\n  title Hist\n  2001 : Alpha\n  2002 : Beta\n", &["Hist", "Alpha", "Beta", "2001"]),
-    ("mindmap", "mindmap\n  root((Core))\n    Alpha\n    Beta\n", &["Core", "Alpha", "Beta"]),
+    (
+        "gantt",
+        "gantt\n  title Plan\n  section Build\n    Task1 : t1, 2024-01-01, 3d\n",
+        &["Plan", "Build", "Task1"],
+    ),
+    (
+        "pie",
+        "pie title Share\n  \"Alpha\" : 60\n  \"Beta\" : 40\n",
+        &["Share", "Alpha", "Beta"],
+    ),
+    (
+        "timeline",
+        "timeline\n  title Hist\n  2001 : Alpha\n  2002 : Beta\n",
+        &["Hist", "Alpha", "Beta", "2001"],
+    ),
+    (
+        "mindmap",
+        "mindmap\n  root((Core))\n    Alpha\n    Beta\n",
+        &["Core", "Alpha", "Beta"],
+    ),
     (
         "quadrant",
         "quadrantChart\n  title Reach\n  x-axis Low --> High\n  y-axis Bot --> Top\n  Alpha: [0.3, 0.6]\n",
@@ -56,16 +76,36 @@ const CASES: &[(&str, &str, &[&str])] = &[
         "requirementDiagram\n  requirement Alpha {\n  id: 1\n  text: hello\n  risk: high\n  }\n",
         &["Alpha", "hello", "high"],
     ),
-    ("sankey", "sankey-beta\n\nAlpha,Beta,5\n", &["Alpha", "Beta"]),
-    ("block", "block-beta\n  columns 2\n  Alpha[\"Alpha\"] Beta[\"Beta\"]\n", &["Alpha", "Beta"]),
-    ("kanban", "kanban\n  Alpha\n    t1[Beta]\n", &["Alpha", "Beta"]),
-    ("packet", "packet-beta\n  0-7: \"Alpha\"\n  8-15: \"Beta\"\n", &["Alpha", "Beta"]),
+    (
+        "sankey",
+        "sankey-beta\n\nAlpha,Beta,5\n",
+        &["Alpha", "Beta"],
+    ),
+    (
+        "block",
+        "block-beta\n  columns 2\n  Alpha[\"Alpha\"] Beta[\"Beta\"]\n",
+        &["Alpha", "Beta"],
+    ),
+    (
+        "kanban",
+        "kanban\n  Alpha\n    t1[Beta]\n",
+        &["Alpha", "Beta"],
+    ),
+    (
+        "packet",
+        "packet-beta\n  0-7: \"Alpha\"\n  8-15: \"Beta\"\n",
+        &["Alpha", "Beta"],
+    ),
     (
         "architecture",
         "architecture-beta\n  group api(cloud)[API]\n  service db(database)[Database] in api\n",
         &["API", "Database"],
     ),
-    ("c4", "C4Context\n  title Sys\n  Person(alice, \"Alice\", \"A user\")\n", &["Sys", "Alice"]),
+    (
+        "c4",
+        "C4Context\n  title Sys\n  Person(alice, \"Alice\", \"A user\")\n",
+        &["Sys", "Alice"],
+    ),
     // `dev` is the BRANCH NAME — the drop this gate found (bd-jgco), now fixed by the branch bands
     // in `layout_diagram_gitgraph_traced`. It stays asserted here rather than in a layout unit test
     // because the user-visible claim is that the name reaches the rendered document.
@@ -114,7 +154,9 @@ fn declared_text_reaches_the_svg_for_every_diagram_type() {
 
         for want in *wants {
             if !svg.contains(want) {
-                failures.push(format!("{name}: declared text {want:?} never reached the SVG"));
+                failures.push(format!(
+                    "{name}: declared text {want:?} never reached the SVG"
+                ));
             }
         }
     }

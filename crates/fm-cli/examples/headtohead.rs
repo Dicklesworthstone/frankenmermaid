@@ -395,6 +395,7 @@ struct CachedParsedBatch {
 /// This is deliberately separate from [`CachedRenderedBatch`]: every revision still parses and
 /// renders, while only layout carries state from the prior revision. A rendered-output memo would
 /// turn later samples into probes rather than edits (bd-bh7d).
+#[allow(dead_code)]
 struct IncrementalRenderedBatch {
     output: Arc<[String]>,
     size_stable_revisions: usize,
@@ -979,7 +980,7 @@ impl RenderExecutor {
         let mut selective_relayout_revisions = 0;
         let mut full_recompute_revisions = 0;
 
-        for text in texts {
+        for text in texts.iter() {
             let parsed = parse(std::hint::black_box(text.as_str()));
             let ir = Arc::new(parsed.ir);
             let traced = engine.layout_diagram_traced_with_config_and_guardrails(
@@ -1173,7 +1174,11 @@ impl RenderExecutor {
     /// spawned its own threads internally would not be counted. That direction is SAFE for the
     /// gate, though: under-reporting threads makes the per-thread ceiling TIGHTER, so an
     /// unaccounted thread can only cause a refusal, never admit a row that should have failed.
-    fn probe_scalar_threads(&self, texts: &Arc<[String]>, cfg: &Arc<SvgRenderConfig>) -> Option<usize> {
+    fn probe_scalar_threads(
+        &self,
+        texts: &Arc<[String]>,
+        cfg: &Arc<SvgRenderConfig>,
+    ) -> Option<usize> {
         if !self.is_scalar() {
             return None;
         }

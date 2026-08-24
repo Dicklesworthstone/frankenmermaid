@@ -33,7 +33,11 @@ fn labels_of(source: &str) -> Vec<String> {
 #[test]
 fn a_well_formed_flowchart_edge_yields_two_clean_nodes() {
     let labels = labels_of("flowchart TD\n  a[A] --> b[B]\n");
-    assert_eq!(labels.len(), 2, "the control source must give two nodes: {labels:?}");
+    assert_eq!(
+        labels.len(),
+        2,
+        "the control source must give two nodes: {labels:?}"
+    );
     assert!(
         labels.iter().any(|l| l == "A") && labels.iter().any(|l| l == "B"),
         "the control source must give clean labels: {labels:?}"

@@ -1606,43 +1606,43 @@ impl TermRenderer {
             for axis_y in axis_rows {
                 let mut last_end: Option<usize> = None;
                 for tick in &layout.extensions.axis_ticks {
-                if tick.label.is_empty() {
-                    continue;
-                }
-                let (x, y, _w, _h) = self.bounds_to_cells(
-                    &fm_layout::LayoutRect {
-                        x: tick.position,
-                        y: axis_y,
-                        width: 0.0,
-                        height: 0.0,
-                    },
-                    scale_x,
-                    scale_y,
-                );
-                if y >= lines.len() {
-                    continue;
-                }
-                // Never let two dates collide into an unreadable run: a tick that would start before
-                // the previous one ended is skipped, which thins a dense axis rather than corrupting
-                // it. The FIRST tick always survives, so an axis is never emptied by this rule.
-                if let Some(end) = last_end
-                    && x <= end
-                {
-                    continue;
-                }
-                let label: String = self.truncate_label(&tick.label).chars().collect();
-                let mut written = 0usize;
-                for (offset, ch) in label.chars().enumerate() {
-                    let col = x + offset;
-                    if col >= cell_width || col >= lines[y].len() {
-                        break;
+                    if tick.label.is_empty() {
+                        continue;
                     }
-                    lines[y][col] = ch;
-                    written = offset + 1;
-                }
-                if written > 0 {
-                    last_end = Some(x + written);
-                }
+                    let (x, y, _w, _h) = self.bounds_to_cells(
+                        &fm_layout::LayoutRect {
+                            x: tick.position,
+                            y: axis_y,
+                            width: 0.0,
+                            height: 0.0,
+                        },
+                        scale_x,
+                        scale_y,
+                    );
+                    if y >= lines.len() {
+                        continue;
+                    }
+                    // Never let two dates collide into an unreadable run: a tick that would start before
+                    // the previous one ended is skipped, which thins a dense axis rather than corrupting
+                    // it. The FIRST tick always survives, so an axis is never emptied by this rule.
+                    if let Some(end) = last_end
+                        && x <= end
+                    {
+                        continue;
+                    }
+                    let label: String = self.truncate_label(&tick.label).chars().collect();
+                    let mut written = 0usize;
+                    for (offset, ch) in label.chars().enumerate() {
+                        let col = x + offset;
+                        if col >= cell_width || col >= lines[y].len() {
+                            break;
+                        }
+                        lines[y][col] = ch;
+                        written = offset + 1;
+                    }
+                    if written > 0 {
+                        last_end = Some(x + written);
+                    }
                 }
             }
         }
@@ -2421,13 +2421,7 @@ impl TermRenderer {
     /// The direct arithmetic fallback preserves the established degenerate-scale behavior. Normal
     /// rendering obtains positive finite scales from `fit_cell_dimensions`, so it takes the rotor
     /// path; keeping the fallback makes this low-level conversion total for direct unit callers.
-    fn layout_point_to_cells(
-        &self,
-        x: f32,
-        y: f32,
-        scale_x: f32,
-        scale_y: f32,
-    ) -> (usize, usize) {
+    fn layout_point_to_cells(&self, x: f32, y: f32, scale_x: f32, scale_y: f32) -> (usize, usize) {
         let (x, y) = TermTransform::new(scale_x, scale_y)
             .map(|transform| transform.apply(x, y))
             .unwrap_or((x * scale_x, y * scale_y));

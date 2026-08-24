@@ -106,84 +106,173 @@ fn cases() -> Vec<Case> {
     use Support::Honoured;
     vec![
         // ── node ──────────────────────────────────────────────────────────────────────────
-        Case { surface: "node", property: "fill", expected: Honoured,
+        Case {
+            surface: "node",
+            property: "fill",
+            expected: Honoured,
             source: "flowchart TD\n  a[Alpha]\n  style a fill:#ff00ff\n",
-            needle: "SetFillStyle(\"#ff00ff\")" },
-        Case { surface: "node", property: "stroke", expected: Honoured,
+            needle: "SetFillStyle(\"#ff00ff\")",
+        },
+        Case {
+            surface: "node",
+            property: "stroke",
+            expected: Honoured,
             source: "flowchart TD\n  a[Alpha]\n  style a stroke:#ff00ff\n",
-            needle: "SetStrokeStyle(\"#ff00ff\")" },
-        Case { surface: "node", property: "stroke-width", expected: Honoured,
+            needle: "SetStrokeStyle(\"#ff00ff\")",
+        },
+        Case {
+            surface: "node",
+            property: "stroke-width",
+            expected: Honoured,
             source: "flowchart TD\n  a[Alpha]\n  style a stroke-width:4px\n",
-            needle: "SetLineWidth(4.0)" },
-        Case { surface: "node", property: "stroke-dasharray", expected: Honoured,
+            needle: "SetLineWidth(4.0)",
+        },
+        Case {
+            surface: "node",
+            property: "stroke-dasharray",
+            expected: Honoured,
             source: "flowchart TD\n  a[Alpha]\n  style a stroke-dasharray:5 5\n",
-            needle: "SetLineDash([5.0, 5.0])" },
-        Case { surface: "node", property: "color", expected: Honoured,
+            needle: "SetLineDash([5.0, 5.0])",
+        },
+        Case {
+            surface: "node",
+            property: "color",
+            expected: Honoured,
             source: "flowchart TD\n  a[Alpha]\n  style a color:#ff00ff\n",
-            needle: "SetFillStyle(\"#ff00ff\")" },
-        Case { surface: "node", property: "font-size", expected: Honoured,
+            needle: "SetFillStyle(\"#ff00ff\")",
+        },
+        Case {
+            surface: "node",
+            property: "font-size",
+            expected: Honoured,
             source: "flowchart TD\n  a[Alpha]\n  style a font-size:32px\n",
-            needle: "SetFont(\"32px" },
-        Case { surface: "node", property: "font-weight", expected: Honoured,
+            needle: "SetFont(\"32px",
+        },
+        Case {
+            surface: "node",
+            property: "font-weight",
+            expected: Honoured,
             source: "flowchart TD\n  a[Alpha]\n  style a font-weight:bold\n",
-            needle: "SetFont(\"bold" },
-        Case { surface: "node", property: "opacity", expected: Honoured,
+            needle: "SetFont(\"bold",
+        },
+        Case {
+            surface: "node",
+            property: "opacity",
+            expected: Honoured,
             source: "flowchart TD\n  a[Alpha]\n  style a opacity:0.5\n",
-            needle: "SetGlobalAlpha(0.5)" },
-        Case { surface: "node", property: "font-style", expected: Honoured,
+            needle: "SetGlobalAlpha(0.5)",
+        },
+        Case {
+            surface: "node",
+            property: "font-style",
+            expected: Honoured,
             source: "flowchart TD\n  a[Alpha]\n  style a font-style:italic\n",
-            needle: "italic" },
-        Case { surface: "node", property: "font-family", expected: Honoured,
+            needle: "italic",
+        },
+        Case {
+            surface: "node",
+            property: "font-family",
+            expected: Honoured,
             source: "flowchart TD\n  a[Alpha]\n  style a font-family:Courier\n",
-            needle: "Courier" },
-
+            needle: "Courier",
+        },
         // ── edge ──────────────────────────────────────────────────────────────────────────
-        Case { surface: "edge", property: "stroke", expected: Honoured,
+        Case {
+            surface: "edge",
+            property: "stroke",
+            expected: Honoured,
             source: "flowchart TD\n  a[A] --> b[B]\n  linkStyle 0 stroke:#ff00ff\n",
-            needle: "SetStrokeStyle(\"#ff00ff\")" },
-        Case { surface: "edge", property: "stroke-width", expected: Honoured,
+            needle: "SetStrokeStyle(\"#ff00ff\")",
+        },
+        Case {
+            surface: "edge",
+            property: "stroke-width",
+            expected: Honoured,
             source: "flowchart TD\n  a[A] --> b[B]\n  linkStyle 0 stroke-width:4px\n",
-            needle: "SetLineWidth(4.0)" },
-        Case { surface: "edge", property: "stroke-dasharray", expected: Honoured,
+            needle: "SetLineWidth(4.0)",
+        },
+        Case {
+            surface: "edge",
+            property: "stroke-dasharray",
+            expected: Honoured,
             source: "flowchart TD\n  a[A] --> b[B]\n  linkStyle 0 stroke-dasharray:7 3\n",
-            needle: "SetLineDash([7.0, 3.0])" },
-        Case { surface: "edge", property: "color", expected: Honoured,
+            needle: "SetLineDash([7.0, 3.0])",
+        },
+        Case {
+            surface: "edge",
+            property: "color",
+            expected: Honoured,
             source: "flowchart TD\n  a[A] -->|hi| b[B]\n  linkStyle 0 color:#ff00ff\n",
-            needle: "SetFillStyle(\"#ff00ff\")" },
-        Case { surface: "edge", property: "opacity", expected: Honoured,
+            needle: "SetFillStyle(\"#ff00ff\")",
+        },
+        Case {
+            surface: "edge",
+            property: "opacity",
+            expected: Honoured,
             source: "flowchart TD\n  a[A] --> b[B]\n  linkStyle 0 opacity:0.5\n",
-            needle: "SetGlobalAlpha(0.5)" },
-        Case { surface: "edge", property: "font-size", expected: Honoured,
+            needle: "SetGlobalAlpha(0.5)",
+        },
+        Case {
+            surface: "edge",
+            property: "font-size",
+            expected: Honoured,
             source: "flowchart TD\n  a[A] -->|hi| b[B]\n  linkStyle 0 font-size:22px\n",
-            needle: "SetFont(\"22px" },
-
+            needle: "SetFont(\"22px",
+        },
         // ── cluster ───────────────────────────────────────────────────────────────────────
-        Case { surface: "cluster", property: "fill", expected: Honoured,
+        Case {
+            surface: "cluster",
+            property: "fill",
+            expected: Honoured,
             source: "flowchart TD\n  subgraph one[One]\n    a[Alpha]\n  end\n  style one fill:#ff00ff\n",
-            needle: "SetFillStyle(\"#ff00ff\")" },
-        Case { surface: "cluster", property: "stroke", expected: Honoured,
+            needle: "SetFillStyle(\"#ff00ff\")",
+        },
+        Case {
+            surface: "cluster",
+            property: "stroke",
+            expected: Honoured,
             source: "flowchart TD\n  subgraph one[One]\n    a[Alpha]\n  end\n  style one stroke:#ff00ff\n",
-            needle: "SetStrokeStyle(\"#ff00ff\")" },
-        Case { surface: "cluster", property: "stroke-width", expected: Honoured,
+            needle: "SetStrokeStyle(\"#ff00ff\")",
+        },
+        Case {
+            surface: "cluster",
+            property: "stroke-width",
+            expected: Honoured,
             source: "flowchart TD\n  subgraph one[One]\n    a[Alpha]\n  end\n  style one stroke-width:5px\n",
-            needle: "SetLineWidth(5.0)" },
-        Case { surface: "cluster", property: "stroke-dasharray", expected: Honoured,
+            needle: "SetLineWidth(5.0)",
+        },
+        Case {
+            surface: "cluster",
+            property: "stroke-dasharray",
+            expected: Honoured,
             source: "flowchart TD\n  subgraph one[One]\n    a[Alpha]\n  end\n  style one stroke-dasharray:9 4\n",
-            needle: "SetLineDash([9.0, 4.0])" },
-        Case { surface: "cluster", property: "color", expected: Honoured,
+            needle: "SetLineDash([9.0, 4.0])",
+        },
+        Case {
+            surface: "cluster",
+            property: "color",
+            expected: Honoured,
             source: "flowchart TD\n  subgraph one[One]\n    a[Alpha]\n  end\n  style one color:#ff00ff\n",
-            needle: "SetFillStyle(\"#ff00ff\")" },
-        Case { surface: "cluster", property: "opacity", expected: Honoured,
+            needle: "SetFillStyle(\"#ff00ff\")",
+        },
+        Case {
+            surface: "cluster",
+            property: "opacity",
+            expected: Honoured,
             source: "flowchart TD\n  subgraph one[One]\n    a[Alpha]\n  end\n  style one opacity:0.5\n",
-            needle: "SetGlobalAlpha(0.5)" },
-
+            needle: "SetGlobalAlpha(0.5)",
+        },
         // ── class-diagram compartment ─────────────────────────────────────────────────────
         // The compartment labels derive their own smaller fonts and are not rescaled, so a
         // font-size on a class node disagrees with the SVG arm, which cascades it to the whole
         // element. Recorded when the node font-size landed, deliberately not half-fixed there.
-        Case { surface: "compartment", property: "font-size", expected: Honoured,
+        Case {
+            surface: "compartment",
+            property: "font-size",
+            expected: Honoured,
             source: "classDiagram\n  class A {\n    +int x\n  }\n  style A font-size:30px\n",
-            needle: "SetFont(\"30px" },
+            needle: "SetFont(\"30px",
+        },
     ]
 }
 
@@ -218,7 +307,11 @@ fn the_styling_matrix_matches_the_table() {
         }
     }
 
-    assert!(wrong.is_empty(), "styling matrix is out of date:\n  {}", wrong.join("\n  "));
+    assert!(
+        wrong.is_empty(),
+        "styling matrix is out of date:\n  {}",
+        wrong.join("\n  ")
+    );
 }
 
 /// CONTROL: every case renders a real diagram.
@@ -260,7 +353,11 @@ fn the_table_covers_every_surface_without_duplicates() {
     seen.sort_unstable();
     let before = seen.len();
     seen.dedup();
-    assert_eq!(before, seen.len(), "the matrix lists a (surface, property) pair twice");
+    assert_eq!(
+        before,
+        seen.len(),
+        "the matrix lists a (surface, property) pair twice"
+    );
 
     for surface in ["node", "edge", "cluster", "compartment"] {
         assert!(
@@ -291,5 +388,8 @@ fn the_table_covers_every_surface_without_duplicates() {
 #[test]
 fn the_subgraph_fixture_parses() {
     let ops = canvas_ops(SUBGRAPH_HEAD);
-    assert!(ops.contains("FillText(\"Alpha\""), "the shared subgraph fixture did not render");
+    assert!(
+        ops.contains("FillText(\"Alpha\""),
+        "the shared subgraph fixture did not render"
+    );
 }
