@@ -72,7 +72,8 @@ struct Row {
 }
 
 fn oracle() -> BTreeMap<String, Row> {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mermaid_flow_links.tsv");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mermaid_flow_links.tsv");
     let text = fs::read_to_string(&fixture).expect("the mermaid link fixture is readable");
     let rows: BTreeMap<String, Row> = text
         .lines()
@@ -135,11 +136,16 @@ fn every_link_mermaid_accepts_wires_the_same_two_nodes() {
                 "`A {token} B`: mermaid wires {}->{}, we wire {from}->{to}",
                 row.start, row.end
             )),
-            None => wrong.push(format!("`A {token} B`: mermaid wires an edge, we produce none")),
+            None => wrong.push(format!(
+                "`A {token} B`: mermaid wires an edge, we produce none"
+            )),
         }
     }
 
-    assert!(checked >= 168, "the fixture lost its accepted tokens: {checked}");
+    assert!(
+        checked >= 168,
+        "the fixture lost its accepted tokens: {checked}"
+    );
     assert!(
         wrong.is_empty(),
         "{} of {checked} links wire the wrong nodes:\n  {}",
@@ -159,7 +165,9 @@ fn every_link_mermaid_accepts_carries_the_same_marker_and_stroke() {
         }
         checked += 1;
         let Some((_, _, arrow)) = parse_single_link(&token) else {
-            wrong.push(format!("`A {token} B`: mermaid builds an edge, we produce none"));
+            wrong.push(format!(
+                "`A {token} B`: mermaid builds an edge, we produce none"
+            ));
             continue;
         };
         let Some((kind, stroke)) = mermaid_meaning(arrow) else {
@@ -176,7 +184,10 @@ fn every_link_mermaid_accepts_carries_the_same_marker_and_stroke() {
         }
     }
 
-    assert!(checked >= 168, "the fixture lost its accepted tokens: {checked}");
+    assert!(
+        checked >= 168,
+        "the fixture lost its accepted tokens: {checked}"
+    );
     assert!(
         wrong.is_empty(),
         "{} of {checked} links carry the wrong marker or stroke:\n  {}",
@@ -190,7 +201,10 @@ fn every_link_mermaid_accepts_carries_the_same_marker_and_stroke() {
 #[test]
 fn the_head_marker_is_stripped_before_the_stroke_is_read() {
     // Head pairs with the tail: it is dropped, and the `==` underneath sets the weight.
-    assert_eq!(parse_single_link("o==o").unwrap().2, ArrowType::ThickCircleBoth);
+    assert_eq!(
+        parse_single_link("o==o").unwrap().2,
+        ArrowType::ThickCircleBoth
+    );
     // Head does NOT pair with the tail: it stays, so mermaid never sees the `=` and the link is
     // NORMAL weight. This is the reading that no one guesses from the syntax.
     assert_eq!(parse_single_link("o==>").unwrap().2, ArrowType::Arrow);
@@ -204,7 +218,9 @@ fn the_head_marker_is_stripped_before_the_stroke_is_read() {
 fn an_unmatched_head_or_tail_marker_never_lands_on_a_node_id() {
     // Each of these once produced a phantom endpoint — `A_o`, `o_B`, `A_x` — because the matcher
     // could not account for the marker byte and the endpoint parser swept it up.
-    for token in ["o===", "o====", "==o", "===x", "o-.-", "x-.-o", "-.-o", "o-..-o"] {
+    for token in [
+        "o===", "o====", "==o", "===x", "o-.-", "x-.-o", "-.-o", "o-..-o",
+    ] {
         let (from, to, _) = parse_single_link(token)
             .unwrap_or_else(|| panic!("`A {token} B` must build exactly one edge"));
         assert_eq!((from.as_str(), to.as_str()), ("A", "B"), "token `{token}`");
@@ -214,8 +230,14 @@ fn an_unmatched_head_or_tail_marker_never_lands_on_a_node_id() {
 /// The body run is unbounded in the grammar, so no finite table of spellings can be complete.
 #[test]
 fn an_arbitrarily_long_body_run_keeps_its_head_and_tail() {
-    assert_eq!(parse_single_link("o-----o").unwrap().2, ArrowType::CircleBoth);
-    assert_eq!(parse_single_link("x=====x").unwrap().2, ArrowType::ThickCrossBoth);
+    assert_eq!(
+        parse_single_link("o-----o").unwrap().2,
+        ArrowType::CircleBoth
+    );
+    assert_eq!(
+        parse_single_link("x=====x").unwrap().2,
+        ArrowType::ThickCrossBoth
+    );
     assert_eq!(
         parse_single_link("<----->").unwrap().2,
         ArrowType::DoubleArrow

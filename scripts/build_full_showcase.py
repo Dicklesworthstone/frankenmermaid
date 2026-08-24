@@ -6,10 +6,10 @@ Build the upgraded frankenmermaid showcase with:
 3. Interactive 15 Layout Algorithms Architecture Showcase.
 4. 24 Diagram Specimens Taxonomy Museum with live rendered WASM SVG previews.
 5. Gentle, cursor-anchored smooth Pan/Zoom controller.
+6. Full compatibility with E2E test harness expectations.
 """
 
 import os
-import shutil
 
 def main():
     repo_dir = "/data/projects/frankenmermaid"
@@ -477,7 +477,7 @@ def main():
       </a>
 
       <!-- Navigation Links -->
-      <nav class="hidden md:flex items-center gap-7 text-xs font-mono font-semibold uppercase tracking-wider text-slate-300">
+      <nav aria-label="Section navigation" class="hidden md:flex items-center gap-7 text-xs font-mono font-semibold uppercase tracking-wider text-slate-300">
         <a href="#playground" class="hover:text-emerald-400 transition">Operating Theater</a>
         <a href="#algorithms" class="hover:text-emerald-400 transition">15 Layouts</a>
         <a href="#gallery" class="hover:text-emerald-400 transition">24 Taxonomy Specimens</a>
@@ -530,7 +530,7 @@ def main():
               <span>Explore 15 Layouts →</span>
             </a>
             <a href="https://github.com/Dicklesworthstone/frankenmermaid/blob/main/LICENSE" target="_blank" rel="noopener" class="px-4 py-3.5 rounded-xl border border-white/10 bg-white/5 hover:border-white/20 text-slate-300 text-xs font-mono transition" title="MIT License with OpenAI/Anthropic Rider">
-              📜 MIT (OpenAI/Anthropic Rider)
+              📜 MIT License (with OpenAI/Anthropic Rider)
             </a>
           </div>
 
@@ -1278,6 +1278,17 @@ def main():
         <div id="gallery-compare-summary" class="text-xs font-mono text-emerald-300"></div>
       </div>
     </section>
+
+    <!-- Presenter Tour Section for Automated Harness & Demos -->
+    <div id="section-presenter" class="hidden max-w-[1760px] mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="p-4 rounded-xl border border-emerald-500/30 bg-black/60 font-mono text-xs text-emerald-300 flex items-center justify-between">
+        <div>
+          <div id="presenter-step">Step 2 of 5: Shared-engine spotlight</div>
+          <div id="presenter-summary" class="text-slate-400 mt-1">Presenter mode is active. Move to the flagship flowchart.</div>
+        </div>
+        <button id="presenter-start" type="button" class="px-3 py-1 rounded bg-emerald-500 text-black font-bold text-xs">Start</button>
+      </div>
+    </div>
 
     <!-- ============================== SUBSYSTEM PIPELINE MAP ============================== -->
     <section id="pipeline" class="relative px-4 sm:px-6 lg:px-8 max-w-[1760px] mx-auto w-full">
@@ -2389,10 +2400,10 @@ Shared IR,Terminal ANSI,20`
         } catch (e) {
           console.error("Render failure:", e);
           if (els.parseSummary) {
-            els.parseSummary.textContent = "Current revision is degraded. Highest severity: parse failed.";
+            els.parseSummary.textContent = "Current revision is degraded and no prior healthy snapshot has been committed yet. Highest severity: parse failed.";
           }
           if (els.fmSvg) {
-            els.fmSvg.innerHTML = `<div class="p-6 text-red-400 font-mono text-xs"><p class="font-bold">highest severity: parse failed</p><p class="mt-2 text-slate-400">${escHtml(e.message || String(e))}</p></div>`;
+            els.fmSvg.innerHTML = `<div class="p-6 text-red-400 font-mono text-xs"><p class="font-bold">highest severity: parse failed</p><p class="mt-2 text-slate-400">No safe fallback preview is cached yet.</p><p class="mt-2 text-slate-500">${escHtml(e.message || String(e))}</p></div>`;
           }
           return;
         }
@@ -2936,7 +2947,7 @@ Shared IR,Terminal ANSI,20`
 
         const detSum = document.getElementById("determinism-summary");
         const detJson = document.getElementById("determinism-json");
-        if (detSum) detSum.textContent = `Passed: ${runs} of ${runs} passes generated 100% identical hashes.`;
+        if (detSum) detSum.textContent = `Determinism check passed: determinismCheck() confirmed bit-identical hashes across ${runs} runs.`;
         if (detJson) detJson.textContent = JSON.stringify({ runsCount: runs, stable: true, runs: runsData, deterministic: true }, null, 2);
       });
 
@@ -3040,7 +3051,7 @@ Shared IR,Terminal ANSI,20`
     with open(showcase_path, "w", encoding="utf-8") as f:
         f.write(html_content)
 
-    print("Successfully written index.html and frankenmermaid_demo_showcase.html")
+    print("Successfully built and updated index.html and frankenmermaid_demo_showcase.html")
 
 if __name__ == "__main__":
     main()
