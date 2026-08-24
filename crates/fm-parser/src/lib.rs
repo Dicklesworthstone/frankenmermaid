@@ -1046,6 +1046,133 @@ impl StateParseLens {
     }
 }
 
+/// An ER-diagram text/IR lens that retains the original source as its formatting complement.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErParseLens {
+    snapshot: ParseLensSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ErParseLensError {
+    NotEr,
+    UnsupportedIrChange,
+    MissingSourceLabel(String),
+}
+
+impl std::fmt::Display for ErParseLensError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotEr => formatter.write_str("ParseLens currently supports ER diagrams only"),
+            Self::UnsupportedIrChange => formatter.write_str(
+                "ParseLens can re-emit explicit ER entity-label text changes only; ER structure is unchanged",
+            ),
+            Self::MissingSourceLabel(node_id) => write!(
+                formatter,
+                "could not locate the source label for ER entity '{node_id}'"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ErParseLensError {}
+
+impl ErParseLens {
+    /// Parses an ER diagram while retaining its exact source text.
+    pub fn parse(input: &str) -> Result<Self, ErParseLensError> {
+        let snapshot = build_parse_lens(input);
+        if snapshot.parsed.ir.diagram_type != DiagramType::Er {
+            return Err(ErParseLensError::NotEr);
+        }
+        Ok(Self { snapshot })
+    }
+
+    #[must_use]
+    pub fn ir(&self) -> &MermaidDiagramIr {
+        &self.snapshot.parsed.ir
+    }
+
+    #[must_use]
+    pub fn original_source(&self) -> &str {
+        self.snapshot.original_source()
+    }
+
+    /// Re-emits `edited` by replacing only explicit ER entity-label text.
+    pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, ErParseLensError> {
+        if edited.diagram_type != DiagramType::Er {
+            return Err(ErParseLensError::NotEr);
+        }
+
+        let original = self.ir();
+        if original.labels.len() != edited.labels.len() {
+            return Err(ErParseLensError::UnsupportedIrChange);
+        }
+        let mut labels_only = original.clone();
+        for (expected, actual) in labels_only.labels.iter_mut().zip(&edited.labels) {
+            expected.text.clone_from(&actual.text);
+        }
+        if &labels_only != edited {
+            return Err(ErParseLensError::UnsupportedIrChange);
+        }
+
+        let changed_labels: Vec<usize> = original
+            .labels
+            .iter()
+            .zip(&edited.labels)
+            .enumerate()
+            .filter_map(|(index, (before, after))| (before.text != after.text).then_some(index))
+            .collect();
+        if changed_labels.is_empty() {
+            return Ok(self.original_source().to_string());
+        }
+
+        let mut replacements = Vec::new();
+        let mut covered_labels = vec![false; original.labels.len()];
+        for (node_index, node) in original.nodes.iter().enumerate() {
+            let Some(label_id) = node.label else {
+                continue;
+            };
+            if !changed_labels.contains(&label_id.0) {
+                continue;
+            }
+            let source_entry = self.snapshot.source_map.entries.iter().find(|entry| {
+                entry.kind == MermaidSourceMapKind::Node && entry.index == node_index
+            });
+            let Some(source_entry) = source_entry else {
+                return Err(ErParseLensError::MissingSourceLabel(node.id.clone()));
+            };
+            let Some(line_range) =
+                resolve_span_text_range(self.original_source(), source_entry.span)
+            else {
+                return Err(ErParseLensError::MissingSourceLabel(node.id.clone()));
+            };
+            let old_label = &original.labels[label_id.0].text;
+            let label_range = find_flowchart_label_text_range(
+                self.original_source(),
+                line_range,
+                &node.id,
+                old_label,
+            )
+            .ok_or_else(|| ErParseLensError::MissingSourceLabel(node.id.clone()))?;
+            replacements.push((label_range, edited.labels[label_id.0].text.as_str()));
+            covered_labels[label_id.0] = true;
+        }
+        if changed_labels
+            .iter()
+            .any(|label_id| !covered_labels[*label_id])
+        {
+            return Err(ErParseLensError::UnsupportedIrChange);
+        }
+
+        replacements.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start_byte));
+        let mut updated = self.original_source().to_string();
+        for (range, replacement) in replacements {
+            updated.replace_range(range.start_byte..range.end_byte, replacement);
+        }
+        Ok(updated)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ParserConfig {
     pub intent_inference: bool,
