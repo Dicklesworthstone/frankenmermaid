@@ -1,0 +1,382 @@
+{
+  "ok": true,
+  "base_url": "http://127.0.0.1:50263",
+  "serve_root": "/data/projects/frankenmermaid",
+  "route_prefix": "/web",
+  "surface": "web",
+  "host_kind": "static-web",
+  "repeat": 5,
+  "profiles": [
+    "desktop-default",
+    "desktop-reduced-motion",
+    "mobile-narrow"
+  ],
+  "scenarios": [
+    "static-web-diagnostics-recovery"
+  ],
+  "results": [
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "url": "http://127.0.0.1:50263/web?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-default/2026-08-24T06-38-22Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-default/2026-08-24T06-38-22Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:a0905b4e02f6fc8d86755656daa2b7d1ab0ad01632726762ecca8142c37a43f1",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-default-run1"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "run_index": 2,
+      "url": "http://127.0.0.1:50263/web?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-default/2026-08-24T06-38-28Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-default/2026-08-24T06-38-28Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:52653c71ae320322d5bc7518da014c912310742ce0dbb5a3aeaa5aa49c82c1fa",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-default-run2"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "run_index": 3,
+      "url": "http://127.0.0.1:50263/web?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-default/2026-08-24T06-38-34Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-default/2026-08-24T06-38-34Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:9918e00c4e4c82e8a253040d1df32ac79fe684c94ed362eeaa3a9adc768846c0",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-default-run3"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "run_index": 4,
+      "url": "http://127.0.0.1:50263/web?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-default/2026-08-24T06-38-39Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-default/2026-08-24T06-38-39Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:82c92fa91c22759c9abc1b373b714e68a6d0d263acc81cd6c5f4ca76e2bd6dbf",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-default-run4"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "run_index": 5,
+      "url": "http://127.0.0.1:50263/web?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-default/2026-08-24T06-38-45Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-default/2026-08-24T06-38-45Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:aeef8c0c251730817e4f14a4385e55aa4072c07e7b9a301a61ac3ce8ec586804",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-default-run5"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-reduced-motion",
+      "run_index": 1,
+      "url": "http://127.0.0.1:50263/web?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-reduced-motion/2026-08-24T06-38-54Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-reduced-motion/2026-08-24T06-38-54Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:a31931c194bf1da1aecc5555b37c93410783f8aec90849e0a856383667f14174",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-reduced-motion-run1"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-reduced-motion",
+      "run_index": 2,
+      "url": "http://127.0.0.1:50263/web?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-reduced-motion/2026-08-24T06-39-02Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-reduced-motion/2026-08-24T06-39-02Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:92d631b0318a0d60db445155d828c63c5acd51c46b86f89e68e4166c093e4a0b",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-reduced-motion-run2"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-reduced-motion",
+      "run_index": 3,
+      "url": "http://127.0.0.1:50263/web?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-reduced-motion/2026-08-24T06-39-11Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-reduced-motion/2026-08-24T06-39-11Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:70416f3fda45bf2a8e642382584db168ebd00a41080d49a91177cd976af8d024",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-reduced-motion-run3"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-reduced-motion",
+      "run_index": 4,
+      "url": "http://127.0.0.1:50263/web?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-reduced-motion/2026-08-24T06-39-20Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-reduced-motion/2026-08-24T06-39-20Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:23187dd80c3f7e844e61b861b0e34ffc4393586bdc465322256961f3dbb30d73",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-reduced-motion-run4"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-reduced-motion",
+      "run_index": 5,
+      "url": "http://127.0.0.1:50263/web?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-reduced-motion/2026-08-24T06-39-28Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-reduced-motion/2026-08-24T06-39-28Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:dbb194538378684601ba46d1c16c4164040b889bb30c8a3db066d009efe9e208",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-reduced-motion-run5"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "mobile-narrow",
+      "run_index": 1,
+      "url": "http://127.0.0.1:50263/web?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/mobile-narrow/2026-08-24T06-39-34Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/mobile-narrow/2026-08-24T06-39-34Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:ceb2029c9e316af1112c6670724591eaebd266c2ac0ad5664113d8d328f4389f",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-mobile-narrow-run1"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "mobile-narrow",
+      "run_index": 2,
+      "url": "http://127.0.0.1:50263/web?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/mobile-narrow/2026-08-24T06-39-40Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/mobile-narrow/2026-08-24T06-39-40Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:0a1aad712ee91c7d490973d75a6ee10b689dbb08ae182aab927e30401cfc2feb",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-mobile-narrow-run2"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "mobile-narrow",
+      "run_index": 3,
+      "url": "http://127.0.0.1:50263/web?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/mobile-narrow/2026-08-24T06-39-46Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/mobile-narrow/2026-08-24T06-39-46Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:83ddd773ec8bd387899b74b7f3fadb93db06d2e50244c932e933e78458659ad2",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-mobile-narrow-run3"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "mobile-narrow",
+      "run_index": 4,
+      "url": "http://127.0.0.1:50263/web?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/mobile-narrow/2026-08-24T06-39-51Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/mobile-narrow/2026-08-24T06-39-51Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:1bbef1c95c4d73ff8ff07f9e59d795fb63c18994919a4c9d6934fa86a731d948",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-mobile-narrow-run4"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "mobile-narrow",
+      "run_index": 5,
+      "url": "http://127.0.0.1:50263/web?sample=flowchart-1-incident-response-escalation&source=flowchart+LR%0AA--%3E&lab=overview",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/mobile-narrow/2026-08-24T06-39-57Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/mobile-narrow/2026-08-24T06-39-57Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:8e11468ad52c2c4e336f9c7f8a7f7b0d5fbc8ff359d734c94383e81208d7afcd",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-mobile-narrow-run5"
+    }
+  ],
+  "determinism": [
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "runs": 5,
+      "stable_output_hash": false,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:a0905b4e02f6fc8d86755656daa2b7d1ab0ad01632726762ecca8142c37a43f1",
+        "sha256:52653c71ae320322d5bc7518da014c912310742ce0dbb5a3aeaa5aa49c82c1fa",
+        "sha256:9918e00c4e4c82e8a253040d1df32ac79fe684c94ed362eeaa3a9adc768846c0",
+        "sha256:82c92fa91c22759c9abc1b373b714e68a6d0d263acc81cd6c5f4ca76e2bd6dbf",
+        "sha256:aeef8c0c251730817e4f14a4385e55aa4072c07e7b9a301a61ac3ce8ec586804"
+      ]
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-reduced-motion",
+      "runs": 5,
+      "stable_output_hash": false,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:a31931c194bf1da1aecc5555b37c93410783f8aec90849e0a856383667f14174",
+        "sha256:92d631b0318a0d60db445155d828c63c5acd51c46b86f89e68e4166c093e4a0b",
+        "sha256:70416f3fda45bf2a8e642382584db168ebd00a41080d49a91177cd976af8d024",
+        "sha256:23187dd80c3f7e844e61b861b0e34ffc4393586bdc465322256961f3dbb30d73",
+        "sha256:dbb194538378684601ba46d1c16c4164040b889bb30c8a3db066d009efe9e208"
+      ]
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "mobile-narrow",
+      "runs": 5,
+      "stable_output_hash": false,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:ceb2029c9e316af1112c6670724591eaebd266c2ac0ad5664113d8d328f4389f",
+        "sha256:0a1aad712ee91c7d490973d75a6ee10b689dbb08ae182aab927e30401cfc2feb",
+        "sha256:83ddd773ec8bd387899b74b7f3fadb93db06d2e50244c932e933e78458659ad2",
+        "sha256:1bbef1c95c4d73ff8ff07f9e59d795fb63c18994919a4c9d6934fa86a731d948",
+        "sha256:8e11468ad52c2c4e336f9c7f8a7f7b0d5fbc8ff359d734c94383e81208d7afcd"
+      ]
+    }
+  ],
+  "differential": [],
+  "trace_index": [
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-default-run1",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-default/2026-08-24T06-38-22Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "run_index": 2,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-default-run2",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-default/2026-08-24T06-38-28Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "run_index": 3,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-default-run3",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-default/2026-08-24T06-38-34Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "run_index": 4,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-default-run4",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-default/2026-08-24T06-38-39Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-default",
+      "run_index": 5,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-default-run5",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-default/2026-08-24T06-38-45Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-reduced-motion",
+      "run_index": 1,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-reduced-motion-run1",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-reduced-motion/2026-08-24T06-38-54Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-reduced-motion",
+      "run_index": 2,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-reduced-motion-run2",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-reduced-motion/2026-08-24T06-39-02Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-reduced-motion",
+      "run_index": 3,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-reduced-motion-run3",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-reduced-motion/2026-08-24T06-39-11Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-reduced-motion",
+      "run_index": 4,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-reduced-motion-run4",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-reduced-motion/2026-08-24T06-39-20Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "desktop-reduced-motion",
+      "run_index": 5,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-desktop-reduced-motion-run5",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/desktop-reduced-motion/2026-08-24T06-39-28Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "mobile-narrow",
+      "run_index": 1,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-mobile-narrow-run1",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/mobile-narrow/2026-08-24T06-39-34Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "mobile-narrow",
+      "run_index": 2,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-mobile-narrow-run2",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/mobile-narrow/2026-08-24T06-39-40Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "mobile-narrow",
+      "run_index": 3,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-mobile-narrow-run3",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/mobile-narrow/2026-08-24T06-39-46Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "mobile-narrow",
+      "run_index": 4,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-mobile-narrow-run4",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/mobile-narrow/2026-08-24T06-39-51Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-diagnostics-recovery",
+      "profile": "mobile-narrow",
+      "run_index": 5,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-diagnostics-recovery-mobile-narrow-run5",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-diagnostics-recovery/mobile-narrow/2026-08-24T06-39-57Z__e2e__log.json"
+    }
+  ],
+  "summary_path": "evidence/runs/web/bd-2u0.5.8.2.3/2026-08-24T06-39-57Z__determinism__summary.json"
+}

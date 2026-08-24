@@ -1,0 +1,298 @@
+{
+  "ok": true,
+  "base_url": "http://127.0.0.1:40401",
+  "serve_root": "/data/projects/frankenmermaid",
+  "route_prefix": "/web",
+  "surface": "web",
+  "host_kind": "static-web",
+  "repeat": 5,
+  "profiles": [
+    "desktop-default"
+  ],
+  "scenarios": [
+    "static-web-compare-export"
+  ],
+  "results": [
+    {
+      "scenario_id": "static-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "url": "http://127.0.0.1:40401/web?sample=flowchart-1-incident-response-escalation&spotlight=flowchart-1-incident-response-escalation&compare=flowchart-3-change-approval-pipeline%2Csequence-1-checkout-risk-review&lab=cycles",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-compare-export/desktop-default/2026-08-24T06-33-26Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-compare-export/desktop-default/2026-08-24T06-33-26Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:e3c3891fbebfe40a405acd236e7bc1fcdf25130d3e84db57f25c49da0e5c9ba9",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-compare-export-desktop-default-run1",
+      "differential": {
+        "telemetry_present": true,
+        "comparison_ready": false,
+        "franken_svg_present": true,
+        "mermaid_svg_present": false,
+        "health": "healthy",
+        "mermaid_timing_ms": 14,
+        "franken_svg_timing_ms": 2,
+        "canvas_timing_ms": 1,
+        "degradation_reasons": [],
+        "mermaid_baseline_degraded": false,
+        "franken_svg_degraded": false,
+        "runtime_artifact_missing": false
+      }
+    },
+    {
+      "scenario_id": "static-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 2,
+      "url": "http://127.0.0.1:40401/web?sample=flowchart-1-incident-response-escalation&spotlight=flowchart-1-incident-response-escalation&compare=flowchart-3-change-approval-pipeline%2Csequence-1-checkout-risk-review&lab=cycles",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-compare-export/desktop-default/2026-08-24T06-33-27Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-compare-export/desktop-default/2026-08-24T06-33-27Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:a9b40f0af5c39a92772735275df1ee85b36b156b37325a4dc25b4652003bde56",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-compare-export-desktop-default-run2",
+      "differential": {
+        "telemetry_present": true,
+        "comparison_ready": false,
+        "franken_svg_present": true,
+        "mermaid_svg_present": false,
+        "health": "healthy",
+        "mermaid_timing_ms": 14,
+        "franken_svg_timing_ms": 2,
+        "canvas_timing_ms": 1,
+        "degradation_reasons": [],
+        "mermaid_baseline_degraded": false,
+        "franken_svg_degraded": false,
+        "runtime_artifact_missing": false
+      }
+    },
+    {
+      "scenario_id": "static-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 3,
+      "url": "http://127.0.0.1:40401/web?sample=flowchart-1-incident-response-escalation&spotlight=flowchart-1-incident-response-escalation&compare=flowchart-3-change-approval-pipeline%2Csequence-1-checkout-risk-review&lab=cycles",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-compare-export/desktop-default/2026-08-24T06-33-28Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-compare-export/desktop-default/2026-08-24T06-33-28Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:1bbd541f7513cfb982d65f1499771d35b56188b21fb8190bb949823d67fce67b",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-compare-export-desktop-default-run3",
+      "differential": {
+        "telemetry_present": true,
+        "comparison_ready": false,
+        "franken_svg_present": true,
+        "mermaid_svg_present": false,
+        "health": "healthy",
+        "mermaid_timing_ms": 14,
+        "franken_svg_timing_ms": 2,
+        "canvas_timing_ms": 1,
+        "degradation_reasons": [],
+        "mermaid_baseline_degraded": false,
+        "franken_svg_degraded": false,
+        "runtime_artifact_missing": false
+      }
+    },
+    {
+      "scenario_id": "static-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 4,
+      "url": "http://127.0.0.1:40401/web?sample=flowchart-1-incident-response-escalation&spotlight=flowchart-1-incident-response-escalation&compare=flowchart-3-change-approval-pipeline%2Csequence-1-checkout-risk-review&lab=cycles",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-compare-export/desktop-default/2026-08-24T06-33-29Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-compare-export/desktop-default/2026-08-24T06-33-29Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:d58bf1d1d85573001c0f6f11b30f209ec6f6b316bb0ab30ede9cba8aa88ed9df",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-compare-export-desktop-default-run4",
+      "differential": {
+        "telemetry_present": true,
+        "comparison_ready": false,
+        "franken_svg_present": true,
+        "mermaid_svg_present": false,
+        "health": "healthy",
+        "mermaid_timing_ms": 14,
+        "franken_svg_timing_ms": 2,
+        "canvas_timing_ms": 1,
+        "degradation_reasons": [],
+        "mermaid_baseline_degraded": false,
+        "franken_svg_degraded": false,
+        "runtime_artifact_missing": false
+      }
+    },
+    {
+      "scenario_id": "static-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 5,
+      "url": "http://127.0.0.1:40401/web?sample=flowchart-1-incident-response-escalation&spotlight=flowchart-1-incident-response-escalation&compare=flowchart-3-change-approval-pipeline%2Csequence-1-checkout-risk-review&lab=cycles",
+      "html_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-compare-export/desktop-default/2026-08-24T06-33-31Z__e2e__html.html",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-compare-export/desktop-default/2026-08-24T06-33-31Z__e2e__log.json",
+      "diagnostic_count": 0,
+      "degradation_tier": "fallback",
+      "runtime_mode": "mock-forbidden",
+      "output_artifact_hash": "sha256:8825e8fcc5e429bcf5f40eec4bf53f82e5cbf2592b1ff4c00d3fdb19d12d6077",
+      "determinism_status": "unreported",
+      "trace_id": "bd-2u0.5.8.2.3-static-web-compare-export-desktop-default-run5",
+      "differential": {
+        "telemetry_present": true,
+        "comparison_ready": false,
+        "franken_svg_present": true,
+        "mermaid_svg_present": false,
+        "health": "healthy",
+        "mermaid_timing_ms": 14,
+        "franken_svg_timing_ms": 2,
+        "canvas_timing_ms": 1,
+        "degradation_reasons": [],
+        "mermaid_baseline_degraded": false,
+        "franken_svg_degraded": false,
+        "runtime_artifact_missing": false
+      }
+    }
+  ],
+  "determinism": [
+    {
+      "scenario_id": "static-web-compare-export",
+      "profile": "desktop-default",
+      "runs": 5,
+      "stable_output_hash": false,
+      "stable_normalized_log": true,
+      "output_hashes": [
+        "sha256:e3c3891fbebfe40a405acd236e7bc1fcdf25130d3e84db57f25c49da0e5c9ba9",
+        "sha256:a9b40f0af5c39a92772735275df1ee85b36b156b37325a4dc25b4652003bde56",
+        "sha256:1bbd541f7513cfb982d65f1499771d35b56188b21fb8190bb949823d67fce67b",
+        "sha256:d58bf1d1d85573001c0f6f11b30f209ec6f6b316bb0ab30ede9cba8aa88ed9df",
+        "sha256:8825e8fcc5e429bcf5f40eec4bf53f82e5cbf2592b1ff4c00d3fdb19d12d6077"
+      ]
+    }
+  ],
+  "differential": [
+    {
+      "scenario_id": "static-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "telemetry_present": true,
+      "comparison_ready": false,
+      "franken_svg_present": true,
+      "mermaid_svg_present": false,
+      "health": "healthy",
+      "mermaid_timing_ms": 14,
+      "franken_svg_timing_ms": 2,
+      "canvas_timing_ms": 1,
+      "degradation_reasons": [],
+      "mermaid_baseline_degraded": false,
+      "franken_svg_degraded": false,
+      "runtime_artifact_missing": false
+    },
+    {
+      "scenario_id": "static-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 2,
+      "telemetry_present": true,
+      "comparison_ready": false,
+      "franken_svg_present": true,
+      "mermaid_svg_present": false,
+      "health": "healthy",
+      "mermaid_timing_ms": 14,
+      "franken_svg_timing_ms": 2,
+      "canvas_timing_ms": 1,
+      "degradation_reasons": [],
+      "mermaid_baseline_degraded": false,
+      "franken_svg_degraded": false,
+      "runtime_artifact_missing": false
+    },
+    {
+      "scenario_id": "static-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 3,
+      "telemetry_present": true,
+      "comparison_ready": false,
+      "franken_svg_present": true,
+      "mermaid_svg_present": false,
+      "health": "healthy",
+      "mermaid_timing_ms": 14,
+      "franken_svg_timing_ms": 2,
+      "canvas_timing_ms": 1,
+      "degradation_reasons": [],
+      "mermaid_baseline_degraded": false,
+      "franken_svg_degraded": false,
+      "runtime_artifact_missing": false
+    },
+    {
+      "scenario_id": "static-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 4,
+      "telemetry_present": true,
+      "comparison_ready": false,
+      "franken_svg_present": true,
+      "mermaid_svg_present": false,
+      "health": "healthy",
+      "mermaid_timing_ms": 14,
+      "franken_svg_timing_ms": 2,
+      "canvas_timing_ms": 1,
+      "degradation_reasons": [],
+      "mermaid_baseline_degraded": false,
+      "franken_svg_degraded": false,
+      "runtime_artifact_missing": false
+    },
+    {
+      "scenario_id": "static-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 5,
+      "telemetry_present": true,
+      "comparison_ready": false,
+      "franken_svg_present": true,
+      "mermaid_svg_present": false,
+      "health": "healthy",
+      "mermaid_timing_ms": 14,
+      "franken_svg_timing_ms": 2,
+      "canvas_timing_ms": 1,
+      "degradation_reasons": [],
+      "mermaid_baseline_degraded": false,
+      "franken_svg_degraded": false,
+      "runtime_artifact_missing": false
+    }
+  ],
+  "trace_index": [
+    {
+      "scenario_id": "static-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 1,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-compare-export-desktop-default-run1",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-compare-export/desktop-default/2026-08-24T06-33-26Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 2,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-compare-export-desktop-default-run2",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-compare-export/desktop-default/2026-08-24T06-33-27Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 3,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-compare-export-desktop-default-run3",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-compare-export/desktop-default/2026-08-24T06-33-28Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 4,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-compare-export-desktop-default-run4",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-compare-export/desktop-default/2026-08-24T06-33-29Z__e2e__log.json"
+    },
+    {
+      "scenario_id": "static-web-compare-export",
+      "profile": "desktop-default",
+      "run_index": 5,
+      "trace_id": "bd-2u0.5.8.2.3-static-web-compare-export-desktop-default-run5",
+      "log_path": "evidence/runs/web/bd-2u0.5.8.2.3/static-web-compare-export/desktop-default/2026-08-24T06-33-31Z__e2e__log.json"
+    }
+  ],
+  "summary_path": "evidence/runs/web/bd-2u0.5.8.2.3/2026-08-24T06-33-31Z__determinism__summary.json"
+}
