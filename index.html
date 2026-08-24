@@ -231,20 +231,20 @@
 
     /* Split shell system */
     .split-shell {
-      --shell-left: minmax(0, 1.05fr);
-      --shell-right: minmax(18rem, 0.95fr);
+      --shell-left: minmax(0, 42%);
+      --shell-right: minmax(0, 58%);
     }
     .split-shell[data-balance="wide-left"] {
-      --shell-left: minmax(0, 1.3fr);
-      --shell-right: minmax(16rem, 0.7fr);
+      --shell-left: minmax(0, 55%);
+      --shell-right: minmax(0, 45%);
     }
     .split-shell[data-balance="balanced"] {
-      --shell-left: minmax(0, 1fr);
-      --shell-right: minmax(17rem, 1fr);
+      --shell-left: minmax(0, 42%);
+      --shell-right: minmax(0, 58%);
     }
     .split-shell[data-balance="wide-right"] {
-      --shell-left: minmax(0, 0.7fr);
-      --shell-right: minmax(18rem, 1.3fr);
+      --shell-left: minmax(0, 32%);
+      --shell-right: minmax(0, 68%);
     }
 
     .shell-grid {
@@ -318,11 +318,11 @@
       position: relative;
       width: 100%;
       height: 100%;
-      min-height: 380px;
+      min-height: 560px;
       overflow: hidden;
       touch-action: none;
       user-select: none;
-      background: radial-gradient(circle, rgba(56, 189, 248, 0.03) 1px, transparent 1px);
+      background: radial-gradient(circle, rgba(56, 189, 248, 0.04) 1px, transparent 1px);
       background-size: 24px 24px;
       cursor: grab;
     }
@@ -336,12 +336,12 @@
       left: 0;
       width: 100%;
       height: 100%;
-      transform-origin: 0 0;
+      transform-origin: center center;
       transition: transform 0.05s ease-out;
       display: flex;
       align-items: center;
       justify-content: center;
-      padding: 1.5rem;
+      padding: 1rem;
     }
 
     .spotlight-stage, .stage, .gallery-stage {
@@ -365,12 +365,14 @@
       box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.4), 0 12px 36px rgba(0, 0, 0, 0.4);
     }
 
-    .spotlight-stage svg, .stage svg, .gallery-stage svg {
+    .spotlight-stage svg, .stage svg, #fm-svg svg, #spotlight-stage svg, .gallery-stage svg {
       max-width: 100%;
+      max-height: 100%;
+      width: auto;
       height: auto;
       display: block;
       margin: auto;
-      filter: drop-shadow(0 4px 16px rgba(0, 0, 0, 0.15));
+      filter: drop-shadow(0 4px 16px rgba(0, 0, 0, 0.2));
     }
 
     /* Enhanced SVG Diagram Visual Quality Boost */
@@ -514,7 +516,8 @@
       border: 1px solid rgba(255, 255, 255, 0.1);
       display: flex;
       overflow: hidden;
-      min-height: 390px;
+      min-height: 560px;
+      flex: 1;
     }
 
     .editor-gutter {
@@ -634,7 +637,7 @@
 
     <!-- Top Sticky Header Navigation Bar -->
     <header class="sticky top-0 z-50 border-b border-white/[0.08] bg-slate-950/85 backdrop-blur-xl transition-all">
-      <div class="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
+      <div class="mx-auto flex max-w-[1800px] w-full items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
         
         <!-- Logo & Engine Brand -->
         <div class="flex items-center gap-3">
@@ -676,12 +679,6 @@
             <kbd class="rounded border border-white/15 bg-white/10 px-1.5 py-0.5 text-[10px] text-slate-400 font-mono">⌘K</kbd>
           </button>
 
-          <!-- Presenter Tour Button -->
-          <button id="tour-launcher-btn" type="button" class="btn-action !py-1.5 !px-3 text-xs bg-violet-500/10 border-violet-500/30 text-violet-300 hover:bg-violet-500/20 hover:text-violet-200">
-            <span class="animate-pulse">✨</span>
-            <span class="hidden sm:inline">Presenter Tour</span>
-          </button>
-
           <!-- Theme Mode Switcher -->
           <button id="theme-toggle-btn" type="button" aria-label="Toggle dark/light theme" class="rounded-xl border border-white/10 bg-white/5 p-2 text-slate-300 hover:bg-white/10 hover:text-white transition">
             <svg id="theme-icon-moon" class="h-4 w-4 block" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -708,8 +705,8 @@
       </div>
     </header>
 
-    <!-- Presenter Tour Floating Bar -->
-    <section id="section-presenter" class="mx-auto mt-4 w-full max-w-7xl px-4 sm:px-6 lg:px-8">
+    <!-- Presenter Tour Bar (Hidden by default, active for guided E2E suites) -->
+    <section id="section-presenter" class="hidden mx-auto mt-4 w-full max-w-[1800px] px-4 sm:px-6 lg:px-8">
       <div class="panel-card border-violet-500/30 bg-gradient-to-br from-violet-950/40 via-slate-900/80 to-slate-950/90 p-5 shadow-glow-violet transition-all">
         <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div class="flex items-start gap-3">
@@ -749,7 +746,7 @@
     </section>
 
     <!-- Main Content Area with A11y Landmark -->
-    <main id="main-content" class="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8 flex-1 flex flex-col gap-10">
+    <main id="main-content" class="mx-auto w-full max-w-[1800px] px-4 py-6 sm:px-6 lg:px-8 xl:px-12 flex-1 flex flex-col gap-10">
 
       <!-- Section: Runtime & Engine Status -->
       <section id="section-runtime" class="w-full">
@@ -2306,7 +2303,7 @@
       currentTour: null,
       currentTourStepIndex: -1,
       viewMode: "svg",
-      activeTheme: "corporate",
+      activeTheme: "dark",
       layoutAlgo: "auto",
       cycleStrategy: "cycle-aware",
       nodeSpacing: 80,
@@ -2459,6 +2456,7 @@
             state.runtimeLoaded = true;
             state.runtimeCandidate = candidate;
             updateRuntimeBanner(candidate);
+            renderSpotlight();
             return frankenRuntime;
           }
         } catch (err) {
@@ -2499,8 +2497,10 @@
     }
 
     function buildRuntimeSvgOptions() {
+      const isLight = document.documentElement.classList.contains("light");
+      const defaultTheme = isLight ? "corporate" : "dark";
       return {
-        theme: state.activeTheme || "corporate",
+        theme: state.activeTheme || defaultTheme,
         responsive: true,
         accessible: true,
         fontSize: parseFloat(els.styleFontSize?.value || 14),
@@ -3464,6 +3464,8 @@
       }
 
       if (requestedTour && presenterTours[requestedTour]) {
+        const presenterSection = document.getElementById("section-presenter");
+        if (presenterSection) presenterSection.classList.remove("hidden");
         state.currentTour = presenterTours[requestedTour];
         state.currentTourStepIndex = parseInt(requestedTourStep || "0", 10);
         applyPresenterTourStep();
@@ -3491,6 +3493,9 @@
 
       // Bootstrap WebAssembly Runtime
       await loadFrankenRuntime();
+
+      // Refresh spotlight with loaded WASM runtime
+      renderSpotlight();
 
       // Initial Render
       await scheduleRender(true);
