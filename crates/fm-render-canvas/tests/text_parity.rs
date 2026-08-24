@@ -451,3 +451,103 @@ fn declared_text_reaches_the_canvas_for_every_diagram_type() {
         failures.join("\n  ")
     );
 }
+
+/// SAME-IR SVG/CANVAS COMPARISON: a class member's TYPE and its abstract/static classifier must
+/// reach the canvas, because they reach the SVG (bd-9wdra).
+///
+/// Found the way bd-bk7h was: by counting field references per backend. `is_abstract` and
+/// `is_static` appeared TWICE in fm-render-svg, ONCE in fm-render-term, and ZERO times in this
+/// crate. Canvas being the only backend of three that never reads a field is what distinguishes a
+/// defect from a deliberate difference in what a raster surface can express.
+///
+/// `+area(): bool` rendered as `+area()` on the canvas; an abstract `+run()*` and a static
+/// `+load()$` lost their marker entirely, so an abstract method was indistinguishable from a
+/// concrete one in the browser and identical in the CLI's SVG.
+///
+/// The SVG is the reference ARM, not the assertion: each check joins the two backends on the same
+/// parsed IR, and the SVG side is asserted first so a fixture that stopped exercising the feature
+/// fails as a CONTROL rather than passing vacuously.
+#[test]
+fn class_member_types_and_classifiers_reach_the_canvas_as_they_reach_the_svg() {
+    const SOURCE: &str = "classDiagram\n  class Shape {\n    +String name\n    +area()* float\n    \
+                          +load()$ Shape\n    -id int\n  }\n";
+    let ir = fm_parser::parse(SOURCE).ir;
+
+    // CONTROL ON THE PARSE: the classifiers must have survived into the IR, or both arms would
+    // agree by both being empty and this test would certify nothing.
+    let shape = ir
+        .nodes
+        .iter()
+        .find_map(|node| node.class_meta.as_deref())
+        .expect("CONTROL FAILED: the class was not parsed, so neither arm can be compared");
+    assert!(
+        shape.methods.iter().any(|m| m.is_abstract),
+        "CONTROL FAILED: no method parsed as abstract, so `*` is not under test here"
+    );
+    assert!(
+        shape.methods.iter().any(|m| m.is_static),
+        "CONTROL FAILED: no method parsed as static, so `$` is not under test here"
+    );
+
+    let svg = fm_render_svg::render_svg(&ir);
+
+    let mut context = MockCanvas2dContext::new(1600.0, 1200.0);
+    render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let texts = drawn_text(&format!("{:?}", context.operations()));
+
+    // Each row as the shared contract spells it: visibility, name, classifier, then the type tail.
+    // fm-layout's `class_member_row_width` builds this exact string to MEASURE the box, so a
+    // disagreement here is also the box being sized for text nobody drew.
+    for row in [
+        "+String name",
+        "-id int",
+        "+area()*: float",
+        "+load()$: Shape",
+    ] {
+        assert!(
+            svg.contains(row),
+            "CONTROL FAILED: the SVG arm never emitted {row:?}, so it cannot serve as the reference"
+        );
+        assert!(
+            texts.iter().any(|text| text == row),
+            "the canvas never drew {row:?}; SVG did. Drawn rows were {:?}",
+            texts
+                .iter()
+                .filter(|t| t.starts_with(['+', '-', '#', '~']))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // NEGATIVE CONTROL: the classifier belongs to methods only. An attribute must NOT gain one, or
+    // the fix would have traded a missing marker for a spurious one — and every assertion above
+    // would still pass.
+    assert!(
+        !texts
+            .iter()
+            .any(|text| text.starts_with("+String name")
+                && (text.contains('*') || text.contains('$'))),
+        "an attribute row gained a method classifier: {texts:?}"
+    );
+}
+
+/// CONTROL: a class whose members declare NO type and NO classifier gains nothing.
+///
+/// Without this, an implementation that appended a stray `": "` or a marker to every row would
+/// satisfy the case above — the assertions there only ever look for MORE text.
+#[test]
+fn a_plain_class_member_gains_no_type_and_no_classifier_on_the_canvas() {
+    let ir = fm_parser::parse("classDiagram\n  class Alpha\n  Alpha : +run()\n").ir;
+
+    let mut context = MockCanvas2dContext::new(1200.0, 800.0);
+    render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let texts = drawn_text(&format!("{:?}", context.operations()));
+
+    let row = texts
+        .iter()
+        .find(|text| text.starts_with("+run"))
+        .expect("CONTROL FAILED: the member row was not drawn at all");
+    assert_eq!(
+        row, "+run()",
+        "a member with no declared type or classifier gained one"
+    );
+}

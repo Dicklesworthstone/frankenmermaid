@@ -2261,8 +2261,7 @@ impl Canvas2dRenderer {
                     if cursor_y > y + h - line_h * 0.5 {
                         break;
                     }
-                    let vis = class_vis_char(attr.visibility);
-                    let text = format!("{vis}{}", attr.name);
+                    let text = class_member_row(attr, false);
                     ctx.fill_text(&text, x + padding, cursor_y);
                     self.draw_calls += 1;
                     *labels_drawn += 1;
@@ -2284,8 +2283,7 @@ impl Canvas2dRenderer {
                     if cursor_y > y + h - member_font * 0.5 {
                         break;
                     }
-                    let vis = class_vis_char(method.visibility);
-                    let text = format!("{vis}{}", method.name);
+                    let text = class_member_row(method, true);
                     ctx.fill_text(&text, x + padding, cursor_y);
                     self.draw_calls += 1;
                     *labels_drawn += 1;
@@ -3594,6 +3592,39 @@ fn class_vis_char(vis: fm_core::ClassVisibility) -> char {
         fm_core::ClassVisibility::Protected => '#',
         fm_core::ClassVisibility::Package => '~',
     }
+}
+
+/// The text of one class compartment row: `{vis}{name}{*|$}{": " return_type}` (bd-9wdra).
+///
+/// ONE function for attributes and methods because the row is one contract, not two. The canvas used
+/// to build the two lines separately and inline, and both had quietly diverged from the other
+/// backends: neither drew a member's type, and the methods line drew no abstract/static classifier
+/// at all — `is_abstract` and `is_static` were referenced ZERO times in this crate, against two in
+/// fm-render-svg and one in fm-render-term.
+///
+/// This mirrors `fm_layout::class_member_row_width`, which builds the SAME string to MEASURE the box
+/// this text is drawn into, and whose doc comment already claimed to mirror "the renderer's row
+/// text". The box was therefore always sized for the fuller row; the canvas simply declined to draw
+/// it. That is why this fix cannot move any geometry.
+///
+/// `is_method` gates the classifier, not the type: mermaid writes `*`/`$` on methods only, and SVG's
+/// attribute path likewise appends a type but never a suffix.
+fn class_member_row(member: &fm_core::IrClassMember, is_method: bool) -> String {
+    let mut row = String::with_capacity(member.name.len() + 8);
+    row.push(class_vis_char(member.visibility));
+    row.push_str(&member.name);
+    if is_method {
+        if member.is_abstract {
+            row.push('*');
+        } else if member.is_static {
+            row.push('$');
+        }
+    }
+    if let Some(ref return_type) = member.return_type {
+        row.push_str(": ");
+        row.push_str(return_type);
+    }
+    row
 }
 
 fn standard_node_font(config: &CanvasRenderConfig) -> String {
