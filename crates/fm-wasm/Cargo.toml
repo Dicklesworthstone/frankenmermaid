@@ -17,6 +17,9 @@ crate-type = ["cdylib", "rlib"]
 default = []
 fnx-integration = ["fm-layout/fnx-integration"]
 fnx-experimental-directed = ["fm-layout/fnx-experimental-directed"]
+# Keep the browser-facing WebGPU planning entrypoint separate from the optional device layer. The
+# latter is forwarded only when a caller explicitly asks for the headless/device tests.
+webgpu = ["fm-render-canvas/webgpu"]
 
 [dependencies]
 fm-core.workspace = true
@@ -32,9 +35,18 @@ serde-wasm-bindgen.workspace = true
 # to parse that text inside the wasm module. Already in the lock via fm-core/fm-layout.
 serde_json.workspace = true
 wasm-bindgen.workspace = true
+# `#[wasm_bindgen] pub async fn` lowers to a JS promise through this crate, so it is required the
+# moment any export is async — which the WebGPU render path must be, since requestAdapter,
+# requestDevice and mapAsync are all resolved by the browser's event loop.
+wasm-bindgen-futures = "0.4.55"
 web-sys.workspace = true
 # Portable monotonic clock; `std::time::Instant` traps on wasm32-unknown-unknown (GH#3).
 web-time.workspace = true
+
+[dev-dependencies]
+# Block on the async browser render path so a native test can drive it. Dev-only: the shipped wasm
+# module never blocks -- that is the whole reason the path is async.
+pollster = "0.4.0"
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false

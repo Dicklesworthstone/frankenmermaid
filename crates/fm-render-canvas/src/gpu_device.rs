@@ -67,21 +67,47 @@ impl GpuDevice {
     ///
     /// # Errors
     /// Returns [`GpuDeviceError::NoAdapter`] or [`GpuDeviceError::NoDevice`].
+    ///
+    /// ⚠️ NATIVE ONLY, and the `cfg` is load-bearing rather than tidy. This blocks on the adapter and
+    /// device futures, and a browser resolves both from its own event loop — blocking the only thread
+    /// there means the promise can never be driven, so this would hang a tab rather than fail. The
+    /// browser path must use [`Self::request`].
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn headless() -> Result<Self, GpuDeviceError> {
+        pollster::block_on(Self::request())
+    }
+
+    /// Acquire a device asynchronously — the form that works in a browser AND natively.
+    ///
+    /// `wgpu`'s adapter and device requests are futures on every backend; only native code can
+    /// afford to block on them. Sharing one async implementation is what stops the WebGPU path
+    /// diverging into a browser version and a native version that are tested differently and fail
+    /// differently.
+    ///
+    /// No surface is requested, so this is equally valid for an offscreen render and for a canvas:
+    /// `compatible_surface: None` asks for an adapter that can do either.
+    ///
+    /// # Errors
+    /// Returns [`GpuDeviceError::NoAdapter`] or [`GpuDeviceError::NoDevice`].
+    pub async fn request() -> Result<Self, GpuDeviceError> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::default(),
-            force_fallback_adapter: false,
-            compatible_surface: None,
-        }))
-        .map_err(|error| GpuDeviceError::NoAdapter(error.to_string()))?;
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(),
+                force_fallback_adapter: false,
+                compatible_surface: None,
+            })
+            .await
+            .map_err(|error| GpuDeviceError::NoAdapter(error.to_string()))?;
 
         let info = adapter.get_info();
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("fm-headless"),
-            ..Default::default()
-        }))
-        .map_err(|error| GpuDeviceError::NoDevice(error.to_string()))?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("fm-device"),
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| GpuDeviceError::NoDevice(error.to_string()))?;
 
         Ok(Self {
             device,
@@ -114,6 +140,10 @@ impl GpuDevice {
     ///
     /// # Errors
     /// Returns the driver's diagnostic when the module does not compile.
+    ///
+    /// Native only: it blocks on `pop_error_scope`, which a browser resolves from its event loop.
+    /// This is a diagnostic for the native test suite, not part of the browser render path.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn validate_shader(&self, label: &str, wgsl: &str) -> Result<(), String> {
         // An error SCOPE rather than the uncaptured-error handler: the handler's default panics the
         // process, so one broken shader would abort every other check in the same run instead of
@@ -504,8 +534,26 @@ impl DiagramPipelines {
 ///
 /// # Errors
 /// Returns [`GpuDeviceError::Readback`] if the mapped buffer cannot be read.
-#[allow(clippy::missing_panics_doc)]
+/// Blocking wrapper for native callers and tests.
+///
+/// # Errors
+/// Returns [`GpuDeviceError::Readback`] if the mapped buffer cannot be read.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn render_diagram(
+    gpu: &GpuDevice,
+    pipelines: &DiagramPipelines,
+    plan: &crate::gpu_plan::GpuRenderPlan,
+    atlas: Option<&GlyphAtlasTexture>,
+    width: u32,
+    height: u32,
+) -> Result<RenderedImage, GpuDeviceError> {
+    pollster::block_on(render_diagram_async(
+        gpu, pipelines, plan, atlas, width, height,
+    ))
+}
+
+#[allow(clippy::missing_panics_doc)]
+pub async fn render_diagram_async(
     gpu: &GpuDevice,
     pipelines: &DiagramPipelines,
     plan: &crate::gpu_plan::GpuRenderPlan,
@@ -679,7 +727,7 @@ pub fn render_diagram(
     // ONE submission for the whole diagram.
     gpu.queue.submit(Some(encoder.finish()));
 
-    read_back(gpu, &readback, width, height, padded_row, unpadded_row)
+    read_back_async(gpu, &readback, width, height, padded_row, unpadded_row).await
 }
 
 /// What to draw in one pass: the geometry, and the atlas if the pipeline samples one.
@@ -709,6 +757,11 @@ pub struct InstanceDraw<'a> {
 ///
 /// # Errors
 /// Returns [`GpuDeviceError::Readback`] if the mapped buffer cannot be read.
+///
+/// Native only: it blocks on the readback. A browser draws whole diagrams through
+/// [`render_diagram_async`], and this per-family path exists so a native test can measure one family
+/// in isolation — which is how the batched path proves it composes.
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::missing_panics_doc)]
 pub fn render_instances(
     gpu: &GpuDevice,
@@ -861,6 +914,7 @@ pub fn render_instances(
 ///
 /// Shared by both entry points so there is exactly one place that understands the 256-byte row
 /// alignment. Two copies of this drifting apart would show up as a diagonal shear in one path only.
+#[cfg(not(target_arch = "wasm32"))]
 fn read_back(
     gpu: &GpuDevice,
     readback: &wgpu::Buffer,
@@ -869,14 +923,37 @@ fn read_back(
     padded_row: usize,
     unpadded_row: usize,
 ) -> Result<RenderedImage, GpuDeviceError> {
+    pollster::block_on(read_back_async(
+        gpu,
+        readback,
+        width,
+        height,
+        padded_row,
+        unpadded_row,
+    ))
+}
+
+/// Await the mapped readback buffer and strip the row padding.
+///
+/// ASYNC because a browser has no other option: `map_async` resolves from the event loop, and
+/// `device.poll(Wait)` — which is what makes the native path work — is a no-op on WebGPU. A blocking
+/// readback in a browser waits forever on a callback the blocked thread is preventing.
+async fn read_back_async(
+    gpu: &GpuDevice,
+    readback: &wgpu::Buffer,
+    width: u32,
+    height: u32,
+    padded_row: usize,
+    unpadded_row: usize,
+) -> Result<RenderedImage, GpuDeviceError> {
     let slice = readback.slice(..);
-    let (sender, receiver) = std::sync::mpsc::channel();
+    let (sender, receiver) = futures_channel::oneshot::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = sender.send(result);
     });
-    // Wait for the most recent submission, indefinitely. A timeout here would turn a slow software
-    // adapter into an intermittent failure, and this repo has already paid for wall-clock-dependent
-    // assertions once.
+    // Native backends need an explicit poll to make progress; on WebGPU this is a no-op and the
+    // browser drives the callback itself. A timeout here would turn a slow software adapter into an
+    // intermittent failure, and this repo has already paid for wall-clock-dependent assertions once.
     gpu.device
         .poll(wgpu::PollType::Wait {
             submission_index: None,
@@ -884,7 +961,7 @@ fn read_back(
         })
         .map_err(|error| GpuDeviceError::Readback(error.to_string()))?;
     receiver
-        .recv()
+        .await
         .map_err(|error| GpuDeviceError::Readback(error.to_string()))?
         .map_err(|error| GpuDeviceError::Readback(error.to_string()))?;
 
