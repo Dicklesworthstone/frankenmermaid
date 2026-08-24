@@ -552,6 +552,70 @@ pub fn render_diagram(
     ))
 }
 
+/// The three views of one diagram a GPU render needs, kept together so they cannot disagree.
+///
+/// The `plan` is BUILT from the `ir` and `layout`, so a caller holding all three already has the
+/// consistency this asks for — the type exists to make passing a mismatched set awkward rather than
+/// natural, and to keep [`render_diagram_with_interactions`] under a sane argument count.
+#[derive(Clone, Copy)]
+pub struct DiagramSource<'a> {
+    pub ir: &'a fm_core::MermaidDiagramIr,
+    pub layout: &'a fm_layout::DiagramLayout,
+    pub plan: &'a crate::gpu_plan::GpuRenderPlan,
+}
+
+/// A rendered diagram and the clickable areas of the layout it was rendered from.
+pub struct RenderedDiagram {
+    pub image: RenderedImage,
+    /// Clickable areas for the interactive nodes, in LAYOUT coordinates.
+    pub hit_regions: Vec<crate::interaction::HitRegion>,
+}
+
+/// Render a whole diagram AND report its hit regions in one call (bd-2u0.2).
+///
+/// The WebGPU path had no way to surface `click` at all: `render_diagram_async` returns pixels, and
+/// pixels cannot tell a host that the box at (x, y) carries a URL. `CanvasRenderResult` gained
+/// `hit_regions` for the Canvas2D surface; this is the same guarantee for the GPU one, and the GPU
+/// path needs it more — a host there typically CACHES a plan and re-renders it, so regions computed
+/// separately have a longer window in which to drift from the plan actually drawn.
+///
+/// # Errors
+/// Propagates any [`GpuDeviceError`] from the render.
+pub async fn render_diagram_with_interactions(
+    gpu: &GpuDevice,
+    pipelines: &DiagramPipelines,
+    source: DiagramSource<'_>,
+    atlas: Option<&GlyphAtlasTexture>,
+    width: u32,
+    height: u32,
+) -> Result<RenderedDiagram, GpuDeviceError> {
+    let image = render_diagram_async(gpu, pipelines, source.plan, atlas, width, height).await?;
+    Ok(RenderedDiagram {
+        image,
+        // From the SAME ir and layout the plan was built from, so the regions describe the picture
+        // that was just drawn rather than one the host still happens to be holding.
+        hit_regions: crate::interaction::hit_regions(source.ir, source.layout),
+    })
+}
+
+/// Blocking wrapper for native callers and tests, mirroring [`render_diagram`].
+///
+/// # Errors
+/// Propagates any [`GpuDeviceError`] from the render.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn render_diagram_with_interactions_blocking(
+    gpu: &GpuDevice,
+    pipelines: &DiagramPipelines,
+    source: DiagramSource<'_>,
+    atlas: Option<&GlyphAtlasTexture>,
+    width: u32,
+    height: u32,
+) -> Result<RenderedDiagram, GpuDeviceError> {
+    pollster::block_on(render_diagram_with_interactions(
+        gpu, pipelines, source, atlas, width, height,
+    ))
+}
+
 #[allow(clippy::missing_panics_doc)]
 pub async fn render_diagram_async(
     gpu: &GpuDevice,

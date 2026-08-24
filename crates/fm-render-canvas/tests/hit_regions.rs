@@ -115,6 +115,83 @@ fn the_render_result_carries_regions_for_the_layout_it_drew() {
     assert_eq!(result.hit_regions[0].tooltip.as_deref(), Some("tip"));
 }
 
+/// THE WEBGPU PATH REPORTS THE SAME REGIONS AS THE CANVAS2D PATH, for the same IR.
+///
+/// Pixels cannot tell a host that the box at (x, y) carries a URL, so before this the GPU surface
+/// had no way to surface `click` at all. The two backends must not disagree about which nodes are
+/// interactive — a host that swapped renderers and got different clickable areas would be a defect
+/// nobody would look for in the renderer.
+///
+/// Joined to the SVG arm as well, so all three agree rather than just the two raster ones.
+#[cfg(feature = "webgpu")]
+#[test]
+fn the_webgpu_path_reports_the_same_regions_as_canvas_and_agrees_with_the_svg() {
+    use fm_render_canvas::gpu_device::{
+        DiagramPipelines, DiagramSource, GpuDevice, GpuDeviceError,
+        render_diagram_with_interactions_blocking,
+    };
+
+    let source = "flowchart LR\n  A[Alpha] --> B[Beta]\n  B --> C[Gamma]\n  \
+                  click A \"https://example.com\" \"Alpha tip\"\n";
+    let (ir, layout) = plan(source);
+    let plan_gpu = fm_render_canvas::GpuRenderPlan::from_layout(
+        &ir,
+        &layout,
+        fm_render_canvas::CanvasRenderConfig::default().edge_stroke_width as f32,
+    );
+
+    let gpu = match GpuDevice::headless() {
+        Ok(gpu) => gpu,
+        Err(GpuDeviceError::NoAdapter(why)) => {
+            // Reported, never silent: a test that returns quietly on a GPU-less box is
+            // indistinguishable from one that passed.
+            eprintln!("[gpu] SKIPPED: no adapter ({why})");
+            return;
+        }
+        Err(other) => panic!("wgpu present but unusable: {other}"),
+    };
+
+    let pipelines = DiagramPipelines::new(&gpu);
+    let rendered = render_diagram_with_interactions_blocking(
+        &gpu,
+        &pipelines,
+        DiagramSource {
+            ir: &ir,
+            layout: &layout,
+            plan: &plan_gpu,
+        },
+        None,
+        256,
+        256,
+    )
+    .expect("render");
+
+    // The GPU path and the free function must agree, and both must agree with what Canvas2D
+    // returns from its own render — otherwise "the same diagram" means two different things.
+    assert_eq!(rendered.hit_regions, hit_regions(&ir, &layout));
+
+    let mut ctx = fm_render_canvas::MockCanvas2dContext::new(1200.0, 800.0);
+    let canvas = fm_render_canvas::render_to_canvas_with_layout(
+        &ir,
+        &layout,
+        &mut ctx,
+        &fm_render_canvas::CanvasRenderConfig::default(),
+    );
+    assert_eq!(
+        rendered.hit_regions, canvas.hit_regions,
+        "the WebGPU and Canvas2D surfaces disagree about which nodes are clickable"
+    );
+
+    // And the SVG arm, joined on the id it publishes.
+    let svg = fm_render_svg::render_svg(&ir);
+    assert!(
+        svg.contains("title=\"Alpha tip\""),
+        "CONTROL FAILED: the SVG emitted no tooltip, so `click` never reached the IR"
+    );
+    assert_eq!(rendered.hit_regions.len(), 1);
+    assert_eq!(rendered.hit_regions[0].node_id, "A");
+}
+
 /// A diagram with no `click` at all must export NO regions.
 #[test]
 fn a_diagram_without_click_exports_no_regions() {
