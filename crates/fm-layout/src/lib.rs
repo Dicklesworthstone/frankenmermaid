@@ -3692,7 +3692,28 @@ impl IncrementalLayoutEngine {
 
         let dispatch = dispatch_layout_algorithm(ir, algorithm);
         let guard = evaluate_layout_guardrails(ir, dispatch.selected, guardrails);
-        if guard.fallback_applied || guard.selected_algorithm != LayoutAlgorithm::Sugiyama {
+        // A FORCED BUDGET disqualifies selective relayout too (bd-s6tkz), for the same reason a
+        // fallback or a non-Sugiyama dispatch already does one line below: the result would not be
+        // the layout this IR actually has.
+        //
+        // Under a budget the layout is ITERATION-LIMITED. Selective relayout seeds it from the
+        // PREVIOUS positions while a full recompute seeds from scratch, and the cap stops either
+        // from converging — so the two land in different places and the incremental one never
+        // recovers. Measured on a 72-node dense flowchart after a single label edit: bounds
+        // 17741x276 against 18515x178, a 774x98 difference with ALL 72 nodes moved, stable across
+        // repeated passes. A COLD engine on the same edited IR matched the full recompute exactly,
+        // which is what identifies the warm seed rather than the budget as the thing at fault.
+        //
+        // This repo's stated contract is that incremental "produces a visually identical (but
+        // possibly translated) layout", and a sibling test asserts the two SVGs are byte-identical.
+        // The engine, not the contract, was wrong. The divergence only ever appeared above the
+        // guardrail threshold — the passing tests use 56 and 64 nodes and never cross it.
+        if guard.fallback_applied
+            || guard.selected_algorithm != LayoutAlgorithm::Sugiyama
+            || guard.time_budget_exceeded
+            || guard.iteration_budget_exceeded
+            || guard.route_budget_exceeded
+        {
             return None;
         }
 
