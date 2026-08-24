@@ -4603,6 +4603,11 @@ fn parse_state_statements(line: &str, config: &ParserConfig) -> Option<Vec<State
         return Some(Vec::new());
     }
 
+    // `class A bad` styles state A; it must not ALSO become a state (bd-0audg).
+    if is_state_class_assignment(line) {
+        return Some(Vec::new());
+    }
+
     // Note syntax: `note right of StateName : text` or `note left of StateName : text`
     if line.starts_with("note ")
         && let Some(note) = parse_state_note(line)
@@ -4752,6 +4757,36 @@ fn is_state_hide_empty_description(line: &str) -> bool {
     hide.eq_ignore_ascii_case("hide")
         && empty.eq_ignore_ascii_case("empty")
         && description.eq_ignore_ascii_case("description")
+}
+
+/// True for a state-diagram `class <states> <classNames>` STYLE APPLICATION (bd-0audg).
+///
+/// The style itself is extracted globally, for every diagram type, before this parser runs — the
+/// targets really do come out carrying the class. The line then fell through to the node parser as
+/// well, and `normalize_identifier` interned it as a state keyed `class_A_bad` captioned with the
+/// author's own directive. Double-handled, not unhandled: the diagram gained a phantom box while
+/// the styling worked perfectly.
+///
+/// Exactly the family the two guards above this one exist for — bd-871ka's `hide empty description`
+/// and bd-xfmm's subgraph phantom — and worse than a silent drop, because the reader sees text
+/// nobody wrote.
+///
+/// Kept LOCAL rather than added to `is_non_node_directive_statement` for the reason that predicate's
+/// own doc gives: it is shared, and in a CLASS diagram `class A` DECLARES a node. Widening it there
+/// would delete every bare class declaration in the corpus — the shape of the bd-ij0f regression.
+///
+/// TWO tokens minimum, so a bare `class A` is left alone for its own path to interpret, and an
+/// arrow bail so a transition leaving a state legitimately named `class` stays a transition.
+fn is_state_class_assignment(line: &str) -> bool {
+    let Some(rest) = trim_fast(line).strip_prefix("class ") else {
+        return false;
+    };
+    let rest = rest.trim();
+    if rest.contains("--") {
+        return false;
+    }
+    let mut words = rest.split_whitespace();
+    words.next().is_some_and(|targets| !targets.is_empty()) && words.next().is_some()
 }
 
 fn parse_state_note(line: &str) -> Option<StateStatement> {
