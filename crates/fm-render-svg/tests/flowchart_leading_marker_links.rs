@@ -137,16 +137,28 @@ fn the_double_arrow_that_already_worked_still_works() {
     assert_eq!(end.as_deref(), Some("url(#arrow-end)"));
 }
 
-/// KNOWN PARTIAL, PINNED SO IT IS NOT MISTAKEN FOR COMPLETE.
+/// A MIXED form marks only its END, and that is CORRECT PARITY — not a gap (bd-lrl48).
 ///
-/// A MIXED form (`o--x`, `x--o`, `o-->`) has two different markers, and `ArrowType` couples both
-/// ends into a single variant — so these render their END marker correctly and draw NO start marker.
-/// That is strictly better than before (the id was corrupted and the edge was wrong anyway), but it
-/// is not parity, and asserting it here keeps the gap visible instead of letting a later reader
-/// assume every form is finished. Fixing it needs a start/end marker pair on the edge, not more
-/// enum variants.
+/// ⚠️ I FILED THIS AS A "KNOWN PARTIAL" AND I WAS WRONG. The comment here used to claim mermaid
+/// draws a circle at the start of `o--x`, and that we were behind. It does not. The whole arrow
+/// token goes to `destructEndLink`, which doubles the marker ONLY when the first character matches
+/// the last:
+///
+/// ```text
+/// case "x": n="arrow_cross";  if (r.startsWith("x")) { n="double_"+n; i=i.slice(1) } break;
+/// case ">": n="arrow_point";  if (r.startsWith("<")) { n="double_"+n; i=i.slice(1) } break;
+/// case "o": n="arrow_circle"; if (r.startsWith("o")) { n="double_"+n; i=i.slice(1) } break;
+/// ```
+///
+/// `o--x` starts with `o` and ends with `x`, so it is NOT doubled: a cross at the end, nothing at
+/// the start. Which is exactly what we render. `o--` hits no case at all and stays `arrow_open`,
+/// i.e. no marker — also what we render.
+///
+/// The lesson is the reason this comment is long: I nearly "fixed" correct behaviour into a
+/// divergence on the strength of a plausible reading of a minified bundle. Derived from source,
+/// not from a Chromium render — the same standard the `parse_c4_boundary` parity note uses.
 #[test]
-fn mixed_leading_marker_forms_currently_draw_only_their_end_marker() {
+fn mixed_leading_marker_forms_mark_only_their_end_as_mermaid_does() {
     for (form, end) in [
         ("o--x", "url(#arrow-cross)"),
         ("x--o", "url(#arrow-circle)"),
@@ -160,7 +172,54 @@ fn mixed_leading_marker_forms_currently_draw_only_their_end_marker() {
         );
         assert_eq!(
             start, None,
-            "`{form}` now draws a start marker — good, but update this test and the note above it"
+            "`{form}` gained a start marker; mermaid does not double a mismatched pair"
+        );
+    }
+}
+
+/// `o==o` / `x==x` are THICK (bd-lrl48).
+///
+/// `destructEndLink` strips the leading marker before reading the stroke — `i = i.slice(1)` in the
+/// doubling branch above — so the weight comes from the `==` that remains. We read it off the whole
+/// token and rendered a 1.8 solid stroke, making `o==o` indistinguishable from `o--o`.
+///
+/// The stroke lives on the layout edge, so this asserts the geometry rather than a marker id: a
+/// marker-only check passes on the bug, because both spellings already share their markers.
+fn find_edge_stroke_width(group: &fm_layout::RenderGroup) -> Option<f32> {
+    for child in &group.children {
+        match child {
+            fm_layout::RenderItem::Path(path) => {
+                if let (fm_layout::RenderSource::Edge(_), Some(stroke)) =
+                    (&path.source, &path.stroke)
+                {
+                    return Some(stroke.width);
+                }
+            }
+            fm_layout::RenderItem::Group(g) => {
+                if let Some(width) = find_edge_stroke_width(g) {
+                    return Some(width);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[test]
+fn a_thick_double_marker_link_is_actually_thick() {
+    let thick = |source: &str| -> f32 {
+        let ir = fm_parser::parse(source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let scene = fm_layout::build_render_scene(&ir, &layout);
+        find_edge_stroke_width(&scene.root).unwrap_or(0.0)
+    };
+    let solid_width = thick("flowchart LR\n  A o--o B\n");
+    for form in ["o==o", "x==x"] {
+        let width = thick(&format!("flowchart LR\n  A {form} B\n"));
+        assert!(
+            width > solid_width,
+            "`{form}` drew a {width} stroke, no thicker than `o--o`'s {solid_width} — the `==` was lost"
         );
     }
 }

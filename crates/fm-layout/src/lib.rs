@@ -2906,6 +2906,18 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                         marker_start = MarkerKind::Cross;
                         marker_end = MarkerKind::Cross;
                     }
+                    // `o==o` / `x==x` — same markers, THICK stroke (bd-lrl48). mermaid strips the
+                    // leading marker before reading the stroke, so the weight comes from the `==`.
+                    fm_core::ArrowType::ThickCircleBoth => {
+                        stroke.width = 2.5;
+                        marker_start = MarkerKind::Circle;
+                        marker_end = MarkerKind::Circle;
+                    }
+                    fm_core::ArrowType::ThickCrossBoth => {
+                        stroke.width = 2.5;
+                        marker_start = MarkerKind::Cross;
+                        marker_end = MarkerKind::Cross;
+                    }
                     fm_core::ArrowType::ThickLine => {
                         stroke.width = 2.5;
                         marker_end = MarkerKind::None;

@@ -3362,8 +3362,8 @@ fn arrow_marker_mask(arrow: fm_core::ArrowType) -> u16 {
         // `o--o` / `x--x` need no NEW marker declaration (bd-zdpwd): a circle and a cross are
         // orientation-independent, so the same `<marker>` serves both ends. That is why there is no
         // `arrow-start-circle` here, unlike the directional `arrow-start` an arrowhead requires.
-        ArrowType::CircleBoth => MARKER_CIRCLE,
-        ArrowType::CrossBoth => MARKER_CROSS,
+        ArrowType::CircleBoth | ArrowType::ThickCircleBoth => MARKER_CIRCLE,
+        ArrowType::CrossBoth | ArrowType::ThickCrossBoth => MARKER_CROSS,
         ArrowType::DoubleArrow | ArrowType::DoubleDottedArrow => MARKER_START | MARKER_END,
         ArrowType::DoubleThickArrow => MARKER_START_FILLED | MARKER_FILLED,
         ArrowType::Aggregation | ArrowType::AggregationReverse => MARKER_DIAMOND_OPEN,
@@ -12957,13 +12957,13 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             ),
             ArrowType::Circle => (None, None, Some("url(#arrow-circle)"), &colors.edge),
             ArrowType::Cross => (None, None, Some("url(#arrow-cross)"), &colors.edge),
-            ArrowType::CircleBoth => (
+            ArrowType::CircleBoth | ArrowType::ThickCircleBoth => (
                 None,
                 Some("url(#arrow-circle)"),
                 Some("url(#arrow-circle)"),
                 &colors.edge,
             ),
-            ArrowType::CrossBoth => (
+            ArrowType::CrossBoth | ArrowType::ThickCrossBoth => (
                 None,
                 Some("url(#arrow-cross)"),
                 Some("url(#arrow-cross)"),
@@ -13587,8 +13587,24 @@ fn render_edge_body_into(
             "",
             " relates to ",
         ),
+        ArrowType::ThickCircleBoth => (
+            3.0,
+            "fm-edge-solid",
+            "url(#arrow-circle)",
+            "url(#arrow-circle)",
+            "",
+            " relates to ",
+        ),
         ArrowType::CrossBoth => (
             1.8,
+            "fm-edge-solid",
+            "url(#arrow-cross)",
+            "url(#arrow-cross)",
+            "",
+            " relates to ",
+        ),
+        ArrowType::ThickCrossBoth => (
+            3.0,
             "fm-edge-solid",
             "url(#arrow-cross)",
             "url(#arrow-cross)",

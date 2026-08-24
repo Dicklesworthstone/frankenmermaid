@@ -1155,6 +1155,14 @@ pub enum ArrowType {
     CircleBoth,
     /// Flowchart `x--x`: a cross on BOTH ends (bd-zdpwd).
     CrossBoth,
+    /// Flowchart `o==o`: circles on both ends AND a thick stroke (bd-lrl48).
+    ///
+    /// mermaid's `destructEndLink` strips the leading marker BEFORE reading the stroke, so the
+    /// thickness comes from the `==` that remains. Reading it off the whole token instead loses the
+    /// weight, which is what we did — `o==o` and `o--o` are different edges.
+    ThickCircleBoth,
+    /// Flowchart `x==x`: crosses on both ends AND a thick stroke (bd-lrl48).
+    ThickCrossBoth,
     /// UML aggregation (`o--`): hollow diamond on the owning end. The diamond marks the *source*,
     /// so `AggregationReverse` is a distinct variant rather than a rendering flag.
     Aggregation,
@@ -1208,6 +1216,8 @@ impl ArrowType {
             Self::DoubleDottedArrow => "<-.->",
             Self::CircleBoth => "o--o",
             Self::CrossBoth => "x--x",
+            Self::ThickCircleBoth => "o==o",
+            Self::ThickCrossBoth => "x==x",
             Self::Aggregation => "o--",
             Self::AggregationReverse => "--o",
             Self::Composition => "*--",

@@ -117,7 +117,9 @@ const fn edge_marker_ends(arrow: ArrowType) -> (bool, bool) {
         | ArrowType::DoubleDottedArrow
         // `o--o` / `x--x` are double-ended too (bd-zdpwd).
         | ArrowType::CircleBoth
-        | ArrowType::CrossBoth => (true, true),
+        | ArrowType::CrossBoth
+        | ArrowType::ThickCircleBoth
+        | ArrowType::ThickCrossBoth => (true, true),
         ArrowType::HalfArrowTopReverse
         | ArrowType::HalfArrowBottomReverse
         | ArrowType::StickArrowTopReverse
