@@ -22,6 +22,10 @@ mod gpu_plan;
 /// size-optimised WASM bundle this crate ships in — never pays for a GPU backend it does not use.
 #[cfg(feature = "webgpu")]
 pub mod gpu_device;
+/// Glyph rasterisation into the text atlas (bd-2u0.2). Device-free — it produces a plain R8 coverage
+/// bitmap — but gated with `webgpu` because that is its only consumer today.
+#[cfg(feature = "webgpu")]
+pub mod glyph_raster;
 pub mod gpu_pipeline;
 mod renderer;
 mod shapes;
