@@ -808,6 +808,10 @@ pub enum GpuTextSource {
     /// `node_index` indexes `layout.extensions.bands`, since a band is layout furniture rather
     /// than an IR node.
     Band,
+    /// A wrapped packet field's repeated label.
+    ///
+    /// `node_index` is the packet field node index carried by the continuation extension.
+    PacketFieldContinuation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -895,6 +899,8 @@ pub struct GpuRenderPlan {
     /// draw_sequence_mirror_headers, draw_activation_bars, draw_edges, draw_nodes). Their labels
     /// are planned too, tagged `GpuTextSource::MirrorHeader`.
     pub mirror_header_instances: Vec<GpuNodeInstance>,
+    /// Wrapped packet field rows, after mirror headers and before activation bars (bd-adabx).
+    pub packet_field_continuation_instances: Vec<GpuNodeInstance>,
     /// Sequence activation bars, as rect instances (bd-adabx).
     ///
     /// Between the clusters and the edges because that is where `render` draws them (call order:
@@ -1140,6 +1146,31 @@ impl GpuRenderPlan {
                 stroke_width: DEFAULT_NODE_STROKE_WIDTH,
                 shape: GpuNodeShape::Rect as u32,
                 node_index: u32::try_from(node_box.node_index).unwrap_or(u32::MAX),
+            });
+        }
+
+        // PACKET FIELD CONTINUATIONS (bd-adabx). These are ordinary field rectangles on later
+        // 32-bit rows, keyed to the original field node so their repeated labels cannot drift.
+        let mut packet_field_continuation_instances =
+            Vec::with_capacity(layout.extensions.packet_field_continuations.len());
+        for continuation in &layout.extensions.packet_field_continuations {
+            if continuation.bounds.width <= 0.0 || continuation.bounds.height <= 0.0 {
+                continue;
+            }
+            packet_field_continuation_instances.push(GpuNodeInstance {
+                center: [
+                    continuation.bounds.x + (continuation.bounds.width * 0.5),
+                    continuation.bounds.y + (continuation.bounds.height * 0.5),
+                ],
+                half_extent: [
+                    continuation.bounds.width * 0.5,
+                    continuation.bounds.height * 0.5,
+                ],
+                fill: DEFAULT_NODE_FILL_RGBA,
+                stroke: DEFAULT_NODE_STROKE_RGBA,
+                stroke_width: DEFAULT_NODE_STROKE_WIDTH,
+                shape: GpuNodeShape::Rect as u32,
+                node_index: u32::try_from(continuation.node_index).unwrap_or(u32::MAX),
             });
         }
 
@@ -1498,7 +1529,21 @@ impl GpuRenderPlan {
                             || (matches!(band.kind, fm_layout::LayoutBandKind::Lane)
                                 && ir.diagram_type != fm_core::DiagramType::Sequence);
                         draw_label.then_some(band.label.as_str()).filter(|label| !label.is_empty())
-                    })),
+                    }))
+                    .chain(
+                        layout
+                            .extensions
+                            .packet_field_continuations
+                            .iter()
+                            .filter_map(|continuation| ir.nodes.get(continuation.node_index))
+                            .filter_map(|node| {
+                                node.label
+                                    .and_then(|label| ir.labels.get(label.0))
+                                    .map_or(Some(node.id.as_str()), |label| {
+                                        label.text.split('\n').next()
+                                    })
+                            }),
+                    ),
                 cell_px,
             );
         let mut text_quads: Vec<GpuTextQuad> = Vec::new();
@@ -1747,6 +1792,31 @@ impl GpuRenderPlan {
             );
         }
 
+        // PACKET FIELD CONTINUATION LABELS (bd-adabx). SVG and Canvas repeat only the first line
+        // of a multi-line packet label on every continued row.
+        for continuation in &layout.extensions.packet_field_continuations {
+            let Some(node) = ir.nodes.get(continuation.node_index) else {
+                continue;
+            };
+            let label = node
+                .label
+                .and_then(|label| ir.labels.get(label.0))
+                .map_or(node.id.as_str(), |label| label.text.split('\n').next().unwrap_or_default());
+            if label.is_empty() || continuation.bounds.width <= 0.0 || continuation.bounds.height <= 0.0 {
+                continue;
+            }
+            sink.push_centred(
+                label,
+                (
+                    continuation.bounds.x + (continuation.bounds.width * 0.5),
+                    continuation.bounds.y + (continuation.bounds.height * 0.5),
+                ),
+                DEFAULT_LABEL_RGBA,
+                GpuTextSource::PacketFieldContinuation,
+                continuation.node_index,
+            );
+        }
+
         Self {
             bounds: layout.bounds,
             cluster_instances,
@@ -1758,6 +1828,7 @@ impl GpuRenderPlan {
             state_note_leader_segments,
             state_note_instances,
             mirror_header_instances,
+            packet_field_continuation_instances,
             activation_instances,
             lifecycle_marker_segments,
             sequence_note_instances,
@@ -3531,6 +3602,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn packet_continuation_gpu_plan_matches_svg_backend_for_the_same_ir() {
+        let ir = fm_parser::parse("packet-beta\n  0-7: Header\n  24-47: Wrapped field\n").ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let continuation = layout
+            .extensions
+            .packet_field_continuations
+            .first()
+            .expect("CONTROL FAILED: wrapped packet field produced no continuation");
+        let svg = fm_render_svg::render_svg_with_layout(
+            &ir,
+            &layout,
+            &fm_render_svg::SvgRenderConfig::default(),
+        );
+        assert!(svg.contains("fm-packet-continuation"));
+        assert!(svg.contains("Wrapped field"));
+
+        let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+        assert_eq!(plan.packet_field_continuation_instances.len(), 1);
+        let instance = plan.packet_field_continuation_instances[0];
+        assert_eq!(
+            instance.center,
+            [
+                continuation.bounds.x + (continuation.bounds.width * 0.5),
+                continuation.bounds.y + (continuation.bounds.height * 0.5),
+            ]
+        );
+        assert_eq!(instance.node_index, continuation.node_index as u32);
+        let run = plan
+            .text_runs
+            .iter()
+            .find(|run| run.source == super::GpuTextSource::PacketFieldContinuation)
+            .expect("continuation label must be planned with its repeated box");
+        assert_eq!(run.node_index, continuation.node_index as u32);
+        assert_eq!(run.quad_count, 13, "Wrapped field is thirteen glyphs");
+    }
+
     /// A destroyed participant's cross reaches the plan as two segments (bd-adabx).
     ///
     /// First line source that is NOT an edge. The `edge_index` sentinel is asserted explicitly:
@@ -3706,6 +3814,7 @@ mod tests {
             ("pub cluster_divider_segments:", "self.draw_cluster_dividers("),
             ("pub state_note_leader_segments:", "self.draw_state_notes("),
             ("pub mirror_header_instances:", "self.draw_sequence_mirror_headers("),
+            ("pub packet_field_continuation_instances:", "self.draw_packet_field_continuations("),
             ("pub activation_instances:", "self.draw_activation_bars("),
             ("pub lifecycle_marker_segments:", "self.draw_sequence_lifecycle_markers("),
             ("pub sequence_note_instances:", "self.draw_sequence_notes("),
@@ -3777,6 +3886,7 @@ mod tests {
             "draw_state_notes",
             "draw_bands",
             "draw_axis_ticks",
+            "draw_packet_field_continuations",
             "draw_clusters",
             "draw_edges",
             "draw_nodes",
@@ -3789,7 +3899,6 @@ mod tests {
             ("draw_path_markers", "bd-adabx: RenderScene path pipeline, not the layout pipeline"),
             ("draw_marker", "bd-adabx: RenderScene path pipeline, not the layout pipeline"),
             ("draw_quadrant_axis_labels", "bd-adabx: quadrant furniture"),
-            ("draw_packet_field_continuations", "bd-adabx: packet furniture"),
             ("draw_gantt_today_marker", "bd-adabx: gantt furniture"),
             (
                 "draw_sequence_fragments",
