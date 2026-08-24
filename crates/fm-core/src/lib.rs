@@ -2,7 +2,6 @@
 
 pub mod art;
 pub mod canary;
-pub mod reuse_proof;
 pub mod cga;
 pub mod constraints;
 pub mod epoch;
@@ -12,6 +11,7 @@ pub mod leapfrog;
 #[cfg(test)]
 mod lens_tests;
 pub mod quotient_filter;
+pub mod reuse_proof;
 pub mod succinct;
 
 pub use evidence::{
@@ -1864,6 +1864,16 @@ pub enum IrConstraint {
         node_ids: Vec<String>,
         span: Span,
     },
+    /// Keep every selected pair of node rectangles disjoint by at least `gap` layout units.
+    ///
+    /// An empty `node_ids` selection means every node in the diagram. The layout backend lowers
+    /// this to a mixed-integer, four-way placement disjunction; keeping the selection in the IR
+    /// lets the parser record a directive before it has seen every node declaration.
+    NonOverlap {
+        node_ids: Vec<String>,
+        gap: f64,
+        span: Span,
+    },
 }
 
 /// Split an ER notation into its two cardinality labels (bd-2h3pp).
@@ -2422,6 +2432,8 @@ pub struct MermaidConfig {
     pub sequence_mirror_actors: Option<bool>,
     /// Mermaid-style sequence message numbering toggle.
     pub sequence_show_sequence_numbers: Option<bool>,
+    /// Mermaid-style Gantt top axis toggle.
+    pub gantt_top_axis: Option<bool>,
 }
 
 impl Default for MermaidConfig {
@@ -2459,6 +2471,7 @@ impl Default for MermaidConfig {
             rank_spacing: None,
             sequence_mirror_actors: None,
             sequence_show_sequence_numbers: None,
+            gantt_top_axis: None,
         }
     }
 }
@@ -2498,6 +2511,7 @@ pub struct MermaidInitConfig {
     pub rank_spacing: Option<u32>,
     pub sequence_mirror_actors: Option<bool>,
     pub sequence_show_sequence_numbers: Option<bool>,
+    pub gantt_top_axis: Option<bool>,
     pub sanitize_mode: MermaidSanitizeMode,
 }
 
@@ -2563,6 +2577,14 @@ pub fn parse_mermaid_js_config_value(value: &Value) -> MermaidConfigParse {
             }
             "flowchart" => parse_flowchart_config(raw_value, &mut parsed),
             "sequence" => parse_sequence_config(raw_value, &mut parsed),
+            "gantt" => parse_gantt_config(raw_value, &mut parsed),
+            // Parsed by fm-parser into `IrConstraint`s. It intentionally has no entry in
+            // `MermaidInitConfig`: layout constraints are diagram IR, not renderer configuration.
+            "constraints" => {
+                if !raw_value.is_object() {
+                    push_type_error(&mut parsed, "constraints", raw_value, "must be an object");
+                }
+            }
             "securityLevel" => {
                 if let Some(level) = raw_value.as_str() {
                     match level.to_ascii_lowercase().as_str() {
@@ -2615,6 +2637,7 @@ pub fn to_init_parse(parsed_config: MermaidConfigParse) -> MermaidInitParse {
         rank_spacing: parsed_config.config.rank_spacing,
         sequence_mirror_actors: parsed_config.config.sequence_mirror_actors,
         sequence_show_sequence_numbers: parsed_config.config.sequence_show_sequence_numbers,
+        gantt_top_axis: parsed_config.config.gantt_top_axis,
         sanitize_mode: parsed_config.config.sanitize_mode,
     };
 
@@ -2695,6 +2718,29 @@ fn parse_flowchart_config(value: &Value, parsed: &mut MermaidConfigParse) {
             other => push_warning(
                 parsed,
                 format!("Unsupported flowchart config key '{other}' ignored"),
+            ),
+        }
+    }
+}
+
+fn parse_gantt_config(value: &Value, parsed: &mut MermaidConfigParse) {
+    let Some(obj) = value.as_object() else {
+        push_type_error(parsed, "gantt", value, "must be an object");
+        return;
+    };
+
+    for (key, raw_value) in obj {
+        match key.as_str() {
+            "topAxis" => {
+                if let Some(enabled) = raw_value.as_bool() {
+                    parsed.config.gantt_top_axis = Some(enabled);
+                } else {
+                    push_type_error(parsed, "gantt.topAxis", raw_value, "must be a boolean");
+                }
+            }
+            other => push_warning(
+                parsed,
+                format!("Unsupported gantt config key '{other}' ignored"),
             ),
         }
     }
@@ -4676,6 +4722,9 @@ pub struct IrGanttMeta {
     pub tick_interval: Option<GanttTickInterval>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub today_marker_style: Option<String>,
+    /// When enabled, Mermaid draws an additional axis above the task rows; the bottom axis remains.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub top_axis: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub inclusive_end_dates: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4736,6 +4785,20 @@ pub struct IrXyChartMeta {
     pub series: Vec<IrXySeries>,
 }
 
+/// One directive-scoped range of numbered sequence messages.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IrSequenceAutonumberRange {
+    /// First message edge numbered by this directive.
+    pub start_edge: usize,
+    /// First edge after this range when a later directive closes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_edge: Option<usize>,
+    /// Number assigned to `start_edge`.
+    pub start: u32,
+    /// Number added for each later edge in the range.
+    pub increment: u32,
+}
+
 /// Sequence-diagram-specific metadata that extends the generic IR.
 ///
 /// Captures all advanced sequence constructs (activations, notes, fragments,
@@ -4754,6 +4817,9 @@ pub struct IrSequenceMeta {
         skip_serializing_if = "is_default_sequence_autonumber_increment"
     )]
     pub autonumber_increment: u32,
+    /// Directive-scoped numbering ranges. An empty list preserves legacy whole-diagram numbering.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub autonumber_ranges: Vec<IrSequenceAutonumberRange>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hide_footbox: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -4792,6 +4858,7 @@ impl Default for IrSequenceMeta {
             autonumber: false,
             autonumber_start: default_sequence_autonumber_start(),
             autonumber_increment: default_sequence_autonumber_increment(),
+            autonumber_ranges: Vec::new(),
             hide_footbox: false,
             activations: Vec::new(),
             notes: Vec::new(),
@@ -4805,6 +4872,20 @@ impl Default for IrSequenceMeta {
 impl IrSequenceMeta {
     #[must_use]
     pub fn autonumber_value(&self, edge_index: usize) -> Option<u64> {
+        if !self.autonumber_ranges.is_empty() {
+            return self
+                .autonumber_ranges
+                .iter()
+                .find(|range| {
+                    edge_index >= range.start_edge
+                        && range.end_edge.is_none_or(|end_edge| edge_index < end_edge)
+                })
+                .map(|range| {
+                    u64::from(range.start)
+                        + (edge_index - range.start_edge) as u64 * u64::from(range.increment)
+                });
+        }
+
         if !self.autonumber {
             return None;
         }
@@ -6213,24 +6294,24 @@ mod tests {
         IrEdge, IrEdgeKind, IrEndpoint, IrEntityAttribute, IrGanttMeta, IrGanttSection,
         IrGanttTask, IrGraphCluster, IrGraphEdge, IrGraphNode, IrInlineStyle, IrLabel, IrLabelId,
         IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup, IrPort, IrPortId,
-        IrPortSideHint, IrSequenceFragment, IrSequenceMeta, IrSequenceNote, IrStyleDef, IrStyleRef,
-        IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries,
-        IrXySeriesKind, LifecycleEventKind, MERMAID_SCHEMA_VERSION, MermaidBudgetLedger,
-        MermaidConfig, MermaidDecisionWeight, MermaidDegradationPlan, MermaidDiagramIr,
-        MermaidError, MermaidErrorCode, MermaidFallbackAction, MermaidFallbackPolicy,
-        MermaidFidelity, MermaidGlyphMode, MermaidGuardReport, MermaidLayoutDecisionAlternative,
-        MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidLensBinding,
-        MermaidLensEdit, MermaidLensEditResult, MermaidLensError, MermaidNativePressureSignals,
-        MermaidPressureReport, MermaidPressureTier, MermaidQualityMode, MermaidSanitizeMode,
-        MermaidSourceMap, MermaidSourceMapEntry, MermaidSourceMapKind, MermaidSupportLevel,
-        MermaidTextRange, MermaidWarningCode, MermaidWasmPressureSignals, NodeMap, NodeSet,
-        NodeShape, NotePosition, Position, Span, StructuredDiagnostic, apply_lens_edit,
-        build_lens_bindings, capability_matrix, capability_matrix_json_pretty,
-        capability_readme_supported_diagram_types_markdown, capability_readme_surface_markdown,
-        documented_diagram_types, is_allowed_style_property, is_safe_link_target,
-        mermaid_layout_guard_observability, parse_mermaid_js_config_value, parse_style_string,
-        parse_style_string_with_rejections, resolve_span_text_range, sanitize_style_value,
-        scale_budget, to_init_parse,
+        IrPortSideHint, IrSequenceAutonumberRange, IrSequenceFragment, IrSequenceMeta,
+        IrSequenceNote, IrStyleDef, IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyAxis,
+        IrXyChartMeta, IrXySeries, IrXySeriesKind, LifecycleEventKind, MERMAID_SCHEMA_VERSION,
+        MermaidBudgetLedger, MermaidConfig, MermaidDecisionWeight, MermaidDegradationPlan,
+        MermaidDiagramIr, MermaidError, MermaidErrorCode, MermaidFallbackAction,
+        MermaidFallbackPolicy, MermaidFidelity, MermaidGlyphMode, MermaidGuardReport,
+        MermaidLayoutDecisionAlternative, MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord,
+        MermaidLensBinding, MermaidLensEdit, MermaidLensEditResult, MermaidLensError,
+        MermaidNativePressureSignals, MermaidPressureReport, MermaidPressureTier,
+        MermaidQualityMode, MermaidSanitizeMode, MermaidSourceMap, MermaidSourceMapEntry,
+        MermaidSourceMapKind, MermaidSupportLevel, MermaidTextRange, MermaidWarningCode,
+        MermaidWasmPressureSignals, NodeMap, NodeSet, NodeShape, NotePosition, Position, Span,
+        StructuredDiagnostic, apply_lens_edit, build_lens_bindings, capability_matrix,
+        capability_matrix_json_pretty, capability_readme_supported_diagram_types_markdown,
+        capability_readme_surface_markdown, documented_diagram_types, is_allowed_style_property,
+        is_safe_link_target, mermaid_layout_guard_observability, parse_mermaid_js_config_value,
+        parse_style_string, parse_style_string_with_rejections, resolve_span_text_range,
+        sanitize_style_value, scale_budget, to_init_parse,
     };
 
     fn sample_span(line: u32, start_col: u32, end_col: u32) -> Span {
@@ -10063,6 +10144,7 @@ mod tests {
         assert!(meta.fragments.is_empty());
         assert!(meta.participant_groups.is_empty());
         assert!(meta.lifecycle_events.is_empty());
+        assert!(meta.autonumber_ranges.is_empty());
     }
 
     #[test]
@@ -10071,6 +10153,12 @@ mod tests {
             autonumber: true,
             autonumber_start: 10,
             autonumber_increment: 5,
+            autonumber_ranges: vec![IrSequenceAutonumberRange {
+                start_edge: 2,
+                end_edge: Some(4),
+                start: 10,
+                increment: 5,
+            }],
             hide_footbox: true,
             activations: vec![IrActivation {
                 participant: IrNodeId(0),
@@ -10169,6 +10257,33 @@ mod tests {
     }
 
     #[test]
+    fn sequence_meta_autonumber_ranges_only_number_their_edges() {
+        let meta = IrSequenceMeta {
+            autonumber_ranges: vec![
+                IrSequenceAutonumberRange {
+                    start_edge: 1,
+                    end_edge: Some(3),
+                    start: 10,
+                    increment: 5,
+                },
+                IrSequenceAutonumberRange {
+                    start_edge: 4,
+                    end_edge: None,
+                    start: 1,
+                    increment: 1,
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(meta.autonumber_value(0), None);
+        assert_eq!(meta.autonumber_value(1), Some(10));
+        assert_eq!(meta.autonumber_value(2), Some(15));
+        assert_eq!(meta.autonumber_value(3), None);
+        assert_eq!(meta.autonumber_value(4), Some(1));
+    }
+
+    #[test]
     fn ir_without_sequence_meta_omits_field() {
         let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         let json = serde_json::to_string(&ir).expect("serialize");
@@ -10183,6 +10298,7 @@ mod tests {
             axis_format: Some("%m/%d".to_string()),
             tick_interval: Some(GanttTickInterval::Week),
             today_marker_style: Some("stroke:#f97316,stroke-width:2px".to_string()),
+            top_axis: true,
             inclusive_end_dates: true,
             weekday_start: Some(1),
             excludes: vec![GanttExclude::Weekends],

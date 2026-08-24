@@ -2983,7 +2983,9 @@ mod rotor_fault_tests {
         );
         // The sign of the rotation direction must match a slightly smaller angle, i.e. approaching
         // pi from below must not jump to approaching it from above.
-        let just_under = Rotor::rotation(angle - 1e-3).to_affine_matrix().apply(1.0, 0.0);
+        let just_under = Rotor::rotation(angle - 1e-3)
+            .to_affine_matrix()
+            .apply(1.0, 0.0);
         assert!(
             just_under.1.signum() == y.signum() || y.abs() < 1e-12,
             "the rotation direction flipped between {} and {angle} rad: {just_under:?} vs ({x}, {y})",
@@ -3051,7 +3053,9 @@ mod rotor_fault_tests {
         for _ in 0..10_000 {
             chained = chained.compose(step);
         }
-        let inverse = chained.inverse().expect("a composed rotation chain must be invertible");
+        let inverse = chained
+            .inverse()
+            .expect("a composed rotation chain must be invertible");
         let round_trip = chained.compose(inverse);
         let (x, y) = round_trip.to_affine_matrix().apply(5.0, -2.0);
         assert!(
@@ -3096,7 +3100,10 @@ mod rotor_fault_tests {
         );
 
         // And the honest API refuses it outright.
-        assert!(!anisotropic.is_conformal(), "a 3x7 scale is not a similarity");
+        assert!(
+            !anisotropic.is_conformal(),
+            "a 3x7 scale is not a similarity"
+        );
         assert!(
             anisotropic.try_to_rotor().is_none(),
             "try_to_rotor must refuse what a rotor cannot represent"
@@ -3136,7 +3143,10 @@ mod rotor_fault_tests {
             tx: 0.0,
             ty: 0.0,
         };
-        assert!(rotated_scale.is_conformal(), "rotation+uniform scale is a similarity");
+        assert!(
+            rotated_scale.is_conformal(),
+            "rotation+uniform scale is a similarity"
+        );
 
         // A SHEAR is not, even though both columns have equal length.
         let shear = AffineMatrix2D {
