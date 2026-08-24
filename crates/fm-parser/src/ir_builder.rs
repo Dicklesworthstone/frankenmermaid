@@ -9,10 +9,10 @@ use fm_core::{
     IrC4NodeMeta, IrClassMember, IrClassNodeMeta, IrCluster, IrClusterId, IrConstraint, IrEdge,
     IrEdgeKind, IrEndpoint, IrEntityAttribute, IrGanttMeta, IrGraphCluster, IrGraphEdge,
     IrGraphNode, IrLabel, IrLabelId, IrLabelSegment, IrLifecycleEvent, IrNode, IrNodeId,
-    IrNodeKind, IrParticipantGroup, IrSequenceFragment, IrSequenceMeta, IrSequenceNote, IrStyleRef,
-    IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyChartMeta, LifecycleEventKind, MermaidDiagramIr,
-    MermaidError, MermaidParseMode, MermaidSanitizeMode, MermaidWarning, MermaidWarningCode,
-    NodeShape, NotePosition, Span,
+    IrNodeKind, IrParticipantGroup, IrSequenceAutonumberRange, IrSequenceFragment, IrSequenceMeta,
+    IrSequenceNote, IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyChartMeta,
+    LifecycleEventKind, MermaidDiagramIr, MermaidError, MermaidParseMode, MermaidSanitizeMode,
+    MermaidWarning, MermaidWarningCode, NodeShape, NotePosition, Span,
 };
 
 use crate::mermaid_parser::trim_fast;
@@ -194,6 +194,9 @@ pub struct IrBuilder {
     // map is both faster and determinism-safe — IR output order comes from the `ir`
     // vectors, not from map iteration.
     node_id_index: NodeIdIndex,
+    /// Mermaid edge IDs are lookup keys for directives such as `class edgeId alert`.
+    /// Store the first match because Mermaid's `setClass` uses `edges.find(...)`.
+    edge_index_by_id: FxHashMap<String, usize>,
     cluster_index_by_key: FxHashMap<String, usize>,
     subgraph_index_by_key: FxHashMap<String, usize>,
     /// O(1) membership dedup for `(cluster_index, node_id)` / `(subgraph_index, node_id)` — the
@@ -478,6 +481,7 @@ impl IrBuilder {
         self.node_id_index
             .buckets
             .clone_from(&source.node_id_index.buckets);
+        self.edge_index_by_id.clone_from(&source.edge_index_by_id);
         self.cluster_index_by_key
             .clone_from(&source.cluster_index_by_key);
         self.subgraph_index_by_key
@@ -507,6 +511,7 @@ impl IrBuilder {
         self.node_id_index
             .buckets
             .clone_from(&source.node_id_index.buckets);
+        self.edge_index_by_id.clone_from(&source.edge_index_by_id);
         self.cluster_index_by_key
             .clone_from(&source.cluster_index_by_key);
         self.subgraph_index_by_key
@@ -535,6 +540,7 @@ impl IrBuilder {
         Self {
             ir: MermaidDiagramIr::empty(diagram_type),
             node_id_index: NodeIdIndex::default(),
+            edge_index_by_id: FxHashMap::default(),
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
             cluster_member_set: FxHashSet::default(),
@@ -581,6 +587,7 @@ impl IrBuilder {
         Self {
             ir,
             node_id_index: NodeIdIndex::with_capacity(estimated_nodes),
+            edge_index_by_id: FxHashMap::default(),
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
             cluster_member_set: FxHashSet::default(),
@@ -788,6 +795,10 @@ impl IrBuilder {
         }
     }
 
+    pub(crate) const fn set_init_gantt_top_axis(&mut self, top_axis: bool) {
+        self.ir.meta.init.config.gantt_top_axis = Some(top_axis);
+    }
+
     pub(crate) const fn set_init_sanitize_mode(&mut self, sanitize_mode: MermaidSanitizeMode) {
         self.ir.meta.init.config.sanitize_mode = sanitize_mode;
     }
@@ -810,18 +821,40 @@ impl IrBuilder {
     /// meaningless when numbering is off, and writing zeroes into them would make a later bare
     /// `autonumber` (which restores the default 1/1) indistinguishable from a corrupted state.
     pub(crate) fn disable_autonumber(&mut self) {
+        let edge_index = self.ir.edges.len();
         let meta = self
             .ir
             .sequence_meta
             .get_or_insert_with(IrSequenceMeta::default);
+        if let Some(range) = meta
+            .autonumber_ranges
+            .last_mut()
+            .filter(|range| range.end_edge.is_none())
+        {
+            range.end_edge = Some(edge_index);
+        }
         meta.autonumber = false;
     }
 
     pub(crate) fn enable_autonumber_with(&mut self, start: u32, increment: u32) {
+        let edge_index = self.ir.edges.len();
         let meta = self
             .ir
             .sequence_meta
             .get_or_insert_with(IrSequenceMeta::default);
+        if let Some(range) = meta
+            .autonumber_ranges
+            .last_mut()
+            .filter(|range| range.end_edge.is_none())
+        {
+            range.end_edge = Some(edge_index);
+        }
+        meta.autonumber_ranges.push(IrSequenceAutonumberRange {
+            start_edge: edge_index,
+            end_edge: None,
+            start,
+            increment,
+        });
         meta.autonumber = true;
         meta.autonumber_start = start;
         meta.autonumber_increment = increment;
@@ -1333,6 +1366,11 @@ impl IrBuilder {
             matches!(edge.from, IrEndpoint::Node(id) if id == from)
                 && matches!(edge.to, IrEndpoint::Node(id) if id == to)
         })
+    }
+
+    /// The first edge carrying Mermaid's source-level `edgeId@` prefix.
+    pub(crate) fn edge_index_by_id(&self, edge_id: &str) -> Option<usize> {
+        self.edge_index_by_id.get(edge_id).copied()
     }
 
     pub(crate) const fn edge_count(&self) -> usize {
@@ -2298,6 +2336,16 @@ impl IrBuilder {
             to: IrEndpoint::Node(to),
             span,
         });
+    }
+
+    /// Associate a source-level Mermaid edge ID with the edge just lowered.
+    pub(crate) fn set_last_edge_id(&mut self, edge_id: &str) {
+        let Some(edge_index) = self.ir.edges.len().checked_sub(1) else {
+            return;
+        };
+        self.edge_index_by_id
+            .entry(edge_id.to_string())
+            .or_insert(edge_index);
     }
 
     /// Set the ER cardinality notation on the last-pushed edge.
