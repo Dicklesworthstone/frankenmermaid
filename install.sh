@@ -5,7 +5,8 @@ REPO_URL="${FM_INSTALL_GIT_URL:-https://github.com/Dicklesworthstone/frankenmerm
 INSTALL_PATH="${FM_INSTALL_PATH:-}"
 INSTALL_ROOT="${FM_INSTALL_ROOT:-$HOME/.local}"
 INSTALL_BIN_DIR="$INSTALL_ROOT/bin"
-PACKAGE_NAME="fm-cli"
+PACKAGE_NAME="frankenmermaid-cli"
+PACKAGE_DIR="fm-cli"
 BIN_NAME="fm-cli"
 RUSTUP_INIT_URL="${FM_RUSTUP_INIT_URL:-https://sh.rustup.rs}"
 
@@ -53,8 +54,8 @@ main() {
     # If pointed at a workspace root, resolve to the fm-cli crate directory.
     local resolved_path="$INSTALL_PATH"
     if [[ -f "$INSTALL_PATH/Cargo.toml" ]] && grep -q '^\[workspace\]' "$INSTALL_PATH/Cargo.toml" 2>/dev/null; then
-      if [[ -d "$INSTALL_PATH/crates/$PACKAGE_NAME" ]]; then
-        resolved_path="$INSTALL_PATH/crates/$PACKAGE_NAME"
+      if [[ -d "$INSTALL_PATH/crates/$PACKAGE_DIR" ]]; then
+        resolved_path="$INSTALL_PATH/crates/$PACKAGE_DIR"
       fi
     fi
     cargo_args=(
