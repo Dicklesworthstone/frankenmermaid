@@ -7062,6 +7062,30 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        // bd-vc1zp: `click a1 href "https://example.com"` was interned as a TASK. The trigger is the
+        // SCHEME COLON: a gantt task line is `name : metadata`, and the `:` inside `https://` made
+        // the directive parse as a task named `click a1 href "https` — so the phantom bar appeared
+        // only for the URL form people actually write. `click a1 href "example.com"` and
+        // `click a1 call doThing()` both had no colon to split on and were already dropped, which is
+        // why one half of gantt's own click support looked fine while the other produced a phantom.
+        //
+        // RECOGNISED AND IGNORED, which is correct here rather than a compromise, on the same
+        // reasoning `hide empty description` is ignored in the state parser: gantt tasks carry no
+        // interaction in this IR, so there is nothing yet to attach the click to. Wiring gantt
+        // interactivity is a capability, not this bug — and drawing the directive is strictly worse
+        // than not supporting it, because the reader sees syntax nobody wrote.
+        //
+        // NARROW on purpose. The broad `is_non_node_directive_statement` also swallows `title`, and
+        // gantt parses `title` into real diagram meta three lines below — swallowing it here would
+        // be the bd-ij0f regression exactly.
+
+        if trimmed
+            .strip_prefix("click")
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+        {
+            continue;
+        }
+
         if let Some(title) = trimmed.strip_prefix("title ") {
             let title = clean_label(Some(title));
             gantt_meta.title = title.clone();
