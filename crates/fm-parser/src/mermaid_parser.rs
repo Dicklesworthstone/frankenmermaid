@@ -3160,15 +3160,37 @@ fn parse_sequence_autonumber(line: &str) -> Option<SequenceStatement> {
 
 /// Parse `Note left of Alice: text`, `Note right of Bob: text`,
 /// `Note over Alice: text`, `Note over Alice,Bob: text`.
-fn parse_sequence_note(line: &str) -> Option<SequenceStatement> {
-    let rest = line.strip_prefix("Note ")?;
+/// Strip `prefix` from the front of `line`, ignoring ASCII case.
+///
+/// mermaid's sequence lexer matches `note` case-insensitively, and so do its position words —
+/// `note`, `Note`, `NOTE` and even `Note Right Of` all PARSE against the pinned bundle.
+fn strip_prefix_ignore_ascii_case<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = line.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &line[prefix.len()..])
+}
 
-    let (position, after_kw) = if let Some(r) = rest.strip_prefix("left of ") {
+fn parse_sequence_note(line: &str) -> Option<SequenceStatement> {
+    // CASE-INSENSITIVE (bd-am6a2). This required a capital `Note `, so `note right of Bob: text` —
+    // the spelling mermaid's own docs use and the one the STATE parser in this same file already
+    // accepts — was SILENTLY DROPPED: no note box, no text, no warning, on all four placements.
+    //
+    // Three independent lines of evidence, not a style preference: the pinned incumbent returns a
+    // clean PARSED for `note`, `NOTE` and `Note Right Of` alike; our state parser accepts lowercase
+    // and renders it; and the drop was silent, which is the worst failure mode for a keyword whose
+    // case the author has no reason to think matters.
+    //
+    // An actor NAMED `note` needs no protection here: mermaid rejects `note->>Bob: hi` as a syntax
+    // error, so the word is reserved on both sides, and this function still returns `None` unless a
+    // position keyword follows.
+    let rest = strip_prefix_ignore_ascii_case(line, "Note ")?;
+
+    let (position, after_kw) = if let Some(r) = strip_prefix_ignore_ascii_case(rest, "left of ") {
         (fm_core::NotePosition::LeftOf, r)
-    } else if let Some(r) = rest.strip_prefix("right of ") {
+    } else if let Some(r) = strip_prefix_ignore_ascii_case(rest, "right of ") {
         (fm_core::NotePosition::RightOf, r)
     } else {
-        let r = rest.strip_prefix("over ")?;
+        let r = strip_prefix_ignore_ascii_case(rest, "over ")?;
         (fm_core::NotePosition::Over, r)
     };
 
