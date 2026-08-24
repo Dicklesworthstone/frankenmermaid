@@ -38,13 +38,13 @@ use fm_parser::{
     apply_parse_lens_delete, apply_parse_lens_edit, apply_parse_lens_insert_line_after,
     build_parse_lens, detect_type_with_confidence, parse,
 };
-use fm_render_canvas::CanvasRenderConfig;
 #[cfg(target_arch = "wasm32")]
 use fm_render_canvas::render_to_canvas_with_layout;
 #[cfg(target_arch = "wasm32")]
 use fm_render_canvas::{
     Canvas2dContext, CanvasRenderResult, LineCap, LineJoin, TextAlign, TextBaseline, TextMetrics,
 };
+use fm_render_canvas::{CanvasRenderConfig, GpuRenderPlan};
 use fm_render_svg::{
     SvgRenderConfig, ThemeColors, ThemePreset, describe_diagram_with_layout, render_svg_with_layout,
 };
@@ -168,6 +168,108 @@ struct RuntimeConfig {
     svg: SvgRenderConfig,
     canvas: CanvasRenderConfig,
     pressure: MermaidWasmPressureSignals,
+}
+
+/// A browser-consumable description of the primitive sets prepared for WebGPU.
+///
+/// The device submission remains in `fm-render-canvas`: this boundary owns parsing, layout and
+/// canvas-context acquisition, while the device-pass owner owns buffer uploads and draw encoding.
+/// Returning counts and bounds lets a host reject an empty or mismatched plan before it creates GPU
+/// resources, without duplicating the renderer's primitive extraction in JavaScript.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebGpuPlanSummary {
+    bounds: [f32; 4],
+    cluster_instances: usize,
+    edge_segments: usize,
+    arrowheads: usize,
+    node_instances: usize,
+    text_quads: usize,
+    text_runs: usize,
+}
+
+impl From<&GpuRenderPlan> for WebGpuPlanSummary {
+    fn from(plan: &GpuRenderPlan) -> Self {
+        Self {
+            bounds: [
+                plan.bounds.x,
+                plan.bounds.y,
+                plan.bounds.width,
+                plan.bounds.height,
+            ],
+            cluster_instances: plan.cluster_instances.len(),
+            edge_segments: plan.edge_segments.len(),
+            arrowheads: plan.arrowheads.len(),
+            node_instances: plan.node_instances.len(),
+            text_quads: plan.text_quads.len(),
+            text_runs: plan.text_runs.len(),
+        }
+    }
+}
+
+struct PlannedWebGpuDiagram {
+    #[cfg(test)]
+    ir: fm_core::MermaidDiagramIr,
+    plan: GpuRenderPlan,
+}
+
+/// A parsed diagram and the geometry every raster surface reads from it.
+///
+/// Extracted so the WebGPU plan and the hit regions cannot be computed from two different layouts.
+/// They must agree about where a node landed — that is the whole content of a hit region — and the
+/// layout depends on the resolved font metrics, so recomputing it from a separately-merged config
+/// would make the regions drift from the picture whenever a theme or a font override moved.
+struct DiagramGeometry {
+    ir: fm_core::MermaidDiagramIr,
+    layout: fm_layout::DiagramLayout,
+    canvas: CanvasRenderConfig,
+}
+
+/// Resolve the runtime config, parse, and lay the diagram out — the step before any raster backend.
+fn build_diagram_geometry(input: &str, config: Option<JsValue>) -> Result<DiagramGeometry, String> {
+    let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
+    let runtime = read_runtime_config();
+    let requested_theme = requested_theme_preset(&overrides)?;
+    let svg = merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref())?;
+    let canvas_base = requested_theme.map_or_else(
+        || runtime.canvas.clone(),
+        |preset| apply_canvas_theme_preset(runtime.canvas.clone(), preset),
+    );
+    let canvas = align_canvas_typography_with_svg(
+        merge_canvas_config(&canvas_base, &overrides.canvas),
+        &svg,
+    );
+    let parsed = parse(input);
+    let layout = fm_layout::layout_diagram_with_config(
+        &parsed.ir,
+        LayoutConfig {
+            font_metrics: Some(svg.font_metrics()),
+            ..Default::default()
+        },
+    );
+
+    Ok(DiagramGeometry {
+        ir: parsed.ir,
+        layout,
+        canvas,
+    })
+}
+
+fn build_webgpu_plan(input: &str, config: Option<JsValue>) -> Result<PlannedWebGpuDiagram, String> {
+    let geometry = build_diagram_geometry(input, config)?;
+    let scene = fm_layout::build_render_scene(&geometry.ir, &geometry.layout);
+    let plan = GpuRenderPlan::from_layout_and_scene(
+        &geometry.ir,
+        &geometry.layout,
+        &scene,
+        geometry.canvas.edge_stroke_width as f32,
+    );
+
+    Ok(PlannedWebGpuDiagram {
+        #[cfg(test)]
+        ir: geometry.ir,
+        plan,
+    })
 }
 
 impl Default for RuntimeConfig {
@@ -1282,6 +1384,189 @@ pub fn render_svg_js(input: &str, config: Option<JsValue>) -> Result<String, JsV
     Ok(svg)
 }
 
+/// Prepare the WebGPU primitive plan for a diagram.
+///
+/// This is the WASM-side half of the WebGPU renderer: it runs the same parse and typography-aware
+/// layout path as the SVG backend, then delegates primitive extraction to `fm-render-canvas`.
+/// Device creation, buffer uploads and draw submission stay with the WebGPU device pass so this API
+/// cannot grow a second renderer in JavaScript.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = planWebGpu))]
+pub fn plan_webgpu_js(input: &str, config: Option<JsValue>) -> Result<JsValue, JsValue> {
+    let planned = build_webgpu_plan(input, config).map_err(js_error)?;
+    to_js_value(&WebGpuPlanSummary::from(&planned.plan))
+}
+
+/// One interactive node's clickable area, as a browser host receives it.
+///
+/// Mirrors `fm_render_canvas::HitRegion` rather than re-exporting it: the wasm boundary needs a
+/// `Serialize` shape with camelCase keys, and the renderer type carries a `LayoutRect` that has no
+/// business being part of this crate's published JSON contract.
+///
+/// `bounds` is `[x, y, width, height]` in LAYOUT coordinates — the same space `planWebGpu` reports
+/// its bounds in, and the space the renderer draws in. The host applies the SAME viewport transform
+/// it already uses for drawing. Baking one in here would assume a viewport this crate cannot see,
+/// and the regions would drift from the picture the moment the user panned or zoomed.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WasmHitRegion {
+    /// The author's node id — the same string the SVG backend puts in `data-id`.
+    node_id: String,
+    /// `[x, y, width, height]`, layout coordinates.
+    bounds: [f32; 4],
+    /// `click <id> href "url"`, when the author wrote one.
+    href: Option<String>,
+    /// `_self` / `_blank` / …, exactly as written. `null` means the author declared none, NOT that
+    /// there is no target: a link defaults to `_blank`, and the host applies that default.
+    link_target: Option<String>,
+    /// `click <id> call fn()`.
+    callback: Option<String>,
+    /// The hover text.
+    tooltip: Option<String>,
+}
+
+impl From<&fm_render_canvas::HitRegion> for WasmHitRegion {
+    fn from(region: &fm_render_canvas::HitRegion) -> Self {
+        Self {
+            node_id: region.node_id.clone(),
+            bounds: [
+                region.bounds.x,
+                region.bounds.y,
+                region.bounds.width,
+                region.bounds.height,
+            ],
+            href: region.href.clone(),
+            link_target: region.link_target.clone(),
+            callback: region.callback.clone(),
+            tooltip: region.tooltip.clone(),
+        }
+    }
+}
+
+/// The clickable areas of a diagram, for a host driving a canvas or WebGPU surface.
+///
+/// SVG carries `click` in the document itself — a `title=` and, in link mode, an `<a href>` — so a
+/// browser resolves a pointer against it with no help from us. A raster surface has no element to
+/// hang an attribute on, so before this the whole `click` family was unreachable from every
+/// non-SVG browser path: `renderWebGpuToRgba` returns pixels, and pixels cannot tell a host that
+/// the box at (x, y) carries a URL.
+///
+/// The host owns the pointer. This returns WHERE each interactive node landed and WHAT the author
+/// attached to it, once per render; hit-testing a point against those rectangles is a few lines of
+/// JS and does not need to cross the wasm boundary on every `mousemove`.
+///
+/// Only nodes that actually carry an interaction are returned — a region per node would report the
+/// whole diagram as clickable and push the filtering back onto the caller.
+///
+/// # Errors
+/// Returns a JS error when the runtime config cannot be resolved.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = hitRegions))]
+pub fn hit_regions_js(input: &str, config: Option<JsValue>) -> Result<JsValue, JsValue> {
+    let geometry = build_diagram_geometry(input, config).map_err(js_error)?;
+    let regions: Vec<WasmHitRegion> = fm_render_canvas::hit_regions(&geometry.ir, &geometry.layout)
+        .iter()
+        .map(WasmHitRegion::from)
+        .collect();
+    to_js_value(&regions)
+}
+
+/// Rasterise a diagram through the WebGPU device pass and return the RGBA pixels.
+///
+/// The half `planWebGpu` deliberately stopped short of. That call ends with primitive buffers and a
+/// summary; this one acquires a device, builds every pipeline, draws all four families in ONE
+/// submission, and reads the image back. It reuses `build_webgpu_plan`, so the parse, the
+/// typography-aware layout and the primitive extraction are the same code the plan call runs —
+/// there is no second pipeline here to drift from that one.
+///
+/// ASYNC, and it has to be: `requestAdapter`, `requestDevice` and `mapAsync` are all resolved by the
+/// browser's event loop, so the blocking native helpers would hang a tab rather than fail. The
+/// device layer shares one async implementation between this and the native path for exactly that
+/// reason.
+///
+/// Returns raw `Rgba8Unorm` bytes, `width * height * 4`, which a caller hands to `ImageData` or
+/// uploads as a texture. Returning pixels rather than drawing onto a passed-in canvas keeps this
+/// callable from a worker, where there is no DOM canvas to draw onto.
+///
+/// # Errors
+/// Returns the device or readback failure as a JS error.
+#[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+#[wasm_bindgen(js_name = renderWebGpuToRgba)]
+pub async fn render_webgpu_to_rgba_js(
+    input: String,
+    width: u32,
+    height: u32,
+    config: Option<JsValue>,
+) -> Result<js_sys::Uint8Array, JsValue> {
+    let planned = build_webgpu_plan(&input, config).map_err(js_error)?;
+    let pixels = render_webgpu_pixels(&planned.plan, width, height)
+        .await
+        .map_err(js_error)?;
+    Ok(js_sys::Uint8Array::from(pixels.as_slice()))
+}
+
+/// Draw a planned diagram and return its pixels.
+///
+/// Split from the `wasm_bindgen` wrapper with a PLAIN STRING error for the same reason
+/// `choose_canvas_target_result` was: `JsValue` is not constructible off wasm32, so a wrapper that
+/// built one would abort the whole `--lib` test binary the moment a native test touched its error
+/// path. This half is compiled and exercised on both targets.
+///
+/// # Errors
+/// Returns the device or readback failure.
+#[cfg(feature = "webgpu")]
+// Unused in a NATIVE non-test build, and deliberately so: its only production caller is the
+// wasm32-gated `renderWebGpuToRgba`, while the native test suite is what proves it works. Making it
+// wasm-only would put the browser render path beyond the reach of every test that can run here,
+// which is the trade this whole split exists to avoid.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn render_webgpu_pixels(
+    plan: &GpuRenderPlan,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, String> {
+    use fm_render_canvas::gpu_device::{
+        DiagramPipelines, GlyphAtlasTexture, GpuDevice, render_diagram_async,
+    };
+
+    let gpu = GpuDevice::request().await.map_err(|e| e.to_string())?;
+    let pipelines = DiagramPipelines::new(&gpu);
+
+    // The atlas is required exactly when there is text to draw. `solid_coverage` is the placeholder
+    // the device tests use; a browser caller that wants readable labels supplies a rasterised atlas
+    // through `glyph_raster`, which needs a font this crate deliberately does not ship.
+    let atlas = (!plan.text_quads.is_empty()).then(|| {
+        GlyphAtlasTexture::new(
+            &gpu,
+            &plan.glyph_atlas,
+            &fm_render_canvas::gpu_device::solid_coverage(&plan.glyph_atlas),
+        )
+    });
+
+    let image = render_diagram_async(&gpu, &pipelines, plan, atlas.as_ref(), width, height)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(image.rgba)
+}
+
+/// Acquire the browser's `GPUCanvasContext` for a canvas.
+///
+/// `web-sys` keeps the WebGPU DOM types behind unstable API flags, so this intentionally returns
+/// the context as `JsValue`. The owner of the device passes receives the browser-native context
+/// without a duplicate, unstable Rust binding layer.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = acquireWebGpuCanvasContext)]
+pub fn acquire_webgpu_canvas_context(
+    canvas: web_sys::HtmlCanvasElement,
+) -> Result<JsValue, JsValue> {
+    if !browser_supports_webgpu() {
+        return Err(js_error("WebGPU is unavailable in this browser"));
+    }
+    canvas
+        .get_context("webgpu")
+        .map_err(|error| js_error_with_value("failed to get WebGPU canvas context", error))?
+        .map(JsValue::from)
+        .ok_or_else(|| js_error("canvas WebGPU context is unavailable"))
+}
+
 /// Choose a render target from probed host capabilities (bd-2u0.6 item 3).
 ///
 /// JSON text in and out, exactly like [`worker_handle_message_js`], so the same call works from the
@@ -1996,14 +2281,14 @@ impl Diagram {
 mod tests {
     use super::{
         CanvasConfigOverrides, LayoutRuntimeSummary, PressureConfigOverrides, RuntimeConfig,
-        RuntimeInitConfig, SvgConfigOverrides, ThemePreset, WebRendererKind, WorkerRenderAction,
-        WorkerRenderCoordinator, WorkerRenderMessage, WorkerRenderRequest, WorkerRenderResponse,
-        align_canvas_typography_with_svg, apply_budget_svg_simplifications,
-        apply_canvas_theme_preset, canvas_font_size_px, collect_source_spans,
-        handle_worker_message, hit_test_layout_edge, hit_test_layout_node, merge_canvas_config,
-        merge_pressure_config, merge_renderer_kind, merge_svg_config, read_runtime_config, render,
-        render_svg_js, render_worker_request, requested_theme_preset, resolve_renderer,
-        write_runtime_config,
+        RuntimeInitConfig, SvgConfigOverrides, ThemePreset, WasmHitRegion, WebGpuPlanSummary,
+        WebRendererKind, WorkerRenderAction, WorkerRenderCoordinator, WorkerRenderMessage,
+        WorkerRenderRequest, WorkerRenderResponse, align_canvas_typography_with_svg,
+        apply_budget_svg_simplifications, apply_canvas_theme_preset, build_diagram_geometry,
+        build_webgpu_plan, canvas_font_size_px, collect_source_spans, handle_worker_message,
+        hit_test_layout_edge, hit_test_layout_node, merge_canvas_config, merge_pressure_config,
+        merge_renderer_kind, merge_svg_config, read_runtime_config, render, render_svg_js,
+        render_worker_request, requested_theme_preset, resolve_renderer, write_runtime_config,
     };
     use fm_core::{
         MermaidBudgetLedger, MermaidGuardReport, MermaidLensBinding, MermaidLensEdit,
@@ -2019,6 +2304,13 @@ mod tests {
     };
     use fm_render_canvas::CanvasRenderConfig;
     use fm_render_svg::{SvgRenderConfig, describe_diagram_with_layout};
+
+    #[cfg(feature = "webgpu")]
+    use fm_render_canvas::gpu_device::{
+        GpuDevice, InstanceDraw, InstancePass, node_instance_bytes, render_instances,
+    };
+    #[cfg(feature = "webgpu")]
+    use fm_render_canvas::gpu_pipeline::node_pipeline;
 
     #[allow(dead_code)]
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3058,21 +3350,322 @@ mod tests {
         use super::{HostCapabilities, choose_canvas_target, choose_canvas_target_result};
 
         for capabilities in [
-            HostCapabilities { offscreen_canvas: true, worker: true, canvas_transferred: true },
-            HostCapabilities { offscreen_canvas: true, worker: true, canvas_transferred: false },
-            HostCapabilities { offscreen_canvas: false, worker: true, canvas_transferred: false },
+            HostCapabilities {
+                offscreen_canvas: true,
+                worker: true,
+                canvas_transferred: true,
+            },
+            HostCapabilities {
+                offscreen_canvas: true,
+                worker: true,
+                canvas_transferred: false,
+            },
+            HostCapabilities {
+                offscreen_canvas: false,
+                worker: true,
+                canvas_transferred: false,
+            },
             HostCapabilities::default(),
         ] {
             let json = serde_json::to_string(&capabilities).expect("serialize");
             let exported =
                 choose_canvas_target_result(&json).expect("the wrapper should accept it");
-            let expected = serde_json::to_string(&choose_canvas_target(capabilities)).expect("expected");
+            let expected =
+                serde_json::to_string(&choose_canvas_target(capabilities)).expect("expected");
             assert_eq!(exported, expected, "wrapper disagreed for {capabilities:?}");
         }
 
         assert!(
             choose_canvas_target_result("not json").is_err(),
             "the wrapper accepted malformed capabilities instead of reporting them"
+        );
+    }
+
+    /// The WASM WebGPU plan must keep the corpus node identity that SVG emits.
+    #[test]
+    fn webgpu_plan_for_corpus_flowchart_matches_svg_node_identity() {
+        let _serial = config_guard();
+        const FLOWCHART: &str =
+            include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/flowchart_basic.mmd");
+        let planned = build_webgpu_plan(FLOWCHART, None).expect("plan corpus flowchart");
+        let summary = WebGpuPlanSummary::from(&planned.plan);
+
+        assert!(
+            summary.node_instances > 0 && summary.edge_segments > 0 && summary.text_quads > 0,
+            "CONTROL FAILED: the corpus flowchart yielded an incomplete WebGPU plan"
+        );
+        let svg = fm_render_svg::render_svg(&planned.ir);
+        for node in &planned.ir.nodes {
+            assert!(
+                svg.contains(node.id.as_str()),
+                "SVG omitted node {:?}; it cannot serve as the reference arm",
+                node.id
+            );
+        }
+        assert_eq!(
+            summary.node_instances,
+            planned.ir.nodes.len(),
+            "WebGPU plan and SVG source disagree about the corpus node set"
+        );
+    }
+
+    /// SAME-IR COMPARISON: the regions the wasm surface publishes must describe the same
+    /// interactive nodes the SVG backend decorates, joined on the id both arms use.
+    ///
+    /// Before this export, `href`, `callback` and `tooltip` appeared NOWHERE in this crate: a
+    /// browser host on the canvas or WebGPU path could not reach `click` at all, while the SVG path
+    /// got it for free from the document. That is the same parsed-stored-reachable-by-nobody shape
+    /// bd-bk7h found one layer down, and it is invisible unless the two arms are compared.
+    #[test]
+    fn the_wasm_hit_regions_describe_the_same_interactive_nodes_as_the_svg() {
+        let _serial = config_guard();
+        const SOURCE: &str = "flowchart LR\n  A[Alpha] --> B[Beta]\n  B --> C[Gamma]\n  \
+                              click A \"https://example.com\" \"Alpha tip\"\n  \
+                              click B call doThing() \"Beta tip\"\n";
+
+        // Through the same path `hitRegions` takes, stopping just short of the `JsValue` wrapper:
+        // wasm-bindgen's `JsValue` traps outside wasm, so — as with every other export in this
+        // crate — a native test drives the inner call. The `Serialize` impl asserted here is
+        // literally the one `to_js_value` hands to serde-wasm-bindgen in the browser, so the JSON
+        // contract below is the contract a JS host sees.
+        let geometry = build_diagram_geometry(SOURCE, None).expect("lay the diagram out");
+        let exported: Vec<WasmHitRegion> =
+            fm_render_canvas::hit_regions(&geometry.ir, &geometry.layout)
+                .iter()
+                .map(WasmHitRegion::from)
+                .collect();
+        let json = serde_json::to_value(&exported).expect("regions serialize");
+        let regions = json.as_array().expect("an array of regions").clone();
+
+        let svg = fm_render_svg::render_svg(&geometry.ir);
+
+        // CONTROL ON THE REFERENCE ARM: if the SVG emitted no tooltips then `click` never reached
+        // the IR, and every assertion below would hold vacuously for the wrong reason.
+        for tip in ["Alpha tip", "Beta tip"] {
+            assert!(
+                svg.contains(&format!("title=\"{tip}\"")),
+                "CONTROL FAILED: SVG emitted no title={tip:?}, so this fixture cannot compare arms"
+            );
+        }
+
+        assert_eq!(
+            regions.len(),
+            2,
+            "expected exactly the two interactive nodes, got {regions:?}"
+        );
+
+        let alpha = regions
+            .iter()
+            .find(|r| r["nodeId"] == "A")
+            .expect("A is interactive in both arms");
+        assert_eq!(alpha["href"], "https://example.com");
+        assert_eq!(alpha["tooltip"], "Alpha tip");
+        assert!(
+            alpha["callback"].is_null(),
+            "A declared an href, not a callback"
+        );
+        // camelCase, not snake_case: this is the published JSON contract a browser host reads.
+        assert!(
+            alpha.get("linkTarget").is_some() && alpha.get("link_target").is_none(),
+            "the JSON contract must be camelCase for a JS host, got {alpha:?}"
+        );
+
+        let beta = regions
+            .iter()
+            .find(|r| r["nodeId"] == "B")
+            .expect("B is interactive in both arms");
+        assert_eq!(beta["tooltip"], "Beta tip");
+        assert!(
+            !beta["callback"].is_null(),
+            "B declared `call doThing()` and the callback was dropped crossing the boundary"
+        );
+
+        // C has no `click`, so it must not be reported — otherwise a host sees the whole diagram as
+        // clickable and the filtering this export exists to do lands back on the caller.
+        assert!(
+            !regions.iter().any(|r| r["nodeId"] == "C"),
+            "a node with no `click` was given a region"
+        );
+        assert!(
+            !svg.contains("title=\"Gamma"),
+            "CONTROL FAILED: the SVG gave C a tooltip, so C is not the negative case assumed here"
+        );
+
+        // The bounds must be the LAYOUT's, not a re-derivation: a region in the wrong place is a
+        // defect with no visible symptom until somebody clicks.
+        let placed = geometry
+            .layout
+            .nodes
+            .iter()
+            .find(|n| geometry.ir.nodes[n.node_index].id.as_str() == "A")
+            .expect("A was placed");
+        let bounds = alpha["bounds"].as_array().expect("bounds is an array");
+        assert_eq!(bounds.len(), 4, "bounds is [x, y, width, height]");
+        for (index, expected) in [
+            placed.bounds.x,
+            placed.bounds.y,
+            placed.bounds.width,
+            placed.bounds.height,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let actual = bounds[index].as_f64().expect("a number") as f32;
+            assert!(
+                (actual - expected).abs() < f32::EPSILON,
+                "bounds[{index}] was {actual}, the layout placed A at {expected}"
+            );
+        }
+        assert!(
+            placed.bounds.width > 0.0 && placed.bounds.height > 0.0,
+            "CONTROL FAILED: A has a degenerate box, so matching it proves nothing"
+        );
+    }
+
+    /// The WASM WebGPU entrypoint must prepare primitives from the same corpus source that SVG
+    /// renders, then a real headless device must paint those node primitives.
+    ///
+    /// This is intentionally a geometry comparison rather than a pixel diff: SVG text shaping and
+    /// raster antialiasing are backend-specific, but a node missing from either plan is an outright
+    /// cross-backend correctness failure. The feature gate keeps default WASM consumers from
+    /// pulling in the optional device stack.
+    #[cfg(feature = "webgpu")]
+    #[test]
+    fn webgpu_plan_rasterises_the_corpus_flowchart_and_agrees_with_svg_nodes() {
+        const FLOWCHART: &str =
+            include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/flowchart_basic.mmd");
+        let planned = build_webgpu_plan(FLOWCHART, None).expect("plan corpus flowchart");
+
+        assert!(
+            !planned.plan.node_instances.is_empty(),
+            "CONTROL FAILED: corpus flowchart produced no WebGPU node instances"
+        );
+        assert!(
+            !planned.plan.text_quads.is_empty(),
+            "CONTROL FAILED: corpus flowchart produced no WebGPU text primitives"
+        );
+
+        let svg = fm_render_svg::render_svg(&planned.ir);
+        for node in &planned.ir.nodes {
+            assert!(
+                svg.contains(node.id.as_str()),
+                "SVG omitted node {:?}; it cannot serve as the reference arm",
+                node.id
+            );
+        }
+        assert_eq!(
+            planned.plan.node_instances.len(),
+            planned.ir.nodes.len(),
+            "WebGPU plan and SVG source disagree about the corpus node set"
+        );
+
+        let gpu = GpuDevice::headless()
+            .unwrap_or_else(|error| panic!("headless WebGPU test requires an adapter: {error}"));
+        eprintln!(
+            "[gpu] adapter={:?} backend={:?}",
+            gpu.adapter_name(),
+            gpu.backend()
+        );
+
+        let pass = InstancePass::new(&gpu, &node_pipeline());
+        let bytes = node_instance_bytes(&planned.plan.node_instances);
+        let draw = InstanceDraw {
+            bounds: &planned.plan.bounds,
+            instance_bytes: &bytes,
+            instance_count: u32::try_from(planned.plan.node_instances.len())
+                .expect("corpus node count fits u32"),
+            atlas: None,
+        };
+        let image = render_instances(&gpu, &pass, &draw, 512, 512).expect("rasterise nodes");
+        assert!(
+            image
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[3] > 0),
+            "WebGPU rendered a fully transparent image"
+        );
+        for instance in &planned.plan.node_instances {
+            let [node_x, node_y] = instance.center;
+            let (x, y) = image.pixel_for(&planned.plan.bounds, node_x, node_y);
+            let pixel = image.pixel(x, y).expect("node centre maps into the target");
+            assert!(
+                pixel[3] > 0,
+                "WebGPU omitted node {} at pixel ({x}, {y})",
+                instance.node_index
+            );
+        }
+    }
+
+    /// THE BROWSER ENTRY POINT'S OWN PATH, exercised natively (bd-2u0.2).
+    ///
+    /// `renderWebGpuToRgba` is `async` and wasm-only, but the half that does the work —
+    /// `render_webgpu_pixels` — is compiled on both targets precisely so it can be tested here. What
+    /// this proves is that the browser export is not a separate renderer: it plans through
+    /// `build_webgpu_plan`, the same call `planWebGpu` uses, and draws every family in one
+    /// submission through the shared device pass.
+    ///
+    /// The test above renders NODES ONLY, through the per-family path. This renders the WHOLE
+    /// diagram, which is what a browser caller receives, and asserts the difference is real: the
+    /// composed image must contain strictly more ink than the node pass alone, or the families are
+    /// not composing and the browser would get a picture missing its edges and labels.
+    #[cfg(feature = "webgpu")]
+    #[test]
+    fn the_browser_render_path_composes_every_family_for_the_corpus_flowchart() {
+        const FLOWCHART: &str =
+            include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/flowchart_basic.mmd");
+        let planned = build_webgpu_plan(FLOWCHART, None).expect("plan corpus flowchart");
+
+        // CONTROLS: a "whole diagram" claim is empty unless the fixture has more than one family.
+        assert!(
+            !planned.plan.node_instances.is_empty(),
+            "CONTROL FAILED: no nodes"
+        );
+        assert!(
+            !planned.plan.edge_segments.is_empty(),
+            "CONTROL FAILED: no edges"
+        );
+        assert!(
+            !planned.plan.text_quads.is_empty(),
+            "CONTROL FAILED: no text"
+        );
+
+        let rgba = pollster::block_on(super::render_webgpu_pixels(&planned.plan, 512, 512))
+            .unwrap_or_else(|error| panic!("browser render path failed: {error}"));
+        assert_eq!(
+            rgba.len(),
+            512 * 512 * 4,
+            "the browser path must return width*height*4 RGBA bytes"
+        );
+
+        let composed_ink = rgba.as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count();
+        assert!(composed_ink > 0, "the browser path returned a blank image");
+
+        // The node family alone, for comparison, through the per-family path in the same run.
+        let gpu = GpuDevice::headless().expect("adapter");
+        let pass = InstancePass::new(&gpu, &node_pipeline());
+        let bytes = node_instance_bytes(&planned.plan.node_instances);
+        let draw = InstanceDraw {
+            bounds: &planned.plan.bounds,
+            instance_bytes: &bytes,
+            instance_count: u32::try_from(planned.plan.node_instances.len()).expect("fits u32"),
+            atlas: None,
+        };
+        let nodes_only = render_instances(&gpu, &pass, &draw, 512, 512).expect("rasterise nodes");
+        let nodes_ink = nodes_only
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[3] > 0)
+            .count();
+
+        eprintln!("[wasm-gpu] composed={composed_ink}px nodes_only={nodes_ink}px");
+        assert!(
+            composed_ink > nodes_ink,
+            "the browser path painted {composed_ink} pixels and the node pass alone painted \
+             {nodes_ink}; a browser caller would be getting nodes without their edges or labels"
         );
     }
 

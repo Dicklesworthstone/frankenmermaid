@@ -162,9 +162,6 @@ pub fn try_render_transform_to_cga(
     let mut stack = CgaTransformStack::new();
     match transform {
         fm_layout::RenderTransform::Matrix { a, b, c, d, e, f } => {
-            if !is_cga_similarity_transform(a, b, c, d, e, f) {
-                return None;
-            }
             // SVG uses x' = a*x + c*y + e, y' = b*x + d*y + f; AffineMatrix2D stores
             // x' = a*x + b*y + tx, y' = c*x + d*y + ty.
             let matrix = AffineMatrix2D {
@@ -175,30 +172,15 @@ pub fn try_render_transform_to_cga(
                 d: f64::from(d),
                 ty: f64::from(f),
             };
-            stack.inner.push_matrix(matrix);
+            // Keep the renderer on the core CGA contract. A rotor has no exact representation for
+            // a shear, reflection, or anisotropic scale, so accepting one here would silently
+            // change the transform when the stack decomposes it again.
+            if !stack.inner.try_push_matrix(matrix) {
+                return None;
+            }
         }
     }
     Some(stack)
-}
-
-fn is_cga_similarity_transform(a: f32, b: f32, c: f32, d: f32, e: f32, f: f32) -> bool {
-    const RELATIVE_TOLERANCE: f32 = 0.0001;
-    if ![a, b, c, d, e, f].into_iter().all(f32::is_finite) {
-        return false;
-    }
-
-    let x_axis_squared = a.mul_add(a, b * b);
-    let y_axis_squared = c.mul_add(c, d * d);
-    let scale_squared = x_axis_squared.max(y_axis_squared);
-    if scale_squared <= 0.0 {
-        return false;
-    }
-
-    let tolerance = scale_squared * RELATIVE_TOLERANCE;
-    let orthogonal = a.mul_add(c, b * d).abs() <= tolerance;
-    let equal_scale = (x_axis_squared - y_axis_squared).abs() <= tolerance;
-    let orientation_preserving = a.mul_add(d, -(b * c)) > 0.0;
-    orthogonal && equal_scale && orientation_preserving
 }
 
 #[cfg(test)]
@@ -310,5 +292,27 @@ mod tests {
         ] {
             assert!(try_render_transform_to_cga(transform).is_none());
         }
+    }
+
+    #[test]
+    fn render_transform_conversion_refuses_nearby_but_anisotropic_scale() {
+        use fm_layout::RenderTransform;
+
+        // A permissive renderer-local epsilon used to accept this as a "similarity" even though
+        // converting it to a rotor drops the distinct y scale. The core contract is deliberately
+        // stricter: the public adapter must either preserve the transform exactly or decline it.
+        let almost_uniform = RenderTransform::Matrix {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.000_01,
+            e: 4.0,
+            f: -3.0,
+        };
+
+        assert!(
+            try_render_transform_to_cga(almost_uniform).is_none(),
+            "a rotor must not silently collapse an anisotropic SVG matrix"
+        );
     }
 }

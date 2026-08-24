@@ -14,6 +14,8 @@
 
 let wasm = null;
 let offscreenDiagram = null;
+let pendingOffscreenRequestId = null;
+const cancelledOffscreenRequestIds = new Set();
 
 async function ensureModule(moduleUrl) {
   if (wasm) return wasm;
@@ -27,6 +29,38 @@ async function ensureModule(moduleUrl) {
 // cancellation after the work it was meant to abandon has already finished.
 function yieldToMessages() {
   return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function isOffscreenRenderRequest(message) {
+  return message.kind === "render"
+    && Number.isSafeInteger(message.requestId)
+    && typeof message.input === "string";
+}
+
+async function renderOffscreenIfStillLive(message) {
+  const { requestId } = message;
+  pendingOffscreenRequestId = requestId;
+
+  // `Diagram.render` is synchronous, so once it starts a later postMessage cannot interrupt it.
+  // Yielding BEFORE that call is still load-bearing: rapid typing can replace or cancel this queued
+  // request before it draws stale pixels into the transferred canvas.
+  await yieldToMessages();
+  if (pendingOffscreenRequestId !== requestId) {
+    if (cancelledOffscreenRequestIds.delete(requestId)) return;
+    self.postMessage({ kind: "noReply", requestId });
+    return;
+  }
+
+  const stats = offscreenDiagram.render(
+    message.input,
+    message.configJson ? JSON.parse(message.configJson) : undefined,
+  );
+  if (pendingOffscreenRequestId !== requestId) {
+    self.postMessage({ kind: "noReply", requestId });
+    return;
+  }
+  pendingOffscreenRequestId = null;
+  self.postMessage({ kind: "completed", requestId, target: "offscreenInWorker", stats });
 }
 
 self.onmessage = async (event) => {
@@ -63,19 +97,32 @@ self.onmessage = async (event) => {
     }
 
     await ensureModule(message.moduleUrl);
-    await yieldToMessages();
 
-    if (offscreenDiagram && message.kind === "render") {
-      // Drawing straight into the transferred canvas: no SVG string crosses postMessage at all.
-      // Cancellation still goes through the Rust coordinator below, so the two paths cannot
-      // disagree about which request is live.
-      const stats = offscreenDiagram.render(
-        message.input,
-        message.configJson ? JSON.parse(message.configJson) : undefined,
-      );
-      self.postMessage({ kind: "completed", requestId: message.requestId, target: "offscreenInWorker", stats });
+    if (offscreenDiagram) {
+      if (message.kind === "cancel") {
+        if (pendingOffscreenRequestId === message.requestId) {
+          pendingOffscreenRequestId = null;
+          cancelledOffscreenRequestIds.add(message.requestId);
+        }
+        self.postMessage({ kind: "noReply", requestId: message.requestId });
+        return;
+      }
+      if (!isOffscreenRenderRequest(message)) {
+        self.postMessage({
+          kind: "failed",
+          requestId: message.requestId,
+          reason: "offscreen render requires an integer requestId and string input",
+        });
+        return;
+      }
+      // The Rust coordinator owns the SVG path. The offscreen renderer cannot use it because its
+      // output is canvas pixels, so this tiny pre-render gate is the sole host state: it prevents
+      // a queued obsolete request from entering synchronous canvas rendering.
+      await renderOffscreenIfStillLive(message);
       return;
     }
+
+    await yieldToMessages();
 
     // `null` means the module decided this message needs no reply — a cancel, or a superseded id.
     // Forwarding a synthetic response here would tell the UI a render finished when none did.

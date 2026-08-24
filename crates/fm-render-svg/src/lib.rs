@@ -5416,7 +5416,6 @@ fn write_cardinality_text_into(
     out.push_str("</text>");
 }
 
-
 #[allow(clippy::too_many_arguments)]
 fn render_quadrant_svg(
     mut doc: SvgDocument,
@@ -7241,13 +7240,7 @@ fn write_class_compartments_into(
         .map(|l| l.text.as_str())
         .unwrap_or(&node.id);
     if let Some(stereotype) = &meta.stereotype {
-        let stereo_text = match stereotype {
-            fm_core::ClassStereotype::Interface => "<<interface>>",
-            fm_core::ClassStereotype::Abstract => "<<abstract>>",
-            fm_core::ClassStereotype::Enum => "<<enumeration>>",
-            fm_core::ClassStereotype::Service => "<<service>>",
-            fm_core::ClassStereotype::Custom(s) => s.as_str(),
-        };
+        let stereo_text = stereotype.label();
         write_class_text_into(
             f,
             x + w / 2.0,
@@ -8360,7 +8353,11 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
     for (prefix, value, class) in [
         ("ID: ", meta.req_id.as_deref(), "fm-req-id"),
         ("Text: ", meta.text.as_deref(), "fm-req-text"),
-        ("Type: ", meta.element_type.as_deref(), "fm-req-element-type"),
+        (
+            "Type: ",
+            meta.element_type.as_deref(),
+            "fm-req-element-type",
+        ),
         ("Doc: ", meta.doc_ref.as_deref(), "fm-req-docref"),
     ] {
         let Some(value) = value else { continue };
@@ -8657,7 +8654,7 @@ fn render_node_into(
     if let Some(node) = ir_node
         && matches!(shape, NodeShape::Rect)
         && let Some(meta) = node.class_meta.as_deref()
-        && (!meta.attributes.is_empty() || !meta.methods.is_empty())
+        && (!meta.attributes.is_empty() || !meta.methods.is_empty() || meta.stereotype.is_some())
         && config.embed_theme_css
         && config.node_gradients
         && !emit_classdef_classes
@@ -8701,7 +8698,7 @@ fn render_node_into(
     if let Some(node) = ir_node
         && matches!(shape, NodeShape::Rect)
         && let Some(meta) = node.class_meta.as_deref()
-        && (!meta.attributes.is_empty() || !meta.methods.is_empty())
+        && (!meta.attributes.is_empty() || !meta.methods.is_empty() || meta.stereotype.is_some())
         && config.embed_theme_css
         && config.node_gradients
         && !emit_classdef_classes
@@ -9433,36 +9430,33 @@ fn render_node(
             if shape != NodeShape::DoubleCircle {
                 elem
             } else {
+                // A double circle needs a SECOND RING, not a thicker stroke (bd-vfxu).
+                //
+                // The previous code drew one circle and nudged `stroke_width` to 2.0 to stand in for the
+                // inner ring. That was a no-op in the shipping theme, whose base node stroke already
+                // resolves to 2.0 — so `A(((Double Circle)))` and `B((Circle))` rendered byte-identical
+                // apart from their centre, and a reader could not tell the two declared shapes apart.
+                // The same shape carries a stateDiagram end state, so an end state was indistinguishable
+                // from an ordinary circular state.
+                //
+                // The inner ring is inset by a fixed 4px rather than a ratio: mermaid's own double circle
+                // keeps a constant gap, and a proportional inset would collapse to invisible on a small
+                // node and gape on a large one. It is unfilled so the outer fill (or gradient) shows
+                // through unchanged, which keeps this a purely additive change to the shape.
+                let inner_r = (r - 4.0).max(r * 0.5);
 
-            // A double circle needs a SECOND RING, not a thicker stroke (bd-vfxu).
-            //
-            // The previous code drew one circle and nudged `stroke_width` to 2.0 to stand in for the
-            // inner ring. That was a no-op in the shipping theme, whose base node stroke already
-            // resolves to 2.0 — so `A(((Double Circle)))` and `B((Circle))` rendered byte-identical
-            // apart from their centre, and a reader could not tell the two declared shapes apart.
-            // The same shape carries a stateDiagram end state, so an end state was indistinguishable
-            // from an ordinary circular state.
-            //
-            // The inner ring is inset by a fixed 4px rather than a ratio: mermaid's own double circle
-            // keeps a constant gap, and a proportional inset would collapse to invisible on a small
-            // node and gape on a large one. It is unfilled so the outer fill (or gradient) shows
-            // through unchanged, which keeps this a purely additive change to the shape.
-            let inner_r = (r - 4.0).max(r * 0.5);
-
-            // The inner disc is FILLED for a state diagram's terminal pseudo-state and hollow
-            // everywhere else (bd-wbxc). mermaid draws a state `[*]` end as a ring around a solid
-            // dot, while a flowchart `(((x)))` is two hollow rings — one NodeShape carries both, so
-            // the fill is decided by the diagram it belongs to rather than by the shape. Without it
-            // the end state showed a target symbol where the incumbent shows a bullseye, which was
-            // the surviving half of bd-vfxu.
-            let inner_fill = if ir.diagram_type == fm_core::DiagramType::State {
-                colors.node_stroke.as_str()
-            } else {
-                "none"
-            };
-            Element::group()
-                .child(elem)
-                .child(
+                // The inner disc is FILLED for a state diagram's terminal pseudo-state and hollow
+                // everywhere else (bd-wbxc). mermaid draws a state `[*]` end as a ring around a solid
+                // dot, while a flowchart `(((x)))` is two hollow rings — one NodeShape carries both, so
+                // the fill is decided by the diagram it belongs to rather than by the shape. Without it
+                // the end state showed a target symbol where the incumbent shows a bullseye, which was
+                // the surviving half of bd-vfxu.
+                let inner_fill = if ir.diagram_type == fm_core::DiagramType::State {
+                    colors.node_stroke.as_str()
+                } else {
+                    "none"
+                };
+                Element::group().child(elem).child(
                     Element::circle()
                         .cx(cx)
                         .cy(cy)
@@ -9916,7 +9910,9 @@ fn render_node(
     if detail.show_node_labels && !placeholder_space_node {
         if let Some(node) = ir_node
             && let Some(ref meta) = node.class_meta
-            && (!meta.attributes.is_empty() || !meta.methods.is_empty())
+            && (!meta.attributes.is_empty()
+                || !meta.methods.is_empty()
+                || meta.stereotype.is_some())
         {
             group = render_class_compartments(
                 group,
@@ -10646,13 +10642,7 @@ fn render_class_compartments(
 
     // Stereotype above class name if present.
     if let Some(ref stereotype) = meta.stereotype {
-        let stereo_text = match stereotype {
-            fm_core::ClassStereotype::Interface => "<<interface>>",
-            fm_core::ClassStereotype::Abstract => "<<abstract>>",
-            fm_core::ClassStereotype::Enum => "<<enumeration>>",
-            fm_core::ClassStereotype::Service => "<<service>>",
-            fm_core::ClassStereotype::Custom(s) => s.as_str(),
-        };
+        let stereo_text = stereotype.label();
         let stereo_elem = TextBuilder::new(stereo_text)
             .x(x + w / 2.0)
             .y(cursor_y)
@@ -12513,10 +12503,11 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         }
     };
 
-    let stroke_width = sankey_flow_stroke_width(ir, ir_edge, sankey_widest).unwrap_or(match arrow {
-        ArrowType::ThickArrow | ArrowType::DoubleThickArrow | ArrowType::ThickLine => 2.5,
-        _ => 1.8,
-    });
+    let stroke_width =
+        sankey_flow_stroke_width(ir, ir_edge, sankey_widest).unwrap_or(match arrow {
+            ArrowType::ThickArrow | ArrowType::DoubleThickArrow | ArrowType::ThickLine => 2.5,
+            _ => 1.8,
+        });
 
     // Determine edge style class
     let style_class = if is_back_edge {
@@ -12916,7 +12907,8 @@ fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &Edge
         // A sankey flow's WIDTH is its value (bd-e69x). This labeled-edge fast path is the one
         // sankey actually takes — its edges always carry a label, because the parser stores the
         // flow amount there — so the width must be resolved here, not only after the arrow match.
-        let labeled_stroke_width = sankey_flow_stroke_width(ir, ir_edge, sankey_widest).unwrap_or(1.8);
+        let labeled_stroke_width =
+            sankey_flow_stroke_width(ir, ir_edge, sankey_widest).unwrap_or(1.8);
         if !label_str.contains('\n') && resolve_edge_inline_style(ir, edge_index).is_none() {
             let path_str = smooth_layout_edge_path(edge_path, offset_x, offset_y);
             if a11y {
@@ -15674,7 +15666,10 @@ mod tests {
         );
         let svg = render_svg(&parsed.ir);
 
-        assert!(svg.contains("stroke:#ff0000"), "edge class stroke was lost: {svg}");
+        assert!(
+            svg.contains("stroke:#ff0000"),
+            "edge class stroke was lost: {svg}"
+        );
         assert!(
             svg.contains("stroke-width:4px"),
             "edge class width was lost: {svg}"
@@ -16120,9 +16115,24 @@ mod tests {
                 Some("stroke:red,stroke-width:4px"),
                 true,
             ),
-            ("in span, turned off", Some("2026-01-02"), Some("off"), false),
-            ("today AFTER the chart span", Some("2026-08-16"), None, false),
-            ("today BEFORE the chart span", Some("2020-01-01"), None, false),
+            (
+                "in span, turned off",
+                Some("2026-01-02"),
+                Some("off"),
+                false,
+            ),
+            (
+                "today AFTER the chart span",
+                Some("2026-08-16"),
+                None,
+                false,
+            ),
+            (
+                "today BEFORE the chart span",
+                Some("2020-01-01"),
+                None,
+                false,
+            ),
             ("no date injected at all", None, None, false),
             ("not a real calendar date", Some("2026-02-31"), None, false),
         ];
@@ -16192,7 +16202,9 @@ mod tests {
                 "exactly one today marker expected for {today}, once per chart not once per task"
             );
             let anchor = svg.find("fm-gantt-today").expect("marker present");
-            let element_start = svg[..anchor].rfind("<line").expect("marker is a line element");
+            let element_start = svg[..anchor]
+                .rfind("<line")
+                .expect("marker is a line element");
             svg[element_start..]
                 .split("x1=\"")
                 .nth(1)
@@ -17464,7 +17476,10 @@ marker#arrow-open path {
         let plain = count_circles("flowchart TD\n  B((Circle))\n");
         let double = count_circles("flowchart TD\n  A(((Double Circle)))\n");
 
-        assert_eq!(plain, 1, "a plain circle node must emit exactly one <circle>");
+        assert_eq!(
+            plain, 1,
+            "a plain circle node must emit exactly one <circle>"
+        );
         assert_eq!(
             double, 2,
             "a double circle must emit two concentric <circle> elements, got {double}"
@@ -17652,7 +17667,14 @@ marker#arrow-open path {
         );
         let attr = |elem: &str, name: &str| -> f32 {
             let key = format!(" {name}=\"");
-            elem.split(&key).nth(1).unwrap().split('"').next().unwrap().parse().unwrap()
+            elem.split(&key)
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap()
         };
         let divider_y = attr(dividers[0], "y1");
         assert!(
@@ -17709,8 +17731,10 @@ marker#arrow-open path {
             &SvgRenderConfig::default(),
         );
         let without_branch = render_svg_with_config(
-            &fm_parser::parse("sequenceDiagram\n    A->>B: hi\n    alt ok\n        A->>B: yes\n    end")
-                .ir,
+            &fm_parser::parse(
+                "sequenceDiagram\n    A->>B: hi\n    alt ok\n        A->>B: yes\n    end",
+            )
+            .ir,
             &SvgRenderConfig::default(),
         );
         assert!(
@@ -19698,7 +19722,9 @@ marker#arrow-open path {
             "the smallest flow must clamp to the 1.5 floor; got {widths:?}"
         );
         assert!(
-            !widths.iter().any(|w| w.parse::<f32>().is_ok_and(|v| v > 0.0 && v < 1.5)),
+            !widths
+                .iter()
+                .any(|w| w.parse::<f32>().is_ok_and(|v| v > 0.0 && v < 1.5)),
             "no RIBBON may be thinner than the 1.5 floor; got {widths:?}"
         );
     }
@@ -19731,7 +19757,9 @@ marker#arrow-open path {
         let svg = render_source("sankey-beta\n\nA,B,notanumber\n");
         let widths = path_stroke_widths(&svg);
         assert!(
-            !widths.iter().any(|w| w.contains("NaN") || w.contains("inf")),
+            !widths
+                .iter()
+                .any(|w| w.contains("NaN") || w.contains("inf")),
             "a non-numeric flow must not produce a non-finite width; got {widths:?}"
         );
     }
@@ -19750,7 +19778,9 @@ marker#arrow-open path {
     fn path_stroke_widths(svg: &str) -> Vec<String> {
         let mut out = Vec::new();
         for tag in svg.split("<path").skip(1) {
-            let Some(end_of_tag) = tag.find('>') else { continue };
+            let Some(end_of_tag) = tag.find('>') else {
+                continue;
+            };
             let head = &tag[..end_of_tag];
             if let Some(at) = head.find("stroke-width=\"") {
                 let rest = &head[at + 14..];

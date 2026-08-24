@@ -134,7 +134,11 @@ fn no_output_contains_nan_infinity_or_negative_zero() {
         // and my first version of this loop duly "found" negative zeros in `id="fm-edge-0"` and
         // `id="fm-node-a-0"` — the same false positive, one layer down, in the code written to
         // remove it. Anchoring on the attribute boundary takes it to zero on this fixture.
-        for path in svg.split(" d=\"").skip(1).filter_map(|rest| rest.split('"').next()) {
+        for path in svg
+            .split(" d=\"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+        {
             for (index, _) in path.match_indices("-0") {
                 let after = path[index + 2..].chars().next();
                 // The `-0` is a WHOLE number only if nothing numeric follows it; `-0.5` and

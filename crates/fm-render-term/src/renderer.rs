@@ -9,6 +9,7 @@ use fm_layout::{DiagramLayout, LayoutClusterBox, LayoutEdgePath, LayoutNodeBox, 
 use crate::canvas::Canvas;
 use crate::config::{ResolvedConfig, TermRenderConfig};
 use crate::glyphs::{BoxGlyphs, ClusterGlyphs, EdgeGlyphs};
+use crate::transform::TermTransform;
 
 /// Result of terminal rendering.
 #[derive(Debug, Clone)]
@@ -1605,43 +1606,43 @@ impl TermRenderer {
             for axis_y in axis_rows {
                 let mut last_end: Option<usize> = None;
                 for tick in &layout.extensions.axis_ticks {
-                if tick.label.is_empty() {
-                    continue;
-                }
-                let (x, y, _w, _h) = self.bounds_to_cells(
-                    &fm_layout::LayoutRect {
-                        x: tick.position,
-                        y: axis_y,
-                        width: 0.0,
-                        height: 0.0,
-                    },
-                    scale_x,
-                    scale_y,
-                );
-                if y >= lines.len() {
-                    continue;
-                }
-                // Never let two dates collide into an unreadable run: a tick that would start before
-                // the previous one ended is skipped, which thins a dense axis rather than corrupting
-                // it. The FIRST tick always survives, so an axis is never emptied by this rule.
-                if let Some(end) = last_end
-                    && x <= end
-                {
-                    continue;
-                }
-                let label: String = self.truncate_label(&tick.label).chars().collect();
-                let mut written = 0usize;
-                for (offset, ch) in label.chars().enumerate() {
-                    let col = x + offset;
-                    if col >= cell_width || col >= lines[y].len() {
-                        break;
+                    if tick.label.is_empty() {
+                        continue;
                     }
-                    lines[y][col] = ch;
-                    written = offset + 1;
-                }
-                if written > 0 {
-                    last_end = Some(x + written);
-                }
+                    let (x, y, _w, _h) = self.bounds_to_cells(
+                        &fm_layout::LayoutRect {
+                            x: tick.position,
+                            y: axis_y,
+                            width: 0.0,
+                            height: 0.0,
+                        },
+                        scale_x,
+                        scale_y,
+                    );
+                    if y >= lines.len() {
+                        continue;
+                    }
+                    // Never let two dates collide into an unreadable run: a tick that would start before
+                    // the previous one ended is skipped, which thins a dense axis rather than corrupting
+                    // it. The FIRST tick always survives, so an axis is never emptied by this rule.
+                    if let Some(end) = last_end
+                        && x <= end
+                    {
+                        continue;
+                    }
+                    let label: String = self.truncate_label(&tick.label).chars().collect();
+                    let mut written = 0usize;
+                    for (offset, ch) in label.chars().enumerate() {
+                        let col = x + offset;
+                        if col >= cell_width || col >= lines[y].len() {
+                            break;
+                        }
+                        lines[y][col] = ch;
+                        written = offset + 1;
+                    }
+                    if written > 0 {
+                        last_end = Some(x + written);
+                    }
                 }
             }
         }
@@ -2017,7 +2018,9 @@ impl TermRenderer {
             // Class diagram nodes with class_meta get three-compartment rendering.
             if let Some(node) = ir_node
                 && let Some(ref meta) = node.class_meta
-                && (!meta.attributes.is_empty() || !meta.methods.is_empty())
+                && (!meta.attributes.is_empty()
+                    || !meta.methods.is_empty()
+                    || meta.stereotype.is_some())
             {
                 self.overlay_class_compartments(&mut lines, x, y, w, h, ir, node, meta, cell_width);
                 continue;
@@ -2397,12 +2400,11 @@ impl TermRenderer {
         scale_x: f32,
         scale_y: f32,
     ) -> (usize, usize, usize, usize) {
-        let x = (bounds.x * scale_x) as usize + self.config.padding;
-        let y = (bounds.y * scale_y) as usize + self.config.padding;
+        let (x, y) = self.layout_point_to_cells(bounds.x, bounds.y, scale_x, scale_y);
         let w = ((bounds.width * scale_x) as usize).max(3);
         let h = ((bounds.height * scale_y) as usize).max(2);
 
-        (x, y, w, h)
+        (x + self.config.padding, y + self.config.padding, w, h)
     }
 
     fn point_to_cells(
@@ -2411,10 +2413,21 @@ impl TermRenderer {
         scale_x: f32,
         scale_y: f32,
     ) -> (usize, usize) {
-        let x = (point.x * scale_x) as usize + self.config.padding;
-        let y = (point.y * scale_y) as usize + self.config.padding;
+        let (x, y) = self.layout_point_to_cells(point.x, point.y, scale_x, scale_y);
 
-        (x, y)
+        (x + self.config.padding, y + self.config.padding)
+    }
+
+    /// Convert one layout-space point into terminal cell space through the CGA-backed transform.
+    ///
+    /// The direct arithmetic fallback preserves the established degenerate-scale behavior. Normal
+    /// rendering obtains positive finite scales from `fit_cell_dimensions`, so it takes the rotor
+    /// path; keeping the fallback makes this low-level conversion total for direct unit callers.
+    fn layout_point_to_cells(&self, x: f32, y: f32, scale_x: f32, scale_y: f32) -> (usize, usize) {
+        let (x, y) = TermTransform::new(scale_x, scale_y)
+            .map(|transform| transform.apply(x, y))
+            .unwrap_or((x * scale_x, y * scale_y));
+        (x as usize, y as usize)
     }
 
     fn truncate_label(&self, text: &str) -> String {
@@ -2875,13 +2888,7 @@ impl TermRenderer {
         if let Some(stereotype) = &meta.stereotype
             && row < max_content_row
         {
-            let stereo_text = match stereotype {
-                fm_core::ClassStereotype::Interface => "<<interface>>",
-                fm_core::ClassStereotype::Abstract => "<<abstract>>",
-                fm_core::ClassStereotype::Enum => "<<enumeration>>",
-                fm_core::ClassStereotype::Service => "<<service>>",
-                fm_core::ClassStereotype::Custom(s) => s.as_str(),
-            };
+            let stereo_text = stereotype.label();
             let stereo = self.truncate_label(stereo_text);
             let stereo_chars = stereo.chars().count();
             let stereo_x = x + 1 + inner_w.saturating_sub(stereo_chars) / 2;
@@ -3539,6 +3546,48 @@ mod tests {
         LayoutStats,
     };
 
+    /// A class declaring a stereotype and NO members must still show it here (bd-d48wi).
+    ///
+    /// The terminal shared the defect with the SVG and canvas backends: all three gated the whole
+    /// compartment stack on having at least one member, so a marker interface — idiomatic mermaid,
+    /// and gated in the pinned incumbent on `annotations.length > 0` with no member requirement —
+    /// printed as a bare box with its annotation silently dropped.
+    ///
+    /// Asserted on this backend separately because agreement between SVG and canvas cannot speak
+    /// for it: the terminal draws into a character grid and clips on its own rules, so a fix that
+    /// works in two vector backends can still be invisible in the third.
+    #[test]
+    fn a_class_with_only_a_stereotype_still_shows_it_in_the_terminal() {
+        let source = format!(
+            "classDiagram\n  class Shape {{\n    {}interface{}\n  }}\n",
+            "<<", ">>"
+        );
+        let ir = fm_parser::parse(&source).ir;
+
+        // CONTROL ON THE PARSE, or a dropped stereotype and an unparsed one look identical below.
+        let meta = ir
+            .nodes
+            .iter()
+            .find_map(|node| node.class_meta.as_deref())
+            .expect("CONTROL FAILED: no class metadata parsed");
+        assert!(
+            meta.stereotype.is_some() && meta.attributes.is_empty() && meta.methods.is_empty(),
+            "CONTROL FAILED: fixture is not a memberless class carrying a stereotype"
+        );
+
+        let out = crate::render_term(&ir);
+        let stereotype = format!("{}interface{}", "<<", ">>");
+        assert!(
+            out.contains(&stereotype),
+            "the terminal dropped the stereotype for a memberless class:\n{out}"
+        );
+        // The name must survive alongside it, not be replaced by it.
+        assert!(
+            out.contains("Shape"),
+            "the class name was lost when the stereotype was drawn:\n{out}"
+        );
+    }
+
     fn sample_ir() -> MermaidDiagramIr {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
         ir.direction = GraphDirection::LR;
@@ -3576,6 +3625,28 @@ mod tests {
         assert_eq!(result.node_count, 2);
         assert_eq!(result.edge_count, 1);
         assert!(!result.output.is_empty());
+    }
+
+    #[test]
+    fn cell_geometry_uses_the_cga_transform_without_moving_cells() {
+        let config = TermRenderConfig {
+            padding: 2,
+            ..Default::default()
+        };
+        let renderer = TermRenderer::new(ResolvedConfig::resolve(&config, 80, 24));
+        let point = fm_layout::LayoutPoint { x: 2.5, y: 1.5 };
+        let bounds = LayoutRect {
+            x: point.x,
+            y: point.y,
+            width: 3.0,
+            height: 2.0,
+        };
+
+        // Baseline contract: the cell renderer has always mapped points with x * scale_x and
+        // y * scale_y, then added its padding. The CGA rotor plus explicit aspect must preserve
+        // that exact cell placement for the anisotropic terminal grid.
+        assert_eq!(renderer.point_to_cells(&point, 2.0, 4.0), (7, 8));
+        assert_eq!(renderer.bounds_to_cells(&bounds, 2.0, 4.0), (7, 8, 6, 8));
     }
 
     #[test]

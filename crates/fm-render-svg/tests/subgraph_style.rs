@@ -33,10 +33,9 @@ fn the_style_is_recorded_against_a_cluster_not_a_node() {
     let ir = fm_parser::parse(STYLED).ir;
 
     assert!(
-        ir.style_refs.iter().any(|style_ref| matches!(
-            style_ref.target,
-            fm_core::IrStyleTarget::Cluster(_)
-        )),
+        ir.style_refs
+            .iter()
+            .any(|style_ref| matches!(style_ref.target, fm_core::IrStyleTarget::Cluster(_))),
         "the subgraph style was not recorded against a cluster: {:?}",
         ir.style_refs
     );
@@ -68,10 +67,9 @@ fn a_node_style_still_applies() {
     let ir = fm_parser::parse("flowchart TD\n  a[A] --> b[B]\n  style a fill:#00ff00\n").ir;
 
     assert!(
-        ir.style_refs.iter().any(|style_ref| matches!(
-            style_ref.target,
-            fm_core::IrStyleTarget::Node(_)
-        )),
+        ir.style_refs
+            .iter()
+            .any(|style_ref| matches!(style_ref.target, fm_core::IrStyleTarget::Node(_))),
         "an ordinary node style stopped being recorded against a node: {:?}",
         ir.style_refs
     );
