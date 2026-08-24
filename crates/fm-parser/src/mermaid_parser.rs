@@ -1099,60 +1099,91 @@ fn lower_flow_ast(
             link_target,
             is_callback,
         } => {
-            let cleaned = target
+            apply_click_directive(
+                builder,
+                node,
+                target,
+                tooltip.as_ref(),
+                link_target.as_ref(),
+                *is_callback,
+                line_number,
+                span,
+            );
+        }
+        FlowAst::StyleOrLinkStyle | FlowAst::ClassDef => {
+            // Intentionally skipped — same as the hand-written parser
+        }
+    }
+}
+
+/// Apply one parsed `click` directive to a node that already exists.
+///
+/// EXTRACTED so the gantt path can reuse it (bd-gydqv) instead of forking it. A second copy of
+/// this is exactly the shape that has bitten this file repeatedly: the safety gate, the quote
+/// stripping, the callback-vs-link split and the `link_target`-only-on-links rule would all have
+/// to be kept in step by hand, and the `_blank`-in-the-tooltip defect above is what that costs.
+///
+/// `node` is a node id that must already be interned — the setters here are non-interning, which
+/// is what stops a click on an unknown id from inventing a phantom.
+fn apply_click_directive(
+    builder: &mut IrBuilder,
+    node: &str,
+    target: &str,
+    tooltip: Option<&String>,
+    link_target: Option<&String>,
+    is_callback: bool,
+    line_number: usize,
+    span: Span,
+) {
+    let cleaned = target
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_matches('`')
+        .trim();
+    if cleaned.is_empty() {
+        builder.add_warning(format!(
+            "Line {line_number}: click directive target is empty after normalization"
+        ));
+    } else if is_callback {
+        // Callback: store function name, add interactive class.
+        builder.add_class_to_node(node, "has-callback", span);
+        builder.set_node_callback(node, cleaned, span);
+        if let Some(tip) = tooltip {
+            let tip_cleaned = tip
                 .trim()
                 .trim_matches('"')
                 .trim_matches('\'')
                 .trim_matches('`')
                 .trim();
-            if cleaned.is_empty() {
-                builder.add_warning(format!(
-                    "Line {line_number}: click directive target is empty after normalization"
-                ));
-            } else if *is_callback {
-                // Callback: store function name, add interactive class.
-                builder.add_class_to_node(node, "has-callback", span);
-                builder.set_node_callback(node, cleaned, span);
-                if let Some(tip) = tooltip {
-                    let tip_cleaned = tip
-                        .trim()
-                        .trim_matches('"')
-                        .trim_matches('\'')
-                        .trim_matches('`')
-                        .trim();
-                    if !tip_cleaned.is_empty() {
-                        builder.set_node_tooltip(node, tip_cleaned, span);
-                    }
-                }
-            } else if !is_safe_link_target(cleaned, builder.sanitize_mode()) {
-                builder.add_warning(format!(
-                    "Line {line_number}: unsafe click link target blocked: {cleaned}"
-                ));
-            } else {
-                builder.add_class_to_node(node, "has-link", span);
-                builder.set_node_link(node, cleaned, span);
-                // The declared browser target, if any (bd-vn7s). Applied only on the LINK branch:
-                // `setLink` is the only mermaid function that takes one, and a callback has no
-                // frame to open in. Runs after `set_node_link` so the node is guaranteed to exist,
-                // which is why the setter can be non-interning.
-                if let Some(link_target) = link_target {
-                    builder.set_node_link_target(node, link_target);
-                }
-                if let Some(tip) = tooltip {
-                    let tip_cleaned = tip
-                        .trim()
-                        .trim_matches('"')
-                        .trim_matches('\'')
-                        .trim_matches('`')
-                        .trim();
-                    if !tip_cleaned.is_empty() {
-                        builder.set_node_tooltip(node, tip_cleaned, span);
-                    }
-                }
+            if !tip_cleaned.is_empty() {
+                builder.set_node_tooltip(node, tip_cleaned, span);
             }
         }
-        FlowAst::StyleOrLinkStyle | FlowAst::ClassDef => {
-            // Intentionally skipped — same as the hand-written parser
+    } else if !is_safe_link_target(cleaned, builder.sanitize_mode()) {
+        builder.add_warning(format!(
+            "Line {line_number}: unsafe click link target blocked: {cleaned}"
+        ));
+    } else {
+        builder.add_class_to_node(node, "has-link", span);
+        builder.set_node_link(node, cleaned, span);
+        // The declared browser target, if any (bd-vn7s). Applied only on the LINK branch:
+        // `setLink` is the only mermaid function that takes one, and a callback has no
+        // frame to open in. Runs after `set_node_link` so the node is guaranteed to exist,
+        // which is why the setter can be non-interning.
+        if let Some(link_target) = link_target {
+            builder.set_node_link_target(node, link_target);
+        }
+        if let Some(tip) = tooltip {
+            let tip_cleaned = tip
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim_matches('`')
+                .trim();
+            if !tip_cleaned.is_empty() {
+                builder.set_node_tooltip(node, tip_cleaned, span);
+            }
         }
     }
 }
@@ -7032,6 +7063,15 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
     // Lookup-only (dependency resolution `get`s below); iteration order is never used — the resolved
     // edges come from `pending_dependencies` in insertion order — so an FxHashMap replaces the BTreeMap's
     // O(log N) String-comparison inserts/lookups with O(1) hashing. Byte-identical output.
+    // Clicks, held until the task-id map is complete — see the deferral note in the loop.
+    let mut pending_clicks: Vec<(Vec<FlowAst>, usize, Span)> = Vec::new();
+    let mut click_warnings: Vec<String> = Vec::new();
+    // A declared task id (`a1`) to the key the node was actually INTERNED under (`Alpha_4`).
+    // The distinction is load-bearing: `set_node_link` interns its key, so handing it the declared
+    // id would mint a phantom node named `a1` — the exact bd-xfmm/bd-vc1zp defect this feature is
+    // built on top of.
+    let mut task_ids_to_keys: rustc_hash::FxHashMap<String, String> =
+        rustc_hash::FxHashMap::default();
     let mut task_ids_to_nodes: rustc_hash::FxHashMap<String, IrNodeId> =
         rustc_hash::FxHashMap::default();
     let mut pending_dependencies: Vec<PendingGanttDependency> = Vec::new();
@@ -7069,11 +7109,14 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         // `click a1 call doThing()` both had no colon to split on and were already dropped, which is
         // why one half of gantt's own click support looked fine while the other produced a phantom.
         //
-        // RECOGNISED AND IGNORED, which is correct here rather than a compromise, on the same
-        // reasoning `hide empty description` is ignored in the state parser: gantt tasks carry no
-        // interaction in this IR, so there is nothing yet to attach the click to. Wiring gantt
-        // interactivity is a capability, not this bug — and drawing the directive is strictly worse
-        // than not supporting it, because the reader sees syntax nobody wrote.
+        // NOW SUPPORTED, not merely ignored (bd-gydqv). bd-vc1zp stopped the directive being drawn
+        // as a task; this attaches it to the task it names, so gantt honours `click` the way the
+        // flowchart already does — including through `fm_render_canvas::hit_regions`, so a browser
+        // host on a raster surface gets it too.
+        //
+        // DEFERRED, not applied inline: a `click` may PRECEDE the task it targets, and the task-id
+        // map is only complete once the loop ends. Applying here would silently drop every forward
+        // reference.
         //
         // NARROW on purpose. The broad `is_non_node_directive_statement` also swallows `title`, and
         // gantt parses `title` into real diagram meta three lines below — swallowing it here would
@@ -7083,6 +7126,11 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
             .strip_prefix("click")
             .is_some_and(|rest| rest.starts_with(char::is_whitespace))
         {
+            if let Some(directives) =
+                parse_click_directive_ast(trimmed, line_number, &mut click_warnings)
+            {
+                pending_clicks.push((directives, line_number, span_for(line_number, line)));
+            }
             continue;
         }
 
@@ -7215,6 +7263,9 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         }
         if let Some(task_id_ref) = parsed_meta.task_id.as_ref() {
             task_ids_to_nodes.entry(task_id_ref.clone()).or_insert(node);
+            task_ids_to_keys
+                .entry(task_id_ref.clone())
+                .or_insert_with(|| task_id.clone());
         }
         if let Some(after_task_id) = parsed_meta.depends_on.first() {
             if let Some(from) = task_ids_to_nodes.get(after_task_id).copied() {
@@ -7270,6 +7321,46 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
                         .add_warning(format!("Unresolved gantt dependency 'after {dependency}'"));
                 }
             }
+        }
+    }
+
+    for warning in click_warnings {
+        builder.add_warning(warning);
+    }
+
+    // Resolve each click against the declared task ids, then apply it through the SAME helper the
+    // flowchart uses, so the safety gate, the callback/link split and the link-target rule cannot
+    // drift between the two diagram types.
+    for (directives, line_number, span) in pending_clicks {
+        for directive in &directives {
+            let FlowAst::ClickDirective {
+                node,
+                target,
+                tooltip,
+                link_target,
+                is_callback,
+            } = directive
+            else {
+                continue;
+            };
+            let Some(node_key) = task_ids_to_keys.get(node) else {
+                // NAMED, not silent: an unresolved click is a typo in the author's chart, and the
+                // alternative — interning the id — is how phantom tasks got here in the first place.
+                builder.add_warning(format!(
+                    "Line {line_number}: click directive targets unknown gantt task '{node}'"
+                ));
+                continue;
+            };
+            apply_click_directive(
+                builder,
+                &node_key.clone(),
+                target,
+                tooltip.as_ref(),
+                link_target.as_ref(),
+                *is_callback,
+                line_number,
+                span,
+            );
         }
     }
 

@@ -12,10 +12,12 @@
 //!
 //! Latest of the phantom family: bd-871ka, bd-xfmm, bd-yrxu, bd-6r13, bd-t2fp, bd-0audg, bd-yfcfv.
 //!
-//! CAPABILITY GAP, deliberately not closed here: gantt tasks carry no interaction in this IR, so the
-//! click is recognised and IGNORED rather than attached. Wiring gantt interactivity is a separate
-//! bead. Ignoring it is strictly better than drawing it — the reader currently sees syntax nobody
-//! wrote — but these tests pin "not drawn", NOT "supported", and should be tightened when it is.
+//! CAPABILITY GAP: CLOSED by bd-gydqv. When this file was written the click was recognised and
+//! IGNORED, because gantt tasks carried no interaction, and this note asked whoever closed the gap
+//! to tighten these tests. They did not need tightening — they assert the directive is not DRAWN and
+//! not interned as a task, which stays true now that it attaches to the task it names. What they do
+//! not cover is the attachment itself; that is `gantt_click_support.rs`, and these remain the
+//! regression guard for the phantom that started it.
 
 fn text_runs(svg: &str) -> Vec<String> {
     let mut out = Vec::new();

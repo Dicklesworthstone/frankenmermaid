@@ -5745,6 +5745,13 @@ fn write_quadrant_point_into(
 /// Stream a gantt task bar `<rect>` byte-identical to the slow path's `Element::rect()`:
 /// `x y width height fill stroke stroke-width="1" rx="3" class="fm-gantt-task {type_class}"`.
 #[allow(clippy::too_many_arguments)]
+/// `tooltip` is the author's `click <task> ... "text"` hover, or `None` (bd-gydqv).
+///
+/// A `title=` ATTRIBUTE, matching what the flowchart path emits and what mermaid itself does
+/// (`n.attr("title", t.tooltip)`) — deliberately NOT a `<title>` CHILD, which is this file's
+/// accessible name for a shape. Conflating the author's hover text with the a11y name is how a
+/// screen reader ends up announcing one in place of the other.
+#[allow(clippy::too_many_arguments)]
 fn write_gantt_bar_into(
     f: &mut String,
     x: f32,
@@ -5754,6 +5761,7 @@ fn write_gantt_bar_into(
     fill: &str,
     stroke: &str,
     type_class: &str,
+    tooltip: Option<&str>,
 ) {
     use crate::attributes::write_escaped_attr;
     f.push_str("<rect x=\"");
@@ -5770,7 +5778,13 @@ fn write_gantt_bar_into(
     let _ = write_escaped_attr(f, stroke);
     f.push_str("\" stroke-width=\"1\" rx=\"3\" class=\"fm-gantt-task ");
     f.push_str(type_class);
-    f.push_str("\"/>");
+    f.push('"');
+    if let Some(tooltip) = tooltip.map(str::trim).filter(|text| !text.is_empty()) {
+        f.push_str(" title=\"");
+        let _ = write_escaped_attr(f, tooltip);
+        f.push('"');
+    }
+    f.push_str("/>");
 }
 
 /// Stream a gantt task label `<text>` byte-identical to the slow path's `Element::text()`:
@@ -6035,6 +6049,12 @@ fn render_gantt_svg(
                     fm_core::GanttTaskType::Milestone => "fm-gantt-task-milestone",
                     fm_core::GanttTaskType::Normal => "fm-gantt-task-normal",
                 };
+                // The task's own node carries whatever interaction the parser attached (bd-gydqv).
+                let task_tooltip = gantt_meta
+                    .tasks
+                    .get(node_idx)
+                    .and_then(|task| ir.nodes.get(task.node.0))
+                    .and_then(|node| node.tooltip());
                 write_gantt_bar_into(
                     &mut task_svg,
                     x,
@@ -6044,6 +6064,7 @@ fn render_gantt_svg(
                     fill,
                     &theme.colors.node_stroke,
                     type_class,
+                    task_tooltip,
                 );
 
                 // Progress bar overlay.
