@@ -25,6 +25,11 @@ pub mod glyph_raster;
 #[cfg(feature = "webgpu")]
 pub mod gpu_device;
 mod gpu_layout;
+/// Hit regions for `click` on a raster surface (bd-2u0.2, closing the gap bd-bk7h identified).
+///
+/// Always available: it needs no GPU and no `web` feature, because Canvas2D hosts need it as much
+/// as the WebGPU path does.
+pub mod interaction;
 pub mod gpu_pipeline;
 mod gpu_plan;
 mod renderer;
@@ -35,6 +40,7 @@ pub use context::{
     Canvas2dContext, Color, LineCap, LineJoin, MockCanvas2dContext, Point, TextAlign, TextBaseline,
     TextMetrics,
 };
+pub use interaction::{HitRegion, hit_regions, hit_test};
 pub use gpu_layout::{
     GpuBufferLayout, GpuVertexAttribute, GpuVertexFormat, arrowhead_buffer_layout,
     edge_buffer_layout, node_buffer_layout, text_buffer_layout,
