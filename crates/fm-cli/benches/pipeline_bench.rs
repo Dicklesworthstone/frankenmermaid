@@ -21,7 +21,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 // corpus fixtures, that they still do (bd-9cma). Two of the three had silently stopped.
 #[path = "corpus_generators.rs"]
 mod corpus_generators;
-use corpus_generators::{gen_cyclic_scc, gen_dense_dag, gen_wide};
+use corpus_generators::{gen_cyclic_scc, gen_dense_dag, gen_sequence, gen_wide};
 
 /// A chain plus two long-range cross edges. **Deliberately NOT the corpus `flowchart_*` item**,
 /// which is a plain chain: the cross edges exist so this bench has non-trivial crossing
@@ -43,17 +43,6 @@ fn gen_flowchart(node_count: usize) -> String {
     if node_count > 4 {
         lines.push(format!("  N0-->N{}", node_count / 2));
         lines.push(format!("  N{}-->N{}", node_count / 3, node_count - 1));
-    }
-    lines.join("\n")
-}
-
-fn gen_sequence(participant_count: usize) -> String {
-    let mut lines = vec![String::from("sequenceDiagram")];
-    for i in 0..participant_count {
-        lines.push(format!("  participant P{i}"));
-    }
-    for i in 0..participant_count.saturating_sub(1) {
-        lines.push(format!("  P{i}->>P{}: message {i}", i + 1));
     }
     lines.join("\n")
 }
@@ -559,6 +548,9 @@ fn bench_full_pipeline(c: &mut Criterion) {
         ("medium_100", gen_flowchart(100)),
         ("large_500", gen_flowchart(500)),
         ("cyclic_50", gen_cyclic(50)),
+        // This is byte-identical to the `sequence_20` head-to-head corpus input; the parity test
+        // below prevents a future Criterion run from silently measuring a smaller sequence.
+        ("sequence_20", gen_sequence(20)),
     ] {
         group.bench_with_input(
             BenchmarkId::new("parse_layout_svg", label),

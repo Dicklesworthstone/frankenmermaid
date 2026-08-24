@@ -18,7 +18,7 @@
 #[path = "../benches/corpus_generators.rs"]
 mod corpus_generators;
 
-use corpus_generators::{gen_cyclic_scc, gen_dense_dag, gen_wide};
+use corpus_generators::{gen_cyclic_scc, gen_dense_dag, gen_sequence, gen_wide};
 
 /// Read a committed corpus fixture by its corpus id.
 fn fixture(id: &str) -> String {
@@ -95,6 +95,18 @@ fn dense_dag_generator_mirrors_the_corpus() {
 #[test]
 fn cyclic_scc_generator_mirrors_the_corpus() {
     assert_mirrors("cyclic_scc_100", &gen_cyclic_scc(100, 5));
+}
+
+#[test]
+fn sequence_generator_matches_the_corpus_input() {
+    // The committed text fixture has the conventional final source-file newline; corpus.mjs keeps
+    // its JSON input without that serialization newline.  The benchmark must match the latter.
+    let expected = fixture("sequence_20");
+    assert_eq!(
+        gen_sequence(20),
+        expected.trim_end_matches('\n'),
+        "sequence_20 bench input must match corpus.mjs apart from the fixture's terminal newline"
+    );
 }
 
 /// The fixtures must be the corpus, not a copy of whatever the bench happened to emit.
