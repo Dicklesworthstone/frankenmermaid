@@ -2303,14 +2303,32 @@ fn flowchart_metadata_shape(name: &str) -> Option<NodeShape> {
         "rect" | "rectangle" | "box" | "proc" | "process" => NodeShape::Rect,
         "rounded" | "round" | "event" => NodeShape::Rounded,
         "stadium" | "pill" | "terminal" => NodeShape::Stadium,
-        "subroutine" | "subprocess" | "framed-rectangle" | "fr-rect" => NodeShape::Subroutine,
+        "subroutine" | "subprocess" | "subproc" | "framed-rectangle" | "fr-rect" => {
+            NodeShape::Subroutine
+        }
         "cylinder" | "cyl" | "database" | "db" => NodeShape::Cylinder,
         "circle" | "circ" => NodeShape::Circle,
         "double-circle" | "doublecircle" | "dbl-circ" => NodeShape::DoubleCircle,
         "diamond" | "decision" | "diam" | "question" => NodeShape::Diamond,
-        "hexagon" | "hex" => NodeShape::Hexagon,
-        "parallelogram" | "lean-r" | "in-out" => NodeShape::Parallelogram,
-        "trapezoid" | "trap-b" | "priority" => NodeShape::Trapezoid,
+        "hexagon" | "hex" | "prepare" => NodeShape::Hexagon,
+        "parallelogram" | "lean-r" | "lean-right" | "in-out" => NodeShape::Parallelogram,
+        "trapezoid" | "trap-b" | "trapezoid-bottom" | "priority" => NodeShape::Trapezoid,
+        // ── THE MIRRORED HALF (bd-3ra5y) ──────────────────────────────────────────────────────
+        // Every name below is a shape this renderer ALREADY DRAWS, reachable today through its
+        // bracket spelling, whose mermaid 11 `shape:` name simply was not listed. `lean-r` mapped
+        // and `lean-l` did not; `trap-b` mapped and `trap-t` did not. Because they were also absent
+        // from `UNIMPLEMENTED_UPSTREAM_SHAPES`, an author writing a correct name was told the name
+        // was unrecognised — sent to fix a spelling that was already right, for a shape we render.
+        // Aliases are taken verbatim from the pinned 11.15.0 shape registry, not invented.
+        "lean-l" | "lean-left" | "out-in" => NodeShape::InvParallelogram,
+        "trap-t" | "trapezoid-top" | "inv-trapezoid" | "manual" => NodeShape::InvTrapezoid,
+        // `odd` carries no public aliases in the registry — only the internal `rect_left_inv_arrow`,
+        // which is not author-facing syntax and is deliberately NOT accepted here.
+        "odd" => NodeShape::Asymmetric,
+        "tri" | "triangle" | "extract" => NodeShape::Triangle,
+        "f-circ" | "filled-circle" | "junction" => NodeShape::FilledCircle,
+        "cross-circ" | "crossed-circle" | "summary" => NodeShape::CrossedCircle,
+        "cloud" => NodeShape::Cloud,
         _ => return None,
     })
 }
@@ -2363,19 +2381,93 @@ fn split_metadata_pairs(body: &str) -> Vec<&str> {
 /// ⚠️ A NAME ADDED TO `flowchart_metadata_shape` MUST BE REMOVED FROM HERE, or implementing a shape
 /// leaves behind a warning claiming it is unimplemented. The `every_unimplemented_shape_is_really
 /// _unimplemented` test enforces exactly that, so the two lists cannot drift apart silently.
-const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 12] = [
+/// ⚠️ THIS LIST HELD 12 OF 80 (bd-3ra5y). It carried only shortNames and none of their ALIASES, so
+/// `shape: card` was told to check its spelling while `shape: notch-rect` — the same shape, the
+/// other name for it — was correctly told the shape is unbuilt. The registry publishes both, so a
+/// list of shortNames alone can only ever answer for the half of authors who happened to pick one.
+/// Every entry below is a name the pinned 11.15.0 registry publishes as author-facing syntax
+/// (`shortName` or `aliases`); internal aliases like `rect_left_inv_arrow` are deliberately absent.
+const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 80] = [
+    "bang",
     "bolt",
     "bow-rect",
+    "bow-tie-rectangle",
     "brace",
+    "brace-l",
+    "brace-r",
+    "braces",
+    "card",
+    "collate",
+    "com-link",
+    "comment",
     "curv-trap",
+    "curved-trapezoid",
+    "das",
+    "data-store",
+    "datastore",
     "delay",
+    "disk",
+    "display",
+    "div-proc",
     "div-rect",
+    "divided-process",
+    "divided-rectangle",
+    "doc",
+    "docs",
+    "document",
+    "documents",
     "flag",
+    "flip-tri",
+    "flipped-triangle",
+    "fork",
+    "fr-circ",
+    "framed-circle",
+    "h-cyl",
+    "half-rounded-rectangle",
+    "horizontal-cylinder",
     "hourglass",
+    "internal-storage",
+    "join",
+    "lightning-bolt",
     "lin-cyl",
+    "lin-doc",
+    "lin-proc",
+    "lin-rect",
+    "lined-cylinder",
+    "lined-document",
+    "lined-process",
+    "lined-rectangle",
+    "loop-limit",
+    "manual-file",
+    "manual-input",
+    "notch-pent",
     "notch-rect",
+    "notched-pentagon",
+    "notched-rectangle",
+    "paper-tape",
+    "processes",
+    "procs",
+    "shaded-process",
     "sl-rect",
+    "sloped-rectangle",
+    "sm-circ",
+    "small-circle",
+    "st-doc",
+    "st-rect",
+    "stacked-document",
+    "stacked-rectangle",
+    "start",
+    "stop",
+    "stored-data",
+    "tag-doc",
+    "tag-proc",
     "tag-rect",
+    "tagged-document",
+    "tagged-process",
+    "tagged-rectangle",
+    "text",
+    "win-pane",
+    "window-pane",
 ];
 
 /// Message for a `shape:` name that [`flowchart_metadata_shape`] does not map.
