@@ -7018,6 +7018,22 @@ fn render_xychart_svg(
             .iter()
             .filter_map(|node_id| layout_nodes_by_index.get(node_id.0).and_then(|node| *node))
             .collect();
+        // The ORIGINAL value index of each surviving node, built with the IDENTICAL filter above
+        // (bd-sdhzh). `series_nodes` drops any node the layout did not place, so its positions are
+        // not `series.values` positions; zipping the two directly would name a mark with its
+        // neighbour's number. A parallel vector keeps the mapping exact without rewriting the five
+        // other loops that consume `series_nodes`.
+        let series_value_indices: Vec<usize> = series
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(value_index, node_id)| {
+                layout_nodes_by_index
+                    .get(node_id.0)
+                    .and_then(|node| *node)
+                    .map(|_| value_index)
+            })
+            .collect();
 
         match series.kind {
             IrXySeriesKind::Bar => {
@@ -7025,7 +7041,8 @@ fn render_xychart_svg(
                 if config.include_source_spans {
                     // Spans on: keep the per-bar `Element` build so `apply_span_metadata` can attach the
                     // `data-fm-source-*` attributes (rare config; not worth reproducing inline).
-                    for node in series_nodes {
+                    for (position, node) in series_nodes.iter().enumerate() {
+                        let node = *node;
                         let rect = Element::rect()
                             .x(node.bounds.x + offset_x)
                             .y(node.bounds.y + offset_y)
@@ -7037,6 +7054,16 @@ fn render_xychart_svg(
                             .stroke_width(1.0)
                             .rx(rx)
                             .class("fm-xychart-bar");
+                        let rect = match series_value_indices
+                            .get(position)
+                            .and_then(|index| {
+                                xychart_mark_accessible_name(xy_chart_meta, series, *index)
+                            })
+                            .filter(|_| config.a11y.text_alternatives)
+                        {
+                            Some(name) => rect.child(Element::title(&name)),
+                            None => rect,
+                        };
                         doc = doc.child(apply_span_metadata(rect, node.span));
                     }
                 } else {
@@ -7056,7 +7083,8 @@ fn render_xychart_svg(
                     let mut rx_text = String::new();
                     let _ = crate::attributes::write_number_into(&mut rx_text, rx);
                     let mut bar_svg = String::new();
-                    for node in series_nodes {
+                    for (position, node) in series_nodes.iter().enumerate() {
+                        let node = *node;
                         bar_svg.push_str("<rect x=\"");
                         let _ = crate::attributes::write_number_into(
                             &mut bar_svg,
@@ -7079,7 +7107,16 @@ fn render_xychart_svg(
                         bar_svg.push_str(&esc_color);
                         bar_svg.push_str("\" stroke-width=\"1\" rx=\"");
                         bar_svg.push_str(&rx_text);
-                        bar_svg.push_str("\" class=\"fm-xychart-bar\"/>");
+                        bar_svg.push_str("\" class=\"fm-xychart-bar\"");
+                        let name = series_value_indices.get(position).and_then(|index| {
+                            xychart_mark_accessible_name(xy_chart_meta, series, *index)
+                        });
+                        write_xychart_mark_accessible_name(
+                            &mut bar_svg,
+                            config.a11y.text_alternatives,
+                            name.as_deref(),
+                            "rect",
+                        );
                     }
                     doc = doc.child(Element::raw_svg(bar_svg));
                 }
@@ -7296,6 +7333,54 @@ fn xychart_value_to_y(
     let range = (y_max - y_min).max(f32::EPSILON);
     let ratio = ((value - y_min) / range).clamp(0.0, 1.0);
     plot_bounds.y + plot_bounds.height - (ratio * plot_bounds.height)
+}
+
+/// The accessible name for one xychart data mark (bd-sdhzh).
+///
+/// `"Series, Category: 42"`, or `"Category: 42"` for an unnamed series, or `"42"` when the x axis
+/// declares no categories. The value is formatted by [`format_xychart_tick_value`], the same
+/// function the Y AXIS uses, so a screen reader reads a bar's value in the notation the axis beside
+/// it is labelled in.
+///
+/// Returns `None` when the mark's index has no value, which is the case a positional zip would
+/// otherwise turn into a mark named with its NEIGHBOUR's number — worse than an unnamed mark,
+/// because a wrong value cannot be detected by the person relying on it.
+fn xychart_mark_accessible_name(
+    meta: &fm_core::IrXyChartMeta,
+    series: &fm_core::IrXySeries,
+    value_index: usize,
+) -> Option<String> {
+    let value = series.values.get(value_index)?;
+    let formatted = format_xychart_tick_value(*value);
+    let category = meta.x_axis.categories.get(value_index);
+    Some(match (series.name.as_deref(), category) {
+        (Some(name), Some(category)) => format!("{name}, {category}: {formatted}"),
+        (Some(name), None) => format!("{name}: {formatted}"),
+        (None, Some(category)) => format!("{category}: {formatted}"),
+        (None, None) => formatted,
+    })
+}
+
+/// Close a data mark, giving it an accessible name when text alternatives are on (bd-sdhzh).
+///
+/// Mirrors `write_pie_slice_accessible_name`: with a11y off the shape closes exactly as before, so
+/// that configuration stays byte-identical.
+fn write_xychart_mark_accessible_name(
+    out: &mut String,
+    text_alternatives: bool,
+    name: Option<&str>,
+    tag: &str,
+) {
+    match name.filter(|_| text_alternatives) {
+        Some(name) => {
+            out.push_str("><title>");
+            let _ = crate::attributes::write_escaped_text(out, name);
+            out.push_str("</title></");
+            out.push_str(tag);
+            out.push('>');
+        }
+        None => out.push_str("/>"),
+    }
 }
 
 fn format_xychart_tick_value(value: f32) -> String {
