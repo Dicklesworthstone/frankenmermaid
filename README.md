@@ -6,7 +6,7 @@
 
 **A Rust-first, Mermaid-compatible diagram engine with intent-aware parsing, 15 layout algorithms, and SVG / terminal / Canvas2D / WASM rendering from a single intermediate representation.**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: MIT (with AI Rider)](https://img.shields.io/badge/License-MIT%20(OpenAI%2FAnthropic%20Rider)-blue.svg)](LICENSE)
 [![Rust 2024](https://img.shields.io/badge/rust-2024_edition-orange.svg)](rust-toolchain.toml)
 [![No unsafe](https://img.shields.io/badge/unsafe-forbid-success.svg)](#zero-unsafe-code)
 [![Live Showcase](https://img.shields.io/badge/showcase-frankenmermaid.com-brightgreen.svg)](https://frankenmermaid.com/)
