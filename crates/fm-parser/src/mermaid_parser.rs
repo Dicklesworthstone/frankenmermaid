@@ -7012,7 +7012,12 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         // ⚠️ gantt was recorded as a clean CONTROL on the bead from an SVG-attribute probe. That
         // probe was blind here — gantt task rects carry no `data-id`, so it reported no phantom for
         // a path that had one. The IR-level test is what found it; the bead is corrected.
-        if is_non_graph_statement(trimmed) {
+        // bd-yfcfv: and the ACCESSIBILITY pair for the same reason. `accTitle:`/`accDescr:`
+        // are valid in every mermaid diagram, and four sibling parsers already pair the two
+        // predicates here; these three omitted the a11y half, so the directive was interned as
+        // a visible gantt TASK. Worst of the family: the phantom carries the author's
+        // accessibility text as its own accessible name, so assistive tech announces it too.
+        if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
             continue;
         }
 
@@ -7529,7 +7534,12 @@ fn parse_pie(input: &str, builder: &mut IrBuilder) {
 
         // bd-6r13: `style a fill:#f9f` was interned as a SLICE (`style_a_fill`), adding a phantom
         // wedge to the chart. Narrow style predicate only — see bd-t2fp.
-        if is_non_graph_statement(trimmed) {
+        // bd-yfcfv: and the ACCESSIBILITY pair for the same reason. `accTitle:`/`accDescr:`
+        // are valid in every mermaid diagram, and four sibling parsers already pair the two
+        // predicates here; these three omitted the a11y half, so the directive was interned as
+        // a visible pie SLICE. Worst of the family: the phantom carries the author's
+        // accessibility text as its own accessible name, so assistive tech announces it too.
+        if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
             continue;
         }
 
@@ -7622,7 +7632,12 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
         }
 
         // bd-6r13: `style A fill:#f9f` was interned as a quadrant POINT (`style_A_fill`).
-        if is_non_graph_statement(trimmed) {
+        // bd-yfcfv: and the ACCESSIBILITY pair for the same reason. `accTitle:`/`accDescr:`
+        // are valid in every mermaid diagram, and four sibling parsers already pair the two
+        // predicates here; these three omitted the a11y half, so the directive was interned as
+        // a visible quadrant POINT. Worst of the family: the phantom carries the author's
+        // accessibility text as its own accessible name, so assistive tech announces it too.
+        if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
             continue;
         }
 
