@@ -866,6 +866,7 @@ impl TextSink<'_> {
     }
 
     /// Emit source lines at a top-left text inset, matching state-note rendering.
+    #[allow(clippy::too_many_arguments)]
     fn push_left_multiline(
         &mut self,
         text: &str,
@@ -1724,7 +1725,8 @@ impl GpuRenderPlan {
                     radius,
                     start_angle: angle,
                     sweep_angle: sweep,
-                    fill: parse_paint_rgba(COLORS[index % COLORS.len()]).unwrap_or(DEFAULT_NODE_FILL_RGBA),
+                    fill: parse_paint_rgba(COLORS[index % COLORS.len()])
+                        .unwrap_or(DEFAULT_NODE_FILL_RGBA),
                     stroke: DEFAULT_NODE_STROKE_RGBA,
                     stroke_width: DEFAULT_NODE_STROKE_WIDTH,
                     slice_index: u32::try_from(index).unwrap_or(u32::MAX),
@@ -1779,7 +1781,10 @@ impl GpuRenderPlan {
         // The default cell is 32px for a 14px glyph, so the headroom ratio is what scales; smaller
         // labels then sample DOWN from a sharp cell, which is the harmless direction. Capped so a
         // pathological declaration cannot ask a backend for an enormous texture.
-        let max_font_px = run_font_px.iter().copied().fold(DEFAULT_FONT_SIZE_PX, f32::max);
+        let max_font_px = run_font_px
+            .iter()
+            .copied()
+            .fold(DEFAULT_FONT_SIZE_PX, f32::max);
         let cell_px = ((DEFAULT_GLYPH_CELL_PX as f32) * (max_font_px / DEFAULT_FONT_SIZE_PX))
             .ceil()
             .clamp(DEFAULT_GLYPH_CELL_PX as f32, 256.0) as u32;
@@ -1919,7 +1924,10 @@ impl GpuRenderPlan {
 
         for (run_index, (node_index, center, text)) in labelled.iter().enumerate() {
             let run_index_u32 = u32::try_from(run_index).unwrap_or(u32::MAX);
-            let font_px = run_font_px.get(run_index).copied().unwrap_or(DEFAULT_FONT_SIZE_PX);
+            let font_px = run_font_px
+                .get(run_index)
+                .copied()
+                .unwrap_or(DEFAULT_FONT_SIZE_PX);
             let half_height = font_px * 0.5;
             let first_quad = u32::try_from(text_quads.len()).unwrap_or(u32::MAX);
 
@@ -1935,10 +1943,13 @@ impl GpuRenderPlan {
             // Resolved once per RUN rather than per glyph: every glyph of one label belongs to one
             // node, so resolving inside the glyph loop would repeat the lookup for each character
             // and could not produce a different answer.
-            let label_rgba = crate::renderer::resolve_node_text_color(ir, usize::try_from(*node_index).unwrap_or(usize::MAX))
-                .as_deref()
-                .and_then(parse_paint_rgba)
-                .unwrap_or(DEFAULT_LABEL_RGBA);
+            let label_rgba = crate::renderer::resolve_node_text_color(
+                ir,
+                usize::try_from(*node_index).unwrap_or(usize::MAX),
+            )
+            .as_deref()
+            .and_then(parse_paint_rgba)
+            .unwrap_or(DEFAULT_LABEL_RGBA);
 
             let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
             let width: f32 = inked.iter().map(|c| glyph_advance(*c, font_px)).sum();
@@ -2050,7 +2061,12 @@ impl GpuRenderPlan {
                 let last = edge.points.len() - 1;
                 let ends = [
                     (source_text, 0, 1, GpuTextSource::EdgeSourceCardinality),
-                    (target_text, last, last - 1, GpuTextSource::EdgeTargetCardinality),
+                    (
+                        target_text,
+                        last,
+                        last - 1,
+                        GpuTextSource::EdgeTargetCardinality,
+                    ),
                 ];
                 for (text, from_idx, toward_idx, source) in ends {
                     let Some(text) = text else {
@@ -2170,8 +2186,13 @@ impl GpuRenderPlan {
             let label = node
                 .label
                 .and_then(|label| ir.labels.get(label.0))
-                .map_or(node.id.as_str(), |label| label.text.split('\n').next().unwrap_or_default());
-            if label.is_empty() || continuation.bounds.width <= 0.0 || continuation.bounds.height <= 0.0 {
+                .map_or(node.id.as_str(), |label| {
+                    label.text.split('\n').next().unwrap_or_default()
+                });
+            if label.is_empty()
+                || continuation.bounds.width <= 0.0
+                || continuation.bounds.height <= 0.0
+            {
                 continue;
             }
             sink.push_centred(
@@ -2946,17 +2967,22 @@ mod tests {
         // has letters of four different widths, so the two stopped agreeing when text became
         // proportional (bd-2u0.2).
         let centre_of = |run: super::GpuTextRun, text: &str| {
-            let quads =
-                &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
+            let quads = &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
             (
                 run_span_midpoint(quads, text, super::DEFAULT_FONT_SIZE_PX),
                 quads[0].center[1],
             )
         };
         let (sx, sy) = centre_of(source_run, "1");
-        assert!((sx - 66.8).abs() < 0.01 && (sy - 35.0).abs() < 0.01, "source at ({sx}, {sy})");
+        assert!(
+            (sx - 66.8).abs() < 0.01 && (sy - 35.0).abs() < 0.01,
+            "source at ({sx}, {sy})"
+        );
         let (tx, ty) = centre_of(target_run, "many");
-        assert!((tx - 73.702).abs() < 0.01 && (ty - 34.075).abs() < 0.01, "target at ({tx}, {ty})");
+        assert!(
+            (tx - 73.702).abs() < 0.01 && (ty - 34.075).abs() < 0.01,
+            "target at ({tx}, {ty})"
+        );
     }
 
     /// A degenerate first segment must not push the text to NaN (bd-2ogh5, the GPU twin of the raster bead bd-rk14).
@@ -2964,7 +2990,10 @@ mod tests {
     fn a_zero_length_segment_anchors_a_cardinality_on_the_point() {
         let p = |x: f32, y: f32| super::LayoutPoint { x, y };
         let (x, y) = super::cardinality_anchor(p(12.0, 8.0), p(12.0, 8.0), 16.8);
-        assert!(x.is_finite() && y.is_finite(), "a zero-length segment divided by zero");
+        assert!(
+            x.is_finite() && y.is_finite(),
+            "a zero-length segment divided by zero"
+        );
         assert_eq!((x, y), (12.0, 8.0));
 
         // And a normal segment insets along it, so the guard did not flatten the real case.
@@ -3493,11 +3522,19 @@ mod tests {
         .ir;
         let layout = fm_layout::layout_diagram(&declared);
         let plan = GpuRenderPlan::from_layout(&declared, &layout, 1.0);
-        assert!(!plan.node_instances.is_empty(), "no instances, so this proves nothing");
         assert!(
-            plan.node_instances.iter().any(|i| (i.stroke_width - 6.0).abs() < f32::EPSILON),
+            !plan.node_instances.is_empty(),
+            "no instances, so this proves nothing"
+        );
+        assert!(
+            plan.node_instances
+                .iter()
+                .any(|i| (i.stroke_width - 6.0).abs() < f32::EPSILON),
             "the declared width never reached an instance: {:?}",
-            plan.node_instances.iter().map(|i| i.stroke_width).collect::<Vec<_>>()
+            plan.node_instances
+                .iter()
+                .map(|i| i.stroke_width)
+                .collect::<Vec<_>>()
         );
 
         // CONTROL: without a declaration the instance carries the theme default, NOT zero. A zero
@@ -3512,7 +3549,11 @@ mod tests {
                 .iter()
                 .all(|i| (i.stroke_width - super::DEFAULT_NODE_STROKE_WIDTH).abs() < f32::EPSILON),
             "an undeclared node did not get the default width: {:?}",
-            plain_plan.node_instances.iter().map(|i| i.stroke_width).collect::<Vec<_>>()
+            plain_plan
+                .node_instances
+                .iter()
+                .map(|i| i.stroke_width)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -3523,18 +3564,24 @@ mod tests {
     /// what VALUE arrives can tell a resolved colour from a constant.
     #[test]
     fn a_declared_label_colour_reaches_the_gpu_text_quads() {
-        let declared =
-            fm_parser::parse("flowchart TD\n  a[Alpha]\n  style a color:#ff0000\n").ir;
+        let declared = fm_parser::parse("flowchart TD\n  a[Alpha]\n  style a color:#ff0000\n").ir;
         let layout = fm_layout::layout_diagram(&declared);
         let plan = GpuRenderPlan::from_layout(&declared, &layout, 1.0);
 
-        assert!(!plan.text_quads.is_empty(), "no glyphs, so this proves nothing");
+        assert!(
+            !plan.text_quads.is_empty(),
+            "no glyphs, so this proves nothing"
+        );
         assert!(
             plan.text_quads
                 .iter()
                 .any(|q| q.color[0] > 0.9 && q.color[1] < 0.1 && q.color[2] < 0.1),
             "no glyph carries the declared red: {:?}",
-            plan.text_quads.iter().map(|q| q.color).take(4).collect::<Vec<_>>()
+            plan.text_quads
+                .iter()
+                .map(|q| q.color)
+                .take(4)
+                .collect::<Vec<_>>()
         );
 
         // CONTROL: an undeclared label keeps the theme default. Without this, returning red for
@@ -3544,9 +3591,17 @@ mod tests {
         let plain_layout = fm_layout::layout_diagram(&plain);
         let plain_plan = GpuRenderPlan::from_layout(&plain, &plain_layout, 1.0);
         assert!(
-            plain_plan.text_quads.iter().all(|q| q.color == super::DEFAULT_LABEL_RGBA),
+            plain_plan
+                .text_quads
+                .iter()
+                .all(|q| q.color == super::DEFAULT_LABEL_RGBA),
             "an undeclared label did not keep the theme colour: {:?}",
-            plain_plan.text_quads.iter().map(|q| q.color).take(4).collect::<Vec<_>>()
+            plain_plan
+                .text_quads
+                .iter()
+                .map(|q| q.color)
+                .take(4)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -3560,13 +3615,19 @@ mod tests {
         let declared = fm_parser::parse("flowchart TD\n  a[A]\n  style a opacity:0.5\n").ir;
         let layout = fm_layout::layout_diagram(&declared);
         let plan = GpuRenderPlan::from_layout(&declared, &layout, 1.0);
-        assert!(!plan.node_instances.is_empty(), "no instances, so this proves nothing");
+        assert!(
+            !plan.node_instances.is_empty(),
+            "no instances, so this proves nothing"
+        );
         assert!(
             plan.node_instances
                 .iter()
                 .any(|i| (i.fill[3] - 0.5).abs() < 0.01 && (i.stroke[3] - 0.5).abs() < 0.01),
             "the declared opacity reached neither alpha: {:?}",
-            plan.node_instances.iter().map(|i| (i.fill[3], i.stroke[3])).collect::<Vec<_>>()
+            plan.node_instances
+                .iter()
+                .map(|i| (i.fill[3], i.stroke[3]))
+                .collect::<Vec<_>>()
         );
 
         // CONTROL: an undeclared node stays fully opaque. Without this, multiplying by a stray 0.5
@@ -3581,7 +3642,11 @@ mod tests {
                 .iter()
                 .all(|i| (i.fill[3] - 1.0).abs() < f32::EPSILON),
             "an undeclared node was faded: {:?}",
-            plain_plan.node_instances.iter().map(|i| i.fill[3]).collect::<Vec<_>>()
+            plain_plan
+                .node_instances
+                .iter()
+                .map(|i| i.fill[3])
+                .collect::<Vec<_>>()
         );
     }
 
@@ -3598,9 +3663,20 @@ mod tests {
         let plain_plan =
             GpuRenderPlan::from_layout(&plain, &fm_layout::layout_diagram(&plain), 1.0);
 
-        let big_h = big_plan.text_quads.first().map(|q| q.half_extent[1]).unwrap_or(0.0);
-        let plain_h = plain_plan.text_quads.first().map(|q| q.half_extent[1]).unwrap_or(0.0);
-        assert!(big_h > 0.0 && plain_h > 0.0, "no glyphs, so this proves nothing");
+        let big_h = big_plan
+            .text_quads
+            .first()
+            .map(|q| q.half_extent[1])
+            .unwrap_or(0.0);
+        let plain_h = plain_plan
+            .text_quads
+            .first()
+            .map(|q| q.half_extent[1])
+            .unwrap_or(0.0);
+        assert!(
+            big_h > 0.0 && plain_h > 0.0,
+            "no glyphs, so this proves nothing"
+        );
         assert!(
             big_h > plain_h * 1.5,
             "a 32px declaration did not enlarge the quad: {big_h} vs default {plain_h}"
@@ -3658,13 +3734,23 @@ mod tests {
             fm_layout::LayoutActivationBar {
                 participant_index: 1,
                 depth: 0,
-                bounds: LayoutRect { x: 40.0, y: 10.0, width: 8.0, height: 60.0 },
+                bounds: LayoutRect {
+                    x: 40.0,
+                    y: 10.0,
+                    width: 8.0,
+                    height: 60.0,
+                },
             },
             // Zero height: drawn by nobody, so planned by nobody.
             fm_layout::LayoutActivationBar {
                 participant_index: 1,
                 depth: 1,
-                bounds: LayoutRect { x: 40.0, y: 90.0, width: 8.0, height: 0.0 },
+                bounds: LayoutRect {
+                    x: 40.0,
+                    y: 90.0,
+                    width: 8.0,
+                    height: 0.0,
+                },
             },
         ];
 
@@ -3730,7 +3816,12 @@ mod tests {
             rank: 0,
             order: 0,
             span: Span::default(),
-            bounds: LayoutRect { x: 20.0, y: 200.0, width: 60.0, height: 30.0 },
+            bounds: LayoutRect {
+                x: 20.0,
+                y: 200.0,
+                width: 60.0,
+                height: 30.0,
+            },
         }];
 
         let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.25);
@@ -3756,7 +3847,10 @@ mod tests {
         // midpoint rather than the mean of glyph centres -- see `run_span_midpoint`.
         let quads = &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
         let midpoint = run_span_midpoint(quads, "Zephyr", super::DEFAULT_FONT_SIZE_PX);
-        assert!((midpoint - 50.0).abs() < 0.01, "name not centred: {midpoint}");
+        assert!(
+            (midpoint - 50.0).abs() < 0.01,
+            "name not centred: {midpoint}"
+        );
         assert!((quads[0].center[1] - 215.0).abs() < 0.01);
     }
 
@@ -3778,12 +3872,22 @@ mod tests {
             fm_layout::LayoutSequenceNote {
                 position: fm_core::NotePosition::Over,
                 text: "Wqkj".to_string(),
-                bounds: LayoutRect { x: 100.0, y: 50.0, width: 80.0, height: 40.0 },
+                bounds: LayoutRect {
+                    x: 100.0,
+                    y: 50.0,
+                    width: 80.0,
+                    height: 40.0,
+                },
             },
             fm_layout::LayoutSequenceNote {
                 position: fm_core::NotePosition::Over,
                 text: String::new(),
-                bounds: LayoutRect { x: 100.0, y: 120.0, width: 0.0, height: 0.0 },
+                bounds: LayoutRect {
+                    x: 100.0,
+                    y: 120.0,
+                    width: 0.0,
+                    height: 0.0,
+                },
             },
         ];
 
@@ -3814,12 +3918,18 @@ mod tests {
             .collect();
         assert_eq!(runs.len(), 1, "the empty note contributes no run");
         assert_eq!(runs[0].quad_count, 4, "\"Wqkj\" is four glyphs");
-        assert_eq!(runs[0].node_index, 0, "node_index indexes the notes, not ir.nodes");
+        assert_eq!(
+            runs[0].node_index, 0,
+            "node_index indexes the notes, not ir.nodes"
+        );
 
         let quads = &plan.text_quads[runs[0].first_quad as usize..][..4];
         // Advance-span midpoint, not the mean of glyph centres -- see `run_span_midpoint`.
         let midpoint = run_span_midpoint(quads, "Wqkj", super::DEFAULT_FONT_SIZE_PX);
-        assert!((midpoint - 140.0).abs() < 0.01, "body not centred: {midpoint}");
+        assert!(
+            (midpoint - 140.0).abs() < 0.01,
+            "body not centred: {midpoint}"
+        );
         assert!((quads[0].center[1] - 70.0).abs() < 0.01);
     }
 
@@ -3839,7 +3949,10 @@ mod tests {
             .state_notes
             .first()
             .expect("CONTROL FAILED: the parsed fixture produced no state note");
-        assert!(note.text.contains('\n'), "CONTROL FAILED: expected a multi-line note");
+        assert!(
+            note.text.contains('\n'),
+            "CONTROL FAILED: expected a multi-line note"
+        );
 
         // Golden reference from the SVG backend, over the exact same parsed IR and layout. These
         // classes identify the three state-note draw products rather than matching an incidental
@@ -3885,7 +3998,10 @@ mod tests {
             note_instance.half_extent,
             [note.bounds.width * 0.5, note.bounds.height * 0.5]
         );
-        assert_eq!(note_instance.node_index, 0, "index must identify the note, not Idle");
+        assert_eq!(
+            note_instance.node_index, 0,
+            "index must identify the note, not Idle"
+        );
         assert_eq!(note_instance.stroke_width, super::STATE_NOTE_STROKE_WIDTH);
 
         let runs: Vec<_> = plan
@@ -3895,13 +4011,19 @@ mod tests {
             .collect();
         assert_eq!(runs.len(), 2, "each SVG line needs its own GPU text run");
         assert!(runs.iter().all(|run| run.node_index == 0));
-        assert_eq!(runs[0].quad_count, 11, "Zephyr line is eleven visible glyphs");
-        assert_eq!(runs[1].quad_count, 11, "Quokka line is eleven visible glyphs");
+        assert_eq!(
+            runs[0].quad_count, 11,
+            "Zephyr line is eleven visible glyphs"
+        );
+        assert_eq!(
+            runs[1].quad_count, 11,
+            "Quokka line is eleven visible glyphs"
+        );
 
-        let first_line = &plan.text_quads
-            [runs[0].first_quad as usize..][..runs[0].quad_count as usize];
-        let second_line = &plan.text_quads
-            [runs[1].first_quad as usize..][..runs[1].quad_count as usize];
+        let first_line =
+            &plan.text_quads[runs[0].first_quad as usize..][..runs[0].quad_count as usize];
+        let second_line =
+            &plan.text_quads[runs[1].first_quad as usize..][..runs[1].quad_count as usize];
         // Half of the FIRST GLYPH's own advance past the anchor, not half a flat average
         // (bd-2u0.2): the pen starts at the anchor and each quad is centred on its own advance.
         let expected_first_x = note.bounds.x
@@ -3911,8 +4033,7 @@ mod tests {
         assert!((first_line[0].center[0] - expected_first_x).abs() < 0.01);
         assert!((first_line[0].center[1] - expected_first_y).abs() < 0.01);
         assert!(
-            (second_line[0].center[1] - first_line[0].center[1]
-                - super::STATE_NOTE_LINE_HEIGHT)
+            (second_line[0].center[1] - first_line[0].center[1] - super::STATE_NOTE_LINE_HEIGHT)
                 .abs()
                 < 0.01,
             "state-note lines must keep the SVG/canvas 16.8px spacing"
@@ -3975,7 +4096,11 @@ mod tests {
                         && run.node_index == u32::try_from(*tick_index).unwrap_or(u32::MAX)
                 })
                 .expect("each planned tick line must keep its SVG label");
-            assert!(run.quad_count > 0, "tick {:?} emitted no text quads", tick.label);
+            assert!(
+                run.quad_count > 0,
+                "tick {:?} emitted no text quads",
+                tick.label
+            );
             let first_quad = &plan.text_quads[run.first_quad as usize];
             assert!(
                 (first_quad.center[0]
@@ -3998,7 +4123,9 @@ mod tests {
     fn layout_band_gpu_plan_matches_svg_backend_for_the_same_ir() {
         let cases = [
             (
-                include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/gantt_project.mmd"),
+                include_str!(
+                    "../../fm-cli/tests/fixtures/frankentui_conformance/gantt_project.mmd"
+                ),
                 "fm-gantt-section-bg",
                 fm_layout::LayoutBandKind::Section,
             ),
@@ -4052,7 +4179,8 @@ mod tests {
                 }
                 fm_layout::LayoutBandKind::Section => {
                     assert_eq!(plan.band_section_instances.len(), bands.len());
-                    for ((band_index, band), instance) in bands.iter().zip(&plan.band_section_instances)
+                    for ((band_index, band), instance) in
+                        bands.iter().zip(&plan.band_section_instances)
                     {
                         assert_eq!(
                             instance.center,
@@ -4089,7 +4217,10 @@ mod tests {
                     run.source == super::GpuTextSource::Band
                         && run.node_index == u32::try_from(band_index).unwrap_or(u32::MAX)
                 });
-                assert_eq!(has_label, expects_label, "band label selection drifted for {kind:?}");
+                assert_eq!(
+                    has_label, expects_label,
+                    "band label selection drifted for {kind:?}"
+                );
             }
         }
     }
@@ -4275,27 +4406,55 @@ mod tests {
         ))
         .ir;
         let layout = fm_layout::layout_diagram(&ir);
-        let pie = ir.pie_meta.as_ref().expect("CONTROL FAILED: fixture produced no pie metadata");
-        assert!(!pie.slices.is_empty(), "CONTROL FAILED: fixture produced no pie slices");
+        let pie = ir
+            .pie_meta
+            .as_ref()
+            .expect("CONTROL FAILED: fixture produced no pie metadata");
+        assert!(
+            !pie.slices.is_empty(),
+            "CONTROL FAILED: fixture produced no pie slices"
+        );
         let svg = fm_render_svg::render_svg_with_layout(
             &ir,
             &layout,
             &fm_render_svg::SvgRenderConfig::default(),
         );
-        assert!(svg.contains("fm-pie-slice"), "SVG golden omitted pie wedges:\n{svg}");
+        assert!(
+            svg.contains("fm-pie-slice"),
+            "SVG golden omitted pie wedges:\n{svg}"
+        );
         for slice in &pie.slices {
-            assert!(svg.contains(&slice.label), "SVG golden omitted {:?}:\n{svg}", slice.label);
+            assert!(
+                svg.contains(&slice.label),
+                "SVG golden omitted {:?}:\n{svg}",
+                slice.label
+            );
         }
 
         let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
         assert_eq!(plan.pie_wedges.len(), pie.slices.len());
-        let total = pie.slices.iter().map(|slice| slice.value.max(0.0)).sum::<f32>();
-        let expected_radius = ((layout.bounds.width.min(layout.bounds.height) * 0.5) - 36.0).max(30.0);
+        let total = pie
+            .slices
+            .iter()
+            .map(|slice| slice.value.max(0.0))
+            .sum::<f32>();
+        let expected_radius =
+            ((layout.bounds.width.min(layout.bounds.height) * 0.5) - 36.0).max(30.0);
         for (index, wedge) in plan.pie_wedges.iter().enumerate() {
             assert_eq!(wedge.slice_index, index as u32);
             assert!((wedge.radius - expected_radius).abs() < 0.01);
-            assert!((wedge.sweep_angle - pie.slices[index].value.max(0.0) / total * std::f32::consts::TAU).abs() < 0.01);
-            assert!(plan.text_runs.iter().any(|run| run.source == super::GpuTextSource::PieSlice && run.node_index == index as u32));
+            assert!(
+                (wedge.sweep_angle
+                    - pie.slices[index].value.max(0.0) / total * std::f32::consts::TAU)
+                    .abs()
+                    < 0.01
+            );
+            assert!(
+                plan.text_runs
+                    .iter()
+                    .any(|run| run.source == super::GpuTextSource::PieSlice
+                        && run.node_index == index as u32)
+            );
         }
     }
 
@@ -4411,10 +4570,8 @@ mod tests {
         // THE DEFECT THIS TEST EXISTS FOR, asserted on a REAL PLANNED CLUSTER and not only on the
         // constants -- the constants can be right while the cluster loop still reaches for the node
         // stroke, which is exactly what it was doing.
-        let cluster_ir = fm_parser::parse(
-            "flowchart TD\n  subgraph one[Group One]\n    a[A]\n  end\n",
-        )
-        .ir;
+        let cluster_ir =
+            fm_parser::parse("flowchart TD\n  subgraph one[Group One]\n    a[A]\n  end\n").ir;
         let cluster_layout = fm_layout::layout_diagram(&cluster_ir);
         assert!(
             !cluster_layout.clusters.is_empty(),
@@ -4471,12 +4628,24 @@ mod tests {
             ("pub cluster_instances:", "self.draw_clusters("),
             ("pub band_lane_segments:", "self.draw_bands("),
             ("pub axis_tick_segments:", "self.draw_axis_ticks("),
-            ("pub cluster_divider_segments:", "self.draw_cluster_dividers("),
+            (
+                "pub cluster_divider_segments:",
+                "self.draw_cluster_dividers(",
+            ),
             ("pub state_note_leader_segments:", "self.draw_state_notes("),
-            ("pub mirror_header_instances:", "self.draw_sequence_mirror_headers("),
-            ("pub packet_field_continuation_instances:", "self.draw_packet_field_continuations("),
+            (
+                "pub mirror_header_instances:",
+                "self.draw_sequence_mirror_headers(",
+            ),
+            (
+                "pub packet_field_continuation_instances:",
+                "self.draw_packet_field_continuations(",
+            ),
             ("pub activation_instances:", "self.draw_activation_bars("),
-            ("pub lifecycle_marker_segments:", "self.draw_sequence_lifecycle_markers("),
+            (
+                "pub lifecycle_marker_segments:",
+                "self.draw_sequence_lifecycle_markers(",
+            ),
             ("pub sequence_note_instances:", "self.draw_sequence_notes("),
             ("pub edge_segments:", "self.draw_edges("),
             ("pub node_instances:", "self.draw_nodes("),
@@ -4558,8 +4727,14 @@ mod tests {
         // the coverage map, so a reader lands on the decision rather than on this list.
         const NOT_PLANNED: &[(&str, &str)] = &[
             ("draw_generic_diagram_title", "bd-adabx: diagram title text"),
-            ("draw_path_markers", "bd-adabx: RenderScene path pipeline, not the layout pipeline"),
-            ("draw_marker", "bd-adabx: RenderScene path pipeline, not the layout pipeline"),
+            (
+                "draw_path_markers",
+                "bd-adabx: RenderScene path pipeline, not the layout pipeline",
+            ),
+            (
+                "draw_marker",
+                "bd-adabx: RenderScene path pipeline, not the layout pipeline",
+            ),
             ("draw_gantt_today_marker", "bd-adabx: gantt furniture"),
             (
                 "draw_sequence_fragments",
@@ -4778,7 +4953,11 @@ mod tests {
             .iter()
             .filter(|run| run.source == super::GpuTextSource::Cluster)
             .collect();
-        assert_eq!(title_runs.len(), 1, "expected exactly one cluster title run");
+        assert_eq!(
+            title_runs.len(),
+            1,
+            "expected exactly one cluster title run"
+        );
         assert!(
             title_runs[0].quad_count >= 5,
             "the title emitted {} quads for 'Group One'; a glyph missing from the atlas is skipped \
@@ -4820,8 +4999,7 @@ mod tests {
     /// the two surfaces produce the same ANSWER, which is the stronger claim and the one a user sees.
     #[test]
     fn the_canvas_and_the_gpu_plan_agree_on_a_declared_fill() {
-        let ir =
-            fm_parser::parse("flowchart TD\n  a[Alpha]\n  style a fill:#ff0000\n").ir;
+        let ir = fm_parser::parse("flowchart TD\n  a[Alpha]\n  style a fill:#ff0000\n").ir;
         let layout = fm_layout::layout_diagram(&ir);
 
         // GPU side: the instance's fill, as linear RGBA.

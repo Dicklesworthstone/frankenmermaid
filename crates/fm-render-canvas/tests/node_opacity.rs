@@ -37,9 +37,8 @@ fn a_declared_node_opacity_reaches_the_canvas() {
 /// The same declaration through `classDef`.
 #[test]
 fn a_classdef_opacity_reaches_the_canvas() {
-    let ops = canvas_ops(
-        "flowchart TD\n  a[Alpha]\n  classDef faded opacity:0.25\n  class a faded\n",
-    );
+    let ops =
+        canvas_ops("flowchart TD\n  a[Alpha]\n  classDef faded opacity:0.25\n  class a faded\n");
 
     assert!(
         ops.contains("SetGlobalAlpha(0.25)"),

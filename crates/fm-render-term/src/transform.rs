@@ -122,7 +122,10 @@ impl TermTransform {
     /// terminal's aspect belongs to the DEVICE, so it is applied in device space.
     #[must_use]
     pub fn apply(&self, x: f32, y: f32) -> (f32, f32) {
-        let (rx, ry) = self.rotor_part().to_affine_matrix().apply(f64::from(x), f64::from(y));
+        let (rx, ry) = self
+            .rotor_part()
+            .to_affine_matrix()
+            .apply(f64::from(x), f64::from(y));
         // The grid is f32 throughout and the f64 rotor is only an intermediate. No #[expect] here:
         // the crate already allows cast_possible_truncation at the top of lib.rs, so an expectation
         // would go UNFULFILLED, and an unfulfilled expectation is itself a warning that CI turns

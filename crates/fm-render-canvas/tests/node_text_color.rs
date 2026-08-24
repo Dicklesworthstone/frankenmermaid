@@ -106,7 +106,9 @@ fn an_unstyled_node_in_the_same_diagram_keeps_the_theme_colour() {
     );
     assert_eq!(
         fill_of(&fills, "Beta"),
-        CanvasRenderConfig::default().label_color.to_ascii_lowercase(),
+        CanvasRenderConfig::default()
+            .label_color
+            .to_ascii_lowercase(),
         "the unstyled label lost the theme default: {fills:?}"
     );
 }
@@ -116,9 +118,14 @@ fn an_unstyled_node_in_the_same_diagram_keeps_the_theme_colour() {
 #[test]
 fn an_unstyled_diagram_draws_every_label_in_the_theme_colour() {
     let fills = text_fills("flowchart TD\n  a[Alpha] --> b[Beta]\n");
-    let theme = CanvasRenderConfig::default().label_color.to_ascii_lowercase();
+    let theme = CanvasRenderConfig::default()
+        .label_color
+        .to_ascii_lowercase();
 
-    assert!(!fills.is_empty(), "nothing was drawn, so this proves nothing");
+    assert!(
+        !fills.is_empty(),
+        "nothing was drawn, so this proves nothing"
+    );
     for (text, fill) in &fills {
         assert_eq!(
             fill.to_ascii_lowercase(),

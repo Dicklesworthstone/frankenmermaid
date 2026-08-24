@@ -39,9 +39,9 @@ fn font_when_text_drawn(ops_debug: &str, needle: &str) -> Option<String> {
 
 /// The fade must be restored, or it leaks onto everything drawn afterwards.
 fn assert_fade_is_restored(ops: &str, context: &str) {
-    let last_fade = ops
-        .rfind("SetGlobalAlpha(0.5)")
-        .unwrap_or_else(|| panic!("{context}: the declared opacity never reached the canvas: {ops}"));
+    let last_fade = ops.rfind("SetGlobalAlpha(0.5)").unwrap_or_else(|| {
+        panic!("{context}: the declared opacity never reached the canvas: {ops}")
+    });
     let last_restore = ops.rfind("SetGlobalAlpha(1.0)");
     assert!(
         last_restore.is_some_and(|restore| restore > last_fade),
@@ -52,9 +52,8 @@ fn assert_fade_is_restored(ops: &str, context: &str) {
 /// A declared edge opacity reaches the canvas, and is restored.
 #[test]
 fn a_declared_edge_opacity_reaches_the_canvas_and_is_restored() {
-    let ops = canvas_ops(
-        "flowchart TD\n  a[A] --> b[B]\n  b --> c[C]\n  linkStyle 0 opacity:0.5\n",
-    );
+    let ops =
+        canvas_ops("flowchart TD\n  a[A] --> b[B]\n  b --> c[C]\n  linkStyle 0 opacity:0.5\n");
 
     assert!(
         ops.contains("SetGlobalAlpha(0.5)"),
@@ -83,9 +82,7 @@ fn a_declared_cluster_opacity_reaches_the_canvas_and_is_restored() {
 /// A declared edge-label font size reaches the label.
 #[test]
 fn a_declared_edge_label_font_size_reaches_the_label() {
-    let ops = canvas_ops(
-        "flowchart TD\n  a[A] -->|hi| b[B]\n  linkStyle 0 font-size:22px\n",
-    );
+    let ops = canvas_ops("flowchart TD\n  a[A] -->|hi| b[B]\n  linkStyle 0 font-size:22px\n");
 
     let font = font_when_text_drawn(&ops, "hi").expect("the edge label was never drawn");
     assert!(

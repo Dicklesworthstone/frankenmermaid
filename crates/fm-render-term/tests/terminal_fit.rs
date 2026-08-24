@@ -169,13 +169,25 @@ fn reported_loss_tracks_the_rendered_text_at_every_viewport() {
     let roomy = measure(80, 400);
     let huge = measure(400, 400);
 
-    assert!(cramped > medium, "a 24-row terminal must lose more than a 60-row one");
-    assert!(medium >= roomy && roomy >= huge, "more room must never lose more nodes");
+    assert!(
+        cramped > medium,
+        "a 24-row terminal must lose more than a 60-row one"
+    );
+    assert!(
+        medium >= roomy && roomy >= huge,
+        "more room must never lose more nodes"
+    );
     // These all use the DEFAULT config, whose max_width/max_height cap the usable area at 120x40
     // however large the terminal argument is, so `huge` is still lossy here. The uncapped case is
     // a_terminal_with_room_to_spare_loses_nothing.
-    assert!(cramped > 0, "a 50-node chain in 24 rows must still lose nodes");
-    assert!(huge > 0, "under the default 120x40 cap a 50-node chain cannot fit");
+    assert!(
+        cramped > 0,
+        "a 50-node chain in 24 rows must still lose nodes"
+    );
+    assert!(
+        huge > 0,
+        "under the default 120x40 cap a 50-node chain cannot fit"
+    );
 }
 
 /// Given genuine room, the canvas grows and nothing is lost (bd-8tsw).
@@ -213,7 +225,10 @@ fn a_terminal_with_room_to_spare_loses_nothing() {
     assert!(
         r.height > capped.height,
         "canvas did not grow: {}x{} with room vs {}x{} under the default cap",
-        r.width, r.height, capped.width, capped.height
+        r.width,
+        r.height,
+        capped.width,
+        capped.height
     );
 }
 
@@ -235,14 +250,20 @@ fn every_chart_type_draws_its_title_exactly_once() {
             "gantt",
             "gantt\n  title ZZTITLE\n  dateFormat YYYY-MM-DD\n  section S\n  T :a, 2026-01-01, 5d\n",
         ),
-        ("xychart", "xychart-beta\n  title \"ZZTITLE\"\n  x-axis [a, b]\n  bar [1, 2]\n"),
+        (
+            "xychart",
+            "xychart-beta\n  title \"ZZTITLE\"\n  x-axis [a, b]\n  bar [1, 2]\n",
+        ),
         (
             "quadrant",
             "quadrantChart\n  title ZZTITLE\n  x-axis Low --> High\n  y-axis Bad --> Good\n  P: [0.3, 0.6]\n",
         ),
         // journey promotes `title` in its own statement loop and is the regression control for
         // the generic path.
-        ("journey", "journey\n  title ZZTITLE\n  section S\n    T: 5: Me\n"),
+        (
+            "journey",
+            "journey\n  title ZZTITLE\n  section S\n    T: 5: Me\n",
+        ),
         // flowchart is here BECAUSE it was the case that failed. bd-ij0f taught the flowchart
         // statement loop to stop interning `title My Flow` as a node — with a bare `continue`, so
         // the line was dropped and nothing ever called set_title. Not a phantom any more, but not a
@@ -261,7 +282,10 @@ fn every_chart_type_draws_its_title_exactly_once() {
         // recorded on the bead rather than guessed at here.
         let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 100, 40).output;
         let seen = out.matches("ZZTITLE").count();
-        assert_eq!(seen, 1, "{name}: title drawn {seen} times, expected exactly once");
+        assert_eq!(
+            seen, 1,
+            "{name}: title drawn {seen} times, expected exactly once"
+        );
     }
 }
 
@@ -275,7 +299,10 @@ fn a_chart_without_a_title_gains_none() {
         "a titleless chart must stay titleless"
     );
     // and it must still draw its content
-    assert!(out.chars().any(|c| !c.is_whitespace()), "the chart drew nothing at all");
+    assert!(
+        out.chars().any(|c| !c.is_whitespace()),
+        "the chart drew nothing at all"
+    );
 }
 
 /// NEGATIVE CASES for the generic title extractor.
@@ -334,8 +361,15 @@ fn a_gantt_section_shows_its_name_in_terminal() {
     // `a_gantt_section_name_is_drawn_in_full` (bd-039t). This test is kept because it
     // still guards the label reaching the canvas at all and being drawn once, but it must NOT be
     // read as evidence that section names render correctly.
-    assert!(out.contains("Zulu"), "the section name is missing from terminal output");
-    assert_eq!(out.matches("Zulu").count(), 1, "the section name was drawn more than once");
+    assert!(
+        out.contains("Zulu"),
+        "the section name is missing from terminal output"
+    );
+    assert_eq!(
+        out.matches("Zulu").count(),
+        1,
+        "the section name was drawn more than once"
+    );
 }
 
 /// A gantt section name is drawn IN FULL, not clipped to the band width (bd-039t).
@@ -403,7 +437,10 @@ fn the_gantt_section_name_and_its_date_axis_both_survive() {
 fn non_section_bands_are_unaffected_by_the_section_placement() {
     let kanban = fm_parser::parse("kanban\n  Todo\n    t1[Write docs]\n").ir;
     let out = render_term_with_config(&kanban, &TermRenderConfig::rich(), 100, 40).output;
-    assert!(out.contains("Todo"), "the kanban column name was lost:\n{out}");
+    assert!(
+        out.contains("Todo"),
+        "the kanban column name was lost:\n{out}"
+    );
     assert!(
         out.contains("Write docs"),
         "the kanban card label was displaced:\n{out}"
@@ -425,12 +462,27 @@ fn quadrant_axis_labels_reach_terminal_output() {
     .ir;
     let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
 
-    assert!(out.contains("Low"), "the x-axis left label never reached the terminal:\n{out}");
-    assert!(out.contains("High"), "the x-axis right label never reached the terminal:\n{out}");
-    assert!(out.contains("Top"), "the y-axis top label never reached the terminal:\n{out}");
+    assert!(
+        out.contains("Low"),
+        "the x-axis left label never reached the terminal:\n{out}"
+    );
+    assert!(
+        out.contains("High"),
+        "the x-axis right label never reached the terminal:\n{out}"
+    );
+    assert!(
+        out.contains("Top"),
+        "the y-axis top label never reached the terminal:\n{out}"
+    );
     // What already worked must keep working: these come from different paths entirely.
-    assert!(out.contains("Reach"), "the chart title was displaced:\n{out}");
-    assert!(out.contains("Alpha"), "the data point label was displaced:\n{out}");
+    assert!(
+        out.contains("Reach"),
+        "the chart title was displaced:\n{out}"
+    );
+    assert!(
+        out.contains("Alpha"),
+        "the data point label was displaced:\n{out}"
+    );
 }
 
 /// CONTROL: a quadrant chart declaring NO axis labels gains none.
@@ -460,7 +512,10 @@ fn sequence_note_text_reaches_terminal_output() {
     let ir = fm_parser::parse("sequenceDiagram\n  Alice->>Bob: Hi\n  Note over Alice: Ponder\n").ir;
     let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
 
-    assert!(out.contains("Ponder"), "the note text never reached the terminal:\n{out}");
+    assert!(
+        out.contains("Ponder"),
+        "the note text never reached the terminal:\n{out}"
+    );
     // The messages must survive — note text drawn over the diagram would trade one dropped thing
     // for another.
     assert!(
@@ -478,8 +533,14 @@ fn sequence_without_notes_gains_no_note_text() {
     let ir = fm_parser::parse("sequenceDiagram\n  Alice->>Bob: Hi\n").ir;
     let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
 
-    assert!(out.contains("Alice") && out.contains("Hi"), "the messages are missing:\n{out}");
-    assert!(!out.contains("Ponder"), "note text appeared with no note declared:\n{out}");
+    assert!(
+        out.contains("Alice") && out.contains("Hi"),
+        "the messages are missing:\n{out}"
+    );
+    assert!(
+        !out.contains("Ponder"),
+        "note text appeared with no note declared:\n{out}"
+    );
 }
 
 /// A sequence FRAGMENT's label must reach terminal output (bd-039t).
@@ -489,16 +550,19 @@ fn sequence_without_notes_gains_no_note_text() {
 /// `Every day` appeared in the SVG and in neither terminal render.
 #[test]
 fn sequence_fragment_label_reaches_terminal_output() {
-    let ir = fm_parser::parse(
-        "sequenceDiagram\n  loop Every day\n    Alice->>Bob: Hi\n  end\n",
-    )
-    .ir;
+    let ir = fm_parser::parse("sequenceDiagram\n  loop Every day\n    Alice->>Bob: Hi\n  end\n").ir;
     let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
 
-    assert!(out.contains("Every day"), "the loop condition never reached the terminal:\n{out}");
+    assert!(
+        out.contains("Every day"),
+        "the loop condition never reached the terminal:\n{out}"
+    );
     // The messages inside the frame must survive — a label drawn over the frame's contents would
     // trade one piece of dropped content for another.
-    assert!(out.contains("Alice") && out.contains("Hi"), "the frame label displaced its contents:\n{out}");
+    assert!(
+        out.contains("Alice") && out.contains("Hi"),
+        "the frame label displaced its contents:\n{out}"
+    );
 }
 
 /// The FRAME TAG is drawn as well as the condition.
@@ -513,8 +577,14 @@ fn sequence_fragment_tag_is_drawn_with_its_condition() {
     .ir;
     let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
 
-    assert!(out.contains("is ok"), "the alt condition never reached the terminal:\n{out}");
-    assert!(out.contains("alt"), "the frame tag never reached the terminal:\n{out}");
+    assert!(
+        out.contains("is ok"),
+        "the alt condition never reached the terminal:\n{out}"
+    );
+    assert!(
+        out.contains("alt"),
+        "the frame tag never reached the terminal:\n{out}"
+    );
 }
 
 /// CONTROL: a sequence diagram with NO fragments is unchanged.
@@ -527,7 +597,10 @@ fn sequence_without_fragments_gains_no_frame_label() {
     let ir = fm_parser::parse("sequenceDiagram\n  Alice->>Bob: Hi\n  Bob->>Alice: Yo\n").ir;
     let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
 
-    assert!(out.contains("Alice") && out.contains("Hi"), "the messages are missing:\n{out}");
+    assert!(
+        out.contains("Alice") && out.contains("Hi"),
+        "the messages are missing:\n{out}"
+    );
     assert!(
         !out.contains("loop") && !out.contains("alt"),
         "a frame tag was drawn for a diagram with no fragments:\n{out}"
@@ -548,16 +621,23 @@ fn class_stereotype_reaches_terminal_output() {
     let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
 
     assert!(out.contains("Alpha"), "the class name is missing:\n{out}");
-    assert!(out.contains("interface"), "the stereotype never reached the terminal:\n{out}");
+    assert!(
+        out.contains("interface"),
+        "the stereotype never reached the terminal:\n{out}"
+    );
     // The members must survive: the stereotype is inserted ABOVE the name inside the same box, so a
     // miscounted row would push the compartment rows out of the box rather than fail loudly.
-    assert!(out.contains("name"), "the stereotype displaced the class members:\n{out}");
+    assert!(
+        out.contains("name"),
+        "the stereotype displaced the class members:\n{out}"
+    );
 
     // THE EXACT SOURCE THE PROBE REPORTED, which declares the class and its member separately
     // rather than in a block. A fix verified only against a differently-shaped fixture would not
     // have closed the case that was actually filed.
     let probe_form =
-        fm_parser::parse("classDiagram\n  class Alpha\n  <<interface>> Alpha\n  Alpha : +run()\n").ir;
+        fm_parser::parse("classDiagram\n  class Alpha\n  <<interface>> Alpha\n  Alpha : +run()\n")
+            .ir;
     let probe_out = render_term_with_config(&probe_form, &TermRenderConfig::rich(), 200, 60).output;
     assert!(
         probe_out.contains("interface"),
@@ -571,7 +651,8 @@ fn class_stereotype_reaches_terminal_output() {
 /// row would shift every class box's contents down by one and go unnoticed on the case above.
 #[test]
 fn class_without_stereotype_is_unchanged() {
-    let ir = fm_parser::parse("classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n").ir;
+    let ir =
+        fm_parser::parse("classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n").ir;
     let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
 
     assert!(
@@ -595,8 +676,14 @@ fn c4_element_details_reach_terminal_output() {
     let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
 
     assert!(out.contains("Alice"), "the element name is missing:\n{out}");
-    assert!(out.contains("A user"), "the description never reached the terminal:\n{out}");
-    assert!(out.contains("Person"), "the element type never reached the terminal:\n{out}");
+    assert!(
+        out.contains("A user"),
+        "the description never reached the terminal:\n{out}"
+    );
+    assert!(
+        out.contains("Person"),
+        "the element type never reached the terminal:\n{out}"
+    );
 }
 
 /// CONTROL: the neighbours in the same node loop still render.
@@ -607,16 +694,26 @@ fn c4_element_details_reach_terminal_output() {
 fn er_requirement_and_class_still_render_after_the_c4_branch() {
     let er = fm_parser::parse("erDiagram\n  A {\n    string name PK\n  }\n  A ||--o{ B : has\n").ir;
     let er_out = render_term_with_config(&er, &TermRenderConfig::rich(), 200, 60).output;
-    assert!(er_out.contains("name") && er_out.contains("PK"), "ER regressed:\n{er_out}");
+    assert!(
+        er_out.contains("name") && er_out.contains("PK"),
+        "ER regressed:\n{er_out}"
+    );
 
     let req =
         fm_parser::parse("requirementDiagram\n  requirement R {\n  id: 1\n  text: hello\n  }\n").ir;
     let req_out = render_term_with_config(&req, &TermRenderConfig::rich(), 200, 60).output;
-    assert!(req_out.contains("hello"), "requirement rows regressed:\n{req_out}");
+    assert!(
+        req_out.contains("hello"),
+        "requirement rows regressed:\n{req_out}"
+    );
 
-    let cls = fm_parser::parse("classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n").ir;
+    let cls =
+        fm_parser::parse("classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n").ir;
     let cls_out = render_term_with_config(&cls, &TermRenderConfig::rich(), 200, 60).output;
-    assert!(cls_out.contains("run"), "class compartments regressed:\n{cls_out}");
+    assert!(
+        cls_out.contains("run"),
+        "class compartments regressed:\n{cls_out}"
+    );
 }
 
 /// A requirement's declared FIELDS must reach terminal output (bd-039t).
@@ -633,8 +730,14 @@ fn requirement_fields_reach_terminal_output() {
     let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
 
     assert!(out.contains('R'), "the requirement name is missing:\n{out}");
-    assert!(out.contains("hello"), "the `text:` field never reached the terminal:\n{out}");
-    assert!(out.contains("high"), "the `risk:` field never reached the terminal:\n{out}");
+    assert!(
+        out.contains("hello"),
+        "the `text:` field never reached the terminal:\n{out}"
+    );
+    assert!(
+        out.contains("high"),
+        "the `risk:` field never reached the terminal:\n{out}"
+    );
 }
 
 /// CONTROL: a requirement declaring NO optional fields still shows its name.
@@ -643,10 +746,14 @@ fn requirement_fields_reach_terminal_output() {
 /// empty — so a bare requirement must still render its header rather than an empty box.
 #[test]
 fn requirement_without_optional_fields_still_shows_its_name() {
-    let ir = fm_parser::parse("requirementDiagram\n  requirement Alpha {\n  id: 7\n  text: t\n  }\n").ir;
+    let ir =
+        fm_parser::parse("requirementDiagram\n  requirement Alpha {\n  id: 7\n  text: t\n  }\n").ir;
     let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
 
-    assert!(out.contains("Alpha"), "the requirement lost its name:\n{out}");
+    assert!(
+        out.contains("Alpha"),
+        "the requirement lost its name:\n{out}"
+    );
 }
 
 /// CONTROL: ER entities and class diagrams still render.
@@ -662,7 +769,8 @@ fn er_and_class_still_render_after_the_requirement_branch() {
         "ER attributes regressed:\n{er_out}"
     );
 
-    let cls = fm_parser::parse("classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n").ir;
+    let cls =
+        fm_parser::parse("classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n").ir;
     let cls_out = render_term_with_config(&cls, &TermRenderConfig::rich(), 200, 60).output;
     assert!(
         cls_out.contains("Alpha") && cls_out.contains("run"),
@@ -680,9 +788,18 @@ fn class_cardinalities_reach_terminal_output() {
     let ir = fm_parser::parse("classDiagram\n  Alpha \"1\" --> \"many\" Beta\n").ir;
     let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
 
-    assert!(out.contains("Alpha") && out.contains("Beta"), "the classes are missing:\n{out}");
-    assert!(out.contains('1'), "the source cardinality never reached the terminal:\n{out}");
-    assert!(out.contains("many"), "the target cardinality never reached the terminal:\n{out}");
+    assert!(
+        out.contains("Alpha") && out.contains("Beta"),
+        "the classes are missing:\n{out}"
+    );
+    assert!(
+        out.contains('1'),
+        "the source cardinality never reached the terminal:\n{out}"
+    );
+    assert!(
+        out.contains("many"),
+        "the target cardinality never reached the terminal:\n{out}"
+    );
 }
 
 /// ER cardinality reaches the terminal through the SAME placement (bd-2h3pp).
@@ -743,7 +860,10 @@ fn class_edge_without_cardinality_is_unchanged() {
     let plain = fm_parser::parse("classDiagram\n  Alpha --> Beta\n").ir;
     let out = render_term_with_config(&plain, &TermRenderConfig::rich(), 200, 60).output;
 
-    assert!(out.contains("Alpha") && out.contains("Beta"), "the classes are missing:\n{out}");
+    assert!(
+        out.contains("Alpha") && out.contains("Beta"),
+        "the classes are missing:\n{out}"
+    );
     // `1` and `many` are the strings the fix introduces; neither may appear from nowhere.
     assert!(
         !out.contains("many"),
@@ -761,7 +881,10 @@ fn class_cardinality_does_not_displace_the_edge_label() {
     let ir = fm_parser::parse("classDiagram\n  Alpha \"1\" --> \"many\" Beta : uses\n").ir;
     let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
 
-    assert!(out.contains("uses"), "the edge label was displaced by a cardinality:\n{out}");
+    assert!(
+        out.contains("uses"),
+        "the edge label was displaced by a cardinality:\n{out}"
+    );
     assert!(out.contains("many"), "the cardinality is missing:\n{out}");
 }
 
@@ -779,14 +902,29 @@ fn er_entity_attributes_reach_terminal_output() {
     .ir;
     let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
 
-    assert!(out.contains("CUSTOMER"), "the entity name is missing:\n{out}");
-    assert!(out.contains("name"), "attribute `name` never reached the terminal:\n{out}");
-    assert!(out.contains("age"), "attribute `age` never reached the terminal:\n{out}");
+    assert!(
+        out.contains("CUSTOMER"),
+        "the entity name is missing:\n{out}"
+    );
+    assert!(
+        out.contains("name"),
+        "attribute `name` never reached the terminal:\n{out}"
+    );
+    assert!(
+        out.contains("age"),
+        "attribute `age` never reached the terminal:\n{out}"
+    );
     // The KEY marker is the part an ER reader relies on to tell a primary key from a plain column.
-    assert!(out.contains("PK"), "the PK key marker never reached the terminal:\n{out}");
+    assert!(
+        out.contains("PK"),
+        "the PK key marker never reached the terminal:\n{out}"
+    );
     // The relationship label must survive alongside the new rows — attributes drawn over the rest
     // of the diagram would trade one piece of dropped content for another.
-    assert!(out.contains("places"), "the relationship label was displaced:\n{out}");
+    assert!(
+        out.contains("places"),
+        "the relationship label was displaced:\n{out}"
+    );
 }
 
 /// CONTROL: class compartments still render, unchanged.
@@ -796,7 +934,8 @@ fn er_entity_attributes_reach_terminal_output() {
 /// `class_meta` rather than `members` — this fails loudly if that happens.
 #[test]
 fn class_compartments_still_render_after_the_er_branch() {
-    let ir = fm_parser::parse("classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n").ir;
+    let ir =
+        fm_parser::parse("classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n").ir;
     let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
 
     assert!(
@@ -827,7 +966,10 @@ fn er_entity_without_attributes_still_shows_its_name() {
 /// this, a fix that keyed off `DiagramType::Kanban` would look just as green.
 #[test]
 fn a_flowchart_subgraph_shows_its_name_in_terminal() {
-    let ir = fm_parser::parse("flowchart TD\n  subgraph Backend\n    a[Alpha]\n  end\n  a --> b[Beta]\n").ir;
+    let ir = fm_parser::parse(
+        "flowchart TD\n  subgraph Backend\n    a[Alpha]\n  end\n  a --> b[Beta]\n",
+    )
+    .ir;
     let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 100, 40).output;
 
     assert!(
@@ -911,8 +1053,16 @@ fn band_label_overlay_does_not_invent_or_displace() {
     // must still appear exactly once each.
     let seq = fm_parser::parse("sequenceDiagram\n  Alpha->>Beta: hi\n").ir;
     let sout = render_term_with_config(&seq, &TermRenderConfig::rich(), 100, 40).output;
-    assert_eq!(sout.matches("Alpha").count(), 1, "participant drawn more than once");
-    assert_eq!(sout.matches("Beta").count(), 1, "participant drawn more than once");
+    assert_eq!(
+        sout.matches("Alpha").count(),
+        1,
+        "participant drawn more than once"
+    );
+    assert_eq!(
+        sout.matches("Beta").count(),
+        1,
+        "participant drawn more than once"
+    );
 
     // A gantt task label must survive alongside its section name.
     let g = fm_parser::parse(
@@ -920,7 +1070,10 @@ fn band_label_overlay_does_not_invent_or_displace() {
     )
     .ir;
     let gout = render_term_with_config(&g, &TermRenderConfig::rich(), 100, 40).output;
-    assert!(gout.contains("Zulu") && gout.contains("Yankee"), "a label was overwritten");
+    assert!(
+        gout.contains("Zulu") && gout.contains("Yankee"),
+        "a label was overwritten"
+    );
 }
 
 /// GENERIC INVARIANT: text the user declared must reach the terminal canvas, for every diagram
@@ -941,19 +1094,63 @@ fn band_label_overlay_does_not_invent_or_displace() {
 fn declared_text_reaches_the_terminal_for_every_diagram_type() {
     // (name, source, strings the user wrote that must appear)
     let cases: &[(&str, &str, &[&str])] = &[
-        ("er", "erDiagram\n  CUSTOMER ||--o{ ORDER : places\n", &["CUSTOMER", "ORDER", "places"]),
-        ("state", "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy : go\n", &["Idle", "Busy", "go"]),
-        ("timeline", "timeline\n  title Hist\n  2001 : Alpha\n  2002 : Beta\n", &["Alpha", "Beta"]),
-        ("mindmap", "mindmap\n  root((Core))\n    Alpha\n    Beta\n", &["Core", "Alpha", "Beta"]),
-        ("gitgraph", "gitGraph\n  commit id: \"Alpha\"\n  branch dev\n  commit id: \"Beta\"\n", &["Alpha", "Beta"]),
-        ("requirement", "requirementDiagram\n  requirement Alpha {\n  id: 1\n  text: hello\n  }\n", &["Alpha"]),
-        ("sankey", "sankey-beta\n\nAlpha,Beta,5\n", &["Alpha", "Beta"]),
-        ("block", "block-beta\n  columns 2\n  Alpha[\"Alpha\"] Beta[\"Beta\"]\n", &["Alpha", "Beta"]),
-        ("journey", "journey\n  title Day\n  section Morning\n    Wake: 5: Me\n", &["Morning", "Wake"]),
-        ("class", "classDiagram\n  class Alpha\n  Alpha : +run()\n", &["Alpha", "run"]),
+        (
+            "er",
+            "erDiagram\n  CUSTOMER ||--o{ ORDER : places\n",
+            &["CUSTOMER", "ORDER", "places"],
+        ),
+        (
+            "state",
+            "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy : go\n",
+            &["Idle", "Busy", "go"],
+        ),
+        (
+            "timeline",
+            "timeline\n  title Hist\n  2001 : Alpha\n  2002 : Beta\n",
+            &["Alpha", "Beta"],
+        ),
+        (
+            "mindmap",
+            "mindmap\n  root((Core))\n    Alpha\n    Beta\n",
+            &["Core", "Alpha", "Beta"],
+        ),
+        (
+            "gitgraph",
+            "gitGraph\n  commit id: \"Alpha\"\n  branch dev\n  commit id: \"Beta\"\n",
+            &["Alpha", "Beta"],
+        ),
+        (
+            "requirement",
+            "requirementDiagram\n  requirement Alpha {\n  id: 1\n  text: hello\n  }\n",
+            &["Alpha"],
+        ),
+        (
+            "sankey",
+            "sankey-beta\n\nAlpha,Beta,5\n",
+            &["Alpha", "Beta"],
+        ),
+        (
+            "block",
+            "block-beta\n  columns 2\n  Alpha[\"Alpha\"] Beta[\"Beta\"]\n",
+            &["Alpha", "Beta"],
+        ),
+        (
+            "journey",
+            "journey\n  title Day\n  section Morning\n    Wake: 5: Me\n",
+            &["Morning", "Wake"],
+        ),
+        (
+            "class",
+            "classDiagram\n  class Alpha\n  Alpha : +run()\n",
+            &["Alpha", "run"],
+        ),
         // The bd-u3fo cases, kept here so the class gate covers them too: a kanban column and a
         // flowchart subgraph are both CLUSTER titles, reached by different layout paths.
-        ("kanban", "kanban\n  Alpha\n    t1[Beta]\n", &["Alpha", "Beta"]),
+        (
+            "kanban",
+            "kanban\n  Alpha\n    t1[Beta]\n",
+            &["Alpha", "Beta"],
+        ),
         (
             "flowchart_subgraph",
             "flowchart TD\n  subgraph Backend\n    a[Alpha]\n  end\n  a --> b[Beta]\n",
@@ -974,7 +1171,11 @@ fn declared_text_reaches_the_terminal_for_every_diagram_type() {
             "{name}: the canvas contains text that was never declared, so the checks below are not              evidence:\n{out}"
         );
 
-        let missing: Vec<&str> = wants.iter().copied().filter(|want| !out.contains(want)).collect();
+        let missing: Vec<&str> = wants
+            .iter()
+            .copied()
+            .filter(|want| !out.contains(want))
+            .collect();
         if !missing.is_empty() {
             failures.push(format!("{name}: missing {missing:?}"));
         }
@@ -1044,7 +1245,10 @@ fn a_gantt_shows_its_time_axis_in_terminal() {
 /// drawing where no axis exists.
 #[test]
 fn a_sequence_diagram_is_unaffected_by_the_axis_overlay() {
-    let ir = fm_parser::parse("sequenceDiagram\n  participant Alice\n  participant Bob\n  Alice->>Bob: Hi\n").ir;
+    let ir = fm_parser::parse(
+        "sequenceDiagram\n  participant Alice\n  participant Bob\n  Alice->>Bob: Hi\n",
+    )
+    .ir;
     let layout = fm_layout::layout_diagram(&ir);
     assert!(
         layout.extensions.axis_ticks.is_empty(),
@@ -1349,4 +1553,3 @@ fn a_quadrant_chart_without_names_gains_none() {
     // and it must still draw its own content
     assert!(out.contains("Reach"), "the chart lost its title:\n{out}");
 }
-

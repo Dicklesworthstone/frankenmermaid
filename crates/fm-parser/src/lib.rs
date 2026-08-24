@@ -2019,10 +2019,9 @@ fn find_sequence_participant_label_text_range(
     let trimmed = &line[leading_len..];
     let (declaration, keyword_len) = if let Some(rest) = trimmed.strip_prefix("participant ") {
         (rest, "participant ".len())
-    } else if let Some(rest) = trimmed.strip_prefix("actor ") {
-        (rest, "actor ".len())
     } else {
-        return None;
+        let rest = trimmed.strip_prefix("actor ")?;
+        (rest, "actor ".len())
     };
     let (source_id, raw_label) = declaration.rsplit_once(" as ")?;
     if normalize_identifier(source_id.trim()) != node_id {
@@ -2524,8 +2523,8 @@ mod tests {
     use super::{
         FlowchartBatchParsePlan, FlowchartBatchParseScratch, MermaidLineEndingStyle,
         MermaidWhitespaceKind, ParserConfig, apply_parse_lens_edit, build_parse_lens,
-        capture_format_complement, detect_type, normalize_identifier, normalize_identifier_cow, parse,
-        parse_with_mode,
+        capture_format_complement, detect_type, normalize_identifier, normalize_identifier_cow,
+        parse, parse_with_mode,
     };
 
     #[test]
@@ -2874,18 +2873,15 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
         }
 
         // add_sequence_note resolved its target rather than dropping the note.
-        let notes = ir
-            .sequence_meta
-            .as_ref()
-            .map_or(0, |m| m.notes.len());
+        let notes = ir.sequence_meta.as_ref().map_or(0, |m| m.notes.len());
         assert!(notes >= 1, "the note did not resolve to a participant");
 
         // activate/deactivate resolved Bob: an unresolved name leaves no activation at all.
-        let activations = ir
-            .sequence_meta
-            .as_ref()
-            .map_or(0, |m| m.activations.len());
-        assert!(activations >= 1, "activation did not resolve its participant");
+        let activations = ir.sequence_meta.as_ref().map_or(0, |m| m.activations.len());
+        assert!(
+            activations >= 1,
+            "activation did not resolve its participant"
+        );
 
         // add_lifecycle_create / add_lifecycle_destroy resolved Carol; an unresolved name would
         // leave no lifecycle event at all, which is precisely how a bad conversion would present.
@@ -2893,10 +2889,17 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             .sequence_meta
             .as_ref()
             .map_or(0, |m| m.lifecycle_events.len());
-        assert!(lifecycle >= 1, "create/destroy did not resolve their participant");
+        assert!(
+            lifecycle >= 1,
+            "create/destroy did not resolve their participant"
+        );
 
         // The messages themselves are unaffected.
-        assert!(ir.edges.len() >= 4, "expected four messages, got {}", ir.edges.len());
+        assert!(
+            ir.edges.len() >= 4,
+            "expected four messages, got {}",
+            ir.edges.len()
+        );
     }
 
     /// The Cow variant must be BYTE-IDENTICAL to the owning one on every shape of input.
@@ -4054,14 +4057,20 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
     fn supported_diagram_types_are_untouched_by_the_new_check() {
         for (source, want) in [
             ("flowchart TD\n  a --> b\n", fm_core::DiagramType::Flowchart),
-            ("sequenceDiagram\n  A->>B: hi\n", fm_core::DiagramType::Sequence),
+            (
+                "sequenceDiagram\n  A->>B: hi\n",
+                fm_core::DiagramType::Sequence,
+            ),
             ("mindmap\n  root\n", fm_core::DiagramType::Mindmap),
             ("kanban\n  Todo\n", fm_core::DiagramType::Kanban),
         ] {
             let detected = super::detect_type_with_confidence(source);
             assert_eq!(detected.diagram_type, want, "{source:?} changed detection");
             assert!(
-                !detected.warnings.join(" ").contains("does not implement yet"),
+                !detected
+                    .warnings
+                    .join(" ")
+                    .contains("does not implement yet"),
                 "{source:?} was called unimplemented"
             );
         }
@@ -4076,9 +4085,15 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
     #[test]
     fn bare_spellings_the_incumbent_accepts_are_detected() {
         for (source, want) in [
-            ("requirement\n  requirement r {\n  }\n", fm_core::DiagramType::Requirement),
+            (
+                "requirement\n  requirement r {\n  }\n",
+                fm_core::DiagramType::Requirement,
+            ),
             ("packet\n  0-7: \"a\"\n", fm_core::DiagramType::PacketBeta),
-            ("architecture\n  group a\n", fm_core::DiagramType::ArchitectureBeta),
+            (
+                "architecture\n  group a\n",
+                fm_core::DiagramType::ArchitectureBeta,
+            ),
         ] {
             let detected = super::detect_type_with_confidence(source);
             assert_eq!(detected.diagram_type, want, "{source:?} was not detected");
@@ -4093,9 +4108,18 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
     #[test]
     fn suffixed_spellings_still_detect_as_before() {
         for (source, want) in [
-            ("requirementDiagram\n  requirement r {\n  }\n", fm_core::DiagramType::Requirement),
-            ("packet-beta\n  0-7: \"a\"\n", fm_core::DiagramType::PacketBeta),
-            ("architecture-beta\n  group a\n", fm_core::DiagramType::ArchitectureBeta),
+            (
+                "requirementDiagram\n  requirement r {\n  }\n",
+                fm_core::DiagramType::Requirement,
+            ),
+            (
+                "packet-beta\n  0-7: \"a\"\n",
+                fm_core::DiagramType::PacketBeta,
+            ),
+            (
+                "architecture-beta\n  group a\n",
+                fm_core::DiagramType::ArchitectureBeta,
+            ),
             ("sankey-beta\n  a,b,1\n", fm_core::DiagramType::Sankey),
             ("xychart-beta\n  bar [1,2]\n", fm_core::DiagramType::XyChart),
         ] {
@@ -4116,7 +4140,10 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
         }
 
         for (source, want) in [
-            ("architectur\n  group a\n", fm_core::DiagramType::ArchitectureBeta),
+            (
+                "architectur\n  group a\n",
+                fm_core::DiagramType::ArchitectureBeta,
+            ),
             ("packt\n  0-7: \"a\"\n", fm_core::DiagramType::PacketBeta),
             ("kanbon\n  Todo\n", fm_core::DiagramType::Kanban),
         ] {
@@ -4139,9 +4166,18 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
         }
 
         for (source, want) in [
-            ("c4contaner\n  Person(a, \"A\")\n", fm_core::DiagramType::C4Container),
-            ("c4contex\n  Person(a, \"A\")\n", fm_core::DiagramType::C4Context),
-            ("c4deploymnt\n  Person(a, \"A\")\n", fm_core::DiagramType::C4Deployment),
+            (
+                "c4contaner\n  Person(a, \"A\")\n",
+                fm_core::DiagramType::C4Container,
+            ),
+            (
+                "c4contex\n  Person(a, \"A\")\n",
+                fm_core::DiagramType::C4Context,
+            ),
+            (
+                "c4deploymnt\n  Person(a, \"A\")\n",
+                fm_core::DiagramType::C4Deployment,
+            ),
         ] {
             let detected = super::detect_type_with_confidence(source);
             assert_eq!(
@@ -4161,8 +4197,14 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
     fn exact_headers_are_never_fuzzy_corrected() {
         for (source, want) in [
             ("block-beta\n  a\n", fm_core::DiagramType::BlockBeta),
-            ("packet-beta\n  0-7: \"a\"\n", fm_core::DiagramType::PacketBeta),
-            ("c4context\n  Person(a, \"A\")\n", fm_core::DiagramType::C4Context),
+            (
+                "packet-beta\n  0-7: \"a\"\n",
+                fm_core::DiagramType::PacketBeta,
+            ),
+            (
+                "c4context\n  Person(a, \"A\")\n",
+                fm_core::DiagramType::C4Context,
+            ),
         ] {
             let detected = super::detect_type_with_confidence(source);
             assert_eq!(detected.diagram_type, want, "{source:?} was rerouted");
@@ -4293,7 +4335,9 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
     /// The observable difference is that strict mode refuses `Fallback`.
     #[test]
     fn the_flowchart_heuristic_covers_dotted_circle_and_cross_edges() {
-        for edge in ["-.->", "<-.->", "-.-", "--o", "--x", "-->", "<-->", "---", "==>", "<==>"] {
+        for edge in [
+            "-.->", "<-.->", "-.-", "--o", "--x", "-->", "<-->", "---", "==>", "<==>",
+        ] {
             let source = format!("A {edge} B\n");
             let detected = super::detect_type_with_confidence(&source);
             assert_eq!(
@@ -4320,7 +4364,10 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
 
         assert_eq!(detected.method, super::DetectionMethod::Fallback);
         assert!(
-            detected.warnings.iter().any(|w| w.contains("does not implement")),
+            detected
+                .warnings
+                .iter()
+                .any(|w| w.contains("does not implement")),
             "the unimplemented-type message was replaced: {:?}",
             detected.warnings
         );
@@ -4329,7 +4376,11 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
     /// A headerless sequence message is still detected through the plain arrow.
     #[test]
     fn a_plain_arrow_message_is_still_a_sequence_diagram() {
-        for source in ["alice->bob: hello\n", "alice -> bob : hello\n", "a-->b: hi\n"] {
+        for source in [
+            "alice->bob: hello\n",
+            "alice -> bob : hello\n",
+            "a-->b: hi\n",
+        ] {
             let detected = super::detect_type_with_confidence(source);
             assert_eq!(
                 detected.diagram_type,

@@ -31,8 +31,14 @@ fn a_requirement_still_draws_its_declared_rows() {
         .ir,
     );
 
-    assert!(svg.contains("hello"), "the requirement's text row is missing:\n{svg}");
-    assert!(svg.contains("high"), "the requirement's risk row is missing:\n{svg}");
+    assert!(
+        svg.contains("hello"),
+        "the requirement's text row is missing:\n{svg}"
+    );
+    assert!(
+        svg.contains("high"),
+        "the requirement's risk row is missing:\n{svg}"
+    );
 }
 
 /// NON-VACUITY for the reproducer: the element must at least become a NODE, so that what the

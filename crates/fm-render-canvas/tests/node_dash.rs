@@ -73,9 +73,8 @@ fn a_comma_separated_dash_is_the_same_declaration() {
 /// the pattern once per dashed node.
 #[test]
 fn a_dashed_node_does_not_dash_the_rest_of_the_diagram() {
-    let ops = canvas_ops(
-        "flowchart TD\n  a[A] --> b[B]\n  b --> c[C]\n  style a stroke-dasharray:5 5\n",
-    );
+    let ops =
+        canvas_ops("flowchart TD\n  a[A] --> b[B]\n  b --> c[C]\n  style a stroke-dasharray:5 5\n");
 
     assert!(
         ops.contains("SetLineDash([5.0, 5.0])"),

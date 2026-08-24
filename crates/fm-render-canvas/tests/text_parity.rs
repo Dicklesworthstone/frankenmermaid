@@ -31,18 +31,66 @@ fn drawn_text(ops_debug: &str) -> Vec<String> {
 }
 
 const CASES: &[(&str, &str, &[&str])] = &[
-    ("flowchart", "flowchart TD\n  a[Alpha] --> b[Beta]\n", &["Alpha", "Beta"]),
-    ("sequence", "sequenceDiagram\n  Alice->>Bob: Hello\n", &["Alice", "Bob", "Hello"]),
-    ("class", "classDiagram\n  class Alpha\n  Alpha : +run()\n", &["Alpha"]),
-    ("state", "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy : go\n", &["Idle", "Busy"]),
-    ("er", "erDiagram\n  CUSTOMER ||--o{ ORDER : places\n", &["CUSTOMER", "ORDER"]),
-    ("pie", "pie title Share\n  \"Alpha\" : 60\n  \"Beta\" : 40\n", &["Alpha", "Beta"]),
-    ("mindmap", "mindmap\n  root((Core))\n    Alpha\n", &["Core", "Alpha"]),
-    ("timeline", "timeline\n  title Hist\n  2001 : Alpha\n", &["Alpha"]),
-    ("gitgraph", "gitGraph\n  commit id: \"Alpha\"\n  branch dev\n  commit id: \"Beta\"\n", &["Alpha", "Beta"]),
-    ("journey", "journey\n  title Day\n  section Morning\n    Wake: 5: Me\n", &["Morning", "Wake"]),
-    ("kanban", "kanban\n  Alpha\n    t1[Beta]\n", &["Alpha", "Beta"]),
-    ("flowchart_subgraph", "flowchart TD\n  subgraph Backend\n    a[Alpha]\n  end\n  a --> b[Beta]\n", &["Backend", "Alpha", "Beta"]),
+    (
+        "flowchart",
+        "flowchart TD\n  a[Alpha] --> b[Beta]\n",
+        &["Alpha", "Beta"],
+    ),
+    (
+        "sequence",
+        "sequenceDiagram\n  Alice->>Bob: Hello\n",
+        &["Alice", "Bob", "Hello"],
+    ),
+    (
+        "class",
+        "classDiagram\n  class Alpha\n  Alpha : +run()\n",
+        &["Alpha"],
+    ),
+    (
+        "state",
+        "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy : go\n",
+        &["Idle", "Busy"],
+    ),
+    (
+        "er",
+        "erDiagram\n  CUSTOMER ||--o{ ORDER : places\n",
+        &["CUSTOMER", "ORDER"],
+    ),
+    (
+        "pie",
+        "pie title Share\n  \"Alpha\" : 60\n  \"Beta\" : 40\n",
+        &["Alpha", "Beta"],
+    ),
+    (
+        "mindmap",
+        "mindmap\n  root((Core))\n    Alpha\n",
+        &["Core", "Alpha"],
+    ),
+    (
+        "timeline",
+        "timeline\n  title Hist\n  2001 : Alpha\n",
+        &["Alpha"],
+    ),
+    (
+        "gitgraph",
+        "gitGraph\n  commit id: \"Alpha\"\n  branch dev\n  commit id: \"Beta\"\n",
+        &["Alpha", "Beta"],
+    ),
+    (
+        "journey",
+        "journey\n  title Day\n  section Morning\n    Wake: 5: Me\n",
+        &["Morning", "Wake"],
+    ),
+    (
+        "kanban",
+        "kanban\n  Alpha\n    t1[Beta]\n",
+        &["Alpha", "Beta"],
+    ),
+    (
+        "flowchart_subgraph",
+        "flowchart TD\n  subgraph Backend\n    a[Alpha]\n  end\n  a --> b[Beta]\n",
+        &["Backend", "Alpha", "Beta"],
+    ),
 ];
 
 /// Class CARDINALITIES must reach the canvas (bd-rk14).
@@ -130,12 +178,24 @@ fn quadrant_axis_labels_reach_the_canvas() {
     let texts = drawn_text(&format!("{:?}", context.operations()));
     let has = |want: &str| texts.iter().any(|t| t.contains(want));
 
-    assert!(has("Low"), "the x-axis left label never reached the canvas: {texts:?}");
-    assert!(has("High"), "the x-axis right label never reached the canvas: {texts:?}");
-    assert!(has("Top"), "the y-axis top label never reached the canvas: {texts:?}");
+    assert!(
+        has("Low"),
+        "the x-axis left label never reached the canvas: {texts:?}"
+    );
+    assert!(
+        has("High"),
+        "the x-axis right label never reached the canvas: {texts:?}"
+    );
+    assert!(
+        has("Top"),
+        "the y-axis top label never reached the canvas: {texts:?}"
+    );
     // What already worked must keep working — these arrive by different paths entirely.
     assert!(has("Reach"), "the chart title was displaced: {texts:?}");
-    assert!(has("Alpha"), "the data point label was displaced: {texts:?}");
+    assert!(
+        has("Alpha"),
+        "the data point label was displaced: {texts:?}"
+    );
 }
 
 /// CONTROL: a quadrant chart declaring NO axis labels gains none, and a NON-quadrant diagram is
@@ -154,7 +214,9 @@ fn quadrant_axis_pass_is_inert_without_labels_and_off_type() {
         "the title is missing: {texts:?}"
     );
     assert!(
-        !texts.iter().any(|t| t.contains("Low") || t.contains("High")),
+        !texts
+            .iter()
+            .any(|t| t.contains("Low") || t.contains("High")),
         "axis text appeared for a chart that declares none: {texts:?}"
     );
 
@@ -228,9 +290,8 @@ fn stereotype_requirement_and_c4_reach_the_canvas() {
         drawn_text(&format!("{:?}", context.operations()))
     };
 
-    let stereo = texts_for(
-        "classDiagram\n  class Alpha {\n    +String name\n  }\n  <<interface>> Alpha\n",
-    );
+    let stereo =
+        texts_for("classDiagram\n  class Alpha {\n    +String name\n  }\n  <<interface>> Alpha\n");
     assert!(
         stereo.iter().any(|t| t.contains("interface")),
         "the class stereotype never reached the canvas: {stereo:?}"
@@ -242,7 +303,9 @@ fn stereotype_requirement_and_c4_reach_the_canvas() {
         "the stereotype displaced the class members: {stereo:?}"
     );
 
-    let req = texts_for("requirementDiagram\n  requirement R {\n  id: 1\n  text: hello\n  risk: high\n  }\n");
+    let req = texts_for(
+        "requirementDiagram\n  requirement R {\n  id: 1\n  text: hello\n  risk: high\n  }\n",
+    );
     assert!(
         req.iter().any(|t| t.contains("hello")),
         "the requirement text never reached the canvas: {req:?}"
@@ -299,9 +362,18 @@ fn er_attributes_reach_the_canvas() {
     let has = |want: &str| texts.iter().any(|t| t.contains(want));
 
     assert!(has("CUSTOMER"), "the entity name is missing: {texts:?}");
-    assert!(has("name"), "attribute `name` never reached the canvas: {texts:?}");
-    assert!(has("age"), "attribute `age` never reached the canvas: {texts:?}");
-    assert!(has("PK"), "the PK key marker never reached the canvas: {texts:?}");
+    assert!(
+        has("name"),
+        "attribute `name` never reached the canvas: {texts:?}"
+    );
+    assert!(
+        has("age"),
+        "attribute `age` never reached the canvas: {texts:?}"
+    );
+    assert!(
+        has("PK"),
+        "the PK key marker never reached the canvas: {texts:?}"
+    );
 }
 
 /// CONTROL: class compartments still render on the canvas.
@@ -311,7 +383,8 @@ fn er_attributes_reach_the_canvas() {
 /// `class_meta` rather than `members`.
 #[test]
 fn class_compartments_still_render_on_the_canvas_after_the_er_arm() {
-    let ir = fm_parser::parse("classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n").ir;
+    let ir =
+        fm_parser::parse("classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n").ir;
     let mut context = MockCanvas2dContext::new(1200.0, 900.0);
     render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
     let texts = drawn_text(&format!("{:?}", context.operations()));

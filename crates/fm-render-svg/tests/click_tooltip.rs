@@ -11,8 +11,7 @@
 
 const WITH_TOOLTIP: &str =
     "flowchart TD\n  a[A] --> b[B]\n  click a \"https://example.com\" \"Go to example\"\n";
-const WITHOUT_TOOLTIP: &str =
-    "flowchart TD\n  a[A] --> b[B]\n  click a \"https://example.com\"\n";
+const WITHOUT_TOOLTIP: &str = "flowchart TD\n  a[A] --> b[B]\n  click a \"https://example.com\"\n";
 
 /// NON-VACUITY: the parser must actually capture the tooltip, or every assertion below would be
 /// testing the parser's silence rather than the renderer's output.
