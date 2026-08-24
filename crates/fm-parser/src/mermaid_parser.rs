@@ -4713,7 +4713,7 @@ fn parse_state_statements(line: &str, config: &ParserConfig) -> Option<Vec<State
     }
 
     // `class A bad` styles state A; it must not ALSO become a state (bd-0audg).
-    if is_state_class_assignment(line) {
+    if is_class_style_assignment_statement(line) {
         return Some(Vec::new());
     }
 
@@ -4868,7 +4868,8 @@ fn is_state_hide_empty_description(line: &str) -> bool {
         && description.eq_ignore_ascii_case("description")
 }
 
-/// True for a state-diagram `class <states> <classNames>` STYLE APPLICATION (bd-0audg).
+/// True for a `class <targets> <classNames>` STYLE APPLICATION in a diagram type where `class`
+/// never DECLARES anything — state diagrams (bd-0audg) and ER diagrams (bd-25lru).
 ///
 /// The style itself is extracted globally, for every diagram type, before this parser runs — the
 /// targets really do come out carrying the class. The line then fell through to the node parser as
@@ -4880,13 +4881,15 @@ fn is_state_hide_empty_description(line: &str) -> bool {
 /// and bd-xfmm's subgraph phantom — and worse than a silent drop, because the reader sees text
 /// nobody wrote.
 ///
-/// Kept LOCAL rather than added to `is_non_node_directive_statement` for the reason that predicate's
-/// own doc gives: it is shared, and in a CLASS diagram `class A` DECLARES a node. Widening it there
-/// would delete every bare class declaration in the corpus — the shape of the bd-ij0f regression.
+/// Deliberately NOT added to `is_non_node_directive_statement`, for the reason that predicate's own
+/// doc gives: it is shared with the CLASS diagram path, where `class A` DECLARES a node. Widening
+/// it there would delete every bare class declaration in the corpus — the bd-ij0f regression shape.
+/// This predicate is opt-in per diagram type instead, which is why it is a named function rather
+/// than an inline check: state and ER need the identical rule, and a second copy would drift.
 ///
 /// TWO tokens minimum, so a bare `class A` is left alone for its own path to interpret, and an
 /// arrow bail so a transition leaving a state legitimately named `class` stays a transition.
-fn is_state_class_assignment(line: &str) -> bool {
+fn is_class_style_assignment_statement(line: &str) -> bool {
     let Some(rest) = trim_fast(line).strip_prefix("class ") else {
         return false;
     };
@@ -5685,6 +5688,19 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
 
         // bd-ij0f: `accTitle: T` and `style A fill:#bbf` were interned as entities.
         if is_non_node_directive_statement(trimmed) {
+            continue;
+        }
+
+        // …and `class CUSTOMER bad` was too (bd-25lru). Not covered above, correctly: that predicate
+        // is shared with the CLASS diagram, where `class A` DECLARES. ER needs the same opt-in rule
+        // state diagrams needed, which is why this is one named predicate and not two inline checks.
+        //
+        // The phantom here was INVISIBLE to a drawn-text check — the entity had no label to draw —
+        // while being very much present: `data-nodes` went 2 to 3, it got its own `data-id` group,
+        // it took LAYOUT SPACE (the viewBox grew from 326x437 to 395x623, shifting the real
+        // entities), and the accessibility description announced "Key nodes: CUSTOMER, ORDER,
+        // class CUSTOMER bad." A screen reader read the author's directive out as an entity.
+        if is_class_style_assignment_statement(trimmed) {
             continue;
         }
 
