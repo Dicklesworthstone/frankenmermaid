@@ -79,6 +79,34 @@ pub const SEQUENCE_NOTE_STROKE_WIDTH: f32 = 1.0;
 /// its own constant, and no test asserts the two differ, because they do not.
 pub const LIFECYCLE_MARKER_STROKE_WIDTH: f32 = 1.5;
 
+/// State-note boxes use the ordinary node border width in the Canvas2D pass.
+///
+/// A state note is not a node, so this remains a named source-specific value even though both
+/// currently come from the default canvas configuration.
+pub const STATE_NOTE_STROKE_WIDTH: f32 = 1.5;
+
+/// State-note text is 80% of the canvas default font size.
+pub const STATE_NOTE_FONT_SIZE_PX: f32 = DEFAULT_FONT_SIZE_PX * 0.8;
+
+/// Distance between state-note text baselines, matching the Canvas2D pass.
+pub const STATE_NOTE_LINE_HEIGHT: f32 = DEFAULT_FONT_SIZE_PX * 1.2;
+
+/// Axis tick marks use the fixed one-unit stroke from the Canvas2D and SVG passes.
+pub const AXIS_TICK_STROKE_WIDTH: f32 = 1.0;
+
+/// Axis labels use 72% of the default text size, matching `draw_axis_ticks`.
+pub const AXIS_TICK_FONT_SIZE_PX: f32 = DEFAULT_FONT_SIZE_PX * 0.72;
+
+/// Gantt section bands use the Canvas2D pass's translucent slate fill and no border.
+pub const BAND_SECTION_FILL_RGBA: [f32; 4] = [0.886_274_5, 0.909_803_9, 0.941_176_5, 0.3];
+pub const BAND_SECTION_STROKE_RGBA: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+pub const BAND_STROKE_WIDTH: f32 = 1.0;
+pub const BAND_LANE_DASH: [f32; 2] = [6.0, 4.0];
+pub const BAND_LABEL_FONT_SIZE_PX: f32 = DEFAULT_FONT_SIZE_PX * 0.85;
+
+/// Quadrant-chart axis and region labels use the Canvas2D secondary-label font.
+pub const QUADRANT_LABEL_FONT_SIZE_PX: f32 = DEFAULT_FONT_SIZE_PX * 0.85;
+
 /// Default subgraph border, which is NOT the node border (bd-adabx).
 ///
 /// `config.cluster_stroke` is `rgba(148,163,184,0.78)` and `config.node_stroke` is `#94a3b8`. Same
@@ -310,6 +338,19 @@ pub struct GpuArrowheadInstance {
     pub color: [f32; 4],
 }
 
+/// One filled sector from Canvas2D's pie-chart pass.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GpuPieWedge {
+    pub center: [f32; 2],
+    pub radius: f32,
+    pub start_angle: f32,
+    pub sweep_angle: f32,
+    pub fill: [f32; 4],
+    pub stroke: [f32; 4],
+    pub stroke_width: f32,
+    pub slice_index: u32,
+}
+
 /// Theme edge stroke used when no `linkStyle` applies: `#475569`, mirroring
 /// `CanvasRenderConfig::default().edge_stroke`. Pinned by
 /// `gpu_theme_defaults_match_the_canvas_config`.
@@ -330,6 +371,40 @@ pub const DEFAULT_FONT_SIZE_PX: f32 = 14.0;
 /// labels while looking correct on short ones — the worst kind of disagreement, because it is
 /// invisible on every small test fixture.
 pub const CHAR_ADVANCE_RATIO: f32 = 0.57;
+
+/// Horizontal advance for one glyph at `font_px`, using the SAME model `fm-layout` sized the box
+/// with (bd-2u0.2).
+///
+/// ⚠️ THE FLAT [`CHAR_ADVANCE_RATIO`] WAS A REAL DIVERGENCE, not merely an approximation.
+/// `fm-core::FontMetrics` — which `fm-layout` uses to measure every label and therefore to decide how
+/// wide a node box must be — is PROPORTIONAL: `font_size * preset.avg_char_ratio() *
+/// CharWidthClass::classify(c).multiplier()`, where the multiplier runs from 0.4 for `i` and `l` to
+/// 2.0 for full-width forms. The GPU text pass advanced a flat `0.57 * font_px` for every character,
+/// so an `i` was laid out about two and a half times wider than the layout that sized its box
+/// believed, and a `W` narrower. A label of narrow letters overflowed its box; one of wide letters
+/// sat short inside it, and neither matched the SVG.
+///
+/// Sharing the function rather than re-deriving the constants is the point: a second table would be
+/// a second source of truth, and the two would drift the moment either changed.
+#[must_use]
+pub fn glyph_advance(glyph: char, font_px: f32) -> f32 {
+    font_px
+        * fm_core::FontPreset::SansSerif.avg_char_ratio()
+        * fm_core::CharWidthClass::classify(glyph).multiplier()
+}
+
+/// Advance for a whole run: the sum of its glyphs', left to right.
+///
+/// Summed in the same order and with the same terms as `FontMetrics::estimate_width`, so the two
+/// agree exactly rather than approximately — pinned by
+/// `the_gpu_run_width_equals_the_metric_layout_sized_the_box_with`.
+#[must_use]
+pub fn run_advance(text: &str, font_px: f32) -> f32 {
+    text.chars()
+        .filter(|c| !c.is_control())
+        .map(|c| glyph_advance(c, font_px))
+        .sum()
+}
 
 /// One glyph's cell in the atlas texture.
 ///
@@ -362,9 +437,38 @@ pub struct GlyphAtlasPlan {
     pub rows: u32,
     /// Texture dimensions in pixels.
     pub texture_px: [u32; 2],
+    /// Distance from the TOP of a cell to the shared glyph baseline, in texture pixels.
+    ///
+    /// One value for the whole atlas: every cell is the same square and every glyph is rasterised at
+    /// the same size, and a per-glyph baseline would be a contradiction in terms — a baseline is
+    /// precisely the line glyphs share.
+    ///
+    /// This is what makes a rasterised atlas typographic rather than merely populated. Centring each
+    /// glyph in its cell — the obvious placement, and what this crate did first — aligns the MIDDLE
+    /// of every letter instead of its foot, so `x` and `g` sit at the same height and a word appears
+    /// to bounce. Placing ink relative to a shared baseline makes `g` hang below the line `x` rests
+    /// on, which is what the SVG and Canvas2D backends do.
+    ///
+    /// A convention, not a measurement: this struct is built without a font, so it cannot ask for
+    /// real ascent metrics. [`GLYPH_BASELINE_RATIO`] carries the reasoning, and
+    /// `glyph_raster::fitted_pixel_size` scales a supplied face so its ascent lands exactly here.
+    pub baseline_px: f32,
     /// Cells, sorted by `glyph` — binary-searchable and stable.
     pub cells: Vec<GlyphCell>,
 }
+
+/// Where the baseline sits inside a cell, as a fraction of the cell's height.
+///
+/// 0.8 is close to the ascent share of a text face's line box, so it is a convention rather than an
+/// arbitrary number: the remaining 0.2 is the descender space that lets `g`, `p` and `y` hang below
+/// the line without leaving their own cell and bleeding into a neighbour's.
+///
+/// It is a CONVENTION and faces differ. DejaVu Sans wants a hair more descender room than 0.2 of the
+/// cell, and loses a sub-pixel sliver from its deepest glyph as a result. The ratio is deliberately
+/// NOT tuned to any one face — that would simply move the mismatch to the next font — so
+/// `glyph_raster::baseline_fits_font` reports the shortfall and `AtlasCoverage::clipped` names the
+/// glyphs it actually cost.
+pub const GLYPH_BASELINE_RATIO: f32 = 0.8;
 
 impl GlyphAtlasPlan {
     /// Plan an atlas covering every glyph in `texts`.
@@ -394,6 +498,7 @@ impl GlyphAtlasPlan {
                 columns: 0,
                 rows: 0,
                 texture_px: [0, 0],
+                baseline_px: 0.0,
                 cells: Vec::new(),
             };
         }
@@ -431,6 +536,7 @@ impl GlyphAtlasPlan {
             columns,
             rows,
             texture_px,
+            baseline_px: cell * GLYPH_BASELINE_RATIO,
             cells,
         }
     }
@@ -526,29 +632,51 @@ impl TextSink<'_> {
         source: GpuTextSource,
         index: usize,
     ) {
+        self.push_centred_with_font(text, center, DEFAULT_FONT_SIZE_PX, color, source, index);
+    }
+
+    /// Emit one centred text run with an explicit raster font size.
+    fn push_centred_with_font(
+        &mut self,
+        text: &str,
+        center: (f32, f32),
+        font_px: f32,
+        color: [f32; 4],
+        source: GpuTextSource,
+        index: usize,
+    ) {
         let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
         if inked.is_empty() {
             return;
         }
         let first_quad = u32::try_from(self.quads.len()).unwrap_or(u32::MAX);
-        let advance = DEFAULT_FONT_SIZE_PX * CHAR_ADVANCE_RATIO;
-        let half_height = DEFAULT_FONT_SIZE_PX * 0.5;
-        let run_width = u16::try_from(inked.len()).map_or(f32::from(u16::MAX), f32::from) * advance;
-        let start_x = center.0 - (run_width * 0.5) + (advance * 0.5);
+        let half_height = font_px * 0.5;
+        // PROPORTIONAL: the pen moves by each glyph's own advance, so the run is exactly as wide as
+        // the metric `fm-layout` sized the box with.
+        let run_width: f32 = inked.iter().map(|c| glyph_advance(*c, font_px)).sum();
+        let mut pen_x = center.0 - (run_width * 0.5);
         let run_index = u32::try_from(self.runs.len()).unwrap_or(u32::MAX);
-        for (offset, glyph) in inked.iter().enumerate() {
+        for glyph in &inked {
+            let advance = glyph_advance(*glyph, font_px);
             let Some(cell) = self.atlas.cell(*glyph) else {
+                pen_x += advance;
                 continue;
             };
-            let step = u16::try_from(offset).map_or(f32::from(u16::MAX), f32::from);
             self.quads.push(GpuTextQuad {
-                center: [start_x + (step * advance), center.1],
-                half_extent: [advance * 0.5, half_height],
+                // The quad is the glyph's DRAWING box and is SQUARE, matching the square atlas cell;
+                // the advance is how far the pen moves and is a different quantity. Sizing the quad
+                // to the advance — as this did — squeezed every glyph's image into its advance
+                // width, so an `i` was drawn as a compressed `i` rather than a narrow one. Centring
+                // the square box on the middle of the advance keeps the ink, which `glyph_raster`
+                // centres inside the cell, exactly one advance apart between neighbours.
+                center: [pen_x + (advance * 0.5), center.1],
+                half_extent: [half_height, half_height],
                 uv_min: cell.uv_min,
                 uv_max: cell.uv_max,
                 color,
                 run_index,
             });
+            pen_x += advance;
         }
         let quad_count = u32::try_from(self.quads.len()).unwrap_or(u32::MAX) - first_quad;
         if quad_count > 0 {
@@ -558,6 +686,151 @@ impl TextSink<'_> {
                 first_quad,
                 quad_count,
             });
+        }
+    }
+
+    /// Emit one left-aligned text run at the raster pass's anchor point.
+    fn push_left(
+        &mut self,
+        text: &str,
+        anchor: (f32, f32),
+        font_px: f32,
+        color: [f32; 4],
+        source: GpuTextSource,
+        index: usize,
+    ) {
+        let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
+        if inked.is_empty() {
+            return;
+        }
+        let first_quad = u32::try_from(self.quads.len()).unwrap_or(u32::MAX);
+        let half_height = font_px * 0.5;
+        let mut pen_x = anchor.0;
+        let run_index = u32::try_from(self.runs.len()).unwrap_or(u32::MAX);
+        for glyph in &inked {
+            let advance = glyph_advance(*glyph, font_px);
+            let Some(cell) = self.atlas.cell(*glyph) else {
+                pen_x += advance;
+                continue;
+            };
+            self.quads.push(GpuTextQuad {
+                center: [pen_x + (advance * 0.5), anchor.1],
+                half_extent: [half_height, half_height],
+                uv_min: cell.uv_min,
+                uv_max: cell.uv_max,
+                color,
+                run_index,
+            });
+            pen_x += advance;
+        }
+        let quad_count = u32::try_from(self.quads.len()).unwrap_or(u32::MAX) - first_quad;
+        if quad_count > 0 {
+            self.runs.push(GpuTextRun {
+                source,
+                node_index: u32::try_from(index).unwrap_or(u32::MAX),
+                first_quad,
+                quad_count,
+            });
+        }
+    }
+
+    /// Emit one right-aligned text run at the raster pass's anchor point.
+    fn push_right(
+        &mut self,
+        text: &str,
+        anchor: (f32, f32),
+        font_px: f32,
+        color: [f32; 4],
+        source: GpuTextSource,
+        index: usize,
+    ) {
+        let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
+        if inked.is_empty() {
+            return;
+        }
+        let first_quad = u32::try_from(self.quads.len()).unwrap_or(u32::MAX);
+        let half_height = font_px * 0.5;
+        let run_width: f32 = inked.iter().map(|c| glyph_advance(*c, font_px)).sum();
+        // RIGHT-ALIGNED: the run ends at the anchor, so it starts a full run width before it.
+        let mut pen_x = anchor.0 - run_width;
+        let run_index = u32::try_from(self.runs.len()).unwrap_or(u32::MAX);
+        for glyph in &inked {
+            let advance = glyph_advance(*glyph, font_px);
+            let Some(cell) = self.atlas.cell(*glyph) else {
+                pen_x += advance;
+                continue;
+            };
+            self.quads.push(GpuTextQuad {
+                center: [pen_x + (advance * 0.5), anchor.1],
+                half_extent: [half_height, half_height],
+                uv_min: cell.uv_min,
+                uv_max: cell.uv_max,
+                color,
+                run_index,
+            });
+            pen_x += advance;
+        }
+        let quad_count = u32::try_from(self.quads.len()).unwrap_or(u32::MAX) - first_quad;
+        if quad_count > 0 {
+            self.runs.push(GpuTextRun {
+                source,
+                node_index: u32::try_from(index).unwrap_or(u32::MAX),
+                first_quad,
+                quad_count,
+            });
+        }
+    }
+
+    /// Emit source lines at a top-left text inset, matching state-note rendering.
+    fn push_left_multiline(
+        &mut self,
+        text: &str,
+        origin: (f32, f32),
+        font_px: f32,
+        line_height: f32,
+        color: [f32; 4],
+        source: GpuTextSource,
+        index: usize,
+    ) {
+        let half_height = font_px * 0.5;
+        for (row, line) in text.lines().enumerate() {
+            let inked: Vec<char> = line.chars().filter(|c| !c.is_control()).collect();
+            if inked.is_empty() {
+                continue;
+            }
+            let first_quad = u32::try_from(self.quads.len()).unwrap_or(u32::MAX);
+            let run_index = u32::try_from(self.runs.len()).unwrap_or(u32::MAX);
+            let row = u16::try_from(row).map_or(f32::from(u16::MAX), f32::from);
+            // Each LINE restarts the pen at the origin; the advance is per glyph within the line.
+            let mut pen_x = origin.0;
+            for glyph in &inked {
+                let advance = glyph_advance(*glyph, font_px);
+                let Some(cell) = self.atlas.cell(*glyph) else {
+                    pen_x += advance;
+                    continue;
+                };
+                self.quads.push(GpuTextQuad {
+                    center: [
+                        pen_x + (advance * 0.5),
+                        origin.1 + half_height + (row * line_height),
+                    ],
+                    half_extent: [half_height, half_height],
+                    uv_min: cell.uv_min,
+                    uv_max: cell.uv_max,
+                    color,
+                    run_index,
+                });
+                pen_x += advance;
+            }
+            let quad_count = u32::try_from(self.quads.len()).unwrap_or(u32::MAX) - first_quad;
+            if quad_count > 0 {
+                self.runs.push(GpuTextRun {
+                    source,
+                    node_index: u32::try_from(index).unwrap_or(u32::MAX),
+                    first_quad,
+                    quad_count,
+                });
+            }
         }
     }
 }
@@ -675,6 +948,35 @@ pub enum GpuTextSource {
     /// `node_index` is the participant's index in `ir.nodes`, the same node the head row names --
     /// the two rows resolve their text from ONE source so the foot cannot drift from the head.
     MirrorHeader,
+    /// One line of a state-note body.
+    ///
+    /// `node_index` indexes `layout.extensions.state_notes`, not `ir.nodes`: the annotated state
+    /// is a different object from the note being drawn.
+    StateNote,
+    /// A gantt or xychart axis label.
+    ///
+    /// `node_index` indexes `layout.extensions.axis_ticks`: ticks are layout furniture, not IR
+    /// nodes, so resolving this as a node index would attach a date to an unrelated shape.
+    AxisTick,
+    /// A label attached to a non-sequence layout band.
+    ///
+    /// `node_index` indexes `layout.extensions.bands`, since a band is layout furniture rather
+    /// than an IR node.
+    Band,
+    /// A wrapped packet field's repeated label.
+    ///
+    /// `node_index` is the packet field node index carried by the continuation extension.
+    PacketFieldContinuation,
+    /// One of the four labels that annotate a quadrant chart's axes.
+    ///
+    /// `node_index` is the fixed axis-label position: left x, right x, top y, then bottom y.
+    QuadrantAxis,
+    /// One of the four region names in a quadrant chart.
+    ///
+    /// `node_index` is the documented `quadrant_labels` index: Q1, Q2, Q3, then Q4.
+    QuadrantLabel,
+    /// A pie-slice percentage label; `node_index` indexes `IrPieMeta::slices`.
+    PieSlice,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -728,6 +1030,19 @@ pub struct GpuRenderPlan {
     /// back-reference the text pass uses -- cluster titles ARE planned now, tagged
     /// `GpuTextSource::Cluster`.
     pub cluster_instances: Vec<GpuNodeInstance>,
+    /// Layout bands emitted by journey, gantt, kanban, gitgraph, and sequence layouts.
+    ///
+    /// The raster source has three primitive kinds, retained in separate buffers so the future
+    /// encoder can submit the rect, lane, and separator pipelines without pretending they are IR
+    /// edges or nodes. They all precede axis ticks, matching `draw_bands`.
+    pub band_lane_segments: Vec<GpuEdgeSegment>,
+    pub band_section_instances: Vec<GpuNodeInstance>,
+    pub band_column_segments: Vec<GpuEdgeSegment>,
+    /// Gantt and xychart axis tick marks, as non-edge line segments (bd-adabx).
+    ///
+    /// The Canvas2D pass draws these after bands and before the other extension furniture. They
+    /// use [`NO_EDGE_INDEX`] because a tick marks a layout coordinate rather than an IR edge.
+    pub axis_tick_segments: Vec<GpuEdgeSegment>,
     /// Subgraph dividers, as dashed line segments (bd-adabx).
     ///
     /// Directly after the clusters, matching the raster call order. A dashed LINE is expressible
@@ -735,12 +1050,22 @@ pub struct GpuRenderPlan {
     /// SDF has no perimeter arc length to phase one along (bd-l3nsf). `edge_index` is
     /// [`NO_EDGE_INDEX`] -- a divider is not an edge.
     pub cluster_divider_segments: Vec<GpuEdgeSegment>,
+    /// State-note leader lines, then their boxes (bd-adabx).
+    ///
+    /// The leader comes first because `draw_state_notes` strokes it before it fills the note box.
+    /// Both vectors use the state-note index, never an IR node index: a note annotates a node but
+    /// is not one itself.
+    pub state_note_leader_segments: Vec<GpuEdgeSegment>,
+    /// State-note boxes, after their leaders and before sequence furniture (bd-adabx).
+    pub state_note_instances: Vec<GpuNodeInstance>,
     /// Sequence foot-row participant headers, as rect instances (bd-adabx).
     ///
     /// Before the activation bars because `render` draws them first (call order: draw_clusters,
     /// draw_sequence_mirror_headers, draw_activation_bars, draw_edges, draw_nodes). Their labels
     /// are planned too, tagged `GpuTextSource::MirrorHeader`.
     pub mirror_header_instances: Vec<GpuNodeInstance>,
+    /// Wrapped packet field rows, after mirror headers and before activation bars (bd-adabx).
+    pub packet_field_continuation_instances: Vec<GpuNodeInstance>,
     /// Sequence activation bars, as rect instances (bd-adabx).
     ///
     /// Between the clusters and the edges because that is where `render` draws them (call order:
@@ -769,6 +1094,8 @@ pub struct GpuRenderPlan {
     pub edge_segments: Vec<GpuEdgeSegment>,
     /// Triangle instances for edge arrowheads.
     pub arrowheads: Vec<GpuArrowheadInstance>,
+    /// Pie-chart sectors, before their slice labels (bd-adabx).
+    pub pie_wedges: Vec<GpuPieWedge>,
     /// ⚠️ AFTER THE EDGES, BECAUSE THE RASTER PASS DRAWS NODES LAST (bd-adabx).
     ///
     /// `render` calls `draw_edges` and THEN `draw_nodes`, so an opaque node fill covers any edge
@@ -845,6 +1172,79 @@ impl GpuRenderPlan {
             });
         }
 
+        // BANDS (bd-adabx). Keep the three Canvas2D primitives distinct: lanes are dashed
+        // centre-lines, sections are filled rectangles, and columns are right-edge separators.
+        let mut band_lane_segments = Vec::new();
+        let mut band_section_instances = Vec::new();
+        let mut band_column_segments = Vec::new();
+        for (band_index, band) in layout.extensions.bands.iter().enumerate() {
+            match band.kind {
+                fm_layout::LayoutBandKind::Lane => {
+                    let center_x = band.bounds.x + (band.bounds.width * 0.5);
+                    band_lane_segments.push(GpuEdgeSegment {
+                        from: [center_x, band.bounds.y],
+                        to: [center_x, band.bounds.y + band.bounds.height],
+                        edge_index: NO_EDGE_INDEX,
+                        color: DEFAULT_NODE_STROKE_RGBA,
+                        dash_phase: 0.0,
+                        dash: BAND_LANE_DASH,
+                        width: BAND_STROKE_WIDTH,
+                    });
+                }
+                fm_layout::LayoutBandKind::Section => {
+                    band_section_instances.push(GpuNodeInstance {
+                        center: [
+                            band.bounds.x + (band.bounds.width * 0.5),
+                            band.bounds.y + (band.bounds.height * 0.5),
+                        ],
+                        half_extent: [band.bounds.width * 0.5, band.bounds.height * 0.5],
+                        fill: BAND_SECTION_FILL_RGBA,
+                        stroke: BAND_SECTION_STROKE_RGBA,
+                        stroke_width: BAND_STROKE_WIDTH,
+                        shape: GpuNodeShape::Rect as u32,
+                        node_index: u32::try_from(band_index).unwrap_or(u32::MAX),
+                    });
+                }
+                fm_layout::LayoutBandKind::Column => {
+                    let right = band.bounds.x + band.bounds.width;
+                    band_column_segments.push(GpuEdgeSegment {
+                        from: [right, band.bounds.y],
+                        to: [right, band.bounds.y + band.bounds.height],
+                        edge_index: NO_EDGE_INDEX,
+                        color: [
+                            DEFAULT_NODE_STROKE_RGBA[0],
+                            DEFAULT_NODE_STROKE_RGBA[1],
+                            DEFAULT_NODE_STROKE_RGBA[2],
+                            0.4,
+                        ],
+                        dash_phase: 0.0,
+                        dash: [0.0, 0.0],
+                        width: BAND_STROKE_WIDTH,
+                    });
+                }
+            }
+        }
+
+        // AXIS TICKS (bd-adabx). The same extension drives the gantt date row and xychart
+        // categories. A blank label is not drawn by Canvas2D, so it must not leave a line in the
+        // GPU plan either.
+        let axis_tick_y = layout.bounds.y - 12.0;
+        let mut axis_tick_segments = Vec::with_capacity(layout.extensions.axis_ticks.len());
+        for tick in &layout.extensions.axis_ticks {
+            if tick.label.is_empty() {
+                continue;
+            }
+            axis_tick_segments.push(GpuEdgeSegment {
+                from: [tick.position, axis_tick_y + 4.0],
+                to: [tick.position, axis_tick_y + 16.0],
+                edge_index: NO_EDGE_INDEX,
+                color: DEFAULT_EDGE_STROKE_RGBA,
+                dash_phase: 0.0,
+                dash: [0.0, 0.0],
+                width: AXIS_TICK_STROKE_WIDTH,
+            });
+        }
+
         // SUBGRAPH DIVIDERS (bd-adabx). One dashed segment each, in the cluster stroke.
         let mut cluster_divider_segments =
             Vec::with_capacity(layout.extensions.cluster_dividers.len());
@@ -857,6 +1257,40 @@ impl GpuRenderPlan {
                 dash_phase: 0.0,
                 dash: CLUSTER_DIVIDER_DASH,
                 width: CLUSTER_DIVIDER_STROKE_WIDTH,
+            });
+        }
+
+        // STATE NOTES (bd-adabx). The raster pass draws a leader, then a rectangular note box,
+        // then each text line at the layout-reserved inset. A note is not a graph node, so every
+        // primitive uses its extension index; resolving that key against `ir.nodes` would style an
+        // unrelated state and make a faithful-looking but wrong annotation.
+        let mut state_note_leader_segments =
+            Vec::with_capacity(layout.extensions.state_notes.len());
+        let mut state_note_instances = Vec::with_capacity(layout.extensions.state_notes.len());
+        for (note_index, note) in layout.extensions.state_notes.iter().enumerate() {
+            if note.bounds.width <= 0.0 || note.bounds.height <= 0.0 {
+                continue;
+            }
+            state_note_leader_segments.push(GpuEdgeSegment {
+                from: [note.leader_start.x, note.leader_start.y],
+                to: [note.leader_end.x, note.leader_end.y],
+                edge_index: NO_EDGE_INDEX,
+                color: DEFAULT_EDGE_STROKE_RGBA,
+                dash_phase: 0.0,
+                dash: [0.0, 0.0],
+                width: STATE_NOTE_STROKE_WIDTH,
+            });
+            state_note_instances.push(GpuNodeInstance {
+                center: [
+                    note.bounds.x + (note.bounds.width * 0.5),
+                    note.bounds.y + (note.bounds.height * 0.5),
+                ],
+                half_extent: [note.bounds.width * 0.5, note.bounds.height * 0.5],
+                fill: DEFAULT_NODE_FILL_RGBA,
+                stroke: DEFAULT_NODE_STROKE_RGBA,
+                stroke_width: STATE_NOTE_STROKE_WIDTH,
+                shape: GpuNodeShape::Rect as u32,
+                node_index: u32::try_from(note_index).unwrap_or(u32::MAX),
             });
         }
 
@@ -879,6 +1313,31 @@ impl GpuRenderPlan {
                 stroke_width: DEFAULT_NODE_STROKE_WIDTH,
                 shape: GpuNodeShape::Rect as u32,
                 node_index: u32::try_from(node_box.node_index).unwrap_or(u32::MAX),
+            });
+        }
+
+        // PACKET FIELD CONTINUATIONS (bd-adabx). These are ordinary field rectangles on later
+        // 32-bit rows, keyed to the original field node so their repeated labels cannot drift.
+        let mut packet_field_continuation_instances =
+            Vec::with_capacity(layout.extensions.packet_field_continuations.len());
+        for continuation in &layout.extensions.packet_field_continuations {
+            if continuation.bounds.width <= 0.0 || continuation.bounds.height <= 0.0 {
+                continue;
+            }
+            packet_field_continuation_instances.push(GpuNodeInstance {
+                center: [
+                    continuation.bounds.x + (continuation.bounds.width * 0.5),
+                    continuation.bounds.y + (continuation.bounds.height * 0.5),
+                ],
+                half_extent: [
+                    continuation.bounds.width * 0.5,
+                    continuation.bounds.height * 0.5,
+                ],
+                fill: DEFAULT_NODE_FILL_RGBA,
+                stroke: DEFAULT_NODE_STROKE_RGBA,
+                stroke_width: DEFAULT_NODE_STROKE_WIDTH,
+                shape: GpuNodeShape::Rect as u32,
+                node_index: u32::try_from(continuation.node_index).unwrap_or(u32::MAX),
             });
         }
 
@@ -1111,6 +1570,43 @@ impl GpuRenderPlan {
             }
         }
 
+        // PIE WEDGES (bd-adabx). The Canvas2D pass uses centre, radius, start angle and sweep;
+        // retaining those primitives lets the GPU tessellate the same sectors without pretending a
+        // curved boundary is an edge. Slice labels are added to the shared text pass below.
+        let mut pie_wedges = Vec::new();
+        if let Some(pie) = ir.pie_meta.as_ref().filter(|pie| !pie.slices.is_empty()) {
+            const COLORS: [&str; 10] = [
+                "#4c78a8", "#f58518", "#e45756", "#72b7b2", "#54a24b", "#eeca3b", "#b279a2",
+                "#ff9da6", "#9d755d", "#bab0ac",
+            ];
+            let total = pie
+                .slices
+                .iter()
+                .map(|slice| slice.value.max(0.0))
+                .sum::<f32>()
+                .max(f32::EPSILON);
+            let center = [
+                layout.bounds.x + (layout.bounds.width * 0.5),
+                layout.bounds.y + (layout.bounds.height * 0.5),
+            ];
+            let radius = ((layout.bounds.width.min(layout.bounds.height) * 0.5) - 36.0).max(30.0);
+            let mut angle = -std::f32::consts::FRAC_PI_2;
+            for (index, slice) in pie.slices.iter().enumerate() {
+                let sweep = (slice.value.max(0.0) / total) * std::f32::consts::TAU;
+                pie_wedges.push(GpuPieWedge {
+                    center,
+                    radius,
+                    start_angle: angle,
+                    sweep_angle: sweep,
+                    fill: parse_paint_rgba(COLORS[index % COLORS.len()]).unwrap_or(DEFAULT_NODE_FILL_RGBA),
+                    stroke: DEFAULT_NODE_STROKE_RGBA,
+                    stroke_width: DEFAULT_NODE_STROKE_WIDTH,
+                    slice_index: u32::try_from(index).unwrap_or(u32::MAX),
+                });
+                angle += sweep;
+            }
+        }
+
         // TEXT (bd-2u0.2 component 3). One run per node label, matching the raster pass, which
         // issues exactly one fill_text per label — so the two are countable against each other.
         //
@@ -1162,6 +1658,22 @@ impl GpuRenderPlan {
             .ceil()
             .clamp(DEFAULT_GLYPH_CELL_PX as f32, 256.0) as u32;
 
+        let pie_labels: Vec<String> = ir.pie_meta.as_ref().map_or_else(Vec::new, |pie| {
+            let total = pie
+                .slices
+                .iter()
+                .map(|slice| f64::from(slice.value.max(0.0)))
+                .sum::<f64>()
+                .max(f64::EPSILON);
+            pie.slices
+                .iter()
+                .map(|slice| {
+                    let percent = (f64::from(slice.value.max(0.0)) / total) * 100.0;
+                    format!("{}: {percent:.1}%", slice.label)
+                })
+                .collect()
+        });
+
         let glyph_atlas =
             // ⚠️ CLUSTER TITLES AND EDGE LABELS MUST BE IN THE ATLAS OR THEY VANISH WITHOUT A TRACE. The quad loop
             // does `let Some(cell) = glyph_atlas.cell(glyph) else { continue }`, so a glyph the
@@ -1207,7 +1719,73 @@ impl GpuRenderPlan {
                             .sequence_notes
                             .iter()
                             .map(|note| note.text.as_str()),
-                    ),
+                    )
+                    // STATE-NOTE LINES GO IN THE ATLAS TOO. The plan emits one run per line;
+                    // feeding that same iterator prevents a future line filter from starving a
+                    // run that still looks structurally present.
+                    .chain(
+                        layout
+                            .extensions
+                            .state_notes
+                            .iter()
+                            .flat_map(|note| note.text.lines()),
+                    )
+                    // AXIS LABELS GO IN THE ATLAS TOO. Tick segments without their dates or
+                    // categories are geometry with no scale, which is the same missing-source
+                    // failure as an entirely absent axis.
+                    .chain(
+                        layout
+                            .extensions
+                            .axis_ticks
+                            .iter()
+                            .filter(|tick| !tick.label.is_empty())
+                            .map(|tick| tick.label.as_str()),
+                    )
+                    // BAND LABELS are only drawn for sections and non-sequence lanes. Sequence
+                    // lifeline names already come from their headers, so reproducing them here
+                    // would create a third visible participant name.
+                    .chain(layout.extensions.bands.iter().filter_map(|band| {
+                        let draw_label = matches!(band.kind, fm_layout::LayoutBandKind::Section)
+                            || (matches!(band.kind, fm_layout::LayoutBandKind::Lane)
+                                && ir.diagram_type != fm_core::DiagramType::Sequence);
+                        draw_label.then_some(band.label.as_str()).filter(|label| !label.is_empty())
+                    }))
+                    .chain(
+                        layout
+                            .extensions
+                            .packet_field_continuations
+                            .iter()
+                            .filter_map(|continuation| ir.nodes.get(continuation.node_index))
+                            .filter_map(|node| {
+                                node.label
+                                    .and_then(|label| ir.labels.get(label.0))
+                                    .map_or(Some(node.id.as_str()), |label| {
+                                        label.text.split('\n').next()
+                                    })
+                            }),
+                    )
+                    // QUADRANT FURNITURE GOES IN THE ATLAS TOO. The Canvas2D pass emits both
+                    // axis labels and region names from the IR metadata; omitting either here
+                    // would make their planned runs silently lose every glyph.
+                    .chain(ir.quadrant_meta.iter().flat_map(|quad| {
+                        [
+                            quad.x_axis_left.as_deref(),
+                            quad.x_axis_right.as_deref(),
+                            quad.y_axis_top.as_deref(),
+                            quad.y_axis_bottom.as_deref(),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .filter(|label| !label.is_empty())
+                    }))
+                    .chain(
+                        ir.quadrant_meta
+                            .iter()
+                            .flat_map(|quad| quad.quadrant_labels.iter())
+                            .map(String::as_str)
+                            .filter(|label| !label.is_empty()),
+                    )
+                    .chain(pie_labels.iter().map(String::as_str)),
                 cell_px,
             );
         let mut text_quads: Vec<GpuTextQuad> = Vec::new();
@@ -1216,7 +1794,6 @@ impl GpuRenderPlan {
         for (run_index, (node_index, center, text)) in labelled.iter().enumerate() {
             let run_index_u32 = u32::try_from(run_index).unwrap_or(u32::MAX);
             let font_px = run_font_px.get(run_index).copied().unwrap_or(DEFAULT_FONT_SIZE_PX);
-            let advance = font_px * CHAR_ADVANCE_RATIO;
             let half_height = font_px * 0.5;
             let first_quad = u32::try_from(text_quads.len()).unwrap_or(u32::MAX);
 
@@ -1238,22 +1815,24 @@ impl GpuRenderPlan {
                 .unwrap_or(DEFAULT_LABEL_RGBA);
 
             let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
-            let width = advance * u16::try_from(inked.len()).map_or(f32::from(u16::MAX), f32::from);
-            let start_x = center[0] - (width * 0.5) + (advance * 0.5);
+            let width: f32 = inked.iter().map(|c| glyph_advance(*c, font_px)).sum();
+            let mut pen_x = center[0] - (width * 0.5);
 
-            for (offset, glyph) in inked.iter().enumerate() {
+            for glyph in &inked {
+                let advance = glyph_advance(*glyph, font_px);
                 let Some(cell) = glyph_atlas.cell(*glyph) else {
+                    pen_x += advance;
                     continue;
                 };
-                let step = u16::try_from(offset).map_or(f32::from(u16::MAX), f32::from);
                 text_quads.push(GpuTextQuad {
-                    center: [start_x + (step * advance), center[1]],
-                    half_extent: [advance * 0.5, half_height],
+                    center: [pen_x + (advance * 0.5), center[1]],
+                    half_extent: [half_height, half_height],
                     uv_min: cell.uv_min,
                     uv_max: cell.uv_max,
                     color: label_rgba,
                     run_index: run_index_u32,
                 });
+                pen_x += advance;
             }
 
             let quad_count = u32::try_from(text_quads.len()).unwrap_or(u32::MAX) - first_quad;
@@ -1401,16 +1980,198 @@ impl GpuRenderPlan {
             );
         }
 
+        // STATE-NOTE TEXT (bd-adabx). The SVG backend and Canvas2D pass both put this at the
+        // layout-reserved `(x + 10, y + 8)` inset, use 80% text, and advance one 16.8px row per
+        // source line. Centring it would make an annotation look like a node label and disagree
+        // with the bounds that fm-layout measured for the note.
+        for (index, note) in layout.extensions.state_notes.iter().enumerate() {
+            if note.bounds.width <= 0.0 || note.bounds.height <= 0.0 {
+                continue;
+            }
+            sink.push_left_multiline(
+                note.text.as_str(),
+                (note.bounds.x + 10.0, note.bounds.y + 8.0),
+                STATE_NOTE_FONT_SIZE_PX,
+                STATE_NOTE_LINE_HEIGHT,
+                DEFAULT_LABEL_RGBA,
+                GpuTextSource::StateNote,
+                index,
+            );
+        }
+
+        // AXIS LABELS (bd-adabx). `draw_axis_ticks` places each label three units to the right of
+        // its own tick at the axis baseline. Axis ticks are not nodes, so their extension index is
+        // preserved in the run discriminator rather than borrowing an unrelated node index.
+        for (index, tick) in layout.extensions.axis_ticks.iter().enumerate() {
+            if tick.label.is_empty() {
+                continue;
+            }
+            sink.push_left(
+                tick.label.as_str(),
+                (tick.position + 3.0, axis_tick_y),
+                AXIS_TICK_FONT_SIZE_PX,
+                DEFAULT_LABEL_RGBA,
+                GpuTextSource::AxisTick,
+                index,
+            );
+        }
+
+        // BAND LABELS (bd-adabx). This follows the raster branch exactly: sections and named
+        // non-sequence lanes label themselves; columns and sequence lifelines do not.
+        for (index, band) in layout.extensions.bands.iter().enumerate() {
+            let draw_label = matches!(band.kind, fm_layout::LayoutBandKind::Section)
+                || (matches!(band.kind, fm_layout::LayoutBandKind::Lane)
+                    && ir.diagram_type != fm_core::DiagramType::Sequence);
+            if !draw_label || band.label.is_empty() {
+                continue;
+            }
+            sink.push_left(
+                band.label.as_str(),
+                (band.bounds.x + 4.0, band.bounds.y + 2.0),
+                BAND_LABEL_FONT_SIZE_PX,
+                DEFAULT_LABEL_RGBA,
+                GpuTextSource::Band,
+                index,
+            );
+        }
+
+        // PACKET FIELD CONTINUATION LABELS (bd-adabx). SVG and Canvas repeat only the first line
+        // of a multi-line packet label on every continued row.
+        for continuation in &layout.extensions.packet_field_continuations {
+            let Some(node) = ir.nodes.get(continuation.node_index) else {
+                continue;
+            };
+            let label = node
+                .label
+                .and_then(|label| ir.labels.get(label.0))
+                .map_or(node.id.as_str(), |label| label.text.split('\n').next().unwrap_or_default());
+            if label.is_empty() || continuation.bounds.width <= 0.0 || continuation.bounds.height <= 0.0 {
+                continue;
+            }
+            sink.push_centred(
+                label,
+                (
+                    continuation.bounds.x + (continuation.bounds.width * 0.5),
+                    continuation.bounds.y + (continuation.bounds.height * 0.5),
+                ),
+                DEFAULT_LABEL_RGBA,
+                GpuTextSource::PacketFieldContinuation,
+                continuation.node_index,
+            );
+        }
+
+        // QUADRANT FURNITURE (bd-adabx). This duplicates the Canvas2D positions, not SVG's
+        // chart-relative margins: the canvas deliberately anchors its text to layout bounds.
+        // Axis labels use the secondary font and their actual left/right alignment; region names
+        // are centred in their documented Q1/Q2/Q3/Q4 order.
+        if let Some(quad) = ir.quadrant_meta.as_ref() {
+            let left = layout.bounds.x;
+            let right = layout.bounds.x + layout.bounds.width;
+            let top = layout.bounds.y;
+            let bottom = layout.bounds.y + layout.bounds.height;
+            let pad = DEFAULT_FONT_SIZE_PX;
+            let axis_labels = [
+                (
+                    quad.x_axis_left.as_deref(),
+                    (left + pad, bottom + pad),
+                    false,
+                ),
+                (
+                    quad.x_axis_right.as_deref(),
+                    (right - pad, bottom + pad),
+                    true,
+                ),
+                (quad.y_axis_top.as_deref(), (left - pad, top + pad), true),
+                (
+                    quad.y_axis_bottom.as_deref(),
+                    (left - pad, bottom - pad),
+                    true,
+                ),
+            ];
+            for (index, (label, anchor, right_aligned)) in axis_labels.into_iter().enumerate() {
+                let Some(label) = label.filter(|label| !label.is_empty()) else {
+                    continue;
+                };
+                if right_aligned {
+                    sink.push_right(
+                        label,
+                        anchor,
+                        QUADRANT_LABEL_FONT_SIZE_PX,
+                        DEFAULT_LABEL_RGBA,
+                        GpuTextSource::QuadrantAxis,
+                        index,
+                    );
+                } else {
+                    sink.push_left(
+                        label,
+                        anchor,
+                        QUADRANT_LABEL_FONT_SIZE_PX,
+                        DEFAULT_LABEL_RGBA,
+                        GpuTextSource::QuadrantAxis,
+                        index,
+                    );
+                }
+            }
+
+            let mid_x = f32::midpoint(left, right);
+            let mid_y = f32::midpoint(top, bottom);
+            let label_centres = [
+                (f32::midpoint(mid_x, right), f32::midpoint(top, mid_y)),
+                (f32::midpoint(left, mid_x), f32::midpoint(top, mid_y)),
+                (f32::midpoint(left, mid_x), f32::midpoint(mid_y, bottom)),
+                (f32::midpoint(mid_x, right), f32::midpoint(mid_y, bottom)),
+            ];
+            for (index, (label, centre)) in
+                quad.quadrant_labels.iter().zip(label_centres).enumerate()
+            {
+                sink.push_centred_with_font(
+                    label,
+                    centre,
+                    QUADRANT_LABEL_FONT_SIZE_PX,
+                    DEFAULT_LABEL_RGBA,
+                    GpuTextSource::QuadrantLabel,
+                    index,
+                );
+            }
+        }
+
+        if let Some(pie) = ir.pie_meta.as_ref() {
+            for (index, wedge) in pie_wedges.iter().enumerate() {
+                let angle = wedge.start_angle + (wedge.sweep_angle * 0.5);
+                let label_radius = wedge.radius + 20.0;
+                sink.push_centred_with_font(
+                    pie_labels.get(index).map_or("", String::as_str),
+                    (
+                        wedge.center[0] + label_radius * angle.cos(),
+                        wedge.center[1] + label_radius * angle.sin(),
+                    ),
+                    STATE_NOTE_FONT_SIZE_PX,
+                    DEFAULT_LABEL_RGBA,
+                    GpuTextSource::PieSlice,
+                    index,
+                );
+            }
+            debug_assert_eq!(pie.slices.len(), pie_wedges.len());
+        }
+
         Self {
             bounds: layout.bounds,
             cluster_instances,
+            band_lane_segments,
+            band_section_instances,
+            band_column_segments,
+            axis_tick_segments,
             cluster_divider_segments,
+            state_note_leader_segments,
+            state_note_instances,
             mirror_header_instances,
+            packet_field_continuation_instances,
             activation_instances,
             lifecycle_marker_segments,
             sequence_note_instances,
             edge_segments,
             arrowheads,
+            pie_wedges,
             node_instances,
             text_quads,
             text_runs,
@@ -1702,7 +2463,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, seg: EdgeSegment) -> Vertex
     out.color = seg.color;
     out.dash = seg.dash;
     out.arc_length = corner.x * length_units;
-    out.dash_phase = instance.dash_phase;
+    out.dash_phase = seg.dash_phase;
     out.across = corner.y;
     return out;
 }
@@ -1787,6 +2548,21 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 #[cfg(test)]
 mod tests {
     use super::{GpuNodeShape, GpuRenderPlan};
+
+    /// Midpoint of a run's ADVANCE SPAN — what "centred" means now that advances are proportional.
+    ///
+    /// The mean of glyph CENTRES used to serve, and stopped when text stopped being monospaced
+    /// (bd-2u0.2): the mean is only the run's midpoint when every advance is equal. "Zephyr" centred
+    /// on x=50 now has a centre-mean of 51.28, because its wide letters outnumber its narrow ones on
+    /// one side. The span midpoint is the quantity that was always meant, and it is exact.
+    fn run_span_midpoint(quads: &[super::GpuTextQuad], text: &str, font_px: f32) -> f32 {
+        let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
+        let first = *inked.first().expect("run has no glyphs");
+        let last = *inked.last().expect("run has no glyphs");
+        let left = quads[0].center[0] - (super::glyph_advance(first, font_px) * 0.5);
+        let right = quads[quads.len() - 1].center[0] + (super::glyph_advance(last, font_px) * 0.5);
+        (left + right) * 0.5
+    }
     use fm_core::{DiagramType, IrNode, MermaidDiagramIr, NodeShape, Span};
     use fm_layout::{
         DiagramLayout, EdgePoints, LayoutEdgePath, LayoutExtensions, LayoutNodeBox, LayoutPoint,
@@ -2039,15 +2815,20 @@ mod tests {
         // Independently computed, NOT read back from cardinality_anchor, or this would assert the
         // implementation against itself. The fixture edge runs (50,35) -> (70,35) -> (90,30), and
         // the inset is DEFAULT_FONT_SIZE_PX * 1.2 = 16.8 along each end's own first segment.
-        let centre_of = |run: super::GpuTextRun| {
+        // Advance-span midpoint, not the mean of glyph centres -- see `run_span_midpoint`. "many"
+        // has letters of four different widths, so the two stopped agreeing when text became
+        // proportional (bd-2u0.2).
+        let centre_of = |run: super::GpuTextRun, text: &str| {
             let quads =
                 &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
-            let x = quads.iter().map(|q| q.center[0]).sum::<f32>() / quads.len() as f32;
-            (x, quads[0].center[1])
+            (
+                run_span_midpoint(quads, text, super::DEFAULT_FONT_SIZE_PX),
+                quads[0].center[1],
+            )
         };
-        let (sx, sy) = centre_of(source_run);
+        let (sx, sy) = centre_of(source_run, "1");
         assert!((sx - 66.8).abs() < 0.01 && (sy - 35.0).abs() < 0.01, "source at ({sx}, {sy})");
-        let (tx, ty) = centre_of(target_run);
+        let (tx, ty) = centre_of(target_run, "many");
         assert!((tx - 73.702).abs() < 0.01 && (ty - 34.075).abs() < 0.01, "target at ({tx}, {ty})");
     }
 
@@ -2844,10 +3625,11 @@ mod tests {
         );
         assert_eq!(run.node_index, 2, "the run indexes the participant node");
 
-        // Centred in the box, like the raster pass centres it.
+        // Centred in the box, like the raster pass centres it. Measured as the ADVANCE SPAN's
+        // midpoint rather than the mean of glyph centres -- see `run_span_midpoint`.
         let quads = &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
-        let mean_x = quads.iter().map(|q| q.center[0]).sum::<f32>() / 6.0;
-        assert!((mean_x - 50.0).abs() < 0.01, "name not centred: {mean_x}");
+        let midpoint = run_span_midpoint(quads, "Zephyr", super::DEFAULT_FONT_SIZE_PX);
+        assert!((midpoint - 50.0).abs() < 0.01, "name not centred: {midpoint}");
         assert!((quads[0].center[1] - 215.0).abs() < 0.01);
     }
 
@@ -2908,9 +3690,486 @@ mod tests {
         assert_eq!(runs[0].node_index, 0, "node_index indexes the notes, not ir.nodes");
 
         let quads = &plan.text_quads[runs[0].first_quad as usize..][..4];
-        let mean_x = quads.iter().map(|q| q.center[0]).sum::<f32>() / 4.0;
-        assert!((mean_x - 140.0).abs() < 0.01, "body not centred: {mean_x}");
+        // Advance-span midpoint, not the mean of glyph centres -- see `run_span_midpoint`.
+        let midpoint = run_span_midpoint(quads, "Wqkj", super::DEFAULT_FONT_SIZE_PX);
+        assert!((midpoint - 140.0).abs() < 0.01, "body not centred: {midpoint}");
         assert!((quads[0].center[1] - 70.0).abs() < 0.01);
+    }
+
+    /// State notes reach the GPU plan with the same source, bounds, leader and text the SVG
+    /// backend renders (bd-adabx).
+    ///
+    /// This is deliberately a parsed multi-line state diagram, not a hand-built extension. The
+    /// state-note source was parsed and rendered by SVG before the GPU plan existed; a synthetic
+    /// layout could prove a buffer accepts data while missing the public path that supplies it.
+    #[test]
+    fn state_note_gpu_plan_matches_svg_backend_for_the_same_ir() {
+        let source = "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Running\n  note right of Idle\n    Zephyr line\n    Quokka line\n  end note\n";
+        let ir = fm_parser::parse(source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let note = layout
+            .extensions
+            .state_notes
+            .first()
+            .expect("CONTROL FAILED: the parsed fixture produced no state note");
+        assert!(note.text.contains('\n'), "CONTROL FAILED: expected a multi-line note");
+
+        // Golden reference from the SVG backend, over the exact same parsed IR and layout. These
+        // classes identify the three state-note draw products rather than matching an incidental
+        // SVG byte count, and both source lines prove SVG did not collapse the note to one line.
+        let svg = fm_render_svg::render_svg_with_layout(
+            &ir,
+            &layout,
+            &fm_render_svg::SvgRenderConfig::default(),
+        );
+        for expected in [
+            "fm-state-note-leader",
+            "fm-state-note\"",
+            "fm-state-note-text",
+            "Zephyr line",
+            "Quokka line",
+        ] {
+            assert!(
+                svg.contains(expected),
+                "SVG golden reference omitted {expected:?}:\n{svg}"
+            );
+        }
+
+        let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+        assert_eq!(plan.state_note_leader_segments.len(), 1);
+        assert_eq!(plan.state_note_instances.len(), 1);
+
+        let leader = plan.state_note_leader_segments[0];
+        assert_eq!(leader.from, [note.leader_start.x, note.leader_start.y]);
+        assert_eq!(leader.to, [note.leader_end.x, note.leader_end.y]);
+        assert_eq!(leader.edge_index, super::NO_EDGE_INDEX);
+        assert_eq!(leader.color, super::DEFAULT_EDGE_STROKE_RGBA);
+        assert_eq!(leader.width, super::STATE_NOTE_STROKE_WIDTH);
+
+        let note_instance = plan.state_note_instances[0];
+        assert_eq!(
+            note_instance.center,
+            [
+                note.bounds.x + (note.bounds.width * 0.5),
+                note.bounds.y + (note.bounds.height * 0.5),
+            ]
+        );
+        assert_eq!(
+            note_instance.half_extent,
+            [note.bounds.width * 0.5, note.bounds.height * 0.5]
+        );
+        assert_eq!(note_instance.node_index, 0, "index must identify the note, not Idle");
+        assert_eq!(note_instance.stroke_width, super::STATE_NOTE_STROKE_WIDTH);
+
+        let runs: Vec<_> = plan
+            .text_runs
+            .iter()
+            .filter(|run| run.source == super::GpuTextSource::StateNote)
+            .collect();
+        assert_eq!(runs.len(), 2, "each SVG line needs its own GPU text run");
+        assert!(runs.iter().all(|run| run.node_index == 0));
+        assert_eq!(runs[0].quad_count, 11, "Zephyr line is eleven visible glyphs");
+        assert_eq!(runs[1].quad_count, 11, "Quokka line is eleven visible glyphs");
+
+        let first_line = &plan.text_quads
+            [runs[0].first_quad as usize..][..runs[0].quad_count as usize];
+        let second_line = &plan.text_quads
+            [runs[1].first_quad as usize..][..runs[1].quad_count as usize];
+        // Half of the FIRST GLYPH's own advance past the anchor, not half a flat average
+        // (bd-2u0.2): the pen starts at the anchor and each quad is centred on its own advance.
+        let expected_first_x = note.bounds.x
+            + 10.0
+            + (super::glyph_advance('Z', super::STATE_NOTE_FONT_SIZE_PX) * 0.5);
+        let expected_first_y = note.bounds.y + 8.0 + (super::STATE_NOTE_FONT_SIZE_PX * 0.5);
+        assert!((first_line[0].center[0] - expected_first_x).abs() < 0.01);
+        assert!((first_line[0].center[1] - expected_first_y).abs() < 0.01);
+        assert!(
+            (second_line[0].center[1] - first_line[0].center[1]
+                - super::STATE_NOTE_LINE_HEIGHT)
+                .abs()
+                < 0.01,
+            "state-note lines must keep the SVG/canvas 16.8px spacing"
+        );
+    }
+
+    /// Gantt and xychart ticks reach the GPU plan with the same extension-backed products the SVG
+    /// backend renders (bd-adabx).
+    #[test]
+    fn axis_tick_gpu_plan_matches_svg_backend_for_the_same_ir() {
+        let ir = fm_parser::parse(include_str!(
+            "../../fm-cli/tests/fixtures/frankentui_conformance/gantt_project.mmd"
+        ))
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let ticks: Vec<_> = layout
+            .extensions
+            .axis_ticks
+            .iter()
+            .enumerate()
+            .filter(|(_, tick)| !tick.label.is_empty())
+            .collect();
+        assert!(
+            !ticks.is_empty(),
+            "CONTROL FAILED: divergent gantt fixture produced no labelled axis ticks"
+        );
+
+        let svg = fm_render_svg::render_svg_with_layout(
+            &ir,
+            &layout,
+            &fm_render_svg::SvgRenderConfig::default(),
+        );
+        assert!(
+            svg.contains("fm-axis-tick"),
+            "SVG reference omitted the axis tick group:\n{svg}"
+        );
+        for (_, tick) in &ticks {
+            assert!(
+                svg.contains(&format!("fm-axis-tick-label\">{}<", tick.label)),
+                "SVG reference omitted the tick label {:?}:\n{svg}",
+                tick.label
+            );
+        }
+
+        let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+        assert_eq!(plan.axis_tick_segments.len(), ticks.len());
+        let expected_y = layout.bounds.y - 12.0;
+        for ((tick_index, tick), segment) in ticks.iter().zip(&plan.axis_tick_segments) {
+            assert_eq!(segment.from, [tick.position, expected_y + 4.0]);
+            assert_eq!(segment.to, [tick.position, expected_y + 16.0]);
+            assert_eq!(segment.edge_index, super::NO_EDGE_INDEX);
+            assert_eq!(segment.color, super::DEFAULT_EDGE_STROKE_RGBA);
+            assert_eq!(segment.width, super::AXIS_TICK_STROKE_WIDTH);
+
+            let run = plan
+                .text_runs
+                .iter()
+                .find(|run| {
+                    run.source == super::GpuTextSource::AxisTick
+                        && run.node_index == u32::try_from(*tick_index).unwrap_or(u32::MAX)
+                })
+                .expect("each planned tick line must keep its SVG label");
+            assert!(run.quad_count > 0, "tick {:?} emitted no text quads", tick.label);
+            let first_quad = &plan.text_quads[run.first_quad as usize];
+            assert!(
+                (first_quad.center[0]
+                    - (tick.position
+                        + 3.0
+                        + (super::glyph_advance(
+                            tick.label.chars().next().expect("tick label has a glyph"),
+                            super::AXIS_TICK_FONT_SIZE_PX,
+                        ) * 0.5)))
+                    .abs()
+                    < 0.01
+            );
+            assert!((first_quad.center[1] - expected_y).abs() < 0.01);
+        }
+    }
+
+    /// Every Canvas2D band kind reaches a GPU primitive while the SVG arm renders the same parsed
+    /// corpus IR/layout (bd-adabx).
+    #[test]
+    fn layout_band_gpu_plan_matches_svg_backend_for_the_same_ir() {
+        let cases = [
+            (
+                include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/gantt_project.mmd"),
+                "fm-gantt-section-bg",
+                fm_layout::LayoutBandKind::Section,
+            ),
+            (
+                include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/journey_user.mmd"),
+                "fm-band-lane",
+                fm_layout::LayoutBandKind::Lane,
+            ),
+            (
+                include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/sankey_links.mmd"),
+                "fm-band-column",
+                fm_layout::LayoutBandKind::Column,
+            ),
+        ];
+
+        for (source, svg_class, kind) in cases {
+            let ir = fm_parser::parse(source).ir;
+            let layout = fm_layout::layout_diagram(&ir);
+            let bands: Vec<_> = layout
+                .extensions
+                .bands
+                .iter()
+                .enumerate()
+                .filter(|(_, band)| band.kind == kind)
+                .collect();
+            assert!(
+                !bands.is_empty(),
+                "CONTROL FAILED: fixture for {kind:?} produced no matching layout band"
+            );
+
+            let svg = fm_render_svg::render_svg_with_layout(
+                &ir,
+                &layout,
+                &fm_render_svg::SvgRenderConfig::default(),
+            );
+            assert!(
+                svg.contains(svg_class),
+                "SVG reference omitted {svg_class} for {kind:?}:\n{svg}"
+            );
+
+            let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+            match kind {
+                fm_layout::LayoutBandKind::Lane => {
+                    assert_eq!(plan.band_lane_segments.len(), bands.len());
+                    for ((_, band), segment) in bands.iter().zip(&plan.band_lane_segments) {
+                        let center_x = band.bounds.x + (band.bounds.width * 0.5);
+                        assert_eq!(segment.from, [center_x, band.bounds.y]);
+                        assert_eq!(segment.to, [center_x, band.bounds.y + band.bounds.height]);
+                        assert_eq!(segment.dash, super::BAND_LANE_DASH);
+                    }
+                }
+                fm_layout::LayoutBandKind::Section => {
+                    assert_eq!(plan.band_section_instances.len(), bands.len());
+                    for ((band_index, band), instance) in bands.iter().zip(&plan.band_section_instances)
+                    {
+                        assert_eq!(
+                            instance.center,
+                            [
+                                band.bounds.x + (band.bounds.width * 0.5),
+                                band.bounds.y + (band.bounds.height * 0.5),
+                            ]
+                        );
+                        assert_eq!(
+                            instance.node_index,
+                            u32::try_from(*band_index).unwrap_or(u32::MAX)
+                        );
+                        assert_eq!(instance.fill, super::BAND_SECTION_FILL_RGBA);
+                        assert_eq!(instance.stroke, super::BAND_SECTION_STROKE_RGBA);
+                    }
+                }
+                fm_layout::LayoutBandKind::Column => {
+                    assert_eq!(plan.band_column_segments.len(), bands.len());
+                    for ((_, band), segment) in bands.iter().zip(&plan.band_column_segments) {
+                        let right = band.bounds.x + band.bounds.width;
+                        assert_eq!(segment.from, [right, band.bounds.y]);
+                        assert_eq!(segment.to, [right, band.bounds.y + band.bounds.height]);
+                        assert_eq!(segment.color[3], 0.4);
+                    }
+                }
+            }
+
+            for (band_index, band) in bands {
+                let expects_label = !band.label.is_empty()
+                    && (kind == fm_layout::LayoutBandKind::Section
+                        || (kind == fm_layout::LayoutBandKind::Lane
+                            && ir.diagram_type != fm_core::DiagramType::Sequence));
+                let has_label = plan.text_runs.iter().any(|run| {
+                    run.source == super::GpuTextSource::Band
+                        && run.node_index == u32::try_from(band_index).unwrap_or(u32::MAX)
+                });
+                assert_eq!(has_label, expects_label, "band label selection drifted for {kind:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn packet_continuation_gpu_plan_matches_svg_backend_for_the_same_ir() {
+        let ir = fm_parser::parse("packet-beta\n  0-7: Header\n  24-47: Wrapped field\n").ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let continuation = layout
+            .extensions
+            .packet_field_continuations
+            .first()
+            .expect("CONTROL FAILED: wrapped packet field produced no continuation");
+        let svg = fm_render_svg::render_svg_with_layout(
+            &ir,
+            &layout,
+            &fm_render_svg::SvgRenderConfig::default(),
+        );
+        assert!(svg.contains("fm-packet-continuation"));
+        assert!(svg.contains("Wrapped field"));
+
+        let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+        assert_eq!(plan.packet_field_continuation_instances.len(), 1);
+        let instance = plan.packet_field_continuation_instances[0];
+        assert_eq!(
+            instance.center,
+            [
+                continuation.bounds.x + (continuation.bounds.width * 0.5),
+                continuation.bounds.y + (continuation.bounds.height * 0.5),
+            ]
+        );
+        assert_eq!(instance.node_index, continuation.node_index as u32);
+        let run = plan
+            .text_runs
+            .iter()
+            .find(|run| run.source == super::GpuTextSource::PacketFieldContinuation)
+            .expect("continuation label must be planned with its repeated box");
+        assert_eq!(run.node_index, continuation.node_index as u32);
+        assert_eq!(run.quad_count, 13, "Wrapped field is thirteen glyphs");
+    }
+
+    /// Quadrant labels are a real Canvas2D draw source, and the plan must keep all of the same
+    /// fixture's IR-backed text products that SVG emits (bd-adabx).
+    #[test]
+    fn quadrant_text_gpu_plan_matches_svg_backend_for_the_same_ir() {
+        let ir = fm_parser::parse(include_str!(
+            "../../fm-cli/tests/fixtures/frankentui_conformance/quadrant_basic.mmd"
+        ))
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let quad = ir
+            .quadrant_meta
+            .as_ref()
+            .expect("CONTROL FAILED: divergent corpus fixture produced no quadrant metadata");
+        let axis_labels = [
+            quad.x_axis_left.as_deref(),
+            quad.x_axis_right.as_deref(),
+            quad.y_axis_top.as_deref(),
+            quad.y_axis_bottom.as_deref(),
+        ];
+        assert!(
+            axis_labels
+                .iter()
+                .all(|label| label.is_some_and(|label| !label.is_empty())),
+            "CONTROL FAILED: divergent corpus fixture needs all four axis labels"
+        );
+        assert_eq!(
+            quad.quadrant_labels.len(),
+            4,
+            "CONTROL FAILED: divergent corpus fixture needs all four quadrant names"
+        );
+
+        let svg = fm_render_svg::render_svg_with_layout(
+            &ir,
+            &layout,
+            &fm_render_svg::SvgRenderConfig::default(),
+        );
+        for expected in ["fm-quadrant-axis-label", "fm-quadrant-label"]
+            .into_iter()
+            .chain(axis_labels.into_iter().flatten())
+            .chain(quad.quadrant_labels.iter().map(String::as_str))
+        {
+            assert!(
+                svg.contains(expected),
+                "SVG golden reference omitted {expected:?}:\n{svg}"
+            );
+        }
+
+        let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+        // Per-glyph advance now (bd-2u0.2): the aligned end of a run sits half of THAT GLYPH's own
+        // advance from the anchor, not half a flat average.
+        let edge_advance = |label: Option<&str>, right_aligned: bool| {
+            let text = label.expect("axis label present");
+            let glyph = if right_aligned {
+                text.chars().rfind(|c| !c.is_control())
+            } else {
+                text.chars().find(|c| !c.is_control())
+            }
+            .expect("axis label has a glyph");
+            super::glyph_advance(glyph, super::QUADRANT_LABEL_FONT_SIZE_PX)
+        };
+        let left = layout.bounds.x;
+        let right = layout.bounds.x + layout.bounds.width;
+        let top = layout.bounds.y;
+        let bottom = layout.bounds.y + layout.bounds.height;
+        let pad = super::DEFAULT_FONT_SIZE_PX;
+        let axis_anchors = [
+            (left + pad, bottom + pad, false),
+            (right - pad, bottom + pad, true),
+            (left - pad, top + pad, true),
+            (left - pad, bottom - pad, true),
+        ];
+        for (index, (anchor_x, anchor_y, right_aligned)) in axis_anchors.into_iter().enumerate() {
+            let run = plan
+                .text_runs
+                .iter()
+                .find(|run| {
+                    run.source == super::GpuTextSource::QuadrantAxis
+                        && run.node_index == u32::try_from(index).unwrap_or(u32::MAX)
+                })
+                .expect("each SVG axis label needs one GPU text run");
+            let glyphs = &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
+            let x = if right_aligned {
+                glyphs.last().expect("axis run has a glyph").center[0]
+            } else {
+                glyphs.first().expect("axis run has a glyph").center[0]
+            };
+            let advance = edge_advance(axis_labels[index], right_aligned);
+            let expected_x = if right_aligned {
+                anchor_x - (advance * 0.5)
+            } else {
+                anchor_x + (advance * 0.5)
+            };
+            assert!(
+                (x - expected_x).abs() < 0.01,
+                "axis {index} alignment drifted"
+            );
+            assert!(
+                (glyphs[0].center[1] - anchor_y).abs() < 0.01,
+                "axis {index} baseline drifted"
+            );
+        }
+
+        let mid_x = f32::midpoint(left, right);
+        let mid_y = f32::midpoint(top, bottom);
+        let centres = [
+            (f32::midpoint(mid_x, right), f32::midpoint(top, mid_y)),
+            (f32::midpoint(left, mid_x), f32::midpoint(top, mid_y)),
+            (f32::midpoint(left, mid_x), f32::midpoint(mid_y, bottom)),
+            (f32::midpoint(mid_x, right), f32::midpoint(mid_y, bottom)),
+        ];
+        for (index, expected) in centres.into_iter().enumerate() {
+            let run = plan
+                .text_runs
+                .iter()
+                .find(|run| {
+                    run.source == super::GpuTextSource::QuadrantLabel
+                        && run.node_index == u32::try_from(index).unwrap_or(u32::MAX)
+                })
+                .expect("each SVG quadrant label needs one GPU text run");
+            let glyphs = &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
+            // Advance-span midpoint, not the mean of glyph centres -- see `run_span_midpoint`.
+            let midpoint = run_span_midpoint(
+                glyphs,
+                &quad.quadrant_labels[index],
+                super::QUADRANT_LABEL_FONT_SIZE_PX,
+            );
+            assert!(
+                (midpoint - expected.0).abs() < 0.01,
+                "quadrant {index} not centred"
+            );
+            assert!(
+                (glyphs[0].center[1] - expected.1).abs() < 0.01,
+                "quadrant {index} vertical placement drifted"
+            );
+        }
+    }
+
+    #[test]
+    fn pie_wedges_gpu_plan_matches_svg_backend_for_the_same_ir() {
+        let ir = fm_parser::parse(include_str!(
+            "../../fm-cli/tests/fixtures/frankentui_conformance/pie_chart.mmd"
+        ))
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let pie = ir.pie_meta.as_ref().expect("CONTROL FAILED: fixture produced no pie metadata");
+        assert!(!pie.slices.is_empty(), "CONTROL FAILED: fixture produced no pie slices");
+        let svg = fm_render_svg::render_svg_with_layout(
+            &ir,
+            &layout,
+            &fm_render_svg::SvgRenderConfig::default(),
+        );
+        assert!(svg.contains("fm-pie-slice"), "SVG golden omitted pie wedges:\n{svg}");
+        for slice in &pie.slices {
+            assert!(svg.contains(&slice.label), "SVG golden omitted {:?}:\n{svg}", slice.label);
+        }
+
+        let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+        assert_eq!(plan.pie_wedges.len(), pie.slices.len());
+        let total = pie.slices.iter().map(|slice| slice.value.max(0.0)).sum::<f32>();
+        let expected_radius = ((layout.bounds.width.min(layout.bounds.height) * 0.5) - 36.0).max(30.0);
+        for (index, wedge) in plan.pie_wedges.iter().enumerate() {
+            assert_eq!(wedge.slice_index, index as u32);
+            assert!((wedge.radius - expected_radius).abs() < 0.01);
+            assert!((wedge.sweep_angle - pie.slices[index].value.max(0.0) / total * std::f32::consts::TAU).abs() < 0.01);
+            assert!(plan.text_runs.iter().any(|run| run.source == super::GpuTextSource::PieSlice && run.node_index == index as u32));
+        }
     }
 
     /// A destroyed participant's cross reaches the plan as two segments (bd-adabx).
@@ -3083,8 +4342,12 @@ mod tests {
         // (plan field, the raster call that produces it), in the order both must agree on.
         const PAIRS: &[(&str, &str)] = &[
             ("pub cluster_instances:", "self.draw_clusters("),
+            ("pub band_lane_segments:", "self.draw_bands("),
+            ("pub axis_tick_segments:", "self.draw_axis_ticks("),
             ("pub cluster_divider_segments:", "self.draw_cluster_dividers("),
+            ("pub state_note_leader_segments:", "self.draw_state_notes("),
             ("pub mirror_header_instances:", "self.draw_sequence_mirror_headers("),
+            ("pub packet_field_continuation_instances:", "self.draw_packet_field_continuations("),
             ("pub activation_instances:", "self.draw_activation_bars("),
             ("pub lifecycle_marker_segments:", "self.draw_sequence_lifecycle_markers("),
             ("pub sequence_note_instances:", "self.draw_sequence_notes("),
@@ -3135,11 +4398,8 @@ mod tests {
 
     /// Every raster draw source is CLASSIFIED against the GPU plan (bd-adabx).
     ///
-    /// The plan mirrors three of renderer.rs's nineteen `draw_*` entry points. The other sixteen
-    /// have no GPU counterpart, so a sequence, gantt, pie, quadrant, packet or state diagram plans
-    /// its nodes and edges and none of the furniture that makes it that diagram type. Nothing
-    /// failed over this, because a plan that omits a draw source is indistinguishable from a plan
-    /// for a diagram that never had one.
+    /// The plan mirrors a growing subset of renderer.rs's nineteen `draw_*` entry points. An
+    /// unplanned source is otherwise indistinguishable from a diagram that never had its furniture.
     ///
     /// FAILS BOTH WAYS, which is the whole point. A new `draw_*` that nobody classified fails here
     /// until someone decides whether the plan covers it; and a classification naming a `draw_*` that
@@ -3156,6 +4416,12 @@ mod tests {
             "draw_cluster_dividers",
             "draw_sequence_lifecycle_markers",
             "draw_sequence_notes",
+            "draw_state_notes",
+            "draw_bands",
+            "draw_axis_ticks",
+            "draw_packet_field_continuations",
+            "draw_quadrant_axis_labels",
+            "draw_pie_wedges",
             "draw_clusters",
             "draw_edges",
             "draw_nodes",
@@ -3167,12 +4433,7 @@ mod tests {
             ("draw_generic_diagram_title", "bd-adabx: diagram title text"),
             ("draw_path_markers", "bd-adabx: RenderScene path pipeline, not the layout pipeline"),
             ("draw_marker", "bd-adabx: RenderScene path pipeline, not the layout pipeline"),
-            ("draw_quadrant_axis_labels", "bd-adabx: quadrant furniture"),
-            ("draw_bands", "bd-adabx: journey/kanban band furniture"),
-            ("draw_packet_field_continuations", "bd-adabx: packet furniture"),
-            ("draw_axis_ticks", "bd-adabx: axis furniture"),
             ("draw_gantt_today_marker", "bd-adabx: gantt furniture"),
-            ("draw_state_notes", "bd-adabx: state furniture"),
             (
                 "draw_sequence_fragments",
                 "bd-l3nsf, NOT merely unplanned: a fragment box has a DASHED border \
@@ -3180,7 +4441,6 @@ mod tests {
                  it as a plain rect instance would draw a solid border where the canvas draws a \
                  dashed one -- a wrong picture, not a missing one",
             ),
-            ("draw_pie_wedges", "bd-adabx: pie geometry"),
         ];
 
         let mut found = Vec::new();

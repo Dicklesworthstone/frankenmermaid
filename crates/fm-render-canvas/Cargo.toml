@@ -10,12 +10,34 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[features]
+default = []
+# The wgpu device layer (bd-2u0.2). OFF BY DEFAULT AND DELIBERATELY SO: this crate ships in the
+# size-optimised WASM bundle (`opt-level = "z"`), and wgpu pulls in a large backend tree that would
+# bloat it for every user of the Canvas2D path, which is the path that covers most diagrams. The
+# bead itself calls WebGPU "for power users with massive diagrams", so it is opt-in. Everything in
+# `gpu_pipeline` — the layouts, the shader-agreement tests — stays available without this feature,
+# because none of it needs a device.
+webgpu = ["dep:wgpu", "dep:pollster", "dep:fontdue"]
+
 [dependencies]
 fm-core.workspace = true
 fm-layout.workspace = true
+wgpu = { version = "27.0.1", optional = true }
+# Block on wgpu's async device/adapter requests. The browser drives these off its own event loop;
+# a native headless caller has no executor, and pulling in tokio for three awaits would be a far
+# heavier dependency than the job needs.
+pollster = { version = "0.4.0", optional = true }
+# Glyph rasterisation into the atlas (bd-2u0.2). `Font::rasterize` returns an 8-bit coverage bitmap,
+# which is exactly the R8 texture the text shader samples -- no colour conversion, no intermediate
+# surface. Pure Rust, so it builds for wasm32 the same as native, and it carries NO font: the caller
+# supplies the bytes, which keeps a multi-megabyte binary out of this repo and makes the choice of
+# typeface the caller's rather than ours.
+fontdue = { version = "0.9.3", optional = true }
 
 [dev-dependencies]
 sha2 = "0.11"
+fm-render-svg.workspace = true
 # Tests parse REAL mermaid source rather than hand-building IR. A hand-built fixture is how
 # c0d7ed3a's kanban fix came to pass its own tests while being unreachable from parser output
 # (bd-u3fo); a renderer test that never sees what the parser actually emits can certify a path
