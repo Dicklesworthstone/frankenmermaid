@@ -6601,7 +6601,19 @@ fn render_xychart_svg(
                     config.font_size * 0.72,
                     config.min_font_size,
                 ))
-                .fill(&theme.colors.edge)
+                // `colors.text`, NOT `colors.edge` (bd-c14jf). This painted TICK LABELS with the
+                // LINE colour — a category error that is nearly invisible in review because both
+                // slots hold a dark-ish value, and it has no CSS rule behind it to correct the
+                // attribute (unlike `.fm-cluster-label`, where a rule wins over the attribute).
+                //
+                // Measured contrast against the theme background, before this change:
+                //   default  #94a3b8 on #fafbfc  =  2.47:1   <- fails WCAG AA (4.5:1), and even
+                //                                              the 3:1 large-text floor
+                //   dark     #94a3b8 on #0f172a  =  6.96:1
+                // Its own siblings were already right: `fm-xychart-x-tick` and `fm-xychart-title`
+                // both use `colors.text` (16.46:1 and 17.06:1). One axis was legible and the other
+                // was not, on the SHIPPED default theme.
+                .fill(&theme.colors.text)
                 .class("fm-xychart-y-tick")
                 .build(),
         );
