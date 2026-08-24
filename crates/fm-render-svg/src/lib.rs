@@ -5894,23 +5894,31 @@ fn render_gantt_svg(
     // single source of tick GEOMETRY — re-deriving day positions here is how an axis and its bars
     // come to disagree about where a day is.
     //
-    // `tick_y` is the top of the layout bounds, which for gantt sits a fixed ~52px above the topmost
-    // bar (normalization pins the first bar's top at y=20 and `compute_bounds` pads above it), so
-    // the tick line — drawn from `tick_y + 4` to `tick_y + 16` — clears the bars with room to spare
-    // and stays inside the canvas rather than being clipped at the viewBox edge.
+    // The layout owns both baselines: Mermaid always has the bottom grid and `topAxis` appends a
+    // second one. Keeping the rows here rather than deriving `bounds.y +/- 12` lets SVG and canvas
+    // consume the same geometry and prevents a renderer-only axis from being clipped by its bounds.
     if !layout.extensions.axis_ticks.is_empty() {
-        let mut ticks_svg = String::new();
-        let tick_y = layout.bounds.y + offset_y + 12.0;
-        for tick in &layout.extensions.axis_ticks {
-            write_layout_axis_tick_into(
-                &mut ticks_svg,
-                tick.label.as_str(),
-                tick.position + offset_x,
-                tick_y,
-                config,
-            );
+        for axis in &layout.extensions.gantt_axis_rows {
+            let mut ticks_svg = String::new();
+            let class = match axis.placement {
+                fm_layout::LayoutGanttAxisPlacement::Bottom => "fm-gantt-axis fm-gantt-axis-bottom",
+                fm_layout::LayoutGanttAxisPlacement::Top => "fm-gantt-axis fm-gantt-axis-top",
+            };
+            ticks_svg.push_str("<g class=\"");
+            ticks_svg.push_str(class);
+            ticks_svg.push_str("\">");
+            for tick in &layout.extensions.axis_ticks {
+                write_layout_axis_tick_into(
+                    &mut ticks_svg,
+                    tick.label.as_str(),
+                    tick.position + offset_x,
+                    axis.y + offset_y,
+                    config,
+                );
+            }
+            ticks_svg.push_str("</g>");
+            doc = doc.child(Element::raw_svg(ticks_svg));
         }
-        doc = doc.child(Element::raw_svg(ticks_svg));
     }
 
     // The `todayMarker` line (bd-j0va). mermaid draws a vertical line across the chart at the
@@ -15656,6 +15664,23 @@ mod tests {
         assert!(svg.contains("id=\"arrow-end\""));
     }
 
+    /// Regression fixture shared with `scripts/headtohead/corpus.mjs`: Mermaid 11.15.0 renders
+    /// `class e1 alert` as a red, 4px `e1@` edge. The parser resolves that class to Link(0), and
+    /// this consumer must carry both declarations into the rendered path.
+    #[test]
+    fn class_directive_on_an_edge_id_reaches_the_svg_path() {
+        let parsed = fm_parser::parse(
+            "flowchart LR\n  Animal e1@--> Dog\n  classDef alert stroke:#ff0000,stroke-width:4px\n  class e1 alert\n",
+        );
+        let svg = render_svg(&parsed.ir);
+
+        assert!(svg.contains("stroke:#ff0000"), "edge class stroke was lost: {svg}");
+        assert!(
+            svg.contains("stroke-width:4px"),
+            "edge class width was lost: {svg}"
+        );
+    }
+
     #[test]
     fn includes_half_arrow_marker_defs() {
         // Sequence half/stick arrowheads still render through their markers; the reference-gated
@@ -17804,9 +17829,9 @@ marker#arrow-open path {
             );
         }
 
-        // The axis annotates the chart; it must not be drawn across it. Read the tick lines out of
-        // the tick groups themselves rather than every `<line>` in the document, so an unrelated
-        // line elsewhere can neither satisfy nor break this.
+        // Mermaid's unconditional grid is below the task rows. Read tick lines out of the tick
+        // groups themselves rather than every `<line>` in the document, so an unrelated line
+        // elsewhere can neither satisfy nor break this.
         let lowest_tick = svg
             .match_indices("<g class=\"fm-axis-tick\">")
             .map(|(at, m)| {
@@ -17815,10 +17840,13 @@ marker#arrow-open path {
                 attr(line, "y2")
             })
             .fold(f32::MIN, f32::max);
-        let topmost_bar = bars.iter().map(|e| attr(e, "y")).fold(f32::MAX, f32::min);
+        let bottommost_bar = bars
+            .iter()
+            .map(|e| attr(e, "y") + attr(e, "height"))
+            .fold(f32::MIN, f32::max);
         assert!(
-            lowest_tick < topmost_bar,
-            "tick marks reach y={lowest_tick} but the first bar starts at y={topmost_bar}"
+            lowest_tick > bottommost_bar,
+            "bottom tick marks end at y={lowest_tick} but the last bar ends at y={bottommost_bar}"
         );
 
         // The bars are untouched by this change: their x still comes straight from the layout box,
@@ -17830,6 +17858,34 @@ marker#arrow-open path {
                 "bar {bar_index} x drifted from its layout box"
             );
         }
+    }
+
+    /// Mermaid 11.15's `gantt.topAxis` configuration APPENDS a top grid; it does not move the
+    /// bottom grid. The pinned reference SVG has exactly two `g.grid` groups for this source.
+    #[test]
+    fn gantt_top_axis_appends_a_second_axis_row() {
+        let src = "%%{init: {'gantt': {'topAxis': true}} }%%\ngantt\n  dateFormat YYYY-MM-DD\n  \
+                   section Delivery\n  Design :a1, 2026-01-01, 3d\n  Build :a2, after a1, 4d";
+        let parsed = fm_parser::parse(src);
+        let layout = fm_layout::layout_diagram_gantt(&parsed.ir);
+        let svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+
+        assert_eq!(
+            layout.extensions.gantt_axis_rows.len(),
+            2,
+            "topAxis must append to the unconditional bottom axis"
+        );
+        assert!(
+            layout.extensions.gantt_axis_rows[0].y > layout.extensions.gantt_axis_rows[1].y,
+            "the first row is the reference bottom grid and the second is the added top grid"
+        );
+        assert_eq!(svg.matches("fm-gantt-axis-bottom").count(), 1);
+        assert_eq!(svg.matches("fm-gantt-axis-top").count(), 1);
+        assert_eq!(
+            svg.matches("class=\"fm-axis-tick-label\">").count(),
+            layout.extensions.axis_ticks.len() * 2,
+            "both reference grid rows carry every date label"
+        );
     }
 
     /// Control for the bd-trsd fix. A timeline is the diagram type that reaches BOTH generic loops

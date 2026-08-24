@@ -1592,15 +1592,26 @@ impl TermRenderer {
         // row would overwrite task names, which is the trade bd-u3fo's kanban case warned about —
         // one piece of dropped content swapped for another.
         if !layout.extensions.axis_ticks.is_empty() {
-            let mut last_end: Option<usize> = None;
-            for tick in &layout.extensions.axis_ticks {
+            let axis_rows: Vec<f32> = if layout.extensions.gantt_axis_rows.is_empty() {
+                vec![layout.bounds.y]
+            } else {
+                layout
+                    .extensions
+                    .gantt_axis_rows
+                    .iter()
+                    .map(|axis| axis.y)
+                    .collect()
+            };
+            for axis_y in axis_rows {
+                let mut last_end: Option<usize> = None;
+                for tick in &layout.extensions.axis_ticks {
                 if tick.label.is_empty() {
                     continue;
                 }
                 let (x, y, _w, _h) = self.bounds_to_cells(
                     &fm_layout::LayoutRect {
                         x: tick.position,
-                        y: layout.bounds.y,
+                        y: axis_y,
                         width: 0.0,
                         height: 0.0,
                     },
@@ -1630,6 +1641,7 @@ impl TermRenderer {
                 }
                 if written > 0 {
                     last_end = Some(x + written);
+                }
                 }
             }
         }
