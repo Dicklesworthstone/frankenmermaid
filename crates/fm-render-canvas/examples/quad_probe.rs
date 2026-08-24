@@ -6,15 +6,21 @@ fn main() {
     for (tag, src) in [("named", named), ("unnamed", unnamed)] {
         let ir = fm_parser::parse(src).ir;
         for (label, embed) in [("streaming", true), ("element", false)] {
-            let cfg = fm_render_svg::SvgRenderConfig { embed_theme_css: embed, ..Default::default() };
+            let cfg = fm_render_svg::SvgRenderConfig {
+                embed_theme_css: embed,
+                ..Default::default()
+            };
             let svg = fm_render_svg::render_svg_with_config(&ir, &cfg);
-            let names: Vec<&str> = svg.match_indices("class=\"fm-quadrant-point\"").filter_map(|(i, _)| {
-                let rest = &svg[i..];
-                let close = rest.find('>')?;
-                let after = &rest[close + 1..];
-                let t = after.strip_prefix("<title>")?;
-                Some(&t[..t.find("</title>")?])
-            }).collect();
+            let names: Vec<&str> = svg
+                .match_indices("class=\"fm-quadrant-point\"")
+                .filter_map(|(i, _)| {
+                    let rest = &svg[i..];
+                    let close = rest.find('>')?;
+                    let after = &rest[close + 1..];
+                    let t = after.strip_prefix("<title>")?;
+                    Some(&t[..t.find("</title>")?])
+                })
+                .collect();
             println!("{tag:<9} {label:<10} {names:?}");
         }
     }
