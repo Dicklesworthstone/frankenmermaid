@@ -1468,49 +1468,6 @@
         <!-- Populated via JS -->
       </div>
     </div>
-
-    <!-- Multi-Format Export Modal -->
-    <div id="export-modal" class="fixed inset-0 z-50 hidden modal-backdrop flex items-center justify-center p-4">
-      <div class="w-full max-w-lg rounded-2xl border border-white/15 bg-slate-900/95 p-6 shadow-2xl backdrop-blur-2xl">
-        <div class="flex items-center justify-between pb-3 border-b border-white/10">
-          <h3 class="text-lg font-bold text-white flex items-center gap-2">
-            <span>💾</span> Export Studio
-          </h3>
-          <button id="close-export-modal-btn" type="button" class="text-slate-400 hover:text-white">✕</button>
-        </div>
-        <div class="mt-4 space-y-3">
-          <button id="export-download-svg-btn" type="button" class="w-full flex items-center justify-between rounded-xl border border-white/10 bg-white/5 p-3 text-left hover:bg-cyan-500/10 hover:border-cyan-500/30 transition">
-            <div>
-              <div class="font-bold text-white text-sm">Download SVG Vector (.svg)</div>
-              <div class="text-xs text-slate-400">Crisp scalable vector graphic with embedded styles</div>
-            </div>
-            <span class="text-cyan-400 font-bold">↓</span>
-          </button>
-          <button id="export-download-png-btn" type="button" class="w-full flex items-center justify-between rounded-xl border border-white/10 bg-white/5 p-3 text-left hover:bg-emerald-500/10 hover:border-emerald-500/30 transition">
-            <div>
-              <div class="font-bold text-white text-sm">Download High-Res PNG (.png)</div>
-              <div class="text-xs text-slate-400">2x Retina rasterized image</div>
-            </div>
-            <span class="text-emerald-400 font-bold">↓</span>
-          </button>
-          <button id="export-copy-svg-btn" type="button" class="w-full flex items-center justify-between rounded-xl border border-white/10 bg-white/5 p-3 text-left hover:bg-violet-500/10 hover:border-violet-500/30 transition">
-            <div>
-              <div class="font-bold text-white text-sm">Copy SVG XML Text</div>
-              <div class="text-xs text-slate-400">Copy standalone SVG code to clipboard</div>
-            </div>
-            <span class="text-violet-400 font-bold">📋</span>
-          </button>
-          <button id="export-copy-ast-btn" type="button" class="w-full flex items-center justify-between rounded-xl border border-white/10 bg-white/5 p-3 text-left hover:bg-amber-500/10 hover:border-amber-500/30 transition">
-            <div>
-              <div class="font-bold text-white text-sm">Copy Intermediate Representation (IR AST)</div>
-              <div class="text-xs text-slate-400">Machine-readable JSON schema from fm.parse</div>
-            </div>
-            <span class="text-amber-400 font-bold">📋</span>
-          </button>
-        </div>
-      </div>
-    </div>
-
   </div>
 
   <!-- Export Dialog Modal -->
@@ -1965,7 +1922,7 @@
     }
     performanceRequirement browser_budget {
       id: 3
-      text: "Browser budget stays under the gzip budget"
+      text: "Browser bundle stays under the gzip budget"
       risk: low
       verifymethod: analysis
     }
@@ -2142,8 +2099,9 @@
       id: `${entry.category}-1-${slug(entry.label)}`,
       category: entry.category,
       label: entry.label,
-      support: entry.support,
+      description: entry.support,
       code: entry.code,
+      featured: true,
       narrative: entry.narrative || null
     }));
 
@@ -2180,44 +2138,54 @@
     const presenterTours = {
       "main-demo": [
         {
-          step: 1,
-          title: "Step 1 of 5: Intent-Aware Parser & Auto-Recovery",
-          targetSection: "section-playground",
-          sampleId: gallerySamples[0].id,
-          summary: "Step 1 of 5: Intent-Aware Parser & Auto-Recovery — demonstrates non-crashing parser resilience.",
-          note: "Notice how fuzzy typos and dangling edges are auto-repaired in real time without throwing runtime errors."
+          id: "runtime-honesty",
+          title: "Runtime honesty first",
+          sectionId: "section-runtime",
+          sampleId: "flowchart-1-incident-response-escalation",
+          spotlightId: "flowchart-1-incident-response-escalation",
+          summary: "Open with runtime honesty. Show that the page either boots the real browser package or states exactly why it cannot.",
+          note: "If the runtime is unavailable, stay on this step and call out the explicit packaging gap instead of pretending the browser surface is published."
         },
         {
-          step: 2,
-          title: "Step 2 of 5: Shared-engine spotlight",
-          targetSection: "section-showcase",
-          sampleId: gallerySamples[0].id,
-          summary: "Step 2 of 5: Shared-engine spotlight. Move to the flagship flowchart with nested operational subgraphs.",
-          note: "Move to the flagship flowchart featuring multi-stage escalation, decision routing, and clean vector geometry."
+          id: "spotlight-shared-engine",
+          title: "Shared-engine spotlight",
+          sectionId: "section-showcase",
+          sampleId: "flowchart-1-incident-response-escalation",
+          spotlightId: "flowchart-1-incident-response-escalation",
+          summary: "Move to the flagship flowchart to make the shared-engine story visual before opening any evidence panels.",
+          note: "The operator goal here is simple: let the audience see a serious render at a readable size before discussing tooling."
         },
         {
-          step: 3,
-          title: "Step 3 of 5: 15 Layout Algorithms & Cycle Strategies",
-          targetSection: "section-layout-lab",
-          sampleId: gallerySamples[3].id,
-          summary: "Step 3 of 5: 15 Layout Algorithms & Cycle Strategies with SCC collapse and e-graph crossing minimization.",
-          note: "Explore how cycle-aware layout and Brandes-Köpf coordinate alignment keep dense graphs legible."
+          id: "resilience-walkthrough",
+          title: "Resilience and diagnostics",
+          sectionId: "section-playground",
+          sampleId: "flowchart-1-incident-response-escalation",
+          spotlightId: "flowchart-1-incident-response-escalation",
+          source: "flowchart LR\nA-->",
+          layoutLabFocus: "overview",
+          summary: "Switch to a malformed source override and let the diagnostics/fallback surfaces prove that the demo fails usefully rather than opaquely.",
+          note: "If the malformed source path looks too harsh for the room, skip forward and reset after the determinism step."
         },
         {
-          step: 4,
-          title: "Step 4 of 5: 10 Visual Theme Presets & Styling Engine",
-          targetSection: "section-theme-studio",
-          sampleId: gallerySamples[8].id,
-          summary: "Step 4 of 5: 10 Visual Theme Presets & Styling Engine with real-time vector updates.",
-          note: "Switch between Corporate, Obsidian Dark, Cyberpunk Neon, and Forest with instant CSS variable updates."
+          id: "determinism-proof",
+          title: "Determinism proof",
+          sectionId: "section-playground",
+          sampleId: "flowchart-1-incident-response-escalation",
+          spotlightId: "flowchart-1-incident-response-escalation",
+          source: gallerySamples.find((entry) => entry.id === "flowchart-1-incident-response-escalation")?.code || editorSamples[0].code,
+          layoutLabFocus: "cycles",
+          runDeterminism: 5,
+          summary: "Restore the healthy flagship source and run the determinism checker so the audience sees repeatable evidence instead of hand-waving.",
+          note: "This is the cleanest point to mention stable hashes, telemetry, and the static replay bundles."
         },
         {
-          step: 5,
-          title: "Step 5 of 5: Determinism Proof & Verification Ledger",
-          targetSection: "section-determinism",
-          sampleId: gallerySamples[0].id,
-          summary: "Step 5 of 5: Determinism Proof & Verification Ledger with bit-identical SHA-256 digests.",
-          note: "All 24 diagram families produce 100% reproducible byte-for-byte vector outputs for CI snapshot testing."
+          id: "support-signoff",
+          title: "Support and signoff evidence",
+          sectionId: "section-support",
+          sampleId: "flowchart-1-incident-response-escalation",
+          spotlightId: "flowchart-1-incident-response-escalation",
+          summary: "End on the coverage/evidence rail so the story closes on what is proven, not just what is visually impressive.",
+          note: "Reset after this step if you want to hand the page back to an operator in a neutral browsing state."
         }
       ]
     };
