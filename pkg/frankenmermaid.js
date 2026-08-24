@@ -188,6 +188,31 @@ export class Diagram {
 if (Symbol.dispose) Diagram.prototype[Symbol.dispose] = Diagram.prototype.free;
 
 /**
+ * Acquire the browser's `GPUCanvasContext` for a canvas.
+ *
+ * `web-sys` keeps the WebGPU DOM types behind unstable API flags, so this intentionally returns
+ * the context as `JsValue`. The owner of the device passes receives the browser-native context
+ * without a duplicate, unstable Rust binding layer.
+ * @param {HTMLCanvasElement} canvas
+ * @returns {any}
+ */
+export function acquireWebGpuCanvasContext(canvas) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.acquireWebGpuCanvasContext(retptr, addHeapObject(canvas));
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        if (r2) {
+            throw takeObject(r1);
+        }
+        return takeObject(r0);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
  * @param {string} input
  * @param {string} element_id
  * @param {string} replacement
@@ -418,6 +443,46 @@ export function diagramLens(input) {
 }
 
 /**
+ * The clickable areas of a diagram, for a host driving a canvas or WebGPU surface.
+ *
+ * SVG carries `click` in the document itself — a `title=` and, in link mode, an `<a href>` — so a
+ * browser resolves a pointer against it with no help from us. A raster surface has no element to
+ * hang an attribute on, so before this the whole `click` family was unreachable from every
+ * non-SVG browser path: `renderWebGpuToRgba` returns pixels, and pixels cannot tell a host that
+ * the box at (x, y) carries a URL.
+ *
+ * The host owns the pointer. This returns WHERE each interactive node landed and WHAT the author
+ * attached to it, once per render; hit-testing a point against those rectangles is a few lines of
+ * JS and does not need to cross the wasm boundary on every `mousemove`.
+ *
+ * Only nodes that actually carry an interaction are returned — a region per node would report the
+ * whole diagram as clickable and push the filtering back onto the caller.
+ *
+ * # Errors
+ * Returns a JS error when the runtime config cannot be resolved.
+ * @param {string} input
+ * @param {any | null} [config]
+ * @returns {any}
+ */
+export function hitRegions(input, config) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(input, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.hitRegions(retptr, ptr0, len0, isLikeNone(config) ? 0 : addHeapObject(config));
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        if (r2) {
+            throw takeObject(r1);
+        }
+        return takeObject(r0);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
  * @param {any | null} [config]
  */
 export function init(config) {
@@ -466,6 +531,35 @@ export function parseLens(input) {
         const ptr0 = passStringToWasm0(input, wasm.__wbindgen_export, wasm.__wbindgen_export2);
         const len0 = WASM_VECTOR_LEN;
         wasm.parseLens(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        if (r2) {
+            throw takeObject(r1);
+        }
+        return takeObject(r0);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Prepare the WebGPU primitive plan for a diagram.
+ *
+ * This is the WASM-side half of the WebGPU renderer: it runs the same parse and typography-aware
+ * layout path as the SVG backend, then delegates primitive extraction to `fm-render-canvas`.
+ * Device creation, buffer uploads and draw submission stay with the WebGPU device pass so this API
+ * cannot grow a second renderer in JavaScript.
+ * @param {string} input
+ * @param {any | null} [config]
+ * @returns {any}
+ */
+export function planWebGpu(input, config) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(input, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.planWebGpu(retptr, ptr0, len0, isLikeNone(config) ? 0 : addHeapObject(config));
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
@@ -787,6 +881,9 @@ function __wbg_get_imports() {
         },
         __wbg_set_font_33fee74f2c82cb6f: function(arg0, arg1, arg2) {
             getObject(arg0).font = getStringFromWasm0(arg1, arg2);
+        },
+        __wbg_set_globalAlpha_9b3de2f2aa9958de: function(arg0, arg1) {
+            getObject(arg0).globalAlpha = arg1;
         },
         __wbg_set_lineWidth_beb3d05e36f4cc53: function(arg0, arg1) {
             getObject(arg0).lineWidth = arg1;

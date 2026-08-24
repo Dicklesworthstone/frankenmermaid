@@ -36,6 +36,15 @@ export class Diagram {
     setTheme(theme: string): void;
 }
 
+/**
+ * Acquire the browser's `GPUCanvasContext` for a canvas.
+ *
+ * `web-sys` keeps the WebGPU DOM types behind unstable API flags, so this intentionally returns
+ * the context as `JsValue`. The owner of the device passes receives the browser-native context
+ * without a duplicate, unstable Rust binding layer.
+ */
+export function acquireWebGpuCanvasContext(canvas: HTMLCanvasElement): any;
+
 export function applyLensEdit(input: string, element_id: string, replacement: string): any;
 
 /**
@@ -73,11 +82,42 @@ export function detectType(input: string): any;
 
 export function diagramLens(input: string): any;
 
+/**
+ * The clickable areas of a diagram, for a host driving a canvas or WebGPU surface.
+ *
+ * SVG carries `click` in the document itself — a `title=` and, in link mode, an `<a href>` — so a
+ * browser resolves a pointer against it with no help from us. A raster surface has no element to
+ * hang an attribute on, so before this the whole `click` family was unreachable from every
+ * non-SVG browser path: `renderWebGpuToRgba` returns pixels, and pixels cannot tell a host that
+ * the box at (x, y) carries a URL.
+ *
+ * The host owns the pointer. This returns WHERE each interactive node landed and WHAT the author
+ * attached to it, once per render; hit-testing a point against those rectangles is a few lines of
+ * JS and does not need to cross the wasm boundary on every `mousemove`.
+ *
+ * Only nodes that actually carry an interaction are returned — a region per node would report the
+ * whole diagram as clickable and push the filtering back onto the caller.
+ *
+ * # Errors
+ * Returns a JS error when the runtime config cannot be resolved.
+ */
+export function hitRegions(input: string, config?: any | null): any;
+
 export function init(config?: any | null): void;
 
 export function parse(input: string): any;
 
 export function parseLens(input: string): any;
+
+/**
+ * Prepare the WebGPU primitive plan for a diagram.
+ *
+ * This is the WASM-side half of the WebGPU renderer: it runs the same parse and typography-aware
+ * layout path as the SVG backend, then delegates primitive extraction to `fm-render-canvas`.
+ * Device creation, buffer uploads and draw submission stay with the WebGPU device pass so this API
+ * cannot grow a second renderer in JavaScript.
+ */
+export function planWebGpu(input: string, config?: any | null): any;
 
 export function renderSvg(input: string, config?: any | null): string;
 
@@ -97,6 +137,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_diagram_free: (a: number, b: number) => void;
+    readonly acquireWebGpuCanvasContext: (a: number, b: number) => void;
     readonly applyLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly applyParseLensDelete: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly applyParseLensEdit: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
@@ -113,9 +154,11 @@ export interface InitOutput {
     readonly diagram_on: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly diagram_render: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly diagram_setTheme: (a: number, b: number, c: number, d: number) => void;
+    readonly hitRegions: (a: number, b: number, c: number, d: number) => void;
     readonly init: (a: number, b: number) => void;
     readonly parse: (a: number, b: number, c: number) => void;
     readonly parseLens: (a: number, b: number, c: number) => void;
+    readonly planWebGpu: (a: number, b: number, c: number, d: number) => void;
     readonly renderSvg: (a: number, b: number, c: number, d: number) => void;
     readonly workerHandleMessage: (a: number, b: number, c: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;

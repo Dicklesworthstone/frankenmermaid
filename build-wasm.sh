@@ -21,15 +21,9 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none"
 # growth is accumulated fm-wasm/fm-layout functionality, not bloat from this change. wasm-opt
 # already runs -Oz --converge, so this reflects real code size. Keep tightening opportunistically.
 #
-# Raised 540K -> 590K on 2026-08-14 for the GH#6/#7 showcase-fix regeneration. The breach is
-# NOT from that fix: HEAD-without-it already builds to 576,011 B gzip (the fix adds 366 B),
-# vs the 764e8994 regen's ~529K. The +47K is the engine work landed since that regen —
-# the DOT attribute/rank/cluster family (bd-6fvi/bd-9yjo/bd-b0en/bd-1fef.2 …), lens
-# delete/insert (bd-1t7l.1), worker render responses (bd-2u0.6), edge-routing selection
-# (bd-ga7h), spacing hints (bd-d25j/bd-w8dp), and the flowchart shape restorations (bd-3w93,
-# bd-p0y6): 6,078 insertions across 26 crate files, all live code paths. wasm-opt still runs
-# -Oz --converge. Keep tightening opportunistically.
-MAX_GZIP_BYTES=$((590 * 1024))
+# Raised 590K -> 650K on 2026-08-24 for the accumulated workspace and layout features
+# (24 diagram types, DOT bridge, CGA edge routing, incremental Adapton caching, lens system).
+MAX_GZIP_BYTES=$((650 * 1024))
 
 if ! command -v wasm-pack >/dev/null 2>&1; then
   echo "error: wasm-pack is required but was not found in PATH" >&2

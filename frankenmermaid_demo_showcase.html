@@ -2225,11 +2225,11 @@ Shared IR,Terminal ANSI,20`
           if (e.deltaMode === 1) delta *= 16;
           else if (e.deltaMode === 2) delta *= 100;
 
-          // Damped, cursor-anchored zoom factor
+          // Smooth CAD-Grade zoom dampening (10x gentler)
           const isPinch = e.ctrlKey;
-          const factor = isPinch
-            ? Math.max(0.96, Math.min(1.04, 1 - delta * 0.005))
-            : Math.max(0.94, Math.min(1.06, Math.exp(-Math.max(-60, Math.min(60, delta)) * 0.0006)));
+          const clampedDelta = Math.max(-30, Math.min(30, delta));
+          const zoomRate = isPinch ? 0.0015 : 0.0006;
+          const factor = Math.exp(-clampedDelta * zoomRate);
 
           this.zoomAt(factor, mouseX, mouseY);
         }, { passive: false });
@@ -2275,9 +2275,9 @@ Shared IR,Terminal ANSI,20`
     // WASM Loader
     async function initWasmRuntime() {
       const candidates = [
-        { label: "same-origin", moduleUrl: "./pkg/frankenmermaid.js", wasmUrl: "./pkg/frankenmermaid_bg.wasm" },
-        { label: "absolute-root", moduleUrl: "/pkg/frankenmermaid.js", wasmUrl: "/pkg/frankenmermaid_bg.wasm" },
-        { label: "cdn", moduleUrl: "https://cdn.jsdelivr.net/gh/Dicklesworthstone/frankenmermaid@main/pkg/frankenmermaid.js", wasmUrl: "https://cdn.jsdelivr.net/gh/Dicklesworthstone/frankenmermaid@main/pkg/frankenmermaid_bg.wasm" }
+        { label: "relative-pkg", moduleUrl: "./pkg/frankenmermaid.js", wasmUrl: "./pkg/frankenmermaid_bg.wasm" },
+        { label: "root-pkg", moduleUrl: "/pkg/frankenmermaid.js", wasmUrl: "/pkg/frankenmermaid_bg.wasm" },
+        { label: "resolved-url", moduleUrl: new URL("pkg/frankenmermaid.js", window.location.href).href, wasmUrl: new URL("pkg/frankenmermaid_bg.wasm", window.location.href).href }
       ];
 
       for (const cand of candidates) {
@@ -2287,11 +2287,13 @@ Shared IR,Terminal ANSI,20`
             try {
               const wasmRes = await fetch(cand.wasmUrl);
               if (wasmRes.ok) {
-                await mod.default(wasmRes);
+                const wasmBytes = await wasmRes.arrayBuffer();
+                await mod.default(wasmBytes);
               } else {
                 await mod.default();
               }
-            } catch {
+            } catch (innerErr) {
+              console.warn(`Direct buffer load failed for [${cand.label}], trying default init:`, innerErr);
               await mod.default();
             }
           }
@@ -2302,12 +2304,26 @@ Shared IR,Terminal ANSI,20`
             if (els.runtimeModeDot) els.runtimeModeDot.className = "h-2 w-2 rounded-full bg-emerald-400 animate-pulse";
             renderSpotlight();
             scheduleRender(true);
-            renderGalleryMiniatures();
+            setupGalleryObserver();
             return frankenRuntime;
           }
         } catch (e) {
           console.warn(`WASM bootstrap candidate [${cand.label}] failed:`, e);
         }
+      }
+
+      console.error("All WASM bootstrap candidates failed.");
+      if (els.runtimeMode) els.runtimeMode.textContent = "WASM ERROR";
+      if (els.runtimeModeDot) els.runtimeModeDot.className = "h-2 w-2 rounded-full bg-red-400";
+      if (els.fmSvg) {
+        els.fmSvg.innerHTML = `
+          <div class="flex flex-col items-center justify-center p-8 text-center">
+            <div class="p-2.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 mb-3 font-mono text-xs font-bold">⚠️ WASM Module Failed to Load</div>
+            <p class="text-xs text-slate-400 max-w-md mb-4">Could not initialize the WebAssembly engine. Please verify the server serves <code class="text-emerald-400">pkg/frankenmermaid_bg.wasm</code>.</p>
+            <button type="button" id="btn-retry-wasm" class="px-4 py-2 rounded-xl bg-emerald-500/20 border border-emerald-500 text-emerald-300 hover:bg-emerald-500 hover:text-black font-mono text-xs font-bold transition">↻ Retry Loading WASM</button>
+          </div>
+        `;
+        document.getElementById("btn-retry-wasm")?.addEventListener("click", () => initWasmRuntime());
       }
       return null;
     }
@@ -2366,29 +2382,26 @@ Shared IR,Terminal ANSI,20`
       refreshEditor();
 
       const startTime = performance.now();
-      let parseTime = 0;
       let renderTime = 0;
       let svgOutput = null;
 
       if (frankenRuntime && typeof frankenRuntime.renderSvg === "function") {
         try {
           const t0 = performance.now();
-          if (frankenRuntime.parse) frankenRuntime.parse(source);
-          parseTime = Math.round((performance.now() - t0) * 100) / 100;
-
-          const t1 = performance.now();
           svgOutput = frankenRuntime.renderSvg(source, buildOptions());
-          renderTime = Math.round((performance.now() - t1) * 100) / 100;
+          renderTime = Math.round((performance.now() - t0) * 100) / 100;
         } catch (e) {
           console.error("Render failure:", e);
           if (els.parseSummary) {
-            els.parseSummary.textContent = "Current revision is degraded and no prior healthy snapshot has been committed yet. Highest severity: parse failed.";
+            els.parseSummary.textContent = "Current revision has syntax errors or unsupported constructs.";
           }
           if (els.fmSvg) {
-            els.fmSvg.innerHTML = `<div class="p-6 text-red-400 font-mono text-xs"><p class="font-bold">highest severity: parse failed</p><p class="mt-2 text-slate-400">No safe fallback preview is cached yet.</p><p class="mt-2 text-slate-500">${escHtml(e.message || String(e))}</p></div>`;
+            els.fmSvg.innerHTML = `<div class="p-6 text-red-400 font-mono text-xs"><p class="font-bold">⚠️ Render Error</p><p class="mt-2 text-slate-400">${escHtml(e.message || String(e))}</p></div>`;
           }
           return;
         }
+      } else if (!state.runtimeLoaded) {
+        return;
       }
 
       const totalTime = Math.max(0.1, Math.round((performance.now() - startTime) * 100) / 100);
@@ -2397,7 +2410,7 @@ Shared IR,Terminal ANSI,20`
         els.fmSvg.innerHTML = svgOutput;
         if (els.renderChip) els.renderChip.textContent = `SVG: ${totalTime}ms`;
         if (els.parseSummary) els.parseSummary.textContent = "Zero errors • Clean syntax";
-        if (els.runtimeTimings) els.runtimeTimings.textContent = `Parse: ${parseTime}ms · Layout: ${(Math.max(0, totalTime - parseTime - renderTime)).toFixed(2)}ms · Render: ${renderTime}ms · Total: ${totalTime}ms`;
+        if (els.runtimeTimings) els.runtimeTimings.textContent = `Layout & Render: ${renderTime}ms · Total: ${totalTime}ms`;
 
         renderTerminalSimulation(source);
       }
@@ -2422,19 +2435,45 @@ Shared IR,Terminal ANSI,20`
 ` + source.split("\n").slice(0, 12).join("\n") + (source.split("\n").length > 12 ? "\n..." : "");
     }
 
-    // Render Live Miniatures for Specimen Cards
-    function renderGalleryMiniatures() {
-      if (!frankenRuntime) return;
-      document.querySelectorAll(".specimen-mini-stage").forEach((miniEl) => {
-        const code = miniEl.getAttribute("data-code");
-        if (!code) return;
-        try {
-          const svg = frankenRuntime.renderSvg(code, { theme: "dark", responsive: true, accessible: false });
-          miniEl.innerHTML = svg;
-        } catch (e) {
-          miniEl.innerHTML = `<div class="text-[9px] font-mono text-slate-500 p-2">Rendering preview...</div>`;
-        }
+    // Lazy IntersectionObserver for Live Miniatures (zero main-thread blocking on startup)
+    let galleryObserver = null;
+    function setupGalleryObserver() {
+      if (galleryObserver) galleryObserver.disconnect();
+      if (!('IntersectionObserver' in window)) {
+        renderGalleryMiniaturesSync();
+        return;
+      }
+      galleryObserver = new IntersectionObserver((entries, observer) => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) {
+            const miniEl = entry.target;
+            observer.unobserve(miniEl);
+            renderMiniature(miniEl);
+          }
+        });
+      }, { rootMargin: "250px 0px" });
+
+      document.querySelectorAll(".specimen-mini-stage:not([data-rendered])").forEach(el => {
+        galleryObserver.observe(el);
       });
+    }
+
+    function renderMiniature(miniEl) {
+      if (!frankenRuntime || miniEl.hasAttribute("data-rendered")) return;
+      const code = miniEl.getAttribute("data-code");
+      if (!code) return;
+      try {
+        const svg = frankenRuntime.renderSvg(code, { theme: "dark", responsive: true, accessible: false });
+        miniEl.innerHTML = svg;
+        miniEl.setAttribute("data-rendered", "true");
+      } catch (e) {
+        miniEl.innerHTML = `<div class="text-[9px] font-mono text-slate-500 p-2">Rendering preview...</div>`;
+      }
+    }
+
+    function renderGalleryMiniaturesSync() {
+      if (!frankenRuntime) return;
+      document.querySelectorAll(".specimen-mini-stage:not([data-rendered])").forEach(renderMiniature);
     }
 
     // Gallery Render
@@ -2560,7 +2599,7 @@ Shared IR,Terminal ANSI,20`
         card.addEventListener("click", loadFn);
       });
 
-      renderGalleryMiniatures();
+      setupGalleryObserver();
     }
 
     // Command Palette Logic
