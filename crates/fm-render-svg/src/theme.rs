@@ -846,7 +846,8 @@ fn hsl_to_hex(h: f32, s: f32, l: f32) -> String {
     let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
     let m = l - c / 2.0;
 
-    let (r, g, b) = match (h / 60.0) as u8 {
+    let sector = (h / 60.0).floor().rem_euclid(6.0) as u8;
+    let (r, g, b) = match sector {
         0 => (c, x, 0.0),
         1 => (x, c, 0.0),
         2 => (0.0, c, x),
@@ -855,9 +856,9 @@ fn hsl_to_hex(h: f32, s: f32, l: f32) -> String {
         _ => (c, 0.0, x),
     };
 
-    let r = ((r + m) * 255.0) as u8;
-    let g = ((g + m) * 255.0) as u8;
-    let b = ((b + m) * 255.0) as u8;
+    let r = ((r + m).clamp(0.0, 1.0) * 255.0).round() as u8;
+    let g = ((g + m).clamp(0.0, 1.0) * 255.0).round() as u8;
+    let b = ((b + m).clamp(0.0, 1.0) * 255.0).round() as u8;
 
     format!("#{r:02x}{g:02x}{b:02x}")
 }
