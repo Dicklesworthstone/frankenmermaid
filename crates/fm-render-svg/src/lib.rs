@@ -5794,6 +5794,59 @@ fn write_quadrant_point_into(
     f.push_str("</text>");
 }
 
+/// The accessible name for one gantt task bar (bd-ic3rx).
+///
+/// A bar conveys four things VISUALLY that no text run carries: where it starts (position), how long
+/// it runs (width), what kind of task it is (colour) and how far along it is (the progress overlay).
+/// The name states each of them, so a non-visual reader gets what the geometry says rather than the
+/// task name alone.
+///
+/// Last of the four chart types that emitted zero per-element accessibility affordances (pie
+/// bd-uf3p1, xychart bd-sdhzh, quadrant bd-0eoa6).
+fn gantt_bar_accessible_name(label: &str, task: Option<&fm_core::IrGanttTask>) -> String {
+    use std::fmt::Write as _;
+
+    let mut name = label.to_string();
+    let Some(task) = task else {
+        return name;
+    };
+
+    if let Some(fm_core::GanttDate::Absolute(start)) = task.start.as_ref() {
+        name.push_str(", starts ");
+        name.push_str(start);
+    }
+    match task.end.as_ref() {
+        Some(fm_core::GanttDate::Absolute(end)) => {
+            name.push_str(", ends ");
+            name.push_str(end);
+        }
+        Some(fm_core::GanttDate::DurationDays(days)) => {
+            let _ = write!(name, ", {days} day{}", if *days == 1 { "" } else { "s" });
+        }
+        _ => {}
+    }
+    // The TYPE is carried only by the bar's fill colour, so a reader who cannot see the colour has
+    // no other source for it. `Normal` is the default and adds nothing.
+    match task.task_type {
+        fm_core::GanttTaskType::Critical => name.push_str(", critical"),
+        fm_core::GanttTaskType::Active => name.push_str(", active"),
+        fm_core::GanttTaskType::Done => name.push_str(", done"),
+        fm_core::GanttTaskType::Milestone => name.push_str(", milestone"),
+        fm_core::GanttTaskType::Normal => {}
+    }
+    // ⚠️ `progress` is a FRACTION, not a percentage: `50%` parses to `0.5`
+    // (`parse_gantt_progress` divides by 100). Formatting it directly as `{:.0}%` announced
+    // "0% complete" for a task that is HALF DONE — a wrong number, which is worse than no number,
+    // and one that only showed up by reading the rendered output rather than trusting the field name.
+    //
+    // Only a progress that says something: a task that declares none has `None`, and nothing is
+    // gained by announcing 0% on every ordinary bar.
+    if let Some(progress) = task.progress.filter(|value| *value > 0.0) {
+        let _ = write!(name, ", {:.0}% complete", progress * 100.0);
+    }
+    name
+}
+
 /// Stream a gantt task bar `<rect>` byte-identical to the slow path's `Element::rect()`:
 /// `x y width height fill stroke stroke-width="1" rx="3" class="fm-gantt-task {type_class}"`.
 ///
@@ -5814,6 +5867,7 @@ fn write_gantt_bar_into(
     stroke: &str,
     type_class: &str,
     tooltip: Option<&str>,
+    accessible_name: Option<&str>,
 ) {
     use crate::attributes::write_escaped_attr;
     f.push_str("<rect x=\"");
@@ -5836,7 +5890,20 @@ fn write_gantt_bar_into(
         let _ = write_escaped_attr(f, tooltip);
         f.push('"');
     }
-    f.push_str("/>");
+    // The `title=` ATTRIBUTE above is the author's `click` hover; the `<title>` CHILD here is the
+    // accessible NAME. They are different things and the flowchart node path carries both the same
+    // way, so a bar with a click keeps its hover text and still announces its schedule.
+    match accessible_name
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        Some(name) => {
+            f.push_str("><title>");
+            let _ = crate::attributes::write_escaped_text(f, name);
+            f.push_str("</title></rect>");
+        }
+        None => f.push_str("/>"),
+    }
 }
 
 /// WCAG relative luminance of a `#rgb`/`#rrggbb` colour, or `None` for anything else.
@@ -6154,7 +6221,37 @@ fn render_gantt_svg(
                 let _ = write_escaped_attr(&mut task_svg, fill);
                 task_svg.push_str("\" stroke=\"");
                 let _ = write_escaped_attr(&mut task_svg, &theme.colors.node_stroke);
-                task_svg.push_str("\" stroke-width=\"1.5\" class=\"fm-gantt-milestone\"/>");
+                task_svg.push_str("\" stroke-width=\"1.5\" class=\"fm-gantt-milestone\"");
+                // A MILESTONE is drawn as a diamond `<path>`, not a bar `<rect>`, so the bar writer
+                // never sees it — it would have stayed the one unnamed mark on an otherwise named
+                // chart. Same helper, so the two shapes cannot describe a task differently.
+                let milestone_label = ir
+                    .nodes
+                    .get(node_box.node_index)
+                    .and_then(|node| node.label)
+                    .and_then(|lid| ir.labels.get(lid.0))
+                    .map(|label| label.text.as_str())
+                    .or_else(|| {
+                        ir.nodes
+                            .get(node_box.node_index)
+                            .map(|node| node.id.as_str())
+                    })
+                    .unwrap_or("");
+                match config
+                    .a11y
+                    .text_alternatives
+                    .then(|| {
+                        gantt_bar_accessible_name(milestone_label, gantt_meta.tasks.get(node_idx))
+                    })
+                    .filter(|name| !name.trim().is_empty())
+                {
+                    Some(name) => {
+                        task_svg.push_str("><title>");
+                        let _ = crate::attributes::write_escaped_text(&mut task_svg, &name);
+                        task_svg.push_str("</title></path>");
+                    }
+                    None => task_svg.push_str("/>"),
+                }
             } else {
                 let type_class = match task_type {
                     fm_core::GanttTaskType::Done => "fm-gantt-task-done",
@@ -6169,6 +6266,25 @@ fn render_gantt_svg(
                     .get(node_idx)
                     .and_then(|task| ir.nodes.get(task.node.0))
                     .and_then(|node| node.tooltip());
+                // The task label is resolved again here rather than hoisted: the existing
+                // resolution happens after the bar is written, and reordering it would move bytes in
+                // a golden-pinned writer for no benefit.
+                let bar_label = ir
+                    .nodes
+                    .get(node_box.node_index)
+                    .and_then(|node| node.label)
+                    .and_then(|lid| ir.labels.get(lid.0))
+                    .map(|label| label.text.as_str())
+                    .or_else(|| {
+                        ir.nodes
+                            .get(node_box.node_index)
+                            .map(|node| node.id.as_str())
+                    })
+                    .unwrap_or("");
+                let accessible_name = config
+                    .a11y
+                    .text_alternatives
+                    .then(|| gantt_bar_accessible_name(bar_label, gantt_meta.tasks.get(node_idx)));
                 write_gantt_bar_into(
                     &mut task_svg,
                     x,
@@ -6179,6 +6295,7 @@ fn render_gantt_svg(
                     &theme.colors.node_stroke,
                     type_class,
                     task_tooltip,
+                    accessible_name.as_deref(),
                 );
 
                 // Progress bar overlay.

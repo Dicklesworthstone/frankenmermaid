@@ -17,12 +17,18 @@
 //! The parser reuses the flowchart's own `apply_click_directive`, so the link-safety gate, the
 //! callback/link split and the link-target rule cannot drift between the two diagram types.
 
+/// The ATTRIBUTES of each task bar, up to the end of its opening tag.
+///
+/// ⚠️ Stops at the first `>`, NOT at `/>`. A bar is self-closing only when it carries no accessible
+/// name; since bd-ic3rx gave every bar a `<title>` child it closes with `</rect>` instead, and the
+/// `/>`-based reader silently returned an EMPTY list — these tests failed while the tooltip they
+/// check was working perfectly. The extractor was wrong, not the renderer.
 fn bar_attrs(svg: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = svg;
     while let Some(start) = rest.find("class=\"fm-gantt-task ") {
         rest = &rest[start..];
-        let Some(end) = rest.find("/>") else { break };
+        let Some(end) = rest.find('>') else { break };
         out.push(rest[..end].to_string());
         rest = &rest[end..];
     }
