@@ -198,11 +198,27 @@ const ARROWHEAD_ATTRIBUTES: &[GpuVertexAttribute] = &[
         format: GpuVertexFormat::Uint32,
         field: "edge_index",
     },
+    // `kind` MUST hold @location(4). It was absent while `color` sat here wearing location 4, so the
+    // shader's `kind: u32` was fed the first four bytes of an RGBA vec4 reinterpreted as an integer
+    // — a marker whose FORM is decided by a colour channel. That is why this is not merely a missing
+    // field: the two that follow were undefined, and the one that was present was wrong.
     GpuVertexAttribute {
         shader_location: 4,
+        offset: offset_of!(GpuArrowheadInstance, kind),
+        format: GpuVertexFormat::Uint32,
+        field: "kind",
+    },
+    GpuVertexAttribute {
+        shader_location: 5,
         offset: offset_of!(GpuArrowheadInstance, color),
         format: GpuVertexFormat::Float32x4,
         field: "color",
+    },
+    GpuVertexAttribute {
+        shader_location: 6,
+        offset: offset_of!(GpuArrowheadInstance, fill),
+        format: GpuVertexFormat::Float32x4,
+        field: "fill",
     },
 ];
 
@@ -289,8 +305,9 @@ pub const fn text_buffer_layout() -> GpuBufferLayout {
 mod tests {
     use super::{
         GpuBufferLayout, GpuVertexFormat, arrowhead_buffer_layout, edge_buffer_layout,
-        node_buffer_layout, text_buffer_layout,
+        node_buffer_layout, offset_of, text_buffer_layout,
     };
+    use crate::gpu_plan::GpuArrowheadInstance;
     use crate::gpu_plan::{ARROWHEAD_WGSL, EDGE_WGSL, NODE_SDF_WGSL, TEXT_ATLAS_WGSL};
 
     // WGSL / layout ABI agreement (bd-2u0.2).
@@ -596,6 +613,126 @@ mod tests {
                 "{name}: attributes describe {described} bytes, more than the {} byte instance",
                 layout.stride
             );
+        }
+    }
+
+    /// The arrowhead descriptor, field by field — NOT by byte total (bd-2u0.2).
+    ///
+    /// The defect this pins shipped on main behind four green sibling gates. `kind` was absent and
+    /// `color` sat at `@location(4)` in its place, so the shader's `kind: u32` read the first four
+    /// bytes of an RGBA vec4 as an integer — a marker whose FORM was chosen by a colour channel —
+    /// while `color` and `fill` were never uploaded at all.
+    ///
+    /// ⚠️ WHY A BYTE SUM COULD NOT BE TRUSTED TO CATCH IT. `the_attributes_cover_the_whole_instance`
+    /// compares a SUM OF SIZES against the stride. Two missing 4-byte fields and one spurious
+    /// 8-byte one sum identically, and the layout passes while describing the wrong interface. This
+    /// asserts the (location, field, offset, format) tuples themselves, so agreement has to be in
+    /// the CONTENT and not merely in the total.
+    ///
+    /// `assert_locations_dense` and `assert_shader_declares_locations` both passed throughout: 0..4
+    /// IS dense, and the shader DOES declare a location 4. Density and existence are not identity.
+    #[test]
+    fn the_arrowhead_descriptor_names_every_field_of_its_instance() {
+        let expected: &[(u32, &str, usize, GpuVertexFormat)] = &[
+            (
+                0,
+                "position",
+                offset_of!(GpuArrowheadInstance, position),
+                GpuVertexFormat::Float32x2,
+            ),
+            (
+                1,
+                "angle",
+                offset_of!(GpuArrowheadInstance, angle),
+                GpuVertexFormat::Float32,
+            ),
+            (
+                2,
+                "size",
+                offset_of!(GpuArrowheadInstance, size),
+                GpuVertexFormat::Float32,
+            ),
+            (
+                3,
+                "edge_index",
+                offset_of!(GpuArrowheadInstance, edge_index),
+                GpuVertexFormat::Uint32,
+            ),
+            (
+                4,
+                "kind",
+                offset_of!(GpuArrowheadInstance, kind),
+                GpuVertexFormat::Uint32,
+            ),
+            (
+                5,
+                "color",
+                offset_of!(GpuArrowheadInstance, color),
+                GpuVertexFormat::Float32x4,
+            ),
+            (
+                6,
+                "fill",
+                offset_of!(GpuArrowheadInstance, fill),
+                GpuVertexFormat::Float32x4,
+            ),
+        ];
+
+        let layout = arrowhead_buffer_layout();
+        assert_eq!(
+            layout.attributes.len(),
+            expected.len(),
+            "the arrowhead descriptor describes {} of {} instance fields",
+            layout.attributes.len(),
+            expected.len()
+        );
+        for (location, field, offset, format) in expected {
+            let attribute = layout
+                .attributes
+                .iter()
+                .find(|a| a.shader_location == *location)
+                .unwrap_or_else(|| panic!("no attribute holds @location({location}) for `{field}`"));
+            assert_eq!(
+                attribute.field, *field,
+                "@location({location}) describes `{}` where the shader reads `{field}`",
+                attribute.field
+            );
+            assert_eq!(
+                attribute.offset, *offset,
+                "`{field}` is described at byte {} but sits at byte {offset}",
+                attribute.offset
+            );
+            assert_eq!(
+                attribute.format, *format,
+                "`{field}` is described as {:?} but the shader reads {format:?}",
+                attribute.format
+            );
+        }
+    }
+
+    /// CONTROL: no descriptor may name the same field twice.
+    ///
+    /// This is the other half of the byte-sum blind spot. A duplicated entry keeps the total right
+    /// and the locations dense while one real field goes undescribed — which is very close to how
+    /// the arrowhead descriptor was wrong in the first place.
+    #[test]
+    fn no_layout_describes_the_same_field_twice() {
+        for (layout, name) in [
+            (node_buffer_layout(), "node"),
+            (edge_buffer_layout(), "edge"),
+            (arrowhead_buffer_layout(), "arrowhead"),
+            (text_buffer_layout(), "text"),
+        ] {
+            for (index, attribute) in layout.attributes.iter().enumerate() {
+                let duplicate = layout.attributes[..index]
+                    .iter()
+                    .find(|earlier| earlier.field == attribute.field);
+                assert!(
+                    duplicate.is_none(),
+                    "{name}: `{}` is described twice, so some other field is described not at all",
+                    attribute.field
+                );
+            }
         }
     }
 }

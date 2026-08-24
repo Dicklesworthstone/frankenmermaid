@@ -1,0 +1,128 @@
+//! xychart axis tick labels must be legible against their own theme background (bd-c14jf).
+//!
+//! The y-axis ticks were painted with `colors.edge` — the LINE colour — while their siblings
+//! `fm-xychart-x-tick` and `fm-xychart-title` used `colors.text`. A category error that is nearly
+//! invisible in review, because both theme slots hold a dark-ish value, and one with no CSS rule
+//! behind it to correct the attribute (unlike `.fm-cluster-label`, where a rule wins over the
+//! presentation attribute and hides exactly this kind of mistake).
+//!
+//! MEASURED against the theme's own background, before the fix:
+//!
+//!   default  #94a3b8 on #fafbfc  =  2.47:1   <- fails WCAG AA (4.5:1) and the 3:1 large-text floor
+//!   dark     #94a3b8 on #0f172a  =  6.96:1
+//!   x-tick, both themes                        16.46:1 / 17.06:1
+//!
+//! So on the SHIPPED DEFAULT theme one axis was legible and the other was not.
+//!
+//! These tests assert the COMPUTED CONTRAST RATIO, not a colour string. A hex assertion would pin
+//! today's palette and fail the next time anyone retunes a theme, while saying nothing about the
+//! property that actually matters — that the label can be read.
+
+use fm_render_svg::{SvgRenderConfig, ThemePreset, render_svg_with_config};
+
+const CHART: &str = "xychart-beta\n  title \"X\"\n  x-axis [a, b]\n  bar [1, 2]\n";
+
+/// WCAG 2.x relative luminance.
+fn luminance(hex: &str) -> f64 {
+    let hex = hex.trim_start_matches('#');
+    let channel = |index: usize| {
+        let value = u8::from_str_radix(&hex[index..index + 2], 16).unwrap_or(0) as f64 / 255.0;
+        if value <= 0.03928 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4)
+}
+
+fn contrast(a: &str, b: &str) -> f64 {
+    let (x, y) = (luminance(a), luminance(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+fn render(theme: ThemePreset) -> String {
+    render_svg_with_config(
+        &fm_parser::parse(CHART).ir,
+        &SvgRenderConfig {
+            theme,
+            ..SvgRenderConfig::default()
+        },
+    )
+}
+
+/// The fill of the first `<text>` carrying `class`.
+fn fill_of<'a>(svg: &'a str, class: &str) -> Option<&'a str> {
+    let marker = format!("class=\"{class}\"");
+    for chunk in svg.split("<text").skip(1) {
+        let Some(end) = chunk.find('>') else { continue };
+        let attrs = &chunk[..end];
+        if attrs.contains(&marker) {
+            let start = attrs.find("fill=\"")? + "fill=\"".len();
+            let stop = attrs[start..].find('"')? + start;
+            return Some(&attrs[start..stop]);
+        }
+    }
+    None
+}
+
+/// The theme background the chart is drawn on, read from the document's own stylesheet.
+fn background(svg: &str) -> Option<&str> {
+    let start = svg.find("--fm-bg:")? + "--fm-bg:".len();
+    let rest = svg[start..].trim_start();
+    let offset = svg.len() - rest.len();
+    let end = rest.find(';')?;
+    Some(svg[offset..offset + end].trim())
+}
+
+/// BOTH axes must clear WCAG AA for normal text, in BOTH themes.
+#[test]
+fn axis_tick_labels_meet_wcag_aa_contrast_in_both_themes() {
+    for theme in [ThemePreset::Default, ThemePreset::Dark] {
+        let svg = render(theme);
+        let bg = background(&svg).expect("the document declares a background");
+
+        for class in ["fm-xychart-y-tick", "fm-xychart-x-tick", "fm-xychart-title"] {
+            let fill = fill_of(&svg, class)
+                .unwrap_or_else(|| panic!("CONTROL FAILED: {class} was not rendered with a fill"));
+            let ratio = contrast(fill, bg);
+            assert!(
+                ratio >= 4.5,
+                "{theme:?}: {class} is {fill} on {bg} = {ratio:.2}:1, below the WCAG AA floor of \
+                 4.5:1 for normal text"
+            );
+        }
+    }
+}
+
+/// THE ASYMMETRY that identified the defect: the two axes must agree.
+///
+/// The y ticks used the LINE colour and the x ticks the TEXT colour. Neither has a CSS rule, so the
+/// attributes are authoritative and the two axes really did render differently. Pinning them to each
+/// other means a future change has to move both or fail here.
+#[test]
+fn both_axes_paint_their_tick_labels_the_same_colour() {
+    for theme in [ThemePreset::Default, ThemePreset::Dark] {
+        let svg = render(theme);
+        assert_eq!(
+            fill_of(&svg, "fm-xychart-y-tick"),
+            fill_of(&svg, "fm-xychart-x-tick"),
+            "{theme:?}: the two axes paint their tick labels differently"
+        );
+    }
+}
+
+/// CONTROL: the colour is THEME-DERIVED, not a literal that happens to pass.
+///
+/// Without this, hardcoding a high-contrast value — black — would satisfy both tests above while
+/// reintroducing the original class of bug on every dark theme.
+#[test]
+fn the_tick_colour_follows_the_theme() {
+    let light = render(ThemePreset::Default);
+    let dark = render(ThemePreset::Dark);
+    assert_ne!(
+        fill_of(&light, "fm-xychart-y-tick"),
+        fill_of(&dark, "fm-xychart-y-tick"),
+        "the y-axis tick colour is identical in both themes, so it is hardcoded rather than themed"
+    );
+}

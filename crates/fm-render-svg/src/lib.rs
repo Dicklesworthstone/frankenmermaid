@@ -5648,6 +5648,11 @@ fn render_quadrant_svg(
                 .get(i)
                 .map(|p| p.label.as_str())
                 .unwrap_or(&node_box.node_id);
+            let accessible_name = quad_meta
+                .points
+                .get(i)
+                .filter(|_| config.a11y.text_alternatives)
+                .map(|point| quadrant_point_accessible_name(point, &quad_meta.quadrant_labels));
             write_quadrant_point_into(
                 &mut points_svg,
                 cx,
@@ -5659,6 +5664,7 @@ fn render_quadrant_svg(
                 config.font_size * 0.75,
                 &theme.colors.text,
                 label,
+                accessible_name.as_deref(),
             );
         }
         if !points_svg.is_empty() {
@@ -5671,16 +5677,26 @@ fn render_quadrant_svg(
         let cx = node_box.bounds.x + node_box.bounds.width / 2.0 + offset_x;
         let cy = node_box.bounds.y + node_box.bounds.height / 2.0 + offset_y;
         let color = accent_colors[i % accent_colors.len()];
-        doc = doc.child(
-            Element::circle()
-                .cx(cx)
-                .cy(cy)
-                .r(6.0)
-                .fill(color)
-                .stroke(&theme.colors.background)
-                .stroke_width(1.5)
-                .class("fm-quadrant-point"),
-        );
+        let point_circle = Element::circle()
+            .cx(cx)
+            .cy(cy)
+            .r(6.0)
+            .fill(color)
+            .stroke(&theme.colors.background)
+            .stroke_width(1.5)
+            .class("fm-quadrant-point");
+        // Same accessible name the streaming path emits (bd-0eoa6); this is the non-embedded-CSS
+        // export, and the two must not disagree about what a point is called.
+        let point_circle = match quad_meta
+            .points
+            .get(i)
+            .filter(|_| config.a11y.text_alternatives)
+            .map(|point| quadrant_point_accessible_name(point, &quad_meta.quadrant_labels))
+        {
+            Some(name) => point_circle.child(Element::title(&name)),
+            None => point_circle,
+        };
+        doc = doc.child(point_circle);
         // Point label from quadrant metadata or node ID.
         let label = quad_meta
             .points
@@ -5703,6 +5719,32 @@ fn render_quadrant_svg(
     doc
 }
 
+/// The accessible name for one quadrant data point (bd-0eoa6).
+///
+/// The point's visible label already names it, so what a screen reader is missing is the thing the
+/// POSITION conveys: which quadrant it landed in. `"Alpha: Do first"` when that quadrant is named,
+/// otherwise `"Alpha: x 0.90, y 0.90"` — the coordinates, which is all the position says when the
+/// author declared no quadrant labels.
+///
+/// ⚠️ THE QUADRANT INDEX IS MEASURED, NOT ASSUMED. Announcing the wrong quadrant is worse than
+/// announcing none, so the mapping was verified against real output before being written: a point at
+/// `[0.9, 0.9]` renders at the TOP right (canvas y 138 against the `quadrant-1` label's 186), so a
+/// HIGH data `y` is the TOP half even though canvas y grows downward. The order matches
+/// `label_positions` above — 0 top-right, 1 top-left, 2 bottom-left, 3 bottom-right — which is
+/// mermaid's `quadrant-1..4`.
+fn quadrant_point_accessible_name(point: &fm_core::IrQuadrantPoint, labels: &[String]) -> String {
+    let index = match (point.x >= 0.5, point.y >= 0.5) {
+        (true, true) => 0,
+        (false, true) => 1,
+        (false, false) => 2,
+        (true, false) => 3,
+    };
+    match labels.get(index).filter(|label| !label.trim().is_empty()) {
+        Some(quadrant) => format!("{}: {quadrant}", point.label),
+        None => format!("{}: x {:.2}, y {:.2}", point.label, point.x, point.y),
+    }
+}
+
 /// Stream a quadrant data point (`<circle>` + `<text>` label) byte-identical to the slow path's
 /// `Element`s under embedded CSS (the label's `font-family` is CSS-driven, so absent inline). `r="6"` /
 /// `stroke-width="1.50"` are the fixed `r(6.0)`/`stroke_width(1.5)` serializations. Skips the two per-point
@@ -5719,6 +5761,7 @@ fn write_quadrant_point_into(
     label_font_size: f32,
     text_fill: &str,
     label: &str,
+    accessible_name: Option<&str>,
 ) {
     use crate::attributes::{write_escaped_attr, write_escaped_text};
     f.push_str("<circle cx=\"");
@@ -5729,7 +5772,16 @@ fn write_quadrant_point_into(
     let _ = write_escaped_attr(f, color);
     f.push_str("\" stroke=\"");
     let _ = write_escaped_attr(f, bg);
-    f.push_str("\" stroke-width=\"1.50\" class=\"fm-quadrant-point\"/><text x=\"");
+    f.push_str("\" stroke-width=\"1.50\" class=\"fm-quadrant-point\"");
+    match accessible_name {
+        Some(name) => {
+            f.push_str("><title>");
+            let _ = write_escaped_text(f, name);
+            f.push_str("</title></circle>");
+        }
+        None => f.push_str("/>"),
+    }
+    f.push_str("<text x=\"");
     let _ = crate::attributes::write_number_into(f, label_x);
     f.push_str("\" y=\"");
     let _ = crate::attributes::write_number_into(f, label_y);
@@ -5742,8 +5794,68 @@ fn write_quadrant_point_into(
     f.push_str("</text>");
 }
 
+/// The accessible name for one gantt task bar (bd-ic3rx).
+///
+/// A bar conveys four things VISUALLY that no text run carries: where it starts (position), how long
+/// it runs (width), what kind of task it is (colour) and how far along it is (the progress overlay).
+/// The name states each of them, so a non-visual reader gets what the geometry says rather than the
+/// task name alone.
+///
+/// Last of the four chart types that emitted zero per-element accessibility affordances (pie
+/// bd-uf3p1, xychart bd-sdhzh, quadrant bd-0eoa6).
+fn gantt_bar_accessible_name(label: &str, task: Option<&fm_core::IrGanttTask>) -> String {
+    use std::fmt::Write as _;
+
+    let mut name = label.to_string();
+    let Some(task) = task else {
+        return name;
+    };
+
+    if let Some(fm_core::GanttDate::Absolute(start)) = task.start.as_ref() {
+        name.push_str(", starts ");
+        name.push_str(start);
+    }
+    match task.end.as_ref() {
+        Some(fm_core::GanttDate::Absolute(end)) => {
+            name.push_str(", ends ");
+            name.push_str(end);
+        }
+        Some(fm_core::GanttDate::DurationDays(days)) => {
+            let _ = write!(name, ", {days} day{}", if *days == 1 { "" } else { "s" });
+        }
+        _ => {}
+    }
+    // The TYPE is carried only by the bar's fill colour, so a reader who cannot see the colour has
+    // no other source for it. `Normal` is the default and adds nothing.
+    match task.task_type {
+        fm_core::GanttTaskType::Critical => name.push_str(", critical"),
+        fm_core::GanttTaskType::Active => name.push_str(", active"),
+        fm_core::GanttTaskType::Done => name.push_str(", done"),
+        fm_core::GanttTaskType::Milestone => name.push_str(", milestone"),
+        fm_core::GanttTaskType::Normal => {}
+    }
+    // ⚠️ `progress` is a FRACTION, not a percentage: `50%` parses to `0.5`
+    // (`parse_gantt_progress` divides by 100). Formatting it directly as `{:.0}%` announced
+    // "0% complete" for a task that is HALF DONE — a wrong number, which is worse than no number,
+    // and one that only showed up by reading the rendered output rather than trusting the field name.
+    //
+    // Only a progress that says something: a task that declares none has `None`, and nothing is
+    // gained by announcing 0% on every ordinary bar.
+    if let Some(progress) = task.progress.filter(|value| *value > 0.0) {
+        let _ = write!(name, ", {:.0}% complete", progress * 100.0);
+    }
+    name
+}
+
 /// Stream a gantt task bar `<rect>` byte-identical to the slow path's `Element::rect()`:
 /// `x y width height fill stroke stroke-width="1" rx="3" class="fm-gantt-task {type_class}"`.
+///
+/// `tooltip` is the author's `click <task> ... "text"` hover, or `None` (bd-gydqv).
+///
+/// A `title=` ATTRIBUTE, matching what the flowchart path emits and what mermaid itself does
+/// (`n.attr("title", t.tooltip)`) — deliberately NOT a `<title>` CHILD, which is this file's
+/// accessible name for a shape. Conflating the author's hover text with the a11y name is how a
+/// screen reader ends up announcing one in place of the other.
 #[allow(clippy::too_many_arguments)]
 fn write_gantt_bar_into(
     f: &mut String,
@@ -5754,6 +5866,8 @@ fn write_gantt_bar_into(
     fill: &str,
     stroke: &str,
     type_class: &str,
+    tooltip: Option<&str>,
+    accessible_name: Option<&str>,
 ) {
     use crate::attributes::write_escaped_attr;
     f.push_str("<rect x=\"");
@@ -5770,7 +5884,83 @@ fn write_gantt_bar_into(
     let _ = write_escaped_attr(f, stroke);
     f.push_str("\" stroke-width=\"1\" rx=\"3\" class=\"fm-gantt-task ");
     f.push_str(type_class);
-    f.push_str("\"/>");
+    f.push('"');
+    if let Some(tooltip) = tooltip.map(str::trim).filter(|text| !text.is_empty()) {
+        f.push_str(" title=\"");
+        let _ = write_escaped_attr(f, tooltip);
+        f.push('"');
+    }
+    // The `title=` ATTRIBUTE above is the author's `click` hover; the `<title>` CHILD here is the
+    // accessible NAME. They are different things and the flowchart node path carries both the same
+    // way, so a bar with a click keeps its hover text and still announces its schedule.
+    match accessible_name
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        Some(name) => {
+            f.push_str("><title>");
+            let _ = crate::attributes::write_escaped_text(f, name);
+            f.push_str("</title></rect>");
+        }
+        None => f.push_str("/>"),
+    }
+}
+
+/// WCAG relative luminance of a `#rgb`/`#rrggbb` colour, or `None` for anything else.
+///
+/// `None` rather than a guess: a `var(...)`, a gradient reference or a named colour cannot be
+/// measured here, and the caller falls back to its previous behaviour instead of picking a colour
+/// from arithmetic it did not actually do.
+fn relative_luminance(colour: &str) -> Option<f64> {
+    let hex = colour.trim().strip_prefix('#')?;
+    let expanded: String = match hex.len() {
+        3 => hex.chars().flat_map(|c| [c, c]).collect(),
+        6 => hex.to_string(),
+        _ => return None,
+    };
+    let mut channels = [0.0_f64; 3];
+    for (index, channel) in channels.iter_mut().enumerate() {
+        let start = index * 2;
+        let raw = u8::from_str_radix(expanded.get(start..start + 2)?, 16).ok()?;
+        let value = f64::from(raw) / 255.0;
+        *channel = if value <= 0.03928 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        };
+    }
+    Some(0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2])
+}
+
+/// WCAG contrast ratio between two colours, or `None` if either cannot be measured.
+fn contrast_ratio(a: &str, b: &str) -> Option<f64> {
+    let (x, y) = (relative_luminance(a)?, relative_luminance(b)?);
+    Some((x.max(y) + 0.05) / (x.min(y) + 0.05))
+}
+
+/// The theme colour that reads best ON `background` (bd-u0x67).
+///
+/// Gantt task bars are FIXED pastels — `#93c5fd` normal, `#fca5a5` critical, `#86efac` done,
+/// `#94a3b8` active — the same in every theme. The label, however, used `colors.text`, which flips
+/// to near-white on a dark theme. So every task label in every gantt chart measured 1.34–2.45:1
+/// against its own bar in dark mode, against 6.65–12.15:1 in light. All four task types, not an
+/// edge case.
+///
+/// Chooses between the theme's own TEXT and BACKGROUND colours rather than hardcoding black or
+/// white: both stay theme-derived, the light theme keeps exactly the colour it already had (so its
+/// output is unchanged), and a user-restyled bar — which may be dark — gets the right answer instead
+/// of an assumption that bars are always pale.
+///
+/// Falls back to `text` when either colour cannot be measured, which keeps an unparseable fill on
+/// its previous behaviour rather than inventing one.
+fn readable_label_colour<'a>(background: &str, colors: &'a ThemeColors) -> &'a str {
+    match (
+        contrast_ratio(&colors.text, background),
+        contrast_ratio(&colors.background, background),
+    ) {
+        (Some(on_text), Some(on_background)) if on_background > on_text => &colors.background,
+        _ => &colors.text,
+    }
 }
 
 /// Stream a gantt task label `<text>` byte-identical to the slow path's `Element::text()`:
@@ -5997,6 +6187,11 @@ fn render_gantt_svg(
             let w = node_box.bounds.width;
             let h = node_box.bounds.height;
 
+            // Where THIS task's bytes begin, so a link can wrap the bar, its progress overlay and
+            // its label together (bd-gqqkg). Recorded before anything is written and used only when
+            // a link is actually emitted, so an ordinary chart streams byte-identically.
+            let task_bytes_start = task_svg.len();
+
             let task_type = gantt_meta
                 .tasks
                 .get(node_idx)
@@ -6026,7 +6221,37 @@ fn render_gantt_svg(
                 let _ = write_escaped_attr(&mut task_svg, fill);
                 task_svg.push_str("\" stroke=\"");
                 let _ = write_escaped_attr(&mut task_svg, &theme.colors.node_stroke);
-                task_svg.push_str("\" stroke-width=\"1.5\" class=\"fm-gantt-milestone\"/>");
+                task_svg.push_str("\" stroke-width=\"1.5\" class=\"fm-gantt-milestone\"");
+                // A MILESTONE is drawn as a diamond `<path>`, not a bar `<rect>`, so the bar writer
+                // never sees it — it would have stayed the one unnamed mark on an otherwise named
+                // chart. Same helper, so the two shapes cannot describe a task differently.
+                let milestone_label = ir
+                    .nodes
+                    .get(node_box.node_index)
+                    .and_then(|node| node.label)
+                    .and_then(|lid| ir.labels.get(lid.0))
+                    .map(|label| label.text.as_str())
+                    .or_else(|| {
+                        ir.nodes
+                            .get(node_box.node_index)
+                            .map(|node| node.id.as_str())
+                    })
+                    .unwrap_or("");
+                match config
+                    .a11y
+                    .text_alternatives
+                    .then(|| {
+                        gantt_bar_accessible_name(milestone_label, gantt_meta.tasks.get(node_idx))
+                    })
+                    .filter(|name| !name.trim().is_empty())
+                {
+                    Some(name) => {
+                        task_svg.push_str("><title>");
+                        let _ = crate::attributes::write_escaped_text(&mut task_svg, &name);
+                        task_svg.push_str("</title></path>");
+                    }
+                    None => task_svg.push_str("/>"),
+                }
             } else {
                 let type_class = match task_type {
                     fm_core::GanttTaskType::Done => "fm-gantt-task-done",
@@ -6035,6 +6260,31 @@ fn render_gantt_svg(
                     fm_core::GanttTaskType::Milestone => "fm-gantt-task-milestone",
                     fm_core::GanttTaskType::Normal => "fm-gantt-task-normal",
                 };
+                // The task's own node carries whatever interaction the parser attached (bd-gydqv).
+                let task_tooltip = gantt_meta
+                    .tasks
+                    .get(node_idx)
+                    .and_then(|task| ir.nodes.get(task.node.0))
+                    .and_then(|node| node.tooltip());
+                // The task label is resolved again here rather than hoisted: the existing
+                // resolution happens after the bar is written, and reordering it would move bytes in
+                // a golden-pinned writer for no benefit.
+                let bar_label = ir
+                    .nodes
+                    .get(node_box.node_index)
+                    .and_then(|node| node.label)
+                    .and_then(|lid| ir.labels.get(lid.0))
+                    .map(|label| label.text.as_str())
+                    .or_else(|| {
+                        ir.nodes
+                            .get(node_box.node_index)
+                            .map(|node| node.id.as_str())
+                    })
+                    .unwrap_or("");
+                let accessible_name = config
+                    .a11y
+                    .text_alternatives
+                    .then(|| gantt_bar_accessible_name(bar_label, gantt_meta.tasks.get(node_idx)));
                 write_gantt_bar_into(
                     &mut task_svg,
                     x,
@@ -6044,6 +6294,8 @@ fn render_gantt_svg(
                     fill,
                     &theme.colors.node_stroke,
                     type_class,
+                    task_tooltip,
+                    accessible_name.as_deref(),
                 );
 
                 // Progress bar overlay.
@@ -6087,17 +6339,30 @@ fn render_gantt_svg(
                     .gantt_task_labels
                     .iter()
                     .find(|entry| entry.node_index == node_box.node_index);
-                let (label_x, anchor) = match placement.map(|entry| (entry.x, entry.placement)) {
-                    Some((label_x, fm_layout::GanttLabelPlacement::OutsideRight)) => {
-                        (label_x + offset_x, "start")
-                    }
-                    Some((label_x, fm_layout::GanttLabelPlacement::OutsideLeft)) => {
-                        (label_x + offset_x, "end")
-                    }
-                    Some((label_x, fm_layout::GanttLabelPlacement::Inside)) => {
-                        (label_x + offset_x, "middle")
-                    }
-                    None => (x + w / 2.0, "middle"),
+                // PLACEMENT DECIDES WHAT THE LABEL SITS ON (bd-u0x67), which is why the colour is
+                // chosen here and not once for the whole chart. An INSIDE label is drawn over the
+                // task BAR and must contrast with it; an OUTSIDE label is drawn over the page and
+                // must contrast with the background, which `colors.text` already does correctly.
+                // Colouring every label for the bar would have broken the outside case to fix the
+                // inside one.
+                let (label_x, anchor, inside) =
+                    match placement.map(|entry| (entry.x, entry.placement)) {
+                        Some((label_x, fm_layout::GanttLabelPlacement::OutsideRight)) => {
+                            (label_x + offset_x, "start", false)
+                        }
+                        Some((label_x, fm_layout::GanttLabelPlacement::OutsideLeft)) => {
+                            (label_x + offset_x, "end", false)
+                        }
+                        Some((label_x, fm_layout::GanttLabelPlacement::Inside)) => {
+                            (label_x + offset_x, "middle", true)
+                        }
+                        // No recorded placement: the label is centred on the bar, so it is inside.
+                        None => (x + w / 2.0, "middle", true),
+                    };
+                let label_fill = if inside {
+                    readable_label_colour(fill, &theme.colors)
+                } else {
+                    &theme.colors.text
                 };
                 write_gantt_label_into(
                     &mut task_svg,
@@ -6106,10 +6371,47 @@ fn render_gantt_svg(
                     config.font_size * 0.8,
                     &config.font_family,
                     config.embed_theme_css,
-                    &theme.colors.text,
+                    label_fill,
                     label_text,
                     anchor,
                 );
+            }
+
+            // A gantt task with a `click ... href` becomes a real LINK (bd-gqqkg).
+            //
+            // bd-gydqv attached the href to the task's node and rendered its tooltip, but the link
+            // itself was still stored-and-unused: a reader could hover the bar and never click it.
+            //
+            // The gate is the SAME one the flowchart node path uses, read rather than re-derived —
+            // `is_safe_link_target` against the diagram's sanitize mode, then `config.link_mode`.
+            // Re-implementing a security decision for a second diagram type is how the two drift and
+            // one of them starts emitting `javascript:` URLs. `Footnote` deliberately does nothing
+            // here: it decorates a `<g>` with `data-link`, and these bars are raw bytes with no group
+            // to hang it on, so claiming support would be worse than leaving it to the node path.
+            if let Some(href) = gantt_meta
+                .tasks
+                .get(node_idx)
+                .and_then(|task| ir.nodes.get(task.node.0))
+                .and_then(|node| node.href())
+                .filter(|href| is_safe_link_target(href, ir.meta.init.config.sanitize_mode))
+                && matches!(config.link_mode, MermaidLinkMode::Inline)
+            {
+                let link_target = gantt_meta
+                    .tasks
+                    .get(node_idx)
+                    .and_then(|task| ir.nodes.get(task.node.0))
+                    .and_then(|node| node.link_target())
+                    .unwrap_or("_blank");
+                let mut open = String::with_capacity(href.len() + link_target.len() + 64);
+                open.push_str("<a href=\"");
+                let _ = write_escaped_attr(&mut open, href);
+                open.push_str("\" target=\"");
+                let _ = write_escaped_attr(&mut open, link_target);
+                // `rel` unconditionally, matching the node path: it matters for `_blank` and is
+                // inert rather than wrong on a same-frame target.
+                open.push_str("\" rel=\"noopener noreferrer\" style=\"cursor: pointer;\">");
+                task_svg.insert_str(task_bytes_start, &open);
+                task_svg.push_str("</a>");
             }
         }
         if !task_svg.is_empty() {
@@ -6321,7 +6623,16 @@ fn render_pie_svg(
             let _ = write_escaped_attr(&mut pie_svg, color);
             pie_svg.push_str("\" stroke=\"");
             let _ = write_escaped_attr(&mut pie_svg, bg);
-            pie_svg.push_str("\" stroke-width=\"2\" class=\"fm-pie-slice fm-pie-slice-full\"/>");
+            pie_svg.push_str("\" stroke-width=\"2\" class=\"fm-pie-slice fm-pie-slice-full\"");
+            write_pie_slice_accessible_name(
+                &mut pie_svg,
+                config.a11y.text_alternatives,
+                pie_meta.show_data,
+                &slice.label,
+                value,
+                (value / total) * 100.0,
+                "circle",
+            );
             have_prev_end = false;
         } else {
             let x2 = cx + radius * (angle + sweep).cos();
@@ -6351,7 +6662,16 @@ fn render_pie_svg(
             let _ = write_escaped_attr(&mut pie_svg, color);
             pie_svg.push_str("\" stroke=\"");
             let _ = write_escaped_attr(&mut pie_svg, bg);
-            pie_svg.push_str("\" stroke-width=\"2\" class=\"fm-pie-slice\"/>");
+            pie_svg.push_str("\" stroke-width=\"2\" class=\"fm-pie-slice\"");
+            write_pie_slice_accessible_name(
+                &mut pie_svg,
+                config.a11y.text_alternatives,
+                pie_meta.show_data,
+                &slice.label,
+                value,
+                (value / total) * 100.0,
+                "path",
+            );
         }
 
         let mid_angle = angle + sweep / 2.0;
@@ -6462,6 +6782,57 @@ fn render_pie_svg(
     doc
 }
 
+/// Close a pie wedge, giving it an ACCESSIBLE NAME when text alternatives are on (bd-uf3p1).
+///
+/// Pie slices shipped as bare self-closing shapes: no `data-id`, no `role`, no `aria-label`, no
+/// `<title>`. Measured across the corpus, four chart types — gantt, pie, quadrant, xychart — emitted
+/// ZERO per-element accessibility affordances, while the other fifteen (including chart-like
+/// sankey, journey, timeline, packet and kanban) all did. A screen reader got the document `<desc>`
+/// and nothing per wedge.
+///
+/// MIRRORS THE LEGEND, `showData` behaviour included: `Label: 50 (50.0%)` when the author asked for
+/// data, the bare label when they did not.
+///
+/// I first made the share UNCONDITIONAL, reasoning that a wedge's angle conveys its proportion to a
+/// sighted reader and an accessible name should carry what the visual conveys. That broke
+/// `pie_without_showdata_omits_value_and_percentage_labels`, which asserts DOCUMENT-WIDE that
+/// `showData: false` discloses no numbers anywhere. That is a real pre-existing contract about what
+/// the author chose to publish — not an oversight in a visible-text-only check — so the name follows
+/// it rather than the gate being narrowed to accommodate this function. Whether an accessible name
+/// should be exempt from `showData` is a product question, raised on bd-uf3p1 rather than decided
+/// here by whoever happened to be editing.
+///
+/// Gated on `text_alternatives`, matching `uniform_a11y`'s `<title>` component: with a11y off the
+/// shape closes exactly as it did before, so that configuration is byte-identical.
+fn write_pie_slice_accessible_name(
+    out: &mut String,
+    text_alternatives: bool,
+    show_data: bool,
+    label: &str,
+    value: f32,
+    percent: f32,
+    tag: &str,
+) {
+    use crate::attributes::write_escaped_text;
+    if !text_alternatives {
+        out.push_str("/>");
+        return;
+    }
+    use std::fmt::Write as _;
+
+    out.push_str("><title>");
+    let _ = write_escaped_text(out, label);
+    if show_data {
+        // `{:.0}` and `{:.1}` are the LEGEND's own `entry_label` formatting, so the spoken name and
+        // the printed one agree digit for digit. `write_number_into` renders 66.7 as `66.70`, which
+        // would have made the accessible name disagree with the legend beside it.
+        let _ = write!(out, ": {value:.0} ({percent:.1}%)");
+    }
+    out.push_str("</title></");
+    out.push_str(tag);
+    out.push('>');
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_xychart_svg(
     mut doc: SvgDocument,
@@ -6538,7 +6909,19 @@ fn render_xychart_svg(
                     config.font_size * 0.72,
                     config.min_font_size,
                 ))
-                .fill(&theme.colors.edge)
+                // `colors.text`, NOT `colors.edge` (bd-c14jf). This painted TICK LABELS with the
+                // LINE colour — a category error that is nearly invisible in review because both
+                // slots hold a dark-ish value, and it has no CSS rule behind it to correct the
+                // attribute (unlike `.fm-cluster-label`, where a rule wins over the attribute).
+                //
+                // Measured contrast against the theme background, before this change:
+                //   default  #94a3b8 on #fafbfc  =  2.47:1   <- fails WCAG AA (4.5:1), and even
+                //                                              the 3:1 large-text floor
+                //   dark     #94a3b8 on #0f172a  =  6.96:1
+                // Its own siblings were already right: `fm-xychart-x-tick` and `fm-xychart-title`
+                // both use `colors.text` (16.46:1 and 17.06:1). One axis was legible and the other
+                // was not, on the SHIPPED default theme.
+                .fill(&theme.colors.text)
                 .class("fm-xychart-y-tick")
                 .build(),
         );
@@ -6804,6 +7187,22 @@ fn render_xychart_svg(
             .iter()
             .filter_map(|node_id| layout_nodes_by_index.get(node_id.0).and_then(|node| *node))
             .collect();
+        // The ORIGINAL value index of each surviving node, built with the IDENTICAL filter above
+        // (bd-sdhzh). `series_nodes` drops any node the layout did not place, so its positions are
+        // not `series.values` positions; zipping the two directly would name a mark with its
+        // neighbour's number. A parallel vector keeps the mapping exact without rewriting the five
+        // other loops that consume `series_nodes`.
+        let series_value_indices: Vec<usize> = series
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(value_index, node_id)| {
+                layout_nodes_by_index
+                    .get(node_id.0)
+                    .and_then(|node| *node)
+                    .map(|_| value_index)
+            })
+            .collect();
 
         match series.kind {
             IrXySeriesKind::Bar => {
@@ -6811,7 +7210,8 @@ fn render_xychart_svg(
                 if config.include_source_spans {
                     // Spans on: keep the per-bar `Element` build so `apply_span_metadata` can attach the
                     // `data-fm-source-*` attributes (rare config; not worth reproducing inline).
-                    for node in series_nodes {
+                    for (position, node) in series_nodes.iter().enumerate() {
+                        let node = *node;
                         let rect = Element::rect()
                             .x(node.bounds.x + offset_x)
                             .y(node.bounds.y + offset_y)
@@ -6823,6 +7223,16 @@ fn render_xychart_svg(
                             .stroke_width(1.0)
                             .rx(rx)
                             .class("fm-xychart-bar");
+                        let rect = match series_value_indices
+                            .get(position)
+                            .and_then(|index| {
+                                xychart_mark_accessible_name(xy_chart_meta, series, *index)
+                            })
+                            .filter(|_| config.a11y.text_alternatives)
+                        {
+                            Some(name) => rect.child(Element::title(&name)),
+                            None => rect,
+                        };
                         doc = doc.child(apply_span_metadata(rect, node.span));
                     }
                 } else {
@@ -6842,7 +7252,8 @@ fn render_xychart_svg(
                     let mut rx_text = String::new();
                     let _ = crate::attributes::write_number_into(&mut rx_text, rx);
                     let mut bar_svg = String::new();
-                    for node in series_nodes {
+                    for (position, node) in series_nodes.iter().enumerate() {
+                        let node = *node;
                         bar_svg.push_str("<rect x=\"");
                         let _ = crate::attributes::write_number_into(
                             &mut bar_svg,
@@ -6865,7 +7276,16 @@ fn render_xychart_svg(
                         bar_svg.push_str(&esc_color);
                         bar_svg.push_str("\" stroke-width=\"1\" rx=\"");
                         bar_svg.push_str(&rx_text);
-                        bar_svg.push_str("\" class=\"fm-xychart-bar\"/>");
+                        bar_svg.push_str("\" class=\"fm-xychart-bar\"");
+                        let name = series_value_indices.get(position).and_then(|index| {
+                            xychart_mark_accessible_name(xy_chart_meta, series, *index)
+                        });
+                        write_xychart_mark_accessible_name(
+                            &mut bar_svg,
+                            config.a11y.text_alternatives,
+                            name.as_deref(),
+                            "rect",
+                        );
                     }
                     doc = doc.child(Element::raw_svg(bar_svg));
                 }
@@ -7082,6 +7502,54 @@ fn xychart_value_to_y(
     let range = (y_max - y_min).max(f32::EPSILON);
     let ratio = ((value - y_min) / range).clamp(0.0, 1.0);
     plot_bounds.y + plot_bounds.height - (ratio * plot_bounds.height)
+}
+
+/// The accessible name for one xychart data mark (bd-sdhzh).
+///
+/// `"Series, Category: 42"`, or `"Category: 42"` for an unnamed series, or `"42"` when the x axis
+/// declares no categories. The value is formatted by [`format_xychart_tick_value`], the same
+/// function the Y AXIS uses, so a screen reader reads a bar's value in the notation the axis beside
+/// it is labelled in.
+///
+/// Returns `None` when the mark's index has no value, which is the case a positional zip would
+/// otherwise turn into a mark named with its NEIGHBOUR's number — worse than an unnamed mark,
+/// because a wrong value cannot be detected by the person relying on it.
+fn xychart_mark_accessible_name(
+    meta: &fm_core::IrXyChartMeta,
+    series: &fm_core::IrXySeries,
+    value_index: usize,
+) -> Option<String> {
+    let value = series.values.get(value_index)?;
+    let formatted = format_xychart_tick_value(*value);
+    let category = meta.x_axis.categories.get(value_index);
+    Some(match (series.name.as_deref(), category) {
+        (Some(name), Some(category)) => format!("{name}, {category}: {formatted}"),
+        (Some(name), None) => format!("{name}: {formatted}"),
+        (None, Some(category)) => format!("{category}: {formatted}"),
+        (None, None) => formatted,
+    })
+}
+
+/// Close a data mark, giving it an accessible name when text alternatives are on (bd-sdhzh).
+///
+/// Mirrors `write_pie_slice_accessible_name`: with a11y off the shape closes exactly as before, so
+/// that configuration stays byte-identical.
+fn write_xychart_mark_accessible_name(
+    out: &mut String,
+    text_alternatives: bool,
+    name: Option<&str>,
+    tag: &str,
+) {
+    match name.filter(|_| text_alternatives) {
+        Some(name) => {
+            out.push_str("><title>");
+            let _ = crate::attributes::write_escaped_text(out, name);
+            out.push_str("</title></");
+            out.push_str(tag);
+            out.push('>');
+        }
+        None => out.push_str("/>"),
+    }
 }
 
 fn format_xychart_tick_value(value: f32) -> String {
@@ -7593,7 +8061,17 @@ fn write_c4_node_fragment_into(
     out.push_str("\" text-anchor=\"middle\" font-size=\"");
     let _ = write_number_into(out, small_font);
     out.push_str("\" font-weight=\"600\" fill=\"");
-    let _ = write_escaped_attr(out, &colors.cluster_stroke);
+    // `colors.text`, NOT `colors.cluster_stroke` (bd-4rlrx). This painted the stereotype with the
+    // cluster BORDER colour — a slot designed to sit QUIETLY against the background, which is the
+    // opposite of what text needs. Measured against each theme's own background:
+    //   default  #cbd5e1 on #fafbfc  =  1.43:1   effectively invisible
+    //   dark     #475569 on #0f172a  =  2.36:1
+    // Both fail WCAG AA (4.5:1) and the 3:1 large-text floor. It was themed — the colour does move
+    // between themes — which is why a "does it follow the theme?" check passes and only a measured
+    // contrast catches it. Its own siblings in the same box, `fm-c4-name` and `fm-c4-description`,
+    // already use `colors.text`; the visual hierarchy is carried by size (0.78x) and weight (600),
+    // not by making the label unreadable.
+    let _ = write_escaped_attr(out, &colors.text);
     out.push_str("\" class=\"fm-c4-type-label\">&lt;&lt;");
     let _ = write_escaped_text(out, &c4_meta.element_type);
     out.push_str(">></text>");
@@ -8994,6 +9472,17 @@ fn render_node_into(
         && node.href().is_none()
         && node.callback().is_none()
         && node.tooltip().is_none()
+        // A JOURNEY STEP takes the slow path so its description comes from `describe_node`, which
+        // reads `IrNode.classes` and therefore keeps the author's casing (bd-fsj42). This fragment
+        // has only the EMITTED class string, which is prefixed AND lowercased
+        // (`fm-node-user-journey-actor-alice`), so deriving the actors here would announce `alice`
+        // for an author who wrote `Alice` — and the two render paths would then disagree about what
+        // the same step is called. One path for journey is worth more than the fragment's speed on a
+        // diagram type whose charts are small.
+        && !node
+            .classes
+            .iter()
+            .any(|class| class == "journey-step")
     {
         let write = if matches!(uniform_a11y(&config.a11y), Some(true)) {
             write_common_node_fragment_into::<true>
@@ -9166,6 +9655,10 @@ fn render_node(
         && node.href().is_none()
         && node.callback().is_none()
         && node.tooltip().is_none()
+        // Journey steps take the slow path so their description comes from `describe_node` — see
+        // the twin gate on `write_common_node_fragment_into` (bd-fsj42). BOTH gates are needed: the
+        // fragment is reachable through two callers, and excluding it from one left the fix inert.
+        && !node.classes.iter().any(|class| class == "journey-step")
     {
         let build = if matches!(uniform_a11y(&config.a11y), Some(true)) {
             build_common_node_fragment::<true>
@@ -10802,7 +11295,10 @@ fn render_c4_node_content(
             .font_size(small_font)
             .font_weight("600")
             .anchor(TextAnchor::Middle)
-            .fill(&colors.cluster_stroke)
+            // See the streaming twin above (bd-4rlrx): the cluster BORDER colour on text gave
+            // 1.43:1 in the default theme. Both paths must agree or the fix depends on which one a
+            // given diagram happens to take.
+            .fill(&colors.text)
             .class("fm-c4-type-label")
             .build(),
     )));
@@ -12191,16 +12687,13 @@ fn compute_edge_label<'a>(
         && let Some(label_id) = ir_edge.and_then(|e| e.label)
         && let Some(label) = ir.labels.get(label_id.0)
     {
-        let base_label = truncate_label(&label.text, detail.edge_label_max_chars);
-        let label_text: Cow<'a, str> = if let Some(number) = ir
-            .sequence_meta
-            .as_ref()
-            .and_then(|meta| meta.autonumber_value(edge_index))
-        {
-            Cow::Owned(format!("{number} {}", base_label.as_ref()))
-        } else {
-            base_label
-        };
+        // The autonumber is NO LONGER PREFIXED here (bd-o02wn). mermaid 11.15.0's `drawMessage`
+        // emits it as its OWN element — `.attr("class","sequenceNumber").text(f)`, the number and
+        // nothing else — beside the message, not glued to the front of the label. Two repo tests
+        // had contradicted each other about the prefix spelling (`10 Ping` vs `10. numbered once`)
+        // and neither matched the incumbent, because a prefix is not what the incumbent produces.
+        // The number is now written by `write_sequence_number_into`.
+        let label_text: Cow<'a, str> = truncate_label(&label.text, detail.edge_label_max_chars);
         let (lx, ly) = if edge_path.points.len() == 4 {
             let p1 = &edge_path.points[1];
             let p2 = &edge_path.points[2];
@@ -12856,7 +13349,82 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
 /// edge (back-edges, non-Arrow markers, dashed, animated, source spans, inline `linkStyle`, labeled, or
 /// reduced a11y) falls back to the existing `render_edge` Element path, so output stays byte-identical
 /// (corpus-pinned by `golden_svg_test`).
+/// Stream a sequence message's AUTONUMBER as its own `<text>` element (bd-o02wn).
+///
+/// mermaid 11.15.0's `drawMessage` writes the number as a standalone element carrying only the
+/// digits — `.attr("text-anchor","middle").attr("class","sequenceNumber").text(f)` — beside the
+/// message. We used to glue it onto the front of the label instead, which is why the label read
+/// `10 Ping` and why two tests in this repo disagreed about whether a period belonged after the
+/// number. Neither spelling was the incumbent's, because the incumbent does not build a prefix.
+///
+/// Positioned at the message's START point, which is where mermaid draws it, rather than at the
+/// label midpoint. NOT claimed as pixel parity: mermaid also draws a filled circle behind the digits
+/// and themes them via `sequenceNumberColor`, and neither is replicated here — this is the element
+/// and its content, not the decoration.
+///
+/// Emitted from a WRAPPER around the edge body rather than from inside it, deliberately: the
+/// labeled-edge fast fragments are byte-identity-pinned by `golden_svg_test` and
+/// `edge_fast_full_fragment_matches_render`, and threading a second element through them would put
+/// the hottest render path in the crate at risk to add a decoration beside it.
+fn write_sequence_number_into(
+    out: &mut String,
+    edge_path: &LayoutEdgePath,
+    context: &EdgeRenderContext<'_>,
+) {
+    let Some(number) = context
+        .ir
+        .sequence_meta
+        .as_ref()
+        .and_then(|meta| meta.autonumber_value(edge_path.edge_index))
+    else {
+        return;
+    };
+    let Some(start) = edge_path.points.first() else {
+        return;
+    };
+    let Some(end) = edge_path.points.last() else {
+        return;
+    };
+
+    out.push_str("<text x=\"");
+    let _ = crate::attributes::write_number_into(out, start.x + context.offset_x);
+    out.push_str("\" y=\"");
+    let _ = crate::attributes::write_number_into(
+        out,
+        f32::midpoint(start.y, end.y) + context.offset_y - 8.0,
+    );
+    // THEMED, and it was not when this element first landed (bd-7hgxu). `fm-sequence-number` was
+    // emitted with no `fill` and no CSS rule anywhere in the crate, so the number fell back to the
+    // SVG default of black — invisible against a dark theme's background, on a diagram whose every
+    // other text run is themed. A class with no rule behind it is not styling, it is a name.
+    //
+    // `colors.text`, the same colour every other label uses, rather than a new theme field. mermaid
+    // has a dedicated `sequenceNumberColor` computed to CONTRAST with the line colour, which is not
+    // the same thing and is not claimed here: this makes the number readable and theme-consistent,
+    // not identical to the incumbent's palette.
+    //
+    // Attribute order follows `write_gantt_label_into` — text-anchor, dominant-baseline, font-size,
+    // fill, class — because in this file order is output, and a sibling writer disagreeing about it
+    // is how byte-identity tests start failing for reasons nobody can read.
+    out.push_str("\" text-anchor=\"middle\" dominant-baseline=\"central\" font-size=\"");
+    let _ = crate::attributes::write_number_into(out, context.config.font_size * 0.8);
+    out.push_str("\" fill=\"");
+    let _ = crate::attributes::write_escaped_attr(out, &context.colors.text);
+    out.push_str("\" class=\"fm-sequence-number\">");
+    let _ = crate::attributes::write_number_into(out, number as f32);
+    out.push_str("</text>");
+}
+
 fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) {
+    render_edge_body_into(out, edge_path, context);
+    write_sequence_number_into(out, edge_path, context);
+}
+
+fn render_edge_body_into(
+    out: &mut String,
+    edge_path: &LayoutEdgePath,
+    context: &EdgeRenderContext<'_>,
+) {
     use fm_core::ArrowType;
     let EdgeRenderContext {
         ir,
@@ -18838,8 +19406,27 @@ marker#arrow-open path {
         });
 
         let svg = render_svg(&ir);
-        assert!(svg.contains(">10 Ping<"));
-        assert!(svg.contains(">15 Pong<"));
+
+        // The number is its OWN element and the label is CLEAN (bd-o02wn). This test used to assert
+        // `>10 Ping<` — a prefix — which is not what mermaid produces: `drawMessage` writes
+        // `.attr("class","sequenceNumber").text(f)` with the digits alone. The configured start and
+        // increment are still exactly what this test exists to pin, and they still are: 10 then 15.
+        assert!(
+            svg.contains("class=\"fm-sequence-number\">10</text>"),
+            "the first message's number is not its own element"
+        );
+        assert!(
+            svg.contains("class=\"fm-sequence-number\">15</text>"),
+            "the increment did not reach the second message's number element"
+        );
+        assert!(
+            svg.contains(">Ping</text>") && svg.contains(">Pong</text>"),
+            "the labels did not come out clean; the number is still glued to them"
+        );
+        assert!(
+            !svg.contains(">10 Ping<") && !svg.contains(">15 Pong<"),
+            "a prefixed label survived alongside the number element, so both forms are emitted"
+        );
     }
 
     #[test]

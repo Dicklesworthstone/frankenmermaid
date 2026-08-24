@@ -271,6 +271,14 @@ struct NodeToken {
     label: Option<ParsedLabel>,
     icon: Option<String>,
     shape: NodeShape,
+    /// CSS classes from the `:::className` suffix (bd-8n2b5).
+    ///
+    /// The suffix is part of the TOKEN, so it belongs on the token. `parse_node_token_with_config`
+    /// already truncates the raw string at `:::` to find the id and previously threw the remainder
+    /// away, which is why `A:::urgent` styled nothing while `class A urgent` worked. Carrying it
+    /// here means edge endpoints, `&` node lists and bare declarations all pick it up from the one
+    /// function that decides where the id ends — no second copy of the splitting rules.
+    classes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -645,6 +653,8 @@ struct FlowAstNode {
     label: Option<ParsedLabel>,
     icon: Option<String>,
     shape: NodeShape,
+    /// `:::className` classes carried from the token (bd-8n2b5), applied by `intern_flow_ast_node`.
+    classes: Vec<String>,
 }
 
 impl From<NodeToken> for FlowAstNode {
@@ -654,6 +664,7 @@ impl From<NodeToken> for FlowAstNode {
             label: value.label,
             icon: value.icon,
             shape: value.shape,
+            classes: value.classes,
         }
     }
 }
@@ -843,6 +854,9 @@ fn flow_statement_parser<'a>()
                         label,
                         icon,
                         shape,
+                        // The chumsky `ident` excludes `:`, so a `:::` statement never parses here
+                        // — it falls through to the manual matchers, which do carry the suffix.
+                        classes: Vec::new(),
                     }
                 }
                 None => FlowAstNode {
@@ -850,6 +864,7 @@ fn flow_statement_parser<'a>()
                     label: None,
                     icon: None,
                     shape: NodeShape::Rect,
+                    classes: Vec::new(),
                 },
             }
         },
@@ -1099,60 +1114,97 @@ fn lower_flow_ast(
             link_target,
             is_callback,
         } => {
-            let cleaned = target
+            apply_click_directive(
+                builder,
+                node,
+                target,
+                tooltip.as_ref(),
+                link_target.as_ref(),
+                *is_callback,
+                line_number,
+                span,
+            );
+        }
+        FlowAst::StyleOrLinkStyle | FlowAst::ClassDef => {
+            // Intentionally skipped — same as the hand-written parser
+        }
+    }
+}
+
+/// Apply one parsed `click` directive to a node that already exists.
+///
+/// EXTRACTED so the gantt path can reuse it (bd-gydqv) instead of forking it. A second copy of
+/// this is exactly the shape that has bitten this file repeatedly: the safety gate, the quote
+/// stripping, the callback-vs-link split and the `link_target`-only-on-links rule would all have
+/// to be kept in step by hand, and the `_blank`-in-the-tooltip defect above is what that costs.
+///
+/// `node` is a node id that must already be interned — the setters here are non-interning, which
+/// is what stops a click on an unknown id from inventing a phantom.
+///
+/// The parameter list is the `ClickDirective` variant's own fields plus the two the caller must
+/// supply for diagnostics. Bundling them into a struct would add a type whose only purpose is to be
+/// destructured immediately on both sides of one call, so the lint is allowed rather than worked
+/// around — the same choice the SVG renderer makes for its stream writers.
+#[allow(clippy::too_many_arguments)]
+fn apply_click_directive(
+    builder: &mut IrBuilder,
+    node: &str,
+    target: &str,
+    tooltip: Option<&String>,
+    link_target: Option<&String>,
+    is_callback: bool,
+    line_number: usize,
+    span: Span,
+) {
+    let cleaned = target
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_matches('`')
+        .trim();
+    if cleaned.is_empty() {
+        builder.add_warning(format!(
+            "Line {line_number}: click directive target is empty after normalization"
+        ));
+    } else if is_callback {
+        // Callback: store function name, add interactive class.
+        builder.add_class_to_node(node, "has-callback", span);
+        builder.set_node_callback(node, cleaned, span);
+        if let Some(tip) = tooltip {
+            let tip_cleaned = tip
                 .trim()
                 .trim_matches('"')
                 .trim_matches('\'')
                 .trim_matches('`')
                 .trim();
-            if cleaned.is_empty() {
-                builder.add_warning(format!(
-                    "Line {line_number}: click directive target is empty after normalization"
-                ));
-            } else if *is_callback {
-                // Callback: store function name, add interactive class.
-                builder.add_class_to_node(node, "has-callback", span);
-                builder.set_node_callback(node, cleaned, span);
-                if let Some(tip) = tooltip {
-                    let tip_cleaned = tip
-                        .trim()
-                        .trim_matches('"')
-                        .trim_matches('\'')
-                        .trim_matches('`')
-                        .trim();
-                    if !tip_cleaned.is_empty() {
-                        builder.set_node_tooltip(node, tip_cleaned, span);
-                    }
-                }
-            } else if !is_safe_link_target(cleaned, builder.sanitize_mode()) {
-                builder.add_warning(format!(
-                    "Line {line_number}: unsafe click link target blocked: {cleaned}"
-                ));
-            } else {
-                builder.add_class_to_node(node, "has-link", span);
-                builder.set_node_link(node, cleaned, span);
-                // The declared browser target, if any (bd-vn7s). Applied only on the LINK branch:
-                // `setLink` is the only mermaid function that takes one, and a callback has no
-                // frame to open in. Runs after `set_node_link` so the node is guaranteed to exist,
-                // which is why the setter can be non-interning.
-                if let Some(link_target) = link_target {
-                    builder.set_node_link_target(node, link_target);
-                }
-                if let Some(tip) = tooltip {
-                    let tip_cleaned = tip
-                        .trim()
-                        .trim_matches('"')
-                        .trim_matches('\'')
-                        .trim_matches('`')
-                        .trim();
-                    if !tip_cleaned.is_empty() {
-                        builder.set_node_tooltip(node, tip_cleaned, span);
-                    }
-                }
+            if !tip_cleaned.is_empty() {
+                builder.set_node_tooltip(node, tip_cleaned, span);
             }
         }
-        FlowAst::StyleOrLinkStyle | FlowAst::ClassDef => {
-            // Intentionally skipped — same as the hand-written parser
+    } else if !is_safe_link_target(cleaned, builder.sanitize_mode()) {
+        builder.add_warning(format!(
+            "Line {line_number}: unsafe click link target blocked: {cleaned}"
+        ));
+    } else {
+        builder.add_class_to_node(node, "has-link", span);
+        builder.set_node_link(node, cleaned, span);
+        // The declared browser target, if any (bd-vn7s). Applied only on the LINK branch:
+        // `setLink` is the only mermaid function that takes one, and a callback has no
+        // frame to open in. Runs after `set_node_link` so the node is guaranteed to exist,
+        // which is why the setter can be non-interning.
+        if let Some(link_target) = link_target {
+            builder.set_node_link_target(node, link_target);
+        }
+        if let Some(tip) = tooltip {
+            let tip_cleaned = tip
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim_matches('`')
+                .trim();
+            if !tip_cleaned.is_empty() {
+                builder.set_node_tooltip(node, tip_cleaned, span);
+            }
         }
     }
 }
@@ -2128,6 +2180,9 @@ fn parse_flowchart_statement_asts(
             label: node.label,
             icon: node.icon,
             shape: node.shape,
+            // The bare `A[Label]:::urgent` declaration — one of the two positions that was silently
+            // dropping the class. The token already carries it; it just has to survive the move.
+            classes: node.classes,
         })]);
     }
 
@@ -2248,14 +2303,32 @@ fn flowchart_metadata_shape(name: &str) -> Option<NodeShape> {
         "rect" | "rectangle" | "box" | "proc" | "process" => NodeShape::Rect,
         "rounded" | "round" | "event" => NodeShape::Rounded,
         "stadium" | "pill" | "terminal" => NodeShape::Stadium,
-        "subroutine" | "subprocess" | "framed-rectangle" | "fr-rect" => NodeShape::Subroutine,
+        "subroutine" | "subprocess" | "subproc" | "framed-rectangle" | "fr-rect" => {
+            NodeShape::Subroutine
+        }
         "cylinder" | "cyl" | "database" | "db" => NodeShape::Cylinder,
         "circle" | "circ" => NodeShape::Circle,
         "double-circle" | "doublecircle" | "dbl-circ" => NodeShape::DoubleCircle,
         "diamond" | "decision" | "diam" | "question" => NodeShape::Diamond,
-        "hexagon" | "hex" => NodeShape::Hexagon,
-        "parallelogram" | "lean-r" | "in-out" => NodeShape::Parallelogram,
-        "trapezoid" | "trap-b" | "priority" => NodeShape::Trapezoid,
+        "hexagon" | "hex" | "prepare" => NodeShape::Hexagon,
+        "parallelogram" | "lean-r" | "lean-right" | "in-out" => NodeShape::Parallelogram,
+        "trapezoid" | "trap-b" | "trapezoid-bottom" | "priority" => NodeShape::Trapezoid,
+        // ── THE MIRRORED HALF (bd-3ra5y) ──────────────────────────────────────────────────────
+        // Every name below is a shape this renderer ALREADY DRAWS, reachable today through its
+        // bracket spelling, whose mermaid 11 `shape:` name simply was not listed. `lean-r` mapped
+        // and `lean-l` did not; `trap-b` mapped and `trap-t` did not. Because they were also absent
+        // from `UNIMPLEMENTED_UPSTREAM_SHAPES`, an author writing a correct name was told the name
+        // was unrecognised — sent to fix a spelling that was already right, for a shape we render.
+        // Aliases are taken verbatim from the pinned 11.15.0 shape registry, not invented.
+        "lean-l" | "lean-left" | "out-in" => NodeShape::InvParallelogram,
+        "trap-t" | "trapezoid-top" | "inv-trapezoid" | "manual" => NodeShape::InvTrapezoid,
+        // `odd` carries no public aliases in the registry — only the internal `rect_left_inv_arrow`,
+        // which is not author-facing syntax and is deliberately NOT accepted here.
+        "odd" => NodeShape::Asymmetric,
+        "tri" | "triangle" | "extract" => NodeShape::Triangle,
+        "f-circ" | "filled-circle" | "junction" => NodeShape::FilledCircle,
+        "cross-circ" | "crossed-circle" | "summary" => NodeShape::CrossedCircle,
+        "cloud" => NodeShape::Cloud,
         _ => return None,
     })
 }
@@ -2308,19 +2381,93 @@ fn split_metadata_pairs(body: &str) -> Vec<&str> {
 /// ⚠️ A NAME ADDED TO `flowchart_metadata_shape` MUST BE REMOVED FROM HERE, or implementing a shape
 /// leaves behind a warning claiming it is unimplemented. The `every_unimplemented_shape_is_really
 /// _unimplemented` test enforces exactly that, so the two lists cannot drift apart silently.
-const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 12] = [
+/// ⚠️ THIS LIST HELD 12 OF 80 (bd-3ra5y). It carried only shortNames and none of their ALIASES, so
+/// `shape: card` was told to check its spelling while `shape: notch-rect` — the same shape, the
+/// other name for it — was correctly told the shape is unbuilt. The registry publishes both, so a
+/// list of shortNames alone can only ever answer for the half of authors who happened to pick one.
+/// Every entry below is a name the pinned 11.15.0 registry publishes as author-facing syntax
+/// (`shortName` or `aliases`); internal aliases like `rect_left_inv_arrow` are deliberately absent.
+const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 80] = [
+    "bang",
     "bolt",
     "bow-rect",
+    "bow-tie-rectangle",
     "brace",
+    "brace-l",
+    "brace-r",
+    "braces",
+    "card",
+    "collate",
+    "com-link",
+    "comment",
     "curv-trap",
+    "curved-trapezoid",
+    "das",
+    "data-store",
+    "datastore",
     "delay",
+    "disk",
+    "display",
+    "div-proc",
     "div-rect",
+    "divided-process",
+    "divided-rectangle",
+    "doc",
+    "docs",
+    "document",
+    "documents",
     "flag",
+    "flip-tri",
+    "flipped-triangle",
+    "fork",
+    "fr-circ",
+    "framed-circle",
+    "h-cyl",
+    "half-rounded-rectangle",
+    "horizontal-cylinder",
     "hourglass",
+    "internal-storage",
+    "join",
+    "lightning-bolt",
     "lin-cyl",
+    "lin-doc",
+    "lin-proc",
+    "lin-rect",
+    "lined-cylinder",
+    "lined-document",
+    "lined-process",
+    "lined-rectangle",
+    "loop-limit",
+    "manual-file",
+    "manual-input",
+    "notch-pent",
     "notch-rect",
+    "notched-pentagon",
+    "notched-rectangle",
+    "paper-tape",
+    "processes",
+    "procs",
+    "shaded-process",
     "sl-rect",
+    "sloped-rectangle",
+    "sm-circ",
+    "small-circle",
+    "st-doc",
+    "st-rect",
+    "stacked-document",
+    "stacked-rectangle",
+    "start",
+    "stop",
+    "stored-data",
+    "tag-doc",
+    "tag-proc",
     "tag-rect",
+    "tagged-document",
+    "tagged-process",
+    "tagged-rectangle",
+    "text",
+    "win-pane",
+    "window-pane",
 ];
 
 /// Message for a `shape:` name that [`flowchart_metadata_shape`] does not map.
@@ -2398,6 +2545,7 @@ fn parse_flowchart_node_metadata(
         label,
         icon: base.icon,
         shape,
+        classes: base.classes,
     }))
 }
 
@@ -2481,6 +2629,8 @@ fn parse_fast_simple_flowchart_edge_ast(statement: &str) -> Option<FlowAst> {
             label: None,
             icon: None,
             shape: NodeShape::Rect,
+            // FAST edge path: `FAST_EDGE_REJECT` lists `:`, so a `:::` statement cannot reach here.
+            classes: Vec::new(),
         },
         arrow,
         label: None,
@@ -2490,6 +2640,7 @@ fn parse_fast_simple_flowchart_edge_ast(statement: &str) -> Option<FlowAst> {
             label: None,
             icon: None,
             shape: NodeShape::Rect,
+            classes: Vec::new(),
         },
     })
 }
@@ -2585,6 +2736,9 @@ fn parse_fast_simple_flowchart_node_ast(statement: &str) -> Option<FlowAstNode> 
         label,
         icon,
         shape: NodeShape::Rect,
+        // FAST node path: `FAST_ID_CHAR` omits `:` and a bracketed `N0[x]:::c` fails the
+        // `ends_with(']')` guard, so a `:::` token always defers to the general parser.
+        classes: Vec::new(),
     })
 }
 
@@ -2803,7 +2957,25 @@ fn intern_node_token(builder: &mut IrBuilder, node: &NodeToken, span: Span) -> O
     if let Some(icon) = node.icon.as_deref() {
         builder.set_node_icon(node_id, icon);
     }
+    apply_inline_classes(builder, node_id, &node.classes);
     Some(node_id)
+}
+
+/// Apply a token's `:::className` classes to the node just interned (bd-8n2b5).
+///
+/// ⚠️ THERE ARE TWO INTERNING FUNCTIONS, and applying this in only one of them is inert — the exact
+/// shape of the guard that shipped covering one of two callers before. `intern_node_token` takes the
+/// `NodeToken`, `intern_flow_ast_node` takes the `FlowAstNode` it converts into, and a flowchart
+/// node can arrive through either. Both call this, so neither can drift.
+///
+/// The two FAST document paths (`FastNode`/`FastEdge`) deliberately do NOT: both refuse a `:::`
+/// token before reaching this point — `FAST_EDGE_REJECT` lists `:`, `FAST_ID_CHAR` omits it, and a
+/// bracketed `N0[x]:::c` fails the `ends_with(']')` guard — so such a statement always falls through
+/// to the general path. That is checked, not assumed; `a_class_suffix_never_takes_a_fast_path` pins it.
+fn apply_inline_classes(builder: &mut IrBuilder, node_id: IrNodeId, classes: &[String]) {
+    for class_name in classes {
+        builder.add_class_to_node_id(node_id, class_name);
+    }
 }
 
 fn intern_flow_ast_node(
@@ -2824,6 +2996,7 @@ fn intern_flow_ast_node(
     if let Some(icon) = node.icon.as_deref() {
         builder.set_node_icon(node_id, icon);
     }
+    apply_inline_classes(builder, node_id, &node.classes);
     Some(node_id)
 }
 
@@ -3123,15 +3296,37 @@ fn parse_sequence_autonumber(line: &str) -> Option<SequenceStatement> {
 
 /// Parse `Note left of Alice: text`, `Note right of Bob: text`,
 /// `Note over Alice: text`, `Note over Alice,Bob: text`.
-fn parse_sequence_note(line: &str) -> Option<SequenceStatement> {
-    let rest = line.strip_prefix("Note ")?;
+/// Strip `prefix` from the front of `line`, ignoring ASCII case.
+///
+/// mermaid's sequence lexer matches `note` case-insensitively, and so do its position words —
+/// `note`, `Note`, `NOTE` and even `Note Right Of` all PARSE against the pinned bundle.
+fn strip_prefix_ignore_ascii_case<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = line.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &line[prefix.len()..])
+}
 
-    let (position, after_kw) = if let Some(r) = rest.strip_prefix("left of ") {
+fn parse_sequence_note(line: &str) -> Option<SequenceStatement> {
+    // CASE-INSENSITIVE (bd-am6a2). This required a capital `Note `, so `note right of Bob: text` —
+    // the spelling mermaid's own docs use and the one the STATE parser in this same file already
+    // accepts — was SILENTLY DROPPED: no note box, no text, no warning, on all four placements.
+    //
+    // Three independent lines of evidence, not a style preference: the pinned incumbent returns a
+    // clean PARSED for `note`, `NOTE` and `Note Right Of` alike; our state parser accepts lowercase
+    // and renders it; and the drop was silent, which is the worst failure mode for a keyword whose
+    // case the author has no reason to think matters.
+    //
+    // An actor NAMED `note` needs no protection here: mermaid rejects `note->>Bob: hi` as a syntax
+    // error, so the word is reserved on both sides, and this function still returns `None` unless a
+    // position keyword follows.
+    let rest = strip_prefix_ignore_ascii_case(line, "Note ")?;
+
+    let (position, after_kw) = if let Some(r) = strip_prefix_ignore_ascii_case(rest, "left of ") {
         (fm_core::NotePosition::LeftOf, r)
-    } else if let Some(r) = rest.strip_prefix("right of ") {
+    } else if let Some(r) = strip_prefix_ignore_ascii_case(rest, "right of ") {
         (fm_core::NotePosition::RightOf, r)
     } else {
-        let r = rest.strip_prefix("over ")?;
+        let r = strip_prefix_ignore_ascii_case(rest, "over ")?;
         (fm_core::NotePosition::Over, r)
     };
 
@@ -4409,6 +4604,42 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
     (!statements.is_empty() || handled_non_node_statement).then_some(statements)
 }
 
+/// True for a class-diagram `linkStyle <targets> <styles>` directive (bd-9gmvp).
+///
+/// `linkStyle 0 stroke:#f00` was drawn as a CLASS BOX captioned with the directive.
+/// `keyword("link")` in the caller does NOT cover it — that helper requires the token to stand
+/// alone, which is what keeps a class named `linkage` safe, and is exactly why the omission was
+/// invisible: the list already looked like it handled the `link` family. The SHARED sibling
+/// predicate, `is_non_node_directive_statement`, has covered `linkStyle` all along; this is the
+/// same asymmetry bd-yfcfv found between two predicates meant to say the same thing.
+///
+/// ⚠️ NOT a bare `keyword("linkStyle")`, and the difference is a regression I caught with my own
+/// control rather than reasoning: a class may legitimately be NAMED `linkStyle`, and
+/// `linkStyle --> B` is then a RELATION. The bare keyword swallowed it and silently dropped the
+/// edge — the bd-ij0f shape, where widening a filter eats valid input.
+///
+/// The targets position is what disambiguates, because mermaid's own grammar constrains it: an
+/// index, a comma list of indices, or `default`. A relation can never look like that, and a real
+/// directive always does — so this needs no guess about arrow spellings and cannot be defeated by a
+/// CSS value that happens to contain `--` (`stroke:var(--x)` would defeat a contains-`--` bail).
+fn is_class_link_style_directive(statement: &str) -> bool {
+    let Some(rest) = statement.strip_prefix("linkStyle") else {
+        return false;
+    };
+    let Some(targets) = rest
+        .strip_prefix(char::is_whitespace)
+        .map(str::trim_start)
+        .and_then(|rest| rest.split_whitespace().next())
+    else {
+        return false;
+    };
+    targets.eq_ignore_ascii_case("default")
+        || (!targets.is_empty()
+            && targets
+                .split(',')
+                .all(|index| !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())))
+}
+
 /// Statements that carry class-diagram metadata or interactivity rather than declaring a class.
 ///
 /// Their data is either extracted globally (`accTitle`, `accDescr`, `style`, `classDef`) or not
@@ -4433,6 +4664,7 @@ fn is_class_non_node_statement(statement: &str) -> bool {
         || accessibility("accDescr")
         || keyword("title")
         || keyword("style")
+        || is_class_link_style_directive(statement)
         || keyword("classDef")
         || keyword("cssClass")
         || keyword("click")
@@ -4645,7 +4877,7 @@ fn parse_state_statements(line: &str, config: &ParserConfig) -> Option<Vec<State
     }
 
     // `class A bad` styles state A; it must not ALSO become a state (bd-0audg).
-    if is_state_class_assignment(line) {
+    if is_class_style_assignment_statement(line) {
         return Some(Vec::new());
     }
 
@@ -4800,7 +5032,8 @@ fn is_state_hide_empty_description(line: &str) -> bool {
         && description.eq_ignore_ascii_case("description")
 }
 
-/// True for a state-diagram `class <states> <classNames>` STYLE APPLICATION (bd-0audg).
+/// True for a `class <targets> <classNames>` STYLE APPLICATION in a diagram type where `class`
+/// never DECLARES anything — state diagrams (bd-0audg) and ER diagrams (bd-25lru).
 ///
 /// The style itself is extracted globally, for every diagram type, before this parser runs — the
 /// targets really do come out carrying the class. The line then fell through to the node parser as
@@ -4812,13 +5045,15 @@ fn is_state_hide_empty_description(line: &str) -> bool {
 /// and bd-xfmm's subgraph phantom — and worse than a silent drop, because the reader sees text
 /// nobody wrote.
 ///
-/// Kept LOCAL rather than added to `is_non_node_directive_statement` for the reason that predicate's
-/// own doc gives: it is shared, and in a CLASS diagram `class A` DECLARES a node. Widening it there
-/// would delete every bare class declaration in the corpus — the shape of the bd-ij0f regression.
+/// Deliberately NOT added to `is_non_node_directive_statement`, for the reason that predicate's own
+/// doc gives: it is shared with the CLASS diagram path, where `class A` DECLARES a node. Widening
+/// it there would delete every bare class declaration in the corpus — the bd-ij0f regression shape.
+/// This predicate is opt-in per diagram type instead, which is why it is a named function rather
+/// than an inline check: state and ER need the identical rule, and a second copy would drift.
 ///
 /// TWO tokens minimum, so a bare `class A` is left alone for its own path to interpret, and an
 /// arrow bail so a transition leaving a state legitimately named `class` stays a transition.
-fn is_state_class_assignment(line: &str) -> bool {
+fn is_class_style_assignment_statement(line: &str) -> bool {
     let Some(rest) = trim_fast(line).strip_prefix("class ") else {
         return false;
     };
@@ -5476,6 +5711,7 @@ fn parse_mindmap_node_token(raw: &str, config: &ParserConfig) -> Option<NodeToke
                 label: parsed.label,
                 icon: parsed.icon,
                 shape: NodeShape::Circle,
+                classes: Vec::new(),
             });
         }
 
@@ -5505,6 +5741,7 @@ fn parse_mindmap_node_token(raw: &str, config: &ParserConfig) -> Option<NodeToke
         label,
         icon,
         shape: NodeShape::Rect,
+        classes: Vec::new(),
     })
 }
 
@@ -5533,6 +5770,7 @@ fn parse_mindmap_bang(raw: &str) -> Option<NodeToken> {
         label,
         icon,
         shape: NodeShape::Asymmetric,
+        classes: Vec::new(),
     })
 }
 
@@ -5570,6 +5808,7 @@ fn parse_mindmap_cloud(raw: &str) -> Option<NodeToken> {
         label,
         icon,
         shape: NodeShape::Cloud,
+        classes: Vec::new(),
     })
 }
 
@@ -5598,6 +5837,7 @@ fn parse_mindmap_hexagon(raw: &str) -> Option<NodeToken> {
         label,
         icon,
         shape: NodeShape::Hexagon,
+        classes: Vec::new(),
     })
 }
 
@@ -5617,6 +5857,19 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
 
         // bd-ij0f: `accTitle: T` and `style A fill:#bbf` were interned as entities.
         if is_non_node_directive_statement(trimmed) {
+            continue;
+        }
+
+        // …and `class CUSTOMER bad` was too (bd-25lru). Not covered above, correctly: that predicate
+        // is shared with the CLASS diagram, where `class A` DECLARES. ER needs the same opt-in rule
+        // state diagrams needed, which is why this is one named predicate and not two inline checks.
+        //
+        // The phantom here was INVISIBLE to a drawn-text check — the entity had no label to draw —
+        // while being very much present: `data-nodes` went 2 to 3, it got its own `data-id` group,
+        // it took LAYOUT SPACE (the viewBox grew from 326x437 to 395x623, shifting the real
+        // entities), and the accessibility description announced "Key nodes: CUSTOMER, ORDER,
+        // class CUSTOMER bad." A screen reader read the author's directive out as an entity.
+        if is_class_style_assignment_statement(trimmed) {
             continue;
         }
 
@@ -7032,6 +7285,15 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
     // Lookup-only (dependency resolution `get`s below); iteration order is never used — the resolved
     // edges come from `pending_dependencies` in insertion order — so an FxHashMap replaces the BTreeMap's
     // O(log N) String-comparison inserts/lookups with O(1) hashing. Byte-identical output.
+    // Clicks, held until the task-id map is complete — see the deferral note in the loop.
+    let mut pending_clicks: Vec<(Vec<FlowAst>, usize, Span)> = Vec::new();
+    let mut click_warnings: Vec<String> = Vec::new();
+    // A declared task id (`a1`) to the key the node was actually INTERNED under (`Alpha_4`).
+    // The distinction is load-bearing: `set_node_link` interns its key, so handing it the declared
+    // id would mint a phantom node named `a1` — the exact bd-xfmm/bd-vc1zp defect this feature is
+    // built on top of.
+    let mut task_ids_to_keys: rustc_hash::FxHashMap<String, String> =
+        rustc_hash::FxHashMap::default();
     let mut task_ids_to_nodes: rustc_hash::FxHashMap<String, IrNodeId> =
         rustc_hash::FxHashMap::default();
     let mut pending_dependencies: Vec<PendingGanttDependency> = Vec::new();
@@ -7059,6 +7321,38 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         // a visible gantt TASK. Worst of the family: the phantom carries the author's
         // accessibility text as its own accessible name, so assistive tech announces it too.
         if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
+            continue;
+        }
+
+        // bd-vc1zp: `click a1 href "https://example.com"` was interned as a TASK. The trigger is the
+        // SCHEME COLON: a gantt task line is `name : metadata`, and the `:` inside `https://` made
+        // the directive parse as a task named `click a1 href "https` — so the phantom bar appeared
+        // only for the URL form people actually write. `click a1 href "example.com"` and
+        // `click a1 call doThing()` both had no colon to split on and were already dropped, which is
+        // why one half of gantt's own click support looked fine while the other produced a phantom.
+        //
+        // NOW SUPPORTED, not merely ignored (bd-gydqv). bd-vc1zp stopped the directive being drawn
+        // as a task; this attaches it to the task it names, so gantt honours `click` the way the
+        // flowchart already does — including through `fm_render_canvas::hit_regions`, so a browser
+        // host on a raster surface gets it too.
+        //
+        // DEFERRED, not applied inline: a `click` may PRECEDE the task it targets, and the task-id
+        // map is only complete once the loop ends. Applying here would silently drop every forward
+        // reference.
+        //
+        // NARROW on purpose. The broad `is_non_node_directive_statement` also swallows `title`, and
+        // gantt parses `title` into real diagram meta three lines below — swallowing it here would
+        // be the bd-ij0f regression exactly.
+
+        if trimmed
+            .strip_prefix("click")
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+        {
+            if let Some(directives) =
+                parse_click_directive_ast(trimmed, line_number, &mut click_warnings)
+            {
+                pending_clicks.push((directives, line_number, span_for(line_number, line)));
+            }
             continue;
         }
 
@@ -7191,6 +7485,9 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         }
         if let Some(task_id_ref) = parsed_meta.task_id.as_ref() {
             task_ids_to_nodes.entry(task_id_ref.clone()).or_insert(node);
+            task_ids_to_keys
+                .entry(task_id_ref.clone())
+                .or_insert_with(|| task_id.clone());
         }
         if let Some(after_task_id) = parsed_meta.depends_on.first() {
             if let Some(from) = task_ids_to_nodes.get(after_task_id).copied() {
@@ -7246,6 +7543,46 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
                         .add_warning(format!("Unresolved gantt dependency 'after {dependency}'"));
                 }
             }
+        }
+    }
+
+    for warning in click_warnings {
+        builder.add_warning(warning);
+    }
+
+    // Resolve each click against the declared task ids, then apply it through the SAME helper the
+    // flowchart uses, so the safety gate, the callback/link split and the link-target rule cannot
+    // drift between the two diagram types.
+    for (directives, line_number, span) in pending_clicks {
+        for directive in &directives {
+            let FlowAst::ClickDirective {
+                node,
+                target,
+                tooltip,
+                link_target,
+                is_callback,
+            } = directive
+            else {
+                continue;
+            };
+            let Some(node_key) = task_ids_to_keys.get(node) else {
+                // NAMED, not silent: an unresolved click is a typo in the author's chart, and the
+                // alternative — interning the id — is how phantom tasks got here in the first place.
+                builder.add_warning(format!(
+                    "Line {line_number}: click directive targets unknown gantt task '{node}'"
+                ));
+                continue;
+            };
+            apply_click_directive(
+                builder,
+                &node_key.clone(),
+                target,
+                tooltip.as_ref(),
+                link_target.as_ref(),
+                *is_callback,
+                line_number,
+                span,
+            );
         }
     }
 
@@ -10619,7 +10956,42 @@ fn extract_pipe_label(right_hand_side: &str) -> (Option<String>, &str) {
     (label, remainder)
 }
 
+/// Class names from a trailing `:::a b` suffix, in declaration order (bd-8n2b5).
+///
+/// mermaid's `setClass` splits the suffix on whitespace, so `A:::a b` carries TWO classes. Returns
+/// empty for a token with no suffix, which is the common node and must stay allocation-free.
+fn inline_class_names(raw: &str) -> Vec<String> {
+    let trimmed = trim_fast(raw);
+    // The common node token has no `:` at all; `find_triple_colon` is a vectorized first-byte scan,
+    // but skipping it entirely keeps a plain flowchart off this path completely.
+    if !trimmed.as_bytes().contains(&b':') {
+        return Vec::new();
+    }
+    let Some(pos) = find_triple_colon(trimmed) else {
+        return Vec::new();
+    };
+    trimmed[pos + 3..]
+        .split_ascii_whitespace()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Parses a node token, INCLUDING its `:::className` suffix (bd-8n2b5).
+///
+/// The suffix used to be located, truncated away to find the id, and then dropped on the floor —
+/// so `A:::urgent` produced a node with no classes while the emitted stylesheet still carried the
+/// `classDef` rule for it. Wrapping the original matcher rather than teaching each of its ~10 exits
+/// about the suffix keeps ONE place that knows where the id ends and where the classes begin.
 fn parse_node_token_with_config(raw: &str, config: &ParserConfig) -> Option<NodeToken> {
+    let mut token = parse_node_token_core(raw, config)?;
+    // A path that already resolved its own classes (none do today) keeps them: this only fills in.
+    if token.classes.is_empty() {
+        token.classes = inline_class_names(raw);
+    }
+    Some(token)
+}
+
+fn parse_node_token_core(raw: &str, config: &ParserConfig) -> Option<NodeToken> {
     let trimmed = trim_fast(raw);
     if trimmed.is_empty() {
         return None;
@@ -10631,6 +11003,7 @@ fn parse_node_token_with_config(raw: &str, config: &ParserConfig) -> Option<Node
             label: None,
             icon: None,
             shape: NodeShape::Circle,
+            classes: Vec::new(),
         });
     }
 
@@ -10736,6 +11109,7 @@ fn parse_node_token_with_config(raw: &str, config: &ParserConfig) -> Option<Node
         label,
         icon,
         shape: NodeShape::Rect,
+        classes: Vec::new(),
     })
 }
 
@@ -10768,6 +11142,7 @@ fn parse_double_circle_with_config(raw: &str, config: &ParserConfig) -> Option<N
         label,
         icon,
         shape: NodeShape::DoubleCircle,
+        classes: Vec::new(),
     })
 }
 
@@ -10811,6 +11186,7 @@ fn parse_wrapped_with_config(
         label,
         icon,
         shape,
+        classes: Vec::new(),
     })
 }
 
@@ -10872,6 +11248,7 @@ fn parse_wrapped_str_with_config(
         label,
         icon,
         shape,
+        classes: Vec::new(),
     })
 }
 
@@ -10893,6 +11270,7 @@ fn dangling_placeholder_node(line_number: usize, placeholder_index: usize) -> No
         label: None,
         icon: None,
         shape: NodeShape::Rect,
+        classes: Vec::new(),
     }
 }
 
