@@ -295,40 +295,53 @@ impl LayoutDependencyGraph {
         let fragment_components = connectivity_fragments(ir.nodes.len(), &edges, &covered_nodes);
         let mut node_to_fragment = BTreeMap::new();
         for component in fragment_components {
-            let region_id = SubgraphRegionId(next_region_index);
-            next_region_index = next_region_index.saturating_add(1);
+            let is_oversized_flat_component = component.len() > FLAT_COMPONENT_REGION_NODE_CAP;
+            for members in component.chunks(FLAT_COMPONENT_REGION_NODE_CAP) {
+                let region_id = SubgraphRegionId(next_region_index);
+                next_region_index = next_region_index.saturating_add(1);
 
-            let node_indexes: BTreeSet<_> = component.into_iter().collect();
-            for node_index in &node_indexes {
-                node_to_fragment.insert(*node_index, region_id);
+                let node_indexes: BTreeSet<_> = members.iter().copied().collect();
+                for node_index in &node_indexes {
+                    node_to_fragment.insert(*node_index, region_id);
+                }
+                let edge_indexes = edges
+                    .iter()
+                    .filter(|edge| {
+                        node_indexes.contains(&edge.source) && node_indexes.contains(&edge.target)
+                    })
+                    .map(|edge| edge.edge_index)
+                    .collect();
+                let inputs = node_indexes
+                    .iter()
+                    .copied()
+                    .map(RegionInput::Node)
+                    .collect::<BTreeSet<_>>();
+                let kind = if is_oversized_flat_component {
+                    SubgraphRegionKind::SpatialPartition
+                } else {
+                    SubgraphRegionKind::ConnectivityFragment
+                };
+                let label = if is_oversized_flat_component {
+                    format!("flat-window:{}", region_id.0)
+                } else {
+                    format!("component:{}", region_id.0)
+                };
+                regions.insert(
+                    region_id,
+                    SubgraphRegion {
+                        id: region_id,
+                        kind,
+                        label,
+                        node_indexes,
+                        edge_indexes,
+                        subgraph_indexes: BTreeSet::new(),
+                        depends_on: BTreeSet::new(),
+                        dependents: BTreeSet::new(),
+                        inputs,
+                        estimated_bytes: 0,
+                    },
+                );
             }
-            let edge_indexes = edges
-                .iter()
-                .filter(|edge| {
-                    node_indexes.contains(&edge.source) && node_indexes.contains(&edge.target)
-                })
-                .map(|edge| edge.edge_index)
-                .collect();
-            let inputs = node_indexes
-                .iter()
-                .copied()
-                .map(RegionInput::Node)
-                .collect::<BTreeSet<_>>();
-            regions.insert(
-                region_id,
-                SubgraphRegion {
-                    id: region_id,
-                    kind: SubgraphRegionKind::ConnectivityFragment,
-                    label: format!("component:{region_id_index}", region_id_index = region_id.0),
-                    node_indexes,
-                    edge_indexes,
-                    subgraph_indexes: BTreeSet::new(),
-                    depends_on: BTreeSet::new(),
-                    dependents: BTreeSet::new(),
-                    inputs,
-                    estimated_bytes: 0,
-                },
-            );
         }
 
         let primary_regions = primary_region_owners(ir, &explicit_region_ids, &node_to_fragment);
@@ -837,6 +850,12 @@ pub struct LayoutConfig {
     pub font_metrics: Option<fm_core::FontMetrics>,
     /// Enable FNX-assisted ordering heuristics when available.
     pub fnx_enabled: bool,
+    /// Solve a bounded flowchart layer assignment as a continuous LP after the heuristic pass.
+    ///
+    /// This is opt-in because the incumbent rank assignment is already deterministic and linear.
+    /// The LP path is deliberately restricted to small, constraint-free flowcharts until it has
+    /// accumulated corpus evidence on broader inputs.
+    pub lp_relaxation_layers: bool,
     pub constraint_solver: ConstraintSolverMode,
     /// Wall-clock ceiling for the LP solve, in milliseconds, as a **liveness valve only** (bd-9xwk).
     ///
@@ -872,6 +891,7 @@ impl Default for LayoutConfig {
             edge_routing: EdgeRouting::default(),
             font_metrics: None,
             fnx_enabled: true,
+            lp_relaxation_layers: false,
             constraint_solver: ConstraintSolverMode::Optimize,
             constraint_solver_wall_clock_valve_ms: CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS,
         }
@@ -1430,6 +1450,10 @@ fn metrics_topology_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramI
 }
 
 const INCREMENTAL_DEPENDENCY_GRAPH_BYPASS_NODE_THRESHOLD: usize = 50;
+/// The largest flat connectivity fragment that remains one invalidation region. Larger connected
+/// flowcharts carry no semantic subgraph boundary, so deterministic input-order windows provide
+/// the bounded fallback that keeps a local edit from invalidating the entire document.
+const FLAT_COMPONENT_REGION_NODE_CAP: usize = 64;
 
 fn track_dependency_graph_query(ir: &MermaidDiagramIr) {
     ACTIVE_INCREMENTAL_STATE.with(|slot| {
@@ -2067,6 +2091,8 @@ pub struct NodeCentrality {
 pub struct LayoutExtensions {
     pub bands: Vec<LayoutBand>,
     pub axis_ticks: Vec<LayoutAxisTick>,
+    /// Gantt has one unconditional bottom axis and an optional top axis.
+    pub gantt_axis_rows: Vec<LayoutGanttAxisRow>,
     pub cluster_dividers: Vec<LayoutClusterDivider>,
     /// Activation bars for sequence diagrams — narrow rectangles on lifelines
     /// indicating when a participant is active (processing a message).
@@ -2240,6 +2266,19 @@ impl LayoutGanttDayAxis {
 pub struct LayoutAxisTick {
     pub label: String,
     pub position: f32,
+}
+
+/// One Gantt time-axis row, positioned by layout so every renderer uses the same placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutGanttAxisPlacement {
+    Bottom,
+    Top,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayoutGanttAxisRow {
+    pub placement: LayoutGanttAxisPlacement,
+    pub y: f32,
 }
 
 /// Where a gantt task's name is drawn relative to its bar.
@@ -4764,6 +4803,14 @@ fn layout_diagram_sugiyama_traced_with_config(
     };
 
     let mut ranks = rank_assignment(ir, &cycle_result, &node_priority);
+    if config.lp_relaxation_layers
+        && ir.diagram_type == DiagramType::Flowchart
+        && ir.nodes.len() <= LP_RELAXATION_LAYER_NODE_LIMIT
+        && ir.constraints.is_empty()
+        && let Some(relaxed_ranks) = lp_relaxation_layer_assignment(ir, &cycle_result, &ranks)
+    {
+        ranks = relaxed_ranks;
+    }
     apply_ir_constraints(ir, &mut ranks);
     push_snapshot(
         &mut trace,
@@ -6343,6 +6390,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 bands: lifeline_bands,
                 gantt_day_axis: None,
                 axis_ticks: Vec::new(),
+                gantt_axis_rows: Vec::new(),
                 cluster_dividers: Vec::new(),
                 activation_bars,
                 sequence_notes: build_sequence_note_geometry(
@@ -6640,6 +6688,7 @@ fn layout_diagram_gantt_fallback(ir: &MermaidDiagramIr) -> TracedLayout {
     // canvas has to grow to hold it or it is clipped at the viewBox edge — which is exactly what made
     // the first attempt at this unshippable.
     extend_bounds_for_gantt_labels(layout);
+    layout_gantt_axis_rows(layout, false);
     traced
 }
 
@@ -6943,6 +6992,7 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
     // canvas has to grow to hold it or it is clipped at the viewBox edge — which is exactly what made
     // the first attempt at this unshippable.
     extend_bounds_for_gantt_labels(layout);
+    layout_gantt_axis_rows(layout, gantt_meta.top_axis);
     traced
 }
 
@@ -7036,6 +7086,47 @@ fn extend_bounds_for_gantt_labels(layout: &mut DiagramLayout) {
     }
     layout.bounds.x = min_x;
     layout.bounds.width = max_x - min_x;
+}
+
+/// Publish Gantt axis baselines after task geometry and horizontal label extents are final.
+///
+/// Mermaid 11.15 always appends the bottom grid. `gantt.topAxis` adds a second grid above the task
+/// rows; it does not relocate the first one. The coordinates belong here because renderers must not
+/// infer chart extents independently and disagree about whether `+12` or `-12` is inside the SVG.
+fn layout_gantt_axis_rows(layout: &mut DiagramLayout, top_axis: bool) {
+    let Some(first) = layout.nodes.first() else {
+        return;
+    };
+    let (task_top, task_bottom) = layout.nodes.iter().fold(
+        (first.bounds.y, first.bounds.y + first.bounds.height),
+        |(top, bottom), node| {
+            (
+                top.min(node.bounds.y),
+                bottom.max(node.bounds.y + node.bounds.height),
+            )
+        },
+    );
+
+    // The pinned reference puts the top baseline immediately above the first task row and the
+    // bottom baseline immediately below the last. Reserve the lower tick depth in bounds so neither
+    // the canvas nor SVG clips the unconditional bottom labels.
+    let bottom_y = task_bottom + 4.0;
+    let required_bottom = bottom_y + 16.0;
+    let current_bottom = layout.bounds.y + layout.bounds.height;
+    if required_bottom > current_bottom {
+        layout.bounds.height = required_bottom - layout.bounds.y;
+    }
+
+    layout.extensions.gantt_axis_rows.push(LayoutGanttAxisRow {
+        placement: LayoutGanttAxisPlacement::Bottom,
+        y: bottom_y,
+    });
+    if top_axis {
+        layout.extensions.gantt_axis_rows.push(LayoutGanttAxisRow {
+            placement: LayoutGanttAxisPlacement::Top,
+            y: task_top - 8.0,
+        });
+    }
 }
 
 #[must_use]
@@ -11610,8 +11701,10 @@ fn apply_ir_constraints(ir: &MermaidDiagramIr, ranks: &mut BTreeMap<usize, usize
                     }
                 }
             }
-            IrConstraint::Pin { .. } | IrConstraint::OrderInRank { .. } => {
-                // Pin and OrderInRank are applied during coordinate assignment,
+            IrConstraint::Pin { .. }
+            | IrConstraint::OrderInRank { .. }
+            | IrConstraint::NonOverlap { .. } => {
+                // Pin, OrderInRank, and NonOverlap are applied during coordinate assignment,
                 // not during rank assignment.
             }
         }
@@ -11762,6 +11855,87 @@ fn rank_assignment(
     }
 
     (0..node_count).map(|index| (index, ranks[index])).collect()
+}
+
+/// The largest graph admitted to the optional LP layer-assignment pass.
+///
+/// Layer inequalities form a totally-unimodular system, so an optimal basic solution is integral.
+/// Keeping this initial path bounded makes its solver cost and failure mode explicit while the
+/// default Sugiyama rank pass remains the production default.
+const LP_RELAXATION_LAYER_NODE_LIMIT: usize = 50;
+
+/// Re-solve the existing flowchart layer inequalities as a continuous LP.
+///
+/// The heuristic rank bands anchor each weak component, preserving its deliberate disconnected
+/// component packing. Within each component the LP minimizes total layer index subject to one
+/// layer per oriented edge, yielding the canonical longest-path layering when HiGHS proves optimal.
+/// Any non-optimal, non-integral, or failed result is rejected by returning `None`.
+#[cfg(not(target_arch = "wasm32"))]
+fn lp_relaxation_layer_assignment(
+    ir: &MermaidDiagramIr,
+    cycles: &CycleRemovalResult,
+    fallback: &BTreeMap<usize, usize>,
+) -> Option<BTreeMap<usize, usize>> {
+    if ir.nodes.len() > LP_RELAXATION_LAYER_NODE_LIMIT {
+        return None;
+    }
+
+    let edges = oriented_edges(ir, &cycles.reversed_edge_indexes);
+    let mut variables = good_lp::ProblemVariables::new();
+    let rank_vars: Vec<_> = ir
+        .nodes
+        .iter()
+        .map(|_| variables.add(variable().min(0.0)))
+        .collect();
+    let objective = rank_vars
+        .iter()
+        .fold(Expression::from(0.0), |sum, rank| sum + *rank);
+    let mut model = variables.minimise(objective).using(default_solver);
+
+    for edge in &edges {
+        if edge.source != edge.target {
+            model = model.with(constraint!(
+                rank_vars[edge.target] - rank_vars[edge.source] >= 1.0
+            ));
+        }
+    }
+
+    for component in weakly_connected_components(ir.nodes.len(), &edges) {
+        let minimum_rank = component
+            .iter()
+            .filter_map(|node_index| fallback.get(node_index).copied())
+            .min()?;
+        for node_index in component {
+            if fallback.get(&node_index).copied() == Some(minimum_rank) {
+                model = model.with(constraint!(rank_vars[node_index] == minimum_rank as f64));
+            }
+        }
+    }
+
+    let solution = model.solve().ok()?;
+    if !constraint_solution_is_usable(solution.status()) {
+        return None;
+    }
+
+    ir.nodes
+        .iter()
+        .enumerate()
+        .map(|(node_index, _)| {
+            let value = solution.value(rank_vars[node_index]);
+            let rounded = value.round();
+            ((value - rounded).abs() <= 1e-6 && rounded >= 0.0)
+                .then_some((node_index, rounded as usize))
+        })
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn lp_relaxation_layer_assignment(
+    _ir: &MermaidDiagramIr,
+    _cycles: &CycleRemovalResult,
+    _fallback: &BTreeMap<usize, usize>,
+) -> Option<BTreeMap<usize, usize>> {
+    None
 }
 
 fn weakly_connected_components(node_count: usize, edges: &[OrientedEdge]) -> Vec<Vec<usize>> {
@@ -13329,11 +13503,10 @@ fn solve_constraint_coordinates(
     wall_clock_valve_ms: u64,
 ) -> Result<usize, String> {
     let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
-    let id_to_index: BTreeMap<&str, usize> = ir
-        .nodes
+    let id_to_index: BTreeMap<&str, usize> = nodes
         .iter()
         .enumerate()
-        .map(|(index, node)| (node.id.as_str(), index))
+        .map(|(index, node)| (node.node_id.as_str(), index))
         .collect();
     let ordered_nodes: BTreeSet<_> = ir
         .constraints
@@ -13345,6 +13518,7 @@ fn solve_constraint_coordinates(
         .flatten()
         .filter_map(|node_id| id_to_index.get(node_id.as_str()).copied())
         .collect();
+    let non_overlap_pairs = collect_non_overlap_pairs(ir, &id_to_index, nodes.len());
 
     let mut variables = good_lp::ProblemVariables::new();
     let x_vars: Vec<_> = nodes.iter().map(|_| variables.add(variable())).collect();
@@ -13364,6 +13538,20 @@ fn solve_constraint_coordinates(
     let dy_neg: Vec<_> = nodes
         .iter()
         .map(|_| variables.add(variable().min(0.0)))
+        .collect();
+    // Four binary selectors encode the four allowed relative placements for each rectangle pair.
+    // Exactly one is not required: at least one active side is enough, and it avoids needlessly
+    // rejecting a pair that is separated on both axes.
+    let non_overlap_selectors: Vec<_> = non_overlap_pairs
+        .iter()
+        .map(|_| {
+            [
+                variables.add(variable().binary()),
+                variables.add(variable().binary()),
+                variables.add(variable().binary()),
+                variables.add(variable().binary()),
+            ]
+        })
         .collect();
 
     let objective = (0..nodes.len()).fold(Expression::from(0.0), |mut expr, index| {
@@ -13398,11 +13586,8 @@ fn solve_constraint_coordinates(
     }
 
     let mut nodes_by_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for node in nodes.iter() {
-        nodes_by_rank
-            .entry(node.rank)
-            .or_default()
-            .push(node.node_index);
+    for (node_index, node) in nodes.iter().enumerate() {
+        nodes_by_rank.entry(node.rank).or_default().push(node_index);
     }
     for node_indexes in nodes_by_rank.values_mut() {
         node_indexes.sort_by_key(|node_index| nodes[*node_index].order);
@@ -13488,7 +13673,42 @@ fn solve_constraint_coordinates(
                     applied = applied.saturating_add(1);
                 }
             }
+            fm_core::IrConstraint::NonOverlap { .. } => {
+                // Lowered in one deterministic pass below so overlapping declarations are merged
+                // by pair and use their largest requested gap.
+            }
         }
+    }
+
+    let big_m = non_overlap_big_m(nodes, &non_overlap_pairs);
+    for ((left, right, gap), selectors) in non_overlap_pairs.iter().zip(&non_overlap_selectors) {
+        let left_width = f64::from(nodes[*left].bounds.width);
+        let left_height = f64::from(nodes[*left].bounds.height);
+        let right_width = f64::from(nodes[*right].bounds.width);
+        let right_height = f64::from(nodes[*right].bounds.height);
+        model = model
+            .with(constraint!(
+                x_vars[*left] + (left_width / 2.0) + *gap
+                    <= x_vars[*right] - (right_width / 2.0) + big_m * (1.0 - selectors[0])
+            ))
+            .with(constraint!(
+                x_vars[*right] + (right_width / 2.0) + *gap
+                    <= x_vars[*left] - (left_width / 2.0) + big_m * (1.0 - selectors[1])
+            ))
+            .with(constraint!(
+                y_vars[*left] + (left_height / 2.0) + *gap
+                    <= y_vars[*right] - (right_height / 2.0) + big_m * (1.0 - selectors[2])
+            ))
+            .with(constraint!(
+                y_vars[*right] + (right_height / 2.0) + *gap
+                    <= y_vars[*left] - (left_height / 2.0) + big_m * (1.0 - selectors[3])
+            ))
+            .with(constraint!(
+                selectors[0] + selectors[1] + selectors[2] + selectors[3] >= 1
+            ));
+    }
+    if !non_overlap_pairs.is_empty() {
+        applied = applied.saturating_add(non_overlap_pairs.len());
     }
 
     if applied == 0 {
@@ -13548,6 +13768,65 @@ fn resolve_constraint_nodes(
             }
         })
         .collect()
+}
+
+/// Expand explicit and all-node non-overlap declarations into unique rectangle pairs.
+///
+/// Multiple declarations for a pair compose by taking the largest gap. A `BTreeMap` gives the MIP
+/// columns a stable order and makes the resulting coordinate tie-breaking reproducible.
+fn collect_non_overlap_pairs(
+    ir: &MermaidDiagramIr,
+    id_to_index: &BTreeMap<&str, usize>,
+    node_count: usize,
+) -> Vec<(usize, usize, f64)> {
+    let mut pairs = BTreeMap::<(usize, usize), f64>::new();
+    for constraint in &ir.constraints {
+        let fm_core::IrConstraint::NonOverlap { node_ids, gap, .. } = constraint else {
+            continue;
+        };
+        let selected = if node_ids.is_empty() {
+            (0..node_count).collect()
+        } else {
+            resolve_constraint_nodes(node_ids, id_to_index)
+        };
+        for (offset, &left) in selected.iter().enumerate() {
+            for &right in selected.iter().skip(offset + 1) {
+                let pair = if left < right {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
+                pairs
+                    .entry(pair)
+                    .and_modify(|current| *current = current.max(*gap))
+                    .or_insert(*gap);
+            }
+        }
+    }
+    pairs
+        .into_iter()
+        .map(|((left, right), gap)| (left, right, gap))
+        .collect()
+}
+
+/// A conservative finite relaxation value for every inactive non-overlap branch.
+///
+/// The displacement objective chooses coordinates near the heuristic placement, so the sum of all
+/// rectangle extents and requested gaps bounds every useful move from that placement. Scaling that
+/// finite envelope leaves inactive branches non-binding without smuggling a machine-dependent stop
+/// or a magic diagram-size constant into the MIP.
+fn non_overlap_big_m(nodes: &[LayoutNodeBox], pairs: &[(usize, usize, f64)]) -> f64 {
+    let coordinate_extent = nodes.iter().fold(1.0_f64, |extent, node| {
+        extent
+            .max(f64::from(node.bounds.x).abs())
+            .max(f64::from(node.bounds.y).abs())
+    });
+    let rectangle_extent = nodes.iter().fold(0.0_f64, |total, node| {
+        total + f64::from(node.bounds.width.abs()) + f64::from(node.bounds.height.abs())
+    });
+    let gap_extent = pairs.iter().map(|(_, _, gap)| *gap).sum::<f64>();
+    let envelope = coordinate_extent + rectangle_extent + gap_extent + 1.0;
+    (envelope * 4.0).max(1.0)
 }
 
 fn in_rank_gap(node: &LayoutNodeBox, spacing: LayoutSpacing, horizontal_ranks: bool) -> f64 {
@@ -13936,10 +14215,6 @@ fn egraph_optimized_order_for_rank(
     rank: usize,
 ) -> Option<(usize, crate::egraph_ordering::LayerOptimizationResult)> {
     let current_order = ordering_by_rank.get(&rank)?.clone();
-    if current_order.len() < 2 || !crate::egraph_ordering::should_use_egraph(current_order.len()) {
-        return None;
-    }
-
     let current = crate::egraph_ordering::LayerOrdering::new(current_order);
 
     let upper_ordering = rank.checked_sub(1).and_then(|upper_rank| {
@@ -13963,6 +14238,14 @@ fn egraph_optimized_order_for_rank(
         .and_then(|lower_rank| layer_edges.get(&(rank, lower_rank)));
 
     if upper_edges.is_none() && lower_edges.is_none() {
+        return None;
+    }
+
+    if !crate::egraph_ordering::should_optimize_egraph_layer(
+        &current,
+        upper_ordering.as_ref().zip(upper_edges),
+        lower_ordering.as_ref().zip(lower_edges),
+    ) {
         return None;
     }
 
@@ -17567,7 +17850,8 @@ mod tests {
         layout_diagram_traced_with_config_and_guardrails, layout_diagram_tree,
         layout_diagram_with_config, layout_diagram_with_cycle_strategy, layout_diagram_xychart,
         layout_source_map, node_size_cache_key, requirement_row_dimensions, route_edge_points,
-        route_edge_points_with_obstacles, try_relayout_directed_path_suffix,
+        route_edge_points_with_obstacles, solve_constraint_coordinates,
+        try_relayout_directed_path_suffix,
     };
     use fm_core::{
         ArrowType, DiagramType, GanttDate, GanttExclude, GraphDirection, IrCluster, IrClusterId,
@@ -17578,6 +17862,7 @@ mod tests {
         MermaidDiagramIr, MermaidPressureReport, MermaidPressureTier, MermaidSourceMapKind,
         NodeShape, Span,
     };
+    use fm_parser::parse;
     use good_lp::SolutionStatus;
     use proptest::prelude::*;
     use std::cell::RefCell;
@@ -24261,6 +24546,208 @@ mod tests {
         ir
     }
 
+    #[test]
+    fn lp_relaxation_layers_keep_oriented_edges_in_later_layers() {
+        let ir = graph_ir(
+            DiagramType::Flowchart,
+            6,
+            &[(0, 2), (1, 2), (2, 3), (2, 4), (4, 5)],
+        );
+        let priorities = super::stable_node_priorities(&ir);
+        let cycles = super::cycle_removal(&ir, CycleStrategy::default(), &priorities);
+        let fallback = super::rank_assignment(&ir, &cycles, &priorities);
+        let relaxed = super::lp_relaxation_layer_assignment(&ir, &cycles, &fallback)
+            .expect("the bounded flowchart LP must have an optimal integral layer assignment");
+
+        for edge in super::oriented_edges(&ir, &cycles.reversed_edge_indexes) {
+            assert!(
+                relaxed[&edge.target] >= relaxed[&edge.source] + 1,
+                "LP assigned edge {} -> {} to non-increasing layers: {} -> {}",
+                edge.source,
+                edge.target,
+                relaxed[&edge.source],
+                relaxed[&edge.target],
+            );
+        }
+    }
+
+    #[test]
+    fn lp_relaxation_layers_rejects_graphs_above_its_explicit_limit() {
+        let ir = graph_ir(DiagramType::Flowchart, 51, &[]);
+        let priorities = super::stable_node_priorities(&ir);
+        let cycles = super::cycle_removal(&ir, CycleStrategy::default(), &priorities);
+        let fallback = super::rank_assignment(&ir, &cycles, &priorities);
+        assert!(super::lp_relaxation_layer_assignment(&ir, &cycles, &fallback).is_none());
+    }
+
+    #[test]
+    fn lp_relaxation_layers_do_not_regress_crossings_on_small_flowchart_corpus() {
+        const CORPUS: [(&str, &str); 20] = [
+            (
+                "fuzz-0e1a2c",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/0e1a2c27f25c0b028735434671048683050759e0"
+                ),
+            ),
+            (
+                "fuzz-110c66",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/110c6613f1e16f27834f7d55df3c4d3460d3bc59"
+                ),
+            ),
+            (
+                "fuzz-191c83",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/191c83add1b3108e027db28c0913f4f526bbff44"
+                ),
+            ),
+            (
+                "fuzz-1cc1f8",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/1cc1f8f108876de4f120c996ac9317ef668e4bbc"
+                ),
+            ),
+            (
+                "fuzz-1e32da",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/1e32dac753223ef3b84129095f39056026206557"
+                ),
+            ),
+            (
+                "fuzz-1f7f9c",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/1f7f9c4195789fdd37c048ed0b59a91051b293eb"
+                ),
+            ),
+            (
+                "fuzz-39140b",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/39140bc5e646592783419731a90208d525a7ac1f"
+                ),
+            ),
+            (
+                "fuzz-3e8099",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/3e80991d33351142a86855eee1301e56d8a8e84f"
+                ),
+            ),
+            (
+                "fuzz-435e98",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/435e9835abb9c5a425032a6d241458691dbe7f8a"
+                ),
+            ),
+            (
+                "fuzz-47682a",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/47682ac8d9093d45adf4cb0aebb7efc12b1c8df1"
+                ),
+            ),
+            (
+                "fuzz-50cc47",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/50cc47ec2da8621e94ec1fcadc2abbdf05dd2efc"
+                ),
+            ),
+            (
+                "fuzz-56ce2b",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/56ce2bcc387742bdad9df6f5fe96b59b9ffd7c5f"
+                ),
+            ),
+            (
+                "fuzz-716625",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/716625595ef42866ad580491d81b308a85b1951f"
+                ),
+            ),
+            (
+                "fuzz-7abb5b",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/7abb5bfc4b7dd7302992819c581afe4ed87b5d4e"
+                ),
+            ),
+            (
+                "fuzz-865568",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/865568772ebb6df86ac5375b3dee8c84051ae4d7"
+                ),
+            ),
+            (
+                "fuzz-8b74bb",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/8b74bb6685dff9a68353d50285d01d9753163b70"
+                ),
+            ),
+            (
+                "fuzz-933f7c",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/933f7c14be3bcc36cd7ee2a06e1428e11aa754d8"
+                ),
+            ),
+            (
+                "fuzz-958f12",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/958f12bbf57ba15a7188020a5f3470fedea4a495"
+                ),
+            ),
+            (
+                "fuzz-972ce8",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/972ce88b4bff115a6286fb1bf8adc0504c03d688"
+                ),
+            ),
+            (
+                "fuzz-a2809f",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/a2809f24a1068fc2d6ec9d72dc3bfd2f04c1f8b5"
+                ),
+            ),
+        ];
+
+        assert!(
+            !LayoutConfig::default().lp_relaxation_layers,
+            "the LP layer assignment must stay opt-in until broader corpus evidence exists"
+        );
+        let mut reports = Vec::with_capacity(CORPUS.len());
+        for (case_id, source) in CORPUS {
+            let ir = parse(source).ir;
+            assert_eq!(
+                ir.diagram_type,
+                DiagramType::Flowchart,
+                "{case_id}: not a flowchart"
+            );
+            assert!(
+                ir.nodes.len() <= super::LP_RELAXATION_LAYER_NODE_LIMIT,
+                "{case_id}: corpus input has {} nodes, above LP limit",
+                ir.nodes.len(),
+            );
+
+            let baseline = layout_diagram(&ir);
+            let lp_relaxed = layout_diagram_with_config(
+                &ir,
+                LayoutConfig {
+                    lp_relaxation_layers: true,
+                    ..LayoutConfig::default()
+                },
+            );
+            reports.push(format!(
+                "{case_id}: {} -> {}",
+                baseline.stats.crossing_count, lp_relaxed.stats.crossing_count
+            ));
+            assert!(
+                lp_relaxed.stats.crossing_count <= baseline.stats.crossing_count,
+                "{case_id}: LP layer relaxation regressed crossings: baseline={}, lp={}",
+                baseline.stats.crossing_count,
+                lp_relaxed.stats.crossing_count,
+            );
+        }
+        println!(
+            "LP layer crossing counts (baseline -> LP):\\n{}",
+            reports.join("\\n")
+        );
+    }
+
     /// A two-state diagram with `note <position> of <target> : <text>` on it.
     fn state_ir_with_note(position: &str, target: &str, text: &str) -> MermaidDiagramIr {
         let mut ir = graph_ir(DiagramType::State, 2, &[(0, 1)]);
@@ -25205,6 +25692,95 @@ mod tests {
         let first = node_bounds(&layout, "N0");
         let second = node_bounds(&layout, "N1");
         assert!((first.y - second.y).abs() < 1.0);
+    }
+
+    #[test]
+    fn constraint_solver_mip_separates_overlapping_rectangles() {
+        let mut ir = labeled_graph_ir(2, &[]);
+        ir.constraints.push(IrConstraint::NonOverlap {
+            node_ids: vec!["N0".to_string(), "N1".to_string()],
+            gap: 12.0,
+            span: Span::default(),
+        });
+        let make_nodes = || {
+            vec![
+                LayoutNodeBox {
+                    node_index: 0,
+                    node_id: "N0".to_string(),
+                    rank: 0,
+                    order: 0,
+                    span: Span::default(),
+                    bounds: LayoutRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 80.0,
+                        height: 40.0,
+                    },
+                },
+                LayoutNodeBox {
+                    node_index: 1,
+                    node_id: "N1".to_string(),
+                    rank: 1,
+                    order: 0,
+                    span: Span::default(),
+                    bounds: LayoutRect {
+                        x: 10.0,
+                        y: 0.0,
+                        width: 80.0,
+                        height: 40.0,
+                    },
+                },
+            ]
+        };
+
+        let mut without_constraint = make_nodes();
+        let mut no_constraint_ir = ir.clone();
+        no_constraint_ir.constraints.clear();
+        assert_eq!(
+            solve_constraint_coordinates(
+                &no_constraint_ir,
+                &mut without_constraint,
+                LayoutSpacing::default(),
+                CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS,
+            ),
+            Ok(0),
+            "control: the fixture must begin overlapping without a MIP row"
+        );
+        let initial_horizontal_gap = (without_constraint[1].bounds.x
+            - (without_constraint[0].bounds.x + without_constraint[0].bounds.width))
+            .max(
+                without_constraint[0].bounds.x
+                    - (without_constraint[1].bounds.x + without_constraint[1].bounds.width),
+            );
+        let initial_vertical_gap = (without_constraint[1].bounds.y
+            - (without_constraint[0].bounds.y + without_constraint[0].bounds.height))
+            .max(
+                without_constraint[0].bounds.y
+                    - (without_constraint[1].bounds.y + without_constraint[1].bounds.height),
+            );
+        assert!(
+            initial_horizontal_gap < 0.0 && initial_vertical_gap < 0.0,
+            "control failed: the initial rectangles are already disjoint"
+        );
+
+        let mut nodes = make_nodes();
+        assert_eq!(
+            solve_constraint_coordinates(
+                &ir,
+                &mut nodes,
+                LayoutSpacing::default(),
+                CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS,
+            ),
+            Ok(1)
+        );
+        let horizontal_gap = (nodes[1].bounds.x - (nodes[0].bounds.x + nodes[0].bounds.width))
+            .max(nodes[0].bounds.x - (nodes[1].bounds.x + nodes[1].bounds.width));
+        let vertical_gap = (nodes[1].bounds.y - (nodes[0].bounds.y + nodes[0].bounds.height))
+            .max(nodes[0].bounds.y - (nodes[1].bounds.y + nodes[1].bounds.height));
+        assert!(
+            horizontal_gap >= 12.0 - 0.01 || vertical_gap >= 12.0 - 0.01,
+            "MIP did not separate the rectangles by the requested gap: {nodes:?}"
+        );
     }
 
     #[test]

@@ -675,6 +675,59 @@ pub fn should_use_egraph(nodes_per_layer: usize) -> bool {
     nodes_per_layer <= 100
 }
 
+/// Estimated e-graph memory above which it is worth proving that a saturated rank has no
+/// ordering leverage before constructing rewrite candidates.
+const NO_LEVERAGE_GATE_MIN_BYTES: usize = 64 * 1024;
+
+/// Decide whether bounded rewrite exploration can change the crossing count for one rank.
+///
+/// The width limit remains the primary liveness bound.  Above a material estimated allocation,
+/// this additionally rejects a rank only when every incident adjacent-rank pair is a complete
+/// bipartite graph.  In that case every permutation produces the same edge-position sequence, so
+/// the local crossing count is invariant and e-graph exploration cannot improve the layout.
+#[must_use]
+pub fn should_optimize_egraph_layer(
+    current: &LayerOrdering,
+    upper: Option<(&LayerOrdering, &LayerEdges)>,
+    lower: Option<(&LayerOrdering, &LayerEdges)>,
+) -> bool {
+    if current.len() < 2 || !should_use_egraph(current.len()) {
+        return false;
+    }
+
+    let (_, estimated_bytes) = estimate_egraph_size(current.len());
+    if estimated_bytes < NO_LEVERAGE_GATE_MIN_BYTES {
+        return true;
+    }
+
+    let no_upper_leverage =
+        upper.is_none_or(|(ordering, edges)| is_complete_bipartite(ordering, current, edges));
+    let no_lower_leverage =
+        lower.is_none_or(|(ordering, edges)| is_complete_bipartite(current, ordering, edges));
+
+    !(no_upper_leverage && no_lower_leverage)
+}
+
+fn is_complete_bipartite(upper: &LayerOrdering, lower: &LayerOrdering, edges: &LayerEdges) -> bool {
+    let Some(expected_edges) = upper.len().checked_mul(lower.len()) else {
+        return false;
+    };
+    if edges.edges.len() != expected_edges {
+        return false;
+    }
+
+    let upper_nodes: BTreeMap<usize, ()> =
+        upper.order.iter().copied().map(|node| (node, ())).collect();
+    let lower_nodes: BTreeMap<usize, ()> =
+        lower.order.iter().copied().map(|node| (node, ())).collect();
+    let mut seen = BTreeMap::new();
+    edges.edges.iter().all(|&(source, target)| {
+        upper_nodes.contains_key(&source)
+            && lower_nodes.contains_key(&target)
+            && seen.insert((source, target), ()).is_none()
+    })
+}
+
 fn median_insert_candidates(
     ordering: &LayerOrdering,
     upper: Option<(&LayerOrdering, &LayerEdges)>,

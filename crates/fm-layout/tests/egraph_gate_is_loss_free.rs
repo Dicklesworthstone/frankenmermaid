@@ -21,7 +21,10 @@
 //! the pass for ordinary diagrams, or removes the ceiling that keeps a pathological layer from
 //! saturating an e-graph.
 
-use fm_layout::egraph_ordering::should_use_egraph;
+use fm_layout::egraph_ordering::{
+    LayerEdges, LayerOrdering, crossing_count, optimize_layer_ordering,
+    should_optimize_egraph_layer, should_use_egraph,
+};
 
 /// The gate must ADMIT the layer widths real diagrams produce.
 ///
@@ -80,4 +83,57 @@ fn the_gate_is_monotone_in_width() {
         "no width up to 2000 was refused, so there is no ceiling at all and the pathological case \
          is unbounded"
     );
+}
+
+#[test]
+fn budgeted_complete_neighborhood_is_refused_without_losing_crossing_quality() {
+    let width = 40_usize;
+    let upper = LayerOrdering::new((0..width).collect());
+    let current = LayerOrdering::new((width..width * 2).rev().collect());
+    let lower = LayerOrdering::new((width * 2..width * 3).collect());
+    let upper_edges = complete_edges(&upper, &current);
+    let lower_edges = complete_edges(&current, &lower);
+
+    assert!(
+        !should_optimize_egraph_layer(
+            &current,
+            Some((&upper, &upper_edges)),
+            Some((&lower, &lower_edges)),
+        ),
+        "a complete 40-node neighborhood is above the budget and has no ordering leverage"
+    );
+
+    let before = crossing_count(&upper, &current, &upper_edges)
+        + crossing_count(&current, &lower, &lower_edges);
+    let optimized = optimize_layer_ordering(
+        &current,
+        Some((&upper, &upper_edges)),
+        Some((&lower, &lower_edges)),
+    );
+    assert_eq!(optimized.crossing_count, before);
+    assert_eq!(optimized.ordering, current);
+}
+
+#[test]
+fn budgeted_neighborhood_with_a_missing_edge_stays_admitted() {
+    let width = 40_usize;
+    let upper = LayerOrdering::new((0..width).collect());
+    let current = LayerOrdering::new((width..width * 2).rev().collect());
+    let mut upper_edges = complete_edges(&upper, &current);
+    upper_edges.edges.pop();
+
+    assert!(
+        should_optimize_egraph_layer(&current, Some((&upper, &upper_edges)), None),
+        "one missing edge restores ordering leverage, so the existing optimizer must run"
+    );
+}
+
+fn complete_edges(upper: &LayerOrdering, lower: &LayerOrdering) -> LayerEdges {
+    LayerEdges {
+        edges: upper
+            .order
+            .iter()
+            .flat_map(|&source| lower.order.iter().map(move |&target| (source, target)))
+            .collect(),
+    }
 }

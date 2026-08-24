@@ -48,6 +48,7 @@ fnx-views = { workspace = true, optional = true }
 tracing = { workspace = true, features = ["release_max_level_off"] }
 
 [dev-dependencies]
+fm-parser.workspace = true
 proptest = "1.6.0"
 serde_json = "1.0"
 # The incremental_layout bench installs mimalloc as its `#[global_allocator]` so it measures under
