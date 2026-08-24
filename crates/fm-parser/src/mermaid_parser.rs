@@ -248,6 +248,29 @@ const ER_OPERATORS: [(&str, ArrowType); 35] = [
     ("..", ArrowType::DottedLine),
 ];
 
+/// How [`find_operator_core`] is allowed to scan for one particular operator table.
+///
+/// This travels with the table at every call site (each `*_OP_GATE` const is always passed
+/// alongside its own `*_OPERATORS`), which is exactly why the flowchart-only behaviour rides here
+/// rather than on a separate argument: there is no way to hand the flowchart flag to a class or
+/// sequence scan without also handing over `FLOW_OPERATORS`.
+///
+/// ⚠️ The obvious alternative — recognising the flowchart table by pointer identity — is UNSOUND
+/// for the reason already recorded on `extend_operator_run`: `FLOW_OPERATORS` is a `const`, so a
+/// use site may materialise its own temporary and `ptr::eq` against it can be false. That version
+/// compiles and silently never fires.
+#[derive(Debug, Clone, Copy)]
+struct OpScan {
+    /// Bit `b` set ⇔ some operator in the table starts with ASCII byte `b`.
+    first_byte: u128,
+    /// Recognise mermaid's flowchart LINK grammar at each candidate position, in preference to a
+    /// literal hit in the table. TRUE FOR THE FLOWCHART TABLE ONLY — see
+    /// [`match_mermaid_flow_link`] for why the grammar cannot be spelled as a table, and why
+    /// letting it loose on the other tables would mis-lex them (`A --o B` is a flowchart circle
+    /// link but a class-diagram aggregation, and `A -->> B` is a sequence dotted arrow).
+    mermaid_flow_links: bool,
+}
+
 /// Compile-time first-byte gate for an operator list: bit `b` set ⇔ some operator starts with ASCII
 /// byte `b`. Lets `'static` operator lists precompute the gate as a `const` and pass it to
 /// [`find_operator_core`], skipping the per-call rebuild (`find_operator`'s hot cost on sequences).
@@ -266,11 +289,21 @@ const fn op_first_byte_gate(operators: &[(&str, ArrowType)]) -> u128 {
 
 /// Precomputed first-byte gate for [`SEQUENCE_OPERATORS`] (26 entries) — used on the hot per-message
 /// sequence path so `find_operator` doesn't rebuild the gate for every message line.
-const SEQUENCE_OP_GATE: u128 = op_first_byte_gate(&SEQUENCE_OPERATORS);
-const ER_OP_GATE: u128 = op_first_byte_gate(&ER_OPERATORS);
-const FLOW_OP_GATE: u128 = op_first_byte_gate(&FLOW_OPERATORS);
-const CLASS_OP_GATE: u128 = op_first_byte_gate(&CLASS_OPERATORS);
-const PACKET_OP_GATE: u128 = op_first_byte_gate(&PACKET_OPERATORS);
+const fn op_scan(operators: &[(&str, ArrowType)]) -> OpScan {
+    OpScan {
+        first_byte: op_first_byte_gate(operators),
+        mermaid_flow_links: false,
+    }
+}
+
+const SEQUENCE_OP_GATE: OpScan = op_scan(&SEQUENCE_OPERATORS);
+const ER_OP_GATE: OpScan = op_scan(&ER_OPERATORS);
+const FLOW_OP_GATE: OpScan = OpScan {
+    mermaid_flow_links: true,
+    ..op_scan(&FLOW_OPERATORS)
+};
+const CLASS_OP_GATE: OpScan = op_scan(&CLASS_OPERATORS);
+const PACKET_OP_GATE: OpScan = op_scan(&PACKET_OPERATORS);
 
 const DANGLING_PLACEHOLDER_PREFIX: &str = "__fm_dangling_line_";
 const JOURNEY_SCORE_CLASSES: [&str; 10] = [
@@ -6000,7 +6033,7 @@ fn parse_plain_er_relationship(
 fn find_plain_er_operator(relation: &str) -> Option<(usize, &'static str, ArrowType)> {
     for (idx, &byte) in relation.as_bytes().iter().enumerate() {
         let cp = u32::from(byte);
-        if cp >= 128 || (ER_OP_GATE >> cp) & 1 == 0 {
+        if cp >= 128 || (ER_OP_GATE.first_byte >> cp) & 1 == 0 {
             continue;
         }
 
@@ -10400,7 +10433,7 @@ fn parse_edge_statement(
     line_number: usize,
     source_line: &str,
     operators: &[(&str, ArrowType)],
-    gate: u128,
+    gate: OpScan,
     builder: &mut IrBuilder,
 ) -> bool {
     parse_edge_statement_with_nodes(
@@ -10417,7 +10450,7 @@ fn parse_edge_statement(
 fn parse_edge_statement_asts(
     statement: &str,
     operators: &[(&str, ArrowType)],
-    gate: u128,
+    gate: OpScan,
     allow_parallel_node_lists: bool,
     config: &ParserConfig,
     line_number: usize,
@@ -10658,7 +10691,7 @@ fn parse_edge_statement_with_nodes(
     line_number: usize,
     source_line: &str,
     operators: &[(&str, ArrowType)],
-    gate: u128,
+    gate: OpScan,
     builder: &mut IrBuilder,
 ) -> Option<Vec<IrNodeId>> {
     let (first_operator_idx, first_operator, first_arrow) =
@@ -10757,7 +10790,7 @@ fn parse_edge_statement_with_nodes(
 fn find_operator<'a>(
     statement: &'a str,
     operators: &'a [(&'a str, ArrowType)],
-    gate: u128,
+    gate: OpScan,
 ) -> Option<(usize, &'a str, ArrowType)> {
     find_operator_from_index(statement, 0, operators, gate)
 }
@@ -10766,7 +10799,7 @@ fn find_operator_from_index<'a>(
     statement: &'a str,
     start_index: usize,
     operators: &'a [(&'a str, ArrowType)],
-    gate: u128,
+    gate: OpScan,
 ) -> Option<(usize, &'a str, ArrowType)> {
     // `gate` is the caller's precomputed first-byte gate for `operators` (a `const` such as
     // `FLOW_OP_GATE` / `CLASS_OP_GATE` / `SEQUENCE_OP_GATE`). Threading it in — rather than rebuilding
@@ -10805,6 +10838,142 @@ fn find_operator_from_index<'a>(
 /// would have compiled and silently never fired.
 ///
 /// Returns `None` when nothing extends, so the table's own answer stands unchanged.
+/// mermaid's flowchart link, lexed and destructured the way mermaid does it (bd-lrl48b).
+///
+/// WHY THIS IS NOT A TABLE. `FLOW_OPERATORS` lists link SPELLINGS, but mermaid's link is a
+/// PRODUCT of three independent parts, and its `destructEndLink` reads them in an order no list of
+/// literals reproduces:
+///
+/// ```text
+///   [xo<]?                     head marker, optional
+///   --+ | ==+ | -?\.+-         body: dashes, equals, or dots
+///   [-xo>] | [=xo>] | [xo>]?   tail marker
+/// ```
+///
+/// mermaid then strips the head ONLY WHEN IT PAIRS with the tail (`o…o`, `x…x`, `<…>`) and reads
+/// the stroke weight off what is LEFT. Two consequences fall out that a spelling table gets wrong
+/// in opposite directions:
+///
+/// - `o==o` is THICK. The head pairs, so the line is `==` and the `=` sets the weight.
+/// - `o==>` is NORMAL, not thick. The head does NOT pair with `>`, so it stays on the line, which
+///   now begins `o` — and mermaid's `line.startsWith("=")` is then false, so it never sees the
+///   equals at all. The literal `("o==>", ThickArrow)` in the table asserted the opposite.
+///
+/// And because the body run is UNBOUNDED, every literal is a bound the grammar does not have:
+/// `o===o`, `o----o`, `x-..-x` are all ordinary links that no finite table can name.
+///
+/// The failure this replaces was worse than a wrong weight. A token the table could not match at
+/// its head position matched at its BODY instead, leaving the head byte on the endpoint: `A o=== B`
+/// parsed into a node called `A_o`, and `A ==o B` into a node called `o_B`. The GRAPH was wrong,
+/// not just its stroke.
+///
+/// Returns the matched byte length and the `ArrowType` naming the (tail marker × stroke) pair.
+/// `None` means "not a link here" and leaves the table's answer standing.
+fn match_mermaid_flow_link(bytes: &[u8], index: usize) -> Option<(usize, ArrowType)> {
+    // A LEADING `o`/`x` IS A HEAD ONLY AT A TOKEN BOUNDARY, exactly as for the table scan
+    // (bd-zdpwd): mermaid's regex opens `\s*[xo<]?`, so without this `Foo--o Bar` would match a
+    // head at the second `o` of `Foo` and split the node. `<` cannot occur inside an identifier.
+    let head = match bytes.get(index) {
+        Some(b'o' | b'x') if index == 0 || bytes[index - 1].is_ascii_whitespace() => 1,
+        Some(b'<') => 1,
+        _ => 0,
+    };
+    let body_start = index + head;
+
+    // Longest match across the three alternatives, as jison's lexer does: mermaid's flow grammar
+    // does not set `%options flex`, so it is longest-match rather than first-match.
+    let solid = match_run_link(bytes, body_start, b'-');
+    let thick = match_run_link(bytes, body_start, b'=');
+    let dotted = match_dotted_link(bytes, body_start);
+    let body_len = [solid, thick, dotted].into_iter().flatten().max()?;
+
+    let matched = bytes.get(index..body_start + body_len)?;
+    Some((matched.len(), destruct_end_link(matched)))
+}
+
+/// `--+[-xo>]` / `==+[=xo>]`: two or more `fill` bytes then one tail marker. Returns the length
+/// consumed from `start`, tail marker included.
+///
+/// The greedy run gives one byte back when no `x`/`o`/`>` follows, because the run's own last byte
+/// is then the tail marker. That is why `---` is a complete link and `--` is not: mermaid lexes a
+/// bare `--` as START_LINK, the opener of `A -- text --> B`.
+fn match_run_link(bytes: &[u8], start: usize, fill: u8) -> Option<usize> {
+    let mut run = 0_usize;
+    while bytes.get(start + run) == Some(&fill) {
+        run += 1;
+    }
+    if run < 2 {
+        return None;
+    }
+    match bytes.get(start + run) {
+        Some(b'x' | b'o' | b'>') => Some(run + 1),
+        // `---` closing on its own last `-`: what remains must still be a two-or-more run.
+        _ if run >= 3 => Some(run),
+        _ => None,
+    }
+}
+
+/// `-?\.+-[xo>]?`: the dotted body, whose tail marker is OPTIONAL because the trailing `-` already
+/// terminates it. This is what makes both `A .- B` and `A -.- B` links.
+fn match_dotted_link(bytes: &[u8], start: usize) -> Option<usize> {
+    let lead = usize::from(bytes.get(start) == Some(&b'-'));
+    let mut dots = 0_usize;
+    while bytes.get(start + lead + dots) == Some(&b'.') {
+        dots += 1;
+    }
+    if dots == 0 || bytes.get(start + lead + dots) != Some(&b'-') {
+        return None;
+    }
+    let len = lead + dots + 1;
+    Some(len + usize::from(matches!(bytes.get(start + len), Some(b'x' | b'o' | b'>'))))
+}
+
+/// mermaid's `destructEndLink`, step for step.
+///
+/// The ORDER is the whole point: the tail marker is read first, the head is dropped only if it
+/// pairs with that marker, and only then is what remains asked about its weight. A dot anywhere in
+/// the remainder wins over a leading `=`, because a link cannot be both dotted and thick.
+fn destruct_end_link(matched: &[u8]) -> ArrowType {
+    let (line, tail) = matched.split_at(matched.len() - 1);
+    let paired_head = match tail[0] {
+        b'x' => Some(b'x'),
+        b'o' => Some(b'o'),
+        b'>' => Some(b'<'),
+        _ => None,
+    };
+    let doubled = paired_head.is_some_and(|head| line.first() == Some(&head));
+    // Dropping the paired head is what lets the weight be read: `o==o` leaves `==`, `o==>` does not.
+    let line = if doubled { &line[1..] } else { line };
+
+    let dotted = line.contains(&b'.');
+    let thick = !dotted && line.first() == Some(&b'=');
+
+    match (tail[0], doubled, thick, dotted) {
+        (b'>', false, false, false) => ArrowType::Arrow,
+        (b'>', false, true, false) => ArrowType::ThickArrow,
+        (b'>', false, false, true) => ArrowType::DottedArrow,
+        (b'>', true, false, false) => ArrowType::DoubleArrow,
+        (b'>', true, true, false) => ArrowType::DoubleThickArrow,
+        (b'>', true, false, true) => ArrowType::DoubleDottedArrow,
+        (b'o', false, false, false) => ArrowType::Circle,
+        (b'o', false, true, false) => ArrowType::ThickCircle,
+        (b'o', false, false, true) => ArrowType::DottedCircle,
+        (b'o', true, false, false) => ArrowType::CircleBoth,
+        (b'o', true, true, false) => ArrowType::ThickCircleBoth,
+        (b'o', true, false, true) => ArrowType::DottedCircleBoth,
+        (b'x', false, false, false) => ArrowType::Cross,
+        (b'x', false, true, false) => ArrowType::ThickCross,
+        (b'x', false, false, true) => ArrowType::DottedCross,
+        (b'x', true, false, false) => ArrowType::CrossBoth,
+        (b'x', true, true, false) => ArrowType::ThickCrossBoth,
+        (b'x', true, false, true) => ArrowType::DottedCrossBoth,
+        // No tail marker at all: mermaid's `arrow_open`, our plain lines.
+        (_, _, true, _) => ArrowType::ThickLine,
+        (_, _, _, true) => ArrowType::DottedLine,
+        _ => ArrowType::Line,
+    }
+}
+
 fn extend_operator_run(statement: &str, index: usize, matched: &str) -> Option<(usize, ArrowType)> {
     let dotted = matches!(matched, "-." | "-.-");
     let thick = matched == "==";
@@ -10864,7 +11033,7 @@ fn find_operator_core<'a>(
     statement: &'a str,
     start_index: usize,
     operators: &'a [(&'a str, ArrowType)],
-    op_first_byte: u128,
+    scan: OpScan,
 ) -> Option<(usize, &'a str, ArrowType)> {
     // Byte-level scan (was `char_indices`): every structural byte tracked here — the quotes `"` `'` `` ` ``,
     // the brackets `[] () {}`, the escape `\` — and every operator first byte is ASCII (< 128). A UTF-8
@@ -10938,8 +11107,17 @@ fn find_operator_core<'a>(
         // Skip positions whose byte can't begin any operator (see `op_first_byte`). Bytes >= 128
         // (UTF-8 lead/continuation) can never match an ASCII-prefixed operator either.
         let cp = u32::from(byte);
-        if cp >= 128 || (op_first_byte >> cp) & 1 == 0 {
+        if cp >= 128 || (scan.first_byte >> cp) & 1 == 0 {
             continue;
+        }
+
+        // FLOWCHART ONLY: the real grammar first, the table as the fallback (bd-lrl48b). A hit here
+        // wins over any literal in the table because the table cannot express the grammar — see
+        // `match_mermaid_flow_link`.
+        if scan.mermaid_flow_links
+            && let Some((len, arrow)) = match_mermaid_flow_link(statement.as_bytes(), idx)
+        {
+            return Some((idx, &statement[idx..idx + len], arrow));
         }
 
         let tail = &statement[idx..];

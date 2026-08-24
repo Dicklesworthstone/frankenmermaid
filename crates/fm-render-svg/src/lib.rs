@@ -250,9 +250,9 @@ impl Default for SvgRenderConfig {
             font_family: String::from(
                 "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
             ),
-            font_size: 14.0,
-            avg_char_width: 7.0,
-            line_height: 1.4,
+            font_size: 15.0,
+            avg_char_width: 7.5,
+            line_height: 1.5,
             padding: 32.0,
             shadows: true,
             shadow_offset_x: 1.5,
@@ -1447,7 +1447,7 @@ fn apply_output_post_passes(
 
 /// The default-preset theme's edge color. The arrowhead-marker `<defs>` for this color are memoized
 /// (see [`marker_defs_body`]). Pinned to the preset by `default_edge_color_matches_preset`.
-const DEFAULT_EDGE_COLOR: &str = "#94a3b8";
+const DEFAULT_EDGE_COLOR: &str = "#64748b";
 
 /// Serialize the arrowhead-marker `<defs>` children for `edge_color` EXACTLY as the per-marker
 /// `ArrowheadMarker::…(id, edge_color).to_element()` sequence (same order + `emit_fancy` gating) that
@@ -2946,7 +2946,7 @@ fn resolve_detail_profile(
         MermaidTier::Normal => RenderDetailTier::Normal,
         MermaidTier::Rich => RenderDetailTier::Rich,
         MermaidTier::Auto => {
-            if area < 56_000.0 {
+            if area < 12_000.0 {
                 RenderDetailTier::Compact
             } else if area < 220_000.0 {
                 RenderDetailTier::Normal
@@ -3357,13 +3357,17 @@ fn arrow_marker_mask(arrow: fm_core::ArrowType) -> u16 {
         | ArrowType::StickArrowBottomDotted
         | ArrowType::StickArrowTopReverseDotted => MARKER_STICK_BOTTOM,
         ArrowType::ThickArrow => MARKER_FILLED,
-        ArrowType::Circle => MARKER_CIRCLE,
-        ArrowType::Cross | ArrowType::DottedCross => MARKER_CROSS,
+        ArrowType::Circle | ArrowType::ThickCircle | ArrowType::DottedCircle => MARKER_CIRCLE,
+        ArrowType::Cross | ArrowType::ThickCross | ArrowType::DottedCross => MARKER_CROSS,
         // `o--o` / `x--x` need no NEW marker declaration (bd-zdpwd): a circle and a cross are
         // orientation-independent, so the same `<marker>` serves both ends. That is why there is no
         // `arrow-start-circle` here, unlike the directional `arrow-start` an arrowhead requires.
-        ArrowType::CircleBoth | ArrowType::ThickCircleBoth => MARKER_CIRCLE,
-        ArrowType::CrossBoth | ArrowType::ThickCrossBoth => MARKER_CROSS,
+        ArrowType::CircleBoth | ArrowType::ThickCircleBoth | ArrowType::DottedCircleBoth => {
+            MARKER_CIRCLE
+        }
+        ArrowType::CrossBoth | ArrowType::ThickCrossBoth | ArrowType::DottedCrossBoth => {
+            MARKER_CROSS
+        }
         ArrowType::DoubleArrow | ArrowType::DoubleDottedArrow => MARKER_START | MARKER_END,
         ArrowType::DoubleThickArrow => MARKER_START_FILLED | MARKER_FILLED,
         ArrowType::Aggregation | ArrowType::AggregationReverse => MARKER_DIAMOND_OPEN,
@@ -12955,16 +12959,35 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
                 None,
                 &colors.edge,
             ),
-            ArrowType::Circle => (None, None, Some("url(#arrow-circle)"), &colors.edge),
-            ArrowType::Cross => (None, None, Some("url(#arrow-cross)"), &colors.edge),
+            ArrowType::Circle | ArrowType::ThickCircle => {
+                (None, None, Some("url(#arrow-circle)"), &colors.edge)
+            }
+            ArrowType::Cross | ArrowType::ThickCross => {
+                (None, None, Some("url(#arrow-cross)"), &colors.edge)
+            }
+            ArrowType::DottedCircle => {
+                (Some("5,5"), None, Some("url(#arrow-circle)"), &colors.edge)
+            }
             ArrowType::CircleBoth | ArrowType::ThickCircleBoth => (
                 None,
                 Some("url(#arrow-circle)"),
                 Some("url(#arrow-circle)"),
                 &colors.edge,
             ),
+            ArrowType::DottedCircleBoth => (
+                Some("5,5"),
+                Some("url(#arrow-circle)"),
+                Some("url(#arrow-circle)"),
+                &colors.edge,
+            ),
             ArrowType::CrossBoth | ArrowType::ThickCrossBoth => (
                 None,
+                Some("url(#arrow-cross)"),
+                Some("url(#arrow-cross)"),
+                &colors.edge,
+            ),
+            ArrowType::DottedCrossBoth => (
+                Some("5,5"),
                 Some("url(#arrow-cross)"),
                 Some("url(#arrow-cross)"),
                 &colors.edge,
@@ -13587,12 +13610,36 @@ fn render_edge_body_into(
             "",
             " relates to ",
         ),
+        ArrowType::ThickCircle => (
+            3.0,
+            "fm-edge-solid",
+            "",
+            "url(#arrow-circle)",
+            "",
+            " relates to ",
+        ),
+        ArrowType::DottedCircle => (
+            1.8,
+            "fm-edge-dotted",
+            "",
+            "url(#arrow-circle)",
+            "5,5",
+            " relates to ",
+        ),
         ArrowType::ThickCircleBoth => (
             3.0,
             "fm-edge-solid",
             "url(#arrow-circle)",
             "url(#arrow-circle)",
             "",
+            " relates to ",
+        ),
+        ArrowType::DottedCircleBoth => (
+            1.8,
+            "fm-edge-dotted",
+            "url(#arrow-circle)",
+            "url(#arrow-circle)",
+            "5,5",
             " relates to ",
         ),
         ArrowType::CrossBoth => (
@@ -13611,8 +13658,24 @@ fn render_edge_body_into(
             "",
             " relates to ",
         ),
+        ArrowType::DottedCrossBoth => (
+            1.8,
+            "fm-edge-dotted",
+            "url(#arrow-cross)",
+            "url(#arrow-cross)",
+            "5,5",
+            " relates to ",
+        ),
         ArrowType::Cross => (
             1.8,
+            "fm-edge-solid",
+            "",
+            "url(#arrow-cross)",
+            "",
+            " blocks ",
+        ),
+        ArrowType::ThickCross => (
+            3.0,
             "fm-edge-solid",
             "",
             "url(#arrow-cross)",
@@ -14316,10 +14379,10 @@ mod tests {
         let expected = concat!(
             "<g id=\"fm-node-n0-0\" class=\"fm-node fm-node-accent-4 fm-node-shape-rect\" ",
             "data-id=\"N0\" role=\"graphics-symbol\" aria-label=\"Single Node\" tabindex=\"0\">",
-            "<rect x=\"92\" y=\"92\" width=\"148.73\" height=\"66.50\" rx=\"5.50\" ",
+            "<rect x=\"60\" y=\"60\" width=\"112.72\" height=\"42.50\" rx=\"4.40\" ",
             "fill=\"url(#fm-node-gradient)\"/>",
-            "<text x=\"166.36\" y=\"129.85\" text-anchor=\"middle\" font-size=\"13.80\" ",
-            "fill=\"#1a1a2e\">Single Node</text>",
+            "<text x=\"116.36\" y=\"85.85\" text-anchor=\"middle\" font-size=\"13.80\" ",
+            "fill=\"#1e293b\">Single Node</text>",
             "<title>Node: Single Node, rectangle</title></g>",
         );
         let region = svg.find("<g id=\"fm-node").map_or("", |s| &svg[s..]);
@@ -14346,10 +14409,10 @@ mod tests {
         let expected = concat!(
             "<g id=\"fm-node-n0-0\" class=\"fm-node fm-node-accent-4 fm-node-shape-rect\" ",
             "data-id=\"N0\">",
-            "<rect x=\"92\" y=\"92\" width=\"148.73\" height=\"66.50\" rx=\"5.50\" ",
+            "<rect x=\"60\" y=\"60\" width=\"112.72\" height=\"42.50\" rx=\"4.40\" ",
             "fill=\"url(#fm-node-gradient)\"/>",
-            "<text x=\"166.36\" y=\"129.85\" text-anchor=\"middle\" font-size=\"13.80\" ",
-            "fill=\"#1a1a2e\">Single Node</text></g>",
+            "<text x=\"116.36\" y=\"85.85\" text-anchor=\"middle\" font-size=\"13.80\" ",
+            "fill=\"#1e293b\">Single Node</text></g>",
         );
         let region = svg.find("<g id=\"fm-node").map_or("", |s| &svg[s..]);
         assert!(
@@ -17097,7 +17160,7 @@ mod tests {
             ..Default::default()
         };
         let svg = render_svg_with_config(&ir, &config);
-        assert!(svg.contains("data-detail-tier=\"compact\""));
+        assert!(svg.contains("data-detail-tier=\"normal\""));
     }
 
     #[test]

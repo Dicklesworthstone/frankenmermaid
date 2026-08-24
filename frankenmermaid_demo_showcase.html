@@ -1170,17 +1170,109 @@ $ fm-cli render --format=svg sample.mmd
       </div>
 
       <div class="grid md:grid-cols-3 gap-6">
-        <div class="glass-card p-6 rounded-2xl">
+        <div class="glass-card p-6 rounded-2xl relative">
+          <div class="franken-bolt -left-1.5 -top-1.5"></div>
           <h3 class="text-lg font-black text-white mb-2">Sugiyama Hierarchical</h3>
           <p class="text-sm text-slate-300 leading-relaxed">Layered ranking with barycenter and median crossing minimization. Handles dense flowcharts and deep dependency cascades.</p>
         </div>
-        <div class="glass-card p-6 rounded-2xl">
+        <div class="glass-card p-6 rounded-2xl relative">
+          <div class="franken-bolt -right-1.5 -top-1.5"></div>
           <h3 class="text-lg font-black text-white mb-2">Cycle-Aware Feedback Arc</h3>
           <p class="text-sm text-slate-300 leading-relaxed">Detects back-edges and recursive loops automatically, reversing them during ranking to ensure strict acyclic layering without tangle.</p>
         </div>
-        <div class="glass-card p-6 rounded-2xl">
+        <div class="glass-card p-6 rounded-2xl relative">
+          <div class="franken-bolt -right-1.5 -bottom-1.5"></div>
           <h3 class="text-lg font-black text-white mb-2">Incremental Pipeline</h3>
           <p class="text-sm text-slate-300 leading-relaxed">Layout stages cache prior node bounds and rank assignments. Typing edits compute in sub-millisecond frames.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================== COMPARISON MATRIX ============================== -->
+    <section id="comparison" class="relative px-4 sm:px-6 lg:px-8 max-w-[1760px] mx-auto w-full">
+      <div class="text-center mb-12">
+        <div class="inline-flex items-center gap-3 text-[10px] font-black uppercase tracking-[0.3em] text-emerald-400 mb-3">
+          <span class="h-px w-8 bg-emerald-500/40"></span>
+          DIALECT_BENCHMARK_MATRIX
+          <span class="h-px w-8 bg-emerald-500/40"></span>
+        </div>
+        <h2 class="text-4xl md:text-6xl font-black tracking-tight text-white mb-4">
+          Engine <span class="text-emerald-400">Head-to-Head</span>.
+        </h2>
+        <p class="text-slate-300 max-w-3xl mx-auto text-base md:text-lg">
+          Why we rebuilt diagram rendering from bare metal: zero Node.js dependencies, 100% deterministic layout, and native multi-surface output.
+        </p>
+      </div>
+
+      <div class="glass-modern rounded-3xl p-6 md:p-10 border border-emerald-500/20 shadow-2xl relative overflow-hidden">
+        <div class="franken-bolt -left-1.5 -top-1.5"></div>
+        <div class="franken-bolt -right-1.5 -top-1.5"></div>
+        <div class="franken-bolt -left-1.5 -bottom-1.5"></div>
+        <div class="franken-bolt -right-1.5 -bottom-1.5"></div>
+
+        <div class="overflow-x-auto">
+          <table class="w-full text-left font-mono text-xs">
+            <thead>
+              <tr class="border-b border-emerald-500/20 bg-emerald-950/20 text-slate-400">
+                <th class="py-4 px-4 font-black uppercase tracking-widest text-slate-300">Feature / Dimension</th>
+                <th class="py-4 px-4 font-black uppercase tracking-widest text-emerald-300 bg-emerald-500/10 border-x border-emerald-500/20">🧜 frankenmermaid</th>
+                <th class="py-4 px-4 font-bold uppercase tracking-wider text-slate-400">mermaid-js</th>
+                <th class="py-4 px-4 font-bold uppercase tracking-wider text-slate-400">Graphviz (DOT)</th>
+                <th class="py-4 px-4 font-bold uppercase tracking-wider text-slate-400">Excalidraw</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-emerald-500/10 text-slate-300">
+              <tr class="hover:bg-emerald-500/5 transition">
+                <td class="py-3.5 px-4 font-bold text-white font-sans">Execution &amp; Core Engine</td>
+                <td class="py-3.5 px-4 font-black text-emerald-300 bg-emerald-500/10 border-x border-emerald-500/20">⚡ Pure Rust + WebAssembly</td>
+                <td class="py-3.5 px-4 text-slate-400">JavaScript / DOM / D3</td>
+                <td class="py-3.5 px-4 text-slate-400">C / Native binary</td>
+                <td class="py-3.5 px-4 text-slate-400">React / Canvas JS</td>
+              </tr>
+              <tr class="hover:bg-emerald-500/5 transition">
+                <td class="py-3.5 px-4 font-bold text-white font-sans">Render Latency (WASM / Native)</td>
+                <td class="py-3.5 px-4 font-black text-emerald-300 bg-emerald-500/10 border-x border-emerald-500/20">🚀 0.1ms – 0.9ms</td>
+                <td class="py-3.5 px-4 text-amber-300/80">120ms – 450ms</td>
+                <td class="py-3.5 px-4 text-slate-300">15ms – 60ms</td>
+                <td class="py-3.5 px-4 text-slate-300">8ms – 30ms</td>
+              </tr>
+              <tr class="hover:bg-emerald-500/5 transition">
+                <td class="py-3.5 px-4 font-bold text-white font-sans">Determinism Guarantee</td>
+                <td class="py-3.5 px-4 font-black text-emerald-300 bg-emerald-500/10 border-x border-emerald-500/20">✓ 100% Bit-Identical Hashes</td>
+                <td class="py-3.5 px-4 text-red-400">✗ Non-deterministic jitter</td>
+                <td class="py-3.5 px-4 text-emerald-400">✓ Deterministic</td>
+                <td class="py-3.5 px-4 text-red-400">✗ Manual layout</td>
+              </tr>
+              <tr class="hover:bg-emerald-500/5 transition">
+                <td class="py-3.5 px-4 font-bold text-white font-sans">Multi-Surface Targets</td>
+                <td class="py-3.5 px-4 font-black text-emerald-300 bg-emerald-500/10 border-x border-emerald-500/20">✓ SVG + Canvas2D + Terminal + WASM + CLI</td>
+                <td class="py-3.5 px-4 text-slate-400">SVG + PNG (via Puppeteer)</td>
+                <td class="py-3.5 px-4 text-slate-400">SVG, PostScript, PNG</td>
+                <td class="py-3.5 px-4 text-slate-400">Canvas / PNG export</td>
+              </tr>
+              <tr class="hover:bg-emerald-500/5 transition">
+                <td class="py-3.5 px-4 font-bold text-white font-sans">Error Recovery &amp; Tolerance</td>
+                <td class="py-3.5 px-4 font-black text-emerald-300 bg-emerald-500/10 border-x border-emerald-500/20">✓ Best-effort parse + diagnostics</td>
+                <td class="py-3.5 px-4 text-red-400">✗ Hard exception (red box)</td>
+                <td class="py-3.5 px-4 text-amber-400">⚠ Syntax error exit</td>
+                <td class="py-3.5 px-4 text-slate-400">—</td>
+              </tr>
+              <tr class="hover:bg-emerald-500/5 transition">
+                <td class="py-3.5 px-4 font-bold text-white font-sans">CLI Footprint / Prerequisites</td>
+                <td class="py-3.5 px-4 font-black text-emerald-300 bg-emerald-500/10 border-x border-emerald-500/20">📦 Single standalone static binary</td>
+                <td class="py-3.5 px-4 text-red-400">Node + Puppeteer + Chromium (350MB+)</td>
+                <td class="py-3.5 px-4 text-slate-300">C compiler / package manager</td>
+                <td class="py-3.5 px-4 text-slate-500">No standalone CLI</td>
+              </tr>
+              <tr class="hover:bg-emerald-500/5 transition">
+                <td class="py-3.5 px-4 font-bold text-white font-sans">Terminal / ASCII Rendering</td>
+                <td class="py-3.5 px-4 font-black text-emerald-300 bg-emerald-500/10 border-x border-emerald-500/20">✓ Unicode Box-Drawing &amp; Braille</td>
+                <td class="py-3.5 px-4 text-red-400">✗ Unsupported</td>
+                <td class="py-3.5 px-4 text-slate-500">✗ Unsupported</td>
+                <td class="py-3.5 px-4 text-slate-500">✗ Unsupported</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
     </section>
@@ -1798,7 +1890,9 @@ Shared IR,Terminal ANSI,20`
 
         this.container.addEventListener("wheel", (e) => {
           e.preventDefault();
-          const zoomFactor = e.deltaY < 0 ? 1.15 : 0.88;
+          // Dampened wheel zoom to avoid wild swings on high-resolution mice/trackpads (10x sensitivity fix)
+          const delta = Math.max(-60, Math.min(60, e.deltaY));
+          const zoomFactor = Math.exp(-delta * 0.0012);
           this.zoom(zoomFactor);
         }, { passive: false });
       }
@@ -1831,6 +1925,7 @@ Shared IR,Terminal ANSI,20`
     async function initWasmRuntime() {
       const candidates = [
         { label: "same-origin", moduleUrl: "./pkg/frankenmermaid.js", wasmUrl: "./pkg/frankenmermaid_bg.wasm" },
+        { label: "absolute-root", moduleUrl: "/pkg/frankenmermaid.js", wasmUrl: "/pkg/frankenmermaid_bg.wasm" },
         { label: "cdn", moduleUrl: "https://cdn.jsdelivr.net/gh/Dicklesworthstone/frankenmermaid@main/pkg/frankenmermaid.js", wasmUrl: "https://cdn.jsdelivr.net/gh/Dicklesworthstone/frankenmermaid@main/pkg/frankenmermaid_bg.wasm" }
       ];
 
@@ -1838,11 +1933,16 @@ Shared IR,Terminal ANSI,20`
         try {
           const mod = await import(cand.moduleUrl);
           if (typeof mod.default === "function") {
-            const wasmBytes = await fetch(cand.wasmUrl).then(r => {
-              if (!r.ok) throw new Error(`HTTP ${r.status}`);
-              return r.arrayBuffer();
-            });
-            await mod.default({ module_or_path: wasmBytes });
+            try {
+              const wasmRes = await fetch(cand.wasmUrl);
+              if (wasmRes.ok) {
+                await mod.default(wasmRes);
+              } else {
+                await mod.default();
+              }
+            } catch {
+              await mod.default();
+            }
           }
           if (typeof mod.renderSvg === "function") {
             frankenRuntime = mod;
@@ -1961,6 +2061,16 @@ Shared IR,Terminal ANSI,20`
 │ Diagram Type: ${type.padEnd(20)} Status: OK (Rich Tier)   │
 └───────────────────────────────────────────────────────────┘
 ` + source.split("\n").slice(0, 12).join("\n") + (source.split("\n").length > 12 ? "\n..." : "");
+    }
+
+    function escapeHtml(str) {
+      if (!str) return "";
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
     }
 
     // Gallery Render

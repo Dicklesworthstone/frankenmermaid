@@ -1163,6 +1163,22 @@ pub enum ArrowType {
     ThickCircleBoth,
     /// Flowchart `x==x`: crosses on both ends AND a thick stroke (bd-lrl48).
     ThickCrossBoth,
+    /// Flowchart `==o`: a circle on the END only, over a thick stroke (bd-lrl48b).
+    ///
+    /// mermaid's link grammar is a PRODUCT of an end marker and a stroke weight — `[xo<]?` head,
+    /// a `--`/`==`/`-.-` body, then one of `[-xo>]`. Every combination of the two is spellable, so
+    /// an `ArrowType` set that carries `Circle` and `ThickLine` but no `ThickCircle` cannot name
+    /// `A ==o B`. The parser used to answer `ThickLine` and drop the circle — and, worse, leave the
+    /// `o` on the endpoint, so `A ==o B` built the node `o_B`.
+    ThickCircle,
+    /// Flowchart `==x`: a cross on the END only, over a thick stroke (bd-lrl48b).
+    ThickCross,
+    /// Flowchart `-.-o`: a circle on the END only, over a dotted stroke (bd-lrl48b).
+    DottedCircle,
+    /// Flowchart `o-.-o`: circles on both ends over a dotted stroke (bd-lrl48b).
+    DottedCircleBoth,
+    /// Flowchart `x-.-x`: crosses on both ends over a dotted stroke (bd-lrl48b).
+    DottedCrossBoth,
     /// UML aggregation (`o--`): hollow diamond on the owning end. The diamond marks the *source*,
     /// so `AggregationReverse` is a distinct variant rather than a rendering flag.
     Aggregation,
@@ -1218,6 +1234,11 @@ impl ArrowType {
             Self::CrossBoth => "x--x",
             Self::ThickCircleBoth => "o==o",
             Self::ThickCrossBoth => "x==x",
+            Self::ThickCircle => "==o",
+            Self::ThickCross => "==x",
+            Self::DottedCircle => "-.-o",
+            Self::DottedCircleBoth => "o-.-o",
+            Self::DottedCrossBoth => "x-.-x",
             Self::Aggregation => "o--",
             Self::AggregationReverse => "--o",
             Self::Composition => "*--",

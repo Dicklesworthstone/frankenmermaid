@@ -119,7 +119,9 @@ const fn edge_marker_ends(arrow: ArrowType) -> (bool, bool) {
         | ArrowType::CircleBoth
         | ArrowType::CrossBoth
         | ArrowType::ThickCircleBoth
-        | ArrowType::ThickCrossBoth => (true, true),
+        | ArrowType::ThickCrossBoth
+        | ArrowType::DottedCircleBoth
+        | ArrowType::DottedCrossBoth => (true, true),
         ArrowType::HalfArrowTopReverse
         | ArrowType::HalfArrowBottomReverse
         | ArrowType::StickArrowTopReverse
@@ -147,6 +149,9 @@ const fn edge_marker_ends(arrow: ArrowType) -> (bool, bool) {
         | ArrowType::StickArrowBottomDotted
         | ArrowType::Circle
         | ArrowType::Cross
+        | ArrowType::ThickCircle
+        | ArrowType::ThickCross
+        | ArrowType::DottedCircle
         | ArrowType::AggregationReverse
         | ArrowType::CompositionReverse
         | ArrowType::InheritanceReverse => (false, true),
