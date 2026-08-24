@@ -1,6 +1,6 @@
 {
   "name": "frankenmermaid",
-  "pages_build_output_dir": "./dist/cloudflare-pages/latest",
+  "pages_build_output_dir": "./dist/site",
   "compatibility_date": "2026-04-06",
   "vars": {
     "FM_CANONICAL_HOST": "frankenmermaid.com",
@@ -11,11 +11,17 @@
   "env": {
     "preview": {
       "vars": {
+        "FM_CANONICAL_HOST": "frankenmermaid.pages.dev",
+        "FM_STATIC_ROUTE": "/web",
+        "FM_REACT_ROUTE": "/web_react",
         "FM_DEPLOY_ENV": "preview"
       }
     },
     "production": {
       "vars": {
+        "FM_CANONICAL_HOST": "frankenmermaid.com",
+        "FM_STATIC_ROUTE": "/web",
+        "FM_REACT_ROUTE": "/web_react",
         "FM_DEPLOY_ENV": "production"
       }
     }

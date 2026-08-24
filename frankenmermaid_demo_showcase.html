@@ -6,11 +6,18 @@
   <title>frankenmermaid — The Monster Diagram Engine</title>
   <meta name="description" content="A Rust-first, Mermaid-compatible diagram engine with intent-aware parsing, 15 layout algorithms, deterministic output, and SVG / terminal / Canvas2D / WASM renderers from a single intermediate representation.">
   <meta name="theme-color" content="#020a06">
-  <link rel="canonical" href="https://frankenmermaid.pages.dev/">
+  <link rel="canonical" href="https://frankenmermaid.com/">
   <meta property="og:title" content="frankenmermaid — The Monster Diagram Engine">
   <meta property="og:description" content="Mermaid → deterministic SVG, Canvas2D, and terminal rendering from one auditable Rust core. 15 layout algorithms. Zero unsafe code. Rendered live in your browser via WASM.">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://frankenmermaid.pages.dev/">
+  <meta property="og:url" content="https://frankenmermaid.com/">
+  <meta property="og:image" content="https://frankenmermaid.com/gh_og_share_image.png">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="frankenmermaid — The Monster Diagram Engine">
+  <meta name="twitter:description" content="Mermaid → deterministic SVG, Canvas2D, and terminal rendering from one auditable Rust core. 15 layout algorithms. Zero unsafe code.">
+  <meta name="twitter:image" content="https://frankenmermaid.com/gh_og_share_image.png">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23020a06'/%3E%3Crect width='64' height='64' rx='14' fill='none' stroke='%2310b981' stroke-opacity='0.5' stroke-width='2'/%3E%3Ctext x='32' y='44' font-family='monospace' font-size='36' font-weight='900' fill='%2334d399' text-anchor='middle'%3E🧜%3C/text%3E%3C/svg%3E">
 
   <!-- Inter and JetBrains Mono Fonts -->
@@ -86,6 +93,8 @@
       inset: 0;
       z-index: -2;
       pointer-events: none;
+      transform: translateZ(0);
+      will-change: transform;
       background:
         radial-gradient(circle at 15% 12%, rgba(16, 185, 129, 0.08), transparent 45%),
         radial-gradient(circle at 85% 30%, rgba(0, 66, 37, 0.35), transparent 50%),
@@ -93,23 +102,15 @@
         linear-gradient(to bottom, var(--color-bg), var(--color-bg-deep));
     }
 
-    body::before {
-      content: "";
-      position: fixed;
-      inset: 0;
-      opacity: 0.035;
-      pointer-events: none;
-      z-index: 9999;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.7'/%3E%3C/svg%3E");
-    }
-
-    /* Ambient Glow Orbs */
+    /* Ambient Glow Orbs - hardware accelerated */
     .glow-orb {
       position: absolute;
       border-radius: 9999px;
-      filter: blur(80px);
+      filter: blur(60px);
       pointer-events: none;
       z-index: 0;
+      will-change: transform;
+      transform: translateZ(0);
       animation: orbFloat 22s ease-in-out infinite alternate;
     }
 
@@ -119,25 +120,34 @@
       100% { transform: translate(-20px, -30px) scale(0.95); }
     }
 
-    /* Glass Modern Panels */
+    /* High-Performance Modern Panels */
     .glass-modern {
-      background: rgba(6, 20, 13, 0.7);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
+      background: rgba(6, 20, 13, 0.94);
       border: 1px solid var(--color-border);
-      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6), inset 0 1px 1px rgba(255, 255, 255, 0.05);
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5), inset 0 1px 1px rgba(255, 255, 255, 0.05);
+      contain: paint;
     }
 
     .glass-card {
-      background: rgba(4, 14, 9, 0.85);
-      backdrop-filter: blur(12px);
-      border: 1px solid rgba(16, 185, 129, 0.12);
-      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      background: rgba(4, 15, 10, 0.95);
+      border: 1px solid rgba(16, 185, 129, 0.16);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+      transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+      will-change: transform;
     }
     .glass-card:hover {
-      border-color: rgba(52, 211, 153, 0.35);
-      box-shadow: 0 12px 36px rgba(0, 66, 37, 0.25);
+      border-color: rgba(52, 211, 153, 0.45);
+      box-shadow: 0 8px 28px rgba(0, 66, 37, 0.3);
       transform: translateY(-2px);
+    }
+
+    .specimen-card {
+      content-visibility: auto;
+      contain-intrinsic-size: 1px 280px;
+    }
+
+    #gallery-grid {
+      contain: layout paint;
     }
 
     @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
@@ -1111,25 +1121,30 @@ $ fm-cli render --format=svg sample.mmd
     <section id="gallery" class="relative px-4 sm:px-6 lg:px-8 max-w-[1760px] mx-auto w-full">
       <div class="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-8">
         <div>
-          <div class="inline-flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.3em] text-emerald-400 mb-2">
-            TAXONOMY_INVENTORY
+          <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-[10px] font-black uppercase tracking-[0.25em] text-emerald-400 mb-3">
+            <span class="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+            DIAGRAM TAXONOMY &amp; SPECIMEN MATRIX
           </div>
           <h2 class="text-3xl md:text-5xl font-black text-white">24 Diagram <span class="text-emerald-400">Specimens</span>.</h2>
+          <p class="text-slate-300 text-sm md:text-base max-w-2xl mt-2">Every Mermaid specification and extended dialect parsed into a unified semantic IR with deterministic multi-target layout and rendering.</p>
         </div>
 
         <div class="flex flex-wrap items-center gap-3">
-          <input id="gallery-search" type="search" placeholder="Filter specimens (e.g. flowchart, git, c4)..." class="rounded-xl border border-emerald-500/25 bg-black/60 px-4 py-2 text-xs font-mono text-slate-200 placeholder:text-slate-600 focus:border-emerald-500 w-72">
-          <span id="gallery-count" class="font-mono text-xs text-emerald-400 font-bold">24 of 24</span>
+          <div class="relative">
+            <input id="gallery-search" type="search" placeholder="Search specimens (e.g. flowchart, git, c4)..." class="rounded-xl border border-emerald-500/25 bg-black/80 pl-4 pr-10 py-2.5 text-xs font-mono text-slate-200 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none w-72 sm:w-80 transition shadow-inner">
+            <span class="absolute right-3 top-2.5 text-slate-500 text-xs pointer-events-none">⌘K</span>
+          </div>
+          <span id="gallery-count" class="px-3 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 font-mono text-xs text-emerald-300 font-bold">24 of 24 Specimens</span>
         </div>
       </div>
 
       <!-- Category Filter Chips -->
       <div id="gallery-filters" class="flex flex-wrap items-center gap-2 mb-8">
-        <!-- Injected dynamically -->
+        <!-- Injected dynamically with category counts -->
       </div>
 
       <!-- Specimen Grid -->
-      <div id="gallery-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+      <div id="gallery-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
         <!-- Rendered dynamically -->
       </div>
 
@@ -1953,56 +1968,90 @@ Shared IR,Terminal ANSI,20`
       if (!els.galleryGrid) return;
       const search = (els.gallerySearch?.value || "").toLowerCase().trim();
       const filtered = DIAGRAM_SAMPLES.filter(s => {
-        const matchesCategory = state.activeCategory === "all" || s.category.toLowerCase().includes(state.activeCategory);
+        const matchesCategory = state.activeCategory === "all" || s.category.toLowerCase().includes(state.activeCategory.toLowerCase());
         const matchesSearch = !search || s.label.toLowerCase().includes(search) || s.category.toLowerCase().includes(search) || s.summary.toLowerCase().includes(search);
         return matchesCategory && matchesSearch;
       });
 
       if (els.galleryCount) {
-        els.galleryCount.textContent = `${filtered.length} of ${DIAGRAM_SAMPLES.length}`;
+        els.galleryCount.textContent = `${filtered.length} of ${DIAGRAM_SAMPLES.length} Specimens`;
       }
 
-      // Populate Category Filters
+      // Populate Category Filters with dynamic counts
+      const categoryMap = [
+        { id: "all", label: "All Dialects" },
+        { id: "flowchart", label: "Flowcharts" },
+        { id: "sequence", label: "Sequence & Trace" },
+        { id: "class", label: "Classes & UML" },
+        { id: "state", label: "Statecharts" },
+        { id: "er", label: "ER Relational" },
+        { id: "c4", label: "C4 Architecture" },
+        { id: "gitgraph", label: "Git DAG" },
+        { id: "mindmap", label: "Mindmaps" },
+        { id: "gantt", label: "Gantt & Time" }
+      ];
+
       if (els.galleryFilters && els.galleryFilters.children.length === 0) {
-        const categories = ["all", "flowchart", "sequence", "class", "state", "er", "c4", "gitGraph", "mindmap", "gantt"];
-        els.galleryFilters.innerHTML = categories.map(cat => `
-          <button type="button" class="cat-pill px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider transition ${cat === 'all' ? 'border border-emerald-500 bg-emerald-500/20 text-emerald-300' : 'border border-white/10 text-slate-400 hover:border-emerald-500/40'}" data-cat="${cat}">
-            ${cat}
-          </button>
-        `).join("");
+        els.galleryFilters.innerHTML = categoryMap.map(cat => {
+          const count = cat.id === "all"
+            ? DIAGRAM_SAMPLES.length
+            : DIAGRAM_SAMPLES.filter(s => s.category.toLowerCase().includes(cat.id.toLowerCase())).length;
+          const isActive = state.activeCategory === cat.id;
+          return `
+            <button type="button" class="cat-pill px-3.5 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-wider transition duration-150 flex items-center gap-1.5 ${isActive ? 'border border-emerald-500 bg-emerald-500/20 text-emerald-300 shadow-sm' : 'border border-white/10 text-slate-400 hover:border-emerald-500/40 hover:text-slate-200'}" data-cat="${cat.id}">
+              <span>${cat.label}</span>
+              <span class="rounded-full bg-white/10 px-1.5 py-0.2 text-[9px] font-mono text-emerald-400">${count}</span>
+            </button>
+          `;
+        }).join("");
 
         els.galleryFilters.querySelectorAll(".cat-pill").forEach(pill => {
           pill.addEventListener("click", () => {
             state.activeCategory = pill.getAttribute("data-cat") || "all";
             els.galleryFilters.querySelectorAll(".cat-pill").forEach(p => {
-              p.className = "cat-pill px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider border border-white/10 text-slate-400 hover:border-emerald-500/40";
+              p.className = "cat-pill px-3.5 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-wider border border-white/10 text-slate-400 hover:border-emerald-500/40 hover:text-slate-200 transition duration-150 flex items-center gap-1.5";
             });
-            pill.className = "cat-pill px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider border border-emerald-500 bg-emerald-500/20 text-emerald-300";
+            pill.className = "cat-pill px-3.5 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-wider border border-emerald-500 bg-emerald-500/20 text-emerald-300 shadow-sm transition duration-150 flex items-center gap-1.5";
             renderGallery();
           });
         });
       }
 
-      els.galleryGrid.innerHTML = filtered.map(s => `
-        <div class="glass-card rounded-2xl p-4 flex flex-col justify-between cursor-pointer hover:border-emerald-500/50 transition group" data-id="${s.category}">
+      els.galleryGrid.innerHTML = filtered.map((s, idx) => `
+        <div class="glass-card specimen-card rounded-2xl p-5 flex flex-col justify-between hover:border-emerald-500/50 transition duration-200 group" data-idx="${idx}">
           <div>
-            <div class="flex items-center justify-between gap-2 mb-2">
-              <span class="rounded bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 text-[9px] font-bold text-emerald-400 font-mono uppercase">${s.category}</span>
-              <span class="text-[9px] font-mono text-slate-500">${s.support}</span>
+            <div class="flex items-center justify-between gap-2 mb-3">
+              <span class="rounded-md bg-emerald-500/15 border border-emerald-500/30 px-2.5 py-0.5 text-[9px] font-black text-emerald-400 font-mono uppercase tracking-wider">${s.category}</span>
+              <span class="text-[9px] font-mono text-slate-400 bg-white/5 px-2 py-0.5 rounded border border-white/5">● Unified IR</span>
             </div>
-            <h4 class="font-extrabold text-sm text-white group-hover:text-emerald-300 transition">${s.label}</h4>
-            <p class="text-xs text-slate-400 mt-1 line-clamp-2">${s.summary}</p>
+            <h4 class="font-extrabold text-base text-white group-hover:text-emerald-300 transition leading-snug">${s.label}</h4>
+            <p class="text-xs text-slate-300 mt-1.5 line-clamp-2 leading-relaxed">${s.summary}</p>
+            
+            <div class="mt-3.5 rounded-xl bg-black/80 border border-white/10 p-3 overflow-hidden">
+              <pre class="font-mono text-[10px] text-emerald-300/80 leading-relaxed overflow-x-hidden whitespace-pre">${escapeHtml(s.code.split('\n').slice(0, 3).join('\n'))}${s.code.split('\n').length > 3 ? '\n...' : ''}</pre>
+            </div>
           </div>
-          <div class="mt-4 pt-3 border-t border-emerald-500/10 flex items-center justify-between">
-            <span class="text-[10px] font-mono text-emerald-400 font-bold group-hover:underline">Load into Theater →</span>
+
+          <div class="mt-4 pt-3.5 border-t border-emerald-500/15 flex items-center justify-between gap-2">
+            <button type="button" class="btn-load-specimen flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-emerald-500/15 hover:bg-emerald-500 text-emerald-300 hover:text-black font-mono text-[10px] font-black uppercase tracking-wider transition duration-150">
+              <span>⚡ Load in Studio</span>
+            </button>
+            <button type="button" class="btn-copy-specimen p-2 rounded-xl bg-white/5 hover:bg-white/15 text-slate-400 hover:text-white transition duration-150" title="Copy Mermaid code">
+              <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+              </svg>
+            </button>
           </div>
         </div>
       `).join("");
 
-      els.galleryGrid.querySelectorAll(".glass-card").forEach((card, i) => {
-        card.addEventListener("click", () => {
-          const sample = filtered[i];
-          if (sample && els.input) {
+      els.galleryGrid.querySelectorAll(".specimen-card").forEach((card) => {
+        const idx = parseInt(card.getAttribute("data-idx") || "0", 10);
+        const sample = filtered[idx];
+        if (!sample) return;
+
+        const loadFn = () => {
+          if (els.input) {
             els.input.value = sample.code;
             if (els.familyChip) els.familyChip.textContent = sample.category.toUpperCase();
             if (!prefersReducedMotion()) {
@@ -2012,7 +2061,26 @@ Shared IR,Terminal ANSI,20`
             }
             scheduleRender(true);
           }
+        };
+
+        card.querySelector(".btn-load-specimen")?.addEventListener("click", (e) => {
+          e.stopPropagation();
+          loadFn();
         });
+
+        card.querySelector(".btn-copy-specimen")?.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          await writeClipboardText(sample.code);
+          const btn = card.querySelector(".btn-copy-specimen");
+          if (btn) {
+            btn.innerHTML = `<span class="text-[10px] text-emerald-400 font-bold">✓</span>`;
+            setTimeout(() => {
+              btn.innerHTML = `<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>`;
+            }, 1500);
+          }
+        });
+
+        card.addEventListener("click", loadFn);
       });
     }
 

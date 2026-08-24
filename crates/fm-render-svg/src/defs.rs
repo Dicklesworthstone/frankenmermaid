@@ -61,18 +61,18 @@ impl ArrowheadMarker {
     #[must_use]
     pub fn standard(id: &str, fill: &str) -> Self {
         let path = PathBuilder::new()
-            .move_to(0.0, 0.0)
-            .line_to(8.0, 3.5)
-            .line_to(0.0, 7.0)
-            .line_to(2.0, 3.5)
+            .move_to(0.0, 0.5)
+            .line_to(6.5, 3.5)
+            .line_to(0.0, 6.5)
+            .line_to(1.5, 3.5)
             .close()
             .build();
 
         Self {
             id: id.to_string(),
-            marker_width: 8.0,
+            marker_width: 7.0,
             marker_height: 7.0,
-            ref_x: 8.0,
+            ref_x: 6.5,
             ref_y: 3.5,
             orient: MarkerOrient::Auto,
             path,
@@ -86,19 +86,19 @@ impl ArrowheadMarker {
     #[must_use]
     pub fn filled(id: &str, fill: &str) -> Self {
         let path = PathBuilder::new()
-            .move_to(0.0, 0.0)
-            .line_to(9.0, 4.0)
-            .line_to(0.0, 8.0)
-            .line_to(2.5, 4.0)
+            .move_to(0.0, 0.5)
+            .line_to(7.0, 3.5)
+            .line_to(0.0, 6.5)
+            .line_to(1.8, 3.5)
             .close()
             .build();
 
         Self {
             id: id.to_string(),
-            marker_width: 9.0,
-            marker_height: 8.0,
-            ref_x: 9.0,
-            ref_y: 4.0,
+            marker_width: 7.5,
+            marker_height: 7.0,
+            ref_x: 7.0,
+            ref_y: 3.5,
             orient: MarkerOrient::Auto,
             path,
             fill: fill.to_string(),
@@ -111,16 +111,16 @@ impl ArrowheadMarker {
     #[must_use]
     pub fn open(id: &str, stroke: &str) -> Self {
         let path = PathBuilder::new()
-            .move_to(0.0, 0.5)
-            .line_to(7.0, 3.5)
-            .line_to(0.0, 6.5)
+            .move_to(0.5, 0.8)
+            .line_to(6.0, 3.5)
+            .line_to(0.5, 6.2)
             .build();
 
         Self {
             id: id.to_string(),
-            marker_width: 8.0,
+            marker_width: 7.0,
             marker_height: 7.0,
-            ref_x: 7.0,
+            ref_x: 6.0,
             ref_y: 3.5,
             orient: MarkerOrient::Auto,
             path,

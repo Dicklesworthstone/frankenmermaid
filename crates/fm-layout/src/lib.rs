@@ -1020,17 +1020,17 @@ pub struct LayoutSpacing {
 impl Default for LayoutSpacing {
     fn default() -> Self {
         Self {
-            node_spacing: 80.0,
-            rank_spacing: 120.0,
-            cluster_padding: 52.0,
-            sequence_participant_gap_extra: 80.0,
-            sequence_min_message_gap: 56.0,
-            sequence_self_loop_width: 40.0,
+            node_spacing: 52.0,
+            rank_spacing: 76.0,
+            cluster_padding: 28.0,
+            sequence_participant_gap_extra: 48.0,
+            sequence_min_message_gap: 38.0,
+            sequence_self_loop_width: 36.0,
             sequence_activation_width: 10.0,
-            chart_legend_padding: 86.0,
-            chart_legend_min_width: 136.0,
-            chart_legend_max_width: 280.0,
-            chart_title_height: 44.0,
+            chart_legend_padding: 48.0,
+            chart_legend_min_width: 110.0,
+            chart_legend_max_width: 260.0,
+            chart_title_height: 38.0,
         }
     }
 }
@@ -10693,9 +10693,9 @@ fn compute_node_size(
             let width = label_width
                 .max(icon_width)
                 .max(icon_width.mul_add(0.85, label_width))
-                + 72.0;
-            let height = label_height + icon_height + 44.0;
-            let (width, height) = (width.max(100.0), height.max(52.0));
+                + 36.0;
+            let height = label_height + icon_height + 20.0;
+            let (width, height) = (width.max(68.0), height.max(38.0));
             // A class node's box must also hold its compartment stack. The SVG renderer walks the
             // member rows against the node's own height and `break`s on the first row that would
             // fall outside it, so a box sized from the label alone SILENTLY DROPS members rather

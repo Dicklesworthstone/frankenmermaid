@@ -9,9 +9,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust 2024](https://img.shields.io/badge/rust-2024_edition-orange.svg)](rust-toolchain.toml)
 [![No unsafe](https://img.shields.io/badge/unsafe-forbid-success.svg)](#zero-unsafe-code)
-[![Live Demo](https://img.shields.io/badge/demo-live-brightgreen.svg)](https://frankenmermaid.pages.dev/)
+[![Live Showcase](https://img.shields.io/badge/showcase-frankenmermaid.com-brightgreen.svg)](https://frankenmermaid.com/)
+[![Cloudflare Pages](https://img.shields.io/badge/pages-frankenmermaid.pages.dev-blue.svg)](https://frankenmermaid.pages.dev/)
 
-**Live Demo:** <https://frankenmermaid.pages.dev/>
+**Live Showcase:** <https://frankenmermaid.com/> (or <https://frankenmermaid.pages.dev/>)
 *80+ interactive examples, live editor, presenter mode, style studio, diagnostics panel, and determinism checker.*
 
 ```bash

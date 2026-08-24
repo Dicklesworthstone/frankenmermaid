@@ -115,21 +115,21 @@ impl ThemeColors {
         match preset {
             ThemePreset::Default => Self {
                 background: "#fafbfc".into(),
-                text: "#1a1a2e".into(),
+                text: "#1e293b".into(),
                 node_fill: "#ffffff".into(),
-                node_stroke: "#e2e8f0".into(),
-                edge: "#94a3b8".into(),
-                cluster_fill: "rgba(241,245,249,0.6)".into(),
-                cluster_stroke: "#cbd5e1".into(),
+                node_stroke: "#cbd5e1".into(),
+                edge: "#64748b".into(),
+                cluster_fill: "rgba(241,245,249,0.65)".into(),
+                cluster_stroke: "#94a3b8".into(),
                 accents: [
-                    "#6366f1".into(), // Indigo - primary
-                    "#3b82f6".into(), // Blue
-                    "#06b6d4".into(), // Cyan
-                    "#8b5cf6".into(), // Violet
-                    "#f59e0b".into(), // Amber
-                    "#ec4899".into(), // Pink
-                    "#10b981".into(), // Emerald
-                    "#f43f5e".into(), // Rose
+                    "#4f46e5".into(), // Indigo - primary
+                    "#0284c7".into(), // Sky
+                    "#0d9488".into(), // Teal
+                    "#7c3aed".into(), // Violet
+                    "#d97706".into(), // Amber
+                    "#db2777".into(), // Pink
+                    "#059669".into(), // Emerald
+                    "#e11d48".into(), // Rose
                 ],
             },
 
@@ -501,7 +501,7 @@ impl Theme {
         self.font.write_css(&mut css);
 
         let shadow_filter = if shadows {
-            "filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.10)) drop-shadow(0 1px 3px rgba(0, 0, 0, 0.06));"
+            "filter: drop-shadow(0 1px 3px rgba(15, 23, 42, 0.08)) drop-shadow(0 1px 2px rgba(15, 23, 42, 0.04));"
         } else {
             ""
         };
@@ -513,7 +513,7 @@ impl Theme {
         // hover/unhover. Motion belongs to the opt-in `.fm-animations-enabled` group hover,
         // which scales correctly via `transform-box: fill-box`.
         let hover_shadow_filter = if shadows {
-            "filter: drop-shadow(0 8px 20px rgba(0, 0, 0, 0.14)) drop-shadow(0 3px 8px rgba(0, 0, 0, 0.08));"
+            "filter: drop-shadow(0 4px 12px rgba(15, 23, 42, 0.12)) drop-shadow(0 2px 4px rgba(15, 23, 42, 0.06));"
         } else {
             ""
         };
@@ -532,14 +532,14 @@ impl Theme {
   --fm-cluster-c4-stroke: var(--fm-cluster-stroke);
   --fm-cluster-swimlane-fill: var(--fm-cluster-fill);
   --fm-cluster-swimlane-stroke: var(--fm-cluster-stroke);
-  --fm-surface-shadow: rgba(15, 23, 42, 0.1);
+  --fm-surface-shadow: rgba(15, 23, 42, 0.08);
 }}
 svg {{
   shape-rendering: geometricPrecision;
   background: var(--fm-bg);
   background-image:
-    radial-gradient(ellipse at 20% 0%, color-mix(in srgb, var(--fm-accent-1) 4%, transparent) 0%, transparent 50%),
-    linear-gradient(180deg, var(--fm-bg) 0%, color-mix(in srgb, var(--fm-bg) 96%, var(--fm-node-stroke) 4%) 100%);
+    radial-gradient(ellipse at 20% 0%, color-mix(in srgb, var(--fm-accent-1) 3%, transparent) 0%, transparent 50%),
+    linear-gradient(180deg, var(--fm-bg) 0%, color-mix(in srgb, var(--fm-bg) 97%, var(--fm-node-stroke) 3%) 100%);
 }}
 .fm-node {{
   isolation: isolate;
@@ -553,11 +553,11 @@ svg {{
 .fm-node polygon {{
   fill: var(--fm-node-fill);
   stroke: var(--fm-node-accent);
-  stroke-width: 1.6;
+  stroke-width: 1.25;
   vector-effect: non-scaling-stroke;
   shape-rendering: geometricPrecision;
   {shadow_filter}
-  transition: fill 200ms ease, stroke 200ms ease, filter 200ms ease;
+  transition: fill 150ms ease, stroke 150ms ease, filter 150ms ease;
 }}
 .fm-node.fm-node-user-mindmap-no-border rect,
 .fm-node.fm-node-user-mindmap-no-border path,
@@ -566,13 +566,13 @@ svg {{
 }}
 .fm-node line {{
   stroke: var(--fm-node-accent);
-  stroke-width: 1.5;
+  stroke-width: 1.25;
   vector-effect: non-scaling-stroke;
 }}
 .fm-node text {{
   fill: var(--fm-text-color);
-  font-weight: 600;
-  letter-spacing: -0.02em;
+  font-weight: 500;
+  letter-spacing: -0.015em;
   text-rendering: optimizeLegibility;
   font-feature-settings: "kern" 1, "liga" 1, "calt" 1;
 }}
@@ -644,29 +644,30 @@ svg {{
 .fm-edge {{
   fill: none;
   stroke: var(--fm-edge-color);
+  stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
   vector-effect: non-scaling-stroke;
   paint-order: stroke;
-  transition: stroke 200ms ease, opacity 200ms ease, stroke-width 200ms ease;
+  transition: stroke 150ms ease, opacity 150ms ease, stroke-width 150ms ease;
   cursor: default;
 }}
 .fm-edge:hover {{
   stroke: var(--fm-accent-1);
-  stroke-width: 2.5;
+  stroke-width: 2.25;
   opacity: 1;
 }}
 .fm-edge-solid {{
   stroke-dasharray: none;
 }}
 .fm-edge-dashed {{
-  stroke-dasharray: 6 6;
+  stroke-dasharray: 5 5;
 }}
 .fm-edge-thick {{
-  stroke-width: 2.5;
+  stroke-width: 2.25;
 }}
 .fm-edge-thick:hover {{
-  stroke-width: 3.5;
+  stroke-width: 3.0;
 }}
 .fm-edge-back {{
   stroke: var(--fm-edge-muted);
@@ -679,7 +680,7 @@ marker#arrow-circle path,
 marker#arrow-diamond path {{
   fill: var(--fm-edge-color);
   stroke: none;
-  transition: fill 200ms ease;
+  transition: fill 150ms ease;
 }}
 .fm-edge:hover ~ marker#arrow-end path,
 .fm-edge:hover ~ marker#arrow-filled path,
@@ -690,26 +691,26 @@ marker#arrow-diamond path {{
 marker#arrow-open path {{
   stroke: var(--fm-edge-muted);
   fill: none;
-  stroke-width: 1.8;
-  transition: stroke 200ms ease;
+  stroke-width: 1.5;
+  transition: stroke 150ms ease;
 }}
 marker#arrow-cross path {{
   stroke: var(--fm-edge-color);
   fill: none;
-  stroke-width: 1.8;
-  transition: stroke 200ms ease;
+  stroke-width: 1.5;
+  transition: stroke 150ms ease;
 }}
 .fm-cluster {{
   fill: var(--fm-cluster-fill);
   stroke: var(--fm-cluster-stroke);
   stroke-width: 1;
-  stroke-dasharray: 5 3;
-  rx: 12;
-  ry: 12;
+  stroke-dasharray: 4 4;
+  rx: 10;
+  ry: 10;
 }}
 .fm-cluster-label {{
   fill: var(--fm-cluster-label-color);
-  font-weight: 700;
+  font-weight: 600;
   font-size: 0.85em;
   letter-spacing: 0.01em;
 }}
@@ -753,20 +754,20 @@ marker#arrow-cross path {{
 .fm-edge-labeled > rect {
   fill: var(--fm-edge-label-bg);
   stroke: var(--fm-edge-label-border);
-  stroke-width: 0.75;
+  stroke-width: 0.85;
   rx: 6px;
   ry: 6px;
 }
 @supports (backdrop-filter: blur(4px)) {
   .fm-edge-labeled > rect {
-    fill: color-mix(in srgb, var(--fm-edge-label-bg) 85%, transparent);
+    fill: color-mix(in srgb, var(--fm-edge-label-bg) 90%, transparent);
     backdrop-filter: blur(8px);
   }
 }
 .edge-label {
   fill: var(--fm-edge-label-text);
-  font-weight: 600;
-  font-size: 0.88em;
+  font-weight: 500;
+  font-size: 0.85em;
   letter-spacing: -0.01em;
   text-rendering: optimizeLegibility;
 }
