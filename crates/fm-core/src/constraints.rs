@@ -72,13 +72,15 @@ struct OrderCandidate {
     min_gap: f32,
 }
 
-/// Synthesizes strict pairwise order constraints with a counterexample-guided loop.
+/// Synthesizes strict pairwise order and alignment constraints with a counterexample-guided loop.
 ///
 /// The first example proposes an order for every pair of nodes it contains. Each
 /// subsequent example is a counterexample search: a candidate is retained only
 /// when its direction remains strict and finite, while its minimum observed gap
-/// is tightened. Nodes absent from any example are excluded; tied or non-finite
-/// coordinates reject a candidate rather than creating a constraint that a later
+/// is tightened. Nodes that share an exact coordinate in the seed similarly
+/// propose an alignment candidate, retained only while every example agrees.
+/// Nodes absent from any example are excluded; tied or non-finite coordinates
+/// reject an order candidate rather than creating a constraint that a later
 /// layout cannot satisfy.
 #[must_use]
 pub fn synthesize_order_constraints(examples: &[ConstraintExample]) -> ConstraintSynthesisResult {
@@ -151,20 +153,105 @@ pub fn synthesize_order_constraints(examples: &[ConstraintExample]) -> Constrain
         });
     }
 
-    ConstraintSynthesisResult {
-        constraints: candidates
+    let mut constraints = candidates
+        .into_iter()
+        .map(|candidate| {
+            LayoutConstraint::Order(OrderConstraint {
+                subject: candidate.subject,
+                relation: candidate.relation,
+                reference: candidate.reference,
+                min_gap: candidate.min_gap,
+                strength: ConstraintStrength::Hard,
+            })
+        })
+        .collect::<Vec<_>>();
+    constraints.extend(
+        alignment_candidates(seed, &node_ids)
             .into_iter()
+            .filter(|candidate| {
+                examples
+                    .iter()
+                    .all(|example| nodes_remain_aligned(example, candidate))
+            })
             .map(|candidate| {
-                LayoutConstraint::Order(OrderConstraint {
-                    subject: candidate.subject,
-                    relation: candidate.relation,
-                    reference: candidate.reference,
-                    min_gap: candidate.min_gap,
+                LayoutConstraint::Align(AlignConstraint {
+                    nodes: candidate.nodes,
+                    axis: candidate.axis,
                     strength: ConstraintStrength::Hard,
                 })
-            })
-            .collect(),
+            }),
+    );
+
+    ConstraintSynthesisResult {
+        constraints,
         counterexamples,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AlignmentCandidate {
+    nodes: Vec<String>,
+    axis: AlignAxis,
+}
+
+fn alignment_candidates(seed: &ConstraintExample, node_ids: &[&String]) -> Vec<AlignmentCandidate> {
+    let mut candidates = Vec::new();
+    for axis in [AlignAxis::Horizontal, AlignAxis::Vertical] {
+        let mut groups: Vec<Vec<&String>> = Vec::new();
+        for node_id in node_ids {
+            let Some(position) = seed.positions.get(*node_id) else {
+                continue;
+            };
+            let coordinate = alignment_coordinate(*position, axis);
+            if !coordinate.is_finite() {
+                continue;
+            }
+            if let Some(group) = groups.iter_mut().find(|group| {
+                group.first().is_some_and(|first_node_id| {
+                    seed.positions
+                        .get(*first_node_id)
+                        .is_some_and(|first_position| {
+                            alignment_coordinate(*first_position, axis) == coordinate
+                        })
+                })
+            }) {
+                group.push(*node_id);
+            } else {
+                groups.push(vec![*node_id]);
+            }
+        }
+        candidates.extend(groups.into_iter().filter_map(|group| {
+            (group.len() > 1).then(|| AlignmentCandidate {
+                nodes: group.into_iter().cloned().collect(),
+                axis,
+            })
+        }));
+    }
+    candidates
+}
+
+fn nodes_remain_aligned(example: &ConstraintExample, candidate: &AlignmentCandidate) -> bool {
+    let Some(reference_position) = candidate
+        .nodes
+        .first()
+        .and_then(|node_id| example.positions.get(node_id))
+    else {
+        return false;
+    };
+    let reference_coordinate = alignment_coordinate(*reference_position, candidate.axis);
+    reference_coordinate.is_finite()
+        && candidate.nodes.iter().skip(1).all(|node_id| {
+            example.positions.get(node_id).is_some_and(|position| {
+                let coordinate = alignment_coordinate(*position, candidate.axis);
+                coordinate.is_finite() && coordinate == reference_coordinate
+            })
+        })
+}
+
+fn alignment_coordinate(position: ConstraintExamplePosition, axis: AlignAxis) -> f32 {
+    match axis {
+        AlignAxis::Horizontal => position.y,
+        AlignAxis::Vertical => position.x,
     }
 }
 
@@ -559,6 +646,20 @@ mod tests {
         })
     }
 
+    fn has_alignment(result: &ConstraintSynthesisResult, nodes: &[&str], axis: AlignAxis) -> bool {
+        result.constraints.iter().any(|constraint| {
+            matches!(
+                constraint,
+                LayoutConstraint::Align(AlignConstraint {
+                    nodes: actual_nodes,
+                    axis: actual_axis,
+                    strength: ConstraintStrength::Hard,
+                }) if *actual_axis == axis
+                    && actual_nodes.iter().map(String::as_str).eq(nodes.iter().copied())
+            )
+        })
+    }
+
     #[test]
     fn cegis_synthesis_keeps_only_orders_shared_by_all_examples() {
         let result = synthesize_order_constraints(&[
@@ -578,7 +679,13 @@ mod tests {
             constraint_example(&[("A", 140.0, 0.0), ("B", 100.0, 0.0)]),
         ]);
 
-        assert!(result.constraints.is_empty());
+        assert!(
+            !result
+                .constraints
+                .iter()
+                .any(|constraint| matches!(constraint, LayoutConstraint::Order(_))),
+            "the reversed example must reject the seed's order rather than synthesize its opposite"
+        );
         assert_eq!(result.counterexamples.len(), 1);
         assert_eq!(result.counterexamples[0].example_index, 1);
         assert_eq!(result.counterexamples[0].subject, "A");
@@ -593,9 +700,52 @@ mod tests {
             constraint_example(&[("A", f32::NAN, 0.0), ("B", 100.0, 0.0)]),
         ]);
 
-        assert!(result.constraints.is_empty());
+        assert!(
+            !result
+                .constraints
+                .iter()
+                .any(|constraint| matches!(constraint, LayoutConstraint::Order(_))),
+            "a non-finite coordinate must reject order synthesis"
+        );
         assert_eq!(result.counterexamples.len(), 1);
         assert_eq!(result.counterexamples[0].relation, OrderRelation::LeftOf);
+    }
+
+    #[test]
+    fn cegis_synthesis_keeps_alignment_shared_by_all_examples() {
+        let result = synthesize_order_constraints(&[
+            constraint_example(&[("A", 0.0, 10.0), ("B", 100.0, 10.0), ("C", 40.0, 90.0)]),
+            constraint_example(&[("A", 20.0, 25.0), ("B", 180.0, 25.0), ("C", 60.0, 120.0)]),
+        ]);
+
+        assert!(has_alignment(&result, &["A", "B"], AlignAxis::Horizontal));
+        assert!(
+            !has_alignment(&result, &["A", "C"], AlignAxis::Horizontal),
+            "only relationships sustained by every example may become hard alignment constraints"
+        );
+    }
+
+    #[test]
+    fn cegis_synthesis_preserves_vertical_alignment_across_examples() {
+        let result = synthesize_order_constraints(&[
+            constraint_example(&[("A", 10.0, 0.0), ("B", 10.0, 100.0)]),
+            constraint_example(&[("A", 25.0, 20.0), ("B", 25.0, 180.0)]),
+        ]);
+
+        assert!(has_alignment(&result, &["A", "B"], AlignAxis::Vertical));
+    }
+
+    #[test]
+    fn cegis_synthesis_drops_alignment_disproved_by_a_later_example() {
+        let result = synthesize_order_constraints(&[
+            constraint_example(&[("A", 0.0, 10.0), ("B", 100.0, 10.0)]),
+            constraint_example(&[("A", 20.0, 25.0), ("B", 180.0, 30.0)]),
+        ]);
+
+        assert!(
+            !has_alignment(&result, &["A", "B"], AlignAxis::Horizontal),
+            "a later counterexample must not turn a seed-only alignment into a hard constraint"
+        );
     }
 
     fn non_conflicting_constraint_fixture(len: usize) -> Vec<LayoutConstraint> {

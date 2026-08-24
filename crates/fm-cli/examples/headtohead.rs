@@ -390,6 +390,19 @@ struct CachedParsedBatch {
     results: Arc<[ParseResult]>,
 }
 
+/// Output plus counted layout work from one stateful live-edit trace.
+///
+/// This is deliberately separate from [`CachedRenderedBatch`]: every revision still parses and
+/// renders, while only layout carries state from the prior revision. A rendered-output memo would
+/// turn later samples into probes rather than edits (bd-bh7d).
+#[allow(dead_code)]
+struct IncrementalRenderedBatch {
+    output: Arc<[String]>,
+    size_stable_revisions: usize,
+    selective_relayout_revisions: usize,
+    full_recompute_revisions: usize,
+}
+
 /// Render-snapshot memo, retained for the incremental-edit workload (bd-1buv.3) and unreachable
 /// from the timed arm on purpose.
 ///
@@ -663,6 +676,7 @@ struct RenderExecutor {
     revision_keyed_render_snapshot: bool,
     rematerialize_batch_inputs: bool,
     balanced_shards: bool,
+    incremental_revision_layout: bool,
     parse_plan_cache: Mutex<Option<CachedFlowchartBatchPlan>>,
     parse_snapshot_cache: Mutex<Option<CachedParsedBatch>>,
     /// See [`CachedRenderedBatch`]: retained for bd-1buv.3, no timed-arm caller (bd-dqkg).
@@ -712,6 +726,24 @@ impl RenderExecutor {
         let rematerialize_batch_inputs =
             std::env::var_os("FM_H2H_REMATERIALIZE_BATCH_INPUTS").is_some();
         let balanced_shards = std::env::var_os("FM_H2H_CONTIGUOUS_SHARDS").is_none();
+        let incremental_revision_layout = match std::env::var("FM_H2H_INCREMENTAL_REVISIONS") {
+            Ok(value) if value == "1" => true,
+            Ok(value) => {
+                return Err(format!(
+                    "invalid FM_H2H_INCREMENTAL_REVISIONS={value:?}; expected \"1\" or unset"
+                ));
+            }
+            Err(std::env::VarError::NotPresent) => false,
+            Err(error) => {
+                return Err(format!("cannot read FM_H2H_INCREMENTAL_REVISIONS: {error}"));
+            }
+        };
+        if incremental_revision_layout && threads != 1 {
+            return Err(
+                "FM_H2H_INCREMENTAL_REVISIONS=1 requires FM_H2H_THREADS=1 so one layout session owns the trace"
+                    .to_owned(),
+            );
+        }
         let pool = (threads != 1)
             .then(|| FixedShardPool::new(threads))
             .transpose()?;
@@ -729,6 +761,7 @@ impl RenderExecutor {
             revision_keyed_render_snapshot,
             rematerialize_batch_inputs,
             balanced_shards,
+            incremental_revision_layout,
             parse_plan_cache: Mutex::new(None),
             parse_snapshot_cache: Mutex::new(None),
             render_snapshot_cache: Mutex::new(Vec::with_capacity(RENDER_SNAPSHOT_CACHE_CAPACITY)),
@@ -932,6 +965,50 @@ impl RenderExecutor {
         rendered.into()
     }
 
+    /// Render a live-edit trace through one layout engine, preserving only layout state across
+    /// successive documents. Parsing and SVG emission remain per-revision work inside the caller.
+    fn render_all_incremental_revisions(
+        &self,
+        texts: &Arc<[String]>,
+        cfg: &Arc<SvgRenderConfig>,
+    ) -> IncrementalRenderedBatch {
+        debug_assert!(self.is_scalar());
+        let mut engine = fm_layout::IncrementalLayoutEngine::default();
+        let mut renderer = SvgBatchRenderer::default();
+        let mut rendered = Vec::with_capacity(texts.len());
+        let mut size_stable_revisions = 0;
+        let mut selective_relayout_revisions = 0;
+        let mut full_recompute_revisions = 0;
+
+        for text in texts.iter() {
+            let parsed = parse(std::hint::black_box(text.as_str()));
+            let ir = Arc::new(parsed.ir);
+            let traced = engine.layout_diagram_traced_with_config_and_guardrails(
+                &ir,
+                fm_layout::LayoutAlgorithm::Auto,
+                fm_layout::LayoutConfig::default(),
+                fm_layout::LayoutGuardrails::default(),
+            );
+            match traced.trace.incremental.query_type {
+                "layout_incremental_subgraph_relayout_size_stable" => {
+                    size_stable_revisions += 1;
+                }
+                "layout_incremental_subgraph_relayout" => {
+                    selective_relayout_revisions += 1;
+                }
+                _ => full_recompute_revisions += 1,
+            }
+            rendered.push(renderer.render(ir, traced.layout, cfg));
+        }
+
+        IncrementalRenderedBatch {
+            output: rendered.into(),
+            size_stable_revisions,
+            selective_relayout_revisions,
+            full_recompute_revisions,
+        }
+    }
+
     /// See [`CachedRenderedBatch`]: retained for bd-1buv.3, no timed-arm caller (bd-dqkg).
     #[cfg_attr(
         not(test),
@@ -1097,7 +1174,11 @@ impl RenderExecutor {
     /// spawned its own threads internally would not be counted. That direction is SAFE for the
     /// gate, though: under-reporting threads makes the per-thread ceiling TIGHTER, so an
     /// unaccounted thread can only cause a refusal, never admit a row that should have failed.
-    fn probe_scalar_threads(&self, texts: &Arc<[String]>, cfg: &Arc<SvgRenderConfig>) -> Option<usize> {
+    fn probe_scalar_threads(
+        &self,
+        texts: &Arc<[String]>,
+        cfg: &Arc<SvgRenderConfig>,
+    ) -> Option<usize> {
         if !self.is_scalar() {
             return None;
         }
@@ -1607,6 +1688,11 @@ fn render_item(
     item: &CorpusItem,
     cfg: &Arc<SvgRenderConfig>,
 ) -> Arc<[String]> {
+    if executor.incremental_revision_layout && item.texts.len() > 1 {
+        return executor
+            .render_all_incremental_revisions(&item.texts, cfg)
+            .output;
+    }
     executor.render_all_uncached(&item.texts, cfg)
 }
 
@@ -1833,6 +1919,7 @@ fn main() {
             "content_keyed_render_snapshot": executor.content_keyed_render_snapshot,
             "revision_keyed_render_snapshot": executor.revision_keyed_render_snapshot,
             "rematerialize_batch_inputs": executor.rematerialize_batch_inputs,
+            "incremental_revision_layout": executor.incremental_revision_layout,
             "shared_prefix_reuse": executor.shared_prefix_reuse,
             "shard_schedule": if executor.balanced_shards { "balanced_lpt_bytes" } else { "fixed_contiguous" },
             "measurement_mode": workload_mode.as_str(),
@@ -2100,6 +2187,7 @@ fn main() {
                 "persistent_parse_plan": executor.persistent_parse_plan,
                 "timed_render_reuses_output_snapshot": TIMED_RENDER_REUSES_OUTPUT_SNAPSHOT,
                 "timed_render_reuses_parse_plan": TIMED_RENDER_REUSES_PARSE_PLAN,
+                "incremental_revision_layout": executor.incremental_revision_layout,
                 "shared_prefix_reuse": executor.shared_prefix_reuse,
                 "shard_schedule": if executor.balanced_shards { "balanced_lpt_bytes" } else { "fixed_contiguous" },
                 "revisions": item.texts.len(),
@@ -2206,6 +2294,77 @@ mod tests {
             // The control schedule must agree on the partition contract.
             let control = contiguous_shards(inputs.len(), threads);
             assert_exact_partition(&control, inputs.len());
+        }
+    }
+
+    fn live_edit_trace_500x1000() -> Arc<[String]> {
+        let mut nodes: Vec<String> = (0..500)
+            .map(|node_index| format!("  N{node_index}[Node {node_index}]"))
+            .collect();
+        let mut edges: Vec<String> = (0..499)
+            .map(|node_index| format!("  N{node_index}-->N{}", node_index + 1))
+            .collect();
+        let mut texts = Vec::with_capacity(1001);
+        for revision in 0..=1000 {
+            texts.push(
+                std::iter::once("flowchart LR".to_owned())
+                    .chain(nodes.iter().cloned())
+                    .chain(edges.iter().cloned())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            if revision == 1000 {
+                continue;
+            }
+            match revision % 3 {
+                0 => {
+                    let node_index = nodes.len();
+                    nodes.push(format!("  N{node_index}[Node {node_index}]"));
+                    edges.push(format!("  N{}-->N{node_index}", node_index - 1));
+                }
+                1 => {
+                    let node_index = revision % nodes.len();
+                    nodes[node_index] = format!("  N{node_index}[Renamed {revision}]");
+                }
+                _ => {
+                    let from = revision % 500;
+                    let to = (revision * 7 + 3) % 500;
+                    if from != to {
+                        edges.push(format!("  N{from}-->N{to}"));
+                    }
+                }
+            }
+        }
+        texts.into()
+    }
+
+    #[test]
+    fn live_edit_trace_500x1000_keeps_a_layout_session_without_output_memoization() {
+        let texts = live_edit_trace_500x1000();
+        let config = Arc::new(SvgRenderConfig::default());
+        let executor = RenderExecutor::new(1).expect("scalar executor");
+
+        let incremental = executor.render_all_incremental_revisions(&texts, &config);
+        assert_eq!(incremental.output.len(), 1001);
+        assert!(
+            incremental.size_stable_revisions + incremental.selective_relayout_revisions > 0,
+            "the real edit trace must use the layout session for at least one revision"
+        );
+        assert!(
+            incremental.full_recompute_revisions < 1001,
+            "the live-edit path must not devolve into a full recompute for every revision"
+        );
+        assert!(lock_unpoisoned(&executor.render_snapshot_cache).is_empty());
+
+        let repeated = executor.render_all_incremental_revisions(&texts, &config);
+        assert_eq!(
+            repeated.output, incremental.output,
+            "a second live-edit session must reproduce every revision byte-for-byte"
+        );
+
+        for revision in [0, 500, 1000] {
+            assert!(incremental.output[revision].starts_with("<svg"));
+            assert!(incremental.output[revision].ends_with("</svg>"));
         }
     }
 

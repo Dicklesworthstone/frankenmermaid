@@ -9629,7 +9629,10 @@ mod interactive_tests {
         // A different base must reach the same cell-mode ASCII surface, and likewise keep its tier.
         let default_base = fm_render_term::TermRenderConfig::default();
         let from_default = super::ascii_term_config(default_base.clone());
-        assert_eq!(from_default.render_mode, fm_core::MermaidRenderMode::CellOnly);
+        assert_eq!(
+            from_default.render_mode,
+            fm_core::MermaidRenderMode::CellOnly
+        );
         assert_eq!(from_default.glyph_mode, fm_core::MermaidGlyphMode::Ascii);
         assert_eq!(from_default.tier, default_base.tier);
     }
@@ -9643,9 +9646,8 @@ mod interactive_tests {
         let parsed = fm_parser::parse("flowchart LR\n  Alpha --> Beta\n");
         let layout = fm_layout::layout_diagram(&parsed.ir);
         let cfg = super::ascii_term_config(fm_render_term::TermRenderConfig::rich());
-        let out = fm_render_term::render_term_with_layout_and_config(
-            &parsed.ir, &layout, &cfg, 80, 24,
-        );
+        let out =
+            fm_render_term::render_term_with_layout_and_config(&parsed.ir, &layout, &cfg, 80, 24);
 
         let offending: Vec<char> = out.output.chars().filter(|c| !c.is_ascii()).collect();
         assert!(
@@ -9665,7 +9667,11 @@ mod interactive_tests {
         // output shrank 5,771 -> 904 bytes. Asking for ASCII glyphs is not asking for a smaller
         // diagram, so the ascii surface must carry the same labels the term surface does.
         let term = fm_render_term::render_term_with_layout_and_config(
-            &parsed.ir, &layout, &fm_render_term::TermRenderConfig::rich(), 80, 24,
+            &parsed.ir,
+            &layout,
+            &fm_render_term::TermRenderConfig::rich(),
+            80,
+            24,
         );
         for label in ["Alpha", "Beta"] {
             assert_eq!(

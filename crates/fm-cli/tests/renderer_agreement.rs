@@ -28,75 +28,251 @@ fn canvas_text(ops_debug: &str) -> Vec<String> {
 
 /// `(case, source, declared text)` — text the SOURCE declares and the SVG is expected to draw.
 const CASES: &[(&str, &str, &str)] = &[
-    ("er_attribute", "erDiagram\n  A {\n    string name PK\n  }\n", "name"),
-    ("er_key", "erDiagram\n  A {\n    string name PK\n  }\n", "PK"),
-    ("er_comment", "erDiagram\n  A {\n    string name \"who they are\"\n  }\n", "who they are"),
+    (
+        "er_attribute",
+        "erDiagram\n  A {\n    string name PK\n  }\n",
+        "name",
+    ),
+    (
+        "er_key",
+        "erDiagram\n  A {\n    string name PK\n  }\n",
+        "PK",
+    ),
+    (
+        "er_comment",
+        "erDiagram\n  A {\n    string name \"who they are\"\n  }\n",
+        "who they are",
+    ),
     // Cardinality was drawn by the SVG ALONE until bd-2h3pp; the canvas and terminal drew the
     // relationship line and no numbers. Gated here so that agreement is ENFORCED rather than
     // incidental — the three surfaces reached it through different code (a shared fm-core mapping,
     // then each surface's own existing label placement), and nothing else makes them stay together.
-    ("er_cardinality", "erDiagram\n  CUSTOMER }o--o| ORDER : places\n", "0..*"),
-    ("class_member", "classDiagram\n  class Alpha {\n    +String name\n  }\n", "name"),
-    ("class_stereotype", "classDiagram\n  class Alpha {\n    +String name\n  }\n  <<interface>> Alpha\n", "interface"),
-    ("class_cardinality", "classDiagram\n  Alpha \"1\" --> \"many\" Beta\n", "many"),
-    ("req_text", "requirementDiagram\n  requirement R {\n  id: 1\n  text: hello\n  }\n", "hello"),
-    ("req_risk", "requirementDiagram\n  requirement R {\n  id: 1\n  text: t\n  risk: high\n  }\n", "high"),
-    ("c4_desc", "C4Context\n  title S\n  Person(a, \"Alice\", \"A user\")\n", "A user"),
-    ("seq_loop", "sequenceDiagram\n  loop Every day\n    Alice->>Bob: Hi\n  end\n", "Every day"),
-    ("gitgraph_branch", "gitGraph\n  commit\n  branch dev\n  commit\n", "dev"),
-    ("state_note", "stateDiagram-v2\n  [*] --> A\n  note right of A : Waiting\n", "Waiting"),
-    ("flowchart_subgraph", "flowchart TD\n  subgraph Backend\n    a[Alpha]\n  end\n  a --> b[Beta]\n", "Backend"),
+    (
+        "er_cardinality",
+        "erDiagram\n  CUSTOMER }o--o| ORDER : places\n",
+        "0..*",
+    ),
+    (
+        "class_member",
+        "classDiagram\n  class Alpha {\n    +String name\n  }\n",
+        "name",
+    ),
+    (
+        "class_stereotype",
+        "classDiagram\n  class Alpha {\n    +String name\n  }\n  <<interface>> Alpha\n",
+        "interface",
+    ),
+    (
+        "class_cardinality",
+        "classDiagram\n  Alpha \"1\" --> \"many\" Beta\n",
+        "many",
+    ),
+    (
+        "req_text",
+        "requirementDiagram\n  requirement R {\n  id: 1\n  text: hello\n  }\n",
+        "hello",
+    ),
+    (
+        "req_risk",
+        "requirementDiagram\n  requirement R {\n  id: 1\n  text: t\n  risk: high\n  }\n",
+        "high",
+    ),
+    (
+        "c4_desc",
+        "C4Context\n  title S\n  Person(a, \"Alice\", \"A user\")\n",
+        "A user",
+    ),
+    (
+        "seq_loop",
+        "sequenceDiagram\n  loop Every day\n    Alice->>Bob: Hi\n  end\n",
+        "Every day",
+    ),
+    (
+        "gitgraph_branch",
+        "gitGraph\n  commit\n  branch dev\n  commit\n",
+        "dev",
+    ),
+    (
+        "state_note",
+        "stateDiagram-v2\n  [*] --> A\n  note right of A : Waiting\n",
+        "Waiting",
+    ),
+    (
+        "flowchart_subgraph",
+        "flowchart TD\n  subgraph Backend\n    a[Alpha]\n  end\n  a --> b[Beta]\n",
+        "Backend",
+    ),
     // ── added after bd-59o4: this corpus was NARROWER THAN ITS OWN NAME. It claimed the three
     // renderers agree while never exercising pie, xychart, quadrant, packet, c4, architecture or
     // sequence notes — and two disagreements were hiding in exactly those types. A gate is only as
     // wide as its case list.
-    ("pie_label", "pie title Share\n  \"Alpha\" : 60\n  \"Beta\" : 40\n", "Alpha"),
+    (
+        "pie_label",
+        "pie title Share\n  \"Alpha\" : 60\n  \"Beta\" : 40\n",
+        "Alpha",
+    ),
     ("pie_title", "pie title Share\n  \"Alpha\" : 60\n", "Share"),
-    ("xychart_title", "xychart-beta\n  title Sales\n  x-axis [jan, feb]\n  bar [50, 60]\n", "Sales"),
-    ("xychart_axis", "xychart-beta\n  title Sales\n  x-axis [jan, feb]\n  bar [50, 60]\n", "jan"),
-    ("quadrant_title", "quadrantChart\n  title Reach\n  x-axis Low --> High\n  A: [0.3, 0.6]\n", "Reach"),
-    ("quadrant_point", "quadrantChart\n  title Reach\n  x-axis Low --> High\n  A: [0.3, 0.6]\n", "A"),
-    ("quadrant_axis", "quadrantChart\n  title Reach\n  x-axis Low --> High\n  A: [0.3, 0.6]\n", "Low"),
-    ("packet_field", "packet-beta\n  0-7: \"Alpha\"\n  8-15: \"Beta\"\n", "Alpha"),
-    ("c4_name", "C4Context\n  title Sys\n  Person(a, \"Alice\", \"A user\")\n", "Alice"),
-    ("arch_service", "architecture-beta\n  service db(database)[Database]\n", "Database"),
-    ("seq_message", "sequenceDiagram\n  Alice->>Bob: Hello\n", "Hello"),
-    ("seq_note", "sequenceDiagram\n  Alice->>Bob: Hi\n  Note over Alice: Ponder\n", "Ponder"),
-    ("timeline_event", "timeline\n  title Hist\n  2001 : Alpha\n", "Alpha"),
+    (
+        "xychart_title",
+        "xychart-beta\n  title Sales\n  x-axis [jan, feb]\n  bar [50, 60]\n",
+        "Sales",
+    ),
+    (
+        "xychart_axis",
+        "xychart-beta\n  title Sales\n  x-axis [jan, feb]\n  bar [50, 60]\n",
+        "jan",
+    ),
+    (
+        "quadrant_title",
+        "quadrantChart\n  title Reach\n  x-axis Low --> High\n  A: [0.3, 0.6]\n",
+        "Reach",
+    ),
+    (
+        "quadrant_point",
+        "quadrantChart\n  title Reach\n  x-axis Low --> High\n  A: [0.3, 0.6]\n",
+        "A",
+    ),
+    (
+        "quadrant_axis",
+        "quadrantChart\n  title Reach\n  x-axis Low --> High\n  A: [0.3, 0.6]\n",
+        "Low",
+    ),
+    (
+        "packet_field",
+        "packet-beta\n  0-7: \"Alpha\"\n  8-15: \"Beta\"\n",
+        "Alpha",
+    ),
+    (
+        "c4_name",
+        "C4Context\n  title Sys\n  Person(a, \"Alice\", \"A user\")\n",
+        "Alice",
+    ),
+    (
+        "arch_service",
+        "architecture-beta\n  service db(database)[Database]\n",
+        "Database",
+    ),
+    (
+        "seq_message",
+        "sequenceDiagram\n  Alice->>Bob: Hello\n",
+        "Hello",
+    ),
+    (
+        "seq_note",
+        "sequenceDiagram\n  Alice->>Bob: Hi\n  Note over Alice: Ponder\n",
+        "Ponder",
+    ),
+    (
+        "timeline_event",
+        "timeline\n  title Hist\n  2001 : Alpha\n",
+        "Alpha",
+    ),
     ("sankey_node", "sankey-beta\n\nAlpha,Beta,5\n", "Alpha"),
     // ── second widening: the types still absent after bd-59o4. All fourteen agreed on the first
     // run, so this batch adds no known gap — it locks in a clean sweep rather than recording one.
     // Worth having precisely because the PREVIOUS widening found two real defects in exactly the
     // types it had been missing.
-    ("mindmap_root", "mindmap\n  root((Core))\n    Alpha\n", "Core"),
-    ("mindmap_child", "mindmap\n  root((Core))\n    Alpha\n", "Alpha"),
-    ("journey_task", "journey\n  title Day\n  section Morning\n    Wake: 5: Me\n", "Wake"),
-    ("journey_section", "journey\n  title Day\n  section Morning\n    Wake: 5: Me\n", "Morning"),
-    ("kanban_card", "kanban\n  Todo\n    t1[Write docs]\n", "Write docs"),
-    ("kanban_column", "kanban\n  Todo\n    t1[Write docs]\n", "Todo"),
-    ("block_label", "block-beta\n  columns 2\n  Alpha[\"Alpha\"] Beta[\"Beta\"]\n", "Alpha"),
-    ("gantt_task", "gantt\n  title P\n  section S\n    BuildStep : t1, 2024-01-01, 3d\n", "BuildStep"),
-    ("gantt_title", "gantt\n  title Plan\n  section S\n    T : t1, 2024-01-01, 3d\n", "Plan"),
+    (
+        "mindmap_root",
+        "mindmap\n  root((Core))\n    Alpha\n",
+        "Core",
+    ),
+    (
+        "mindmap_child",
+        "mindmap\n  root((Core))\n    Alpha\n",
+        "Alpha",
+    ),
+    (
+        "journey_task",
+        "journey\n  title Day\n  section Morning\n    Wake: 5: Me\n",
+        "Wake",
+    ),
+    (
+        "journey_section",
+        "journey\n  title Day\n  section Morning\n    Wake: 5: Me\n",
+        "Morning",
+    ),
+    (
+        "kanban_card",
+        "kanban\n  Todo\n    t1[Write docs]\n",
+        "Write docs",
+    ),
+    (
+        "kanban_column",
+        "kanban\n  Todo\n    t1[Write docs]\n",
+        "Todo",
+    ),
+    (
+        "block_label",
+        "block-beta\n  columns 2\n  Alpha[\"Alpha\"] Beta[\"Beta\"]\n",
+        "Alpha",
+    ),
+    (
+        "gantt_task",
+        "gantt\n  title P\n  section S\n    BuildStep : t1, 2024-01-01, 3d\n",
+        "BuildStep",
+    ),
+    (
+        "gantt_title",
+        "gantt\n  title Plan\n  section S\n    T : t1, 2024-01-01, 3d\n",
+        "Plan",
+    ),
     // ⚠️ ADDED BECAUSE KNOWN_GAPS NAMED A CASE THAT DID NOT EXIST. `gantt_section` had an entry in
     // the gap list and no matching entry here, so the gate never evaluated it: the "an entry that
     // starts agreeing fails" half of this test cannot fire for a case it never renders, which made
     // that entry a permanent hole rather than a tracked gap. The section name is now a real case,
     // and the gap entry is gone because the terminal draws it (bd-039t).
-    ("gantt_section", "gantt\n  title P\n  section Engineering\n    T : t1, 2024-01-01, 3d\n", "Engineering"),
-    ("state_composite", "stateDiagram-v2\n  state Outer {\n    A --> B\n  }\n", "Outer"),
-    ("er_relationship_label", "erDiagram\n  A ||--o{ B : places\n", "places"),
-    ("flowchart_edge_label", "flowchart TD\n  a[A] -->|yes| b[B]\n", "yes"),
-    ("class_method", "classDiagram\n  class Alpha {\n    +run()\n  }\n", "run"),
-    ("timeline_title", "timeline\n  title Hist\n  2001 : Alpha\n", "Hist"),
+    (
+        "gantt_section",
+        "gantt\n  title P\n  section Engineering\n    T : t1, 2024-01-01, 3d\n",
+        "Engineering",
+    ),
+    (
+        "state_composite",
+        "stateDiagram-v2\n  state Outer {\n    A --> B\n  }\n",
+        "Outer",
+    ),
+    (
+        "er_relationship_label",
+        "erDiagram\n  A ||--o{ B : places\n",
+        "places",
+    ),
+    (
+        "flowchart_edge_label",
+        "flowchart TD\n  a[A] -->|yes| b[B]\n",
+        "yes",
+    ),
+    (
+        "class_method",
+        "classDiagram\n  class Alpha {\n    +run()\n  }\n",
+        "run",
+    ),
+    (
+        "timeline_title",
+        "timeline\n  title Hist\n  2001 : Alpha\n",
+        "Hist",
+    ),
     // ── third widening: the corpus was broad across diagram TYPES and thin across CONTENT KINDS.
     // Every type above is represented, but within a type only one or two of the things a user can
     // write were checked — `seq_loop` but no other fragment, `gitgraph_branch` but not a tag,
     // `quadrant_title`/`_point`/`_axis` but not the quadrant NAMES, `arch_service` but not a group.
     // The two previous widenings each found real defects in exactly the places they had not looked,
     // so the cheapest place to look next is the content a type declares that nothing asserts yet.
-    ("seq_alt", "sequenceDiagram\n  alt is ok\n    Alice->>Bob: Hi\n  end\n", "is ok"),
-    ("seq_opt", "sequenceDiagram\n  opt maybe\n    Alice->>Bob: Hi\n  end\n", "maybe"),
-    ("seq_par", "sequenceDiagram\n  par One\n    Alice->>Bob: Hi\n  end\n", "One"),
+    (
+        "seq_alt",
+        "sequenceDiagram\n  alt is ok\n    Alice->>Bob: Hi\n  end\n",
+        "is ok",
+    ),
+    (
+        "seq_opt",
+        "sequenceDiagram\n  opt maybe\n    Alice->>Bob: Hi\n  end\n",
+        "maybe",
+    ),
+    (
+        "seq_par",
+        "sequenceDiagram\n  par One\n    Alice->>Bob: Hi\n  end\n",
+        "One",
+    ),
     ("gitgraph_tag", "gitGraph\n  commit tag: \"v9\"\n", "v9"),
     ("gitgraph_id", "gitGraph\n  commit id: \"Alpha\"\n", "Alpha"),
     // `journey_actor` DELIBERATELY OMITTED, and the reason is a finding rather than a shrug: the
@@ -105,16 +281,40 @@ const CASES: &[(&str, &str, &str)] = &[
     // reference misses it. Whether an actor NAME should be drawn is a real question — mermaid shows
     // actors as marks on the task — but it is a feature question about the journey renderer, not a
     // three-way agreement question, and asserting it here would only report the SVG as broken.
-    ("quadrant_name", "quadrantChart\n  title Reach\n  x-axis Low --> High\n  quadrant-1 Do it\n  A: [0.3, 0.6]\n", "Do it"),
-    ("arch_group", "architecture-beta\n  group api(cloud)[API Layer]\n  service db(database)[Database] in api\n", "API Layer"),
-    ("c4_boundary", "C4Context\n  title S\n  System_Boundary(b, \"Internal\") {\n    Person(a, \"Alice\", \"A user\")\n  }\n", "Internal"),
+    (
+        "quadrant_name",
+        "quadrantChart\n  title Reach\n  x-axis Low --> High\n  quadrant-1 Do it\n  A: [0.3, 0.6]\n",
+        "Do it",
+    ),
+    (
+        "arch_group",
+        "architecture-beta\n  group api(cloud)[API Layer]\n  service db(database)[Database] in api\n",
+        "API Layer",
+    ),
+    (
+        "c4_boundary",
+        "C4Context\n  title S\n  System_Boundary(b, \"Internal\") {\n    Person(a, \"Alice\", \"A user\")\n  }\n",
+        "Internal",
+    ),
     // RESTORED once bd-qdmn gave the field an IR home. It was omitted for one commit because a
     // requirement ELEMENT's `type:` reached no renderer — it reached no IR — so all three "agreed"
     // by drawing nothing and this corpus was blind to it by construction; only the SVG-reference
     // assertion caught it. Back here now that there is something to compare.
-    ("req_element", "requirementDiagram\n  element E {\n  type: simulation\n  }\n", "simulation"),
-    ("state_transition_label", "stateDiagram-v2\n  A --> B : go\n", "go"),
-    ("timeline_section", "timeline\n  title Hist\n  section Age\n    2001 : Alpha\n", "Age"),
+    (
+        "req_element",
+        "requirementDiagram\n  element E {\n  type: simulation\n  }\n",
+        "simulation",
+    ),
+    (
+        "state_transition_label",
+        "stateDiagram-v2\n  A --> B : go\n",
+        "go",
+    ),
+    (
+        "timeline_section",
+        "timeline\n  title Hist\n  section Age\n    2001 : Alpha\n",
+        "Age",
+    ),
 ];
 
 /// `(case, renderer, bead)` — pairs known to disagree, each naming the bead that tracks it.
@@ -262,7 +462,9 @@ fn the_renderers_agree_on_declared_styling() {
 
     for (case, source, hex, rgb) in cases {
         let ir = fm_parser::parse(source).ir;
-        let svg = fm_render_svg::render_svg(&ir).to_ascii_lowercase().replace(' ', "");
+        let svg = fm_render_svg::render_svg(&ir)
+            .to_ascii_lowercase()
+            .replace(' ', "");
         let mut context = MockCanvas2dContext::new(1200.0, 900.0);
         render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
         let canvas = format!("{:?}", context.operations())

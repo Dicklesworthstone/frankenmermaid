@@ -7,9 +7,9 @@ use chumsky::prelude::*;
 use fm_core::{
     ArchitectureSide, ArrowType, Diagnostic, DiagnosticCategory, DiagramType, GanttDate,
     GanttExclude, GanttTaskType, GanttTickInterval, GraphDirection, IrAttributeKey, IrC4NodeMeta,
-    IrGanttMeta, IrGanttSection, IrGanttTask, IrLabelSegment, IrNodeId, IrXyAxis, IrXyChartMeta,
-    IrXySeries, IrXySeriesKind, MermaidParseMode, MermaidSupportLevel, NodeShape, Span,
-    is_safe_link_target, parse_mermaid_js_config_value, to_init_parse,
+    IrConstraint, IrGanttMeta, IrGanttSection, IrGanttTask, IrLabelSegment, IrNodeId, IrXyAxis,
+    IrXyChartMeta, IrXySeries, IrXySeriesKind, MermaidParseMode, MermaidSupportLevel, NodeShape,
+    Span, is_safe_link_target, parse_mermaid_js_config_value, to_init_parse,
 };
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
@@ -346,6 +346,12 @@ enum ClassStatement {
     BlockStart(String, Vec<String>),
     Ast(FlowAst),
     Node(NodeToken),
+    /// A non-block declaration that carries generic parameters alongside its parsed label.
+    ///
+    /// `BlockStart` deliberately re-parses its source when it opens a member block. A bare
+    /// declaration has no such second parse, so keeping the already-parsed token here prevents
+    /// `class A~T~["Label"]` from losing `Label` while its generic parameters are recorded.
+    NodeWithGenerics(NodeToken, Vec<String>),
     Member(fm_core::IrClassMember),
     Stereotype(String, fm_core::ClassStereotype),
     /// Cardinality labels to attach to the most recently created edge.
@@ -2224,12 +2230,8 @@ fn strip_trailing_edge_id(left: &str) -> &str {
 
 /// Split `A edgeId@` into its endpoint text and Mermaid edge ID.
 fn trailing_edge_id(left: &str) -> Option<(&str, &str)> {
-    let Some((head, last)) = left.rsplit_once(char::is_whitespace) else {
-        return None;
-    };
-    let Some(id) = last.strip_suffix('@') else {
-        return None;
-    };
+    let (head, last) = left.rsplit_once(char::is_whitespace)?;
+    let id = last.strip_suffix('@')?;
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
         return None;
     }
@@ -3785,8 +3787,13 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
 
             // If inside a namespace, track node key to add to subgraph after lowering.
             let ns_node_key = match (&statement, namespace_stack.last()) {
-                (ClassStatement::Node(node), Some(_)) => Some(node.id.clone()),
-                (ClassStatement::BlockStart(name, _), Some(_)) => Some(name.clone()),
+                (
+                    ClassStatement::Node(node) | ClassStatement::NodeWithGenerics(node, _),
+                    Some(_),
+                ) => Some(node.id.clone()),
+                (ClassStatement::BlockStart(name, _), Some(_)) => {
+                    parse_node_token_with_config(name, builder.parser_config()).map(|node| node.id)
+                }
                 _ => None,
             };
             let ns_sg_idx = namespace_stack.last().map(|(_, idx)| *idx);
@@ -3823,6 +3830,35 @@ fn extract_class_generics(raw_name: &str) -> (&str, Vec<String>) {
         .filter(|s| !s.is_empty())
         .collect();
     (class_name, generics)
+}
+
+/// Remove one valid `~T~` group from a class declaration while retaining any node label after it.
+///
+/// Generic parameters belong to class metadata, while a bracket suffix belongs to the ordinary
+/// node-token parser. Passing `A~T~["Pretty Label"]` straight to `extract_class_generics` used to
+/// return only `A`, discarding the suffix before that parser could see it. Rebuilding the source as
+/// `A["Pretty Label"]` keeps the two independent pieces of syntax on their rightful paths.
+fn strip_class_declaration_generics(raw: &str) -> (String, Vec<String>) {
+    let Some(tilde_start) = raw.find('~') else {
+        return (raw.to_string(), Vec::new());
+    };
+    let Some(relative_tilde_end) = raw[tilde_start + 1..].find('~') else {
+        return (raw.to_string(), Vec::new());
+    };
+    let tilde_end = tilde_start + 1 + relative_tilde_end;
+    let generics: Vec<String> = raw[tilde_start + 1..tilde_end]
+        .split(',')
+        .map(|parameter| parameter.trim().to_string())
+        .filter(|parameter| !parameter.is_empty())
+        .collect();
+    if generics.is_empty() {
+        return (raw.to_string(), generics);
+    }
+
+    let mut declaration = String::with_capacity(raw.len() - (tilde_end - tilde_start + 1));
+    declaration.push_str(&raw[..tilde_start]);
+    declaration.push_str(&raw[tilde_end + 1..]);
+    (declaration, generics)
 }
 
 /// Parse mermaid's non-block class member shorthand: `Animal : +name`, `Dog : +bark()`.
@@ -4185,11 +4221,8 @@ fn strip_class_cardinality(statement: &str) -> Option<(String, Option<String>, O
 fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<ClassStatement>> {
     if line.starts_with("class ") && line.ends_with('{') {
         let raw_name = trim_fast(trim_fast(line.trim_start_matches("class")).trim_end_matches('{'));
-        let (class_name, generics) = extract_class_generics(raw_name);
-        return Some(vec![ClassStatement::BlockStart(
-            class_name.to_string(),
-            generics,
-        )]);
+        let (class_name, generics) = strip_class_declaration_generics(raw_name);
+        return Some(vec![ClassStatement::BlockStart(class_name, generics)]);
     }
 
     if line.starts_with('}') {
@@ -4242,14 +4275,12 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
         if statement.starts_with("class ") {
             let rest = statement.strip_prefix("class ").unwrap_or("").trim();
             if !rest.is_empty() && !rest.contains("--") && !rest.contains("..") {
-                let (clean_name, generics) = extract_class_generics(rest);
-                if let Some(node) = parse_node_token_with_config(clean_name, config) {
+                let (clean_name, generics) = strip_class_declaration_generics(rest);
+                if let Some(node) = parse_node_token_with_config(&clean_name, config) {
                     if generics.is_empty() {
                         statements.push(ClassStatement::Node(node));
                     } else {
-                        // For inline generics, use BlockStart+End to carry them.
-                        statements.push(ClassStatement::BlockStart(node.id.clone(), generics));
-                        statements.push(ClassStatement::End);
+                        statements.push(ClassStatement::NodeWithGenerics(node, generics));
                     }
                     continue;
                 }
@@ -4440,6 +4471,12 @@ fn lower_class_statement(
             let span = span_for(line_number, source_line);
             let _ = intern_node_token(builder, &node, span);
         }
+        ClassStatement::NodeWithGenerics(node, generics) => {
+            let span = span_for(line_number, source_line);
+            let node_id = node.id.clone();
+            let _ = intern_node_token(builder, &node, span);
+            builder.set_class_generics(&node_id, generics);
+        }
         ClassStatement::Member(member) => {
             builder.add_class_member(member);
         }
@@ -4607,6 +4644,11 @@ fn parse_state_statements(line: &str, config: &ParserConfig) -> Option<Vec<State
         return Some(Vec::new());
     }
 
+    // `class A bad` styles state A; it must not ALSO become a state (bd-0audg).
+    if is_state_class_assignment(line) {
+        return Some(Vec::new());
+    }
+
     // Note syntax: `note right of StateName : text` or `note left of StateName : text`
     if line.starts_with("note ")
         && let Some(note) = parse_state_note(line)
@@ -4756,6 +4798,36 @@ fn is_state_hide_empty_description(line: &str) -> bool {
     hide.eq_ignore_ascii_case("hide")
         && empty.eq_ignore_ascii_case("empty")
         && description.eq_ignore_ascii_case("description")
+}
+
+/// True for a state-diagram `class <states> <classNames>` STYLE APPLICATION (bd-0audg).
+///
+/// The style itself is extracted globally, for every diagram type, before this parser runs — the
+/// targets really do come out carrying the class. The line then fell through to the node parser as
+/// well, and `normalize_identifier` interned it as a state keyed `class_A_bad` captioned with the
+/// author's own directive. Double-handled, not unhandled: the diagram gained a phantom box while
+/// the styling worked perfectly.
+///
+/// Exactly the family the two guards above this one exist for — bd-871ka's `hide empty description`
+/// and bd-xfmm's subgraph phantom — and worse than a silent drop, because the reader sees text
+/// nobody wrote.
+///
+/// Kept LOCAL rather than added to `is_non_node_directive_statement` for the reason that predicate's
+/// own doc gives: it is shared, and in a CLASS diagram `class A` DECLARES a node. Widening it there
+/// would delete every bare class declaration in the corpus — the shape of the bd-ij0f regression.
+///
+/// TWO tokens minimum, so a bare `class A` is left alone for its own path to interpret, and an
+/// arrow bail so a transition leaving a state legitimately named `class` stays a transition.
+fn is_state_class_assignment(line: &str) -> bool {
+    let Some(rest) = trim_fast(line).strip_prefix("class ") else {
+        return false;
+    };
+    let rest = rest.trim();
+    if rest.contains("--") {
+        return false;
+    }
+    let mut words = rest.split_whitespace();
+    words.next().is_some_and(|targets| !targets.is_empty()) && words.next().is_some()
 }
 
 fn parse_state_note(line: &str) -> Option<StateStatement> {
@@ -5907,8 +5979,24 @@ fn parse_class_assignment_ast(statement: &str) -> Option<FlowAst> {
         return None;
     }
 
+    // A BRACKET LABEL IS NOT A CLASS LIST (bd-lfrlx). `class A["Pretty Label"]` declares a class
+    // whose displayed name is `Pretty Label`; splitting it on whitespace reads `A["Pretty` as the
+    // node list and `Label"]` as a CSS class to apply, so this function claimed the statement, the
+    // declaration branch below it never ran, and the class VANISHED — a one-class diagram parsed to
+    // zero nodes.
+    //
+    // The tell is an UNBALANCED `[` in the first token: the label ran past the whitespace this
+    // splitter cut on. A balanced first token (`class A["Pretty"] someClass`) is left alone, which
+    // is also why `class A["Pretty"]` without a space already worked — `class_list_raw` came out
+    // empty and this returned `None` on its own.
+    //
+    // Bracket counting rather than a `contains('[')` bail: a genuine assignment never contains a
+    // bracket at all, so counting costs nothing here and keeps the balanced form on its old path.
     let mut parts = rest.split_whitespace();
     let node_list_raw = parts.next()?;
+    if node_list_raw.matches('[').count() > node_list_raw.matches(']').count() {
+        return None;
+    }
     let class_list_raw = parts.collect::<Vec<_>>().join(" ");
     if class_list_raw.is_empty() {
         return None;
@@ -6930,8 +7018,16 @@ enum PendingGanttDependency {
 }
 
 fn parse_gantt(input: &str, builder: &mut IrBuilder) {
-    let mut gantt_meta = IrGanttMeta::default();
-    gantt_meta.top_axis = builder.ir().meta.init.config.gantt_top_axis.unwrap_or(false);
+    let mut gantt_meta = IrGanttMeta {
+        top_axis: builder
+            .ir()
+            .meta
+            .init
+            .config
+            .gantt_top_axis
+            .unwrap_or(false),
+        ..Default::default()
+    };
     let mut current_section_idx = 0_usize;
     // Lookup-only (dependency resolution `get`s below); iteration order is never used — the resolved
     // edges come from `pending_dependencies` in insertion order — so an FxHashMap replaces the BTreeMap's
@@ -6957,7 +7053,12 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         // ⚠️ gantt was recorded as a clean CONTROL on the bead from an SVG-attribute probe. That
         // probe was blind here — gantt task rects carry no `data-id`, so it reported no phantom for
         // a path that had one. The IR-level test is what found it; the bead is corrected.
-        if is_non_graph_statement(trimmed) {
+        // bd-yfcfv: and the ACCESSIBILITY pair for the same reason. `accTitle:`/`accDescr:`
+        // are valid in every mermaid diagram, and four sibling parsers already pair the two
+        // predicates here; these three omitted the a11y half, so the directive was interned as
+        // a visible gantt TASK. Worst of the family: the phantom carries the author's
+        // accessibility text as its own accessible name, so assistive tech announces it too.
+        if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
             continue;
         }
 
@@ -7474,7 +7575,12 @@ fn parse_pie(input: &str, builder: &mut IrBuilder) {
 
         // bd-6r13: `style a fill:#f9f` was interned as a SLICE (`style_a_fill`), adding a phantom
         // wedge to the chart. Narrow style predicate only — see bd-t2fp.
-        if is_non_graph_statement(trimmed) {
+        // bd-yfcfv: and the ACCESSIBILITY pair for the same reason. `accTitle:`/`accDescr:`
+        // are valid in every mermaid diagram, and four sibling parsers already pair the two
+        // predicates here; these three omitted the a11y half, so the directive was interned as
+        // a visible pie SLICE. Worst of the family: the phantom carries the author's
+        // accessibility text as its own accessible name, so assistive tech announces it too.
+        if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
             continue;
         }
 
@@ -7567,7 +7673,12 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
         }
 
         // bd-6r13: `style A fill:#f9f` was interned as a quadrant POINT (`style_A_fill`).
-        if is_non_graph_statement(trimmed) {
+        // bd-yfcfv: and the ACCESSIBILITY pair for the same reason. `accTitle:`/`accDescr:`
+        // are valid in every mermaid diagram, and four sibling parsers already pair the two
+        // predicates here; these three omitted the a11y half, so the directive was interned as
+        // a visible quadrant POINT. Worst of the family: the phantom carries the author's
+        // accessibility text as its own accessible name, so assistive tech announces it too.
+        if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
             continue;
         }
 
@@ -7649,7 +7760,10 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
                 after_colon[close + 1..].trim(),
             ),
             _ => (
-                after_colon.trim_start_matches('[').trim_end_matches(']').trim(),
+                after_colon
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .trim(),
                 "",
             ),
         };
@@ -8107,11 +8221,7 @@ fn parse_c4(input: &str, builder: &mut IrBuilder) {
 ///
 /// Both endpoints resolve through the NON-interning `node_id_by_key`, so a misspelled alias cannot
 /// invent a node the way bd-xfmm's did.
-fn parse_c4_relationship_style(
-    arguments: &[String],
-    span: Span,
-    builder: &mut IrBuilder,
-) -> bool {
+fn parse_c4_relationship_style(arguments: &[String], span: Span, builder: &mut IrBuilder) -> bool {
     let (Some(from_alias), Some(to_alias)) = (
         clean_label(arguments.first().map(String::as_str)),
         clean_label(arguments.get(1).map(String::as_str)),
@@ -10009,7 +10119,9 @@ fn parse_edge_statement_asts(
                         from: from_node.clone().into(),
                         arrow,
                         label: None,
-                        edge_id: (asts.is_empty() && edge_position == 0).then(|| edge_id.clone()).flatten(),
+                        edge_id: (asts.is_empty() && edge_position == 0)
+                            .then(|| edge_id.clone())
+                            .flatten(),
                         to: placeholder.clone().into(),
                     });
                 }
@@ -11254,14 +11366,14 @@ fn parse_xychart_series(line: &str) -> Option<(&str, Option<String>, &str)> {
 fn parse_init_directives(input: &str, builder: &mut IrBuilder) {
     // Init directives are `%%{ ... }%%` blocks; if that marker never appears there is
     // nothing to parse, so skip the per-line scan (run on every parse). Output-identical:
-    // `extract_init_payload` only matches lines containing `%%{`.
+    // `extract_config_directive_payload` only matches lines containing `%%{`.
     if !input.contains("%%{") {
         return;
     }
     for (index, line) in byte_lines(input).enumerate() {
         let line_number = index + 1;
         let trimmed = trim_fast(line);
-        let Some(payload) = extract_init_payload(trimmed) else {
+        let Some((directive, payload)) = extract_config_directive_payload(trimmed) else {
             continue;
         };
 
@@ -11277,7 +11389,15 @@ fn parse_init_directives(input: &str, builder: &mut IrBuilder) {
             }
         };
 
-        apply_mermaid_config_value(parsed_value, &format!("Line {line_number}"), span, builder);
+        let config_value = if directive.eq_ignore_ascii_case("constraints") {
+            Value::Object(serde_json::Map::from_iter([(
+                "constraints".to_string(),
+                parsed_value,
+            )]))
+        } else {
+            parsed_value
+        };
+        apply_mermaid_config_value(config_value, &format!("Line {line_number}"), span, builder);
     }
 }
 
@@ -11320,6 +11440,7 @@ fn parse_front_matter_config(front_matter_payload: &str, builder: &mut IrBuilder
 }
 
 fn apply_mermaid_config_value(value: Value, context: &str, span: Span, builder: &mut IrBuilder) {
+    parse_layout_constraint_config(&value, context, span, builder);
     let parsed = to_init_parse(parse_mermaid_js_config_value(&value));
 
     if let Some(theme) = parsed.config.theme {
@@ -11373,6 +11494,105 @@ fn apply_mermaid_config_value(value: Value, context: &str, span: Span, builder: 
     }
 }
 
+/// Read the experimental layout-constraint directive surface.
+///
+/// `constraints.nonOverlap` accepts `true` for every node or an object with an optional `nodes`
+/// string array and non-negative `gap`, for example:
+/// `%%{constraints: {nonOverlap: {nodes: [A, B], gap: 12}}}%%`.
+///
+/// This is deliberately parsed before the diagram body: an empty selection in the IR means every
+/// node, so declarations later in the document are included without a second parser pass.
+fn parse_layout_constraint_config(
+    value: &Value,
+    context: &str,
+    span: Span,
+    builder: &mut IrBuilder,
+) {
+    let Some(constraints) = value.get("constraints") else {
+        return;
+    };
+    let Some(constraints) = constraints.as_object() else {
+        return;
+    };
+
+    for key in constraints.keys() {
+        if key != "nonOverlap" {
+            builder.add_warning(format!(
+                "{context}: unsupported layout constraint '{key}' ignored"
+            ));
+        }
+    }
+
+    let Some(non_overlap) = constraints.get("nonOverlap") else {
+        return;
+    };
+    let (node_ids, gap) = match non_overlap {
+        Value::Bool(true) => (Vec::new(), 0.0),
+        Value::Object(object) => {
+            let node_ids = match object.get("nodes") {
+                None => Vec::new(),
+                Some(Value::Array(values)) => {
+                    let ids: Option<Vec<_>> = values
+                        .iter()
+                        .map(Value::as_str)
+                        .map(|id| id.map(str::to_string))
+                        .collect();
+                    let Some(ids) = ids else {
+                        builder.add_warning(format!(
+                            "{context}: constraints.nonOverlap.nodes must contain only strings"
+                        ));
+                        return;
+                    };
+                    ids
+                }
+                Some(_) => {
+                    builder.add_warning(format!(
+                        "{context}: constraints.nonOverlap.nodes must be an array of node IDs"
+                    ));
+                    return;
+                }
+            };
+            let gap = match object.get("gap") {
+                None => Some(0.0),
+                Some(Value::Number(value)) => value.as_f64().filter(|gap| *gap >= 0.0),
+                Some(_) => None,
+            };
+            let Some(gap) = gap else {
+                builder.add_warning(format!(
+                    "{context}: constraints.nonOverlap.gap must be a non-negative number"
+                ));
+                return;
+            };
+            (node_ids, gap)
+        }
+        Value::Bool(false) => return,
+        _ => {
+            builder.add_warning(format!(
+                "{context}: constraints.nonOverlap must be true or an object"
+            ));
+            return;
+        }
+    };
+
+    if !gap.is_finite() {
+        builder.add_warning(format!(
+            "{context}: constraints.nonOverlap.gap must be finite"
+        ));
+        return;
+    }
+    if !node_ids.is_empty() && node_ids.len() < 2 {
+        builder.add_warning(format!(
+            "{context}: constraints.nonOverlap needs at least two node IDs"
+        ));
+        return;
+    }
+    builder.add_constraint(IrConstraint::NonOverlap {
+        node_ids,
+        gap,
+        span,
+    });
+}
+
 fn split_front_matter_block(input: &str) -> (&str, Option<&str>) {
     let mut segments = input.split_inclusive('\n');
     let Some(first_segment) = segments.next() else {
@@ -11399,17 +11619,18 @@ fn split_front_matter_block(input: &str) -> (&str, Option<&str>) {
     (input, None)
 }
 
-fn extract_init_payload(trimmed: &str) -> Option<&str> {
+fn extract_config_directive_payload(trimmed: &str) -> Option<(&str, &str)> {
     if !(trimmed.starts_with("%%{") && trimmed.ends_with("}%%")) {
         return None;
     }
     let inner = &trimmed[3..trimmed.len().saturating_sub(3)];
     let (directive, payload) = inner.trim().split_once(':')?;
-    if !directive.trim().eq_ignore_ascii_case("init") {
+    let directive = directive.trim();
+    if !(directive.eq_ignore_ascii_case("init") || directive.eq_ignore_ascii_case("constraints")) {
         return None;
     }
     let payload = payload.trim();
-    (!payload.is_empty()).then_some(payload)
+    (!payload.is_empty()).then_some((directive, payload))
 }
 
 fn parse_init_payload_value(payload: &str) -> Result<Value, String> {
@@ -12938,6 +13159,63 @@ fn is_comment(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// `parse_class_assignment_ast` must DECLINE a statement whose bracket label ran past the
+    /// whitespace it splits on (bd-lfrlx).
+    ///
+    /// Asserted directly on the function rather than only through the parsed IR, because this is
+    /// where the statement was stolen: it returned a `ClassAssign` applying a CSS class literally
+    /// named `Label"]` to a node literally named `A["Pretty`, and the declaration branch that would
+    /// have created the class never ran.
+    #[test]
+    fn a_bracket_label_running_past_a_space_is_not_a_class_assignment() {
+        assert!(
+            super::parse_class_assignment_ast("class A[\"Pretty Label\"]").is_none(),
+            "a labelled declaration was claimed as a CSS-class assignment"
+        );
+        // Unquoted brackets take the same path — the quotes are not what makes it a label.
+        assert!(
+            super::parse_class_assignment_ast("class A[Pretty Label]").is_none(),
+            "an unquoted bracket label was claimed as a CSS-class assignment"
+        );
+
+        // CONTROL: a real assignment is still claimed. The guard keys on an UNBALANCED bracket, and
+        // a genuine assignment carries no bracket at all; widening it to any `[` would still pass
+        // the two assertions above while breaking every `class A someClass` in the corpus.
+        assert!(
+            super::parse_class_assignment_ast("class A bad").is_some(),
+            "a genuine CSS-class assignment stopped being recognised"
+        );
+        assert!(
+            super::parse_class_assignment_ast("class A,B bad").is_some(),
+            "a multi-node CSS-class assignment stopped being recognised"
+        );
+        // CONTROL: a BALANCED first token keeps its old behaviour — this is why the space-free
+        // spelling already worked, and it must not change.
+        assert!(
+            super::parse_class_assignment_ast("class A[\"Pretty\"]").is_none(),
+            "a space-free bracket label should still fall through to the declaration branch"
+        );
+    }
+
+    #[test]
+    fn generic_class_declarations_preserve_their_bracket_label_source() {
+        assert_eq!(
+            super::strip_class_declaration_generics("A~T~[\"Pretty Label\"]"),
+            ("A[\"Pretty Label\"]".to_string(), vec!["T".to_string()])
+        );
+        assert_eq!(
+            super::strip_class_declaration_generics("Map~K, V~[\"Entries\"]"),
+            (
+                "Map[\"Entries\"]".to_string(),
+                vec!["K".to_string(), "V".to_string()]
+            )
+        );
+        assert_eq!(
+            super::strip_class_declaration_generics("A~~[\"Label\"]"),
+            ("A~~[\"Label\"]".to_string(), Vec::new())
+        );
+    }
+
     #[test]
     fn ci_prefix_helpers_are_byte_identical() {
         // Pin the alloc-free helpers to the old `to_ascii_lowercase()` forms they replaced.
@@ -13156,7 +13434,10 @@ mod tests {
         ] {
             let parsed = parse_mermaid(source);
             assert_eq!(parsed.ir.edges.len(), 1, "expected one edge for: {source}");
-            assert_eq!(parsed.ir.edges[0].arrow, expected, "wrong head for: {source}");
+            assert_eq!(
+                parsed.ir.edges[0].arrow, expected,
+                "wrong head for: {source}"
+            );
             let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
             assert_eq!(ids, vec!["A", "B"], "endpoints changed for: {source}");
         }
@@ -13178,9 +13459,16 @@ mod tests {
         ] {
             let parsed = parse_mermaid(source);
             assert_eq!(parsed.ir.edges.len(), 1, "no edge for: {source}");
-            assert_eq!(parsed.ir.edges[0].arrow, expected, "wrong head for: {source}");
+            assert_eq!(
+                parsed.ir.edges[0].arrow, expected,
+                "wrong head for: {source}"
+            );
             let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
-            assert_eq!(ids, vec!["A", "B"], "the fast path invented a node: {source}");
+            assert_eq!(
+                ids,
+                vec!["A", "B"],
+                "the fast path invented a node: {source}"
+            );
         }
     }
 
@@ -13218,7 +13506,10 @@ mod tests {
         ] {
             let parsed = parse_mermaid(source);
             assert_eq!(parsed.ir.edges.len(), 1, "no edge for: {source}");
-            assert_eq!(parsed.ir.edges[0].arrow, expected, "wrong style for: {source}");
+            assert_eq!(
+                parsed.ir.edges[0].arrow, expected,
+                "wrong style for: {source}"
+            );
         }
     }
 
@@ -14374,20 +14665,28 @@ mod tests {
         );
         // NON-VACUITY: the real state must survive, or "no hide node" would also hold for a parse
         // that produced nothing at all.
-        assert!(ids.contains(&"Alpha"), "the declared state vanished: {ids:?}");
+        assert!(
+            ids.contains(&"Alpha"),
+            "the declared state vanished: {ids:?}"
+        );
     }
 
     /// The directive is case- and spacing-insensitive, as mermaid's is.
     #[test]
     fn state_hide_empty_description_is_case_insensitive() {
-        let parsed = parse_mermaid("stateDiagram-v2\n  HIDE  Empty   DESCRIPTION\n  [*] --> Alpha\n");
+        let parsed =
+            parse_mermaid("stateDiagram-v2\n  HIDE  Empty   DESCRIPTION\n  [*] --> Alpha\n");
 
         let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
         assert!(
-            !ids.iter().any(|id| id.to_ascii_lowercase().contains("hide")),
+            !ids.iter()
+                .any(|id| id.to_ascii_lowercase().contains("hide")),
             "a differently-cased directive was drawn as a state: {ids:?}"
         );
-        assert!(ids.contains(&"Alpha"), "the declared state vanished: {ids:?}");
+        assert!(
+            ids.contains(&"Alpha"),
+            "the declared state vanished: {ids:?}"
+        );
     }
 
     /// CONTROL: the filter is exactly three words, so a state legitimately NAMED `hide` still
@@ -14397,7 +14696,10 @@ mod tests {
         let parsed = parse_mermaid("stateDiagram-v2\n  [*] --> hide\n  hide --> Alpha\n");
 
         let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
-        assert!(ids.contains(&"hide"), "a state named `hide` was swallowed: {ids:?}");
+        assert!(
+            ids.contains(&"hide"),
+            "a state named `hide` was swallowed: {ids:?}"
+        );
     }
 
     #[test]
@@ -15211,6 +15513,40 @@ mod tests {
         // only in the init config would leave a value nothing consumes.
         assert_eq!(parsed.ir.meta.node_spacing, Some(60));
         assert_eq!(parsed.ir.meta.rank_spacing, Some(90));
+    }
+
+    #[test]
+    fn constraints_directive_emits_a_non_overlap_ir_constraint() {
+        let parsed = parse_mermaid(
+            "%%{constraints: {nonOverlap: {nodes: ['A', 'B'], gap: 12}}}%%\nflowchart TB\nA-->B",
+        );
+
+        assert_eq!(
+            parsed.ir.constraints.len(),
+            1,
+            "{:?}",
+            parsed.ir.constraints
+        );
+        assert!(matches!(
+            &parsed.ir.constraints[0],
+            fm_core::IrConstraint::NonOverlap { node_ids, gap, .. }
+                if node_ids == &["A".to_string(), "B".to_string()] && (*gap - 12.0).abs() < f64::EPSILON
+        ));
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn constraints_non_overlap_rejects_a_single_node_selection() {
+        let parsed =
+            parse_mermaid("%%{constraints: {nonOverlap: {nodes: ['A']}}}%%\nflowchart TB\nA-->B");
+
+        assert!(parsed.ir.constraints.is_empty());
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("needs at least two node IDs"))
+        );
     }
 
     #[test]
@@ -16989,7 +17325,10 @@ Rel_Back(db, app, "Responds")"#,
                     .iter()
                     .map(|a| a.name.clone())
                     .collect::<Vec<_>>(),
-                meta.methods.iter().map(|m| m.name.clone()).collect::<Vec<_>>(),
+                meta.methods
+                    .iter()
+                    .map(|m| m.name.clone())
+                    .collect::<Vec<_>>(),
             )
         };
 
@@ -17127,7 +17466,12 @@ Rel_Back(db, app, "Responds")"#,
         // A method with a return type and NO classifier must not acquire one.
         assert_eq!(
             first("classDiagram\n  class C {\n    +getName() String\n  }\n"),
-            ("getName()".to_string(), false, false, Some("String".to_string()))
+            (
+                "getName()".to_string(),
+                false,
+                false,
+                Some("String".to_string())
+            )
         );
     }
 
@@ -17184,7 +17528,10 @@ Rel_Back(db, app, "Responds")"#,
         assert_eq!(ids_of("A --> B\n  B --> C\n"), vec!["A", "B", "C"]);
 
         // 3. A node whose id merely STARTS with a keyword is not a header and must survive.
-        assert_eq!(ids_of("flowchart LR\n  graph1[Box] --> B\n"), vec!["graph1", "B"]);
+        assert_eq!(
+            ids_of("flowchart LR\n  graph1[Box] --> B\n"),
+            vec!["graph1", "B"]
+        );
 
         // 4. Only the FIRST significant line is treated as the header; a later typo-shaped line is
         //    ordinary content.
@@ -17252,7 +17599,9 @@ Rel_Back(db, app, "Responds")"#,
     /// when something has to be undone.
     #[test]
     fn autonumber_off_overrides_an_earlier_autonumber() {
-        let parsed = parse_mermaid("sequenceDiagram\n  autonumber 10 5\n  Alice->>Bob: Hi\n  autonumber off\n  Bob->>Alice: Bye\n");
+        let parsed = parse_mermaid(
+            "sequenceDiagram\n  autonumber 10 5\n  Alice->>Bob: Hi\n  autonumber off\n  Bob->>Alice: Bye\n",
+        );
         let meta = parsed
             .ir
             .sequence_meta
@@ -17907,7 +18256,12 @@ Rel_Back(db, app, "Responds")"#,
             "flowchart LR\n  Animal e1@--> Dog\n  classDef alert stroke:#ff0000,stroke-width:4px\n  class e1 alert\n",
         );
 
-        let ids: Vec<&str> = parsed.ir.nodes.iter().map(|node| node.id.as_str()).collect();
+        let ids: Vec<&str> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
         assert_eq!(ids, vec!["Animal", "Dog"]);
         assert!(parsed.ir.style_refs.iter().any(|style_ref| {
             matches!(style_ref.target, fm_core::IrStyleTarget::Link(0))
@@ -18848,9 +19202,22 @@ Rel_Back(db, app, "Responds")"#,
             .style_refs
             .iter()
             .find(|sr| sr.target == fm_core::IrStyleTarget::Link(0))
-            .unwrap_or_else(|| panic!("no style ref reached the relationship: {:?}", parsed.ir.style_refs));
-        assert!(styled.style.contains("color:blue"), "textColor lost: {}", styled.style);
-        assert!(styled.style.contains("stroke:green"), "lineColor lost: {}", styled.style);
+            .unwrap_or_else(|| {
+                panic!(
+                    "no style ref reached the relationship: {:?}",
+                    parsed.ir.style_refs
+                )
+            });
+        assert!(
+            styled.style.contains("color:blue"),
+            "textColor lost: {}",
+            styled.style
+        );
+        assert!(
+            styled.style.contains("stroke:green"),
+            "lineColor lost: {}",
+            styled.style
+        );
     }
 
     /// CONTROL: a pair with no relationship between them styles nothing and says so. Without this,
@@ -18900,9 +19267,21 @@ Rel_Back(db, app, "Responds")"#,
             .find(|sr| sr.target == fm_core::IrStyleTarget::Node(fm_core::IrNodeId(index)))
             .unwrap_or_else(|| panic!("no style ref reached node a: {:?}", parsed.ir.style_refs));
 
-        assert!(styled.style.contains("fill:red"), "bgColor lost: {}", styled.style);
-        assert!(styled.style.contains("color:white"), "fontColor lost: {}", styled.style);
-        assert!(styled.style.contains("stroke:black"), "borderColor lost: {}", styled.style);
+        assert!(
+            styled.style.contains("fill:red"),
+            "bgColor lost: {}",
+            styled.style
+        );
+        assert!(
+            styled.style.contains("color:white"),
+            "fontColor lost: {}",
+            styled.style
+        );
+        assert!(
+            styled.style.contains("stroke:black"),
+            "borderColor lost: {}",
+            styled.style
+        );
     }
 
     /// ⚠️ AN UNKNOWN ALIAS MUST NOT INVENT A NODE. `add_class_to_node`-style interning is what drew a
@@ -19788,7 +20167,11 @@ Rel_Back(db, app, "Responds")"#,
                 .iter()
                 .any(|sr| sr.target == fm_core::IrStyleTarget::Link(index))
         };
-        assert!(has(0) && has(2), "the comma list did not reach both links: {:?}", parsed.ir.style_refs);
+        assert!(
+            has(0) && has(2),
+            "the comma list did not reach both links: {:?}",
+            parsed.ir.style_refs
+        );
         assert!(
             !has(1),
             "an unnamed link was styled — the list is being ignored rather than parsed: {:?}",
@@ -19848,9 +20231,8 @@ Rel_Back(db, app, "Responds")"#,
     /// every other directive in that db does.
     #[test]
     fn click_links_every_node_in_a_comma_list() {
-        let parsed = parse_mermaid(
-            "flowchart LR\n  A --> B\n  click A,B \"https://example.com\"\n",
-        );
+        let parsed =
+            parse_mermaid("flowchart LR\n  A --> B\n  click A,B \"https://example.com\"\n");
 
         for id in ["A", "B"] {
             let node = parsed
@@ -19872,9 +20254,8 @@ Rel_Back(db, app, "Responds")"#,
     /// splits the first token on commas.
     #[test]
     fn click_node_list_tolerates_spaces_around_the_comma() {
-        let parsed = parse_mermaid(
-            "flowchart LR\n  A --> B\n  click A, B \"https://example.com\"\n",
-        );
+        let parsed =
+            parse_mermaid("flowchart LR\n  A --> B\n  click A, B \"https://example.com\"\n");
 
         for id in ["A", "B"] {
             let node = parsed
@@ -19883,7 +20264,11 @@ Rel_Back(db, app, "Responds")"#,
                 .iter()
                 .find(|n| n.id == id)
                 .unwrap_or_else(|| panic!("node {id} should exist"));
-            assert_eq!(node.href(), Some("https://example.com"), "node {id} was not linked");
+            assert_eq!(
+                node.href(),
+                Some("https://example.com"),
+                "node {id} was not linked"
+            );
         }
     }
 
@@ -19892,8 +20277,7 @@ Rel_Back(db, app, "Responds")"#,
     /// href at all — so this pins the stop condition, not just the happy path.
     #[test]
     fn click_with_one_node_is_unchanged() {
-        let parsed =
-            parse_mermaid("flowchart LR\n  A --> B\n  click A \"https://example.com\"\n");
+        let parsed = parse_mermaid("flowchart LR\n  A --> B\n  click A \"https://example.com\"\n");
 
         let node = parsed
             .ir
@@ -19921,9 +20305,8 @@ Rel_Back(db, app, "Responds")"#,
     /// at all would also leave the tooltip empty and pass.
     #[test]
     fn click_link_target_is_not_mistaken_for_a_tooltip() {
-        let parsed = parse_mermaid(
-            "flowchart LR\n  A --> B\n  click A \"https://example.com\" _blank\n",
-        );
+        let parsed =
+            parse_mermaid("flowchart LR\n  A --> B\n  click A \"https://example.com\" _blank\n");
 
         let node = parsed
             .ir
@@ -19964,8 +20347,9 @@ Rel_Back(db, app, "Responds")"#,
     /// meant by quoting it. This is why the keyword is matched before quote stripping.
     #[test]
     fn click_quoted_blank_is_still_a_tooltip() {
-        let parsed =
-            parse_mermaid("flowchart LR\n  A --> B\n  click A \"https://example.com\" \"_blank\"\n");
+        let parsed = parse_mermaid(
+            "flowchart LR\n  A --> B\n  click A \"https://example.com\" \"_blank\"\n",
+        );
 
         let node = parsed
             .ir
@@ -19986,8 +20370,9 @@ Rel_Back(db, app, "Responds")"#,
     /// behaviour too.
     #[test]
     fn linkstyle_interpolate_clause_is_stripped_from_the_style() {
-        let parsed =
-            parse_mermaid("flowchart LR\n  A --> B\n  linkStyle 0 interpolate basis stroke:#ff0000");
+        let parsed = parse_mermaid(
+            "flowchart LR\n  A --> B\n  linkStyle 0 interpolate basis stroke:#ff0000",
+        );
 
         let link = parsed
             .ir
@@ -20026,8 +20411,9 @@ Rel_Back(db, app, "Responds")"#,
     /// The keyword is case-insensitive in mermaid (`INTERPOLATE basis` parses), so it is here.
     #[test]
     fn linkstyle_interpolate_keyword_is_case_insensitive() {
-        let parsed =
-            parse_mermaid("flowchart LR\n  A --> B\n  linkStyle 0 INTERPOLATE basis stroke:#00ff00");
+        let parsed = parse_mermaid(
+            "flowchart LR\n  A --> B\n  linkStyle 0 INTERPOLATE basis stroke:#00ff00",
+        );
 
         let link = parsed
             .ir
@@ -20135,7 +20521,8 @@ Rel_Back(db, app, "Responds")"#,
     /// would start absorbing arbitrary lines.
     #[test]
     fn requirement_unknown_field_is_still_ignored() {
-        let input = "requirementDiagram\n  requirement MyReq {\n    id: REQ-001\n    notafield: nope\n  }";
+        let input =
+            "requirementDiagram\n  requirement MyReq {\n    id: REQ-001\n    notafield: nope\n  }";
         let parsed = parse_mermaid(input);
 
         let meta = parsed
@@ -20436,11 +20823,11 @@ Rel_Back(db, app, "Responds")"#,
             for line in ["--", ".."] {
                 for right in ["||", "o|", "|{", "o{"] {
                     let operator = format!("{left}{line}{right}");
-                    let parsed =
-                        parse_mermaid(&format!("erDiagram\n  CUSTOMER {operator} ORDER : places\n"));
+                    let parsed = parse_mermaid(&format!(
+                        "erDiagram\n  CUSTOMER {operator} ORDER : places\n"
+                    ));
 
-                    let ids: Vec<&str> =
-                        parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
+                    let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
                     assert_eq!(
                         ids,
                         vec!["CUSTOMER", "ORDER"],
@@ -20463,8 +20850,9 @@ Rel_Back(db, app, "Responds")"#,
     #[test]
     fn bare_er_relations_still_parse_without_cardinality() {
         for (operator, expected) in [("--", ArrowType::Line), ("..", ArrowType::DottedLine)] {
-            let parsed =
-                parse_mermaid(&format!("erDiagram\n  CUSTOMER {operator} ORDER : places\n"));
+            let parsed = parse_mermaid(&format!(
+                "erDiagram\n  CUSTOMER {operator} ORDER : places\n"
+            ));
             let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
             assert_eq!(ids, vec!["CUSTOMER", "ORDER"]);
             assert_eq!(parsed.ir.edges[0].arrow, expected);
@@ -20654,11 +21042,17 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid("flowchart LR\n  A --> B\n  classDef a,b fill:#ff0000");
 
         let declared = |name: &str| {
-            parsed.ir.style_refs.iter().any(
-                |sr| matches!(&sr.target, fm_core::IrStyleTarget::Class(n) if n == name),
-            )
+            parsed
+                .ir
+                .style_refs
+                .iter()
+                .any(|sr| matches!(&sr.target, fm_core::IrStyleTarget::Class(n) if n == name))
         };
-        assert!(declared("a") && declared("b"), "the comma list did not declare both classes: {:?}", parsed.ir.style_refs);
+        assert!(
+            declared("a") && declared("b"),
+            "the comma list did not declare both classes: {:?}",
+            parsed.ir.style_refs
+        );
         assert!(
             !declared("a,b"),
             "the name position is still being taken as one class name: {:?}",
@@ -20678,7 +21072,12 @@ Rel_Back(db, app, "Responds")"#,
             assert!(
                 parsed.ir.style_defs.iter().any(|def| def.name == name),
                 "class `{name}` produced no style_def: {:?}",
-                parsed.ir.style_defs.iter().map(|d| &d.name).collect::<Vec<_>>()
+                parsed
+                    .ir
+                    .style_defs
+                    .iter()
+                    .map(|d| &d.name)
+                    .collect::<Vec<_>>()
             );
         }
     }
@@ -20698,7 +21097,11 @@ Rel_Back(db, app, "Responds")"#,
                 _ => None,
             })
             .collect();
-        assert_eq!(names, vec!["solo"], "the single-name form changed behaviour");
+        assert_eq!(
+            names,
+            vec!["solo"],
+            "the single-name form changed behaviour"
+        );
     }
 
     #[test]
@@ -20996,7 +21399,11 @@ Rel_Back(db, app, "Responds")"#,
             "the guard and action were stripped out of the rendered label: {label:?}"
         );
 
-        assert_eq!(edge.guard(), Some("isValid"), "the structured guard was lost");
+        assert_eq!(
+            edge.guard(),
+            Some("isValid"),
+            "the structured guard was lost"
+        );
         assert_eq!(
             edge.action(),
             Some("cleanup()"),
@@ -21056,7 +21463,10 @@ Rel_Back(db, app, "Responds")"#,
         // this the scan would split inside a node token and hand the parser a truncated endpoint.
         let (edge_text, label) = super::split_state_transition_label("S0 --> \"S1: x\"");
         assert_eq!(edge_text, "S0 --> \"S1: x\"");
-        assert_eq!(label, None, "a colon inside quotes was treated as a separator");
+        assert_eq!(
+            label, None,
+            "a colon inside quotes was treated as a separator"
+        );
         let (edge_text, label) = super::split_state_transition_label("S0 --> S1[a:b]");
         assert_eq!(edge_text, "S0 --> S1[a:b]");
         assert_eq!(
@@ -21503,13 +21913,19 @@ Rel_Back(db, app, "Responds")"#,
                 .iter()
                 .any(|node| node.id == "dup" && node.classes.iter().any(|c| c == "big")),
             "the shared name did not reach the node: {:?}",
-            parsed.ir.nodes.iter().map(|n| (&n.id, &n.classes)).collect::<Vec<_>>()
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .map(|n| (&n.id, &n.classes))
+                .collect::<Vec<_>>()
         );
         assert!(
-            parsed.ir.style_refs.iter().any(|style_ref| matches!(
-                style_ref.target,
-                fm_core::IrStyleTarget::Cluster(_)
-            )),
+            parsed
+                .ir
+                .style_refs
+                .iter()
+                .any(|style_ref| matches!(style_ref.target, fm_core::IrStyleTarget::Cluster(_))),
             "the shared name did not reach the cluster: {:?}",
             parsed.ir.style_refs
         );
@@ -21530,7 +21946,12 @@ Rel_Back(db, app, "Responds")"#,
                 .iter()
                 .any(|node| node.id == "a" && node.classes.iter().any(|c| c == "big")),
             "an ordinary node class stopped being recorded on the node: {:?}",
-            parsed.ir.nodes.iter().map(|n| (&n.id, &n.classes)).collect::<Vec<_>>()
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .map(|n| (&n.id, &n.classes))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -21577,10 +21998,11 @@ Rel_Back(db, app, "Responds")"#,
         );
 
         assert!(
-            parsed.ir.style_refs.iter().any(|style_ref| matches!(
-                style_ref.target,
-                fm_core::IrStyleTarget::Node(_)
-            )),
+            parsed
+                .ir
+                .style_refs
+                .iter()
+                .any(|style_ref| matches!(style_ref.target, fm_core::IrStyleTarget::Node(_))),
             "a name shared by a node and a subgraph resolved to the cluster: {:?}",
             parsed.ir.style_refs
         );
@@ -21592,7 +22014,10 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid("flowchart TD\n  a[A] --> b[B]\n  style aa fill:#ff0000\n");
 
         assert!(
-            parsed.warnings.iter().any(|warning| warning.contains("`aa`")),
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("`aa`")),
             "a misspelled style target passed in silence; warnings: {:?}",
             parsed.warnings
         );
@@ -21610,17 +22035,18 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid("flowchart TD\n  a[A] --> b[B]\n  style a fill:#ff0000\n");
 
         assert!(
-            !parsed.warnings.iter().any(|warning| warning.contains("not a node id")),
+            !parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("not a node id")),
             "a valid style directive produced a spurious warning: {:?}",
             parsed.warnings
         );
         assert!(
-            parsed
-                .ir
-                .style_refs
-                .iter()
-                .any(|style_ref| matches!(style_ref.target, fm_core::IrStyleTarget::Node(_))
-                    && style_ref.style.contains("ff0000")),
+            parsed.ir.style_refs.iter().any(|style_ref| matches!(
+                style_ref.target,
+                fm_core::IrStyleTarget::Node(_)
+            ) && style_ref.style.contains("ff0000")),
             "the valid style stopped being recorded: {:?}",
             parsed.ir.style_refs
         );
@@ -21629,16 +22055,21 @@ Rel_Back(db, app, "Responds")"#,
     /// CONTROL: a comma list warns ONLY for the members that miss.
     #[test]
     fn a_comma_list_warns_only_for_the_unresolved_member() {
-        let parsed =
-            parse_mermaid("flowchart TD\n  a[A] --> b[B]\n  style a,zz fill:#ff0000\n");
+        let parsed = parse_mermaid("flowchart TD\n  a[A] --> b[B]\n  style a,zz fill:#ff0000\n");
 
         assert!(
-            parsed.warnings.iter().any(|warning| warning.contains("`zz`")),
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("`zz`")),
             "the unresolved member did not warn: {:?}",
             parsed.warnings
         );
         assert!(
-            !parsed.warnings.iter().any(|warning| warning.contains("`a`")),
+            !parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("`a`")),
             "the RESOLVED member warned as well, so the warning is not target-specific: {:?}",
             parsed.warnings
         );
@@ -21739,8 +22170,9 @@ Rel_Back(db, app, "Responds")"#,
     /// would pile onto the branch — trading this defect for its mirror image.
     #[test]
     fn gitgraph_checkout_still_overrides_the_branch_that_created_it() {
-        let parsed =
-            parse_mermaid("gitGraph\n  commit\n  branch dev\n  commit\n  checkout main\n  commit\n");
+        let parsed = parse_mermaid(
+            "gitGraph\n  commit\n  branch dev\n  commit\n  checkout main\n  commit\n",
+        );
         let meta = parsed
             .ir
             .git_graph_meta

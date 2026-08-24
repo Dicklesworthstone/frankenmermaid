@@ -1128,6 +1128,9 @@ jobs:
       - name: Build optimized WASM package
         run: ./build-wasm.sh
 
+      - name: Test WASM WebGPU plan against SVG under headless Node
+        run: node scripts/wasm_webgpu_plan_node_test.mjs
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest

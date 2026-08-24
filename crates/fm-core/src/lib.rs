@@ -2,7 +2,6 @@
 
 pub mod art;
 pub mod canary;
-pub mod reuse_proof;
 pub mod cga;
 pub mod constraints;
 pub mod epoch;
@@ -12,6 +11,7 @@ pub mod leapfrog;
 #[cfg(test)]
 mod lens_tests;
 pub mod quotient_filter;
+pub mod reuse_proof;
 pub mod succinct;
 
 pub use evidence::{
@@ -1277,6 +1277,29 @@ pub enum ClassStereotype {
     Custom(String),
 }
 
+impl ClassStereotype {
+    /// The text a renderer draws for this stereotype, e.g. `<<interface>>` (bd-d48wi).
+    ///
+    /// Centralised because this mapping was forked FOUR ways — twice in fm-render-svg, once each in
+    /// fm-render-canvas and fm-render-term — and fm-layout now needs it too, to MEASURE the box the
+    /// renderers draw this string into. A fifth copy in the sizing path is the one that cannot be
+    /// allowed to drift: if the measured text and the drawn text disagree, the class renderers drop
+    /// any row that falls outside the box rather than growing it, so the divergence deletes output
+    /// instead of merely looking wrong.
+    ///
+    /// `Custom` renders verbatim: the author already wrote their own delimiters.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Interface => "<<interface>>",
+            Self::Abstract => "<<abstract>>",
+            Self::Enum => "<<enumeration>>",
+            Self::Service => "<<service>>",
+            Self::Custom(text) => text.as_str(),
+        }
+    }
+}
+
 /// Class-diagram-specific metadata for a node.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct IrClassNodeMeta {
@@ -1862,6 +1885,16 @@ pub enum IrConstraint {
     },
     OrderInRank {
         node_ids: Vec<String>,
+        span: Span,
+    },
+    /// Keep every selected pair of node rectangles disjoint by at least `gap` layout units.
+    ///
+    /// An empty `node_ids` selection means every node in the diagram. The layout backend lowers
+    /// this to a mixed-integer, four-way placement disjunction; keeping the selection in the IR
+    /// lets the parser record a directive before it has seen every node declaration.
+    NonOverlap {
+        node_ids: Vec<String>,
+        gap: f64,
         span: Span,
     },
 }
@@ -2568,6 +2601,13 @@ pub fn parse_mermaid_js_config_value(value: &Value) -> MermaidConfigParse {
             "flowchart" => parse_flowchart_config(raw_value, &mut parsed),
             "sequence" => parse_sequence_config(raw_value, &mut parsed),
             "gantt" => parse_gantt_config(raw_value, &mut parsed),
+            // Parsed by fm-parser into `IrConstraint`s. It intentionally has no entry in
+            // `MermaidInitConfig`: layout constraints are diagram IR, not renderer configuration.
+            "constraints" => {
+                if !raw_value.is_object() {
+                    push_type_error(&mut parsed, "constraints", raw_value, "must be an object");
+                }
+            }
             "securityLevel" => {
                 if let Some(level) = raw_value.as_str() {
                     match level.to_ascii_lowercase().as_str() {
@@ -6277,24 +6317,24 @@ mod tests {
         IrEdge, IrEdgeKind, IrEndpoint, IrEntityAttribute, IrGanttMeta, IrGanttSection,
         IrGanttTask, IrGraphCluster, IrGraphEdge, IrGraphNode, IrInlineStyle, IrLabel, IrLabelId,
         IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup, IrPort, IrPortId,
-        IrPortSideHint, IrSequenceFragment, IrSequenceMeta, IrSequenceNote, IrStyleDef, IrStyleRef,
-        IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries,
-        IrXySeriesKind, LifecycleEventKind, MERMAID_SCHEMA_VERSION, MermaidBudgetLedger,
-        MermaidConfig, MermaidDecisionWeight, MermaidDegradationPlan, MermaidDiagramIr,
-        MermaidError, MermaidErrorCode, MermaidFallbackAction, MermaidFallbackPolicy,
-        MermaidFidelity, MermaidGlyphMode, MermaidGuardReport, MermaidLayoutDecisionAlternative,
-        MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidLensBinding,
-        MermaidLensEdit, MermaidLensEditResult, MermaidLensError, MermaidNativePressureSignals,
-        MermaidPressureReport, MermaidPressureTier, MermaidQualityMode, MermaidSanitizeMode,
-        MermaidSourceMap, MermaidSourceMapEntry, MermaidSourceMapKind, MermaidSupportLevel,
-        MermaidTextRange, MermaidWarningCode, MermaidWasmPressureSignals, NodeMap, NodeSet,
-        NodeShape, NotePosition, Position, Span, StructuredDiagnostic, apply_lens_edit,
-        build_lens_bindings, capability_matrix, capability_matrix_json_pretty,
-        capability_readme_supported_diagram_types_markdown, capability_readme_surface_markdown,
-        documented_diagram_types, is_allowed_style_property, is_safe_link_target,
-        mermaid_layout_guard_observability, parse_mermaid_js_config_value, parse_style_string,
-        parse_style_string_with_rejections, resolve_span_text_range, sanitize_style_value,
-        scale_budget, to_init_parse,
+        IrPortSideHint, IrSequenceAutonumberRange, IrSequenceFragment, IrSequenceMeta,
+        IrSequenceNote, IrStyleDef, IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyAxis,
+        IrXyChartMeta, IrXySeries, IrXySeriesKind, LifecycleEventKind, MERMAID_SCHEMA_VERSION,
+        MermaidBudgetLedger, MermaidConfig, MermaidDecisionWeight, MermaidDegradationPlan,
+        MermaidDiagramIr, MermaidError, MermaidErrorCode, MermaidFallbackAction,
+        MermaidFallbackPolicy, MermaidFidelity, MermaidGlyphMode, MermaidGuardReport,
+        MermaidLayoutDecisionAlternative, MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord,
+        MermaidLensBinding, MermaidLensEdit, MermaidLensEditResult, MermaidLensError,
+        MermaidNativePressureSignals, MermaidPressureReport, MermaidPressureTier,
+        MermaidQualityMode, MermaidSanitizeMode, MermaidSourceMap, MermaidSourceMapEntry,
+        MermaidSourceMapKind, MermaidSupportLevel, MermaidTextRange, MermaidWarningCode,
+        MermaidWasmPressureSignals, NodeMap, NodeSet, NodeShape, NotePosition, Position, Span,
+        StructuredDiagnostic, apply_lens_edit, build_lens_bindings, capability_matrix,
+        capability_matrix_json_pretty, capability_readme_supported_diagram_types_markdown,
+        capability_readme_surface_markdown, documented_diagram_types, is_allowed_style_property,
+        is_safe_link_target, mermaid_layout_guard_observability, parse_mermaid_js_config_value,
+        parse_style_string, parse_style_string_with_rejections, resolve_span_text_range,
+        sanitize_style_value, scale_budget, to_init_parse,
     };
 
     fn sample_span(line: u32, start_col: u32, end_col: u32) -> Span {
@@ -10281,6 +10321,7 @@ mod tests {
             axis_format: Some("%m/%d".to_string()),
             tick_interval: Some(GanttTickInterval::Week),
             today_marker_style: Some("stroke:#f97316,stroke-width:2px".to_string()),
+            top_axis: true,
             inclusive_end_dates: true,
             weekday_start: Some(1),
             excludes: vec![GanttExclude::Weekends],
