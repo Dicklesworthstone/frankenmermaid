@@ -1125,6 +1125,12 @@ fn lower_flow_ast(
 ///
 /// `node` is a node id that must already be interned — the setters here are non-interning, which
 /// is what stops a click on an unknown id from inventing a phantom.
+///
+/// The parameter list is the `ClickDirective` variant's own fields plus the two the caller must
+/// supply for diagnostics. Bundling them into a struct would add a type whose only purpose is to be
+/// destructured immediately on both sides of one call, so the lint is allowed rather than worked
+/// around — the same choice the SVG renderer makes for its stream writers.
+#[allow(clippy::too_many_arguments)]
 fn apply_click_directive(
     builder: &mut IrBuilder,
     node: &str,

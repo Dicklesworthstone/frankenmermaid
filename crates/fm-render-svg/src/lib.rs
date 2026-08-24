@@ -5744,7 +5744,7 @@ fn write_quadrant_point_into(
 
 /// Stream a gantt task bar `<rect>` byte-identical to the slow path's `Element::rect()`:
 /// `x y width height fill stroke stroke-width="1" rx="3" class="fm-gantt-task {type_class}"`.
-#[allow(clippy::too_many_arguments)]
+///
 /// `tooltip` is the author's `click <task> ... "text"` hover, or `None` (bd-gydqv).
 ///
 /// A `title=` ATTRIBUTE, matching what the flowchart path emits and what mermaid itself does
@@ -5785,6 +5785,63 @@ fn write_gantt_bar_into(
         f.push('"');
     }
     f.push_str("/>");
+}
+
+/// WCAG relative luminance of a `#rgb`/`#rrggbb` colour, or `None` for anything else.
+///
+/// `None` rather than a guess: a `var(...)`, a gradient reference or a named colour cannot be
+/// measured here, and the caller falls back to its previous behaviour instead of picking a colour
+/// from arithmetic it did not actually do.
+fn relative_luminance(colour: &str) -> Option<f64> {
+    let hex = colour.trim().strip_prefix('#')?;
+    let expanded: String = match hex.len() {
+        3 => hex.chars().flat_map(|c| [c, c]).collect(),
+        6 => hex.to_string(),
+        _ => return None,
+    };
+    let mut channels = [0.0_f64; 3];
+    for (index, channel) in channels.iter_mut().enumerate() {
+        let start = index * 2;
+        let raw = u8::from_str_radix(expanded.get(start..start + 2)?, 16).ok()?;
+        let value = f64::from(raw) / 255.0;
+        *channel = if value <= 0.03928 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        };
+    }
+    Some(0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2])
+}
+
+/// WCAG contrast ratio between two colours, or `None` if either cannot be measured.
+fn contrast_ratio(a: &str, b: &str) -> Option<f64> {
+    let (x, y) = (relative_luminance(a)?, relative_luminance(b)?);
+    Some((x.max(y) + 0.05) / (x.min(y) + 0.05))
+}
+
+/// The theme colour that reads best ON `background` (bd-u0x67).
+///
+/// Gantt task bars are FIXED pastels — `#93c5fd` normal, `#fca5a5` critical, `#86efac` done,
+/// `#94a3b8` active — the same in every theme. The label, however, used `colors.text`, which flips
+/// to near-white on a dark theme. So every task label in every gantt chart measured 1.34–2.45:1
+/// against its own bar in dark mode, against 6.65–12.15:1 in light. All four task types, not an
+/// edge case.
+///
+/// Chooses between the theme's own TEXT and BACKGROUND colours rather than hardcoding black or
+/// white: both stay theme-derived, the light theme keeps exactly the colour it already had (so its
+/// output is unchanged), and a user-restyled bar — which may be dark — gets the right answer instead
+/// of an assumption that bars are always pale.
+///
+/// Falls back to `text` when either colour cannot be measured, which keeps an unparseable fill on
+/// its previous behaviour rather than inventing one.
+fn readable_label_colour<'a>(background: &str, colors: &'a ThemeColors) -> &'a str {
+    match (
+        contrast_ratio(&colors.text, background),
+        contrast_ratio(&colors.background, background),
+    ) {
+        (Some(on_text), Some(on_background)) if on_background > on_text => &colors.background,
+        _ => &colors.text,
+    }
 }
 
 /// Stream a gantt task label `<text>` byte-identical to the slow path's `Element::text()`:
@@ -6113,17 +6170,30 @@ fn render_gantt_svg(
                     .gantt_task_labels
                     .iter()
                     .find(|entry| entry.node_index == node_box.node_index);
-                let (label_x, anchor) = match placement.map(|entry| (entry.x, entry.placement)) {
-                    Some((label_x, fm_layout::GanttLabelPlacement::OutsideRight)) => {
-                        (label_x + offset_x, "start")
-                    }
-                    Some((label_x, fm_layout::GanttLabelPlacement::OutsideLeft)) => {
-                        (label_x + offset_x, "end")
-                    }
-                    Some((label_x, fm_layout::GanttLabelPlacement::Inside)) => {
-                        (label_x + offset_x, "middle")
-                    }
-                    None => (x + w / 2.0, "middle"),
+                // PLACEMENT DECIDES WHAT THE LABEL SITS ON (bd-u0x67), which is why the colour is
+                // chosen here and not once for the whole chart. An INSIDE label is drawn over the
+                // task BAR and must contrast with it; an OUTSIDE label is drawn over the page and
+                // must contrast with the background, which `colors.text` already does correctly.
+                // Colouring every label for the bar would have broken the outside case to fix the
+                // inside one.
+                let (label_x, anchor, inside) =
+                    match placement.map(|entry| (entry.x, entry.placement)) {
+                        Some((label_x, fm_layout::GanttLabelPlacement::OutsideRight)) => {
+                            (label_x + offset_x, "start", false)
+                        }
+                        Some((label_x, fm_layout::GanttLabelPlacement::OutsideLeft)) => {
+                            (label_x + offset_x, "end", false)
+                        }
+                        Some((label_x, fm_layout::GanttLabelPlacement::Inside)) => {
+                            (label_x + offset_x, "middle", true)
+                        }
+                        // No recorded placement: the label is centred on the bar, so it is inside.
+                        None => (x + w / 2.0, "middle", true),
+                    };
+                let label_fill = if inside {
+                    readable_label_colour(fill, &theme.colors)
+                } else {
+                    &theme.colors.text
                 };
                 write_gantt_label_into(
                     &mut task_svg,
@@ -6132,7 +6202,7 @@ fn render_gantt_svg(
                     config.font_size * 0.8,
                     &config.font_family,
                     config.embed_theme_css,
-                    &theme.colors.text,
+                    label_fill,
                     label_text,
                     anchor,
                 );
