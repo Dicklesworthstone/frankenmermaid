@@ -919,6 +919,133 @@ impl ClassParseLens {
     }
 }
 
+/// A state-diagram text/IR lens that retains the original source as its formatting complement.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StateParseLens {
+    snapshot: ParseLensSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StateParseLensError {
+    NotState,
+    UnsupportedIrChange,
+    MissingSourceLabel(String),
+}
+
+impl std::fmt::Display for StateParseLensError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotState => formatter.write_str("ParseLens currently supports state diagrams only"),
+            Self::UnsupportedIrChange => formatter.write_str(
+                "ParseLens can re-emit explicit state-label text changes only; state structure is unchanged",
+            ),
+            Self::MissingSourceLabel(node_id) => write!(
+                formatter,
+                "could not locate the source label for state '{node_id}'"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for StateParseLensError {}
+
+impl StateParseLens {
+    /// Parses a state diagram while retaining its exact source text.
+    pub fn parse(input: &str) -> Result<Self, StateParseLensError> {
+        let snapshot = build_parse_lens(input);
+        if snapshot.parsed.ir.diagram_type != DiagramType::State {
+            return Err(StateParseLensError::NotState);
+        }
+        Ok(Self { snapshot })
+    }
+
+    #[must_use]
+    pub fn ir(&self) -> &MermaidDiagramIr {
+        &self.snapshot.parsed.ir
+    }
+
+    #[must_use]
+    pub fn original_source(&self) -> &str {
+        self.snapshot.original_source()
+    }
+
+    /// Re-emits `edited` by replacing only explicit `state Label as Id` label text.
+    pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, StateParseLensError> {
+        if edited.diagram_type != DiagramType::State {
+            return Err(StateParseLensError::NotState);
+        }
+
+        let original = self.ir();
+        if original.labels.len() != edited.labels.len() {
+            return Err(StateParseLensError::UnsupportedIrChange);
+        }
+        let mut labels_only = original.clone();
+        for (expected, actual) in labels_only.labels.iter_mut().zip(&edited.labels) {
+            expected.text.clone_from(&actual.text);
+        }
+        if &labels_only != edited {
+            return Err(StateParseLensError::UnsupportedIrChange);
+        }
+
+        let changed_labels: Vec<usize> = original
+            .labels
+            .iter()
+            .zip(&edited.labels)
+            .enumerate()
+            .filter_map(|(index, (before, after))| (before.text != after.text).then_some(index))
+            .collect();
+        if changed_labels.is_empty() {
+            return Ok(self.original_source().to_string());
+        }
+
+        let mut replacements = Vec::new();
+        let mut covered_labels = vec![false; original.labels.len()];
+        for (node_index, node) in original.nodes.iter().enumerate() {
+            let Some(label_id) = node.label else {
+                continue;
+            };
+            if !changed_labels.contains(&label_id.0) {
+                continue;
+            }
+            let source_entry = self.snapshot.source_map.entries.iter().find(|entry| {
+                entry.kind == MermaidSourceMapKind::Node && entry.index == node_index
+            });
+            let Some(source_entry) = source_entry else {
+                return Err(StateParseLensError::MissingSourceLabel(node.id.clone()));
+            };
+            let Some(line_range) =
+                resolve_span_text_range(self.original_source(), source_entry.span)
+            else {
+                return Err(StateParseLensError::MissingSourceLabel(node.id.clone()));
+            };
+            let old_label = &original.labels[label_id.0].text;
+            let label_range = find_state_label_text_range(
+                self.original_source(),
+                line_range,
+                &node.id,
+                old_label,
+            )
+            .ok_or_else(|| StateParseLensError::MissingSourceLabel(node.id.clone()))?;
+            replacements.push((label_range, edited.labels[label_id.0].text.as_str()));
+            covered_labels[label_id.0] = true;
+        }
+        if changed_labels
+            .iter()
+            .any(|label_id| !covered_labels[*label_id])
+        {
+            return Err(StateParseLensError::UnsupportedIrChange);
+        }
+
+        replacements.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start_byte));
+        let mut updated = self.original_source().to_string();
+        for (range, replacement) in replacements {
+            updated.replace_range(range.start_byte..range.end_byte, replacement);
+        }
+        Ok(updated)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ParserConfig {
     pub intent_inference: bool,
@@ -1781,6 +1908,33 @@ fn find_sequence_participant_label_text_range(
         + source_id.len()
         + " as ".len()
         + relative_label;
+    Some(MermaidTextRange {
+        start_byte,
+        end_byte: start_byte + label.len(),
+    })
+}
+
+/// Finds the visible title in `state "Label" as Id {`. The `state` declaration is the only state
+/// syntax that carries an independent, editable display label; transition endpoints are identities.
+fn find_state_label_text_range(
+    source: &str,
+    line_range: MermaidTextRange,
+    node_id: &str,
+    label: &str,
+) -> Option<MermaidTextRange> {
+    if label.is_empty() || line_range.end_byte > source.len() {
+        return None;
+    }
+    let line = source.get(line_range.start_byte..line_range.end_byte)?;
+    let leading_len = line.len() - line.trim_start().len();
+    let declaration = line[leading_len..].strip_prefix("state ")?;
+    let declaration = declaration.trim_end().trim_end_matches('{').trim_end();
+    let (raw_label, raw_id) = declaration.rsplit_once(" as ")?;
+    if normalize_identifier(raw_id.trim()) != node_id {
+        return None;
+    }
+    let relative_label = raw_label.find(label)?;
+    let start_byte = line_range.start_byte + leading_len + "state ".len() + relative_label;
     Some(MermaidTextRange {
         start_byte,
         end_byte: start_byte + label.len(),
