@@ -6011,6 +6011,11 @@ fn render_gantt_svg(
             let w = node_box.bounds.width;
             let h = node_box.bounds.height;
 
+            // Where THIS task's bytes begin, so a link can wrap the bar, its progress overlay and
+            // its label together (bd-gqqkg). Recorded before anything is written and used only when
+            // a link is actually emitted, so an ordinary chart streams byte-identically.
+            let task_bytes_start = task_svg.len();
+
             let task_type = gantt_meta
                 .tasks
                 .get(node_idx)
@@ -6131,6 +6136,43 @@ fn render_gantt_svg(
                     label_text,
                     anchor,
                 );
+            }
+
+            // A gantt task with a `click ... href` becomes a real LINK (bd-gqqkg).
+            //
+            // bd-gydqv attached the href to the task's node and rendered its tooltip, but the link
+            // itself was still stored-and-unused: a reader could hover the bar and never click it.
+            //
+            // The gate is the SAME one the flowchart node path uses, read rather than re-derived —
+            // `is_safe_link_target` against the diagram's sanitize mode, then `config.link_mode`.
+            // Re-implementing a security decision for a second diagram type is how the two drift and
+            // one of them starts emitting `javascript:` URLs. `Footnote` deliberately does nothing
+            // here: it decorates a `<g>` with `data-link`, and these bars are raw bytes with no group
+            // to hang it on, so claiming support would be worse than leaving it to the node path.
+            if let Some(href) = gantt_meta
+                .tasks
+                .get(node_idx)
+                .and_then(|task| ir.nodes.get(task.node.0))
+                .and_then(|node| node.href())
+                .filter(|href| is_safe_link_target(href, ir.meta.init.config.sanitize_mode))
+                && matches!(config.link_mode, MermaidLinkMode::Inline)
+            {
+                let link_target = gantt_meta
+                    .tasks
+                    .get(node_idx)
+                    .and_then(|task| ir.nodes.get(task.node.0))
+                    .and_then(|node| node.link_target())
+                    .unwrap_or("_blank");
+                let mut open = String::with_capacity(href.len() + link_target.len() + 64);
+                open.push_str("<a href=\"");
+                let _ = write_escaped_attr(&mut open, href);
+                open.push_str("\" target=\"");
+                let _ = write_escaped_attr(&mut open, link_target);
+                // `rel` unconditionally, matching the node path: it matters for `_blank` and is
+                // inert rather than wrong on a same-frame target.
+                open.push_str("\" rel=\"noopener noreferrer\" style=\"cursor: pointer;\">");
+                task_svg.insert_str(task_bytes_start, &open);
+                task_svg.push_str("</a>");
             }
         }
         if !task_svg.is_empty() {
