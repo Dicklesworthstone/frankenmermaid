@@ -403,9 +403,38 @@ pub struct GlyphAtlasPlan {
     pub rows: u32,
     /// Texture dimensions in pixels.
     pub texture_px: [u32; 2],
+    /// Distance from the TOP of a cell to the shared glyph baseline, in texture pixels.
+    ///
+    /// One value for the whole atlas: every cell is the same square and every glyph is rasterised at
+    /// the same size, and a per-glyph baseline would be a contradiction in terms — a baseline is
+    /// precisely the line glyphs share.
+    ///
+    /// This is what makes a rasterised atlas typographic rather than merely populated. Centring each
+    /// glyph in its cell — the obvious placement, and what this crate did first — aligns the MIDDLE
+    /// of every letter instead of its foot, so `x` and `g` sit at the same height and a word appears
+    /// to bounce. Placing ink relative to a shared baseline makes `g` hang below the line `x` rests
+    /// on, which is what the SVG and Canvas2D backends do.
+    ///
+    /// A convention, not a measurement: this struct is built without a font, so it cannot ask for
+    /// real ascent metrics. [`GLYPH_BASELINE_RATIO`] carries the reasoning, and
+    /// `glyph_raster::fitted_pixel_size` scales a supplied face so its ascent lands exactly here.
+    pub baseline_px: f32,
     /// Cells, sorted by `glyph` — binary-searchable and stable.
     pub cells: Vec<GlyphCell>,
 }
+
+/// Where the baseline sits inside a cell, as a fraction of the cell's height.
+///
+/// 0.8 is close to the ascent share of a text face's line box, so it is a convention rather than an
+/// arbitrary number: the remaining 0.2 is the descender space that lets `g`, `p` and `y` hang below
+/// the line without leaving their own cell and bleeding into a neighbour's.
+///
+/// It is a CONVENTION and faces differ. DejaVu Sans wants a hair more descender room than 0.2 of the
+/// cell, and loses a sub-pixel sliver from its deepest glyph as a result. The ratio is deliberately
+/// NOT tuned to any one face — that would simply move the mismatch to the next font — so
+/// `glyph_raster::baseline_fits_font` reports the shortfall and `AtlasCoverage::clipped` names the
+/// glyphs it actually cost.
+pub const GLYPH_BASELINE_RATIO: f32 = 0.8;
 
 impl GlyphAtlasPlan {
     /// Plan an atlas covering every glyph in `texts`.
@@ -435,6 +464,7 @@ impl GlyphAtlasPlan {
                 columns: 0,
                 rows: 0,
                 texture_px: [0, 0],
+                baseline_px: 0.0,
                 cells: Vec::new(),
             };
         }
@@ -472,6 +502,7 @@ impl GlyphAtlasPlan {
             columns,
             rows,
             texture_px,
+            baseline_px: cell * GLYPH_BASELINE_RATIO,
             cells,
         }
     }
