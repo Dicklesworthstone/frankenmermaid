@@ -53,6 +53,16 @@ renderer that drops an edge or mislays a subgraph is not faster, it is wrong.
 
 ---
 
+## NEVER USE GITHUB ACTIONS — RELEASES ARE VIA /dsr ONLY
+
+**NEVER EVER EVER USE GITHUB ACTIONS FOR ANY REASON.**
+- GitHub Actions workflows are NOT used in this repository.
+- We use `/dsr` for releases ONLY.
+- GitHub Pages is deployed directly from the `main` branch root (`/` with `index.html`), NEVER via GitHub Actions workflows.
+- Never trigger, rely on, write, or wait on GitHub Actions workflows (`gh run ...`, `gh workflow ...`, etc.).
+
+---
+
 ## Git Branch: ONLY Use `main`, NEVER `master`
 
 **The default branch is `main`. The `master` branch exists only for legacy URL compatibility.**
