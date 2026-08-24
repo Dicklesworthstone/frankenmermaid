@@ -97,6 +97,13 @@ pub const AXIS_TICK_STROKE_WIDTH: f32 = 1.0;
 /// Axis labels use 72% of the default text size, matching `draw_axis_ticks`.
 pub const AXIS_TICK_FONT_SIZE_PX: f32 = DEFAULT_FONT_SIZE_PX * 0.72;
 
+/// Gantt section bands use the Canvas2D pass's translucent slate fill and no border.
+pub const BAND_SECTION_FILL_RGBA: [f32; 4] = [0.886_274_5, 0.909_803_9, 0.941_176_5, 0.3];
+pub const BAND_SECTION_STROKE_RGBA: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+pub const BAND_STROKE_WIDTH: f32 = 1.0;
+pub const BAND_LANE_DASH: [f32; 2] = [6.0, 4.0];
+pub const BAND_LABEL_FONT_SIZE_PX: f32 = DEFAULT_FONT_SIZE_PX * 0.85;
+
 /// Default subgraph border, which is NOT the node border (bd-adabx).
 ///
 /// `config.cluster_stroke` is `rgba(148,163,184,0.78)` and `config.node_stroke` is `#94a3b8`. Same
@@ -796,6 +803,11 @@ pub enum GpuTextSource {
     /// `node_index` indexes `layout.extensions.axis_ticks`: ticks are layout furniture, not IR
     /// nodes, so resolving this as a node index would attach a date to an unrelated shape.
     AxisTick,
+    /// A label attached to a non-sequence layout band.
+    ///
+    /// `node_index` indexes `layout.extensions.bands`, since a band is layout furniture rather
+    /// than an IR node.
+    Band,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -849,6 +861,14 @@ pub struct GpuRenderPlan {
     /// back-reference the text pass uses -- cluster titles ARE planned now, tagged
     /// `GpuTextSource::Cluster`.
     pub cluster_instances: Vec<GpuNodeInstance>,
+    /// Layout bands emitted by journey, gantt, kanban, gitgraph, and sequence layouts.
+    ///
+    /// The raster source has three primitive kinds, retained in separate buffers so the future
+    /// encoder can submit the rect, lane, and separator pipelines without pretending they are IR
+    /// edges or nodes. They all precede axis ticks, matching `draw_bands`.
+    pub band_lane_segments: Vec<GpuEdgeSegment>,
+    pub band_section_instances: Vec<GpuNodeInstance>,
+    pub band_column_segments: Vec<GpuEdgeSegment>,
     /// Gantt and xychart axis tick marks, as non-edge line segments (bd-adabx).
     ///
     /// The Canvas2D pass draws these after bands and before the other extension furniture. They
@@ -977,6 +997,59 @@ impl GpuRenderPlan {
                 shape: GpuNodeShape::Rect as u32,
                 node_index: u32::try_from(cluster.cluster_index).unwrap_or(u32::MAX),
             });
+        }
+
+        // BANDS (bd-adabx). Keep the three Canvas2D primitives distinct: lanes are dashed
+        // centre-lines, sections are filled rectangles, and columns are right-edge separators.
+        let mut band_lane_segments = Vec::new();
+        let mut band_section_instances = Vec::new();
+        let mut band_column_segments = Vec::new();
+        for (band_index, band) in layout.extensions.bands.iter().enumerate() {
+            match band.kind {
+                fm_layout::LayoutBandKind::Lane => {
+                    let center_x = band.bounds.x + (band.bounds.width * 0.5);
+                    band_lane_segments.push(GpuEdgeSegment {
+                        from: [center_x, band.bounds.y],
+                        to: [center_x, band.bounds.y + band.bounds.height],
+                        edge_index: NO_EDGE_INDEX,
+                        color: DEFAULT_NODE_STROKE_RGBA,
+                        dash_phase: 0.0,
+                        dash: BAND_LANE_DASH,
+                        width: BAND_STROKE_WIDTH,
+                    });
+                }
+                fm_layout::LayoutBandKind::Section => {
+                    band_section_instances.push(GpuNodeInstance {
+                        center: [
+                            band.bounds.x + (band.bounds.width * 0.5),
+                            band.bounds.y + (band.bounds.height * 0.5),
+                        ],
+                        half_extent: [band.bounds.width * 0.5, band.bounds.height * 0.5],
+                        fill: BAND_SECTION_FILL_RGBA,
+                        stroke: BAND_SECTION_STROKE_RGBA,
+                        stroke_width: BAND_STROKE_WIDTH,
+                        shape: GpuNodeShape::Rect as u32,
+                        node_index: u32::try_from(band_index).unwrap_or(u32::MAX),
+                    });
+                }
+                fm_layout::LayoutBandKind::Column => {
+                    let right = band.bounds.x + band.bounds.width;
+                    band_column_segments.push(GpuEdgeSegment {
+                        from: [right, band.bounds.y],
+                        to: [right, band.bounds.y + band.bounds.height],
+                        edge_index: NO_EDGE_INDEX,
+                        color: [
+                            DEFAULT_NODE_STROKE_RGBA[0],
+                            DEFAULT_NODE_STROKE_RGBA[1],
+                            DEFAULT_NODE_STROKE_RGBA[2],
+                            0.4,
+                        ],
+                        dash_phase: 0.0,
+                        dash: [0.0, 0.0],
+                        width: BAND_STROKE_WIDTH,
+                    });
+                }
+            }
         }
 
         // AXIS TICKS (bd-adabx). The same extension drives the gantt date row and xychart
@@ -1416,7 +1489,16 @@ impl GpuRenderPlan {
                             .iter()
                             .filter(|tick| !tick.label.is_empty())
                             .map(|tick| tick.label.as_str()),
-                    ),
+                    )
+                    // BAND LABELS are only drawn for sections and non-sequence lanes. Sequence
+                    // lifeline names already come from their headers, so reproducing them here
+                    // would create a third visible participant name.
+                    .chain(layout.extensions.bands.iter().filter_map(|band| {
+                        let draw_label = matches!(band.kind, fm_layout::LayoutBandKind::Section)
+                            || (matches!(band.kind, fm_layout::LayoutBandKind::Lane)
+                                && ir.diagram_type != fm_core::DiagramType::Sequence);
+                        draw_label.then_some(band.label.as_str()).filter(|label| !label.is_empty())
+                    })),
                 cell_px,
             );
         let mut text_quads: Vec<GpuTextQuad> = Vec::new();
@@ -1646,9 +1728,31 @@ impl GpuRenderPlan {
             );
         }
 
+        // BAND LABELS (bd-adabx). This follows the raster branch exactly: sections and named
+        // non-sequence lanes label themselves; columns and sequence lifelines do not.
+        for (index, band) in layout.extensions.bands.iter().enumerate() {
+            let draw_label = matches!(band.kind, fm_layout::LayoutBandKind::Section)
+                || (matches!(band.kind, fm_layout::LayoutBandKind::Lane)
+                    && ir.diagram_type != fm_core::DiagramType::Sequence);
+            if !draw_label || band.label.is_empty() {
+                continue;
+            }
+            sink.push_left(
+                band.label.as_str(),
+                (band.bounds.x + 4.0, band.bounds.y + 2.0),
+                BAND_LABEL_FONT_SIZE_PX,
+                DEFAULT_LABEL_RGBA,
+                GpuTextSource::Band,
+                index,
+            );
+        }
+
         Self {
             bounds: layout.bounds,
             cluster_instances,
+            band_lane_segments,
+            band_section_instances,
+            band_column_segments,
             axis_tick_segments,
             cluster_divider_segments,
             state_note_leader_segments,
@@ -3325,6 +3429,108 @@ mod tests {
         }
     }
 
+    /// Every Canvas2D band kind reaches a GPU primitive while the SVG arm renders the same parsed
+    /// corpus IR/layout (bd-adabx).
+    #[test]
+    fn layout_band_gpu_plan_matches_svg_backend_for_the_same_ir() {
+        let cases = [
+            (
+                include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/gantt_project.mmd"),
+                "fm-gantt-section-bg",
+                fm_layout::LayoutBandKind::Section,
+            ),
+            (
+                include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/journey_user.mmd"),
+                "fm-band-lane",
+                fm_layout::LayoutBandKind::Lane,
+            ),
+            (
+                include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/kanban_basic.mmd"),
+                "fm-band-column",
+                fm_layout::LayoutBandKind::Column,
+            ),
+        ];
+
+        for (source, svg_class, kind) in cases {
+            let ir = fm_parser::parse(source).ir;
+            let layout = fm_layout::layout_diagram(&ir);
+            let bands: Vec<_> = layout
+                .extensions
+                .bands
+                .iter()
+                .enumerate()
+                .filter(|(_, band)| band.kind == kind)
+                .collect();
+            assert!(
+                !bands.is_empty(),
+                "CONTROL FAILED: fixture for {kind:?} produced no matching layout band"
+            );
+
+            let svg = fm_render_svg::render_svg_with_layout(
+                &ir,
+                &layout,
+                &fm_render_svg::SvgRenderConfig::default(),
+            );
+            assert!(
+                svg.contains(svg_class),
+                "SVG reference omitted {svg_class} for {kind:?}:\n{svg}"
+            );
+
+            let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+            match kind {
+                fm_layout::LayoutBandKind::Lane => {
+                    assert_eq!(plan.band_lane_segments.len(), bands.len());
+                    for ((_, band), segment) in bands.iter().zip(&plan.band_lane_segments) {
+                        let center_x = band.bounds.x + (band.bounds.width * 0.5);
+                        assert_eq!(segment.from, [center_x, band.bounds.y]);
+                        assert_eq!(segment.to, [center_x, band.bounds.y + band.bounds.height]);
+                        assert_eq!(segment.dash, super::BAND_LANE_DASH);
+                    }
+                }
+                fm_layout::LayoutBandKind::Section => {
+                    assert_eq!(plan.band_section_instances.len(), bands.len());
+                    for ((band_index, band), instance) in bands.iter().zip(&plan.band_section_instances)
+                    {
+                        assert_eq!(
+                            instance.center,
+                            [
+                                band.bounds.x + (band.bounds.width * 0.5),
+                                band.bounds.y + (band.bounds.height * 0.5),
+                            ]
+                        );
+                        assert_eq!(
+                            instance.node_index,
+                            u32::try_from(*band_index).unwrap_or(u32::MAX)
+                        );
+                        assert_eq!(instance.fill, super::BAND_SECTION_FILL_RGBA);
+                        assert_eq!(instance.stroke, super::BAND_SECTION_STROKE_RGBA);
+                    }
+                }
+                fm_layout::LayoutBandKind::Column => {
+                    assert_eq!(plan.band_column_segments.len(), bands.len());
+                    for ((_, band), segment) in bands.iter().zip(&plan.band_column_segments) {
+                        let right = band.bounds.x + band.bounds.width;
+                        assert_eq!(segment.from, [right, band.bounds.y]);
+                        assert_eq!(segment.to, [right, band.bounds.y + band.bounds.height]);
+                        assert_eq!(segment.color[3], 0.4);
+                    }
+                }
+            }
+
+            for (band_index, band) in bands {
+                let expects_label = !band.label.is_empty()
+                    && (kind == fm_layout::LayoutBandKind::Section
+                        || (kind == fm_layout::LayoutBandKind::Lane
+                            && ir.diagram_type != fm_core::DiagramType::Sequence));
+                let has_label = plan.text_runs.iter().any(|run| {
+                    run.source == super::GpuTextSource::Band
+                        && run.node_index == u32::try_from(band_index).unwrap_or(u32::MAX)
+                });
+                assert_eq!(has_label, expects_label, "band label selection drifted for {kind:?}");
+            }
+        }
+    }
+
     /// A destroyed participant's cross reaches the plan as two segments (bd-adabx).
     ///
     /// First line source that is NOT an edge. The `edge_index` sentinel is asserted explicitly:
@@ -3495,6 +3701,7 @@ mod tests {
         // (plan field, the raster call that produces it), in the order both must agree on.
         const PAIRS: &[(&str, &str)] = &[
             ("pub cluster_instances:", "self.draw_clusters("),
+            ("pub band_lane_segments:", "self.draw_bands("),
             ("pub axis_tick_segments:", "self.draw_axis_ticks("),
             ("pub cluster_divider_segments:", "self.draw_cluster_dividers("),
             ("pub state_note_leader_segments:", "self.draw_state_notes("),
@@ -3568,6 +3775,7 @@ mod tests {
             "draw_sequence_lifecycle_markers",
             "draw_sequence_notes",
             "draw_state_notes",
+            "draw_bands",
             "draw_axis_ticks",
             "draw_clusters",
             "draw_edges",
@@ -3581,7 +3789,6 @@ mod tests {
             ("draw_path_markers", "bd-adabx: RenderScene path pipeline, not the layout pipeline"),
             ("draw_marker", "bd-adabx: RenderScene path pipeline, not the layout pipeline"),
             ("draw_quadrant_axis_labels", "bd-adabx: quadrant furniture"),
-            ("draw_bands", "bd-adabx: journey/kanban band furniture"),
             ("draw_packet_field_continuations", "bd-adabx: packet furniture"),
             ("draw_gantt_today_marker", "bd-adabx: gantt furniture"),
             (
