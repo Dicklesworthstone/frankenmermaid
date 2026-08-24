@@ -4734,21 +4734,57 @@ fn sequence_autonumber_directives_only_label_their_message_ranges() {
 
     let svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
     let text = svg_text_runs(&svg);
-    for expected in ["10. numbered once", "15. numbered twice", "1. restarted"] {
-        assert!(
-            text.iter().any(|run| run == expected),
-            "Mermaid-reference label {expected:?} missing from SVG text runs: {text:?}"
-        );
-    }
-    for forbidden in [
-        "1. before directive",
-        "20. after off",
-        "2. after off",
-        "20. restarted",
+
+    // ⚠️ THE EXPECTED FORM CHANGED, and it changed toward the incumbent rather than toward whatever
+    // was easiest to make pass (bd-o02wn). This test used to require "10. numbered once" and called
+    // it a "Mermaid-reference label". It was not one, and it had never passed: mermaid 11.15.0's
+    // `drawMessage` emits the number as its OWN element carrying only the digits —
+    // `.attr("class","sequenceNumber").text(f)` — and never builds a `N. label` prefix. The renderer
+    // meanwhile emitted `10 numbered once`, and fm-render-svg's own unit test asserted THAT. Three
+    // spellings, no two agreeing, none of them mermaid.
+    //
+    // The scope assertions below are the reason this test exists and are UNCHANGED in substance:
+    // a numbered message must carry a number, and a message outside every autonumber range must
+    // carry none. Only the shape of "carries a number" moved.
+    for (label, number) in [
+        ("numbered once", "10"),
+        ("numbered twice", "15"),
+        ("restarted", "1"),
     ] {
         assert!(
-            !text.iter().any(|run| run == forbidden),
-            "autonumber scope leaked into {forbidden:?}: {text:?}"
+            text.iter().any(|run| run == label),
+            "message label {label:?} missing from SVG text runs: {text:?}"
+        );
+        assert!(
+            svg.contains(&format!("class=\"fm-sequence-number\">{number}</text>")),
+            "message {label:?} carries no sequence number element for {number:?}: {text:?}"
+        );
+    }
+
+    // The numbers that must NOT exist, because those messages sit outside every autonumber range.
+    // Asserted on the NUMBER ELEMENTS rather than on prefixed labels, which is the same statement
+    // about scope in the shape the renderer now produces.
+    let numbers: Vec<&String> = text
+        .iter()
+        .filter(|run| run.chars().all(|ch| ch.is_ascii_digit()) && !run.is_empty())
+        .collect();
+    assert_eq!(
+        numbers.len(),
+        3,
+        "expected exactly three numbered messages, got {numbers:?} in {text:?}"
+    );
+    for forbidden in ["20", "2"] {
+        assert!(
+            !svg.contains(&format!("class=\"fm-sequence-number\">{forbidden}</text>")),
+            "autonumber scope leaked: a message was numbered {forbidden:?}: {text:?}"
+        );
+    }
+    // And the two unnumbered messages must still be RENDERED — a scope fix that dropped them would
+    // satisfy every assertion above.
+    for unnumbered in ["before directive", "after off"] {
+        assert!(
+            text.iter().any(|run| run == unnumbered),
+            "unnumbered message {unnumbered:?} was lost entirely: {text:?}"
         );
     }
 }

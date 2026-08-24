@@ -12254,16 +12254,13 @@ fn compute_edge_label<'a>(
         && let Some(label_id) = ir_edge.and_then(|e| e.label)
         && let Some(label) = ir.labels.get(label_id.0)
     {
-        let base_label = truncate_label(&label.text, detail.edge_label_max_chars);
-        let label_text: Cow<'a, str> = if let Some(number) = ir
-            .sequence_meta
-            .as_ref()
-            .and_then(|meta| meta.autonumber_value(edge_index))
-        {
-            Cow::Owned(format!("{number} {}", base_label.as_ref()))
-        } else {
-            base_label
-        };
+        // The autonumber is NO LONGER PREFIXED here (bd-o02wn). mermaid 11.15.0's `drawMessage`
+        // emits it as its OWN element — `.attr("class","sequenceNumber").text(f)`, the number and
+        // nothing else — beside the message, not glued to the front of the label. Two repo tests
+        // had contradicted each other about the prefix spelling (`10 Ping` vs `10. numbered once`)
+        // and neither matched the incumbent, because a prefix is not what the incumbent produces.
+        // The number is now written by `write_sequence_number_into`.
+        let label_text: Cow<'a, str> = truncate_label(&label.text, detail.edge_label_max_chars);
         let (lx, ly) = if edge_path.points.len() == 4 {
             let p1 = &edge_path.points[1];
             let p2 = &edge_path.points[2];
@@ -12919,7 +12916,67 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
 /// edge (back-edges, non-Arrow markers, dashed, animated, source spans, inline `linkStyle`, labeled, or
 /// reduced a11y) falls back to the existing `render_edge` Element path, so output stays byte-identical
 /// (corpus-pinned by `golden_svg_test`).
+/// Stream a sequence message's AUTONUMBER as its own `<text>` element (bd-o02wn).
+///
+/// mermaid 11.15.0's `drawMessage` writes the number as a standalone element carrying only the
+/// digits — `.attr("text-anchor","middle").attr("class","sequenceNumber").text(f)` — beside the
+/// message. We used to glue it onto the front of the label instead, which is why the label read
+/// `10 Ping` and why two tests in this repo disagreed about whether a period belonged after the
+/// number. Neither spelling was the incumbent's, because the incumbent does not build a prefix.
+///
+/// Positioned at the message's START point, which is where mermaid draws it, rather than at the
+/// label midpoint. NOT claimed as pixel parity: mermaid also draws a filled circle behind the digits
+/// and themes them via `sequenceNumberColor`, and neither is replicated here — this is the element
+/// and its content, not the decoration.
+///
+/// Emitted from a WRAPPER around the edge body rather than from inside it, deliberately: the
+/// labeled-edge fast fragments are byte-identity-pinned by `golden_svg_test` and
+/// `edge_fast_full_fragment_matches_render`, and threading a second element through them would put
+/// the hottest render path in the crate at risk to add a decoration beside it.
+fn write_sequence_number_into(
+    out: &mut String,
+    edge_path: &LayoutEdgePath,
+    context: &EdgeRenderContext<'_>,
+) {
+    let Some(number) = context
+        .ir
+        .sequence_meta
+        .as_ref()
+        .and_then(|meta| meta.autonumber_value(edge_path.edge_index))
+    else {
+        return;
+    };
+    let Some(start) = edge_path.points.first() else {
+        return;
+    };
+    let Some(end) = edge_path.points.last() else {
+        return;
+    };
+
+    out.push_str("<text x=\"");
+    let _ = crate::attributes::write_number_into(out, start.x + context.offset_x);
+    out.push_str("\" y=\"");
+    let _ = crate::attributes::write_number_into(
+        out,
+        f32::midpoint(start.y, end.y) + context.offset_y - 8.0,
+    );
+    out.push_str(
+        "\" text-anchor=\"middle\" dominant-baseline=\"central\" class=\"fm-sequence-number\">",
+    );
+    let _ = crate::attributes::write_number_into(out, number as f32);
+    out.push_str("</text>");
+}
+
 fn render_edge_into(out: &mut String, edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) {
+    render_edge_body_into(out, edge_path, context);
+    write_sequence_number_into(out, edge_path, context);
+}
+
+fn render_edge_body_into(
+    out: &mut String,
+    edge_path: &LayoutEdgePath,
+    context: &EdgeRenderContext<'_>,
+) {
     use fm_core::ArrowType;
     let EdgeRenderContext {
         ir,
@@ -18901,8 +18958,27 @@ marker#arrow-open path {
         });
 
         let svg = render_svg(&ir);
-        assert!(svg.contains(">10 Ping<"));
-        assert!(svg.contains(">15 Pong<"));
+
+        // The number is its OWN element and the label is CLEAN (bd-o02wn). This test used to assert
+        // `>10 Ping<` — a prefix — which is not what mermaid produces: `drawMessage` writes
+        // `.attr("class","sequenceNumber").text(f)` with the digits alone. The configured start and
+        // increment are still exactly what this test exists to pin, and they still are: 10 then 15.
+        assert!(
+            svg.contains("class=\"fm-sequence-number\">10</text>"),
+            "the first message's number is not its own element"
+        );
+        assert!(
+            svg.contains("class=\"fm-sequence-number\">15</text>"),
+            "the increment did not reach the second message's number element"
+        );
+        assert!(
+            svg.contains(">Ping</text>") && svg.contains(">Pong</text>"),
+            "the labels did not come out clean; the number is still glued to them"
+        );
+        assert!(
+            !svg.contains(">10 Ping<") && !svg.contains(">15 Pong<"),
+            "a prefixed label survived alongside the number element, so both forms are emitted"
+        );
     }
 
     #[test]
