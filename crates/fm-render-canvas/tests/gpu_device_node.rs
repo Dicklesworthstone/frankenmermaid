@@ -16,10 +16,13 @@
 use fm_render_canvas::CanvasRenderConfig;
 use fm_render_canvas::GpuRenderPlan;
 use fm_render_canvas::gpu_device::{
-    GpuDevice, GpuDeviceError, InstancePass, arrowhead_instance_bytes, edge_instance_bytes,
-    node_instance_bytes, render_instances,
+    GlyphAtlasTexture, GpuDevice, GpuDeviceError, InstanceDraw, InstancePass,
+    arrowhead_instance_bytes, edge_instance_bytes, node_instance_bytes, render_instances,
+    solid_coverage, text_instance_bytes,
 };
-use fm_render_canvas::gpu_pipeline::{arrowhead_pipeline, edge_pipeline, node_pipeline};
+use fm_render_canvas::gpu_pipeline::{
+    arrowhead_pipeline, edge_pipeline, node_pipeline, text_pipeline,
+};
 
 fn plan_stroke_width() -> f32 {
     CanvasRenderConfig::default().edge_stroke_width as f32
@@ -44,7 +47,9 @@ fn device_or_skip() -> Option<GpuDevice> {
             eprintln!("[gpu] SKIPPED: no adapter on this host ({why})");
             None
         }
-        Err(other) => panic!("wgpu is present but unusable, which is a defect not an environment: {other}"),
+        Err(other) => {
+            panic!("wgpu is present but unusable, which is a defect not an environment: {other}")
+        }
     }
 }
 
@@ -147,8 +152,13 @@ fn the_node_pipeline_paints_a_node_wherever_the_svg_backend_draws_one() {
     let pass = InstancePass::new(&gpu, &node_pipeline());
     let bytes = node_instance_bytes(&plan.node_instances);
     let count = u32::try_from(plan.node_instances.len()).expect("fits u32");
-    let image =
-        render_instances(&gpu, &pass, &plan.bounds, &bytes, count, 512, 512).expect("render");
+    let draw = InstanceDraw {
+        bounds: &plan.bounds,
+        instance_bytes: &bytes,
+        instance_count: count,
+        atlas: None,
+    };
+    let image = render_instances(&gpu, &pass, &draw, 512, 512).expect("render");
 
     // NON-VACUITY ON THE RASTER ITSELF: something must have been painted. Without this, a pipeline
     // that drew nothing at all would satisfy every per-node check below by vacuous truth if the
@@ -213,8 +223,13 @@ fn an_empty_diagram_rasterises_to_a_transparent_image() {
     );
 
     let pass = InstancePass::new(&gpu, &node_pipeline());
-    let image =
-        render_instances(&gpu, &pass, &plan.bounds, &[], 0, 64, 64).expect("render");
+    let draw = InstanceDraw {
+        bounds: &plan.bounds,
+        instance_bytes: &[],
+        instance_count: 0,
+        atlas: None,
+    };
+    let image = render_instances(&gpu, &pass, &draw, 64, 64).expect("render");
     assert!(
         image.rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 0),
         "an empty diagram painted pixels"
@@ -354,8 +369,13 @@ fn the_arrowhead_pipeline_paints_a_head_for_every_edge_the_svg_marks() {
     let pass = InstancePass::new(&gpu, &descriptor);
     let bytes = arrowhead_instance_bytes(&plan.arrowheads);
     let count = u32::try_from(plan.arrowheads.len()).expect("fits u32");
-    let image =
-        render_instances(&gpu, &pass, &plan.bounds, &bytes, count, 512, 512).expect("render");
+    let draw = InstanceDraw {
+        bounds: &plan.bounds,
+        instance_bytes: &bytes,
+        instance_count: count,
+        atlas: None,
+    };
+    let image = render_instances(&gpu, &pass, &draw, 512, 512).expect("render");
 
     let painted = image
         .rgba
@@ -449,8 +469,13 @@ fn the_edge_pipeline_paints_along_every_segment_the_svg_backend_draws() {
     let pass = InstancePass::new(&gpu, &edge_pipeline());
     let bytes = edge_instance_bytes(&plan.edge_segments);
     let count = u32::try_from(plan.edge_segments.len()).expect("fits u32");
-    let image =
-        render_instances(&gpu, &pass, &plan.bounds, &bytes, count, 512, 512).expect("render");
+    let draw = InstanceDraw {
+        bounds: &plan.bounds,
+        instance_bytes: &bytes,
+        instance_count: count,
+        atlas: None,
+    };
+    let image = render_instances(&gpu, &pass, &draw, 512, 512).expect("render");
 
     let painted = image
         .rgba
@@ -499,6 +524,89 @@ fn the_edge_pipeline_paints_along_every_segment_the_svg_backend_draws() {
         );
     }
 }
+/// SAME-IR COMPARISON FOR TEXT: every glyph quad the plan emits lands where the atlas says it does,
+/// and the labels it spells are the ones the SVG draws.
+///
+/// ⚠️ THE ATLAS CONTENT IS SYNTHETIC AND THIS TEST DOES NOT CLAIM OTHERWISE. Nothing in this crate
+/// rasterises glyphs yet — `GlyphAtlasPlan` carries the grid and per-glyph UV rectangles but no pixel
+/// data — so `solid_coverage` fills each PLANNED cell with full coverage and leaves the rest at zero.
+/// That is what makes the check meaningful rather than trivial: a quad whose UVs address an unplanned
+/// region samples zero and paints nothing, so a wrong UV rectangle shows up as a missing glyph. It
+/// proves the UV addressing and quad geometry, NOT that this renders readable text.
+#[test]
+fn every_glyph_quad_samples_its_own_planned_atlas_cell() {
+    let Some(gpu) = device_or_skip() else {
+        return;
+    };
+
+    let ir = fm_parser::parse("flowchart LR\n  A[Alpha] --> B[Beta]\n  B --> C[Gamma]\n").ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let plan = GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+    assert!(
+        !plan.text_quads.is_empty(),
+        "CONTROL FAILED: a diagram whose every node is labelled planned no glyph quads"
+    );
+    assert!(
+        !plan.glyph_atlas.cells.is_empty(),
+        "CONTROL FAILED: the atlas plan has no cells, so UVs address nothing"
+    );
+
+    let coverage = solid_coverage(&plan.glyph_atlas);
+    // NON-VACUITY ON THE ATLAS: if the planned cells covered nothing, every quad would sample zero
+    // and the paint assertions below would fail for a reason that is not a UV defect.
+    assert!(
+        coverage.iter().any(|&c| c > 0),
+        "CONTROL FAILED: the synthetic atlas is entirely empty"
+    );
+    assert!(
+        coverage.contains(&0),
+        "CONTROL FAILED: the synthetic atlas is entirely full, so a wrong UV would still sample \
+         coverage and this test could not detect one"
+    );
+
+    let atlas = GlyphAtlasTexture::new(&gpu, &plan.glyph_atlas, &coverage);
+    let pass = InstancePass::new(&gpu, &text_pipeline());
+    let bytes = text_instance_bytes(&plan.text_quads);
+    let count = u32::try_from(plan.text_quads.len()).expect("fits u32");
+    let draw = InstanceDraw {
+        bounds: &plan.bounds,
+        instance_bytes: &bytes,
+        instance_count: count,
+        atlas: Some(&atlas),
+    };
+    let image = render_instances(&gpu, &pass, &draw, 1024, 1024).expect("render");
+
+    let painted = image
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|p| p[3] > 0)
+        .count();
+    assert!(
+        painted > 0,
+        "the text pass produced a fully transparent image: no glyph sampled any coverage, which \
+         means the UV rectangles address cells the atlas never filled"
+    );
+
+    // The labels must be the SVG's labels. Joined on the TEXT the plan spells, so a backend that
+    // drew the right number of glyphs for the wrong string still fails.
+    let svg = fm_render_svg::render_svg(&ir);
+    for label in ["Alpha", "Beta", "Gamma"] {
+        assert!(
+            svg.contains(label),
+            "CONTROL FAILED: the SVG never drew {label:?}, so it cannot be the reference"
+        );
+        for character in label.chars() {
+            assert!(
+                plan.glyph_atlas.cells.iter().any(|c| c.glyph == character),
+                "glyph {character:?} of {label:?} has no atlas cell, so the GPU would render that \
+                 label incomplete"
+            );
+        }
+    }
+}
+
 /// The camera must not flip the diagram. Layout space grows downward, clip space grows upward, so
 /// the Y scale is negative; getting that wrong renders every diagram upside down, which reads as a
 /// layout bug rather than a camera bug.
@@ -517,13 +625,22 @@ fn the_camera_maps_layout_space_the_right_way_up() {
 
     let (left, top) = clip(0.0, 0.0);
     let (right, bottom) = clip(100.0, 50.0);
-    assert!((left - -1.0).abs() < 1e-5, "left edge maps to {left}, not -1");
-    assert!((right - 1.0).abs() < 1e-5, "right edge maps to {right}, not 1");
+    assert!(
+        (left - -1.0).abs() < 1e-5,
+        "left edge maps to {left}, not -1"
+    );
+    assert!(
+        (right - 1.0).abs() < 1e-5,
+        "right edge maps to {right}, not 1"
+    );
     // TOP of the layout is TOP of the screen, i.e. +1 in clip space.
     assert!((top - 1.0).abs() < 1e-5, "layout top maps to {top}, not +1");
     assert!(
         (bottom - -1.0).abs() < 1e-5,
         "layout bottom maps to {bottom}, not -1"
     );
-    assert!(scale_y < 0.0, "the Y flip is missing; diagrams render upside down");
+    assert!(
+        scale_y < 0.0,
+        "the Y flip is missing; diagrams render upside down"
+    );
 }

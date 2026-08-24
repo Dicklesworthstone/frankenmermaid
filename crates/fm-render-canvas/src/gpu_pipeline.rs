@@ -27,8 +27,8 @@
 //! device layer is bd-2u0.2's next step; this is the part that can be proven correct headlessly.
 
 use crate::gpu_plan::{
-    ARROWHEAD_WGSL, EDGE_WGSL, GpuArrowheadInstance, GpuEdgeSegment, GpuNodeInstance, GpuRenderPlan,
-    GpuTextQuad, NODE_SDF_WGSL, TEXT_ATLAS_WGSL,
+    ARROWHEAD_WGSL, EDGE_WGSL, GpuArrowheadInstance, GpuEdgeSegment, GpuNodeInstance,
+    GpuRenderPlan, GpuTextQuad, NODE_SDF_WGSL, TEXT_ATLAS_WGSL,
 };
 
 /// Vertex attribute scalar/vector type, spelled the way WGSL spells it.
@@ -120,6 +120,13 @@ pub struct PipelineDescriptor {
     /// Vertices the vertex stage generates per instance. The shaders expand a unit quad from
     /// `@builtin(vertex_index)`, so there is no vertex buffer at all — only instance data.
     pub vertices_per_instance: u32,
+    /// Whether the fragment stage samples the glyph atlas.
+    ///
+    /// Text binds three resources at `@group(0)` — the camera uniform plus `atlas_texture` and
+    /// `atlas_sampler`; every other family binds only the camera. A device layer that built one
+    /// bind-group layout for all four would fail pipeline validation on text, so the difference is
+    /// declared here rather than special-cased by label at the call site.
+    pub samples_atlas: bool,
 }
 
 /// Node instance layout, offsets taken from the struct rather than hand-counted.
@@ -178,6 +185,7 @@ pub const QUAD_VERTICES_PER_INSTANCE: u32 = 6;
 #[must_use]
 pub const fn node_pipeline() -> PipelineDescriptor {
     PipelineDescriptor {
+        samples_atlas: false,
         label: "fm-node-sdf",
         family: PrimitiveFamily::Node,
         wgsl: NODE_SDF_WGSL,
@@ -250,6 +258,7 @@ const EDGE_ATTRIBUTES: &[VertexAttribute] = &[
 #[must_use]
 pub const fn edge_pipeline() -> PipelineDescriptor {
     PipelineDescriptor {
+        samples_atlas: false,
         label: "fm-edge",
         family: PrimitiveFamily::Edge,
         wgsl: EDGE_WGSL,
@@ -306,6 +315,7 @@ const ARROWHEAD_ATTRIBUTES: &[VertexAttribute] = &[
 #[must_use]
 pub const fn arrowhead_pipeline() -> PipelineDescriptor {
     PipelineDescriptor {
+        samples_atlas: false,
         label: "fm-arrowhead",
         family: PrimitiveFamily::Arrowhead,
         wgsl: ARROWHEAD_WGSL,
@@ -370,6 +380,8 @@ const TEXT_ATTRIBUTES: &[VertexAttribute] = &[
 #[must_use]
 pub const fn text_pipeline() -> PipelineDescriptor {
     PipelineDescriptor {
+        // The only family that samples a texture.
+        samples_atlas: true,
         label: "fm-text-atlas",
         family: PrimitiveFamily::Text,
         wgsl: TEXT_ATLAS_WGSL,

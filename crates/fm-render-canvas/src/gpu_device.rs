@@ -118,8 +118,7 @@ impl GpuDevice {
         // An error SCOPE rather than the uncaptured-error handler: the handler's default panics the
         // process, so one broken shader would abort every other check in the same run instead of
         // being reported alongside them.
-        self.device
-            .push_error_scope(wgpu::ErrorFilter::Validation);
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let module = self
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -173,8 +172,16 @@ pub fn vertex_attributes(layout: &InstanceLayout) -> Vec<wgpu::VertexAttribute> 
 /// layout bug rather than a camera bug and is correspondingly slow to find.
 #[must_use]
 pub fn camera_transform(bounds: &fm_layout::LayoutRect) -> [f32; 4] {
-    let width = if bounds.width > 0.0 { bounds.width } else { 1.0 };
-    let height = if bounds.height > 0.0 { bounds.height } else { 1.0 };
+    let width = if bounds.width > 0.0 {
+        bounds.width
+    } else {
+        1.0
+    };
+    let height = if bounds.height > 0.0 {
+        bounds.height
+    } else {
+        1.0
+    };
     let scale_x = 2.0 / width;
     let scale_y = -2.0 / height;
     [
@@ -183,6 +190,111 @@ pub fn camera_transform(bounds: &fm_layout::LayoutRect) -> [f32; 4] {
         (-1.0) - bounds.x * scale_x,
         1.0 - bounds.y * scale_y,
     ]
+}
+
+/// The glyph atlas as a GPU texture, plus the sampler the text shader reads it with.
+///
+/// ⚠️ NOTHING IN THIS CRATE RASTERISES GLYPHS YET. `GlyphAtlasPlan` describes the atlas — cell size,
+/// grid, and the UV rectangle of every glyph — but carries no pixel data, so there is no real
+/// coverage bitmap to upload. [`solid_coverage`] therefore fills each planned cell with full
+/// coverage, which is enough to prove that the UV rectangles address the cells they claim and that
+/// the quads land where the plan puts them, and is NOT a claim that this renders readable text.
+/// Real glyph rasterisation is separate work.
+pub struct GlyphAtlasTexture {
+    view: wgpu::TextureView,
+    sampler: wgpu::Sampler,
+}
+
+impl GlyphAtlasTexture {
+    /// Upload an R8 coverage bitmap sized to the plan's `texture_px`.
+    ///
+    /// # Panics
+    /// If `coverage` is not exactly `texture_px[0] * texture_px[1]` bytes — a mis-sized upload would
+    /// shear every glyph rather than fail, which is the kind of wrongness that looks like a font bug.
+    #[must_use]
+    pub fn new(gpu: &GpuDevice, plan: &crate::gpu_plan::GlyphAtlasPlan, coverage: &[u8]) -> Self {
+        let width = plan.texture_px[0].max(1);
+        let height = plan.texture_px[1].max(1);
+        assert_eq!(
+            coverage.len(),
+            (width as usize) * (height as usize),
+            "coverage bitmap is {} bytes for a {width}x{height} atlas",
+            coverage.len()
+        );
+
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("fm-glyph-atlas"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            // R8: the shader reads `.r` as coverage. A single channel is all a glyph mask needs.
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            coverage,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        Self {
+            view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            // NEAREST, not linear: a linear filter would bleed neighbouring cells into each other at
+            // cell borders, so a glyph would sample its neighbour's coverage and the UV-addressing
+            // test would pass or fail for reasons unrelated to the UVs.
+            sampler: gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("fm-glyph-atlas"),
+                mag_filter: wgpu::FilterMode::Nearest,
+                min_filter: wgpu::FilterMode::Nearest,
+                ..Default::default()
+            }),
+        }
+    }
+}
+
+/// A fully-covered atlas bitmap for the plan's dimensions: every planned cell opaque, the rest zero.
+///
+/// Synthetic by necessity — see [`GlyphAtlasTexture`]. Filling only the PLANNED cells rather than the
+/// whole texture is what makes it useful: a quad whose UVs address an unplanned region samples zero
+/// and paints nothing, so a wrong UV rectangle is visible as a missing glyph rather than hidden by a
+/// uniformly white texture.
+#[must_use]
+pub fn solid_coverage(plan: &crate::gpu_plan::GlyphAtlasPlan) -> Vec<u8> {
+    let width = plan.texture_px[0].max(1) as usize;
+    let height = plan.texture_px[1].max(1) as usize;
+    let mut coverage = vec![0_u8; width * height];
+    for cell in &plan.cells {
+        let x0 = (cell.uv_min[0] * width as f32).round().max(0.0) as usize;
+        let y0 = (cell.uv_min[1] * height as f32).round().max(0.0) as usize;
+        let x1 = ((cell.uv_max[0] * width as f32).round() as usize).min(width);
+        let y1 = ((cell.uv_max[1] * height as f32).round() as usize).min(height);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                coverage[y * width + x] = 255;
+            }
+        }
+    }
+    coverage
 }
 
 /// A built pipeline for one primitive family, plus the camera binding it draws with.
@@ -195,6 +307,7 @@ pub struct InstancePass {
     pipeline: wgpu::RenderPipeline,
     camera_layout: wgpu::BindGroupLayout,
     vertices_per_instance: u32,
+    samples_atlas: bool,
 }
 
 impl InstancePass {
@@ -211,29 +324,48 @@ impl InstancePass {
                 source: wgpu::ShaderSource::Wgsl(descriptor.wgsl.into()),
             });
 
-        let camera_layout =
-            gpu.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("fm-camera"),
-                    entries: &[wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    }],
-                });
+        let mut entries = vec![wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }];
+        if descriptor.samples_atlas {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            });
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            });
+        }
+        let camera_layout = gpu
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some(descriptor.label),
+                entries: &entries,
+            });
 
-        let pipeline_layout =
-            gpu.device
-                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some(descriptor.label),
-                    bind_group_layouts: &[&camera_layout],
-                    push_constant_ranges: &[],
-                });
+        let pipeline_layout = gpu
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(descriptor.label),
+                bind_group_layouts: &[&camera_layout],
+                push_constant_ranges: &[],
+            });
 
         let attributes = vertex_attributes(&descriptor.instance);
         let buffers = [wgpu::VertexBufferLayout {
@@ -279,6 +411,7 @@ impl InstancePass {
             pipeline,
             camera_layout,
             vertices_per_instance: descriptor.vertices_per_instance,
+            samples_atlas: descriptor.samples_atlas,
         }
     }
 }
@@ -298,7 +431,9 @@ impl RenderedImage {
             return None;
         }
         let start = ((y as usize) * (self.width as usize) + (x as usize)) * 4;
-        self.rgba.get(start..start + 4).map(|p| [p[0], p[1], p[2], p[3]])
+        self.rgba
+            .get(start..start + 4)
+            .map(|p| [p[0], p[1], p[2], p[3]])
     }
 
     /// Convert a point in layout coordinates to the pixel it lands on.
@@ -307,8 +442,16 @@ impl RenderedImage {
     /// re-deriving the camera, which is exactly how a test comes to agree with a bug.
     #[must_use]
     pub fn pixel_for(&self, bounds: &fm_layout::LayoutRect, x: f32, y: f32) -> (u32, u32) {
-        let width = if bounds.width > 0.0 { bounds.width } else { 1.0 };
-        let height = if bounds.height > 0.0 { bounds.height } else { 1.0 };
+        let width = if bounds.width > 0.0 {
+            bounds.width
+        } else {
+            1.0
+        };
+        let height = if bounds.height > 0.0 {
+            bounds.height
+        } else {
+            1.0
+        };
         let u = ((x - bounds.x) / width * self.width as f32).round();
         let v = ((y - bounds.y) / height * self.height as f32).round();
         (
@@ -316,6 +459,22 @@ impl RenderedImage {
             (v.max(0.0) as u32).min(self.height.saturating_sub(1)),
         )
     }
+}
+
+/// What to draw in one pass: the geometry, and the atlas if the pipeline samples one.
+///
+/// Grouped into a struct rather than passed as loose arguments because these four travel together
+/// and are individually easy to transpose — `instance_count` and a dimension are both bare `u32`,
+/// so a swapped pair would compile and draw the wrong thing.
+#[derive(Clone, Copy)]
+pub struct InstanceDraw<'a> {
+    /// The plan's bounds, so every family in a diagram shares one camera and the passes compose.
+    pub bounds: &'a fm_layout::LayoutRect,
+    /// Serialised instances, from the family's `*_instance_bytes` function.
+    pub instance_bytes: &'a [u8],
+    pub instance_count: u32,
+    /// Required exactly when the pipeline's `samples_atlas` is set.
+    pub atlas: Option<&'a GlyphAtlasTexture>,
 }
 
 /// Render one family's instances to an offscreen texture and read the pixels back.
@@ -333,12 +492,22 @@ impl RenderedImage {
 pub fn render_instances(
     gpu: &GpuDevice,
     pass: &InstancePass,
-    bounds: &fm_layout::LayoutRect,
-    instance_bytes: &[u8],
-    instance_count: u32,
+    draw: &InstanceDraw<'_>,
     width: u32,
     height: u32,
 ) -> Result<RenderedImage, GpuDeviceError> {
+    let InstanceDraw {
+        bounds,
+        instance_bytes,
+        instance_count,
+        atlas,
+    } = *draw;
+    assert_eq!(
+        pass.samples_atlas,
+        atlas.is_some(),
+        "the atlas argument must match the pipeline: a text pass without one fails bind-group \
+         validation, and a non-text pass with one binds a resource its layout does not declare"
+    );
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("fm-target"),
         size: wgpu::Extent3d {
@@ -365,13 +534,24 @@ pub fn render_instances(
     gpu.queue
         .write_buffer(&camera_buffer, 0, &bytemuck_cast(&camera));
 
+    let mut bind_entries = vec![wgpu::BindGroupEntry {
+        binding: 0,
+        resource: camera_buffer.as_entire_binding(),
+    }];
+    if let Some(atlas) = atlas {
+        bind_entries.push(wgpu::BindGroupEntry {
+            binding: 1,
+            resource: wgpu::BindingResource::TextureView(&atlas.view),
+        });
+        bind_entries.push(wgpu::BindGroupEntry {
+            binding: 2,
+            resource: wgpu::BindingResource::Sampler(&atlas.sampler),
+        });
+    }
     let camera_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("fm-camera"),
+        label: Some("fm-bindings"),
         layout: &pass.camera_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: camera_buffer.as_entire_binding(),
-        }],
+        entries: &bind_entries,
     });
 
     let instance_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -571,6 +751,53 @@ pub fn node_instance_bytes(instances: &[crate::gpu_plan::GpuNodeInstance]) -> Ve
     instance_bytes(instances)
 }
 
+/// Text quads as instance bytes, each field written AT ITS `offset_of!` POSITION.
+///
+/// One quad per GLYPH, not per label: `uv_min`/`uv_max` address that glyph's cell in the atlas, so a
+/// whole diagram's text is one instanced draw.
+#[must_use]
+pub fn text_instance_bytes(quads: &[crate::gpu_plan::GpuTextQuad]) -> Vec<u8> {
+    use crate::gpu_plan::GpuTextQuad;
+
+    let stride = size_of::<GpuTextQuad>();
+    let mut out = vec![0_u8; std::mem::size_of_val(quads)];
+    for (index, quad) in quads.iter().enumerate() {
+        let base = index * stride;
+        let mut put = |offset: usize, bytes: &[u8]| {
+            out[base + offset..base + offset + bytes.len()].copy_from_slice(bytes);
+        };
+        put(
+            core::mem::offset_of!(GpuTextQuad, center),
+            &[quad.center[0].to_ne_bytes(), quad.center[1].to_ne_bytes()].concat(),
+        );
+        put(
+            core::mem::offset_of!(GpuTextQuad, half_extent),
+            &[
+                quad.half_extent[0].to_ne_bytes(),
+                quad.half_extent[1].to_ne_bytes(),
+            ]
+            .concat(),
+        );
+        put(
+            core::mem::offset_of!(GpuTextQuad, uv_min),
+            &[quad.uv_min[0].to_ne_bytes(), quad.uv_min[1].to_ne_bytes()].concat(),
+        );
+        put(
+            core::mem::offset_of!(GpuTextQuad, uv_max),
+            &[quad.uv_max[0].to_ne_bytes(), quad.uv_max[1].to_ne_bytes()].concat(),
+        );
+        put(
+            core::mem::offset_of!(GpuTextQuad, color),
+            &quad.color.map(f32::to_ne_bytes).concat(),
+        );
+        put(
+            core::mem::offset_of!(GpuTextQuad, run_index),
+            &quad.run_index.to_ne_bytes(),
+        );
+    }
+    out
+}
+
 /// Arrowheads as instance bytes, each field written AT ITS `offset_of!` POSITION.
 #[must_use]
 pub fn arrowhead_instance_bytes(heads: &[crate::gpu_plan::GpuArrowheadInstance]) -> Vec<u8> {
@@ -631,11 +858,7 @@ pub fn edge_instance_bytes(segments: &[crate::gpu_plan::GpuEdgeSegment]) -> Vec<
         };
         put(
             core::mem::offset_of!(GpuEdgeSegment, from),
-            &[
-                segment.from[0].to_ne_bytes(),
-                segment.from[1].to_ne_bytes(),
-            ]
-            .concat(),
+            &[segment.from[0].to_ne_bytes(), segment.from[1].to_ne_bytes()].concat(),
         );
         put(
             core::mem::offset_of!(GpuEdgeSegment, to),

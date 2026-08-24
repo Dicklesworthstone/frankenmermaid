@@ -135,7 +135,10 @@ fn the_edge_layout_binds_dash_and_dash_phase_across_the_struct_order() {
     let dash = by_name("dash");
     let dash_phase = by_name("dash_phase");
 
-    assert_eq!(dash.shader_location, 4, "the shader binds dash at location 4");
+    assert_eq!(
+        dash.shader_location, 4,
+        "the shader binds dash at location 4"
+    );
     assert_eq!(
         dash_phase.shader_location, 6,
         "the shader binds dash_phase at location 6"
@@ -164,7 +167,11 @@ fn no_attribute_reads_past_the_instance_stride() {
     // test for it.
     for pipeline in pipelines() {
         let stride = pipeline.instance.array_stride;
-        assert!(stride > 0, "CONTROL FAILED: {} has zero stride", pipeline.label);
+        assert!(
+            stride > 0,
+            "CONTROL FAILED: {} has zero stride",
+            pipeline.label
+        );
 
         for attribute in pipeline.instance.attributes {
             let end = attribute.offset + attribute.format.size();
