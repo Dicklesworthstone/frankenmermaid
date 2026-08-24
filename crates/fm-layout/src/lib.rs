@@ -11669,8 +11669,10 @@ fn apply_ir_constraints(ir: &MermaidDiagramIr, ranks: &mut BTreeMap<usize, usize
                     }
                 }
             }
-            IrConstraint::Pin { .. } | IrConstraint::OrderInRank { .. } => {
-                // Pin and OrderInRank are applied during coordinate assignment,
+            IrConstraint::Pin { .. }
+            | IrConstraint::OrderInRank { .. }
+            | IrConstraint::NonOverlap { .. } => {
+                // Pin, OrderInRank, and NonOverlap are applied during coordinate assignment,
                 // not during rank assignment.
             }
         }
@@ -13388,11 +13390,10 @@ fn solve_constraint_coordinates(
     wall_clock_valve_ms: u64,
 ) -> Result<usize, String> {
     let horizontal_ranks = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
-    let id_to_index: BTreeMap<&str, usize> = ir
-        .nodes
+    let id_to_index: BTreeMap<&str, usize> = nodes
         .iter()
         .enumerate()
-        .map(|(index, node)| (node.id.as_str(), index))
+        .map(|(index, node)| (node.node_id.as_str(), index))
         .collect();
     let ordered_nodes: BTreeSet<_> = ir
         .constraints
@@ -13404,6 +13405,7 @@ fn solve_constraint_coordinates(
         .flatten()
         .filter_map(|node_id| id_to_index.get(node_id.as_str()).copied())
         .collect();
+    let non_overlap_pairs = collect_non_overlap_pairs(ir, &id_to_index, nodes.len());
 
     let mut variables = good_lp::ProblemVariables::new();
     let x_vars: Vec<_> = nodes.iter().map(|_| variables.add(variable())).collect();
@@ -13423,6 +13425,20 @@ fn solve_constraint_coordinates(
     let dy_neg: Vec<_> = nodes
         .iter()
         .map(|_| variables.add(variable().min(0.0)))
+        .collect();
+    // Four binary selectors encode the four allowed relative placements for each rectangle pair.
+    // Exactly one is not required: at least one active side is enough, and it avoids needlessly
+    // rejecting a pair that is separated on both axes.
+    let non_overlap_selectors: Vec<_> = non_overlap_pairs
+        .iter()
+        .map(|_| {
+            [
+                variables.add(variable().binary()),
+                variables.add(variable().binary()),
+                variables.add(variable().binary()),
+                variables.add(variable().binary()),
+            ]
+        })
         .collect();
 
     let objective = (0..nodes.len()).fold(Expression::from(0.0), |mut expr, index| {
@@ -13457,11 +13473,8 @@ fn solve_constraint_coordinates(
     }
 
     let mut nodes_by_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for node in nodes.iter() {
-        nodes_by_rank
-            .entry(node.rank)
-            .or_default()
-            .push(node.node_index);
+    for (node_index, node) in nodes.iter().enumerate() {
+        nodes_by_rank.entry(node.rank).or_default().push(node_index);
     }
     for node_indexes in nodes_by_rank.values_mut() {
         node_indexes.sort_by_key(|node_index| nodes[*node_index].order);
@@ -13547,7 +13560,42 @@ fn solve_constraint_coordinates(
                     applied = applied.saturating_add(1);
                 }
             }
+            fm_core::IrConstraint::NonOverlap { .. } => {
+                // Lowered in one deterministic pass below so overlapping declarations are merged
+                // by pair and use their largest requested gap.
+            }
         }
+    }
+
+    let big_m = non_overlap_big_m(nodes, &non_overlap_pairs);
+    for ((left, right, gap), selectors) in non_overlap_pairs.iter().zip(&non_overlap_selectors) {
+        let left_width = f64::from(nodes[*left].bounds.width);
+        let left_height = f64::from(nodes[*left].bounds.height);
+        let right_width = f64::from(nodes[*right].bounds.width);
+        let right_height = f64::from(nodes[*right].bounds.height);
+        model = model
+            .with(constraint!(
+                x_vars[*left] + (left_width / 2.0) + *gap
+                    <= x_vars[*right] - (right_width / 2.0) + big_m * (1.0 - selectors[0])
+            ))
+            .with(constraint!(
+                x_vars[*right] + (right_width / 2.0) + *gap
+                    <= x_vars[*left] - (left_width / 2.0) + big_m * (1.0 - selectors[1])
+            ))
+            .with(constraint!(
+                y_vars[*left] + (left_height / 2.0) + *gap
+                    <= y_vars[*right] - (right_height / 2.0) + big_m * (1.0 - selectors[2])
+            ))
+            .with(constraint!(
+                y_vars[*right] + (right_height / 2.0) + *gap
+                    <= y_vars[*left] - (left_height / 2.0) + big_m * (1.0 - selectors[3])
+            ))
+            .with(constraint!(
+                selectors[0] + selectors[1] + selectors[2] + selectors[3] >= 1
+            ));
+    }
+    if !non_overlap_pairs.is_empty() {
+        applied = applied.saturating_add(non_overlap_pairs.len());
     }
 
     if applied == 0 {
@@ -13607,6 +13655,65 @@ fn resolve_constraint_nodes(
             }
         })
         .collect()
+}
+
+/// Expand explicit and all-node non-overlap declarations into unique rectangle pairs.
+///
+/// Multiple declarations for a pair compose by taking the largest gap. A `BTreeMap` gives the MIP
+/// columns a stable order and makes the resulting coordinate tie-breaking reproducible.
+fn collect_non_overlap_pairs(
+    ir: &MermaidDiagramIr,
+    id_to_index: &BTreeMap<&str, usize>,
+    node_count: usize,
+) -> Vec<(usize, usize, f64)> {
+    let mut pairs = BTreeMap::<(usize, usize), f64>::new();
+    for constraint in &ir.constraints {
+        let fm_core::IrConstraint::NonOverlap { node_ids, gap, .. } = constraint else {
+            continue;
+        };
+        let selected = if node_ids.is_empty() {
+            (0..node_count).collect()
+        } else {
+            resolve_constraint_nodes(node_ids, id_to_index)
+        };
+        for (offset, &left) in selected.iter().enumerate() {
+            for &right in selected.iter().skip(offset + 1) {
+                let pair = if left < right {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
+                pairs
+                    .entry(pair)
+                    .and_modify(|current| *current = current.max(*gap))
+                    .or_insert(*gap);
+            }
+        }
+    }
+    pairs
+        .into_iter()
+        .map(|((left, right), gap)| (left, right, gap))
+        .collect()
+}
+
+/// A conservative finite relaxation value for every inactive non-overlap branch.
+///
+/// The displacement objective chooses coordinates near the heuristic placement, so the sum of all
+/// rectangle extents and requested gaps bounds every useful move from that placement. Scaling that
+/// finite envelope leaves inactive branches non-binding without smuggling a machine-dependent stop
+/// or a magic diagram-size constant into the MIP.
+fn non_overlap_big_m(nodes: &[LayoutNodeBox], pairs: &[(usize, usize, f64)]) -> f64 {
+    let coordinate_extent = nodes.iter().fold(1.0_f64, |extent, node| {
+        extent
+            .max(f64::from(node.bounds.x).abs())
+            .max(f64::from(node.bounds.y).abs())
+    });
+    let rectangle_extent = nodes.iter().fold(0.0_f64, |total, node| {
+        total + f64::from(node.bounds.width.abs()) + f64::from(node.bounds.height.abs())
+    });
+    let gap_extent = pairs.iter().map(|(_, _, gap)| *gap).sum::<f64>();
+    let envelope = coordinate_extent + rectangle_extent + gap_extent + 1.0;
+    (envelope * 4.0).max(1.0)
 }
 
 fn in_rank_gap(node: &LayoutNodeBox, spacing: LayoutSpacing, horizontal_ranks: bool) -> f64 {
@@ -17630,7 +17737,8 @@ mod tests {
         layout_diagram_traced_with_config_and_guardrails, layout_diagram_tree,
         layout_diagram_with_config, layout_diagram_with_cycle_strategy, layout_diagram_xychart,
         layout_source_map, node_size_cache_key, requirement_row_dimensions, route_edge_points,
-        route_edge_points_with_obstacles, try_relayout_directed_path_suffix,
+        route_edge_points_with_obstacles, solve_constraint_coordinates,
+        try_relayout_directed_path_suffix,
     };
     use fm_core::{
         ArrowType, DiagramType, GanttDate, GanttExclude, GraphDirection, IrCluster, IrClusterId,

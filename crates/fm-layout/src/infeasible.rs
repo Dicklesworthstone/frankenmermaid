@@ -124,6 +124,14 @@ pub fn describe(report: &InfeasibilityReport, constraints: &[IrConstraint]) -> S
             IrConstraint::OrderInRank { node_ids, .. } => {
                 out.push_str(&format!("order within rank: {}", node_ids.join(" before ")));
             }
+            IrConstraint::NonOverlap { node_ids, gap, .. } => {
+                let scope = if node_ids.is_empty() {
+                    "all nodes".to_string()
+                } else {
+                    node_ids.join(", ")
+                };
+                out.push_str(&format!("non-overlap for {scope} with gap {gap}"));
+            }
         }
     }
     out
