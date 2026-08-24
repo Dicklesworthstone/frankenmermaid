@@ -67,21 +67,47 @@ impl GpuDevice {
     ///
     /// # Errors
     /// Returns [`GpuDeviceError::NoAdapter`] or [`GpuDeviceError::NoDevice`].
+    ///
+    /// ⚠️ NATIVE ONLY, and the `cfg` is load-bearing rather than tidy. This blocks on the adapter and
+    /// device futures, and a browser resolves both from its own event loop — blocking the only thread
+    /// there means the promise can never be driven, so this would hang a tab rather than fail. The
+    /// browser path must use [`Self::request`].
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn headless() -> Result<Self, GpuDeviceError> {
+        pollster::block_on(Self::request())
+    }
+
+    /// Acquire a device asynchronously — the form that works in a browser AND natively.
+    ///
+    /// `wgpu`'s adapter and device requests are futures on every backend; only native code can
+    /// afford to block on them. Sharing one async implementation is what stops the WebGPU path
+    /// diverging into a browser version and a native version that are tested differently and fail
+    /// differently.
+    ///
+    /// No surface is requested, so this is equally valid for an offscreen render and for a canvas:
+    /// `compatible_surface: None` asks for an adapter that can do either.
+    ///
+    /// # Errors
+    /// Returns [`GpuDeviceError::NoAdapter`] or [`GpuDeviceError::NoDevice`].
+    pub async fn request() -> Result<Self, GpuDeviceError> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::default(),
-            force_fallback_adapter: false,
-            compatible_surface: None,
-        }))
-        .map_err(|error| GpuDeviceError::NoAdapter(error.to_string()))?;
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(),
+                force_fallback_adapter: false,
+                compatible_surface: None,
+            })
+            .await
+            .map_err(|error| GpuDeviceError::NoAdapter(error.to_string()))?;
 
         let info = adapter.get_info();
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("fm-headless"),
-            ..Default::default()
-        }))
-        .map_err(|error| GpuDeviceError::NoDevice(error.to_string()))?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("fm-device"),
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| GpuDeviceError::NoDevice(error.to_string()))?;
 
         Ok(Self {
             device,
@@ -114,6 +140,10 @@ impl GpuDevice {
     ///
     /// # Errors
     /// Returns the driver's diagnostic when the module does not compile.
+    ///
+    /// Native only: it blocks on `pop_error_scope`, which a browser resolves from its event loop.
+    /// This is a diagnostic for the native test suite, not part of the browser render path.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn validate_shader(&self, label: &str, wgsl: &str) -> Result<(), String> {
         // An error SCOPE rather than the uncaptured-error handler: the handler's default panics the
         // process, so one broken shader would abort every other check in the same run instead of
@@ -461,6 +491,316 @@ impl RenderedImage {
     }
 }
 
+/// Every diagram pipeline, built once.
+///
+/// A pipeline is expensive to create and immutable once built, so a caller rendering more than one
+/// diagram — or one diagram more than once, which is the whole point of a GPU path — builds this
+/// once and keeps it.
+pub struct DiagramPipelines {
+    passes: Vec<(crate::gpu_pipeline::PrimitiveFamily, InstancePass)>,
+}
+
+impl DiagramPipelines {
+    /// Build every pipeline in [`crate::gpu_pipeline::pipelines`] order.
+    ///
+    /// Order is preserved rather than sorted or keyed, because it IS the draw order: edges, then
+    /// their arrowheads, then the boxes that paint over both, then the labels on top.
+    #[must_use]
+    pub fn new(gpu: &GpuDevice) -> Self {
+        Self {
+            passes: crate::gpu_pipeline::pipelines()
+                .iter()
+                .map(|descriptor| (descriptor.family, InstancePass::new(gpu, descriptor)))
+                .collect(),
+        }
+    }
+}
+
+/// Render a WHOLE diagram — every primitive family — in ONE submission (bd-2u0.2).
+///
+/// **Why this exists and `render_instances` is not enough.** Rendering per family meant four
+/// textures, four command encoders, four queue submissions and four readbacks, and the four images
+/// could not be composed: each pass cleared its own target, so nothing ever produced a picture of
+/// the diagram. This shares one texture, one encoder, one render pass and one readback, and draws
+/// the families in order into the same attachment. That is both the correct picture and four times
+/// fewer round trips to the device.
+///
+/// Per-family instance buffers are still separate — the families have different strides and
+/// different vertex counts, and a single interleaved buffer would need a stride they do not share.
+/// What is shared is everything that costs a round trip.
+///
+/// `atlas` is required exactly when the plan has text to draw; a plan with no glyphs renders without
+/// one.
+///
+/// # Errors
+/// Returns [`GpuDeviceError::Readback`] if the mapped buffer cannot be read.
+/// Blocking wrapper for native callers and tests.
+///
+/// # Errors
+/// Returns [`GpuDeviceError::Readback`] if the mapped buffer cannot be read.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn render_diagram(
+    gpu: &GpuDevice,
+    pipelines: &DiagramPipelines,
+    plan: &crate::gpu_plan::GpuRenderPlan,
+    atlas: Option<&GlyphAtlasTexture>,
+    width: u32,
+    height: u32,
+) -> Result<RenderedImage, GpuDeviceError> {
+    pollster::block_on(render_diagram_async(
+        gpu, pipelines, plan, atlas, width, height,
+    ))
+}
+
+/// The three views of one diagram a GPU render needs, kept together so they cannot disagree.
+///
+/// The `plan` is BUILT from the `ir` and `layout`, so a caller holding all three already has the
+/// consistency this asks for — the type exists to make passing a mismatched set awkward rather than
+/// natural, and to keep [`render_diagram_with_interactions`] under a sane argument count.
+#[derive(Clone, Copy)]
+pub struct DiagramSource<'a> {
+    pub ir: &'a fm_core::MermaidDiagramIr,
+    pub layout: &'a fm_layout::DiagramLayout,
+    pub plan: &'a crate::gpu_plan::GpuRenderPlan,
+}
+
+/// A rendered diagram and the clickable areas of the layout it was rendered from.
+pub struct RenderedDiagram {
+    pub image: RenderedImage,
+    /// Clickable areas for the interactive nodes, in LAYOUT coordinates.
+    pub hit_regions: Vec<crate::interaction::HitRegion>,
+}
+
+/// Render a whole diagram AND report its hit regions in one call (bd-2u0.2).
+///
+/// The WebGPU path had no way to surface `click` at all: `render_diagram_async` returns pixels, and
+/// pixels cannot tell a host that the box at (x, y) carries a URL. `CanvasRenderResult` gained
+/// `hit_regions` for the Canvas2D surface; this is the same guarantee for the GPU one, and the GPU
+/// path needs it more — a host there typically CACHES a plan and re-renders it, so regions computed
+/// separately have a longer window in which to drift from the plan actually drawn.
+///
+/// # Errors
+/// Propagates any [`GpuDeviceError`] from the render.
+pub async fn render_diagram_with_interactions(
+    gpu: &GpuDevice,
+    pipelines: &DiagramPipelines,
+    source: DiagramSource<'_>,
+    atlas: Option<&GlyphAtlasTexture>,
+    width: u32,
+    height: u32,
+) -> Result<RenderedDiagram, GpuDeviceError> {
+    let image = render_diagram_async(gpu, pipelines, source.plan, atlas, width, height).await?;
+    Ok(RenderedDiagram {
+        image,
+        // From the SAME ir and layout the plan was built from, so the regions describe the picture
+        // that was just drawn rather than one the host still happens to be holding.
+        hit_regions: crate::interaction::hit_regions(source.ir, source.layout),
+    })
+}
+
+/// Blocking wrapper for native callers and tests, mirroring [`render_diagram`].
+///
+/// # Errors
+/// Propagates any [`GpuDeviceError`] from the render.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn render_diagram_with_interactions_blocking(
+    gpu: &GpuDevice,
+    pipelines: &DiagramPipelines,
+    source: DiagramSource<'_>,
+    atlas: Option<&GlyphAtlasTexture>,
+    width: u32,
+    height: u32,
+) -> Result<RenderedDiagram, GpuDeviceError> {
+    pollster::block_on(render_diagram_with_interactions(
+        gpu, pipelines, source, atlas, width, height,
+    ))
+}
+
+#[allow(clippy::missing_panics_doc)]
+pub async fn render_diagram_async(
+    gpu: &GpuDevice,
+    pipelines: &DiagramPipelines,
+    plan: &crate::gpu_plan::GpuRenderPlan,
+    atlas: Option<&GlyphAtlasTexture>,
+    width: u32,
+    height: u32,
+) -> Result<RenderedImage, GpuDeviceError> {
+    use crate::gpu_pipeline::PrimitiveFamily;
+
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("fm-diagram"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: RENDER_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // ONE camera for every family, which is what makes the passes compose: a per-family camera could
+    // drift and the picture would come apart at the seams rather than fail.
+    let camera = camera_transform(&plan.bounds);
+    let camera_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("fm-camera"),
+        size: size_of::<[f32; 4]>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    gpu.queue
+        .write_buffer(&camera_buffer, 0, &bytemuck_cast(&camera));
+
+    // Serialise every family up front. Held for the whole render pass because the buffers they fill
+    // must outlive it.
+    let mut uploads: Vec<(PrimitiveFamily, wgpu::Buffer, u32)> = Vec::new();
+    for (family, _) in &pipelines.passes {
+        let (bytes, count) = match family {
+            PrimitiveFamily::Edge => (
+                edge_instance_bytes(&plan.edge_segments),
+                plan.edge_segments.len(),
+            ),
+            PrimitiveFamily::Arrowhead => (
+                arrowhead_instance_bytes(&plan.arrowheads),
+                plan.arrowheads.len(),
+            ),
+            PrimitiveFamily::Node => (
+                node_instance_bytes(&plan.node_instances),
+                plan.node_instances.len(),
+            ),
+            // Dashed node borders ride the EDGE pipeline (bd-l3nsf) but draw AFTER the nodes, since
+            // a border sits on top of the fill it outlines. Same pipeline, different slot in the
+            // order — which is why the family exists separately from `Edge`.
+            PrimitiveFamily::NodeBorder => (
+                edge_instance_bytes(&plan.node_border_segments),
+                plan.node_border_segments.len(),
+            ),
+            PrimitiveFamily::Text => (text_instance_bytes(&plan.text_quads), plan.text_quads.len()),
+        };
+        if count == 0 {
+            continue;
+        }
+        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fm-instances"),
+            size: bytes.len().max(4) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        gpu.queue.write_buffer(&buffer, 0, &bytes);
+        uploads.push((*family, buffer, u32::try_from(count).unwrap_or(u32::MAX)));
+    }
+
+    // Bind groups, one per pass, because text binds three resources where the others bind one.
+    let mut binds: Vec<(PrimitiveFamily, wgpu::BindGroup)> = Vec::new();
+    for (family, pass) in &pipelines.passes {
+        let mut entries = vec![wgpu::BindGroupEntry {
+            binding: 0,
+            resource: camera_buffer.as_entire_binding(),
+        }];
+        if pass.samples_atlas {
+            let Some(atlas) = atlas else {
+                // A plan with no glyphs never reaches a text draw, so a missing atlas is only fatal
+                // when there is text to draw; skipping keeps "render a diagram with no labels"
+                // working without inventing a blank texture.
+                continue;
+            };
+            entries.push(wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&atlas.view),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(&atlas.sampler),
+            });
+        }
+        binds.push((
+            *family,
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("fm-bindings"),
+                layout: &pass.camera_layout,
+                entries: &entries,
+            }),
+        ));
+    }
+
+    let unpadded_row = width as usize * 4;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
+    let padded_row = unpadded_row.div_ceil(align) * align;
+    let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("fm-readback"),
+        size: (padded_row * height as usize) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("fm-diagram"),
+        });
+    {
+        let mut render = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("fm-diagram"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    // Cleared ONCE, before any family draws. Clearing per family is exactly what
+                    // made the separate passes uncomposable: each one erased the last.
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        for (family, pass) in &pipelines.passes {
+            let Some((_, buffer, count)) = uploads.iter().find(|(f, _, _)| f == family) else {
+                continue;
+            };
+            let Some((_, bind)) = binds.iter().find(|(f, _)| f == family) else {
+                continue;
+            };
+            render.set_pipeline(&pass.pipeline);
+            render.set_bind_group(0, bind, &[]);
+            render.set_vertex_buffer(0, buffer.slice(..));
+            render.draw(0..pass.vertices_per_instance, 0..*count);
+        }
+    }
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_row as u32),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    // ONE submission for the whole diagram.
+    gpu.queue.submit(Some(encoder.finish()));
+
+    read_back_async(gpu, &readback, width, height, padded_row, unpadded_row).await
+}
+
 /// What to draw in one pass: the geometry, and the atlas if the pipeline samples one.
 ///
 /// Grouped into a struct rather than passed as loose arguments because these four travel together
@@ -488,6 +828,11 @@ pub struct InstanceDraw<'a> {
 ///
 /// # Errors
 /// Returns [`GpuDeviceError::Readback`] if the mapped buffer cannot be read.
+///
+/// Native only: it blocks on the readback. A browser draws whole diagrams through
+/// [`render_diagram_async`], and this per-family path exists so a native test can measure one family
+/// in isolation — which is how the batched path proves it composes.
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::missing_panics_doc)]
 pub fn render_instances(
     gpu: &GpuDevice,
@@ -605,8 +950,8 @@ pub fn render_instances(
             render.set_pipeline(&pass.pipeline);
             render.set_bind_group(0, &camera_bind, &[]);
             render.set_vertex_buffer(0, instance_buffer.slice(..));
-            // Vertex count FROM THE PASS, not a literal 6: an arrowhead is a three-vertex triangle
-            // and a hardcoded quad would draw two phantom vertices per head.
+            // Vertex count comes FROM THE PASS: marker shapes are shader-expanded quads, and a
+            // literal here would silently diverge when a new marker form changes the pipeline.
             render.draw(0..pass.vertices_per_instance, 0..instance_count);
         }
     }
@@ -633,14 +978,53 @@ pub fn render_instances(
     );
     gpu.queue.submit(Some(encoder.finish()));
 
+    read_back(gpu, &readback, width, height, padded_row, unpadded_row)
+}
+
+/// Map the readback buffer and strip the row padding.
+///
+/// Shared by both entry points so there is exactly one place that understands the 256-byte row
+/// alignment. Two copies of this drifting apart would show up as a diagonal shear in one path only.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_back(
+    gpu: &GpuDevice,
+    readback: &wgpu::Buffer,
+    width: u32,
+    height: u32,
+    padded_row: usize,
+    unpadded_row: usize,
+) -> Result<RenderedImage, GpuDeviceError> {
+    pollster::block_on(read_back_async(
+        gpu,
+        readback,
+        width,
+        height,
+        padded_row,
+        unpadded_row,
+    ))
+}
+
+/// Await the mapped readback buffer and strip the row padding.
+///
+/// ASYNC because a browser has no other option: `map_async` resolves from the event loop, and
+/// `device.poll(Wait)` — which is what makes the native path work — is a no-op on WebGPU. A blocking
+/// readback in a browser waits forever on a callback the blocked thread is preventing.
+async fn read_back_async(
+    gpu: &GpuDevice,
+    readback: &wgpu::Buffer,
+    width: u32,
+    height: u32,
+    padded_row: usize,
+    unpadded_row: usize,
+) -> Result<RenderedImage, GpuDeviceError> {
     let slice = readback.slice(..);
-    let (sender, receiver) = std::sync::mpsc::channel();
+    let (sender, receiver) = futures_channel::oneshot::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = sender.send(result);
     });
-    // Wait for the most recent submission, indefinitely. A timeout here would turn a slow software
-    // adapter into an intermittent failure, and this repo has already paid for wall-clock-dependent
-    // assertions once.
+    // Native backends need an explicit poll to make progress; on WebGPU this is a no-op and the
+    // browser drives the callback itself. A timeout here would turn a slow software adapter into an
+    // intermittent failure, and this repo has already paid for wall-clock-dependent assertions once.
     gpu.device
         .poll(wgpu::PollType::Wait {
             submission_index: None,
@@ -648,7 +1032,7 @@ pub fn render_instances(
         })
         .map_err(|error| GpuDeviceError::Readback(error.to_string()))?;
     receiver
-        .recv()
+        .await
         .map_err(|error| GpuDeviceError::Readback(error.to_string()))?
         .map_err(|error| GpuDeviceError::Readback(error.to_string()))?;
 
@@ -831,8 +1215,16 @@ pub fn arrowhead_instance_bytes(heads: &[crate::gpu_plan::GpuArrowheadInstance])
             &head.edge_index.to_ne_bytes(),
         );
         put(
+            core::mem::offset_of!(GpuArrowheadInstance, kind),
+            &head.kind.to_ne_bytes(),
+        );
+        put(
             core::mem::offset_of!(GpuArrowheadInstance, color),
             &head.color.map(f32::to_ne_bytes).concat(),
+        );
+        put(
+            core::mem::offset_of!(GpuArrowheadInstance, fill),
+            &head.fill.map(f32::to_ne_bytes).concat(),
         );
     }
     out

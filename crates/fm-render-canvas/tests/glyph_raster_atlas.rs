@@ -11,7 +11,9 @@
 
 use fm_render_canvas::CanvasRenderConfig;
 use fm_render_canvas::GpuRenderPlan;
-use fm_render_canvas::glyph_raster::{GlyphFont, rasterize_atlas};
+use fm_render_canvas::glyph_raster::{
+    GlyphFont, baseline_fits_font, fitted_pixel_size, rasterize_atlas,
+};
 use fm_render_canvas::gpu_device::{
     GlyphAtlasTexture, GpuDevice, GpuDeviceError, InstanceDraw, InstancePass, render_instances,
     solid_coverage, text_instance_bytes,
@@ -114,6 +116,140 @@ fn a_rasterised_cell_has_both_ink_and_gaps_unlike_the_synthetic_fill() {
         real.bitmap, synthetic,
         "the rasterised atlas is byte-identical to the synthetic fill"
     );
+}
+
+/// Bottom-most ink row of a glyph's cell, in cell-local pixels, or `None` if the cell is blank.
+fn ink_bottom(
+    plan: &fm_render_canvas::GlyphAtlasPlan,
+    bitmap: &[u8],
+    glyph: char,
+) -> Option<usize> {
+    let width = plan.texture_px[0] as usize;
+    let height = plan.texture_px[1] as usize;
+    let cell = plan.cells.iter().find(|c| c.glyph == glyph)?;
+    let x0 = (cell.uv_min[0] * width as f32).round() as usize;
+    let y0 = (cell.uv_min[1] * height as f32).round() as usize;
+    let x1 = ((cell.uv_max[0] * width as f32).round() as usize).min(width);
+    let y1 = ((cell.uv_max[1] * height as f32).round() as usize).min(height);
+    (y0..y1)
+        .rev()
+        .find(|&y| (x0..x1).any(|x| bitmap[y * width + x] > 0))
+        .map(|y| y - y0)
+}
+
+/// THE POINT OF BASELINE OFFSETS: glyphs sit on a shared line, they are not centred in their cells.
+///
+/// This is the property that distinguishes typeset text from a row of stamps, and it is invisible to
+/// every other test in this file — a centred atlas has ink, has gaps, stays in its cell, and differs
+/// per glyph, so all of those pass either way.
+///
+/// `x` has no descender and must rest ON the baseline. `g` descends and must reach BELOW it. Under
+/// the previous centring, both were centred in their identical square cells and their ink bottoms
+/// landed at nearly the same row, which is exactly what this now forbids.
+#[test]
+fn a_descender_reaches_below_the_baseline_and_a_flat_glyph_rests_on_it() {
+    let Some(font) = font_or_skip() else {
+        return;
+    };
+    let plan = plan_for("flowchart LR\n  A[xg] --> B[Beta]\n");
+    let real = rasterize_atlas(&plan.glyph_atlas, &font);
+    eprintln!(
+        "[glyph] cell_px={} baseline_px={} fitted_px={:?} fits={} clipped={:?}",
+        plan.glyph_atlas.cell_px,
+        plan.glyph_atlas.baseline_px,
+        fitted_pixel_size(&plan.glyph_atlas, &font),
+        baseline_fits_font(&plan.glyph_atlas, &font),
+        real.clipped
+    );
+
+    // CONTROL, scoped to the glyphs actually measured rather than to the whole face. A face whose
+    // descenders are marginally deeper than `1 - GLYPH_BASELINE_RATIO` of the cell loses a row from
+    // its deepest glyph and is reported in `clipped`; that is a known, sub-pixel consequence of
+    // using a fixed convention rather than tuning the ratio to one font. What WOULD invalidate this
+    // test is either glyph under measurement being clipped, because then the ink bottoms would
+    // describe the cell edge instead of the baseline.
+    for glyph in ['x', 'g'] {
+        assert!(
+            !real.clipped.contains(&glyph),
+            "{glyph:?} was clipped, so its ink bottom is the cell edge and says nothing about the \
+             baseline"
+        );
+    }
+    let baseline = plan.glyph_atlas.baseline_px.round() as usize;
+
+    let x_bottom = ink_bottom(&plan.glyph_atlas, &real.bitmap, 'x').expect("'x' drew no ink");
+    let g_bottom = ink_bottom(&plan.glyph_atlas, &real.bitmap, 'g').expect("'g' drew no ink");
+
+    // `x` rests on the line: its lowest ink is at the baseline, within a pixel of rounding and
+    // antialiasing. A tolerance rather than equality, because a rasteriser may put a faint row of
+    // coverage just past the mathematical edge.
+    assert!(
+        x_bottom.abs_diff(baseline) <= 2,
+        "'x' bottoms at row {x_bottom} but the baseline is {baseline}: a flat-bottomed glyph is \
+         not resting on the line"
+    );
+
+    // `g` hangs below it, and by a real amount rather than a rounding wobble.
+    assert!(
+        g_bottom > x_bottom + 2,
+        "'g' bottoms at {g_bottom} and 'x' at {x_bottom}: the descender is not hanging below the \
+         baseline, which is what CENTRING each glyph in its cell would produce"
+    );
+    assert!(
+        g_bottom > baseline,
+        "'g' bottoms at {g_bottom}, at or above the baseline {baseline}"
+    );
+}
+
+/// SAME-IR COMPARISON: the labels the atlas is built for are the labels the SVG backend draws, and
+/// the descender relationship holds for the glyphs both backends agree exist.
+///
+/// The SVG arm places text with a single `y` per label and lets the font put descenders below it —
+/// there is no per-glyph geometry in the SVG to diff against. What IS comparable is that both
+/// backends are working from the same glyph set for the same IR, and that the GPU's atlas encodes
+/// the descender/non-descender distinction the font defines.
+#[test]
+fn the_atlas_covers_the_same_labels_the_svg_draws_and_encodes_their_descenders() {
+    let Some(font) = font_or_skip() else {
+        return;
+    };
+    let source = "flowchart LR\n  A[Happy] --> B[gypsy]\n";
+    let ir = fm_parser::parse(source).ir;
+    let plan = plan_for(source);
+    let real = rasterize_atlas(&plan.glyph_atlas, &font);
+    let baseline = plan.glyph_atlas.baseline_px.round() as usize;
+
+    let svg = fm_render_svg::render_svg(&ir);
+    for label in ["Happy", "gypsy"] {
+        assert!(
+            svg.contains(label),
+            "CONTROL FAILED: the SVG never drew {label:?}, so it cannot be the reference"
+        );
+        for glyph in label.chars() {
+            assert!(
+                plan.glyph_atlas.cells.iter().any(|c| c.glyph == glyph),
+                "glyph {glyph:?} of {label:?} has no atlas cell"
+            );
+        }
+    }
+
+    // Descenders in these labels must all reach below the baseline; the non-descenders must not.
+    for glyph in ['g', 'y', 'p'] {
+        let bottom = ink_bottom(&plan.glyph_atlas, &real.bitmap, glyph)
+            .unwrap_or_else(|| panic!("{glyph:?} drew no ink"));
+        assert!(
+            bottom > baseline,
+            "descender {glyph:?} bottoms at {bottom}, not below the baseline {baseline}"
+        );
+    }
+    for glyph in ['H', 'a', 's'] {
+        let bottom = ink_bottom(&plan.glyph_atlas, &real.bitmap, glyph)
+            .unwrap_or_else(|| panic!("{glyph:?} drew no ink"));
+        assert!(
+            bottom <= baseline + 2,
+            "non-descender {glyph:?} bottoms at {bottom}, well below the baseline {baseline}"
+        );
+    }
 }
 
 /// Ink must stay inside the cell it belongs to. A glyph bleeding into a neighbour would be sampled

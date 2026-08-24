@@ -80,7 +80,11 @@ fn an_unstyled_cluster_keeps_its_previous_border() {
 /// CONTROL: malformed values are refused on both properties.
 #[test]
 fn a_malformed_cluster_border_falls_back() {
-    for declared in ["stroke-width:wide", "stroke-width:-3px", "stroke-dasharray:0 0"] {
+    for declared in [
+        "stroke-width:wide",
+        "stroke-width:-3px",
+        "stroke-dasharray:0 0",
+    ] {
         let ops = canvas_ops(&format!("{SUBGRAPH}  style one {declared}\n"));
 
         assert!(

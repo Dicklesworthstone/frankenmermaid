@@ -45,7 +45,9 @@ fn a_sequence_rect_colour_reaches_the_canvas() {
     let fills = fill_styles(&ops);
 
     assert!(
-        fills.iter().any(|f| f.replace(' ', "").contains("rgb(255,0,0)")),
+        fills
+            .iter()
+            .any(|f| f.replace(' ', "").contains("rgb(255,0,0)")),
         "the declared rect colour never reached the canvas: {fills:?}"
     );
 }
@@ -59,7 +61,10 @@ fn an_uncoloured_cluster_keeps_the_theme_background() {
     let ops = canvas_ops("flowchart TD\n  subgraph one[One]\n    a[A]\n  end\n");
     let fills = fill_styles(&ops);
 
-    assert!(!fills.is_empty(), "nothing was filled, so this control proves nothing");
+    assert!(
+        !fills.is_empty(),
+        "nothing was filled, so this control proves nothing"
+    );
     assert!(
         fills.iter().any(|f| f.starts_with("rgba(226,232,240")),
         "the default cluster fill is missing: {fills:?}"
@@ -221,9 +226,8 @@ fn a_declared_node_stroke_width_reaches_the_canvas() {
 /// `classDef` width that works in SVG is silently dropped here unless it is resolved explicitly.
 #[test]
 fn a_classdef_stroke_width_reaches_the_canvas() {
-    let ops = canvas_ops(
-        "flowchart TD\n  a[A]\n  classDef thick stroke-width:6\n  class a thick\n",
-    );
+    let ops =
+        canvas_ops("flowchart TD\n  a[A]\n  classDef thick stroke-width:6\n  class a thick\n");
 
     assert!(
         ops.contains("SetLineWidth(6.0)"),

@@ -67,12 +67,16 @@ fn a_classdef_colours_the_nodes_that_name_it() {
     );
 
     assert!(
-        fill_styles(&ops).iter().any(|f| f.to_lowercase().contains("ff0000")),
+        fill_styles(&ops)
+            .iter()
+            .any(|f| f.to_lowercase().contains("ff0000")),
         "the classDef fill never reached the canvas: {:?}",
         fill_styles(&ops)
     );
     assert!(
-        stroke_styles(&ops).iter().any(|s| s.to_lowercase().contains("00ff00")),
+        stroke_styles(&ops)
+            .iter()
+            .any(|s| s.to_lowercase().contains("00ff00")),
         "the classDef stroke never reached the canvas: {:?}",
         stroke_styles(&ops)
     );
@@ -88,7 +92,10 @@ fn an_unstyled_diagram_keeps_the_theme_colours() {
     let ops = canvas_ops("flowchart TD\n  a[A] --> b[B]\n");
     let fills = fill_styles(&ops);
 
-    assert!(!fills.is_empty(), "nothing was filled, so this control proves nothing");
+    assert!(
+        !fills.is_empty(),
+        "nothing was filled, so this control proves nothing"
+    );
     assert!(
         !fills.iter().any(|f| f.to_lowercase().contains("ff0000")),
         "an unstyled diagram acquired a colour from nowhere: {fills:?}"
@@ -105,12 +112,14 @@ fn an_unstyled_diagram_keeps_the_theme_colours() {
 /// declared style to every node would pass the positive tests above and be badly wrong.
 #[test]
 fn styling_applies_only_to_the_named_node() {
-    let ops = canvas_ops(
-        "flowchart TD\n  a[A] --> b[B]\n  classDef hot fill:#ff0000\n  class a hot\n",
-    );
+    let ops =
+        canvas_ops("flowchart TD\n  a[A] --> b[B]\n  classDef hot fill:#ff0000\n  class a hot\n");
     let fills = fill_styles(&ops);
 
-    let styled = fills.iter().filter(|f| f.to_lowercase().contains("ff0000")).count();
+    let styled = fills
+        .iter()
+        .filter(|f| f.to_lowercase().contains("ff0000"))
+        .count();
     let default = fills.iter().filter(|f| f.as_str() == "#ffffff").count();
 
     assert!(styled >= 1, "the styled node lost its colour: {fills:?}");
@@ -164,7 +173,10 @@ fn linkstyle_default_colours_all_edges() {
     );
     let strokes = stroke_styles(&ops);
 
-    let coloured = strokes.iter().filter(|s| s.to_lowercase().contains("00ff00")).count();
+    let coloured = strokes
+        .iter()
+        .filter(|s| s.to_lowercase().contains("00ff00"))
+        .count();
     assert!(
         coloured >= 2,
         "only {coloured} stroke(s) took the default; both edges should have: {strokes:?}"
@@ -195,12 +207,14 @@ fn an_indexed_linkstyle_beats_the_default() {
 /// CONTROL: `linkStyle 0` styles edge 0 and leaves edge 1 alone.
 #[test]
 fn an_indexed_linkstyle_does_not_leak_to_other_edges() {
-    let ops = canvas_ops(
-        "flowchart TD\n  a[A] --> b[B]\n  b --> c[C]\n  linkStyle 0 stroke:#ff0000\n",
-    );
+    let ops =
+        canvas_ops("flowchart TD\n  a[A] --> b[B]\n  b --> c[C]\n  linkStyle 0 stroke:#ff0000\n");
     let strokes = stroke_styles(&ops);
 
-    let styled = strokes.iter().filter(|s| s.to_lowercase().contains("ff0000")).count();
+    let styled = strokes
+        .iter()
+        .filter(|s| s.to_lowercase().contains("ff0000"))
+        .count();
     let themed = strokes.iter().filter(|s| s.as_str() == "#475569").count();
 
     assert!(styled >= 1, "the styled edge lost its colour: {strokes:?}");
@@ -219,7 +233,10 @@ fn an_unstyled_edge_keeps_the_theme_stroke() {
     let ops = canvas_ops("flowchart TD\n  a[A] --> b[B]\n");
     let strokes = stroke_styles(&ops);
 
-    assert!(!strokes.is_empty(), "nothing was stroked, so this control proves nothing");
+    assert!(
+        !strokes.is_empty(),
+        "nothing was stroked, so this control proves nothing"
+    );
     assert!(
         strokes.iter().any(|s| s.as_str() == "#475569"),
         "the default edge stroke is missing: {strokes:?}"
@@ -254,7 +271,10 @@ fn a_malformed_stroke_width_keeps_the_arrow_derived_width() {
         out
     };
 
-    assert!(!widths.is_empty(), "no line widths were set, so this control proves nothing");
+    assert!(
+        !widths.is_empty(),
+        "no line widths were set, so this control proves nothing"
+    );
     assert!(
         widths.iter().all(|w| w.is_finite() && *w > 0.0),
         "a malformed stroke-width produced an unusable line width: {widths:?}"

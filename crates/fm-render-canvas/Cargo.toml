@@ -18,7 +18,7 @@ default = []
 # bead itself calls WebGPU "for power users with massive diagrams", so it is opt-in. Everything in
 # `gpu_pipeline` — the layouts, the shader-agreement tests — stays available without this feature,
 # because none of it needs a device.
-webgpu = ["dep:wgpu", "dep:pollster", "dep:fontdue"]
+webgpu = ["dep:wgpu", "dep:pollster", "dep:fontdue", "dep:futures-channel"]
 
 [dependencies]
 fm-core.workspace = true
@@ -34,6 +34,9 @@ pollster = { version = "0.4.0", optional = true }
 # supplies the bytes, which keeps a multi-megabyte binary out of this repo and makes the choice of
 # typeface the caller's rather than ours.
 fontdue = { version = "0.9.3", optional = true }
+# A oneshot channel that can be AWAITED. `std::sync::mpsc` can only be blocked on, which is exactly
+# what a browser readback cannot do; this keeps one async readback for both targets.
+futures-channel = { version = "0.3.31", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
 sha2 = "0.11"

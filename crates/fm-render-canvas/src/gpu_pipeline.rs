@@ -101,8 +101,14 @@ pub enum PrimitiveFamily {
     Node,
     /// Edge segments, drawn as instanced quads expanded across the line's width.
     Edge,
-    /// Arrowheads, drawn as instanced TRIANGLES — three vertices, not six.
+    /// Path-end markers, drawn as instanced quads so the shader can represent UML endpoint forms.
     Arrowhead,
+    /// Dashed node borders, drawn with the EDGE pipeline but after the nodes (bd-l3nsf).
+    ///
+    /// A separate family rather than more `Edge` instances because the two occupy different slots in
+    /// the draw order: edges go under the boxes they connect, a border goes on top of the box it
+    /// outlines. Same shader, same layout, different moment.
+    NodeBorder,
     /// Glyph quads sampled from the text atlas.
     Text,
 }
@@ -270,13 +276,6 @@ pub const fn edge_pipeline() -> PipelineDescriptor {
     }
 }
 
-/// Vertices in one arrowhead: a single TRIANGLE, matching `HEAD` in `ARROWHEAD_WGSL`.
-///
-/// Separate from [`QUAD_VERTICES_PER_INSTANCE`] and not a copy of it. Every other family expands a
-/// six-vertex quad, so a device layer that hardcoded six would draw two phantom vertices per head —
-/// reading `HEAD[3]` and `HEAD[4]` out of a three-element array.
-pub const TRIANGLE_VERTICES_PER_INSTANCE: u32 = 3;
-
 /// Arrowhead instance layout.
 const ARROWHEAD_ATTRIBUTES: &[VertexAttribute] = &[
     VertexAttribute {
@@ -305,9 +304,21 @@ const ARROWHEAD_ATTRIBUTES: &[VertexAttribute] = &[
     },
     VertexAttribute {
         shader_location: 4,
+        offset: core::mem::offset_of!(GpuArrowheadInstance, kind) as u64,
+        format: VertexFormat::Uint32,
+        name: "kind",
+    },
+    VertexAttribute {
+        shader_location: 5,
         offset: core::mem::offset_of!(GpuArrowheadInstance, color) as u64,
         format: VertexFormat::Float32x4,
         name: "color",
+    },
+    VertexAttribute {
+        shader_location: 6,
+        offset: core::mem::offset_of!(GpuArrowheadInstance, fill) as u64,
+        format: VertexFormat::Float32x4,
+        name: "fill",
     },
 ];
 
@@ -323,7 +334,7 @@ pub const fn arrowhead_pipeline() -> PipelineDescriptor {
             array_stride: size_of::<GpuArrowheadInstance>() as u64,
             attributes: ARROWHEAD_ATTRIBUTES,
         },
-        vertices_per_instance: TRIANGLE_VERTICES_PER_INSTANCE,
+        vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
     }
 }
 
@@ -402,13 +413,39 @@ pub const fn text_pipeline() -> PipelineDescriptor {
 /// the box that carries it. A caller iterating this slice gets the right picture without having to
 /// know why.
 #[must_use]
-pub const fn pipelines() -> [PipelineDescriptor; 4] {
+pub const fn pipelines() -> [PipelineDescriptor; 5] {
     [
         edge_pipeline(),
         arrowhead_pipeline(),
         node_pipeline(),
+        node_border_pipeline(),
         text_pipeline(),
     ]
+}
+
+/// The dashed-node-border pipeline: the EDGE pipeline, drawn in a later slot.
+///
+/// Shares `edge_pipeline`'s layout and shader exactly — a border segment IS an edge segment, and
+/// giving it its own copy would be a second place for the dash binding to drift. Only the family and
+/// the label differ, and the family is what puts it after the nodes.
+#[must_use]
+pub const fn node_border_pipeline() -> PipelineDescriptor {
+    PipelineDescriptor {
+        family: PrimitiveFamily::NodeBorder,
+        label: "fm-node-border",
+        ..edge_pipeline()
+    }
+}
+
+/// Width of a text run at `font_px`, in layout units.
+///
+/// Re-exported here because this module is the crate's device-free surface and a caller sizing a
+/// text pass needs the width without reaching into the plan builder. It is `gpu_plan`'s function,
+/// not a second implementation — the whole point of bd-2u0.2's advance work is that there is exactly
+/// one text-width model, shared with `fm-layout`.
+#[must_use]
+pub fn run_advance_for(text: &str, font_px: f32) -> f32 {
+    crate::gpu_plan::run_advance(text, font_px)
 }
 
 /// One instanced draw call.
@@ -451,13 +488,21 @@ pub fn draw_batches(plan: &GpuRenderPlan) -> Vec<DrawBatch> {
         batches.push(DrawBatch {
             family: PrimitiveFamily::Arrowhead,
             instance_count: u32::try_from(plan.arrowheads.len()).unwrap_or(u32::MAX),
-            vertices_per_instance: TRIANGLE_VERTICES_PER_INSTANCE,
+            vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
         });
     }
     if !plan.node_instances.is_empty() {
         batches.push(DrawBatch {
             family: PrimitiveFamily::Node,
             instance_count: u32::try_from(plan.node_instances.len()).unwrap_or(u32::MAX),
+            vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
+        });
+    }
+    // Dashed borders after their nodes: a border sits on top of the fill it outlines (bd-l3nsf).
+    if !plan.node_border_segments.is_empty() {
+        batches.push(DrawBatch {
+            family: PrimitiveFamily::NodeBorder,
+            instance_count: u32::try_from(plan.node_border_segments.len()).unwrap_or(u32::MAX),
             vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
         });
     }

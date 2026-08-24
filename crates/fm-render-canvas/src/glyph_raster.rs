@@ -18,6 +18,16 @@
 
 use crate::gpu_plan::GlyphAtlasPlan;
 
+/// The baseline row within a cell, in cell-local pixels.
+///
+/// Taken from the plan and clamped into the cell. A `baseline_px` outside the cell would place every
+/// glyph out of bounds and clip the whole atlas to nothing, which reads as "the rasteriser is
+/// broken" rather than "the plan's baseline is wrong".
+fn baseline_row(plan: &GlyphAtlasPlan, cell_h: usize) -> i64 {
+    let baseline = plan.baseline_px.round().max(0.0) as i64;
+    baseline.min(cell_h as i64)
+}
+
 /// A parsed font, ready to rasterise glyphs at a given pixel size.
 pub struct GlyphFont {
     font: fontdue::Font,
@@ -47,15 +57,74 @@ impl GlyphFont {
         Some(RasterizedGlyph {
             width: metrics.width,
             height: metrics.height,
+            // Whole-pixel offset of the bitmap's BOTTOM edge from the baseline, negative below it.
+            // This is the number that makes baseline placement possible at all: without it the only
+            // available reference is the bitmap's own box, and aligning boxes is what centring does.
+            ymin: metrics.ymin,
             coverage,
         })
     }
+
+    /// The font's own ascent at `px`, in pixels below the top of an em box.
+    ///
+    /// # Errors
+    /// Returns `None` for a font with no horizontal line metrics.
+    #[must_use]
+    pub fn ascent(&self, px: f32) -> Option<f32> {
+        self.font.horizontal_line_metrics(px).map(|m| m.ascent)
+    }
+}
+
+/// The pixel size to rasterise at so this font's ascent lands exactly on the plan's baseline.
+///
+/// ⚠️ NOT `cell_px`, and that mistake is worth stating because it is the obvious thing to do. A cell
+/// is one em square, but a text face's `hhea` ascent plus descent usually EXCEEDS its em — DejaVu
+/// Sans measures 29.70px of ascent alone at 32px, against a 32px cell — so rasterising at the cell
+/// size guarantees the tall letters overflow the cell no matter where the baseline sits. There is no
+/// baseline ratio that rescues it; the size itself is wrong.
+///
+/// Scaling so that `ascent(px) == baseline_px` makes ascenders reach the baseline exactly and leaves
+/// the rest of the cell for descenders. For DejaVu Sans and a 0.8 baseline this lands at ~27.6px in
+/// a 32px cell, which is also why 0.8 is a good convention rather than a lucky one: it is close to
+/// the ascent share of the face's own line box.
+///
+/// # Errors
+/// Returns `None` when the font reports no horizontal line metrics.
+#[must_use]
+pub fn fitted_pixel_size(plan: &GlyphAtlasPlan, font: &GlyphFont) -> Option<f32> {
+    let cell = plan.cell_px.max(1) as f32;
+    let ascent_at_cell = font.ascent(cell)?;
+    if ascent_at_cell <= 0.0 {
+        return None;
+    }
+    Some(cell * plan.baseline_px / ascent_at_cell)
+}
+
+/// Does this font's DESCENT fit below the plan's baseline once scaled to it?
+///
+/// Ascenders fit by construction — [`fitted_pixel_size`] chooses the size that makes them fit. What
+/// can still overflow is the descender space: a face with unusually deep descenders needs more than
+/// the `1 - GLYPH_BASELINE_RATIO` of the cell left underneath. This lets a caller ask in advance
+/// instead of reading it back out of [`AtlasCoverage::clipped`].
+#[must_use]
+pub fn baseline_fits_font(plan: &GlyphAtlasPlan, font: &GlyphFont) -> bool {
+    let Some(px) = fitted_pixel_size(plan, font) else {
+        return true;
+    };
+    let Some(metrics) = font.font.horizontal_line_metrics(px) else {
+        return true;
+    };
+    // `descent` is negative below the baseline.
+    let below = plan.cell_px as f32 - plan.baseline_px;
+    -metrics.descent <= below
 }
 
 /// One glyph's 8-bit coverage bitmap.
 pub struct RasterizedGlyph {
     pub width: usize,
     pub height: usize,
+    /// Whole-pixel offset of the bitmap's bottom edge from the baseline; negative for a descender.
+    pub ymin: i32,
     /// Row-major coverage, `width * height` bytes, 0 = transparent, 255 = solid.
     pub coverage: Vec<u8>,
 }
@@ -76,15 +145,19 @@ pub struct AtlasCoverage {
 
 /// Rasterise every glyph the plan placed into its own cell.
 ///
-/// Each glyph is drawn CENTRED in its cell rather than at the cell origin. The plan allocates a
-/// square cell per glyph and the UV rectangle addresses that whole square, so a glyph pinned to the
-/// corner would appear offset by however much narrower it is than the cell — an `i` would sit hard
-/// left of where an `M` sits. Centring makes every glyph's ink land where its quad expects it.
+/// VERTICALLY, every glyph sits on the plan's shared baseline (`GlyphAtlasPlan::baseline_px`), not
+/// centred in its cell. This is the difference between text and a row of stamps. Centring aligns the
+/// MIDDLE of each letter, so `x` and `g` occupy the same band and a word appears to bounce; baseline
+/// placement puts `g`'s bowl below the line `x` rests on, which is what the SVG and Canvas2D
+/// backends do and what a reader expects. The offset comes from the font's own `ymin` — the bitmap's
+/// bottom edge relative to the baseline, negative for a descender — so the placement is the face's
+/// judgement rather than this module's.
 ///
-/// Baseline alignment is deliberately NOT applied here: the plan's cells are uniform squares with no
-/// per-glyph baseline offset to honour, so applying `ymin` would push descenders out of their own
-/// cell and into a neighbour's. Proper baseline-relative placement needs per-glyph offsets in the
-/// plan, which is a change to `gpu_plan` rather than to this module, and is noted on the bead.
+/// HORIZONTALLY, glyphs remain centred. The plan gives every glyph an identical square cell and no
+/// per-glyph advance or left side bearing, so there is no horizontal reference to align to; centring
+/// is the only choice that does not bias narrow glyphs to one side. Proportional horizontal metrics
+/// would change how wide a LABEL is, which is a `gpu_plan` layout change that must stay in step with
+/// the SVG text measurement, and is out of scope here.
 ///
 /// A glyph larger than a cell is CLIPPED rather than scaled, and reported in
 /// [`AtlasCoverage::clipped`]: silently scaling one glyph would make it a different size from every
@@ -98,10 +171,11 @@ pub fn rasterize_atlas(plan: &GlyphAtlasPlan, font: &GlyphFont) -> AtlasCoverage
     let mut missing = Vec::new();
     let mut clipped = Vec::new();
 
-    // Rasterise at the cell size so a glyph fills its cell as fully as the face allows. `cell_px` is
-    // an EM box, and most glyphs are shorter than their em, so this is an upper bound rather than a
-    // target.
-    let px = plan.cell_px.max(1) as f32;
+    // NOT `cell_px` — see `fitted_pixel_size`. Rasterising at the cell size overflows the cell for
+    // any face whose ascent plus descent exceeds its em, which is most of them. Falling back to the
+    // cell size when the font reports no line metrics is the best available guess, and any resulting
+    // overflow is reported through `clipped` rather than silently written into a neighbour.
+    let px = fitted_pixel_size(plan, font).unwrap_or_else(|| plan.cell_px.max(1) as f32);
 
     for cell in &plan.cells {
         // The cell's pixel rectangle, derived from the SAME UVs the shader samples with. Deriving it
@@ -126,21 +200,36 @@ pub fn rasterize_atlas(plan: &GlyphAtlasPlan, font: &GlyphFont) -> AtlasCoverage
             continue;
         };
 
-        if raster.width > cell_w || raster.height > cell_h {
-            clipped.push(cell.glyph);
-        }
-
-        // Centre within the cell; see the doc comment.
+        // Centre horizontally; place vertically ON THE BASELINE. See the doc comment.
         let offset_x = cell_w.saturating_sub(raster.width) / 2;
-        let offset_y = cell_h.saturating_sub(raster.height) / 2;
 
-        for row in 0..raster.height.min(cell_h.saturating_sub(offset_y)) {
-            let dest_y = y0 + offset_y + row;
+        // The glyph's ink spans `ymin ..= ymin + height` in baseline-relative coordinates with y UP.
+        // The bitmap runs y DOWN from the cell's top, so the ink's first row sits at
+        // `baseline - ymin - height` below that top. A descender has a negative `ymin`, which pushes
+        // its rows further down — exactly the intent.
+        let baseline = baseline_row(plan, cell_h);
+        let top = baseline - i64::from(raster.ymin) - raster.height as i64;
+
+        // Rows falling outside the cell are dropped rather than wrapped, and the glyph is reported.
+        // Wrapping would write a descender's tail into the cell BELOW it in the texture, so one
+        // label would show a sliver of an unrelated letter — a corruption far harder to read back
+        // than a clipped glyph.
+        let mut clipped_this = raster.width > cell_w;
+        for row in 0..raster.height {
+            let dest_row_in_cell = top + row as i64;
+            if dest_row_in_cell < 0 || dest_row_in_cell >= cell_h as i64 {
+                clipped_this = true;
+                continue;
+            }
+            let dest_y = y0 + dest_row_in_cell as usize;
             let dest_row = dest_y * width;
             let src_row = row * raster.width;
             for column in 0..raster.width.min(cell_w.saturating_sub(offset_x)) {
                 bitmap[dest_row + x0 + offset_x + column] = raster.coverage[src_row + column];
             }
+        }
+        if clipped_this {
+            clipped.push(cell.glyph);
         }
         rendered += 1;
     }

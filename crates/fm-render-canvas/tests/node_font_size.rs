@@ -56,9 +56,8 @@ fn a_declared_font_size_reaches_the_canvas() {
 /// The same declaration through `classDef`.
 #[test]
 fn a_classdef_font_size_reaches_the_canvas() {
-    let ops = canvas_ops(
-        "flowchart TD\n  a[Alpha]\n  classDef big font-size:28px\n  class a big\n",
-    );
+    let ops =
+        canvas_ops("flowchart TD\n  a[Alpha]\n  classDef big font-size:28px\n  class a big\n");
 
     let font = font_when_text_drawn(&ops, "Alpha").expect("the node label was never drawn");
     assert!(
@@ -73,9 +72,7 @@ fn a_classdef_font_size_reaches_the_canvas() {
 /// the target, would enlarge every label drawn afterwards and still pass the tests above.
 #[test]
 fn a_declared_font_size_does_not_resize_other_labels() {
-    let ops = canvas_ops(
-        "flowchart TD\n  a[Alpha] --> b[Beta]\n  style a font-size:32px\n",
-    );
+    let ops = canvas_ops("flowchart TD\n  a[Alpha] --> b[Beta]\n  style a font-size:32px\n");
 
     let styled = font_when_text_drawn(&ops, "Alpha").expect("styled label not drawn");
     let plain = font_when_text_drawn(&ops, "Beta").expect("unstyled label not drawn");
@@ -167,9 +164,7 @@ fn a_weight_without_a_size_keeps_the_theme_size() {
 #[test]
 fn a_weight_and_a_size_compose() {
     let config = CanvasRenderConfig::default();
-    let ops = canvas_ops(
-        "flowchart TD\n  a[Alpha]\n  style a font-weight:bold,font-size:32px\n",
-    );
+    let ops = canvas_ops("flowchart TD\n  a[Alpha]\n  style a font-weight:bold,font-size:32px\n");
 
     let font = font_when_text_drawn(&ops, "Alpha").expect("the node label was never drawn");
     assert_eq!(
@@ -189,9 +184,8 @@ fn a_weight_and_a_size_compose() {
 #[test]
 fn a_malformed_weight_does_not_discard_a_valid_size() {
     let config = CanvasRenderConfig::default();
-    let ops = canvas_ops(
-        "flowchart TD\n  a[Alpha]\n  style a font-weight:heavyish,font-size:32px\n",
-    );
+    let ops =
+        canvas_ops("flowchart TD\n  a[Alpha]\n  style a font-weight:heavyish,font-size:32px\n");
 
     let font = font_when_text_drawn(&ops, "Alpha").expect("the node label was never drawn");
     assert_eq!(
@@ -276,9 +270,8 @@ fn every_font_component_composes_in_shorthand_order() {
 /// A quoted multi-word family stack survives, because that is what real declarations look like.
 #[test]
 fn a_quoted_font_family_stack_is_accepted() {
-    let ops = canvas_ops(
-        "flowchart TD\n  a[Alpha]\n  style a font-family:'Fira Code', monospace\n",
-    );
+    let ops =
+        canvas_ops("flowchart TD\n  a[Alpha]\n  style a font-family:'Fira Code', monospace\n");
 
     let font = font_when_text_drawn(&ops, "Alpha").expect("the node label was never drawn");
     assert!(
@@ -343,9 +336,7 @@ fn a_semicolon_is_consumed_by_the_style_grammar_not_by_the_sanitiser() {
 #[test]
 fn a_malformed_font_style_does_not_discard_a_valid_size() {
     let config = CanvasRenderConfig::default();
-    let ops = canvas_ops(
-        "flowchart TD\n  a[Alpha]\n  style a font-style:slanty,font-size:32px\n",
-    );
+    let ops = canvas_ops("flowchart TD\n  a[Alpha]\n  style a font-style:slanty,font-size:32px\n");
 
     let font = font_when_text_drawn(&ops, "Alpha").expect("the node label was never drawn");
     assert_eq!(
@@ -413,8 +404,7 @@ fn an_undeclared_class_diagram_keeps_its_derived_compartment_fonts() {
     let ops = canvas_ops("classDiagram\n  class Alpha {\n    +int member\n  }\n");
 
     let heading = font_when_text_drawn(&ops, "Alpha").expect("the class heading was never drawn");
-    let member =
-        font_when_text_drawn(&ops, "+int member").expect("the member row was never drawn");
+    let member = font_when_text_drawn(&ops, "+int member").expect("the member row was never drawn");
 
     assert_eq!(
         heading,

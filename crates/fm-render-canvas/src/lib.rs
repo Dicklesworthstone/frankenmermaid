@@ -16,17 +16,22 @@
 //! - `web`: Enables actual Canvas2D rendering via web-sys (WASM target)
 
 mod context;
-mod gpu_layout;
-mod gpu_plan;
-/// The wgpu device layer (bd-2u0.2). Behind the `webgpu` feature so the Canvas2D path — and the
-/// size-optimised WASM bundle this crate ships in — never pays for a GPU backend it does not use.
-#[cfg(feature = "webgpu")]
-pub mod gpu_device;
 /// Glyph rasterisation into the text atlas (bd-2u0.2). Device-free — it produces a plain R8 coverage
 /// bitmap — but gated with `webgpu` because that is its only consumer today.
 #[cfg(feature = "webgpu")]
 pub mod glyph_raster;
+/// The wgpu device layer (bd-2u0.2). Behind the `webgpu` feature so the Canvas2D path — and the
+/// size-optimised WASM bundle this crate ships in — never pays for a GPU backend it does not use.
+#[cfg(feature = "webgpu")]
+pub mod gpu_device;
+mod gpu_layout;
+/// Hit regions for `click` on a raster surface (bd-2u0.2, closing the gap bd-bk7h identified).
+///
+/// Always available: it needs no GPU and no `web` feature, because Canvas2D hosts need it as much
+/// as the WebGPU path does.
+pub mod interaction;
 pub mod gpu_pipeline;
+mod gpu_plan;
 mod renderer;
 mod shapes;
 mod viewport;
@@ -35,6 +40,7 @@ pub use context::{
     Canvas2dContext, Color, LineCap, LineJoin, MockCanvas2dContext, Point, TextAlign, TextBaseline,
     TextMetrics,
 };
+pub use interaction::{HitRegion, hit_regions, hit_test};
 pub use gpu_layout::{
     GpuBufferLayout, GpuVertexAttribute, GpuVertexFormat, arrowhead_buffer_layout,
     edge_buffer_layout, node_buffer_layout, text_buffer_layout,
@@ -99,6 +105,10 @@ pub fn render_canvas(ir: &MermaidDiagramIr) -> CanvasRenderResult {
         clusters_drawn: layout.clusters.len(),
         labels_drawn: 0,
         viewport: Viewport::default(),
+        // From the layout this function just computed — the same one every other number here
+        // describes. It draws nothing, so these regions are as hypothetical as its `draw_calls`,
+        // and consistent with them.
+        hit_regions: interaction::hit_regions(ir, &layout),
     }
 }
 

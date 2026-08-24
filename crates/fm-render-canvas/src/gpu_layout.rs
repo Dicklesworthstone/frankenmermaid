@@ -329,7 +329,10 @@ mod tests {
             let (location, rest) = rest.split_once(')').expect("malformed @location");
             let (name, ty) = rest.split_once(':').expect("malformed member");
             out.push((
-                location.trim().parse::<u32>().expect("location is a number"),
+                location
+                    .trim()
+                    .parse::<u32>()
+                    .expect("location is a number"),
                 name.trim().to_string(),
                 ty.trim().to_string(),
             ));
@@ -362,7 +365,12 @@ mod tests {
         let pairs: &[(&str, &str, GpuBufferLayout, &str)] = &[
             (NODE_SDF_WGSL, "NodeInstance", node_buffer_layout(), "node"),
             (EDGE_WGSL, "EdgeSegment", edge_buffer_layout(), "edge"),
-            (ARROWHEAD_WGSL, "Arrowhead", arrowhead_buffer_layout(), "arrowhead"),
+            (
+                ARROWHEAD_WGSL,
+                "Arrowhead",
+                arrowhead_buffer_layout(),
+                "arrowhead",
+            ),
             (TEXT_ATLAS_WGSL, "TextQuad", text_buffer_layout(), "text"),
         ];
 
@@ -450,7 +458,15 @@ mod tests {
         let names: Vec<&str> = instance.iter().map(|(_, name, _)| name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["center", "half_extent", "fill", "stroke", "shape", "node_index", "stroke_width"],
+            vec![
+                "center",
+                "half_extent",
+                "fill",
+                "stroke",
+                "shape",
+                "node_index",
+                "stroke_width"
+            ],
             "the NodeInstance members moved; update the layout table with them"
         );
 

@@ -487,7 +487,8 @@ impl Canvas2dContext for MockCanvas2dContext {
     }
 
     fn set_font(&mut self, font: &str) {
-        self.operations.push(DrawOperation::SetFont(font.to_string()));
+        self.operations
+            .push(DrawOperation::SetFont(font.to_string()));
         self.current_state.font = font.to_string();
     }
 
@@ -498,7 +499,8 @@ impl Canvas2dContext for MockCanvas2dContext {
 
     fn set_text_baseline(&mut self, baseline: TextBaseline) {
         self.current_state.text_baseline = baseline;
-        self.operations.push(DrawOperation::SetTextBaseline(baseline));
+        self.operations
+            .push(DrawOperation::SetTextBaseline(baseline));
     }
 
     fn begin_path(&mut self) {
