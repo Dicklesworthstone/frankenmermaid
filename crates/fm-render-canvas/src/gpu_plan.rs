@@ -3132,7 +3132,9 @@ mod tests {
             [runs[0].first_quad as usize..][..runs[0].quad_count as usize];
         let second_line = &plan.text_quads
             [runs[1].first_quad as usize..][..runs[1].quad_count as usize];
-        let expected_first_x = note.bounds.x + 10.0 + (super::STATE_NOTE_FONT_SIZE_PX * 0.5);
+        let expected_first_x = note.bounds.x
+            + 10.0
+            + (super::STATE_NOTE_FONT_SIZE_PX * super::CHAR_ADVANCE_RATIO * 0.5);
         let expected_first_y = note.bounds.y + 8.0 + (super::STATE_NOTE_FONT_SIZE_PX * 0.5);
         assert!((first_line[0].center[0] - expected_first_x).abs() < 0.01);
         assert!((first_line[0].center[1] - expected_first_y).abs() < 0.01);
