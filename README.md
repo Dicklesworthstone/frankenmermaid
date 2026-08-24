@@ -9,9 +9,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust 2024](https://img.shields.io/badge/rust-2024_edition-orange.svg)](rust-toolchain.toml)
 [![No unsafe](https://img.shields.io/badge/unsafe-forbid-success.svg)](#zero-unsafe-code)
-[![Live Demo](https://img.shields.io/badge/demo-live-brightgreen.svg)](https://dicklesworthstone.github.io/frankenmermaid/)
+[![Live Demo](https://img.shields.io/badge/demo-live-brightgreen.svg)](https://frankenmermaid.pages.dev/)
 
-**Live Demo:** <https://dicklesworthstone.github.io/frankenmermaid/>
+**Live Demo:** <https://frankenmermaid.pages.dev/>
 *80+ interactive examples, live editor, presenter mode, style studio, diagnostics panel, and determinism checker.*
 
 ```bash
@@ -228,7 +228,7 @@ cd frankenmermaid
 cp -r pkg/ your-project/frankenmermaid/
 ```
 
-**Option 2 — use the GitHub Pages bundle.** The [live demo](https://dicklesworthstone.github.io/frankenmermaid/) ships a pre-built WASM bundle. Reference it directly, or download from the `gh-pages` branch.
+**Option 2 — use the Cloudflare Pages bundle.** The [live demo](https://frankenmermaid.pages.dev/) ships a pre-built WASM bundle. Reference it directly, or download from the repository.
 
 ### Optional feature flags
 
@@ -1851,8 +1851,7 @@ Diagnostics are sorted by six keys for consistent output (severity, source line,
 
 ### Demo surfaces
 
-1. **GitHub Pages** at <https://dicklesworthstone.github.io/frankenmermaid/> — deployed automatically on push to `main` via `.github/workflows/pages.yml`. Includes the showcase HTML, WASM binary, and `web/` + `web_react/` host pages.
-2. **Cloudflare Pages** — deployed via the CI pipeline with staged smoke checks driven by `scripts/cloudflare_pages_ops.py`.
+1. **Cloudflare Pages** at <https://frankenmermaid.pages.dev/> — deployed via Wrangler. Includes the showcase HTML, WASM binary, and `web/` + `web_react/` host pages.
 
 Both deployment paths include automated smoke checks (HTTP 200 on root page + WASM artifact, plus showcase render evidence). Showcase E2E lives in `scripts/showcase_harness.py` and `scripts/run_static_web_e2e.py`.
 
@@ -1960,7 +1959,7 @@ done
 
 ## Showcase and demo features
 
-The [live demo](https://dicklesworthstone.github.io/frankenmermaid/) at `dicklesworthstone.github.io/frankenmermaid/` exercises the engine in-browser via the WASM bundle. The showcase HTML (`frankenmermaid_demo_showcase.html`) is a single self-contained file and is part of the regression suite — every push to `main` runs a demo-evidence guard that verifies the showcase still renders cleanly.
+The [live demo](https://frankenmermaid.pages.dev/) at `frankenmermaid.pages.dev` exercises the engine in-browser via the WASM bundle. The showcase HTML (`frankenmermaid_demo_showcase.html`) is a single self-contained file and is part of the regression suite — every push to `main` runs a demo-evidence guard that verifies the showcase still renders cleanly.
 
 Features in the showcase:
 
@@ -2679,7 +2678,7 @@ The exhaustive backlog lives in [`.beads/`](.beads/). The largest pieces of in-f
 
 To confirm a diagram renders the way you expect, paste it into the live demo:
 
-<https://dicklesworthstone.github.io/frankenmermaid/>
+<https://frankenmermaid.pages.dev/>
 
 The demo uses the same WASM build that will ship to npm once publishing is live; anything `fm-cli render` does locally, the demo does in the browser. On top of that, the showcase adds presenter mode, a style studio, compare mode against hosted mermaid.js, a layout lab for swapping algorithms, a diagnostics panel, and a determinism checker that re-runs your input N times and verifies bit-identical output.
 
