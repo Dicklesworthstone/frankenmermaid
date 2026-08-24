@@ -7668,7 +7668,17 @@ fn write_c4_node_fragment_into(
     out.push_str("\" text-anchor=\"middle\" font-size=\"");
     let _ = write_number_into(out, small_font);
     out.push_str("\" font-weight=\"600\" fill=\"");
-    let _ = write_escaped_attr(out, &colors.cluster_stroke);
+    // `colors.text`, NOT `colors.cluster_stroke` (bd-4rlrx). This painted the stereotype with the
+    // cluster BORDER colour — a slot designed to sit QUIETLY against the background, which is the
+    // opposite of what text needs. Measured against each theme's own background:
+    //   default  #cbd5e1 on #fafbfc  =  1.43:1   effectively invisible
+    //   dark     #475569 on #0f172a  =  2.36:1
+    // Both fail WCAG AA (4.5:1) and the 3:1 large-text floor. It was themed — the colour does move
+    // between themes — which is why a "does it follow the theme?" check passes and only a measured
+    // contrast catches it. Its own siblings in the same box, `fm-c4-name` and `fm-c4-description`,
+    // already use `colors.text`; the visual hierarchy is carried by size (0.78x) and weight (600),
+    // not by making the label unreadable.
+    let _ = write_escaped_attr(out, &colors.text);
     out.push_str("\" class=\"fm-c4-type-label\">&lt;&lt;");
     let _ = write_escaped_text(out, &c4_meta.element_type);
     out.push_str(">></text>");
@@ -10877,7 +10887,10 @@ fn render_c4_node_content(
             .font_size(small_font)
             .font_weight("600")
             .anchor(TextAnchor::Middle)
-            .fill(&colors.cluster_stroke)
+            // See the streaming twin above (bd-4rlrx): the cluster BORDER colour on text gave
+            // 1.43:1 in the default theme. Both paths must agree or the fix depends on which one a
+            // given diagram happens to take.
+            .fill(&colors.text)
             .class("fm-c4-type-label")
             .build(),
     )));
