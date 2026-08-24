@@ -79,6 +79,18 @@ pub const SEQUENCE_NOTE_STROKE_WIDTH: f32 = 1.0;
 /// its own constant, and no test asserts the two differ, because they do not.
 pub const LIFECYCLE_MARKER_STROKE_WIDTH: f32 = 1.5;
 
+/// State-note boxes use the ordinary node border width in the Canvas2D pass.
+///
+/// A state note is not a node, so this remains a named source-specific value even though both
+/// currently come from the default canvas configuration.
+pub const STATE_NOTE_STROKE_WIDTH: f32 = 1.5;
+
+/// State-note text is 80% of the canvas default font size.
+pub const STATE_NOTE_FONT_SIZE_PX: f32 = DEFAULT_FONT_SIZE_PX * 0.8;
+
+/// Distance between state-note text baselines, matching the Canvas2D pass.
+pub const STATE_NOTE_LINE_HEIGHT: f32 = DEFAULT_FONT_SIZE_PX * 1.2;
+
 /// Default subgraph border, which is NOT the node border (bd-adabx).
 ///
 /// `config.cluster_stroke` is `rgba(148,163,184,0.78)` and `config.node_stroke` is `#94a3b8`. Same
@@ -560,6 +572,56 @@ impl TextSink<'_> {
             });
         }
     }
+
+    /// Emit source lines at a top-left text inset, matching state-note rendering.
+    fn push_left_multiline(
+        &mut self,
+        text: &str,
+        origin: (f32, f32),
+        font_px: f32,
+        line_height: f32,
+        color: [f32; 4],
+        source: GpuTextSource,
+        index: usize,
+    ) {
+        let advance = font_px * CHAR_ADVANCE_RATIO;
+        let half_height = font_px * 0.5;
+        for (row, line) in text.lines().enumerate() {
+            let inked: Vec<char> = line.chars().filter(|c| !c.is_control()).collect();
+            if inked.is_empty() {
+                continue;
+            }
+            let first_quad = u32::try_from(self.quads.len()).unwrap_or(u32::MAX);
+            let run_index = u32::try_from(self.runs.len()).unwrap_or(u32::MAX);
+            let row = u16::try_from(row).map_or(f32::from(u16::MAX), f32::from);
+            for (offset, glyph) in inked.iter().enumerate() {
+                let Some(cell) = self.atlas.cell(*glyph) else {
+                    continue;
+                };
+                let step = u16::try_from(offset).map_or(f32::from(u16::MAX), f32::from);
+                self.quads.push(GpuTextQuad {
+                    center: [
+                        origin.0 + (advance * 0.5) + (step * advance),
+                        origin.1 + half_height + (row * line_height),
+                    ],
+                    half_extent: [advance * 0.5, half_height],
+                    uv_min: cell.uv_min,
+                    uv_max: cell.uv_max,
+                    color,
+                    run_index,
+                });
+            }
+            let quad_count = u32::try_from(self.quads.len()).unwrap_or(u32::MAX) - first_quad;
+            if quad_count > 0 {
+                self.runs.push(GpuTextRun {
+                    source,
+                    node_index: u32::try_from(index).unwrap_or(u32::MAX),
+                    first_quad,
+                    quad_count,
+                });
+            }
+        }
+    }
 }
 
 /// The cardinality texts at an edge's two ends, source first (bd-2ogh5, the GPU twin of the raster bead bd-rk14).
@@ -675,6 +737,11 @@ pub enum GpuTextSource {
     /// `node_index` is the participant's index in `ir.nodes`, the same node the head row names --
     /// the two rows resolve their text from ONE source so the foot cannot drift from the head.
     MirrorHeader,
+    /// One line of a state-note body.
+    ///
+    /// `node_index` indexes `layout.extensions.state_notes`, not `ir.nodes`: the annotated state
+    /// is a different object from the note being drawn.
+    StateNote,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -735,6 +802,14 @@ pub struct GpuRenderPlan {
     /// SDF has no perimeter arc length to phase one along (bd-l3nsf). `edge_index` is
     /// [`NO_EDGE_INDEX`] -- a divider is not an edge.
     pub cluster_divider_segments: Vec<GpuEdgeSegment>,
+    /// State-note leader lines, then their boxes (bd-adabx).
+    ///
+    /// The leader comes first because `draw_state_notes` strokes it before it fills the note box.
+    /// Both vectors use the state-note index, never an IR node index: a note annotates a node but
+    /// is not one itself.
+    pub state_note_leader_segments: Vec<GpuEdgeSegment>,
+    /// State-note boxes, after their leaders and before sequence furniture (bd-adabx).
+    pub state_note_instances: Vec<GpuNodeInstance>,
     /// Sequence foot-row participant headers, as rect instances (bd-adabx).
     ///
     /// Before the activation bars because `render` draws them first (call order: draw_clusters,
@@ -857,6 +932,40 @@ impl GpuRenderPlan {
                 dash_phase: 0.0,
                 dash: CLUSTER_DIVIDER_DASH,
                 width: CLUSTER_DIVIDER_STROKE_WIDTH,
+            });
+        }
+
+        // STATE NOTES (bd-adabx). The raster pass draws a leader, then a rectangular note box,
+        // then each text line at the layout-reserved inset. A note is not a graph node, so every
+        // primitive uses its extension index; resolving that key against `ir.nodes` would style an
+        // unrelated state and make a faithful-looking but wrong annotation.
+        let mut state_note_leader_segments =
+            Vec::with_capacity(layout.extensions.state_notes.len());
+        let mut state_note_instances = Vec::with_capacity(layout.extensions.state_notes.len());
+        for (note_index, note) in layout.extensions.state_notes.iter().enumerate() {
+            if note.bounds.width <= 0.0 || note.bounds.height <= 0.0 {
+                continue;
+            }
+            state_note_leader_segments.push(GpuEdgeSegment {
+                from: [note.leader_start.x, note.leader_start.y],
+                to: [note.leader_end.x, note.leader_end.y],
+                edge_index: NO_EDGE_INDEX,
+                color: DEFAULT_EDGE_STROKE_RGBA,
+                dash_phase: 0.0,
+                dash: [0.0, 0.0],
+                width: STATE_NOTE_STROKE_WIDTH,
+            });
+            state_note_instances.push(GpuNodeInstance {
+                center: [
+                    note.bounds.x + (note.bounds.width * 0.5),
+                    note.bounds.y + (note.bounds.height * 0.5),
+                ],
+                half_extent: [note.bounds.width * 0.5, note.bounds.height * 0.5],
+                fill: DEFAULT_NODE_FILL_RGBA,
+                stroke: DEFAULT_NODE_STROKE_RGBA,
+                stroke_width: STATE_NOTE_STROKE_WIDTH,
+                shape: GpuNodeShape::Rect as u32,
+                node_index: u32::try_from(note_index).unwrap_or(u32::MAX),
             });
         }
 
@@ -1207,6 +1316,16 @@ impl GpuRenderPlan {
                             .sequence_notes
                             .iter()
                             .map(|note| note.text.as_str()),
+                    )
+                    // STATE-NOTE LINES GO IN THE ATLAS TOO. The plan emits one run per line;
+                    // feeding that same iterator prevents a future line filter from starving a
+                    // run that still looks structurally present.
+                    .chain(
+                        layout
+                            .extensions
+                            .state_notes
+                            .iter()
+                            .flat_map(|note| note.text.lines()),
                     ),
                 cell_px,
             );
@@ -1401,10 +1520,31 @@ impl GpuRenderPlan {
             );
         }
 
+        // STATE-NOTE TEXT (bd-adabx). The SVG backend and Canvas2D pass both put this at the
+        // layout-reserved `(x + 10, y + 8)` inset, use 80% text, and advance one 16.8px row per
+        // source line. Centring it would make an annotation look like a node label and disagree
+        // with the bounds that fm-layout measured for the note.
+        for (index, note) in layout.extensions.state_notes.iter().enumerate() {
+            if note.bounds.width <= 0.0 || note.bounds.height <= 0.0 {
+                continue;
+            }
+            sink.push_left_multiline(
+                note.text.as_str(),
+                (note.bounds.x + 10.0, note.bounds.y + 8.0),
+                STATE_NOTE_FONT_SIZE_PX,
+                STATE_NOTE_LINE_HEIGHT,
+                DEFAULT_LABEL_RGBA,
+                GpuTextSource::StateNote,
+                index,
+            );
+        }
+
         Self {
             bounds: layout.bounds,
             cluster_instances,
             cluster_divider_segments,
+            state_note_leader_segments,
+            state_note_instances,
             mirror_header_instances,
             activation_instances,
             lifecycle_marker_segments,
@@ -2913,6 +3053,98 @@ mod tests {
         assert!((quads[0].center[1] - 70.0).abs() < 0.01);
     }
 
+    /// State notes reach the GPU plan with the same source, bounds, leader and text the SVG
+    /// backend renders (bd-adabx).
+    ///
+    /// This is deliberately a parsed multi-line state diagram, not a hand-built extension. The
+    /// state-note source was parsed and rendered by SVG before the GPU plan existed; a synthetic
+    /// layout could prove a buffer accepts data while missing the public path that supplies it.
+    #[test]
+    fn state_note_gpu_plan_matches_svg_backend_for_the_same_ir() {
+        let source = "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Running\n  note right of Idle\n    Zephyr line\n    Quokka line\n  end note\n";
+        let ir = fm_parser::parse(source).ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let note = layout
+            .extensions
+            .state_notes
+            .first()
+            .expect("CONTROL FAILED: the parsed fixture produced no state note");
+        assert!(note.text.contains('\n'), "CONTROL FAILED: expected a multi-line note");
+
+        // Golden reference from the SVG backend, over the exact same parsed IR and layout. These
+        // classes identify the three state-note draw products rather than matching an incidental
+        // SVG byte count, and both source lines prove SVG did not collapse the note to one line.
+        let svg = fm_render_svg::render_svg_with_layout(
+            &ir,
+            &layout,
+            &fm_render_svg::SvgRenderConfig::default(),
+        );
+        for expected in [
+            "fm-state-note-leader",
+            "fm-state-note\"",
+            "fm-state-note-text",
+            "Zephyr line",
+            "Quokka line",
+        ] {
+            assert!(
+                svg.contains(expected),
+                "SVG golden reference omitted {expected:?}:\n{svg}"
+            );
+        }
+
+        let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+        assert_eq!(plan.state_note_leader_segments.len(), 1);
+        assert_eq!(plan.state_note_instances.len(), 1);
+
+        let leader = plan.state_note_leader_segments[0];
+        assert_eq!(leader.from, [note.leader_start.x, note.leader_start.y]);
+        assert_eq!(leader.to, [note.leader_end.x, note.leader_end.y]);
+        assert_eq!(leader.edge_index, super::NO_EDGE_INDEX);
+        assert_eq!(leader.color, super::DEFAULT_EDGE_STROKE_RGBA);
+        assert_eq!(leader.width, super::STATE_NOTE_STROKE_WIDTH);
+
+        let note_instance = plan.state_note_instances[0];
+        assert_eq!(
+            note_instance.center,
+            [
+                note.bounds.x + (note.bounds.width * 0.5),
+                note.bounds.y + (note.bounds.height * 0.5),
+            ]
+        );
+        assert_eq!(
+            note_instance.half_extent,
+            [note.bounds.width * 0.5, note.bounds.height * 0.5]
+        );
+        assert_eq!(note_instance.node_index, 0, "index must identify the note, not Idle");
+        assert_eq!(note_instance.stroke_width, super::STATE_NOTE_STROKE_WIDTH);
+
+        let runs: Vec<_> = plan
+            .text_runs
+            .iter()
+            .filter(|run| run.source == super::GpuTextSource::StateNote)
+            .collect();
+        assert_eq!(runs.len(), 2, "each SVG line needs its own GPU text run");
+        assert!(runs.iter().all(|run| run.node_index == 0));
+        assert_eq!(runs[0].quad_count, 11, "Zephyr line is eleven visible glyphs");
+        assert_eq!(runs[1].quad_count, 11, "Quokka line is eleven visible glyphs");
+
+        let first_line = &plan.text_quads
+            [runs[0].first_quad as usize..][..runs[0].quad_count as usize];
+        let second_line = &plan.text_quads
+            [runs[1].first_quad as usize..][..runs[1].quad_count as usize];
+        let expected_first_x = note.bounds.x + 10.0 + (super::STATE_NOTE_FONT_SIZE_PX * 0.5);
+        let expected_first_y = note.bounds.y + 8.0 + (super::STATE_NOTE_FONT_SIZE_PX * 0.5);
+        assert!((first_line[0].center[0] - expected_first_x).abs() < 0.01);
+        assert!((first_line[0].center[1] - expected_first_y).abs() < 0.01);
+        assert!(
+            (second_line[0].center[1] - first_line[0].center[1]
+                - super::STATE_NOTE_LINE_HEIGHT)
+                .abs()
+                < 0.01,
+            "state-note lines must keep the SVG/canvas 16.8px spacing"
+        );
+    }
+
     /// A destroyed participant's cross reaches the plan as two segments (bd-adabx).
     ///
     /// First line source that is NOT an edge. The `edge_index` sentinel is asserted explicitly:
@@ -3084,6 +3316,7 @@ mod tests {
         const PAIRS: &[(&str, &str)] = &[
             ("pub cluster_instances:", "self.draw_clusters("),
             ("pub cluster_divider_segments:", "self.draw_cluster_dividers("),
+            ("pub state_note_leader_segments:", "self.draw_state_notes("),
             ("pub mirror_header_instances:", "self.draw_sequence_mirror_headers("),
             ("pub activation_instances:", "self.draw_activation_bars("),
             ("pub lifecycle_marker_segments:", "self.draw_sequence_lifecycle_markers("),
@@ -3156,6 +3389,7 @@ mod tests {
             "draw_cluster_dividers",
             "draw_sequence_lifecycle_markers",
             "draw_sequence_notes",
+            "draw_state_notes",
             "draw_clusters",
             "draw_edges",
             "draw_nodes",
@@ -3172,7 +3406,6 @@ mod tests {
             ("draw_packet_field_continuations", "bd-adabx: packet furniture"),
             ("draw_axis_ticks", "bd-adabx: axis furniture"),
             ("draw_gantt_today_marker", "bd-adabx: gantt furniture"),
-            ("draw_state_notes", "bd-adabx: state furniture"),
             (
                 "draw_sequence_fragments",
                 "bd-l3nsf, NOT merely unplanned: a fragment box has a DASHED border \

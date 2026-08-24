@@ -16,6 +16,7 @@ fm-layout.workspace = true
 
 [dev-dependencies]
 sha2 = "0.11"
+fm-render-svg.workspace = true
 # Tests parse REAL mermaid source rather than hand-building IR. A hand-built fixture is how
 # c0d7ed3a's kanban fix came to pass its own tests while being unreachable from parser output
 # (bd-u3fo); a renderer test that never sees what the parser actually emits can certify a path
