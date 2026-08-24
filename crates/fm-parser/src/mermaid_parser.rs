@@ -5903,8 +5903,24 @@ fn parse_class_assignment_ast(statement: &str) -> Option<FlowAst> {
         return None;
     }
 
+    // A BRACKET LABEL IS NOT A CLASS LIST (bd-lfrlx). `class A["Pretty Label"]` declares a class
+    // whose displayed name is `Pretty Label`; splitting it on whitespace reads `A["Pretty` as the
+    // node list and `Label"]` as a CSS class to apply, so this function claimed the statement, the
+    // declaration branch below it never ran, and the class VANISHED — a one-class diagram parsed to
+    // zero nodes.
+    //
+    // The tell is an UNBALANCED `[` in the first token: the label ran past the whitespace this
+    // splitter cut on. A balanced first token (`class A["Pretty"] someClass`) is left alone, which
+    // is also why `class A["Pretty"]` without a space already worked — `class_list_raw` came out
+    // empty and this returned `None` on its own.
+    //
+    // Bracket counting rather than a `contains('[')` bail: a genuine assignment never contains a
+    // bracket at all, so counting costs nothing here and keeps the balanced form on its old path.
     let mut parts = rest.split_whitespace();
     let node_list_raw = parts.next()?;
+    if node_list_raw.matches('[').count() > node_list_raw.matches(']').count() {
+        return None;
+    }
     let class_list_raw = parts.collect::<Vec<_>>().join(" ");
     if class_list_raw.is_empty() {
         return None;
@@ -13052,6 +13068,44 @@ fn is_comment(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// `parse_class_assignment_ast` must DECLINE a statement whose bracket label ran past the
+    /// whitespace it splits on (bd-lfrlx).
+    ///
+    /// Asserted directly on the function rather than only through the parsed IR, because this is
+    /// where the statement was stolen: it returned a `ClassAssign` applying a CSS class literally
+    /// named `Label"]` to a node literally named `A["Pretty`, and the declaration branch that would
+    /// have created the class never ran.
+    #[test]
+    fn a_bracket_label_running_past_a_space_is_not_a_class_assignment() {
+        assert!(
+            super::parse_class_assignment_ast("class A[\"Pretty Label\"]").is_none(),
+            "a labelled declaration was claimed as a CSS-class assignment"
+        );
+        // Unquoted brackets take the same path — the quotes are not what makes it a label.
+        assert!(
+            super::parse_class_assignment_ast("class A[Pretty Label]").is_none(),
+            "an unquoted bracket label was claimed as a CSS-class assignment"
+        );
+
+        // CONTROL: a real assignment is still claimed. The guard keys on an UNBALANCED bracket, and
+        // a genuine assignment carries no bracket at all; widening it to any `[` would still pass
+        // the two assertions above while breaking every `class A someClass` in the corpus.
+        assert!(
+            super::parse_class_assignment_ast("class A bad").is_some(),
+            "a genuine CSS-class assignment stopped being recognised"
+        );
+        assert!(
+            super::parse_class_assignment_ast("class A,B bad").is_some(),
+            "a multi-node CSS-class assignment stopped being recognised"
+        );
+        // CONTROL: a BALANCED first token keeps its old behaviour — this is why the space-free
+        // spelling already worked, and it must not change.
+        assert!(
+            super::parse_class_assignment_ast("class A[\"Pretty\"]").is_none(),
+            "a space-free bracket label should still fall through to the declaration branch"
+        );
+    }
+
     #[test]
     fn ci_prefix_helpers_are_byte_identical() {
         // Pin the alloc-free helpers to the old `to_ascii_lowercase()` forms they replaced.
