@@ -11448,7 +11448,7 @@ fn parse_layout_constraint_config(
                 }
             };
             let gap = match object.get("gap") {
-                None => 0.0,
+                None => Some(0.0),
                 Some(Value::Number(value)) => value.as_f64().filter(|gap| *gap >= 0.0),
                 Some(_) => None,
             };
