@@ -26,7 +26,7 @@
 //! `wgpu::VertexBufferLayout` (or `GPUVertexBufferLayout` in the browser) in a handful of lines. The
 //! device layer is bd-2u0.2's next step; this is the part that can be proven correct headlessly.
 
-use crate::gpu_plan::{GpuNodeInstance, GpuRenderPlan, NODE_SDF_WGSL};
+use crate::gpu_plan::{EDGE_WGSL, GpuEdgeSegment, GpuNodeInstance, GpuRenderPlan, NODE_SDF_WGSL};
 
 /// Vertex attribute scalar/vector type, spelled the way WGSL spells it.
 ///
@@ -96,6 +96,8 @@ pub struct InstanceLayout {
 pub enum PrimitiveFamily {
     /// Node boxes, drawn as SDF quads.
     Node,
+    /// Edge segments, drawn as instanced quads expanded across the line's width.
+    Edge,
 }
 
 /// Everything a caller needs to build one render pipeline, minus the device.
@@ -180,6 +182,89 @@ pub const fn node_pipeline() -> PipelineDescriptor {
     }
 }
 
+/// Edge instance layout.
+///
+/// ⚠️ THE STRUCT ORDER AND THE SHADER ORDER DISAGREE HERE, AND THAT IS THE WHOLE REASON THIS MODULE
+/// EXISTS. `GpuEdgeSegment` declares `… color, dash_phase, dash, width`; `EDGE_WGSL` binds
+/// `@location(3) color`, `@location(4) dash`, `@location(5) width`, `@location(6) dash_phase`. Any
+/// scheme that derived locations from declaration order would hand the shader's `dash` the bytes of
+/// `dash_phase`, and every dotted edge would draw a pattern computed from how far along the route it
+/// started — a wrong picture with no error anywhere. Offsets come from `offset_of!`, locations are
+/// written out explicitly, and the two are reconciled BY NAME in the test.
+const EDGE_ATTRIBUTES: &[VertexAttribute] = &[
+    VertexAttribute {
+        shader_location: 0,
+        offset: core::mem::offset_of!(GpuEdgeSegment, from) as u64,
+        format: VertexFormat::Float32x2,
+        // The shader spells these `from_point`/`to_point` while the struct spells them `from`/`to`.
+        // The NAME IS THE JOIN KEY for the parity test, so the shader's spelling is authoritative
+        // and the difference is recorded here rather than silently reconciled by position.
+        name: "from_point",
+    },
+    VertexAttribute {
+        shader_location: 1,
+        offset: core::mem::offset_of!(GpuEdgeSegment, to) as u64,
+        format: VertexFormat::Float32x2,
+        name: "to_point",
+    },
+    VertexAttribute {
+        shader_location: 2,
+        offset: core::mem::offset_of!(GpuEdgeSegment, edge_index) as u64,
+        format: VertexFormat::Uint32,
+        name: "edge_index",
+    },
+    VertexAttribute {
+        shader_location: 3,
+        offset: core::mem::offset_of!(GpuEdgeSegment, color) as u64,
+        format: VertexFormat::Float32x4,
+        name: "color",
+    },
+    VertexAttribute {
+        shader_location: 4,
+        offset: core::mem::offset_of!(GpuEdgeSegment, dash) as u64,
+        format: VertexFormat::Float32x2,
+        name: "dash",
+    },
+    VertexAttribute {
+        shader_location: 5,
+        offset: core::mem::offset_of!(GpuEdgeSegment, width) as u64,
+        format: VertexFormat::Float32,
+        name: "width",
+    },
+    VertexAttribute {
+        shader_location: 6,
+        offset: core::mem::offset_of!(GpuEdgeSegment, dash_phase) as u64,
+        format: VertexFormat::Float32,
+        name: "dash_phase",
+    },
+];
+
+/// The edge pipeline description.
+#[must_use]
+pub const fn edge_pipeline() -> PipelineDescriptor {
+    PipelineDescriptor {
+        label: "fm-edge",
+        family: PrimitiveFamily::Edge,
+        wgsl: EDGE_WGSL,
+        instance: InstanceLayout {
+            array_stride: size_of::<GpuEdgeSegment>() as u64,
+            attributes: EDGE_ATTRIBUTES,
+        },
+        vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
+    }
+}
+
+/// Every pipeline this module describes, in SUBMISSION order.
+///
+/// The order is the draw order, not an arbitrary listing: edges are submitted before nodes so a node
+/// box paints over the segment that terminates at it, which is what the Canvas2D pass does and what
+/// `GpuRenderPlan` documents about its own field order. A caller that iterates this slice gets the
+/// right picture without having to know why.
+#[must_use]
+pub const fn pipelines() -> [PipelineDescriptor; 2] {
+    [edge_pipeline(), node_pipeline()]
+}
+
 /// One instanced draw call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DrawBatch {
@@ -206,6 +291,15 @@ impl DrawBatch {
 #[must_use]
 pub fn draw_batches(plan: &GpuRenderPlan) -> Vec<DrawBatch> {
     let mut batches = Vec::new();
+    // EDGES FIRST, matching `pipelines()` and the Canvas2D draw order: a node box paints over the
+    // segment that terminates at it, not under it.
+    if !plan.edge_segments.is_empty() {
+        batches.push(DrawBatch {
+            family: PrimitiveFamily::Edge,
+            instance_count: u32::try_from(plan.edge_segments.len()).unwrap_or(u32::MAX),
+            vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
+        });
+    }
     if !plan.node_instances.is_empty() {
         batches.push(DrawBatch {
             family: PrimitiveFamily::Node,
