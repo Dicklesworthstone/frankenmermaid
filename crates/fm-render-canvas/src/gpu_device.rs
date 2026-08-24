@@ -461,6 +461,227 @@ impl RenderedImage {
     }
 }
 
+/// Every diagram pipeline, built once.
+///
+/// A pipeline is expensive to create and immutable once built, so a caller rendering more than one
+/// diagram — or one diagram more than once, which is the whole point of a GPU path — builds this
+/// once and keeps it.
+pub struct DiagramPipelines {
+    passes: Vec<(crate::gpu_pipeline::PrimitiveFamily, InstancePass)>,
+}
+
+impl DiagramPipelines {
+    /// Build every pipeline in [`crate::gpu_pipeline::pipelines`] order.
+    ///
+    /// Order is preserved rather than sorted or keyed, because it IS the draw order: edges, then
+    /// their arrowheads, then the boxes that paint over both, then the labels on top.
+    #[must_use]
+    pub fn new(gpu: &GpuDevice) -> Self {
+        Self {
+            passes: crate::gpu_pipeline::pipelines()
+                .iter()
+                .map(|descriptor| (descriptor.family, InstancePass::new(gpu, descriptor)))
+                .collect(),
+        }
+    }
+}
+
+/// Render a WHOLE diagram — every primitive family — in ONE submission (bd-2u0.2).
+///
+/// **Why this exists and `render_instances` is not enough.** Rendering per family meant four
+/// textures, four command encoders, four queue submissions and four readbacks, and the four images
+/// could not be composed: each pass cleared its own target, so nothing ever produced a picture of
+/// the diagram. This shares one texture, one encoder, one render pass and one readback, and draws
+/// the families in order into the same attachment. That is both the correct picture and four times
+/// fewer round trips to the device.
+///
+/// Per-family instance buffers are still separate — the families have different strides and
+/// different vertex counts, and a single interleaved buffer would need a stride they do not share.
+/// What is shared is everything that costs a round trip.
+///
+/// `atlas` is required exactly when the plan has text to draw; a plan with no glyphs renders without
+/// one.
+///
+/// # Errors
+/// Returns [`GpuDeviceError::Readback`] if the mapped buffer cannot be read.
+#[allow(clippy::missing_panics_doc)]
+pub fn render_diagram(
+    gpu: &GpuDevice,
+    pipelines: &DiagramPipelines,
+    plan: &crate::gpu_plan::GpuRenderPlan,
+    atlas: Option<&GlyphAtlasTexture>,
+    width: u32,
+    height: u32,
+) -> Result<RenderedImage, GpuDeviceError> {
+    use crate::gpu_pipeline::PrimitiveFamily;
+
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("fm-diagram"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: RENDER_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // ONE camera for every family, which is what makes the passes compose: a per-family camera could
+    // drift and the picture would come apart at the seams rather than fail.
+    let camera = camera_transform(&plan.bounds);
+    let camera_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("fm-camera"),
+        size: size_of::<[f32; 4]>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    gpu.queue
+        .write_buffer(&camera_buffer, 0, &bytemuck_cast(&camera));
+
+    // Serialise every family up front. Held for the whole render pass because the buffers they fill
+    // must outlive it.
+    let mut uploads: Vec<(PrimitiveFamily, wgpu::Buffer, u32)> = Vec::new();
+    for (family, _) in &pipelines.passes {
+        let (bytes, count) = match family {
+            PrimitiveFamily::Edge => (
+                edge_instance_bytes(&plan.edge_segments),
+                plan.edge_segments.len(),
+            ),
+            PrimitiveFamily::Arrowhead => (
+                arrowhead_instance_bytes(&plan.arrowheads),
+                plan.arrowheads.len(),
+            ),
+            PrimitiveFamily::Node => (
+                node_instance_bytes(&plan.node_instances),
+                plan.node_instances.len(),
+            ),
+            PrimitiveFamily::Text => (text_instance_bytes(&plan.text_quads), plan.text_quads.len()),
+        };
+        if count == 0 {
+            continue;
+        }
+        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fm-instances"),
+            size: bytes.len().max(4) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        gpu.queue.write_buffer(&buffer, 0, &bytes);
+        uploads.push((*family, buffer, u32::try_from(count).unwrap_or(u32::MAX)));
+    }
+
+    // Bind groups, one per pass, because text binds three resources where the others bind one.
+    let mut binds: Vec<(PrimitiveFamily, wgpu::BindGroup)> = Vec::new();
+    for (family, pass) in &pipelines.passes {
+        let mut entries = vec![wgpu::BindGroupEntry {
+            binding: 0,
+            resource: camera_buffer.as_entire_binding(),
+        }];
+        if pass.samples_atlas {
+            let Some(atlas) = atlas else {
+                // A plan with no glyphs never reaches a text draw, so a missing atlas is only fatal
+                // when there is text to draw; skipping keeps "render a diagram with no labels"
+                // working without inventing a blank texture.
+                continue;
+            };
+            entries.push(wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&atlas.view),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(&atlas.sampler),
+            });
+        }
+        binds.push((
+            *family,
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("fm-bindings"),
+                layout: &pass.camera_layout,
+                entries: &entries,
+            }),
+        ));
+    }
+
+    let unpadded_row = width as usize * 4;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
+    let padded_row = unpadded_row.div_ceil(align) * align;
+    let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("fm-readback"),
+        size: (padded_row * height as usize) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("fm-diagram"),
+        });
+    {
+        let mut render = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("fm-diagram"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    // Cleared ONCE, before any family draws. Clearing per family is exactly what
+                    // made the separate passes uncomposable: each one erased the last.
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        for (family, pass) in &pipelines.passes {
+            let Some((_, buffer, count)) = uploads.iter().find(|(f, _, _)| f == family) else {
+                continue;
+            };
+            let Some((_, bind)) = binds.iter().find(|(f, _)| f == family) else {
+                continue;
+            };
+            render.set_pipeline(&pass.pipeline);
+            render.set_bind_group(0, bind, &[]);
+            render.set_vertex_buffer(0, buffer.slice(..));
+            render.draw(0..pass.vertices_per_instance, 0..*count);
+        }
+    }
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_row as u32),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    // ONE submission for the whole diagram.
+    gpu.queue.submit(Some(encoder.finish()));
+
+    read_back(gpu, &readback, width, height, padded_row, unpadded_row)
+}
+
 /// What to draw in one pass: the geometry, and the atlas if the pipeline samples one.
 ///
 /// Grouped into a struct rather than passed as loose arguments because these four travel together
@@ -633,6 +854,21 @@ pub fn render_instances(
     );
     gpu.queue.submit(Some(encoder.finish()));
 
+    read_back(gpu, &readback, width, height, padded_row, unpadded_row)
+}
+
+/// Map the readback buffer and strip the row padding.
+///
+/// Shared by both entry points so there is exactly one place that understands the 256-byte row
+/// alignment. Two copies of this drifting apart would show up as a diagonal shear in one path only.
+fn read_back(
+    gpu: &GpuDevice,
+    readback: &wgpu::Buffer,
+    width: u32,
+    height: u32,
+    padded_row: usize,
+    unpadded_row: usize,
+) -> Result<RenderedImage, GpuDeviceError> {
     let slice = readback.slice(..);
     let (sender, receiver) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {

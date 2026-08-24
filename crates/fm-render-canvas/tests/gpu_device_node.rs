@@ -16,9 +16,9 @@
 use fm_render_canvas::CanvasRenderConfig;
 use fm_render_canvas::GpuRenderPlan;
 use fm_render_canvas::gpu_device::{
-    GlyphAtlasTexture, GpuDevice, GpuDeviceError, InstanceDraw, InstancePass,
-    arrowhead_instance_bytes, edge_instance_bytes, node_instance_bytes, render_instances,
-    solid_coverage, text_instance_bytes,
+    DiagramPipelines, GlyphAtlasTexture, GpuDevice, GpuDeviceError, InstanceDraw, InstancePass,
+    arrowhead_instance_bytes, edge_instance_bytes, node_instance_bytes, render_diagram,
+    render_instances, solid_coverage, text_instance_bytes,
 };
 use fm_render_canvas::gpu_pipeline::{
     arrowhead_pipeline, edge_pipeline, node_pipeline, text_pipeline,
@@ -605,6 +605,166 @@ fn every_glyph_quad_samples_its_own_planned_atlas_cell() {
             );
         }
     }
+}
+
+/// CROSS-FAMILY BATCHING: one submission draws the WHOLE diagram, and the result is a composition
+/// no single-family pass could produce.
+///
+/// Each family used to render into its own texture with its own clear, so four images existed and a
+/// picture of the diagram did not. This asserts the composed image really is the union: every node
+/// centre painted, every edge painted, AND strictly more painted pixels than the largest single
+/// family alone. That last clause is the one that fails if the render pass ever goes back to
+/// clearing per family — each pass would erase the last and the total would collapse to one family's
+/// worth of ink.
+#[test]
+fn one_submission_composes_every_family_into_a_single_image() {
+    let Some(gpu) = device_or_skip() else {
+        return;
+    };
+
+    let ir = fm_parser::parse(
+        "flowchart LR\n  A[Alpha] --> B[Beta]\n  B -.-> C{Gamma}\n  C ==> D((Delta))\n",
+    )
+    .ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let plan = GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+
+    // CONTROLS: every family must actually be present, or "the union is bigger" would be a claim
+    // about one or two families wearing the name of four.
+    assert!(!plan.node_instances.is_empty(), "CONTROL: no nodes planned");
+    assert!(!plan.edge_segments.is_empty(), "CONTROL: no edges planned");
+    assert!(
+        !plan.arrowheads.is_empty(),
+        "CONTROL: no arrowheads planned"
+    );
+    assert!(!plan.text_quads.is_empty(), "CONTROL: no text planned");
+
+    let atlas = GlyphAtlasTexture::new(&gpu, &plan.glyph_atlas, &solid_coverage(&plan.glyph_atlas));
+    let pipelines = DiagramPipelines::new(&gpu);
+    let composed =
+        render_diagram(&gpu, &pipelines, &plan, Some(&atlas), 512, 512).expect("render diagram");
+
+    let painted = |image: &fm_render_canvas::gpu_device::RenderedImage| {
+        image
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[3] > 0)
+            .count()
+    };
+    let composed_painted = painted(&composed);
+    assert!(composed_painted > 0, "the composed diagram is blank");
+
+    // Each family alone, through the single-family path, for comparison.
+    let single =
+        |family_pipeline, bytes: Vec<u8>, count: usize, atlas: Option<&GlyphAtlasTexture>| {
+            let pass = InstancePass::new(&gpu, &family_pipeline);
+            let draw = InstanceDraw {
+                bounds: &plan.bounds,
+                instance_bytes: &bytes,
+                instance_count: u32::try_from(count).expect("fits u32"),
+                atlas,
+            };
+            painted(&render_instances(&gpu, &pass, &draw, 512, 512).expect("render"))
+        };
+    let nodes_alone = single(
+        node_pipeline(),
+        node_instance_bytes(&plan.node_instances),
+        plan.node_instances.len(),
+        None,
+    );
+    let edges_alone = single(
+        edge_pipeline(),
+        edge_instance_bytes(&plan.edge_segments),
+        plan.edge_segments.len(),
+        None,
+    );
+    let largest_single = nodes_alone.max(edges_alone);
+
+    eprintln!(
+        "[batch] composed={composed_painted}px nodes_alone={nodes_alone}px \
+         edges_alone={edges_alone}px families={} submissions=1",
+        4
+    );
+    assert!(
+        composed_painted > largest_single,
+        "the composed image paints {composed_painted} pixels but the largest single family paints \
+         {largest_single}; the families are not composing -- a per-family clear would erase each \
+         previous draw and leave exactly one family's ink"
+    );
+
+    // And the composition must still be geometrically right: nodes where the layout puts them,
+    // edges along their routes.
+    for instance in &plan.node_instances {
+        let (x, y) = composed.pixel_for(&plan.bounds, instance.center[0], instance.center[1]);
+        assert!(
+            composed.pixel(x, y).is_some_and(|p| p[3] > 0),
+            "node {} is missing from the composed diagram",
+            instance.node_index
+        );
+    }
+    for index in 0..u32::try_from(ir.edges.len()).expect("fits u32") {
+        let painted_somewhere = plan
+            .edge_segments
+            .iter()
+            .filter(|s| s.edge_index == index)
+            .any(|segment| {
+                let mid_x = (segment.from[0] + segment.to[0]) * 0.5;
+                let mid_y = (segment.from[1] + segment.to[1]) * 0.5;
+                let (x, y) = composed.pixel_for(&plan.bounds, mid_x, mid_y);
+                composed.pixel(x, y).is_some_and(|p| p[3] > 0)
+            });
+        assert!(
+            painted_somewhere,
+            "edge {index} is missing from the composed diagram"
+        );
+    }
+
+    // THE REFERENCE ARM: the SVG draws the same nodes and edges for the same IR.
+    let svg = fm_render_svg::render_svg(&ir);
+    for node in &ir.nodes {
+        assert!(
+            svg.contains(node.id.as_str()),
+            "the SVG never mentions node {:?}",
+            node.id
+        );
+    }
+    for index in 0..ir.edges.len() {
+        assert!(
+            svg.contains(&format!("data-fm-edge-id=\"{index}\"")),
+            "the SVG drew no path for edge {index}"
+        );
+    }
+}
+
+/// A diagram with no labels must render without an atlas, or every unlabelled diagram would need a
+/// blank texture invented for it.
+#[test]
+fn a_diagram_with_no_text_renders_without_an_atlas() {
+    let Some(gpu) = device_or_skip() else {
+        return;
+    };
+    let ir = fm_parser::parse("flowchart LR\n  A --> B\n").ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let mut plan = GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+    // Unlabelled nodes still carry their id as a label, so the text is removed explicitly to make
+    // the no-text path reachable at all.
+    plan.text_quads.clear();
+
+    let pipelines = DiagramPipelines::new(&gpu);
+    let image = render_diagram(&gpu, &pipelines, &plan, None, 256, 256).expect("render");
+    let painted = image
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|p| p[3] > 0)
+        .count();
+    assert!(
+        painted > 0,
+        "a diagram with nodes and edges but no text rendered blank"
+    );
 }
 
 /// The camera must not flip the diagram. Layout space grows downward, clip space grows upward, so
