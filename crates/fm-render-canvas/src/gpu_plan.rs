@@ -338,6 +338,19 @@ pub struct GpuArrowheadInstance {
     pub color: [f32; 4],
 }
 
+/// One filled sector from Canvas2D's pie-chart pass.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GpuPieWedge {
+    pub center: [f32; 2],
+    pub radius: f32,
+    pub start_angle: f32,
+    pub sweep_angle: f32,
+    pub fill: [f32; 4],
+    pub stroke: [f32; 4],
+    pub stroke_width: f32,
+    pub slice_index: u32,
+}
+
 /// Theme edge stroke used when no `linkStyle` applies: `#475569`, mirroring
 /// `CanvasRenderConfig::default().edge_stroke`. Pinned by
 /// `gpu_theme_defaults_match_the_canvas_config`.
@@ -881,6 +894,8 @@ pub enum GpuTextSource {
     ///
     /// `node_index` is the documented `quadrant_labels` index: Q1, Q2, Q3, then Q4.
     QuadrantLabel,
+    /// A pie-slice percentage label; `node_index` indexes `IrPieMeta::slices`.
+    PieSlice,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -998,6 +1013,8 @@ pub struct GpuRenderPlan {
     pub edge_segments: Vec<GpuEdgeSegment>,
     /// Triangle instances for edge arrowheads.
     pub arrowheads: Vec<GpuArrowheadInstance>,
+    /// Pie-chart sectors, before their slice labels (bd-adabx).
+    pub pie_wedges: Vec<GpuPieWedge>,
     /// ⚠️ AFTER THE EDGES, BECAUSE THE RASTER PASS DRAWS NODES LAST (bd-adabx).
     ///
     /// `render` calls `draw_edges` and THEN `draw_nodes`, so an opaque node fill covers any edge
@@ -1472,6 +1489,43 @@ impl GpuRenderPlan {
             }
         }
 
+        // PIE WEDGES (bd-adabx). The Canvas2D pass uses centre, radius, start angle and sweep;
+        // retaining those primitives lets the GPU tessellate the same sectors without pretending a
+        // curved boundary is an edge. Slice labels are added to the shared text pass below.
+        let mut pie_wedges = Vec::new();
+        if let Some(pie) = ir.pie_meta.as_ref().filter(|pie| !pie.slices.is_empty()) {
+            const COLORS: [&str; 10] = [
+                "#4c78a8", "#f58518", "#e45756", "#72b7b2", "#54a24b", "#eeca3b", "#b279a2",
+                "#ff9da6", "#9d755d", "#bab0ac",
+            ];
+            let total = pie
+                .slices
+                .iter()
+                .map(|slice| slice.value.max(0.0))
+                .sum::<f32>()
+                .max(f32::EPSILON);
+            let center = [
+                layout.bounds.x + (layout.bounds.width * 0.5),
+                layout.bounds.y + (layout.bounds.height * 0.5),
+            ];
+            let radius = ((layout.bounds.width.min(layout.bounds.height) * 0.5) - 36.0).max(30.0);
+            let mut angle = -std::f32::consts::FRAC_PI_2;
+            for (index, slice) in pie.slices.iter().enumerate() {
+                let sweep = (slice.value.max(0.0) / total) * std::f32::consts::TAU;
+                pie_wedges.push(GpuPieWedge {
+                    center,
+                    radius,
+                    start_angle: angle,
+                    sweep_angle: sweep,
+                    fill: parse_paint_rgba(COLORS[index % COLORS.len()]).unwrap_or(DEFAULT_NODE_FILL_RGBA),
+                    stroke: DEFAULT_NODE_STROKE_RGBA,
+                    stroke_width: DEFAULT_NODE_STROKE_WIDTH,
+                    slice_index: u32::try_from(index).unwrap_or(u32::MAX),
+                });
+                angle += sweep;
+            }
+        }
+
         // TEXT (bd-2u0.2 component 3). One run per node label, matching the raster pass, which
         // issues exactly one fill_text per label — so the two are countable against each other.
         //
@@ -1522,6 +1576,22 @@ impl GpuRenderPlan {
         let cell_px = ((DEFAULT_GLYPH_CELL_PX as f32) * (max_font_px / DEFAULT_FONT_SIZE_PX))
             .ceil()
             .clamp(DEFAULT_GLYPH_CELL_PX as f32, 256.0) as u32;
+
+        let pie_labels: Vec<String> = ir.pie_meta.as_ref().map_or_else(Vec::new, |pie| {
+            let total = pie
+                .slices
+                .iter()
+                .map(|slice| f64::from(slice.value.max(0.0)))
+                .sum::<f64>()
+                .max(f64::EPSILON);
+            pie.slices
+                .iter()
+                .map(|slice| {
+                    let percent = (f64::from(slice.value.max(0.0)) / total) * 100.0;
+                    format!("{}: {percent:.1}%", slice.label)
+                })
+                .collect()
+        });
 
         let glyph_atlas =
             // ⚠️ CLUSTER TITLES AND EDGE LABELS MUST BE IN THE ATLAS OR THEY VANISH WITHOUT A TRACE. The quad loop
@@ -1633,7 +1703,8 @@ impl GpuRenderPlan {
                             .flat_map(|quad| quad.quadrant_labels.iter())
                             .map(String::as_str)
                             .filter(|label| !label.is_empty()),
-                    ),
+                    )
+                    .chain(pie_labels.iter().map(String::as_str)),
                 cell_px,
             );
         let mut text_quads: Vec<GpuTextQuad> = Vec::new();
@@ -1982,6 +2053,25 @@ impl GpuRenderPlan {
             }
         }
 
+        if let Some(pie) = ir.pie_meta.as_ref() {
+            for (index, wedge) in pie_wedges.iter().enumerate() {
+                let angle = wedge.start_angle + (wedge.sweep_angle * 0.5);
+                let label_radius = wedge.radius + 20.0;
+                sink.push_centred_with_font(
+                    pie_labels.get(index).map_or("", String::as_str),
+                    (
+                        wedge.center[0] + label_radius * angle.cos(),
+                        wedge.center[1] + label_radius * angle.sin(),
+                    ),
+                    STATE_NOTE_FONT_SIZE_PX,
+                    DEFAULT_LABEL_RGBA,
+                    GpuTextSource::PieSlice,
+                    index,
+                );
+            }
+            debug_assert_eq!(pie.slices.len(), pie_wedges.len());
+        }
+
         Self {
             bounds: layout.bounds,
             cluster_instances,
@@ -1999,6 +2089,7 @@ impl GpuRenderPlan {
             sequence_note_instances,
             edge_segments,
             arrowheads,
+            pie_wedges,
             node_instances,
             text_quads,
             text_runs,
@@ -3925,6 +4016,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pie_wedges_gpu_plan_matches_svg_backend_for_the_same_ir() {
+        let ir = fm_parser::parse(include_str!(
+            "../../fm-cli/tests/fixtures/frankentui_conformance/pie_chart.mmd"
+        ))
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let pie = ir.pie_meta.as_ref().expect("CONTROL FAILED: fixture produced no pie metadata");
+        assert!(!pie.slices.is_empty(), "CONTROL FAILED: fixture produced no pie slices");
+        let svg = fm_render_svg::render_svg_with_layout(
+            &ir,
+            &layout,
+            &fm_render_svg::SvgRenderConfig::default(),
+        );
+        assert!(svg.contains("fm-pie-slice"), "SVG golden omitted pie wedges:\n{svg}");
+        for slice in &pie.slices {
+            assert!(svg.contains(&slice.label), "SVG golden omitted {:?}:\n{svg}", slice.label);
+        }
+
+        let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
+        assert_eq!(plan.pie_wedges.len(), pie.slices.len());
+        let total = pie.slices.iter().map(|slice| slice.value.max(0.0)).sum::<f32>();
+        let expected_radius = ((layout.bounds.width.min(layout.bounds.height) * 0.5) - 36.0).max(30.0);
+        for (index, wedge) in plan.pie_wedges.iter().enumerate() {
+            assert_eq!(wedge.slice_index, index as u32);
+            assert!((wedge.radius - expected_radius).abs() < 0.01);
+            assert!((wedge.sweep_angle - pie.slices[index].value.max(0.0) / total * std::f32::consts::TAU).abs() < 0.01);
+            assert!(plan.text_runs.iter().any(|run| run.source == super::GpuTextSource::PieSlice && run.node_index == index as u32));
+        }
+    }
+
     /// A destroyed participant's cross reaches the plan as two segments (bd-adabx).
     ///
     /// First line source that is NOT an edge. The `edge_index` sentinel is asserted explicitly:
@@ -4174,6 +4296,7 @@ mod tests {
             "draw_axis_ticks",
             "draw_packet_field_continuations",
             "draw_quadrant_axis_labels",
+            "draw_pie_wedges",
             "draw_clusters",
             "draw_edges",
             "draw_nodes",
@@ -4193,7 +4316,6 @@ mod tests {
                  it as a plain rect instance would draw a solid border where the canvas draws a \
                  dashed one -- a wrong picture, not a missing one",
             ),
-            ("draw_pie_wedges", "bd-adabx: pie geometry"),
         ];
 
         let mut found = Vec::new();
