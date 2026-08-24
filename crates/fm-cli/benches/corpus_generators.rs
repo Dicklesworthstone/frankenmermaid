@@ -1,6 +1,6 @@
 //! Bench inputs that MIRROR the head-to-head corpus, byte for byte (bd-9cma).
 //!
-//! These three generators are the only ones in `pipeline_bench.rs` that claim to reproduce a
+//! These four generators are the only ones in `pipeline_bench.rs` that claim to reproduce a
 //! `scripts/headtohead/corpus.mjs` item. That claim used to be a doc comment and nothing else, and
 //! two of the three were false: `gen_dense_dag` laid out `TD` where the corpus lays out `LR`, with
 //! different node ids and an edge step of 5 where the corpus uses 4; `gen_cyclic_scc` had the right
@@ -93,6 +93,23 @@ pub fn gen_cyclic_scc(node_count: usize, ring: usize) -> String {
         if i + ring < node_count {
             lines.push(format!("  C{i}-->C{}", i + ring));
         }
+    }
+    lines.join("\n")
+}
+
+/// Mirrors `sequence(n)` in `corpus.mjs` — corpus id `sequence_20` when `n = 20`.
+///
+/// Each adjacent participant pair exchanges both a request and a response.  The response is
+/// necessary: a forward-only sequence has half the messages and does not exercise the same parser,
+/// sequence layout, or SVG edge work as the head-to-head corpus item.
+pub fn gen_sequence(participant_count: usize) -> String {
+    let mut lines = vec![String::from("sequenceDiagram")];
+    for index in 0..participant_count {
+        lines.push(format!("  participant P{index}"));
+    }
+    for index in 0..participant_count.saturating_sub(1) {
+        lines.push(format!("  P{index}->>P{}: request {index}", index + 1));
+        lines.push(format!("  P{}-->>P{index}: response {index}", index + 1));
     }
     lines.join("\n")
 }
