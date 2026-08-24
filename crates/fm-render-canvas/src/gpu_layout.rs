@@ -691,7 +691,9 @@ mod tests {
                 .attributes
                 .iter()
                 .find(|a| a.shader_location == *location)
-                .unwrap_or_else(|| panic!("no attribute holds @location({location}) for `{field}`"));
+                .unwrap_or_else(|| {
+                    panic!("no attribute holds @location({location}) for `{field}`")
+                });
             assert_eq!(
                 attribute.field, *field,
                 "@location({location}) describes `{}` where the shader reads `{field}`",
