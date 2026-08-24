@@ -38,13 +38,13 @@ use fm_parser::{
     apply_parse_lens_delete, apply_parse_lens_edit, apply_parse_lens_insert_line_after,
     build_parse_lens, detect_type_with_confidence, parse,
 };
+use fm_render_canvas::CanvasRenderConfig;
 #[cfg(target_arch = "wasm32")]
 use fm_render_canvas::render_to_canvas_with_layout;
 #[cfg(target_arch = "wasm32")]
 use fm_render_canvas::{
     Canvas2dContext, CanvasRenderResult, LineCap, LineJoin, TextAlign, TextBaseline, TextMetrics,
 };
-use fm_render_canvas::{CanvasRenderConfig, GpuRenderPlan};
 use fm_render_svg::{
     SvgRenderConfig, ThemeColors, ThemePreset, describe_diagram_with_layout, render_svg_with_layout,
 };
@@ -168,79 +168,6 @@ struct RuntimeConfig {
     svg: SvgRenderConfig,
     canvas: CanvasRenderConfig,
     pressure: MermaidWasmPressureSignals,
-}
-
-/// A browser-consumable description of the primitive sets prepared for WebGPU.
-///
-/// The device submission remains in `fm-render-canvas`: this boundary owns parsing, layout and
-/// canvas-context acquisition, while the device-pass owner owns buffer uploads and draw encoding.
-/// Returning counts and bounds lets a host reject an empty or mismatched plan before it creates GPU
-/// resources, without duplicating the renderer's primitive extraction in JavaScript.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WebGpuPlanSummary {
-    bounds: [f32; 4],
-    cluster_instances: usize,
-    edge_segments: usize,
-    arrowheads: usize,
-    node_instances: usize,
-    text_quads: usize,
-    text_runs: usize,
-}
-
-impl From<&GpuRenderPlan> for WebGpuPlanSummary {
-    fn from(plan: &GpuRenderPlan) -> Self {
-        Self {
-            bounds: [
-                plan.bounds.x,
-                plan.bounds.y,
-                plan.bounds.width,
-                plan.bounds.height,
-            ],
-            cluster_instances: plan.cluster_instances.len(),
-            edge_segments: plan.edge_segments.len(),
-            arrowheads: plan.arrowheads.len(),
-            node_instances: plan.node_instances.len(),
-            text_quads: plan.text_quads.len(),
-            text_runs: plan.text_runs.len(),
-        }
-    }
-}
-
-struct PlannedWebGpuDiagram {
-    #[cfg(test)]
-    ir: fm_core::MermaidDiagramIr,
-    plan: GpuRenderPlan,
-}
-
-fn build_webgpu_plan(input: &str, config: Option<JsValue>) -> Result<PlannedWebGpuDiagram, String> {
-    let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
-    let runtime = read_runtime_config();
-    let requested_theme = requested_theme_preset(&overrides)?;
-    let svg = merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref())?;
-    let canvas_base = requested_theme.map_or_else(
-        || runtime.canvas.clone(),
-        |preset| apply_canvas_theme_preset(runtime.canvas.clone(), preset),
-    );
-    let canvas = align_canvas_typography_with_svg(
-        merge_canvas_config(&canvas_base, &overrides.canvas),
-        &svg,
-    );
-    let parsed = parse(input);
-    let layout = fm_layout::layout_diagram_with_config(
-        &parsed.ir,
-        LayoutConfig {
-            font_metrics: Some(svg.font_metrics()),
-            ..Default::default()
-        },
-    );
-    let plan = GpuRenderPlan::from_layout(&parsed.ir, &layout, canvas.edge_stroke_width as f32);
-
-    Ok(PlannedWebGpuDiagram {
-        #[cfg(test)]
-        ir: parsed.ir,
-        plan,
-    })
 }
 
 impl Default for RuntimeConfig {
@@ -1355,38 +1282,6 @@ pub fn render_svg_js(input: &str, config: Option<JsValue>) -> Result<String, JsV
     Ok(svg)
 }
 
-/// Prepare the WebGPU primitive plan for a diagram.
-///
-/// This is the WASM-side half of the WebGPU renderer: it runs the same parse and typography-aware
-/// layout path as the SVG backend, then delegates primitive extraction to `fm-render-canvas`.
-/// Device creation, buffer uploads and draw submission stay with the WebGPU device pass so this API
-/// cannot grow a second renderer in JavaScript.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = planWebGpu))]
-pub fn plan_webgpu_js(input: &str, config: Option<JsValue>) -> Result<JsValue, JsValue> {
-    let planned = build_webgpu_plan(input, config).map_err(js_error)?;
-    to_js_value(&WebGpuPlanSummary::from(&planned.plan))
-}
-
-/// Acquire the browser's `GPUCanvasContext` for a canvas.
-///
-/// `web-sys` keeps the WebGPU DOM types behind unstable API flags, so this intentionally returns
-/// the context as `JsValue`. The owner of the device passes receives the browser-native context
-/// without a duplicate, unstable Rust binding layer.
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen(js_name = acquireWebGpuCanvasContext)]
-pub fn acquire_webgpu_canvas_context(
-    canvas: web_sys::HtmlCanvasElement,
-) -> Result<JsValue, JsValue> {
-    if !browser_supports_webgpu() {
-        return Err(js_error("WebGPU is unavailable in this browser"));
-    }
-    canvas
-        .get_context("webgpu")
-        .map_err(|error| js_error_with_value("failed to get WebGPU canvas context", error))?
-        .map(JsValue::from)
-        .ok_or_else(|| js_error("canvas WebGPU context is unavailable"))
-}
-
 /// Choose a render target from probed host capabilities (bd-2u0.6 item 3).
 ///
 /// JSON text in and out, exactly like [`worker_handle_message_js`], so the same call works from the
@@ -2101,10 +1996,10 @@ impl Diagram {
 mod tests {
     use super::{
         CanvasConfigOverrides, LayoutRuntimeSummary, PressureConfigOverrides, RuntimeConfig,
-        RuntimeInitConfig, SvgConfigOverrides, ThemePreset, WebGpuPlanSummary, WebRendererKind,
-        WorkerRenderAction, WorkerRenderCoordinator, WorkerRenderMessage, WorkerRenderRequest,
-        WorkerRenderResponse, align_canvas_typography_with_svg, apply_budget_svg_simplifications,
-        apply_canvas_theme_preset, build_webgpu_plan, canvas_font_size_px, collect_source_spans,
+        RuntimeInitConfig, SvgConfigOverrides, ThemePreset, WebRendererKind, WorkerRenderAction,
+        WorkerRenderCoordinator, WorkerRenderMessage, WorkerRenderRequest, WorkerRenderResponse,
+        align_canvas_typography_with_svg, apply_budget_svg_simplifications,
+        apply_canvas_theme_preset, canvas_font_size_px, collect_source_spans,
         handle_worker_message, hit_test_layout_edge, hit_test_layout_node, merge_canvas_config,
         merge_pressure_config, merge_renderer_kind, merge_svg_config, read_runtime_config, render,
         render_svg_js, render_worker_request, requested_theme_preset, resolve_renderer,
@@ -2124,13 +2019,6 @@ mod tests {
     };
     use fm_render_canvas::CanvasRenderConfig;
     use fm_render_svg::{SvgRenderConfig, describe_diagram_with_layout};
-
-    #[cfg(feature = "webgpu")]
-    use fm_render_canvas::gpu_device::{
-        GpuDevice, InstanceDraw, InstancePass, node_instance_bytes, render_instances,
-    };
-    #[cfg(feature = "webgpu")]
-    use fm_render_canvas::gpu_pipeline::node_pipeline;
 
     #[allow(dead_code)]
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3186,110 +3074,6 @@ mod tests {
             choose_canvas_target_result("not json").is_err(),
             "the wrapper accepted malformed capabilities instead of reporting them"
         );
-    }
-
-    /// The WASM WebGPU plan must keep the corpus node identity that SVG emits.
-    #[test]
-    fn webgpu_plan_for_corpus_flowchart_matches_svg_node_identity() {
-        let _serial = config_guard();
-        const FLOWCHART: &str =
-            include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/flowchart_basic.mmd");
-        let planned = build_webgpu_plan(FLOWCHART, None).expect("plan corpus flowchart");
-        let summary = WebGpuPlanSummary::from(&planned.plan);
-
-        assert!(
-            summary.node_instances > 0 && summary.edge_segments > 0 && summary.text_quads > 0,
-            "CONTROL FAILED: the corpus flowchart yielded an incomplete WebGPU plan"
-        );
-        let svg = fm_render_svg::render_svg(&planned.ir);
-        for node in &planned.ir.nodes {
-            assert!(
-                svg.contains(node.id.as_str()),
-                "SVG omitted node {:?}; it cannot serve as the reference arm",
-                node.id
-            );
-        }
-        assert_eq!(
-            summary.node_instances,
-            planned.ir.nodes.len(),
-            "WebGPU plan and SVG source disagree about the corpus node set"
-        );
-    }
-
-    /// The WASM WebGPU entrypoint must prepare primitives from the same corpus source that SVG
-    /// renders, then a real headless device must paint those node primitives.
-    ///
-    /// This is intentionally a geometry comparison rather than a pixel diff: SVG text shaping and
-    /// raster antialiasing are backend-specific, but a node missing from either plan is an outright
-    /// cross-backend correctness failure. The feature gate keeps default WASM consumers from
-    /// pulling in the optional device stack.
-    #[cfg(feature = "webgpu")]
-    #[test]
-    fn webgpu_plan_rasterises_the_corpus_flowchart_and_agrees_with_svg_nodes() {
-        const FLOWCHART: &str =
-            include_str!("../../fm-cli/tests/fixtures/frankentui_conformance/flowchart_basic.mmd");
-        let planned = build_webgpu_plan(FLOWCHART, None).expect("plan corpus flowchart");
-
-        assert!(
-            !planned.plan.node_instances.is_empty(),
-            "CONTROL FAILED: corpus flowchart produced no WebGPU node instances"
-        );
-        assert!(
-            !planned.plan.text_quads.is_empty(),
-            "CONTROL FAILED: corpus flowchart produced no WebGPU text primitives"
-        );
-
-        let svg = fm_render_svg::render_svg(&planned.ir);
-        for node in &planned.ir.nodes {
-            assert!(
-                svg.contains(node.id.as_str()),
-                "SVG omitted node {:?}; it cannot serve as the reference arm",
-                node.id
-            );
-        }
-        assert_eq!(
-            planned.plan.node_instances.len(),
-            planned.ir.nodes.len(),
-            "WebGPU plan and SVG source disagree about the corpus node set"
-        );
-
-        let gpu = GpuDevice::headless()
-            .unwrap_or_else(|error| panic!("headless WebGPU test requires an adapter: {error}"));
-        eprintln!(
-            "[gpu] adapter={:?} backend={:?}",
-            gpu.adapter_name(),
-            gpu.backend()
-        );
-
-        let pass = InstancePass::new(&gpu, &node_pipeline());
-        let bytes = node_instance_bytes(&planned.plan.node_instances);
-        let draw = InstanceDraw {
-            bounds: &planned.plan.bounds,
-            instance_bytes: &bytes,
-            instance_count: u32::try_from(planned.plan.node_instances.len())
-                .expect("corpus node count fits u32"),
-            atlas: None,
-        };
-        let image = render_instances(&gpu, &pass, &draw, 512, 512).expect("rasterise nodes");
-        assert!(
-            image
-                .rgba
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .any(|pixel| pixel[3] > 0),
-            "WebGPU rendered a fully transparent image"
-        );
-        for instance in &planned.plan.node_instances {
-            let [node_x, node_y] = instance.center;
-            let (x, y) = image.pixel_for(&planned.plan.bounds, node_x, node_y);
-            let pixel = image.pixel(x, y).expect("node centre maps into the target");
-            assert!(
-                pixel[3] > 0,
-                "WebGPU omitted node {} at pixel ({x}, {y})",
-                instance.node_index
-            );
-        }
     }
 
     /// CROSS-TARGET DETERMINISM: x86_64 must render byte-identically to wasm32 (bd-1s1g.6).

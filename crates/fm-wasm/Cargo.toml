@@ -17,9 +17,6 @@ crate-type = ["cdylib", "rlib"]
 default = []
 fnx-integration = ["fm-layout/fnx-integration"]
 fnx-experimental-directed = ["fm-layout/fnx-experimental-directed"]
-# Keep the browser-facing WebGPU planning entrypoint separate from the optional device layer. The
-# latter is forwarded only when a caller explicitly asks for the headless/device tests.
-webgpu = ["fm-render-canvas/webgpu"]
 
 [dependencies]
 fm-core.workspace = true

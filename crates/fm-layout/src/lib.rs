@@ -837,6 +837,12 @@ pub struct LayoutConfig {
     pub font_metrics: Option<fm_core::FontMetrics>,
     /// Enable FNX-assisted ordering heuristics when available.
     pub fnx_enabled: bool,
+    /// Solve a bounded flowchart layer assignment as a continuous LP after the heuristic pass.
+    ///
+    /// This is opt-in because the incumbent rank assignment is already deterministic and linear.
+    /// The LP path is deliberately restricted to small, constraint-free flowcharts until it has
+    /// accumulated corpus evidence on broader inputs.
+    pub lp_relaxation_layers: bool,
     pub constraint_solver: ConstraintSolverMode,
     /// Wall-clock ceiling for the LP solve, in milliseconds, as a **liveness valve only** (bd-9xwk).
     ///
@@ -872,6 +878,7 @@ impl Default for LayoutConfig {
             edge_routing: EdgeRouting::default(),
             font_metrics: None,
             fnx_enabled: true,
+            lp_relaxation_layers: false,
             constraint_solver: ConstraintSolverMode::Optimize,
             constraint_solver_wall_clock_valve_ms: CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS,
         }
@@ -4779,6 +4786,14 @@ fn layout_diagram_sugiyama_traced_with_config(
     };
 
     let mut ranks = rank_assignment(ir, &cycle_result, &node_priority);
+    if config.lp_relaxation_layers
+        && ir.diagram_type == DiagramType::Flowchart
+        && ir.nodes.len() <= LP_RELAXATION_LAYER_NODE_LIMIT
+        && ir.constraints.is_empty()
+        && let Some(relaxed_ranks) = lp_relaxation_layer_assignment(ir, &cycle_result, &ranks)
+    {
+        ranks = relaxed_ranks;
+    }
     apply_ir_constraints(ir, &mut ranks);
     push_snapshot(
         &mut trace,
@@ -11825,6 +11840,87 @@ fn rank_assignment(
     (0..node_count).map(|index| (index, ranks[index])).collect()
 }
 
+/// The largest graph admitted to the optional LP layer-assignment pass.
+///
+/// Layer inequalities form a totally-unimodular system, so an optimal basic solution is integral.
+/// Keeping this initial path bounded makes its solver cost and failure mode explicit while the
+/// default Sugiyama rank pass remains the production default.
+const LP_RELAXATION_LAYER_NODE_LIMIT: usize = 50;
+
+/// Re-solve the existing flowchart layer inequalities as a continuous LP.
+///
+/// The heuristic rank bands anchor each weak component, preserving its deliberate disconnected
+/// component packing. Within each component the LP minimizes total layer index subject to one
+/// layer per oriented edge, yielding the canonical longest-path layering when HiGHS proves optimal.
+/// Any non-optimal, non-integral, or failed result is rejected by returning `None`.
+#[cfg(not(target_arch = "wasm32"))]
+fn lp_relaxation_layer_assignment(
+    ir: &MermaidDiagramIr,
+    cycles: &CycleRemovalResult,
+    fallback: &BTreeMap<usize, usize>,
+) -> Option<BTreeMap<usize, usize>> {
+    if ir.nodes.len() > LP_RELAXATION_LAYER_NODE_LIMIT {
+        return None;
+    }
+
+    let edges = oriented_edges(ir, &cycles.reversed_edge_indexes);
+    let mut variables = good_lp::ProblemVariables::new();
+    let rank_vars: Vec<_> = ir
+        .nodes
+        .iter()
+        .map(|_| variables.add(variable().min(0.0)))
+        .collect();
+    let objective = rank_vars
+        .iter()
+        .fold(Expression::from(0.0), |sum, rank| sum + *rank);
+    let mut model = variables.minimise(objective).using(default_solver);
+
+    for edge in &edges {
+        if edge.source != edge.target {
+            model = model.with(constraint!(
+                rank_vars[edge.target] - rank_vars[edge.source] >= 1.0
+            ));
+        }
+    }
+
+    for component in weakly_connected_components(ir.nodes.len(), &edges) {
+        let minimum_rank = component
+            .iter()
+            .filter_map(|node_index| fallback.get(node_index).copied())
+            .min()?;
+        for node_index in component {
+            if fallback.get(&node_index).copied() == Some(minimum_rank) {
+                model = model.with(constraint!(rank_vars[node_index] == minimum_rank as f64));
+            }
+        }
+    }
+
+    let solution = model.solve().ok()?;
+    if !constraint_solution_is_usable(solution.status()) {
+        return None;
+    }
+
+    ir.nodes
+        .iter()
+        .enumerate()
+        .map(|(node_index, _)| {
+            let value = solution.value(rank_vars[node_index]);
+            let rounded = value.round();
+            ((value - rounded).abs() <= 1e-6 && rounded >= 0.0)
+                .then_some((node_index, rounded as usize))
+        })
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn lp_relaxation_layer_assignment(
+    _ir: &MermaidDiagramIr,
+    _cycles: &CycleRemovalResult,
+    _fallback: &BTreeMap<usize, usize>,
+) -> Option<BTreeMap<usize, usize>> {
+    None
+}
+
 fn weakly_connected_components(node_count: usize, edges: &[OrientedEdge]) -> Vec<Vec<usize>> {
     if node_count == 0 {
         return Vec::new();
@@ -17749,6 +17845,7 @@ mod tests {
         MermaidDiagramIr, MermaidPressureReport, MermaidPressureTier, MermaidSourceMapKind,
         NodeShape, Span,
     };
+    use fm_parser::parse;
     use good_lp::SolutionStatus;
     use proptest::prelude::*;
     use std::cell::RefCell;
@@ -24430,6 +24527,208 @@ mod tests {
             });
         }
         ir
+    }
+
+    #[test]
+    fn lp_relaxation_layers_keep_oriented_edges_in_later_layers() {
+        let ir = graph_ir(
+            DiagramType::Flowchart,
+            6,
+            &[(0, 2), (1, 2), (2, 3), (2, 4), (4, 5)],
+        );
+        let priorities = super::stable_node_priorities(&ir);
+        let cycles = super::cycle_removal(&ir, CycleStrategy::default(), &priorities);
+        let fallback = super::rank_assignment(&ir, &cycles, &priorities);
+        let relaxed = super::lp_relaxation_layer_assignment(&ir, &cycles, &fallback)
+            .expect("the bounded flowchart LP must have an optimal integral layer assignment");
+
+        for edge in super::oriented_edges(&ir, &cycles.reversed_edge_indexes) {
+            assert!(
+                relaxed[&edge.target] >= relaxed[&edge.source] + 1,
+                "LP assigned edge {} -> {} to non-increasing layers: {} -> {}",
+                edge.source,
+                edge.target,
+                relaxed[&edge.source],
+                relaxed[&edge.target],
+            );
+        }
+    }
+
+    #[test]
+    fn lp_relaxation_layers_rejects_graphs_above_its_explicit_limit() {
+        let ir = graph_ir(DiagramType::Flowchart, 51, &[]);
+        let priorities = super::stable_node_priorities(&ir);
+        let cycles = super::cycle_removal(&ir, CycleStrategy::default(), &priorities);
+        let fallback = super::rank_assignment(&ir, &cycles, &priorities);
+        assert!(super::lp_relaxation_layer_assignment(&ir, &cycles, &fallback).is_none());
+    }
+
+    #[test]
+    fn lp_relaxation_layers_do_not_regress_crossings_on_small_flowchart_corpus() {
+        const CORPUS: [(&str, &str); 20] = [
+            (
+                "fuzz-0e1a2c",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/0e1a2c27f25c0b028735434671048683050759e0"
+                ),
+            ),
+            (
+                "fuzz-110c66",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/110c6613f1e16f27834f7d55df3c4d3460d3bc59"
+                ),
+            ),
+            (
+                "fuzz-191c83",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/191c83add1b3108e027db28c0913f4f526bbff44"
+                ),
+            ),
+            (
+                "fuzz-1cc1f8",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/1cc1f8f108876de4f120c996ac9317ef668e4bbc"
+                ),
+            ),
+            (
+                "fuzz-1e32da",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/1e32dac753223ef3b84129095f39056026206557"
+                ),
+            ),
+            (
+                "fuzz-1f7f9c",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/1f7f9c4195789fdd37c048ed0b59a91051b293eb"
+                ),
+            ),
+            (
+                "fuzz-39140b",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/39140bc5e646592783419731a90208d525a7ac1f"
+                ),
+            ),
+            (
+                "fuzz-3e8099",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/3e80991d33351142a86855eee1301e56d8a8e84f"
+                ),
+            ),
+            (
+                "fuzz-435e98",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/435e9835abb9c5a425032a6d241458691dbe7f8a"
+                ),
+            ),
+            (
+                "fuzz-47682a",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/47682ac8d9093d45adf4cb0aebb7efc12b1c8df1"
+                ),
+            ),
+            (
+                "fuzz-50cc47",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/50cc47ec2da8621e94ec1fcadc2abbdf05dd2efc"
+                ),
+            ),
+            (
+                "fuzz-56ce2b",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/56ce2bcc387742bdad9df6f5fe96b59b9ffd7c5f"
+                ),
+            ),
+            (
+                "fuzz-716625",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/716625595ef42866ad580491d81b308a85b1951f"
+                ),
+            ),
+            (
+                "fuzz-7abb5b",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/7abb5bfc4b7dd7302992819c581afe4ed87b5d4e"
+                ),
+            ),
+            (
+                "fuzz-865568",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/865568772ebb6df86ac5375b3dee8c84051ae4d7"
+                ),
+            ),
+            (
+                "fuzz-8b74bb",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/8b74bb6685dff9a68353d50285d01d9753163b70"
+                ),
+            ),
+            (
+                "fuzz-933f7c",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/933f7c14be3bcc36cd7ee2a06e1428e11aa754d8"
+                ),
+            ),
+            (
+                "fuzz-958f12",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/958f12bbf57ba15a7188020a5f3470fedea4a495"
+                ),
+            ),
+            (
+                "fuzz-972ce8",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/972ce88b4bff115a6286fb1bf8adc0504c03d688"
+                ),
+            ),
+            (
+                "fuzz-a2809f",
+                include_str!(
+                    "../../../fuzz/corpus/fuzz_parse/a2809f24a1068fc2d6ec9d72dc3bfd2f04c1f8b5"
+                ),
+            ),
+        ];
+
+        assert!(
+            !LayoutConfig::default().lp_relaxation_layers,
+            "the LP layer assignment must stay opt-in until broader corpus evidence exists"
+        );
+        let mut reports = Vec::with_capacity(CORPUS.len());
+        for (case_id, source) in CORPUS {
+            let ir = parse(source).ir;
+            assert_eq!(
+                ir.diagram_type,
+                DiagramType::Flowchart,
+                "{case_id}: not a flowchart"
+            );
+            assert!(
+                ir.nodes.len() <= super::LP_RELAXATION_LAYER_NODE_LIMIT,
+                "{case_id}: corpus input has {} nodes, above LP limit",
+                ir.nodes.len(),
+            );
+
+            let baseline = layout_diagram(&ir);
+            let lp_relaxed = layout_diagram_with_config(
+                &ir,
+                LayoutConfig {
+                    lp_relaxation_layers: true,
+                    ..LayoutConfig::default()
+                },
+            );
+            reports.push(format!(
+                "{case_id}: {} -> {}",
+                baseline.stats.crossing_count, lp_relaxed.stats.crossing_count
+            ));
+            assert!(
+                lp_relaxed.stats.crossing_count <= baseline.stats.crossing_count,
+                "{case_id}: LP layer relaxation regressed crossings: baseline={}, lp={}",
+                baseline.stats.crossing_count,
+                lp_relaxed.stats.crossing_count,
+            );
+        }
+        println!(
+            "LP layer crossing counts (baseline -> LP):\\n{}",
+            reports.join("\\n")
+        );
     }
 
     /// A two-state diagram with `note <position> of <target> : <text>` on it.

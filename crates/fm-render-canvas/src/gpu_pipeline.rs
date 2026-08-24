@@ -411,17 +411,6 @@ pub const fn pipelines() -> [PipelineDescriptor; 4] {
     ]
 }
 
-/// Width of a text run at `font_px`, in layout units.
-///
-/// Re-exported here because this module is the crate's device-free surface and a caller sizing a
-/// text pass needs the width without reaching into the plan builder. It is `gpu_plan`'s function,
-/// not a second implementation — the whole point of bd-2u0.2's advance work is that there is exactly
-/// one text-width model, shared with `fm-layout`.
-#[must_use]
-pub fn run_advance_for(text: &str, font_px: f32) -> f32 {
-    crate::gpu_plan::run_advance(text, font_px)
-}
-
 /// One instanced draw call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DrawBatch {
