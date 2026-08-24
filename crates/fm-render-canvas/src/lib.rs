@@ -18,6 +18,10 @@
 mod context;
 mod gpu_layout;
 mod gpu_plan;
+/// The wgpu device layer (bd-2u0.2). Behind the `webgpu` feature so the Canvas2D path — and the
+/// size-optimised WASM bundle this crate ships in — never pays for a GPU backend it does not use.
+#[cfg(feature = "webgpu")]
+pub mod gpu_device;
 pub mod gpu_pipeline;
 mod renderer;
 mod shapes;
