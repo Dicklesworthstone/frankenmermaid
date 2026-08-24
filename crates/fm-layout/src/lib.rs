@@ -2897,6 +2897,15 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
                     }
                     fm_core::ArrowType::Circle => marker_end = MarkerKind::Circle,
                     fm_core::ArrowType::Cross => marker_end = MarkerKind::Cross,
+                    // `o--o` / `x--x` mark BOTH ends (bd-zdpwd), exactly as `<-->` does below.
+                    fm_core::ArrowType::CircleBoth => {
+                        marker_start = MarkerKind::Circle;
+                        marker_end = MarkerKind::Circle;
+                    }
+                    fm_core::ArrowType::CrossBoth => {
+                        marker_start = MarkerKind::Cross;
+                        marker_end = MarkerKind::Cross;
+                    }
                     fm_core::ArrowType::ThickLine => {
                         stroke.width = 2.5;
                         marker_end = MarkerKind::None;

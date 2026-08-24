@@ -20,7 +20,7 @@ use crate::{
     is_sankey_header, matches_keyword_header, normalize_identifier,
 };
 
-const FLOW_OPERATORS: [(&str, ArrowType); 14] = [
+const FLOW_OPERATORS: [(&str, ArrowType); 26] = [
     ("-.->", ArrowType::DottedArrow),
     ("<-.->", ArrowType::DoubleDottedArrow),
     ("-.-", ArrowType::DottedLine),
@@ -29,6 +29,27 @@ const FLOW_OPERATORS: [(&str, ArrowType); 14] = [
     ("-->", ArrowType::Arrow),
     ("<-->", ArrowType::DoubleArrow),
     ("---", ArrowType::Line),
+    // ⚠️ LEADING-MARKER LINKS (bd-zdpwd). mermaid's flowchart arrow is `[xo<]?--+[-xo>]`, so an `o`
+    // or `x` BEFORE the dashes is part of the link, not of the node. None of these forms was in this
+    // table, so `--o` matched inside `o--o` and left `A o` as the source — normalized into the
+    // phantom node `A_o`. `A o--o B` plus `A --> C` drew FOUR nodes, splitting the author's `A` in
+    // two. This is bd-92b6 exactly, which CLASS_OPERATORS below already fixed for `o--`/`*--`; the
+    // flowchart table never got the same treatment.
+    //
+    // ORDER, as for `--o`/`--x` above: each longer form must precede the shorter one it contains, or
+    // the short one matches first and swallows the trailing marker byte back into the endpoint.
+    ("o--o", ArrowType::CircleBoth),
+    ("o--x", ArrowType::Cross),
+    ("o-->", ArrowType::Arrow),
+    ("o==o", ArrowType::CircleBoth),
+    ("o==>", ArrowType::ThickArrow),
+    ("x--x", ArrowType::CrossBoth),
+    ("x--o", ArrowType::Circle),
+    ("x-->", ArrowType::Arrow),
+    ("x==x", ArrowType::CrossBoth),
+    ("x==>", ArrowType::ThickArrow),
+    ("o--", ArrowType::Line),
+    ("x--", ArrowType::Line),
     ("--o", ArrowType::Circle),
     ("--x", ArrowType::Cross),
     ("--", ArrowType::Line),
@@ -10924,6 +10945,20 @@ fn find_operator_core<'a>(
         let tail = &statement[idx..];
         for (operator, arrow) in operators {
             if tail.starts_with(operator) {
+                // ⚠️ A LEADING `o`/`x` IS AN OPERATOR ONLY AT A TOKEN BOUNDARY (bd-zdpwd).
+                //
+                // mermaid's arrow regex begins `\s*[xo<]?`, so the marker must follow whitespace.
+                // Without this, adding `o--o` to the table would break `Foo--o Bar`: the second `o`
+                // of `Foo` starts a perfect `o--o` match, splitting the node into `Fo`. The guard
+                // covers CLASS_OPERATORS' `o--` too, where the same hazard has always existed for an
+                // id ending in `o` — `Foo-- Bar` matched `o--` at that same byte.
+                //
+                // `<` needs no guard: it cannot appear inside an identifier.
+                let leading_marker = matches!(operator.as_bytes().first(), Some(b'o' | b'x'));
+                if leading_marker && idx > 0 && !statement.as_bytes()[idx - 1].is_ascii_whitespace()
+                {
+                    continue;
+                }
                 // A longer run reclassifies the match; see `extend_operator_run` (bd-6s6sx). The
                 // token returned then borrows the STATEMENT rather than the table, which is why
                 // `statement` is bound to `'a`.

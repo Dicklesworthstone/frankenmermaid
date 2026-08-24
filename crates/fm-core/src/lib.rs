@@ -1147,6 +1147,14 @@ pub enum ArrowType {
     DoubleArrow,
     DoubleThickArrow,
     DoubleDottedArrow,
+    /// Flowchart `o--o`: a circle on BOTH ends (bd-zdpwd).
+    ///
+    /// Distinct from [`Self::Circle`] (`--o`, end only) for the same reason [`Self::DoubleArrow`] is
+    /// distinct from [`Self::Arrow`]: which ends carry a marker is the whole meaning of the edge, and
+    /// collapsing the two spellings onto one variant loses it before any renderer can see it.
+    CircleBoth,
+    /// Flowchart `x--x`: a cross on BOTH ends (bd-zdpwd).
+    CrossBoth,
     /// UML aggregation (`o--`): hollow diamond on the owning end. The diamond marks the *source*,
     /// so `AggregationReverse` is a distinct variant rather than a rendering flag.
     Aggregation,
@@ -1198,6 +1206,8 @@ impl ArrowType {
             Self::DoubleArrow => "<-->",
             Self::DoubleThickArrow => "<==>",
             Self::DoubleDottedArrow => "<-.->",
+            Self::CircleBoth => "o--o",
+            Self::CrossBoth => "x--x",
             Self::Aggregation => "o--",
             Self::AggregationReverse => "--o",
             Self::Composition => "*--",

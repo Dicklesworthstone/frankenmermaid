@@ -112,9 +112,12 @@ fn compact_label_width(line: &str) -> usize {
 const fn edge_marker_ends(arrow: ArrowType) -> (bool, bool) {
     match arrow {
         ArrowType::Line | ArrowType::ThickLine | ArrowType::DottedLine => (false, false),
-        ArrowType::DoubleArrow | ArrowType::DoubleThickArrow | ArrowType::DoubleDottedArrow => {
-            (true, true)
-        }
+        ArrowType::DoubleArrow
+        | ArrowType::DoubleThickArrow
+        | ArrowType::DoubleDottedArrow
+        // `o--o` / `x--x` are double-ended too (bd-zdpwd).
+        | ArrowType::CircleBoth
+        | ArrowType::CrossBoth => (true, true),
         ArrowType::HalfArrowTopReverse
         | ArrowType::HalfArrowBottomReverse
         | ArrowType::StickArrowTopReverse
