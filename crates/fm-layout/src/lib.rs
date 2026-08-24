@@ -295,40 +295,53 @@ impl LayoutDependencyGraph {
         let fragment_components = connectivity_fragments(ir.nodes.len(), &edges, &covered_nodes);
         let mut node_to_fragment = BTreeMap::new();
         for component in fragment_components {
-            let region_id = SubgraphRegionId(next_region_index);
-            next_region_index = next_region_index.saturating_add(1);
+            let is_oversized_flat_component = component.len() > FLAT_COMPONENT_REGION_NODE_CAP;
+            for members in component.chunks(FLAT_COMPONENT_REGION_NODE_CAP) {
+                let region_id = SubgraphRegionId(next_region_index);
+                next_region_index = next_region_index.saturating_add(1);
 
-            let node_indexes: BTreeSet<_> = component.into_iter().collect();
-            for node_index in &node_indexes {
-                node_to_fragment.insert(*node_index, region_id);
+                let node_indexes: BTreeSet<_> = members.iter().copied().collect();
+                for node_index in &node_indexes {
+                    node_to_fragment.insert(*node_index, region_id);
+                }
+                let edge_indexes = edges
+                    .iter()
+                    .filter(|edge| {
+                        node_indexes.contains(&edge.source) && node_indexes.contains(&edge.target)
+                    })
+                    .map(|edge| edge.edge_index)
+                    .collect();
+                let inputs = node_indexes
+                    .iter()
+                    .copied()
+                    .map(RegionInput::Node)
+                    .collect::<BTreeSet<_>>();
+                let kind = if is_oversized_flat_component {
+                    SubgraphRegionKind::SpatialPartition
+                } else {
+                    SubgraphRegionKind::ConnectivityFragment
+                };
+                let label = if is_oversized_flat_component {
+                    format!("flat-window:{}", region_id.0)
+                } else {
+                    format!("component:{}", region_id.0)
+                };
+                regions.insert(
+                    region_id,
+                    SubgraphRegion {
+                        id: region_id,
+                        kind,
+                        label,
+                        node_indexes,
+                        edge_indexes,
+                        subgraph_indexes: BTreeSet::new(),
+                        depends_on: BTreeSet::new(),
+                        dependents: BTreeSet::new(),
+                        inputs,
+                        estimated_bytes: 0,
+                    },
+                );
             }
-            let edge_indexes = edges
-                .iter()
-                .filter(|edge| {
-                    node_indexes.contains(&edge.source) && node_indexes.contains(&edge.target)
-                })
-                .map(|edge| edge.edge_index)
-                .collect();
-            let inputs = node_indexes
-                .iter()
-                .copied()
-                .map(RegionInput::Node)
-                .collect::<BTreeSet<_>>();
-            regions.insert(
-                region_id,
-                SubgraphRegion {
-                    id: region_id,
-                    kind: SubgraphRegionKind::ConnectivityFragment,
-                    label: format!("component:{region_id_index}", region_id_index = region_id.0),
-                    node_indexes,
-                    edge_indexes,
-                    subgraph_indexes: BTreeSet::new(),
-                    depends_on: BTreeSet::new(),
-                    dependents: BTreeSet::new(),
-                    inputs,
-                    estimated_bytes: 0,
-                },
-            );
         }
 
         let primary_regions = primary_region_owners(ir, &explicit_region_ids, &node_to_fragment);
@@ -1437,6 +1450,10 @@ fn metrics_topology_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramI
 }
 
 const INCREMENTAL_DEPENDENCY_GRAPH_BYPASS_NODE_THRESHOLD: usize = 50;
+/// The largest flat connectivity fragment that remains one invalidation region. Larger connected
+/// flowcharts carry no semantic subgraph boundary, so deterministic input-order windows provide
+/// the bounded fallback that keeps a local edit from invalidating the entire document.
+const FLAT_COMPONENT_REGION_NODE_CAP: usize = 64;
 
 fn track_dependency_graph_query(ir: &MermaidDiagramIr) {
     ACTIVE_INCREMENTAL_STATE.with(|slot| {
@@ -25675,6 +25692,95 @@ mod tests {
         let first = node_bounds(&layout, "N0");
         let second = node_bounds(&layout, "N1");
         assert!((first.y - second.y).abs() < 1.0);
+    }
+
+    #[test]
+    fn constraint_solver_mip_separates_overlapping_rectangles() {
+        let mut ir = labeled_graph_ir(2, &[]);
+        ir.constraints.push(IrConstraint::NonOverlap {
+            node_ids: vec!["N0".to_string(), "N1".to_string()],
+            gap: 12.0,
+            span: Span::default(),
+        });
+        let make_nodes = || {
+            vec![
+                LayoutNodeBox {
+                    node_index: 0,
+                    node_id: "N0".to_string(),
+                    rank: 0,
+                    order: 0,
+                    span: Span::default(),
+                    bounds: LayoutRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 80.0,
+                        height: 40.0,
+                    },
+                },
+                LayoutNodeBox {
+                    node_index: 1,
+                    node_id: "N1".to_string(),
+                    rank: 1,
+                    order: 0,
+                    span: Span::default(),
+                    bounds: LayoutRect {
+                        x: 10.0,
+                        y: 0.0,
+                        width: 80.0,
+                        height: 40.0,
+                    },
+                },
+            ]
+        };
+
+        let mut without_constraint = make_nodes();
+        let mut no_constraint_ir = ir.clone();
+        no_constraint_ir.constraints.clear();
+        assert_eq!(
+            solve_constraint_coordinates(
+                &no_constraint_ir,
+                &mut without_constraint,
+                LayoutSpacing::default(),
+                CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS,
+            ),
+            Ok(0),
+            "control: the fixture must begin overlapping without a MIP row"
+        );
+        let initial_horizontal_gap = (without_constraint[1].bounds.x
+            - (without_constraint[0].bounds.x + without_constraint[0].bounds.width))
+            .max(
+                without_constraint[0].bounds.x
+                    - (without_constraint[1].bounds.x + without_constraint[1].bounds.width),
+            );
+        let initial_vertical_gap = (without_constraint[1].bounds.y
+            - (without_constraint[0].bounds.y + without_constraint[0].bounds.height))
+            .max(
+                without_constraint[0].bounds.y
+                    - (without_constraint[1].bounds.y + without_constraint[1].bounds.height),
+            );
+        assert!(
+            initial_horizontal_gap < 0.0 && initial_vertical_gap < 0.0,
+            "control failed: the initial rectangles are already disjoint"
+        );
+
+        let mut nodes = make_nodes();
+        assert_eq!(
+            solve_constraint_coordinates(
+                &ir,
+                &mut nodes,
+                LayoutSpacing::default(),
+                CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS,
+            ),
+            Ok(1)
+        );
+        let horizontal_gap = (nodes[1].bounds.x - (nodes[0].bounds.x + nodes[0].bounds.width))
+            .max(nodes[0].bounds.x - (nodes[1].bounds.x + nodes[1].bounds.width));
+        let vertical_gap = (nodes[1].bounds.y - (nodes[0].bounds.y + nodes[0].bounds.height))
+            .max(nodes[0].bounds.y - (nodes[1].bounds.y + nodes[1].bounds.height));
+        assert!(
+            horizontal_gap >= 12.0 - 0.01 || vertical_gap >= 12.0 - 0.01,
+            "MIP did not separate the rectangles by the requested gap: {nodes:?}"
+        );
     }
 
     #[test]
