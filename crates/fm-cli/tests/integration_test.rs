@@ -2584,15 +2584,58 @@ fn e2e_pipeline_class() {
 /// Asserts the label lands on the EDGE and the node keeps a clean id, because node and edge COUNTS
 /// are correct in the plain case and in two of the three corrupting forms: a count-only check passes
 /// while the label sits in the wrong place entirely.
+/// WIDENED TO THE WHOLE CORPUS VOCABULARY, not just the forms that were caught failing. The five
+/// bad labels below were found by a full ci_docs equivalence run, so the test that pinned only
+/// those five could pass while a SIXTH label in the same generator still corrupted the parse — the
+/// gate would then have to be re-run at corpus scale to notice. `LABEL_WORDS` is the complete pick
+/// list `docState` draws from in `scripts/headtohead/corpus.mjs:227`, and every entry appears here
+/// verbatim, so any label the CI corpus can put after a `:` is decided by this test at unit speed.
+///
+/// The non-ASCII and apostrophe entries were never implicated: they are here because "the corpus
+/// cannot produce a label this test has not tried" is the property worth pinning, and a set that
+/// silently omits the members nobody suspected is exactly how the first five got to corpus scale.
 #[test]
 fn state_transition_labels_attach_to_the_edge_not_the_node() {
+    // Verbatim `LABEL_WORDS` from scripts/headtohead/corpus.mjs:227-234. Keep in sync with it: a
+    // label the generator can emit and this array cannot is a hole in the gate, not a nicety.
     let labels = [
         "plain label",
+        // The five forms the ci_docs_2000/5000 equivalence run proved divergent (bd-yq3k).
         "Retry & backoff",  // top-level `&` read as a parallel endpoint list
         "Parse <config>",   // `<` `>` read as asymmetric node delimiters
         "Rate limit (429)", // `(` `)` read as a rounded node delimiter
         "Diff & merge",
         "Sign & upload",
+        // The rest of the generator's vocabulary, none of it previously exercised here.
+        "User",
+        "Client",
+        "API Gateway",
+        "Auth Service",
+        "Session Store",
+        "Database",
+        "Read Replica",
+        "Cache",
+        "Message Queue",
+        "Worker",
+        "Scheduler",
+        "Load Balancer",
+        "CDN",
+        "Object Store",
+        "Validate input",
+        "Normalize payload",
+        "Check permissions",
+        "Emit audit event",
+        "Persist record",
+        "Fan out",
+        "Aggregate results",
+        "Render response",
+        "Rollback on failure",
+        "Café latency",
+        "naïve retry",
+        "Ingestion",
+        "Überprüfung",
+        "Résumé job",
+        "User's session",
     ];
 
     for label in labels {
@@ -2639,6 +2682,71 @@ fn state_transition_labels_attach_to_the_edge_not_the_node() {
             }
         }
     }
+}
+
+/// bd-yq3k: a VERBATIM `ci_docs_2000` state diagram, not a hand-written approximation of one.
+///
+/// The synthesized cases above vary one label at a time against a fixed two-state skeleton. That
+/// shape cannot show what the corpus run actually measured, because the corpus emits a CHAIN whose
+/// transitions carry different labels — and the original defect dropped each affected transition
+/// while recovery invented a phantom node, so a clean label following a corrupting one is exactly
+/// where an off-by-one in the recovery path would land.
+///
+/// This document is the shortest of the 105 divergent state diagrams in `ci_docs_2000`, obtained by
+/// generating the pinned corpus (seed 20260729) and taking the smallest state diagram whose
+/// transition label carries `&`, `<`, `>`, `(` or `)`. Independently reproducing the bead's census:
+/// the job holds 169 state diagrams, of which exactly 105 carry such a label — the same 105/169 the
+/// cross-engine run reported divergent, which is what ties this fixture to that measurement rather
+/// than to a plausible-looking guess.
+#[test]
+fn a_verbatim_divergent_ci_docs_state_diagram_parses_with_clean_nodes_and_labelled_edges() {
+    let source = "stateDiagram-v2\n  [*] --> S0\n  S0 --> S1: Sign & upload\n  S1 --> S2: CDN\n  S2 --> [*]\n";
+    let result = parse(source);
+    assert_eq!(result.ir.diagram_type, DiagramType::State);
+
+    let ids: Vec<&str> = result
+        .ir
+        .nodes
+        .iter()
+        .map(|n| n.id.as_str())
+        .filter(|id| !id.starts_with("__state_"))
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["S0", "S1", "S2"],
+        "node ids {ids:?}: a phantom endpoint means the `&` label was read as a parallel endpoint \
+         list again (bd-yq3k)"
+    );
+
+    let labelled: Vec<&str> = result
+        .ir
+        .edges
+        .iter()
+        .filter_map(|e| e.label)
+        .filter_map(|id| result.ir.labels.get(id.0))
+        .map(|l| l.text.as_str())
+        .collect();
+
+    // BOTH, and this is the point of using a chain: the corrupting label must survive AND the plain
+    // label that follows it must not be displaced by the recovery the corrupting one used to trigger.
+    assert!(
+        labelled.contains(&"Sign & upload"),
+        "the `&` transition label was lost; edge labels were {labelled:?} (bd-yq3k)"
+    );
+    assert!(
+        labelled.contains(&"CDN"),
+        "the transition AFTER the `&` label lost its own label; edge labels were {labelled:?} \
+         (bd-yq3k)"
+    );
+
+    // The chain must still be a chain. The original defect dropped affected transitions outright,
+    // which a label-only assertion cannot see.
+    assert_eq!(
+        result.ir.edges.len(),
+        4,
+        "expected [*]->S0, S0->S1, S1->S2, S2->[*]; a different count means a transition was \
+         dropped or invented (bd-yq3k)"
+    );
 }
 
 /// bd-92b6: `o--` and `*--` were absent from `CLASS_OPERATORS`, so the operator scan matched the

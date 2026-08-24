@@ -79,6 +79,15 @@ function classDiagram(n) {
   return lines.join('\n');
 }
 
+function classEdgeId() {
+  return [
+    'flowchart LR',
+    '  Animal e1@--> Dog',
+    '  classDef alert stroke:#ff0000,stroke-width:4px',
+    '  class e1 alert',
+  ].join('\n');
+}
+
 function stateDiagram(n) {
   const lines = ['stateDiagram-v2'];
   lines.push('  [*] --> S0');
@@ -91,6 +100,19 @@ function erDiagram(n) {
   const lines = ['erDiagram'];
   for (let i = 0; i < n - 1; i++) lines.push(`  E${i} ||--o{ E${i + 1} : has`);
   return lines.join('\n');
+}
+
+// Small but complete Gantt fixture used to pin Mermaid 11.15's axis contract: it always emits the
+// ordinary bottom grid and `topAxis` appends a second grid above the task rows.
+function ganttTopAxis() {
+  return [
+    "%%{init: {'gantt': {'topAxis': true}} }%%",
+    'gantt',
+    '  dateFormat YYYY-MM-DD',
+    '  section Delivery',
+    '  Design :a1, 2026-01-01, 3d',
+    '  Build :a2, after a1, 4d',
+  ].join('\n');
 }
 
 /**
@@ -519,8 +541,10 @@ const GENERATORS = {
   dense_dag: (p) => [denseDag(p.n, p.fanout)],
   sequence: (p) => [sequence(p.n)],
   class: (p) => [classDiagram(p.n)],
+  class_edge_id: () => [classEdgeId()],
   state: (p) => [stateDiagram(p.n)],
   er: (p) => [erDiagram(p.n)],
+  gantt_top_axis: () => [ganttTopAxis()],
   edit_trace: (p) => editTrace(p.n, p.revisions),
   docs_site: (p) => docsSite(p.count, p.seed),
   equivalence_decidable_docs: (p) => equivalenceDecidableDocs(p.count, p.seed),
@@ -552,8 +576,10 @@ export const CORPUS = [
   { id: 'cyclic_scc_100',       gen: 'cyclic',    params: { n: 100, ring: 5 },       reps_js: 12, warmup_js: 2, reps_rs: 80,  warmup_rs: 8 },
   { id: 'sequence_20',          gen: 'sequence',  params: { n: 20 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
   { id: 'class_50',             gen: 'class',     params: { n: 50 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
+  { id: 'class_edge_id',        gen: 'class_edge_id', params: {},                    reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
   { id: 'state_40',             gen: 'state',     params: { n: 40 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
   { id: 'er_40',                gen: 'er',        params: { n: 40 },                 reps_js: 15, warmup_js: 3, reps_rs: 100, warmup_rs: 10 },
+  { id: 'gantt_top_axis',       gen: 'gantt_top_axis', params: {},                    reps_js: 4, warmup_js: 1, reps_rs: 40, warmup_rs: 4 },
   // A live-preview editing session: 21 successive full documents. One "iteration" renders all 21,
   // which is what an editor does as the user types -- mermaid has no incremental path.
   { id: 'edit_trace_60x20',     gen: 'edit_trace', params: { n: 60, revisions: 20 }, reps_js: 3,  warmup_js: 1, reps_rs: 30,  warmup_rs: 3 },
