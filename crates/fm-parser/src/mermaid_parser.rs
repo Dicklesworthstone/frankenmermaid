@@ -854,6 +854,9 @@ fn flow_statement_parser<'a>()
                         label,
                         icon,
                         shape,
+                        // The chumsky `ident` excludes `:`, so a `:::` statement never parses here
+                        // — it falls through to the manual matchers, which do carry the suffix.
+                        classes: Vec::new(),
                     }
                 }
                 None => FlowAstNode {
@@ -861,6 +864,7 @@ fn flow_statement_parser<'a>()
                     label: None,
                     icon: None,
                     shape: NodeShape::Rect,
+                    classes: Vec::new(),
                 },
             }
         },
@@ -2176,6 +2180,9 @@ fn parse_flowchart_statement_asts(
             label: node.label,
             icon: node.icon,
             shape: node.shape,
+            // The bare `A[Label]:::urgent` declaration — one of the two positions that was silently
+            // dropping the class. The token already carries it; it just has to survive the move.
+            classes: node.classes,
         })]);
     }
 
@@ -2446,6 +2453,7 @@ fn parse_flowchart_node_metadata(
         label,
         icon: base.icon,
         shape,
+        classes: base.classes,
     }))
 }
 
@@ -2529,6 +2537,8 @@ fn parse_fast_simple_flowchart_edge_ast(statement: &str) -> Option<FlowAst> {
             label: None,
             icon: None,
             shape: NodeShape::Rect,
+            // FAST edge path: `FAST_EDGE_REJECT` lists `:`, so a `:::` statement cannot reach here.
+            classes: Vec::new(),
         },
         arrow,
         label: None,
@@ -2538,6 +2548,7 @@ fn parse_fast_simple_flowchart_edge_ast(statement: &str) -> Option<FlowAst> {
             label: None,
             icon: None,
             shape: NodeShape::Rect,
+            classes: Vec::new(),
         },
     })
 }
@@ -2633,6 +2644,9 @@ fn parse_fast_simple_flowchart_node_ast(statement: &str) -> Option<FlowAstNode> 
         label,
         icon,
         shape: NodeShape::Rect,
+        // FAST node path: `FAST_ID_CHAR` omits `:` and a bracketed `N0[x]:::c` fails the
+        // `ends_with(']')` guard, so a `:::` token always defers to the general parser.
+        classes: Vec::new(),
     })
 }
 
