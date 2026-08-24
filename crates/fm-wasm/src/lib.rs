@@ -3711,26 +3711,53 @@ mod tests {
     #[test]
     fn x86_64_and_wasm32_render_the_same_bytes() {
         let _serial = config_guard();
+        // These five files are the publishable package surface. Pinning their combined digest
+        // separately from the rendered-output digests makes a regenerated or partially rebuilt
+        // package fail with an artifact-specific instruction before it can masquerade as a
+        // cross-target floating-point difference. The package was built at f9b6291b; update this
+        // digest and the per-fixture digests together after reviewing the generated artifact diff.
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x2899_9e23_6431_aa0f;
+        let package_artifacts: [&[u8]; 5] = [
+            include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
+            include_bytes!("../../../pkg/frankenmermaid.js"),
+            include_bytes!("../../../pkg/frankenmermaid.d.ts"),
+            include_bytes!("../../../pkg/frankenmermaid_bg.wasm.d.ts"),
+            include_bytes!("../../../pkg/package.json"),
+        ];
+        let mut package_hash = 0xcbf2_9ce4_8422_2325_u64;
+        for artifact in package_artifacts {
+            for byte in artifact {
+                package_hash ^= u64::from(*byte);
+                package_hash = package_hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        assert_eq!(
+            package_hash, EXPECTED_PACKAGE_ARTIFACT_DIGEST,
+            "the committed pkg artifact set changed or is only partially rebuilt; run the canonical \
+             build-wasm.sh, review all five generated files, then update this package digest and \
+             the four render digests together"
+        );
+
         const EXPECTED: &[(&str, &str, u64)] = &[
             (
                 "flowchart",
                 "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n  c -.--> a\n  b --> d[Delta]\n",
-                0x8835_c1df_81b8_f371,
+                0x58f6_2762_f7c1_df74,
             ),
             (
                 "sequence",
                 "sequenceDiagram\n  participant A\n  participant B\n  A->>B: hello\n  B-->>A: reply\n",
-                0x47ce_5122_edae_647b,
+                0xef37_a056_6848_1c37,
             ),
             (
                 "class",
                 "classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n  Alpha <|-- Beta\n",
-                0x0f7f_f683_1988_915d,
+                0xf3fe_fb69_0d7c_6234,
             ),
             (
                 "state",
                 "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy: start\n  Busy --> Idle: done\n",
-                0x65fd_f22d_fa9f_8fcc,
+                0x026e_c454_73ef_635b,
             ),
         ];
 

@@ -48,16 +48,34 @@ const DIAGRAMS = [
   ['state', `stateDiagram-v2\n  [*] ${ARROW} Idle\n  Idle ${ARROW} Busy: start\n  Busy ${ARROW} Idle: done\n`],
 ];
 
-function fnv1a(bytes) {
-  let hash = 0xcbf29ce484222325n;
-  const prime = 0x100000001b3n;
-  const mask = (1n << 64n) - 1n;
+const FNV_OFFSET = 0xcbf29ce484222325n;
+const FNV_PRIME = 0x100000001b3n;
+const FNV_MASK = (1n << 64n) - 1n;
+
+function fnv1a(bytes, initial = FNV_OFFSET) {
+  let hash = initial;
   for (const b of bytes) {
     hash ^= BigInt(b);
-    hash = (hash * prime) & mask;
+    hash = (hash * FNV_PRIME) & FNV_MASK;
   }
   return hash;
 }
+
+const PACKAGE_ARTIFACTS = [
+  'pkg/frankenmermaid_bg.wasm',
+  'pkg/frankenmermaid.js',
+  'pkg/frankenmermaid.d.ts',
+  'pkg/frankenmermaid_bg.wasm.d.ts',
+  'pkg/package.json',
+];
+let packageDigest = FNV_OFFSET;
+for (const artifact of PACKAGE_ARTIFACTS) {
+  packageDigest = fnv1a(readFileSync(join(here, '..', artifact)), packageDigest);
+}
+console.log(
+  `package artifacts=${PACKAGE_ARTIFACTS.length} ` +
+  `digest=0x${packageDigest.toString(16).padStart(16, '0')}`,
+);
 
 let vacuous = false;
 for (const [name, source] of DIAGRAMS) {
