@@ -608,6 +608,13 @@ pub async fn render_diagram_async(
                 node_instance_bytes(&plan.node_instances),
                 plan.node_instances.len(),
             ),
+            // Dashed node borders ride the EDGE pipeline (bd-l3nsf) but draw AFTER the nodes, since
+            // a border sits on top of the fill it outlines. Same pipeline, different slot in the
+            // order — which is why the family exists separately from `Edge`.
+            PrimitiveFamily::NodeBorder => (
+                edge_instance_bytes(&plan.node_border_segments),
+                plan.node_border_segments.len(),
+            ),
             PrimitiveFamily::Text => (text_instance_bytes(&plan.text_quads), plan.text_quads.len()),
         };
         if count == 0 {
