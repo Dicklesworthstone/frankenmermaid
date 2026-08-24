@@ -2422,6 +2422,8 @@ pub struct MermaidConfig {
     pub sequence_mirror_actors: Option<bool>,
     /// Mermaid-style sequence message numbering toggle.
     pub sequence_show_sequence_numbers: Option<bool>,
+    /// Mermaid-style Gantt top axis toggle.
+    pub gantt_top_axis: Option<bool>,
 }
 
 impl Default for MermaidConfig {
@@ -2459,6 +2461,7 @@ impl Default for MermaidConfig {
             rank_spacing: None,
             sequence_mirror_actors: None,
             sequence_show_sequence_numbers: None,
+            gantt_top_axis: None,
         }
     }
 }
@@ -2498,6 +2501,7 @@ pub struct MermaidInitConfig {
     pub rank_spacing: Option<u32>,
     pub sequence_mirror_actors: Option<bool>,
     pub sequence_show_sequence_numbers: Option<bool>,
+    pub gantt_top_axis: Option<bool>,
     pub sanitize_mode: MermaidSanitizeMode,
 }
 
@@ -2563,6 +2567,7 @@ pub fn parse_mermaid_js_config_value(value: &Value) -> MermaidConfigParse {
             }
             "flowchart" => parse_flowchart_config(raw_value, &mut parsed),
             "sequence" => parse_sequence_config(raw_value, &mut parsed),
+            "gantt" => parse_gantt_config(raw_value, &mut parsed),
             "securityLevel" => {
                 if let Some(level) = raw_value.as_str() {
                     match level.to_ascii_lowercase().as_str() {
@@ -2615,6 +2620,7 @@ pub fn to_init_parse(parsed_config: MermaidConfigParse) -> MermaidInitParse {
         rank_spacing: parsed_config.config.rank_spacing,
         sequence_mirror_actors: parsed_config.config.sequence_mirror_actors,
         sequence_show_sequence_numbers: parsed_config.config.sequence_show_sequence_numbers,
+        gantt_top_axis: parsed_config.config.gantt_top_axis,
         sanitize_mode: parsed_config.config.sanitize_mode,
     };
 
@@ -2695,6 +2701,29 @@ fn parse_flowchart_config(value: &Value, parsed: &mut MermaidConfigParse) {
             other => push_warning(
                 parsed,
                 format!("Unsupported flowchart config key '{other}' ignored"),
+            ),
+        }
+    }
+}
+
+fn parse_gantt_config(value: &Value, parsed: &mut MermaidConfigParse) {
+    let Some(obj) = value.as_object() else {
+        push_type_error(parsed, "gantt", value, "must be an object");
+        return;
+    };
+
+    for (key, raw_value) in obj {
+        match key.as_str() {
+            "topAxis" => {
+                if let Some(enabled) = raw_value.as_bool() {
+                    parsed.config.gantt_top_axis = Some(enabled);
+                } else {
+                    push_type_error(parsed, "gantt.topAxis", raw_value, "must be a boolean");
+                }
+            }
+            other => push_warning(
+                parsed,
+                format!("Unsupported gantt config key '{other}' ignored"),
             ),
         }
     }
@@ -4676,6 +4705,9 @@ pub struct IrGanttMeta {
     pub tick_interval: Option<GanttTickInterval>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub today_marker_style: Option<String>,
+    /// When enabled, Mermaid draws an additional axis above the task rows; the bottom axis remains.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub top_axis: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub inclusive_end_dates: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

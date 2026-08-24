@@ -6904,6 +6904,7 @@ enum PendingGanttDependency {
 
 fn parse_gantt(input: &str, builder: &mut IrBuilder) {
     let mut gantt_meta = IrGanttMeta::default();
+    gantt_meta.top_axis = builder.ir().meta.init.config.gantt_top_axis.unwrap_or(false);
     let mut current_section_idx = 0_usize;
     // Lookup-only (dependency resolution `get`s below); iteration order is never used — the resolved
     // edges come from `pending_dependencies` in insertion order — so an FxHashMap replaces the BTreeMap's
@@ -6982,21 +6983,11 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
-        // `topAxis` moves the date axis above the chart. It reached the fallthrough below and was
-        // reported as "unsupported gantt syntax" — a FALSE warning on valid input, which is the
-        // failure mode that trains readers to ignore the channel.
-        //
-        // Recognised and IGNORED because it is already what we draw: fm-render-svg puts the ticks at
-        // `layout.bounds.y - 12.0` and the terminal overlay puts them on the row ABOVE the diagram
-        // body, so this directive asks for the layout we already produce. Storing a flag no renderer
-        // reads would be dead IR.
-        //
-        // ⚠️ THE INVERSE IS A REAL DIVERGENCE AND IS FILED, NOT FIXED HERE (bd-c7ijh): the pinned
-        // bundle's gantt config reads `topAxis:!1`, so mermaid's DEFAULT is the axis at the BOTTOM
-        // and `topAxis` is what moves it up. We draw it on top unconditionally, which means a gantt
-        // WITHOUT this directive is the one that differs. Correcting that needs an IR field plus
-        // placement in all three renderers, so it is not a parser change.
+        // Mermaid 11.15 exposes this via `gantt.topAxis`. Keep the historical bare token as a
+        // permissive alias, but carry it into layout so it appends a top axis rather than moving the
+        // unconditional bottom axis.
         if trimmed.eq_ignore_ascii_case("topAxis") {
+            gantt_meta.top_axis = true;
             continue;
         }
 
@@ -11332,6 +11323,9 @@ fn apply_mermaid_config_value(value: Value, context: &str, span: Span, builder: 
     }
     if let Some(show_numbers) = parsed.config.sequence_show_sequence_numbers {
         builder.set_init_sequence_show_sequence_numbers(show_numbers);
+    }
+    if let Some(top_axis) = parsed.config.gantt_top_axis {
+        builder.set_init_gantt_top_axis(top_axis);
     }
     builder.set_init_sanitize_mode(parsed.config.sanitize_mode);
 
@@ -20318,15 +20312,12 @@ Rel_Back(db, app, "Responds")"#,
         );
     }
 
-    /// `topAxis` is a real gantt directive and must not be reported as unsupported (bd-c7ijh).
-    ///
-    /// It reached the fallthrough and produced "unsupported gantt syntax" — a false warning on
-    /// valid input. It is recognised and ignored because it already describes what we draw: the SVG
-    /// puts ticks above the diagram bounds and the terminal puts them on the row above the body.
+    /// Mermaid 11.15's `gantt.topAxis` config must survive parsing (bd-c7ijh).
     #[test]
-    fn gantt_top_axis_directive_is_not_reported_as_unsupported() {
+    fn gantt_top_axis_config_is_carried_to_gantt_meta() {
         let parsed = parse_mermaid(
-            "gantt\n  dateFormat YYYY-MM-DD\n  topAxis\n  section S\n  T :a, 2026-01-01, 5d\n",
+            "%%{init: {'gantt': {'topAxis': true}} }%%\ngantt\n  dateFormat YYYY-MM-DD\n  \
+             section S\n  T :a, 2026-01-01, 5d\n",
         );
 
         assert!(
@@ -20344,7 +20335,7 @@ Rel_Back(db, app, "Responds")"#,
                 .ir
                 .gantt_meta
                 .as_ref()
-                .is_some_and(|meta| !meta.sections.is_empty()),
+                .is_some_and(|meta| meta.top_axis && !meta.sections.is_empty()),
             "the gantt chart did not parse, so the assertion above proves nothing"
         );
     }

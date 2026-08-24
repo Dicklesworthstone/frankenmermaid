@@ -788,6 +788,10 @@ impl IrBuilder {
         }
     }
 
+    pub(crate) const fn set_init_gantt_top_axis(&mut self, top_axis: bool) {
+        self.ir.meta.init.config.gantt_top_axis = Some(top_axis);
+    }
+
     pub(crate) const fn set_init_sanitize_mode(&mut self, sanitize_mode: MermaidSanitizeMode) {
         self.ir.meta.init.config.sanitize_mode = sanitize_mode;
     }

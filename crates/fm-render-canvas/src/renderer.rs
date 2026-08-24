@@ -1218,14 +1218,20 @@ impl Canvas2dRenderer {
             return;
         }
         let mut tick_font: Option<String> = None;
-        // ⚠️ MINUS TWELVE, matching fm-render-svg (bd-4n5j2). This read `+ 12.0` and put every axis
-        // label TWENTY-FOUR units below where the SVG arm puts it. Measured against the checked-in
-        // golden gantt_basic.svg, whose viewBox is `0 0 520 369.1`: the SVG writes its labels at
-        // y=89 with tick marks spanning 93..105 and the first task bar at 129, so the canvas was
-        // dropping the labels to 113 -- into the gap between the axis and the bars, detached from
-        // tick marks it did not draw at all.
-        let y = f64::from(layout.bounds.y) + offset_y - 12.0;
-        for tick in &layout.extensions.axis_ticks {
+        // Gantt publishes its axis baselines from layout: the bottom row is always present and
+        // `topAxis` appends a second row. Other diagram types retain their existing generic axis.
+        let axis_rows: Vec<f64> = if layout.extensions.gantt_axis_rows.is_empty() {
+            vec![f64::from(layout.bounds.y) + offset_y - 12.0]
+        } else {
+            layout
+                .extensions
+                .gantt_axis_rows
+                .iter()
+                .map(|axis| f64::from(axis.y) + offset_y)
+                .collect()
+        };
+        for y in axis_rows {
+            for tick in &layout.extensions.axis_ticks {
             if tick.label.is_empty() {
                 continue;
             }
@@ -1264,6 +1270,7 @@ impl Canvas2dRenderer {
             // than centred on it.
             ctx.fill_text(&tick.label, tick_x + 3.0, y);
             self.draw_calls += 2;
+            }
         }
     }
 

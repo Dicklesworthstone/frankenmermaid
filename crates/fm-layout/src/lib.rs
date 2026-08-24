@@ -2067,6 +2067,8 @@ pub struct NodeCentrality {
 pub struct LayoutExtensions {
     pub bands: Vec<LayoutBand>,
     pub axis_ticks: Vec<LayoutAxisTick>,
+    /// Gantt has one unconditional bottom axis and an optional top axis.
+    pub gantt_axis_rows: Vec<LayoutGanttAxisRow>,
     pub cluster_dividers: Vec<LayoutClusterDivider>,
     /// Activation bars for sequence diagrams — narrow rectangles on lifelines
     /// indicating when a participant is active (processing a message).
@@ -2240,6 +2242,19 @@ impl LayoutGanttDayAxis {
 pub struct LayoutAxisTick {
     pub label: String,
     pub position: f32,
+}
+
+/// One Gantt time-axis row, positioned by layout so every renderer uses the same placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutGanttAxisPlacement {
+    Bottom,
+    Top,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayoutGanttAxisRow {
+    pub placement: LayoutGanttAxisPlacement,
+    pub y: f32,
 }
 
 /// Where a gantt task's name is drawn relative to its bar.
@@ -6343,6 +6358,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
                 bands: lifeline_bands,
                 gantt_day_axis: None,
                 axis_ticks: Vec::new(),
+                gantt_axis_rows: Vec::new(),
                 cluster_dividers: Vec::new(),
                 activation_bars,
                 sequence_notes: build_sequence_note_geometry(
@@ -6640,6 +6656,7 @@ fn layout_diagram_gantt_fallback(ir: &MermaidDiagramIr) -> TracedLayout {
     // canvas has to grow to hold it or it is clipped at the viewBox edge — which is exactly what made
     // the first attempt at this unshippable.
     extend_bounds_for_gantt_labels(layout);
+    layout_gantt_axis_rows(layout, gantt_meta.top_axis);
     traced
 }
 
@@ -6943,6 +6960,7 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
     // canvas has to grow to hold it or it is clipped at the viewBox edge — which is exactly what made
     // the first attempt at this unshippable.
     extend_bounds_for_gantt_labels(layout);
+    layout_gantt_axis_rows(layout, gantt_meta.top_axis);
     traced
 }
 
@@ -7036,6 +7054,47 @@ fn extend_bounds_for_gantt_labels(layout: &mut DiagramLayout) {
     }
     layout.bounds.x = min_x;
     layout.bounds.width = max_x - min_x;
+}
+
+/// Publish Gantt axis baselines after task geometry and horizontal label extents are final.
+///
+/// Mermaid 11.15 always appends the bottom grid. `gantt.topAxis` adds a second grid above the task
+/// rows; it does not relocate the first one. The coordinates belong here because renderers must not
+/// infer chart extents independently and disagree about whether `+12` or `-12` is inside the SVG.
+fn layout_gantt_axis_rows(layout: &mut DiagramLayout, top_axis: bool) {
+    let Some(first) = layout.nodes.first() else {
+        return;
+    };
+    let (task_top, task_bottom) = layout.nodes.iter().fold(
+        (first.bounds.y, first.bounds.y + first.bounds.height),
+        |(top, bottom), node| {
+            (
+                top.min(node.bounds.y),
+                bottom.max(node.bounds.y + node.bounds.height),
+            )
+        },
+    );
+
+    // The pinned reference puts the top baseline immediately above the first task row and the
+    // bottom baseline immediately below the last. Reserve the lower tick depth in bounds so neither
+    // the canvas nor SVG clips the unconditional bottom labels.
+    let bottom_y = task_bottom + 4.0;
+    let required_bottom = bottom_y + 16.0;
+    let current_bottom = layout.bounds.y + layout.bounds.height;
+    if required_bottom > current_bottom {
+        layout.bounds.height = required_bottom - layout.bounds.y;
+    }
+
+    layout.extensions.gantt_axis_rows.push(LayoutGanttAxisRow {
+        placement: LayoutGanttAxisPlacement::Bottom,
+        y: bottom_y,
+    });
+    if top_axis {
+        layout.extensions.gantt_axis_rows.push(LayoutGanttAxisRow {
+            placement: LayoutGanttAxisPlacement::Top,
+            y: task_top - 8.0,
+        });
+    }
 }
 
 #[must_use]
