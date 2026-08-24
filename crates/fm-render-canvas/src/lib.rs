@@ -18,6 +18,7 @@
 mod context;
 mod gpu_layout;
 mod gpu_plan;
+pub mod gpu_pipeline;
 mod renderer;
 mod shapes;
 mod viewport;
