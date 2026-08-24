@@ -10746,6 +10746,21 @@ fn compute_node_size(
                 Some(description_height) => (width, height.max(description_height)),
                 None => (width, height),
             };
+            // ...and it must hold the ROW STACK drawn under the name — `<<type>>`, `[technology]`,
+            // description. `c4_description_height` above sizes only for a description that WRAPS,
+            // on the reasoning that a single-line one is contained by the SVG renderer's baseline
+            // clamp. That reasoning does not reach the canvas, which does not clamp: it walks the
+            // rows against the box and `break`s on the first that would fall outside, exactly as the
+            // class renderer does. Measured on `Person(alice, "Alice", "A user")`: a 39.6 box, name
+            // at 46.2, `<<Person>>` at 55.3, and the description's baseline at 70.42 against a
+            // 61.3 limit — so the declared description was DROPPED from the canvas that fm-wasm
+            // ships, while the SVG drew it clamped on top of the row above.
+            let (width, height) = match c4_row_stack_dimensions(node, metrics) {
+                Some((rows_width, rows_height)) => {
+                    (width.max(rows_width), height.max(rows_height))
+                }
+                None => (width, height),
+            };
             // A requirement node's box must hold the two rows the renderer draws BESIDE the name:
             // the `«type»` header and the `Risk: … | Verify: …` row. Nothing sized for them at all,
             // so whether a row escaped depended on how long the declared `risk:`/`verifymethod:`
@@ -10855,6 +10870,76 @@ const REQUIREMENT_ROW_MARGIN: f32 = 24.0;
 /// than iterate to a fixed point, this uses `block_height` as the bound — always valid because
 /// `min(a, b) <= a` — so the result is an over-estimate for tall boxes. Over-sizing renders as
 /// padding, and it keeps the arithmetic auditable.
+/// Size a C4 node's box needs so the metadata rows drawn UNDER its name stay inside it.
+///
+/// `None` when the node is not a C4 node, or when it declares no metadata row at all — then only
+/// the name is drawn and the base sizing already covers it.
+///
+/// Mirrors `fm-render-canvas`'s C4 branch, which is the stricter of the two renderers and therefore
+/// the one that must fit: a name baseline at `font_size * 1.3`, a `* 0.65` step to the first row,
+/// then one row per declared `<<type>>` / `[technology]` / description at `font_size * 0.9`,
+/// advancing `member_font * 1.2` and kept only while the baseline stays within
+/// `y + h - member_font * 0.5`. fm-render-svg lays the same three strings out differently but
+/// clamps rather than drops, so a box that satisfies the canvas satisfies it too.
+///
+/// This is the same defect the class, ER and requirement siblings above were each filed for: sizing
+/// read the node's LABEL and the renderer drew more than the label. The C4 entry existed but
+/// measured only the wrapped description, so the row stack that sits above the description was
+/// never counted.
+fn c4_row_stack_dimensions(
+    node: &IrNode,
+    metrics: &fm_core::FontMetrics,
+) -> Option<(f32, f32)> {
+    let meta = node.c4_meta.as_deref()?;
+
+    // Renderer order, and only the rows it actually pushes.
+    let mut rows: Vec<&str> = Vec::with_capacity(3);
+    if !meta.element_type.is_empty() {
+        rows.push(meta.element_type.as_str());
+    }
+    if let Some(technology) = meta.technology.as_deref().filter(|t| !t.trim().is_empty()) {
+        rows.push(technology);
+    }
+    if let Some(description) = meta.description.as_deref().filter(|d| !d.trim().is_empty()) {
+        rows.push(description);
+    }
+    let last = rows.len().checked_sub(1)?;
+
+    let font_size = metrics.font_size();
+    let line_h = font_size * 1.3;
+    let member_font = font_size * 0.9;
+
+    // Cursor offsets from the top of the box, in renderer order.
+    let mut height = line_h; // `cursor_y = y + line_h` (name baseline)
+    height += line_h * 0.5; // name -> first metadata row
+    height += member_font * 1.2 * last as f32; // advance to the LAST row's baseline
+    height += member_font * 0.5; // the slack the renderer's own keep-test demands
+    // Mirroring the cursor arithmetic exactly leaves the last row sitting ON the boundary, where f32
+    // rounding — or a render font size that does not match `metrics` — drops it again. Half a row of
+    // margin costs a few pixels of padding and takes the decision off the knife edge. Same reasoning,
+    // same constant, as `class_compartment_dimensions`.
+    height += member_font * 0.6;
+
+    // Rows are left-anchored at `x + 6.0`; mirror that padding on the right so the widest row stays
+    // inside the box. `metrics` measures at full size and the rows are drawn at `* 0.9`. The
+    // `<<…>>` and `[…]` decorations are drawn too, so they are measured — a bare `element_type`
+    // would under-count by four characters.
+    let widest = rows
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            let decorated = match (index, meta.element_type.is_empty()) {
+                (0, false) => format!("<<{text}>>"),
+                _ if Some(*text) == meta.technology.as_deref() => format!("[{text}]"),
+                _ => (*text).to_string(),
+            };
+            metrics.estimate_dimensions(&decorated).0 * 0.9
+        })
+        .fold(0.0_f32, f32::max);
+
+    Some((widest + 12.0, height))
+}
+
 fn c4_description_height(node: &IrNode, metrics: &fm_core::FontMetrics, width: f32) -> Option<f32> {
     let description = node.c4_meta.as_deref()?.description.as_deref()?;
     if description.trim().is_empty() {
@@ -28623,6 +28708,53 @@ mod tests {
             verbose.layout.nodes[0].bounds.height > before,
             "C4 box must grow when the description wraps: {} > {before}",
             verbose.layout.nodes[0].bounds.height
+        );
+    }
+
+    /// A C4 node's box must hold the ROW STACK drawn under its name, not just a wrapped
+    /// description (bd-rk14 follow-on).
+    ///
+    /// Asserted against the CANVAS renderer's own cursor arithmetic rather than pinned numbers,
+    /// because the canvas is the renderer that DROPS a row that would fall outside the box — it
+    /// walks the rows against the node height and `break`s, so an undersized box loses declared
+    /// text silently rather than overflowing where a reader would see it. Measured before the fix,
+    /// with `Person(alice, "Alice", "A user")` at font 14: box height 39.6, name baseline 46.2,
+    /// `<<Person>>` at 55.3, and the description's baseline at 70.42 against the renderer's 61.3
+    /// limit — one row past the end, so `A user` never reached the canvas that fm-wasm ships.
+    ///
+    /// A single-line description is the case that was missed: `c4_description_height` grows the box
+    /// only when the description WRAPS, on the reasoning that the SVG renderer's baseline clamp
+    /// contains a single line. It does — by drawing it on top of the row above — and the canvas does
+    /// not clamp at all.
+    #[test]
+    fn a_c4_box_holds_every_metadata_row_the_canvas_draws() {
+        let mut engine = IncrementalLayoutEngine::default();
+        // A SINGLE-LINE description, deliberately: the wrapping case was already covered, and a
+        // long one would let `c4_description_height` carry the assertion and hide the row stack.
+        let ir = c4_person_ir("A user");
+        let laid_out = engine.layout_diagram_traced_with_config_and_guardrails(
+            &ir,
+            LayoutAlgorithm::Auto,
+            super::LayoutConfig::default(),
+            LayoutGuardrails::default(),
+        );
+        let node = &laid_out.layout.nodes[0];
+
+        // fm-render-canvas' C4 branch, verbatim: name baseline at `line_h`, a `line_h * 0.5` step to
+        // the first row, then one `member_font * 1.2` per row, each kept only while its baseline
+        // stays within `h - member_font * 0.5`.
+        let font_size = fm_core::FontMetrics::default().font_size();
+        let line_h = font_size * 1.3;
+        let member_font = font_size * 0.9;
+        let rows = 2.0; // `<<Person>>` and the description; no technology declared.
+        let last_baseline = line_h + line_h * 0.5 + member_font * 1.2 * (rows - 1.0);
+        let limit = node.bounds.height - member_font * 0.5;
+
+        assert!(
+            last_baseline <= limit,
+            "the C4 box drops its last metadata row: baseline {last_baseline} > limit {limit} \
+             (height {})",
+            node.bounds.height
         );
     }
 
