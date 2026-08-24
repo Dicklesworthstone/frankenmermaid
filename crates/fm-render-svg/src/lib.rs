@@ -12960,9 +12960,24 @@ fn write_sequence_number_into(
         out,
         f32::midpoint(start.y, end.y) + context.offset_y - 8.0,
     );
-    out.push_str(
-        "\" text-anchor=\"middle\" dominant-baseline=\"central\" class=\"fm-sequence-number\">",
-    );
+    // THEMED, and it was not when this element first landed (bd-7hgxu). `fm-sequence-number` was
+    // emitted with no `fill` and no CSS rule anywhere in the crate, so the number fell back to the
+    // SVG default of black — invisible against a dark theme's background, on a diagram whose every
+    // other text run is themed. A class with no rule behind it is not styling, it is a name.
+    //
+    // `colors.text`, the same colour every other label uses, rather than a new theme field. mermaid
+    // has a dedicated `sequenceNumberColor` computed to CONTRAST with the line colour, which is not
+    // the same thing and is not claimed here: this makes the number readable and theme-consistent,
+    // not identical to the incumbent's palette.
+    //
+    // Attribute order follows `write_gantt_label_into` — text-anchor, dominant-baseline, font-size,
+    // fill, class — because in this file order is output, and a sibling writer disagreeing about it
+    // is how byte-identity tests start failing for reasons nobody can read.
+    out.push_str("\" text-anchor=\"middle\" dominant-baseline=\"central\" font-size=\"");
+    let _ = crate::attributes::write_number_into(out, context.config.font_size * 0.8);
+    out.push_str("\" fill=\"");
+    let _ = crate::attributes::write_escaped_attr(out, &context.colors.text);
+    out.push_str("\" class=\"fm-sequence-number\">");
     let _ = crate::attributes::write_number_into(out, number as f32);
     out.push_str("</text>");
 }
