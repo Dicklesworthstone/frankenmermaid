@@ -224,7 +224,61 @@ pub fn describe_node(node: &IrNode, ir: &MermaidDiagramIr) -> String {
         fm_core::NodeShape::InvParallelogram => "inverted parallelogram",
     };
 
-    format!("Node: {label}, {shape_desc}")
+    let mut description = format!("Node: {label}, {shape_desc}");
+
+    // A JOURNEY STEP declares two things beyond its name — a SCORE and its ACTORS — and neither was
+    // reachable by anyone (bd-fsj42). The parser stores them as class hooks (`journey-score-5`,
+    // `journey-actor-Alice`), which is a styling affordance, not information: no CSS rule targets
+    // them, no text run carries them, and the accessible name said only `Node: TaskOne, rounded
+    // rectangle`. A reader could not tell who performs a task or how it scored. mermaid draws both —
+    // a face for the score, a coloured circle per actor.
+    //
+    // Read back from the classes because that is where the parser puts them; the casing survives
+    // there (`journey-actor-Alice`, not `alice`), so the actor is announced as the author wrote it.
+    //
+    // Gated on `journey-step` so this cannot alter any other diagram type's description, and the
+    // bare `journey-actor` marker is skipped — it flags that a step HAS actors and names none.
+    description.push_str(&journey_step_description_suffix(node));
+
+    description
+}
+
+/// The `, score N, actors: A, B` tail a JOURNEY STEP adds to its accessible name (bd-fsj42), or an
+/// empty string for any other node.
+///
+/// SHARED, and that is the point. The node description is built in two places: `describe_node` for
+/// the `Element` path, and a hand-written `<title>Node: …` in the streaming fast fragment that the
+/// DEFAULT configuration actually takes. My first version enriched only `describe_node`, so the fix
+/// was inert in the shipped path and live only under `include_source_spans` — a guard on one of two
+/// paths, which this repo has been bitten by before. One function, two callers.
+#[must_use]
+pub fn journey_step_description_suffix(node: &IrNode) -> String {
+    if !node.classes.iter().any(|class| class == "journey-step") {
+        return String::new();
+    }
+
+    let mut suffix = String::new();
+    if let Some(score) = node
+        .classes
+        .iter()
+        .find_map(|class| class.strip_prefix("journey-score-"))
+    {
+        suffix.push_str(", score ");
+        suffix.push_str(score);
+    }
+    // The bare `journey-actor` marker only flags THAT a step has actors; `strip_prefix` leaves it as
+    // an empty string, which would announce an actor with no name.
+    let actors: Vec<&str> = node
+        .classes
+        .iter()
+        .filter_map(|class| class.strip_prefix("journey-actor-"))
+        .filter(|actor| !actor.is_empty())
+        .collect();
+    if !actors.is_empty() {
+        suffix.push_str(", actors: ");
+        suffix.push_str(&actors.join(", "));
+    }
+    suffix
 }
 
 /// Generate a text alternative for an edge.

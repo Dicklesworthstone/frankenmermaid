@@ -9355,6 +9355,17 @@ fn render_node_into(
         && node.href().is_none()
         && node.callback().is_none()
         && node.tooltip().is_none()
+        // A JOURNEY STEP takes the slow path so its description comes from `describe_node`, which
+        // reads `IrNode.classes` and therefore keeps the author's casing (bd-fsj42). This fragment
+        // has only the EMITTED class string, which is prefixed AND lowercased
+        // (`fm-node-user-journey-actor-alice`), so deriving the actors here would announce `alice`
+        // for an author who wrote `Alice` — and the two render paths would then disagree about what
+        // the same step is called. One path for journey is worth more than the fragment's speed on a
+        // diagram type whose charts are small.
+        && !node
+            .classes
+            .iter()
+            .any(|class| class == "journey-step")
     {
         let write = if matches!(uniform_a11y(&config.a11y), Some(true)) {
             write_common_node_fragment_into::<true>
@@ -9527,6 +9538,10 @@ fn render_node(
         && node.href().is_none()
         && node.callback().is_none()
         && node.tooltip().is_none()
+        // Journey steps take the slow path so their description comes from `describe_node` — see
+        // the twin gate on `write_common_node_fragment_into` (bd-fsj42). BOTH gates are needed: the
+        // fragment is reachable through two callers, and excluding it from one left the fix inert.
+        && !node.classes.iter().any(|class| class == "journey-step")
     {
         let build = if matches!(uniform_a11y(&config.a11y), Some(true)) {
             build_common_node_fragment::<true>
