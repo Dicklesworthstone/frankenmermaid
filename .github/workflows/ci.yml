@@ -122,6 +122,15 @@ jobs:
         if: matrix.fnx_mode == 'on'
         run: cargo test --workspace --all-targets --features fnx-integration
 
+      # `--all-targets` means lib+bins+tests+benches+examples and EXCLUDES DOCTESTS, so the two
+      # steps above never ran a single one: measured, 0 "Doc-tests" sections with the flag and 1
+      # without it. Two doctests were red on main for days underneath a green CI (bd-82sxu).
+      # This must be its own step — `cargo test --all-targets --doc` is a hard error
+      # ("can't mix --doc with other target selecting options"), not a combination.
+      - name: Doctests
+        if: matrix.fnx_mode == 'off'
+        run: cargo test --workspace --doc
+
   installer-canary:
     name: Installer Canary
     runs-on: ubuntu-latest

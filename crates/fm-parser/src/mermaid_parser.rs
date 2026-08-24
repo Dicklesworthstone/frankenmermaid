@@ -12589,11 +12589,13 @@ fn parse_c4_relationship(
 /// MEASURED FIELD COVERAGE for the C4 element macros, so the follow-up above has numbers next to
 /// it. One macro per diagram, unique sentinel per field, checked against the rendered SVG:
 ///
-///     Person, System                 label ✓  desc ✓                (no type argument)
-///     Container, ContainerDb,
-///     Component                      label ✓  type ✓  desc ✓
-///     Rel                            label ✓  type ✓
-///     Deployment_Node                label ✓  type ✗                <- its type is dropped
+/// ```text
+/// Person, System                 label ✓  desc ✓                (no type argument)
+/// Container, ContainerDb,
+/// Component                      label ✓  type ✓  desc ✓
+/// Rel                            label ✓  type ✓
+/// Deployment_Node                label ✓  type ✗                <- its type is dropped
+/// ```
 ///
 /// All 22 macros the parser recognises DO render their label — none is dead. `Deployment_Node` is
 /// the one element whose type argument reaches nothing, and it is the one element routed through
@@ -12615,7 +12617,9 @@ fn parse_c4_relationship(
 /// ROUTING NOW CONFIRMED, which was the missing half. `addDeploymentNode` in the bundle is boundary
 /// machinery and nothing else:
 ///
-///     u.nodeType = e, u.parentBoundary = Xa, u.wrap = Wh(), gl = Xa, Xa = t, Vh.push(gl)
+/// ```text
+/// u.nodeType = e, u.parentBoundary = Xa, u.wrap = Wh(), gl = Xa, Xa = t, Vh.push(gl)
+/// ```
 ///
 /// It pushes onto the same boundary parse stack `Vh` that `popBoundaryParseStack` pops, and sets
 /// `parentBoundary`. So a `Deployment_Node` is stored as a BOUNDARY and drawn by `drawBoundary` —
