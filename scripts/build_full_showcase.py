@@ -1,4 +1,22 @@
-<!DOCTYPE html>
+#!/usr/bin/env python3
+"""
+Build the upgraded frankenmermaid showcase with:
+1. Performant, visually stunning Mermaid syntax highlighter (overlay architecture).
+2. MIT License (with OpenAI/Anthropic Rider) clarification everywhere.
+3. Interactive 15 Layout Algorithms Architecture Showcase.
+4. 24 Diagram Specimens Taxonomy Museum with live rendered WASM SVG previews.
+5. Gentle, cursor-anchored smooth Pan/Zoom controller.
+"""
+
+import os
+import shutil
+
+def main():
+    repo_dir = "/data/projects/frankenmermaid"
+    index_path = os.path.join(repo_dir, "index.html")
+    showcase_path = os.path.join(repo_dir, "frankenmermaid_demo_showcase.html")
+
+    html_content = """<!DOCTYPE html>
 <html lang="en" class="dark">
 <head>
   <meta charset="utf-8">
@@ -1548,11 +1566,11 @@
     }
 
     function highlightMermaid(source) {
-      const lines = source.split("\n");
+      const lines = source.split("\\n");
       const out = [];
 
-      const DIAGRAM_KEYWORDS = /^(flowchart|flowchart-elk|graph|sequenceDiagram|classDiagram|classDiagram-v2|stateDiagram|stateDiagram-v2|erDiagram|gantt|pie|gitGraph|mindmap|quadrantChart|timeline|sankey-beta|sankey|packet-beta|packet|kanban|block|block-beta|architecture|architecture-beta|C4Context|C4Container|C4Component|C4Dynamic|C4Deployment|requirementDiagram|zenuml)\b/i;
-      const SUBGRAPH_KEYWORDS = /^(subgraph|end|section|box|par|rect|loop|alt|else|opt|critical|break)\b/i;
+      const DIAGRAM_KEYWORDS = /^(flowchart|flowchart-elk|graph|sequenceDiagram|classDiagram|classDiagram-v2|stateDiagram|stateDiagram-v2|erDiagram|gantt|pie|gitGraph|mindmap|quadrantChart|timeline|sankey-beta|sankey|packet-beta|packet|kanban|block|block-beta|architecture|architecture-beta|C4Context|C4Container|C4Component|C4Dynamic|C4Deployment|requirementDiagram|zenuml)\\b/i;
+      const SUBGRAPH_KEYWORDS = /^(subgraph|end|section|box|par|rect|loop|alt|else|opt|critical|break)\\b/i;
 
       for (const line of lines) {
         if (line.length > 20000) {
@@ -1589,7 +1607,7 @@
           const rest = lineText.slice(i);
 
           // Diagram main keyword or subgraph at start of line
-          if (i === 0 || /^\s+$/.test(lineText.slice(0, i))) {
+          if (i === 0 || /^\\s+$/.test(lineText.slice(0, i))) {
             const diagMatch = rest.match(DIAGRAM_KEYWORDS);
             if (diagMatch) {
               lineOut += spanTok("mmd-keyword", diagMatch[0]);
@@ -1607,7 +1625,7 @@
 
           // Quoted Strings: "..."
           if (rest[0] === '"') {
-            const strMatch = rest.match(/^"([^"\\]|\\.)*"/);
+            const strMatch = rest.match(/^"([^"\\\\]|\\\\.)*"/);
             if (strMatch) {
               lineOut += spanTok("mmd-string", strMatch[0]);
               i += strMatch[0].length;
@@ -1617,7 +1635,7 @@
 
           // Edge labels: |label|
           if (rest[0] === '|') {
-            const labelMatch = rest.match(/^\|([^|\n]+)\|/);
+            const labelMatch = rest.match(/^\\|([^|\\n]+)\\|/);
             if (labelMatch) {
               lineOut += spanTok("mmd-bracket", "|") + spanTok("mmd-edgelabel", labelMatch[1]) + spanTok("mmd-bracket", "|");
               i += labelMatch[0].length;
@@ -1626,7 +1644,7 @@
           }
 
           // Arrows and Connectors
-          const arrowMatch = rest.match(/^(?:-->|---|-.->|==>|==o|--o|--x|-\.->|===|---o|->>|-->>|->|-->|-x|--x|-\)|--\)\)|<\|--|\*--|o--|\.\.\|>|\.\.>|\|\|--o\{|\}\|\.\.\|\{)/);
+          const arrowMatch = rest.match(/^(?:-->|---|-.->|==>|==o|--o|--x|-\\.->|===|---o|->>|-->>|->|-->|-x|--x|-\\)|--\\)\\)|<\\|--|\\*--|o--|\\.\\.\\|>|\\.\\.>|\\|\\|--o\\{|\\}\\|\\.\\.\\|\\{)/);
           if (arrowMatch) {
             lineOut += spanTok("mmd-arrow", arrowMatch[0]);
             i += arrowMatch[0].length;
@@ -1634,7 +1652,7 @@
           }
 
           // Direction tokens (TB, LR, etc.)
-          const dirMatch = rest.match(/^(?:TB|TD|BT|RL|LR)\b/);
+          const dirMatch = rest.match(/^(?:TB|TD|BT|RL|LR)\\b/);
           if (dirMatch) {
             lineOut += spanTok("mmd-dir", dirMatch[0]);
             i += dirMatch[0].length;
@@ -1642,7 +1660,7 @@
           }
 
           // Style & class keywords
-          const styleMatch = rest.match(/^(?:classDef|class|style|click|linkStyle|link|callback|accTitle|accDescr)\b/);
+          const styleMatch = rest.match(/^(?:classDef|class|style|click|linkStyle|link|callback|accTitle|accDescr)\\b/);
           if (styleMatch) {
             lineOut += spanTok("mmd-style", styleMatch[0]);
             i += styleMatch[0].length;
@@ -1650,7 +1668,7 @@
           }
 
           // Sequence keywords
-          const seqMatch = rest.match(/^(?:participant|actor|activate|deactivate|autonumber|Note\s+over|Note\s+left\s+of|Note\s+right\s+of)\b/i);
+          const seqMatch = rest.match(/^(?:participant|actor|activate|deactivate|autonumber|Note\\s+over|Note\\s+left\\s+of|Note\\s+right\\s+of)\\b/i);
           if (seqMatch) {
             lineOut += spanTok("mmd-sequence", seqMatch[0]);
             i += seqMatch[0].length;
@@ -1658,7 +1676,7 @@
           }
 
           // Class/ER types & modifiers (+, -, #, PK, FK, etc.)
-          const typeMatch = rest.match(/^(?:\+|-|#|~|\*|\$|PK|FK)\b/);
+          const typeMatch = rest.match(/^(?:\\+|-|#|~|\\*|\\$|PK|FK)\\b/);
           if (typeMatch) {
             lineOut += spanTok("mmd-modifier", typeMatch[0]);
             i += typeMatch[0].length;
@@ -1666,7 +1684,7 @@
           }
 
           // Node shape delimiters: [ ... ], ( ... ), { ... }, etc.
-          const bracketMatch = rest.match(/^(?:\[\[|\]\]|\(\(|\)\)|\[\/|\/\]|\[\\|\\\]|\{\{|\}\}|\[\(|\)\]|\[|\{|\(|\)|\]|\})/);
+          const bracketMatch = rest.match(/^(?:\\[\\[|\\]\\]|\\(\\(|\\)\\)|\\[\\/|\\/\\]|\\[\\\\|\\\\\\]|\\{\\{|\\}\\}|\\[\\(|\\)\\]|\\[|\\{|\\(|\\)|\\]|\\})/);
           if (bracketMatch) {
             lineOut += spanTok("mmd-bracket", bracketMatch[0]);
             i += bracketMatch[0].length;
@@ -1674,7 +1692,7 @@
           }
 
           // Node identifiers / words
-          const wordMatch = rest.match(/^[a-zA-Z0-9_\-.:]+/);
+          const wordMatch = rest.match(/^[a-zA-Z0-9_\\-.:]+/);
           if (wordMatch) {
             const word = wordMatch[0];
             if (word.startsWith(":::")) {
@@ -1700,7 +1718,7 @@
         out.push(lineOut);
       }
 
-      return out.join("\n");
+      return out.join("\\n");
     }
 
     // >>> demo-samples:start
@@ -2338,7 +2356,7 @@ Shared IR,Terminal ANSI,20`
         els.highlight.scrollTop = els.input.scrollTop;
         els.highlight.scrollLeft = els.input.scrollLeft;
       }
-      const lines = source.split("\n").length;
+      const lines = source.split("\\n").length;
       const chars = source.length;
       if (els.statLines) els.statLines.textContent = `${lines} line${lines === 1 ? '' : 's'}`;
       if (els.statChars) els.statChars.textContent = `${chars} B`;
@@ -2404,11 +2422,11 @@ Shared IR,Terminal ANSI,20`
     function renderTerminalSimulation(source) {
       const term = document.getElementById("terminal-output");
       if (!term) return;
-      const type = source.trim().split(/\s+/)[0].toUpperCase();
+      const type = source.trim().split(/\\s+/)[0].toUpperCase();
       term.textContent = `┌─ frankenmermaid terminal output ──────────────────────────┐
 │ Diagram Type: ${type.padEnd(20)} Status: OK (Rich Tier)   │
 └───────────────────────────────────────────────────────────┘
-` + source.split("\n").slice(0, 12).join("\n") + (source.split("\n").length > 12 ? "\n..." : "");
+` + source.split("\\n").slice(0, 12).join("\\n") + (source.split("\\n").length > 12 ? "\\n..." : "");
     }
 
     // Render Live Miniatures for Specimen Cards
@@ -2771,7 +2789,7 @@ Shared IR,Terminal ANSI,20`
           const start = els.input.selectionStart;
           const end = els.input.selectionEnd;
           const val = els.input.value;
-          els.input.value = val.substring(0, start) + "\n" + snip + "\n" + val.substring(end);
+          els.input.value = val.substring(0, start) + "\\n" + snip + "\\n" + val.substring(end);
           refreshEditor();
           scheduleRender(true);
         });
@@ -2887,7 +2905,7 @@ Shared IR,Terminal ANSI,20`
       // Format Code
       document.getElementById("format-code-btn")?.addEventListener("click", () => {
         if (!els.input) return;
-        els.input.value = els.input.value.split("\n").map(l => l.trimEnd()).join("\n");
+        els.input.value = els.input.value.split("\\n").map(l => l.trimEnd()).join("\\n");
         refreshEditor();
         scheduleRender(true);
       });
@@ -3014,3 +3032,15 @@ Shared IR,Terminal ANSI,20`
   </script>
 </body>
 </html>
+"""
+
+    with open(index_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    with open(showcase_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    print("Successfully written index.html and frankenmermaid_demo_showcase.html")
+
+if __name__ == "__main__":
+    main()

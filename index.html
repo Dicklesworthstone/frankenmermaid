@@ -102,7 +102,7 @@
         linear-gradient(to bottom, var(--color-bg), var(--color-bg-deep));
     }
 
-    /* Ambient Glow Orbs - hardware accelerated */
+    /* Ambient Glow Orbs */
     .glow-orb {
       position: absolute;
       border-radius: 9999px;
@@ -143,7 +143,7 @@
 
     .specimen-card {
       content-visibility: auto;
-      contain-intrinsic-size: 1px 280px;
+      contain-intrinsic-size: 1px 320px;
     }
 
     #gallery-grid {
@@ -156,7 +156,7 @@
       }
     }
 
-    /* Franken Bolts */
+    /* Franken Hardware Accents */
     .franken-bolt {
       position: absolute;
       width: 14px;
@@ -187,49 +187,6 @@
       position: absolute;
     }
 
-    /* Glitch Typography */
-    .franken-glitch {
-      position: relative;
-      display: inline-block;
-      text-shadow: 0 0 25px rgba(239, 68, 68, 0.5);
-    }
-    .franken-glitch::before,
-    .franken-glitch::after {
-      content: attr(data-glitch);
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      clip: rect(0, 0, 0, 0);
-    }
-    .franken-glitch:hover::before {
-      left: -2px;
-      text-shadow: 2px 0 #10b981;
-      animation: glitchAnim 2s infinite linear alternate-reverse;
-    }
-    .franken-glitch:hover::after {
-      left: 2px;
-      text-shadow: -2px 0 #38bdf8;
-      animation: glitchAnim2 2.5s infinite linear alternate-reverse;
-    }
-
-    @keyframes glitchAnim {
-      0% { clip: rect(12px, 9999px, 44px, 0); }
-      20% { clip: rect(60px, 9999px, 80px, 0); }
-      40% { clip: rect(20px, 9999px, 50px, 0); }
-      60% { clip: rect(70px, 9999px, 90px, 0); }
-      80% { clip: rect(30px, 9999px, 60px, 0); }
-      100% { clip: rect(10px, 9999px, 40px, 0); }
-    }
-    @keyframes glitchAnim2 {
-      0% { clip: rect(50px, 9999px, 70px, 0); }
-      25% { clip: rect(10px, 9999px, 35px, 0); }
-      50% { clip: rect(80px, 9999px, 100px, 0); }
-      75% { clip: rect(30px, 9999px, 55px, 0); }
-      100% { clip: rect(65px, 9999px, 85px, 0); }
-    }
-
     /* Interactive Pan & Zoom Canvas Stages */
     .pan-zoom-container {
       position: relative;
@@ -250,8 +207,8 @@
     .pan-zoom-viewport {
       position: absolute;
       inset: 0;
-      transform-origin: center center;
-      transition: transform 0.05s ease-out;
+      transform-origin: 0 0;
+      transition: transform 0.04s ease-out;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -262,7 +219,7 @@
     .pan-zoom-viewport svg,
     #fm-svg svg,
     #spotlight-stage svg,
-    .gallery-stage svg {
+    .specimen-mini-stage svg {
       max-width: 100%;
       max-height: 100%;
       width: auto;
@@ -272,7 +229,9 @@
       filter: drop-shadow(0 6px 24px rgba(0, 0, 0, 0.5));
     }
 
-    /* Code Editor Overlay & Gutters */
+    /* =================================================================== */
+    /* Code Editor Dual-Layer Syntax Highlighting Overlay                  */
+    /* =================================================================== */
     .editor-wrapper {
       position: relative;
       border-radius: 0 0 0 1rem;
@@ -280,7 +239,7 @@
       border: 1px solid rgba(16, 185, 129, 0.15);
       display: flex;
       overflow: hidden;
-      min-height: 560px;
+      min-height: 580px;
       flex: 1;
     }
 
@@ -288,48 +247,81 @@
       width: 3.4rem;
       background: #010503;
       border-right: 1px solid rgba(16, 185, 129, 0.12);
-      padding: 1rem 0.6rem;
+      padding: 1.25rem 0.6rem 3rem;
       font-family: var(--font-mono);
-      font-size: 0.85rem;
-      line-height: 1.6;
-      color: #94a3b8;
+      font-size: 13px;
+      line-height: 1.65;
+      color: #52796f;
       text-align: right;
       user-select: none;
       overflow: hidden;
+      box-sizing: border-box;
     }
 
     .editor-textarea-container {
       position: relative;
       flex: 1;
       min-width: 0;
-      display: flex;
+      height: 100%;
+      min-height: 580px;
+    }
+
+    .editor-highlight,
+    .editor-textarea {
+      position: absolute;
+      inset: 0;
+      margin: 0;
+      padding: 1.25rem 1.5rem 3rem;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.65;
+      letter-spacing: 0;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+      tab-size: 2;
+      box-sizing: border-box;
+    }
+
+    .editor-highlight {
+      z-index: 1;
+      pointer-events: none;
+      overflow: hidden;
+      background: transparent;
+      color: #b7cfc2;
     }
 
     .editor-textarea {
-      flex: 1;
-      width: 100%;
-      height: 100%;
-      padding: 1rem;
-      font-family: var(--font-mono);
-      font-size: 0.88rem;
-      line-height: 1.6;
-      color: #f8fafc;
-      background: transparent;
-      caret-color: #34d399;
-      resize: none;
-      border: none;
-      outline: none;
       z-index: 2;
-      overflow-y: auto;
-      white-space: pre-wrap;
-      word-break: break-word;
-      tab-size: 2;
+      overflow: auto;
+      background: transparent;
+      color: transparent;
+      caret-color: var(--color-green-glow);
+      outline: none;
+      border: none;
+      resize: none;
     }
 
     .editor-textarea::selection {
-      background: rgba(16, 185, 129, 0.35);
-      color: #ffffff;
+      background: rgba(16, 185, 129, 0.3);
+      color: transparent;
     }
+
+    /* Mermaid Syntax Highlighting Overlay Tokens */
+    .mmd-keyword { color: #34d399; font-weight: 800; text-shadow: 0 0 12px rgba(52, 211, 153, 0.35); }
+    .mmd-subgraph { color: #38bdf8; font-weight: 700; }
+    .mmd-dir { color: #67e8f9; font-weight: 700; }
+    .mmd-arrow { color: #10b981; font-weight: 800; }
+    .mmd-edgelabel { color: #fbbf24; font-weight: 600; }
+    .mmd-string { color: #fde047; }
+    .mmd-bracket { color: #4e6f5e; font-weight: 700; }
+    .mmd-node { color: #f8fafc; font-weight: 600; }
+    .mmd-style { color: #e879f9; font-weight: 700; }
+    .mmd-classref { color: #d946ef; }
+    .mmd-sequence { color: #a78bfa; font-weight: 700; }
+    .mmd-modifier { color: #f43f5e; font-weight: 700; }
+    .mmd-directive { color: #fb7185; font-style: italic; }
+    .mmd-comment { color: #52796f; font-style: italic; }
 
     /* Floating Canvas HUD */
     .canvas-hud {
@@ -349,312 +341,204 @@
     }
 
     .hud-btn {
-      width: 2rem;
-      height: 2rem;
+      width: 28px;
+      height: 28px;
+      border-radius: 9999px;
       display: flex;
       align-items: center;
       justify-content: center;
-      border-radius: 9999px;
-      color: #94a3b8;
-      font-size: 0.85rem;
+      font-family: var(--font-mono);
+      font-size: 13px;
       font-weight: 700;
-      background: transparent;
-      border: none;
-      cursor: pointer;
+      color: #94a3b8;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
       transition: all 0.15s ease;
     }
     .hud-btn:hover {
-      background: rgba(16, 185, 129, 0.2);
       color: #34d399;
+      background: rgba(16, 185, 129, 0.2);
+      border-color: rgba(52, 211, 153, 0.4);
     }
 
-    /* Terminal Simulator */
+    /* Terminal Output Surface */
     .terminal-window {
-      background: #010503;
-      border: 1px solid rgba(16, 185, 129, 0.15);
-      border-radius: 1rem;
-      box-shadow: 0 25px 60px -12px rgba(0, 0, 0, 0.8);
+      background: #020704;
+      border: 1px solid rgba(16, 185, 129, 0.2);
+      border-radius: 0.75rem;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.7);
       overflow: hidden;
     }
-
     .terminal-header {
-      background: #04120a;
-      padding: 0.65rem 1rem;
-      border-bottom: 1px solid rgba(16, 185, 129, 0.1);
+      background: #030f08;
+      border-bottom: 1px solid rgba(16, 185, 129, 0.15);
+      padding: 0.5rem 0.75rem;
       display: flex;
       align-items: center;
       justify-content: space-between;
     }
-
     .terminal-body {
-      padding: 1.25rem;
+      padding: 1rem;
       font-family: var(--font-mono);
-      font-size: 0.82rem;
-      line-height: 1.4;
+      font-size: 11px;
+      line-height: 1.5;
       color: #34d399;
       overflow-x: auto;
       white-space: pre;
     }
 
-    /* Animated Pipeline Flow */
-    .flow-line {
-      stroke-dasharray: 8 6;
-      animation: pipeFlow 1.5s linear infinite;
+    /* Animated Flow Connection Lines */
+    @keyframes flowStroke {
+      to { stroke-dashoffset: -32; }
     }
-    @keyframes pipeFlow {
-      from { stroke-dashoffset: 28; }
-      to { stroke-dashoffset: 0; }
+    .flow-line {
+      stroke-dasharray: 6, 6;
+      animation: flowStroke 1.8s linear infinite;
     }
 
-    /* Maximize Playground Full-Screen Theater Mode */
+    /* Maximized Studio Mode */
     body.pg-maximized {
       overflow: hidden;
     }
     body.pg-maximized #pg-root {
       position: fixed;
-      inset: 1rem;
-      z-index: 100;
-      margin: 0 !important;
-      max-width: none !important;
-      height: calc(100vh - 2rem);
+      inset: 0;
+      z-index: 9999;
+      margin: 0;
+      border-radius: 0;
+      padding: 0;
+      background: #020a06;
       display: flex;
       flex-direction: column;
     }
     body.pg-maximized #pg-shell {
-      flex: 1;
+      height: 100vh;
+      border-radius: 0;
+      border: none;
       display: flex;
       flex-direction: column;
-      height: 100%;
     }
     body.pg-maximized .pg-panes {
       flex: 1;
       min-height: 0;
     }
-    body.pg-maximized .editor-wrapper,
-    body.pg-maximized .pan-zoom-container {
-      height: 100% !important;
-      min-height: 0 !important;
-    }
 
-    /* Accessibility & Contrast Guardrails */
-    .skip-link {
-      position: absolute;
-      top: -100px;
-      left: 1rem;
-      z-index: 1000;
-      padding: 0.75rem 1.5rem;
-      background: #10b981;
-      color: #020a06;
-      font-weight: 800;
-      border-radius: 0.5rem;
-      transition: top 0.2s ease;
+    /* Reveal animations */
+    .reveal {
+      opacity: 0;
+      transform: translateY(16px);
+      transition: opacity 0.4s ease-out, transform 0.4s ease-out;
     }
-    .skip-link:focus {
-      top: 1rem;
-    }
-
-    :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
-      outline: 2px solid #34d399;
-      outline-offset: 3px;
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-      *, ::before, ::after {
-        animation-duration: 0.01ms !important;
-        animation-iteration-count: 1 !important;
-        transition-duration: 0.01ms !important;
-        scroll-behavior: auto !important;
-      }
-      .glow-orb, .flow-line {
-        animation: none !important;
-      }
-    }
-
-    @media (prefers-contrast: more) {
-      body {
-        background: #000000 !important;
-        color: #ffffff !important;
-      }
-      .glass-modern, .glass-card {
-        background: #000000 !important;
-        border-color: #ffffff !important;
-      }
+    .reveal.revealed {
+      opacity: 1;
+      transform: translateY(0);
     }
   </style>
 </head>
-<body class="min-h-screen">
-  <a href="#main-content" class="skip-link">Skip to main content</a>
 
-  <!-- Ambient Glowing Orbs -->
-  <div class="glow-orb h-[480px] w-[480px] left-[-120px] top-[-80px]" style="background: radial-gradient(circle, rgba(16,185,129,0.18), transparent 70%)"></div>
-  <div class="glow-orb h-[560px] w-[560px] right-[-160px] top-[25vh]" style="background: radial-gradient(circle, rgba(0,66,37,0.55), transparent 70%); animation-delay: -9s"></div>
-  <div class="glow-orb h-[420px] w-[420px] left-[30vw] bottom-[-140px]" style="background: radial-gradient(circle, rgba(251,191,36,0.08), transparent 70%); animation-delay: -17s"></div>
+<body class="selection:bg-emerald-500/30 selection:text-white" id="top">
 
-  <!-- ============================== TOP STICKY HEADER ============================== -->
-  <header id="site-header" class="fixed top-4 md:top-6 left-1/2 -translate-x-1/2 z-50 w-[94%] max-w-[1760px] h-14 md:h-16 px-4 md:px-8 rounded-full border border-emerald-500/20 bg-[#020a06]/85 backdrop-blur-xl transition-all duration-500 flex items-center justify-between shadow-2xl">
-    <a href="#top" class="flex items-center gap-3 group">
-      <div class="relative h-9 w-9 rounded-xl bg-gradient-to-tr from-[#004225] via-emerald-600 to-emerald-400 flex items-center justify-center font-mono font-black text-black text-lg shadow-[0_0_20px_rgba(16,185,129,0.3)] group-hover:scale-105 transition-transform">
-        🧜
-        <div class="franken-bolt -left-1 -top-1"></div>
-        <div class="franken-bolt -right-1 -bottom-1"></div>
-      </div>
-      <div class="leading-none">
-        <div class="font-black tracking-tight text-sm md:text-base text-white">frankenmermaid</div>
-        <div class="text-[8px] font-black text-emerald-400 uppercase tracking-widest flex items-center gap-1.5 mt-0.5">
-          <span class="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-          <span>RENDERER_ALIVE</span>
+  <!-- Ambient Background Glows -->
+  <div class="glow-orb w-[600px] h-[600px] bg-emerald-500/10 top-[-100px] left-[-200px]" style="animation-delay: 0s;"></div>
+  <div class="glow-orb w-[700px] h-[700px] bg-[#004225]/25 top-[35%] right-[-250px]" style="animation-delay: -7s;"></div>
+  <div class="glow-orb w-[500px] h-[500px] bg-emerald-500/10 bottom-[10%] left-[10%]" style="animation-delay: -14s;"></div>
+
+  <!-- Header Navigation -->
+  <header class="sticky top-0 z-40 w-full border-b border-emerald-500/15 bg-[#020a06]/85 backdrop-blur-md transition-all">
+    <div class="max-w-[1760px] mx-auto flex items-center justify-between px-4 sm:px-6 lg:px-8 h-16">
+      
+      <!-- Brand Logo -->
+      <a href="#top" class="flex items-center gap-3 group">
+        <div class="h-9 w-9 rounded-xl bg-gradient-to-br from-emerald-400 to-emerald-600 flex items-center justify-center text-black font-black text-lg shadow-[0_0_20px_rgba(16,185,129,0.4)] group-hover:scale-105 transition transform">
+          🧜
         </div>
+        <div>
+          <span class="text-lg font-extrabold tracking-tight text-white group-hover:text-emerald-400 transition">frankenmermaid</span>
+          <span class="ml-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest text-emerald-400 font-mono">v0.3.0</span>
+        </div>
+      </a>
+
+      <!-- Navigation Links -->
+      <nav class="hidden md:flex items-center gap-7 text-xs font-mono font-semibold uppercase tracking-wider text-slate-300">
+        <a href="#playground" class="hover:text-emerald-400 transition">Operating Theater</a>
+        <a href="#algorithms" class="hover:text-emerald-400 transition">15 Layouts</a>
+        <a href="#gallery" class="hover:text-emerald-400 transition">24 Taxonomy Specimens</a>
+        <a href="#pipeline" class="hover:text-emerald-400 transition">Pipeline IR</a>
+        <a href="#comparison" class="hover:text-emerald-400 transition">Comparison</a>
+        <a href="#install" class="hover:text-emerald-400 transition">Install</a>
+      </nav>
+
+      <!-- Quick Actions -->
+      <div class="flex items-center gap-3">
+        <button id="cmd-palette-btn" type="button" class="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-xl border border-emerald-500/25 bg-emerald-500/5 text-xs font-mono text-slate-300 hover:border-emerald-500/50 hover:text-white transition">
+          <span>Search</span>
+          <kbd class="rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-emerald-300">⌘K</kbd>
+        </button>
+
+        <a href="https://github.com/Dicklesworthstone/frankenmermaid" target="_blank" rel="noopener" class="flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-500 text-black font-black text-xs hover:bg-white transition shadow-[0_0_20px_rgba(16,185,129,0.3)]">
+          <span>GitHub</span>
+          <span class="text-sm">↗</span>
+        </a>
       </div>
-    </a>
-
-    <!-- Navigation Links -->
-    <nav id="sticky-nav" class="hidden lg:flex items-center gap-1" aria-label="Section navigation">
-      <a href="#playground" class="nav-link px-4 py-2 rounded-full text-[10px] font-black uppercase tracking-[0.18em] text-slate-300 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors">Playground</a>
-      <a href="#pipeline" class="nav-link px-4 py-2 rounded-full text-[10px] font-black uppercase tracking-[0.18em] text-slate-300 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors">Pipeline</a>
-      <a href="#showcase" class="nav-link px-4 py-2 rounded-full text-[10px] font-black uppercase tracking-[0.18em] text-slate-300 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors">Spotlight</a>
-      <a href="#gallery" class="nav-link px-4 py-2 rounded-full text-[10px] font-black uppercase tracking-[0.18em] text-slate-300 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors">Specimens (24)</a>
-      <a href="#algorithms" class="nav-link px-4 py-2 rounded-full text-[10px] font-black uppercase tracking-[0.18em] text-slate-300 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors">15 Algos</a>
-      <a href="#install" class="nav-link px-4 py-2 rounded-full text-[10px] font-black uppercase tracking-[0.18em] text-slate-300 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors">Install</a>
-    </nav>
-
-    <!-- Header Actions -->
-    <div class="flex items-center gap-3">
-      <!-- Command Palette Trigger -->
-      <button id="cmd-palette-btn" type="button" class="hidden sm:flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-[10px] font-black uppercase tracking-widest text-slate-300 hover:border-emerald-500/40 hover:text-white transition">
-        <span>Search</span>
-        <kbd class="rounded border border-white/15 bg-white/10 px-1 py-0.5 text-[9px] text-emerald-400 font-mono">⌘K</kbd>
-      </button>
-
-      <!-- Theme Switcher -->
-      <button id="theme-toggle-btn" type="button" aria-label="Toggle dark/light theme" class="rounded-full border border-white/10 bg-white/5 p-2 text-slate-300 hover:bg-white/10 hover:text-white transition">
-        <svg id="theme-icon-moon" class="h-4 w-4 block" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
-        </svg>
-        <svg id="theme-icon-sun" class="h-4 w-4 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
-        </svg>
-      </button>
-
-      <!-- GitHub Link Button -->
-      <a href="https://github.com/Dicklesworthstone/frankenmermaid" target="_blank" rel="noopener noreferrer" class="hidden sm:inline-flex px-4 py-2 rounded-full bg-white text-black text-[10px] font-black uppercase tracking-widest hover:bg-emerald-400 transition-colors">
-        GitHub
-      </a>
-
-      <!-- Direct Action CTA -->
-      <a href="#playground" class="px-4 py-2 rounded-full bg-emerald-500 text-black text-[10px] font-black uppercase tracking-widest hover:bg-white transition-colors shadow-[0_0_20px_rgba(16,185,129,0.3)]">
-        Launch Theater
-      </a>
     </div>
   </header>
 
-  <!-- Presenter Tour Bar (Hidden by default, active for automated E2E test suites) -->
-  <section id="section-presenter" class="hidden mx-auto mt-24 w-full max-w-[1760px] px-4 sm:px-6 lg:px-8">
-    <div class="glass-modern rounded-2xl p-5 border-emerald-500/30">
-      <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div class="flex items-start gap-3">
-          <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-300">
-            <span>🎙️</span>
-          </div>
-          <div>
-            <div class="flex items-center gap-2">
-              <span class="text-xs font-bold uppercase tracking-wider text-emerald-400 font-mono">Presenter Mode</span>
-              <span id="presenter-step" class="rounded-full bg-emerald-500/20 border border-emerald-500/30 px-2 py-0.5 text-[11px] font-bold text-emerald-300 font-mono">Idle</span>
-            </div>
-            <div id="presenter-summary" class="mt-1 text-sm font-medium text-slate-200">Presenter mode is idle. Start the guided tour to step through the strongest runtime, resilience, and evidence moments in sequence.</div>
-            <div id="presenter-note" class="mt-1 text-xs text-slate-400">Reset restores the pre-tour showcase state so ad hoc exploration and scripted presentation can share one page safely.</div>
-          </div>
-        </div>
-
-        <div class="flex flex-wrap items-center gap-2 shrink-0">
-          <button id="presenter-start" type="button" class="px-3.5 py-1.5 rounded-full bg-emerald-500 text-black font-black text-xs">Start Tour</button>
-          <button id="presenter-prev" type="button" class="px-3 py-1.5 rounded-full border border-white/10 text-xs">Prev</button>
-          <button id="presenter-next" type="button" class="px-3 py-1.5 rounded-full border border-white/10 text-xs">Next</button>
-          <button id="presenter-skip" type="button" class="px-3 py-1.5 rounded-full border border-white/10 text-xs text-slate-400">Skip</button>
-          <button id="presenter-reset" type="button" class="px-3 py-1.5 rounded-full border border-red-500/30 text-red-300 text-xs">Reset</button>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ============================== MAIN CONTENT ============================== -->
-  <main id="main-content" class="relative z-10 flex flex-col gap-24 pt-32 md:pt-40 pb-24">
+  <main class="space-y-24 md:space-y-36 pt-10 pb-24">
 
     <!-- ============================== HERO SECTION ============================== -->
-    <section class="relative px-4 sm:px-6 lg:px-8 max-w-[1760px] mx-auto w-full">
-      <div class="grid lg:grid-cols-12 gap-12 lg:gap-16 items-center">
-        
-        <!-- Left Hero Content -->
-        <div class="lg:col-span-7">
-          <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-emerald-500/30 bg-emerald-500/5 text-[10px] font-black uppercase tracking-[0.3em] text-emerald-400 mb-8">
-            <span class="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping"></span>
-            V0.2.0 Alive on Rust 2024
+    <section class="relative px-4 sm:px-6 lg:px-8 max-w-[1760px] mx-auto w-full pt-8 md:pt-14">
+      <div class="flex flex-col lg:flex-row items-center justify-between gap-12">
+        <div class="max-w-3xl space-y-6">
+          
+          <div class="inline-flex items-center gap-2.5 px-3.5 py-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-xs font-mono font-bold text-emerald-400">
+            <span class="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span>
+            <span>PURE RUST CORE · ZERO NODE.JS RUNTIME · WASM CERTIFIED</span>
           </div>
 
-          <h1 class="text-[clamp(2.8rem,7vw,5.5rem)] font-black tracking-tight leading-[0.88] text-white mb-8">
-            The<br>
-            <span class="franken-glitch text-emerald-400" data-glitch="Monster">Monster</span><br>
-            Diagram Engine.
+          <h1 class="text-4xl sm:text-6xl lg:text-7xl font-black tracking-tight text-white leading-[1.05]">
+            The Monster <span class="text-emerald-400 underline decoration-emerald-500/40 underline-offset-8">Diagram Engine</span>.
           </h1>
 
-          <p class="text-lg md:text-xl text-slate-300 font-medium leading-relaxed max-w-3xl mb-10">
-            Stitched together from an intent-aware parser, 15 layout algorithms, and a unified intermediate representation — one auditable Rust core with
-            <span class="text-emerald-400 font-bold">zero unsafe blocks</span> that renders Mermaid diagrams to high-definition SVG, hardware Canvas2D, and terminal consoles.
-            Natively in CLI, and in this page via WASM. Deterministic to the byte.
+          <p class="text-lg sm:text-xl text-slate-300 font-normal leading-relaxed max-w-2xl">
+            A clean-room, zero-dependency Rust diagram engine with intent-aware parsing, 15 layout algorithms, 100% deterministic geometry, and native multi-surface rendering across SVG, Canvas2D, Terminal ANSI, and WebAssembly.
           </p>
 
-          <div class="flex flex-wrap gap-4">
-            <a href="#playground" class="px-8 md:px-10 py-4 md:py-5 rounded-2xl bg-emerald-500 text-black font-black text-base md:text-lg shadow-[0_0_40px_rgba(16,185,129,0.35)] hover:bg-white transition-colors active:scale-95">
-              OPEN THE OPERATING THEATER
+          <!-- CTAs -->
+          <div class="flex flex-wrap items-center gap-4 pt-2">
+            <a href="#playground" class="px-6 py-3.5 rounded-xl bg-emerald-500 hover:bg-white text-black font-black text-sm transition shadow-[0_0_25px_rgba(16,185,129,0.35)] flex items-center gap-2">
+              <span>⚡ Enter Operating Theater</span>
             </a>
-            <a href="#pipeline" class="px-8 md:px-10 py-4 md:py-5 rounded-2xl bg-white/5 border border-emerald-500/25 text-white font-black text-base md:text-lg hover:bg-emerald-500/10 hover:border-emerald-500/40 transition-colors active:scale-95">
-              EXPLORE PIPELINE
+            <a href="#algorithms" class="px-5 py-3.5 rounded-xl border border-emerald-500/30 bg-emerald-500/5 hover:border-emerald-500/60 text-emerald-300 font-black text-sm transition">
+              <span>Explore 15 Layouts →</span>
             </a>
-            <a href="https://github.com/Dicklesworthstone/frankenmermaid" target="_blank" rel="noopener" class="px-8 md:px-10 py-4 md:py-5 rounded-2xl bg-white/5 border border-white/10 text-white font-black text-base md:text-lg hover:bg-white/10 transition-colors active:scale-95">
-              VIEW SOURCE
+            <a href="https://github.com/Dicklesworthstone/frankenmermaid/blob/main/LICENSE" target="_blank" rel="noopener" class="px-4 py-3.5 rounded-xl border border-white/10 bg-white/5 hover:border-white/20 text-slate-300 text-xs font-mono transition" title="MIT License with OpenAI/Anthropic Rider">
+              📜 MIT (OpenAI/Anthropic Rider)
             </a>
+          </div>
+
+          <!-- Quick Terminal Command -->
+          <div class="pt-2">
+            <div class="inline-flex items-center gap-3 p-2 rounded-xl bg-black/60 border border-emerald-500/20 font-mono text-xs text-slate-300">
+              <span class="text-emerald-400 select-none">$</span>
+              <span>curl -fsSL https://frankenmermaid.com/install.sh | bash</span>
+            </div>
           </div>
         </div>
 
-        <!-- Right Hero Specimen Terminal -->
-        <div class="lg:col-span-5 relative">
-          <div class="relative glass-modern rounded-3xl overflow-hidden shadow-2xl border border-emerald-500/20">
-            <div class="flex items-center justify-between px-6 py-4 bg-[#04120a] border-b border-emerald-500/15">
-              <div class="flex items-center gap-3">
-                <div class="flex gap-1.5">
-                  <div class="h-2.5 w-2.5 rounded-full bg-red-500/40"></div>
-                  <div class="h-2.5 w-2.5 rounded-full bg-yellow-500/40"></div>
-                  <div class="h-2.5 w-2.5 rounded-full bg-green-500/40"></div>
-                </div>
-                <span class="text-[10px] font-black uppercase tracking-widest text-slate-400 font-mono">fm_render_stream</span>
-              </div>
-              <div class="flex items-center gap-2">
-                <span class="h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_8px_#10b981] animate-pulse"></span>
-                <span class="text-[9px] font-black text-emerald-400 uppercase tracking-widest font-mono">WASM Ready</span>
-              </div>
-            </div>
-            <pre id="hero-terminal" class="p-6 md:p-8 font-mono text-[12px] md:text-[13px] leading-relaxed min-h-[260px] text-emerald-300 whitespace-pre-wrap">
-┌─ frankenmermaid engine ───────────────────────────────┐
-│ Status:  READY (Rust 2024 Edition)                    │
-│ IR Core: DiagramType(24) • Algorithms(15)             │
-│ WASM:    Streaming compilation initialized            │
-│ Gating:  Deterministic SHA-256 byte parity            │
-└───────────────────────────────────────────────────────┘
-$ fm-cli render --format=svg sample.mmd
-[INFO] Parsed 24 tokens in 0.12ms
-[INFO] Layout: Sugiyama hierarchical (0.24ms)
-[INFO] Emitted clean SVG (100% byte identical)</pre>
-          </div>
-
-          <!-- Floating Badge -->
-          <div class="absolute -bottom-6 -left-4 glass-modern rounded-2xl px-5 py-4 border border-emerald-500/30 shadow-glow">
-            <div class="text-[9px] font-black uppercase tracking-[0.3em] text-slate-400 mb-1">Unsafe Blocks</div>
-            <div class="text-3xl font-black text-emerald-400 tabular-nums">0<span class="text-xs text-slate-400 ml-2 font-mono">#![forbid(unsafe_code)]</span></div>
+        <!-- Hero Graphic / Illustration -->
+        <div class="relative w-full max-w-md lg:max-w-lg">
+          <div class="relative rounded-3xl overflow-hidden border border-emerald-500/30 shadow-[0_0_50px_rgba(16,185,129,0.2)] bg-[#030d07] group">
+            <div class="franken-bolt -left-1.5 -top-1.5"></div>
+            <div class="franken-bolt -right-1.5 -top-1.5"></div>
+            <div class="franken-bolt -left-1.5 -bottom-1.5"></div>
+            <div class="franken-bolt -right-1.5 -bottom-1.5"></div>
+            <img src="frankenmermaid_illustration.webp" alt="frankenmermaid engine illustration" class="w-full h-auto object-cover opacity-90 group-hover:scale-102 transition duration-500">
           </div>
         </div>
       </div>
 
       <!-- 4 Core Metric Counters -->
-      <div class="group relative rounded-2xl border border-emerald-500/15 bg-black/40 mt-20 md:mt-28">
+      <div class="group relative rounded-2xl border border-emerald-500/15 bg-black/40 mt-16 md:mt-24">
         <div class="franken-bolt -left-1.5 -top-1.5"></div>
         <div class="franken-bolt -right-1.5 -top-1.5"></div>
         <div class="franken-bolt -left-1.5 -bottom-1.5"></div>
@@ -697,7 +581,7 @@ $ fm-cli render --format=svg sample.mmd
           The Operating <span class="text-emerald-400">Theater</span>.
         </h2>
         <p class="text-slate-300 max-w-3xl mx-auto text-base md:text-lg">
-          Type Mermaid on the left. The <em>actual</em> engine — compiled to WebAssembly, running directly in your browser — computes deterministic layouts and renders vector SVG or Canvas2D on the right.
+          Type Mermaid with performant real-time syntax highlighting on the left. The WebAssembly engine computes deterministic layouts and renders vector SVG or Canvas2D on the right in sub-millisecond frames.
         </p>
       </div>
 
@@ -749,7 +633,7 @@ $ fm-cli render --format=svg sample.mmd
               <button type="button" class="sample-pill px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider border border-white/10 text-slate-400 hover:border-emerald-500/40" data-sample="state">State Machine</button>
             </div>
 
-            <!-- View Mode Tabs (SVG / Canvas / Terminal / Diff) -->
+            <!-- View Mode Tabs (SVG / Canvas / Terminal / Theme / Proof) -->
             <div class="flex items-center gap-1.5">
               <div class="inline-flex items-center rounded-full border border-emerald-500/30 bg-black/60 p-1" role="group" aria-label="Output backends">
                 <button type="button" id="tab-svg-btn" class="view-tab px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest bg-emerald-500 text-black shadow-sm">SVG</button>
@@ -769,7 +653,7 @@ $ fm-cli render --format=svg sample.mmd
           <!-- Side-by-Side Editor & Visualizer Panes -->
           <div class="pg-panes grid grid-cols-1 lg:grid-cols-12 min-h-[620px]">
             
-            <!-- Left Column: Source Editor (5 Columns) -->
+            <!-- Left Column: Syntax Highlighted Editor (5 Columns) -->
             <div class="lg:col-span-5 border-b lg:border-b-0 lg:border-r border-emerald-500/15 flex flex-col bg-[#020704]">
               
               <!-- Editor Subhead -->
@@ -795,11 +679,12 @@ $ fm-cli render --format=svg sample.mmd
                 <button type="button" class="snippet-btn px-2 py-0.5 rounded border border-white/5 text-[10px] font-mono text-slate-300 hover:border-emerald-500/40 hover:text-emerald-300 shrink-0" data-snippet="style A fill:#064e3b,stroke:#34d399,stroke-width:2px">Style</button>
               </div>
 
-              <!-- Editor Line Numbers & Textarea -->
+              <!-- Editor Dual-Layer Syntax Highlighting & Line Numbers -->
               <div class="editor-wrapper">
                 <div id="editor-gutter" class="editor-gutter" aria-hidden="true">1</div>
                 <div class="editor-textarea-container">
-                  <textarea id="diagram-input" class="editor-textarea" spellcheck="false" placeholder="Enter Mermaid diagram syntax..." aria-label="Mermaid diagram source code editor"></textarea>
+                  <pre id="editor-highlight" class="editor-highlight" aria-hidden="true"></pre>
+                  <textarea id="diagram-input" class="editor-textarea" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="Enter Mermaid diagram syntax..." aria-label="Mermaid diagram source code editor"></textarea>
                 </div>
               </div>
             </div>
@@ -1045,6 +930,337 @@ $ fm-cli render --format=svg sample.mmd
       </div>
     </section>
 
+    <!-- ============================== 15 LAYOUT ALGORITHMS ARCHITECTURE ============================== -->
+    <section id="algorithms" class="relative px-4 sm:px-6 lg:px-8 max-w-[1760px] mx-auto w-full">
+      <div class="text-center mb-14">
+        <div class="inline-flex items-center gap-3 text-[10px] font-black uppercase tracking-[0.3em] text-emerald-400 mb-3">
+          <span class="h-px w-8 bg-emerald-500/40"></span>
+          GEOMETRY_DISPATCH_CORE
+          <span class="h-px w-8 bg-emerald-500/40"></span>
+        </div>
+        <h2 class="text-4xl md:text-6xl font-black tracking-tight text-white mb-4">
+          15 Specialized <span class="text-emerald-400">Layout Engines</span>.
+        </h2>
+        <p class="text-slate-300 max-w-3xl mx-auto text-base md:text-lg">
+          Instead of forcing every diagram into generic graphviz DOT, frankenmermaid implements 15 dedicated geometry solvers engineered for deterministic stability, zero float drift, and specialized domain aesthetics.
+        </p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        
+        <!-- Algorithm 1: Sugiyama Hierarchical -->
+        <div class="glass-card p-6 rounded-2xl relative flex flex-col justify-between group hover:border-emerald-500/60 transition">
+          <div class="franken-bolt -left-1.5 -top-1.5"></div>
+          <div>
+            <div class="flex items-center justify-between gap-2 mb-3">
+              <span class="rounded bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[9px] font-black text-emerald-300 font-mono">sugiyama</span>
+              <span class="text-[9px] font-mono text-slate-400">O(V log V) · Layered DAG</span>
+            </div>
+            <h3 class="text-lg font-black text-white group-hover:text-emerald-300 transition">Sugiyama Layered DAG</h3>
+            <p class="text-xs text-slate-300 mt-2 leading-relaxed">
+              Decycled feedback arc set breaking, Coffman-Graham layer width bounds, and E-graph barycenter crossing minimization for hierarchical workflows and state machines.
+            </p>
+          </div>
+          <div class="mt-5 pt-4 border-t border-emerald-500/15 flex items-center justify-between">
+            <span class="text-[10px] font-mono text-emerald-400 font-bold">Flowchart · State · Class</span>
+            <button type="button" class="btn-algo-try text-[10px] font-mono font-black text-emerald-300 hover:text-white uppercase" data-sample="flowchart">⚡ Try in Theater</button>
+          </div>
+        </div>
+
+        <!-- Algorithm 2: Barnes-Hut Force-Directed -->
+        <div class="glass-card p-6 rounded-2xl relative flex flex-col justify-between group hover:border-emerald-500/60 transition">
+          <div class="franken-bolt -right-1.5 -top-1.5"></div>
+          <div>
+            <div class="flex items-center justify-between gap-2 mb-3">
+              <span class="rounded bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[9px] font-black text-emerald-300 font-mono">force</span>
+              <span class="text-[9px] font-mono text-slate-400">O(N log N) · Spatial Quadtree</span>
+            </div>
+            <h3 class="text-lg font-black text-white group-hover:text-emerald-300 transition">Barnes-Hut Force-Directed</h3>
+            <p class="text-xs text-slate-300 mt-2 leading-relaxed">
+              Quadtree-accelerated N-body physical simulation with Coulomb repulsion and Hooke elasticity, stabilized by a symplectic Euler numerical integrator.
+            </p>
+          </div>
+          <div class="mt-5 pt-4 border-t border-emerald-500/15 flex items-center justify-between">
+            <span class="text-[10px] font-mono text-emerald-400 font-bold">Network · Organic Topologies</span>
+            <button type="button" class="btn-algo-try text-[10px] font-mono font-black text-emerald-300 hover:text-white uppercase" data-sample="architecture">⚡ Try in Theater</button>
+          </div>
+        </div>
+
+        <!-- Algorithm 3: Orthogonal Grid Router -->
+        <div class="glass-card p-6 rounded-2xl relative flex flex-col justify-between group hover:border-emerald-500/60 transition">
+          <div class="franken-bolt -left-1.5 -bottom-1.5"></div>
+          <div>
+            <div class="flex items-center justify-between gap-2 mb-3">
+              <span class="rounded bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[9px] font-black text-emerald-300 font-mono">grid</span>
+              <span class="text-[9px] font-mono text-slate-400">A* Manhattan · 0 Bend</span>
+            </div>
+            <h3 class="text-lg font-black text-white group-hover:text-emerald-300 transition">Orthogonal Grid Router</h3>
+            <p class="text-xs text-slate-300 mt-2 leading-relaxed">
+              Dual-grid A* pathfinder with minimum-bend cost heuristics and channel compaction to route orthogonal connectors cleanly without node occlusion.
+            </p>
+          </div>
+          <div class="mt-5 pt-4 border-t border-emerald-500/15 flex items-center justify-between">
+            <span class="text-[10px] font-mono text-emerald-400 font-bold">Block · Schematics · ER</span>
+            <button type="button" class="btn-algo-try text-[10px] font-mono font-black text-emerald-300 hover:text-white uppercase" data-sample="er">⚡ Try in Theater</button>
+          </div>
+        </div>
+
+        <!-- Algorithm 4: Radial Circular -->
+        <div class="glass-card p-6 rounded-2xl relative flex flex-col justify-between group hover:border-emerald-500/60 transition">
+          <div>
+            <div class="flex items-center justify-between gap-2 mb-3">
+              <span class="rounded bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[9px] font-black text-emerald-300 font-mono">radial</span>
+              <span class="text-[9px] font-mono text-slate-400">Concentric · Angle Slices</span>
+            </div>
+            <h3 class="text-lg font-black text-white group-hover:text-emerald-300 transition">Concentric Radial Embedding</h3>
+            <p class="text-xs text-slate-300 mt-2 leading-relaxed">
+              Depth-based concentric ring radii allocation with logarithmic sector partitioning, preventing angular crowding on high-degree root hubs.
+            </p>
+          </div>
+          <div class="mt-5 pt-4 border-t border-emerald-500/15 flex items-center justify-between">
+            <span class="text-[10px] font-mono text-emerald-400 font-bold">Mindmaps · Tree Graphs</span>
+            <button type="button" class="btn-algo-try text-[10px] font-mono font-black text-emerald-300 hover:text-white uppercase" data-sample="mindmap">⚡ Try in Theater</button>
+          </div>
+        </div>
+
+        <!-- Algorithm 5: Sequence Lifeline Matrix -->
+        <div class="glass-card p-6 rounded-2xl relative flex flex-col justify-between group hover:border-emerald-500/60 transition">
+          <div>
+            <div class="flex items-center justify-between gap-2 mb-3">
+              <span class="rounded bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[9px] font-black text-emerald-300 font-mono">sequence</span>
+              <span class="text-[9px] font-mono text-slate-400">Strict Causal Matrix</span>
+            </div>
+            <h3 class="text-lg font-black text-white group-hover:text-emerald-300 transition">Sequence Lifeline Solver</h3>
+            <p class="text-xs text-slate-300 mt-2 leading-relaxed">
+              Deterministic participant column allocation with activation fragment stacking, causal message arrow routing, and multi-actor span geometry.
+            </p>
+          </div>
+          <div class="mt-5 pt-4 border-t border-emerald-500/15 flex items-center justify-between">
+            <span class="text-[10px] font-mono text-emerald-400 font-bold">Sequence Diagrams · API Traces</span>
+            <button type="button" class="btn-algo-try text-[10px] font-mono font-black text-emerald-300 hover:text-white uppercase" data-sample="sequence">⚡ Try in Theater</button>
+          </div>
+        </div>
+
+        <!-- Algorithm 6: GitGraph Lane Allocator -->
+        <div class="glass-card p-6 rounded-2xl relative flex flex-col justify-between group hover:border-emerald-500/60 transition">
+          <div class="franken-bolt -right-1.5 -bottom-1.5"></div>
+          <div>
+            <div class="flex items-center justify-between gap-2 mb-3">
+              <span class="rounded bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[9px] font-black text-emerald-300 font-mono">gitgraph</span>
+              <span class="text-[9px] font-mono text-slate-400">Topological Lanes</span>
+            </div>
+            <h3 class="text-lg font-black text-white group-hover:text-emerald-300 transition">GitGraph Lane Allocator</h3>
+            <p class="text-xs text-slate-300 mt-2 leading-relaxed">
+              Topological DAG branch reservation with compact lane compaction, branch lifespan tracking, and cubic Bézier merge route smoothing.
+            </p>
+          </div>
+          <div class="mt-5 pt-4 border-t border-emerald-500/15 flex items-center justify-between">
+            <span class="text-[10px] font-mono text-emerald-400 font-bold">Git History · Version Graphs</span>
+            <button type="button" class="btn-algo-try text-[10px] font-mono font-black text-emerald-300 hover:text-white uppercase" data-sample="gitgraph">⚡ Try in Theater</button>
+          </div>
+        </div>
+
+        <!-- Algorithm 7: Class UML Pin Router -->
+        <div class="glass-card p-6 rounded-2xl relative flex flex-col justify-between group hover:border-emerald-500/60 transition">
+          <div>
+            <div class="flex items-center justify-between gap-2 mb-3">
+              <span class="rounded bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[9px] font-black text-emerald-300 font-mono">class-uml</span>
+              <span class="text-[9px] font-mono text-slate-400">Pin Orthogonal Router</span>
+            </div>
+            <h3 class="text-lg font-black text-white group-hover:text-emerald-300 transition">Class UML Pin Router</h3>
+            <p class="text-xs text-slate-300 mt-2 leading-relaxed">
+              Stereotype compartmentalization, member table sizing, and cardinality-aware pin assignment for generalization, composition, and aggregation edges.
+            </p>
+          </div>
+          <div class="mt-5 pt-4 border-t border-emerald-500/15 flex items-center justify-between">
+            <span class="text-[10px] font-mono text-emerald-400 font-bold">Class Diagrams · Type Hierarchies</span>
+            <button type="button" class="btn-algo-try text-[10px] font-mono font-black text-emerald-300 hover:text-white uppercase" data-sample="class">⚡ Try in Theater</button>
+          </div>
+        </div>
+
+        <!-- Algorithm 8: Statechart Matrix -->
+        <div class="glass-card p-6 rounded-2xl relative flex flex-col justify-between group hover:border-emerald-500/60 transition">
+          <div>
+            <div class="flex items-center justify-between gap-2 mb-3">
+              <span class="rounded bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[9px] font-black text-emerald-300 font-mono">state-matrix</span>
+              <span class="text-[9px] font-mono text-slate-400">Hierarchical Nested States</span>
+            </div>
+            <h3 class="text-lg font-black text-white group-hover:text-emerald-300 transition">Statechart Matrix</h3>
+            <p class="text-xs text-slate-300 mt-2 leading-relaxed">
+              Composite hierarchical state clustering with entry/exit pseudo-state pins, self-transition loops, and transition event label bounding.
+            </p>
+          </div>
+          <div class="mt-5 pt-4 border-t border-emerald-500/15 flex items-center justify-between">
+            <span class="text-[10px] font-mono text-emerald-400 font-bold">State Diagrams · FSMs</span>
+            <button type="button" class="btn-algo-try text-[10px] font-mono font-black text-emerald-300 hover:text-white uppercase" data-sample="state">⚡ Try in Theater</button>
+          </div>
+        </div>
+
+        <!-- Algorithm 9: Gantt Resource Scheduler -->
+        <div class="glass-card p-6 rounded-2xl relative flex flex-col justify-between group hover:border-emerald-500/60 transition">
+          <div>
+            <div class="flex items-center justify-between gap-2 mb-3">
+              <span class="rounded bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[9px] font-black text-emerald-300 font-mono">gantt</span>
+              <span class="text-[9px] font-mono text-slate-400">Critical Path Propagation</span>
+            </div>
+            <h3 class="text-lg font-black text-white group-hover:text-emerald-300 transition">Gantt Critical-Path Engine</h3>
+            <p class="text-xs text-slate-300 mt-2 leading-relaxed">
+              Temporal date normalization across centuries to milliseconds with automated section swimlanes, milestone pins, and critical path cascades.
+            </p>
+          </div>
+          <div class="mt-5 pt-4 border-t border-emerald-500/15 flex items-center justify-between">
+            <span class="text-[10px] font-mono text-emerald-400 font-bold">Roadmaps · Release Cycles</span>
+            <button type="button" class="btn-algo-try text-[10px] font-mono font-black text-emerald-300 hover:text-white uppercase" data-sample="gantt">⚡ Try in Theater</button>
+          </div>
+        </div>
+
+        <!-- Algorithm 10: Sankey Flow Weaver -->
+        <div class="glass-card p-6 rounded-2xl relative flex flex-col justify-between group hover:border-emerald-500/60 transition">
+          <div>
+            <div class="flex items-center justify-between gap-2 mb-3">
+              <span class="rounded bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[9px] font-black text-emerald-300 font-mono">sankey</span>
+              <span class="text-[9px] font-mono text-slate-400">Conservation of Flow</span>
+            </div>
+            <h3 class="text-lg font-black text-white group-hover:text-emerald-300 transition">Sankey Flow Weaver</h3>
+            <p class="text-xs text-slate-300 mt-2 leading-relaxed">
+              Volume-weighted node stratification enforcing conservation of flow laws with continuous variable-width Bézier ribbon splines.
+            </p>
+          </div>
+          <div class="mt-5 pt-4 border-t border-emerald-500/15 flex items-center justify-between">
+            <span class="text-[10px] font-mono text-emerald-400 font-bold">Flow Distributions · Cost Funnels</span>
+            <button type="button" class="btn-algo-try text-[10px] font-mono font-black text-emerald-300 hover:text-white uppercase" data-sample="sankey">⚡ Try in Theater</button>
+          </div>
+        </div>
+
+        <!-- Algorithm 11: Block Architecture Grid -->
+        <div class="glass-card p-6 rounded-2xl relative flex flex-col justify-between group hover:border-emerald-500/60 transition">
+          <div>
+            <div class="flex items-center justify-between gap-2 mb-3">
+              <span class="rounded bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[9px] font-black text-emerald-300 font-mono">block</span>
+              <span class="text-[9px] font-mono text-slate-400">Proportional Span Grid</span>
+            </div>
+            <h3 class="text-lg font-black text-white group-hover:text-emerald-300 transition">Block Architecture Grid</h3>
+            <p class="text-xs text-slate-300 mt-2 leading-relaxed">
+              Multi-column grid packing with fractional column spans, nested container bounds, and edge port coordinate auto-snapping.
+            </p>
+          </div>
+          <div class="mt-5 pt-4 border-t border-emerald-500/15 flex items-center justify-between">
+            <span class="text-[10px] font-mono text-emerald-400 font-bold">Hardware Blocks · System Units</span>
+            <button type="button" class="btn-algo-try text-[10px] font-mono font-black text-emerald-300 hover:text-white uppercase" data-sample="blockBeta">⚡ Try in Theater</button>
+          </div>
+        </div>
+
+        <!-- Algorithm 12: C4 Model Architecture -->
+        <div class="glass-card p-6 rounded-2xl relative flex flex-col justify-between group hover:border-emerald-500/60 transition">
+          <div>
+            <div class="flex items-center justify-between gap-2 mb-3">
+              <span class="rounded bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[9px] font-black text-emerald-300 font-mono">c4-engine</span>
+              <span class="text-[9px] font-mono text-slate-400">Context · Container · Component</span>
+            </div>
+            <h3 class="text-lg font-black text-white group-hover:text-emerald-300 transition">C4 Enterprise Hierarchy</h3>
+            <p class="text-xs text-slate-300 mt-2 leading-relaxed">
+              System Context, Container, Component, Dynamic and Deployment layout abstraction layers with boundary grouping and protocol tags.
+            </p>
+          </div>
+          <div class="mt-5 pt-4 border-t border-emerald-500/15 flex items-center justify-between">
+            <span class="text-[10px] font-mono text-emerald-400 font-bold">C4 Context · Containers · Mesh</span>
+            <button type="button" class="btn-algo-try text-[10px] font-mono font-black text-emerald-300 hover:text-white uppercase" data-sample="c4Context">⚡ Try in Theater</button>
+          </div>
+        </div>
+
+        <!-- Algorithm 13: Packet Bytefield Grid -->
+        <div class="glass-card p-6 rounded-2xl relative flex flex-col justify-between group hover:border-emerald-500/60 transition">
+          <div>
+            <div class="flex items-center justify-between gap-2 mb-3">
+              <span class="rounded bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[9px] font-black text-emerald-300 font-mono">packet</span>
+              <span class="text-[9px] font-mono text-slate-400">Word-Aligned Bitfields</span>
+            </div>
+            <h3 class="text-lg font-black text-white group-hover:text-emerald-300 transition">Packet Bytefield Grid</h3>
+            <p class="text-xs text-slate-300 mt-2 leading-relaxed">
+              Bitfield word boundary wrapping with bit-range headers, field span computation, and hardware register layout geometry.
+            </p>
+          </div>
+          <div class="mt-5 pt-4 border-t border-emerald-500/15 flex items-center justify-between">
+            <span class="text-[10px] font-mono text-emerald-400 font-bold">Network Headers · Wire Formats</span>
+            <button type="button" class="btn-algo-try text-[10px] font-mono font-black text-emerald-300 hover:text-white uppercase" data-sample="packetBeta">⚡ Try in Theater</button>
+          </div>
+        </div>
+
+        <!-- Algorithm 14: Quadrant & Pie Arc Solver -->
+        <div class="glass-card p-6 rounded-2xl relative flex flex-col justify-between group hover:border-emerald-500/60 transition">
+          <div>
+            <div class="flex items-center justify-between gap-2 mb-3">
+              <span class="rounded bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[9px] font-black text-emerald-300 font-mono">quadrant-pie</span>
+              <span class="text-[9px] font-mono text-slate-400">Trigonometric Bounding</span>
+            </div>
+            <h3 class="text-lg font-black text-white group-hover:text-emerald-300 transition">Quadrant &amp; Pie Arc Solver</h3>
+            <p class="text-xs text-slate-300 mt-2 leading-relaxed">
+              Four-quadrant Cartesian partitioning and exact trigonometric arc sectioning with collision-free radial leader text placement.
+            </p>
+          </div>
+          <div class="mt-5 pt-4 border-t border-emerald-500/15 flex items-center justify-between">
+            <span class="text-[10px] font-mono text-emerald-400 font-bold">Quadrant Charts · Pie Shares</span>
+            <button type="button" class="btn-algo-try text-[10px] font-mono font-black text-emerald-300 hover:text-white uppercase" data-sample="quadrantChart">⚡ Try in Theater</button>
+          </div>
+        </div>
+
+        <!-- Algorithm 15: Reingold-Tilford Tree -->
+        <div class="glass-card p-6 rounded-2xl relative flex flex-col justify-between group hover:border-emerald-500/60 transition">
+          <div>
+            <div class="flex items-center justify-between gap-2 mb-3">
+              <span class="rounded bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[9px] font-black text-emerald-300 font-mono">tree</span>
+              <span class="text-[9px] font-mono text-slate-400">Reingold-Tilford Linear</span>
+            </div>
+            <h3 class="text-lg font-black text-white group-hover:text-emerald-300 transition">Hierarchical Tree Embedding</h3>
+            <p class="text-xs text-slate-300 mt-2 leading-relaxed">
+              Linear-time contour merging and subtree centering producing aesthetic compact tree diagrams with guaranteed minimum sibling spacing.
+            </p>
+          </div>
+          <div class="mt-5 pt-4 border-t border-emerald-500/15 flex items-center justify-between">
+            <span class="text-[10px] font-mono text-emerald-400 font-bold">Hierarchies · ASTs · Taxonomies</span>
+            <button type="button" class="btn-algo-try text-[10px] font-mono font-black text-emerald-300 hover:text-white uppercase" data-sample="requirement">⚡ Try in Theater</button>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ============================== 24 SPECIMEN TAXONOMY MUSEUM ============================== -->
+    <section id="gallery" class="relative px-4 sm:px-6 lg:px-8 max-w-[1760px] mx-auto w-full">
+      <div class="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-8">
+        <div>
+          <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-[10px] font-black uppercase tracking-[0.25em] text-emerald-400 mb-3">
+            <span class="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+            TAXONOMY MUSEUM · ALL 24 FAMILIES
+          </div>
+          <h2 class="text-3xl md:text-5xl font-black text-white">24 Diagram <span class="text-emerald-400">Specimens</span>.</h2>
+          <p class="text-slate-300 text-sm md:text-base max-w-2xl mt-2">Every Mermaid specification and extended dialect parsed into a unified semantic IR with live vector previews rendered in your browser.</p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-3">
+          <div class="relative">
+            <input id="gallery-search" type="search" placeholder="Search specimens (e.g. flowchart, git, c4)..." class="rounded-xl border border-emerald-500/25 bg-black/80 pl-4 pr-10 py-2.5 text-xs font-mono text-slate-200 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none w-72 sm:w-80 transition shadow-inner">
+            <span class="absolute right-3 top-2.5 text-slate-500 text-xs pointer-events-none">⌘K</span>
+          </div>
+          <span id="gallery-count" class="px-3 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 font-mono text-xs text-emerald-300 font-bold">24 of 24 Specimens</span>
+        </div>
+      </div>
+
+      <!-- Category Filter Chips -->
+      <div id="gallery-filters" class="flex flex-wrap items-center gap-2 mb-8">
+        <!-- Injected dynamically with category counts -->
+      </div>
+
+      <!-- Specimen Grid with Live Miniatures -->
+      <div id="gallery-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
+        <!-- Rendered dynamically with live SVG miniatures -->
+      </div>
+
+      <div id="gallery-compare-shelf" class="hidden mt-8 p-4 rounded-xl border border-emerald-500/30 bg-black/60">
+        <div id="gallery-compare-summary" class="text-xs font-mono text-emerald-300"></div>
+      </div>
+    </section>
+
     <!-- ============================== SUBSYSTEM PIPELINE MAP ============================== -->
     <section id="pipeline" class="relative px-4 sm:px-6 lg:px-8 max-w-[1760px] mx-auto w-full">
       <div class="text-center mb-12">
@@ -1117,77 +1333,6 @@ $ fm-cli render --format=svg sample.mmd
       </div>
     </section>
 
-    <!-- ============================== 24 SPECIMEN TAXONOMY GALLERY ============================== -->
-    <section id="gallery" class="relative px-4 sm:px-6 lg:px-8 max-w-[1760px] mx-auto w-full">
-      <div class="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-8">
-        <div>
-          <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-[10px] font-black uppercase tracking-[0.25em] text-emerald-400 mb-3">
-            <span class="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-            DIAGRAM TAXONOMY &amp; SPECIMEN MATRIX
-          </div>
-          <h2 class="text-3xl md:text-5xl font-black text-white">24 Diagram <span class="text-emerald-400">Specimens</span>.</h2>
-          <p class="text-slate-300 text-sm md:text-base max-w-2xl mt-2">Every Mermaid specification and extended dialect parsed into a unified semantic IR with deterministic multi-target layout and rendering.</p>
-        </div>
-
-        <div class="flex flex-wrap items-center gap-3">
-          <div class="relative">
-            <input id="gallery-search" type="search" placeholder="Search specimens (e.g. flowchart, git, c4)..." class="rounded-xl border border-emerald-500/25 bg-black/80 pl-4 pr-10 py-2.5 text-xs font-mono text-slate-200 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none w-72 sm:w-80 transition shadow-inner">
-            <span class="absolute right-3 top-2.5 text-slate-500 text-xs pointer-events-none">⌘K</span>
-          </div>
-          <span id="gallery-count" class="px-3 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 font-mono text-xs text-emerald-300 font-bold">24 of 24 Specimens</span>
-        </div>
-      </div>
-
-      <!-- Category Filter Chips -->
-      <div id="gallery-filters" class="flex flex-wrap items-center gap-2 mb-8">
-        <!-- Injected dynamically with category counts -->
-      </div>
-
-      <!-- Specimen Grid -->
-      <div id="gallery-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
-        <!-- Rendered dynamically -->
-      </div>
-
-      <div id="gallery-compare-shelf" class="hidden mt-8 p-4 rounded-xl border border-emerald-500/30 bg-black/60">
-        <div id="gallery-compare-summary" class="text-xs font-mono text-emerald-300"></div>
-      </div>
-    </section>
-
-    <!-- ============================== 15 LAYOUT ALGORITHMS LAB ============================== -->
-    <section id="algorithms" class="relative px-4 sm:px-6 lg:px-8 max-w-[1760px] mx-auto w-full">
-      <div class="text-center mb-12">
-        <div class="inline-flex items-center gap-3 text-[10px] font-black uppercase tracking-[0.3em] text-emerald-400 mb-3">
-          <span class="h-px w-8 bg-emerald-500/40"></span>
-          GEOMETRY_DISPATCH
-          <span class="h-px w-8 bg-emerald-500/40"></span>
-        </div>
-        <h2 class="text-4xl md:text-6xl font-black tracking-tight text-white mb-4">
-          15 Layout <span class="text-emerald-400">Algorithms</span>.
-        </h2>
-        <p class="text-slate-300 max-w-3xl mx-auto text-base md:text-lg">
-          Hierarchical Sugiyama, Force-Directed, Tree, Radial, Grid, and Cycle-Aware feedback arc set breakers designed for deterministic layout stability.
-        </p>
-      </div>
-
-      <div class="grid md:grid-cols-3 gap-6">
-        <div class="glass-card p-6 rounded-2xl relative">
-          <div class="franken-bolt -left-1.5 -top-1.5"></div>
-          <h3 class="text-lg font-black text-white mb-2">Sugiyama Hierarchical</h3>
-          <p class="text-sm text-slate-300 leading-relaxed">Layered ranking with barycenter and median crossing minimization. Handles dense flowcharts and deep dependency cascades.</p>
-        </div>
-        <div class="glass-card p-6 rounded-2xl relative">
-          <div class="franken-bolt -right-1.5 -top-1.5"></div>
-          <h3 class="text-lg font-black text-white mb-2">Cycle-Aware Feedback Arc</h3>
-          <p class="text-sm text-slate-300 leading-relaxed">Detects back-edges and recursive loops automatically, reversing them during ranking to ensure strict acyclic layering without tangle.</p>
-        </div>
-        <div class="glass-card p-6 rounded-2xl relative">
-          <div class="franken-bolt -right-1.5 -bottom-1.5"></div>
-          <h3 class="text-lg font-black text-white mb-2">Incremental Pipeline</h3>
-          <p class="text-sm text-slate-300 leading-relaxed">Layout stages cache prior node bounds and rank assignments. Typing edits compute in sub-millisecond frames.</p>
-        </div>
-      </div>
-    </section>
-
     <!-- ============================== COMPARISON MATRIX ============================== -->
     <section id="comparison" class="relative px-4 sm:px-6 lg:px-8 max-w-[1760px] mx-auto w-full">
       <div class="text-center mb-12">
@@ -1238,15 +1383,15 @@ $ fm-cli render --format=svg sample.mmd
               </tr>
               <tr class="hover:bg-emerald-500/5 transition">
                 <td class="py-3.5 px-4 font-bold text-white font-sans">Determinism Guarantee</td>
-                <td class="py-3.5 px-4 font-black text-emerald-300 bg-emerald-500/10 border-x border-emerald-500/20">✓ 100% Bit-Identical Hashes</td>
-                <td class="py-3.5 px-4 text-red-400">✗ Non-deterministic jitter</td>
-                <td class="py-3.5 px-4 text-emerald-400">✓ Deterministic</td>
-                <td class="py-3.5 px-4 text-red-400">✗ Manual layout</td>
+                <td class="py-3.5 px-4 font-black text-emerald-300 bg-emerald-500/10 border-x border-emerald-500/20">🔒 100% Bit-Identical SHA-256</td>
+                <td class="py-3.5 px-4 text-red-400">✗ Non-deterministic DOM jitter</td>
+                <td class="py-3.5 px-4 text-amber-300/80">~ Near deterministic</td>
+                <td class="py-3.5 px-4 text-slate-400">— Interactive rough</td>
               </tr>
               <tr class="hover:bg-emerald-500/5 transition">
-                <td class="py-3.5 px-4 font-bold text-white font-sans">Multi-Surface Targets</td>
-                <td class="py-3.5 px-4 font-black text-emerald-300 bg-emerald-500/10 border-x border-emerald-500/20">✓ SVG + Canvas2D + Terminal + WASM + CLI</td>
-                <td class="py-3.5 px-4 text-slate-400">SVG + PNG (via Puppeteer)</td>
+                <td class="py-3.5 px-4 font-bold text-white font-sans">Supported Render Targets</td>
+                <td class="py-3.5 px-4 font-black text-emerald-300 bg-emerald-500/10 border-x border-emerald-500/20">🎯 SVG, Canvas2D, Terminal, WASM</td>
+                <td class="py-3.5 px-4 text-slate-400">SVG (DOM only)</td>
                 <td class="py-3.5 px-4 text-slate-400">SVG, PostScript, PNG</td>
                 <td class="py-3.5 px-4 text-slate-400">Canvas / PNG export</td>
               </tr>
@@ -1310,12 +1455,13 @@ $ fm-cli render --format=svg sample.mmd
       <div class="flex items-center gap-3">
         <div class="h-7 w-7 rounded-lg bg-emerald-500 flex items-center justify-center text-black font-black text-sm">🧜</div>
         <span class="font-extrabold text-white tracking-tight">frankenmermaid</span>
-        <span class="text-xs text-slate-500 font-mono">· MIT Licensed · Rust 2024</span>
+        <span class="text-xs text-slate-500 font-mono">· <a href="https://github.com/Dicklesworthstone/frankenmermaid/blob/main/LICENSE" target="_blank" rel="noopener" class="underline hover:text-emerald-400">MIT License (with OpenAI/Anthropic Rider)</a> · Rust 2024</span>
       </div>
 
       <div class="flex items-center gap-6 text-xs font-mono text-slate-400">
         <a href="https://github.com/Dicklesworthstone/frankenmermaid" target="_blank" rel="noopener" class="hover:text-emerald-400 transition">GitHub</a>
-        <a href="https://frankenmermaid.pages.dev/" class="hover:text-emerald-400 transition">Live Demo</a>
+        <a href="https://frankenmermaid.pages.dev/" class="hover:text-emerald-400 transition">Live Showcase</a>
+        <a href="https://github.com/Dicklesworthstone/frankenmermaid/blob/main/LICENSE" target="_blank" rel="noopener" class="hover:text-emerald-400 transition">License Terms</a>
         <a href="#top" class="hover:text-emerald-400 transition">Back to Top ↑</a>
       </div>
     </div>
@@ -1385,6 +1531,176 @@ $ fm-cli render --format=svg sample.mmd
         });
       });
       document.querySelectorAll(".reveal").forEach(el => obs.observe(el));
+    }
+
+    // ===================================================================
+    // Performant Mermaid Syntax Highlighter Lexer
+    // ===================================================================
+    const AMP_REG = /[&<>]/g;
+    const HTML_ENTITIES = { "&": "&amp;", "<": "&lt;", ">": "&gt;" };
+
+    function escHtml(text) {
+      return text.replace(AMP_REG, (ch) => HTML_ENTITIES[ch]);
+    }
+
+    function spanTok(cls, text) {
+      return `<span class="${cls}">${escHtml(text)}</span>`;
+    }
+
+    function highlightMermaid(source) {
+      const lines = source.split("\n");
+      const out = [];
+
+      const DIAGRAM_KEYWORDS = /^(flowchart|flowchart-elk|graph|sequenceDiagram|classDiagram|classDiagram-v2|stateDiagram|stateDiagram-v2|erDiagram|gantt|pie|gitGraph|mindmap|quadrantChart|timeline|sankey-beta|sankey|packet-beta|packet|kanban|block|block-beta|architecture|architecture-beta|C4Context|C4Container|C4Component|C4Dynamic|C4Deployment|requirementDiagram|zenuml)\b/i;
+      const SUBGRAPH_KEYWORDS = /^(subgraph|end|section|box|par|rect|loop|alt|else|opt|critical|break)\b/i;
+
+      for (const line of lines) {
+        if (line.length > 20000) {
+          out.push(escHtml(line));
+          continue;
+        }
+
+        // Directives: %%{init: {...}}%%
+        if (line.trim().startsWith("%%{")) {
+          out.push(spanTok("mmd-directive", line));
+          continue;
+        }
+
+        // Comments: %% ...
+        if (line.trim().startsWith("%%")) {
+          out.push(spanTok("mmd-comment", line));
+          continue;
+        }
+
+        // Check for comment at end of line
+        let lineText = line;
+        let commentText = "";
+        const commentIdx = line.indexOf("%%");
+        if (commentIdx > 0 && !line.slice(0, commentIdx).includes('"')) {
+          lineText = line.slice(0, commentIdx);
+          commentText = line.slice(commentIdx);
+        }
+
+        let lineOut = "";
+        let i = 0;
+        const len = lineText.length;
+
+        while (i < len) {
+          const rest = lineText.slice(i);
+
+          // Diagram main keyword or subgraph at start of line
+          if (i === 0 || /^\s+$/.test(lineText.slice(0, i))) {
+            const diagMatch = rest.match(DIAGRAM_KEYWORDS);
+            if (diagMatch) {
+              lineOut += spanTok("mmd-keyword", diagMatch[0]);
+              i += diagMatch[0].length;
+              continue;
+            }
+
+            const subMatch = rest.match(SUBGRAPH_KEYWORDS);
+            if (subMatch) {
+              lineOut += spanTok("mmd-subgraph", subMatch[0]);
+              i += subMatch[0].length;
+              continue;
+            }
+          }
+
+          // Quoted Strings: "..."
+          if (rest[0] === '"') {
+            const strMatch = rest.match(/^"([^"\\]|\\.)*"/);
+            if (strMatch) {
+              lineOut += spanTok("mmd-string", strMatch[0]);
+              i += strMatch[0].length;
+              continue;
+            }
+          }
+
+          // Edge labels: |label|
+          if (rest[0] === '|') {
+            const labelMatch = rest.match(/^\|([^|\n]+)\|/);
+            if (labelMatch) {
+              lineOut += spanTok("mmd-bracket", "|") + spanTok("mmd-edgelabel", labelMatch[1]) + spanTok("mmd-bracket", "|");
+              i += labelMatch[0].length;
+              continue;
+            }
+          }
+
+          // Arrows and Connectors
+          const arrowMatch = rest.match(/^(?:-->|---|-.->|==>|==o|--o|--x|-\.->|===|---o|->>|-->>|->|-->|-x|--x|-\)|--\)\)|<\|--|\*--|o--|\.\.\|>|\.\.>|\|\|--o\{|\}\|\.\.\|\{)/);
+          if (arrowMatch) {
+            lineOut += spanTok("mmd-arrow", arrowMatch[0]);
+            i += arrowMatch[0].length;
+            continue;
+          }
+
+          // Direction tokens (TB, LR, etc.)
+          const dirMatch = rest.match(/^(?:TB|TD|BT|RL|LR)\b/);
+          if (dirMatch) {
+            lineOut += spanTok("mmd-dir", dirMatch[0]);
+            i += dirMatch[0].length;
+            continue;
+          }
+
+          // Style & class keywords
+          const styleMatch = rest.match(/^(?:classDef|class|style|click|linkStyle|link|callback|accTitle|accDescr)\b/);
+          if (styleMatch) {
+            lineOut += spanTok("mmd-style", styleMatch[0]);
+            i += styleMatch[0].length;
+            continue;
+          }
+
+          // Sequence keywords
+          const seqMatch = rest.match(/^(?:participant|actor|activate|deactivate|autonumber|Note\s+over|Note\s+left\s+of|Note\s+right\s+of)\b/i);
+          if (seqMatch) {
+            lineOut += spanTok("mmd-sequence", seqMatch[0]);
+            i += seqMatch[0].length;
+            continue;
+          }
+
+          // Class/ER types & modifiers (+, -, #, PK, FK, etc.)
+          const typeMatch = rest.match(/^(?:\+|-|#|~|\*|\$|PK|FK)\b/);
+          if (typeMatch) {
+            lineOut += spanTok("mmd-modifier", typeMatch[0]);
+            i += typeMatch[0].length;
+            continue;
+          }
+
+          // Node shape delimiters: [ ... ], ( ... ), { ... }, etc.
+          const bracketMatch = rest.match(/^(?:\[\[|\]\]|\(\(|\)\)|\[\/|\/\]|\[\\|\\\]|\{\{|\}\}|\[\(|\)\]|\[|\{|\(|\)|\]|\})/);
+          if (bracketMatch) {
+            lineOut += spanTok("mmd-bracket", bracketMatch[0]);
+            i += bracketMatch[0].length;
+            continue;
+          }
+
+          // Node identifiers / words
+          const wordMatch = rest.match(/^[a-zA-Z0-9_\-.:]+/);
+          if (wordMatch) {
+            const word = wordMatch[0];
+            if (word.startsWith(":::")) {
+              lineOut += spanTok("mmd-classref", word);
+            } else if (/^[A-Z][a-zA-Z0-9_]*$/.test(word)) {
+              lineOut += spanTok("mmd-node", word);
+            } else {
+              lineOut += escHtml(word);
+            }
+            i += word.length;
+            continue;
+          }
+
+          // Default single char
+          lineOut += escHtml(rest[0]);
+          i += 1;
+        }
+
+        if (commentText) {
+          lineOut += spanTok("mmd-comment", commentText);
+        }
+
+        out.push(lineOut);
+      }
+
+      return out.join("\n");
     }
 
     // >>> demo-samples:start
@@ -1818,41 +2134,41 @@ Shared IR,Terminal ANSI,20`
     const state = {
       activeSample: DIAGRAM_SAMPLES[0],
       activeTheme: "dark",
-      viewMode: "svg",
-      runtimeLoaded: false,
-      zoom: 1,
+      activeCategory: "all",
       isMaximized: false,
-      activeCategory: "all"
+      runtimeLoaded: false
     };
 
     let frankenRuntime = null;
     let diagramInstance = null;
 
-    // DOM Elements
     const els = {
       input: document.getElementById("diagram-input"),
+      highlight: document.getElementById("editor-highlight"),
       gutter: document.getElementById("editor-gutter"),
       fmSvg: document.getElementById("fm-svg"),
-      spotlightStage: document.getElementById("spotlight-stage"),
-      runtimeMode: document.getElementById("runtime-mode"),
-      runtimeModeDot: document.getElementById("runtime-mode-dot"),
       renderChip: document.getElementById("fm-render-chip"),
       statLines: document.getElementById("stat-lines"),
       statChars: document.getElementById("stat-chars"),
       familyChip: document.getElementById("editor-family-chip"),
       parseSummary: document.getElementById("parse-summary"),
       runtimeTimings: document.getElementById("runtime-timings"),
+      runtimeMode: document.getElementById("runtime-mode"),
+      runtimeModeDot: document.getElementById("runtime-mode-dot"),
+      spotlightStage: document.getElementById("spotlight-stage"),
       galleryGrid: document.getElementById("gallery-grid"),
       galleryFilters: document.getElementById("gallery-filters"),
       gallerySearch: document.getElementById("gallery-search"),
       galleryCount: document.getElementById("gallery-count")
     };
 
-    // Pan & Zoom Engine Controller Class
+    // ===================================================================
+    // Smooth CAD-Grade Pan/Zoom Controller (Cursor-Anchored)
+    // ===================================================================
     class PanZoomController {
-      constructor(containerEl, viewportEl, zoomLevelEl) {
-        this.container = containerEl;
-        this.viewport = viewportEl;
+      constructor(container, viewport, zoomLevelEl) {
+        this.container = container;
+        this.viewport = viewport;
         this.zoomLevel = zoomLevelEl;
         this.scale = 1;
         this.panX = 0;
@@ -1890,16 +2206,40 @@ Shared IR,Terminal ANSI,20`
 
         this.container.addEventListener("wheel", (e) => {
           e.preventDefault();
-          // Dampened wheel zoom to avoid wild swings on high-resolution mice/trackpads (10x sensitivity fix)
-          const delta = Math.max(-60, Math.min(60, e.deltaY));
-          const zoomFactor = Math.exp(-delta * 0.0012);
-          this.zoom(zoomFactor);
+          const rect = this.container.getBoundingClientRect();
+          const mouseX = e.clientX - rect.left;
+          const mouseY = e.clientY - rect.top;
+
+          let delta = e.deltaY;
+          if (e.deltaMode === 1) delta *= 16;
+          else if (e.deltaMode === 2) delta *= 100;
+
+          // Damped, cursor-anchored zoom factor
+          const isPinch = e.ctrlKey;
+          const factor = isPinch
+            ? Math.max(0.96, Math.min(1.04, 1 - delta * 0.005))
+            : Math.max(0.94, Math.min(1.06, Math.exp(-Math.max(-60, Math.min(60, delta)) * 0.0006)));
+
+          this.zoomAt(factor, mouseX, mouseY);
         }, { passive: false });
       }
 
-      zoom(factor) {
-        this.scale = Math.min(Math.max(0.2, this.scale * factor), 5.0);
+      zoomAt(factor, cx, cy) {
+        const oldScale = this.scale;
+        const newScale = Math.min(Math.max(0.15, oldScale * factor), 6.0);
+        if (newScale === oldScale) return;
+
+        // Smooth cursor-anchored transformation
+        this.panX = cx - (cx - this.panX) * (newScale / oldScale);
+        this.panY = cy - (cy - this.panY) * (newScale / oldScale);
+        this.scale = newScale;
         this.applyTransform();
+      }
+
+      zoom(factor) {
+        if (!this.container) return;
+        const rect = this.container.getBoundingClientRect();
+        this.zoomAt(factor, rect.width / 2, rect.height / 2);
       }
 
       reset() {
@@ -1951,6 +2291,7 @@ Shared IR,Terminal ANSI,20`
             if (els.runtimeModeDot) els.runtimeModeDot.className = "h-2 w-2 rounded-full bg-emerald-400 animate-pulse";
             renderSpotlight();
             scheduleRender(true);
+            renderGalleryMiniatures();
             return frankenRuntime;
           }
         } catch (e) {
@@ -1989,11 +2330,29 @@ Shared IR,Terminal ANSI,20`
       }
     }
 
+    function refreshEditor() {
+      if (!els.input) return;
+      const source = els.input.value;
+      if (els.highlight) {
+        els.highlight.innerHTML = highlightMermaid(source);
+        els.highlight.scrollTop = els.input.scrollTop;
+        els.highlight.scrollLeft = els.input.scrollLeft;
+      }
+      const lines = source.split("\n").length;
+      const chars = source.length;
+      if (els.statLines) els.statLines.textContent = `${lines} line${lines === 1 ? '' : 's'}`;
+      if (els.statChars) els.statChars.textContent = `${chars} B`;
+      if (els.gutter) {
+        els.gutter.innerHTML = Array.from({ length: lines }, (_, i) => i + 1).join("<br>");
+        els.gutter.scrollTop = els.input.scrollTop;
+      }
+    }
+
     function executeRender() {
       const source = els.input ? els.input.value : "";
       if (!source.trim()) return;
 
-      updateEditorMeta(source);
+      refreshEditor();
 
       const startTime = performance.now();
       let parseTime = 0;
@@ -2012,10 +2371,10 @@ Shared IR,Terminal ANSI,20`
         } catch (e) {
           console.error("Render failure:", e);
           if (els.parseSummary) {
-            els.parseSummary.textContent = "Current revision is degraded and no prior healthy snapshot has been committed yet. Highest severity: parse failed. No safe fallback preview is cached yet.";
+            els.parseSummary.textContent = "Current revision is degraded. Highest severity: parse failed.";
           }
           if (els.fmSvg) {
-            els.fmSvg.innerHTML = `<div class="p-6 text-red-400 font-mono text-xs"><p class="font-bold">highest severity: parse failed</p><p class="mt-2 text-slate-400">Current revision is degraded and no prior healthy snapshot has been committed yet.</p><p class="text-slate-500">No safe fallback preview is cached yet.</p></div>`;
+            els.fmSvg.innerHTML = `<div class="p-6 text-red-400 font-mono text-xs"><p class="font-bold">highest severity: parse failed</p><p class="mt-2 text-slate-400">${escHtml(e.message || String(e))}</p></div>`;
           }
           return;
         }
@@ -2042,17 +2401,6 @@ Shared IR,Terminal ANSI,20`
       } catch (e) {}
     }
 
-    function updateEditorMeta(source) {
-      const lines = source.split("\n").length;
-      const chars = source.length;
-      if (els.statLines) els.statLines.textContent = `${lines} line${lines === 1 ? '' : 's'}`;
-      if (els.statChars) els.statChars.textContent = `${chars} B`;
-
-      if (els.gutter) {
-        els.gutter.innerHTML = Array.from({ length: lines }, (_, i) => i + 1).join("<br>");
-      }
-    }
-
     function renderTerminalSimulation(source) {
       const term = document.getElementById("terminal-output");
       if (!term) return;
@@ -2063,14 +2411,19 @@ Shared IR,Terminal ANSI,20`
 ` + source.split("\n").slice(0, 12).join("\n") + (source.split("\n").length > 12 ? "\n..." : "");
     }
 
-    function escapeHtml(str) {
-      if (!str) return "";
-      return String(str)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
+    // Render Live Miniatures for Specimen Cards
+    function renderGalleryMiniatures() {
+      if (!frankenRuntime) return;
+      document.querySelectorAll(".specimen-mini-stage").forEach((miniEl) => {
+        const code = miniEl.getAttribute("data-code");
+        if (!code) return;
+        try {
+          const svg = frankenRuntime.renderSvg(code, { theme: "dark", responsive: true, accessible: false });
+          miniEl.innerHTML = svg;
+        } catch (e) {
+          miniEl.innerHTML = `<div class="text-[9px] font-mono text-slate-500 p-2">Rendering preview...</div>`;
+        }
+      });
     }
 
     // Gallery Render
@@ -2090,15 +2443,15 @@ Shared IR,Terminal ANSI,20`
       // Populate Category Filters with dynamic counts
       const categoryMap = [
         { id: "all", label: "All Dialects" },
-        { id: "flowchart", label: "Flowcharts" },
+        { id: "flowchart", label: "Flow & Systems" },
         { id: "sequence", label: "Sequence & Trace" },
-        { id: "class", label: "Classes & UML" },
+        { id: "class", label: "UML & Class" },
         { id: "state", label: "Statecharts" },
         { id: "er", label: "ER Relational" },
         { id: "c4", label: "C4 Architecture" },
         { id: "gitgraph", label: "Git DAG" },
         { id: "mindmap", label: "Mindmaps" },
-        { id: "gantt", label: "Gantt & Time" }
+        { id: "gantt", label: "Gantt & Analytics" }
       ];
 
       if (els.galleryFilters && els.galleryFilters.children.length === 0) {
@@ -2134,17 +2487,19 @@ Shared IR,Terminal ANSI,20`
               <span class="rounded-md bg-emerald-500/15 border border-emerald-500/30 px-2.5 py-0.5 text-[9px] font-black text-emerald-400 font-mono uppercase tracking-wider">${s.category}</span>
               <span class="text-[9px] font-mono text-slate-400 bg-white/5 px-2 py-0.5 rounded border border-white/5">● Unified IR</span>
             </div>
+            
+            <!-- Live Miniature SVG Preview Stage -->
+            <div class="specimen-mini-stage relative w-full h-36 rounded-xl bg-black/80 border border-emerald-500/20 flex items-center justify-center overflow-hidden mb-3.5" data-code="${escHtml(s.code)}">
+              <div class="text-[9px] font-mono text-slate-500 p-2 animate-pulse">Computing SVG...</div>
+            </div>
+
             <h4 class="font-extrabold text-base text-white group-hover:text-emerald-300 transition leading-snug">${s.label}</h4>
             <p class="text-xs text-slate-300 mt-1.5 line-clamp-2 leading-relaxed">${s.summary}</p>
-            
-            <div class="mt-3.5 rounded-xl bg-black/80 border border-white/10 p-3 overflow-hidden">
-              <pre class="font-mono text-[10px] text-emerald-300/80 leading-relaxed overflow-x-hidden whitespace-pre">${escapeHtml(s.code.split('\n').slice(0, 3).join('\n'))}${s.code.split('\n').length > 3 ? '\n...' : ''}</pre>
-            </div>
           </div>
 
           <div class="mt-4 pt-3.5 border-t border-emerald-500/15 flex items-center justify-between gap-2">
             <button type="button" class="btn-load-specimen flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-emerald-500/15 hover:bg-emerald-500 text-emerald-300 hover:text-black font-mono text-[10px] font-black uppercase tracking-wider transition duration-150">
-              <span>⚡ Load in Studio</span>
+              <span>⚡ Load in Theater</span>
             </button>
             <button type="button" class="btn-copy-specimen p-2 rounded-xl bg-white/5 hover:bg-white/15 text-slate-400 hover:text-white transition duration-150" title="Copy Mermaid code">
               <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -2169,6 +2524,7 @@ Shared IR,Terminal ANSI,20`
             } else {
               document.getElementById("playground")?.scrollIntoView();
             }
+            refreshEditor();
             scheduleRender(true);
           }
         };
@@ -2192,6 +2548,8 @@ Shared IR,Terminal ANSI,20`
 
         card.addEventListener("click", loadFn);
       });
+
+      renderGalleryMiniatures();
     }
 
     // Command Palette Logic
@@ -2221,6 +2579,7 @@ Shared IR,Terminal ANSI,20`
             if (els.familyChip) els.familyChip.textContent = sample.category.toUpperCase();
             document.getElementById("cmd-palette-modal")?.classList.add("hidden");
             document.getElementById("playground")?.scrollIntoView({ behavior: motionBehavior() });
+            refreshEditor();
             scheduleRender(true);
           }
         });
@@ -2251,22 +2610,37 @@ Shared IR,Terminal ANSI,20`
         document.getElementById("spot-zoom-level")
       );
 
-      document.getElementById("studio-zoom-in")?.addEventListener("click", () => studioPanZoom?.zoom(1.25));
-      document.getElementById("studio-zoom-out")?.addEventListener("click", () => studioPanZoom?.zoom(0.8));
+      document.getElementById("studio-zoom-in")?.addEventListener("click", () => studioPanZoom?.zoom(1.2));
+      document.getElementById("studio-zoom-out")?.addEventListener("click", () => studioPanZoom?.zoom(0.83));
       document.getElementById("studio-zoom-reset")?.addEventListener("click", () => studioPanZoom?.reset());
       document.getElementById("studio-fullscreen-btn")?.addEventListener("click", toggleMaximize);
       document.getElementById("pg-maximize")?.addEventListener("click", toggleMaximize);
 
-      document.getElementById("spot-zoom-in")?.addEventListener("click", () => spotPanZoom?.zoom(1.25));
-      document.getElementById("spot-zoom-out")?.addEventListener("click", () => spotPanZoom?.zoom(0.8));
+      document.getElementById("spot-zoom-in")?.addEventListener("click", () => spotPanZoom?.zoom(1.2));
+      document.getElementById("spot-zoom-out")?.addEventListener("click", () => spotPanZoom?.zoom(0.83));
       document.getElementById("spot-zoom-reset")?.addEventListener("click", () => spotPanZoom?.reset());
+
+      // Try in Theater buttons in 15 Layouts section
+      document.querySelectorAll(".btn-algo-try").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const sampleName = btn.getAttribute("data-sample") || "flowchart";
+          const target = DIAGRAM_SAMPLES.find(s => s.category.toLowerCase().includes(sampleName.toLowerCase())) || DIAGRAM_SAMPLES[0];
+          if (target && els.input) {
+            els.input.value = target.code;
+            if (els.familyChip) els.familyChip.textContent = target.category.toUpperCase();
+            document.getElementById("playground")?.scrollIntoView({ behavior: motionBehavior() });
+            refreshEditor();
+            scheduleRender(true);
+          }
+        });
+      });
 
       // Spotlight Stage Keyboard & Click Zoom
       const spotStage = document.getElementById("spotlight-stage");
       if (spotStage) {
         const toggleSpotZoom = () => {
           if (spotPanZoom) {
-            if (spotPanZoom.scale === 1) spotPanZoom.zoom(1.5);
+            if (spotPanZoom.scale === 1) spotPanZoom.zoom(1.4);
             else spotPanZoom.reset();
           }
         };
@@ -2304,20 +2678,6 @@ Shared IR,Terminal ANSI,20`
         }
       });
 
-      // Light/Dark Theme Toggle Button
-      document.getElementById("theme-toggle-btn")?.addEventListener("click", () => {
-        const html = document.documentElement;
-        const isDark = html.classList.toggle("dark");
-        const moonIcon = document.getElementById("theme-icon-moon");
-        const sunIcon = document.getElementById("theme-icon-sun");
-        if (moonIcon && sunIcon) {
-          moonIcon.classList.toggle("hidden", !isDark);
-          sunIcon.classList.toggle("hidden", isDark);
-        }
-        state.activeTheme = isDark ? "dark" : "pastel";
-        scheduleRender(true);
-      });
-
       // Command Palette Toggle & Search
       const cmdModal = document.getElementById("cmd-palette-modal");
       const cmdInput = document.getElementById("cmd-palette-input");
@@ -2353,8 +2713,15 @@ Shared IR,Terminal ANSI,20`
 
       // Editor Input & Scroll Sync
       if (els.input) {
-        els.input.addEventListener("input", () => scheduleRender(false));
+        els.input.addEventListener("input", () => {
+          refreshEditor();
+          scheduleRender(false);
+        });
         els.input.addEventListener("scroll", () => {
+          if (els.highlight) {
+            els.highlight.scrollTop = els.input.scrollTop;
+            els.highlight.scrollLeft = els.input.scrollLeft;
+          }
           if (els.gutter) {
             els.gutter.scrollTop = els.input.scrollTop;
           }
@@ -2405,6 +2772,7 @@ Shared IR,Terminal ANSI,20`
           const end = els.input.selectionEnd;
           const val = els.input.value;
           els.input.value = val.substring(0, start) + "\n" + snip + "\n" + val.substring(end);
+          refreshEditor();
           scheduleRender(true);
         });
       });
@@ -2422,6 +2790,7 @@ Shared IR,Terminal ANSI,20`
           if (target && els.input) {
             els.input.value = target.code;
             if (els.familyChip) els.familyChip.textContent = target.category.toUpperCase();
+            refreshEditor();
             scheduleRender(true);
           }
         });
@@ -2500,7 +2869,7 @@ Shared IR,Terminal ANSI,20`
         img.src = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(svgEl.outerHTML)));
       });
 
-      // Share Link (Serverless #doc= or #zdoc=)
+      // Share Link (Serverless #doc=)
       document.getElementById("btn-share-doc")?.addEventListener("click", async () => {
         if (!els.input) return;
         const source = els.input.value;
@@ -2519,6 +2888,7 @@ Shared IR,Terminal ANSI,20`
       document.getElementById("format-code-btn")?.addEventListener("click", () => {
         if (!els.input) return;
         els.input.value = els.input.value.split("\n").map(l => l.trimEnd()).join("\n");
+        refreshEditor();
         scheduleRender(true);
       });
 
@@ -2561,6 +2931,7 @@ Shared IR,Terminal ANSI,20`
           } else {
             document.getElementById("playground")?.scrollIntoView();
           }
+          refreshEditor();
           scheduleRender(true);
         }
       });
@@ -2593,6 +2964,7 @@ Shared IR,Terminal ANSI,20`
       }
 
       setupEvents();
+      refreshEditor();
       renderGallery();
 
       // Check query params for E2E testing
