@@ -6656,7 +6656,7 @@ fn layout_diagram_gantt_fallback(ir: &MermaidDiagramIr) -> TracedLayout {
     // canvas has to grow to hold it or it is clipped at the viewBox edge — which is exactly what made
     // the first attempt at this unshippable.
     extend_bounds_for_gantt_labels(layout);
-    layout_gantt_axis_rows(layout, gantt_meta.top_axis);
+    layout_gantt_axis_rows(layout, false);
     traced
 }
 
