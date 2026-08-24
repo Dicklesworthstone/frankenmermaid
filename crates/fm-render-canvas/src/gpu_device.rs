@@ -14,7 +14,6 @@
 //! caller uses right up to the point where the target texture comes from a canvas instead.
 
 use crate::gpu_pipeline::{InstanceLayout, PipelineDescriptor, VertexFormat};
-use crate::gpu_plan::GpuRenderPlan;
 
 /// Why a GPU could not be obtained or used.
 ///
@@ -104,6 +103,35 @@ impl GpuDevice {
     pub const fn backend(&self) -> wgpu::Backend {
         self.backend
     }
+
+    /// Compile a WGSL source and report whether the driver accepted it.
+    ///
+    /// Exists because a shader constant is otherwise checked only by string parsing, which cannot
+    /// tell a valid shader from a plausible-looking one. `EDGE_WGSL` shipped referencing an
+    /// identifier that does not exist in its own vertex entry point, and nothing noticed until a
+    /// device tried to compile it — the layout tests parse `@location` lines and are blind to the
+    /// body.
+    ///
+    /// # Errors
+    /// Returns the driver's diagnostic when the module does not compile.
+    pub fn validate_shader(&self, label: &str, wgsl: &str) -> Result<(), String> {
+        // An error SCOPE rather than the uncaptured-error handler: the handler's default panics the
+        // process, so one broken shader would abort every other check in the same run instead of
+        // being reported alongside them.
+        self.device
+            .push_error_scope(wgpu::ErrorFilter::Validation);
+        let module = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+            });
+        drop(module);
+        match pollster::block_on(self.device.pop_error_scope()) {
+            Some(error) => Err(error.to_string()),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Translate one of our formats into wgpu's.
@@ -157,17 +185,23 @@ pub fn camera_transform(bounds: &fm_layout::LayoutRect) -> [f32; 4] {
     ]
 }
 
-/// A built node pipeline plus the camera binding it draws with.
-pub struct NodePass {
+/// A built pipeline for one primitive family, plus the camera binding it draws with.
+///
+/// Family-agnostic on purpose: every field that differs between node, edge, arrowhead and text
+/// comes out of the [`PipelineDescriptor`], including the vertex count per instance — arrowheads are
+/// a THREE-vertex triangle while the other families expand a six-vertex quad, and a pass that
+/// assumed six would draw two phantom vertices per head.
+pub struct InstancePass {
     pipeline: wgpu::RenderPipeline,
     camera_layout: wgpu::BindGroupLayout,
+    vertices_per_instance: u32,
 }
 
-impl NodePass {
-    /// Build the node pipeline from its [`PipelineDescriptor`].
+impl InstancePass {
+    /// Build a pipeline from its [`PipelineDescriptor`].
     ///
-    /// Nothing here re-states the layout: the attributes, stride and shader all come from the
-    /// descriptor, so this cannot drift from what the layout tests verified.
+    /// Nothing here re-states the layout: the attributes, stride, shader and vertex count all come
+    /// from the descriptor, so this cannot drift from what the GPU-free layout tests verified.
     #[must_use]
     pub fn new(gpu: &GpuDevice, descriptor: &PipelineDescriptor) -> Self {
         let shader = gpu
@@ -244,6 +278,7 @@ impl NodePass {
         Self {
             pipeline,
             camera_layout,
+            vertices_per_instance: descriptor.vertices_per_instance,
         }
     }
 }
@@ -283,15 +318,24 @@ impl RenderedImage {
     }
 }
 
-/// Render a plan's NODE instances to an offscreen texture and read the pixels back.
+/// Render one family's instances to an offscreen texture and read the pixels back.
+///
+/// Takes already-serialised bytes rather than a typed slice: each family has its own instance
+/// struct, and the serialisers are the only place that knows how to lay one out. Passing bytes keeps
+/// exactly one code path for the device work, so a rendering bug cannot be family-specific.
+///
+/// `bounds` comes from the plan rather than from the instances, so every family in a diagram shares
+/// one camera and the passes compose into the same image.
 ///
 /// # Errors
 /// Returns [`GpuDeviceError::Readback`] if the mapped buffer cannot be read.
 #[allow(clippy::missing_panics_doc)]
-pub fn render_nodes(
+pub fn render_instances(
     gpu: &GpuDevice,
-    pass: &NodePass,
-    plan: &GpuRenderPlan,
+    pass: &InstancePass,
+    bounds: &fm_layout::LayoutRect,
+    instance_bytes: &[u8],
+    instance_count: u32,
     width: u32,
     height: u32,
 ) -> Result<RenderedImage, GpuDeviceError> {
@@ -311,7 +355,7 @@ pub fn render_nodes(
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-    let camera = camera_transform(&plan.bounds);
+    let camera = camera_transform(bounds);
     let camera_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("fm-camera"),
         size: size_of::<[f32; 4]>() as u64,
@@ -330,10 +374,8 @@ pub fn render_nodes(
         }],
     });
 
-    let instances = plan.node_instances.as_slice();
-    let instance_bytes = instance_bytes(instances);
     let instance_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("fm-node-instances"),
+        label: Some("fm-instances"),
         // A zero-sized buffer is invalid; a diagram with no nodes still needs a bindable buffer,
         // and the draw below is skipped anyway.
         size: instance_bytes.len().max(4) as u64,
@@ -341,7 +383,7 @@ pub fn render_nodes(
         mapped_at_creation: false,
     });
     if !instance_bytes.is_empty() {
-        gpu.queue.write_buffer(&instance_buffer, 0, &instance_bytes);
+        gpu.queue.write_buffer(&instance_buffer, 0, instance_bytes);
     }
 
     // Readback rows must be 256-byte aligned; the padding is stripped after mapping.
@@ -379,12 +421,13 @@ pub fn render_nodes(
             timestamp_writes: None,
             occlusion_query_set: None,
         });
-        if !instances.is_empty() {
+        if instance_count > 0 {
             render.set_pipeline(&pass.pipeline);
             render.set_bind_group(0, &camera_bind, &[]);
             render.set_vertex_buffer(0, instance_buffer.slice(..));
-            let count = u32::try_from(instances.len()).unwrap_or(u32::MAX);
-            render.draw(0..6, 0..count);
+            // Vertex count FROM THE PASS, not a literal 6: an arrowhead is a three-vertex triangle
+            // and a hardcoded quad would draw two phantom vertices per head.
+            render.draw(0..pass.vertices_per_instance, 0..instance_count);
         }
     }
     encoder.copy_texture_to_buffer(
@@ -526,4 +569,98 @@ fn instance_bytes(instances: &[crate::gpu_plan::GpuNodeInstance]) -> Vec<u8> {
 #[must_use]
 pub fn node_instance_bytes(instances: &[crate::gpu_plan::GpuNodeInstance]) -> Vec<u8> {
     instance_bytes(instances)
+}
+
+/// Arrowheads as instance bytes, each field written AT ITS `offset_of!` POSITION.
+#[must_use]
+pub fn arrowhead_instance_bytes(heads: &[crate::gpu_plan::GpuArrowheadInstance]) -> Vec<u8> {
+    use crate::gpu_plan::GpuArrowheadInstance;
+
+    let stride = size_of::<GpuArrowheadInstance>();
+    let mut out = vec![0_u8; std::mem::size_of_val(heads)];
+    for (index, head) in heads.iter().enumerate() {
+        let base = index * stride;
+        let mut put = |offset: usize, bytes: &[u8]| {
+            out[base + offset..base + offset + bytes.len()].copy_from_slice(bytes);
+        };
+        put(
+            core::mem::offset_of!(GpuArrowheadInstance, position),
+            &[
+                head.position[0].to_ne_bytes(),
+                head.position[1].to_ne_bytes(),
+            ]
+            .concat(),
+        );
+        put(
+            core::mem::offset_of!(GpuArrowheadInstance, angle),
+            &head.angle.to_ne_bytes(),
+        );
+        put(
+            core::mem::offset_of!(GpuArrowheadInstance, size),
+            &head.size.to_ne_bytes(),
+        );
+        put(
+            core::mem::offset_of!(GpuArrowheadInstance, edge_index),
+            &head.edge_index.to_ne_bytes(),
+        );
+        put(
+            core::mem::offset_of!(GpuArrowheadInstance, color),
+            &head.color.map(f32::to_ne_bytes).concat(),
+        );
+    }
+    out
+}
+
+/// Edge segments as instance bytes, each field written AT ITS `offset_of!` POSITION.
+///
+/// ⚠️ THIS IS THE FAMILY WHERE WRITING IN FIELD ORDER WOULD BE HARMLESS AND BINDING IN FIELD ORDER
+/// WOULD NOT. The serialisation order below is irrelevant precisely because every field is placed at
+/// its own offset; what matters is that `EDGE_ATTRIBUTES` binds `dash` to `@location(4)`, `width` to
+/// `@location(5)` and `dash_phase` to `@location(6)` while the struct declares
+/// `dash_phase, dash, width`. Those two facts only agree because both sides go through `offset_of!`.
+#[must_use]
+pub fn edge_instance_bytes(segments: &[crate::gpu_plan::GpuEdgeSegment]) -> Vec<u8> {
+    use crate::gpu_plan::GpuEdgeSegment;
+
+    let stride = size_of::<GpuEdgeSegment>();
+    let mut out = vec![0_u8; std::mem::size_of_val(segments)];
+    for (index, segment) in segments.iter().enumerate() {
+        let base = index * stride;
+        let mut put = |offset: usize, bytes: &[u8]| {
+            out[base + offset..base + offset + bytes.len()].copy_from_slice(bytes);
+        };
+        put(
+            core::mem::offset_of!(GpuEdgeSegment, from),
+            &[
+                segment.from[0].to_ne_bytes(),
+                segment.from[1].to_ne_bytes(),
+            ]
+            .concat(),
+        );
+        put(
+            core::mem::offset_of!(GpuEdgeSegment, to),
+            &[segment.to[0].to_ne_bytes(), segment.to[1].to_ne_bytes()].concat(),
+        );
+        put(
+            core::mem::offset_of!(GpuEdgeSegment, edge_index),
+            &segment.edge_index.to_ne_bytes(),
+        );
+        put(
+            core::mem::offset_of!(GpuEdgeSegment, color),
+            &segment.color.map(f32::to_ne_bytes).concat(),
+        );
+        put(
+            core::mem::offset_of!(GpuEdgeSegment, dash),
+            &[segment.dash[0].to_ne_bytes(), segment.dash[1].to_ne_bytes()].concat(),
+        );
+        put(
+            core::mem::offset_of!(GpuEdgeSegment, width),
+            &segment.width.to_ne_bytes(),
+        );
+        put(
+            core::mem::offset_of!(GpuEdgeSegment, dash_phase),
+            &segment.dash_phase.to_ne_bytes(),
+        );
+    }
+    out
 }

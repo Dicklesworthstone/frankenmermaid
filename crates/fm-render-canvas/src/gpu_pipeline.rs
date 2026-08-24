@@ -27,8 +27,8 @@
 //! device layer is bd-2u0.2's next step; this is the part that can be proven correct headlessly.
 
 use crate::gpu_plan::{
-    EDGE_WGSL, GpuEdgeSegment, GpuNodeInstance, GpuRenderPlan, GpuTextQuad, NODE_SDF_WGSL,
-    TEXT_ATLAS_WGSL,
+    ARROWHEAD_WGSL, EDGE_WGSL, GpuArrowheadInstance, GpuEdgeSegment, GpuNodeInstance, GpuRenderPlan,
+    GpuTextQuad, NODE_SDF_WGSL, TEXT_ATLAS_WGSL,
 };
 
 /// Vertex attribute scalar/vector type, spelled the way WGSL spells it.
@@ -101,6 +101,8 @@ pub enum PrimitiveFamily {
     Node,
     /// Edge segments, drawn as instanced quads expanded across the line's width.
     Edge,
+    /// Arrowheads, drawn as instanced TRIANGLES — three vertices, not six.
+    Arrowhead,
     /// Glyph quads sampled from the text atlas.
     Text,
 }
@@ -259,6 +261,62 @@ pub const fn edge_pipeline() -> PipelineDescriptor {
     }
 }
 
+/// Vertices in one arrowhead: a single TRIANGLE, matching `HEAD` in `ARROWHEAD_WGSL`.
+///
+/// Separate from [`QUAD_VERTICES_PER_INSTANCE`] and not a copy of it. Every other family expands a
+/// six-vertex quad, so a device layer that hardcoded six would draw two phantom vertices per head —
+/// reading `HEAD[3]` and `HEAD[4]` out of a three-element array.
+pub const TRIANGLE_VERTICES_PER_INSTANCE: u32 = 3;
+
+/// Arrowhead instance layout.
+const ARROWHEAD_ATTRIBUTES: &[VertexAttribute] = &[
+    VertexAttribute {
+        shader_location: 0,
+        offset: core::mem::offset_of!(GpuArrowheadInstance, position) as u64,
+        format: VertexFormat::Float32x2,
+        name: "position",
+    },
+    VertexAttribute {
+        shader_location: 1,
+        offset: core::mem::offset_of!(GpuArrowheadInstance, angle) as u64,
+        format: VertexFormat::Float32,
+        name: "angle",
+    },
+    VertexAttribute {
+        shader_location: 2,
+        offset: core::mem::offset_of!(GpuArrowheadInstance, size) as u64,
+        format: VertexFormat::Float32,
+        name: "size",
+    },
+    VertexAttribute {
+        shader_location: 3,
+        offset: core::mem::offset_of!(GpuArrowheadInstance, edge_index) as u64,
+        format: VertexFormat::Uint32,
+        name: "edge_index",
+    },
+    VertexAttribute {
+        shader_location: 4,
+        offset: core::mem::offset_of!(GpuArrowheadInstance, color) as u64,
+        format: VertexFormat::Float32x4,
+        name: "color",
+    },
+];
+
+/// The arrowhead pipeline description.
+#[must_use]
+pub const fn arrowhead_pipeline() -> PipelineDescriptor {
+    PipelineDescriptor {
+        label: "fm-arrowhead",
+        family: PrimitiveFamily::Arrowhead,
+        wgsl: ARROWHEAD_WGSL,
+        instance: InstanceLayout {
+            array_stride: size_of::<GpuArrowheadInstance>() as u64,
+            attributes: ARROWHEAD_ATTRIBUTES,
+        },
+        vertices_per_instance: TRIANGLE_VERTICES_PER_INSTANCE,
+    }
+}
+
 /// Text instance layout.
 ///
 /// The only family that samples a texture: `uv_min`/`uv_max` address the glyph's cell in the atlas
@@ -325,14 +383,20 @@ pub const fn text_pipeline() -> PipelineDescriptor {
 
 /// Every pipeline this module describes, in SUBMISSION order.
 ///
-/// The order is the draw order, not an arbitrary listing: edges are submitted before nodes so a node
-/// box paints over the segment that terminates at it, which is what the Canvas2D pass does and what
-/// `GpuRenderPlan` documents about its own field order. Text comes last so a label is never painted
-/// over by the box it labels. A caller that iterates this slice gets the right picture without
-/// having to know why.
+/// The order is the draw order, not an arbitrary listing, and it is taken from `GpuRenderPlan`'s own
+/// field order — `edge_segments`, `arrowheads`, `node_instances`, `text_quads` — which that struct
+/// documents as the order a consumer must submit in. Edges and their heads go down first so a node
+/// box paints over the segment terminating at it; text goes last so a label is never painted over by
+/// the box that carries it. A caller iterating this slice gets the right picture without having to
+/// know why.
 #[must_use]
-pub const fn pipelines() -> [PipelineDescriptor; 3] {
-    [edge_pipeline(), node_pipeline(), text_pipeline()]
+pub const fn pipelines() -> [PipelineDescriptor; 4] {
+    [
+        edge_pipeline(),
+        arrowhead_pipeline(),
+        node_pipeline(),
+        text_pipeline(),
+    ]
 }
 
 /// One instanced draw call.
@@ -368,6 +432,14 @@ pub fn draw_batches(plan: &GpuRenderPlan) -> Vec<DrawBatch> {
             family: PrimitiveFamily::Edge,
             instance_count: u32::try_from(plan.edge_segments.len()).unwrap_or(u32::MAX),
             vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
+        });
+    }
+    // Arrowheads ride with their edges, before the boxes those edges terminate at.
+    if !plan.arrowheads.is_empty() {
+        batches.push(DrawBatch {
+            family: PrimitiveFamily::Arrowhead,
+            instance_count: u32::try_from(plan.arrowheads.len()).unwrap_or(u32::MAX),
+            vertices_per_instance: TRIANGLE_VERTICES_PER_INSTANCE,
         });
     }
     if !plan.node_instances.is_empty() {

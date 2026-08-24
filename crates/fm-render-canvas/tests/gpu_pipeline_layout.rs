@@ -359,11 +359,12 @@ fn the_edge_batch_is_submitted_before_the_node_batch() {
         pipeline_families,
         vec![
             PrimitiveFamily::Edge,
+            PrimitiveFamily::Arrowhead,
             PrimitiveFamily::Node,
             PrimitiveFamily::Text
         ],
-        "pipeline order must stay edges -> nodes -> text: boxes over their edges, labels over \
-         their boxes"
+        "pipeline order must stay edges -> arrowheads -> nodes -> text, matching GpuRenderPlan's \
+         own field order: heads ride with their edges, boxes paint over both, labels over the boxes"
     );
 }
 
