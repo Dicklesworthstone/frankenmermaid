@@ -14,7 +14,7 @@
 use fm_render_canvas::CanvasRenderConfig;
 use fm_render_canvas::gpu_pipeline::{
     DrawBatch, PipelineDescriptor, PrimitiveFamily, VertexFormat, draw_batches, edge_pipeline,
-    node_pipeline, pipelines,
+    node_pipeline, pipelines, text_pipeline,
 };
 
 /// The stroke width the plan is built with, taken from the Canvas2D config rather than written as
@@ -357,7 +357,80 @@ fn the_edge_batch_is_submitted_before_the_node_batch() {
     let pipeline_families: Vec<PrimitiveFamily> = pipelines().iter().map(|p| p.family).collect();
     assert_eq!(
         pipeline_families,
-        vec![PrimitiveFamily::Edge, PrimitiveFamily::Node]
+        vec![
+            PrimitiveFamily::Edge,
+            PrimitiveFamily::Node,
+            PrimitiveFamily::Text
+        ],
+        "pipeline order must stay edges -> nodes -> text: boxes over their edges, labels over \
+         their boxes"
+    );
+}
+
+#[test]
+fn the_text_instance_layout_matches_the_shader_that_consumes_it() {
+    assert_layout_matches_shader(&text_pipeline(), "TextQuad");
+}
+
+/// SAME-IR COMPARISON FOR THE TEXT FAMILY: every node label the SVG draws must reach the atlas.
+///
+/// Glyph quads cannot be counted against label count — one label is many quads, and the atlas packs
+/// per glyph. What is comparable is COVERAGE: each label's characters must all be present in the
+/// atlas plan, so a label cannot be silently dropped or truncated on the way to the GPU. That is the
+/// text analogue of "no edge disappeared", and it is the property the cross-engine gate cares about.
+#[test]
+fn every_node_label_the_svg_draws_has_its_glyphs_in_the_atlas() {
+    let ir = fm_parser::parse("flowchart LR\n  A[Alpha] --> B[Beta]\n  B --> C[Gamma]\n").ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let plan = fm_render_canvas::GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+
+    let batches = draw_batches(&plan);
+    let text_batch = batches
+        .iter()
+        .find(|b| b.family == PrimitiveFamily::Text)
+        .expect("no text batch was planned for a diagram whose every node is labelled");
+    assert!(
+        text_batch.instance_count > 0,
+        "the text batch draws no glyph quads"
+    );
+
+    let svg = fm_render_svg::render_svg(&ir);
+    for label in ["Alpha", "Beta", "Gamma"] {
+        // CONTROL on the reference arm first: if the SVG does not draw the label, the GPU is not
+        // required to either, and asserting against the atlas would be asserting the wrong thing.
+        assert!(
+            svg.contains(label),
+            "CONTROL FAILED: the SVG backend never drew {label:?}, so it cannot be the reference"
+        );
+        for character in label.chars() {
+            assert!(
+                plan.glyph_atlas.cells.iter().any(|c| c.glyph == character),
+                "glyph {character:?} of label {label:?} is drawn by the SVG backend but has no \
+                 atlas cell, so that label would render incomplete on the GPU"
+            );
+        }
+    }
+}
+
+/// TEXT IS SUBMITTED LAST, or a label is painted over by the box it labels.
+#[test]
+fn the_text_batch_is_submitted_after_the_node_batch() {
+    let ir = fm_parser::parse("flowchart LR\n  A[Alpha] --> B[Beta]\n").ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let plan = fm_render_canvas::GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+
+    let families: Vec<PrimitiveFamily> = draw_batches(&plan).iter().map(|b| b.family).collect();
+    let node_at = families
+        .iter()
+        .position(|f| *f == PrimitiveFamily::Node)
+        .expect("no node batch");
+    let text_at = families
+        .iter()
+        .position(|f| *f == PrimitiveFamily::Text)
+        .expect("no text batch");
+    assert!(
+        node_at < text_at,
+        "text is submitted before nodes, so every label would be painted over by its own box"
     );
 }
 

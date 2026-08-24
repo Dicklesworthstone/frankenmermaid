@@ -26,7 +26,10 @@
 //! `wgpu::VertexBufferLayout` (or `GPUVertexBufferLayout` in the browser) in a handful of lines. The
 //! device layer is bd-2u0.2's next step; this is the part that can be proven correct headlessly.
 
-use crate::gpu_plan::{EDGE_WGSL, GpuEdgeSegment, GpuNodeInstance, GpuRenderPlan, NODE_SDF_WGSL};
+use crate::gpu_plan::{
+    EDGE_WGSL, GpuEdgeSegment, GpuNodeInstance, GpuRenderPlan, GpuTextQuad, NODE_SDF_WGSL,
+    TEXT_ATLAS_WGSL,
+};
 
 /// Vertex attribute scalar/vector type, spelled the way WGSL spells it.
 ///
@@ -98,6 +101,8 @@ pub enum PrimitiveFamily {
     Node,
     /// Edge segments, drawn as instanced quads expanded across the line's width.
     Edge,
+    /// Glyph quads sampled from the text atlas.
+    Text,
 }
 
 /// Everything a caller needs to build one render pipeline, minus the device.
@@ -254,15 +259,80 @@ pub const fn edge_pipeline() -> PipelineDescriptor {
     }
 }
 
+/// Text instance layout.
+///
+/// The only family that samples a texture: `uv_min`/`uv_max` address the glyph's cell in the atlas
+/// `GlyphAtlasPlan` describes, so this pipeline additionally needs the atlas texture and its sampler
+/// bound. That binding is a device-layer concern and is deliberately not modelled here — what IS
+/// modelled is that the UV rectangle travels per instance rather than per draw, which is what lets
+/// one draw call cover every glyph of every label.
+///
+/// Struct and shader agree on order here, unlike the edge family. That is a fact about today's
+/// declarations, not a property, which is why the test joins by name for this family too.
+const TEXT_ATTRIBUTES: &[VertexAttribute] = &[
+    VertexAttribute {
+        shader_location: 0,
+        offset: core::mem::offset_of!(GpuTextQuad, center) as u64,
+        format: VertexFormat::Float32x2,
+        name: "center",
+    },
+    VertexAttribute {
+        shader_location: 1,
+        offset: core::mem::offset_of!(GpuTextQuad, half_extent) as u64,
+        format: VertexFormat::Float32x2,
+        name: "half_extent",
+    },
+    VertexAttribute {
+        shader_location: 2,
+        offset: core::mem::offset_of!(GpuTextQuad, uv_min) as u64,
+        format: VertexFormat::Float32x2,
+        name: "uv_min",
+    },
+    VertexAttribute {
+        shader_location: 3,
+        offset: core::mem::offset_of!(GpuTextQuad, uv_max) as u64,
+        format: VertexFormat::Float32x2,
+        name: "uv_max",
+    },
+    VertexAttribute {
+        shader_location: 4,
+        offset: core::mem::offset_of!(GpuTextQuad, color) as u64,
+        format: VertexFormat::Float32x4,
+        name: "color",
+    },
+    VertexAttribute {
+        shader_location: 5,
+        offset: core::mem::offset_of!(GpuTextQuad, run_index) as u64,
+        format: VertexFormat::Uint32,
+        name: "run_index",
+    },
+];
+
+/// The text pipeline description.
+#[must_use]
+pub const fn text_pipeline() -> PipelineDescriptor {
+    PipelineDescriptor {
+        label: "fm-text-atlas",
+        family: PrimitiveFamily::Text,
+        wgsl: TEXT_ATLAS_WGSL,
+        instance: InstanceLayout {
+            array_stride: size_of::<GpuTextQuad>() as u64,
+            attributes: TEXT_ATTRIBUTES,
+        },
+        vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
+    }
+}
+
 /// Every pipeline this module describes, in SUBMISSION order.
 ///
 /// The order is the draw order, not an arbitrary listing: edges are submitted before nodes so a node
 /// box paints over the segment that terminates at it, which is what the Canvas2D pass does and what
-/// `GpuRenderPlan` documents about its own field order. A caller that iterates this slice gets the
-/// right picture without having to know why.
+/// `GpuRenderPlan` documents about its own field order. Text comes last so a label is never painted
+/// over by the box it labels. A caller that iterates this slice gets the right picture without
+/// having to know why.
 #[must_use]
-pub const fn pipelines() -> [PipelineDescriptor; 2] {
-    [edge_pipeline(), node_pipeline()]
+pub const fn pipelines() -> [PipelineDescriptor; 3] {
+    [edge_pipeline(), node_pipeline(), text_pipeline()]
 }
 
 /// One instanced draw call.
@@ -304,6 +374,14 @@ pub fn draw_batches(plan: &GpuRenderPlan) -> Vec<DrawBatch> {
         batches.push(DrawBatch {
             family: PrimitiveFamily::Node,
             instance_count: u32::try_from(plan.node_instances.len()).unwrap_or(u32::MAX),
+            vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
+        });
+    }
+    // TEXT LAST: a label must not be painted over by the box it labels.
+    if !plan.text_quads.is_empty() {
+        batches.push(DrawBatch {
+            family: PrimitiveFamily::Text,
+            instance_count: u32::try_from(plan.text_quads.len()).unwrap_or(u32::MAX),
             vertices_per_instance: QUAD_VERTICES_PER_INSTANCE,
         });
     }
