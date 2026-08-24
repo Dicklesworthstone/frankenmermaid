@@ -1659,7 +1659,7 @@ fn resolve_theme(ir: Option<&MermaidDiagramIr>, config: &SvgRenderConfig) -> The
 /// rendering while shrinking the fixed ~9 KB `<style>` (clusters ≈ 532 B). Kept as an exact constant
 /// so a drift (CSS edit) makes `strip_unused_theme_css` a safe NO-OP (it matches nothing → no strip),
 /// never a corruption. See docs/NEGATIVE_EVIDENCE.md (CSS dead-weight lever).
-const CLUSTER_THEME_CSS: &str = ".fm-cluster {\n  fill: var(--fm-cluster-fill);\n  stroke: var(--fm-cluster-stroke);\n  stroke-width: 1;\n  stroke-dasharray: 5 3;\n  rx: 12;\n  ry: 12;\n}\n.fm-cluster-label {\n  fill: var(--fm-cluster-label-color);\n  font-weight: 700;\n  font-size: 0.85em;\n  letter-spacing: 0.01em;\n}\n.fm-cluster-c4 {\n  fill: var(--fm-cluster-c4-fill);\n  stroke: var(--fm-cluster-c4-stroke);\n  stroke-dasharray: none;\n}\n.fm-cluster-swimlane {\n  fill: var(--fm-cluster-swimlane-fill);\n  stroke: var(--fm-cluster-swimlane-stroke);\n  stroke-dasharray: none;\n}\n";
+const CLUSTER_THEME_CSS: &str = ".fm-cluster {\n  fill: var(--fm-cluster-fill);\n  stroke: var(--fm-cluster-stroke);\n  stroke-width: 1;\n  stroke-dasharray: 4 4;\n  rx: 10;\n  ry: 10;\n}\n.fm-cluster-label {\n  fill: var(--fm-cluster-label-color);\n  font-weight: 600;\n  font-size: 0.85em;\n  letter-spacing: 0.01em;\n}\n.fm-cluster-c4 {\n  fill: var(--fm-cluster-c4-fill);\n  stroke: var(--fm-cluster-c4-stroke);\n  stroke-dasharray: none;\n}\n.fm-cluster-swimlane {\n  fill: var(--fm-cluster-swimlane-fill);\n  stroke: var(--fm-cluster-swimlane-stroke);\n  stroke-dasharray: none;\n}\n";
 
 /// The special-node-shape theme CSS block (`note`/`cloud`/`cylinder`/`star`/`pentagon`), captured
 /// EXACTLY as `Theme::to_svg_style` emits it. Stripped when the diagram uses none of those shapes
@@ -1748,9 +1748,16 @@ fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
                     | fm_core::ArrowType::StickArrowBottomReverseDotted
                     | fm_core::ArrowType::DottedLine
                     | fm_core::ArrowType::DoubleDottedArrow
+                    | fm_core::ArrowType::DottedCircle
+                    | fm_core::ArrowType::DottedCircleBoth
+                    | fm_core::ArrowType::DottedCrossBoth
                     | fm_core::ArrowType::ThickArrow
                     | fm_core::ArrowType::DoubleThickArrow
                     | fm_core::ArrowType::ThickLine
+                    | fm_core::ArrowType::ThickCircle
+                    | fm_core::ArrowType::ThickCross
+                    | fm_core::ArrowType::ThickCircleBoth
+                    | fm_core::ArrowType::ThickCrossBoth
             )
         })
     });
@@ -1762,7 +1769,7 @@ fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
 /// The `.fm-edge-dashed` + `.fm-edge-thick`(+`:hover`) theme rules — captured EXACTLY as
 /// `Theme::to_svg_style` emits them — stripped when no edge uses a dotted/thick arrow. Same
 /// byte-identical, safe-no-op-if-drifts contract as the other blocks.
-const EDGE_STYLE_THEME_CSS: &str = ".fm-edge-dashed {\n  stroke-dasharray: 6 6;\n}\n.fm-edge-thick {\n  stroke-width: 2.5;\n}\n.fm-edge-thick:hover {\n  stroke-width: 3.5;\n}\n";
+const EDGE_STYLE_THEME_CSS: &str = ".fm-edge-dashed {\n  stroke-dasharray: 5 5;\n}\n.fm-edge-thick {\n  stroke-width: 2.25;\n}\n.fm-edge-thick:hover {\n  stroke-width: 3.0;\n}\n";
 
 fn render_scene_document_with_ir(
     scene: &RenderScene,
@@ -13038,7 +13045,16 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
 
     let stroke_width =
         sankey_flow_stroke_width(ir, ir_edge, sankey_widest).unwrap_or(match arrow {
-            ArrowType::ThickArrow | ArrowType::DoubleThickArrow | ArrowType::ThickLine => 2.5,
+            ArrowType::ThickArrow
+            | ArrowType::DoubleThickArrow
+            | ArrowType::ThickLine
+            // The `==` body sets the weight whatever marker ends it (bd-lrl48): `A ==o B` is as
+            // thick as `A ==> B`. Missing here, these drew at the default 1.8 — which is what
+            // "o==o renders a solid stroke" meant.
+            | ArrowType::ThickCircle
+            | ArrowType::ThickCross
+            | ArrowType::ThickCircleBoth
+            | ArrowType::ThickCrossBoth => 2.5,
             _ => 1.8,
         });
 
@@ -13059,10 +13075,18 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             | ArrowType::StickArrowTopReverseDotted
             | ArrowType::StickArrowBottomReverseDotted
             | ArrowType::DottedLine
-            | ArrowType::DoubleDottedArrow => "fm-edge-dashed",
-            ArrowType::ThickArrow | ArrowType::DoubleThickArrow | ArrowType::ThickLine => {
-                "fm-edge-thick"
-            }
+            | ArrowType::DoubleDottedArrow
+            // Dotted bodies that end in a circle or cross marker (bd-lrl48).
+            | ArrowType::DottedCircle
+            | ArrowType::DottedCircleBoth
+            | ArrowType::DottedCrossBoth => "fm-edge-dashed",
+            ArrowType::ThickArrow
+            | ArrowType::DoubleThickArrow
+            | ArrowType::ThickLine
+            | ArrowType::ThickCircle
+            | ArrowType::ThickCross
+            | ArrowType::ThickCircleBoth
+            | ArrowType::ThickCrossBoth => "fm-edge-thick",
             _ => "fm-edge-solid",
         }
     };
@@ -13611,8 +13635,8 @@ fn render_edge_body_into(
             " relates to ",
         ),
         ArrowType::ThickCircle => (
-            3.0,
-            "fm-edge-solid",
+            2.5,
+            "fm-edge-thick",
             "",
             "url(#arrow-circle)",
             "",
@@ -13620,15 +13644,15 @@ fn render_edge_body_into(
         ),
         ArrowType::DottedCircle => (
             1.8,
-            "fm-edge-dotted",
+            "fm-edge-dashed",
             "",
             "url(#arrow-circle)",
             "5,5",
             " relates to ",
         ),
         ArrowType::ThickCircleBoth => (
-            3.0,
-            "fm-edge-solid",
+            2.5,
+            "fm-edge-thick",
             "url(#arrow-circle)",
             "url(#arrow-circle)",
             "",
@@ -13636,7 +13660,7 @@ fn render_edge_body_into(
         ),
         ArrowType::DottedCircleBoth => (
             1.8,
-            "fm-edge-dotted",
+            "fm-edge-dashed",
             "url(#arrow-circle)",
             "url(#arrow-circle)",
             "5,5",
@@ -13651,8 +13675,8 @@ fn render_edge_body_into(
             " relates to ",
         ),
         ArrowType::ThickCrossBoth => (
-            3.0,
-            "fm-edge-solid",
+            2.5,
+            "fm-edge-thick",
             "url(#arrow-cross)",
             "url(#arrow-cross)",
             "",
@@ -13660,7 +13684,7 @@ fn render_edge_body_into(
         ),
         ArrowType::DottedCrossBoth => (
             1.8,
-            "fm-edge-dotted",
+            "fm-edge-dashed",
             "url(#arrow-cross)",
             "url(#arrow-cross)",
             "5,5",
@@ -13675,8 +13699,8 @@ fn render_edge_body_into(
             " blocks ",
         ),
         ArrowType::ThickCross => (
-            3.0,
-            "fm-edge-solid",
+            2.5,
+            "fm-edge-thick",
             "",
             "url(#arrow-cross)",
             "",

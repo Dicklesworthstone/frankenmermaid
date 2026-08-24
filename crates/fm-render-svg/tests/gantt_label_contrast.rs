@@ -189,12 +189,17 @@ fn a_label_placed_outside_its_bar_contrasts_with_the_page() {
 ///
 /// The defect was dark-only. Pinning the light colour means a future change to the picker cannot
 /// quietly restyle every gantt chart in the default theme.
+///
+/// RE-PINNED, not relaxed: a52d0587 moved the Default preset's `text` from `#1a1a2e` to `#1e293b`
+/// as a deliberate palette change, and this control did its job by failing. It still asserts ONE
+/// exact colour for EVERY label, which is the whole property — what changed is which colour the
+/// theme declares, not how tightly this holds the picker to it.
 #[test]
 fn the_default_theme_label_colour_is_unchanged() {
     let svg = render(ALL_TYPES, ThemePreset::Default);
     for (_, _, fill, text) in labels(&svg) {
         assert_eq!(
-            fill, "#1a1a2e",
+            fill, "#1e293b",
             "the default theme's label colour moved for {text:?}"
         );
     }
