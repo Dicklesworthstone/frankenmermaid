@@ -346,6 +346,12 @@ enum ClassStatement {
     BlockStart(String, Vec<String>),
     Ast(FlowAst),
     Node(NodeToken),
+    /// A non-block declaration that carries generic parameters alongside its parsed label.
+    ///
+    /// `BlockStart` deliberately re-parses its source when it opens a member block. A bare
+    /// declaration has no such second parse, so keeping the already-parsed token here prevents
+    /// `class A~T~["Label"]` from losing `Label` while its generic parameters are recorded.
+    NodeWithGenerics(NodeToken, Vec<String>),
     Member(fm_core::IrClassMember),
     Stereotype(String, fm_core::ClassStereotype),
     /// Cardinality labels to attach to the most recently created edge.
@@ -3781,8 +3787,13 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
 
             // If inside a namespace, track node key to add to subgraph after lowering.
             let ns_node_key = match (&statement, namespace_stack.last()) {
-                (ClassStatement::Node(node), Some(_)) => Some(node.id.clone()),
-                (ClassStatement::BlockStart(name, _), Some(_)) => Some(name.clone()),
+                (
+                    ClassStatement::Node(node) | ClassStatement::NodeWithGenerics(node, _),
+                    Some(_),
+                ) => Some(node.id.clone()),
+                (ClassStatement::BlockStart(name, _), Some(_)) => {
+                    parse_node_token_with_config(name, builder.parser_config()).map(|node| node.id)
+                }
                 _ => None,
             };
             let ns_sg_idx = namespace_stack.last().map(|(_, idx)| *idx);
@@ -3819,6 +3830,35 @@ fn extract_class_generics(raw_name: &str) -> (&str, Vec<String>) {
         .filter(|s| !s.is_empty())
         .collect();
     (class_name, generics)
+}
+
+/// Remove one valid `~T~` group from a class declaration while retaining any node label after it.
+///
+/// Generic parameters belong to class metadata, while a bracket suffix belongs to the ordinary
+/// node-token parser. Passing `A~T~["Pretty Label"]` straight to `extract_class_generics` used to
+/// return only `A`, discarding the suffix before that parser could see it. Rebuilding the source as
+/// `A["Pretty Label"]` keeps the two independent pieces of syntax on their rightful paths.
+fn strip_class_declaration_generics(raw: &str) -> (String, Vec<String>) {
+    let Some(tilde_start) = raw.find('~') else {
+        return (raw.to_string(), Vec::new());
+    };
+    let Some(relative_tilde_end) = raw[tilde_start + 1..].find('~') else {
+        return (raw.to_string(), Vec::new());
+    };
+    let tilde_end = tilde_start + 1 + relative_tilde_end;
+    let generics: Vec<String> = raw[tilde_start + 1..tilde_end]
+        .split(',')
+        .map(|parameter| parameter.trim().to_string())
+        .filter(|parameter| !parameter.is_empty())
+        .collect();
+    if generics.is_empty() {
+        return (raw.to_string(), generics);
+    }
+
+    let mut declaration = String::with_capacity(raw.len() - (tilde_end - tilde_start + 1));
+    declaration.push_str(&raw[..tilde_start]);
+    declaration.push_str(&raw[tilde_end + 1..]);
+    (declaration, generics)
 }
 
 /// Parse mermaid's non-block class member shorthand: `Animal : +name`, `Dog : +bark()`.
@@ -4181,11 +4221,8 @@ fn strip_class_cardinality(statement: &str) -> Option<(String, Option<String>, O
 fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<ClassStatement>> {
     if line.starts_with("class ") && line.ends_with('{') {
         let raw_name = trim_fast(trim_fast(line.trim_start_matches("class")).trim_end_matches('{'));
-        let (class_name, generics) = extract_class_generics(raw_name);
-        return Some(vec![ClassStatement::BlockStart(
-            class_name.to_string(),
-            generics,
-        )]);
+        let (class_name, generics) = strip_class_declaration_generics(raw_name);
+        return Some(vec![ClassStatement::BlockStart(class_name, generics)]);
     }
 
     if line.starts_with('}') {
@@ -4238,14 +4275,12 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
         if statement.starts_with("class ") {
             let rest = statement.strip_prefix("class ").unwrap_or("").trim();
             if !rest.is_empty() && !rest.contains("--") && !rest.contains("..") {
-                let (clean_name, generics) = extract_class_generics(rest);
-                if let Some(node) = parse_node_token_with_config(clean_name, config) {
+                let (clean_name, generics) = strip_class_declaration_generics(rest);
+                if let Some(node) = parse_node_token_with_config(&clean_name, config) {
                     if generics.is_empty() {
                         statements.push(ClassStatement::Node(node));
                     } else {
-                        // For inline generics, use BlockStart+End to carry them.
-                        statements.push(ClassStatement::BlockStart(node.id.clone(), generics));
-                        statements.push(ClassStatement::End);
+                        statements.push(ClassStatement::NodeWithGenerics(node, generics));
                     }
                     continue;
                 }
@@ -4435,6 +4470,12 @@ fn lower_class_statement(
         ClassStatement::Node(node) => {
             let span = span_for(line_number, source_line);
             let _ = intern_node_token(builder, &node, span);
+        }
+        ClassStatement::NodeWithGenerics(node, generics) => {
+            let span = span_for(line_number, source_line);
+            let node_id = node.id.clone();
+            let _ = intern_node_token(builder, &node, span);
+            builder.set_class_generics(&node_id, generics);
         }
         ClassStatement::Member(member) => {
             builder.add_class_member(member);
@@ -13153,6 +13194,25 @@ mod tests {
         assert!(
             super::parse_class_assignment_ast("class A[\"Pretty\"]").is_none(),
             "a space-free bracket label should still fall through to the declaration branch"
+        );
+    }
+
+    #[test]
+    fn generic_class_declarations_preserve_their_bracket_label_source() {
+        assert_eq!(
+            super::strip_class_declaration_generics("A~T~[\"Pretty Label\"]"),
+            ("A[\"Pretty Label\"]".to_string(), vec!["T".to_string()])
+        );
+        assert_eq!(
+            super::strip_class_declaration_generics("Map~K, V~[\"Entries\"]"),
+            (
+                "Map[\"Entries\"]".to_string(),
+                vec!["K".to_string(), "V".to_string()]
+            )
+        );
+        assert_eq!(
+            super::strip_class_declaration_generics("A~~[\"Label\"]"),
+            ("A~~[\"Label\"]".to_string(), Vec::new())
         );
     }
 

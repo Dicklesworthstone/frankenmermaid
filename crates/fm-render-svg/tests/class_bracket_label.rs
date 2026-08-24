@@ -118,3 +118,60 @@ fn a_single_word_bracket_label_still_reaches_the_svg() {
         "the single-word bracket label stopped reaching the SVG; text runs were {runs:?}"
     );
 }
+
+/// Mermaid accepts generics and bracket labels on the same class declaration. The generic is
+/// metadata rendered after the declared heading; it must not consume the bracket suffix before the
+/// ordinary label parser sees it (bd-lfrlx).
+#[test]
+fn a_generic_bracket_label_reaches_the_svg_as_the_class_heading() {
+    let source = "classDiagram\n  class A~T~[\"Pretty Label\"]\n  A : +go()\n";
+    let ir = fm_parser::parse(source).ir;
+    let node = ir
+        .nodes
+        .first()
+        .expect("the generic class must be declared");
+    let label = node
+        .label
+        .and_then(|label_id| ir.labels.get(label_id.0))
+        .map(|label| label.text.as_str());
+    assert_eq!(label, Some("Pretty Label"));
+
+    let runs = text_runs(&fm_render_svg::render_svg(&ir));
+    assert!(
+        runs.iter()
+            .any(|run| run.contains("Pretty Label") && run.contains('T')),
+        "the SVG did not draw the declared generic heading: {runs:?}"
+    );
+    assert!(
+        !runs.iter().any(|run| run.contains("A&lt;T>")),
+        "the SVG drew the raw id instead of the declared heading: {runs:?}"
+    );
+    assert!(
+        runs.iter().any(|run| run == "+go()"),
+        "the class member was lost while preserving the labelled generic: {runs:?}"
+    );
+}
+
+/// The brace spelling must retain the same label and generic metadata as the bare declaration.
+#[test]
+fn a_generic_bracket_label_inside_a_class_block_reaches_the_svg() {
+    let source = "classDiagram\n  class A~T~[\"Pretty Label\"] {\n    +go()\n  }\n";
+    let ir = fm_parser::parse(source).ir;
+    let node = ir
+        .nodes
+        .first()
+        .expect("the generic class block must be declared");
+    let label = node
+        .label
+        .and_then(|label_id| ir.labels.get(label_id.0))
+        .map(|label| label.text.as_str());
+    assert_eq!(label, Some("Pretty Label"));
+
+    let runs = text_runs(&fm_render_svg::render_svg(&ir));
+    assert!(
+        runs.iter()
+            .any(|run| run.contains("Pretty Label") && run.contains('T')),
+        "the SVG did not draw the labelled generic class block: {runs:?}"
+    );
+    assert!(runs.iter().any(|run| run == "+go()"));
+}
