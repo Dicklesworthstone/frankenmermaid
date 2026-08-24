@@ -372,6 +372,40 @@ pub const DEFAULT_FONT_SIZE_PX: f32 = 14.0;
 /// invisible on every small test fixture.
 pub const CHAR_ADVANCE_RATIO: f32 = 0.57;
 
+/// Horizontal advance for one glyph at `font_px`, using the SAME model `fm-layout` sized the box
+/// with (bd-2u0.2).
+///
+/// ⚠️ THE FLAT [`CHAR_ADVANCE_RATIO`] WAS A REAL DIVERGENCE, not merely an approximation.
+/// `fm-core::FontMetrics` — which `fm-layout` uses to measure every label and therefore to decide how
+/// wide a node box must be — is PROPORTIONAL: `font_size * preset.avg_char_ratio() *
+/// CharWidthClass::classify(c).multiplier()`, where the multiplier runs from 0.4 for `i` and `l` to
+/// 2.0 for full-width forms. The GPU text pass advanced a flat `0.57 * font_px` for every character,
+/// so an `i` was laid out about two and a half times wider than the layout that sized its box
+/// believed, and a `W` narrower. A label of narrow letters overflowed its box; one of wide letters
+/// sat short inside it, and neither matched the SVG.
+///
+/// Sharing the function rather than re-deriving the constants is the point: a second table would be
+/// a second source of truth, and the two would drift the moment either changed.
+#[must_use]
+pub fn glyph_advance(glyph: char, font_px: f32) -> f32 {
+    font_px
+        * fm_core::FontPreset::SansSerif.avg_char_ratio()
+        * fm_core::CharWidthClass::classify(glyph).multiplier()
+}
+
+/// Advance for a whole run: the sum of its glyphs', left to right.
+///
+/// Summed in the same order and with the same terms as `FontMetrics::estimate_width`, so the two
+/// agree exactly rather than approximately — pinned by
+/// `the_gpu_run_width_equals_the_metric_layout_sized_the_box_with`.
+#[must_use]
+pub fn run_advance(text: &str, font_px: f32) -> f32 {
+    text.chars()
+        .filter(|c| !c.is_control())
+        .map(|c| glyph_advance(c, font_px))
+        .sum()
+}
+
 /// One glyph's cell in the atlas texture.
 ///
 /// UVs are normalised, so the shader samples without knowing the texture size, and the browser side
@@ -616,24 +650,33 @@ impl TextSink<'_> {
             return;
         }
         let first_quad = u32::try_from(self.quads.len()).unwrap_or(u32::MAX);
-        let advance = font_px * CHAR_ADVANCE_RATIO;
         let half_height = font_px * 0.5;
-        let run_width = u16::try_from(inked.len()).map_or(f32::from(u16::MAX), f32::from) * advance;
-        let start_x = center.0 - (run_width * 0.5) + (advance * 0.5);
+        // PROPORTIONAL: the pen moves by each glyph's own advance, so the run is exactly as wide as
+        // the metric `fm-layout` sized the box with.
+        let run_width: f32 = inked.iter().map(|c| glyph_advance(*c, font_px)).sum();
+        let mut pen_x = center.0 - (run_width * 0.5);
         let run_index = u32::try_from(self.runs.len()).unwrap_or(u32::MAX);
-        for (offset, glyph) in inked.iter().enumerate() {
+        for glyph in &inked {
+            let advance = glyph_advance(*glyph, font_px);
             let Some(cell) = self.atlas.cell(*glyph) else {
+                pen_x += advance;
                 continue;
             };
-            let step = u16::try_from(offset).map_or(f32::from(u16::MAX), f32::from);
             self.quads.push(GpuTextQuad {
-                center: [start_x + (step * advance), center.1],
-                half_extent: [advance * 0.5, half_height],
+                // The quad is the glyph's DRAWING box and is SQUARE, matching the square atlas cell;
+                // the advance is how far the pen moves and is a different quantity. Sizing the quad
+                // to the advance — as this did — squeezed every glyph's image into its advance
+                // width, so an `i` was drawn as a compressed `i` rather than a narrow one. Centring
+                // the square box on the middle of the advance keeps the ink, which `glyph_raster`
+                // centres inside the cell, exactly one advance apart between neighbours.
+                center: [pen_x + (advance * 0.5), center.1],
+                half_extent: [half_height, half_height],
                 uv_min: cell.uv_min,
                 uv_max: cell.uv_max,
                 color,
                 run_index,
             });
+            pen_x += advance;
         }
         let quad_count = u32::try_from(self.quads.len()).unwrap_or(u32::MAX) - first_quad;
         if quad_count > 0 {
@@ -661,22 +704,24 @@ impl TextSink<'_> {
             return;
         }
         let first_quad = u32::try_from(self.quads.len()).unwrap_or(u32::MAX);
-        let advance = font_px * CHAR_ADVANCE_RATIO;
         let half_height = font_px * 0.5;
+        let mut pen_x = anchor.0;
         let run_index = u32::try_from(self.runs.len()).unwrap_or(u32::MAX);
-        for (offset, glyph) in inked.iter().enumerate() {
+        for glyph in &inked {
+            let advance = glyph_advance(*glyph, font_px);
             let Some(cell) = self.atlas.cell(*glyph) else {
+                pen_x += advance;
                 continue;
             };
-            let step = u16::try_from(offset).map_or(f32::from(u16::MAX), f32::from);
             self.quads.push(GpuTextQuad {
-                center: [anchor.0 + (advance * 0.5) + (step * advance), anchor.1],
-                half_extent: [advance * 0.5, half_height],
+                center: [pen_x + (advance * 0.5), anchor.1],
+                half_extent: [half_height, half_height],
                 uv_min: cell.uv_min,
                 uv_max: cell.uv_max,
                 color,
                 run_index,
             });
+            pen_x += advance;
         }
         let quad_count = u32::try_from(self.quads.len()).unwrap_or(u32::MAX) - first_quad;
         if quad_count > 0 {
@@ -704,24 +749,26 @@ impl TextSink<'_> {
             return;
         }
         let first_quad = u32::try_from(self.quads.len()).unwrap_or(u32::MAX);
-        let advance = font_px * CHAR_ADVANCE_RATIO;
         let half_height = font_px * 0.5;
-        let run_width = u16::try_from(inked.len()).map_or(f32::from(u16::MAX), f32::from) * advance;
-        let start_x = anchor.0 - run_width + (advance * 0.5);
+        let run_width: f32 = inked.iter().map(|c| glyph_advance(*c, font_px)).sum();
+        // RIGHT-ALIGNED: the run ends at the anchor, so it starts a full run width before it.
+        let mut pen_x = anchor.0 - run_width;
         let run_index = u32::try_from(self.runs.len()).unwrap_or(u32::MAX);
-        for (offset, glyph) in inked.iter().enumerate() {
+        for glyph in &inked {
+            let advance = glyph_advance(*glyph, font_px);
             let Some(cell) = self.atlas.cell(*glyph) else {
+                pen_x += advance;
                 continue;
             };
-            let step = u16::try_from(offset).map_or(f32::from(u16::MAX), f32::from);
             self.quads.push(GpuTextQuad {
-                center: [start_x + (step * advance), anchor.1],
-                half_extent: [advance * 0.5, half_height],
+                center: [pen_x + (advance * 0.5), anchor.1],
+                half_extent: [half_height, half_height],
                 uv_min: cell.uv_min,
                 uv_max: cell.uv_max,
                 color,
                 run_index,
             });
+            pen_x += advance;
         }
         let quad_count = u32::try_from(self.quads.len()).unwrap_or(u32::MAX) - first_quad;
         if quad_count > 0 {
@@ -745,7 +792,6 @@ impl TextSink<'_> {
         source: GpuTextSource,
         index: usize,
     ) {
-        let advance = font_px * CHAR_ADVANCE_RATIO;
         let half_height = font_px * 0.5;
         for (row, line) in text.lines().enumerate() {
             let inked: Vec<char> = line.chars().filter(|c| !c.is_control()).collect();
@@ -755,22 +801,26 @@ impl TextSink<'_> {
             let first_quad = u32::try_from(self.quads.len()).unwrap_or(u32::MAX);
             let run_index = u32::try_from(self.runs.len()).unwrap_or(u32::MAX);
             let row = u16::try_from(row).map_or(f32::from(u16::MAX), f32::from);
-            for (offset, glyph) in inked.iter().enumerate() {
+            // Each LINE restarts the pen at the origin; the advance is per glyph within the line.
+            let mut pen_x = origin.0;
+            for glyph in &inked {
+                let advance = glyph_advance(*glyph, font_px);
                 let Some(cell) = self.atlas.cell(*glyph) else {
+                    pen_x += advance;
                     continue;
                 };
-                let step = u16::try_from(offset).map_or(f32::from(u16::MAX), f32::from);
                 self.quads.push(GpuTextQuad {
                     center: [
-                        origin.0 + (advance * 0.5) + (step * advance),
+                        pen_x + (advance * 0.5),
                         origin.1 + half_height + (row * line_height),
                     ],
-                    half_extent: [advance * 0.5, half_height],
+                    half_extent: [half_height, half_height],
                     uv_min: cell.uv_min,
                     uv_max: cell.uv_max,
                     color,
                     run_index,
                 });
+                pen_x += advance;
             }
             let quad_count = u32::try_from(self.quads.len()).unwrap_or(u32::MAX) - first_quad;
             if quad_count > 0 {
@@ -1744,7 +1794,6 @@ impl GpuRenderPlan {
         for (run_index, (node_index, center, text)) in labelled.iter().enumerate() {
             let run_index_u32 = u32::try_from(run_index).unwrap_or(u32::MAX);
             let font_px = run_font_px.get(run_index).copied().unwrap_or(DEFAULT_FONT_SIZE_PX);
-            let advance = font_px * CHAR_ADVANCE_RATIO;
             let half_height = font_px * 0.5;
             let first_quad = u32::try_from(text_quads.len()).unwrap_or(u32::MAX);
 
@@ -1766,22 +1815,24 @@ impl GpuRenderPlan {
                 .unwrap_or(DEFAULT_LABEL_RGBA);
 
             let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
-            let width = advance * u16::try_from(inked.len()).map_or(f32::from(u16::MAX), f32::from);
-            let start_x = center[0] - (width * 0.5) + (advance * 0.5);
+            let width: f32 = inked.iter().map(|c| glyph_advance(*c, font_px)).sum();
+            let mut pen_x = center[0] - (width * 0.5);
 
-            for (offset, glyph) in inked.iter().enumerate() {
+            for glyph in &inked {
+                let advance = glyph_advance(*glyph, font_px);
                 let Some(cell) = glyph_atlas.cell(*glyph) else {
+                    pen_x += advance;
                     continue;
                 };
-                let step = u16::try_from(offset).map_or(f32::from(u16::MAX), f32::from);
                 text_quads.push(GpuTextQuad {
-                    center: [start_x + (step * advance), center[1]],
-                    half_extent: [advance * 0.5, half_height],
+                    center: [pen_x + (advance * 0.5), center[1]],
+                    half_extent: [half_height, half_height],
                     uv_min: cell.uv_min,
                     uv_max: cell.uv_max,
                     color: label_rgba,
                     run_index: run_index_u32,
                 });
+                pen_x += advance;
             }
 
             let quad_count = u32::try_from(text_quads.len()).unwrap_or(u32::MAX) - first_quad;
@@ -2497,6 +2548,21 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 #[cfg(test)]
 mod tests {
     use super::{GpuNodeShape, GpuRenderPlan};
+
+    /// Midpoint of a run's ADVANCE SPAN — what "centred" means now that advances are proportional.
+    ///
+    /// The mean of glyph CENTRES used to serve, and stopped when text stopped being monospaced
+    /// (bd-2u0.2): the mean is only the run's midpoint when every advance is equal. "Zephyr" centred
+    /// on x=50 now has a centre-mean of 51.28, because its wide letters outnumber its narrow ones on
+    /// one side. The span midpoint is the quantity that was always meant, and it is exact.
+    fn run_span_midpoint(quads: &[super::GpuTextQuad], text: &str, font_px: f32) -> f32 {
+        let inked: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
+        let first = *inked.first().expect("run has no glyphs");
+        let last = *inked.last().expect("run has no glyphs");
+        let left = quads[0].center[0] - (super::glyph_advance(first, font_px) * 0.5);
+        let right = quads[quads.len() - 1].center[0] + (super::glyph_advance(last, font_px) * 0.5);
+        (left + right) * 0.5
+    }
     use fm_core::{DiagramType, IrNode, MermaidDiagramIr, NodeShape, Span};
     use fm_layout::{
         DiagramLayout, EdgePoints, LayoutEdgePath, LayoutExtensions, LayoutNodeBox, LayoutPoint,
@@ -2749,15 +2815,20 @@ mod tests {
         // Independently computed, NOT read back from cardinality_anchor, or this would assert the
         // implementation against itself. The fixture edge runs (50,35) -> (70,35) -> (90,30), and
         // the inset is DEFAULT_FONT_SIZE_PX * 1.2 = 16.8 along each end's own first segment.
-        let centre_of = |run: super::GpuTextRun| {
+        // Advance-span midpoint, not the mean of glyph centres -- see `run_span_midpoint`. "many"
+        // has letters of four different widths, so the two stopped agreeing when text became
+        // proportional (bd-2u0.2).
+        let centre_of = |run: super::GpuTextRun, text: &str| {
             let quads =
                 &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
-            let x = quads.iter().map(|q| q.center[0]).sum::<f32>() / quads.len() as f32;
-            (x, quads[0].center[1])
+            (
+                run_span_midpoint(quads, text, super::DEFAULT_FONT_SIZE_PX),
+                quads[0].center[1],
+            )
         };
-        let (sx, sy) = centre_of(source_run);
+        let (sx, sy) = centre_of(source_run, "1");
         assert!((sx - 66.8).abs() < 0.01 && (sy - 35.0).abs() < 0.01, "source at ({sx}, {sy})");
-        let (tx, ty) = centre_of(target_run);
+        let (tx, ty) = centre_of(target_run, "many");
         assert!((tx - 73.702).abs() < 0.01 && (ty - 34.075).abs() < 0.01, "target at ({tx}, {ty})");
     }
 
@@ -3554,10 +3625,11 @@ mod tests {
         );
         assert_eq!(run.node_index, 2, "the run indexes the participant node");
 
-        // Centred in the box, like the raster pass centres it.
+        // Centred in the box, like the raster pass centres it. Measured as the ADVANCE SPAN's
+        // midpoint rather than the mean of glyph centres -- see `run_span_midpoint`.
         let quads = &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
-        let mean_x = quads.iter().map(|q| q.center[0]).sum::<f32>() / 6.0;
-        assert!((mean_x - 50.0).abs() < 0.01, "name not centred: {mean_x}");
+        let midpoint = run_span_midpoint(quads, "Zephyr", super::DEFAULT_FONT_SIZE_PX);
+        assert!((midpoint - 50.0).abs() < 0.01, "name not centred: {midpoint}");
         assert!((quads[0].center[1] - 215.0).abs() < 0.01);
     }
 
@@ -3618,8 +3690,9 @@ mod tests {
         assert_eq!(runs[0].node_index, 0, "node_index indexes the notes, not ir.nodes");
 
         let quads = &plan.text_quads[runs[0].first_quad as usize..][..4];
-        let mean_x = quads.iter().map(|q| q.center[0]).sum::<f32>() / 4.0;
-        assert!((mean_x - 140.0).abs() < 0.01, "body not centred: {mean_x}");
+        // Advance-span midpoint, not the mean of glyph centres -- see `run_span_midpoint`.
+        let midpoint = run_span_midpoint(quads, "Wqkj", super::DEFAULT_FONT_SIZE_PX);
+        assert!((midpoint - 140.0).abs() < 0.01, "body not centred: {midpoint}");
         assert!((quads[0].center[1] - 70.0).abs() < 0.01);
     }
 
@@ -3702,9 +3775,11 @@ mod tests {
             [runs[0].first_quad as usize..][..runs[0].quad_count as usize];
         let second_line = &plan.text_quads
             [runs[1].first_quad as usize..][..runs[1].quad_count as usize];
+        // Half of the FIRST GLYPH's own advance past the anchor, not half a flat average
+        // (bd-2u0.2): the pen starts at the anchor and each quad is centred on its own advance.
         let expected_first_x = note.bounds.x
             + 10.0
-            + (super::STATE_NOTE_FONT_SIZE_PX * super::CHAR_ADVANCE_RATIO * 0.5);
+            + (super::glyph_advance('Z', super::STATE_NOTE_FONT_SIZE_PX) * 0.5);
         let expected_first_y = note.bounds.y + 8.0 + (super::STATE_NOTE_FONT_SIZE_PX * 0.5);
         assert!((first_line[0].center[0] - expected_first_x).abs() < 0.01);
         assert!((first_line[0].center[1] - expected_first_y).abs() < 0.01);
@@ -3779,7 +3854,10 @@ mod tests {
                 (first_quad.center[0]
                     - (tick.position
                         + 3.0
-                        + (super::AXIS_TICK_FONT_SIZE_PX * super::CHAR_ADVANCE_RATIO * 0.5)))
+                        + (super::glyph_advance(
+                            tick.label.chars().next().expect("tick label has a glyph"),
+                            super::AXIS_TICK_FONT_SIZE_PX,
+                        ) * 0.5)))
                     .abs()
                     < 0.01
             );
@@ -3974,7 +4052,18 @@ mod tests {
         }
 
         let plan = super::GpuRenderPlan::from_layout(&ir, &layout, 1.0);
-        let advance = super::QUADRANT_LABEL_FONT_SIZE_PX * super::CHAR_ADVANCE_RATIO;
+        // Per-glyph advance now (bd-2u0.2): the aligned end of a run sits half of THAT GLYPH's own
+        // advance from the anchor, not half a flat average.
+        let edge_advance = |label: Option<&str>, right_aligned: bool| {
+            let text = label.expect("axis label present");
+            let glyph = if right_aligned {
+                text.chars().rfind(|c| !c.is_control())
+            } else {
+                text.chars().find(|c| !c.is_control())
+            }
+            .expect("axis label has a glyph");
+            super::glyph_advance(glyph, super::QUADRANT_LABEL_FONT_SIZE_PX)
+        };
         let left = layout.bounds.x;
         let right = layout.bounds.x + layout.bounds.width;
         let top = layout.bounds.y;
@@ -4001,6 +4090,7 @@ mod tests {
             } else {
                 glyphs.first().expect("axis run has a glyph").center[0]
             };
+            let advance = edge_advance(axis_labels[index], right_aligned);
             let expected_x = if right_aligned {
                 anchor_x - (advance * 0.5)
             } else {
@@ -4034,10 +4124,14 @@ mod tests {
                 })
                 .expect("each SVG quadrant label needs one GPU text run");
             let glyphs = &plan.text_quads[run.first_quad as usize..][..run.quad_count as usize];
-            let mean_x =
-                glyphs.iter().map(|glyph| glyph.center[0]).sum::<f32>() / (glyphs.len() as f32);
+            // Advance-span midpoint, not the mean of glyph centres -- see `run_span_midpoint`.
+            let midpoint = run_span_midpoint(
+                glyphs,
+                &quad.quadrant_labels[index],
+                super::QUADRANT_LABEL_FONT_SIZE_PX,
+            );
             assert!(
-                (mean_x - expected.0).abs() < 0.01,
+                (midpoint - expected.0).abs() < 0.01,
                 "quadrant {index} not centred"
             );
             assert!(
