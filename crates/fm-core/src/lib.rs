@@ -1163,7 +1163,7 @@ pub enum ArrowType {
     ThickCircleBoth,
     /// Flowchart `x==x`: crosses on both ends AND a thick stroke (bd-lrl48).
     ThickCrossBoth,
-    /// Flowchart `==o`: a circle on the END only, over a thick stroke (bd-lrl48b).
+    /// Flowchart `==o`: a circle on the END only, over a thick stroke (bd-lrl48).
     ///
     /// mermaid's link grammar is a PRODUCT of an end marker and a stroke weight — `[xo<]?` head,
     /// a `--`/`==`/`-.-` body, then one of `[-xo>]`. Every combination of the two is spellable, so
@@ -1171,13 +1171,13 @@ pub enum ArrowType {
     /// `A ==o B`. The parser used to answer `ThickLine` and drop the circle — and, worse, leave the
     /// `o` on the endpoint, so `A ==o B` built the node `o_B`.
     ThickCircle,
-    /// Flowchart `==x`: a cross on the END only, over a thick stroke (bd-lrl48b).
+    /// Flowchart `==x`: a cross on the END only, over a thick stroke (bd-lrl48).
     ThickCross,
-    /// Flowchart `-.-o`: a circle on the END only, over a dotted stroke (bd-lrl48b).
+    /// Flowchart `-.-o`: a circle on the END only, over a dotted stroke (bd-lrl48).
     DottedCircle,
-    /// Flowchart `o-.-o`: circles on both ends over a dotted stroke (bd-lrl48b).
+    /// Flowchart `o-.-o`: circles on both ends over a dotted stroke (bd-lrl48).
     DottedCircleBoth,
-    /// Flowchart `x-.-x`: crosses on both ends over a dotted stroke (bd-lrl48b).
+    /// Flowchart `x-.-x`: crosses on both ends over a dotted stroke (bd-lrl48).
     DottedCrossBoth,
     /// UML aggregation (`o--`): hollow diamond on the owning end. The diamond marks the *source*,
     /// so `AggregationReverse` is a distinct variant rather than a rendering flag.

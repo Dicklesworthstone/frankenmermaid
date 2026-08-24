@@ -3,7 +3,7 @@
 //! The oracle is `tests/fixtures/mermaid_flow_links.tsv`, produced by
 //! `scripts/headtohead/link_battery.mjs` from the pinned mermaid 11.15.0 bundle. It is a
 //! MEASUREMENT of the incumbent, not a transcription of its documentation — which matters, because
-//! the defect this test pins (bd-lrl48b) was a table of link spellings written from what the syntax
+//! the defect this test pins (bd-lrl48) was a table of link spellings written from what the syntax
 //! looks like. mermaid reads `o==>` as a NORMAL-weight arrow; nobody guesses that.
 //!
 //! WHAT IS ASSERTED, and why both halves are needed:

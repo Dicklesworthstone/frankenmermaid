@@ -3,7 +3,7 @@
 //
 // WHY A GENERATOR AND NOT A HAND-WRITTEN TABLE. The fixture is the differential oracle for
 // `flowchart_link_differential.rs`, so a hand-authored row would be a claim about mermaid rather
-// than a measurement of it — and the whole defect class this covers (bd-lrl48b) came from exactly
+// than a measurement of it — and the whole defect class this covers (bd-lrl48) came from exactly
 // that: a table of link spellings written from what the syntax LOOKS like. mermaid's own answer for
 // `o==>` is `arrow_point` / stroke `normal`, which nobody guesses.
 //

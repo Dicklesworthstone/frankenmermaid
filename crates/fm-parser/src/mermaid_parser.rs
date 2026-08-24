@@ -10838,7 +10838,7 @@ fn find_operator_from_index<'a>(
 /// would have compiled and silently never fired.
 ///
 /// Returns `None` when nothing extends, so the table's own answer stands unchanged.
-/// mermaid's flowchart link, lexed and destructured the way mermaid does it (bd-lrl48b).
+/// mermaid's flowchart link, lexed and destructured the way mermaid does it (bd-lrl48).
 ///
 /// WHY THIS IS NOT A TABLE. `FLOW_OPERATORS` lists link SPELLINGS, but mermaid's link is a
 /// PRODUCT of three independent parts, and its `destructEndLink` reads them in an order no list of
@@ -11111,7 +11111,7 @@ fn find_operator_core<'a>(
             continue;
         }
 
-        // FLOWCHART ONLY: the real grammar first, the table as the fallback (bd-lrl48b). A hit here
+        // FLOWCHART ONLY: the real grammar first, the table as the fallback (bd-lrl48). A hit here
         // wins over any literal in the table because the table cannot express the grammar — see
         // `match_mermaid_flow_link`.
         if scan.mermaid_flow_links
