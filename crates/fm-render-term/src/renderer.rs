@@ -2018,7 +2018,9 @@ impl TermRenderer {
             // Class diagram nodes with class_meta get three-compartment rendering.
             if let Some(node) = ir_node
                 && let Some(ref meta) = node.class_meta
-                && (!meta.attributes.is_empty() || !meta.methods.is_empty())
+                && (!meta.attributes.is_empty()
+                    || !meta.methods.is_empty()
+                    || meta.stereotype.is_some())
             {
                 self.overlay_class_compartments(&mut lines, x, y, w, h, ir, node, meta, cell_width);
                 continue;
@@ -2886,13 +2888,7 @@ impl TermRenderer {
         if let Some(stereotype) = &meta.stereotype
             && row < max_content_row
         {
-            let stereo_text = match stereotype {
-                fm_core::ClassStereotype::Interface => "<<interface>>",
-                fm_core::ClassStereotype::Abstract => "<<abstract>>",
-                fm_core::ClassStereotype::Enum => "<<enumeration>>",
-                fm_core::ClassStereotype::Service => "<<service>>",
-                fm_core::ClassStereotype::Custom(s) => s.as_str(),
-            };
+            let stereo_text = stereotype.label();
             let stereo = self.truncate_label(stereo_text);
             let stereo_chars = stereo.chars().count();
             let stereo_x = x + 1 + inner_w.saturating_sub(stereo_chars) / 2;
@@ -3549,6 +3545,48 @@ mod tests {
         LayoutActivationBar, LayoutClusterBox, LayoutExtensions, LayoutNodeBox, LayoutRect,
         LayoutStats,
     };
+
+    /// A class declaring a stereotype and NO members must still show it here (bd-d48wi).
+    ///
+    /// The terminal shared the defect with the SVG and canvas backends: all three gated the whole
+    /// compartment stack on having at least one member, so a marker interface — idiomatic mermaid,
+    /// and gated in the pinned incumbent on `annotations.length > 0` with no member requirement —
+    /// printed as a bare box with its annotation silently dropped.
+    ///
+    /// Asserted on this backend separately because agreement between SVG and canvas cannot speak
+    /// for it: the terminal draws into a character grid and clips on its own rules, so a fix that
+    /// works in two vector backends can still be invisible in the third.
+    #[test]
+    fn a_class_with_only_a_stereotype_still_shows_it_in_the_terminal() {
+        let source = format!(
+            "classDiagram\n  class Shape {{\n    {}interface{}\n  }}\n",
+            "<<", ">>"
+        );
+        let ir = fm_parser::parse(&source).ir;
+
+        // CONTROL ON THE PARSE, or a dropped stereotype and an unparsed one look identical below.
+        let meta = ir
+            .nodes
+            .iter()
+            .find_map(|node| node.class_meta.as_deref())
+            .expect("CONTROL FAILED: no class metadata parsed");
+        assert!(
+            meta.stereotype.is_some() && meta.attributes.is_empty() && meta.methods.is_empty(),
+            "CONTROL FAILED: fixture is not a memberless class carrying a stereotype"
+        );
+
+        let out = crate::render_term(&ir);
+        let stereotype = format!("{}interface{}", "<<", ">>");
+        assert!(
+            out.contains(&stereotype),
+            "the terminal dropped the stereotype for a memberless class:\n{out}"
+        );
+        // The name must survive alongside it, not be replaced by it.
+        assert!(
+            out.contains("Shape"),
+            "the class name was lost when the stereotype was drawn:\n{out}"
+        );
+    }
 
     fn sample_ir() -> MermaidDiagramIr {
         let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);

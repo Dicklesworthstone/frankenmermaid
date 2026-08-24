@@ -1277,6 +1277,29 @@ pub enum ClassStereotype {
     Custom(String),
 }
 
+impl ClassStereotype {
+    /// The text a renderer draws for this stereotype, e.g. `<<interface>>` (bd-d48wi).
+    ///
+    /// Centralised because this mapping was forked FOUR ways — twice in fm-render-svg, once each in
+    /// fm-render-canvas and fm-render-term — and fm-layout now needs it too, to MEASURE the box the
+    /// renderers draw this string into. A fifth copy in the sizing path is the one that cannot be
+    /// allowed to drift: if the measured text and the drawn text disagree, the class renderers drop
+    /// any row that falls outside the box rather than growing it, so the divergence deletes output
+    /// instead of merely looking wrong.
+    ///
+    /// `Custom` renders verbatim: the author already wrote their own delimiters.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Interface => "<<interface>>",
+            Self::Abstract => "<<abstract>>",
+            Self::Enum => "<<enumeration>>",
+            Self::Service => "<<service>>",
+            Self::Custom(text) => text.as_str(),
+        }
+    }
+}
+
 /// Class-diagram-specific metadata for a node.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct IrClassNodeMeta {

@@ -10879,7 +10879,12 @@ fn class_compartment_dimensions(
     metrics: &fm_core::FontMetrics,
 ) -> Option<(f32, f32)> {
     let meta = node.class_meta.as_deref()?;
-    if meta.attributes.is_empty() && meta.methods.is_empty() {
+    // A STEREOTYPE ALONE is enough to need a compartment stack (bd-d48wi). A marker interface —
+    // `class Shape { <<interface>> }` with no members — is idiomatic mermaid, and the pinned
+    // incumbent gates its annotation row on `annotations.length > 0` with no member requirement.
+    // Returning `None` here left the box sized from the class name alone, and every backend then
+    // declined to draw the stereotype at all rather than draw it into an unsized box.
+    if meta.attributes.is_empty() && meta.methods.is_empty() && meta.stereotype.is_none() {
         return None;
     }
 
@@ -10921,7 +10926,17 @@ fn class_compartment_dimensions(
         )
         .fold(0.0_f32, f32::max);
 
-    Some((member_width + 16.0, height))
+    // The STEREOTYPE row is drawn in this box too, so it has to be measured in it. It was not:
+    // width came from the member rows alone, and the caller's other term is the CLASS NAME, so
+    // `class A { <<interface>> }` sized a box to fit `A` and then drew a string four times wider.
+    // Height had always counted this row; only the width forgot it — the asymmetry that made the
+    // omission survive, since a too-narrow box overflows visibly rather than dropping content.
+    // Renderers draw it at `font_size * 0.85`, and `metrics` measures at full size.
+    let stereotype_width = meta.stereotype.as_ref().map_or(0.0, |stereotype| {
+        metrics.estimate_dimensions(stereotype.label()).0 * 0.85
+    });
+
+    Some((member_width.max(stereotype_width) + 16.0, height))
 }
 
 /// Space an ER entity needs for its attribute rows. `None` for any node that declares no `members`.
@@ -17827,6 +17842,106 @@ mod tests {
         clippy::similar_names,
         clippy::many_single_char_names
     )]
+
+    /// A class declaring ONLY a stereotype must still be sized for its compartment stack (bd-d48wi).
+    ///
+    /// This sizer returning `None` is the ROOT of that bead, not a symptom of it: all three
+    /// renderers gate "draw the compartment stack" on the same emptiness test, so a marker
+    /// interface — idiomatic mermaid, and accepted by the pinned incumbent, whose own annotation row
+    /// is gated on `annotations.length > 0` with no member requirement — rendered as a bare box
+    /// everywhere.
+    #[test]
+    fn a_class_with_only_a_stereotype_is_sized_for_its_compartment_stack() {
+        let source = concat!(
+            "classDiagram\n",
+            "  class Plain {\n",
+            "    ",
+            "<<",
+            "interface",
+            ">>",
+            "\n",
+            "  }\n"
+        );
+        let ir = fm_parser::parse(source).ir;
+        let node = ir
+            .nodes
+            .iter()
+            .find(|node| node.class_meta.is_some())
+            .expect("CONTROL FAILED: no class node parsed, so nothing here is under test");
+        let meta = node.class_meta.as_deref().expect("class meta");
+        assert!(
+            meta.attributes.is_empty() && meta.methods.is_empty(),
+            "CONTROL FAILED: the fixture declares members, so it is not the memberless case"
+        );
+        assert!(
+            meta.stereotype.is_some(),
+            "CONTROL FAILED: the stereotype never reached the IR"
+        );
+
+        let metrics = fm_core::FontMetrics::default();
+        let sized = super::class_compartment_dimensions(node, &metrics);
+        assert!(
+            sized.is_some(),
+            "a stereotype-only class was refused a compartment box, so no backend will draw it"
+        );
+
+        // The WIDTH must cover the stereotype text — the term this sizer used to omit entirely. It
+        // measured member rows only, and the caller's other term is the CLASS NAME, so a box for
+        // `Plain` would leave the much wider stereotype hanging outside it. Height always counted
+        // the row; only width forgot it, which is why the omission survived: a too-narrow box
+        // overflows visibly instead of silently dropping content.
+        let (width, height) = sized.expect("just asserted Some");
+        let needed = metrics
+            .estimate_dimensions(meta.stereotype.as_ref().expect("checked above").label())
+            .0
+            * 0.85;
+        assert!(
+            width >= needed,
+            "box width {width} cannot hold the {needed} the stereotype row needs"
+        );
+        assert!(
+            height > 0.0,
+            "a compartment box with no height holds nothing"
+        );
+    }
+
+    /// CONTROL: a class with NO stereotype gains no width from the new stereotype term.
+    ///
+    /// The obvious control — "a class with neither members nor a stereotype gets no box" — turned
+    /// out to be unreachable and is deliberately not written here: the parser attaches no
+    /// `class_meta` at all to `class Plain`, so that case never reaches this function and a test of
+    /// it would assert the parser's behaviour while appearing to assert this sizer's.
+    ///
+    /// This is the reachable control, and it is the one that bites: the width must come out at
+    /// EXACTLY the member row plus padding, proving the stereotype term contributes zero when
+    /// absent. A stereotype term that leaked a constant would widen every class box in the corpus
+    /// and still satisfy the test above, which only checks that the box is big ENOUGH.
+    #[test]
+    fn a_class_without_a_stereotype_gains_no_width_from_the_stereotype_term() {
+        let ir = fm_parser::parse("classDiagram\n  class Plain {\n    +go()\n  }\n").ir;
+        let node = ir
+            .nodes
+            .iter()
+            .find(|node| node.class_meta.is_some())
+            .expect("CONTROL FAILED: no class node parsed");
+        let meta = node.class_meta.as_deref().expect("class meta");
+        assert!(
+            meta.stereotype.is_none(),
+            "CONTROL FAILED: the fixture declares a stereotype, so it is not the negative case"
+        );
+        assert_eq!(meta.methods.len(), 1, "CONTROL FAILED: expected one method");
+
+        let metrics = fm_core::FontMetrics::default();
+        let (width, _) = super::class_compartment_dimensions(node, &metrics)
+            .expect("a class with a member is sized");
+        let expected = super::class_member_row_width(&meta.methods[0], true, &metrics) + 16.0;
+        assert!(
+            (width - expected).abs() < f32::EPSILON,
+            "width {width} is not the member row plus padding ({expected}); the stereotype term \
+             leaked into a class that declares no stereotype"
+        );
+    }
+
     use super::{
         CONSTRAINT_SOLVER_WALL_CLOCK_VALVE_MS, CachedNodeSize, ConstraintSolverMode, CycleStrategy,
         DependencyGraph, DiagramLayout, DirtySet, EdgeRouting, GraphMetrics,

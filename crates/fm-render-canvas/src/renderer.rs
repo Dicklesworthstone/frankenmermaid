@@ -2187,7 +2187,9 @@ impl Canvas2dRenderer {
             // Check for class diagram three-compartment rendering.
             if let Some(node) = ir_node
                 && let Some(ref meta) = node.class_meta
-                && (!meta.attributes.is_empty() || !meta.methods.is_empty())
+                && (!meta.attributes.is_empty()
+                    || !meta.methods.is_empty()
+                    || meta.stereotype.is_some())
             {
                 let line_h = self.config.font_size * 1.3;
                 let member_font = self.config.font_size * 0.9;
@@ -2225,13 +2227,7 @@ impl Canvas2dRenderer {
                 // fm-render-svg, including Enum rendering as `enumeration` and a Custom stereotype
                 // written verbatim.
                 if let Some(stereotype) = &meta.stereotype {
-                    let stereo_text = match stereotype {
-                        fm_core::ClassStereotype::Interface => "<<interface>>",
-                        fm_core::ClassStereotype::Abstract => "<<abstract>>",
-                        fm_core::ClassStereotype::Enum => "<<enumeration>>",
-                        fm_core::ClassStereotype::Service => "<<service>>",
-                        fm_core::ClassStereotype::Custom(custom) => custom.as_str(),
-                    };
+                    let stereo_text = stereotype.label();
                     ctx.fill_text(stereo_text, x + w / 2.0, cursor_y);
                     self.draw_calls += 1;
                     *labels_drawn += 1;

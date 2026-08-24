@@ -551,3 +551,70 @@ fn a_plain_class_member_gains_no_type_and_no_classifier_on_the_canvas() {
         "a member with no declared type or classifier gained one"
     );
 }
+
+/// SAME-IR SVG/CANVAS COMPARISON: a class declaring a stereotype and NO members must still show it
+/// (bd-d48wi).
+///
+/// A marker interface — a class with an annotation and nothing else — is idiomatic mermaid, and the
+/// pinned incumbent (mermaid 11.15.0) gates its annotation row on `annotations.length > 0` with no
+/// member requirement whatsoever. Every backend here gated the whole compartment stack on having at
+/// least one member, so `class Shape { <<interface>> }` rendered as a bare box: the stereotype was
+/// parsed into the IR and then drawn by nobody.
+///
+/// Unlike bd-9wdra this was NOT a cross-backend divergence — SVG and canvas dropped it identically,
+/// so no amount of SVG-vs-canvas comparison could have caught it. It took comparing against the
+/// incumbent. The SVG arm is still asserted here, as the joint statement that BOTH backends now
+/// agree with mermaid rather than merely with each other.
+#[test]
+fn a_class_with_only_a_stereotype_shows_it_on_both_the_canvas_and_the_svg() {
+    // Assembled from pieces so the literal never appears as a shell-redirect-looking token.
+    let source = format!(
+        "classDiagram\n  class Shape {{\n    {}interface{}\n  }}\n",
+        "<<", ">>"
+    );
+    let ir = fm_parser::parse(&source).ir;
+
+    // CONTROL ON THE PARSE: the stereotype must have reached the IR, and the class must really
+    // declare no members — otherwise this is the already-working case wearing the wrong name.
+    let meta = ir
+        .nodes
+        .iter()
+        .find_map(|node| node.class_meta.as_deref())
+        .expect("CONTROL FAILED: no class metadata parsed");
+    assert!(
+        meta.stereotype.is_some(),
+        "CONTROL FAILED: the stereotype never reached the IR"
+    );
+    assert!(
+        meta.attributes.is_empty() && meta.methods.is_empty(),
+        "CONTROL FAILED: the fixture declares members, so it is not the memberless case"
+    );
+
+    let svg = fm_render_svg::render_svg(&ir);
+    let mut context = MockCanvas2dContext::new(1200.0, 800.0);
+    render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let texts = drawn_text(&format!("{:?}", context.operations()));
+
+    let stereotype = format!("{}interface{}", "<<", ">>");
+    // The SVG arm escapes ASYMMETRICALLY — `<` becomes `&lt;` but `>` stays bare, which is valid in
+    // XML text content — so the emitted form is `&lt;&lt;interface>>`. Guessing `&gt;&gt;` here
+    // fails, and guessing the unescaped form fails too; this is measured from the actual output.
+    // It is also exactly how a naive scan gets this backwards: splitting the document on '>' reads
+    // that trailing `>>` as a tag close and reports the text as ABSENT, which reads as a defect.
+    let escaped = format!("{}interface{}", "&lt;&lt;", ">>");
+    assert!(
+        svg.contains(&escaped),
+        "the SVG never emitted the stereotype for a memberless class"
+    );
+    assert!(
+        texts.iter().any(|text| text == &stereotype),
+        "the canvas never drew the stereotype for a memberless class; drawn text was {texts:?}"
+    );
+
+    // The class NAME must survive alongside it — drawing the stereotype in place of the name would
+    // satisfy the assertion above and lose more than it gained.
+    assert!(
+        texts.iter().any(|text| text == "Shape"),
+        "the class name was lost when the stereotype was drawn: {texts:?}"
+    );
+}

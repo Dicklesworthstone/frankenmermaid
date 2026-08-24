@@ -7240,13 +7240,7 @@ fn write_class_compartments_into(
         .map(|l| l.text.as_str())
         .unwrap_or(&node.id);
     if let Some(stereotype) = &meta.stereotype {
-        let stereo_text = match stereotype {
-            fm_core::ClassStereotype::Interface => "<<interface>>",
-            fm_core::ClassStereotype::Abstract => "<<abstract>>",
-            fm_core::ClassStereotype::Enum => "<<enumeration>>",
-            fm_core::ClassStereotype::Service => "<<service>>",
-            fm_core::ClassStereotype::Custom(s) => s.as_str(),
-        };
+        let stereo_text = stereotype.label();
         write_class_text_into(
             f,
             x + w / 2.0,
@@ -8660,7 +8654,7 @@ fn render_node_into(
     if let Some(node) = ir_node
         && matches!(shape, NodeShape::Rect)
         && let Some(meta) = node.class_meta.as_deref()
-        && (!meta.attributes.is_empty() || !meta.methods.is_empty())
+        && (!meta.attributes.is_empty() || !meta.methods.is_empty() || meta.stereotype.is_some())
         && config.embed_theme_css
         && config.node_gradients
         && !emit_classdef_classes
@@ -8704,7 +8698,7 @@ fn render_node_into(
     if let Some(node) = ir_node
         && matches!(shape, NodeShape::Rect)
         && let Some(meta) = node.class_meta.as_deref()
-        && (!meta.attributes.is_empty() || !meta.methods.is_empty())
+        && (!meta.attributes.is_empty() || !meta.methods.is_empty() || meta.stereotype.is_some())
         && config.embed_theme_css
         && config.node_gradients
         && !emit_classdef_classes
@@ -9916,7 +9910,9 @@ fn render_node(
     if detail.show_node_labels && !placeholder_space_node {
         if let Some(node) = ir_node
             && let Some(ref meta) = node.class_meta
-            && (!meta.attributes.is_empty() || !meta.methods.is_empty())
+            && (!meta.attributes.is_empty()
+                || !meta.methods.is_empty()
+                || meta.stereotype.is_some())
         {
             group = render_class_compartments(
                 group,
@@ -10646,13 +10642,7 @@ fn render_class_compartments(
 
     // Stereotype above class name if present.
     if let Some(ref stereotype) = meta.stereotype {
-        let stereo_text = match stereotype {
-            fm_core::ClassStereotype::Interface => "<<interface>>",
-            fm_core::ClassStereotype::Abstract => "<<abstract>>",
-            fm_core::ClassStereotype::Enum => "<<enumeration>>",
-            fm_core::ClassStereotype::Service => "<<service>>",
-            fm_core::ClassStereotype::Custom(s) => s.as_str(),
-        };
+        let stereo_text = stereotype.label();
         let stereo_elem = TextBuilder::new(stereo_text)
             .x(x + w / 2.0)
             .y(cursor_y)
