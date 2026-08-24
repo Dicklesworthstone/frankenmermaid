@@ -271,7 +271,7 @@ struct NodeToken {
     label: Option<ParsedLabel>,
     icon: Option<String>,
     shape: NodeShape,
-    /// CSS classes from the `:::className` suffix (bd-2ss8g).
+    /// CSS classes from the `:::className` suffix (bd-8n2b5).
     ///
     /// The suffix is part of the TOKEN, so it belongs on the token. `parse_node_token_with_config`
     /// already truncates the raw string at `:::` to find the id and previously threw the remainder
@@ -653,7 +653,7 @@ struct FlowAstNode {
     label: Option<ParsedLabel>,
     icon: Option<String>,
     shape: NodeShape,
-    /// `:::className` classes carried from the token (bd-2ss8g), applied by `intern_flow_ast_node`.
+    /// `:::className` classes carried from the token (bd-8n2b5), applied by `intern_flow_ast_node`.
     classes: Vec<String>,
 }
 
@@ -2869,7 +2869,7 @@ fn intern_node_token(builder: &mut IrBuilder, node: &NodeToken, span: Span) -> O
     Some(node_id)
 }
 
-/// Apply a token's `:::className` classes to the node just interned (bd-2ss8g).
+/// Apply a token's `:::className` classes to the node just interned (bd-8n2b5).
 ///
 /// ⚠️ THERE ARE TWO INTERNING FUNCTIONS, and applying this in only one of them is inert — the exact
 /// shape of the guard that shipped covering one of two callers before. `intern_node_token` takes the
@@ -10864,7 +10864,7 @@ fn extract_pipe_label(right_hand_side: &str) -> (Option<String>, &str) {
     (label, remainder)
 }
 
-/// Class names from a trailing `:::a b` suffix, in declaration order (bd-2ss8g).
+/// Class names from a trailing `:::a b` suffix, in declaration order (bd-8n2b5).
 ///
 /// mermaid's `setClass` splits the suffix on whitespace, so `A:::a b` carries TWO classes. Returns
 /// empty for a token with no suffix, which is the common node and must stay allocation-free.
@@ -10884,7 +10884,7 @@ fn inline_class_names(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// Parses a node token, INCLUDING its `:::className` suffix (bd-2ss8g).
+/// Parses a node token, INCLUDING its `:::className` suffix (bd-8n2b5).
 ///
 /// The suffix used to be located, truncated away to find the id, and then dropped on the floor —
 /// so `A:::urgent` produced a node with no classes while the emitted stylesheet still carried the
