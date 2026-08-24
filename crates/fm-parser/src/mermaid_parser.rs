@@ -271,6 +271,14 @@ struct NodeToken {
     label: Option<ParsedLabel>,
     icon: Option<String>,
     shape: NodeShape,
+    /// CSS classes from the `:::className` suffix (bd-2ss8g).
+    ///
+    /// The suffix is part of the TOKEN, so it belongs on the token. `parse_node_token_with_config`
+    /// already truncates the raw string at `:::` to find the id and previously threw the remainder
+    /// away, which is why `A:::urgent` styled nothing while `class A urgent` worked. Carrying it
+    /// here means edge endpoints, `&` node lists and bare declarations all pick it up from the one
+    /// function that decides where the id ends — no second copy of the splitting rules.
+    classes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -645,6 +653,8 @@ struct FlowAstNode {
     label: Option<ParsedLabel>,
     icon: Option<String>,
     shape: NodeShape,
+    /// `:::className` classes carried from the token (bd-2ss8g), applied by `intern_flow_ast_node`.
+    classes: Vec<String>,
 }
 
 impl From<NodeToken> for FlowAstNode {
@@ -654,6 +664,7 @@ impl From<NodeToken> for FlowAstNode {
             label: value.label,
             icon: value.icon,
             shape: value.shape,
+            classes: value.classes,
         }
     }
 }
@@ -2840,7 +2851,25 @@ fn intern_node_token(builder: &mut IrBuilder, node: &NodeToken, span: Span) -> O
     if let Some(icon) = node.icon.as_deref() {
         builder.set_node_icon(node_id, icon);
     }
+    apply_inline_classes(builder, node_id, &node.classes);
     Some(node_id)
+}
+
+/// Apply a token's `:::className` classes to the node just interned (bd-2ss8g).
+///
+/// ⚠️ THERE ARE TWO INTERNING FUNCTIONS, and applying this in only one of them is inert — the exact
+/// shape of the guard that shipped covering one of two callers before. `intern_node_token` takes the
+/// `NodeToken`, `intern_flow_ast_node` takes the `FlowAstNode` it converts into, and a flowchart
+/// node can arrive through either. Both call this, so neither can drift.
+///
+/// The two FAST document paths (`FastNode`/`FastEdge`) deliberately do NOT: both refuse a `:::`
+/// token before reaching this point — `FAST_EDGE_REJECT` lists `:`, `FAST_ID_CHAR` omits it, and a
+/// bracketed `N0[x]:::c` fails the `ends_with(']')` guard — so such a statement always falls through
+/// to the general path. That is checked, not assumed; `a_class_suffix_never_takes_a_fast_path` pins it.
+fn apply_inline_classes(builder: &mut IrBuilder, node_id: IrNodeId, classes: &[String]) {
+    for class_name in classes {
+        builder.add_class_to_node_id(node_id, class_name);
+    }
 }
 
 fn intern_flow_ast_node(
@@ -2861,6 +2890,7 @@ fn intern_flow_ast_node(
     if let Some(icon) = node.icon.as_deref() {
         builder.set_node_icon(node_id, icon);
     }
+    apply_inline_classes(builder, node_id, &node.classes);
     Some(node_id)
 }
 
@@ -5575,6 +5605,7 @@ fn parse_mindmap_node_token(raw: &str, config: &ParserConfig) -> Option<NodeToke
                 label: parsed.label,
                 icon: parsed.icon,
                 shape: NodeShape::Circle,
+                classes: Vec::new(),
             });
         }
 
@@ -5604,6 +5635,7 @@ fn parse_mindmap_node_token(raw: &str, config: &ParserConfig) -> Option<NodeToke
         label,
         icon,
         shape: NodeShape::Rect,
+        classes: Vec::new(),
     })
 }
 
@@ -5632,6 +5664,7 @@ fn parse_mindmap_bang(raw: &str) -> Option<NodeToken> {
         label,
         icon,
         shape: NodeShape::Asymmetric,
+        classes: Vec::new(),
     })
 }
 
@@ -5669,6 +5702,7 @@ fn parse_mindmap_cloud(raw: &str) -> Option<NodeToken> {
         label,
         icon,
         shape: NodeShape::Cloud,
+        classes: Vec::new(),
     })
 }
 
@@ -5697,6 +5731,7 @@ fn parse_mindmap_hexagon(raw: &str) -> Option<NodeToken> {
         label,
         icon,
         shape: NodeShape::Hexagon,
+        classes: Vec::new(),
     })
 }
 
@@ -10815,7 +10850,42 @@ fn extract_pipe_label(right_hand_side: &str) -> (Option<String>, &str) {
     (label, remainder)
 }
 
+/// Class names from a trailing `:::a b` suffix, in declaration order (bd-2ss8g).
+///
+/// mermaid's `setClass` splits the suffix on whitespace, so `A:::a b` carries TWO classes. Returns
+/// empty for a token with no suffix, which is the common node and must stay allocation-free.
+fn inline_class_names(raw: &str) -> Vec<String> {
+    let trimmed = trim_fast(raw);
+    // The common node token has no `:` at all; `find_triple_colon` is a vectorized first-byte scan,
+    // but skipping it entirely keeps a plain flowchart off this path completely.
+    if !trimmed.as_bytes().contains(&b':') {
+        return Vec::new();
+    }
+    let Some(pos) = find_triple_colon(trimmed) else {
+        return Vec::new();
+    };
+    trimmed[pos + 3..]
+        .split_ascii_whitespace()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Parses a node token, INCLUDING its `:::className` suffix (bd-2ss8g).
+///
+/// The suffix used to be located, truncated away to find the id, and then dropped on the floor —
+/// so `A:::urgent` produced a node with no classes while the emitted stylesheet still carried the
+/// `classDef` rule for it. Wrapping the original matcher rather than teaching each of its ~10 exits
+/// about the suffix keeps ONE place that knows where the id ends and where the classes begin.
 fn parse_node_token_with_config(raw: &str, config: &ParserConfig) -> Option<NodeToken> {
+    let mut token = parse_node_token_core(raw, config)?;
+    // A path that already resolved its own classes (none do today) keeps them: this only fills in.
+    if token.classes.is_empty() {
+        token.classes = inline_class_names(raw);
+    }
+    Some(token)
+}
+
+fn parse_node_token_core(raw: &str, config: &ParserConfig) -> Option<NodeToken> {
     let trimmed = trim_fast(raw);
     if trimmed.is_empty() {
         return None;
@@ -10827,6 +10897,7 @@ fn parse_node_token_with_config(raw: &str, config: &ParserConfig) -> Option<Node
             label: None,
             icon: None,
             shape: NodeShape::Circle,
+            classes: Vec::new(),
         });
     }
 
@@ -10932,6 +11003,7 @@ fn parse_node_token_with_config(raw: &str, config: &ParserConfig) -> Option<Node
         label,
         icon,
         shape: NodeShape::Rect,
+        classes: Vec::new(),
     })
 }
 
@@ -10964,6 +11036,7 @@ fn parse_double_circle_with_config(raw: &str, config: &ParserConfig) -> Option<N
         label,
         icon,
         shape: NodeShape::DoubleCircle,
+        classes: Vec::new(),
     })
 }
 
@@ -11007,6 +11080,7 @@ fn parse_wrapped_with_config(
         label,
         icon,
         shape,
+        classes: Vec::new(),
     })
 }
 
@@ -11068,6 +11142,7 @@ fn parse_wrapped_str_with_config(
         label,
         icon,
         shape,
+        classes: Vec::new(),
     })
 }
 
@@ -11089,6 +11164,7 @@ fn dangling_placeholder_node(line_number: usize, placeholder_index: usize) -> No
         label: None,
         icon: None,
         shape: NodeShape::Rect,
+        classes: Vec::new(),
     }
 }
 
