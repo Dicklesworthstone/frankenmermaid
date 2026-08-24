@@ -6454,7 +6454,16 @@ fn render_pie_svg(
             let _ = write_escaped_attr(&mut pie_svg, color);
             pie_svg.push_str("\" stroke=\"");
             let _ = write_escaped_attr(&mut pie_svg, bg);
-            pie_svg.push_str("\" stroke-width=\"2\" class=\"fm-pie-slice fm-pie-slice-full\"/>");
+            pie_svg.push_str("\" stroke-width=\"2\" class=\"fm-pie-slice fm-pie-slice-full\"");
+            write_pie_slice_accessible_name(
+                &mut pie_svg,
+                config.a11y.text_alternatives,
+                pie_meta.show_data,
+                &slice.label,
+                value,
+                (value / total) * 100.0,
+                "circle",
+            );
             have_prev_end = false;
         } else {
             let x2 = cx + radius * (angle + sweep).cos();
@@ -6484,7 +6493,16 @@ fn render_pie_svg(
             let _ = write_escaped_attr(&mut pie_svg, color);
             pie_svg.push_str("\" stroke=\"");
             let _ = write_escaped_attr(&mut pie_svg, bg);
-            pie_svg.push_str("\" stroke-width=\"2\" class=\"fm-pie-slice\"/>");
+            pie_svg.push_str("\" stroke-width=\"2\" class=\"fm-pie-slice\"");
+            write_pie_slice_accessible_name(
+                &mut pie_svg,
+                config.a11y.text_alternatives,
+                pie_meta.show_data,
+                &slice.label,
+                value,
+                (value / total) * 100.0,
+                "path",
+            );
         }
 
         let mid_angle = angle + sweep / 2.0;
@@ -6593,6 +6611,57 @@ fn render_pie_svg(
     doc = doc.child(Element::raw_svg(pie_svg));
 
     doc
+}
+
+/// Close a pie wedge, giving it an ACCESSIBLE NAME when text alternatives are on (bd-uf3p1).
+///
+/// Pie slices shipped as bare self-closing shapes: no `data-id`, no `role`, no `aria-label`, no
+/// `<title>`. Measured across the corpus, four chart types — gantt, pie, quadrant, xychart — emitted
+/// ZERO per-element accessibility affordances, while the other fifteen (including chart-like
+/// sankey, journey, timeline, packet and kanban) all did. A screen reader got the document `<desc>`
+/// and nothing per wedge.
+///
+/// MIRRORS THE LEGEND, `showData` behaviour included: `Label: 50 (50.0%)` when the author asked for
+/// data, the bare label when they did not.
+///
+/// I first made the share UNCONDITIONAL, reasoning that a wedge's angle conveys its proportion to a
+/// sighted reader and an accessible name should carry what the visual conveys. That broke
+/// `pie_without_showdata_omits_value_and_percentage_labels`, which asserts DOCUMENT-WIDE that
+/// `showData: false` discloses no numbers anywhere. That is a real pre-existing contract about what
+/// the author chose to publish — not an oversight in a visible-text-only check — so the name follows
+/// it rather than the gate being narrowed to accommodate this function. Whether an accessible name
+/// should be exempt from `showData` is a product question, raised on bd-uf3p1 rather than decided
+/// here by whoever happened to be editing.
+///
+/// Gated on `text_alternatives`, matching `uniform_a11y`'s `<title>` component: with a11y off the
+/// shape closes exactly as it did before, so that configuration is byte-identical.
+fn write_pie_slice_accessible_name(
+    out: &mut String,
+    text_alternatives: bool,
+    show_data: bool,
+    label: &str,
+    value: f32,
+    percent: f32,
+    tag: &str,
+) {
+    use crate::attributes::write_escaped_text;
+    if !text_alternatives {
+        out.push_str("/>");
+        return;
+    }
+    use std::fmt::Write as _;
+
+    out.push_str("><title>");
+    let _ = write_escaped_text(out, label);
+    if show_data {
+        // `{:.0}` and `{:.1}` are the LEGEND's own `entry_label` formatting, so the spoken name and
+        // the printed one agree digit for digit. `write_number_into` renders 66.7 as `66.70`, which
+        // would have made the accessible name disagree with the legend beside it.
+        let _ = write!(out, ": {value:.0} ({percent:.1}%)");
+    }
+    out.push_str("</title></");
+    out.push_str(tag);
+    out.push('>');
 }
 
 #[allow(clippy::too_many_arguments)]
