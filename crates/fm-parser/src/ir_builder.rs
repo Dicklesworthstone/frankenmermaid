@@ -9,10 +9,10 @@ use fm_core::{
     IrC4NodeMeta, IrClassMember, IrClassNodeMeta, IrCluster, IrClusterId, IrConstraint, IrEdge,
     IrEdgeKind, IrEndpoint, IrEntityAttribute, IrGanttMeta, IrGraphCluster, IrGraphEdge,
     IrGraphNode, IrLabel, IrLabelId, IrLabelSegment, IrLifecycleEvent, IrNode, IrNodeId,
-    IrNodeKind, IrParticipantGroup, IrSequenceFragment, IrSequenceMeta, IrSequenceNote, IrStyleRef,
-    IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyChartMeta, LifecycleEventKind, MermaidDiagramIr,
-    MermaidError, MermaidParseMode, MermaidSanitizeMode, MermaidWarning, MermaidWarningCode,
-    NodeShape, NotePosition, Span,
+    IrNodeKind, IrParticipantGroup, IrSequenceAutonumberRange, IrSequenceFragment, IrSequenceMeta,
+    IrSequenceNote, IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyChartMeta,
+    LifecycleEventKind, MermaidDiagramIr, MermaidError, MermaidParseMode, MermaidSanitizeMode,
+    MermaidWarning, MermaidWarningCode, NodeShape, NotePosition, Span,
 };
 
 use crate::mermaid_parser::trim_fast;
@@ -810,18 +810,40 @@ impl IrBuilder {
     /// meaningless when numbering is off, and writing zeroes into them would make a later bare
     /// `autonumber` (which restores the default 1/1) indistinguishable from a corrupted state.
     pub(crate) fn disable_autonumber(&mut self) {
+        let edge_index = self.ir.edges.len();
         let meta = self
             .ir
             .sequence_meta
             .get_or_insert_with(IrSequenceMeta::default);
+        if let Some(range) = meta
+            .autonumber_ranges
+            .last_mut()
+            .filter(|range| range.end_edge.is_none())
+        {
+            range.end_edge = Some(edge_index);
+        }
         meta.autonumber = false;
     }
 
     pub(crate) fn enable_autonumber_with(&mut self, start: u32, increment: u32) {
+        let edge_index = self.ir.edges.len();
         let meta = self
             .ir
             .sequence_meta
             .get_or_insert_with(IrSequenceMeta::default);
+        if let Some(range) = meta
+            .autonumber_ranges
+            .last_mut()
+            .filter(|range| range.end_edge.is_none())
+        {
+            range.end_edge = Some(edge_index);
+        }
+        meta.autonumber_ranges.push(IrSequenceAutonumberRange {
+            start_edge: edge_index,
+            end_edge: None,
+            start,
+            increment,
+        });
         meta.autonumber = true;
         meta.autonumber_start = start;
         meta.autonumber_increment = increment;

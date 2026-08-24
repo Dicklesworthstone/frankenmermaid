@@ -67,6 +67,13 @@ fn golden_dir() -> PathBuf {
         .join("golden")
 }
 
+fn conformance_fixture_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("frankentui_conformance")
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -4707,6 +4714,43 @@ fn a_state_diagram_without_notes_emits_no_note_markup() {
         &SvgRenderConfig::default(),
     );
     assert!(!svg.contains("fm-state-note"));
+}
+
+/// Mermaid scopes autonumbering from each directive to `autonumber off` (or the next directive),
+/// rather than applying one final boolean to every message in the diagram. The fixture deliberately
+/// has messages on both sides of each boundary so a global flag cannot pass this output check.
+#[test]
+fn sequence_autonumber_directives_only_label_their_message_ranges() {
+    let path = conformance_fixture_dir().join("sequence_autonumber_scopes.mmd");
+    let source = fs::read_to_string(&path)
+        .map_err(|err| format!("read {}: {err}", path.display()))
+        .expect("read autonumber scope fixture");
+    let parsed = parse(&source);
+    assert!(
+        parsed.warnings.is_empty(),
+        "parse warnings: {:?}",
+        parsed.warnings
+    );
+
+    let svg = render_svg_with_config(&parsed.ir, &SvgRenderConfig::default());
+    let text = svg_text_runs(&svg);
+    for expected in ["10. numbered once", "15. numbered twice", "1. restarted"] {
+        assert!(
+            text.iter().any(|run| run == expected),
+            "Mermaid-reference label {expected:?} missing from SVG text runs: {text:?}"
+        );
+    }
+    for forbidden in [
+        "1. before directive",
+        "20. after off",
+        "2. after off",
+        "20. restarted",
+    ] {
+        assert!(
+            !text.iter().any(|run| run == forbidden),
+            "autonumber scope leaked into {forbidden:?}: {text:?}"
+        );
+    }
 }
 
 /// Collect the text content of every `<text>`/`<tspan>` run, for failure messages that say what WAS

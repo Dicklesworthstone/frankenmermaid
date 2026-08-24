@@ -4736,6 +4736,20 @@ pub struct IrXyChartMeta {
     pub series: Vec<IrXySeries>,
 }
 
+/// One directive-scoped range of numbered sequence messages.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IrSequenceAutonumberRange {
+    /// First message edge numbered by this directive.
+    pub start_edge: usize,
+    /// First edge after this range when a later directive closes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_edge: Option<usize>,
+    /// Number assigned to `start_edge`.
+    pub start: u32,
+    /// Number added for each later edge in the range.
+    pub increment: u32,
+}
+
 /// Sequence-diagram-specific metadata that extends the generic IR.
 ///
 /// Captures all advanced sequence constructs (activations, notes, fragments,
@@ -4754,6 +4768,9 @@ pub struct IrSequenceMeta {
         skip_serializing_if = "is_default_sequence_autonumber_increment"
     )]
     pub autonumber_increment: u32,
+    /// Directive-scoped numbering ranges. An empty list preserves legacy whole-diagram numbering.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub autonumber_ranges: Vec<IrSequenceAutonumberRange>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hide_footbox: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -4792,6 +4809,7 @@ impl Default for IrSequenceMeta {
             autonumber: false,
             autonumber_start: default_sequence_autonumber_start(),
             autonumber_increment: default_sequence_autonumber_increment(),
+            autonumber_ranges: Vec::new(),
             hide_footbox: false,
             activations: Vec::new(),
             notes: Vec::new(),
@@ -4805,6 +4823,20 @@ impl Default for IrSequenceMeta {
 impl IrSequenceMeta {
     #[must_use]
     pub fn autonumber_value(&self, edge_index: usize) -> Option<u64> {
+        if !self.autonumber_ranges.is_empty() {
+            return self
+                .autonumber_ranges
+                .iter()
+                .find(|range| {
+                    edge_index >= range.start_edge
+                        && range.end_edge.is_none_or(|end_edge| edge_index < end_edge)
+                })
+                .map(|range| {
+                    u64::from(range.start)
+                        + (edge_index - range.start_edge) as u64 * u64::from(range.increment)
+                });
+        }
+
         if !self.autonumber {
             return None;
         }
@@ -10063,6 +10095,7 @@ mod tests {
         assert!(meta.fragments.is_empty());
         assert!(meta.participant_groups.is_empty());
         assert!(meta.lifecycle_events.is_empty());
+        assert!(meta.autonumber_ranges.is_empty());
     }
 
     #[test]
@@ -10071,6 +10104,12 @@ mod tests {
             autonumber: true,
             autonumber_start: 10,
             autonumber_increment: 5,
+            autonumber_ranges: vec![IrSequenceAutonumberRange {
+                start_edge: 2,
+                end_edge: Some(4),
+                start: 10,
+                increment: 5,
+            }],
             hide_footbox: true,
             activations: vec![IrActivation {
                 participant: IrNodeId(0),
@@ -10166,6 +10205,33 @@ mod tests {
         assert_eq!(meta.autonumber_value(0), Some(10));
         assert_eq!(meta.autonumber_value(1), Some(15));
         assert_eq!(meta.autonumber_value(2), Some(20));
+    }
+
+    #[test]
+    fn sequence_meta_autonumber_ranges_only_number_their_edges() {
+        let meta = IrSequenceMeta {
+            autonumber_ranges: vec![
+                IrSequenceAutonumberRange {
+                    start_edge: 1,
+                    end_edge: Some(3),
+                    start: 10,
+                    increment: 5,
+                },
+                IrSequenceAutonumberRange {
+                    start_edge: 4,
+                    end_edge: None,
+                    start: 1,
+                    increment: 1,
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(meta.autonumber_value(0), None);
+        assert_eq!(meta.autonumber_value(1), Some(10));
+        assert_eq!(meta.autonumber_value(2), Some(15));
+        assert_eq!(meta.autonumber_value(3), None);
+        assert_eq!(meta.autonumber_value(4), Some(1));
     }
 
     #[test]

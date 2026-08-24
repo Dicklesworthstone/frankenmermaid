@@ -1,0 +1,9 @@
+sequenceDiagram
+  Alice->>Bob: before directive
+  autonumber 10 5
+  Alice->>Bob: numbered once
+  Bob->>Alice: numbered twice
+  autonumber off
+  Alice->>Bob: after off
+  autonumber 1
+  Bob->>Alice: restarted
