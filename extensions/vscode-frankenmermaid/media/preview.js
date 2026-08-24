@@ -44,13 +44,19 @@ function render(message) {
   }
 }
 
+function isRenderMessage(message) {
+  return message !== null
+    && typeof message === 'object'
+    && message.type === 'render'
+    && typeof message.source === 'string'
+    && typeof message.title === 'string';
+}
+
 function onMessage(event) {
-  if (event.origin !== window.location.origin || event.source !== window) {
+  if (!isRenderMessage(event.data)) {
     return;
   }
-  if (event.data?.type === 'render') {
-    render(event.data);
-  }
+  render(event.data);
 }
 
 function dispose() {

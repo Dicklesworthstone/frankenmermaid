@@ -1,7 +1,10 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
+const vm = require('node:vm');
 const {
   buildPreviewHtml,
   DebouncedRenderScheduler,
@@ -68,4 +71,47 @@ test('render scheduler validates and applies later debounce settings', () => {
 
   scheduler.setDelayMs(0);
   assert.equal(scheduler.delayMs, 0);
+});
+
+test('webview renders typed extension messages regardless of browser event metadata', () => {
+  const previewPath = path.join(__dirname, '..', 'media', 'preview.js');
+  let previewSource = fs.readFileSync(previewPath, 'utf8');
+  assert.equal(previewSource.includes('void start();'), true);
+  previewSource = previewSource.replace('void start();', '');
+  assert.equal(previewSource.includes('let renderSvg;'), true);
+  previewSource = previewSource.replace(
+    'let renderSvg;',
+    "let renderSvg = (source) => { globalThis.renderedSource = source; return '<svg></svg>'; };",
+  );
+
+  const listeners = new Map();
+  const root = { replaceChildren: () => {}, textContent: '' };
+  const context = {
+    Blob: class Blob {},
+    Image: class Image {},
+    URL: { createObjectURL: () => 'blob:preview', revokeObjectURL: () => {} },
+    acquireVsCodeApi: () => ({ postMessage: () => {} }),
+    document: {
+      body: { dataset: { wasmBinary: 'wasm', wasmModule: 'module' } },
+      getElementById: () => root,
+    },
+    window: {
+      addEventListener: (type, listener) => listeners.set(type, listener),
+      location: { origin: 'https://not-the-extension-host.invalid' },
+      removeEventListener: () => {},
+    },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(previewSource, context, { filename: previewPath });
+
+  const onMessage = listeners.get('message');
+  onMessage({
+    data: { type: 'render', source: 'flowchart LR\nA-->B', title: 'diagram.mmd' },
+    origin: 'vscode-webview://opaque-origin',
+    source: null,
+  });
+  assert.equal(context.renderedSource, 'flowchart LR\nA-->B');
+
+  onMessage({ data: { type: 'render', source: 42, title: 'diagram.mmd' } });
+  assert.equal(context.renderedSource, 'flowchart LR\nA-->B');
 });
