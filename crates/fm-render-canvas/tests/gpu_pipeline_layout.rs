@@ -442,6 +442,48 @@ fn the_text_batch_is_submitted_after_the_node_batch() {
     );
 }
 
+/// SAME-IR COMPARISON FOR TEXT ADVANCE: the GPU lays a label out to exactly the width `fm-layout`
+/// measured when it sized that label's box.
+///
+/// This is the check that the flat `CHAR_ADVANCE_RATIO` could never pass. `fm-core::FontMetrics` —
+/// the model `fm-layout` uses for every label, and therefore what decides how wide a node box is —
+/// is proportional: `font_size * avg_char_ratio * classify(c).multiplier()`, with multipliers from
+/// 0.4 for `i` to 2.0. The GPU advanced a flat 0.57 per character, so a narrow label overflowed its
+/// box and a wide one sat short inside it.
+///
+/// Equality is asserted, not proximity: `run_advance` sums the SAME terms in the SAME order as
+/// `estimate_width`, so any difference means the two models have diverged rather than that floating
+/// point drifted.
+#[test]
+fn the_gpu_run_width_equals_the_metric_layout_sized_the_box_with() {
+    // Deliberately mixed widths. A label of uniform-width letters would agree under the old flat
+    // advance too, and prove nothing.
+    for label in ["Alpha", "iiiii", "WWWWW", "Illustration", "mix Wi lI"] {
+        let metrics = fm_core::FontMetrics::new(fm_core::FontMetricsConfig {
+            preset: fm_core::FontPreset::SansSerif,
+            font_size: 14.0,
+            ..Default::default()
+        });
+        let expected = metrics.estimate_width(label);
+        let actual = fm_render_canvas::gpu_pipeline::run_advance_for(label, 14.0);
+        assert!(
+            (actual - expected).abs() < 1e-4,
+            "label {label:?}: the GPU lays it out {actual} wide but layout sized its box for \
+             {expected}; the two text models have diverged"
+        );
+    }
+
+    // NON-VACUITY: the fixture must actually contain labels whose widths differ, or the assertion
+    // above would hold for any model at all, flat included.
+    let narrow = fm_render_canvas::gpu_pipeline::run_advance_for("iiiii", 14.0);
+    let wide = fm_render_canvas::gpu_pipeline::run_advance_for("WWWWW", 14.0);
+    assert!(
+        wide > narrow * 1.5,
+        "CONTROL FAILED: 'WWWWW' ({wide}) is not meaningfully wider than 'iiiii' ({narrow}), so \
+         this test cannot tell a proportional model from a flat one"
+    );
+}
+
 /// A diagram with no nodes must plan no batch, or the test above would pass on a backend that
 /// always emitted one.
 #[test]
