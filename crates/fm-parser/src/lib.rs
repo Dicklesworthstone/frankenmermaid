@@ -664,6 +664,134 @@ impl FlowchartParseLens {
     }
 }
 
+/// A sequence-diagram text/IR lens that preserves the original source as its formatting
+/// complement.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SequenceParseLens {
+    snapshot: ParseLensSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SequenceParseLensError {
+    NotSequence,
+    UnsupportedIrChange,
+    MissingSourceLabel(String),
+}
+
+impl std::fmt::Display for SequenceParseLensError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSequence => formatter.write_str("ParseLens currently supports sequence diagrams only"),
+            Self::UnsupportedIrChange => formatter.write_str(
+                "ParseLens can re-emit participant-label text changes only; sequence structure is unchanged",
+            ),
+            Self::MissingSourceLabel(node_id) => write!(
+                formatter,
+                "could not locate the source label for sequence participant '{node_id}'"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SequenceParseLensError {}
+
+impl SequenceParseLens {
+    /// Parses a sequence diagram while retaining its exact source text.
+    pub fn parse(input: &str) -> Result<Self, SequenceParseLensError> {
+        let snapshot = build_parse_lens(input);
+        if snapshot.parsed.ir.diagram_type != DiagramType::Sequence {
+            return Err(SequenceParseLensError::NotSequence);
+        }
+        Ok(Self { snapshot })
+    }
+
+    #[must_use]
+    pub fn ir(&self) -> &MermaidDiagramIr {
+        &self.snapshot.parsed.ir
+    }
+
+    #[must_use]
+    pub fn original_source(&self) -> &str {
+        self.snapshot.original_source()
+    }
+
+    /// Re-emits `edited` by replacing only explicit participant alias text.
+    pub fn put(&self, edited: &MermaidDiagramIr) -> Result<String, SequenceParseLensError> {
+        if edited.diagram_type != DiagramType::Sequence {
+            return Err(SequenceParseLensError::NotSequence);
+        }
+
+        let original = self.ir();
+        if original.labels.len() != edited.labels.len() {
+            return Err(SequenceParseLensError::UnsupportedIrChange);
+        }
+        let mut labels_only = original.clone();
+        for (expected, actual) in labels_only.labels.iter_mut().zip(&edited.labels) {
+            expected.text.clone_from(&actual.text);
+        }
+        if &labels_only != edited {
+            return Err(SequenceParseLensError::UnsupportedIrChange);
+        }
+
+        let changed_labels: Vec<usize> = original
+            .labels
+            .iter()
+            .zip(&edited.labels)
+            .enumerate()
+            .filter_map(|(index, (before, after))| (before.text != after.text).then_some(index))
+            .collect();
+        if changed_labels.is_empty() {
+            return Ok(self.original_source().to_string());
+        }
+
+        let mut replacements = Vec::new();
+        let mut covered_labels = vec![false; original.labels.len()];
+        for (node_index, node) in original.nodes.iter().enumerate() {
+            let Some(label_id) = node.label else {
+                continue;
+            };
+            if !changed_labels.contains(&label_id.0) {
+                continue;
+            }
+            let source_entry = self.snapshot.source_map.entries.iter().find(|entry| {
+                entry.kind == MermaidSourceMapKind::Node && entry.index == node_index
+            });
+            let Some(source_entry) = source_entry else {
+                return Err(SequenceParseLensError::MissingSourceLabel(node.id.clone()));
+            };
+            let Some(line_range) =
+                resolve_span_text_range(self.original_source(), source_entry.span)
+            else {
+                return Err(SequenceParseLensError::MissingSourceLabel(node.id.clone()));
+            };
+            let old_label = &original.labels[label_id.0].text;
+            let label_range = find_sequence_participant_label_text_range(
+                self.original_source(),
+                line_range,
+                &node.id,
+                old_label,
+            )
+            .ok_or_else(|| SequenceParseLensError::MissingSourceLabel(node.id.clone()))?;
+            replacements.push((label_range, edited.labels[label_id.0].text.as_str()));
+            covered_labels[label_id.0] = true;
+        }
+        if changed_labels
+            .iter()
+            .any(|label_id| !covered_labels[*label_id])
+        {
+            return Err(SequenceParseLensError::UnsupportedIrChange);
+        }
+
+        replacements.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start_byte));
+        let mut updated = self.original_source().to_string();
+        for (range, replacement) in replacements {
+            updated.replace_range(range.start_byte..range.end_byte, replacement);
+        }
+        Ok(updated)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ParserConfig {
     pub intent_inference: bool,
@@ -1491,6 +1619,45 @@ fn find_flowchart_label_text_range(
 
 fn is_flowchart_identifier_char(character: char) -> bool {
     character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | '/')
+}
+
+/// Finds the visible alias text in `participant id as label` or `actor id as label`. Sequence
+/// participant ids can also be introduced implicitly by messages, but those have no independent
+/// alias token to edit faithfully and are refused by the lens instead of guessed at.
+fn find_sequence_participant_label_text_range(
+    source: &str,
+    line_range: MermaidTextRange,
+    node_id: &str,
+    label: &str,
+) -> Option<MermaidTextRange> {
+    if label.is_empty() || line_range.end_byte > source.len() {
+        return None;
+    }
+    let line = source.get(line_range.start_byte..line_range.end_byte)?;
+    let leading_len = line.len() - line.trim_start().len();
+    let trimmed = &line[leading_len..];
+    let (declaration, keyword_len) = if let Some(rest) = trimmed.strip_prefix("participant ") {
+        (rest, "participant ".len())
+    } else if let Some(rest) = trimmed.strip_prefix("actor ") {
+        (rest, "actor ".len())
+    } else {
+        return None;
+    };
+    let (source_id, raw_label) = declaration.rsplit_once(" as ")?;
+    if normalize_identifier(source_id.trim()) != node_id {
+        return None;
+    }
+    let relative_label = raw_label.find(label)?;
+    let start_byte = line_range.start_byte
+        + leading_len
+        + keyword_len
+        + source_id.len()
+        + " as ".len()
+        + relative_label;
+    Some(MermaidTextRange {
+        start_byte,
+        end_byte: start_byte + label.len(),
+    })
 }
 
 pub fn apply_parse_lens_edit(
