@@ -127,6 +127,129 @@ fn normalize_svg(svg: &str) -> String {
     normalized
 }
 
+/// Remove the generated base theme from the per-diagram structural comparison.
+///
+/// The same generated stylesheet used to be byte-pinned in all 41 snapshots. A deliberate Default
+/// palette/CSS revision therefore made every diagram stale even though their SVG structure and
+/// geometry were unchanged. Theme semantics have focused coverage in `fm-render-svg` (including
+/// exact Default text colour and both directions of dead-rule stripping), so repeating the base
+/// theme bytes here adds churn rather than an independent oracle. Generated accessibility CSS has
+/// focused coverage too (including its SVG scoping), while print and fixture-specific `classDef`
+/// CSS follow the print boundary and remain byte-pinned. Requiring the style tags and that boundary
+/// keeps this from turning a missing or truncated stylesheet into a false pass.
+fn ignored_generated_css_bounds(svg: &str) -> (usize, usize) {
+    const STYLE_OPEN: &str = "<style>";
+    const PINNED_CSS_START: &str = "@media print";
+
+    let generated_css_start = svg
+        .find(STYLE_OPEN)
+        .expect("golden SVG must embed its theme stylesheet")
+        + STYLE_OPEN.len();
+    let pinned_css_start = svg[generated_css_start..]
+        .find(PINNED_CSS_START)
+        .map(|offset| generated_css_start + offset)
+        .expect("golden SVG must retain its pinned print CSS boundary");
+    assert!(
+        svg[pinned_css_start..].contains("</style>"),
+        "golden SVG theme stylesheet must have a closing tag"
+    );
+    (generated_css_start, pinned_css_start)
+}
+
+fn normalize_svg_structure(svg: &str) -> String {
+    const THEME_SENTINEL: &str =
+        "/* base theme and accessibility CSS covered by focused fm-render-svg tests */";
+
+    let mut normalized = normalize_svg(svg);
+    let (generated_css_start, pinned_css_start) = ignored_generated_css_bounds(&normalized);
+    normalized.replace_range(generated_css_start..pinned_css_start, THEME_SENTINEL);
+    normalized
+}
+
+/// Keep the ignored generated-CSS prefix stable when admitting a structural change.
+///
+/// Without this, narrowly blessing one geometry change also rewrites that snapshot's base theme,
+/// leaving the corpus with two arbitrary theme generations even though the comparison deliberately
+/// delegates those bytes to focused renderer tests. Print and fixture-specific CSS come from the new
+/// render and therefore still move when their own contract changes.
+fn preserve_ignored_css_for_bless(rendered: &str, prior: &str) -> String {
+    let mut blessed = normalize_svg(rendered);
+    let prior = normalize_svg(prior);
+    let (rendered_start, rendered_end) = ignored_generated_css_bounds(&blessed);
+    let (prior_start, prior_end) = ignored_generated_css_bounds(&prior);
+    blessed.replace_range(rendered_start..rendered_end, &prior[prior_start..prior_end]);
+    blessed
+}
+
+#[test]
+fn structural_normalization_ignores_only_base_theme_css() {
+    let old_theme = concat!(
+        "<svg><style>old generated theme",
+        "@media print{.fm-node{stroke:black}}.fm-node-user-alert{fill:red}</style>",
+        "<rect class=\"fm-node-user-alert\"/></svg>"
+    );
+    let new_theme = concat!(
+        "<svg><style>new generated theme",
+        "@media print{.fm-node{stroke:black}}.fm-node-user-alert{fill:red}</style>",
+        "<rect class=\"fm-node-user-alert\"/></svg>"
+    );
+    let changed_classdef = concat!(
+        "<svg><style>new generated theme",
+        "@media print{.fm-node{stroke:black}}.fm-node-user-alert{fill:blue}</style>",
+        "<rect class=\"fm-node-user-alert\"/></svg>"
+    );
+
+    assert_eq!(
+        normalize_svg_structure(old_theme),
+        normalize_svg_structure(new_theme)
+    );
+    assert_ne!(
+        normalize_svg_structure(old_theme),
+        normalize_svg_structure(changed_classdef),
+        "fixture-specific CSS must remain part of the structural golden"
+    );
+    let blessed = preserve_ignored_css_for_bless(changed_classdef, old_theme);
+    assert!(blessed.contains("old generated theme"));
+    assert!(blessed.contains(".fm-node-user-alert{fill:blue}"));
+}
+
+/// Pin the historical visual palette that the structural snapshots were authored against.
+///
+/// This goes through the same Mermaid `themeVariables` override path users exercise; it does not
+/// introduce a test-only renderer mode. The current Default palette remains covered by focused
+/// renderer tests, while these snapshots stay sensitive to geometry, element structure, text,
+/// marker definitions, accessibility metadata, and non-theme attributes.
+fn pin_golden_theme(ir: &mut fm_core::MermaidDiagramIr, case_id: &str) {
+    let overrides = &mut ir.meta.theme_overrides;
+    assert!(
+        overrides.theme.is_none() && overrides.theme_variables.is_empty(),
+        "{case_id}: a fixture now declares its own theme; give it a dedicated visual contract \
+         instead of silently replacing that declaration in the structural golden"
+    );
+
+    for (key, value) in [
+        ("background", "#fafbfc"),
+        ("primaryTextColor", "#1a1a2e"),
+        ("primaryColor", "#ffffff"),
+        ("primaryBorderColor", "#e2e8f0"),
+        ("lineColor", "#94a3b8"),
+        ("clusterBkg", "rgba(241,245,249,0.6)"),
+        ("clusterBorder", "#cbd5e1"),
+        ("pie1", "#6366f1"),
+        ("pie2", "#3b82f6"),
+        ("pie3", "#06b6d4"),
+        ("pie4", "#8b5cf6"),
+        ("pie5", "#f59e0b"),
+        ("pie6", "#ec4899"),
+        ("pie7", "#10b981"),
+        ("pie8", "#f43f5e"),
+    ] {
+        overrides
+            .theme_variables
+            .insert(key.to_string(), value.to_string());
+    }
+}
+
 fn fnv1a_64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in bytes {
@@ -152,6 +275,7 @@ fn golden_render_config() -> SvgRenderConfig {
         glow_enabled: false,
         cluster_fill_opacity: 1.0,
         inactive_opacity: 1.0,
+        rounded_corners: 10.0,
         shadow_blur: 3.0,
         shadow_color: String::new(),
         ..Default::default()
@@ -209,15 +333,16 @@ fn run_case(case_id: &str, bless: bool) -> Option<String> {
         .expect("read golden svg input");
 
     let parse_start = Instant::now();
-    let parsed = parse(&input);
+    let mut parsed = parse(&input);
     let parse_ms = parse_start.elapsed().as_millis();
+    pin_golden_theme(&mut parsed.ir, case_id);
 
     let layout_start = Instant::now();
     let layout = layout_diagram(&parsed.ir);
     let layout_ms = layout_start.elapsed().as_millis();
 
     let config = golden_render_config();
-    let config_hash = fnv_hex(&format!("{config:?}"));
+    let config_hash = fnv_hex(&format!("{config:?}|{:?}", parsed.ir.meta.theme_overrides));
     let input_hash = fnv_hex(&input);
 
     let render_start = Instant::now();
@@ -241,7 +366,11 @@ fn run_case(case_id: &str, bless: bool) -> Option<String> {
         fs::create_dir_all(&base)
             .map_err(|err| format!("failed creating {}: {err}", base.display()))
             .expect("create golden svg directory");
-        fs::write(&expected_path, &rendered)
+        let blessed = fs::read_to_string(&expected_path).map_or_else(
+            |_| rendered.clone(),
+            |prior| preserve_ignored_css_for_bless(&rendered, &prior),
+        );
+        fs::write(&expected_path, blessed)
             .map_err(|err| format!("failed writing {}: {err}", expected_path.display()))
             .expect("write golden svg snapshot");
     }
@@ -255,20 +384,23 @@ fn run_case(case_id: &str, bless: bool) -> Option<String> {
         })
         .expect("read golden svg snapshot");
     let expected = normalize_svg(&expected);
-    let expected_hash = fnv_hex(&expected);
+    let rendered_structure = normalize_svg_structure(&rendered);
+    let expected_structure = normalize_svg_structure(&expected);
+    let rendered_structure_hash = fnv_hex(&rendered_structure);
+    let expected_structure_hash = fnv_hex(&expected_structure);
 
-    let mismatch = if output_hash == expected_hash {
+    let mismatch = if rendered_structure_hash == expected_structure_hash {
         // Equal hashes with differing content would be an FNV collision on this corpus. Assert it
         // rather than trusting the hash, because the hash is what the report quotes.
         assert_eq!(
-            rendered, expected,
+            rendered_structure, expected_structure,
             "golden snapshot content mismatch for case {case_id} despite equal hashes"
         );
         None
     } else {
         Some(format!(
-            "  {case_id}: expected {expected_hash}, got {output_hash}\n{}",
-            first_difference(&expected, &rendered)
+            "  {case_id}: expected {expected_structure_hash}, got {rendered_structure_hash}\n{}",
+            first_difference(&expected_structure, &rendered_structure)
         ))
     };
 
@@ -318,7 +450,7 @@ fn run_case(case_id: &str, bless: bool) -> Option<String> {
         "input_hash": input_hash,
         "surface": "cli-integration",
         "renderer": "svg",
-        "theme": "default",
+        "theme": "pinned-structural-golden",
         "config_hash": config_hash,
         "parse_ms": parse_ms,
         "layout_ms": layout_ms,
@@ -330,6 +462,7 @@ fn run_case(case_id: &str, bless: bool) -> Option<String> {
         "diagnostic_count": parsed.warnings.len(),
         "degradation_tier": degradation_tier,
         "output_artifact_hash": output_hash,
+        "structural_comparison_hash": rendered_structure_hash,
         "pass_fail_reason": if bless {
             "bless-updated"
         } else if mismatch.is_some() {

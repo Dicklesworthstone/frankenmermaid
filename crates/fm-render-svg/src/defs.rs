@@ -61,18 +61,18 @@ impl ArrowheadMarker {
     #[must_use]
     pub fn standard(id: &str, fill: &str) -> Self {
         let path = PathBuilder::new()
-            .move_to(0.0, 0.5)
-            .line_to(6.5, 3.5)
-            .line_to(0.0, 6.5)
-            .line_to(1.5, 3.5)
+            .move_to(0.0, 0.0)
+            .line_to(8.0, 3.5)
+            .line_to(0.0, 7.0)
+            .line_to(2.0, 3.5)
             .close()
             .build();
 
         Self {
             id: id.to_string(),
-            marker_width: 7.0,
+            marker_width: 8.0,
             marker_height: 7.0,
-            ref_x: 6.5,
+            ref_x: 8.0,
             ref_y: 3.5,
             orient: MarkerOrient::Auto,
             path,
@@ -86,19 +86,19 @@ impl ArrowheadMarker {
     #[must_use]
     pub fn filled(id: &str, fill: &str) -> Self {
         let path = PathBuilder::new()
-            .move_to(0.0, 0.5)
-            .line_to(7.0, 3.5)
-            .line_to(0.0, 6.5)
-            .line_to(1.8, 3.5)
+            .move_to(0.0, 0.0)
+            .line_to(9.0, 4.0)
+            .line_to(0.0, 8.0)
+            .line_to(2.5, 4.0)
             .close()
             .build();
 
         Self {
             id: id.to_string(),
-            marker_width: 7.5,
-            marker_height: 7.0,
-            ref_x: 7.0,
-            ref_y: 3.5,
+            marker_width: 9.0,
+            marker_height: 8.0,
+            ref_x: 9.0,
+            ref_y: 4.0,
             orient: MarkerOrient::Auto,
             path,
             fill: fill.to_string(),
@@ -111,16 +111,16 @@ impl ArrowheadMarker {
     #[must_use]
     pub fn open(id: &str, stroke: &str) -> Self {
         let path = PathBuilder::new()
-            .move_to(0.5, 0.8)
-            .line_to(6.0, 3.5)
-            .line_to(0.5, 6.2)
+            .move_to(0.0, 0.5)
+            .line_to(7.0, 3.5)
+            .line_to(0.0, 6.5)
             .build();
 
         Self {
             id: id.to_string(),
-            marker_width: 7.0,
+            marker_width: 8.0,
             marker_height: 7.0,
-            ref_x: 6.0,
+            ref_x: 7.0,
             ref_y: 3.5,
             orient: MarkerOrient::Auto,
             path,
@@ -801,30 +801,34 @@ mod tests {
     #[test]
     fn creates_standard_arrowhead() {
         let marker = ArrowheadMarker::standard("arrow", "#333");
-        let elem = marker.to_element();
-        let svg = elem.render();
-        assert!(svg.contains("<marker"));
-        assert!(svg.contains("id=\"arrow\""));
-        assert!(svg.contains("markerWidth"));
-        assert!(svg.contains("<path"));
+        assert_eq!(marker.marker_width, 8.0);
+        assert_eq!(marker.marker_height, 7.0);
+        assert_eq!(marker.ref_x, 8.0);
+        assert_eq!(marker.ref_y, 3.5);
+        assert_eq!(marker.path, "M0 0 L8 3.50 L0 7 L2 3.50 Z");
     }
 
     #[test]
     fn creates_filled_arrowhead() {
         let marker = ArrowheadMarker::filled("arrow-filled", "#000");
-        let elem = marker.to_element();
-        let svg = elem.render();
-        assert!(svg.contains("id=\"arrow-filled\""));
+        assert_eq!(marker.marker_width, 9.0);
+        assert_eq!(marker.marker_height, 8.0);
+        assert_eq!(marker.ref_x, 9.0);
+        assert_eq!(marker.ref_y, 4.0);
+        assert_eq!(marker.path, "M0 0 L9 4 L0 8 L2.50 4 Z");
     }
 
     #[test]
     fn creates_open_arrowhead() {
         let marker = ArrowheadMarker::open("arrow-open", "#666");
-        let elem = marker.to_element();
-        let svg = elem.render();
-        assert!(svg.contains("id=\"arrow-open\""));
-        assert!(svg.contains("fill=\"none\""));
-        assert!(svg.contains("stroke=\"#666\""));
+        assert_eq!(marker.marker_width, 8.0);
+        assert_eq!(marker.marker_height, 7.0);
+        assert_eq!(marker.ref_x, 7.0);
+        assert_eq!(marker.ref_y, 3.5);
+        assert_eq!(marker.path, "M0 0.50 L7 3.50 L0 6.50");
+        assert_eq!(marker.fill, "none");
+        assert_eq!(marker.stroke.as_deref(), Some("#666"));
+        assert_eq!(marker.stroke_width, Some(1.2));
     }
 
     #[test]

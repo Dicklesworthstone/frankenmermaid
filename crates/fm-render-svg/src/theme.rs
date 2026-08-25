@@ -1003,7 +1003,12 @@ mod tests {
     fn theme_generates_complete_style() {
         let theme = Theme::from_preset(ThemePreset::Default);
         let style = theme.to_svg_style(true, true);
-        assert!(style.contains(":root {"));
+        assert!(style.contains("svg {\n  --fm-bg:"));
+        assert!(
+            !style.contains(":root {\n  --fm-bg:"),
+            "embedded theme variables must stay scoped to their SVG instead of leaking into the \
+             host document"
+        );
         assert!(style.contains(".fm-node"));
         assert!(style.contains(".fm-edge"));
         assert!(style.contains(".fm-cluster"));
