@@ -14392,67 +14392,92 @@ mod tests {
         }
     }
 
-    /// The full-node fast path must render byte-identical to the `Element` slow path it replaces.
-    /// Pins the assembled `<g><rect/><text/><title/></g>` against the known-correct default-config
-    /// output (captured from the slow path); conformance covers the gated-out node variants.
-    #[test]
-    fn node_fast_fragment_matches_render() {
+    fn render_common_rect_through_both_paths(config: &SvgRenderConfig) -> (String, String) {
         let ir = create_ir_with_single_node("N0", NodeShape::Rect);
-        let config = SvgRenderConfig::default();
-        let svg = render_svg_with_config(&ir, &config);
-        let expected = concat!(
-            "<g id=\"fm-node-n0-0\" class=\"fm-node fm-node-accent-4 fm-node-shape-rect\" ",
-            "data-id=\"N0\" role=\"graphics-symbol\" aria-label=\"Single Node\" tabindex=\"0\">",
-            "<rect x=\"60\" y=\"60\" width=\"112.72\" height=\"42.50\" rx=\"4.40\" ",
-            "fill=\"url(#fm-node-gradient)\"/>",
-            "<text x=\"116.36\" y=\"85.85\" text-anchor=\"middle\" font-size=\"13.80\" ",
-            "fill=\"#1e293b\">Single Node</text>",
-            "<title>Node: Single Node, rectangle</title></g>",
+        let colors = ThemeColors::default();
+        let detail = resolve_detail_profile(800.0, 600.0, config);
+        let centrality = HashMap::new();
+        let node_box = LayoutNodeBox {
+            node_index: 0,
+            node_id: "N0".to_string(),
+            rank: 0,
+            order: 0,
+            span: Span::default(),
+            bounds: fm_layout::LayoutRect {
+                x: 10.0,
+                y: 20.0,
+                width: 140.0,
+                height: 90.0,
+            },
+        };
+
+        let mut streamed = String::new();
+        render_node_into(
+            &mut streamed,
+            &node_box,
+            &ir,
+            0.0,
+            0.0,
+            config,
+            detail,
+            &colors,
+            false,
+            &centrality,
         );
-        let region = svg.find("<g id=\"fm-node").map_or("", |s| &svg[s..]);
-        assert!(
-            svg.contains(expected),
-            "full-node fast-path bytes must match the slow path.\nGOT node region:\n{region}\nEXPECTED:\n{expected}"
-        );
+
+        let mut slow = String::new();
+        render_node(
+            &node_box,
+            &ir,
+            0.0,
+            0.0,
+            config,
+            detail,
+            &colors,
+            false,
+            &centrality,
+            false,
+        )
+        .write_to_string(&mut slow);
+
+        (streamed, slow)
     }
 
-    /// The lean (`A11yConfig::none()`) node now streams through the same fast path. These bytes are the
-    /// ones the slow `Element` path produced before the lean monomorphization existed -- verified at the
-    /// time by rendering the whole 13-item head-to-head corpus with both builds and comparing SHA-256s.
-    /// They are pinned here because, with the fast path now handling lean, no configuration can reach the
-    /// slow path to re-derive them.
+    /// The full-node streaming path must render byte-identically to the authoritative `Element`
+    /// slow path it replaces. Both arms receive the same explicit geometry so layout-default changes
+    /// cannot silently turn this renderer-equivalence test into a stale layout golden.
+    #[test]
+    fn node_fast_fragment_matches_render() {
+        let config = SvgRenderConfig::default();
+        let (streamed, slow) = render_common_rect_through_both_paths(&config);
+        assert_eq!(streamed, slow);
+        assert!(streamed.contains("role=\"graphics-symbol\""));
+        assert!(streamed.contains("aria-label=\"Single Node\""));
+        assert!(streamed.contains("tabindex=\"0\""));
+        assert!(streamed.contains("<title>Node: Single Node, rectangle</title>"));
+    }
+
+    /// The lean (`A11yConfig::none()`) node must remain byte-identical across the streaming and forced
+    /// slow paths while omitting every per-node accessibility field.
     #[test]
     fn node_lean_fast_fragment_omits_a11y() {
-        let ir = create_ir_with_single_node("N0", NodeShape::Rect);
         let config = SvgRenderConfig {
             a11y: A11yConfig::none(),
             accessible: false,
             ..SvgRenderConfig::default()
         };
-        let svg = render_svg_with_config(&ir, &config);
-        let expected = concat!(
-            "<g id=\"fm-node-n0-0\" class=\"fm-node fm-node-accent-4 fm-node-shape-rect\" ",
-            "data-id=\"N0\">",
-            "<rect x=\"60\" y=\"60\" width=\"112.72\" height=\"42.50\" rx=\"4.40\" ",
-            "fill=\"url(#fm-node-gradient)\"/>",
-            "<text x=\"116.36\" y=\"85.85\" text-anchor=\"middle\" font-size=\"13.80\" ",
-            "fill=\"#1e293b\">Single Node</text></g>",
-        );
-        let region = svg.find("<g id=\"fm-node").map_or("", |s| &svg[s..]);
+        let (streamed, slow) = render_common_rect_through_both_paths(&config);
+        assert_eq!(streamed, slow);
         assert!(
-            svg.contains(expected),
-            "lean-node fast-path bytes must match the slow path's a11y-off output.\nGOT node region:\n{region}\nEXPECTED:\n{expected}"
-        );
-        assert!(
-            !svg.contains("role=\"graphics-symbol\""),
+            !streamed.contains("role=\"graphics-symbol\""),
             "lean output must not carry per-element role"
         );
         assert!(
-            !svg.contains("tabindex="),
+            !streamed.contains("tabindex="),
             "lean output must not carry tabindex"
         );
         assert!(
-            !svg.contains("<title>Node:"),
+            !streamed.contains("<title>Node:"),
             "lean output must not carry per-node <title>"
         );
     }
