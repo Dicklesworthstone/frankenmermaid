@@ -2823,6 +2823,30 @@ mod tests {
     }
 
     #[test]
+    fn runtime_init_accepts_top_level_svg_options_and_nested_options_win() {
+        let overrides: RuntimeInitConfig = serde_json::from_str(
+            r#"{
+                "theme": "dark",
+                "responsive": false,
+                "fontSize": 18.0,
+                "shadows": true,
+                "svg": {
+                    "theme": "forest",
+                    "fontSize": 21.0,
+                    "shadows": false
+                }
+            }"#,
+        )
+        .expect("runtime options should deserialize from the JavaScript wire shape");
+
+        let effective = overrides.effective_svg_overrides();
+        assert_eq!(effective.theme.as_deref(), Some("forest"));
+        assert_eq!(effective.responsive, Some(false));
+        assert_eq!(effective.font_size, Some(21.0));
+        assert_eq!(effective.shadows, Some(false));
+    }
+
+    #[test]
     fn merge_renderer_kind_prefers_explicit_override() {
         assert_eq!(
             merge_renderer_kind(WebRendererKind::Canvas2d, Some(WebRendererKind::WebGpu)),
@@ -3848,7 +3872,7 @@ mod tests {
         // before it can masquerade as a cross-target floating-point difference. Rebuild from the
         // same source revision, then update this digest and the per-fixture digests together after
         // reviewing every generated artifact.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x0b3a_ec27_513d_e3ca;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x9f9f_8e83_c756_1353;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),
@@ -3874,22 +3898,22 @@ mod tests {
             (
                 "flowchart",
                 "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n  c -.--> a\n  b --> d[Delta]\n",
-                0x5b6a_4743_a3f7_857a,
+                0xd982_16e0_d36f_3915,
             ),
             (
                 "sequence",
                 "sequenceDiagram\n  participant A\n  participant B\n  A->>B: hello\n  B-->>A: reply\n",
-                0xc66f_e6a6_5a7a_6221,
+                0xaf6f_0c2a_bea9_6580,
             ),
             (
                 "class",
                 "classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n  Alpha <|-- Beta\n",
-                0xb64a_03da_fe09_c7ba,
+                0x0865_43ab_90cf_9e93,
             ),
             (
                 "state",
                 "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy: start\n  Busy --> Idle: done\n",
-                0xa28c_d563_0ff2_61bd,
+                0x604e_03b7_8578_f5c0,
             ),
         ];
 
