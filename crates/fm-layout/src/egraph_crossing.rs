@@ -925,18 +925,18 @@ mod tests {
         // enough on its own: at zero the search has explored nothing, so even the OLD code could
         // only have extracted the input ordering back — that arm passes either way. The defect
         // lived where the clock fired PART WAY THROUGH a search that had already found better
-        // orderings. Nine fully-inverted nodes with the counted budget lifted far out of the way:
-        // adjacent-swap saturation over 9! orderings cannot finish inside the valve, and any
+        // orderings. Thirty-two fully-inverted nodes with the counted budget lifted far out of the
+        // way: adjacent-swap saturation over 32! orderings cannot finish inside the valve, and any
         // completed iteration leaves the e-graph holding orderings cheaper than the input, so
         // extracting from it returns a third answer while failing closed returns the input.
-        let wide_initial = LayerOrdering::new((0..9).collect());
-        let wide_lower = LayerOrdering::new((9..18).collect());
+        let wide_initial = LayerOrdering::new((0..32).collect());
+        let wide_lower = LayerOrdering::new((32..64).collect());
         let wide_ctx = CrossingContext {
             upper_ordering: None,
             upper_edges: None,
             lower_ordering: Some(wide_lower),
             lower_edges: Some(LayerEdges {
-                edges: (0..9).map(|i| (i, 17 - i)).collect(),
+                edges: (0..32).map(|i| (i, 63 - i)).collect(),
             }),
         };
         let mid_search = saturate_layer(
@@ -965,7 +965,7 @@ mod tests {
         //
         // The discriminating power is a property of the FIXTURE and the engine, not of how much CPU
         // this particular run was given, so it is established with a COUNTED budget and a valve that
-        // cannot bind: a few iterations over nine fully-inverted nodes provably grow the e-graph
+        // cannot bind: a few iterations over 32 fully-inverted nodes provably grow the e-graph
         // past the input, which is what makes "failed closed" distinguishable from "explored
         // nothing". The timed run below then asserts the invariant unconditionally.
         let wide_counted = saturate_layer(
