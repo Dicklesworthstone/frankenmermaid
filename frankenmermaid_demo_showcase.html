@@ -107,13 +107,25 @@
       overflow-x: hidden;
     }
 
-    /* Prevent horizontal scroll chaining on horizontal scroll containers */
+    /* Prevent horizontal scroll chaining on horizontal scroll containers and hide unsightly scrollbars */
     .overflow-x-auto,
     .no-scrollbar,
     .scrollbar-none {
       overscroll-behavior-x: contain;
       -webkit-overflow-scrolling: touch;
       max-width: 100%;
+      scrollbar-width: none !important;
+      -ms-overflow-style: none !important;
+    }
+
+    .no-scrollbar::-webkit-scrollbar,
+    .scrollbar-none::-webkit-scrollbar,
+    #duel-specimen-pills::-webkit-scrollbar,
+    #spotlight-pills-strip::-webkit-scrollbar {
+      display: none !important;
+      width: 0 !important;
+      height: 0 !important;
+      background: transparent !important;
     }
 
     body::after {
@@ -1394,7 +1406,7 @@
         </div>
 
         <!-- Specimen Selector Pill Bar (10 Interactive Dialects) -->
-        <div id="duel-specimen-pills" class="flex items-center gap-2 overflow-x-auto pb-3 mb-6 no-scrollbar" role="group" aria-label="Visual inspection specimen selector">
+        <div id="duel-specimen-pills" class="flex flex-wrap items-center gap-2 mb-6 scrollbar-none no-scrollbar" role="group" aria-label="Visual inspection specimen selector">
           <!-- Dynamically populated with 10 specimen buttons -->
         </div>
 
