@@ -19,7 +19,11 @@ const cancelledOffscreenRequestIds = new Set();
 
 async function ensureModule(moduleUrl) {
   if (wasm) return wasm;
-  wasm = await import(moduleUrl);
+  if (!moduleUrl || moduleUrl === "../pkg/frankenmermaid.js" || moduleUrl.endsWith("frankenmermaid.js")) {
+    wasm = await import("../pkg/frankenmermaid.js");
+  } else {
+    wasm = await import(/* @vite-ignore */ `${moduleUrl}`);
+  }
   if (wasm.default) await wasm.default();
   return wasm;
 }

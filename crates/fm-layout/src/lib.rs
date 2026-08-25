@@ -10756,9 +10756,7 @@ fn compute_node_size(
             // 61.3 limit — so the declared description was DROPPED from the canvas that fm-wasm
             // ships, while the SVG drew it clamped on top of the row above.
             let (width, height) = match c4_row_stack_dimensions(node, metrics) {
-                Some((rows_width, rows_height)) => {
-                    (width.max(rows_width), height.max(rows_height))
-                }
+                Some((rows_width, rows_height)) => (width.max(rows_width), height.max(rows_height)),
                 None => (width, height),
             };
             // A requirement node's box must hold the two rows the renderer draws BESIDE the name:
@@ -10886,10 +10884,7 @@ const REQUIREMENT_ROW_MARGIN: f32 = 24.0;
 /// read the node's LABEL and the renderer drew more than the label. The C4 entry existed but
 /// measured only the wrapped description, so the row stack that sits above the description was
 /// never counted.
-fn c4_row_stack_dimensions(
-    node: &IrNode,
-    metrics: &fm_core::FontMetrics,
-) -> Option<(f32, f32)> {
+fn c4_row_stack_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> Option<(f32, f32)> {
     let meta = node.c4_meta.as_deref()?;
 
     // Renderer order, and only the rows it actually pushes.

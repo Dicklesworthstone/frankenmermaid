@@ -94,9 +94,17 @@
       const originalHtml = await response.text();
       const finalHtml = injectHostMarker(originalHtml);
 
-      document.open();
-      document.write(finalHtml);
-      document.close();
+      const parser = new DOMParser();
+      const parsedDoc = parser.parseFromString(finalHtml, "text/html");
+      document.documentElement.replaceWith(parsedDoc.documentElement);
+
+      const scripts = Array.from(document.querySelectorAll("script"));
+      for (const oldScript of scripts) {
+        const newScript = document.createElement("script");
+        Array.from(oldScript.attributes).forEach(attr => newScript.setAttribute(attr.name, attr.value));
+        newScript.textContent = oldScript.textContent;
+        oldScript.replaceWith(newScript);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       status.classList.add("error");

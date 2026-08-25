@@ -103,7 +103,8 @@ fn no_edge_carries_a_class_the_stylesheet_never_declares() {
             "{source:?} emits `fm-edge-dotted`, which no stylesheet in this repo declares"
         );
         for class in ["fm-edge-dashed", "fm-edge-thick"] {
-            if svg.contains(&format!("class=\"fm-edge {class}")) || svg.contains(&format!(" {class}\""))
+            if svg.contains(&format!("class=\"fm-edge {class}"))
+                || svg.contains(&format!(" {class}\""))
             {
                 assert!(
                     svg.contains(&format!(".{class}{{")),

@@ -36,7 +36,8 @@
     }
   },
   "scripts": {
-    "test": "node --test test/*.test.cjs"
+    "test": "node --test test/*.test.cjs",
+    "doctor": "npx react-doctor@latest"
   },
   "dependencies": {
     "@frankenmermaid/core": "^0.2.0"

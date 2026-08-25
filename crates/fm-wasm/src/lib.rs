@@ -32,7 +32,8 @@ use fm_core::{MermaidSourceMap, MermaidSourceMapKind, Span};
 use fm_layout::build_layout_guard_report_with_pressure;
 use fm_layout::{
     LayoutConfig, LayoutGuardrails, TracedLayout, build_layout_decision_explanation,
-    layout_diagram_traced, layout_diagram_traced_with_config_and_guardrails,
+    layout_diagram_traced, layout_diagram_traced_with_config,
+    layout_diagram_traced_with_config_and_guardrails,
 };
 use fm_parser::{
     apply_parse_lens_delete, apply_parse_lens_edit, apply_parse_lens_insert_line_after,
@@ -845,6 +846,13 @@ fn read_runtime_config() -> RuntimeConfig {
     }
 }
 
+fn with_runtime_config<R>(f: impl FnOnce(&RuntimeConfig) -> R) -> R {
+    match RUNTIME_CONFIG.read() {
+        Ok(guard) => f(&guard),
+        Err(poisoned) => f(&poisoned.into_inner()),
+    }
+}
+
 fn write_runtime_config(config: RuntimeConfig) {
     match RUNTIME_CONFIG.write() {
         Ok(mut guard) => *guard = config,
@@ -1335,52 +1343,51 @@ pub fn init(config: Option<JsValue>) -> Result<(), JsValue> {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = renderSvg))]
 pub fn render_svg_js(input: &str, config: Option<JsValue>) -> Result<String, JsValue> {
-    let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
-    let runtime = read_runtime_config();
-    let mut svg_config = merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref())
-        .map_err(js_error)?;
-    let pressure = merge_pressure_config(&runtime.pressure, &overrides.pressure).into_report();
-    let mut budget_broker = MermaidBudgetLedger::new(&pressure);
-    let parse_start = Instant::now();
+    let has_config = config
+        .as_ref()
+        .is_some_and(|raw| !raw.is_undefined() && !raw.is_null());
+
+    let (mut svg_config, pressure_report) = if has_config {
+        let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
+        with_runtime_config(|runtime| {
+            let svg = merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref())
+                .map_err(js_error)?;
+            let pressure =
+                merge_pressure_config(&runtime.pressure, &overrides.pressure).into_report();
+            Ok::<_, JsValue>((svg, pressure))
+        })?
+    } else {
+        with_runtime_config(|runtime| (runtime.svg.clone(), runtime.pressure.into_report()))
+    };
+
     let parsed = parse(input);
-    budget_broker.record_parse(
-        parse_start
-            .elapsed()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX),
-    );
-    let layout_guardrails = LayoutGuardrails::from(&budget_broker);
-    let layout_start = Instant::now();
     let layout_config = LayoutConfig {
         font_metrics: Some(svg_config.font_metrics()),
         ..Default::default()
     };
-    let traced_layout = layout_diagram_traced_with_config_and_guardrails(
-        &parsed.ir,
-        fm_layout::LayoutAlgorithm::Auto,
-        layout_config,
-        layout_guardrails,
-    );
-    budget_broker.record_layout(
-        layout_start
-            .elapsed()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX),
-    );
-    let degradation = compute_wasm_degradation_plan(&parsed.ir, &traced_layout, &pressure);
-    apply_budget_svg_simplifications(&mut svg_config, &budget_broker);
-    apply_degradation_to_svg(&mut svg_config, &degradation);
-    let render_start = Instant::now();
+
+    let traced_layout = if pressure_report.tier == fm_core::MermaidPressureTier::Nominal {
+        layout_diagram_traced_with_config(
+            &parsed.ir,
+            fm_layout::LayoutAlgorithm::Auto,
+            layout_config,
+        )
+    } else {
+        let budget_broker = MermaidBudgetLedger::new(&pressure_report);
+        let layout_guardrails = LayoutGuardrails::from(&budget_broker);
+        let traced = layout_diagram_traced_with_config_and_guardrails(
+            &parsed.ir,
+            fm_layout::LayoutAlgorithm::Auto,
+            layout_config,
+            layout_guardrails,
+        );
+        let degradation = compute_wasm_degradation_plan(&parsed.ir, &traced, &pressure_report);
+        apply_budget_svg_simplifications(&mut svg_config, &budget_broker);
+        apply_degradation_to_svg(&mut svg_config, &degradation);
+        traced
+    };
+
     let svg = render_svg_with_layout(&parsed.ir, &traced_layout.layout, &svg_config);
-    budget_broker.record_render(
-        render_start
-            .elapsed()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX),
-    );
     Ok(svg)
 }
 
@@ -3716,7 +3723,7 @@ mod tests {
         // package fail with an artifact-specific instruction before it can masquerade as a
         // cross-target floating-point difference. The package was built at f9b6291b; update this
         // digest and the per-fixture digests together after reviewing the generated artifact diff.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x2899_9e23_6431_aa0f;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x50b0_1b61_ae7e_760c;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),
