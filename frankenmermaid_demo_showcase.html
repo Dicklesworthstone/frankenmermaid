@@ -2,7 +2,7 @@
 <html lang="en" class="dark">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>frankenmermaid — The Monster Diagram Engine</title>
   <meta name="description" content="A Rust-first, Mermaid-compatible diagram engine with intent-aware parsing, 15 layout algorithms, deterministic output, and SVG / terminal / Canvas2D / WASM renderers from a single intermediate representation.">
   <meta name="theme-color" content="#020a06">
@@ -630,8 +630,8 @@
           🧜
         </div>
         <div>
-          <span class="text-lg font-extrabold tracking-tight text-white group-hover:text-emerald-400 transition">frankenmermaid</span>
-          <span class="ml-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest text-emerald-400 font-mono">v0.3.0</span>
+          <span class="text-base sm:text-lg font-extrabold tracking-tight text-white group-hover:text-emerald-400 transition">frankenmermaid</span>
+          <span class="hidden sm:inline-block ml-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-black uppercase tracking-widest text-emerald-400 font-mono">v0.3.0</span>
         </div>
       </a>
 
@@ -716,40 +716,40 @@
     <!-- ============================== HERO SECTION ============================== -->
     <section class="relative px-4 sm:px-6 lg:px-8 max-w-[1760px] mx-auto w-full pt-8 md:pt-14">
       <div class="flex flex-col lg:flex-row items-center justify-between gap-12">
-        <div class="max-w-3xl space-y-6">
+        <div class="max-w-3xl space-y-6 min-w-0 w-full">
           
-          <div class="inline-flex items-center gap-2.5 px-3.5 py-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-xs font-mono font-bold text-emerald-400">
-            <span class="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span>
-            <span>PURE RUST CORE · ZERO NODE.JS RUNTIME · WASM CERTIFIED</span>
+          <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-[10px] sm:text-xs font-mono font-bold text-emerald-400 max-w-full">
+            <span class="h-2 w-2 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
+            <span class="break-words">PURE RUST CORE · ZERO NODE.JS · WASM CERTIFIED</span>
           </div>
 
-          <h1 class="text-4xl sm:text-6xl lg:text-7xl font-black tracking-tight text-white leading-[1.05]">
+          <h1 class="text-3xl sm:text-5xl lg:text-7xl font-black tracking-tight text-white leading-tight break-words max-w-full">
             The Monster <span class="text-emerald-400 underline decoration-emerald-500/40 underline-offset-8">Diagram Engine</span>.
           </h1>
 
-          <p class="text-lg sm:text-xl text-slate-300 font-normal leading-relaxed max-w-2xl">
+          <p class="text-base sm:text-lg lg:text-xl text-slate-300 font-normal leading-relaxed max-w-2xl">
             A clean-room, zero-dependency Rust diagram engine with intent-aware parsing, 15 layout algorithms, 100% deterministic geometry, and native multi-surface rendering across SVG, Canvas2D, Terminal ANSI, and WebAssembly.
           </p>
 
           <!-- CTAs -->
-          <div class="flex flex-wrap items-center gap-4 pt-2">
-            <a href="#playground" class="px-6 py-3.5 rounded-xl bg-emerald-500 hover:bg-white text-black font-black text-sm transition shadow-[0_0_25px_rgba(16,185,129,0.35)] flex items-center gap-2">
+          <div class="flex flex-wrap items-center gap-3 sm:gap-4 pt-2 max-w-full">
+            <a href="#playground" class="w-full sm:w-auto text-center justify-center px-6 py-3.5 rounded-xl bg-emerald-500 hover:bg-white text-black font-black text-sm transition shadow-[0_0_25px_rgba(16,185,129,0.35)] flex items-center gap-2">
               <span>⚡ Enter Operating Theater</span>
             </a>
-            <a href="#algorithms" class="px-5 py-3.5 rounded-xl border border-emerald-500/30 bg-emerald-500/5 hover:border-emerald-500/60 text-emerald-300 font-black text-sm transition">
+            <a href="#algorithms" class="w-full sm:w-auto text-center justify-center px-5 py-3.5 rounded-xl border border-emerald-500/30 bg-emerald-500/5 hover:border-emerald-500/60 text-emerald-300 font-black text-sm transition flex items-center">
               <span>Explore 15 Layouts →</span>
             </a>
-            <a href="https://github.com/Dicklesworthstone/frankenmermaid/blob/main/LICENSE" target="_blank" rel="noopener" class="px-4 py-3.5 rounded-xl border border-white/10 bg-white/5 hover:border-white/20 text-slate-300 text-xs font-mono transition" title="MIT License with OpenAI/Anthropic Rider">
-              📜 MIT License (with OpenAI/Anthropic Rider)
+            <a href="https://github.com/Dicklesworthstone/frankenmermaid/blob/main/LICENSE" target="_blank" rel="noopener" class="w-full sm:w-auto text-center justify-center px-4 py-3.5 rounded-xl border border-white/10 bg-white/5 hover:border-white/20 text-slate-300 text-xs font-mono transition flex items-center" title="MIT License with OpenAI/Anthropic Rider">
+              📜 MIT License
             </a>
           </div>
 
           <!-- Quick Terminal Command with 1-Tap Copy -->
-          <div class="pt-2">
-            <div class="inline-flex max-w-full items-center justify-between gap-3 p-2.5 rounded-xl bg-black/70 border border-emerald-500/25 font-mono text-xs text-slate-300 shadow-md">
-              <div class="flex items-center gap-2 overflow-x-auto no-scrollbar">
-                <span class="text-emerald-400 select-none font-bold">$</span>
-                <span id="hero-install-cmd" class="text-emerald-200 whitespace-nowrap">curl -fsSL https://frankenmermaid.com/install.sh | bash</span>
+          <div class="pt-2 max-w-full">
+            <div class="inline-flex w-full sm:w-auto max-w-full items-center justify-between gap-2 sm:gap-3 p-2 sm:p-2.5 rounded-xl bg-black/70 border border-emerald-500/25 font-mono text-xs text-slate-300 shadow-md">
+              <div class="flex items-center gap-2 overflow-x-auto scrollbar-none min-w-0">
+                <span class="text-emerald-400 select-none font-bold shrink-0">$</span>
+                <span id="hero-install-cmd" class="text-emerald-200 truncate">curl -fsSL https://frankenmermaid.com/install.sh | bash</span>
               </div>
               <button id="hero-copy-btn" type="button" class="shrink-0 px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500 text-emerald-300 hover:text-black font-mono text-[10px] font-black uppercase transition" title="Copy install command">
                 Copy
@@ -3228,6 +3228,7 @@ Shared IR,Terminal ANSI,20`
       const candidates = [
         { label: "relative-pkg", moduleUrl: "./pkg/frankenmermaid.js", wasmUrl: "./pkg/frankenmermaid_bg.wasm" },
         { label: "root-pkg", moduleUrl: "/pkg/frankenmermaid.js", wasmUrl: "/pkg/frankenmermaid_bg.wasm" },
+        { label: "fm-wasm-name", moduleUrl: "./pkg/fm_wasm.js", wasmUrl: "./pkg/fm_wasm_bg.wasm" },
         { label: "resolved-url", moduleUrl: new URL("pkg/frankenmermaid.js", window.location.href).href, wasmUrl: new URL("pkg/frankenmermaid_bg.wasm", window.location.href).href }
       ];
 
@@ -3238,21 +3239,26 @@ Shared IR,Terminal ANSI,20`
             mod = await import("./pkg/frankenmermaid.js");
           } else if (cand.label === "root-pkg") {
             mod = await import("/pkg/frankenmermaid.js");
+          } else if (cand.label === "fm-wasm-name") {
+            mod = await import("./pkg/fm_wasm.js");
           } else {
             mod = await import(/* @vite-ignore */ `${cand.moduleUrl}`);
           }
           if (typeof mod.default === "function") {
             try {
-              const wasmRes = await fetch(cand.wasmUrl);
-              if (wasmRes.ok) {
-                const wasmBytes = await wasmRes.arrayBuffer();
-                await mod.default(wasmBytes);
-              } else {
+              // 1. Pass wasm URL directly to let wasm-bindgen use WebAssembly.instantiateStreaming
+              await mod.default(cand.wasmUrl);
+            } catch (errA) {
+              console.warn(`Init with wasmUrl failed for [${cand.label}], trying default init:`, errA);
+              try {
                 await mod.default();
+              } catch (errB) {
+                console.warn(`Default init failed for [${cand.label}], trying precompiled module:`, errB);
+                const wasmRes = await fetch(cand.wasmUrl);
+                const bytes = await wasmRes.arrayBuffer();
+                const compiled = await WebAssembly.compile(bytes);
+                await mod.default(compiled);
               }
-            } catch (innerErr) {
-              console.warn(`Direct buffer load failed for [${cand.label}], trying default init:`, innerErr);
-              await mod.default();
             }
           }
           if (typeof mod.renderSvg === "function") {

@@ -4912,6 +4912,7 @@ fn layout_diagram_sugiyama_traced_with_config(
 
     let mut nodes = coordinate_assignment(ir, &node_sizes, &ranks, &ordering_by_rank, spacing);
     apply_subgraph_direction_overrides(ir, &node_sizes, &mut nodes, spacing);
+    separate_disjoint_subgraphs(ir, &mut nodes, spacing);
     apply_constraint_solver(ir, &mut nodes, spacing, &config);
     // Clusters are built BEFORE edge routing, not after. `build_cluster_boxes` is a pure function of
     // the already-positioned `nodes`, so the boxes are identical either way — but a composite state
@@ -13576,6 +13577,112 @@ fn apply_subgraph_direction_override(
     }
 }
 
+fn separate_disjoint_subgraphs(
+    ir: &MermaidDiagramIr,
+    nodes: &mut [LayoutNodeBox],
+    spacing: LayoutSpacing,
+) {
+    if ir.graph.subgraphs.len() < 2 || nodes.is_empty() {
+        return;
+    }
+
+    let is_horizontal = matches!(ir.direction, GraphDirection::LR | GraphDirection::RL);
+
+    // Collect all top-level (root) subgraphs that have members in `nodes`.
+    let root_subgraphs: Vec<_> = ir
+        .graph
+        .subgraphs
+        .iter()
+        .filter(|s| s.parent.is_none())
+        .filter_map(|s| {
+            let members: Vec<usize> = ir
+                .graph
+                .subgraph_members_recursive(s.id)
+                .into_iter()
+                .map(|id| id.0)
+                .collect();
+            if members.is_empty() {
+                None
+            } else {
+                Some((s.id, members))
+            }
+        })
+        .collect();
+
+    if root_subgraphs.len() < 2 {
+        return;
+    }
+
+    let padding = spacing.cluster_padding.max(24.0);
+
+    // Helper to compute bounding box of a list of member node indices
+    let compute_bounds =
+        |members: &[usize], node_list: &[LayoutNodeBox]| -> Option<(f32, f32, f32, f32)> {
+            let mut min_x = f32::INFINITY;
+            let mut min_y = f32::INFINITY;
+            let mut max_x = f32::NEG_INFINITY;
+            let mut max_y = f32::NEG_INFINITY;
+            for &m in members {
+                if let Some(nb) = node_list.iter().find(|n| n.node_index == m) {
+                    min_x = min_x.min(nb.bounds.x);
+                    min_y = min_y.min(nb.bounds.y);
+                    max_x = max_x.max(nb.bounds.x + nb.bounds.width);
+                    max_y = max_y.max(nb.bounds.y + nb.bounds.height);
+                }
+            }
+            if min_x.is_finite() && min_y.is_finite() && max_x.is_finite() && max_y.is_finite() {
+                Some((min_x, min_y, max_x, max_y))
+            } else {
+                None
+            }
+        };
+
+    // For vertical layouts (TB/TD), sibling subgraphs spanning the same vertical levels must not overlap horizontally.
+    // For horizontal layouts (LR/RL), sibling subgraphs spanning the same horizontal levels must not overlap vertically.
+    for i in 0..root_subgraphs.len() {
+        for j in (i + 1)..root_subgraphs.len() {
+            let Some((min_x_i, min_y_i, max_x_i, max_y_i)) =
+                compute_bounds(&root_subgraphs[i].1, nodes)
+            else {
+                continue;
+            };
+            let Some((min_x_j, min_y_j, max_x_j, max_y_j)) =
+                compute_bounds(&root_subgraphs[j].1, nodes)
+            else {
+                continue;
+            };
+
+            if is_horizontal {
+                let x_overlap = min_x_i < max_x_j && min_x_j < max_x_i;
+                if x_overlap {
+                    let y_target = max_y_i + 2.0 * padding;
+                    if min_y_j < y_target {
+                        let shift_y = y_target - min_y_j;
+                        for &m in &root_subgraphs[j].1 {
+                            if let Some(nb) = nodes.iter_mut().find(|n| n.node_index == m) {
+                                nb.bounds.y += shift_y;
+                            }
+                        }
+                    }
+                }
+            } else {
+                let y_overlap = min_y_i < max_y_j && min_y_j < max_y_i;
+                if y_overlap {
+                    let x_target = max_x_i + 2.0 * padding;
+                    if min_x_j < x_target {
+                        let shift_x = x_target - min_x_j;
+                        for &m in &root_subgraphs[j].1 {
+                            if let Some(nb) = nodes.iter_mut().find(|n| n.node_index == m) {
+                                nb.bounds.x += shift_x;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn apply_constraint_solver(
     ir: &MermaidDiagramIr,
     nodes: &mut [LayoutNodeBox],
@@ -16893,58 +17000,127 @@ fn build_cluster_boxes(
     spacing: LayoutSpacing,
     metrics: &fm_core::FontMetrics,
 ) -> Vec<LayoutClusterBox> {
-    ir.clusters
-        .iter()
-        .enumerate()
-        .filter_map(|(cluster_index, cluster)| {
-            let mut min_x = f32::INFINITY;
-            let mut min_y = f32::INFINITY;
-            let mut max_x = f32::NEG_INFINITY;
-            let mut max_y = f32::NEG_INFINITY;
+    if ir.clusters.is_empty() {
+        return Vec::new();
+    }
 
-            for member in &cluster.members {
-                let Some(node_box) = nodes.get(member.0) else {
-                    continue;
-                };
+    // Step 1: Compute initial raw bounds for each cluster from its direct/all members.
+    let mut cluster_bounds: Vec<Option<(f32, f32, f32, f32)>> =
+        Vec::with_capacity(ir.clusters.len());
+    for cluster in &ir.clusters {
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+
+        for member in &cluster.members {
+            if let Some(node_box) = nodes.iter().find(|n| n.node_index == member.0) {
                 min_x = min_x.min(node_box.bounds.x);
                 min_y = min_y.min(node_box.bounds.y);
                 max_x = max_x.max(node_box.bounds.x + node_box.bounds.width);
                 max_y = max_y.max(node_box.bounds.y + node_box.bounds.height);
             }
+        }
 
-            let title = cluster
-                .title
-                .and_then(|label_id| ir.labels.get(label_id.0))
-                .map(|label| label.text.clone());
+        if min_x.is_finite() && min_y.is_finite() && max_x.is_finite() && max_y.is_finite() {
+            cluster_bounds.push(Some((min_x, min_y, max_x, max_y)));
+        } else {
+            cluster_bounds.push(None);
+        }
+    }
 
-            // The box must be wide enough for its TITLE as well as its contents. The renderer draws
-            // the title unclamped at `bounds.x + 8.0` with no wrapping or truncation, so a title
-            // wider than the member nodes spilled outside the box it labels — up to 320px on an
-            // 80-character title (bd-tm5p). Height needs no equivalent: `cluster_padding` (52) leaves
-            // the label's ~13px row comfortably above the first row of nodes.
-            let contents_width = 2.0f32.mul_add(spacing.cluster_padding, max_x - min_x);
-            let title_width = title
-                .as_deref()
-                .map_or(0.0, |text| cluster_title_width(text, metrics));
+    // Step 2: Map cluster_index -> subgraph
+    let mut cluster_to_subgraph: Vec<Option<fm_core::IrSubgraphId>> = vec![None; ir.clusters.len()];
+    for sg in &ir.graph.subgraphs {
+        if let Some(c_id) = sg.cluster {
+            if c_id.0 < cluster_to_subgraph.len() {
+                cluster_to_subgraph[c_id.0] = Some(sg.id);
+            }
+        }
+    }
 
-            (min_x.is_finite() && min_y.is_finite() && max_x.is_finite() && max_y.is_finite())
-                .then_some(LayoutClusterBox {
-                    cluster_index,
-                    span: ir
-                        .clusters
-                        .get(cluster_index)
-                        .map_or(Span::default(), |cluster| cluster.span),
-                    title,
-                    color: None,
-                    bounds: LayoutRect {
-                        x: min_x - spacing.cluster_padding,
-                        y: min_y - spacing.cluster_padding,
-                        width: contents_width.max(title_width),
-                        height: 2.0f32.mul_add(spacing.cluster_padding, max_y - min_y),
-                    },
-                })
+    // Compute nesting depth for each cluster
+    let mut depths: Vec<(usize, usize)> = (0..ir.clusters.len())
+        .map(|idx| {
+            let depth = cluster_to_subgraph[idx]
+                .map(|sg_id| subgraph_depth(ir, sg_id))
+                .unwrap_or(0);
+            (depth, idx)
         })
-        .collect()
+        .collect();
+
+    // Sort by depth descending (deepest / innermost children first)
+    depths.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+
+    const HEADER_CLEARANCE: f32 = 28.0;
+    const NESTING_INSET: f32 = 16.0;
+
+    let mut final_boxes: Vec<Option<LayoutClusterBox>> = vec![None; ir.clusters.len()];
+
+    for &(_depth, cluster_index) in &depths {
+        let Some(cluster) = ir.clusters.get(cluster_index) else {
+            continue;
+        };
+        let Some((mut min_x, mut min_y, mut max_x, mut max_y)) = cluster_bounds[cluster_index]
+        else {
+            continue;
+        };
+
+        // If this cluster has children subgraphs, expand its bounds to enclose all child cluster boxes
+        if let Some(sg_id) = cluster_to_subgraph[cluster_index] {
+            if let Some(sg) = ir.graph.subgraph(sg_id) {
+                for &child_sg_id in &sg.children {
+                    if let Some(child_sg) = ir.graph.subgraph(child_sg_id) {
+                        if let Some(child_c_id) = child_sg.cluster {
+                            if let Some(Some(child_box)) = final_boxes.get(child_c_id.0) {
+                                min_x = min_x.min(
+                                    child_box.bounds.x - NESTING_INSET + spacing.cluster_padding,
+                                );
+                                max_x = max_x.max(
+                                    child_box.bounds.x + child_box.bounds.width + NESTING_INSET
+                                        - spacing.cluster_padding,
+                                );
+                                min_y = min_y.min(
+                                    child_box.bounds.y - HEADER_CLEARANCE - NESTING_INSET
+                                        + spacing.cluster_padding,
+                                );
+                                max_y = max_y.max(
+                                    child_box.bounds.y + child_box.bounds.height + NESTING_INSET
+                                        - spacing.cluster_padding,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let title = cluster
+            .title
+            .and_then(|label_id| ir.labels.get(label_id.0))
+            .map(|label| label.text.clone());
+
+        let contents_width = 2.0f32.mul_add(spacing.cluster_padding, max_x - min_x);
+        let title_width = title
+            .as_deref()
+            .map_or(0.0, |text| cluster_title_width(text, metrics));
+
+        let box_obj = LayoutClusterBox {
+            cluster_index,
+            span: cluster.span,
+            title,
+            color: None,
+            bounds: LayoutRect {
+                x: min_x - spacing.cluster_padding,
+                y: min_y - spacing.cluster_padding,
+                width: contents_width.max(title_width),
+                height: 2.0f32.mul_add(spacing.cluster_padding, max_y - min_y),
+            },
+        };
+        final_boxes[cluster_index] = Some(box_obj);
+    }
+
+    final_boxes.into_iter().flatten().collect()
 }
 
 /// Width a cluster box needs so its title fits inside it (bd-tm5p).
