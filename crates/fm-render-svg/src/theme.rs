@@ -10,6 +10,8 @@ pub enum ThemePreset {
     /// Clean neutral colors (blue/gray) - default mermaid-compatible
     #[default]
     Default,
+    /// 1:1 exact visual reproduction of Mermaid.js classic default palette (lavender/purple)
+    Mermaid,
     /// Dark background with bright accents
     Dark,
     /// Green/brown earth tones
@@ -48,6 +50,7 @@ impl FromStr for ThemePreset {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "default" => Ok(Self::Default),
+            "mermaid" | "mermaid-default" | "mermaid-classic" | "classic" => Ok(Self::Mermaid),
             "dark" => Ok(Self::Dark),
             "forest" => Ok(Self::Forest),
             "neutral" => Ok(Self::Neutral),
@@ -68,6 +71,7 @@ impl ThemePreset {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Default => "default",
+            Self::Mermaid => "mermaid",
             Self::Dark => "dark",
             Self::Forest => "forest",
             Self::Neutral => "neutral",
@@ -130,6 +134,26 @@ impl ThemeColors {
                     "#db2777".into(), // Pink
                     "#059669".into(), // Emerald
                     "#e11d48".into(), // Rose
+                ],
+            },
+
+            ThemePreset::Mermaid => Self {
+                background: "#ffffff".into(),
+                text: "#333333".into(),
+                node_fill: "#ECECFF".into(),
+                node_stroke: "#9370DB".into(),
+                edge: "#333333".into(),
+                cluster_fill: "#ffffde".into(),
+                cluster_stroke: "#aaaa33".into(),
+                accents: [
+                    "#9370DB".into(), // Classic purple
+                    "#ECECFF".into(), // Lavender fill
+                    "#ffffde".into(), // Pale yellow
+                    "#81B1DB".into(), // Actor blue
+                    "#d4edbc".into(), // Pale green
+                    "#fce4ec".into(), // Pale pink
+                    "#666666".into(), // Neutral dark
+                    "#aaaa33".into(), // Cluster border
                 ],
             },
 
@@ -885,6 +909,7 @@ mod tests {
     fn preset_as_str_round_trips() {
         for preset in [
             ThemePreset::Default,
+            ThemePreset::Mermaid,
             ThemePreset::Dark,
             ThemePreset::Forest,
             ThemePreset::Neutral,

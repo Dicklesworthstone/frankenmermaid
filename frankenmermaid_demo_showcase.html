@@ -1352,9 +1352,10 @@
 
           <div class="flex flex-wrap items-center gap-2 sm:gap-3 w-full lg:w-auto">
             <!-- Live Theme Palette Picker -->
-            <div class="flex items-center gap-1 bg-[#010804] border border-white/10 p-1 rounded-xl overflow-x-auto scrollbar-none max-w-full" role="group" aria-label="Duel Theme Switcher">
-              <span class="text-[10px] font-mono text-slate-400 px-2 uppercase font-bold shrink-0">Theme:</span>
-              <button type="button" class="duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono font-bold bg-emerald-500 text-black transition shrink-0" data-duel-theme="dark">Dark</button>
+            <div class="flex flex-wrap items-center gap-1 bg-[#010804] border border-white/10 p-1.5 rounded-xl max-w-full" role="group" aria-label="Duel Theme Switcher">
+              <span class="text-[10px] font-mono text-slate-400 px-2 uppercase font-bold shrink-0">Style:</span>
+              <button type="button" class="duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono font-bold bg-white/10 text-slate-300 hover:text-white transition shrink-0" data-duel-theme="mermaid">🎯 1:1 Mermaid Parity</button>
+              <button type="button" class="duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono font-bold bg-emerald-500 text-black transition shrink-0" data-duel-theme="dark">✨ FrankenModern Obsidian</button>
               <button type="button" class="duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono text-slate-400 hover:text-white transition shrink-0" data-duel-theme="neon">Neon</button>
               <button type="button" class="duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono text-slate-400 hover:text-white transition shrink-0" data-duel-theme="blueprint">Blueprint</button>
               <button type="button" class="duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono text-slate-400 hover:text-white transition shrink-0" data-duel-theme="forest">Forest</button>
@@ -1369,6 +1370,17 @@
               <button id="duel-copy-code-btn" type="button" class="px-3 py-2 rounded-xl border border-white/10 bg-white/5 hover:border-white/20 text-xs font-mono text-slate-300 transition">
                 📋 Copy Code
               </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Apples-to-Apples & Style Flexibility Explanatory Callout -->
+        <div class="p-3.5 rounded-xl bg-gradient-to-r from-emerald-950/40 via-[#011409] to-emerald-950/40 border border-emerald-500/25 mb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+          <div class="flex items-start sm:items-center gap-2.5">
+            <span class="text-lg">⚖️</span>
+            <div class="text-slate-200 text-[11px] sm:text-xs leading-relaxed">
+              <strong class="text-white font-bold">Apples-to-Apples Parity or Modern Elevation:</strong>
+              Select <span class="text-emerald-400 font-mono font-bold">🎯 1:1 Mermaid Parity</span> to test exact Mermaid.js color palettes (<span class="font-mono text-indigo-300">#ECECFF</span>/<span class="font-mono text-purple-300">#9370DB</span>) with 150x faster WASM execution, or toggle <span class="text-emerald-400 font-mono font-bold">✨ FrankenModern</span> for tactile drop-shadows, obsidian glass cards, and neon vector highlights.
             </div>
           </div>
         </div>
@@ -1433,7 +1445,7 @@
                 <span class="font-sans font-bold text-white text-sm">frankenmermaid Output</span>
                 <span class="px-2 py-0.5 rounded-full text-[9px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">Vector SVG</span>
               </div>
-              <span class="text-[10px] font-mono text-emerald-400 font-bold hidden sm:inline">100% DETERMINISTIC LAYOUT</span>
+              <span id="duel-fm-tag-badge" class="text-[10px] font-mono text-emerald-400 font-bold hidden sm:inline">FRANKENMODERN PRO</span>
             </div>
 
             <!-- Interactive Stage with Pan/Zoom Controller -->
@@ -4783,16 +4795,23 @@ Shared IR,Terminal ANSI,20`
       // 1. Render frankenmermaid
       const t0Fm = performance.now();
       let fmSvg = "";
+      const currentTheme = state.activeTheme || "dark";
+      const isParity = (currentTheme === "mermaid" || currentTheme === "classic");
+      const stageBadgeFm = document.getElementById("duel-fm-tag-badge");
+      if (stageBadgeFm) {
+        stageBadgeFm.textContent = isParity ? "1:1 MERMAID PARITY STYLE" : "FRANKENMODERN PRO";
+      }
+
       if (frankenRuntime && typeof frankenRuntime.renderSvg === "function") {
         try {
           const duelOpts = {
-            theme: state.activeTheme || "dark",
+            theme: currentTheme,
             responsive: true,
             accessible: true,
             fontSize: 14,
             padding: 24,
-            roundedCorners: 8,
-            shadows: true,
+            roundedCorners: isParity ? 4 : 8,
+            shadows: !isParity,
             embedThemeCss: true
           };
           fmSvg = frankenRuntime.renderSvg(specimen.code, duelOpts);

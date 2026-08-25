@@ -980,7 +980,7 @@ fn merge_svg_config(
     if let Some(name) = theme_name {
         merged.theme = name.parse::<ThemePreset>().map_err(|err| {
             format!(
-                "invalid theme '{name}': {err}; expected one of default,dark,forest,neutral,corporate,neon,pastel,high-contrast,monochrome,blueprint"
+                "invalid theme '{name}': {err}; expected one of default,mermaid,dark,forest,neutral,corporate,neon,pastel,high-contrast,monochrome,blueprint"
             )
         })?;
     }
@@ -1073,7 +1073,7 @@ fn requested_theme_preset(overrides: &RuntimeInitConfig) -> Result<Option<ThemeP
         .map(|name| {
             name.parse::<ThemePreset>().map_err(|err| {
                 format!(
-                    "invalid theme '{name}': {err}; expected one of default,dark,forest,neutral,corporate,neon,pastel,high-contrast,monochrome,blueprint"
+                    "invalid theme '{name}': {err}; expected one of default,mermaid,dark,forest,neutral,corporate,neon,pastel,high-contrast,monochrome,blueprint"
                 )
             })
         })
@@ -2210,7 +2210,7 @@ impl Diagram {
         self.ensure_alive()?;
         let preset = theme.parse::<ThemePreset>().map_err(|err| {
             js_error(format!(
-                "invalid theme '{theme}': {err}; expected one of default,dark,forest,neutral,corporate,neon,pastel,high-contrast,monochrome,blueprint"
+                "invalid theme '{theme}': {err}; expected one of default,mermaid,dark,forest,neutral,corporate,neon,pastel,high-contrast,monochrome,blueprint"
             ))
         })?;
         let overrides = SvgConfigOverrides {

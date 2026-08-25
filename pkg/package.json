@@ -1,23 +1,21 @@
 {
-  "name": "@frankenmermaid/core",
+  "name": "fm-wasm",
   "type": "module",
-  "description": "Rust-first Mermaid-compatible diagram engine for WebAssembly and browser rendering.",
+  "description": "Rust-first Mermaid-compatible diagram engine for WebAssembly and browser rendering",
   "version": "0.2.0",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Dicklesworthstone/frankenmermaid.git"
+    "url": "https://github.com/Dicklesworthstone/frankenmermaid"
   },
   "files": [
-    "README.md",
-    "frankenmermaid_bg.wasm",
-    "frankenmermaid.js",
-    "frankenmermaid.d.ts",
-    "frankenmermaid_bg.wasm.d.ts"
+    "fm_wasm_bg.wasm",
+    "fm_wasm.js",
+    "fm_wasm.d.ts"
   ],
-  "main": "frankenmermaid.js",
-  "homepage": "https://github.com/Dicklesworthstone/frankenmermaid#readme",
-  "types": "frankenmermaid.d.ts",
+  "main": "fm_wasm.js",
+  "homepage": "https://github.com/Dicklesworthstone/frankenmermaid",
+  "types": "fm_wasm.d.ts",
   "sideEffects": [
     "./snippets/*"
   ],
@@ -27,8 +25,5 @@
     "wasm",
     "svg",
     "canvas"
-  ],
-  "bugs": {
-    "url": "https://github.com/Dicklesworthstone/frankenmermaid/issues"
-  }
+  ]
 }
