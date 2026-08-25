@@ -55,6 +55,48 @@ fn shader_locations(wgsl: &str, struct_name: &str) -> Vec<(u32, String, String)>
     out
 }
 
+/// Number of vertices the private array indexed by `vertex_index` actually contains.
+///
+/// This is derived from the shader source rather than from a family table. Marker rendering grew
+/// from one three-vertex arrow triangle into a six-vertex quad whose fragment shader can express
+/// circles, crosses and UML diamonds too. A device-only test kept asserting the obsolete triangle
+/// count because no headless contract connected the descriptor to the shader array.
+fn shader_vertices_per_instance(wgsl: &str) -> u32 {
+    let vertex_stage = wgsl
+        .split_once("@vertex")
+        .map(|(_, stage)| stage)
+        .expect("shader has no vertex stage");
+    let indexed_line = vertex_stage
+        .lines()
+        .find(|line| line.contains("[vertex_index]"))
+        .expect("vertex stage never indexes a private geometry array");
+    let before_index = indexed_line
+        .split_once("[vertex_index]")
+        .map(|(before, _)| before)
+        .expect("checked that the line contains vertex_index");
+    let array_name = before_index
+        .rsplit(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .find(|part| !part.is_empty())
+        .expect("vertex array expression has no identifier");
+
+    let declaration_prefix = format!("var<private> {array_name}: array<vec2<f32>,");
+    let declaration = wgsl
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with(&declaration_prefix))
+        .unwrap_or_else(|| {
+            panic!("shader indexes {array_name} but never declares its vertex array")
+        });
+    declaration
+        .strip_prefix(&declaration_prefix)
+        .expect("selected the line by this prefix")
+        .split_once('>')
+        .map(|(count, _)| count.trim())
+        .expect("vertex array declaration has no closing angle bracket")
+        .parse()
+        .expect("vertex array length is not an integer")
+}
+
 /// Assert one pipeline's layout against the shader that consumes it.
 fn assert_layout_matches_shader(pipeline: &PipelineDescriptor, vertex_input_struct: &str) {
     let declared = shader_locations(pipeline.wgsl, vertex_input_struct);
@@ -111,6 +153,23 @@ fn the_node_instance_layout_matches_the_shader_that_consumes_it() {
 #[test]
 fn the_edge_instance_layout_matches_the_shader_that_consumes_it() {
     assert_layout_matches_shader(&edge_pipeline(), "EdgeSegment");
+}
+
+/// Every draw must submit exactly the private geometry array its vertex shader indexes.
+///
+/// Too few vertices silently leave part of a primitive undrawn. Too many make `vertex_index`
+/// address beyond the array. Parsing the shader is load-bearing here: asserting every descriptor
+/// equals the shared Rust quad constant would stay green if the WGSL changed independently.
+#[test]
+fn every_pipeline_submits_exactly_its_shader_vertex_array() {
+    for pipeline in pipelines() {
+        let shader_count = shader_vertices_per_instance(pipeline.wgsl);
+        assert_eq!(
+            pipeline.vertices_per_instance, shader_count,
+            "{} submits {} vertices per instance but its shader indexes a {shader_count}-element array",
+            pipeline.label, pipeline.vertices_per_instance
+        );
+    }
 }
 
 /// THE HAZARD THIS MODULE EXISTS FOR, pinned as its own case so it cannot be lost in a loop.
@@ -375,6 +434,38 @@ fn the_edge_batch_is_submitted_before_the_node_batch() {
          GpuRenderPlan's own field order: heads ride with their edges, boxes paint over both, a \
          dashed border sits on top of the box it outlines, labels over everything"
     );
+}
+
+/// The public batch plan and the device pipeline descriptions must submit the same vertex counts.
+///
+/// They are separate APIs and used to repeat the count independently. A descriptor/shader check
+/// alone cannot protect a caller that budgets or submits from `draw_batches`, so exercise all five
+/// families in one plan and join them by family rather than by array position.
+#[test]
+fn every_draw_batch_uses_its_pipeline_vertex_count() {
+    let ir =
+        fm_parser::parse("flowchart LR\n  A[Alpha] --> B[Beta]\n  style A stroke-dasharray:5 3\n")
+            .ir;
+    let layout = fm_layout::layout_diagram(&ir);
+    let plan = fm_render_canvas::GpuRenderPlan::from_layout(&ir, &layout, plan_stroke_width());
+    let batches = draw_batches(&plan);
+
+    assert_eq!(
+        batches.len(),
+        pipelines().len(),
+        "CONTROL FAILED: the fixture does not exercise every primitive family"
+    );
+    for batch in batches {
+        let pipeline = pipelines()
+            .into_iter()
+            .find(|pipeline| pipeline.family == batch.family)
+            .unwrap_or_else(|| panic!("draw batch {:?} has no pipeline", batch.family));
+        assert_eq!(
+            batch.vertices_per_instance, pipeline.vertices_per_instance,
+            "draw batch {:?} submits {} vertices per instance but its pipeline submits {}",
+            batch.family, batch.vertices_per_instance, pipeline.vertices_per_instance
+        );
+    }
 }
 
 #[test]

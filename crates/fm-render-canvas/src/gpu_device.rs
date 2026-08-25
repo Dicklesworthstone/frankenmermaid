@@ -330,9 +330,9 @@ pub fn solid_coverage(plan: &crate::gpu_plan::GlyphAtlasPlan) -> Vec<u8> {
 /// A built pipeline for one primitive family, plus the camera binding it draws with.
 ///
 /// Family-agnostic on purpose: every field that differs between node, edge, arrowhead and text
-/// comes out of the [`PipelineDescriptor`], including the vertex count per instance — arrowheads are
-/// a THREE-vertex triangle while the other families expand a six-vertex quad, and a pass that
-/// assumed six would draw two phantom vertices per head.
+/// comes out of the [`PipelineDescriptor`], including the vertex count per instance. That count
+/// must match the private vertex array indexed by the shader: changing marker geometry without
+/// changing the descriptor either leaves vertices undrawn or indexes past the declared array.
 pub struct InstancePass {
     pipeline: wgpu::RenderPipeline,
     camera_layout: wgpu::BindGroupLayout,

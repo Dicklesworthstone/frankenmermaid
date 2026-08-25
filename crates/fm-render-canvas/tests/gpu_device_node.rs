@@ -337,10 +337,10 @@ fn the_serialised_edge_segment_round_trips_through_the_declared_offsets() {
 /// SAME-IR COMPARISON FOR ARROWHEADS: the GPU paints a head at each arrow tip, and the SVG attaches
 /// a marker to that same edge.
 ///
-/// The head is sampled slightly BEHIND its tip along the facing angle, not at the tip itself: the
-/// tip is a single antialiased vertex of a triangle, which is the one pixel most likely to be
-/// partially transparent for reasons that are not defects. A quarter of the head's own size back
-/// along the angle lands in the body of the triangle.
+/// The ordinary arrow is sampled slightly BEHIND its tip along the facing angle, not at the tip
+/// itself. Although every marker kind is rasterised inside the same quad, the arrow itself is a
+/// triangle whose tip is the one antialiased point most likely to be partially transparent for
+/// reasons that are not defects. A quarter of the marker size back lands in its body.
 #[test]
 fn the_arrowhead_pipeline_paints_a_head_for_every_edge_the_svg_marks() {
     let Some(gpu) = device_or_skip() else {
@@ -359,12 +359,6 @@ fn the_arrowhead_pipeline_paints_a_head_for_every_edge_the_svg_marks() {
     );
 
     let descriptor = arrowhead_pipeline();
-    // A TRIANGLE, NOT A QUAD. If this ever reads 6, the pass would index past the shader's
-    // three-element HEAD array.
-    assert_eq!(
-        descriptor.vertices_per_instance, 3,
-        "an arrowhead is a triangle; six vertices would over-read the shader's HEAD array"
-    );
 
     let pass = InstancePass::new(&gpu, &descriptor);
     let bytes = arrowhead_instance_bytes(&plan.arrowheads);
