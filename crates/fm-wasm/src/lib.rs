@@ -3985,7 +3985,7 @@ mod tests {
         // before it can masquerade as a cross-target floating-point difference. Rebuild from the
         // same source revision, then update this digest and the per-fixture digests together after
         // reviewing every generated artifact.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x8ba0_0def_097b_3741;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0xe242_49ec_c25f_c273;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),
@@ -4013,22 +4013,22 @@ mod tests {
             (
                 "flowchart",
                 "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n  c -.--> a\n  b --> d[Delta]\n",
-                0xa9ba_3e7f_2697_24f1,
+                0xa916_dd2e_a13c_f5c0,
             ),
             (
                 "sequence",
                 "sequenceDiagram\n  participant A\n  participant B\n  A->>B: hello\n  B-->>A: reply\n",
-                0xae15_0176_991b_2822,
+                0x9efd_c2d1_5d01_7b26,
             ),
             (
                 "class",
                 "classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n  Alpha <|-- Beta\n",
-                0xde2b_6ef2_b615_4a90,
+                0xbc1c_5e78_1065_7b1e,
             ),
             (
                 "state",
                 "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy: start\n  Busy --> Idle: done\n",
-                0xb5bd_5fc9_d752_5125,
+                0x50cc_e18a_8677_9d55,
             ),
         ];
 
