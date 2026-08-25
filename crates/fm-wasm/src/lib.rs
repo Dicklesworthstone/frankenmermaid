@@ -231,7 +231,9 @@ fn build_diagram_geometry(input: &str, config: Option<JsValue>) -> Result<Diagra
     let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
     let runtime = read_runtime_config();
     let requested_theme = requested_theme_preset(&overrides)?;
-    let svg = merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref())?;
+    let effective_svg = overrides.effective_svg_overrides();
+    let theme_name = overrides.theme.as_deref().or(effective_svg.theme.as_deref());
+    let svg = merge_svg_config(&runtime.svg, &effective_svg, theme_name)?;
     let canvas_base = requested_theme.map_or_else(
         || runtime.canvas.clone(),
         |preset| apply_canvas_theme_preset(runtime.canvas.clone(), preset),
@@ -291,9 +293,51 @@ impl Default for RuntimeConfig {
 struct RuntimeInitConfig {
     theme: Option<String>,
     renderer: Option<WebRendererKind>,
+    #[serde(default)]
     svg: SvgConfigOverrides,
+    #[serde(flatten)]
+    svg_flat: SvgConfigOverrides,
+    #[serde(default)]
     canvas: CanvasConfigOverrides,
+    #[serde(default)]
     pressure: PressureConfigOverrides,
+}
+
+impl RuntimeInitConfig {
+    fn effective_svg_overrides(&self) -> SvgConfigOverrides {
+        let mut merged = self.svg_flat.clone();
+        if self.svg.responsive.is_some() {
+            merged.responsive = self.svg.responsive;
+        }
+        if self.svg.accessible.is_some() {
+            merged.accessible = self.svg.accessible;
+        }
+        if self.svg.font_size.is_some() {
+            merged.font_size = self.svg.font_size;
+        }
+        if self.svg.padding.is_some() {
+            merged.padding = self.svg.padding;
+        }
+        if self.svg.shadows.is_some() {
+            merged.shadows = self.svg.shadows;
+        }
+        if self.svg.rounded_corners.is_some() {
+            merged.rounded_corners = self.svg.rounded_corners;
+        }
+        if self.svg.embed_theme_css.is_some() {
+            merged.embed_theme_css = self.svg.embed_theme_css;
+        }
+        if self.svg.theme.is_some() {
+            merged.theme = self.svg.theme.clone();
+        }
+        if self.svg.enable_links.is_some() {
+            merged.enable_links = self.svg.enable_links;
+        }
+        if self.svg.link_mode.is_some() {
+            merged.link_mode = self.svg.link_mode.clone();
+        }
+        merged
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -500,8 +544,10 @@ pub fn render_worker_request(request: &WorkerRenderRequest) -> WorkerRenderRespo
     };
 
     let runtime = read_runtime_config();
+    let effective_svg = overrides.effective_svg_overrides();
+    let theme_name = overrides.theme.as_deref().or(effective_svg.theme.as_deref());
     let svg_config =
-        match merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref()) {
+        match merge_svg_config(&runtime.svg, &effective_svg, theme_name) {
             Ok(config) => config,
             Err(error) => {
                 return WorkerRenderResponse::Failed {
@@ -1064,8 +1110,8 @@ fn merge_pressure_config(
 
 /// Resolve the requested theme preset. `String` error for the same reason as [`merge_svg_config`].
 fn requested_theme_preset(overrides: &RuntimeInitConfig) -> Result<Option<ThemePreset>, String> {
-    let theme_name = overrides
-        .svg
+    let effective_svg = overrides.effective_svg_overrides();
+    let theme_name = effective_svg
         .theme
         .as_deref()
         .or(overrides.theme.as_deref());
@@ -1320,7 +1366,9 @@ pub fn init(config: Option<JsValue>) -> Result<(), JsValue> {
     let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
     let current = read_runtime_config();
     let requested_theme = requested_theme_preset(&overrides).map_err(js_error)?;
-    let svg = merge_svg_config(&current.svg, &overrides.svg, overrides.theme.as_deref())
+    let effective_svg = overrides.effective_svg_overrides();
+    let theme_name = overrides.theme.as_deref().or(effective_svg.theme.as_deref());
+    let svg = merge_svg_config(&current.svg, &effective_svg, theme_name)
         .map_err(js_error)?;
     let canvas_base = requested_theme.map_or_else(
         || current.canvas.clone(),
@@ -1350,7 +1398,9 @@ pub fn render_svg_js(input: &str, config: Option<JsValue>) -> Result<String, JsV
     let (mut svg_config, pressure_report) = if has_config {
         let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
         with_runtime_config(|runtime| {
-            let svg = merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref())
+            let effective_svg = overrides.effective_svg_overrides();
+            let theme_name = overrides.theme.as_deref().or(effective_svg.theme.as_deref());
+            let svg = merge_svg_config(&runtime.svg, &effective_svg, theme_name)
                 .map_err(js_error)?;
             let pressure =
                 merge_pressure_config(&runtime.pressure, &overrides.pressure).into_report();
@@ -1992,7 +2042,9 @@ impl Diagram {
         let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
         let runtime = read_runtime_config();
         let requested_theme = requested_theme_preset(&overrides).map_err(js_error)?;
-        let svg_config = merge_svg_config(&runtime.svg, &overrides.svg, overrides.theme.as_deref())
+        let effective_svg = overrides.effective_svg_overrides();
+        let theme_name = overrides.theme.as_deref().or(effective_svg.theme.as_deref());
+        let svg_config = merge_svg_config(&runtime.svg, &effective_svg, theme_name)
             .map_err(js_error)?;
         let canvas_base = requested_theme
             .map(|preset| apply_canvas_theme_preset(runtime.canvas.clone(), preset))
@@ -2068,8 +2120,10 @@ impl Diagram {
 
         let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
         let requested_theme = requested_theme_preset(&overrides).map_err(js_error)?;
+        let effective_svg = overrides.effective_svg_overrides();
+        let theme_name = overrides.theme.as_deref().or(effective_svg.theme.as_deref());
         let next_svg =
-            merge_svg_config(&self.svg_config, &overrides.svg, overrides.theme.as_deref())
+            merge_svg_config(&self.svg_config, &effective_svg, theme_name)
                 .map_err(js_error)?;
         let next_pressure = merge_pressure_config(&self.pressure_config, &overrides.pressure);
         let pressure_report = next_pressure.into_report();
@@ -3723,7 +3777,7 @@ mod tests {
         // package fail with an artifact-specific instruction before it can masquerade as a
         // cross-target floating-point difference. The package was built at f9b6291b; update this
         // digest and the per-fixture digests together after reviewing the generated artifact diff.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x50b0_1b61_ae7e_760c;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x0b21_d680_56ac_f4b9;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),
@@ -3749,22 +3803,22 @@ mod tests {
             (
                 "flowchart",
                 "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n  c -.--> a\n  b --> d[Delta]\n",
-                0x58f6_2762_f7c1_df74,
+                0x06fe_fd61_ab25_d27c,
             ),
             (
                 "sequence",
                 "sequenceDiagram\n  participant A\n  participant B\n  A->>B: hello\n  B-->>A: reply\n",
-                0xef37_a056_6848_1c37,
+                0x059d_55c1_7daf_02ef,
             ),
             (
                 "class",
                 "classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n  Alpha <|-- Beta\n",
-                0xf3fe_fb69_0d7c_6234,
+                0x9e60_5577_a780_5a40,
             ),
             (
                 "state",
                 "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy: start\n  Busy --> Idle: done\n",
-                0x026e_c454_73ef_635b,
+                0x266d_2df7_8b7e_b453,
             ),
         ];
 

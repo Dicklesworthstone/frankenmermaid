@@ -4263,6 +4263,9 @@ Shared IR,Terminal ANSI,20`
 
           // Re-render immediately so the visual result is instant
           scheduleRender(true);
+          if (typeof selectDuelSpecimen === "function") {
+            selectDuelSpecimen(currentDuelIndex);
+          }
         });
       });
 
@@ -4512,12 +4515,22 @@ Shared IR,Terminal ANSI,20`
         }
       });
 
-      // Share Link (Serverless #doc=)
+      // Share Link (Serverless #doc= with UTF-8 byte encoding)
       document.getElementById("btn-share-doc")?.addEventListener("click", async () => {
         if (!els.input) return;
         const source = els.input.value;
-        const b64 = btoa(unescape(encodeURIComponent(source)));
-        const shareUrl = `${location.origin}${location.pathname}#doc=${b64}`;
+        let b64 = "";
+        try {
+          const bytes = new TextEncoder().encode(source);
+          let bin = "";
+          for (let i = 0; i < bytes.length; i++) {
+            bin += String.fromCharCode(bytes[i]);
+          }
+          b64 = btoa(bin);
+        } catch (e) {
+          b64 = btoa(unescape(encodeURIComponent(source)));
+        }
+        const shareUrl = `${location.origin}${location.pathname}#doc=${encodeURIComponent(b64)}`;
         await writeClipboardText(shareUrl);
         const btn = document.getElementById("btn-share-doc");
         if (btn) {
@@ -5333,12 +5346,23 @@ Shared IR,Terminal ANSI,20`
     async function init() {
       const params = new URLSearchParams(location.search);
 
-      // Check URL Fragment (#doc= or #zdoc=)
+      // Check URL Fragment (#doc=)
       const hash = location.hash.slice(1);
       if (hash.startsWith("doc=")) {
         try {
-          const raw = decodeURIComponent(escape(atob(hash.slice(4))));
-          if (els.input) els.input.value = raw;
+          const rawB64 = decodeURIComponent(hash.slice(4));
+          let decoded = "";
+          try {
+            const bin = atob(rawB64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) {
+              bytes[i] = bin.charCodeAt(i);
+            }
+            decoded = new TextDecoder().decode(bytes);
+          } catch (innerE) {
+            decoded = decodeURIComponent(escape(atob(rawB64)));
+          }
+          if (decoded && els.input) els.input.value = decoded;
         } catch (e) {}
       } else if (params.get("source")) {
         if (els.input) els.input.value = params.get("source");

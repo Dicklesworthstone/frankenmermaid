@@ -408,7 +408,7 @@ impl ThemeColors {
     /// per declaration (the `push_str(&format!(..))` anti-pattern) plus the intermediate `String`
     /// and its copy when the render funnel composes the full stylesheet.
     pub(crate) fn write_css_vars(&self, css: &mut String) {
-        css.push_str(":root {\n");
+        css.push_str("svg, :root {\n");
         let _ = writeln!(css, "  --fm-bg: {};", self.background);
         let _ = writeln!(css, "  --fm-text-color: {};", self.text);
         let _ = writeln!(css, "  --fm-node-fill: {};", self.node_fill);
@@ -546,7 +546,7 @@ impl Theme {
         let _ = write!(
             css,
             r#"
-:root {{
+svg, :root {{
   --fm-edge-muted: var(--fm-cluster-stroke);
   --fm-edge-label-bg: var(--fm-bg);
   --fm-edge-label-border: var(--fm-cluster-stroke);
