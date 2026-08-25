@@ -17032,10 +17032,10 @@ fn build_cluster_boxes(
     // Step 2: Map cluster_index -> subgraph
     let mut cluster_to_subgraph: Vec<Option<fm_core::IrSubgraphId>> = vec![None; ir.clusters.len()];
     for sg in &ir.graph.subgraphs {
-        if let Some(c_id) = sg.cluster {
-            if c_id.0 < cluster_to_subgraph.len() {
-                cluster_to_subgraph[c_id.0] = Some(sg.id);
-            }
+        if let Some(c_id) = sg.cluster
+            && c_id.0 < cluster_to_subgraph.len()
+        {
+            cluster_to_subgraph[c_id.0] = Some(sg.id);
         }
     }
 
@@ -17067,30 +17067,27 @@ fn build_cluster_boxes(
         };
 
         // If this cluster has children subgraphs, expand its bounds to enclose all child cluster boxes
-        if let Some(sg_id) = cluster_to_subgraph[cluster_index] {
-            if let Some(sg) = ir.graph.subgraph(sg_id) {
-                for &child_sg_id in &sg.children {
-                    if let Some(child_sg) = ir.graph.subgraph(child_sg_id) {
-                        if let Some(child_c_id) = child_sg.cluster {
-                            if let Some(Some(child_box)) = final_boxes.get(child_c_id.0) {
-                                min_x = min_x.min(
-                                    child_box.bounds.x - NESTING_INSET + spacing.cluster_padding,
-                                );
-                                max_x = max_x.max(
-                                    child_box.bounds.x + child_box.bounds.width + NESTING_INSET
-                                        - spacing.cluster_padding,
-                                );
-                                min_y = min_y.min(
-                                    child_box.bounds.y - HEADER_CLEARANCE - NESTING_INSET
-                                        + spacing.cluster_padding,
-                                );
-                                max_y = max_y.max(
-                                    child_box.bounds.y + child_box.bounds.height + NESTING_INSET
-                                        - spacing.cluster_padding,
-                                );
-                            }
-                        }
-                    }
+        if let Some(sg_id) = cluster_to_subgraph[cluster_index]
+            && let Some(sg) = ir.graph.subgraph(sg_id)
+        {
+            for &child_sg_id in &sg.children {
+                if let Some(child_sg) = ir.graph.subgraph(child_sg_id)
+                    && let Some(child_c_id) = child_sg.cluster
+                    && let Some(Some(child_box)) = final_boxes.get(child_c_id.0)
+                {
+                    min_x = min_x.min(child_box.bounds.x - NESTING_INSET + spacing.cluster_padding);
+                    max_x = max_x.max(
+                        child_box.bounds.x + child_box.bounds.width + NESTING_INSET
+                            - spacing.cluster_padding,
+                    );
+                    min_y = min_y.min(
+                        child_box.bounds.y - HEADER_CLEARANCE - NESTING_INSET
+                            + spacing.cluster_padding,
+                    );
+                    max_y = max_y.max(
+                        child_box.bounds.y + child_box.bounds.height + NESTING_INSET
+                            - spacing.cluster_padding,
+                    );
                 }
             }
         }
