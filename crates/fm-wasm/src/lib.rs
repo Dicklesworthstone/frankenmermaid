@@ -3978,6 +3978,21 @@ mod tests {
     #[test]
     fn x86_64_and_wasm32_render_the_same_bytes() {
         let _serial = config_guard();
+        struct RuntimeConfigGuard(RuntimeConfig);
+
+        impl Drop for RuntimeConfigGuard {
+            fn drop(&mut self) {
+                write_runtime_config(self.0.clone());
+            }
+        }
+
+        // The Node driver starts a fresh WASM instance and never calls `init`, so its runtime is
+        // exactly `RuntimeConfig::default()`. Reset the native arm to the same state before any
+        // digest comparison. With source and package provenance checked below, a later byte
+        // mismatch is then a real target disagreement rather than leaked process-global config.
+        let _runtime_config_guard = RuntimeConfigGuard(read_runtime_config());
+        write_runtime_config(RuntimeConfig::default());
+
         // These five files are the versioned code, interface, and metadata package surface. The
         // copied README is deliberately excluded so a documentation-only edit does not require a
         // bundle rebuild. Pinning the combined digest separately from rendered-output digests makes
