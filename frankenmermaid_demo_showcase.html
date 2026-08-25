@@ -76,34 +76,35 @@
       box-sizing: border-box;
     }
 
-    html, body {
+    html {
       width: 100%;
       max-width: 100%;
       overflow-x: hidden;
-      overflow-x: clip;
-      position: relative;
       margin: 0;
       padding: 0;
+      scroll-behavior: smooth;
+      scroll-padding-top: 5rem;
       -webkit-text-size-adjust: 100%;
     }
 
-    main, section, header, footer, aside, nav, article {
-      max-width: 100%;
-      overflow-x: clip;
-    }
-
-    html {
-      scroll-behavior: smooth;
-      scroll-padding-top: 5rem;
-    }
-
     body {
+      width: 100%;
+      max-width: 100%;
+      overflow-x: hidden;
+      margin: 0;
+      padding: 0;
+      position: relative;
       background-color: var(--color-bg);
       color: #f1f5f9;
       font-family: var(--font-sans);
       -webkit-font-smoothing: antialiased;
       -moz-osx-font-smoothing: grayscale;
       line-height: 1.6;
+    }
+
+    main, section, header, footer, aside, nav, article {
+      max-width: 100%;
+      overflow-x: hidden;
     }
 
     /* Prevent horizontal scroll chaining on horizontal scroll containers */
@@ -140,6 +141,12 @@
       will-change: transform;
       transform: translateZ(0);
       animation: orbFloat 22s ease-in-out infinite alternate;
+    }
+
+    @media (max-width: 768px) {
+      .glow-orb {
+        display: none !important;
+      }
     }
 
     @keyframes orbFloat {
@@ -1279,7 +1286,7 @@
             <span id="race-victory-badge">FRANKENMERMAID VICTORY</span>
           </div>
           <h4 id="race-victory-title" class="text-3xl sm:text-5xl font-black text-white tracking-tight">
-            frankenmermaid is <span id="race-victory-multiplier" class="text-emerald-400 underline decoration-emerald-400/50 underline-offset-8">200x Faster</span>!
+            FrankenMermaid is <span id="race-victory-multiplier" class="text-emerald-400 underline decoration-emerald-400/50 underline-offset-8">200x Faster</span>!
           </h4>
           <p id="race-victory-subtitle" class="mt-3 text-base sm:text-lg text-slate-200 max-w-3xl mx-auto">
             Rendered all 10 complex enterprise diagrams in <span id="race-victory-fm-time" class="text-emerald-300 font-mono font-bold">11.4ms</span> vs <span id="race-victory-m-time" class="text-amber-300 font-mono font-bold">2,380.2ms</span> for mermaid.js with zero UI freeze.
@@ -1331,18 +1338,18 @@
             <p class="text-slate-300 text-xs sm:text-sm mt-1 max-w-2xl">Click any of the 10 diagrams below to inspect visual rendering quality, node alignment, bezier curvature, and typographic crispness head-to-head.</p>
           </div>
 
-          <div class="flex flex-wrap items-center gap-3">
+          <div class="flex flex-wrap items-center gap-2 sm:gap-3 w-full lg:w-auto">
             <!-- Live Theme Palette Picker -->
-            <div class="flex items-center gap-1 bg-[#010804] border border-white/10 p-1 rounded-xl" role="group" aria-label="Duel Theme Switcher">
-              <span class="text-[10px] font-mono text-slate-400 px-2 uppercase font-bold">Theme:</span>
-              <button type="button" class="duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono font-bold bg-emerald-500 text-black transition" data-duel-theme="dark">Dark</button>
-              <button type="button" class="duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono text-slate-400 hover:text-white transition" data-duel-theme="neon">Neon</button>
-              <button type="button" class="duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono text-slate-400 hover:text-white transition" data-duel-theme="blueprint">Blueprint</button>
-              <button type="button" class="duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono text-slate-400 hover:text-white transition" data-duel-theme="forest">Forest</button>
-              <button type="button" class="duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono text-slate-400 hover:text-white transition" data-duel-theme="corporate">Corporate</button>
+            <div class="flex items-center gap-1 bg-[#010804] border border-white/10 p-1 rounded-xl overflow-x-auto scrollbar-none max-w-full" role="group" aria-label="Duel Theme Switcher">
+              <span class="text-[10px] font-mono text-slate-400 px-2 uppercase font-bold shrink-0">Theme:</span>
+              <button type="button" class="duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono font-bold bg-emerald-500 text-black transition shrink-0" data-duel-theme="dark">Dark</button>
+              <button type="button" class="duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono text-slate-400 hover:text-white transition shrink-0" data-duel-theme="neon">Neon</button>
+              <button type="button" class="duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono text-slate-400 hover:text-white transition shrink-0" data-duel-theme="blueprint">Blueprint</button>
+              <button type="button" class="duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono text-slate-400 hover:text-white transition shrink-0" data-duel-theme="forest">Forest</button>
+              <button type="button" class="duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono text-slate-400 hover:text-white transition shrink-0" data-duel-theme="corporate">Corporate</button>
             </div>
 
-            <div class="flex items-center gap-2">
+            <div class="flex items-center gap-2 shrink-0">
               <button id="duel-open-studio-btn" type="button" class="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-white text-black font-black text-xs transition shadow-[0_0_20px_rgba(16,185,129,0.3)] flex items-center gap-1.5">
                 <span>⚡</span>
                 <span>Open in Studio</span>
@@ -3404,7 +3411,13 @@ Shared IR,Terminal ANSI,20`
       document.querySelectorAll(".spotlight-quick-pill").forEach((pill, pIdx) => {
         if (pIdx === currentSpotlightIndex) {
           pill.className = "spotlight-quick-pill shrink-0 px-3 py-1.5 rounded-xl border border-emerald-500 bg-emerald-500/20 text-emerald-300 font-mono text-[10px] font-black transition shadow-glow";
-          pill.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+          const strip = document.getElementById("spotlight-pills-strip");
+          if (strip && pill.offsetLeft) {
+            strip.scrollTo({
+              left: pill.offsetLeft - (strip.clientWidth / 2) + (pill.clientWidth / 2),
+              behavior: "smooth"
+            });
+          }
         } else {
           pill.className = "spotlight-quick-pill shrink-0 px-3 py-1.5 rounded-xl border border-white/5 bg-white/[0.02] text-slate-400 hover:text-white hover:border-emerald-500/40 font-mono text-[10px] transition";
         }
