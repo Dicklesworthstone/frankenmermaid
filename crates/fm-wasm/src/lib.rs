@@ -232,7 +232,10 @@ fn build_diagram_geometry(input: &str, config: Option<JsValue>) -> Result<Diagra
     let runtime = read_runtime_config();
     let requested_theme = requested_theme_preset(&overrides)?;
     let effective_svg = overrides.effective_svg_overrides();
-    let theme_name = overrides.theme.as_deref().or(effective_svg.theme.as_deref());
+    let theme_name = overrides
+        .theme
+        .as_deref()
+        .or(effective_svg.theme.as_deref());
     let svg = merge_svg_config(&runtime.svg, &effective_svg, theme_name)?;
     let canvas_base = requested_theme.map_or_else(
         || runtime.canvas.clone(),
@@ -336,6 +339,12 @@ impl RuntimeInitConfig {
         if self.svg.link_mode.is_some() {
             merged.link_mode = self.svg.link_mode.clone();
         }
+        if self.svg.node_gradients.is_some() {
+            merged.node_gradients = self.svg.node_gradients;
+        }
+        if self.svg.cluster_fill_opacity.is_some() {
+            merged.cluster_fill_opacity = self.svg.cluster_fill_opacity;
+        }
         merged
     }
 }
@@ -353,6 +362,8 @@ struct SvgConfigOverrides {
     theme: Option<String>,
     enable_links: Option<bool>,
     link_mode: Option<String>,
+    node_gradients: Option<bool>,
+    cluster_fill_opacity: Option<f32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -545,18 +556,20 @@ pub fn render_worker_request(request: &WorkerRenderRequest) -> WorkerRenderRespo
 
     let runtime = read_runtime_config();
     let effective_svg = overrides.effective_svg_overrides();
-    let theme_name = overrides.theme.as_deref().or(effective_svg.theme.as_deref());
-    let svg_config =
-        match merge_svg_config(&runtime.svg, &effective_svg, theme_name) {
-            Ok(config) => config,
-            Err(error) => {
-                return WorkerRenderResponse::Failed {
-                    request_id: request.request_id,
-                    error,
-                    diagnostics: Vec::new(),
-                };
-            }
-        };
+    let theme_name = overrides
+        .theme
+        .as_deref()
+        .or(effective_svg.theme.as_deref());
+    let svg_config = match merge_svg_config(&runtime.svg, &effective_svg, theme_name) {
+        Ok(config) => config,
+        Err(error) => {
+            return WorkerRenderResponse::Failed {
+                request_id: request.request_id,
+                error,
+                diagnostics: Vec::new(),
+            };
+        }
+    };
     let pressure = merge_pressure_config(&runtime.pressure, &overrides.pressure).into_report();
     let mut budget_broker = MermaidBudgetLedger::new(&pressure);
 
@@ -1024,11 +1037,24 @@ fn merge_svg_config(
 
     let theme_name = overrides.theme.as_deref().or(theme_override);
     if let Some(name) = theme_name {
-        merged.theme = name.parse::<ThemePreset>().map_err(|err| {
+        let preset = name.parse::<ThemePreset>().map_err(|err| {
             format!(
                 "invalid theme '{name}': {err}; expected one of default,mermaid,dark,forest,neutral,corporate,neon,pastel,high-contrast,monochrome,blueprint"
             )
         })?;
+        merged.theme = preset;
+        if preset == ThemePreset::Mermaid {
+            merged.cluster_fill_opacity = 1.0;
+            merged.node_gradients = false;
+            merged.rounded_corners = 5.0;
+        }
+    }
+
+    if let Some(value) = overrides.node_gradients {
+        merged.node_gradients = value;
+    }
+    if let Some(value) = overrides.cluster_fill_opacity {
+        merged.cluster_fill_opacity = value;
     }
 
     Ok(merged)
@@ -1367,9 +1393,11 @@ pub fn init(config: Option<JsValue>) -> Result<(), JsValue> {
     let current = read_runtime_config();
     let requested_theme = requested_theme_preset(&overrides).map_err(js_error)?;
     let effective_svg = overrides.effective_svg_overrides();
-    let theme_name = overrides.theme.as_deref().or(effective_svg.theme.as_deref());
-    let svg = merge_svg_config(&current.svg, &effective_svg, theme_name)
-        .map_err(js_error)?;
+    let theme_name = overrides
+        .theme
+        .as_deref()
+        .or(effective_svg.theme.as_deref());
+    let svg = merge_svg_config(&current.svg, &effective_svg, theme_name).map_err(js_error)?;
     let canvas_base = requested_theme.map_or_else(
         || current.canvas.clone(),
         |preset| apply_canvas_theme_preset(current.canvas.clone(), preset),
@@ -1399,9 +1427,12 @@ pub fn render_svg_js(input: &str, config: Option<JsValue>) -> Result<String, JsV
         let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
         with_runtime_config(|runtime| {
             let effective_svg = overrides.effective_svg_overrides();
-            let theme_name = overrides.theme.as_deref().or(effective_svg.theme.as_deref());
-            let svg = merge_svg_config(&runtime.svg, &effective_svg, theme_name)
-                .map_err(js_error)?;
+            let theme_name = overrides
+                .theme
+                .as_deref()
+                .or(effective_svg.theme.as_deref());
+            let svg =
+                merge_svg_config(&runtime.svg, &effective_svg, theme_name).map_err(js_error)?;
             let pressure =
                 merge_pressure_config(&runtime.pressure, &overrides.pressure).into_report();
             Ok::<_, JsValue>((svg, pressure))
@@ -1413,6 +1444,11 @@ pub fn render_svg_js(input: &str, config: Option<JsValue>) -> Result<String, JsV
     let parsed = parse(input);
     let layout_config = LayoutConfig {
         font_metrics: Some(svg_config.font_metrics()),
+        edge_routing: if svg_config.theme == ThemePreset::Mermaid {
+            fm_layout::EdgeRouting::Spline
+        } else {
+            fm_layout::EdgeRouting::Orthogonal
+        },
         ..Default::default()
     };
 
@@ -2043,9 +2079,12 @@ impl Diagram {
         let runtime = read_runtime_config();
         let requested_theme = requested_theme_preset(&overrides).map_err(js_error)?;
         let effective_svg = overrides.effective_svg_overrides();
-        let theme_name = overrides.theme.as_deref().or(effective_svg.theme.as_deref());
-        let svg_config = merge_svg_config(&runtime.svg, &effective_svg, theme_name)
-            .map_err(js_error)?;
+        let theme_name = overrides
+            .theme
+            .as_deref()
+            .or(effective_svg.theme.as_deref());
+        let svg_config =
+            merge_svg_config(&runtime.svg, &effective_svg, theme_name).map_err(js_error)?;
         let canvas_base = requested_theme
             .map(|preset| apply_canvas_theme_preset(runtime.canvas.clone(), preset))
             .unwrap_or_else(|| runtime.canvas.clone());
@@ -2121,10 +2160,12 @@ impl Diagram {
         let overrides: RuntimeInitConfig = parse_js_value_or_default(config);
         let requested_theme = requested_theme_preset(&overrides).map_err(js_error)?;
         let effective_svg = overrides.effective_svg_overrides();
-        let theme_name = overrides.theme.as_deref().or(effective_svg.theme.as_deref());
+        let theme_name = overrides
+            .theme
+            .as_deref()
+            .or(effective_svg.theme.as_deref());
         let next_svg =
-            merge_svg_config(&self.svg_config, &effective_svg, theme_name)
-                .map_err(js_error)?;
+            merge_svg_config(&self.svg_config, &effective_svg, theme_name).map_err(js_error)?;
         let next_pressure = merge_pressure_config(&self.pressure_config, &overrides.pressure);
         let pressure_report = next_pressure.into_report();
         let mut budget_broker = MermaidBudgetLedger::new(&pressure_report);
@@ -2150,6 +2191,11 @@ impl Diagram {
         let layout_start = Instant::now();
         let layout_config = LayoutConfig {
             font_metrics: Some(next_svg.font_metrics()),
+            edge_routing: if next_svg.theme == ThemePreset::Mermaid {
+                fm_layout::EdgeRouting::Spline
+            } else {
+                fm_layout::EdgeRouting::Orthogonal
+            },
             ..Default::default()
         };
         let traced_layout = self

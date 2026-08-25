@@ -11,7 +11,7 @@ target/
 *.wasm
 node_modules/
 .wrangler/
-dist/cloudflare-pages/
+dist/
 
 # Local scratch SQLite DBs (never tracked)
 storage.sqlite3

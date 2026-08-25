@@ -364,7 +364,7 @@ pub fn accessibility_css() -> &'static str {
     r"
 /* High contrast mode support */
 @media (prefers-contrast: more) {
-  :root {
+  svg, :root {
     --fm-bg: #ffffff !important;
     --fm-text-color: #000000 !important;
     --fm-node-fill: #ffffff !important;

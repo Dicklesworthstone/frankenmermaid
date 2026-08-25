@@ -4237,37 +4237,75 @@ Shared IR,Terminal ANSI,20`
         });
       });
 
-      // Studio Always-Visible Theme Buttons (Under Operating Theater)
-      document.querySelectorAll(".studio-theme-btn").forEach(btn => {
-        btn.addEventListener("click", () => {
-          const th = btn.getAttribute("data-studio-theme") || "dark";
-          state.activeTheme = th;
-          
-          // Update studio theme buttons
-          document.querySelectorAll(".studio-theme-btn").forEach(b => {
-            if (b === btn) {
-              b.className = "studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-emerald-500 text-black shadow-[0_0_15px_rgba(16,185,129,0.4)] border border-emerald-400";
-            } else {
-              b.className = "studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-black/60 border border-white/10 text-slate-300 hover:border-emerald-500/40 hover:text-white";
-            }
-          });
+    // Unified Global Engine Theme Switcher
+    function setEngineTheme(theme) {
+      if (!theme) return;
+      state.activeTheme = theme;
 
-          // Sync with theme preset cards in the detail tab if open
-          document.querySelectorAll(".theme-preset-card").forEach(c => {
-            if (c.getAttribute("data-theme") === th) {
-              c.classList.add("border-emerald-500", "bg-emerald-950/40");
-            } else {
-              c.classList.remove("border-emerald-500", "bg-emerald-950/40");
-            }
-          });
-
-          // Re-render immediately so the visual result is instant
-          scheduleRender(true);
-          if (typeof selectDuelSpecimen === "function") {
-            selectDuelSpecimen(currentDuelIndex);
-          }
-        });
+      // 1. Update Duel theme buttons
+      document.querySelectorAll(".duel-theme-btn").forEach(b => {
+        const isThis = b.getAttribute("data-duel-theme") === theme;
+        if (isThis) {
+          b.className = "duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono font-bold bg-emerald-500 text-black transition shrink-0 shadow-[0_0_12px_rgba(16,185,129,0.4)]";
+        } else {
+          b.className = "duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono text-slate-300 bg-white/5 border border-white/10 hover:border-emerald-500/40 hover:text-white transition shrink-0";
+        }
       });
+
+      // 2. Update Studio theme buttons
+      document.querySelectorAll(".studio-theme-btn").forEach(b => {
+        const isThis = b.getAttribute("data-studio-theme") === theme;
+        if (isThis) {
+          b.className = "studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-emerald-500 text-black shadow-[0_0_15px_rgba(16,185,129,0.4)] border border-emerald-400";
+        } else {
+          b.className = "studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-black/60 border border-white/10 text-slate-300 hover:border-emerald-500/40 hover:text-white";
+        }
+      });
+
+      // 3. Update Settings modal theme preset cards
+      document.querySelectorAll(".theme-preset-card").forEach(c => {
+        if (c.getAttribute("data-theme") === theme) {
+          c.classList.add("border-emerald-500", "bg-emerald-950/40");
+        } else {
+          c.classList.remove("border-emerald-500", "bg-emerald-950/40");
+        }
+      });
+
+      // 4. Update Studio & Duel container backgrounds
+      const studioPan = document.getElementById("studio-svg-pan-container");
+      const duelFmPan = document.getElementById("duel-fm-pan-container");
+      const duelMPan = document.getElementById("duel-m-pan-container");
+      
+      let bgColor = "#080e14";
+      if (theme === "mermaid" || theme === "corporate") {
+        bgColor = "#ffffff";
+      } else if (theme === "forest") {
+        bgColor = "#f5f5dc";
+      } else if (theme === "blueprint") {
+        bgColor = "#001e3d";
+      } else if (theme === "neon") {
+        bgColor = "#08080c";
+      }
+      
+      if (studioPan) studioPan.style.backgroundColor = bgColor;
+      if (duelFmPan) duelFmPan.style.backgroundColor = bgColor;
+      if (duelMPan) duelMPan.style.backgroundColor = "#ffffff";
+
+      // 5. Re-render Studio & Duel immediately
+      scheduleRender(true);
+      if (typeof selectDuelSpecimen === "function") {
+        selectDuelSpecimen(currentDuelIndex);
+      }
+    }
+    window.setEngineTheme = setEngineTheme;
+
+    // Studio Always-Visible Theme Buttons (Under Operating Theater)
+    document.querySelectorAll(".studio-theme-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const th = btn.getAttribute("data-studio-theme") || "dark";
+        setEngineTheme(th);
+      });
+    });
 
       // Quick sliders under operating theater
       const qRadius = document.getElementById("quick-style-radius");
@@ -4301,25 +4339,12 @@ Shared IR,Terminal ANSI,20`
         });
       }
 
-      // Theme Preset Cards
+      // Theme Preset Cards (Settings Modal)
       document.querySelectorAll(".theme-preset-card").forEach(card => {
         card.addEventListener("click", () => {
           const th = card.getAttribute("data-theme");
           if (!th) return;
-          state.activeTheme = th;
-          document.querySelectorAll(".theme-preset-card").forEach(c => c.classList.remove("border-emerald-500", "bg-emerald-950/40"));
-          card.classList.add("border-emerald-500", "bg-emerald-950/40");
-          
-          // Sync studio theme buttons
-          document.querySelectorAll(".studio-theme-btn").forEach(b => {
-            if (b.getAttribute("data-studio-theme") === th) {
-              b.className = "studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-emerald-500 text-black shadow-[0_0_15px_rgba(16,185,129,0.4)] border border-emerald-400";
-            } else {
-              b.className = "studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-black/60 border border-white/10 text-slate-300 hover:border-emerald-500/40 hover:text-white";
-            }
-          });
-
-          scheduleRender(true);
+          setEngineTheme(th);
         });
       });
 
@@ -4954,15 +4979,7 @@ Shared IR,Terminal ANSI,20`
       document.querySelectorAll(".duel-theme-btn").forEach(btn => {
         btn.addEventListener("click", () => {
           const theme = btn.getAttribute("data-duel-theme") || "dark";
-          state.activeTheme = theme;
-          document.querySelectorAll(".duel-theme-btn").forEach(b => {
-            if (b === btn) {
-              b.className = "duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono font-bold bg-emerald-500 text-black transition shrink-0";
-            } else {
-              b.className = "duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono text-slate-400 hover:text-white transition shrink-0";
-            }
-          });
-          selectDuelSpecimen(currentDuelIndex);
+          setEngineTheme(theme);
         });
       });
 
@@ -5042,6 +5059,8 @@ Shared IR,Terminal ANSI,20`
               padding: 24,
               roundedCorners: isParity ? 4 : 8,
               shadows: !isParity,
+              nodeGradients: !isParity,
+              clusterFillOpacity: isParity ? 1.0 : 0.6,
               embedThemeCss: true
             },
             responsive: true,
@@ -5050,6 +5069,8 @@ Shared IR,Terminal ANSI,20`
             padding: 24,
             roundedCorners: isParity ? 4 : 8,
             shadows: !isParity,
+            nodeGradients: !isParity,
+            clusterFillOpacity: isParity ? 1.0 : 0.6,
             embedThemeCss: true
           };
           fmSvg = frankenRuntime.renderSvg(specimen.code, duelOpts);
