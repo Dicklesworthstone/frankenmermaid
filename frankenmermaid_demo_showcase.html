@@ -28,6 +28,7 @@
   <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
+    window.tailwind = window.tailwind || {};
     tailwind.config = {
       darkMode: 'class',
       theme: {
@@ -1312,7 +1313,13 @@
             <span class="text-xs font-mono text-emerald-400/80">Real-Time Measurements</span>
           </div>
 
-          <div class="overflow-x-auto overscroll-contain">
+          <!-- Swipe Hint on Mobile -->
+          <div class="flex items-center justify-between pb-2.5 sm:hidden text-emerald-400 font-mono text-[10px]">
+            <span>← Swipe horizontally to see latencies →</span>
+            <span class="px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/30">10 Specimens</span>
+          </div>
+
+          <div class="overflow-x-auto overscroll-contain no-scrollbar">
             <table class="w-full text-left font-mono text-xs border-collapse min-w-[700px]">
               <thead>
                 <tr class="border-b border-emerald-500/20 bg-emerald-950/30 text-slate-400">
@@ -1503,7 +1510,13 @@
         <div class="franken-bolt -left-1.5 -bottom-1.5"></div>
         <div class="franken-bolt -right-1.5 -bottom-1.5"></div>
 
-        <div class="overflow-x-auto overscroll-contain">
+        <!-- Swipe Hint on Mobile -->
+        <div class="flex items-center justify-between pb-3 sm:hidden text-emerald-400 font-mono text-[10px]">
+          <span>← Swipe table horizontally to compare →</span>
+          <span class="px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/30">5 Dialects</span>
+        </div>
+
+        <div class="overflow-x-auto overscroll-contain no-scrollbar">
           <table class="w-full text-left font-sans text-sm md:text-base border-collapse min-w-[760px]">
             <thead>
               <tr class="border-b border-emerald-500/25 bg-emerald-950/40 text-slate-300">
@@ -3107,7 +3120,7 @@ Shared IR,Terminal ANSI,20`
         }, { passive: true });
       }
 
-      fitToView(force = false, padding = null) {
+      fitToView(force = false, requestedPadding = null) {
         if (!this.container || !this.viewport) return;
         const svg = this.viewport.querySelector("svg");
         if (!svg) return;
@@ -3115,10 +3128,7 @@ Shared IR,Terminal ANSI,20`
         const cWidth = this.container.clientWidth || this.container.getBoundingClientRect().width || 800;
         const cHeight = this.container.clientHeight || this.container.getBoundingClientRect().height || 560;
 
-        // Auto-adapt padding on smaller mobile screens
-        if (padding === null) {
-          padding = cWidth < 640 ? 12 : 24;
-        }
+        const padding = requestedPadding !== null ? requestedPadding : (cWidth < 640 ? 12 : 24);
 
         let vbW = 0;
         let vbH = 0;
@@ -3154,8 +3164,8 @@ Shared IR,Terminal ANSI,20`
         }
 
         // Apply physical width and height to SVG matching its viewBox geometry
-        svg.style.width = vbW + "px";
-        svg.style.height = vbH + "px";
+        svg.style.width = `${vbW}px`;
+        svg.style.height = `${vbH}px`;
         svg.style.display = "block";
         svg.style.maxWidth = "none";
         svg.style.maxHeight = "none";
@@ -3167,14 +3177,24 @@ Shared IR,Terminal ANSI,20`
         const scaleY = availH / vbH;
         let targetScale = Math.min(scaleX, scaleY);
 
-        // Auto zoom to fit comfortably: fits entire diagram without clipping or extreme shrinkage
-        targetScale = Math.max(0.15, Math.min(3.5, targetScale));
+        const isMobile = window.innerWidth < 768;
+
+        // Auto zoom to fit comfortably: on mobile viewports, keep diagram legible while allowing easy pan
+        if (isMobile && targetScale < 0.40) {
+          targetScale = Math.max(0.40, Math.min(1.0, scaleY * 0.95));
+        } else {
+          targetScale = Math.max(0.20, Math.min(3.0, targetScale));
+        }
 
         const renderedW = vbW * targetScale;
         const renderedH = vbH * targetScale;
 
         this.scale = targetScale;
-        this.panX = Math.round((cWidth - renderedW) / 2 - minX * targetScale);
+        if (isMobile && renderedW > cWidth) {
+          this.panX = Math.round(padding - minX * targetScale);
+        } else {
+          this.panX = Math.round((cWidth - renderedW) / 2 - minX * targetScale);
+        }
         this.panY = Math.round((cHeight - renderedH) / 2 - minY * targetScale);
         this.hasFitted = true;
         this.applyTransform();
@@ -3225,6 +3245,10 @@ Shared IR,Terminal ANSI,20`
 
     // WASM Loader
     async function initWasmRuntime() {
+      if (frankenRuntime && typeof frankenRuntime.renderSvg === "function") {
+        return frankenRuntime;
+      }
+
       const candidates = [
         { label: "relative-pkg", moduleUrl: "./pkg/frankenmermaid.js", wasmUrl: "./pkg/frankenmermaid_bg.wasm" },
         { label: "root-pkg", moduleUrl: "/pkg/frankenmermaid.js", wasmUrl: "/pkg/frankenmermaid_bg.wasm" },
@@ -3246,28 +3270,32 @@ Shared IR,Terminal ANSI,20`
           }
           if (typeof mod.default === "function") {
             try {
-              // 1. Pass wasm URL directly to let wasm-bindgen use WebAssembly.instantiateStreaming
-              await mod.default(cand.wasmUrl);
+              await mod.default({ module_or_path: cand.wasmUrl });
             } catch (errA) {
-              console.warn(`Init with wasmUrl failed for [${cand.label}], trying default init:`, errA);
               try {
-                await mod.default();
+                await mod.default(cand.wasmUrl);
               } catch (errB) {
-                console.warn(`Default init failed for [${cand.label}], trying precompiled module:`, errB);
-                const wasmRes = await fetch(cand.wasmUrl);
-                const bytes = await wasmRes.arrayBuffer();
-                const compiled = await WebAssembly.compile(bytes);
-                await mod.default(compiled);
+                try {
+                  await mod.default();
+                } catch (errC) {
+                  const wasmRes = await fetch(cand.wasmUrl);
+                  const bytes = await wasmRes.arrayBuffer();
+                  const compiled = await WebAssembly.compile(bytes);
+                  await mod.default({ module_or_path: compiled });
+                }
               }
             }
           }
           if (typeof mod.renderSvg === "function") {
             frankenRuntime = mod;
+            window.frankenRuntime = mod;
+            window.frankenmermaid = mod;
             state.runtimeLoaded = true;
             if (els.runtimeMode) els.runtimeMode.textContent = "LIVE (WASM)";
             if (els.runtimeModeDot) els.runtimeModeDot.className = "h-2 w-2 rounded-full bg-emerald-400 animate-pulse";
             renderSpotlight();
             scheduleRender(true);
+            renderGalleryMiniaturesSync();
             setupGalleryObserver();
             if (typeof selectDuelSpecimen === "function") {
               selectDuelSpecimen(currentDuelIndex);
@@ -3555,7 +3583,13 @@ Shared IR,Terminal ANSI,20`
     }
 
     function renderMiniatureNow(miniEl) {
-      if (!frankenRuntime || !miniEl || miniEl.hasAttribute("data-rendered")) return;
+      if (!miniEl || miniEl.hasAttribute("data-rendered")) return;
+      if (!frankenRuntime) {
+        if (!miniatureQueue.includes(miniEl)) {
+          miniatureQueue.push(miniEl);
+        }
+        return;
+      }
       const code = miniEl.getAttribute("data-code");
       if (!code) return;
       if (MINIATURE_CACHE.has(code)) {
@@ -5125,6 +5159,10 @@ Shared IR,Terminal ANSI,20`
 
       setupEvents();
       refreshEditor();
+
+      // Bootstrap WASM first so all components render with live engine available
+      await initWasmRuntime();
+
       renderGallery();
       initDragRaceTable();
       initDuelInspector();
@@ -5168,9 +5206,6 @@ Shared IR,Terminal ANSI,20`
         const sum = document.getElementById("presenter-summary");
         if (sum) sum.textContent = "Presenter mode is active. Move to the flagship flowchart.";
       }
-
-      // Bootstrap WASM
-      await initWasmRuntime();
     }
 
     init();
