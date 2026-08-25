@@ -217,7 +217,7 @@ cargo build --release --workspace
 
 ### JavaScript / WASM
 
-> **Note on npm distribution.** The `@frankenmermaid/core` package builds cleanly to `pkg/` via `./build-wasm.sh` and the `npm-publish` CI job in `.github/workflows/ci.yml` is wired up, but it is gated to `refs/tags/v*` pushes; the `v0.2.0` tag is the project's first tagged release and triggers that job. Until the publish job's first run is confirmed, use one of the two methods below.
+> **Note on npm distribution.** The `@frankenmermaid/core` package builds cleanly to `pkg/` via `./build-wasm.sh`, but it is not published on npm yet. Releases are built and verified through the project's local `/dsr` release path. Until an npm publication from that path is verified, use one of the two methods below.
 
 **Option 1 — build from source (recommended):**
 
@@ -619,7 +619,7 @@ The complete runtime configuration surface, defined in `fm-core/src/lib.rs`:
 
 | Field | Default | Purpose |
 |---|---|---|
-| `enabled` | `true` | Master switch — when `false`, render returns a noop placeholder |
+| `enabled` | `true` | Global switch — when `false`, render returns a noop placeholder |
 | `glyph_mode` | `Unicode` | `Unicode` / `Ascii` — character set for terminal rendering |
 | `render_mode` | `Auto` | `Auto` / `CellOnly` / `Braille` / `Block` / `HalfBlock` — sub-cell mode (`Auto` picks based on detected terminal capability) |
 | `tier_override` | `Normal` | `Compact` / `Normal` / `Rich` / `Auto` — terminal detail tier |
@@ -2056,7 +2056,7 @@ A --> B
 - **PNG export** rasterizes the SVG output. CSS animations and hover effects are not preserved in static PNGs.
 - **WebGPU backend** is plumbed in the WebRenderer selection logic but the implementation is a fallback to Canvas2D; full WebGPU rendering is a planned epic.
 - **FNX directed analysis** (Phase 2) is in canary rollout via the `RolloutPhase` state machine in `fm-core/src/canary.rs` (`Disabled → Canary → Partial → Full`, with `RolledBack` for health-criteria violations). Enable explicitly with `--features fnx-experimental-directed` if you want to drive it.
-- **`@frankenmermaid/core` npm package** is not on npm yet. The publish CI job exists and is gated to `refs/tags/v*` pushes; the project hasn't cut a tagged release. Until then, use the WASM bundle from the live demo or build locally with `./build-wasm.sh`.
+- **`@frankenmermaid/core` npm package** is not on npm yet. The supported release path is `/dsr`, and no npm publication from that path has been verified. Until then, use the WASM bundle from the live demo or build locally with `./build-wasm.sh`.
 - Some niche Mermaid syntax may parse with warnings and produce different visual output from mermaid-js; the `Compatibility` diagnostic category surfaces these explicitly.
 
 ## Documentation
@@ -2264,7 +2264,7 @@ frankenmermaid borrows heavily from prior graph-drawing research and from the op
 - **[tracing](https://github.com/tokio-rs/tracing)** + **[tracing-subscriber](https://docs.rs/tracing-subscriber)** for structured observability.
 - **[notify](https://github.com/notify-rs/notify)** for the `watch` feature.
 - **[tiny_http](https://crates.io/crates/tiny_http)** for the `serve` feature.
-- **[resvg](https://github.com/RazrFalcon/resvg)** + **[usvg](https://github.com/RazrFalcon/resvg/tree/master/crates/usvg)** for the optional PNG rasterization path.
+- **[resvg](https://github.com/linebender/resvg)** + **[usvg](https://github.com/linebender/resvg/tree/main/crates/usvg)** for the optional PNG rasterization path.
 - **[unicode-segmentation](https://github.com/unicode-rs/unicode-segmentation)** for grapheme-aware label handling.
 - **[json5](https://github.com/callum-oakley/json5-rs)** for init-directive parsing fallback.
 
@@ -2489,51 +2489,43 @@ Diagnostics are sorted deterministically by `(severity, line, column, stage, err
 
 ---
 
-## CI/CD integration recipes
+## Local automation recipes
 
-### GitHub Actions: render diagrams + check for drift
+### Render diagrams + check for drift
 
-```yaml
-name: Diagrams
-on: [push, pull_request]
-jobs:
-  render:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install frankenmermaid
-        run: curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/frankenmermaid/main/install.sh | bash
-      - name: Render diagrams
-        run: |
-          export PATH="$HOME/.local/bin:$PATH"
-          find docs -name '*.mmd' | while read -r f; do
-            fm-cli render "$f" --format svg --output "${f%.mmd}.svg"
-          done
-      - name: Check for drift
-        run: git diff --exit-code -- docs/
+```bash
+set -euo pipefail
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/frankenmermaid/main/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+
+while IFS= read -r -d '' file; do
+  fm-cli render "$file" --format svg --output "${file%.mmd}.svg"
+done < <(find docs -name '*.mmd' -print0)
+
+git diff --exit-code -- docs/
 ```
 
 ### Reject diagrams with parse warnings
 
-```yaml
-- name: Validate
-  run: |
-    fail=0
-    find docs -name '*.mmd' | while read -r f; do
-      fm-cli validate "$f" --fail-on warning || fail=1
-    done
-    exit $fail
+```bash
+fail=0
+while IFS= read -r -d '' file; do
+  fm-cli validate "$file" --fail-on warning || fail=1
+done < <(find docs -name '*.mmd' -print0)
+exit "$fail"
 ```
 
 ### Snapshot a render and gate on hash
 
-```yaml
-- name: Render to a fixed digest
-  run: |
-    fm-cli render docs/architecture.mmd --format svg --output /tmp/arch.svg
-    expected=$(cat docs/architecture.sha256)
-    actual=$(sha256sum /tmp/arch.svg | cut -d' ' -f1)
-    [ "$expected" = "$actual" ] || { echo "SVG drift!"; diff <(cat docs/architecture.svg) /tmp/arch.svg; exit 1; }
+```bash
+fm-cli render docs/architecture.mmd --format svg --output /tmp/arch.svg
+expected=$(cat docs/architecture.sha256)
+actual=$(sha256sum /tmp/arch.svg | cut -d' ' -f1)
+[ "$expected" = "$actual" ] || {
+  echo "SVG drift!"
+  diff docs/architecture.svg /tmp/arch.svg
+  exit 1
+}
 ```
 
 ### Differential PR review
@@ -2668,7 +2660,7 @@ The exhaustive backlog lives in [`.beads/`](.beads/). The largest pieces of in-f
 | **WebGPU diagram renderer** (`bd-2u0.2`) | Partial | The WebRenderer selector exists; Canvas2D is the current fallback; full WebGPU implementation is queued |
 | **Web Worker / OffscreenCanvas path** (`bd-2u0.6`) | Planned | Off-main-thread rendering for large in-browser diagrams |
 | **LP/MIP solver backend for constraint layout** (`bd-1fef.2`) | Partial | Constraint-based layout exists; the LP/MIP backend would replace the heuristic solver for hard constraints |
-| **`@frankenmermaid/core` npm publish** | CI wired, awaiting tag | The npm-publish CI job exists (`bd-hye0`) and is gated to `refs/tags/v*`. The first `v0.2.0` tag publishes to npm automatically; the job idempotently no-ops if the version is already on npm |
+| **`@frankenmermaid/core` npm publish** | Awaiting `/dsr` release | Build and verify the package through `/dsr`, then confirm the public registry from a clean consumer before documenting npm installation |
 | **Crates.io publish** | Blocker-clear | Per `docs/CRATES_IO_PUBLISHING.md`, all blockers are resolved as of 2026-04-21 (`franken-kernel` migrated). Awaiting publish-order execution |
 | **Swiss Tables for node/edge maps** (`bd-2gr9`) | Planned | Replace `BTreeMap` hot paths with deterministic hash-based maps; needs a determinism story |
 | **Triage UBS warning baseline** (`bd-tp4z`) | In progress | Bringing the UBS scanner output to zero |

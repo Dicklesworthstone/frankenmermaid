@@ -3818,12 +3818,14 @@ mod tests {
     #[test]
     fn x86_64_and_wasm32_render_the_same_bytes() {
         let _serial = config_guard();
-        // These five files are the publishable package surface. Pinning their combined digest
-        // separately from the rendered-output digests makes a regenerated or partially rebuilt
-        // package fail with an artifact-specific instruction before it can masquerade as a
-        // cross-target floating-point difference. The package was built at f9b6291b; update this
-        // digest and the per-fixture digests together after reviewing the generated artifact diff.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x0b21_d680_56ac_f4b9;
+        // These five files are the versioned code, interface, and metadata package surface. The
+        // copied README is deliberately excluded so a documentation-only edit does not require a
+        // bundle rebuild. Pinning the combined digest separately from rendered-output digests makes
+        // a regenerated or partially rebuilt package fail with an artifact-specific instruction
+        // before it can masquerade as a cross-target floating-point difference. Rebuild from the
+        // same source revision, then update this digest and the per-fixture digests together after
+        // reviewing every generated artifact.
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x0b3a_ec27_513d_e3ca;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),
@@ -3849,22 +3851,22 @@ mod tests {
             (
                 "flowchart",
                 "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n  c -.--> a\n  b --> d[Delta]\n",
-                0x06fe_fd61_ab25_d27c,
+                0x5b6a_4743_a3f7_857a,
             ),
             (
                 "sequence",
                 "sequenceDiagram\n  participant A\n  participant B\n  A->>B: hello\n  B-->>A: reply\n",
-                0x059d_55c1_7daf_02ef,
+                0xc66f_e6a6_5a7a_6221,
             ),
             (
                 "class",
                 "classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n  Alpha <|-- Beta\n",
-                0x9e60_5577_a780_5a40,
+                0xb64a_03da_fe09_c7ba,
             ),
             (
                 "state",
                 "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy: start\n  Busy --> Idle: done\n",
-                0x266d_2df7_8b7e_b453,
+                0xa28c_d563_0ff2_61bd,
             ),
         ];
 
