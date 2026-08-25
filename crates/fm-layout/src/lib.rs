@@ -3365,13 +3365,7 @@ fn compute_traced_layout_with_config_and_guardrails(
         }
         LayoutAlgorithm::Force => layout_diagram_force_traced(ir),
         LayoutAlgorithm::Tree => layout_diagram_tree_traced(ir),
-        LayoutAlgorithm::Radial => {
-            if ir.diagram_type == fm_core::DiagramType::Mindmap {
-                layout_diagram_mindmap_traced(ir)
-            } else {
-                layout_diagram_radial_traced(ir)
-            }
-        }
+        LayoutAlgorithm::Radial => layout_diagram_radial_traced(ir),
         LayoutAlgorithm::Timeline => layout_diagram_timeline_traced(ir),
         LayoutAlgorithm::Gantt => layout_diagram_gantt_traced(ir),
         LayoutAlgorithm::XyChart => layout_diagram_xychart_traced(ir),
@@ -5823,23 +5817,50 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     }
 }
 
-fn mindmap_subtree_height(
-    node: usize,
+fn mindmap_subtree_heights(
     tree: &TreeLayoutStructure,
     node_sizes: &[(f32, f32)],
     v_gap: f32,
-) -> f32 {
-    let children = tree.children.of(node);
-    if children.is_empty() {
-        node_sizes[node].1.max(38.0)
-    } else {
-        let sum: f32 = children
-            .iter()
-            .map(|c| mindmap_subtree_height(*c, tree, node_sizes, v_gap))
-            .sum();
-        let total_gaps = (children.len().saturating_sub(1)) as f32 * v_gap;
-        (sum + total_gaps).max(node_sizes[node].1.max(38.0))
+) -> Vec<f32> {
+    let mut heights: Vec<f32> = node_sizes
+        .iter()
+        .map(|(_, height)| height.max(38.0))
+        .collect();
+    let mut state = vec![0_u8; node_sizes.len()];
+
+    // Mindmaps are untrusted input and can be thousands of levels deep. Keep the postorder walk on
+    // the heap instead of the call stack; the state guard also makes malformed cyclic structures
+    // terminate rather than repeatedly expanding the same node.
+    for start in tree.roots.iter().copied().chain(0..node_sizes.len()) {
+        if state[start] == 2 {
+            continue;
+        }
+        let mut work = vec![(start, false)];
+        while let Some((node, children_visited)) = work.pop() {
+            if children_visited {
+                let children = tree.children.of(node);
+                if !children.is_empty() {
+                    let child_height: f32 = children.iter().map(|child| heights[*child]).sum();
+                    let gaps = children.len().saturating_sub(1) as f32 * v_gap;
+                    heights[node] = (child_height + gaps).max(heights[node]);
+                }
+                state[node] = 2;
+                continue;
+            }
+            if state[node] != 0 {
+                continue;
+            }
+            state[node] = 1;
+            work.push((node, true));
+            for child in tree.children.of(node).iter().rev() {
+                if state[*child] == 0 {
+                    work.push((*child, false));
+                }
+            }
+        }
     }
+
+    heights
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5850,57 +5871,50 @@ fn mindmap_place_subtree(
     is_left: bool,
     tree: &TreeLayoutStructure,
     node_sizes: &[(f32, f32)],
+    subtree_heights: &[f32],
     h_gap: f32,
     v_gap: f32,
     positions: &mut [(f32, f32)],
     is_left_arr: &mut [bool],
 ) {
-    let (nw, nh) = node_sizes[node];
-    let x = if is_left {
-        x_parent - h_gap - nw
-    } else {
-        x_parent + h_gap
-    };
-    let y = y_center - nh * 0.5;
-    positions[node] = (x, y);
-    is_left_arr[node] = is_left;
+    let mut work = vec![(node, x_parent, y_center, is_left)];
+    while let Some((node, x_parent, y_center, is_left)) = work.pop() {
+        let (node_width, node_height) = node_sizes[node];
+        let x = if is_left {
+            x_parent - h_gap - node_width
+        } else {
+            x_parent + h_gap
+        };
+        positions[node] = (x, y_center - node_height * 0.5);
+        is_left_arr[node] = is_left;
 
-    let children = tree.children.of(node);
-    if children.is_empty() {
-        return;
-    }
+        let children = tree.children.of(node);
+        if children.is_empty() {
+            continue;
+        }
+        let total_children_height: f32 = children
+            .iter()
+            .map(|child| subtree_heights[*child])
+            .sum::<f32>()
+            + children.len().saturating_sub(1) as f32 * v_gap;
+        let next_x_parent = if is_left { x } else { x + node_width };
+        let mut next_y = y_center + total_children_height * 0.5;
 
-    let total_children_h: f32 = children
-        .iter()
-        .map(|c| mindmap_subtree_height(*c, tree, node_sizes, v_gap))
-        .sum::<f32>()
-        + (children.len().saturating_sub(1) as f32 * v_gap);
-
-    let mut curr_y = y_center - total_children_h * 0.5;
-    let next_x_parent = if is_left { x } else { x + nw };
-
-    for child in children {
-        let ch_h = mindmap_subtree_height(*child, tree, node_sizes, v_gap);
-        let child_center_y = curr_y + ch_h * 0.5;
-        mindmap_place_subtree(
-            *child,
-            next_x_parent,
-            child_center_y,
-            is_left,
-            tree,
-            node_sizes,
-            h_gap,
-            v_gap,
-            positions,
-            is_left_arr,
-        );
-        curr_y += ch_h + v_gap;
+        // Reverse insertion preserves the recursive routine's source-order traversal when popped.
+        for child in children.iter().rev() {
+            let child_height = subtree_heights[*child];
+            let child_center_y = next_y - child_height * 0.5;
+            work.push((*child, next_x_parent, child_center_y, is_left));
+            next_y -= child_height + v_gap;
+        }
     }
 }
 
+/// Experimental bilateral mindmap layout. The default radial dispatch remains authoritative until
+/// this geometry is admitted by the committed layout and renderer equivalence gates.
 #[must_use]
 pub fn layout_diagram_mindmap_traced(ir: &MermaidDiagramIr) -> TracedLayout {
-    let trace = LayoutTrace::default();
+    let mut trace = LayoutTrace::default();
     let metrics = fm_core::FontMetrics::default_metrics();
     let node_sizes = compute_node_sizes(ir, &metrics);
     let node_count = ir.nodes.len();
@@ -5929,43 +5943,14 @@ pub fn layout_diagram_mindmap_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     let tree = build_tree_layout_structure(ir);
     let root_idx = tree.roots.first().copied().unwrap_or(0);
-    let root_children = tree.children.of(root_idx);
+    let mut root_branches = tree.children.of(root_idx).to_vec();
+    root_branches.extend(tree.roots.iter().copied().filter(|root| *root != root_idx));
+    let subtree_heights = mindmap_subtree_heights(&tree, &node_sizes, 22.0);
 
-    if root_children.is_empty() {
-        let (rw, rh) = node_sizes[root_idx];
-        let nodes = vec![LayoutNodeBox {
-            node_index: root_idx,
-            node_id: ir.nodes[root_idx].id.clone(),
-            span: ir.nodes[root_idx].span_primary,
-            bounds: LayoutRect {
-                x: 60.0,
-                y: 60.0,
-                width: rw,
-                height: rh,
-            },
-            rank: 0,
-            order: 0,
-        }];
-        let bounds = compute_bounds(&nodes, &[], &[], spacing);
-        return TracedLayout {
-            layout: Arc::new(DiagramLayout {
-                nodes,
-                clusters: Vec::new(),
-                cycle_clusters: Vec::new(),
-                edges: Vec::new(),
-                bounds,
-                stats: LayoutStats::default(),
-                extensions: LayoutExtensions::default(),
-                dirty_regions: Vec::new(),
-            }),
-            trace,
-        };
-    }
-
-    let num_branches = root_children.len();
-    let right_count = (num_branches + 1) / 2;
-    let right_branches = &root_children[..right_count];
-    let left_branches = &root_children[right_count..];
+    let num_branches = root_branches.len();
+    let right_count = num_branches.div_ceil(2);
+    let right_branches = &root_branches[..right_count];
+    let left_branches = &root_branches[right_count..];
 
     let v_gap = 22.0_f32;
     let h_gap = 52.0_f32;
@@ -5975,13 +5960,13 @@ pub fn layout_diagram_mindmap_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     let right_total_h: f32 = right_branches
         .iter()
-        .map(|b| mindmap_subtree_height(*b, &tree, &node_sizes, v_gap))
+        .map(|branch| subtree_heights[*branch])
         .sum::<f32>()
         + (right_branches.len().saturating_sub(1) as f32 * v_gap);
 
     let left_total_h: f32 = left_branches
         .iter()
-        .map(|b| mindmap_subtree_height(*b, &tree, &node_sizes, v_gap))
+        .map(|branch| subtree_heights[*branch])
         .sum::<f32>()
         + (left_branches.len().saturating_sub(1) as f32 * v_gap);
 
@@ -5996,7 +5981,7 @@ pub fn layout_diagram_mindmap_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     // Place right branches
     let mut curr_y = (max_side_h - right_total_h) * 0.5;
     for branch in right_branches {
-        let bh = mindmap_subtree_height(*branch, &tree, &node_sizes, v_gap);
+        let bh = subtree_heights[*branch];
         let b_center_y = curr_y + bh * 0.5;
         mindmap_place_subtree(
             *branch,
@@ -6005,6 +5990,7 @@ pub fn layout_diagram_mindmap_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             false,
             &tree,
             &node_sizes,
+            &subtree_heights,
             h_gap,
             v_gap,
             &mut node_positions,
@@ -6016,7 +6002,7 @@ pub fn layout_diagram_mindmap_traced(ir: &MermaidDiagramIr) -> TracedLayout {
     // Place left branches
     let mut curr_y = (max_side_h - left_total_h) * 0.5;
     for branch in left_branches {
-        let bh = mindmap_subtree_height(*branch, &tree, &node_sizes, v_gap);
+        let bh = subtree_heights[*branch];
         let b_center_y = curr_y + bh * 0.5;
         mindmap_place_subtree(
             *branch,
@@ -6025,6 +6011,7 @@ pub fn layout_diagram_mindmap_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             true,
             &tree,
             &node_sizes,
+            &subtree_heights,
             h_gap,
             v_gap,
             &mut node_positions,
@@ -6142,6 +6129,16 @@ pub fn layout_diagram_mindmap_traced(ir: &MermaidDiagramIr) -> TracedLayout {
 
     let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
     let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
+    let (total_edge_length, reversed_edge_total_length) = compute_edge_length_metrics(&edges);
+    push_snapshot(&mut trace, "mindmap_layout", node_count, edges.len(), 0, 0);
+    let stats = LayoutStats {
+        node_count,
+        edge_count: edges.len(),
+        reversed_edge_total_length,
+        total_edge_length,
+        phase_iterations: trace.snapshots.len(),
+        ..LayoutStats::default()
+    };
 
     TracedLayout {
         layout: Arc::new(DiagramLayout {
@@ -6150,7 +6147,7 @@ pub fn layout_diagram_mindmap_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             cycle_clusters: Vec::new(),
             edges,
             bounds,
-            stats: LayoutStats::default(),
+            stats,
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
         }),
@@ -11048,21 +11045,6 @@ fn compute_node_size(
                 )
             }
         }
-        fm_core::NodeShape::Circle => {
-            if text.is_empty() {
-                (36.0, 36.0)
-            } else {
-                let (label_width, label_height) = metrics.estimate_dimensions(text);
-                let (icon_width, icon_height) = icon_dimensions(node, metrics);
-                let content_w = label_width.max(icon_width);
-                let content_h = label_height + icon_height;
-                let diameter = (content_w.hypot(content_h) + 24.0)
-                    .max(content_w + 36.0)
-                    .max(content_h + 36.0)
-                    .max(48.0);
-                (diameter, diameter)
-            }
-        }
         fm_core::NodeShape::HorizontalBar => (72.0, 16.0),
         _ => {
             let text = if text.is_empty() {
@@ -11432,12 +11414,15 @@ fn class_compartment_dimensions(
 
     // The STEREOTYPE row is drawn in this box too, so it has to be measured in it. It was not:
     // width came from the member rows alone, and the caller's other term is the CLASS NAME, so
+    // `class A { <<interface>> }` sized a box to fit `A` and then drew a string four times wider.
+    // Height had always counted this row; only the width forgot it — the asymmetry that made the
+    // omission survive, since a too-narrow box overflows visibly rather than dropping content.
+    // Renderers draw it at `font_size * 0.85`, and `metrics` measures at full size.
     let stereotype_width = meta.stereotype.as_ref().map_or(0.0, |stereotype| {
         metrics.estimate_dimensions(stereotype.label()).0 * 0.85
     });
 
-    let content_w = (member_width * 1.25).max(stereotype_width * 1.25);
-    Some(((content_w + 40.0).max(180.0), height + 20.0))
+    Some((member_width.max(stereotype_width) + 16.0, height))
 }
 
 /// Space an ER entity needs for its attribute rows. `None` for any node that declares no `members`.
@@ -11752,16 +11737,17 @@ fn cycle_removal(
         detect_cycle_components(node_count, &edges, node_priority)
     };
 
-    let reversed_edge_indexes = if matches!(ir.diagram_type, DiagramType::State) {
-        dfs_back_edges.clone()
-    } else {
-        match cycle_strategy {
-            CycleStrategy::Greedy => cycle_removal_greedy(node_count, &edges, node_priority),
-            CycleStrategy::DfsBack => dfs_back_edges.clone(),
-            CycleStrategy::MfasApprox => {
-                cycle_removal_mfas_approx(node_count, &edges, node_priority, &cycle_detection)
-            }
-            CycleStrategy::CycleAware => dfs_back_edges.clone(),
+    let reversed_edge_indexes = match cycle_strategy {
+        CycleStrategy::Greedy => cycle_removal_greedy(node_count, &edges, node_priority),
+        CycleStrategy::DfsBack => dfs_back_edges.clone(),
+        CycleStrategy::MfasApprox => {
+            cycle_removal_mfas_approx(node_count, &edges, node_priority, &cycle_detection)
+        }
+        CycleStrategy::CycleAware => {
+            // For CycleAware, we still want to break cycles for the ranking phase
+            // to ensure a high-quality topological baseline, but we keep the
+            // original orientation for other phases that handle cycles explicitly.
+            dfs_back_edges.clone()
         }
     };
 
@@ -12128,7 +12114,7 @@ fn cycle_removal_greedy(
             let right_score = out_degree[*right] as isize - in_degree[*right] as isize;
             left_score
                 .cmp(&right_score)
-                .then_with(|| compare_priority(*left, *right, node_priority))
+                .then_with(|| compare_priority(*right, *left, node_priority))
         }) else {
             break;
         };
@@ -12939,21 +12925,9 @@ fn place_block_beta_items(
 }
 
 fn compare_node_indices(ir: &MermaidDiagramIr, left: usize, right: usize) -> std::cmp::Ordering {
-    let left_is_start = ir.nodes.get(left).is_some_and(|n| {
-        n.id.starts_with("__state_start") || n.shape == fm_core::NodeShape::FilledCircle
-    });
-    let right_is_start = ir.nodes.get(right).is_some_and(|n| {
-        n.id.starts_with("__state_start") || n.shape == fm_core::NodeShape::FilledCircle
-    });
-
-    right_is_start
-        .cmp(&left_is_start)
-        .then_with(|| {
-            let left_subgraph_depth = ir.graph.nodes.get(left).map_or(0, |n| n.subgraphs.len());
-            let right_subgraph_depth = ir.graph.nodes.get(right).map_or(0, |n| n.subgraphs.len());
-            left_subgraph_depth.cmp(&right_subgraph_depth)
-        })
-        .then_with(|| ir.nodes[left].id.cmp(&ir.nodes[right].id))
+    ir.nodes[left]
+        .id
+        .cmp(&ir.nodes[right].id)
         .then_with(|| left.cmp(&right))
 }
 
@@ -17212,54 +17186,6 @@ fn anchor_composite_state_nodes(
                 node.bounds = cluster.bounds;
             }
         }
-
-        // Ensure any outgoing transition target that is an end state [*] sits below this cluster
-        for edge in &ir.edges {
-            if let (Some(source), Some(target)) = (
-                endpoint_node_index(ir, edge.from),
-                endpoint_node_index(ir, edge.to),
-            ) {
-                if let (Some(s_node), Some(t_node)) = (ir.nodes.get(source), ir.nodes.get(target)) {
-                    if s_node.id == title
-                        && (t_node.id == "__state_end"
-                            || t_node.shape == fm_core::NodeShape::DoubleCircle)
-                    {
-                        if let Some(target_box) = nodes.get_mut(target) {
-                            if target_box.bounds.y <= cluster.bounds.y + cluster.bounds.height {
-                                target_box.bounds.y =
-                                    cluster.bounds.y + cluster.bounds.height + 40.0;
-                                target_box.bounds.x = cluster.bounds.x
-                                    + (cluster.bounds.width - target_box.bounds.width) / 2.0;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Offset 2-cycle intermediary nodes horizontally so forward and return paths never coincide
-    for edge in &ir.edges {
-        if let (Some(s), Some(t)) = (
-            endpoint_node_index(ir, edge.from),
-            endpoint_node_index(ir, edge.to),
-        ) {
-            if s != t {
-                let has_return = ir.edges.iter().any(|other| {
-                    endpoint_node_index(ir, other.from) == Some(t)
-                        && endpoint_node_index(ir, other.to) == Some(s)
-                });
-                if has_return && s < nodes.len() && t < nodes.len() {
-                    let s_depth = ir.graph.nodes.get(s).map_or(0, |n| n.subgraphs.len());
-                    let t_depth = ir.graph.nodes.get(t).map_or(0, |n| n.subgraphs.len());
-                    if s_depth == 0 && t_depth == 0 {
-                        if (nodes[s].bounds.x - nodes[t].bounds.x).abs() < 20.0 {
-                            nodes[t].bounds.x -= 80.0;
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -18690,9 +18616,10 @@ mod tests {
         force_barnes_hut_repulsion, force_direct_repulsion, incremental_overlap_alignment,
         is_directed_path, layout, layout_diagram, layout_diagram_force,
         layout_diagram_force_traced, layout_diagram_gantt, layout_diagram_grid,
-        layout_diagram_incremental_traced_with_config_and_guardrails, layout_diagram_radial,
-        layout_diagram_sankey, layout_diagram_sequence, layout_diagram_sequence_traced,
-        layout_diagram_timeline, layout_diagram_traced, layout_diagram_traced_with_algorithm,
+        layout_diagram_incremental_traced_with_config_and_guardrails,
+        layout_diagram_mindmap_traced, layout_diagram_radial, layout_diagram_sankey,
+        layout_diagram_sequence, layout_diagram_sequence_traced, layout_diagram_timeline,
+        layout_diagram_traced, layout_diagram_traced_with_algorithm,
         layout_diagram_traced_with_algorithm_and_guardrails,
         layout_diagram_traced_with_config_and_guardrails, layout_diagram_tree,
         layout_diagram_with_config, layout_diagram_with_cycle_strategy, layout_diagram_xychart,
@@ -23163,7 +23090,7 @@ mod tests {
     }
 
     #[test]
-    fn radial_layout_handles_ten_thousand_node_chain_on_worker_stack() {
+    fn mindmap_layout_handles_ten_thousand_node_chain_on_worker_stack() {
         let node_count = std::thread::Builder::new()
             .stack_size(2 * 1024 * 1024)
             .spawn(|| {
@@ -23185,11 +23112,11 @@ mod tests {
                     });
                 }
 
-                layout_diagram_radial(&ir).nodes.len()
+                layout_diagram_mindmap_traced(&ir).layout.nodes.len()
             })
-            .expect("spawn radial layout worker")
+            .expect("spawn mindmap layout worker")
             .join()
-            .expect("radial layout should not overflow worker stack");
+            .expect("mindmap layout should not overflow worker stack");
 
         assert_eq!(node_count, 10_000);
     }
@@ -23201,9 +23128,31 @@ mod tests {
         let auto_stats = layout(&ir, LayoutAlgorithm::Auto);
         let radial_stats = layout(&ir, LayoutAlgorithm::Radial);
         assert_eq!(auto_stats, radial_stats);
+        assert_eq!(auto_stats.node_count, ir.nodes.len());
+        assert_eq!(auto_stats.edge_count, ir.edges.len());
+        assert!(auto_stats.phase_iterations > 0);
         let traced = layout_diagram_traced_with_algorithm(&ir, LayoutAlgorithm::Auto);
         assert_eq!(traced.trace.dispatch.selected, LayoutAlgorithm::Radial);
         assert!(!traced.trace.dispatch.capability_unavailable);
+    }
+
+    #[test]
+    fn mindmap_layout_preserves_disconnected_recovered_components() {
+        let ir = graph_ir(DiagramType::Mindmap, 4, &[(0, 1), (2, 3)]);
+        let layout = layout_diagram_mindmap_traced(&ir).layout;
+
+        assert_eq!(layout.nodes.len(), 4);
+        assert_eq!(layout.edges.len(), 2);
+        assert_eq!(layout.stats.node_count, 4);
+        assert_eq!(layout.stats.edge_count, 2);
+        for (index, left) in layout.nodes.iter().enumerate() {
+            for right in &layout.nodes[index + 1..] {
+                assert_ne!(
+                    left.bounds, right.bounds,
+                    "recovered roots must not overlap"
+                );
+            }
+        }
     }
 
     #[test]
