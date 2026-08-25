@@ -63,9 +63,12 @@ struct CorpusItem {
     /// parse arm stopped consulting once it was found to be measuring the cache rather than the
     /// parse; the field is kept because it is part of the corpus item's deserialized shape and the
     /// memo's semantics tests still exercise it.
-    #[expect(
-        dead_code,
-        reason = "keyed the parse memo that no timed arm may consult; retained for corpus shape and semantics tests"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "keyed the parse memo that no timed arm may consult; retained for corpus shape and semantics tests"
+        )
     )]
     #[serde(skip, default = "new_batch_revision_key")]
     revision_key: Arc<BatchRevisionKey>,
@@ -832,9 +835,12 @@ impl RenderExecutor {
     /// `persistent_parse_snapshot` flag is still reported in each row's provenance block and its
     /// semantics are pinned by tests -- deleting it would silently drop a field that recorded rows
     /// already carry. It must not be reintroduced into a timed loop.
-    #[expect(
-        dead_code,
-        reason = "memo path kept for its reported provenance flag and semantics tests; no timed arm may call it"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "memo path kept for its reported provenance flag and semantics tests; no timed arm may call it"
+        )
     )]
     fn parse_all_versioned(
         &self,
