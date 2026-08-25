@@ -20,6 +20,10 @@
   <meta name="twitter:image" content="https://frankenmermaid.com/gh_og_share_image.png">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23020a06'/%3E%3Crect width='64' height='64' rx='14' fill='none' stroke='%2310b981' stroke-opacity='0.5' stroke-width='2'/%3E%3Ctext x='32' y='44' font-family='monospace' font-size='36' font-weight='900' fill='%2334d399' text-anchor='middle'%3E🧜%3C/text%3E%3C/svg%3E">
 
+  <!-- Preload WebAssembly Binary & Engine Module for Instant Execution -->
+  <link rel="preload" href="./pkg/frankenmermaid_bg.wasm" as="fetch" type="application/wasm" crossorigin>
+  <link rel="modulepreload" href="./pkg/frankenmermaid.js">
+
   <!-- Inter and JetBrains Mono Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -873,7 +877,6 @@
                 <button type="button" id="tab-svg-btn" class="view-tab px-3 sm:px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest bg-emerald-500 text-black shadow-sm shrink-0">SVG</button>
                 <button type="button" id="tab-canvas-btn" class="view-tab px-2.5 sm:px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-emerald-300 shrink-0">Canvas2D</button>
                 <button type="button" id="tab-term-btn" class="view-tab px-2.5 sm:px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-emerald-300 shrink-0">Terminal</button>
-                <button type="button" id="tab-style-btn" class="view-tab px-2.5 sm:px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-emerald-300 shrink-0">Theme</button>
                 <button type="button" id="tab-proof-btn" class="view-tab px-2.5 sm:px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-emerald-300 shrink-0">Proof</button>
               </div>
 
@@ -1106,6 +1109,79 @@
                 <div id="determinism-summary" class="text-xs font-mono text-emerald-400">Ready to execute determinism audit.</div>
                 <pre id="determinism-json" class="p-4 rounded-xl bg-black border border-white/10 font-mono text-xs text-slate-400 overflow-x-auto">Determinism evidence JSON will appear here after running...</pre>
               </div>
+            </div>
+          </div>
+
+          <!-- Always-Visible Live Theme Palette Strip (Under the Operating Theater) -->
+          <div id="studio-theme-strip" class="px-4 sm:px-6 md:px-8 py-3 bg-[#020a06] border-t border-emerald-500/15">
+            <div class="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
+              
+              <!-- Palette Selection Buttons with Color Swatch Dots -->
+              <div class="flex items-center gap-2 overflow-x-auto scrollbar-none py-1 min-w-0 max-w-full" role="group" aria-label="Operating Theater Theme Palettes">
+                <span class="text-[9px] font-black uppercase tracking-widest text-slate-400 shrink-0 font-mono flex items-center gap-1.5 mr-1">
+                  <span>🎨</span>
+                  <span>THEME:</span>
+                </span>
+                
+                <button type="button" class="studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-emerald-500 text-black shadow-[0_0_15px_rgba(16,185,129,0.4)] border border-emerald-400" data-studio-theme="dark">
+                  <span class="h-2.5 w-2.5 rounded-full bg-[#020a06] border border-emerald-300"></span>
+                  <span>Dark Obsidian</span>
+                </button>
+
+                <button type="button" class="studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-black/60 border border-white/10 text-slate-300 hover:border-cyan-400/50 hover:text-white" data-studio-theme="corporate">
+                  <span class="h-2.5 w-2.5 rounded-full bg-[#0f172a] border border-sky-400"></span>
+                  <span>Corporate</span>
+                </button>
+
+                <button type="button" class="studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-black/60 border border-white/10 text-slate-300 hover:border-pink-500/50 hover:text-white" data-studio-theme="neon">
+                  <span class="h-2.5 w-2.5 rounded-full bg-[#180415] border border-pink-400"></span>
+                  <span>Cyber Neon</span>
+                </button>
+
+                <button type="button" class="studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-black/60 border border-white/10 text-slate-300 hover:border-green-500/50 hover:text-white" data-studio-theme="forest">
+                  <span class="h-2.5 w-2.5 rounded-full bg-[#052e16] border border-green-400"></span>
+                  <span>Forest</span>
+                </button>
+
+                <button type="button" class="studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-black/60 border border-white/10 text-slate-300 hover:border-blue-400/50 hover:text-white" data-studio-theme="blueprint">
+                  <span class="h-2.5 w-2.5 rounded-full bg-[#0c1e3d] border border-blue-400"></span>
+                  <span>Blueprint</span>
+                </button>
+
+                <button type="button" class="studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-black/60 border border-white/10 text-slate-300 hover:border-amber-400/50 hover:text-white" data-studio-theme="high-contrast">
+                  <span class="h-2.5 w-2.5 rounded-full bg-black border border-amber-400"></span>
+                  <span>High Contrast</span>
+                </button>
+
+                <button type="button" class="studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-black/60 border border-white/10 text-slate-300 hover:border-purple-400/50 hover:text-white" data-studio-theme="pastel">
+                  <span class="h-2.5 w-2.5 rounded-full bg-[#1e1035] border border-purple-400"></span>
+                  <span>Pastel</span>
+                </button>
+
+                <button type="button" class="studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-black/60 border border-white/10 text-slate-300 hover:border-slate-400/50 hover:text-white" data-studio-theme="monochrome">
+                  <span class="h-2.5 w-2.5 rounded-full bg-[#111] border border-slate-400"></span>
+                  <span>Monochrome</span>
+                </button>
+              </div>
+
+              <!-- Quick Fine-Tune Styling Controls -->
+              <div class="flex items-center gap-3 shrink-0 overflow-x-auto scrollbar-none py-1 text-xs text-slate-300 font-mono">
+                <div class="flex items-center gap-2">
+                  <label for="quick-style-radius" class="text-[10px] uppercase font-bold text-slate-400">Radius:</label>
+                  <input id="quick-style-radius" type="range" min="0" max="24" value="8" class="w-16 sm:w-20 accent-emerald-500 h-1.5">
+                  <span id="quick-radius-val" class="text-[10px] text-emerald-400 w-6">8px</span>
+                </div>
+                <div class="h-4 w-px bg-emerald-500/20"></div>
+                <label class="flex items-center gap-1.5 cursor-pointer text-[10px] font-bold text-slate-300 hover:text-white">
+                  <input type="checkbox" id="quick-style-shadows" checked class="rounded accent-emerald-500">
+                  <span>Shadows</span>
+                </label>
+                <label class="flex items-center gap-1.5 cursor-pointer text-[10px] font-bold text-slate-300 hover:text-white">
+                  <input type="checkbox" id="quick-style-embed" checked class="rounded accent-emerald-500">
+                  <span>Embed CSS</span>
+                </label>
+              </div>
+
             </div>
           </div>
 
@@ -3245,6 +3321,7 @@ Shared IR,Terminal ANSI,20`
 
     // WASM Loader
     async function initWasmRuntime() {
+      window.initWasmRuntime = initWasmRuntime;
       if (frankenRuntime && typeof frankenRuntime.renderSvg === "function") {
         return frankenRuntime;
       }
@@ -3324,14 +3401,25 @@ Shared IR,Terminal ANSI,20`
     }
 
     function buildOptions() {
-      const radius = parseFloat(document.getElementById("style-radius")?.value || 8);
+      const radius = parseFloat(document.getElementById("quick-style-radius")?.value || document.getElementById("style-radius")?.value || 8);
       const fontSize = parseFloat(document.getElementById("style-font-size")?.value || 14);
       const padding = parseFloat(document.getElementById("style-padding")?.value || 40);
-      const shadows = document.getElementById("style-shadows") ? document.getElementById("style-shadows").checked : true;
-      const embedCss = document.getElementById("style-embed-css") ? document.getElementById("style-embed-css").checked : true;
+      const shadows = document.getElementById("quick-style-shadows") ? document.getElementById("quick-style-shadows").checked : (document.getElementById("style-shadows") ? document.getElementById("style-shadows").checked : true);
+      const embedCss = document.getElementById("quick-style-embed") ? document.getElementById("quick-style-embed").checked : (document.getElementById("style-embed-css") ? document.getElementById("style-embed-css").checked : true);
+      const activeTheme = state.activeTheme || "dark";
 
       return {
-        theme: state.activeTheme || "dark",
+        theme: activeTheme,
+        svg: {
+          theme: activeTheme,
+          responsive: true,
+          accessible: true,
+          fontSize,
+          padding,
+          roundedCorners: radius,
+          shadows,
+          embedThemeCss: embedCss
+        },
         responsive: true,
         accessible: true,
         fontSize,
@@ -4149,6 +4237,67 @@ Shared IR,Terminal ANSI,20`
         });
       });
 
+      // Studio Always-Visible Theme Buttons (Under Operating Theater)
+      document.querySelectorAll(".studio-theme-btn").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const th = btn.getAttribute("data-studio-theme") || "dark";
+          state.activeTheme = th;
+          
+          // Update studio theme buttons
+          document.querySelectorAll(".studio-theme-btn").forEach(b => {
+            if (b === btn) {
+              b.className = "studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-emerald-500 text-black shadow-[0_0_15px_rgba(16,185,129,0.4)] border border-emerald-400";
+            } else {
+              b.className = "studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-black/60 border border-white/10 text-slate-300 hover:border-emerald-500/40 hover:text-white";
+            }
+          });
+
+          // Sync with theme preset cards in the detail tab if open
+          document.querySelectorAll(".theme-preset-card").forEach(c => {
+            if (c.getAttribute("data-theme") === th) {
+              c.classList.add("border-emerald-500", "bg-emerald-950/40");
+            } else {
+              c.classList.remove("border-emerald-500", "bg-emerald-950/40");
+            }
+          });
+
+          // Re-render immediately so the visual result is instant
+          scheduleRender(true);
+        });
+      });
+
+      // Quick sliders under operating theater
+      const qRadius = document.getElementById("quick-style-radius");
+      const qRadiusVal = document.getElementById("quick-radius-val");
+      if (qRadius) {
+        qRadius.addEventListener("input", (e) => {
+          if (qRadiusVal) qRadiusVal.textContent = `${e.target.value}px`;
+          const mainRad = document.getElementById("style-radius");
+          if (mainRad) mainRad.value = e.target.value;
+          const mainRadVal = document.getElementById("style-radius-value");
+          if (mainRadVal) mainRadVal.textContent = `${e.target.value}px`;
+          scheduleRender(true);
+        });
+      }
+
+      const qShadows = document.getElementById("quick-style-shadows");
+      if (qShadows) {
+        qShadows.addEventListener("change", (e) => {
+          const mainShadows = document.getElementById("style-shadows");
+          if (mainShadows) mainShadows.checked = e.target.checked;
+          scheduleRender(true);
+        });
+      }
+
+      const qEmbed = document.getElementById("quick-style-embed");
+      if (qEmbed) {
+        qEmbed.addEventListener("change", (e) => {
+          const mainEmbed = document.getElementById("style-embed-css");
+          if (mainEmbed) mainEmbed.checked = e.target.checked;
+          scheduleRender(true);
+        });
+      }
+
       // Theme Preset Cards
       document.querySelectorAll(".theme-preset-card").forEach(card => {
         card.addEventListener("click", () => {
@@ -4157,6 +4306,16 @@ Shared IR,Terminal ANSI,20`
           state.activeTheme = th;
           document.querySelectorAll(".theme-preset-card").forEach(c => c.classList.remove("border-emerald-500", "bg-emerald-950/40"));
           card.classList.add("border-emerald-500", "bg-emerald-950/40");
+          
+          // Sync studio theme buttons
+          document.querySelectorAll(".studio-theme-btn").forEach(b => {
+            if (b.getAttribute("data-studio-theme") === th) {
+              b.className = "studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-emerald-500 text-black shadow-[0_0_15px_rgba(16,185,129,0.4)] border border-emerald-400";
+            } else {
+              b.className = "studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-black/60 border border-white/10 text-slate-300 hover:border-emerald-500/40 hover:text-white";
+            }
+          });
+
           scheduleRender(true);
         });
       });
@@ -4734,8 +4893,8 @@ Shared IR,Terminal ANSI,20`
       const duelFmZoom = document.getElementById("duel-fm-zoom-level");
       if (duelFmCont && duelFmView) {
         duelFmController = new PanZoomController(duelFmCont, duelFmView, duelFmZoom);
-        document.getElementById("duel-fm-zoom-in")?.addEventListener("click", () => duelFmController?.zoomBy(1.2));
-        document.getElementById("duel-fm-zoom-out")?.addEventListener("click", () => duelFmController?.zoomBy(0.8));
+        document.getElementById("duel-fm-zoom-in")?.addEventListener("click", () => duelFmController?.zoom(1.15));
+        document.getElementById("duel-fm-zoom-out")?.addEventListener("click", () => duelFmController?.zoom(0.85));
         document.getElementById("duel-fm-zoom-reset")?.addEventListener("click", () => duelFmController?.fitToView(true));
       }
 
@@ -4744,8 +4903,8 @@ Shared IR,Terminal ANSI,20`
       const duelMZoom = document.getElementById("duel-m-zoom-level");
       if (duelMCont && duelMView) {
         duelMController = new PanZoomController(duelMCont, duelMView, duelMZoom);
-        document.getElementById("duel-m-zoom-in")?.addEventListener("click", () => duelMController?.zoomBy(1.2));
-        document.getElementById("duel-m-zoom-out")?.addEventListener("click", () => duelMController?.zoomBy(0.8));
+        document.getElementById("duel-m-zoom-in")?.addEventListener("click", () => duelMController?.zoom(1.15));
+        document.getElementById("duel-m-zoom-out")?.addEventListener("click", () => duelMController?.zoom(0.85));
         document.getElementById("duel-m-zoom-reset")?.addEventListener("click", () => duelMController?.fitToView(true));
       }
 
@@ -4785,9 +4944,9 @@ Shared IR,Terminal ANSI,20`
           state.activeTheme = theme;
           document.querySelectorAll(".duel-theme-btn").forEach(b => {
             if (b === btn) {
-              b.className = "duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono font-bold bg-emerald-500 text-black transition";
+              b.className = "duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono font-bold bg-emerald-500 text-black transition shrink-0";
             } else {
-              b.className = "duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono text-slate-400 hover:text-white transition";
+              b.className = "duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono text-slate-400 hover:text-white transition shrink-0";
             }
           });
           selectDuelSpecimen(currentDuelIndex);
@@ -4832,20 +4991,46 @@ Shared IR,Terminal ANSI,20`
       const stageFm = document.getElementById("duel-fm-stage");
       const stageM = document.getElementById("duel-m-stage");
 
-      // 1. Render frankenmermaid
+      // 1. Render frankenmermaid (WASM) — Instant synchronous sub-millisecond execution
       const t0Fm = performance.now();
       let fmSvg = "";
       const currentTheme = state.activeTheme || "dark";
       const isParity = (currentTheme === "mermaid" || currentTheme === "classic");
       const stageBadgeFm = document.getElementById("duel-fm-tag-badge");
       if (stageBadgeFm) {
-        stageBadgeFm.textContent = isParity ? "1:1 MERMAID PARITY STYLE" : "FRANKENMODERN PRO";
+        stageBadgeFm.textContent = isParity ? "🎯 1:1 MERMAID PARITY" : (currentTheme === "dark" ? "✨ FRANKENMODERN OBSIDIAN" : `${currentTheme.toUpperCase()} THEME`);
+      }
+
+      // Adapt Duel stage container background to match theme
+      const duelFmPanContainer = document.getElementById("duel-fm-pan-container");
+      if (duelFmPanContainer) {
+        if (currentTheme === "mermaid" || currentTheme === "corporate") {
+          duelFmPanContainer.style.backgroundColor = "#ffffff";
+        } else if (currentTheme === "forest") {
+          duelFmPanContainer.style.backgroundColor = "#f5f5dc";
+        } else if (currentTheme === "blueprint") {
+          duelFmPanContainer.style.backgroundColor = "#001e3d";
+        } else if (currentTheme === "neon") {
+          duelFmPanContainer.style.backgroundColor = "#08080c";
+        } else {
+          duelFmPanContainer.style.backgroundColor = "#080e14";
+        }
       }
 
       if (frankenRuntime && typeof frankenRuntime.renderSvg === "function") {
         try {
           const duelOpts = {
             theme: currentTheme,
+            svg: {
+              theme: currentTheme,
+              responsive: true,
+              accessible: true,
+              fontSize: 14,
+              padding: 24,
+              roundedCorners: isParity ? 4 : 8,
+              shadows: !isParity,
+              embedThemeCss: true
+            },
             responsive: true,
             accessible: true,
             fontSize: 14,
@@ -4862,20 +5047,24 @@ Shared IR,Terminal ANSI,20`
       const t1Fm = performance.now();
       const fmTime = Math.max(0.08, t1Fm - t0Fm);
       if (latencyFmEl) latencyFmEl.textContent = `frankenmermaid: ${fmTime.toFixed(2)}ms (⚡ WASM)`;
-      if (stageFm && fmSvg) {
-        stageFm.innerHTML = fmSvg;
-        const svgEl = stageFm.querySelector("svg");
-        if (svgEl) {
-          svgEl.removeAttribute("style");
-          svgEl.style.display = "block";
-          svgEl.style.overflow = "visible";
+      if (stageFm) {
+        if (fmSvg) {
+          stageFm.innerHTML = fmSvg;
+          const svgEl = stageFm.querySelector("svg");
+          if (svgEl) {
+            svgEl.removeAttribute("style");
+            svgEl.style.display = "block";
+            svgEl.style.overflow = "visible";
+          }
+          duelFmController?.fitToView(true, 16);
+          setTimeout(() => duelFmController?.fitToView(true, 16), 40);
+          setTimeout(() => duelFmController?.fitToView(true, 16), 150);
+        } else {
+          stageFm.innerHTML = `<div class="text-slate-500 font-mono text-xs animate-pulse">Initializing WebAssembly Engine...</div>`;
         }
-        duelFmController?.fitToView(true, 16);
-        setTimeout(() => duelFmController?.fitToView(true, 16), 40);
-        setTimeout(() => duelFmController?.fitToView(true, 16), 150);
       }
 
-      // 2. Render mermaid.js
+      // 2. Render mermaid.js (Async DOM / D3)
       const mEngine = await ensureMermaidJs();
       const t0M = performance.now();
       let mSvg = "";

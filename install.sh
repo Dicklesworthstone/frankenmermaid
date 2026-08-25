@@ -7,7 +7,8 @@ INSTALL_ROOT="${FM_INSTALL_ROOT:-$HOME/.local}"
 INSTALL_BIN_DIR="$INSTALL_ROOT/bin"
 PACKAGE_NAME="frankenmermaid-cli"
 PACKAGE_DIR="fm-cli"
-BIN_NAME="fm-cli"
+CANONICAL_BIN_NAME="frankenmermaid"
+LEGACY_BIN_NAME="fm-cli"
 RUSTUP_INIT_URL="${FM_RUSTUP_INIT_URL:-https://sh.rustup.rs}"
 
 need_cmd() {
@@ -64,7 +65,8 @@ main() {
       --locked
       --force
       --root "$INSTALL_ROOT"
-      --bin "$BIN_NAME"
+      --bin "$CANONICAL_BIN_NAME"
+      --bin "$LEGACY_BIN_NAME"
     )
     source_description="$resolved_path"
   else
@@ -76,7 +78,8 @@ main() {
       --locked
       --force
       --root "$INSTALL_ROOT"
-      --bin "$BIN_NAME"
+      --bin "$CANONICAL_BIN_NAME"
+      --bin "$LEGACY_BIN_NAME"
       "$PACKAGE_NAME"
     )
     source_description="$REPO_URL"
@@ -85,13 +88,15 @@ main() {
   echo "==> Installing $PACKAGE_NAME from $source_description"
   CARGO_NET_GIT_FETCH_WITH_CLI="${CARGO_NET_GIT_FETCH_WITH_CLI:-true}" cargo "${cargo_args[@]}"
 
-  if [[ ! -x "$INSTALL_BIN_DIR/$BIN_NAME" ]]; then
-    echo "error: expected installed binary at $INSTALL_BIN_DIR/$BIN_NAME" >&2
-    exit 1
-  fi
+  for bin_name in "$CANONICAL_BIN_NAME" "$LEGACY_BIN_NAME"; do
+    if [[ ! -x "$INSTALL_BIN_DIR/$bin_name" ]]; then
+      echo "error: expected installed binary at $INSTALL_BIN_DIR/$bin_name" >&2
+      exit 1
+    fi
+  done
 
-  echo "==> Installed $BIN_NAME to $INSTALL_BIN_DIR/$BIN_NAME"
-  "$INSTALL_BIN_DIR/$BIN_NAME" --version
+  echo "==> Installed $CANONICAL_BIN_NAME and $LEGACY_BIN_NAME to $INSTALL_BIN_DIR"
+  "$INSTALL_BIN_DIR/$CANONICAL_BIN_NAME" --version
 
   case ":$PATH:" in
     *":$INSTALL_BIN_DIR:"*) ;;
