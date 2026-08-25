@@ -542,6 +542,27 @@ impl Theme {
             ""
         };
 
+        let (svg_bg_style, cluster_dash) = if shadows {
+            (
+                r#"svg {
+  shape-rendering: geometricPrecision;
+  background: var(--fm-bg);
+  background-image:
+    radial-gradient(ellipse at 20% 0%, color-mix(in srgb, var(--fm-accent-1) 3%, transparent) 0%, transparent 50%),
+    linear-gradient(180deg, var(--fm-bg) 0%, color-mix(in srgb, var(--fm-bg) 97%, var(--fm-node-stroke) 3%) 100%);
+}"#,
+                "4 4",
+            )
+        } else {
+            (
+                r#"svg {
+  shape-rendering: geometricPrecision;
+  background: var(--fm-bg);
+}"#,
+                "none",
+            )
+        };
+
         // Add utility classes
         let _ = write!(
             css,
@@ -558,13 +579,7 @@ svg {{
   --fm-cluster-swimlane-stroke: var(--fm-cluster-stroke);
   --fm-surface-shadow: rgba(15, 23, 42, 0.08);
 }}
-svg {{
-  shape-rendering: geometricPrecision;
-  background: var(--fm-bg);
-  background-image:
-    radial-gradient(ellipse at 20% 0%, color-mix(in srgb, var(--fm-accent-1) 3%, transparent) 0%, transparent 50%),
-    linear-gradient(180deg, var(--fm-bg) 0%, color-mix(in srgb, var(--fm-bg) 97%, var(--fm-node-stroke) 3%) 100%);
-}}
+{svg_bg_style}
 .fm-node {{
   isolation: isolate;
   --fm-node-accent: var(--fm-node-stroke);
@@ -728,7 +743,7 @@ marker#arrow-cross path {{
   fill: var(--fm-cluster-fill);
   stroke: var(--fm-cluster-stroke);
   stroke-width: 1;
-  stroke-dasharray: 4 4;
+  stroke-dasharray: {cluster_dash};
   rx: 10;
   ry: 10;
 }}

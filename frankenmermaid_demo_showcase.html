@@ -31,6 +31,8 @@
 
   <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Mermaid.js for Interactive Duel Comparison -->
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
   <script>
     window.tailwind = window.tailwind || {};
     tailwind.config = {
@@ -275,7 +277,6 @@
     #fm-svg svg,
     #spotlight-stage svg {
       display: block;
-      filter: drop-shadow(0 8px 30px rgba(0, 0, 0, 0.6));
       overflow: visible;
       pointer-events: auto;
       shape-rendering: geometricPrecision;
@@ -1123,6 +1124,11 @@
                   <span>THEME:</span>
                 </span>
                 
+                <button type="button" class="studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-white/10 text-slate-300 hover:border-purple-400/50 hover:text-white" data-studio-theme="mermaid">
+                  <span class="h-2.5 w-2.5 rounded-full bg-[#ECECFF] border border-[#9370DB]"></span>
+                  <span>🎯 1:1 Mermaid Parity</span>
+                </button>
+
                 <button type="button" class="studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-emerald-500 text-black shadow-[0_0_15px_rgba(16,185,129,0.4)] border border-emerald-400" data-studio-theme="dark">
                   <span class="h-2.5 w-2.5 rounded-full bg-[#020a06] border border-emerald-300"></span>
                   <span>Dark Obsidian</span>
@@ -2654,10 +2660,7 @@
   subgraph Closure["Post-Incident"]
     I --> J[Validate Telemetry]
     J --> K[Publish Postmortem]
-  end
-  style A fill:#064e3b,stroke:#34d399,stroke-width:2px
-  style C fill:#7f1d1d,stroke:#f87171,stroke-width:2px
-  style I fill:#065f46,stroke:#10b981,stroke-width:2px`
+  end`
       },
       {
         category: "sequence",
@@ -3055,6 +3058,178 @@ Shared IR,Terminal ANSI,20`
       runtimeLoaded: false
     };
 
+    const THEME_PALETTES = {
+      mermaid: {
+        "--fm-bg": "#ffffff",
+        "--fm-text-color": "#333333",
+        "--fm-node-fill": "#ECECFF",
+        "--fm-node-stroke": "#9370DB",
+        "--fm-edge-color": "#333333",
+        "--fm-cluster-fill": "#ffffde",
+        "--fm-cluster-stroke": "#aaaa33",
+        "--fm-node-accent": "#9370DB"
+      },
+      dark: {
+        "--fm-bg": "#0f172a",
+        "--fm-text-color": "#ffffff",
+        "--fm-node-fill": "#1e293b",
+        "--fm-node-stroke": "#38bdf8",
+        "--fm-edge-color": "#94a3b8",
+        "--fm-cluster-fill": "rgba(30, 41, 59, 0.6)",
+        "--fm-cluster-stroke": "#475569",
+        "--fm-node-accent": "#38bdf8"
+      },
+      corporate: {
+        "--fm-bg": "#ffffff",
+        "--fm-text-color": "#212529",
+        "--fm-node-fill": "#e9ecef",
+        "--fm-node-stroke": "#495057",
+        "--fm-edge-color": "#6c757d",
+        "--fm-cluster-fill": "rgba(248, 249, 250, 0.85)",
+        "--fm-cluster-stroke": "#dee2e6",
+        "--fm-node-accent": "#495057"
+      },
+      forest: {
+        "--fm-bg": "#f5f5dc",
+        "--fm-text-color": "#2d4a22",
+        "--fm-node-fill": "#d4edbc",
+        "--fm-node-stroke": "#4a7c31",
+        "--fm-edge-color": "#6b8e23",
+        "--fm-cluster-fill": "rgba(212, 237, 188, 0.6)",
+        "--fm-cluster-stroke": "#8fbc8f",
+        "--fm-node-accent": "#4a7c31"
+      },
+      neon: {
+        "--fm-bg": "#0d0d0d",
+        "--fm-text-color": "#ffffff",
+        "--fm-node-fill": "#1a1a1a",
+        "--fm-node-stroke": "#00ff88",
+        "--fm-edge-color": "#ff00ff",
+        "--fm-cluster-fill": "rgba(0, 255, 136, 0.1)",
+        "--fm-cluster-stroke": "#00ffff",
+        "--fm-node-accent": "#00ff88"
+      },
+      blueprint: {
+        "--fm-bg": "#001e3d",
+        "--fm-text-color": "#e0f0ff",
+        "--fm-node-fill": "#002b5c",
+        "--fm-node-stroke": "#4da6ff",
+        "--fm-edge-color": "#80c0ff",
+        "--fm-cluster-fill": "rgba(0, 43, 92, 0.6)",
+        "--fm-cluster-stroke": "#4da6ff",
+        "--fm-node-accent": "#4da6ff"
+      },
+      "high-contrast": {
+        "--fm-bg": "#000000",
+        "--fm-text-color": "#ffffff",
+        "--fm-node-fill": "#000000",
+        "--fm-node-stroke": "#ffffff",
+        "--fm-edge-color": "#ffffff",
+        "--fm-cluster-fill": "#000000",
+        "--fm-cluster-stroke": "#ffffff",
+        "--fm-node-accent": "#ffffff"
+      },
+      pastel: {
+        "--fm-bg": "#fdf6e2",
+        "--fm-text-color": "#586e75",
+        "--fm-node-fill": "#eee8d5",
+        "--fm-node-stroke": "#b58900",
+        "--fm-edge-color": "#839496",
+        "--fm-cluster-fill": "rgba(238, 232, 213, 0.6)",
+        "--fm-cluster-stroke": "#93a1a1",
+        "--fm-node-accent": "#b58900"
+      },
+      monochrome: {
+        "--fm-bg": "#ffffff",
+        "--fm-text-color": "#111827",
+        "--fm-node-fill": "#f3f4f6",
+        "--fm-node-stroke": "#1f2937",
+        "--fm-edge-color": "#374151",
+        "--fm-cluster-fill": "rgba(243, 244, 246, 0.7)",
+        "--fm-cluster-stroke": "#4b5563",
+        "--fm-node-accent": "#1f2937"
+      }
+    };
+
+    function applyThemeVarsToElement(el, theme) {
+      if (!el) return;
+      const palette = THEME_PALETTES[theme] || THEME_PALETTES["dark"];
+      for (const [key, val] of Object.entries(palette)) {
+        el.style.setProperty(key, val);
+      }
+    }
+
+    // Unified Global Engine Theme Switcher
+    function setEngineTheme(theme) {
+      if (!theme) return;
+      state.activeTheme = theme;
+
+      // 1. Update Duel theme buttons
+      document.querySelectorAll(".duel-theme-btn").forEach(b => {
+        const isThis = b.getAttribute("data-duel-theme") === theme;
+        if (isThis) {
+          b.className = "duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono font-bold bg-emerald-500 text-black transition shrink-0 shadow-[0_0_12px_rgba(16,185,129,0.4)]";
+        } else {
+          b.className = "duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono text-slate-300 bg-white/5 border border-white/10 hover:border-emerald-500/40 hover:text-white transition shrink-0";
+        }
+      });
+
+      // 2. Update Studio theme buttons
+      document.querySelectorAll(".studio-theme-btn").forEach(b => {
+        const isThis = b.getAttribute("data-studio-theme") === theme;
+        if (isThis) {
+          b.className = "studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-emerald-500 text-black shadow-[0_0_15px_rgba(16,185,129,0.4)] border border-emerald-400";
+        } else {
+          b.className = "studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-black/60 border border-white/10 text-slate-300 hover:border-emerald-500/40 hover:text-white";
+        }
+      });
+
+      // 3. Update Settings modal theme preset cards
+      document.querySelectorAll(".theme-preset-card").forEach(c => {
+        if (c.getAttribute("data-theme") === theme) {
+          c.classList.add("border-emerald-500", "bg-emerald-950/40");
+        } else {
+          c.classList.remove("border-emerald-500", "bg-emerald-950/40");
+        }
+      });
+
+      // 4. Update Studio & Duel container backgrounds and scoped CSS variables
+      const studioPan = document.getElementById("studio-pan-container");
+      const duelFmPan = document.getElementById("duel-fm-pan-container");
+      const duelMPan = document.getElementById("duel-m-pan-container");
+      const fmSvgEl = document.getElementById("fm-svg");
+      const duelFmStage = document.getElementById("duel-fm-stage");
+      
+      let bgColor = "#080e14";
+      if (theme === "mermaid" || theme === "corporate") {
+        bgColor = "#ffffff";
+      } else if (theme === "forest") {
+        bgColor = "#f5f5dc";
+      } else if (theme === "blueprint") {
+        bgColor = "#001e3d";
+      } else if (theme === "neon") {
+        bgColor = "#08080c";
+      }
+      
+      if (studioPan) studioPan.style.backgroundColor = bgColor;
+      if (duelFmPan) duelFmPan.style.backgroundColor = bgColor;
+      if (duelMPan) duelMPan.style.backgroundColor = (theme === "mermaid" || theme === "corporate") ? "#ffffff" : bgColor;
+
+      applyThemeVarsToElement(studioPan, theme);
+      applyThemeVarsToElement(fmSvgEl, theme);
+      applyThemeVarsToElement(fmSvgEl?.querySelector("svg"), theme);
+      applyThemeVarsToElement(duelFmPan, theme);
+      applyThemeVarsToElement(duelFmStage, theme);
+      applyThemeVarsToElement(duelFmStage?.querySelector("svg"), theme);
+
+      // 5. Re-render Studio & Duel immediately
+      scheduleRender(true);
+      if (typeof selectDuelSpecimen === "function") {
+        selectDuelSpecimen(currentDuelIndex);
+      }
+    }
+    window.setEngineTheme = setEngineTheme;
+
     let frankenRuntime = null;
     let diagramInstance = null;
 
@@ -3401,12 +3576,13 @@ Shared IR,Terminal ANSI,20`
     }
 
     function buildOptions() {
-      const radius = parseFloat(document.getElementById("quick-style-radius")?.value || document.getElementById("style-radius")?.value || 8);
+      const activeTheme = state.activeTheme || "dark";
+      const isParity = (activeTheme === "mermaid" || activeTheme === "classic");
+      const radius = isParity ? 4.0 : parseFloat(document.getElementById("quick-style-radius")?.value || document.getElementById("style-radius")?.value || 8);
       const fontSize = parseFloat(document.getElementById("style-font-size")?.value || 14);
       const padding = parseFloat(document.getElementById("style-padding")?.value || 40);
-      const shadows = document.getElementById("quick-style-shadows") ? document.getElementById("quick-style-shadows").checked : (document.getElementById("style-shadows") ? document.getElementById("style-shadows").checked : true);
+      const shadows = isParity ? false : (document.getElementById("quick-style-shadows") ? document.getElementById("quick-style-shadows").checked : (document.getElementById("style-shadows") ? document.getElementById("style-shadows").checked : true));
       const embedCss = document.getElementById("quick-style-embed") ? document.getElementById("quick-style-embed").checked : (document.getElementById("style-embed-css") ? document.getElementById("style-embed-css").checked : true);
-      const activeTheme = state.activeTheme || "dark";
 
       return {
         theme: activeTheme,
@@ -3418,6 +3594,8 @@ Shared IR,Terminal ANSI,20`
           padding,
           roundedCorners: radius,
           shadows,
+          nodeGradients: !isParity,
+          clusterFillOpacity: isParity ? 1.0 : 0.6,
           embedThemeCss: embedCss
         },
         responsive: true,
@@ -3426,6 +3604,8 @@ Shared IR,Terminal ANSI,20`
         padding,
         roundedCorners: radius,
         shadows,
+        nodeGradients: !isParity,
+        clusterFillOpacity: isParity ? 1.0 : 0.6,
         embedThemeCss: embedCss
       };
     }
@@ -3506,6 +3686,12 @@ Shared IR,Terminal ANSI,20`
         els.fmSvg.innerHTML = svgOutput;
         const svgEl = els.fmSvg.querySelector("svg");
         if (svgEl) {
+          const activeTheme = state.activeTheme || "dark";
+          applyThemeVarsToElement(svgEl, activeTheme);
+          const isParity = (activeTheme === "mermaid" || activeTheme === "classic");
+          const bgCol = (activeTheme === "mermaid" || activeTheme === "corporate") ? "#ffffff" : (activeTheme === "forest" ? "#f5f5dc" : (activeTheme === "blueprint" ? "#001e3d" : (activeTheme === "neon" ? "#08080c" : "#0f172a")));
+          svgEl.style.background = bgCol;
+          svgEl.style.backgroundImage = isParity ? "none" : "";
           const vb = svgEl.getAttribute("viewBox");
           if (vb) {
             const parts = vb.trim().split(/[\s,]+/).map(Number);
@@ -4237,68 +4423,6 @@ Shared IR,Terminal ANSI,20`
         });
       });
 
-    // Unified Global Engine Theme Switcher
-    function setEngineTheme(theme) {
-      if (!theme) return;
-      state.activeTheme = theme;
-
-      // 1. Update Duel theme buttons
-      document.querySelectorAll(".duel-theme-btn").forEach(b => {
-        const isThis = b.getAttribute("data-duel-theme") === theme;
-        if (isThis) {
-          b.className = "duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono font-bold bg-emerald-500 text-black transition shrink-0 shadow-[0_0_12px_rgba(16,185,129,0.4)]";
-        } else {
-          b.className = "duel-theme-btn px-2.5 py-1 rounded-lg text-xs font-mono text-slate-300 bg-white/5 border border-white/10 hover:border-emerald-500/40 hover:text-white transition shrink-0";
-        }
-      });
-
-      // 2. Update Studio theme buttons
-      document.querySelectorAll(".studio-theme-btn").forEach(b => {
-        const isThis = b.getAttribute("data-studio-theme") === theme;
-        if (isThis) {
-          b.className = "studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-emerald-500 text-black shadow-[0_0_15px_rgba(16,185,129,0.4)] border border-emerald-400";
-        } else {
-          b.className = "studio-theme-btn px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition flex items-center gap-2 shrink-0 bg-black/60 border border-white/10 text-slate-300 hover:border-emerald-500/40 hover:text-white";
-        }
-      });
-
-      // 3. Update Settings modal theme preset cards
-      document.querySelectorAll(".theme-preset-card").forEach(c => {
-        if (c.getAttribute("data-theme") === theme) {
-          c.classList.add("border-emerald-500", "bg-emerald-950/40");
-        } else {
-          c.classList.remove("border-emerald-500", "bg-emerald-950/40");
-        }
-      });
-
-      // 4. Update Studio & Duel container backgrounds
-      const studioPan = document.getElementById("studio-svg-pan-container");
-      const duelFmPan = document.getElementById("duel-fm-pan-container");
-      const duelMPan = document.getElementById("duel-m-pan-container");
-      
-      let bgColor = "#080e14";
-      if (theme === "mermaid" || theme === "corporate") {
-        bgColor = "#ffffff";
-      } else if (theme === "forest") {
-        bgColor = "#f5f5dc";
-      } else if (theme === "blueprint") {
-        bgColor = "#001e3d";
-      } else if (theme === "neon") {
-        bgColor = "#08080c";
-      }
-      
-      if (studioPan) studioPan.style.backgroundColor = bgColor;
-      if (duelFmPan) duelFmPan.style.backgroundColor = bgColor;
-      if (duelMPan) duelMPan.style.backgroundColor = "#ffffff";
-
-      // 5. Re-render Studio & Duel immediately
-      scheduleRender(true);
-      if (typeof selectDuelSpecimen === "function") {
-        selectDuelSpecimen(currentDuelIndex);
-      }
-    }
-    window.setEngineTheme = setEngineTheme;
-
     // Studio Always-Visible Theme Buttons (Under Operating Theater)
     document.querySelectorAll(".studio-theme-btn").forEach(btn => {
       btn.addEventListener("click", () => {
@@ -4880,15 +5004,19 @@ Shared IR,Terminal ANSI,20`
     let isMermaidLoading = false;
 
     async function ensureMermaidJs() {
+      if (window.mermaid && typeof window.mermaid.render === "function") {
+        return window.mermaid;
+      }
       if (mermaidInstance) return mermaidInstance;
       if (isMermaidLoading) {
         while (isMermaidLoading) await new Promise(r => setTimeout(r, 50));
-        return mermaidInstance;
+        return window.mermaid || mermaidInstance;
       }
       isMermaidLoading = true;
       try {
         const mod = await import("https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs");
-        mermaidInstance = mod.default;
+        mermaidInstance = mod.default || mod;
+        window.mermaid = mermaidInstance;
         mermaidInstance.initialize({
           startOnLoad: false,
           theme: "dark",
@@ -4900,7 +5028,7 @@ Shared IR,Terminal ANSI,20`
       } finally {
         isMermaidLoading = false;
       }
-      return mermaidInstance;
+      return window.mermaid || mermaidInstance;
     }
 
     let currentDuelIndex = 0;
@@ -5082,13 +5210,19 @@ Shared IR,Terminal ANSI,20`
       const fmTime = Math.max(0.08, t1Fm - t0Fm);
       if (latencyFmEl) latencyFmEl.textContent = `frankenmermaid: ${fmTime.toFixed(2)}ms (⚡ WASM)`;
       if (stageFm) {
+        applyThemeVarsToElement(stageFm, currentTheme);
+        if (duelFmPanContainer) applyThemeVarsToElement(duelFmPanContainer, currentTheme);
         if (fmSvg) {
           stageFm.innerHTML = fmSvg;
           const svgEl = stageFm.querySelector("svg");
           if (svgEl) {
             svgEl.removeAttribute("style");
+            applyThemeVarsToElement(svgEl, currentTheme);
             svgEl.style.display = "block";
             svgEl.style.overflow = "visible";
+            const bgCol = (currentTheme === "mermaid" || currentTheme === "corporate") ? "#ffffff" : (currentTheme === "forest" ? "#f5f5dc" : (currentTheme === "blueprint" ? "#001e3d" : (currentTheme === "neon" ? "#08080c" : "#0f172a")));
+            svgEl.style.background = bgCol;
+            svgEl.style.backgroundImage = isParity ? "none" : "";
           }
           duelFmController?.fitToView(true, 16);
           setTimeout(() => duelFmController?.fitToView(true, 16), 40);
@@ -5104,6 +5238,8 @@ Shared IR,Terminal ANSI,20`
       let mSvg = "";
       if (mEngine && typeof mEngine.render === "function") {
         try {
+          const mTheme = isParity ? "default" : (currentTheme === "dark" ? "dark" : (currentTheme === "forest" ? "forest" : (currentTheme === "corporate" ? "neutral" : (currentTheme === "neon" ? "dark" : "dark"))));
+          mEngine.initialize({ startOnLoad: false, theme: mTheme, securityLevel: 'loose' });
           const renderKey = `m-duel-render-${idx}-${Date.now()}`;
           const res = await mEngine.render(renderKey, specimen.code);
           mSvg = res.svg;
@@ -5123,6 +5259,9 @@ Shared IR,Terminal ANSI,20`
           svgEl.removeAttribute("style");
           svgEl.style.display = "block";
           svgEl.style.overflow = "visible";
+          const bgCol = (currentTheme === "mermaid" || currentTheme === "corporate") ? "#ffffff" : (currentTheme === "forest" ? "#f5f5dc" : (currentTheme === "blueprint" ? "#001e3d" : (currentTheme === "neon" ? "#08080c" : "#0f172a")));
+          svgEl.style.background = bgCol;
+          svgEl.style.backgroundImage = isParity ? "none" : "";
           if (!svgEl.getAttribute("viewBox")) {
             const w = parseFloat(svgEl.getAttribute("width")) || 800;
             const h = parseFloat(svgEl.getAttribute("height")) || 600;

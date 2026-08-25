@@ -298,17 +298,40 @@ struct RuntimeInitConfig {
     renderer: Option<WebRendererKind>,
     #[serde(default)]
     svg: SvgConfigOverrides,
-    #[serde(flatten)]
-    svg_flat: SvgConfigOverrides,
     #[serde(default)]
     canvas: CanvasConfigOverrides,
     #[serde(default)]
     pressure: PressureConfigOverrides,
+    // Top-level SVG override fields for direct JS options: { theme, responsive, fontSize, ... }
+    responsive: Option<bool>,
+    accessible: Option<bool>,
+    font_size: Option<f32>,
+    padding: Option<f32>,
+    shadows: Option<bool>,
+    rounded_corners: Option<f32>,
+    embed_theme_css: Option<bool>,
+    enable_links: Option<bool>,
+    link_mode: Option<String>,
+    node_gradients: Option<bool>,
+    cluster_fill_opacity: Option<f32>,
 }
 
 impl RuntimeInitConfig {
     fn effective_svg_overrides(&self) -> SvgConfigOverrides {
-        let mut merged = self.svg_flat.clone();
+        let mut merged = SvgConfigOverrides {
+            responsive: self.responsive,
+            accessible: self.accessible,
+            font_size: self.font_size,
+            padding: self.padding,
+            shadows: self.shadows,
+            rounded_corners: self.rounded_corners,
+            embed_theme_css: self.embed_theme_css,
+            theme: self.theme.clone(),
+            enable_links: self.enable_links,
+            link_mode: self.link_mode.clone(),
+            node_gradients: self.node_gradients,
+            cluster_fill_opacity: self.cluster_fill_opacity,
+        };
         if self.svg.responsive.is_some() {
             merged.responsive = self.svg.responsive;
         }
