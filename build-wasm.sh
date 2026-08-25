@@ -25,6 +25,57 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none"
 # (24 diagram types, DOT bridge, CGA edge routing, incremental Adapton caching, lens system).
 MAX_GZIP_BYTES=$((650 * 1024))
 
+compute_source_sha256() {
+  python3 - "$ROOT_DIR" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+fixed_inputs = [
+    ".cargo/config.toml",
+    "Cargo.lock",
+    "Cargo.toml",
+    "build-wasm.sh",
+    "evidence/capability_matrix.json",
+    "rust-toolchain.toml",
+]
+crate_inputs = [
+    "fm-core",
+    "fm-layout",
+    "fm-parser",
+    "fm-render-canvas",
+    "fm-render-svg",
+    "fm-wasm",
+]
+
+inputs = [root / relative for relative in fixed_inputs]
+for crate in crate_inputs:
+    crate_dir = root / "crates" / crate
+    inputs.append(crate_dir / "Cargo.toml")
+    inputs.extend(path for path in (crate_dir / "src").rglob("*") if path.is_file())
+
+hasher = hashlib.sha256()
+for path in sorted(inputs, key=lambda item: item.relative_to(root).as_posix()):
+    relative = path.relative_to(root).as_posix()
+    data = path.read_bytes()
+    if relative == "crates/fm-wasm/src/lib.rs":
+        marker = b"\n#[cfg(test)]\nmod tests {"
+        if marker not in data:
+            raise SystemExit("error: fm-wasm test-module marker not found")
+        data = data.split(marker, 1)[0]
+    hasher.update(relative.encode())
+    hasher.update(b"\0")
+    hasher.update(len(data).to_bytes(8, "little"))
+    hasher.update(data)
+
+print(hasher.hexdigest())
+PY
+}
+
+SOURCE_SHA256_BEFORE="$(compute_source_sha256)"
+echo "==> Source input SHA-256: $SOURCE_SHA256_BEFORE"
+
 if ! command -v wasm-pack >/dev/null 2>&1; then
   echo "error: wasm-pack is required but was not found in PATH" >&2
   exit 1
@@ -74,6 +125,14 @@ wasm-opt -Oz \
   --enable-multivalue \
   --converge "$WASM_PATH" -o "$WASM_PATH"
 
+SOURCE_SHA256_AFTER="$(compute_source_sha256)"
+if [[ "$SOURCE_SHA256_AFTER" != "$SOURCE_SHA256_BEFORE" ]]; then
+  echo "error: WASM source inputs changed during the build" >&2
+  echo "before: $SOURCE_SHA256_BEFORE" >&2
+  echo "after:  $SOURCE_SHA256_AFTER" >&2
+  exit 1
+fi
+
 echo "==> Syncing npm package metadata"
 cp "$ROOT_DIR/README.md" "$OUT_DIR/README.md"
 PACKAGE_JSON="$OUT_DIR/package.json" \
@@ -85,6 +144,7 @@ PACKAGE_BUGS_URL="$PACKAGE_BUGS_URL" \
 PACKAGE_JS="$OUT_DIR/${OUT_NAME}.js" \
 PACKAGE_DTS="$OUT_DIR/${OUT_NAME}.d.ts" \
 CAPABILITY_MATRIX_JSON="$CAPABILITY_MATRIX_JSON" \
+SOURCE_SHA256="$SOURCE_SHA256_AFTER" \
 python3 - <<'PY'
 import json
 import os
@@ -101,6 +161,7 @@ payload["repository"] = {
 payload["homepage"] = os.environ["PACKAGE_HOMEPAGE"]
 payload["bugs"] = {"url": os.environ["PACKAGE_BUGS_URL"]}
 payload["keywords"] = ["mermaid", "diagram", "wasm", "svg", "canvas"]
+payload["frankenmermaidSourceSha256"] = os.environ["SOURCE_SHA256"]
 payload["files"] = [
     "README.md",
     "frankenmermaid_bg.wasm",

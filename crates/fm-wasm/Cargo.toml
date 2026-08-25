@@ -47,6 +47,7 @@ web-time.workspace = true
 # Block on the async browser render path so a native test can drive it. Dev-only: the shipped wasm
 # module never blocks -- that is the whole reason the path is async.
 pollster = "0.4.0"
+sha2 = "0.11"
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
