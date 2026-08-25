@@ -603,6 +603,96 @@ svg {{
 .fm-node.fm-node-user-mindmap-no-border polygon {{
   stroke: none;
 }}
+.fm-node.fm-node-user-mindmap-root circle,
+.fm-node.fm-node-user-mindmap-root rect,
+.fm-node.fm-node-user-mindmap-root path {{
+  fill: #0000ec !important;
+  stroke: #0000ec !important;
+}}
+.fm-node.fm-node-user-mindmap-root text {{
+  fill: #ffffff !important;
+  font-weight: 700 !important;
+}}
+.fm-node.fm-node-user-mindmap-branch-0 rect,
+.fm-node.fm-node-user-mindmap-branch-0 path,
+.fm-node.fm-node-user-mindmap-branch-0 circle {{
+  fill: #ffff78 !important;
+  stroke: none !important;
+}}
+.fm-node.fm-node-user-mindmap-branch-0 text {{
+  fill: #000000 !important;
+  font-weight: 600 !important;
+}}
+.fm-node.fm-node-user-mindmap-branch-1 rect,
+.fm-node.fm-node-user-mindmap-branch-1 path,
+.fm-node.fm-node-user-mindmap-branch-1 circle {{
+  fill: #c5ff87 !important;
+  stroke: none !important;
+}}
+.fm-node.fm-node-user-mindmap-branch-1 text {{
+  fill: #000000 !important;
+  font-weight: 600 !important;
+}}
+.fm-node.fm-node-user-mindmap-branch-2 rect,
+.fm-node.fm-node-user-mindmap-branch-2 path,
+.fm-node.fm-node-user-mindmap-branch-2 circle {{
+  fill: #cf87ff !important;
+  stroke: none !important;
+}}
+.fm-node.fm-node-user-mindmap-branch-2 text {{
+  fill: #ffffff !important;
+  font-weight: 600 !important;
+}}
+.fm-node.fm-node-user-mindmap-branch-3 rect,
+.fm-node.fm-node-user-mindmap-branch-3 path,
+.fm-node.fm-node-user-mindmap-branch-3 circle {{
+  fill: #ff87ff !important;
+  stroke: none !important;
+}}
+.fm-node.fm-node-user-mindmap-branch-3 text {{
+  fill: #000000 !important;
+  font-weight: 600 !important;
+}}
+.fm-node.fm-node-user-mindmap-branch-4 rect,
+.fm-node.fm-node-user-mindmap-branch-4 path,
+.fm-node.fm-node-user-mindmap-branch-4 circle {{
+  fill: #ff87b4 !important;
+  stroke: none !important;
+}}
+.fm-node.fm-node-user-mindmap-branch-4 text {{
+  fill: #000000 !important;
+  font-weight: 600 !important;
+}}
+.fm-node.fm-node-user-mindmap-branch-5 rect,
+.fm-node.fm-node-user-mindmap-branch-5 path,
+.fm-node.fm-node-user-mindmap-branch-5 circle {{
+  fill: #ff8787 !important;
+  stroke: none !important;
+}}
+.fm-node.fm-node-user-mindmap-branch-5 text {{
+  fill: #000000 !important;
+  font-weight: 600 !important;
+}}
+.fm-node.fm-node-user-mindmap-branch-6 rect,
+.fm-node.fm-node-user-mindmap-branch-6 path,
+.fm-node.fm-node-user-mindmap-branch-6 circle {{
+  fill: #ffb487 !important;
+  stroke: none !important;
+}}
+.fm-node.fm-node-user-mindmap-branch-6 text {{
+  fill: #000000 !important;
+  font-weight: 600 !important;
+}}
+.fm-node.fm-node-user-mindmap-branch-7 rect,
+.fm-node.fm-node-user-mindmap-branch-7 path,
+.fm-node.fm-node-user-mindmap-branch-7 circle {{
+  fill: #e6ff87 !important;
+  stroke: none !important;
+}}
+.fm-node.fm-node-user-mindmap-branch-7 text {{
+  fill: #000000 !important;
+  font-weight: 600 !important;
+}}
 .fm-node line {{
   stroke: var(--fm-node-accent);
   stroke-width: 1.25;

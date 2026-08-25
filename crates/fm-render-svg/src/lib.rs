@@ -7715,7 +7715,7 @@ fn write_class_compartments_into(
     colors: &ThemeColors,
 ) {
     let line_h = font_size * config.line_height;
-    let text_x = x + 8.0;
+    let text_x = x + 12.0;
     let mut cursor_y = y + line_h;
     let fill = colors.text.as_str();
     let class_name = node
@@ -11138,7 +11138,7 @@ fn render_class_compartments(
         |elem: Element| maybe_add_class(elem, "fm-node-label", emit_classdef_classes);
 
     let line_h = font_size * config.line_height;
-    let padding_x = 8.0;
+    let padding_x = 12.0;
     let text_x = x + padding_x;
     let mut cursor_y = y + line_h;
 
@@ -12710,7 +12710,10 @@ fn compute_edge_label<'a>(
         // and neither matched the incumbent, because a prefix is not what the incumbent produces.
         // The number is now written by `write_sequence_number_into`.
         let label_text: Cow<'a, str> = truncate_label(&label.text, detail.edge_label_max_chars);
-        let (lx, ly) = if edge_path.points.len() == 4 {
+        let (mut lx, mut ly) = if edge_path.is_self_loop && edge_path.points.len() >= 4 {
+            let p = &edge_path.points[2];
+            (p.x + offset_x + 28.0, p.y + offset_y)
+        } else if edge_path.points.len() == 4 {
             let p1 = &edge_path.points[1];
             let p2 = &edge_path.points[2];
             (
@@ -12729,6 +12732,43 @@ fn compute_edge_label<'a>(
             let mid_point = &edge_path.points[mid_idx];
             (mid_point.x + offset_x, mid_point.y + offset_y - 8.0)
         };
+
+        let p_start = &edge_path.points[0];
+        let p_end = edge_path.points.last().unwrap();
+
+        if edge_path.points.len() == 4 && !edge_path.is_self_loop {
+            let p1 = &edge_path.points[1];
+            let p2 = &edge_path.points[2];
+            let estimated_half_w = (label_text.len() as f32 * 7.5).max(36.0) / 2.0;
+            if (p_end.x - p_start.x).abs() > 40.0 && (p1.y - p2.y).abs() < 5.0 {
+                // Horizontal tree/inheritance branch: place above the horizontal segment
+                lx = f32::midpoint(p1.x, p2.x) + offset_x;
+                ly = p1.y + offset_y - 12.0;
+            } else if p_end.y < p_start.y - 15.0 {
+                // Upward return transition: place completely to the right of the edge loop
+                lx = p_start.x.max(p_end.x) + offset_x + estimated_half_w + 14.0;
+                ly = f32::midpoint(p_start.y, p_end.y) + offset_y;
+            } else if p_end.y > p_start.y + 15.0 {
+                // Downward forward transition: place completely to the left of the edge loop
+                lx = p_start.x.min(p_end.x) + offset_x - estimated_half_w - 14.0;
+                ly = f32::midpoint(p_start.y, p_end.y) + offset_y;
+            }
+        } else if edge_path.parallel_offset.abs() > 0.01 {
+            let is_vert = (p_end.y - p_start.y).abs() >= (p_end.x - p_start.x).abs();
+            if is_vert {
+                let estimated_half_w = (label_text.len() as f32 * 7.5).max(36.0) / 2.0;
+                let sign = if edge_path.parallel_offset > 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                lx += sign * (estimated_half_w + 14.0);
+            } else {
+                ly += edge_path.parallel_offset * 3.5;
+            }
+        } else if edge_path.points.len() >= 2 && p_end.y < p_start.y - 15.0 {
+            lx += 60.0;
+        }
         Some((label_text, lx, ly))
     } else {
         None

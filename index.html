@@ -64,6 +64,7 @@
 
   <style>
     :root {
+      color-scheme: dark;
       --color-bg: #020a06;
       --color-bg-deep: #010503;
       --color-surface: #06140d;
@@ -81,6 +82,8 @@
 
     *, *::before, *::after {
       box-sizing: border-box;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(16, 185, 129, 0.35) #020a06;
     }
 
     html {
@@ -92,6 +95,8 @@
       scroll-behavior: smooth;
       scroll-padding-top: 5rem;
       -webkit-text-size-adjust: 100%;
+      color-scheme: dark;
+      background-color: var(--color-bg);
     }
 
     body {
@@ -107,6 +112,33 @@
       -webkit-font-smoothing: antialiased;
       -moz-osx-font-smoothing: grayscale;
       line-height: 1.6;
+    }
+
+    /* Universal WebKit / Blink Dark Scrollbar Theming — ZERO WHITE ANYWHERE */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+      background-color: #020a06 !important;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: #020a06 !important;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: rgba(16, 185, 129, 0.3) !important;
+      border-radius: 9999px;
+      border: 2px solid #020a06 !important;
+      background-clip: padding-box;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(16, 185, 129, 0.65) !important;
+      border: 2px solid #020a06 !important;
+    }
+
+    ::-webkit-scrollbar-corner {
+      background: #020a06 !important;
     }
 
     main, section, header, footer, aside, nav, article {
@@ -128,11 +160,25 @@
     .no-scrollbar::-webkit-scrollbar,
     .scrollbar-none::-webkit-scrollbar,
     #duel-specimen-pills::-webkit-scrollbar,
-    #spotlight-pills-strip::-webkit-scrollbar {
+    #spotlight-pills-strip::-webkit-scrollbar,
+    .pan-zoom-container::-webkit-scrollbar,
+    .pan-zoom-viewport::-webkit-scrollbar,
+    .spotlight-stage::-webkit-scrollbar,
+    .gallery-stage::-webkit-scrollbar,
+    .specimen-mini-stage::-webkit-scrollbar {
       display: none !important;
       width: 0 !important;
       height: 0 !important;
       background: transparent !important;
+    }
+
+    .pan-zoom-container,
+    .pan-zoom-viewport,
+    .spotlight-stage,
+    .gallery-stage,
+    .specimen-mini-stage {
+      overflow: hidden !important;
+      scrollbar-width: none !important;
     }
 
     body::after {
@@ -339,7 +385,7 @@
       border: 1px solid rgba(16, 185, 129, 0.15);
       display: flex;
       overflow: hidden;
-      min-height: 580px;
+      min-height: 640px;
       flex: 1;
     }
 
@@ -347,7 +393,7 @@
       width: 3.4rem;
       background: #010503;
       border-right: 1px solid rgba(16, 185, 129, 0.12);
-      padding: 1.25rem 0.6rem 3rem;
+      padding: 1.25rem 0.6rem 1.5rem;
       font-family: var(--font-mono);
       font-size: 13px;
       line-height: 1.65;
@@ -363,7 +409,7 @@
       flex: 1;
       min-width: 0;
       height: 100%;
-      min-height: 580px;
+      min-height: 640px;
     }
 
     .editor-highlight,
@@ -371,7 +417,7 @@
       position: absolute;
       inset: 0;
       margin: 0;
-      padding: 1.25rem 1.5rem 3rem;
+      padding: 1.25rem 1.5rem 1.5rem;
       font-family: var(--font-mono);
       font-size: 13px;
       line-height: 1.65;
@@ -393,7 +439,8 @@
 
     .editor-textarea {
       z-index: 2;
-      overflow: auto;
+      overflow-y: auto;
+      overflow-x: hidden;
       background: transparent;
       color: transparent;
       caret-color: var(--color-green-glow);
@@ -903,7 +950,7 @@
           </div>
 
           <!-- Side-by-Side Editor & Visualizer Panes -->
-          <div class="pg-panes grid grid-cols-1 lg:grid-cols-12 min-h-[580px] show-preview">
+          <div class="pg-panes grid grid-cols-1 lg:grid-cols-12 min-h-[660px] show-preview">
             
             <!-- Left Column: Syntax Highlighted Editor (5 Columns) -->
             <div class="pane-editor lg:col-span-5 border-b lg:border-b-0 lg:border-r border-emerald-500/15 flex flex-col bg-[#020704]">
@@ -932,9 +979,9 @@
               </div>
 
               <!-- Editor Dual-Layer Syntax Highlighting & Line Numbers -->
-              <div class="editor-wrapper flex-1">
+              <div class="editor-wrapper flex-1 min-h-[640px]">
                 <div id="editor-gutter" class="editor-gutter" aria-hidden="true">1</div>
-                <div class="editor-textarea-container">
+                <div class="editor-textarea-container min-h-[640px]">
                   <pre id="editor-highlight" class="editor-highlight" aria-hidden="true"></pre>
                   <textarea id="diagram-input" class="editor-textarea" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="Enter Mermaid diagram syntax..." aria-label="Mermaid diagram source code editor"></textarea>
                 </div>
@@ -949,7 +996,7 @@
             </div>
 
             <!-- Right Column: Visualizer & Viewports (7 Columns) -->
-            <div class="pane-visualizer lg:col-span-7 flex flex-col bg-[#0c0f0d] relative min-h-[460px] sm:min-h-[560px]">
+            <div class="pane-visualizer lg:col-span-7 flex flex-col bg-[#0c0f0d] relative min-h-[660px]">
               
               <!-- Viewport Subhead -->
               <div class="flex items-center justify-between px-5 py-2.5 bg-[#06140d] border-b border-emerald-500/15">
@@ -961,8 +1008,8 @@
               </div>
 
               <!-- VIEW 1: SVG High-Fidelity Vector Viewport -->
-              <div id="view-svg-container" class="flex-1 flex flex-col relative min-h-[500px]">
-                <div id="studio-pan-container" class="pan-zoom-container flex-1">
+              <div id="view-svg-container" class="flex-1 flex flex-col relative min-h-[600px]">
+                <div id="studio-pan-container" class="pan-zoom-container flex-1 min-h-[560px]">
                   <div id="studio-viewport" class="pan-zoom-viewport">
                     <div id="fm-svg" class="w-full h-full flex items-center justify-center">
                       <div class="flex flex-col items-center justify-center p-12 text-slate-500 font-mono text-xs animate-pulse">
@@ -1538,7 +1585,7 @@
             </div>
 
             <!-- Interactive Stage with Pan/Zoom Controller -->
-            <div id="duel-fm-pan-container" class="pan-zoom-container rounded-xl border border-emerald-500/20 bg-[#080e14] min-h-[520px] sm:min-h-[580px] lg:min-h-[640px] flex-1 relative overflow-hidden">
+            <div id="duel-fm-pan-container" class="pan-zoom-container rounded-xl border border-emerald-500/20 bg-[#080e14] min-h-[660px] sm:min-h-[720px] lg:min-h-[800px] flex-1 relative overflow-hidden">
               <div id="duel-fm-viewport" class="pan-zoom-viewport">
                 <div id="duel-fm-stage" class="w-full h-full flex items-center justify-center p-4 cursor-grab">
                   <div class="text-slate-500 font-mono text-xs animate-pulse">Rendering vector diagram...</div>
@@ -1566,7 +1613,7 @@
             </div>
 
             <!-- Interactive Stage with Pan/Zoom Controller -->
-            <div id="duel-m-pan-container" class="pan-zoom-container rounded-xl border border-slate-800 bg-[#080e14] min-h-[520px] sm:min-h-[580px] lg:min-h-[640px] flex-1 relative overflow-hidden">
+            <div id="duel-m-pan-container" class="pan-zoom-container rounded-xl border border-slate-800 bg-[#080e14] min-h-[660px] sm:min-h-[720px] lg:min-h-[800px] flex-1 relative overflow-hidden">
               <div id="duel-m-viewport" class="pan-zoom-viewport">
                 <div id="duel-m-stage" class="w-full h-full flex items-center justify-center p-4 cursor-grab">
                   <div class="text-slate-500 font-mono text-xs animate-pulse">Rendering mermaid-js DOM...</div>

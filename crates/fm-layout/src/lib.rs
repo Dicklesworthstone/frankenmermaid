@@ -1020,17 +1020,17 @@ pub struct LayoutSpacing {
 impl Default for LayoutSpacing {
     fn default() -> Self {
         Self {
-            node_spacing: 52.0,
-            rank_spacing: 76.0,
-            cluster_padding: 28.0,
-            sequence_participant_gap_extra: 48.0,
-            sequence_min_message_gap: 38.0,
-            sequence_self_loop_width: 36.0,
+            node_spacing: 80.0,
+            rank_spacing: 120.0,
+            cluster_padding: 52.0,
+            sequence_participant_gap_extra: 80.0,
+            sequence_min_message_gap: 56.0,
+            sequence_self_loop_width: 40.0,
             sequence_activation_width: 10.0,
-            chart_legend_padding: 48.0,
-            chart_legend_min_width: 110.0,
-            chart_legend_max_width: 260.0,
-            chart_title_height: 38.0,
+            chart_legend_padding: 86.0,
+            chart_legend_min_width: 136.0,
+            chart_legend_max_width: 280.0,
+            chart_title_height: 44.0,
         }
     }
 }
@@ -3365,7 +3365,13 @@ fn compute_traced_layout_with_config_and_guardrails(
         }
         LayoutAlgorithm::Force => layout_diagram_force_traced(ir),
         LayoutAlgorithm::Tree => layout_diagram_tree_traced(ir),
-        LayoutAlgorithm::Radial => layout_diagram_radial_traced(ir),
+        LayoutAlgorithm::Radial => {
+            if ir.diagram_type == fm_core::DiagramType::Mindmap {
+                layout_diagram_mindmap_traced(ir)
+            } else {
+                layout_diagram_radial_traced(ir)
+            }
+        }
         LayoutAlgorithm::Timeline => layout_diagram_timeline_traced(ir),
         LayoutAlgorithm::Gantt => layout_diagram_gantt_traced(ir),
         LayoutAlgorithm::XyChart => layout_diagram_xychart_traced(ir),
@@ -5810,6 +5816,341 @@ pub fn layout_diagram_radial_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             edges,
             bounds,
             stats,
+            extensions: LayoutExtensions::default(),
+            dirty_regions: Vec::new(),
+        }),
+        trace,
+    }
+}
+
+fn mindmap_subtree_height(
+    node: usize,
+    tree: &TreeLayoutStructure,
+    node_sizes: &[(f32, f32)],
+    v_gap: f32,
+) -> f32 {
+    let children = tree.children.of(node);
+    if children.is_empty() {
+        node_sizes[node].1.max(38.0)
+    } else {
+        let sum: f32 = children
+            .iter()
+            .map(|c| mindmap_subtree_height(*c, tree, node_sizes, v_gap))
+            .sum();
+        let total_gaps = (children.len().saturating_sub(1)) as f32 * v_gap;
+        (sum + total_gaps).max(node_sizes[node].1.max(38.0))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mindmap_place_subtree(
+    node: usize,
+    x_parent: f32,
+    y_center: f32,
+    is_left: bool,
+    tree: &TreeLayoutStructure,
+    node_sizes: &[(f32, f32)],
+    h_gap: f32,
+    v_gap: f32,
+    positions: &mut [(f32, f32)],
+    is_left_arr: &mut [bool],
+) {
+    let (nw, nh) = node_sizes[node];
+    let x = if is_left {
+        x_parent - h_gap - nw
+    } else {
+        x_parent + h_gap
+    };
+    let y = y_center - nh * 0.5;
+    positions[node] = (x, y);
+    is_left_arr[node] = is_left;
+
+    let children = tree.children.of(node);
+    if children.is_empty() {
+        return;
+    }
+
+    let total_children_h: f32 = children
+        .iter()
+        .map(|c| mindmap_subtree_height(*c, tree, node_sizes, v_gap))
+        .sum::<f32>()
+        + (children.len().saturating_sub(1) as f32 * v_gap);
+
+    let mut curr_y = y_center - total_children_h * 0.5;
+    let next_x_parent = if is_left { x } else { x + nw };
+
+    for child in children {
+        let ch_h = mindmap_subtree_height(*child, tree, node_sizes, v_gap);
+        let child_center_y = curr_y + ch_h * 0.5;
+        mindmap_place_subtree(
+            *child,
+            next_x_parent,
+            child_center_y,
+            is_left,
+            tree,
+            node_sizes,
+            h_gap,
+            v_gap,
+            positions,
+            is_left_arr,
+        );
+        curr_y += ch_h + v_gap;
+    }
+}
+
+#[must_use]
+pub fn layout_diagram_mindmap_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    let trace = LayoutTrace::default();
+    let metrics = fm_core::FontMetrics::default_metrics();
+    let node_sizes = compute_node_sizes(ir, &metrics);
+    let node_count = ir.nodes.len();
+    let spacing = LayoutSpacing::default();
+
+    if node_count == 0 {
+        return TracedLayout {
+            layout: Arc::new(DiagramLayout {
+                nodes: Vec::new(),
+                clusters: Vec::new(),
+                cycle_clusters: Vec::new(),
+                edges: Vec::new(),
+                bounds: LayoutRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                },
+                stats: LayoutStats::default(),
+                extensions: LayoutExtensions::default(),
+                dirty_regions: Vec::new(),
+            }),
+            trace,
+        };
+    }
+
+    let tree = build_tree_layout_structure(ir);
+    let root_idx = tree.roots.first().copied().unwrap_or(0);
+    let root_children = tree.children.of(root_idx);
+
+    if root_children.is_empty() {
+        let (rw, rh) = node_sizes[root_idx];
+        let nodes = vec![LayoutNodeBox {
+            node_index: root_idx,
+            node_id: ir.nodes[root_idx].id.clone(),
+            span: ir.nodes[root_idx].span_primary,
+            bounds: LayoutRect {
+                x: 60.0,
+                y: 60.0,
+                width: rw,
+                height: rh,
+            },
+            rank: 0,
+            order: 0,
+        }];
+        let bounds = compute_bounds(&nodes, &[], &[], spacing);
+        return TracedLayout {
+            layout: Arc::new(DiagramLayout {
+                nodes,
+                clusters: Vec::new(),
+                cycle_clusters: Vec::new(),
+                edges: Vec::new(),
+                bounds,
+                stats: LayoutStats::default(),
+                extensions: LayoutExtensions::default(),
+                dirty_regions: Vec::new(),
+            }),
+            trace,
+        };
+    }
+
+    let num_branches = root_children.len();
+    let right_count = (num_branches + 1) / 2;
+    let right_branches = &root_children[..right_count];
+    let left_branches = &root_children[right_count..];
+
+    let v_gap = 22.0_f32;
+    let h_gap = 52.0_f32;
+
+    let mut node_positions = vec![(0.0_f32, 0.0_f32); node_count];
+    let mut node_is_left = vec![false; node_count];
+
+    let right_total_h: f32 = right_branches
+        .iter()
+        .map(|b| mindmap_subtree_height(*b, &tree, &node_sizes, v_gap))
+        .sum::<f32>()
+        + (right_branches.len().saturating_sub(1) as f32 * v_gap);
+
+    let left_total_h: f32 = left_branches
+        .iter()
+        .map(|b| mindmap_subtree_height(*b, &tree, &node_sizes, v_gap))
+        .sum::<f32>()
+        + (left_branches.len().saturating_sub(1) as f32 * v_gap);
+
+    let max_side_h = right_total_h.max(left_total_h);
+
+    let (rw, rh) = node_sizes[root_idx];
+    let root_x = 0.0_f32;
+    let root_y = (max_side_h - rh) * 0.5;
+    node_positions[root_idx] = (root_x, root_y);
+    node_is_left[root_idx] = false;
+
+    // Place right branches
+    let mut curr_y = (max_side_h - right_total_h) * 0.5;
+    for branch in right_branches {
+        let bh = mindmap_subtree_height(*branch, &tree, &node_sizes, v_gap);
+        let b_center_y = curr_y + bh * 0.5;
+        mindmap_place_subtree(
+            *branch,
+            root_x + rw,
+            b_center_y,
+            false,
+            &tree,
+            &node_sizes,
+            h_gap,
+            v_gap,
+            &mut node_positions,
+            &mut node_is_left,
+        );
+        curr_y += bh + v_gap;
+    }
+
+    // Place left branches
+    let mut curr_y = (max_side_h - left_total_h) * 0.5;
+    for branch in left_branches {
+        let bh = mindmap_subtree_height(*branch, &tree, &node_sizes, v_gap);
+        let b_center_y = curr_y + bh * 0.5;
+        mindmap_place_subtree(
+            *branch,
+            root_x,
+            b_center_y,
+            true,
+            &tree,
+            &node_sizes,
+            h_gap,
+            v_gap,
+            &mut node_positions,
+            &mut node_is_left,
+        );
+        curr_y += bh + v_gap;
+    }
+
+    let min_x = node_positions
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(f32::INFINITY, f32::min);
+    let min_y = node_positions
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(f32::INFINITY, f32::min);
+    let offset_x = 60.0 - min_x;
+    let offset_y = 60.0 - min_y;
+
+    let mut nodes = Vec::with_capacity(node_count);
+    for (i, node) in ir.nodes.iter().enumerate() {
+        let (w, h) = node_sizes[i];
+        let (x, y) = node_positions[i];
+        nodes.push(LayoutNodeBox {
+            node_index: i,
+            node_id: node.id.clone(),
+            span: node.span_primary,
+            bounds: LayoutRect {
+                x: x + offset_x,
+                y: y + offset_y,
+                width: w,
+                height: h,
+            },
+            rank: tree.depth.get(i).copied().unwrap_or(0),
+            order: i,
+        });
+    }
+
+    let edges: Vec<LayoutEdgePath> = ir
+        .edges
+        .iter()
+        .enumerate()
+        .filter_map(|(ei, edge)| {
+            let from_idx = endpoint_node_index(ir, edge.from)?;
+            let to_idx = endpoint_node_index(ir, edge.to)?;
+            if from_idx >= nodes.len() || to_idx >= nodes.len() {
+                return None;
+            }
+            let from_box = &nodes[from_idx];
+            let to_box = &nodes[to_idx];
+            let is_left = node_is_left[to_idx];
+
+            let (from_pt, to_pt) = if is_left {
+                (
+                    LayoutPoint {
+                        x: from_box.bounds.x,
+                        y: from_box.bounds.y + from_box.bounds.height * 0.5,
+                    },
+                    LayoutPoint {
+                        x: to_box.bounds.x + to_box.bounds.width,
+                        y: to_box.bounds.y + to_box.bounds.height * 0.5,
+                    },
+                )
+            } else {
+                (
+                    LayoutPoint {
+                        x: from_box.bounds.x + from_box.bounds.width,
+                        y: from_box.bounds.y + from_box.bounds.height * 0.5,
+                    },
+                    LayoutPoint {
+                        x: to_box.bounds.x,
+                        y: to_box.bounds.y + to_box.bounds.height * 0.5,
+                    },
+                )
+            };
+
+            let dx = (to_pt.x - from_pt.x).abs() * 0.5;
+            let cp1 = if is_left {
+                LayoutPoint {
+                    x: from_pt.x - dx,
+                    y: from_pt.y,
+                }
+            } else {
+                LayoutPoint {
+                    x: from_pt.x + dx,
+                    y: from_pt.y,
+                }
+            };
+            let cp2 = if is_left {
+                LayoutPoint {
+                    x: to_pt.x + dx,
+                    y: to_pt.y,
+                }
+            } else {
+                LayoutPoint {
+                    x: to_pt.x - dx,
+                    y: to_pt.y,
+                }
+            };
+
+            let points = smallvec::smallvec![from_pt, cp1, cp2, to_pt];
+
+            Some(LayoutEdgePath {
+                edge_index: ei,
+                span: edge.span,
+                points,
+                reversed: false,
+                is_self_loop: false,
+                parallel_offset: 0.0,
+                bundle_count: 1,
+                bundled: false,
+            })
+        })
+        .collect();
+
+    let clusters = build_cluster_boxes(ir, &nodes, spacing, &metrics);
+    let bounds = compute_bounds(&nodes, &clusters, &edges, spacing);
+
+    TracedLayout {
+        layout: Arc::new(DiagramLayout {
+            nodes,
+            clusters,
+            cycle_clusters: Vec::new(),
+            edges,
+            bounds,
+            stats: LayoutStats::default(),
             extensions: LayoutExtensions::default(),
             dirty_regions: Vec::new(),
         }),
@@ -10707,6 +11048,21 @@ fn compute_node_size(
                 )
             }
         }
+        fm_core::NodeShape::Circle => {
+            if text.is_empty() {
+                (36.0, 36.0)
+            } else {
+                let (label_width, label_height) = metrics.estimate_dimensions(text);
+                let (icon_width, icon_height) = icon_dimensions(node, metrics);
+                let content_w = label_width.max(icon_width);
+                let content_h = label_height + icon_height;
+                let diameter = (content_w.hypot(content_h) + 24.0)
+                    .max(content_w + 36.0)
+                    .max(content_h + 36.0)
+                    .max(48.0);
+                (diameter, diameter)
+            }
+        }
         fm_core::NodeShape::HorizontalBar => (72.0, 16.0),
         _ => {
             let text = if text.is_empty() {
@@ -10719,9 +11075,9 @@ fn compute_node_size(
             let width = label_width
                 .max(icon_width)
                 .max(icon_width.mul_add(0.85, label_width))
-                + 36.0;
-            let height = label_height + icon_height + 20.0;
-            let (width, height) = (width.max(68.0), height.max(38.0));
+                + 72.0;
+            let height = label_height + icon_height + 44.0;
+            let (width, height) = (width.max(100.0), height.max(52.0));
             // A class node's box must also hold its compartment stack. The SVG renderer walks the
             // member rows against the node's own height and `break`s on the first row that would
             // fall outside it, so a box sized from the label alone SILENTLY DROPS members rather
@@ -11076,15 +11432,12 @@ fn class_compartment_dimensions(
 
     // The STEREOTYPE row is drawn in this box too, so it has to be measured in it. It was not:
     // width came from the member rows alone, and the caller's other term is the CLASS NAME, so
-    // `class A { <<interface>> }` sized a box to fit `A` and then drew a string four times wider.
-    // Height had always counted this row; only the width forgot it — the asymmetry that made the
-    // omission survive, since a too-narrow box overflows visibly rather than dropping content.
-    // Renderers draw it at `font_size * 0.85`, and `metrics` measures at full size.
     let stereotype_width = meta.stereotype.as_ref().map_or(0.0, |stereotype| {
         metrics.estimate_dimensions(stereotype.label()).0 * 0.85
     });
 
-    Some((member_width.max(stereotype_width) + 16.0, height))
+    let content_w = (member_width * 1.25).max(stereotype_width * 1.25);
+    Some(((content_w + 40.0).max(180.0), height + 20.0))
 }
 
 /// Space an ER entity needs for its attribute rows. `None` for any node that declares no `members`.
@@ -11399,17 +11752,16 @@ fn cycle_removal(
         detect_cycle_components(node_count, &edges, node_priority)
     };
 
-    let reversed_edge_indexes = match cycle_strategy {
-        CycleStrategy::Greedy => cycle_removal_greedy(node_count, &edges, node_priority),
-        CycleStrategy::DfsBack => dfs_back_edges.clone(),
-        CycleStrategy::MfasApprox => {
-            cycle_removal_mfas_approx(node_count, &edges, node_priority, &cycle_detection)
-        }
-        CycleStrategy::CycleAware => {
-            // For CycleAware, we still want to break cycles for the ranking phase
-            // to ensure a high-quality topological baseline, but we keep the
-            // original orientation for other phases that handle cycles explicitly.
-            dfs_back_edges.clone()
+    let reversed_edge_indexes = if matches!(ir.diagram_type, DiagramType::State) {
+        dfs_back_edges.clone()
+    } else {
+        match cycle_strategy {
+            CycleStrategy::Greedy => cycle_removal_greedy(node_count, &edges, node_priority),
+            CycleStrategy::DfsBack => dfs_back_edges.clone(),
+            CycleStrategy::MfasApprox => {
+                cycle_removal_mfas_approx(node_count, &edges, node_priority, &cycle_detection)
+            }
+            CycleStrategy::CycleAware => dfs_back_edges.clone(),
         }
     };
 
@@ -11776,7 +12128,7 @@ fn cycle_removal_greedy(
             let right_score = out_degree[*right] as isize - in_degree[*right] as isize;
             left_score
                 .cmp(&right_score)
-                .then_with(|| compare_priority(*right, *left, node_priority))
+                .then_with(|| compare_priority(*left, *right, node_priority))
         }) else {
             break;
         };
@@ -12587,9 +12939,21 @@ fn place_block_beta_items(
 }
 
 fn compare_node_indices(ir: &MermaidDiagramIr, left: usize, right: usize) -> std::cmp::Ordering {
-    ir.nodes[left]
-        .id
-        .cmp(&ir.nodes[right].id)
+    let left_is_start = ir.nodes.get(left).is_some_and(|n| {
+        n.id.starts_with("__state_start") || n.shape == fm_core::NodeShape::FilledCircle
+    });
+    let right_is_start = ir.nodes.get(right).is_some_and(|n| {
+        n.id.starts_with("__state_start") || n.shape == fm_core::NodeShape::FilledCircle
+    });
+
+    right_is_start
+        .cmp(&left_is_start)
+        .then_with(|| {
+            let left_subgraph_depth = ir.graph.nodes.get(left).map_or(0, |n| n.subgraphs.len());
+            let right_subgraph_depth = ir.graph.nodes.get(right).map_or(0, |n| n.subgraphs.len());
+            left_subgraph_depth.cmp(&right_subgraph_depth)
+        })
+        .then_with(|| ir.nodes[left].id.cmp(&ir.nodes[right].id))
         .then_with(|| left.cmp(&right))
 }
 
@@ -16846,6 +17210,54 @@ fn anchor_composite_state_nodes(
         for node in nodes.iter_mut() {
             if node.node_id == title {
                 node.bounds = cluster.bounds;
+            }
+        }
+
+        // Ensure any outgoing transition target that is an end state [*] sits below this cluster
+        for edge in &ir.edges {
+            if let (Some(source), Some(target)) = (
+                endpoint_node_index(ir, edge.from),
+                endpoint_node_index(ir, edge.to),
+            ) {
+                if let (Some(s_node), Some(t_node)) = (ir.nodes.get(source), ir.nodes.get(target)) {
+                    if s_node.id == title
+                        && (t_node.id == "__state_end"
+                            || t_node.shape == fm_core::NodeShape::DoubleCircle)
+                    {
+                        if let Some(target_box) = nodes.get_mut(target) {
+                            if target_box.bounds.y <= cluster.bounds.y + cluster.bounds.height {
+                                target_box.bounds.y =
+                                    cluster.bounds.y + cluster.bounds.height + 40.0;
+                                target_box.bounds.x = cluster.bounds.x
+                                    + (cluster.bounds.width - target_box.bounds.width) / 2.0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Offset 2-cycle intermediary nodes horizontally so forward and return paths never coincide
+    for edge in &ir.edges {
+        if let (Some(s), Some(t)) = (
+            endpoint_node_index(ir, edge.from),
+            endpoint_node_index(ir, edge.to),
+        ) {
+            if s != t {
+                let has_return = ir.edges.iter().any(|other| {
+                    endpoint_node_index(ir, other.from) == Some(t)
+                        && endpoint_node_index(ir, other.to) == Some(s)
+                });
+                if has_return && s < nodes.len() && t < nodes.len() {
+                    let s_depth = ir.graph.nodes.get(s).map_or(0, |n| n.subgraphs.len());
+                    let t_depth = ir.graph.nodes.get(t).map_or(0, |n| n.subgraphs.len());
+                    if s_depth == 0 && t_depth == 0 {
+                        if (nodes[s].bounds.x - nodes[t].bounds.x).abs() < 20.0 {
+                            nodes[t].bounds.x -= 80.0;
+                        }
+                    }
+                }
             }
         }
     }

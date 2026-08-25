@@ -12,6 +12,34 @@
 
   * {
     box-sizing: border-box;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(59, 130, 246, 0.4) #020617;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+    background-color: #020617 !important;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #020617 !important;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(59, 130, 246, 0.3) !important;
+    border-radius: 9999px;
+    border: 2px solid #020617 !important;
+    background-clip: padding-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(59, 130, 246, 0.65) !important;
+    border: 2px solid #020617 !important;
+  }
+
+  ::-webkit-scrollbar-corner {
+    background: #020617 !important;
   }
 
   body {

@@ -2434,6 +2434,12 @@ mod tests {
     };
     use fm_render_canvas::CanvasRenderConfig;
     use fm_render_svg::{SvgRenderConfig, describe_diagram_with_layout};
+    use sha2::{Digest, Sha256};
+    use std::{
+        fmt::Write as _,
+        fs,
+        path::{Path, PathBuf},
+    };
 
     #[cfg(feature = "webgpu")]
     use fm_render_canvas::gpu_device::{
@@ -2441,6 +2447,113 @@ mod tests {
     };
     #[cfg(feature = "webgpu")]
     use fm_render_canvas::gpu_pipeline::node_pipeline;
+
+    fn collect_source_files(directory: &Path, inputs: &mut Vec<PathBuf>) {
+        let entries = fs::read_dir(directory)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", directory.display()));
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "failed to read an entry in {}: {error}",
+                        directory.display()
+                    )
+                })
+                .path();
+            if path.is_dir() {
+                collect_source_files(&path, inputs);
+            } else if path.is_file() {
+                inputs.push(path);
+            }
+        }
+    }
+
+    fn source_input_sha256() -> String {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("fm-wasm must live under <workspace>/crates/fm-wasm");
+        let mut inputs: Vec<PathBuf> = [
+            ".cargo/config.toml",
+            "Cargo.lock",
+            "Cargo.toml",
+            "build-wasm.sh",
+            "evidence/capability_matrix.json",
+            "rust-toolchain.toml",
+        ]
+        .into_iter()
+        .map(|relative| root.join(relative))
+        .collect();
+
+        for crate_name in [
+            "fm-core",
+            "fm-layout",
+            "fm-parser",
+            "fm-render-canvas",
+            "fm-render-svg",
+            "fm-wasm",
+        ] {
+            let crate_dir = root.join("crates").join(crate_name);
+            inputs.push(crate_dir.join("Cargo.toml"));
+            collect_source_files(&crate_dir.join("src"), &mut inputs);
+        }
+        inputs.sort();
+
+        let mut hasher = Sha256::new();
+        for path in inputs {
+            let relative = path
+                .strip_prefix(root)
+                .expect("source input must be inside the workspace");
+            let mut data = fs::read(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            if relative == Path::new("crates/fm-wasm/src/lib.rs") {
+                const TEST_MODULE_MARKER: &[u8] = b"\n#[cfg(test)]\nmod tests {";
+                let marker_position = data
+                    .windows(TEST_MODULE_MARKER.len())
+                    .position(|window| window == TEST_MODULE_MARKER)
+                    .expect("fm-wasm test-module marker must remain present");
+                data.truncate(marker_position);
+            }
+
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            hasher.update(relative.as_bytes());
+            hasher.update([0]);
+            hasher.update(
+                u64::try_from(data.len())
+                    .expect("source input length must fit in u64")
+                    .to_le_bytes(),
+            );
+            hasher.update(&data);
+        }
+
+        let digest = hasher.finalize();
+        let mut encoded = String::with_capacity(64);
+        for byte in digest {
+            write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        encoded
+    }
+
+    fn assert_package_source_matches_current_inputs() {
+        let package_metadata: serde_json::Value =
+            serde_json::from_str(include_str!("../../../pkg/package.json"))
+                .expect("pkg/package.json must contain valid JSON");
+        let packaged_source_sha256 = package_metadata
+            .get("frankenmermaidSourceSha256")
+            .and_then(serde_json::Value::as_str)
+            .expect("pkg/package.json must record frankenmermaidSourceSha256");
+        let current_source_sha256 = source_input_sha256();
+        assert_eq!(
+            packaged_source_sha256, current_source_sha256,
+            "the committed WASM package was built from different source inputs; run the canonical \
+             build-wasm.sh before updating any artifact or render digest"
+        );
+    }
+
+    #[test]
+    fn committed_wasm_package_records_current_source_inputs() {
+        assert_package_source_matches_current_inputs();
+    }
 
     #[allow(dead_code)]
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3872,7 +3985,7 @@ mod tests {
         // before it can masquerade as a cross-target floating-point difference. Rebuild from the
         // same source revision, then update this digest and the per-fixture digests together after
         // reviewing every generated artifact.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x9f9f_8e83_c756_1353;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x8ba0_0def_097b_3741;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),
@@ -3894,26 +4007,28 @@ mod tests {
              the four render digests together"
         );
 
+        assert_package_source_matches_current_inputs();
+
         const EXPECTED: &[(&str, &str, u64)] = &[
             (
                 "flowchart",
                 "flowchart TD\n  a[Alpha] --> b[Beta]\n  b --> c[Gamma]\n  c -.--> a\n  b --> d[Delta]\n",
-                0xd982_16e0_d36f_3915,
+                0xa9ba_3e7f_2697_24f1,
             ),
             (
                 "sequence",
                 "sequenceDiagram\n  participant A\n  participant B\n  A->>B: hello\n  B-->>A: reply\n",
-                0xaf6f_0c2a_bea9_6580,
+                0xae15_0176_991b_2822,
             ),
             (
                 "class",
                 "classDiagram\n  class Alpha {\n    +String name\n    +run()\n  }\n  Alpha <|-- Beta\n",
-                0x0865_43ab_90cf_9e93,
+                0xde2b_6ef2_b615_4a90,
             ),
             (
                 "state",
                 "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy: start\n  Busy --> Idle: done\n",
-                0x604e_03b7_8578_f5c0,
+                0xb5bd_5fc9_d752_5125,
             ),
         ];
 
