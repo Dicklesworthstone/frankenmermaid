@@ -2008,6 +2008,40 @@ impl IrBuilder {
         )
     }
 
+    /// Attach a state-diagram description to `id`, APPENDING to any label it already carries.
+    ///
+    /// `intern_node` deliberately fills a label only when the node has none — first writer wins —
+    /// which is right for node tokens and wrong for descriptions: mermaid accumulates them, so
+    /// `state "Desc" as s1` followed by `s1 : more` is `["Desc", "more"]` and draws two lines.
+    /// Routing descriptions through `intern_node` silently dropped every line after the first
+    /// (bd-xm62h). Joined with `\n`, which `fm_render_svg::wrap_node_label_lines` already splits on.
+    pub(crate) fn append_state_description(&mut self, id: &str, text: &str, span: Span) {
+        let Some(node_id) = self.intern_node(id, None, NodeShape::Rounded, span) else {
+            return;
+        };
+        let existing = self
+            .ir
+            .nodes
+            .get(node_id.0)
+            .and_then(|node| node.label)
+            .and_then(|label_id| self.ir.labels.get(label_id.0))
+            .map(|label| label.text.clone());
+        let combined = match existing {
+            Some(existing) if !existing.is_empty() => {
+                let mut combined = String::with_capacity(existing.len() + 1 + text.len());
+                combined.push_str(&existing);
+                combined.push('\n');
+                combined.push_str(text);
+                combined
+            }
+            _ => text.to_owned(),
+        };
+        let label_id = self.intern_plain_label_owned(combined, span);
+        if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
+            node.label = Some(label_id);
+        }
+    }
+
     pub(crate) fn intern_node(
         &mut self,
         id: &str,

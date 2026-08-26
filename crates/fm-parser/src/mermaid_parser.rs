@@ -5005,12 +5005,88 @@ fn parse_state_statements(line: &str, config: &ParserConfig) -> Option<Vec<State
             statements.push(StateStatement::Edge(asts));
             continue;
         }
+        // `s1 : text` is a state DESCRIPTION, not a node whose name happens to contain a colon
+        // (bd-xm62h). Reaching here means the statement carries no edge operator, so there is no
+        // transition label to confuse it with. Left unrecognised, the node parser made the WHOLE
+        // line the label and drew a box captioned `s1 : text` — the author's own id and colon, text
+        // the incumbent never draws — and every description line after the first was silently
+        // dropped, because a node token only supplies a label to a state that has none.
+        if let Some((target, description)) = split_state_description(statement) {
+            statements.push(StateStatement::Description {
+                target: target.to_string(),
+                text: description.to_string(),
+            });
+            continue;
+        }
         if let Some(node) = parse_node_token_with_config(statement, config) {
             statements.push(StateStatement::Node(node));
         }
     }
 
     (!statements.is_empty()).then_some(statements)
+}
+
+/// Split `s1 : description` into its state id and description text.
+///
+/// Returns `None` for anything that is not that form, because the sole caller is the LAST branch
+/// before the bare-node fallback and a false positive there turns a real state into a phantom.
+/// Measured against the pinned incumbent (`scripts/headtohead/diagram_db_probe.mjs`), which parses
+/// both `s1: text` and `s1 : text` into one description on `s1`.
+///
+/// The scan is quote- and bracket-aware for the same reason [`split_state_transition_label`] is: a
+/// colon inside `"…"` or inside `[*]`/`(…)`/`{…}` is not the separator. Three further rejections,
+/// each of which is a construct that reaches this branch with a top-level colon in it:
+///
+/// * `:::` — the class shorthand `A:::bad`. The incumbent records NO class for it in a state
+///   diagram, and it is certainly not a description called `::bad`.
+/// * an id containing whitespace — mermaid's grammar wants an ID token here, so `hide empty
+///   description: x` is not a description of a state called `hide empty description`.
+/// * an empty id or an empty description — `: text` names no state and `s1 :` describes nothing.
+fn split_state_description(statement: &str) -> Option<(&str, &str)> {
+    let bytes = statement.as_bytes();
+    let mut in_quote: Option<u8> = None;
+    let mut escaped = false;
+    let mut square_depth = 0_usize;
+    let mut paren_depth = 0_usize;
+    let mut brace_depth = 0_usize;
+
+    for (idx, &byte) in bytes.iter().enumerate() {
+        if let Some(quote) = in_quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' && quote != b'`' {
+                escaped = true;
+            } else if byte == quote {
+                in_quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'"' | b'\'' | b'`' => in_quote = Some(byte),
+            b'[' => square_depth = square_depth.saturating_add(1),
+            b']' => square_depth = square_depth.saturating_sub(1),
+            b'(' => paren_depth = paren_depth.saturating_add(1),
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            b'{' => brace_depth = brace_depth.saturating_add(1),
+            b'}' => brace_depth = brace_depth.saturating_sub(1),
+            b':' if square_depth == 0 && paren_depth == 0 && brace_depth == 0 => {
+                if bytes.get(idx + 1) == Some(&b':') {
+                    return None;
+                }
+                let target = trim_fast(&statement[..idx]);
+                let description = trim_fast(&statement[idx + 1..]);
+                if target.is_empty()
+                    || description.is_empty()
+                    || target.bytes().any(|byte| byte.is_ascii_whitespace())
+                {
+                    return None;
+                }
+                return Some((target, description));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Split a state transition's `: label` suffix off its edge text.
@@ -5178,6 +5254,9 @@ fn lower_state_statement(
                     "Line {line_number}: encountered '--' outside a composite state"
                 ));
             }
+        }
+        StateStatement::Description { target, text } => {
+            builder.append_state_description(&target, &text, span);
         }
         StateStatement::Note {
             target,
@@ -8967,6 +9046,13 @@ enum StateStatement {
         target: String,
         #[allow(dead_code)]
         position: String,
+        text: String,
+    },
+    /// `s1 : text` — mermaid's state-description syntax. Separate from `Node` because a
+    /// description ACCUMULATES onto whatever label the state already has, while a node token
+    /// supplies a label only when the state has none (bd-xm62h).
+    Description {
+        target: String,
         text: String,
     },
 }
