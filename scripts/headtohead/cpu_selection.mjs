@@ -92,6 +92,12 @@ export function selectPinnedCpuSet(records, size = 8, targetMhz = null) {
     min_mhz: chosen.length > 0 && typeof chosen[0].mhz === 'number'
       ? Math.min(...chosen.map((record) => record.mhz))
       : null,
+    // The set's MEAN clock, which is what a comparability check has to use: the incumbent runs
+    // across all of these cores, so its effective clock is not the slowest one. Comparing our single
+    // pinned core against `min_mhz` overstates the gap; against the mean it does not.
+    mean_mhz: chosen.length > 0 && clocked
+      ? Math.round(chosen.reduce((total, record) => total + record.mhz, 0) / chosen.length)
+      : null,
     // The widest clock gap inside the chosen set, so a row states how comparable its incumbent
     // cores actually were instead of leaving it to be inferred from the rule name.
     spread: chosen.length > 0 && clocked

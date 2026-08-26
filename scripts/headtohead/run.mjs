@@ -118,6 +118,27 @@ const HOST_WIDE_MAX_BUSY_FRACTION = 0.20;
 const HOST_WIDE_QUIET_SAMPLE_MS = 1_000;
 const HOST_WIDE_QUIET_MAX_ATTEMPTS = 900;
 
+/// Classify a frankenmermaid/mermaid-js clock ratio (bd-hmfi).
+///
+/// Pure so the self-test can drive it directly: the surrounding gate needs a live host with cpufreq,
+/// and a rule that can only be exercised on the machine it guards is a rule nobody checks.
+function clockSelectionWiringError(pinMhz, rule) {
+  if (!(typeof pinMhz === 'number' && pinMhz > 0)) return null;
+  if (rule === 'clocks_closest_to_measured_arm') return null;
+  if (rule === 'idle_band_no_cpufreq') return null;
+  return (
+    `incumbent cores were chosen by ${rule}, not by matching our arm's clock. The measured arm's ` +
+    'MHz was available and was not used, so the two engines ran under different clock regimes by ' +
+    'construction.'
+  );
+}
+
+function clockComparabilityVerdict(ratio, limit) {
+  if (ratio > limit) return 'frankenmermaid_clock_advantage';
+  if (ratio < 1 / limit) return 'frankenmermaid_clock_penalty';
+  return 'comparable';
+}
+
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);
   return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : fallback;
@@ -1448,6 +1469,75 @@ function fmBracket(before, after) {
 }
 
 if (has('self-test')) {
+  // CLOCK COMPARABILITY (bd-hmfi). Driven directly, because the gate itself needs a live cpufreq
+  // host: a rule that can only run on the machine it guards is a rule nobody checks.
+  {
+    const limit = 1.10;
+    const cases = [
+      // The schema_catalog_25 row measured 2026-08-26: our arm 4209 MHz, incumbent set mean 3216.
+      [4209 / 3216, 'frankenmermaid_clock_advantage'],
+      // The floor-vs-boost case this bead was filed on: 3914 / 1429 on the same host, same instant.
+      [3914 / 1429, 'frankenmermaid_clock_advantage'],
+      [1.0, 'comparable'],
+      [1.09, 'comparable'],
+      [1.11, 'frankenmermaid_clock_advantage'],
+      // Under-claiming is reported, never refused.
+      [1 / 1.5, 'frankenmermaid_clock_penalty'],
+      [1 / 1.09, 'comparable'],
+    ];
+    // The wiring predicate: the rank rule must be refused once our arm's clock is known.
+    if (clockSelectionWiringError(3200, 'fastest_clocks_in_idle_band') === null) {
+      throw new Error('the rank rule must be refused once our arm clock is known');
+    }
+    if (clockSelectionWiringError(3200, 'clocks_closest_to_measured_arm') !== null) {
+      throw new Error('the matched rule must be accepted');
+    }
+    // A host without cpufreq cannot match, and must not be refused for it.
+    if (clockSelectionWiringError(3200, 'idle_band_no_cpufreq') !== null) {
+      throw new Error('a host with no cpufreq data must not be refused');
+    }
+    if (clockSelectionWiringError(null, 'fastest_clocks_in_idle_band') !== null) {
+      throw new Error('with no measured clock there is nothing to match against');
+    }
+    for (const [ratio, expected] of cases) {
+      const actual = clockComparabilityVerdict(Number(ratio.toFixed(3)), limit);
+      if (actual !== expected) {
+        throw new Error(`clock comparability: ${ratio} -> ${actual}, expected ${expected}`);
+      }
+    }
+    // THE ASYMMETRY IS THE POINT, so it is asserted rather than left to the table above: the same
+    // magnitude of skew must refuse in our favour and merely report against us.
+    if (
+      clockComparabilityVerdict(1.5, limit) === clockComparabilityVerdict(Number((1 / 1.5).toFixed(3)), limit)
+    ) {
+      throw new Error('clock comparability must not treat an advantage and a penalty alike');
+    }
+  }
+  // The incumbent cpuset must be chosen to MATCH our arm's clock, not by rank (bd-hmfi defect 2).
+  {
+    const observed = [
+      { cpu: 0, busy: 0.01, mhz: 4500 },
+      { cpu: 1, busy: 0.01, mhz: 3200 },
+      { cpu: 2, busy: 0.01, mhz: 1429 },
+      { cpu: 3, busy: 0.01, mhz: 3100 },
+    ];
+    const matched = selectPinnedCpuSet(observed, 2, 3200);
+    if (matched.rule !== 'clocks_closest_to_measured_arm') {
+      throw new Error(`targetMhz ignored: rule was ${matched.rule}`);
+    }
+    if (JSON.stringify(matched.cpus) !== JSON.stringify([1, 3])) {
+      throw new Error(`matched set should be the cores nearest 3200 MHz, got ${matched.cpus}`);
+    }
+    if (matched.mean_mhz !== 3150) {
+      throw new Error(`mean_mhz should be 3150, got ${matched.mean_mhz}`);
+    }
+    // CONTROL: without a target the old rule takes the FASTEST, which is what put a 4500 MHz core
+    // opposite a 3200 MHz arm and produced the advantage this gate now refuses.
+    const ranked = selectPinnedCpuSet(observed, 2);
+    if (ranked.rule !== 'fastest_clocks_in_idle_band' || ranked.cpus[0] !== 0) {
+      throw new Error('the rank rule changed; the control no longer demonstrates the defect');
+    }
+  }
   if (!balancedSquareIsSymmetric() || balancedSquareIsSymmetric(['fm', 'mjs'])) {
     throw new Error('balanced-square slot symmetry regression');
   }
@@ -2586,7 +2676,18 @@ let incumbentCpuSet = null;
 if (pin) {
   const requested = Number(arg('incumbent-cpus', '8'));
   const observed = cpuBusy(300).map((record) => ({ ...record, mhz: cpuMhz(record.cpu) }));
-  incumbentCpuSet = selectPinnedCpuSet(observed, Number.isInteger(requested) && requested > 0 ? requested : 8);
+  // ⚠️ MATCH THE INCUMBENT'S CORES TO OURS (bd-hmfi defect 2). `selectPinnedCpuSet` has taken a
+  // `targetMhz` since it was written -- "cores like the one our arm got", a rule its own doc calls
+  // free of any threshold to argue about -- and NO CALLER EVER PASSED IT. Without it the rule is
+  // `fastest_clocks_in_idle_band`, which picks by rank inside a band of PARKED cores: the
+  // schema_catalog_25 row measured on 2026-08-26 recorded `spread: 1.949` WITHIN the incumbent's own
+  // eight cores, `min_mhz: 2202`, while our arm ran at 4209 MHz. An unused parameter is not a
+  // safeguard.
+  incumbentCpuSet = selectPinnedCpuSet(
+    observed,
+    Number.isInteger(requested) && requested > 0 ? requested : 8,
+    typeof pin.mhz === 'number' && pin.mhz > 0 ? pin.mhz : null,
+  );
   console.error(
     `[run] pinning mermaid-js to ${incumbentCpuSet.cpus.length} cpu(s) [${incumbentCpuSet.cpus.join(',')}]` +
       `${incumbentCpuSet.min_mhz === null ? '' : `, slowest ${incumbentCpuSet.min_mhz} MHz`}` +
@@ -2594,6 +2695,65 @@ if (pin) {
   );
 }
 env.incumbent_cpuset = incumbentCpuSet;
+
+// CLOCK COMPARABILITY (bd-hmfi). Frequency was captured per phase and then never CHECKED: `mhz`
+// appeared a dozen times in this driver and not once in a refusal path.
+//
+// NO EXISTING GATE COVERS THIS, and the two that look like they should are blind by construction.
+// Host-wide quiescence vetoes on busy FRACTION, which is occupancy and not speed -- a core at 5%
+// busy and 1429 MHz passes it comfortably. And each arm's A/A null is measured entirely inside its
+// own phase at that phase's clock, so a null of 0.999 proves self-consistency, not comparable
+// clocks. On this host `scaling_min_khz` 1429008 and `scaling_max_khz` 4561833 are a 3.19x hardware
+// range, so the quantity that can move a ratio by up to 2.7x was recorded and ignored.
+//
+// THE CHECK IS DELIBERATELY ASYMMETRIC, for the same reason the STARVED note above is. Our arm
+// running FASTER than the incumbent inflates the ratio in our favour and is refused. Our arm running
+// slower under-claims, which is the safe direction, and is only reported. A gate that refused both
+// would reject sound conservative rows to look even-handed.
+const CLOCK_ADVANTAGE_MAX = 1.10;
+let clockComparability = null;
+if (pin && typeof pin.mhz === 'number' && pin.mhz > 0 && incumbentCpuSet?.mean_mhz) {
+  // THE WIRING IS CHECKED, NOT ASSUMED. `targetMhz` sat unused in the selector's signature for its
+  // whole life, and nothing would notice it being dropped again: the selector's own tests drive it
+  // directly and pass whatever the caller does. So the harness refuses its own output when the rule
+  // is not the matched one.
+  const wiringError = clockSelectionWiringError(pin.mhz, incumbentCpuSet.rule);
+  if (wiringError) {
+    console.error(`[run] INVALID: ${wiringError}`);
+    process.exit(2);
+  }
+  const ratio = Number((pin.mhz / incumbentCpuSet.mean_mhz).toFixed(3));
+  clockComparability = {
+    frankenmermaid_mhz: pin.mhz,
+    // The MEAN, not the min: the incumbent runs across the whole set, so its effective clock is not
+    // its slowest core. Comparing against the min would overstate the gap and refuse sound rows.
+    mermaid_js_mean_mhz: incumbentCpuSet.mean_mhz,
+    mermaid_js_min_mhz: incumbentCpuSet.min_mhz,
+    ratio,
+    limit: CLOCK_ADVANTAGE_MAX,
+    verdict: clockComparabilityVerdict(ratio, CLOCK_ADVANTAGE_MAX),
+  };
+  console.error(
+    `[run] clock comparability: frankenmermaid ${pin.mhz} MHz vs mermaid-js mean ` +
+      `${incumbentCpuSet.mean_mhz} MHz (${ratio}x, limit ${CLOCK_ADVANTAGE_MAX}x) -> ` +
+      `${clockComparability.verdict}`,
+  );
+  if (clockComparability.verdict === 'frankenmermaid_clock_advantage') {
+    console.error(
+      `[run] INVALID: our arm is clocked more than ${CLOCK_ADVANTAGE_MAX}x above the incumbent's ` +
+        'cores, so any ratio measured here is inflated by DVFS rather than by the engine. Re-run ' +
+        'when the cores are comparable.',
+    );
+    process.exit(2);
+  }
+  if (clockComparability.verdict === 'frankenmermaid_clock_penalty') {
+    console.error(
+      '[run] NOTE: our arm is clocked BELOW the incumbent, so this row under-claims. Reported, not ' +
+        'refused -- erring against ourselves is the safe direction.',
+    );
+  }
+}
+env.clock_comparability = clockComparability;
 
 // The preflight output-proof gate lives further down, immediately after `provenanceBinary` is
 // declared and its build-revision gates have run. It is keyed by that ELF sha256, so it cannot be
