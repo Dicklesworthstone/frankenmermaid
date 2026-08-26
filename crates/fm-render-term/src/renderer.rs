@@ -2930,7 +2930,10 @@ impl TermRenderer {
                 break;
             }
             let vis = visibility_char(attr.visibility);
-            let text = format!("{vis}{}", attr.name);
+            let text = format!(
+                "{vis}{}",
+                fm_core::class_member_display_name(&attr.name, false)
+            );
             write_text(grid, row, x + 1, &text, inner_w);
             row += 1;
         }
@@ -2957,9 +2960,12 @@ impl TermRenderer {
             let ret = method
                 .return_type
                 .as_deref()
-                .map(|t| format!(": {t}"))
+                .map(|t| format!(": {}", fm_core::parse_generic_types(t)))
                 .unwrap_or_default();
-            let text = format!("{vis}{}{suffix}{ret}", method.name);
+            let text = format!(
+                "{vis}{}{suffix}{ret}",
+                fm_core::class_member_display_name(&method.name, true)
+            );
             write_text(grid, row, x + 1, &text, inner_w);
             row += 1;
         }

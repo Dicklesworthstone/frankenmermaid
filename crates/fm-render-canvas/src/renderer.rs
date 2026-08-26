@@ -3608,7 +3608,7 @@ fn class_vis_char(vis: fm_core::ClassVisibility) -> char {
 fn class_member_row(member: &fm_core::IrClassMember, is_method: bool) -> String {
     let mut row = String::with_capacity(member.name.len() + 8);
     row.push(class_vis_char(member.visibility));
-    row.push_str(&member.name);
+    row.push_str(&fm_core::class_member_display_name(&member.name, is_method));
     if is_method {
         if member.is_abstract {
             row.push('*');
@@ -3618,7 +3618,7 @@ fn class_member_row(member: &fm_core::IrClassMember, is_method: bool) -> String 
     }
     if let Some(ref return_type) = member.return_type {
         row.push_str(": ");
-        row.push_str(return_type);
+        row.push_str(&fm_core::parse_generic_types(return_type));
     }
     row
 }

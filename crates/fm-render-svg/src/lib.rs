@@ -7772,10 +7772,13 @@ fn write_class_compartments_into(
             break;
         }
         let vis = visibility_symbol(attr.visibility);
+        // Generics are rewritten HERE, not in the IR: mermaid keeps `List~int~` in its db and
+        // turns it into `List<int>` only when the row is drawn (bd class-generics).
+        let name = fm_core::class_member_display_name(&attr.name, false);
         let text = if let Some(ref ret) = attr.return_type {
-            format!("{vis}{}: {ret}", attr.name)
+            format!("{vis}{name}: {}", fm_core::parse_generic_types(ret))
         } else {
-            format!("{vis}{}", attr.name)
+            format!("{vis}{name}")
         };
         write_class_text_into(
             f,
@@ -7809,9 +7812,12 @@ fn write_class_compartments_into(
         let ret = method
             .return_type
             .as_deref()
-            .map(|t| format!(": {t}"))
+            .map(|t| format!(": {}", fm_core::parse_generic_types(t)))
             .unwrap_or_default();
-        let text = format!("{vis}{}{suffix}{ret}", method.name);
+        let text = format!(
+            "{vis}{}{suffix}{ret}",
+            fm_core::class_member_display_name(&method.name, true)
+        );
         write_class_text_into(
             f,
             text_x,
@@ -11203,10 +11209,13 @@ fn render_class_compartments(
             break;
         }
         let vis = visibility_symbol(attr.visibility);
+        // Generics are rewritten HERE, not in the IR: mermaid keeps `List~int~` in its db and
+        // turns it into `List<int>` only when the row is drawn (bd class-generics).
+        let name = fm_core::class_member_display_name(&attr.name, false);
         let text = if let Some(ref ret) = attr.return_type {
-            format!("{vis}{}: {ret}", attr.name)
+            format!("{vis}{name}: {}", fm_core::parse_generic_types(ret))
         } else {
-            format!("{vis}{}", attr.name)
+            format!("{vis}{name}")
         };
         let elem = TextBuilder::new(&text)
             .x(text_x)
@@ -11250,9 +11259,12 @@ fn render_class_compartments(
         let ret = method
             .return_type
             .as_deref()
-            .map(|t| format!(": {t}"))
+            .map(|t| format!(": {}", fm_core::parse_generic_types(t)))
             .unwrap_or_default();
-        let text = format!("{vis}{}{suffix}{ret}", method.name);
+        let text = format!(
+            "{vis}{}{suffix}{ret}",
+            fm_core::class_member_display_name(&method.name, true)
+        );
         let elem = TextBuilder::new(&text)
             .x(text_x)
             .y(cursor_y)

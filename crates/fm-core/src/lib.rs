@@ -1278,6 +1278,125 @@ pub struct IrEntityAttribute {
 
 // ── Class-diagram member types ─────────────────────────────────────────
 
+
+/// Rewrite mermaid's `~T~` generic-type spelling into the `<T>` a class body actually displays.
+///
+/// mermaid keeps the tildes in its db (`id: "List~int~ items"`) and rewrites them only when the
+/// member is drawn, so our IR keeps them too and every renderer calls this on the way out. It is a
+/// straight port of the incumbent's `parseGenericTypes`, measured — not read — against the pinned
+/// 11.15.0 bundle by `scripts/headtohead/class_generics_battery.mjs`, whose 22 rows are the fixture
+/// `crates/fm-render-svg/tests/fixtures/mermaid_class_generics.tsv`.
+///
+/// The rewrite is NOT "replace each `~…~` pair", which is what a spelling table would say, and the
+/// difference is visible on inputs people really write:
+///
+/// * `List~int~ items` → `List<int> items` — the documented case.
+/// * `List~List~int~~ nested` → `List<List<int>> nested` — the OUTERMOST pair converts first, and
+///   nesting falls out of repeating that on the result.
+/// * `a~T~ b~U~` → `a<T< b>U>` — same loop, and it is why "each pair" is the wrong model.
+/// * `weird~ x` → unchanged — a lone tilde is left alone.
+/// * `Map~String, int~ lookup` → `Map<String, int> lookup` — a comma inside the group is rejoined
+///   first, but only when it splits the string into exactly two one-tilde halves, which is why
+///   `Pair~A, B, C~ p` stays as written.
+///
+/// Borrows when there is no tilde to rewrite, which is every member in a diagram that uses no
+/// generics at all.
+#[must_use]
+pub fn parse_generic_types(input: &str) -> Cow<'_, str> {
+    if memchr::memchr(b'~', input.as_bytes()).is_none() {
+        return Cow::Borrowed(input);
+    }
+
+    // mermaid splits on commas KEEPING the separators (`input.split(/(,)/)`), because a group that
+    // spans a comma has to be put back together before it can be recognised as a group at all.
+    let bytes = input.as_bytes();
+    let mut sets: Vec<&str> = Vec::new();
+    let mut start = 0;
+    for comma in memchr::memchr_iter(b',', bytes) {
+        sets.push(&input[start..comma]);
+        sets.push(",");
+        start = comma + 1;
+    }
+    sets.push(&input[start..]);
+
+    let mut pieces: Vec<String> = Vec::with_capacity(sets.len());
+    let mut index = 0;
+    while index < sets.len() {
+        let mut this = Cow::Borrowed(sets[index]);
+        // A separator whose two neighbours each hold EXACTLY one tilde is a group that the split
+        // cut in half; rejoin it and drop the half already emitted. Any other count leaves the
+        // comma alone, which is what keeps `Pair~A, B, C~ p` as written.
+        if sets[index] == ","
+            && index > 0
+            && index + 1 < sets.len()
+            && tilde_count(sets[index - 1]) == 1
+            && tilde_count(sets[index + 1]) == 1
+        {
+            this = Cow::Owned(format!("{},{}", sets[index - 1], sets[index + 1]));
+            index += 1;
+            pieces.pop();
+        }
+        pieces.push(rewrite_outermost_tilde_pairs(&this));
+        index += 1;
+    }
+
+    Cow::Owned(pieces.concat())
+}
+
+fn tilde_count(input: &str) -> usize {
+    memchr::memchr_iter(b'~', input.as_bytes()).count()
+}
+
+/// Replace the FIRST and LAST tilde with `<` and `>`, then repeat on the result until fewer than
+/// two remain. `~` is ASCII, so both indices are char boundaries.
+fn rewrite_outermost_tilde_pairs(input: &str) -> String {
+    let mut current = input.to_string();
+    loop {
+        let bytes = current.as_bytes();
+        let (Some(first), Some(last)) = (
+            memchr::memchr(b'~', bytes),
+            memchr::memrchr(b'~', bytes),
+        ) else {
+            return current;
+        };
+        if first == last {
+            return current;
+        }
+        let mut next = String::with_capacity(current.len());
+        next.push_str(&current[..first]);
+        next.push('<');
+        next.push_str(&current[first + 1..last]);
+        next.push('>');
+        next.push_str(&current[last + 1..]);
+        current = next;
+    }
+}
+
+/// A class member's NAME as it is displayed, with generics rewritten the way mermaid does it.
+///
+/// ⚠️ FIELD BY FIELD, NOT ON THE WHOLE ROW. mermaid stores a method's name and its parameter list
+/// as separate db fields and rewrites each on its own, so `+f~T(x~) void` keeps BOTH tildes —
+/// neither field holds two. Our IR keeps the parameter list inside `name` as `id(params)`, so this
+/// splits it back apart at the LAST `(` (mermaid's own greedy split: `f(a)(b)` is id `f(a)`,
+/// parameters `b`) and rewrites the two halves independently. Running the rewrite over the joined
+/// row instead would pair a tilde in the name with one in the parameters and invent a group the
+/// incumbent does not see.
+#[must_use]
+pub fn class_member_display_name(name: &str, is_method: bool) -> Cow<'_, str> {
+    if !is_method || !name.ends_with(')') {
+        return parse_generic_types(name);
+    }
+    let Some(open) = memchr::memrchr(b'(', name.as_bytes()) else {
+        return parse_generic_types(name);
+    };
+    let head = parse_generic_types(&name[..open]);
+    let parameters = parse_generic_types(&name[open + 1..name.len() - 1]);
+    if matches!(head, Cow::Borrowed(_)) && matches!(parameters, Cow::Borrowed(_)) {
+        return Cow::Borrowed(name);
+    }
+    Cow::Owned(format!("{head}({parameters})"))
+}
+
 /// Visibility modifier for a class member.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub enum ClassVisibility {

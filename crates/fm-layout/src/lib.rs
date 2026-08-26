@@ -11536,7 +11536,9 @@ fn class_member_row_width(
         fm_core::ClassVisibility::Protected => '#',
         fm_core::ClassVisibility::Package => '~',
     });
-    row.push_str(&member.name);
+    // The renderers draw generics rewritten (`List~int~` -> `List<int>`), so measure the rewritten
+    // row: the substitution is character-for-character but `<`/`>` and `~` are not the same width.
+    row.push_str(&fm_core::class_member_display_name(&member.name, is_method));
     if is_method {
         if member.is_abstract {
             row.push('*');
@@ -11546,7 +11548,7 @@ fn class_member_row_width(
     }
     if let Some(ref return_type) = member.return_type {
         row.push_str(": ");
-        row.push_str(return_type);
+        row.push_str(&fm_core::parse_generic_types(return_type));
     }
     // Rows render at `font_size * 0.9`; `metrics` measures at full size, so scale the estimate down.
     metrics.estimate_dimensions(&row).0 * 0.9
