@@ -1,6 +1,52 @@
 /* tslint:disable */
 /* eslint-disable */
 
+/** A rectangle in SVG viewBox space (deck manifest schema 1.0.0). */
+export interface DeckRect { x: number; y: number; width: number; height: number; }
+
+export interface DeckManifestOptions {
+    fitMargin: number; zoomMax: number; dimOpacity: number; autoAdvanceMs: number;
+}
+
+export interface DeckManifestNode {
+    index: number; sourceId: string; elementId: string; step: number; tooltip?: string;
+}
+
+export interface DeckManifestEdge {
+    index: number; elementId: string; step: number; touching: boolean;
+}
+
+export interface DeckManifestCluster {
+    index: number; elementId: string; step: number; cameraContained: boolean;
+}
+
+export interface DeckManifestStep { step: number; elementIds: string[]; }
+
+export interface DeckManifestSlide {
+    id: string; title: string; caption?: string; bounds: DeckRect;
+    fitMargin: number; zoomMax: number;
+    nodes: DeckManifestNode[]; edges?: DeckManifestEdge[]; clusters?: DeckManifestCluster[];
+    maxStep: number; steps?: DeckManifestStep[];
+}
+
+export interface DeckManifestOverview {
+    enabled: boolean; title: string; caption?: string; tour: boolean;
+}
+
+/** The renderer-agnostic presentation contract; additive-only within 1.x. */
+export interface DeckManifest {
+    schemaVersion: string; generator: string; diagramType: string; title?: string;
+    viewBox: DeckRect; options: DeckManifestOptions; slides: DeckManifestSlide[];
+    overview: DeckManifestOverview; nodeSlideIndex?: Record<string, string[]>;
+}
+
+/** renderDeck() result: svg + manifest (null when no deck) + structured deck diagnostics. */
+export interface WasmDeckOutput {
+    svg: string; manifest?: DeckManifest; warnings: unknown[];
+}
+
+
+
 export class Diagram {
     free(): void;
     [Symbol.dispose](): void;
@@ -119,6 +165,15 @@ export function parseLens(input: string): any;
  */
 export function planWebGpu(input: string, config?: any | null): any;
 
+/**
+ * Render a diagram AND its deck manifest from one parse + one layout (epic bd-z7g6k).
+ *
+ * A strict superset of `renderSvg`: identical SVG bytes for identical input/config at
+ * nominal pressure tier, plus `manifest` (or `null` with a structured warning when the
+ * source has no deck, the family is unsupported, or no slide resolves).
+ */
+export function renderDeck(input: string, config?: any | null): any;
+
 export function renderSvg(input: string, config?: any | null): string;
 
 /**
@@ -159,6 +214,7 @@ export interface InitOutput {
     readonly parse: (a: number, b: number, c: number) => void;
     readonly parseLens: (a: number, b: number, c: number) => void;
     readonly planWebGpu: (a: number, b: number, c: number, d: number) => void;
+    readonly renderDeck: (a: number, b: number, c: number, d: number) => void;
     readonly renderSvg: (a: number, b: number, c: number, d: number) => void;
     readonly workerHandleMessage: (a: number, b: number, c: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;

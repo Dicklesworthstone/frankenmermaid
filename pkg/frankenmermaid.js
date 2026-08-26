@@ -573,6 +573,34 @@ export function planWebGpu(input, config) {
 }
 
 /**
+ * Render a diagram AND its deck manifest from one parse + one layout (epic bd-z7g6k).
+ *
+ * A strict superset of `renderSvg`: identical SVG bytes for identical input/config at
+ * nominal pressure tier, plus `manifest` (or `null` with a structured warning when the
+ * source has no deck, the family is unsupported, or no slide resolves).
+ * @param {string} input
+ * @param {any | null} [config]
+ * @returns {any}
+ */
+export function renderDeck(input, config) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(input, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.renderDeck(retptr, ptr0, len0, isLikeNone(config) ? 0 : addHeapObject(config));
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        if (r2) {
+            throw takeObject(r1);
+        }
+        return takeObject(r0);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
  * @param {string} input
  * @param {any | null} [config]
  * @returns {string}

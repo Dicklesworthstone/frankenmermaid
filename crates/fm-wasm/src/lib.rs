@@ -1442,6 +1442,25 @@ pub fn init(config: Option<JsValue>) -> Result<(), JsValue> {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = renderSvg))]
 pub fn render_svg_js(input: &str, config: Option<JsValue>) -> Result<String, JsValue> {
+    let prepared = prepare_svg_render(input, config)?;
+    Ok(render_svg_with_layout(
+        &prepared.parsed.ir,
+        &prepared.traced_layout.layout,
+        &prepared.svg_config,
+    ))
+}
+
+/// The shared parse → configure → layout pipeline behind [`render_svg_js`] and
+/// [`render_deck_js`] (bd-cb9oi). One extraction instead of two copies: the pressure-tier
+/// branching, budget broker, and degradation plumbing must stay identical between the two
+/// exports or their SVG outputs drift — the deck/renderSvg byte-parity test pins that.
+struct PreparedSvgRender {
+    parsed: fm_parser::ParseResult,
+    svg_config: SvgRenderConfig,
+    traced_layout: fm_layout::TracedLayout,
+}
+
+fn prepare_svg_render(input: &str, config: Option<JsValue>) -> Result<PreparedSvgRender, JsValue> {
     let has_config = config
         .as_ref()
         .is_some_and(|raw| !raw.is_undefined() && !raw.is_null());
@@ -1496,9 +1515,125 @@ pub fn render_svg_js(input: &str, config: Option<JsValue>) -> Result<String, JsV
         traced
     };
 
-    let svg = render_svg_with_layout(&parsed.ir, &traced_layout.layout, &svg_config);
-    Ok(svg)
+    Ok(PreparedSvgRender {
+        parsed,
+        svg_config,
+        traced_layout,
+    })
 }
+
+/// `renderDeck`'s structured result: the SVG, the deck manifest (or `null`), and every
+/// deck-related diagnostic in the same serialized `Diagnostic` shape the `parse` export
+/// emits — never bare strings, so hosts can underline a bad selector like any other finding.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WasmDeckOutput {
+    pub svg: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<fm_core::DeckManifest>,
+    pub warnings: Vec<fm_core::Diagnostic>,
+}
+
+/// Native-callable core of the `renderDeck` export — the same pattern as [`render`], so the
+/// full behavior is unit-testable without a browser.
+fn render_deck(input: &str, config: Option<JsValue>) -> Result<WasmDeckOutput, JsValue> {
+    let prepared = prepare_svg_render(input, config)?;
+    let (svg, manifest) = fm_render_svg::render_svg_with_deck(
+        &prepared.parsed.ir,
+        &prepared.traced_layout.layout,
+        &prepared.svg_config,
+    );
+    let mut warnings: Vec<fm_core::Diagnostic> = prepared
+        .parsed
+        .ir
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.message.starts_with("deck:"))
+        .cloned()
+        .collect();
+    for error in &prepared.parsed.ir.meta.init.errors {
+        let message = error.to_string();
+        if message.contains("deck") {
+            warnings.push(
+                fm_core::Diagnostic::warning(message)
+                    .with_category(fm_core::DiagnosticCategory::Parser),
+            );
+        }
+    }
+    if manifest.is_none() && prepared.parsed.ir.deck.is_none() {
+        // renderDeck is a strict superset of renderSvg: deckless input still renders, with
+        // one structured pointer at why the manifest is null.
+        warnings.push(
+            fm_core::Diagnostic::warning(
+                "deck: no %%{deck: …}%% directive in the input; manifest is null",
+            )
+            .with_category(fm_core::DiagnosticCategory::Semantic),
+        );
+    }
+    Ok(WasmDeckOutput {
+        svg,
+        manifest,
+        warnings,
+    })
+}
+
+/// Render a diagram AND its deck manifest from one parse + one layout (epic bd-z7g6k).
+///
+/// A strict superset of `renderSvg`: identical SVG bytes for identical input/config at
+/// nominal pressure tier, plus `manifest` (or `null` with a structured warning when the
+/// source has no deck, the family is unsupported, or no slide resolves).
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = renderDeck))]
+pub fn render_deck_js(input: &str, config: Option<JsValue>) -> Result<JsValue, JsValue> {
+    to_js_value(&render_deck(input, config)?)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(typescript_custom_section)]
+const DECK_MANIFEST_TS: &'static str = r#"
+/** A rectangle in SVG viewBox space (deck manifest schema 1.0.0). */
+export interface DeckRect { x: number; y: number; width: number; height: number; }
+
+export interface DeckManifestOptions {
+  fitMargin: number; zoomMax: number; dimOpacity: number; autoAdvanceMs: number;
+}
+
+export interface DeckManifestNode {
+  index: number; sourceId: string; elementId: string; step: number; tooltip?: string;
+}
+
+export interface DeckManifestEdge {
+  index: number; elementId: string; step: number; touching: boolean;
+}
+
+export interface DeckManifestCluster {
+  index: number; elementId: string; step: number; cameraContained: boolean;
+}
+
+export interface DeckManifestStep { step: number; elementIds: string[]; }
+
+export interface DeckManifestSlide {
+  id: string; title: string; caption?: string; bounds: DeckRect;
+  fitMargin: number; zoomMax: number;
+  nodes: DeckManifestNode[]; edges?: DeckManifestEdge[]; clusters?: DeckManifestCluster[];
+  maxStep: number; steps?: DeckManifestStep[];
+}
+
+export interface DeckManifestOverview {
+  enabled: boolean; title: string; caption?: string; tour: boolean;
+}
+
+/** The renderer-agnostic presentation contract; additive-only within 1.x. */
+export interface DeckManifest {
+  schemaVersion: string; generator: string; diagramType: string; title?: string;
+  viewBox: DeckRect; options: DeckManifestOptions; slides: DeckManifestSlide[];
+  overview: DeckManifestOverview; nodeSlideIndex?: Record<string, string[]>;
+}
+
+/** renderDeck() result: svg + manifest (null when no deck) + structured deck diagnostics. */
+export interface WasmDeckOutput {
+  svg: string; manifest?: DeckManifest; warnings: unknown[];
+}
+"#;
 
 /// Prepare the WebGPU primitive plan for a diagram.
 ///
@@ -2417,8 +2552,9 @@ mod tests {
         apply_budget_svg_simplifications, apply_canvas_theme_preset, build_diagram_geometry,
         build_webgpu_plan, canvas_font_size_px, collect_source_spans, handle_worker_message,
         hit_test_layout_edge, hit_test_layout_node, merge_canvas_config, merge_pressure_config,
-        merge_renderer_kind, merge_svg_config, read_runtime_config, render, render_svg_js,
-        render_worker_request, requested_theme_preset, resolve_renderer, write_runtime_config,
+        merge_renderer_kind, merge_svg_config, read_runtime_config, render, render_deck,
+        render_svg_js, render_worker_request, requested_theme_preset, resolve_renderer,
+        write_runtime_config,
     };
     use fm_core::{
         MermaidBudgetLedger, MermaidGuardReport, MermaidLensBinding, MermaidLensEdit,
@@ -3449,6 +3585,99 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    // ── renderDeck battery (bd-cb9oi) ─────────────────────────────
+
+    const DECKED_INPUT: &str = "flowchart LR\n%%{deck: {tips: {a: 'start here'}, slides: [{id: 's1', nodes: ['a', 'b'], reveal: [['b']]}, {id: 's2', nodes: ['c']}]}}%%\n  a --> b\n  b --> c\n";
+
+    #[test]
+    fn render_deck_returns_svg_and_manifest_for_decked_input() {
+        let _serial = config_guard();
+        let output = render_deck(DECKED_INPUT, None).expect("render_deck");
+        assert!(output.svg.starts_with("<svg"));
+        let manifest = output.manifest.expect("manifest present");
+        assert_eq!(manifest.schema_version, "1.0.0");
+        assert_eq!(manifest.slides.len(), 2);
+        assert_eq!(manifest.slides[0].id, "s1");
+        assert_eq!(manifest.slides[0].max_step, 1);
+        assert_eq!(
+            manifest.slides[0].nodes[0].tooltip.as_deref(),
+            Some("start here")
+        );
+        // Every manifest element id must exist verbatim in the paired SVG (the join-key
+        // contract, checked at the export boundary too).
+        for slide in &manifest.slides {
+            for node in &slide.nodes {
+                assert!(
+                    output.svg.contains(&format!("id=\"{}\"", node.element_id)),
+                    "missing {} in svg",
+                    node.element_id
+                );
+            }
+        }
+        assert!(
+            output.warnings.is_empty(),
+            "clean deck must produce no warnings: {:?}",
+            output.warnings
+        );
+    }
+
+    #[test]
+    fn render_deck_is_a_strict_superset_of_render_svg() {
+        let _serial = config_guard();
+        // Byte-parity at nominal pressure tier: the shared prepare_svg_render pipeline is
+        // what makes this hold — a second copy of the config/pressure plumbing would drift.
+        let deck_output = render_deck(DECKED_INPUT, None).expect("render_deck");
+        let svg_only = render_svg_js(DECKED_INPUT, None).expect("render_svg_js");
+        assert_eq!(deck_output.svg, svg_only);
+    }
+
+    #[test]
+    fn render_deck_on_deckless_input_yields_null_manifest_and_one_warning() {
+        let _serial = config_guard();
+        let output = render_deck("flowchart LR\n  a --> b\n", None).expect("render_deck");
+        assert!(output.svg.starts_with("<svg"));
+        assert!(output.manifest.is_none());
+        assert_eq!(output.warnings.len(), 1);
+        assert!(output.warnings[0].message.contains("manifest is null"));
+    }
+
+    #[test]
+    fn render_deck_surfaces_structured_deck_diagnostics() {
+        let _serial = config_guard();
+        // Unknown selector: the parser's semantic warning must flow through, structured.
+        let output = render_deck(
+            "flowchart LR\n%%{deck: {slides: [{id: 's', nodes: ['a', 'ghost']}]}}%%\n  a --> b\n",
+            None,
+        )
+        .expect("render_deck");
+        assert!(output.manifest.is_some(), "slide still resolves via 'a'");
+        assert!(
+            output
+                .warnings
+                .iter()
+                .any(|warning| warning.message.contains("unknown selector 'ghost'")),
+            "{:?}",
+            output.warnings
+        );
+
+        // Unsupported family: SVG renders, manifest null, family warning present.
+        let output = render_deck(
+            "pie\n%%{deck: {slides: [{id: 's', nodes: ['*']}]}}%%\n  \"A\": 10\n",
+            None,
+        )
+        .expect("render_deck");
+        assert!(output.svg.starts_with("<svg"));
+        assert!(output.manifest.is_none());
+        assert!(
+            output
+                .warnings
+                .iter()
+                .any(|warning| warning.message.contains("no addressable elements")),
+            "{:?}",
+            output.warnings
+        );
+    }
+
     #[test]
     fn render_svg_js_uses_same_font_metrics_layout_path_as_render() {
         let _serial = config_guard();
@@ -4000,7 +4229,7 @@ mod tests {
         // before it can masquerade as a cross-target floating-point difference. Rebuild from the
         // same source revision, then update this digest and the per-fixture digests together after
         // reviewing every generated artifact.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0xe132_bbd9_0f16_a61d;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x47b4_fbce_6bdd_9579;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),

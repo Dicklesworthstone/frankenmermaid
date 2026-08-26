@@ -24,6 +24,7 @@ export const init: (a: number, b: number) => void;
 export const parse: (a: number, b: number, c: number) => void;
 export const parseLens: (a: number, b: number, c: number) => void;
 export const planWebGpu: (a: number, b: number, c: number, d: number) => void;
+export const renderDeck: (a: number, b: number, c: number, d: number) => void;
 export const renderSvg: (a: number, b: number, c: number, d: number) => void;
 export const workerHandleMessage: (a: number, b: number, c: number) => void;
 export const __wbindgen_export: (a: number, b: number) => number;

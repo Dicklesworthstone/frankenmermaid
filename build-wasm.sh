@@ -23,7 +23,14 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none"
 #
 # Raised 590K -> 650K on 2026-08-24 for the accumulated workspace and layout features
 # (24 diagram types, DOT bridge, CGA edge routing, incremental Adapton caching, lens system).
-MAX_GZIP_BYTES=$((650 * 1024))
+#
+# Raised 650K -> 680K on 2026-08-26 for the graph-deck feature (bd-cb9oi): the renderDeck
+# export links fm-render-svg's deck scene-resolution/projection plus DeckManifest
+# serialization, measured at +26.8K gzip (642.7K -> 669.6K). Shrink attempts logged in the
+# bead: routing serialization through serde_json + JSON.parse instead of serde_wasm_bindgen
+# recovered only 254 raw bytes (reverted for API uniformity) — the cost is the feature's
+# resolution logic, not the serializer. Headroom after raise: ~10K.
+MAX_GZIP_BYTES=$((680 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'
