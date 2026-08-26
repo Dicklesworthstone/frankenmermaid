@@ -488,7 +488,41 @@ pub fn parse_mermaid_with_detection_and_config(
         parse_front_matter_config(front_matter_payload, &mut builder);
     }
 
+    // Deck configuration is deliberately parsed after the diagram body by the graph-deck semantic
+    // pass. Until then, a successfully terminated multi-line deck block is source, not diagram
+    // syntax: blank it with its newlines preserved so no body parser can mistake JSON5 keys for
+    // nodes. Unterminated/over-limit blocks stay visible to recovery after recording an init error.
+    let deck_directives = scan_multiline_deck_directives(content);
+    for error in &deck_directives.errors {
+        let message = match error.kind {
+            MultilineDeckDirectiveErrorKind::TooLarge => format!(
+                "Lines {}-{}: multi-line deck directive exceeds the {}-line or {}-byte limit",
+                error.start_line, error.end_line, MAX_DECK_BLOCK_LINES, MAX_DECK_BLOCK_BYTES
+            ),
+            MultilineDeckDirectiveErrorKind::Unterminated => format!(
+                "Lines {}-{}: unterminated multi-line deck directive",
+                error.start_line, error.end_line
+            ),
+        };
+        let span = Span::new(
+            fm_core::Position {
+                line: u32::try_from(error.start_line).unwrap_or(u32::MAX),
+                col: 1,
+                byte: u32::try_from(error.start_byte).unwrap_or(u32::MAX),
+            },
+            fm_core::Position {
+                line: u32::try_from(error.end_line).unwrap_or(u32::MAX),
+                col: 1,
+                byte: u32::try_from(error.end_byte).unwrap_or(u32::MAX),
+            },
+        );
+        builder.add_warning(message.clone());
+        builder.add_init_error(message, span);
+    }
+    let body_content = blank_multiline_deck_directives(content, &deck_directives.blocks);
+
     parse_init_directives(content, &mut builder);
+    let content = body_content.as_ref();
 
     match diagram_type {
         DiagramType::Flowchart => parse_flowchart(content, &mut builder),
@@ -12078,6 +12112,146 @@ fn parse_init_directives(input: &str, builder: &mut IrBuilder) {
     }
 }
 
+const MAX_DECK_BLOCK_LINES: usize = 400;
+const MAX_DECK_BLOCK_BYTES: usize = 32 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MultilineDeckDirectiveBlock {
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MultilineDeckDirectiveErrorKind {
+    TooLarge,
+    Unterminated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MultilineDeckDirectiveError {
+    pub start_line: usize,
+    pub end_line: usize,
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub kind: MultilineDeckDirectiveErrorKind,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct MultilineDeckDirectiveScan {
+    pub blocks: Vec<MultilineDeckDirectiveBlock>,
+    pub errors: Vec<MultilineDeckDirectiveError>,
+}
+
+/// Locate completed multi-line `%%{deck: ...}%%` blocks without changing init/constraints syntax.
+///
+/// The deck pass consumes the JSON5 later, after graph nodes exist. This pre-pass only establishes
+/// the lexical boundary needed to prevent a deck's interior lines from entering a diagram parser.
+pub(crate) fn scan_multiline_deck_directives(input: &str) -> MultilineDeckDirectiveScan {
+    if !input.contains("%%{") {
+        return MultilineDeckDirectiveScan::default();
+    }
+
+    let mut scan = MultilineDeckDirectiveScan::default();
+    let mut lines = input.split_inclusive('\n').enumerate();
+    let mut offset = 0_usize;
+
+    while let Some((line_index, raw_line)) = lines.next() {
+        let start_byte = offset;
+        offset += raw_line.len();
+        let line = raw_line.trim_end_matches(['\r', '\n']);
+        let trimmed = trim_fast(line);
+        if !is_multiline_deck_start(trimmed) || trimmed.contains("}%%") {
+            continue;
+        }
+
+        let start_line = line_index + 1;
+        let mut end_byte = start_byte + line.len();
+        let mut end_line = start_line;
+        let mut line_count = 1_usize;
+        let mut byte_count = raw_line.len();
+        let mut completed = false;
+
+        for (next_index, next_raw_line) in lines.by_ref() {
+            let next_start_byte = offset;
+            offset += next_raw_line.len();
+            let next_line = next_raw_line.trim_end_matches(['\r', '\n']);
+            end_byte = next_start_byte + next_line.len();
+            end_line = next_index + 1;
+            line_count += 1;
+            byte_count += next_raw_line.len();
+
+            if line_count > MAX_DECK_BLOCK_LINES || byte_count > MAX_DECK_BLOCK_BYTES {
+                scan.errors.push(MultilineDeckDirectiveError {
+                    start_line,
+                    end_line,
+                    start_byte,
+                    end_byte,
+                    kind: MultilineDeckDirectiveErrorKind::TooLarge,
+                });
+                break;
+            }
+            if trim_fast(next_line).ends_with("}%%") {
+                scan.blocks.push(MultilineDeckDirectiveBlock {
+                    start_byte,
+                    end_byte,
+                });
+                completed = true;
+                break;
+            }
+        }
+
+        if !completed
+            && scan
+                .errors
+                .last()
+                .is_none_or(|error| error.start_byte != start_byte)
+        {
+            scan.errors.push(MultilineDeckDirectiveError {
+                start_line,
+                end_line,
+                start_byte,
+                end_byte,
+                kind: MultilineDeckDirectiveErrorKind::Unterminated,
+            });
+        }
+    }
+
+    scan
+}
+
+fn is_multiline_deck_start(trimmed: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix("%%{") else {
+        return false;
+    };
+    let Some(name) = rest.get(..4) else {
+        return false;
+    };
+    name.eq_ignore_ascii_case("deck")
+        && rest
+            .get(4..)
+            .and_then(|suffix| suffix.chars().next())
+            .is_some_and(|character| character == ':' || character.is_ascii_whitespace())
+}
+
+fn blank_multiline_deck_directives<'a>(
+    input: &'a str,
+    blocks: &[MultilineDeckDirectiveBlock],
+) -> Cow<'a, str> {
+    if blocks.is_empty() {
+        return Cow::Borrowed(input);
+    }
+
+    let mut blanked = input.as_bytes().to_vec();
+    for block in blocks {
+        for byte in &mut blanked[block.start_byte..block.end_byte] {
+            if !matches!(*byte, b'\n' | b'\r') {
+                *byte = b' ';
+            }
+        }
+    }
+    Cow::Owned(String::from_utf8(blanked).expect("spaces preserve UTF-8 validity"))
+}
+
 fn parse_front_matter_config(front_matter_payload: &str, builder: &mut IrBuilder) {
     let span = Span::at_line(1, front_matter_payload.chars().count());
     #[cfg(target_arch = "wasm32")]
@@ -16138,6 +16312,67 @@ mod tests {
             Some(GraphDirection::RL)
         );
         assert!(parsed.ir.meta.init.errors.is_empty());
+    }
+
+    #[test]
+    fn multiline_deck_directive_is_hidden_from_the_flowchart_body() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n%%{deck: {\n  title: 'Roadmap',\n  phantom --> must_not_become_an_edge,\n  slides: [{ id: 'intro', nodes: ['A'] }],\n}%%\nA --> B",
+        );
+
+        let node_ids: Vec<&str> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(node_ids, ["A", "B"]);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert!(parsed.ir.meta.init.errors.is_empty());
+    }
+
+    #[test]
+    fn multiline_deck_terminator_with_trailing_text_does_not_end_the_block() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n%%{deck: {\n  phantom --> must_not_become_an_edge,\n}%% trailing text\n}%%\nA --> B",
+        );
+
+        let node_ids: Vec<&str> = parsed
+            .ir
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(node_ids, ["A", "B"]);
+        assert_eq!(parsed.ir.edges.len(), 1);
+        assert!(parsed.ir.meta.init.errors.is_empty());
+    }
+
+    #[test]
+    fn oversized_unterminated_deck_records_an_error_and_refeeds_the_body() {
+        let mut input = String::from("flowchart LR\n%%{deck: {\n");
+        for _ in 0..super::MAX_DECK_BLOCK_LINES {
+            input.push_str("  key: value,\n");
+        }
+        input.push_str("A --> B");
+
+        let parsed = parse_mermaid(&input);
+        let endpoint = |endpoint: fm_core::IrEndpoint| match endpoint {
+            fm_core::IrEndpoint::Node(id) => parsed.ir.nodes[id.0].id.as_str(),
+            other => panic!("expected a node endpoint, got {other:?}"),
+        };
+        assert!(
+            parsed
+                .ir
+                .edges
+                .iter()
+                .any(|edge| endpoint(edge.from) == "A" && endpoint(edge.to) == "B")
+        );
+        assert!(parsed.ir.meta.init.errors.iter().any(|error| {
+            error
+                .to_string()
+                .contains("multi-line deck directive exceeds")
+        }));
     }
 
     #[test]

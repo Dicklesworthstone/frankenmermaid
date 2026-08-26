@@ -2129,12 +2129,38 @@ pub fn capture_format_complement(input: &str) -> MermaidFormatComplement {
     let mut comments = Vec::new();
     let mut directives = Vec::new();
     let mut quoted_literals = Vec::new();
+    let deck_directives = mermaid_parser::scan_multiline_deck_directives(input).blocks;
+    let mut next_deck_directive = deck_directives.iter().peekable();
+    let mut deck_directive_end = None;
 
     let mut offset = 0_usize;
     for raw_line in input.split_inclusive('\n') {
         let line_body = raw_line.trim_end_matches(['\r', '\n']);
         let body_start = offset;
         let body_end = body_start + line_body.len();
+
+        if deck_directive_end.is_some_and(|end| body_start < end) {
+            offset += raw_line.len();
+            continue;
+        }
+        if next_deck_directive
+            .peek()
+            .is_some_and(|block| block.start_byte == body_start)
+        {
+            let block = next_deck_directive
+                .next()
+                .expect("peeked deck directive must be available");
+            push_directive_span(
+                input,
+                &mut directives,
+                block.start_byte,
+                block.end_byte,
+                &offsets,
+            );
+            deck_directive_end = Some(block.end_byte);
+            offset += raw_line.len();
+            continue;
+        }
         let trimmed = line_body.trim();
 
         let leading_ws_len = line_body.len() - line_body.trim_start_matches([' ', '\t']).len();
@@ -3041,6 +3067,22 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
         );
     }
 
+    #[test]
+    fn format_complement_captures_a_multiline_deck_as_one_directive_span() {
+        let deck =
+            "%%{deck: {\n  title: 'Roadmap',\n  slides: [{ id: 'intro', nodes: ['A'] }],\n}%%";
+        let input = format!("{deck}\nflowchart LR\nA --> B\n");
+        let complement = capture_format_complement(&input);
+
+        assert_eq!(complement.directives.len(), 1);
+        let directive = &complement.directives[0];
+        assert_eq!(directive.text, deck);
+        assert_eq!(directive.text_range.start_byte, 0);
+        assert_eq!(directive.text_range.end_byte, deck.len());
+        assert_eq!(directive.span.start.line, 1);
+        assert_eq!(directive.span.end.line, 4);
+    }
+
     fn newline_metadata_scalar_reference(source: &str) -> (Vec<usize>, MermaidLineEndingStyle) {
         let mut offsets = vec![0];
         for (index, byte) in source.bytes().enumerate() {
@@ -3230,6 +3272,27 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
                 .bindings
                 .iter()
                 .any(|binding| binding.snippet.as_deref() == Some("A[Alpha] -.-> B[Beta]"))
+        );
+    }
+
+    #[test]
+    fn parse_lens_edit_preserves_a_multiline_deck_verbatim() {
+        let deck =
+            "%%{deck: {\n  title: 'Roadmap',\n  slides: [{ id: 'intro', nodes: ['A'] }],\n}%%\n";
+        let input = format!("{deck}flowchart LR\nA[Alpha] --> B[Beta]\n");
+        let response = apply_parse_lens_edit(
+            &input,
+            &MermaidLensEdit {
+                element_id: "fm-edge-0".to_string(),
+                replacement: "A[Alpha] -.-> B[Beta]".to_string(),
+            },
+        )
+        .expect("parse lens edit should succeed");
+
+        assert!(response.result.updated_source.starts_with(deck));
+        assert_eq!(
+            response.snapshot.parsed.format_complement.directives.len(),
+            1
         );
     }
 
