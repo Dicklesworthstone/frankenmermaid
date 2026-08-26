@@ -6989,10 +6989,14 @@ fn render_xychart_svg(
             .class("fm-xychart-plot"),
     );
 
-    for tick_index in 0..=4 {
-        let tick_ratio = tick_index as f32 / 4.0;
+    // Nice tick values, not quarter points (see `xychart_nice_step`).
+    for tick_value in xychart_y_ticks(y_min, y_max) {
+        let tick_ratio = if (y_max - y_min).abs() > f32::EPSILON {
+            (tick_value - y_min) / (y_max - y_min)
+        } else {
+            0.0
+        };
         let tick_y = plot_y + plot_bounds.height - (plot_bounds.height * tick_ratio);
-        let tick_value = y_min + (y_max - y_min) * tick_ratio;
         doc = doc.child(
             Element::line()
                 .x1(plot_x)
@@ -7169,8 +7173,14 @@ fn render_xychart_svg(
 
     // Tick marks at axis edges (small lines at each grid level and category center).
     let tick_len = 5.0_f32;
-    for tick_index in 0..=4_u32 {
-        let frac = tick_index as f32 / 4.0;
+    // The SAME values the labels use — a tick mark beside a different set of labels is worse than
+    // no tick mark, and these two loops previously agreed only because both hardcoded quarters.
+    for tick_value in xychart_y_ticks(y_min, y_max) {
+        let frac = if (y_max - y_min).abs() > f32::EPSILON {
+            (tick_value - y_min) / (y_max - y_min)
+        } else {
+            0.0
+        };
         let y = plot_bottom - frac * plot_bounds.height;
         doc = doc.child(
             Element::line()
@@ -7654,6 +7664,70 @@ fn write_xychart_mark_accessible_name(
             out.push('>');
         }
         None => out.push_str("/>"),
+    }
+}
+
+/// The "nice" y-axis step mermaid uses: d3's `tickStep(min, max, 10)`.
+///
+/// MERMAID DOES NOT DIVIDE THE RANGE, IT SNAPS TO 1/2/5 x 10^k. We emitted five ticks at quarter
+/// points, so `y-axis 4000 --> 11000` labelled 5750 and 9250 — values that appear nowhere on a
+/// chart anyone would draw by hand. Measured across six ranges on the pinned 11.15.0 bundle, every
+/// one of which this reproduces exactly:
+///
+/// ```text
+///   0 -> 10        step 1        0 -> 100        step 10
+///   0 -> 1         step 0.1      0 -> 7          step 0.5
+///   100 -> 900     step 100      4000 -> 11000   step 500
+/// ```
+///
+/// The thresholds are d3's own — sqrt(50), sqrt(10), sqrt(2) — and they are not round numbers.
+/// `0 -> 7` is the case that needs them: the raw step is 0.7, whose error 7.0 sits between sqrt(10)
+/// and sqrt(50), so the factor is 5 and the step 0.5. A rule using 7.5 as the cutoff picks 1.0
+/// there and still agrees with mermaid on all five other ranges.
+fn xychart_nice_step(min: f32, max: f32) -> f64 {
+    const COUNT: f64 = 10.0;
+    let span = f64::from(max) - f64::from(min);
+    if !span.is_finite() || span <= 0.0 {
+        return 0.0;
+    }
+    let raw = span / COUNT;
+    let power = raw.log10().floor();
+    let error = raw / 10.0_f64.powf(power);
+    let factor = if error >= 50.0_f64.sqrt() {
+        10.0
+    } else if error >= 10.0_f64.sqrt() {
+        5.0
+    } else if error >= 2.0_f64.sqrt() {
+        2.0
+    } else {
+        1.0
+    };
+    10.0_f64.powf(power) * factor
+}
+
+/// The y values mermaid labels, ascending: every multiple of the nice step inside `[min, max]`.
+///
+/// Falls back to the endpoints when the range is degenerate or the step would produce an absurd
+/// number of ticks, so a malformed axis cannot spin here.
+fn xychart_y_ticks(min: f32, max: f32) -> Vec<f32> {
+    let step = xychart_nice_step(min, max);
+    if step <= 0.0 {
+        return vec![min];
+    }
+    let first = (f64::from(min) / step).ceil();
+    let last = (f64::from(max) / step).floor();
+    let count = last - first;
+    if !count.is_finite() || count < 0.0 || count > 200.0 {
+        return vec![min, max];
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let ticks: Vec<f32> = (0..=(count as i64))
+        .map(|index| ((first + index as f64) * step) as f32)
+        .collect();
+    if ticks.is_empty() {
+        vec![min, max]
+    } else {
+        ticks
     }
 }
 
