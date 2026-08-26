@@ -2730,15 +2730,6 @@ fn is_css_named_color(value: &str) -> bool {
     )
 }
 
-const TEXT_STYLE_PROPERTIES: &[&str] = &[
-    "color",
-    "font-size",
-    "font-weight",
-    "font-family",
-    "font-style",
-    "text-decoration",
-];
-
 fn style_map_to_css(map: &BTreeMap<String, String>) -> Option<String> {
     if map.is_empty() {
         return None;
@@ -2758,7 +2749,12 @@ fn split_style_properties(
     let mut text = BTreeMap::new();
 
     for (key, value) in properties {
-        if TEXT_STYLE_PROPERTIES.contains(&key.as_str()) {
+        // ⚠️ ONE LIST, IN fm-core (bd-jyg4s). This used to be a local six-entry table while
+        // mermaid's `isLabelStyle` names eighteen, and the twelve missing ones were ALSO absent
+        // from the security allowlist — so they were dropped before ever reaching this split and an
+        // author's `letter-spacing` did nothing at all. Two copies of one list is how that happened;
+        // there is now one, and the allowlist is checked against it by test.
+        if fm_core::is_label_style_property(key.as_str()) {
             if key == "color" {
                 text.insert("fill".to_string(), value.clone());
             } else {

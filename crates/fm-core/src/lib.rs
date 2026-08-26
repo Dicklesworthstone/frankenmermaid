@@ -2335,6 +2335,55 @@ impl IrInlineStyle {
     }
 }
 
+/// The properties mermaid treats as LABEL styles rather than shape styles (bd-jyg4s).
+///
+/// ⚠️ THIS LIST IS A TRANSCRIPTION OF THE INCUMBENT'S, not a judgement call. mermaid 11.15.0's
+/// `styles2String` partitions a `style` declaration with `isLabelStyle`, and this is that predicate
+/// verbatim from the pinned bundle:
+///
+/// ```text
+/// isLabelStyle = e => e === "color" || e === "font-size" || e === "font-family"
+///   || e === "font-weight" || e === "font-style" || e === "text-decoration"
+///   || e === "text-align" || e === "text-transform" || e === "line-height"
+///   || e === "letter-spacing" || e === "word-spacing" || e === "text-shadow"
+///   || e === "text-overflow" || e === "white-space" || e === "word-wrap"
+///   || e === "word-break" || e === "overflow-wrap" || e === "hyphens"
+/// ```
+///
+/// Everything it accepts is applied to the label; everything else to the shape. Renderers consult
+/// this rather than keeping their own copy, because a renderer-local list that drifted from the
+/// allowlist below is exactly how twelve of these came to be dropped in silence.
+///
+/// Some are inert on an SVG `<text>` (`text-align` does nothing where `text-anchor` governs). That
+/// is true of mermaid too, which classifies them the same way regardless of the surface a given
+/// label is drawn on. Classification is the contract here; rendering effect is the surface's.
+pub const MERMAID_LABEL_STYLE_PROPERTIES: &[&str] = &[
+    "color",
+    "font-size",
+    "font-family",
+    "font-weight",
+    "font-style",
+    "text-decoration",
+    "text-align",
+    "text-transform",
+    "line-height",
+    "letter-spacing",
+    "word-spacing",
+    "text-shadow",
+    "text-overflow",
+    "white-space",
+    "word-wrap",
+    "word-break",
+    "overflow-wrap",
+    "hyphens",
+];
+
+/// Whether `property` is one mermaid applies to a label rather than to a shape.
+#[must_use]
+pub fn is_label_style_property(property: &str) -> bool {
+    MERMAID_LABEL_STYLE_PROPERTIES.contains(&property)
+}
+
 /// The set of CSS-like properties that are safe to pass through to SVG
 /// attributes. Anything not in this list is silently dropped by the
 /// style parsing helpers (e.g. [`parse_style_string_with_rejections`]).
@@ -2361,9 +2410,38 @@ const ALLOWED_STYLE_PROPERTIES_REFERENCE: &[&str] = &[
     "padding",
     "rx",
     "ry",
+    // The twelve label properties below were rejected here while mermaid accepted them, so
+    // `style a letter-spacing:3px` produced no styling at all (bd-jyg4s). See the security note on
+    // `is_allowed_style_property`.
+    "text-align",
+    "text-transform",
+    "line-height",
+    "letter-spacing",
+    "word-spacing",
+    "text-shadow",
+    "text-overflow",
+    "white-space",
+    "word-wrap",
+    "word-break",
+    "overflow-wrap",
+    "hyphens",
 ];
 
 /// Returns `true` if `property` is in the allowed-list.
+///
+/// ⚠️ THIS IS AN XSS-HARDENING ALLOWLIST, and it was widened deliberately (bd-jyg4s). Twelve of
+/// mermaid's eighteen label properties were rejected here, so they never reached the label/shape
+/// splitter and an author's `letter-spacing`, `text-transform` or `text-align` silently did
+/// nothing.
+///
+/// What makes the widening safe is that it does not touch value screening:
+/// [`sanitize_style_value`] is PROPERTY-INDEPENDENT — it rejects `url(`, CSS comment markers,
+/// `javascript:`, event-handler names, `<`/`>`, `{`/`}`, backslashes, control characters and
+/// `expression(` no matter which property carries them. Adding a property therefore admits new
+/// property NAMES, never new value shapes.
+///
+/// The twelve added are text-layout keywords and lengths with no resource-loading surface of their
+/// own; `text-shadow` is the only one taking a colour list, and `url(` is already refused globally.
 #[must_use]
 pub fn is_allowed_style_property(property: &str) -> bool {
     matches!(
@@ -2389,6 +2467,18 @@ pub fn is_allowed_style_property(property: &str) -> bool {
             | "padding"
             | "rx"
             | "ry"
+            | "text-align"
+            | "text-transform"
+            | "line-height"
+            | "letter-spacing"
+            | "word-spacing"
+            | "text-shadow"
+            | "text-overflow"
+            | "white-space"
+            | "word-wrap"
+            | "word-break"
+            | "overflow-wrap"
+            | "hyphens"
     )
 }
 
