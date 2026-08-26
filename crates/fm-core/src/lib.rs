@@ -5725,6 +5725,56 @@ impl MermaidDiagramIr {
         self.nodes.get(node_id.0)
     }
 
+    /// The text a node actually DRAWS: its explicit label, else its id, else nothing (bd-3cj8v).
+    ///
+    /// ⚠️ ONE RULE, THREE CALLERS. fm-layout sizes the node box from this and fm-render-svg draws
+    /// from it at two sites; when they disagree the box is measured for one string and painted with
+    /// another. They previously each carried their own copy of the shape match below, and layout's
+    /// copy dropped even an EXPLICIT label for a filled circle while the renderer's kept it — so a
+    /// `commit type: REVERSE tag: "v1"` was sized empty and painted with text.
+    ///
+    /// ⚠️ THE SUPPRESSION IS ABOUT ORNAMENT NODES, NOT ABOUT SHAPES — and the shape alone cannot
+    /// tell you which is which. See [`Self::is_textless_ornament_node`].
+    #[must_use]
+    pub fn node_display_text<'a>(&'a self, node: &'a IrNode) -> &'a str {
+        if self.is_textless_ornament_node(node) {
+            return "";
+        }
+        node.label
+            .and_then(|label_id| self.labels.get(label_id.0))
+            .map_or(node.id.as_str(), |label| label.text.as_str())
+    }
+
+    /// Whether `node` is a pure ornament — a glyph whose generated id must never be displayed.
+    ///
+    /// Two families draw these shapes as bare marks, and BOTH are confirmed against pinned
+    /// mermaid 11.15.0 rather than assumed:
+    ///
+    /// - state `[*]` start/end and `<<fork>>`/`<<join>>` bars carry generated ids (`__state_start`)
+    ///   that are internal plumbing;
+    /// - a flowchart `junction` (`f-circ`) is a 7px dot — mermaid's handler opens with a literal
+    ///   `t.label = ""`, discarding the text its own db reports for the node.
+    ///
+    /// ⚠️ GITGRAPH IS THE EXCEPTION, and keying this off the SHAPE alone is what hid that. gitGraph
+    /// maps `type: REVERSE` to a filled circle and `type: HIGHLIGHT` to a double circle purely to
+    /// style the dot, while mermaid still draws the commit label — its renderer is
+    /// `.append("text").attr("class","commit-label").text(t.id)` for every commit type. Sharing the
+    /// shapes made those commits inherit an ornament rule and emit an EMPTY `<text>`, so the id of
+    /// every reverted and highlighted commit vanished from our output (bd-3cj8v).
+    ///
+    /// The diagram type is what separates a styled commit from a bare mark; the shape never could.
+    #[must_use]
+    pub fn is_textless_ornament_node(&self, node: &IrNode) -> bool {
+        if self.diagram_type == DiagramType::GitGraph {
+            return false;
+        }
+        match node.shape {
+            NodeShape::FilledCircle | NodeShape::HorizontalBar => true,
+            NodeShape::DoubleCircle => node.label.is_none(),
+            _ => false,
+        }
+    }
+
     #[must_use]
     pub fn graph_node(&self, node_id: IrNodeId) -> Option<&IrGraphNode> {
         self.graph.node(node_id)
@@ -7104,31 +7154,30 @@ mod tests {
         DeckManifestOverview, DeckManifestSlide, DeckManifestStep, DeckRect, DegradationContext,
         DegradationOperator, Diagnostic, DiagnosticCategory, DiagnosticSeverity,
         DiagramPalettePreset, DiagramType, EdgeMap, FragmentAlternative, FragmentKind, GanttDate,
-        GanttExclude, GanttTaskFlags, GanttTaskType, GanttTickInterval, GraphDirection, IrActivation,
-        IrAttributeKey, IrCluster, IrClusterId, IrDeck, IrDeckEdgePolicy, IrDeckOptions,
-        IrDeckOverview, IrDeckReveal, IrDeckSlide, IrEdge, IrEdgeKind, IrEndpoint,
-        IrEntityAttribute, IrGanttMeta, IrGanttSection, IrGanttTask, IrGraphCluster, IrGraphEdge,
-        IrGraphNode, IrInlineStyle, IrLabel, IrLabelId, IrLifecycleEvent, IrNode, IrNodeId,
-        IrNodeKind, IrParticipantGroup, IrPort, IrPortId, IrPortSideHint,
-        IrSequenceAutonumberRange, IrSequenceFragment, IrSequenceMeta, IrSequenceNote, IrStyleDef,
-        IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries,
-        IrXySeriesKind, LifecycleEventKind, MERMAID_SCHEMA_VERSION, MermaidBudgetLedger,
-        MermaidConfig, MermaidDecisionWeight, MermaidDegradationPlan, MermaidDiagramIr,
-        MermaidError, MermaidErrorCode, MermaidFallbackAction, MermaidFallbackPolicy,
-        MermaidFidelity, MermaidGlyphMode, MermaidGuardReport, MermaidLayoutDecisionAlternative,
-        MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidLensBinding,
-        MermaidLensEdit, MermaidLensEditResult, MermaidLensError, MermaidNativePressureSignals,
-        MermaidPressureReport, MermaidPressureTier, MermaidQualityMode, MermaidSanitizeMode,
-        MermaidSourceMap, MermaidSourceMapEntry, MermaidSourceMapKind, MermaidSupportLevel,
-        MermaidTextRange, MermaidWarningCode, MermaidWasmPressureSignals, NodeMap, NodeSet,
-        NodeShape, NotePosition, Position, Span, StructuredDiagnostic, apply_lens_edit,
-        build_lens_bindings, capability_matrix, capability_matrix_json_pretty,
-        capability_readme_supported_diagram_types_markdown, capability_readme_surface_markdown,
-        documented_diagram_types, is_allowed_style_property, is_safe_link_target,
-        mermaid_cluster_element_id, mermaid_edge_element_id, mermaid_layout_guard_observability,
-        mermaid_node_element_id, parse_mermaid_js_config_value, parse_style_string,
-        parse_style_string_with_rejections, resolve_span_text_range, sanitize_style_value,
-        scale_budget, to_init_parse,
+        GanttExclude, GanttTickInterval, GraphDirection, IrActivation, IrAttributeKey, IrCluster,
+        IrClusterId, IrDeck, IrDeckEdgePolicy, IrDeckOptions, IrDeckOverview, IrDeckReveal,
+        IrDeckSlide, IrEdge, IrEdgeKind, IrEndpoint, IrEntityAttribute, IrGanttMeta,
+        IrGanttSection, IrGanttTask, IrGraphCluster, IrGraphEdge, IrGraphNode, IrInlineStyle,
+        IrLabel, IrLabelId, IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup,
+        IrPort, IrPortId, IrPortSideHint, IrSequenceAutonumberRange, IrSequenceFragment,
+        IrSequenceMeta, IrSequenceNote, IrStyleDef, IrStyleRef, IrStyleTarget, IrSubgraph,
+        IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind, LifecycleEventKind,
+        MERMAID_SCHEMA_VERSION, MermaidBudgetLedger, MermaidConfig, MermaidDecisionWeight,
+        MermaidDegradationPlan, MermaidDiagramIr, MermaidError, MermaidErrorCode,
+        MermaidFallbackAction, MermaidFallbackPolicy, MermaidFidelity, MermaidGlyphMode,
+        MermaidGuardReport, MermaidLayoutDecisionAlternative, MermaidLayoutDecisionLedger,
+        MermaidLayoutDecisionRecord, MermaidLensBinding, MermaidLensEdit, MermaidLensEditResult,
+        MermaidLensError, MermaidNativePressureSignals, MermaidPressureReport, MermaidPressureTier,
+        MermaidQualityMode, MermaidSanitizeMode, MermaidSourceMap, MermaidSourceMapEntry,
+        MermaidSourceMapKind, MermaidSupportLevel, MermaidTextRange, MermaidWarningCode,
+        MermaidWasmPressureSignals, NodeMap, NodeSet, NodeShape, NotePosition, Position, Span,
+        StructuredDiagnostic, apply_lens_edit, build_lens_bindings, capability_matrix,
+        capability_matrix_json_pretty, capability_readme_supported_diagram_types_markdown,
+        capability_readme_surface_markdown, documented_diagram_types, is_allowed_style_property,
+        is_safe_link_target, mermaid_cluster_element_id, mermaid_edge_element_id,
+        mermaid_layout_guard_observability, mermaid_node_element_id, parse_mermaid_js_config_value,
+        parse_style_string, parse_style_string_with_rejections, resolve_span_text_range,
+        sanitize_style_value, scale_budget, to_init_parse,
     };
 
     fn sample_span(line: u32, start_col: u32, end_col: u32) -> Span {
@@ -11375,7 +11424,10 @@ mod tests {
                 end: Some(GanttDate::DurationDays(2)),
                 depends_on: Vec::new(),
                 progress: Some(0.5),
-                flags: crate::GanttTaskFlags { done: true, ..Default::default() },
+                flags: crate::GanttTaskFlags {
+                    done: true,
+                    ..Default::default()
+                },
             }],
         };
 

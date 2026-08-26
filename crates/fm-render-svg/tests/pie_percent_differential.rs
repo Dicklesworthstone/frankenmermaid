@@ -34,7 +34,8 @@ struct Row {
 }
 
 fn fixture() -> Vec<Row> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mermaid_pie_percents.tsv");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mermaid_pie_percents.tsv");
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("fixture {} unreadable: {err}", path.display()));
     let rows: Vec<Row> = text
@@ -70,7 +71,9 @@ fn drawn_percents(source: &str) -> Vec<String> {
     while let Some(start) = rest.find("<text") {
         rest = &rest[start..];
         let Some(open) = rest.find('>') else { break };
-        let Some(close) = rest.find("</text>") else { break };
+        let Some(close) = rest.find("</text>") else {
+            break;
+        };
         let inner = rest[open + 1..close].trim();
         if !inner.is_empty()
             && inner.ends_with('%')

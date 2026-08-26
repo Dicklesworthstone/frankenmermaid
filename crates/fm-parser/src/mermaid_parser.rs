@@ -6,11 +6,11 @@ use std::sync::Arc;
 use chumsky::prelude::*;
 use fm_core::{
     ArchitectureSide, ArrowType, Diagnostic, DiagnosticCategory, DiagramType, GanttDate,
-    GanttExclude, GanttTaskFlags, GanttTaskType, GanttTickInterval, GraphDirection, IrAttributeKey,
-    IrC4NodeMeta, IrConstraint, IrDeck, IrDeckEdgePolicy, IrDeckReveal, IrDeckSlide, IrGanttMeta,
-    IrGanttSection, IrGanttTask, IrLabelSegment, IrNodeId, IrXyAxis, IrXyChartMeta, IrXySeries,
-    IrXySeriesKind, MermaidParseMode, MermaidSupportLevel, NodeShape, Position, Span,
-    is_safe_link_target, parse_mermaid_js_config_value, to_init_parse,
+    GanttExclude, GanttTaskFlags, GanttTickInterval, GraphDirection, IrAttributeKey, IrC4NodeMeta,
+    IrConstraint, IrDeck, IrDeckEdgePolicy, IrDeckReveal, IrDeckSlide, IrGanttMeta, IrGanttSection,
+    IrGanttTask, IrLabelSegment, IrNodeId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind,
+    MermaidParseMode, MermaidSupportLevel, NodeShape, Position, Span, is_safe_link_target,
+    parse_mermaid_js_config_value, to_init_parse,
 };
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
