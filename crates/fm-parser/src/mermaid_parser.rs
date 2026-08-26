@@ -7,9 +7,10 @@ use chumsky::prelude::*;
 use fm_core::{
     ArchitectureSide, ArrowType, Diagnostic, DiagnosticCategory, DiagramType, GanttDate,
     GanttExclude, GanttTaskType, GanttTickInterval, GraphDirection, IrAttributeKey, IrC4NodeMeta,
-    IrConstraint, IrGanttMeta, IrGanttSection, IrGanttTask, IrLabelSegment, IrNodeId, IrXyAxis,
-    IrXyChartMeta, IrXySeries, IrXySeriesKind, MermaidParseMode, MermaidSupportLevel, NodeShape,
-    Span, is_safe_link_target, parse_mermaid_js_config_value, to_init_parse,
+    IrConstraint, IrDeck, IrDeckEdgePolicy, IrDeckReveal, IrDeckSlide, IrGanttMeta, IrGanttSection,
+    IrGanttTask, IrLabelSegment, IrNodeId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind,
+    MermaidParseMode, MermaidSupportLevel, NodeShape, Position, Span, is_safe_link_target,
+    parse_mermaid_js_config_value, to_init_parse,
 };
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
@@ -522,6 +523,9 @@ pub fn parse_mermaid_with_detection_and_config(
     let body_content = blank_multiline_deck_directives(content, &deck_directives.blocks);
 
     parse_init_directives(content, &mut builder);
+    // The deck pass reads the ORIGINAL text (block byte offsets index into it); keep a handle
+    // before `content` is shadowed by the blanked body copy.
+    let deck_source = content;
     let content = body_content.as_ref();
 
     match diagram_type {
@@ -567,6 +571,10 @@ pub fn parse_mermaid_with_detection_and_config(
     if diagram_type != DiagramType::Flowchart {
         extract_style_directives(content, &mut builder);
     }
+
+    // Deck pass (bd-jw8m8): consume %%{deck: …}%% directives into ir.deck, after the body so
+    // the semantic selector pass that follows can see every node id.
+    parse_deck_directives(deck_source, &mut builder);
 
     if builder.node_count() == 0 && builder.edge_count() == 0 {
         // The unimplemented-TYPE message is NOT emitted here. `unsupported_upstream_keyword` in
@@ -12162,6 +12170,12 @@ fn parse_init_directives(input: &str, builder: &mut IrBuilder) {
         let Some((directive, payload)) = extract_config_directive_payload(trimmed) else {
             continue;
         };
+        if directive.eq_ignore_ascii_case("deck") {
+            // Deck directives are structural content, not rendering config: they are consumed
+            // by the post-body deck pass (`parse_deck_directives`), never by the config
+            // machinery, and are deliberately NOT gated by `enable_init_directives`.
+            continue;
+        }
 
         let span = span_for(line_number, line);
         let parsed_value = match parse_init_payload_value(payload) {
@@ -12189,6 +12203,519 @@ fn parse_init_directives(input: &str, builder: &mut IrBuilder) {
 
 const MAX_DECK_BLOCK_LINES: usize = 400;
 const MAX_DECK_BLOCK_BYTES: usize = 32 * 1024;
+
+// Structural caps for deck payloads (bd-jw8m8). Directives are attacker-reachable input;
+// every cap clamps with a warning rather than erroring (never-waste-user-intent).
+const MAX_DECK_SLIDES: usize = 64;
+const MAX_DECK_SELECTORS_PER_SLIDE: usize = 512;
+const MAX_DECK_TEXT_CHARS: usize = 512;
+const MAX_DECK_AUTO_ADVANCE_MS: u64 = 600_000;
+
+/// Post-body deck pass (bd-jw8m8): consume every `%%{deck: …}%%` directive — single-line and
+/// the multi-line blocks the lexical pre-pass located — into `ir.deck`.
+///
+/// Runs AFTER the diagram body deliberately (same contract as layout constraints): a deck may be
+/// declared above the nodes it references, and the semantic selector pass needs the finished
+/// node-id set anyway. Multiple directives merge in document order: `title`/`options`/`overview`
+/// are last-writer-wins per key, `slides` concatenate, `tips` merge with later wins.
+pub(crate) fn parse_deck_directives(content: &str, builder: &mut IrBuilder) {
+    if !content.contains("%%{") {
+        return;
+    }
+    let scan = scan_multiline_deck_directives(content);
+    let mut blocks = scan.blocks.iter().copied().peekable();
+    let mut offset = 0_usize;
+    let mut skip_until_byte = 0_usize;
+    for (index, raw_line) in content.split_inclusive('\n').enumerate() {
+        let line_start = offset;
+        offset += raw_line.len();
+        if line_start < skip_until_byte {
+            continue;
+        }
+        let line_number = index + 1;
+        if let Some(block) = blocks.peek().copied()
+            && block.start_byte == line_start
+        {
+            blocks.next();
+            skip_until_byte = block.end_byte;
+            let Some(joined) = content.get(block.start_byte..block.end_byte) else {
+                continue;
+            };
+            let end_line = line_number + joined.matches('\n').count();
+            let context = format!("Lines {line_number}-{end_line}");
+            let span = Span::new(
+                Position {
+                    line: u32::try_from(line_number).unwrap_or(u32::MAX),
+                    col: 1,
+                    byte: u32::try_from(block.start_byte).unwrap_or(u32::MAX),
+                },
+                Position {
+                    line: u32::try_from(end_line).unwrap_or(u32::MAX),
+                    col: 1,
+                    byte: u32::try_from(block.end_byte).unwrap_or(u32::MAX),
+                },
+            );
+            let Some((directive, payload)) = extract_config_directive_payload(joined.trim()) else {
+                continue;
+            };
+            if directive.eq_ignore_ascii_case("deck") {
+                apply_deck_payload(payload, &context, span, builder);
+            }
+            continue;
+        }
+        let line = raw_line.trim_end_matches(['\r', '\n']);
+        let trimmed = trim_fast(line);
+        let Some((directive, payload)) = extract_config_directive_payload(trimmed) else {
+            continue;
+        };
+        if !directive.eq_ignore_ascii_case("deck") {
+            continue;
+        }
+        let span = span_for(line_number, line);
+        apply_deck_payload(payload, &format!("Line {line_number}"), span, builder);
+    }
+}
+
+/// Parse one deck payload (JSON5-tolerant) and merge it into `ir.deck`.
+fn apply_deck_payload(payload: &str, context: &str, span: Span, builder: &mut IrBuilder) {
+    let value = match parse_init_payload_value(payload) {
+        Ok(value) => value,
+        Err(error) => {
+            let message = format!("{context}: invalid deck directive payload: {error}");
+            builder.add_warning(message.clone());
+            builder.add_init_error(message, span);
+            return;
+        }
+    };
+    let Some(object) = value.as_object() else {
+        let message = format!("{context}: deck directive payload must be an object");
+        builder.add_warning(message.clone());
+        builder.add_init_error(message, span);
+        return;
+    };
+
+    // Take the accumulator out so `builder` stays freely borrowable for warnings; the first
+    // directive's span anchors deck-level diagnostics.
+    let mut deck = builder.ir_mut().deck.take().map_or_else(
+        || IrDeck {
+            span,
+            ..IrDeck::default()
+        },
+        |boxed| *boxed,
+    );
+
+    for key in object.keys() {
+        if !matches!(
+            key.as_str(),
+            "title" | "options" | "tips" | "slides" | "overview"
+        ) {
+            builder.add_warning(format!("{context}: unknown deck key '{key}' ignored"));
+        }
+    }
+
+    if let Some(title) = object.get("title") {
+        match title.as_str() {
+            Some(text) => deck.title = Some(deck_text(text, context, "deck title", builder)),
+            None => builder.add_warning(format!("{context}: deck title must be a string")),
+        }
+    }
+
+    if let Some(options) = object.get("options") {
+        parse_deck_options(options, &mut deck, context, builder);
+    }
+
+    if let Some(tips) = object.get("tips") {
+        match tips.as_object() {
+            Some(map) => {
+                for (node_id, tip) in map {
+                    match tip.as_str() {
+                        Some(text) => {
+                            // Later directives win per node (merge rule).
+                            deck.tips.insert(
+                                node_id.clone(),
+                                deck_text(text, context, "deck tip", builder),
+                            );
+                        }
+                        None => builder.add_warning(format!(
+                            "{context}: deck tip for '{node_id}' must be a string"
+                        )),
+                    }
+                }
+            }
+            None => builder.add_warning(format!(
+                "{context}: deck tips must be an object of node-id → text"
+            )),
+        }
+    }
+
+    if let Some(slides) = object.get("slides") {
+        match slides.as_array() {
+            Some(entries) => {
+                for entry in entries {
+                    if deck.slides.len() >= MAX_DECK_SLIDES {
+                        builder.add_warning(format!(
+                            "{context}: deck truncated to {MAX_DECK_SLIDES} slides"
+                        ));
+                        break;
+                    }
+                    if let Some(slide) = parse_deck_slide(entry, context, span, builder) {
+                        push_deck_slide(&mut deck, slide, context, builder);
+                    }
+                }
+            }
+            None => builder.add_warning(format!("{context}: deck slides must be an array")),
+        }
+    }
+
+    if let Some(overview) = object.get("overview") {
+        parse_deck_overview(overview, &mut deck, context, builder);
+    }
+
+    builder.ir_mut().deck = Some(Box::new(deck));
+}
+
+/// Clamp-with-warning string truncation for author-facing deck text.
+fn deck_text(text: &str, context: &str, what: &str, builder: &mut IrBuilder) -> String {
+    if text.chars().count() <= MAX_DECK_TEXT_CHARS {
+        return text.to_string();
+    }
+    builder.add_warning(format!(
+        "{context}: {what} truncated to {MAX_DECK_TEXT_CHARS} characters"
+    ));
+    text.chars().take(MAX_DECK_TEXT_CHARS).collect()
+}
+
+/// A finite JSON number, or `None` (with no warning — callers phrase their own).
+fn deck_number(value: &serde_json::Value) -> Option<f64> {
+    value.as_f64().filter(|number| number.is_finite())
+}
+
+fn parse_deck_options(
+    options: &serde_json::Value,
+    deck: &mut IrDeck,
+    context: &str,
+    builder: &mut IrBuilder,
+) {
+    let Some(map) = options.as_object() else {
+        builder.add_warning(format!("{context}: deck options must be an object"));
+        return;
+    };
+    for key in map.keys() {
+        if !matches!(
+            key.as_str(),
+            "fitMargin" | "zoomMax" | "dimOpacity" | "autoAdvanceMs"
+        ) {
+            builder.add_warning(format!("{context}: unknown deck option '{key}' ignored"));
+        }
+    }
+    if let Some(value) = map.get("fitMargin") {
+        match deck_number(value) {
+            #[allow(clippy::cast_possible_truncation)]
+            Some(number) => {
+                if number < 0.0 {
+                    builder
+                        .add_warning(format!("{context}: fitMargin clamped to 0 (was negative)"));
+                }
+                deck.options.fit_margin = number.max(0.0) as f32;
+            }
+            None => builder.add_warning(format!("{context}: fitMargin must be a finite number")),
+        }
+    }
+    if let Some(value) = map.get("zoomMax") {
+        match deck_number(value) {
+            #[allow(clippy::cast_possible_truncation)]
+            Some(number) if number > 0.0 => deck.options.zoom_max = number as f32,
+            _ => builder.add_warning(format!("{context}: zoomMax must be a positive number")),
+        }
+    }
+    if let Some(value) = map.get("dimOpacity") {
+        match deck_number(value) {
+            #[allow(clippy::cast_possible_truncation)]
+            Some(number) => {
+                if !(0.0..=1.0).contains(&number) {
+                    builder.add_warning(format!("{context}: dimOpacity clamped into [0, 1]"));
+                }
+                deck.options.dim_opacity = number.clamp(0.0, 1.0) as f32;
+            }
+            None => builder.add_warning(format!("{context}: dimOpacity must be a finite number")),
+        }
+    }
+    if let Some(value) = map.get("autoAdvanceMs") {
+        match deck_number(value) {
+            Some(number) if number >= 0.0 => {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let millis = number as u64;
+                if millis > MAX_DECK_AUTO_ADVANCE_MS {
+                    builder.add_warning(format!(
+                        "{context}: autoAdvanceMs clamped to {MAX_DECK_AUTO_ADVANCE_MS}"
+                    ));
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    deck.options.auto_advance_ms = millis.min(MAX_DECK_AUTO_ADVANCE_MS) as u32;
+                }
+            }
+            _ => builder.add_warning(format!(
+                "{context}: autoAdvanceMs must be a non-negative number"
+            )),
+        }
+    }
+}
+
+fn parse_deck_overview(
+    overview: &serde_json::Value,
+    deck: &mut IrDeck,
+    context: &str,
+    builder: &mut IrBuilder,
+) {
+    let Some(map) = overview.as_object() else {
+        builder.add_warning(format!("{context}: deck overview must be an object"));
+        return;
+    };
+    for key in map.keys() {
+        if !matches!(key.as_str(), "enabled" | "title" | "caption" | "tour") {
+            builder.add_warning(format!(
+                "{context}: unknown deck overview key '{key}' ignored"
+            ));
+        }
+    }
+    if let Some(value) = map.get("enabled") {
+        match value.as_bool() {
+            Some(flag) => deck.overview.enabled = flag,
+            None => builder.add_warning(format!("{context}: overview.enabled must be a boolean")),
+        }
+    }
+    if let Some(value) = map.get("tour") {
+        match value.as_bool() {
+            Some(flag) => deck.overview.tour = flag,
+            None => builder.add_warning(format!("{context}: overview.tour must be a boolean")),
+        }
+    }
+    if let Some(value) = map.get("title") {
+        match value.as_str() {
+            Some(text) => {
+                deck.overview.title = deck_text(text, context, "overview title", builder);
+            }
+            None => builder.add_warning(format!("{context}: overview.title must be a string")),
+        }
+    }
+    if let Some(value) = map.get("caption") {
+        match value.as_str() {
+            Some(text) => {
+                deck.overview.caption = deck_text(text, context, "overview caption", builder);
+            }
+            None => builder.add_warning(format!("{context}: overview.caption must be a string")),
+        }
+    }
+}
+
+/// Parse one slide object; `None` when it is structurally unusable (not an object, missing id,
+/// or missing its `nodes` selector list — a slide that could never resolve members).
+fn parse_deck_slide(
+    entry: &serde_json::Value,
+    context: &str,
+    span: Span,
+    builder: &mut IrBuilder,
+) -> Option<IrDeckSlide> {
+    let Some(map) = entry.as_object() else {
+        builder.add_warning(format!("{context}: deck slide must be an object"));
+        return None;
+    };
+    for key in map.keys() {
+        if !matches!(
+            key.as_str(),
+            "id" | "title" | "caption" | "nodes" | "reveal" | "edges" | "fitMargin" | "zoomMax"
+        ) {
+            builder.add_warning(format!("{context}: unknown deck slide key '{key}' ignored"));
+        }
+    }
+    let Some(id) = map.get("id").and_then(serde_json::Value::as_str) else {
+        builder.add_warning(format!(
+            "{context}: deck slide requires a string 'id'; slide skipped"
+        ));
+        return None;
+    };
+    let id = deck_text(id, context, "slide id", builder);
+    let Some(nodes_value) = map.get("nodes") else {
+        builder.add_warning(format!(
+            "{context}: deck slide '{id}' requires a 'nodes' selector array; slide skipped"
+        ));
+        return None;
+    };
+    let Some(node_entries) = nodes_value.as_array() else {
+        builder.add_warning(format!(
+            "{context}: deck slide '{id}': 'nodes' must be an array of selector strings; \
+             slide skipped"
+        ));
+        return None;
+    };
+    let mut nodes = Vec::with_capacity(node_entries.len().min(MAX_DECK_SELECTORS_PER_SLIDE));
+    for selector in node_entries {
+        if nodes.len() >= MAX_DECK_SELECTORS_PER_SLIDE {
+            builder.add_warning(format!(
+                "{context}: deck slide '{id}': selectors truncated to \
+                 {MAX_DECK_SELECTORS_PER_SLIDE}"
+            ));
+            break;
+        }
+        match selector.as_str() {
+            Some(text) => nodes.push(text.to_string()),
+            None => builder.add_warning(format!(
+                "{context}: deck slide '{id}': non-string selector ignored"
+            )),
+        }
+    }
+
+    let title = match map.get("title") {
+        Some(value) => match value.as_str() {
+            Some(text) => deck_text(text, context, "slide title", builder),
+            None => {
+                builder.add_warning(format!(
+                    "{context}: deck slide '{id}': title must be a string; using the id"
+                ));
+                id.clone()
+            }
+        },
+        None => id.clone(),
+    };
+    let caption = match map.get("caption") {
+        Some(value) => match value.as_str() {
+            Some(text) => deck_text(text, context, "slide caption", builder),
+            None => {
+                builder.add_warning(format!(
+                    "{context}: deck slide '{id}': caption must be a string"
+                ));
+                String::new()
+            }
+        },
+        None => String::new(),
+    };
+
+    let reveal = match map.get("reveal") {
+        None => IrDeckReveal::None,
+        Some(value) => match value {
+            serde_json::Value::String(mode) if mode == "auto" => IrDeckReveal::Auto,
+            serde_json::Value::Array(groups) => {
+                let mut parsed_groups = Vec::with_capacity(groups.len());
+                for group in groups {
+                    match group.as_array() {
+                        Some(selectors) => {
+                            let mut parsed = Vec::with_capacity(selectors.len());
+                            for selector in selectors {
+                                match selector.as_str() {
+                                    Some(text) => parsed.push(text.to_string()),
+                                    None => builder.add_warning(format!(
+                                        "{context}: deck slide '{id}': non-string reveal \
+                                         selector ignored"
+                                    )),
+                                }
+                            }
+                            parsed_groups.push(parsed);
+                        }
+                        None => builder.add_warning(format!(
+                            "{context}: deck slide '{id}': each reveal group must be an array \
+                             of selectors"
+                        )),
+                    }
+                }
+                IrDeckReveal::Groups(parsed_groups)
+            }
+            _ => {
+                builder.add_warning(format!(
+                    "{context}: deck slide '{id}': reveal must be \"auto\" or an array of \
+                     selector groups"
+                ));
+                IrDeckReveal::None
+            }
+        },
+    };
+
+    let edges = match map.get("edges") {
+        None => IrDeckEdgePolicy::Induced,
+        Some(value) => match value.as_str() {
+            Some("induced") => IrDeckEdgePolicy::Induced,
+            Some("touching") => IrDeckEdgePolicy::Touching,
+            Some("none") => IrDeckEdgePolicy::None,
+            _ => {
+                builder.add_warning(format!(
+                    "{context}: deck slide '{id}': edges must be \"induced\", \"touching\", \
+                     or \"none\"; using \"induced\""
+                ));
+                IrDeckEdgePolicy::Induced
+            }
+        },
+    };
+
+    let fit_margin = match map.get("fitMargin") {
+        None => None,
+        Some(value) => match deck_number(value) {
+            #[allow(clippy::cast_possible_truncation)]
+            Some(number) => {
+                if number < 0.0 {
+                    builder.add_warning(format!(
+                        "{context}: deck slide '{id}': fitMargin clamped to 0 (was negative)"
+                    ));
+                }
+                Some(number.max(0.0) as f32)
+            }
+            None => {
+                builder.add_warning(format!(
+                    "{context}: deck slide '{id}': fitMargin must be a finite number"
+                ));
+                None
+            }
+        },
+    };
+    let zoom_max = match map.get("zoomMax") {
+        None => None,
+        Some(value) => match deck_number(value) {
+            #[allow(clippy::cast_possible_truncation)]
+            Some(number) if number > 0.0 => Some(number as f32),
+            _ => {
+                builder.add_warning(format!(
+                    "{context}: deck slide '{id}': zoomMax must be a positive number"
+                ));
+                None
+            }
+        },
+    };
+
+    Some(IrDeckSlide {
+        id,
+        title,
+        caption,
+        nodes,
+        reveal,
+        edges,
+        fit_margin,
+        zoom_max,
+        span,
+    })
+}
+
+/// Append a slide, suffixing duplicate ids (`x` → `x-2`, `x-3`, …) with a warning — a duplicate
+/// is never dropped (never-waste-user-intent), and suffixed ids stay URL- and diagnostics-usable.
+fn push_deck_slide(
+    deck: &mut IrDeck,
+    mut slide: IrDeckSlide,
+    context: &str,
+    builder: &mut IrBuilder,
+) {
+    if deck.slides.iter().any(|existing| existing.id == slide.id) {
+        let base = slide.id.clone();
+        let mut counter = 2_usize;
+        let mut candidate = format!("{base}-{counter}");
+        while deck.slides.iter().any(|existing| existing.id == candidate) {
+            counter += 1;
+            candidate = format!("{base}-{counter}");
+        }
+        builder.add_warning(format!(
+            "{context}: duplicate deck slide id '{base}' renamed to '{candidate}'"
+        ));
+        slide.id = candidate;
+    }
+    deck.slides.push(slide);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MultilineDeckDirectiveBlock {
@@ -12552,7 +13079,10 @@ fn extract_config_directive_payload(trimmed: &str) -> Option<(&str, &str)> {
     let inner = &trimmed[3..trimmed.len().saturating_sub(3)];
     let (directive, payload) = inner.trim().split_once(':')?;
     let directive = directive.trim();
-    if !(directive.eq_ignore_ascii_case("init") || directive.eq_ignore_ascii_case("constraints")) {
+    if !(directive.eq_ignore_ascii_case("init")
+        || directive.eq_ignore_ascii_case("constraints")
+        || directive.eq_ignore_ascii_case("deck"))
+    {
         return None;
     }
     let payload = payload.trim();
@@ -16403,7 +16933,20 @@ mod tests {
             .collect();
         assert_eq!(node_ids, ["A", "B"]);
         assert_eq!(parsed.ir.edges.len(), 1);
-        assert!(parsed.ir.meta.init.errors.is_empty());
+        // Since bd-jw8m8 the deck pass CONSUMES the block: this fixture's deliberately
+        // invalid JSON5 (`phantom --> …` as a bare token) now reports as an invalid deck
+        // payload — the interior still never leaks into the body, which is the point.
+        assert!(
+            parsed
+                .ir
+                .meta
+                .init
+                .errors
+                .iter()
+                .all(|error| error.to_string().contains("invalid deck directive payload")),
+            "{:?}",
+            parsed.ir.meta.init.errors
+        );
     }
 
     #[test]
@@ -16420,7 +16963,19 @@ mod tests {
             .collect();
         assert_eq!(node_ids, ["A", "B"]);
         assert_eq!(parsed.ir.edges.len(), 1);
-        assert!(parsed.ir.meta.init.errors.is_empty());
+        // See the sibling fixture: the consumed block's invalid JSON5 reports as an invalid
+        // deck payload; nothing else may error.
+        assert!(
+            parsed
+                .ir
+                .meta
+                .init
+                .errors
+                .iter()
+                .all(|error| error.to_string().contains("invalid deck directive payload")),
+            "{:?}",
+            parsed.ir.meta.init.errors
+        );
     }
 
     #[test]
@@ -16448,6 +17003,234 @@ mod tests {
                 .to_string()
                 .contains("multi-line deck directive exceeds")
         }));
+    }
+
+    // ── parse_deck_config battery (bd-jw8m8) ──────────────────────────
+
+    fn deck_of(parsed: &crate::ParseResult) -> &fm_core::IrDeck {
+        parsed.ir.deck.as_deref().expect("deck should be present")
+    }
+
+    #[test]
+    fn deck_directive_parses_every_grammar_field() {
+        // JSON5 payload (unquoted keys, trailing commas) in a multi-line block. Note:
+        // enable_init_directives defaults to FALSE and deck must parse regardless — deck
+        // directives are structural content, not rendering config.
+        let parsed = parse_mermaid(
+            "flowchart LR\n%%{deck: {\n  title: 'Engine tour',\n  options: { fitMargin: 140, zoomMax: 1.2, dimOpacity: 0.1, autoAdvanceMs: 8000 },\n  tips: { a: 'the start', b: 'the end' },\n  slides: [\n    { id: 's1', title: 'Start', caption: 'first', nodes: ['a', 'subgraph:core'],\n      reveal: [['a'], ['subgraph:core']], edges: 'touching', fitMargin: 200, zoomMax: 1.0 },\n    { id: 's2', nodes: ['*'], reveal: 'auto', edges: 'none' },\n  ],\n  overview: { title: 'All of it', caption: 'zoomed out', tour: false, enabled: true },\n}}%%\n  a --> b\n",
+        );
+        let deck = deck_of(&parsed);
+        assert_eq!(deck.title.as_deref(), Some("Engine tour"));
+        assert!((deck.options.fit_margin - 140.0).abs() < f32::EPSILON);
+        assert!((deck.options.zoom_max - 1.2).abs() < f32::EPSILON);
+        assert!((deck.options.dim_opacity - 0.1).abs() < f32::EPSILON);
+        assert_eq!(deck.options.auto_advance_ms, 8000);
+        assert_eq!(deck.tips.len(), 2);
+        assert_eq!(deck.tips.get("a").map(String::as_str), Some("the start"));
+        assert_eq!(deck.slides.len(), 2);
+        let first = &deck.slides[0];
+        assert_eq!(first.id, "s1");
+        assert_eq!(first.title, "Start");
+        assert_eq!(first.caption, "first");
+        assert_eq!(first.nodes, ["a", "subgraph:core"]);
+        assert_eq!(
+            first.reveal,
+            fm_core::IrDeckReveal::Groups(vec![
+                vec!["a".to_string()],
+                vec!["subgraph:core".to_string()],
+            ])
+        );
+        assert_eq!(first.edges, fm_core::IrDeckEdgePolicy::Touching);
+        assert_eq!(first.fit_margin, Some(200.0));
+        assert_eq!(first.zoom_max, Some(1.0));
+        let second = &deck.slides[1];
+        assert_eq!(second.title, "s2", "title defaults to the id");
+        assert_eq!(second.reveal, fm_core::IrDeckReveal::Auto);
+        assert_eq!(second.edges, fm_core::IrDeckEdgePolicy::None);
+        assert!(deck.overview.enabled);
+        assert!(!deck.overview.tour);
+        assert_eq!(deck.overview.title, "All of it");
+        assert!(
+            parsed.ir.meta.init.errors.is_empty(),
+            "well-formed deck must not error: {:?}",
+            parsed.ir.meta.init.errors
+        );
+    }
+
+    #[test]
+    fn single_line_deck_directive_parses() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n%%{deck: {slides: [{id: \"only\", nodes: [\"a\"]}]}}%%\n  a --> b\n",
+        );
+        let deck = deck_of(&parsed);
+        assert_eq!(deck.slides.len(), 1);
+        assert_eq!(deck.slides[0].id, "only");
+    }
+
+    #[test]
+    fn deck_directives_merge_in_document_order() {
+        // title/options/overview: last-writer-wins per key; slides concatenate; tips later-wins.
+        let parsed = parse_mermaid(
+            "flowchart LR\n%%{deck: {title: 'first', options: {fitMargin: 100}, tips: {a: 'one', b: 'keep'}, slides: [{id: 'x', nodes: ['a']}]}}%%\n  a --> b\n%%{deck: {title: 'second', options: {zoomMax: 0.9}, tips: {a: 'two'}, slides: [{id: 'y', nodes: ['b']}]}}%%\n",
+        );
+        let deck = deck_of(&parsed);
+        assert_eq!(deck.title.as_deref(), Some("second"));
+        assert!(
+            (deck.options.fit_margin - 100.0).abs() < f32::EPSILON,
+            "earlier key kept"
+        );
+        assert!(
+            (deck.options.zoom_max - 0.9).abs() < f32::EPSILON,
+            "later key applied"
+        );
+        assert_eq!(
+            deck.slides
+                .iter()
+                .map(|slide| slide.id.as_str())
+                .collect::<Vec<_>>(),
+            ["x", "y"]
+        );
+        assert_eq!(deck.tips.get("a").map(String::as_str), Some("two"));
+        assert_eq!(deck.tips.get("b").map(String::as_str), Some("keep"));
+    }
+
+    #[test]
+    fn deck_numeric_clamps_warn_and_clamp() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n%%{deck: {options: {fitMargin: -5, dimOpacity: 3.5, autoAdvanceMs: 99999999}, slides: [{id: 's', nodes: ['a']}]}}%%\n  a --> b\n",
+        );
+        let deck = deck_of(&parsed);
+        assert!((deck.options.fit_margin - 0.0).abs() < f32::EPSILON);
+        assert!((deck.options.dim_opacity - 1.0).abs() < f32::EPSILON);
+        assert_eq!(deck.options.auto_advance_ms, 600_000);
+        let warnings = parsed.warnings.join("\n");
+        assert!(warnings.contains("fitMargin clamped"), "{warnings}");
+        assert!(warnings.contains("dimOpacity clamped"), "{warnings}");
+        assert!(warnings.contains("autoAdvanceMs clamped"), "{warnings}");
+    }
+
+    #[test]
+    fn deck_slide_cap_truncates_with_warning() {
+        let mut source = String::from("flowchart LR\n  a --> b\n%%{deck: {slides: [\n");
+        for index in 0..(super::MAX_DECK_SLIDES + 3) {
+            source.push_str(&format!("  {{ id: 's{index}', nodes: ['a'] }},\n"));
+        }
+        source.push_str("]}}%%\n");
+        let parsed = parse_mermaid(&source);
+        let deck = deck_of(&parsed);
+        assert_eq!(deck.slides.len(), super::MAX_DECK_SLIDES);
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("truncated to 64 slides")),
+            "{:?}",
+            parsed.warnings
+        );
+    }
+
+    #[test]
+    fn duplicate_deck_slide_ids_are_suffixed_never_dropped() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n%%{deck: {slides: [{id: 'dup', nodes: ['a']}, {id: 'dup', nodes: ['b']}, {id: 'dup', nodes: ['a']}]}}%%\n  a --> b\n",
+        );
+        let deck = deck_of(&parsed);
+        assert_eq!(
+            deck.slides
+                .iter()
+                .map(|slide| slide.id.as_str())
+                .collect::<Vec<_>>(),
+            ["dup", "dup-2", "dup-3"]
+        );
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("duplicate deck slide id 'dup'")),
+            "{:?}",
+            parsed.warnings
+        );
+    }
+
+    #[test]
+    fn deck_structural_errors_degrade_with_warnings() {
+        // Payload not an object → init error, directive ignored, diagram still parses.
+        let parsed = parse_mermaid("flowchart LR\n%%{deck: [1, 2]}%%\n  a --> b\n");
+        assert!(parsed.ir.deck.is_none());
+        assert!(
+            parsed
+                .ir
+                .meta
+                .init
+                .errors
+                .iter()
+                .any(|error| error.to_string().contains("must be an object"))
+        );
+        assert_eq!(parsed.ir.nodes.len(), 2, "diagram must still parse");
+
+        // Slide without id / without nodes → skipped with warnings; bad reveal/edges → defaults.
+        let parsed = parse_mermaid(
+            "flowchart LR\n%%{deck: {slides: [{nodes: ['a']}, {id: 'no-nodes'}, {id: 'ok', nodes: ['a'], reveal: 42, edges: 'sideways'}]}}%%\n  a --> b\n",
+        );
+        let deck = deck_of(&parsed);
+        assert_eq!(deck.slides.len(), 1);
+        assert_eq!(deck.slides[0].id, "ok");
+        assert_eq!(deck.slides[0].reveal, fm_core::IrDeckReveal::None);
+        assert_eq!(deck.slides[0].edges, fm_core::IrDeckEdgePolicy::Induced);
+        let warnings = parsed.warnings.join("\n");
+        assert!(warnings.contains("requires a string 'id'"), "{warnings}");
+        assert!(
+            warnings.contains("requires a 'nodes' selector array"),
+            "{warnings}"
+        );
+        assert!(warnings.contains("reveal must be"), "{warnings}");
+        assert!(warnings.contains("edges must be"), "{warnings}");
+    }
+
+    #[test]
+    fn deckless_source_has_no_deck_and_unknown_keys_warn() {
+        let parsed = parse_mermaid("flowchart LR\n  a --> b\n");
+        assert!(parsed.ir.deck.is_none());
+
+        let parsed = parse_mermaid(
+            "flowchart LR\n%%{deck: {slides: [{id: 's', nodes: ['a']}], pushOut: true}}%%\n  a --> b\n",
+        );
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unknown deck key 'pushOut'")),
+            "{:?}",
+            parsed.warnings
+        );
+    }
+
+    #[test]
+    fn deck_directive_is_inert_on_dot_input() {
+        // The DOT branch never scans Mermaid directives — a documented v1 limitation. The
+        // digraph header leads so detection actually takes the DOT path.
+        let parsed = crate::parse(
+            "digraph G {\n  a -> b\n}\n%%{deck: {slides: [{id: 's', nodes: ['a']}]}}%%\n",
+        );
+        assert_eq!(parsed.ir.diagram_type, fm_core::DiagramType::Flowchart);
+        assert!(
+            parsed.ir.deck.is_none(),
+            "deck directives must be inert on DOT input"
+        );
+    }
+
+    #[test]
+    fn reparse_with_changed_deck_lands_the_new_deck() {
+        let body = "flowchart LR\n  a --> b\n";
+        let first = parse_mermaid(&format!(
+            "{body}%%{{deck: {{slides: [{{id: 'one', nodes: ['a']}}]}}}}%%\n"
+        ));
+        let second = parse_mermaid(&format!(
+            "{body}%%{{deck: {{slides: [{{id: 'two', nodes: ['b']}}]}}}}%%\n"
+        ));
+        assert_eq!(deck_of(&first).slides[0].id, "one");
+        assert_eq!(deck_of(&second).slides[0].id, "two");
+        assert_eq!(first.ir.nodes, second.ir.nodes, "bodies identical");
     }
 
     #[test]
