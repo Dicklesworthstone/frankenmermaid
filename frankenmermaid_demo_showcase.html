@@ -673,10 +673,46 @@
     #deck-dots i[data-active] {
       background: #34d399;
     }
+    /* Keyboard-navigation skip link (bd-cwas8): visually hidden until focused. */
+    .skip-link {
+      position: fixed;
+      top: -48px;
+      left: 12px;
+      z-index: 100;
+      padding: 10px 16px;
+      border-radius: 10px;
+      background: #10b981;
+      color: #000;
+      font-weight: 800;
+      font-size: 12px;
+      transition: top 0.15s ease;
+    }
+    .skip-link:focus {
+      top: 12px;
+    }
+    /* Reduced motion (bd-cwas8): kill the ambient/entrance animation surface. The deck
+       runtime honors the same preference in JS (camera snaps, stagger collapses,
+       autoplay off) — this is the page-chrome half. */
+    @media (prefers-reduced-motion: reduce) {
+      .glow-orb,
+      .flow-line,
+      .franken-bolt {
+        animation: none !important;
+      }
+      .reveal {
+        opacity: 1;
+        transform: none;
+        transition: none;
+      }
+      html {
+        scroll-behavior: auto;
+      }
+    }
   </style>
 </head>
 
 <body class="selection:bg-emerald-500/30 selection:text-white" id="top">
+  <a class="skip-link" href="#main-content">Skip to content</a>
 
   <!-- Ambient Background Glows (Contained to prevent horizontal document overflow) -->
   <div class="fixed inset-0 overflow-hidden pointer-events-none z-0" aria-hidden="true">
@@ -781,7 +817,7 @@
     </div>
   </header>
 
-  <main class="space-y-24 md:space-y-36 pt-10 pb-24">
+  <main id="main-content" class="space-y-24 md:space-y-36 pt-10 pb-24">
 
     <!-- ============================== HERO SECTION ============================== -->
     <section class="relative px-4 sm:px-6 lg:px-8 max-w-[1760px] mx-auto w-full pt-8 md:pt-14">
