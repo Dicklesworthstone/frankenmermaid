@@ -1881,8 +1881,9 @@ fn content_heuristics(input: &str) -> Option<DetectedType> {
     None
 }
 
-/// Simple Levenshtein distance implementation.
-fn levenshtein_distance(a: &str, b: &str) -> usize {
+/// Simple Levenshtein distance implementation. `pub(crate)`: the deck semantic pass reuses it
+/// for did-you-mean selector suggestions (bd-m2qzi).
+pub(crate) fn levenshtein_distance(a: &str, b: &str) -> usize {
     let a_chars: Vec<char> = a.chars().collect();
     let b_chars: Vec<char> = b.chars().collect();
     let a_len = a_chars.len();

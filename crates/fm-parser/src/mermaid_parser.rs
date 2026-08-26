@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -575,6 +575,9 @@ pub fn parse_mermaid_with_detection_and_config(
     // Deck pass (bd-jw8m8): consume %%{deck: …}%% directives into ir.deck, after the body so
     // the semantic selector pass that follows can see every node id.
     parse_deck_directives(deck_source, &mut builder);
+    // Semantic deck validation (bd-m2qzi): resolve every selector against the finished
+    // diagram, purely for diagnostics — resolution results are never stored.
+    validate_deck_semantics(&mut builder);
 
     if builder.node_count() == 0 && builder.edge_count() == 0 {
         // The unimplemented-TYPE message is NOT emitted here. `unsupported_upstream_keyword` in
@@ -12744,6 +12747,211 @@ pub(crate) struct MultilineDeckDirectiveScan {
     pub errors: Vec<MultilineDeckDirectiveError>,
 }
 
+/// What one deck selector resolves to, against owned pre-collected views of the diagram.
+enum DeckSelectorResolution {
+    /// `*` — every node.
+    All,
+    /// A known bare node id (the single member) or a known subgraph key (its recursive members).
+    Members(BTreeSet<String>),
+    /// A bare id naming no node.
+    UnknownNode,
+    /// `subgraph:KEY` naming no subgraph.
+    UnknownSubgraph(String),
+}
+
+fn resolve_deck_selector(
+    selector: &str,
+    node_ids: &BTreeSet<String>,
+    subgraph_members: &BTreeMap<String, BTreeSet<String>>,
+) -> DeckSelectorResolution {
+    if selector == "*" {
+        return DeckSelectorResolution::All;
+    }
+    if let Some(key) = selector.strip_prefix("subgraph:") {
+        return subgraph_members.get(key).map_or_else(
+            || DeckSelectorResolution::UnknownSubgraph(key.to_string()),
+            |members| DeckSelectorResolution::Members(members.clone()),
+        );
+    }
+    if node_ids.contains(selector) {
+        let mut members = BTreeSet::new();
+        members.insert(selector.to_string());
+        return DeckSelectorResolution::Members(members);
+    }
+    DeckSelectorResolution::UnknownNode
+}
+
+/// Closest candidate within Levenshtein distance 2, for did-you-mean suggestions.
+fn closest_deck_suggestion<'a>(
+    target: &str,
+    candidates: impl Iterator<Item = &'a str>,
+) -> Option<&'a str> {
+    candidates
+        .map(|candidate| (crate::levenshtein_distance(target, candidate), candidate))
+        .filter(|(distance, _)| *distance <= 2)
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, candidate)| candidate)
+}
+
+fn deck_semantic_warning(message: String, span: Span, suggestion: Option<String>) -> Diagnostic {
+    let diagnostic = Diagnostic::warning(message)
+        .with_category(DiagnosticCategory::Semantic)
+        .with_span(span);
+    match suggestion {
+        Some(text) => diagnostic.with_suggestion(text),
+        None => diagnostic,
+    }
+}
+
+/// Semantic deck validation (bd-m2qzi): resolve every selector against the finished diagram,
+/// purely for diagnostics. All findings are Warning-severity `Semantic` diagnostics — the
+/// diagram must still render as a plain SVG when the deck is broken; `fm-cli validate
+/// --fail-on warning` is the CI escalation path. Resolution results are NOT stored: raw
+/// selectors stay the single source of truth (they re-resolve cheaply at manifest time), so
+/// lens edits cannot leave a stale resolved copy behind.
+fn validate_deck_semantics(builder: &mut IrBuilder) {
+    // Take the deck out so the builder stays freely borrowable for diagnostics.
+    let Some(deck) = builder.ir_mut().deck.take() else {
+        return;
+    };
+
+    // Owned views up front — no IR borrows may live across add_diagnostic calls.
+    let (node_ids, subgraph_members) = {
+        let ir = builder.ir();
+        let node_ids: BTreeSet<String> = ir.nodes.iter().map(|node| node.id.clone()).collect();
+        let mut subgraph_members: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for subgraph in &ir.graph.subgraphs {
+            let members = ir
+                .graph
+                .subgraph_members_recursive(subgraph.id)
+                .into_iter()
+                .filter_map(|node_id| ir.nodes.get(node_id.0).map(|node| node.id.clone()));
+            // Same key on several subgraphs unions their members.
+            subgraph_members
+                .entry(subgraph.key.clone())
+                .or_default()
+                .extend(members);
+        }
+        (node_ids, subgraph_members)
+    };
+
+    if deck.slides.is_empty() {
+        builder.add_diagnostic(deck_semantic_warning(
+            "deck: no slides defined".to_string(),
+            deck.span,
+            None,
+        ));
+    }
+
+    // Resolve a selector and emit the unknown-selector warning (with a did-you-mean when a
+    // candidate sits within Levenshtein distance 2). Returns the members it contributes.
+    let resolve_with_warnings =
+        |selector: &str, slide_id: &str, span: Span, builder: &mut IrBuilder| -> BTreeSet<String> {
+            match resolve_deck_selector(selector, &node_ids, &subgraph_members) {
+                DeckSelectorResolution::All => node_ids.clone(),
+                DeckSelectorResolution::Members(members) => members,
+                DeckSelectorResolution::UnknownNode => {
+                    let suggestion =
+                        closest_deck_suggestion(selector, node_ids.iter().map(String::as_str))
+                            .map(|candidate| format!("did you mean '{candidate}'?"));
+                    builder.add_diagnostic(deck_semantic_warning(
+                        format!("deck: slide '{slide_id}': unknown selector '{selector}'"),
+                        span,
+                        suggestion,
+                    ));
+                    BTreeSet::new()
+                }
+                DeckSelectorResolution::UnknownSubgraph(key) => {
+                    let suggestion =
+                        closest_deck_suggestion(&key, subgraph_members.keys().map(String::as_str))
+                            .map(|candidate| format!("did you mean 'subgraph:{candidate}'?"));
+                    builder.add_diagnostic(deck_semantic_warning(
+                        format!("deck: slide '{slide_id}': unknown selector 'subgraph:{key}'"),
+                        span,
+                        suggestion,
+                    ));
+                    BTreeSet::new()
+                }
+            }
+        };
+
+    let mut all_slide_members: BTreeSet<String> = BTreeSet::new();
+    for slide in &deck.slides {
+        let mut members: BTreeSet<String> = BTreeSet::new();
+        for selector in &slide.nodes {
+            members.extend(resolve_with_warnings(
+                selector, &slide.id, slide.span, builder,
+            ));
+        }
+        if members.is_empty() {
+            builder.add_diagnostic(deck_semantic_warning(
+                format!("deck: slide '{}' resolves to zero members", slide.id),
+                slide.span,
+                None,
+            ));
+        }
+        all_slide_members.extend(members.iter().cloned());
+
+        if let IrDeckReveal::Groups(groups) = &slide.reveal {
+            // Member → the 1-based step that first revealed it; lowest group wins.
+            let mut assigned: BTreeMap<String, usize> = BTreeMap::new();
+            for (group_index, group) in groups.iter().enumerate() {
+                let step = group_index + 1;
+                for selector in group {
+                    let resolved = resolve_with_warnings(selector, &slide.id, slide.span, builder);
+                    if !resolved.is_empty() && resolved.is_disjoint(&members) {
+                        builder.add_diagnostic(deck_semantic_warning(
+                            format!(
+                                "deck: slide '{}': reveal selector '{selector}' matches no \
+                                 slide member",
+                                slide.id
+                            ),
+                            slide.span,
+                            None,
+                        ));
+                        continue;
+                    }
+                    for member in resolved.intersection(&members) {
+                        if let Some(previous) = assigned.get(member) {
+                            builder.add_diagnostic(deck_semantic_warning(
+                                format!(
+                                    "deck: slide '{}': '{member}' already revealed at step \
+                                     {previous}",
+                                    slide.id
+                                ),
+                                slide.span,
+                                None,
+                            ));
+                        } else {
+                            assigned.insert(member.clone(), step);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for tip_id in deck.tips.keys() {
+        if !node_ids.contains(tip_id) {
+            let suggestion = closest_deck_suggestion(tip_id, node_ids.iter().map(String::as_str))
+                .map(|candidate| format!("did you mean '{candidate}'?"));
+            builder.add_diagnostic(deck_semantic_warning(
+                format!("deck: tip references unknown node '{tip_id}'"),
+                deck.span,
+                suggestion,
+            ));
+        } else if !all_slide_members.contains(tip_id) {
+            builder.add_diagnostic(deck_semantic_warning(
+                format!("deck: tip for '{tip_id}' is unreachable (node is in no slide)"),
+                deck.span,
+                None,
+            ));
+        }
+    }
+
+    builder.ir_mut().deck = Some(deck);
+}
+
 /// Locate completed multi-line `%%{deck: ...}%%` blocks without changing init/constraints syntax.
 ///
 /// The deck pass consumes the JSON5 later, after graph nodes exist. This pre-pass only establishes
@@ -17231,6 +17439,135 @@ mod tests {
         assert_eq!(deck_of(&first).slides[0].id, "one");
         assert_eq!(deck_of(&second).slides[0].id, "two");
         assert_eq!(first.ir.nodes, second.ir.nodes, "bodies identical");
+    }
+
+    // ── deck semantic validation battery (bd-m2qzi) ───────────────────
+
+    fn deck_semantic_warnings(parsed: &crate::ParseResult) -> Vec<String> {
+        parsed
+            .ir
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.severity == DiagnosticSeverity::Warning
+                    && diagnostic.category == DiagnosticCategory::Semantic
+                    && diagnostic.message.starts_with("deck:")
+            })
+            .map(|diagnostic| diagnostic.message.clone())
+            .collect()
+    }
+
+    #[test]
+    fn unknown_deck_selectors_warn_with_fuzzy_suggestions() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n%%{deck: {slides: [{id: 's', nodes: ['alpha', 'alpah', 'subgraph:core', 'subgraph:coer']}]}}%%\n  subgraph core\n    alpha --> beta\n  end\n",
+        );
+        let warnings = deck_semantic_warnings(&parsed);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("unknown selector 'alpah'")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("unknown selector 'subgraph:coer'")),
+            "{warnings:?}"
+        );
+        let suggestions: Vec<&str> = parsed
+            .ir
+            .diagnostics
+            .iter()
+            .filter_map(|d| d.suggestion.as_deref())
+            .collect();
+        assert!(
+            suggestions.iter().any(|s| s.contains("'alpha'")),
+            "fuzzy node suggestion missing: {suggestions:?}"
+        );
+        assert!(
+            suggestions.iter().any(|s| s.contains("'subgraph:core'")),
+            "fuzzy subgraph suggestion missing: {suggestions:?}"
+        );
+        // Valid selectors resolved: no zero-member warning for the slide.
+        assert!(
+            !warnings.iter().any(|w| w.contains("zero members")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn empty_slide_and_deckless_slideless_decks_warn() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n%%{deck: {slides: [{id: 'ghost', nodes: ['nothing_here']}]}}%%\n  a --> b\n",
+        );
+        let warnings = deck_semantic_warnings(&parsed);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("slide 'ghost' resolves to zero members")),
+            "{warnings:?}"
+        );
+
+        let parsed = parse_mermaid("flowchart LR\n%%{deck: {title: 'empty'}}%%\n  a --> b\n");
+        let warnings = deck_semantic_warnings(&parsed);
+        assert!(
+            warnings.iter().any(|w| w.contains("no slides defined")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn reveal_selector_rules_warn_non_members_and_overlaps() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n%%{deck: {slides: [{id: 's', nodes: ['a', 'b'], reveal: [['a'], ['c'], ['a']]}]}}%%\n  a --> b\n  b --> c\n",
+        );
+        let warnings = deck_semantic_warnings(&parsed);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("reveal selector 'c' matches no slide member")),
+            "'c' is a real node but not a slide member: {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("'a' already revealed at step 1")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn deck_tip_rules_warn_unknown_and_unreachable_targets() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n%%{deck: {tips: {a: 'shown', c: 'never shown', ghost: 'no node'}, slides: [{id: 's', nodes: ['a', 'b']}]}}%%\n  a --> b\n  b --> c\n",
+        );
+        let warnings = deck_semantic_warnings(&parsed);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("tip references unknown node 'ghost'")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("tip for 'c' is unreachable")),
+            "{warnings:?}"
+        );
+        assert!(
+            !warnings.iter().any(|w| w.contains("tip for 'a'")),
+            "a reachable tip must not warn: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn valid_deck_produces_no_semantic_warnings() {
+        let parsed = parse_mermaid(
+            "flowchart LR\n%%{deck: {tips: {a: 'start'}, slides: [{id: 's1', nodes: ['a', 'subgraph:core'], reveal: [['subgraph:core']]}, {id: 's2', nodes: ['*']}]}}%%\n  a --> b\n  subgraph core\n    b --> c\n  end\n",
+        );
+        let warnings = deck_semantic_warnings(&parsed);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]
