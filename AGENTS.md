@@ -78,6 +78,9 @@ cp web/index.html dist/site/web/
 cp web_react/index.html dist/site/web_react/
 cp pkg/* dist/site/pkg/
 cp frankenmermaid_illustration.webp dist/site/
+# Graph-deck runtime (bd-z7g6k): the canonical copy ships beside the site so external users
+# can hotlink the exact runtime version matching the deployed WASM.
+cp crates/fm-cli/src/deck_runtime.js dist/site/web/fm-deck-runtime.js
 
 # 2. Deploy directly to Cloudflare Pages via Wrangler
 wrangler pages deploy dist/site --project-name frankenmermaid --branch main
@@ -347,6 +350,9 @@ frankenmermaid/
 | `fm-parser` | `src/dot_parser.rs` | DOT bridge parser |
 | `fm-layout` | `src/lib.rs` | Layout pipeline and layout stats |
 | `fm-render-svg` | `src/lib.rs` | SVG rendering orchestration |
+| `fm-render-svg` | `src/deck.rs` | Graph-deck scene resolution + manifest projection (epic bd-z7g6k) |
+| `fm-cli` | `src/deck_runtime.js` | Canonical browser presentation runtime (embedded via include_str!; inlined in the showcase; guarded by scripts/verify_deck_runtime.mjs) |
+| `fm-cli` | `src/deck_template.html` | Standalone `fm-cli deck` presentation chrome |
 | `fm-render-term` | `src/lib.rs` | Terminal rendering surface |
 | `fm-render-canvas` | `src/lib.rs` | Canvas rendering surface |
 | `fm-wasm` | `src/lib.rs` | WASM API entrypoint |

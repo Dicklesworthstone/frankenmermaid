@@ -32,6 +32,7 @@ all seven.
 <!-- BEGIN GENERATED: runtime-capability-metadata -->
 | Surface | Status | Evidence |
 |---------|--------|----------|
+| WASM API renders deck manifests | Implemented | 2 evidence refs |
 | CLI deck command emitting a standalone HTML presentation | Implemented | 2 evidence refs |
 | CLI detect command | Implemented | 2 evidence refs |
 | CLI parse command with IR JSON evidence | Implemented | 1 evidence refs |
@@ -412,6 +413,22 @@ fm-cli diff before.mmd after.mmd --format plain        # Color-stripped text
 
 The diff engine classifies each node and edge as `Added`, `Removed`, `Changed` (with the specific change kind: `LabelChanged`, `ShapeChanged`, `ClassesChanged`, `MembersChanged`, `ArrowChanged`), or `Unchanged`.
 
+### `fm-cli deck`
+
+Turn a diagram with a `%%{deck: …}%%` directive into a presentation (see "Graph decks" below).
+
+```bash
+fm-cli deck talk.mmd -o talk.html            # self-contained presentation HTML (default)
+fm-cli deck talk.mmd --format json --pretty  # the deck manifest JSON only
+fm-cli deck talk.mmd -o talk.html --manifest-out talk.deck.json   # both artifacts
+fm-cli deck talk.mmd --theme dark -o talk.html                    # themed diagram + chrome
+```
+
+Shares `--theme`, `--parse-mode`, `--layout-algorithm`, `--font-size`, and `--config` with
+`render`. Deckless input is a hard error (the flag expresses deck intent); `render` also
+accepts `--deck-manifest-out <path>` to emit the same byte-identical manifest artifact
+alongside a normal SVG render.
+
 ### `fm-cli interactive`
 
 Launch a split-pane terminal editor with a live diagram preview.
@@ -449,6 +466,7 @@ A separate `evidence` binary ships alongside `fm-cli` and is responsible for emi
 import {
   init,
   renderSvg,
+  renderDeck,
   detectType,
   parse,
   describeDiagram,
@@ -496,7 +514,7 @@ diagram.on('rendered', () => console.log('done'));
 diagram.destroy();
 ```
 
-The wasm-bindgen surface intentionally stays narrow: nine free functions (`init`, `renderSvg`, `detectType`, `parse`, `describeDiagram`, `diagramLens`, `applyLensEdit`, `parseLens`, `applyParseLensEdit`) plus the `Diagram` class. The capability matrix and source-span artifacts are produced by the CLI / Rust library surfaces; for browser-side capability introspection use the auto-generated metadata block at the top of this README or load the JSON emitted by `fm-cli capabilities`.
+The wasm-bindgen surface intentionally stays narrow: ten free functions (`init`, `renderSvg`, `renderDeck`, `detectType`, `parse`, `describeDiagram`, `diagramLens`, `applyLensEdit`, `parseLens`, `applyParseLensEdit`) plus the `Diagram` class. The capability matrix and source-span artifacts are produced by the CLI / Rust library surfaces; for browser-side capability introspection use the auto-generated metadata block at the top of this README or load the JSON emitted by `fm-cli capabilities`.
 
 The WASM build integrates the same `IncrementalLayoutEngine` used by the CLI, so successive renders of near-identical input skip stages whose dependency-graph inputs have not changed.
 
@@ -518,6 +536,91 @@ Naive parse → re-emit pipelines lose all of that. The lens system instead:
 | `applyParseLensEdit(lens, edit)` | Apply one parse-tree edit |
 
 The showcase's structural-edit toolbar runs entirely on the lens system. The same lens bindings are exported from the WASM API so editor integrations (VS Code extensions, web playgrounds) can perform refactor-style edits without writing their own incremental parser.
+
+---
+
+## Graph decks — presentations from a diagram
+
+Add a `%%{deck: …}%%` directive to any graph-family diagram and frankenmermaid turns it into
+a guided presentation: each slide is a camera move over the one rendered SVG, with non-members
+dimmed, reveal steps advancing on keypress, and a zoomed-out finale that replays every slide's
+window. The presentation model is inspired by
+[graphcon-deck](https://github.com/yoheinakajima/graphcon-deck) by Yohei Nakajima — reimagined
+so that positions come from the deterministic layout engine instead of being hand-placed, and
+the whole presentation is a machine-checkable artifact.
+
+```bash
+frankenmermaid deck talk.mmd -o talk.html     # self-contained presentation (SVG + manifest + runtime)
+frankenmermaid deck talk.mmd --format json    # the deck manifest only
+fm-cli render talk.mmd --format svg --output talk.svg --deck-manifest-out talk.deck.json
+```
+
+```mermaid
+flowchart LR
+%%{deck: {
+  title: 'Pipeline tour',
+  tips: { ir: 'One IR, many outputs' },
+  slides: [
+    { id: 'parse', title: 'Parsing', nodes: ['src', 'parser'], reveal: [['parser']] },
+    { id: 'core', nodes: ['subgraph:engine'], edges: 'touching' },
+    { id: 'out', nodes: ['svg', 'term'], reveal: 'auto' },
+  ],
+}}%%
+  src[.mmd] --> parser --> ir
+  ...
+```
+
+### Deck directive reference
+
+Deck directives may span multiple lines, merge in document order (`title`/`options`/`overview`
+last-writer-wins, `slides` concatenate, `tips` later-wins), and are parsed regardless of
+`enable_init_directives` — they are structural content, not rendering config. Everything
+degrades with warnings rather than failing: unknown selectors get did-you-mean suggestions,
+out-of-range numbers clamp, duplicate slide ids get suffixed.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `title` | — | Deck title (runtime header / HTML `<title>`) |
+| `options.fitMargin` | `150` | ViewBox-space padding around a slide's bounds when fitting |
+| `options.zoomMax` | `1.4` | Max CSS px per SVG unit when fitting |
+| `options.dimOpacity` | `0.07` | Opacity of elements outside the current scene |
+| `options.autoAdvanceMs` | `0` | Kiosk autoplay interval (0 disables; capped at 600000) |
+| `tips` | `{}` | Node id → tooltip text, merged over IR tooltips (deck wins) |
+| `slides[].id` | required | Unique slide id (URLs, diagnostics) |
+| `slides[].nodes` | required | Selectors: a node id, `subgraph:KEY` (incl. nested members), or `*` |
+| `slides[].reveal` | none | `"auto"` (layout-rank waves) or `[[…], […]]` authored step groups |
+| `slides[].edges` | `"induced"` | `induced` (both endpoints on-slide) / `touching` / `none` |
+| `slides[].fitMargin` / `zoomMax` | deck default | Per-slide camera overrides |
+| `overview` | enabled, tour on | The auto-appended whole-graph finale with the window-replay tour |
+
+Decks exist for the graph families whose SVG carries per-node element ids (flowchart, class,
+state, ER, all C4 variants, architecture-beta, requirement, mindmap, sequence, gitGraph,
+timeline, journey, kanban, block-beta). Chart-style families (pie, quadrant, xyChart, sankey,
+gantt, packet-beta) parse the directive but emit a warning and no manifest.
+
+### The deck manifest
+
+The engine emits a **deck manifest** (schema `1.0.0`, additive-only within 1.x) in the same
+parse+layout invocation as the SVG: per-slide member sets keyed by the SVG's stable element
+ids, derived edge/cluster steps, precomputed reveal lists in stagger order, tight camera
+rectangles in viewBox space, and a `nodeSlideIndex` powering click-a-dimmed-node-to-travel.
+It is a pure function of `(source, config)` — bit-identical across runs, golden-tested in
+`crates/fm-cli/tests/golden/deck/`, and safe to commit and diff in CI like any artifact.
+TypeScript definitions ship in the generated `pkg/*.d.ts`.
+
+```ts
+import { init, renderDeck } from '@frankenmermaid/core';
+await init();
+const { svg, manifest, warnings } = renderDeck(source, { theme: 'dark' });
+// svg byte-equals renderSvg(source, config); manifest is null for deckless input.
+```
+
+The browser runtime (`crates/fm-cli/src/deck_runtime.js`, embedded in `deck` HTML output and
+inlined in the live showcase) drives the presentation: camera tween with an idle-parked rAF
+loop, staggered reveals, overview tour with a clickable window rect, free camera
+(drag/wheel/pinch, `Escape` returns to the guided camera), tooltips, kiosk autoplay, and full
+`prefers-reduced-motion` support. Try it live in the
+[showcase's Graph Deck section](https://frankenmermaid.pages.dev/#deck).
 
 ---
 

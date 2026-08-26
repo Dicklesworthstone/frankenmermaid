@@ -3,7 +3,7 @@
   "project": "frankenmermaid",
   "status_counts": {
     "experimental": 1,
-    "implemented": 34,
+    "implemented": 35,
     "partial": 2
   },
   "claims": [
@@ -678,6 +678,32 @@
       "notes": [
         "README advertises this family; current code marks it as full capability"
       ]
+    },
+    {
+      "id": "surface/wasm-render-deck",
+      "category": "surface",
+      "title": "WASM API renders deck manifests",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#graph-decks"
+      ],
+      "code_paths": [
+        "crates/fm-wasm/src/lib.rs::render_deck_js",
+        "crates/fm-render-svg/src/deck.rs::render_svg_with_deck"
+      ],
+      "evidence": [
+        {
+          "kind": "test",
+          "reference": "crates/fm-wasm/src/lib.rs::tests::render_deck_is_a_strict_superset_of_render_svg",
+          "note": "renderDeck().svg byte-equals renderSvg() at nominal pressure tier"
+        },
+        {
+          "kind": "code_path",
+          "reference": "scripts/verify_deck_runtime.mjs (renders the showcase demo deck through pkg/)",
+          "note": null
+        }
+      ],
+      "notes": []
     },
     {
       "id": "surface/cli-deck",

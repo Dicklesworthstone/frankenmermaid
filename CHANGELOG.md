@@ -70,6 +70,26 @@ The CLI shipped concurrent multi-diagram `render-batch` and reused renders acros
 - [`1228089e`](https://github.com/Dicklesworthstone/frankenmermaid/commit/1228089ec7cf7fbdb8fd930dcccaf972c9b48a32) — relocate `FEATURE_PARITY.md`, `UPGRADE_LOG.md`, and `EXISTING_FRANKENTUI_MERMAID_STRUCTURE.md` into `docs/planning/`; move `update_evidence.rs` into `scripts/`.
 - [`7b43c1fb`](https://github.com/Dicklesworthstone/frankenmermaid/commit/7b43c1fbfb2414b8672070790905316aa4e25a82) — move `CRATES_IO_PUBLISHING.md` to [`docs/CRATES_IO_PUBLISHING.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/docs/CRATES_IO_PUBLISHING.md).
 
+### Graph decks — presentations from a diagram (2026-08-26, epic bd-z7g6k)
+
+A graphcon-deck-inspired presentation mode (credit:
+[graphcon-deck](https://github.com/yoheinakajima/graphcon-deck) by Yohei Nakajima), rebuilt
+around the deterministic layout engine. Slides are declared in a multi-line
+`%%{deck: …}%%` directive; the engine computes a golden-testable **deck manifest**
+(schema 1.0.0: member sets keyed by stable SVG element ids, derived edge/cluster reveal
+steps, tight viewBox-space camera rects, a click-to-travel index) in the same
+parse+layout invocation as the SVG. Surfaces: `renderDeck` on the WASM API (byte-parity
+with `renderSvg` at nominal pressure), `frankenmermaid deck talk.mmd -o talk.html`
+emitting a self-contained presentation, `render --deck-manifest-out`, a live
+[showcase section](https://frankenmermaid.pages.dev/#deck) where the engine presents its
+own pipeline, and a zero-dependency browser runtime (camera tween with idle-parked rAF,
+staggered reveals, overview tour, free camera, tooltips, kiosk autoplay,
+reduced-motion support). Guarded by an 8-fixture golden corpus + talk.html byte golden,
+property suites (totality, cross-artifact element-id consistency, step invariants),
+headless-Chromium behavioral drives, and `scripts/verify_deck_runtime.mjs` for the
+runtime's byte-identical inline copies. Design record:
+`docs/planning/GRAPH_DECK_PLAN.md`.
+
 ---
 
 ## v0.2.0 — 2026-07-11 — Performance campaign

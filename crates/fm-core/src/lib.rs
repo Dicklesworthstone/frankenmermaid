@@ -633,6 +633,36 @@ fn documented_diagram_type_claims() -> Vec<CapabilityClaim> {
 fn surface_capability_claims() -> Vec<CapabilityClaim> {
     vec![
         CapabilityClaim {
+            id: String::from("surface/wasm-render-deck"),
+            category: String::from("surface"),
+            title: String::from("WASM API renders deck manifests"),
+            status: CapabilityStatus::Implemented,
+            advertised_in: vec![String::from("README.md#graph-decks")],
+            code_paths: vec![
+                String::from("crates/fm-wasm/src/lib.rs::render_deck_js"),
+                String::from("crates/fm-render-svg/src/deck.rs::render_svg_with_deck"),
+            ],
+            evidence: vec![
+                CapabilityEvidence {
+                    kind: String::from("test"),
+                    reference: String::from(
+                        "crates/fm-wasm/src/lib.rs::tests::render_deck_is_a_strict_superset_of_render_svg",
+                    ),
+                    note: Some(String::from(
+                        "renderDeck().svg byte-equals renderSvg() at nominal pressure tier",
+                    )),
+                },
+                CapabilityEvidence {
+                    kind: String::from("code_path"),
+                    reference: String::from(
+                        "scripts/verify_deck_runtime.mjs (renders the showcase demo deck through pkg/)",
+                    ),
+                    note: None,
+                },
+            ],
+            notes: vec![],
+        },
+        CapabilityClaim {
             id: String::from("surface/cli-deck"),
             category: String::from("surface"),
             title: String::from("CLI deck command emitting a standalone HTML presentation"),
