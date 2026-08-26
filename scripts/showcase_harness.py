@@ -1068,6 +1068,30 @@ def validate_showcase_accessibility(entry: Path, log_path: Path | None) -> dict[
             'id="parse-summary"' in entry_text and 'aria-live="polite"' in entry_text,
             "showcase announces summary updates via polite live regions",
         ),
+        # Graph Deck section (bd-f2njj / epic bd-z7g6k). DOM-presence level on purpose —
+        # the default gate stays headless-browser-free; behavioral coverage lives in
+        # scripts/verify_deck_runtime.mjs (byte-identity + real WASM render) and the
+        # opt-in scripts/deck_runtime_e2e.py.
+        CheckResult(
+            "deck section",
+            'id="deck"' in entry_text and 'id="deck-stage"' in entry_text,
+            "showcase carries the Graph Deck section with its focusable stage",
+        ),
+        CheckResult(
+            "deck runtime block",
+            ">>> deck-runtime:start" in entry_text and ">>> deck-runtime:end" in entry_text,
+            "showcase inlines the deck runtime between its sync markers",
+        ),
+        CheckResult(
+            "deck chrome",
+            'id="deck-num"' in entry_text and 'id="deck-dots"' in entry_text,
+            "deck section exposes the scene counter and dots the runtime populates",
+        ),
+        CheckResult(
+            "deck keyboard scoping",
+            "event.stopPropagation()" in entry_text,
+            "deck keyboard handler stays stage-scoped so spotlight arrows never double-fire",
+        ),
     ]
 
     failures = [check.detail for check in checks if not check.ok]
