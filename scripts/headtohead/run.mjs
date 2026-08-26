@@ -122,6 +122,39 @@ const HOST_WIDE_QUIET_MAX_ATTEMPTS = 900;
 ///
 /// Pure so the self-test can drive it directly: the surrounding gate needs a live host with cpufreq,
 /// and a rule that can only be exercised on the machine it guards is a rule nobody checks.
+/// Compare the clocks the two arms were OBSERVED running at (bd-hmfi).
+///
+/// This is the binding check, and the selection-time one is only a heads-up, because a pre-run
+/// reading is taken while both sides are idle and an idle core on per-core DVFS sits at the
+/// frequency floor. What can bias a ratio is the clock each engine was actually served by, which is
+/// only knowable once it has run.
+///
+/// `cpu_mhz_after` per phase, taken with the work still on the core. Our arm's phases are averaged
+/// together; the incumbent's are averaged over its cpuset. A missing reading yields `null` rather
+/// than a guess -- a host without cpufreq cannot answer this and must not be refused for it.
+function observedClockComparability(phases, limit) {
+  const mean = (prefix) => {
+    const values = phases
+      .filter((phase) => (prefix === 'mermaid' ? phase.phase.startsWith('mermaid') : !phase.phase.startsWith('mermaid')))
+      .map((phase) => phase.cpu_mhz_after?.mean_mhz)
+      .filter((mhz) => typeof mhz === 'number' && mhz > 0);
+    return values.length === 0 ? null : Math.round(values.reduce((a, b) => a + b, 0) / values.length);
+  };
+  const ours = mean('fm');
+  const theirs = mean('mermaid');
+  if (ours === null || theirs === null) {
+    return { frankenmermaid_mhz: ours, mermaid_js_mhz: theirs, ratio: null, limit, verdict: 'unknown' };
+  }
+  const ratio = Number((ours / theirs).toFixed(3));
+  return {
+    frankenmermaid_mhz: ours,
+    mermaid_js_mhz: theirs,
+    ratio,
+    limit,
+    verdict: clockComparabilityVerdict(ratio, limit),
+  };
+}
+
 function clockSelectionWiringError(pinMhz, rule) {
   if (!(typeof pinMhz === 'number' && pinMhz > 0)) return null;
   if (rule === 'clocks_closest_to_measured_arm') return null;
@@ -1499,6 +1532,37 @@ if (has('self-test')) {
     if (clockSelectionWiringError(null, 'fastest_clocks_in_idle_band') !== null) {
       throw new Error('with no measured clock there is nothing to match against');
     }
+    // The OBSERVED-clock check is the binding one, so its aggregation is exercised too.
+    const phases = [
+      { phase: 'frankenmermaid-before', cpu_mhz_after: { mean_mhz: 4000 } },
+      { phase: 'mermaid-js', cpu_mhz_after: { mean_mhz: 3900 } },
+      { phase: 'frankenmermaid-after', cpu_mhz_after: { mean_mhz: 4000 } },
+    ];
+    if (observedClockComparability(phases, limit).verdict !== 'comparable') {
+      throw new Error('4000 vs 3900 MHz must be comparable');
+    }
+    const skewed = [
+      { phase: 'frankenmermaid-before', cpu_mhz_after: { mean_mhz: 4292 } },
+      { phase: 'mermaid-js', cpu_mhz_after: { mean_mhz: 2530 } },
+    ];
+    if (observedClockComparability(skewed, limit).verdict !== 'frankenmermaid_clock_advantage') {
+      throw new Error('the live 4292/2530 skew must be refused');
+    }
+    // A host with no cpufreq must be UNKNOWN, never refused.
+    const blind = [
+      { phase: 'frankenmermaid-before', cpu_mhz_after: null },
+      { phase: 'mermaid-js', cpu_mhz_after: null },
+    ];
+    if (observedClockComparability(blind, limit).verdict !== 'unknown') {
+      throw new Error('a host without cpufreq must report unknown, not a verdict');
+    }
+    // ⚠️ THE INCUMBENT'S PHASES MUST NOT BE COUNTED AS OURS. `startsWith('mermaid')` is the only
+    // thing separating the two arms; if that predicate ever matched both, every ratio would be
+    // 1.0x and the gate would pass everything.
+    const onlyTheirs = [{ phase: 'mermaid-js', cpu_mhz_after: { mean_mhz: 3000 } }];
+    if (observedClockComparability(onlyTheirs, limit).verdict !== 'unknown') {
+      throw new Error('with no frankenmermaid phase there is nothing to compare');
+    }
     for (const [ratio, expected] of cases) {
       const actual = clockComparabilityVerdict(Number(ratio.toFixed(3)), limit);
       if (actual !== expected) {
@@ -2739,12 +2803,19 @@ if (pin && typeof pin.mhz === 'number' && pin.mhz > 0 && incumbentCpuSet?.mean_m
       `${clockComparability.verdict}`,
   );
   if (clockComparability.verdict === 'frankenmermaid_clock_advantage') {
+    // ⚠️ A WARNING, NOT A REFUSAL, and the distinction was learned by shipping the refusal first.
+    // These readings are taken while BOTH sides are still idle, and an idle core on per-core DVFS
+    // sits at the floor until load arrives. A run refused here can be perfectly sound: the
+    // incumbent's cores were merely parked at selection time and boost the moment Chromium loads
+    // them. Refusing on that reading rejects valid work on a signal that has not yet had a chance
+    // to correlate with anything -- which is the failure bd-kt8s exists to warn about.
+    //
+    // The binding check is `observedClockComparability`, on the clocks each arm was OBSERVED
+    // running at during its own phase. This stays as an early, cheap heads-up.
     console.error(
-      `[run] INVALID: our arm is clocked more than ${CLOCK_ADVANTAGE_MAX}x above the incumbent's ` +
-        'cores, so any ratio measured here is inflated by DVFS rather than by the engine. Re-run ' +
-        'when the cores are comparable.',
+      '[run] NOTE: at SELECTION TIME our arm reads faster than the incumbent set. Both sides are ' +
+        'idle here, so this is a heads-up, not a verdict -- the observed per-phase clocks decide.',
     );
-    process.exit(2);
   }
   if (clockComparability.verdict === 'frankenmermaid_clock_penalty') {
     console.error(
@@ -2924,14 +2995,48 @@ function cpuTotals() {
 function timedPhase(label, fn) {
   requireHostWideQuiescence(label);
   const c0 = cpuTotals();
+  // THE CLOCK THE ARM ACTUALLY RAN AT (bd-hmfi). A selection-time reading is taken while the core is
+  // still IDLE, and an idle core on per-core DVFS sits at the floor until load arrives -- so
+  // comparing pre-run readings compares two parked cores against each other and says nothing about
+  // the frequencies the two engines were actually served by. Sampling at phase END, while the work
+  // is still on the core, is the reading that can bias a ratio.
+  const mhzStart = phaseCpuMhz(label);
   const t0 = Date.now();
   const out = fn();
   const seconds = (Date.now() - t0) / 1000;
+  const mhzEnd = phaseCpuMhz(label);
   const c1 = cpuTotals();
   const dTotal = Math.max(1, c1.total - c0.total);
   const busy = 1 - (c1.idle - c0.idle) / dTotal;
-  phaseLoad.push({ phase: label, seconds, busy_fraction: Number(busy.toFixed(4)) });
+  phaseLoad.push({
+    phase: label,
+    seconds,
+    busy_fraction: Number(busy.toFixed(4)),
+    cpu_mhz_before: mhzStart,
+    cpu_mhz_after: mhzEnd,
+  });
   return out;
+}
+
+/// Mean clock of the cpus a phase is pinned to, or null when that is unknown.
+///
+/// Each arm is asked about ITS OWN cores: ours about the single pinned cpu, the incumbent about its
+/// cpuset. A host-wide mean would average in 56 idle cores and hide the comparison entirely.
+function phaseCpuMhz(label) {
+  const cpus = label.startsWith('mermaid')
+    ? incumbentCpuSet?.cpus
+    : typeof pin?.cpu === 'number'
+      ? [pin.cpu]
+      : null;
+  if (!Array.isArray(cpus) || cpus.length === 0) return null;
+  const values = cpus.map((cpu) => cpuMhz(cpu)).filter((mhz) => typeof mhz === 'number' && mhz > 0);
+  if (values.length === 0) return null;
+  return {
+    cpus: cpus.length,
+    mean_mhz: Math.round(values.reduce((total, mhz) => total + mhz, 0) / values.length),
+    min_mhz: Math.min(...values),
+    max_mhz: Math.max(...values),
+  };
 }
 
 function runFrankenmermaidPhase(prefix, sweepOrder = threadSweep) {
@@ -3866,6 +3971,32 @@ const speedupMinAggregate = speedupsMin.length
   : null;
 const rowLabel = (row) =>
   threadSweep.length > 0 ? `${row.id}@t${row.fm_worker_threads}` : row.id;
+// THE BINDING CLOCK CHECK (bd-hmfi), on what the arms were OBSERVED running at rather than on what
+// idle cores read before either had started.
+const observedClocks = observedClockComparability(phaseLoad, CLOCK_ADVANTAGE_MAX);
+env.observed_clock_comparability = observedClocks;
+if (observedClocks.ratio !== null) {
+  console.error(
+    `[run] observed clocks: frankenmermaid ${observedClocks.frankenmermaid_mhz} MHz vs mermaid-js ` +
+      `${observedClocks.mermaid_js_mhz} MHz (${observedClocks.ratio}x, limit ${CLOCK_ADVANTAGE_MAX}x)` +
+      ` -> ${observedClocks.verdict}`,
+  );
+}
+if (observedClocks.verdict === 'frankenmermaid_clock_advantage') {
+  console.error(
+    '[run] INVALID: our arm RAN at more than ' +
+      `${CLOCK_ADVANTAGE_MAX}x the incumbent's clock, so this ratio is inflated by DVFS rather ` +
+      'than by the engine.',
+  );
+  process.exit(2);
+}
+if (observedClocks.verdict === 'frankenmermaid_clock_penalty') {
+  console.error(
+    '[run] NOTE: our arm RAN slower than the incumbent, so this row under-claims. Reported, not ' +
+      'refused -- erring against ourselves is the safe direction.',
+  );
+}
+
 const measurementOrder = phaseLoad.map((phase) => phase.phase);
 const expectedHostWidePhases = hostWidePhaseLabels(threadSweep, has('skip-mermaid'));
 const finalHostWideChecks = expectedHostWidePhases.map((phase) =>
