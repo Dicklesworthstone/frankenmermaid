@@ -101,10 +101,17 @@ const HARNESS_ID = (() => {
 /// without standing up a host probe.
 function ledgerProvenanceMarker(environment, observedThreads) {
   const governor = environment.power_policy?.governors?.join('+') || 'unknown';
+  // ⚠️ `env.isa` IS AN OBJECT in every live run — `{architecture, machine, source, flags[…]}` built
+  // from /proc/cpuinfo — and interpolating it produced the literal `isa=[object Object]`, which the
+  // ledger gate's own `isa=[a-z0-9]…` pattern rejects (bd-yavyd). Take the architecture field, and
+  // still accept a bare string so a caller holding only the level keeps working.
+  const isa =
+    (typeof environment.isa === 'string' ? environment.isa : environment.isa?.architecture) ??
+    'unknown';
   return (
     '**Measurement host (observed, both arms):** ' +
     `same_host=${environment.host_identity} threads=${observedThreads} ` +
-    `governor=${governor} isa=${environment.isa} harness=${HARNESS_ID}`
+    `governor=${governor} isa=${isa} harness=${HARNESS_ID}`
   );
 }
 const HOST_WIDE_MAX_BUSY_FRACTION = 0.20;
@@ -1961,10 +1968,15 @@ if (has('self-test')) {
   // exact patterns scripts/ledger_preflight.mjs matches; if that file tightens a field and this one
   // does not follow, every row this harness produces becomes unbankable, and the failure would
   // otherwise show up only at commit time on a row someone had already spent a quiet host earning.
+  // ⚠️ THE FIXTURE MUST HAVE THE SHAPE PRODUCTION HAS. `isa` was a bare string here while every
+  // live run passes the /proc/cpuinfo OBJECT, so this block stayed green while real runs emitted
+  // `isa=[object Object]` — which the `isa` pattern below rejects. The self-test could have caught
+  // it from the day it was written; the fixture was the only thing standing in the way. Keep this
+  // as the live shape, not a convenient one.
   const provenance = ledgerProvenanceMarker(
     {
       host_identity: 'thinkstation1',
-      isa: 'x86-64-v2',
+      isa: { architecture: 'x64', machine: 'x86_64', source: '/proc/cpuinfo', flags: ['avx2'] },
       power_policy: { governors: ['powersave'] },
     },
     64,
