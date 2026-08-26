@@ -7959,7 +7959,7 @@ fn write_er_entity_into(
         let _ = write_escaped_attr(f, fill);
         f.push_str("\" class=\"fm-er-attribute\">");
         // `attr_text = format!("{key_prefix}{data_type} {name}")`, escaped in pieces (identical bytes).
-        f.push_str(key_prefix);
+        f.push_str(&key_prefix);
         let _ = write_escaped_text(f, &attr.data_type);
         f.push(' ');
         let _ = write_escaped_text(f, &attr.name);
@@ -10726,7 +10726,7 @@ fn render_node(
                 for attr in &node.members {
                     let key_prefix = attr.key_prefix();
                     let attr_text = format!("{key_prefix}{} {}", attr.data_type, attr.name);
-                    let font_weight = if attr.key == fm_core::IrAttributeKey::None {
+                    let font_weight = if attr.keys.is_empty() {
                         "normal"
                     } else {
                         "bold"
@@ -14784,13 +14784,13 @@ mod tests {
                 fm_core::IrEntityAttribute {
                     data_type: "int".to_string(),
                     name: "id".to_string(),
-                    key: fm_core::IrAttributeKey::Pk,
+                    keys: vec![fm_core::IrAttributeKey::Pk],
                     comment: None,
                 },
                 fm_core::IrEntityAttribute {
                     data_type: "string".to_string(),
                     name: "email".to_string(),
-                    key: fm_core::IrAttributeKey::Uk,
+                    keys: vec![fm_core::IrAttributeKey::Uk],
                     comment: None,
                 },
             ],
@@ -14877,19 +14877,19 @@ mod tests {
                 fm_core::IrEntityAttribute {
                     data_type: "int".to_string(),
                     name: "id".to_string(),
-                    key: fm_core::IrAttributeKey::Pk,
+                    keys: vec![fm_core::IrAttributeKey::Pk],
                     comment: None,
                 },
                 fm_core::IrEntityAttribute {
                     data_type: "string".to_string(),
                     name: "na<me>".to_string(),
-                    key: fm_core::IrAttributeKey::None,
+                    keys: Vec::new(),
                     comment: None,
                 },
                 fm_core::IrEntityAttribute {
                     data_type: "string".to_string(),
                     name: "email".to_string(),
-                    key: fm_core::IrAttributeKey::Uk,
+                    keys: vec![fm_core::IrAttributeKey::Uk],
                     comment: None,
                 },
             ],

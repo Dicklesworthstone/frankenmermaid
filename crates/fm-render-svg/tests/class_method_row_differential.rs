@@ -41,7 +41,8 @@ struct Row {
 const DELIBERATE: [&str; 2] = ["+getName() : String", "+getName(): String"];
 
 fn fixture() -> Vec<Row> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mermaid_class_methods.tsv");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mermaid_class_methods.tsv");
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("fixture {} unreadable: {err}", path.display()));
     let rows: Vec<Row> = text
@@ -53,12 +54,20 @@ fn fixture() -> Vec<Row> {
             let classifier = columns.next().expect("classifier column").to_string();
             let display = columns.next().expect("display column").to_string();
             let css = columns.next().unwrap_or("").to_string();
-            Row { member, classifier, display, css }
+            Row {
+                member,
+                classifier,
+                display,
+                css,
+            }
         })
         .collect();
     assert!(rows.len() >= 15, "fixture holds only {} rows", rows.len());
     assert!(
-        rows.iter().filter(|row| row.display.contains(" : ")).count() >= 8,
+        rows.iter()
+            .filter(|row| row.display.contains(" : "))
+            .count()
+            >= 8,
         "fixture has no spaced return-type rows — it cannot pin bd-ci658"
     );
     assert!(
@@ -77,9 +86,13 @@ fn text_runs(svg: &str) -> Vec<String> {
     let mut rest = svg;
     while let Some(start) = rest.find("<text") {
         rest = &rest[start..];
-        let Some(open_end) = rest.find('>') else { break };
+        let Some(open_end) = rest.find('>') else {
+            break;
+        };
         rest = &rest[open_end + 1..];
-        let Some(close) = rest.find("</text>") else { break };
+        let Some(close) = rest.find("</text>") else {
+            break;
+        };
         let mut cursor = &rest[..close];
         while let Some(open) = cursor.find('<') {
             let leaf = &cursor[..open];
@@ -87,7 +100,9 @@ fn text_runs(svg: &str) -> Vec<String> {
                 runs.push(leaf.to_string());
             }
             cursor = &cursor[open..];
-            let Some(tag_end) = cursor.find('>') else { break };
+            let Some(tag_end) = cursor.find('>') else {
+                break;
+            };
             cursor = &cursor[tag_end + 1..];
         }
         if !cursor.is_empty() {
@@ -128,11 +143,17 @@ fn every_method_row_draws_what_mermaid_draws() {
         compared += 1;
         let drawn = drawn_row(&row.member);
         if drawn.as_slice() != [row.display.as_str()] {
-            divergent.push(format!("{:?}: ours {drawn:?}, mermaid [{:?}]", row.member, row.display));
+            divergent.push(format!(
+                "{:?}: ours {drawn:?}, mermaid [{:?}]",
+                row.member, row.display
+            ));
         }
     }
     // WORK PROOF: the two skip conditions above could between them empty this loop.
-    assert!(compared >= 10, "only {compared} rows were actually compared");
+    assert!(
+        compared >= 10,
+        "only {compared} rows were actually compared"
+    );
     assert!(
         divergent.is_empty(),
         "{} method row(s) diverge from mermaid 11.15.0:\n  {}",
@@ -151,7 +172,10 @@ fn every_deliberate_divergence_is_still_a_divergence() {
             members.contains(member),
             "{member:?} is allowlisted but is not in the fixture at all"
         );
-        let row = rows.iter().find(|row| row.member == member).expect("checked above");
+        let row = rows
+            .iter()
+            .find(|row| row.member == member)
+            .expect("checked above");
         let drawn = drawn_row(member);
         assert_ne!(
             drawn.as_slice(),
@@ -187,7 +211,10 @@ fn the_fixture_rejects_the_unspaced_return_type_tail() {
 #[test]
 fn mermaid_carries_the_classifier_in_css_and_not_in_the_text() {
     let mut seen = 0;
-    for row in fixture().into_iter().filter(|row| !row.classifier.is_empty()) {
+    for row in fixture()
+        .into_iter()
+        .filter(|row| !row.classifier.is_empty())
+    {
         seen += 1;
         assert!(
             !row.display.contains(&row.classifier),
@@ -200,7 +227,11 @@ fn mermaid_carries_the_classifier_in_css_and_not_in_the_text() {
         } else {
             "font-style:italic;"
         };
-        assert_eq!(row.css, expected, "{:?}: unexpected classifier style", row.member);
+        assert_eq!(
+            row.css, expected,
+            "{:?}: unexpected classifier style",
+            row.member
+        );
     }
     assert!(seen >= 4, "only {seen} classifier rows were checked");
 }

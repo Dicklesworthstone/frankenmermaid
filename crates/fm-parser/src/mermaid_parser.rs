@@ -6063,7 +6063,14 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
         if let Some(entity_id) = current_entity
             && let Some((data_type, name, key)) = parse_simple_er_attribute(trimmed)
         {
-            builder.add_entity_attribute(entity_id, data_type, name, key, None);
+            // A lone `IrAttributeKey::None` means "no key modifier": the list form is empty
+            // rather than carrying the sentinel (bd-nryyc).
+            let keys = if matches!(key, IrAttributeKey::None) {
+                Vec::new()
+            } else {
+                vec![key]
+            };
+            builder.add_entity_attribute(entity_id, data_type, name, keys, None);
             continue;
         }
 
@@ -6082,7 +6089,7 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
                 entity_id,
                 &attr.data_type,
                 &attr.name,
-                attr.key,
+                attr.keys,
                 attr.comment.as_deref(),
             );
             continue;
@@ -15664,17 +15671,17 @@ mod tests {
         // Check first attribute: int id PK
         assert_eq!(customer.members[0].data_type, "int");
         assert_eq!(customer.members[0].name, "id");
-        assert_eq!(customer.members[0].key, IrAttributeKey::Pk);
+        assert_eq!(customer.members[0].keys, vec![IrAttributeKey::Pk]);
 
         // Check second attribute: string name
         assert_eq!(customer.members[1].data_type, "string");
         assert_eq!(customer.members[1].name, "name");
-        assert_eq!(customer.members[1].key, IrAttributeKey::None);
+        assert!(customer.members[1].keys.is_empty());
 
         // Check third attribute: string email UK
         assert_eq!(customer.members[2].data_type, "string");
         assert_eq!(customer.members[2].name, "email");
-        assert_eq!(customer.members[2].key, IrAttributeKey::Uk);
+        assert_eq!(customer.members[2].keys, vec![IrAttributeKey::Uk]);
     }
 
     #[test]
@@ -15693,7 +15700,7 @@ mod tests {
         assert_eq!(order.members.len(), 3);
 
         // Check FK with comment
-        assert_eq!(order.members[1].key, IrAttributeKey::Fk);
+        assert_eq!(order.members[1].keys, vec![IrAttributeKey::Fk]);
         assert_eq!(
             order.members[1].comment.as_deref(),
             Some("references CUSTOMER")
@@ -15702,7 +15709,7 @@ mod tests {
         // Check attribute without key
         assert_eq!(order.members[2].data_type, "date");
         assert_eq!(order.members[2].name, "created_at");
-        assert_eq!(order.members[2].key, IrAttributeKey::None);
+        assert!(order.members[2].keys.is_empty());
     }
 
     #[test]
@@ -22658,10 +22665,10 @@ Rel_Back(db, app, "Responds")"#,
         );
         let user = parsed.ir.nodes.iter().find(|n| n.id == "USER").unwrap();
         assert_eq!(user.members.len(), 3);
-        assert_eq!(user.members[0].key, fm_core::IrAttributeKey::Pk);
+        assert_eq!(user.members[0].keys, vec![fm_core::IrAttributeKey::Pk]);
         assert_eq!(user.members[0].data_type, "int");
         assert_eq!(user.members[0].name, "id");
-        assert_eq!(user.members[2].key, fm_core::IrAttributeKey::Fk);
+        assert_eq!(user.members[2].keys, vec![fm_core::IrAttributeKey::Fk]);
     }
 
     #[test]

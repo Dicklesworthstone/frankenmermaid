@@ -2338,16 +2338,12 @@ impl Canvas2dRenderer {
                         // Out of box: stop rather than draw rows past the entity.
                         break;
                     }
-                    let key_prefix = match attr.key {
-                        fm_core::IrAttributeKey::Pk => "PK ",
-                        fm_core::IrAttributeKey::Fk => "FK ",
-                        fm_core::IrAttributeKey::Uk => "UK ",
-                        fm_core::IrAttributeKey::None => "",
-                    };
+                    // List-aware since bd-nryyc: one attribute may carry several key modifiers.
+                    let key_prefix = attr.key_prefix();
                     let mut text = String::with_capacity(
                         key_prefix.len() + attr.data_type.len() + attr.name.len() + 1,
                     );
-                    text.push_str(key_prefix);
+                    text.push_str(&key_prefix);
                     text.push_str(&attr.data_type);
                     text.push(' ');
                     text.push_str(&attr.name);

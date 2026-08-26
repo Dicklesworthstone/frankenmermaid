@@ -43,7 +43,8 @@ struct Row {
 }
 
 fn fixture() -> Vec<Row> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mermaid_state_descriptions.tsv");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mermaid_state_descriptions.tsv");
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("fixture {} unreadable: {err}", path.display()));
     let rows: Vec<Row> = text
@@ -60,18 +61,29 @@ fn fixture() -> Vec<Row> {
             } else {
                 raw.split('|').map(str::to_string).collect()
             };
-            Row { case, diagram, state, descriptions }
+            Row {
+                case,
+                diagram,
+                state,
+                descriptions,
+            }
         })
         .collect();
     // Check the instrument before reading it: a fixture that regenerated empty, or with only
     // described states, would make one whole half of the assertion vacuous.
     assert!(rows.len() >= 20, "fixture holds only {} rows", rows.len());
     assert!(
-        rows.iter().filter(|row| !row.descriptions.is_empty()).count() >= 8,
+        rows.iter()
+            .filter(|row| !row.descriptions.is_empty())
+            .count()
+            >= 8,
         "fixture has no described states"
     );
     assert!(
-        rows.iter().filter(|row| row.descriptions.is_empty()).count() >= 8,
+        rows.iter()
+            .filter(|row| row.descriptions.is_empty())
+            .count()
+            >= 8,
         "fixture has no undescribed states — it cannot catch a splitter that fires too often"
     );
     assert!(
@@ -91,7 +103,10 @@ fn our_label(diagram: &str, state: &str) -> Option<String> {
         .unwrap_or_else(|| {
             panic!(
                 "state {state:?} is absent from our IR; we built {:?}",
-                ir.nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>()
+                ir.nodes
+                    .iter()
+                    .map(|node| node.id.as_str())
+                    .collect::<Vec<_>>()
             )
         });
     node.label
@@ -135,9 +150,13 @@ fn the_fixture_rejects_the_plausible_wrong_implementations() {
     type WrongLabel = fn(&Row) -> Option<String>;
     let wrong: [(&str, WrongLabel); 3] = [
         // What `intern_node`'s first-writer-wins does: keep description one, drop the rest.
-        ("first-description-wins", |row| row.descriptions.first().cloned()),
+        ("first-description-wins", |row| {
+            row.descriptions.first().cloned()
+        }),
         // The obvious "fix" that overwrites instead of appending.
-        ("last-description-wins", |row| row.descriptions.last().cloned()),
+        ("last-description-wins", |row| {
+            row.descriptions.last().cloned()
+        }),
         // A splitter with no `:::` guard: `A:::bad` becomes a description `::bad` on `A`.
         ("no-triple-colon-guard", |row| {
             if row.case == "class_shorthand_is_not_a_description" && row.state == "A" {
@@ -184,9 +203,13 @@ fn a_rendered_state_box_draws_the_description_and_not_the_source_line() {
     let mut rest = svg.as_str();
     while let Some(start) = rest.find("<text") {
         rest = &rest[start..];
-        let Some(open_end) = rest.find('>') else { break };
+        let Some(open_end) = rest.find('>') else {
+            break;
+        };
         rest = &rest[open_end + 1..];
-        let Some(close) = rest.find("</text>") else { break };
+        let Some(close) = rest.find("</text>") else {
+            break;
+        };
         let inner = &rest[..close];
         let mut cursor = inner;
         while let Some(open) = cursor.find('<') {
@@ -195,7 +218,9 @@ fn a_rendered_state_box_draws_the_description_and_not_the_source_line() {
                 runs.push(leaf.to_string());
             }
             cursor = &cursor[open..];
-            let Some(tag_end) = cursor.find('>') else { break };
+            let Some(tag_end) = cursor.find('>') else {
+                break;
+            };
             cursor = &cursor[tag_end + 1..];
         }
         if !cursor.is_empty() {

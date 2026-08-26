@@ -1322,7 +1322,6 @@ impl IrEntityAttribute {
 
 // ── Class-diagram member types ─────────────────────────────────────────
 
-
 /// Rewrite mermaid's `~T~` generic-type spelling into the `<T>` a class body actually displays.
 ///
 /// mermaid keeps the tildes in its db (`id: "List~int~ items"`) and rewrites them only when the
@@ -1397,10 +1396,8 @@ fn rewrite_outermost_tilde_pairs(input: &str) -> String {
     let mut current = input.to_string();
     loop {
         let bytes = current.as_bytes();
-        let (Some(first), Some(last)) = (
-            memchr::memchr(b'~', bytes),
-            memchr::memrchr(b'~', bytes),
-        ) else {
+        let (Some(first), Some(last)) = (memchr::memchr(b'~', bytes), memchr::memrchr(b'~', bytes))
+        else {
             return current;
         };
         if first == last {
@@ -9803,13 +9800,13 @@ mod tests {
                 IrEntityAttribute {
                     data_type: "int".to_string(),
                     name: "id".to_string(),
-                    key: IrAttributeKey::Pk,
+                    keys: vec![IrAttributeKey::Pk],
                     comment: Some("primary key".to_string()),
                 },
                 IrEntityAttribute {
                     data_type: "varchar".to_string(),
                     name: "name".to_string(),
-                    key: IrAttributeKey::None,
+                    keys: Vec::new(),
                     comment: None,
                 },
             ],
@@ -9817,7 +9814,7 @@ mod tests {
         };
 
         assert_eq!(node.members.len(), 2);
-        assert_eq!(node.members[0].key, IrAttributeKey::Pk);
+        assert_eq!(node.members[0].keys, vec![IrAttributeKey::Pk]);
         assert_eq!(node.members[1].name, "name");
     }
 

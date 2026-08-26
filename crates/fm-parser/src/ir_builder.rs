@@ -2311,13 +2311,14 @@ impl IrBuilder {
         node.c4_meta = Some(Box::new(meta));
     }
 
-    /// Add an entity attribute to a node (for ER diagrams).
+    /// Add an entity attribute to a node (for ER diagrams). `keys` carries every key modifier
+    /// in source order — empty when the attribute has none (bd-nryyc list semantics).
     pub(crate) fn add_entity_attribute(
         &mut self,
         node_id: IrNodeId,
         data_type: &str,
         name: &str,
-        key: IrAttributeKey,
+        keys: Vec<IrAttributeKey>,
         comment: Option<&str>,
     ) {
         self.mark_reusable_prefix_node_dirty(node_id);
@@ -2328,7 +2329,7 @@ impl IrBuilder {
         node.members.push(IrEntityAttribute {
             data_type: data_type.to_string(),
             name: name.to_string(),
-            key,
+            keys,
             comment: comment.map(std::string::ToString::to_string),
         });
     }

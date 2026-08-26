@@ -45,7 +45,8 @@ struct Row {
 }
 
 fn fixture() -> Vec<Row> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mermaid_sequence_arrows.tsv");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mermaid_sequence_arrows.tsv");
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("fixture {} unreadable: {err}", path.display()));
     let rows: Vec<Row> = text
@@ -57,15 +58,25 @@ fn fixture() -> Vec<Row> {
             let verdict = columns.next().expect("verdict column").to_string();
             let _type_code = columns.next().unwrap_or("");
             let name = columns.next().unwrap_or("").to_string();
-            Row { token, verdict, name }
+            Row {
+                token,
+                verdict,
+                name,
+            }
         })
         .collect();
     // Check the instrument before reading it. A fixture that regenerated all-REJECTED (a bundle that
     // failed to load would do exactly that) would make half these assertions vacuous.
     let parsed = rows.iter().filter(|row| row.verdict == "PARSED").count();
     let rejected = rows.iter().filter(|row| row.verdict == "REJECTED").count();
-    assert!(parsed >= 10, "fixture holds only {parsed} accepted spellings");
-    assert!(rejected >= 8, "fixture holds only {rejected} rejected spellings");
+    assert!(
+        parsed >= 10,
+        "fixture holds only {parsed} accepted spellings"
+    );
+    assert!(
+        rejected >= 8,
+        "fixture holds only {rejected} rejected spellings"
+    );
     rows
 }
 
@@ -120,7 +131,10 @@ fn accepted_spellings_mean_what_mermaid_means() {
             )),
         }
         if actors != ["A", "B"] {
-            divergent.push(format!("{:?}: endpoints {actors:?}, mermaid A/B", row.token));
+            divergent.push(format!(
+                "{:?}: endpoints {actors:?}, mermaid A/B",
+                row.token
+            ));
         }
     }
     assert!(
@@ -136,7 +150,10 @@ fn a_spelling_mermaid_rejects_still_never_invents_a_participant() {
     let expected: BTreeSet<String> = ["A".to_string(), "B".to_string()].into_iter().collect();
     let mut phantoms = Vec::new();
     let mut checked = 0;
-    for row in fixture().into_iter().filter(|row| row.verdict == "REJECTED") {
+    for row in fixture()
+        .into_iter()
+        .filter(|row| row.verdict == "REJECTED")
+    {
         checked += 1;
         let (actors, _) = parse_message(&row.token);
         let actors: BTreeSet<String> = actors.into_iter().collect();
@@ -145,7 +162,10 @@ fn a_spelling_mermaid_rejects_still_never_invents_a_participant() {
         }
     }
     // WORK PROOF: every assertion above is vacuous if the loop never ran.
-    assert!(checked >= 8, "only {checked} rejected spellings were checked");
+    assert!(
+        checked >= 8,
+        "only {checked} rejected spellings were checked"
+    );
     assert!(
         phantoms.is_empty(),
         "{} spelling(s) invented a participant the author never wrote:\n  {}",
@@ -159,7 +179,11 @@ fn a_spelling_mermaid_rejects_still_never_invents_a_participant() {
 #[test]
 fn an_arbitrarily_long_dash_run_still_resolves_to_the_two_named_actors() {
     for token in [
-        "----->", "------>>", "-------x", "--------)", "------------>>",
+        "----->",
+        "------>>",
+        "-------x",
+        "--------)",
+        "------------>>",
     ] {
         let (actors, arrow) = parse_message(token);
         assert_eq!(actors, ["A", "B"], "{token:?} built {actors:?}");
@@ -168,7 +192,10 @@ fn an_arbitrarily_long_dash_run_still_resolves_to_the_two_named_actors() {
     // No separator at all: the dashes are adjacent to the actor names on both sides.
     let ir = fm_parser::parse("sequenceDiagram\nA----->>B: m\n").ir;
     assert_eq!(
-        ir.nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
+        ir.nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>(),
         ["A", "B"],
         "the unspaced form still leaks dashes onto an actor"
     );
@@ -181,10 +208,18 @@ fn an_arbitrarily_long_dash_run_still_resolves_to_the_two_named_actors() {
 fn a_dash_in_an_actor_name_survives() {
     let ir = fm_parser::parse("sequenceDiagram\nmy-actor ->> other-actor: m\n").ir;
     let actors: Vec<&str> = ir.nodes.iter().map(|node| node.id.as_str()).collect();
-    assert_eq!(actors, ["my-actor", "other-actor"], "an actor name lost its dash");
+    assert_eq!(
+        actors,
+        ["my-actor", "other-actor"],
+        "an actor name lost its dash"
+    );
 
     // A trailing dash separated from the arrow by whitespace belongs to the ACTOR, not the arrow.
     let ir = fm_parser::parse("sequenceDiagram\nA- ->> B: m\n").ir;
     let actors: Vec<&str> = ir.nodes.iter().map(|node| node.id.as_str()).collect();
-    assert_eq!(actors, ["A-", "B"], "a trailing dash was absorbed into the arrow");
+    assert_eq!(
+        actors,
+        ["A-", "B"],
+        "a trailing dash was absorbed into the arrow"
+    );
 }

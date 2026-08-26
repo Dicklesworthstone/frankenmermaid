@@ -515,11 +515,22 @@ fn node_member_strings(node: &IrNode) -> Vec<String> {
     node.members
         .iter()
         .map(|member| {
-            let key = match member.key {
-                fm_core::IrAttributeKey::Pk => " PK",
-                fm_core::IrAttributeKey::Fk => " FK",
-                fm_core::IrAttributeKey::Uk => " UK",
-                fm_core::IrAttributeKey::None => "",
+            // List-aware since bd-nryyc: ` PK`, ` PK,FK`, or empty. Suffix style (leading
+            // space, comma-joined) preserves this diff format's historical spelling.
+            let key = if member.keys.is_empty() {
+                String::new()
+            } else {
+                let mut out = String::with_capacity(1 + member.keys.len() * 3);
+                for (index, modifier) in member.keys.iter().enumerate() {
+                    out.push_str(if index == 0 { " " } else { "," });
+                    out.push_str(match modifier {
+                        fm_core::IrAttributeKey::Pk => "PK",
+                        fm_core::IrAttributeKey::Fk => "FK",
+                        fm_core::IrAttributeKey::Uk => "UK",
+                        fm_core::IrAttributeKey::None => "",
+                    });
+                }
+                out
             };
             match &member.comment {
                 Some(comment) => {
@@ -1106,13 +1117,13 @@ mod tests {
         old.nodes[0].members.push(IrEntityAttribute {
             data_type: "int".to_string(),
             name: "id".to_string(),
-            key: IrAttributeKey::Pk,
+            keys: vec![IrAttributeKey::Pk],
             comment: None,
         });
         new.nodes[0].members.push(IrEntityAttribute {
             data_type: "string".to_string(),
             name: "id".to_string(),
-            key: IrAttributeKey::Pk,
+            keys: vec![IrAttributeKey::Pk],
             comment: None,
         });
 
@@ -1129,7 +1140,7 @@ mod tests {
         let member = IrEntityAttribute {
             data_type: "varchar(255)".to_string(),
             name: "account_name".to_string(),
-            key: IrAttributeKey::Uk,
+            keys: vec![IrAttributeKey::Uk],
             comment: Some("stable member comment".to_string()),
         };
         let mut old = make_ir_with_nodes(&["A"]);

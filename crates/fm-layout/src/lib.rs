@@ -11504,7 +11504,7 @@ fn er_attribute_row_width(
             + 1
             + comment.map_or(0, |text| text.len() + 1),
     );
-    row.push_str(prefix);
+    row.push_str(&prefix);
     row.push_str(&attr.data_type);
     row.push(' ');
     row.push_str(&attr.name);
@@ -11594,7 +11594,12 @@ fn node_size_cache_key(
     for attr in &node.members {
         hash_str(&mut hash, &attr.data_type);
         hash_str(&mut hash, &attr.name);
-        hash_u64(&mut hash, attr.key as u64);
+        // Key modifiers are a LIST since bd-nryyc (`string a PK, FK`); the count guards against
+        // ambiguity between adjacent attributes' key sequences in the flat hash stream.
+        hash_u64(&mut hash, attr.keys.len() as u64);
+        for key in &attr.keys {
+            hash_u64(&mut hash, *key as u64);
+        }
         // The comment became a DRAWN, MEASURED part of the row in bd-jerh, so it sizes the box and
         // belongs in the key — exactly as `c4_meta.description` and the requirement strings below
         // do. Without it, two entities differing only in a comment share a cached size and the
@@ -29221,7 +29226,7 @@ mod tests {
             ir.nodes[0].members.push(fm_core::IrEntityAttribute {
                 data_type: "string".to_string(),
                 name: format!("field_{index}"),
-                key: fm_core::IrAttributeKey::None,
+                keys: Vec::new(),
                 comment: None,
             });
         }
@@ -29573,7 +29578,7 @@ mod tests {
                 .map(|index| fm_core::IrEntityAttribute {
                     data_type: "string".to_string(),
                     name: format!("field_{index}"),
-                    key: fm_core::IrAttributeKey::None,
+                    keys: Vec::new(),
                     comment: None,
                 })
                 .collect(),
@@ -29742,7 +29747,7 @@ mod tests {
                 members: vec![fm_core::IrEntityAttribute {
                     data_type: "string".to_string(),
                     name: "name".to_string(),
-                    key: fm_core::IrAttributeKey::None,
+                    keys: Vec::new(),
                     comment: comment.map(str::to_string),
                 }],
                 ..IrNode::default()
@@ -29785,7 +29790,7 @@ mod tests {
                 members: vec![fm_core::IrEntityAttribute {
                     data_type: "string".to_string(),
                     name: "name".to_string(),
-                    key: fm_core::IrAttributeKey::None,
+                    keys: Vec::new(),
                     comment: Some(comment.to_string()),
                 }],
                 ..IrNode::default()
