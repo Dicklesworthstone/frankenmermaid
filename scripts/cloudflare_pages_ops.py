@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -40,6 +41,12 @@ DEFAULT_SMOKE_SCENARIOS = (
     "static-web-diagnostics-recovery",
 )
 DEFAULT_SMOKE_PROFILES = ("desktop-default",)
+HISTORICAL_EVIDENCE_PREFIXES = ("evidence/",)
+FORBIDDEN_ACTION_PATTERNS = (
+    ("gh-actions-command", r"\bgh\s+(?:run|workflow)\b"),
+    ("github-action-reference", r"\bactions/[A-Za-z0-9_.-]+"),
+    ("action-only-environment", r"\bGITHUB_(?:ENV|OUTPUT|STEP_SUMMARY)\b"),
+)
 HEADER_ROUTE_ORDER = (
     "/web",
     "/web/*",
@@ -63,6 +70,85 @@ REQUIRED_BUNDLE_FILES = (
 
 def sha256_file(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def tracked_repo_paths(repo_root: Path) -> list[Path]:
+    """Return Git-tracked paths so policy decisions cannot be bypassed by ignores."""
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "ls-files", "-z"],
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Git tracked-file inventory failed; release policy must fail closed")
+    return [Path(item.decode("utf-8")) for item in result.stdout.split(b"\0") if item]
+
+
+def explicitly_non_executable_historical_evidence(relative_path: Path, text: str) -> bool:
+    """Allow historical evidence only when the file labels itself non-executable."""
+    return (
+        relative_path.as_posix().startswith(HISTORICAL_EVIDENCE_PREFIXES)
+        and "non-executable historical evidence" in text[:4096].lower()
+    )
+
+
+def is_tracked_workflow_path(relative_path: Path) -> bool:
+    parts = relative_path.parts
+    return any(parts[index : index + 2] == (".github", "workflows") for index in range(len(parts) - 1)) and (
+        relative_path.suffix in {".yml", ".yaml"}
+    )
+
+
+def scan_github_actions_policy(repo_root: Path) -> dict[str, object]:
+    """Find tracked operational GitHub Actions dependencies before a local release."""
+    violations: list[dict[str, object]] = []
+    for relative_path in tracked_repo_paths(repo_root):
+        rendered_path = relative_path.as_posix()
+        if is_tracked_workflow_path(relative_path):
+            violations.append(
+                {
+                    "kind": "tracked-workflow",
+                    "path": rendered_path,
+                    "line": None,
+                    "detail": "tracked GitHub Actions workflow YAML is forbidden; owner approval is required before deletion",
+                }
+            )
+
+        source_path = repo_root / relative_path
+        if (
+            rendered_path == "AGENTS.md"
+            or not source_path.is_file()
+            or source_path.suffix not in {".md", ".py", ".mjs", ".sh", ".yml", ".yaml"}
+        ):
+            continue
+        try:
+            source_text = source_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        if explicitly_non_executable_historical_evidence(relative_path, source_text):
+            continue
+        for line_number, line in enumerate(source_text.splitlines(), start=1):
+            for kind, pattern in FORBIDDEN_ACTION_PATTERNS:
+                if re.search(pattern, line):
+                    violations.append(
+                        {
+                            "kind": kind,
+                            "path": rendered_path,
+                            "line": line_number,
+                            "detail": f"forbidden GitHub Actions dependency: {line.strip()}",
+                        }
+                    )
+
+    return {
+        "action": "policy-scan",
+        "repo_root": str(repo_root),
+        "ok": not violations,
+        "violations": violations,
+        "required_remediation": (
+            "Remove operational GitHub Actions dependencies and use /dsr plus Wrangler. "
+            "Tracked workflow deletion requires the repository owner's explicit written approval."
+        ),
+    }
 
 
 def build_bundle_file_map(repo_root: Path) -> dict[Path, Path]:
@@ -739,6 +825,12 @@ def cmd_smoke_check(args: argparse.Namespace) -> int:
     return 0 if payload["ok"] else 1
 
 
+def cmd_policy_scan(args: argparse.Namespace) -> int:
+    payload = scan_github_actions_policy(Path(args.repo_root).resolve())
+    print(json.dumps(payload, indent=2))
+    return 0 if payload["ok"] else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Cloudflare Pages deployment helpers for the showcase")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -842,6 +934,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     smoke_check.add_argument("--report-out", help="Optional path to persist the smoke summary JSON")
     smoke_check.set_defaults(func=cmd_smoke_check)
+
+    policy_scan = subparsers.add_parser(
+        "policy-scan",
+        help="Fail closed on tracked GitHub Actions release dependencies",
+    )
+    policy_scan.add_argument("--repo-root", default=".", help="Repository root")
+    policy_scan.set_defaults(func=cmd_policy_scan)
 
     return parser
 

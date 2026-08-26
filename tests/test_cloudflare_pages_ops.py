@@ -165,6 +165,30 @@ class CloudflarePagesOpsTests(unittest.TestCase):
         self.assertEqual(payload["target_deployment_id"], "deploy-123")
         self.assertIn("Preview deployments are not valid rollback targets.", payload["eligibility_rules"])
 
+    def test_policy_scan_rejects_tracked_workflows_and_action_references(self):
+        repo_root = Path(__file__).resolve().parent.parent
+        payload = OPS.scan_github_actions_policy(repo_root)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(
+            any(
+                violation["kind"] == "tracked-workflow" and violation["path"] == ".github/workflows/ci.yml"
+                for violation in payload["violations"]
+            )
+        )
+        self.assertTrue(
+            any(
+                violation["kind"] == "github-action-reference" and violation["path"] == ".github/workflows/ci.yml"
+                for violation in payload["violations"]
+            )
+        )
+        self.assertTrue(
+            any(
+                violation["kind"] == "tracked-workflow"
+                and violation["path"] == "extensions/vscode-frankenmermaid/.github/workflows/react-doctor.yml"
+                for violation in payload["violations"]
+            )
+        )
+
     def test_stage_bundle_cli_emits_machine_readable_json(self):
         repo_root = Path(__file__).resolve().parent.parent
         with TemporaryDirectory() as tempdir:
