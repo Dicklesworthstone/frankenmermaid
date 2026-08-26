@@ -48,8 +48,8 @@ struct Row {
 }
 
 fn fixture() -> Vec<Row> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/mermaid_class_generics.tsv");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mermaid_class_generics.tsv");
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("fixture {} unreadable: {err}", path.display()));
     let rows: Vec<Row> = text
@@ -60,8 +60,15 @@ fn fixture() -> Vec<Row> {
             let member = columns.next().expect("member column").to_string();
             let id = columns.next().expect("id column").to_string();
             let display = columns.next().expect("display column").to_string();
-            assert!(columns.next().is_none(), "unexpected 4th column in {member:?}");
-            Row { member, id, display }
+            assert!(
+                columns.next().is_none(),
+                "unexpected 4th column in {member:?}"
+            );
+            Row {
+                member,
+                id,
+                display,
+            }
         })
         .collect();
     // A fixture that regenerated empty, or into a single column, would make every assertion below
@@ -170,7 +177,10 @@ fn every_member_displays_the_generics_mermaid_displays() {
             fm_core::class_member_display_name(&parsed.name, false)
         );
         if ours != row.display {
-            divergent.push(format!("{:?}: ours {:?}, mermaid {:?}", row.member, ours, row.display));
+            divergent.push(format!(
+                "{:?}: ours {:?}, mermaid {:?}",
+                row.member, ours, row.display
+            ));
         }
     }
     assert!(
@@ -267,7 +277,8 @@ fn a_rendered_class_box_draws_angle_brackets_not_tildes() {
     // The method's RETURN TYPE is a separate field with its own call site; assert it by containment
     // because the ` : ` spacing around it is a different, still-open divergence.
     assert!(
-        runs.iter().any(|run| run.starts_with("+getItems()") && run.ends_with("List<int>")),
+        runs.iter()
+            .any(|run| run.starts_with("+getItems()") && run.ends_with("List<int>")),
         "the method return type still carries tildes; runs were {runs:?}"
     );
     assert!(
