@@ -3232,10 +3232,27 @@ for (const { item, threads } of measurements) {
   const fBefore = fmBeforeById.get(key);
   const fAfter = fmAfterById.get(key);
   const m = mjsById.get(item.id);
+  // ⚠️ HOISTED OUT OF THE `row` INITIALIZER ON PURPOSE (bd-yavyd). The `ledger_provenance` field
+  // below used to read `f.thread_count_actually_used ?? row.fm_worker_threads_requested`, and
+  // NEITHER binding exists at that point: `f` is declared ~140 lines further down and `row` is the
+  // const being initialized. Both are temporal-dead-zone errors, so the harness measured every arm
+  // and then died before emitting a single ratio — unconditionally, on every row and every mode,
+  // from e943eae8 until this fix.
+  //
+  // `thread_count_actually_used` is a property of the ELF and its configuration, not of a timing,
+  // and the two A/A arms are the SAME ELF in the SAME invocation — so `fBefore` answers it
+  // identically to the bracket-selected arm `f` that the original expression wanted. `fAfter` is
+  // the fallback for the case where only the closing arm reported it.
+  const workerThreadsRequested = threads ?? fBefore?.thread_count_requested ?? 1;
+  const workerThreadsActuallyUsed =
+    fBefore?.thread_count_actually_used ??
+    fAfter?.thread_count_actually_used ??
+    workerThreadsRequested;
   const row = {
     id: item.id,
     fm_worker_threads: threads ?? fBefore?.worker_threads ?? 1,
-    fm_worker_threads_requested: threads ?? fBefore?.thread_count_requested ?? 1,
+    // Same expression as `workerThreadsActuallyUsed` falls back to, hoisted so the two cannot drift.
+    fm_worker_threads_requested: workerThreadsRequested,
     fm_builder: fmBuilder,
     fm_build_base: fmBuildBase,
     fm_build_clean_overlay: fmBuildCleanOverlay,
@@ -3262,10 +3279,7 @@ for (const { item, threads } of measurements) {
     },
     harness: HARNESS_ID,
     // Emitted so a ledger row cannot disagree with the run that produced it.
-    ledger_provenance: ledgerProvenanceMarker(
-      env,
-      f.thread_count_actually_used ?? row.fm_worker_threads_requested ?? threads,
-    ),
+    ledger_provenance: ledgerProvenanceMarker(env, workerThreadsActuallyUsed),
   };
 
   if (row.host_wide_exclusivity?.verdict !== 'clear') {
