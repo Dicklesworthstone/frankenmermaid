@@ -223,13 +223,13 @@
     },
     "gitgraph_basic": {
       "edge_count": 6,
-      "edges_checksum": "6d86e370b36b2771",
+      "edges_checksum": "559ed0421beb8f3d",
       "layout_algorithm": "auto",
-      "layout_checksum": "7676235f8d662d1e",
+      "layout_checksum": "1922780feb69f825",
       "layout_height": 863.0,
-      "layout_width": 503.3125,
+      "layout_width": 450.100006,
       "node_count": 6,
-      "nodes_checksum": "69386b9d8153f2d0"
+      "nodes_checksum": "c2fa745194a0b39a"
     },
     "journey_basic": {
       "edge_count": 6,
