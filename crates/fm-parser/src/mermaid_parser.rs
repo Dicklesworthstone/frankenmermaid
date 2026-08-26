@@ -6233,7 +6233,7 @@ fn is_simple_er_label(value: &str) -> bool {
 struct ErAttribute {
     data_type: String,
     name: String,
-    key: IrAttributeKey,
+    keys: Vec<IrAttributeKey>,
     comment: Option<String>,
 }
 
@@ -6281,31 +6281,63 @@ fn parse_er_attribute(line: &str) -> Option<ErAttribute> {
     let data_type = parts[0].clone();
     let name = parts[1].clone();
 
-    // Check for key modifier and comment in remaining parts
-    let mut key = IrAttributeKey::None;
+    // Check for key modifiers and comment in remaining parts.
+    //
+    // ⚠️ A KEY TOKEN CAN BE A COMMA LIST (bd-nryyc). mermaid spells a column that is both a primary
+    // and a foreign key `string a PK, FK`, and accepts `PK,FK` unspaced too — but NOT the
+    // space-separated `PK FK`, which its grammar rejects outright. Splitting the line on whitespace
+    // therefore hands this loop the tokens `PK,` and `FK`, or the single token `PK,FK`, and the old
+    // exact-string match on `"PK"` recognised NEITHER. They fell through to the comment branch, so
+    // the row drew `FK string a PK,` — the key rendered as a trailing comment with a dangling
+    // comma — and the unspaced form lost its key marker entirely.
+    let mut keys: Vec<IrAttributeKey> = Vec::new();
     let mut comment = None;
 
     for (i, part) in parts.iter().enumerate().skip(2) {
-        let upper = part.to_uppercase();
-        match upper.as_str() {
-            "PK" => key = IrAttributeKey::Pk,
-            "FK" => key = IrAttributeKey::Fk,
-            "UK" => key = IrAttributeKey::Uk,
-            _ => {
-                // If this is not a key and we haven't set a comment, it might be a comment
-                if comment.is_none() && i >= 2 {
-                    comment = Some(part.clone());
-                }
-            }
+        // A part is a key list only if EVERY non-empty piece of it is a key. Anything else is a
+        // comment, so a real comment that merely contains a comma is not mistaken for keys.
+        if let Some(parsed) = parse_er_attribute_key_list(part) {
+            keys.extend(parsed);
+            continue;
+        }
+        // If this is not a key and we haven't set a comment, it might be a comment
+        if comment.is_none() && i >= 2 {
+            comment = Some(part.clone());
         }
     }
 
     Some(ErAttribute {
         data_type,
         name,
-        key,
+        keys,
         comment,
     })
+}
+
+/// Parse one whitespace-separated token as a comma-separated ER key list.
+///
+/// Returns `None` — meaning "this is not keys, treat it as a comment" — unless every non-empty
+/// comma piece is `PK`/`FK`/`UK`. The trailing empty piece of `"PK,"` is skipped, which is what
+/// makes the spaced form `PK, FK` work: it arrives as the two tokens `PK,` and `FK`.
+fn parse_er_attribute_key_list(part: &str) -> Option<Vec<IrAttributeKey>> {
+    let mut keys = Vec::new();
+    for piece in part.split(',') {
+        let piece = trim_fast(piece);
+        if piece.is_empty() {
+            continue;
+        }
+        let key = if piece.eq_ignore_ascii_case("PK") {
+            IrAttributeKey::Pk
+        } else if piece.eq_ignore_ascii_case("FK") {
+            IrAttributeKey::Fk
+        } else if piece.eq_ignore_ascii_case("UK") {
+            IrAttributeKey::Uk
+        } else {
+            return None;
+        };
+        keys.push(key);
+    }
+    (!keys.is_empty()).then_some(keys)
 }
 
 fn parse_requirement_relation(

@@ -1270,10 +1270,54 @@ pub struct IrEntityAttribute {
     pub data_type: String,
     /// Name of the attribute
     pub name: String,
-    /// Key modifier (PK, FK, UK, or None)
-    pub key: IrAttributeKey,
+    /// Every key modifier on the attribute, in source order; empty when it has none.
+    ///
+    /// A LIST, not one key (bd-nryyc). `string a PK, FK` is the canonical way to spell a column
+    /// that is both a primary and a foreign key — a junction table's whole point — and mermaid
+    /// carries it as `keys: ['PK','FK']`. A single field could keep only the last one, and the
+    /// parser in front of it dropped the rest into `comment`, so the row drew `FK string a PK,`.
+    pub keys: Vec<IrAttributeKey>,
     /// Optional comment/description
     pub comment: Option<String>,
+}
+
+impl IrEntityAttribute {
+    /// The key cell exactly as mermaid draws it, with this renderer's trailing space.
+    ///
+    /// mermaid's ER renderer writes `attribute.keys.join()` — `Array.prototype.join` with NO
+    /// separator argument, which is `,` — so two keys are one token `PK,FK`, not `PK FK`. That
+    /// matters beyond looks: the cross-engine text gate compares TOKENS, so a space here would
+    /// read as two tokens the incumbent never emitted.
+    ///
+    /// Borrows for the common zero- and one-key cases; only a composite key allocates.
+    #[must_use]
+    pub fn key_prefix(&self) -> Cow<'static, str> {
+        match self.keys.as_slice() {
+            [] => Cow::Borrowed(""),
+            [single] => Cow::Borrowed(match single {
+                IrAttributeKey::Pk => "PK ",
+                IrAttributeKey::Fk => "FK ",
+                IrAttributeKey::Uk => "UK ",
+                IrAttributeKey::None => "",
+            }),
+            many => {
+                let mut out = String::with_capacity(many.len() * 3);
+                for (index, key) in many.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(match key {
+                        IrAttributeKey::Pk => "PK",
+                        IrAttributeKey::Fk => "FK",
+                        IrAttributeKey::Uk => "UK",
+                        IrAttributeKey::None => "",
+                    });
+                }
+                out.push(' ');
+                Cow::Owned(out)
+            }
+        }
+    }
 }
 
 // ── Class-diagram member types ─────────────────────────────────────────

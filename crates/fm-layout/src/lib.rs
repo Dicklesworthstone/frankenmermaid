@@ -11490,12 +11490,9 @@ fn er_attribute_row_width(
     node_font_size: f32,
     metrics: &fm_core::FontMetrics,
 ) -> f32 {
-    let prefix = match attr.key {
-        fm_core::IrAttributeKey::Pk => "PK ",
-        fm_core::IrAttributeKey::Fk => "FK ",
-        fm_core::IrAttributeKey::Uk => "UK ",
-        fm_core::IrAttributeKey::None => "",
-    };
+    // One call, not a sixth copy of the match: this string is what the BOX IS SIZED FROM, so it
+    // has to be the string the renderers draw, composite keys and all (bd-nryyc).
+    let prefix = attr.key_prefix();
     // Capacity covers the comment too (bd-jerh): the renderer appends ` {comment}` when present, and
     // a row measured without it under-sizes the box by exactly the comment's width — which spills the
     // widest row outside the entity rather than clipping it, per this fn's own contract above.

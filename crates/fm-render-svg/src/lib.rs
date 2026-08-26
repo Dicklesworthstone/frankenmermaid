@@ -3727,6 +3727,53 @@ fn render_nodes_with_batch_reuse(
     out.push_str(&reuse.next.node_svg);
 }
 
+/// The legacy-layout SVG coordinate frame shared by all layout-backed renderers.
+///
+/// Layout coordinates become SVG coordinates by adding `offset_x` and `offset_y`.
+/// Keep the title and C4 legend reservation here so every consumer agrees on the
+/// rendered viewBox rather than reconstructing part of this calculation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SvgFrame {
+    pub viewbox_width: f32,
+    pub viewbox_height: f32,
+    pub offset_x: f32,
+    pub offset_y: f32,
+}
+
+pub(crate) fn svg_frame(
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    config: &SvgRenderConfig,
+) -> SvgFrame {
+    let padding = config.padding;
+    let legend_enabled = is_c4_legend_enabled(ir);
+    let legend_width = if legend_enabled { 320.0 } else { 0.0 };
+    let legend_height = if legend_enabled { 128.0 } else { 0.0 };
+    let has_specialized_title_renderer = ir
+        .xy_chart_meta
+        .as_ref()
+        .as_ref()
+        .is_some_and(|meta| !meta.series.is_empty())
+        || ir
+            .pie_meta
+            .as_ref()
+            .as_ref()
+            .is_some_and(|meta| !meta.slices.is_empty())
+        || ir.quadrant_meta.is_some();
+    let title_height = if has_specialized_title_renderer || ir.meta.title.is_none() {
+        0.0
+    } else {
+        config.font_size + 22.0
+    };
+
+    SvgFrame {
+        viewbox_width: (layout.bounds.width + padding * 2.0).max(legend_width + padding * 2.0),
+        viewbox_height: layout.bounds.height + padding * 2.0 + legend_height + title_height,
+        offset_x: padding - layout.bounds.x,
+        offset_y: padding - layout.bounds.y + title_height,
+    }
+}
+
 fn render_layout_to_svg(
     layout: &DiagramLayout,
     ir: &MermaidDiagramIr,
@@ -3736,9 +3783,9 @@ fn render_layout_to_svg(
     cache_direct_minified_css: bool,
     mut batch_reuse: Option<&mut SvgBatchFragmentReuse<'_>>,
 ) -> String {
+    let frame = svg_frame(ir, layout, config);
     let padding = config.padding;
     let legend_enabled = is_c4_legend_enabled(ir);
-    let legend_width = if legend_enabled { 320.0 } else { 0.0 };
     let legend_height = if legend_enabled { 128.0 } else { 0.0 };
     let has_specialized_title_renderer = ir
         .xy_chart_meta
@@ -3756,13 +3803,8 @@ fn render_layout_to_svg(
     } else {
         ir.meta.title.as_deref()
     };
-    let title_height = if generic_title.is_some() {
-        config.font_size + 22.0
-    } else {
-        0.0
-    };
-    let width = (layout.bounds.width + padding * 2.0).max(legend_width + padding * 2.0);
-    let height = layout.bounds.height + padding * 2.0 + legend_height + title_height;
+    let width = frame.viewbox_width;
+    let height = frame.viewbox_height;
     let detail = resolve_detail_profile(width, height, config);
 
     let mut doc = SvgDocument::new()
@@ -3983,9 +4025,8 @@ fn render_layout_to_svg(
         }
     }
 
-    // Offset for padding
-    let offset_x = padding - layout.bounds.x;
-    let offset_y = padding - layout.bounds.y + title_height;
+    let offset_x = frame.offset_x;
+    let offset_y = frame.offset_y;
 
     if let Some(xy_chart_meta) = ir
         .xy_chart_meta
@@ -7900,13 +7941,8 @@ fn write_er_entity_into(
     // Attribute list.
     let mut attr_y = y + header_height + attr_font_size * 0.9;
     for attr in &node.members {
-        let key_prefix = match attr.key {
-            fm_core::IrAttributeKey::Pk => "PK ",
-            fm_core::IrAttributeKey::Fk => "FK ",
-            fm_core::IrAttributeKey::Uk => "UK ",
-            fm_core::IrAttributeKey::None => "",
-        };
-        let font_weight = if attr.key == fm_core::IrAttributeKey::None {
+        let key_prefix = attr.key_prefix();
+        let font_weight = if attr.keys.is_empty() {
             "normal"
         } else {
             "bold"
@@ -10688,12 +10724,7 @@ fn render_node(
                 // Attribute list
                 let mut attr_y = y + header_height + attr_font_size * 0.9;
                 for attr in &node.members {
-                    let key_prefix = match attr.key {
-                        fm_core::IrAttributeKey::Pk => "PK ",
-                        fm_core::IrAttributeKey::Fk => "FK ",
-                        fm_core::IrAttributeKey::Uk => "UK ",
-                        fm_core::IrAttributeKey::None => "",
-                    };
+                    let key_prefix = attr.key_prefix();
                     let attr_text = format!("{key_prefix}{} {}", attr.data_type, attr.name);
                     let font_weight = if attr.key == fm_core::IrAttributeKey::None {
                         "normal"
@@ -14074,6 +14105,69 @@ fn endpoint_accessible_label<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn frame_test_layout(x: f32, y: f32, width: f32, height: f32) -> DiagramLayout {
+        DiagramLayout {
+            nodes: Vec::new(),
+            clusters: Vec::new(),
+            cycle_clusters: Vec::new(),
+            edges: Vec::new(),
+            bounds: fm_layout::LayoutRect {
+                x,
+                y,
+                width,
+                height,
+            },
+            stats: Default::default(),
+            extensions: Default::default(),
+            dirty_regions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn svg_frame_preserves_plain_legacy_layout_math() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let layout = frame_test_layout(20.0, -10.0, 200.0, 80.0);
+
+        assert_eq!(
+            svg_frame(&ir, &layout, &SvgRenderConfig::default()),
+            SvgFrame {
+                viewbox_width: 280.0,
+                viewbox_height: 160.0,
+                offset_x: 20.0,
+                offset_y: 50.0,
+            }
+        );
+    }
+
+    #[test]
+    fn svg_frame_reserves_the_generic_title_band() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        ir.meta.title = Some("Payments topology".to_string());
+        let layout = frame_test_layout(20.0, -10.0, 200.0, 80.0);
+        let frame = svg_frame(&ir, &layout, &SvgRenderConfig::default());
+
+        assert_eq!(frame.viewbox_height, 197.0);
+        assert_eq!(frame.offset_y, 87.0);
+        assert_ne!(
+            frame.offset_y, 50.0,
+            "a naive frame that ignores the generic title must fail this case"
+        );
+    }
+
+    #[test]
+    fn svg_frame_reserves_the_c4_legend_inset() {
+        let ir = create_c4_ir_with_legend();
+        let layout = frame_test_layout(20.0, -10.0, 100.0, 80.0);
+        let frame = svg_frame(&ir, &layout, &SvgRenderConfig::default());
+
+        assert_eq!(frame.viewbox_width, 400.0);
+        assert_eq!(frame.viewbox_height, 288.0);
+        assert_ne!(
+            frame.viewbox_width, 180.0,
+            "a naive frame that omits the C4 legend width must fail this case"
+        );
+    }
 
     #[test]
     fn renders_every_node_in_a_2000_node_flowchart_deterministically() {
