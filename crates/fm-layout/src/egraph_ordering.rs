@@ -777,8 +777,19 @@ fn candidate_orderings(
     let mut candidates = all_adjacent_swaps(ordering);
     candidates.extend(median_insert_candidates(ordering, upper, lower));
     candidates.extend(block_rotation_candidates(ordering));
-    candidates.sort_by(|left, right| left.order.cmp(&right.order));
-    candidates.dedup_by(|left, right| left.order == right.order);
+    // DELIBERATELY UNSORTED AND UNDEDUPED. The sole consumer, `optimize_layer_ordering`, selects
+    // `min by (crossings, order)` with an EXPLICIT lexicographic tie-break, which is a total order
+    // on the candidate set: the winner is therefore independent of the enumeration order, and a
+    // duplicate can never displace its twin because `candidate.order < current.order` is false for
+    // equal orders. So the `sort_by` + `dedup_by` that used to stand here could not change the
+    // result — they only cost work, and the cost was not small: sorting `Vec<LayerOrdering>` moves
+    // 24-byte `Vec` headers and every comparison walks two orderings element by element, which the
+    // ER catalog profile showed as `quicksort::<LayerOrdering>` at 7.04% self plus its share of
+    // `__memmove_avx`. `candidate_orderings_sorted_reference` in this file's tests keeps the old
+    // list construction as a differential oracle so this claim is checked and not merely asserted.
+    //
+    // PARITY: dagre does not enumerate, sort and dedupe a candidate neighbourhood at all — it runs
+    // barycenter plus transpose — so this was our cost alone, not a cost the incumbent also pays.
     candidates
 }
 
@@ -1113,6 +1124,165 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The candidate list EXACTLY as `candidate_orderings` built it before the sort and dedup were
+    /// removed, retained here as the differential oracle for that removal.
+    fn candidate_orderings_sorted_reference(
+        ordering: &LayerOrdering,
+        upper: Option<(&LayerOrdering, &LayerEdges)>,
+        lower: Option<(&LayerOrdering, &LayerEdges)>,
+    ) -> Vec<LayerOrdering> {
+        let mut candidates = all_adjacent_swaps(ordering);
+        candidates.extend(median_insert_candidates(ordering, upper, lower));
+        candidates.extend(block_rotation_candidates(ordering));
+        candidates.sort_by(|left, right| left.order.cmp(&right.order));
+        candidates.dedup_by(|left, right| left.order == right.order);
+        candidates
+    }
+
+    /// `optimize_layer_ordering` over the sorted+deduped candidate list — the OLD search, kept
+    /// verbatim so the shipping search can be compared against it rather than against an argument.
+    fn optimize_layer_ordering_sorted_reference(
+        ordering: &LayerOrdering,
+        upper: Option<(&LayerOrdering, &LayerEdges)>,
+        lower: Option<(&LayerOrdering, &LayerEdges)>,
+    ) -> LayerOptimizationResult {
+        let mut best = ordering.clone();
+        if best.len() < 2 || !should_use_egraph(best.len()) {
+            return LayerOptimizationResult {
+                crossing_count: local_crossing_count(&best, upper, lower),
+                ordering: best,
+                rewrites_applied: 0,
+            };
+        }
+        let mut scorer = LayerScorer::new(&best, upper, lower);
+        let mut best_crossings = scorer.score(&best);
+        let mut rewrites_applied = 0;
+        let max_rounds = best.len().saturating_mul(2).max(1);
+        for _ in 0..max_rounds {
+            let mut best_candidate: Option<(usize, LayerOrdering)> = None;
+            for candidate in candidate_orderings_sorted_reference(&best, upper, lower) {
+                let candidate_crossings = scorer.score(&candidate);
+                if candidate_crossings >= best_crossings {
+                    continue;
+                }
+                match &mut best_candidate {
+                    Some((current_best_crossings, current_best_ordering)) => {
+                        if candidate_crossings < *current_best_crossings
+                            || (candidate_crossings == *current_best_crossings
+                                && candidate.order < current_best_ordering.order)
+                        {
+                            *current_best_crossings = candidate_crossings;
+                            *current_best_ordering = candidate;
+                        }
+                    }
+                    None => {
+                        best_candidate = Some((candidate_crossings, candidate));
+                    }
+                }
+            }
+            let Some((candidate_crossings, candidate)) = best_candidate else {
+                break;
+            };
+            best = candidate;
+            best_crossings = candidate_crossings;
+            rewrites_applied += 1;
+            if best_crossings == 0 {
+                break;
+            }
+        }
+        LayerOptimizationResult {
+            ordering: best,
+            crossing_count: best_crossings,
+            rewrites_applied,
+        }
+    }
+
+    /// DIFFERENTIAL: dropping the candidate-list sort and dedup changes no result.
+    ///
+    /// The removal rests on a claim about the SELECTION rule — that `min by (crossings, order)` is
+    /// a total order, so neither enumeration order nor duplicates can move the winner. This test
+    /// checks that claim against the code that was removed, over layer sizes that actually reach
+    /// the search (`should_use_egraph`), including the ones where the search runs many rounds.
+    ///
+    /// Both halves matter. The SET check catches a removal that also dropped a candidate family;
+    /// the RESULT check catches the subtler failure, a tie broken differently because two distinct
+    /// orderings score equally and the loop met them in the other order.
+    #[test]
+    fn dropping_the_candidate_sort_changes_no_ordering_result() {
+        let mut state = 0x51ed_2701_u64;
+        let mut next = |bound: usize| -> usize {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(state >> 33).unwrap_or(0) % bound.max(1)
+        };
+
+        let mut searched_rounds = 0_usize;
+        for case in 0..600 {
+            let width = 2 + next(10);
+            let upper = LayerOrdering::new((0..width).map(|i| i * 3).collect());
+            let mut middle_order: Vec<usize> = (0..width).map(|i| 1 + i * 3).collect();
+            for _ in 0..width {
+                let (i, j) = (next(width), next(width));
+                middle_order.swap(i, j);
+            }
+            let middle = LayerOrdering::new(middle_order);
+            let lower = LayerOrdering::new((0..width).map(|i| 2 + i * 3).collect());
+
+            let mut upper_edges = Vec::new();
+            for _ in 0..(1 + next(3 * width)) {
+                upper_edges.push((next(width) * 3, 1 + next(width) * 3));
+            }
+            let mut lower_edges = Vec::new();
+            for _ in 0..(1 + next(3 * width)) {
+                lower_edges.push((1 + next(width) * 3, 2 + next(width) * 3));
+            }
+            let upper_edges = LayerEdges { edges: upper_edges };
+            let lower_edges = LayerEdges { edges: lower_edges };
+            let up = Some((&upper, &upper_edges));
+            let down = Some((&lower, &lower_edges));
+
+            // The candidate SET is unchanged — only its order and its duplicates are.
+            let mut produced: Vec<Vec<usize>> = candidate_orderings(&middle, up, down)
+                .into_iter()
+                .map(|candidate| candidate.order)
+                .collect();
+            produced.sort();
+            produced.dedup();
+            let reference_set: Vec<Vec<usize>> =
+                candidate_orderings_sorted_reference(&middle, up, down)
+                    .into_iter()
+                    .map(|candidate| candidate.order)
+                    .collect();
+            assert_eq!(produced, reference_set, "case {case} candidate set");
+
+            let shipping = optimize_layer_ordering(&middle, up, down);
+            let reference = optimize_layer_ordering_sorted_reference(&middle, up, down);
+            assert_eq!(
+                (
+                    &shipping.ordering.order,
+                    shipping.crossing_count,
+                    shipping.rewrites_applied
+                ),
+                (
+                    &reference.ordering.order,
+                    reference.crossing_count,
+                    reference.rewrites_applied
+                ),
+                "case {case} search result"
+            );
+            searched_rounds += shipping.rewrites_applied;
+        }
+
+        // WORK PROOF. Every assertion above passes vacuously if the search never rewrote anything
+        // — which is exactly how an earlier crossing-minimisation change in this repo got benched
+        // on input where the code under test did not execute.
+        assert!(
+            searched_rounds > 50,
+            "the search applied only {searched_rounds} rewrites across 600 cases; this fixture is              not exercising the candidate loop"
+        );
     }
 
     #[test]
