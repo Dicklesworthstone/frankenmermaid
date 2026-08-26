@@ -5,3 +5,8 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 6e87f7373ad9c763e8122dae6d21603a192b1d8b26fe3a55dce531bbb6a1fdd9 # shrinks to operations = [(0, 0, 0)]
+cc 4ffdf29cb7de18b9087b966d69beb82f2406fe2cd223a9341cd715265e1bcfd8 # shrinks to node_count = 13, edge_seed = 142
+cc b4b909f81a6c88e24baa8d0483dbf174c65c154861b12a0e29db93659fd154c7 # shrinks to node_count = 13, edge_seed = 208
+cc c77a13a4b8cee8c75b129bea68b499ba5b0f5223b913406229708c890e201bda # shrinks to node_count = 9, edge_seed = 297
+cc 298fed62091d8c26661b93c72656731e5ac87bc404a5d22a7e1012cba1c9a1b5 # shrinks to operations = [(157, 44, 33), (19, 13, 208), (55, 59, 4), (73, 34, 4), (125, 41, 86), (19, 74, 166), (7, 152, 151)]
+cc 71472e7625224a2fe31917ec9e4b1944913f3aea4343c4a14adbd7785c9dcc98 # shrinks to operations = [(10, 13, 66), (175, 76, 1), (83, 11, 140)]

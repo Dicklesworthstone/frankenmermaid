@@ -629,6 +629,130 @@ pub fn median_position(
     Some(sorted[sorted.len() / 2])
 }
 
+/// One candidate rewrite, described by its INDICES instead of by the ordering it would produce.
+///
+/// ⚠️ THE MATERIALISATION IS THE COST, NOT THE SCORING. `optimize_layer_ordering` runs `2n` rounds
+/// and scores roughly `8n` candidates per round — `n-1` adjacent swaps, up to `2n` median
+/// insertions and about `5n` block rotations — and every one of those used to arrive as an owned
+/// `LayerOrdering`, a fresh `Vec<usize>` allocated and copied in full so that it could be scored
+/// once and then, almost always, discarded. On the real ER schema-catalog corpus that showed up as
+/// `optimize_layer_ordering` at 25.43% self time with `__memmove_avx_unaligned_erms` at 4.03%
+/// underneath it.
+///
+/// Every one of the three rewrite families is cheaply invertible, so a candidate can instead be
+/// applied to a single scratch ordering, scored, and undone. The candidate SET and the selection
+/// rule are unchanged; only the allocation disappears.
+///
+/// ⚠️ PARITY: this is our cost alone. dagre does not enumerate a candidate neighbourhood at all —
+/// it runs barycenter plus transpose — so a per-candidate allocation is pure structural overhead
+/// against the incumbent rather than a cost both engines pay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LayerMove {
+    /// Swap positions `i` and `i + 1`.
+    Swap(usize),
+    /// Remove the element at `from` and re-insert it at `to`. `to` is already clamped by the
+    /// generator exactly as [`move_node`] clamps it, so apply/undo never re-derives it.
+    Relocate { from: usize, to: usize },
+    /// Rotate `[start .. start + len]` left by `amount`, with `amount` already reduced mod `len`.
+    Rotate {
+        start: usize,
+        len: usize,
+        amount: usize,
+    },
+}
+
+/// Apply `mv` to `order`, in place and without allocating.
+fn apply_layer_move(order: &mut Vec<usize>, mv: LayerMove) {
+    match mv {
+        LayerMove::Swap(i) => order.swap(i, i + 1),
+        LayerMove::Relocate { from, to } => {
+            let node = order.remove(from);
+            order.insert(to, node);
+        }
+        LayerMove::Rotate { start, len, amount } => order[start..start + len].rotate_left(amount),
+    }
+}
+
+/// Exactly reverse [`apply_layer_move`], restoring `order` to what it was.
+///
+/// ⚠️ THE UNDO IS WHAT MAKES THE WHOLE REWRITE SAFE, so each arm is the true inverse rather than a
+/// near-inverse: a `Relocate` is undone by removing at `to` and inserting at `from` (NOT by
+/// relocating `to -> from`, which differs whenever the removal shifts the target index), and a
+/// rotation left by `amount` is undone by rotating right by the same `amount`.
+fn undo_layer_move(order: &mut Vec<usize>, mv: LayerMove) {
+    match mv {
+        LayerMove::Swap(i) => order.swap(i, i + 1),
+        LayerMove::Relocate { from, to } => {
+            let node = order.remove(to);
+            order.insert(from, node);
+        }
+        LayerMove::Rotate { start, len, amount } => order[start..start + len].rotate_right(amount),
+    }
+}
+
+/// Collect the same candidate neighbourhood [`candidate_orderings`] enumerates, as moves.
+///
+/// Identity edits are dropped rather than emitted: `move_node` returns a clone of the ordering when
+/// the node is already at its target, and such a candidate scores exactly `best_crossings` and is
+/// rejected by the caller's strict `< best_crossings` test. Dropping it changes nothing and saves a
+/// score.
+fn collect_candidate_moves(
+    ordering: &LayerOrdering,
+    upper: Option<(&LayerOrdering, &LayerEdges)>,
+    lower: Option<(&LayerOrdering, &LayerEdges)>,
+    out: &mut Vec<LayerMove>,
+) {
+    let n = ordering.order.len();
+    out.clear();
+    if n < 2 {
+        return;
+    }
+
+    for i in 0..n - 1 {
+        out.push(LayerMove::Swap(i));
+    }
+
+    let push_relocation = |node_id: usize, target_pos: usize, out: &mut Vec<LayerMove>| {
+        let Some(from) = ordering.position_of(node_id) else {
+            return;
+        };
+        if from == target_pos {
+            return;
+        }
+        // `move_node` clamps against the length AFTER the removal, which is `n - 1`.
+        let to = target_pos.min(n - 1);
+        if to == from {
+            return;
+        }
+        out.push(LayerMove::Relocate { from, to });
+    };
+
+    for &node_id in &ordering.order {
+        if let Some((upper_ordering, upper_edges)) = upper
+            && let Some(target_pos) = median_position(node_id, upper_ordering, upper_edges, false)
+        {
+            push_relocation(node_id, target_pos, out);
+        }
+        if let Some((lower_ordering, lower_edges)) = lower
+            && let Some(target_pos) = median_position(node_id, lower_ordering, lower_edges, true)
+        {
+            push_relocation(node_id, target_pos, out);
+        }
+    }
+
+    for len in 3..=n.min(4) {
+        for start in 0..=n - len {
+            for amount in 1..len {
+                let amount = amount % len;
+                if amount == 0 {
+                    continue;
+                }
+                out.push(LayerMove::Rotate { start, len, amount });
+            }
+        }
+    }
+}
+
 /// Generate all single-swap neighbors of an ordering.
 ///
 /// Returns all orderings reachable by one adjacent swap. This is the
@@ -728,6 +852,7 @@ fn is_complete_bipartite(upper: &LayerOrdering, lower: &LayerOrdering, edges: &L
     })
 }
 
+#[cfg(test)]
 fn median_insert_candidates(
     ordering: &LayerOrdering,
     upper: Option<(&LayerOrdering, &LayerEdges)>,
@@ -754,6 +879,7 @@ fn median_insert_candidates(
     candidates
 }
 
+#[cfg(test)]
 fn block_rotation_candidates(ordering: &LayerOrdering) -> Vec<LayerOrdering> {
     let mut candidates = Vec::new();
     let n = ordering.len();
@@ -769,6 +895,7 @@ fn block_rotation_candidates(ordering: &LayerOrdering) -> Vec<LayerOrdering> {
     candidates
 }
 
+#[cfg(test)]
 fn candidate_orderings(
     ordering: &LayerOrdering,
     upper: Option<(&LayerOrdering, &LayerEdges)>,
@@ -821,28 +948,40 @@ pub fn optimize_layer_ordering(
 
     let mut rewrites_applied = 0;
     let max_rounds = best.len().saturating_mul(2).max(1);
+    // Two buffers for the whole search instead of one `Vec<usize>` per candidate: the move list and
+    // the scratch ordering every candidate is materialised into and then undone from. Both keep
+    // their capacity across rounds.
+    let mut moves: Vec<LayerMove> = Vec::new();
+    let mut scratch = best.clone();
     for _ in 0..max_rounds {
         let mut best_candidate: Option<(usize, LayerOrdering)> = None;
-        for candidate in candidate_orderings(&best, upper, lower) {
-            let candidate_crossings = scorer.score(&candidate);
-            if candidate_crossings >= best_crossings {
-                continue;
-            }
-
-            match &mut best_candidate {
-                Some((current_best_crossings, current_best_ordering)) => {
-                    if candidate_crossings < *current_best_crossings
-                        || (candidate_crossings == *current_best_crossings
-                            && candidate.order < current_best_ordering.order)
-                    {
-                        *current_best_crossings = candidate_crossings;
-                        *current_best_ordering = candidate;
+        collect_candidate_moves(&best, upper, lower, &mut moves);
+        scratch.order.clear();
+        scratch.order.extend_from_slice(&best.order);
+        for &mv in &moves {
+            apply_layer_move(&mut scratch.order, mv);
+            let candidate_crossings = scorer.score(&scratch);
+            if candidate_crossings < best_crossings {
+                // ⚠️ CLONE ONLY ON A STRICT IMPROVEMENT. The comparison itself reads the scratch
+                // slice, so a candidate that loses the tie-break costs no allocation at all — which
+                // is the entire point of the rewrite, since almost every candidate loses.
+                let takes_lead = match &best_candidate {
+                    Some((current_best_crossings, current_best_ordering)) => {
+                        candidate_crossings < *current_best_crossings
+                            || (candidate_crossings == *current_best_crossings
+                                && scratch.order < current_best_ordering.order)
                     }
-                }
-                None => {
-                    best_candidate = Some((candidate_crossings, candidate));
+                    None => true,
+                };
+                if takes_lead {
+                    best_candidate = Some((candidate_crossings, scratch.clone()));
                 }
             }
+            undo_layer_move(&mut scratch.order, mv);
+            debug_assert_eq!(
+                scratch.order, best.order,
+                "undo_layer_move must restore the scratch ordering exactly"
+            );
         }
 
         let Some((candidate_crossings, candidate)) = best_candidate else {
@@ -1257,6 +1396,37 @@ mod tests {
                     .map(|candidate| candidate.order)
                     .collect();
             assert_eq!(produced, reference_set, "case {case} candidate set");
+
+            // The MOVE list must describe exactly the same neighbourhood the materialised list
+            // does, and every move must undo exactly. Identity edits are the one documented
+            // difference: `move_node` yields a clone of the ordering when a node is already at its
+            // target, and `collect_candidate_moves` drops those because the caller rejects them on
+            // a strict `<` test anyway.
+            let mut moves = Vec::new();
+            collect_candidate_moves(&middle, up, down, &mut moves);
+            let mut from_moves: Vec<Vec<usize>> = Vec::with_capacity(moves.len());
+            let mut scratch = middle.order.clone();
+            for &mv in &moves {
+                apply_layer_move(&mut scratch, mv);
+                from_moves.push(scratch.clone());
+                undo_layer_move(&mut scratch, mv);
+                // ⚠️ THE UNDO IS THE LOAD-BEARING HALF. A near-inverse (undoing a Relocate by
+                // relocating `to -> from`, or a Rotate by rotating left again) leaves the scratch
+                // subtly permuted, and every later candidate in the round is then scored against
+                // the wrong base — silently, since the counts stay plausible.
+                assert_eq!(
+                    scratch, middle.order,
+                    "case {case} move {mv:?} did not undo"
+                );
+            }
+            from_moves.sort();
+            from_moves.dedup();
+            let mut without_identity = produced.clone();
+            without_identity.retain(|order| order != &middle.order);
+            assert_eq!(
+                from_moves, without_identity,
+                "case {case} move-derived neighbourhood"
+            );
 
             let shipping = optimize_layer_ordering(&middle, up, down);
             let reference = optimize_layer_ordering_sorted_reference(&middle, up, down);
