@@ -3,5 +3,5 @@ architecture-beta
   service db(database)[PostgreSQL]
   service cache(server)[Redis Cache]
 
-  api --> db
-  api --> cache
+  api:R --> L:db
+  api:B --> T:cache

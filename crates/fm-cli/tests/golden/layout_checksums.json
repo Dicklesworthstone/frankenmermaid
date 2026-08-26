@@ -23,13 +23,13 @@
     },
     "architecture_basic": {
       "edge_count": 2,
-      "edges_checksum": "d4afb8f09e907eee",
+      "edges_checksum": "93a4ce3592213427",
       "layout_algorithm": "auto",
-      "layout_checksum": "148c842ace56caa9",
+      "layout_checksum": "8b3ecd276c8df8fd",
       "layout_height": 421.5,
       "layout_width": 543.287476,
       "node_count": 3,
-      "nodes_checksum": "afaa0d602423bc6d"
+      "nodes_checksum": "f75d2ed0b8bcd622"
     },
     "block_basic": {
       "edge_count": 0,

@@ -36,7 +36,7 @@ const dom = new JSDOM('<!DOCTYPE html><html><body><div id="c"></div></body></htm
 const w = dom.window;
 // jsdom's window lacks a few Node platform globals the bundle reaches for (gitGraph's id hashing
 // wants TextEncoder). Lend it ours rather than let a family fail as a spurious RUNTIME ERROR.
-for (const name of ['TextEncoder', 'TextDecoder', 'crypto']) {
+for (const name of ['TextEncoder', 'TextDecoder', 'crypto', 'structuredClone']) {
   if (!w[name] && globalThis[name]) w[name] = globalThis[name];
 }
 const script = w.document.createElement('script');
