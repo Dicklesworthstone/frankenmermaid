@@ -110,14 +110,45 @@ for (const file of files) {
 
   const oursSet = new Set(ours);
   const theirsSet = new Set(theirs);
-  const missing = theirs.filter((run) => !oursSet.has(run));
-  const extra = ours.filter((run) => !theirsSet.has(run));
-  if (missing.length === 0 && extra.length === 0) {
+  let missing = theirs.filter((run) => !oursSet.has(run));
+  let extra = ours.filter((run) => !theirsSet.has(run));
+
+  // ⚠️ A WHITESPACE-ONLY DIFFERENCE IS NOT REPORTABLE FROM HERE, and saying so is the point.
+  // The geometry stubs above make `getComputedTextLength()` return 0, so mermaid's word-wrap sees
+  // every string as zero-width and lays text out differently than a browser would. Runs that match
+  // once whitespace is collapsed are therefore INDISTINGUISHABLE, from this probe, between a real
+  // engine divergence and an artefact of the stub — `timeline_basic` reports `"Event   A"` against
+  // our `"Event A"` for exactly this reason, and it is not evidence either way.
+  //
+  // They are reported separately so nobody files them as parity bugs. `equivalence.mjs` drives
+  // Chromium and is the tool that can actually decide them.
+  const squash = (run) => run.replace(/\s+/g, ' ').trim();
+  const extraBySquash = new Map(extra.map((run) => [squash(run), run]));
+  const whitespaceOnly = [];
+  for (const run of [...missing]) {
+    const twin = extraBySquash.get(squash(run));
+    if (twin !== undefined) {
+      whitespaceOnly.push([run, twin]);
+      missing = missing.filter((r) => r !== run);
+      extra = extra.filter((r) => r !== twin);
+      extraBySquash.delete(squash(run));
+    }
+  }
+
+  if (missing.length === 0 && extra.length === 0 && whitespaceOnly.length === 0) {
     console.log(`AGREE          ${file}  (${ours.length} runs)`);
+    continue;
+  }
+  if (missing.length === 0 && extra.length === 0) {
+    console.log(`WHITESPACE     ${file}  ${JSON.stringify(whitespaceOnly.slice(0, 4))}`);
+    console.log('  undecidable from this probe: the stubs change mermaid word-wrap. Use equivalence.mjs.');
     continue;
   }
   divergent += 1;
   console.log(`DIVERGE        ${file}`);
+  if (whitespaceOnly.length > 0) {
+    console.log(`  whitespace-only, UNDECIDABLE here: ${JSON.stringify(whitespaceOnly.slice(0, 3))}`);
+  }
   if (missing.length > 0) console.log(`  mermaid draws, we do NOT: ${JSON.stringify(missing)}`);
   if (extra.length > 0) console.log(`  we draw, mermaid does NOT: ${JSON.stringify(extra)}`);
 }
