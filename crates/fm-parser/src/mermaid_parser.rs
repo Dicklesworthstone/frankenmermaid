@@ -6076,10 +6076,9 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
         {
             // A lone `IrAttributeKey::None` means "no key modifier": the list form is empty
             // rather than carrying the sentinel (bd-nryyc).
-            let keys = if matches!(key, IrAttributeKey::None) {
-                Vec::new()
-            } else {
-                vec![key]
+            let keys = match key {
+                IrAttributeKey::None => Vec::new(),
+                single => vec![single],
             };
             builder.add_entity_attribute(entity_id, data_type, name, keys, None);
             continue;

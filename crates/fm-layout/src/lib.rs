@@ -11594,8 +11594,9 @@ fn node_size_cache_key(
     for attr in &node.members {
         hash_str(&mut hash, &attr.data_type);
         hash_str(&mut hash, &attr.name);
-        // Key modifiers are a LIST since bd-nryyc (`string a PK, FK`); the count guards against
-        // ambiguity between adjacent attributes' key sequences in the flat hash stream.
+        // EVERY key, and the COUNT (bd-nryyc). Key modifiers are a list (`string a PK, FK`);
+        // the count guards against ambiguity in the flat hash stream and ensures composite keys
+        // invalidate size caches appropriately.
         hash_u64(&mut hash, attr.keys.len() as u64);
         for key in &attr.keys {
             hash_u64(&mut hash, *key as u64);
