@@ -71,6 +71,7 @@ pub struct TextBuilder {
     font_size: Option<f32>,
     font_weight: Option<String>,
     font_style: Option<String>,
+    text_decoration: Option<String>,
     fill: Option<String>,
     anchor: TextAnchor,
     baseline: DominantBaseline,
@@ -90,6 +91,7 @@ impl TextBuilder {
             font_size: None,
             font_weight: None,
             font_style: None,
+            text_decoration: None,
             fill: None,
             anchor: TextAnchor::Start,
             baseline: DominantBaseline::Auto,
@@ -165,6 +167,17 @@ impl TextBuilder {
         self.font_style("italic")
     }
 
+    /// Set `text-decoration`, e.g. `underline` for a UML static member (bd-r2gll).
+    ///
+    /// Emitted immediately after `font-style` and before `fill`, which is the slot the streaming
+    /// class-row writer fills through its `extra` parameter. The two paths are compared
+    /// byte-for-byte, so a different position here would be a test failure, not a cosmetic one.
+    #[must_use]
+    pub fn text_decoration(mut self, decoration: &str) -> Self {
+        self.text_decoration = Some(decoration.to_string());
+        self
+    }
+
     /// Set the fill color.
     #[must_use]
     pub fn fill(mut self, color: &str) -> Self {
@@ -230,6 +243,9 @@ impl TextBuilder {
 
         if let Some(ref style) = self.font_style {
             elem = elem.attr("font-style", style);
+        }
+        if let Some(ref decoration) = self.text_decoration {
+            elem = elem.attr("text-decoration", decoration);
         }
 
         if let Some(ref fill) = self.fill {

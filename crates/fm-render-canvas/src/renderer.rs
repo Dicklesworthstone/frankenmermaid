@@ -2275,14 +2275,39 @@ impl Canvas2dRenderer {
                 }
 
                 // Methods.
+                let base_member_font = match declared_member_font.as_deref() {
+                    Some(font) => font.to_string(),
+                    None => class_fonts.1.clone(),
+                };
                 for method in &meta.methods {
                     if cursor_y > y + h - member_font * 0.5 {
                         break;
                     }
                     let text = class_member_row(method, true);
+                    // ⚠️ THE CLASSIFIER IS A STYLE HERE TOO (bd-r2gll). `class_member_row` no longer
+                    // puts `$`/`*` in the text, so this backend has to draw the marker or the
+                    // static/abstract distinction is simply LOST — which is worse than the literal
+                    // character it replaced. Canvas2D has no `text-decoration`, so the underline is
+                    // a measured rule; italic goes through the font string.
+                    let classifier =
+                        fm_core::class_member_classifier_css(method.is_static, method.is_abstract);
+                    if classifier == Some("font-style:italic") {
+                        ctx.set_font(&format!("italic {base_member_font}"));
+                    }
                     ctx.fill_text(&text, x + padding, cursor_y);
                     self.draw_calls += 1;
                     *labels_drawn += 1;
+                    if classifier == Some("font-style:italic") {
+                        ctx.set_font(&base_member_font);
+                    } else if classifier == Some("text-decoration:underline") {
+                        let width = ctx.measure_text(&text).width;
+                        let baseline = cursor_y + member_font * 0.15;
+                        ctx.begin_path();
+                        ctx.move_to(x + padding, baseline);
+                        ctx.line_to(x + padding + width, baseline);
+                        ctx.stroke();
+                        self.draw_calls += 1;
+                    }
                     cursor_y += member_font * 1.2;
                 }
             } else if let Some(node) = ir_node.filter(|n| !n.members.is_empty()) {
@@ -3606,13 +3631,9 @@ fn class_member_row(member: &fm_core::IrClassMember, is_method: bool) -> String 
     let mut row = String::with_capacity(member.name.len() + 8);
     row.push_str(class_vis_symbol(member.visibility));
     row.push_str(&fm_core::class_member_display_name(&member.name, is_method));
-    if is_method {
-        if member.is_abstract {
-            row.push('*');
-        } else if member.is_static {
-            row.push('$');
-        }
-    }
+    // ⚠️ NO CLASSIFIER CHARACTER (bd-r2gll); it is a STYLE, and the caller applies it. Keeping the
+    // byte here would also disagree with `fm_layout::class_member_row_width`, which this function's
+    // own doc comment promises to mirror and which sizes the box this text is drawn into.
     if let Some(ref return_type) = member.return_type {
         // ` : `, as mermaid draws it and as `fm_layout::class_member_row_width` measures it
         // (bd-ci658).

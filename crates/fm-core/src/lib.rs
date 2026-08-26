@@ -1497,6 +1497,44 @@ pub fn class_member_display_name(name: &str, is_method: bool) -> Cow<'_, str> {
     Cow::Owned(format!("{head}({parameters})"))
 }
 
+/// The CSS mermaid emits for a method's UML classifier, or `None` when it has none (bd-r2gll).
+///
+/// ⚠️ THE CLASSIFIER IS A STYLE, NOT A CHARACTER, and that is the whole divergence. UML underlines
+/// a static member and italicises an abstract one; mermaid follows it exactly. Measured on the
+/// pinned 11.15.0 bundle through `ClassMember.getDisplayDetails()` and recorded in
+/// `crates/fm-render-svg/tests/fixtures/mermaid_class_methods.tsv`:
+///
+/// ```text
+///   member                 displayText            cssStyle
+///   +getName()$ String     +getName() : String    text-decoration:underline;
+///   +getName()* String     +getName() : String    font-style:italic;
+/// ```
+///
+/// Note what the display column does NOT contain: there is no `$` and no `*` anywhere in it. Every
+/// row builder in this workspace appended the raw marker to the text instead, so `+getStatic()$ :
+/// String` was drawn where mermaid draws an underlined `+getStatic() : String` — the same member
+/// reading as a different NAME.
+///
+/// ⚠️ BOTH HALVES OR NEITHER. Dropping the character without emitting the style destroys the
+/// information it carried (static vs abstract) and is strictly worse than the divergence it
+/// replaces. A caller that cannot express the style — a plain-text terminal grid — must therefore
+/// KEEP the character rather than call this and discard the result.
+#[must_use]
+pub const fn class_member_classifier_css(
+    is_static: bool,
+    is_abstract: bool,
+) -> Option<&'static str> {
+    // Abstract first, matching the order every row builder already used. The parser sets these from
+    // a single marker byte, so they are mutually exclusive in practice.
+    if is_abstract {
+        Some("font-style:italic")
+    } else if is_static {
+        Some("text-decoration:underline")
+    } else {
+        None
+    }
+}
+
 /// Visibility modifier for a class member.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub enum ClassVisibility {

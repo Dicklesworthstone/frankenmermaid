@@ -7881,13 +7881,11 @@ fn write_class_compartments_into(
             break;
         }
         let vis = visibility_symbol(method.visibility);
-        let suffix = if method.is_abstract {
-            "*"
-        } else if method.is_static {
-            "$"
-        } else {
-            ""
-        };
+        // ⚠️ THE CLASSIFIER IS A STYLE, NOT A CHARACTER (bd-r2gll). mermaid's `getDisplayDetails()`
+        // returns `+getName() : String` with NO `$`/`*` in it and carries the marker as
+        // `cssStyle: text-decoration:underline;` / `font-style:italic;`. Appending the raw byte
+        // here made the same member read as a different NAME.
+        let classifier = fm_core::class_member_classifier_css(method.is_static, method.is_abstract);
         // ` : T`, not `: T` (bd-ci658). Measured on the pinned bundle: mermaid's
         // `getDisplayDetails()` builds the tail as `' : ' + parseGenericTypes(returnType)`, so a
         // typed method row differed from the incumbent by one character in every class diagram.
@@ -7897,16 +7895,23 @@ fn write_class_compartments_into(
             .map(|t| format!(" : {}", fm_core::parse_generic_types(t)))
             .unwrap_or_default();
         let text = format!(
-            "{vis}{}{suffix}{ret}",
+            "{vis}{}{ret}",
             fm_core::class_member_display_name(&method.name, true)
         );
+        // Same slot `TextBuilder` emits `font-style`/`text-decoration` into — after `font-size`,
+        // before `fill` — so the streaming and Element paths stay byte-identical.
+        let classifier_attr = match classifier {
+            Some("font-style:italic") => " font-style=\"italic\"",
+            Some("text-decoration:underline") => " text-decoration=\"underline\"",
+            _ => "",
+        };
         write_class_text_into(
             f,
             text_x,
             cursor_y,
             "start",
             member_font_size,
-            "",
+            classifier_attr,
             fill,
             &text,
         );
@@ -11307,13 +11312,11 @@ fn render_class_compartments(
             break;
         }
         let vis = visibility_symbol(method.visibility);
-        let suffix = if method.is_abstract {
-            "*"
-        } else if method.is_static {
-            "$"
-        } else {
-            ""
-        };
+        // ⚠️ THE CLASSIFIER IS A STYLE, NOT A CHARACTER (bd-r2gll). mermaid's `getDisplayDetails()`
+        // returns `+getName() : String` with NO `$`/`*` in it and carries the marker as
+        // `cssStyle: text-decoration:underline;` / `font-style:italic;`. Appending the raw byte
+        // here made the same member read as a different NAME.
+        let classifier = fm_core::class_member_classifier_css(method.is_static, method.is_abstract);
         // ` : T`, not `: T` (bd-ci658). Measured on the pinned bundle: mermaid's
         // `getDisplayDetails()` builds the tail as `' : ' + parseGenericTypes(returnType)`, so a
         // typed method row differed from the incumbent by one character in every class diagram.
@@ -11323,17 +11326,21 @@ fn render_class_compartments(
             .map(|t| format!(" : {}", fm_core::parse_generic_types(t)))
             .unwrap_or_default();
         let text = format!(
-            "{vis}{}{suffix}{ret}",
+            "{vis}{}{ret}",
             fm_core::class_member_display_name(&method.name, true)
         );
-        let elem = TextBuilder::new(&text)
+        let builder = TextBuilder::new(&text)
             .x(text_x)
             .y(cursor_y)
             .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
             .font_size(member_font_size)
-            .anchor(TextAnchor::Start)
-            .fill(&colors.text)
-            .build();
+            .anchor(TextAnchor::Start);
+        let builder = match classifier {
+            Some("font-style:italic") => builder.font_style("italic"),
+            Some("text-decoration:underline") => builder.text_decoration("underline"),
+            _ => builder,
+        };
+        let elem = builder.fill(&colors.text).build();
         group = group.child(apply_label_style(apply_label_class(elem)));
     }
 

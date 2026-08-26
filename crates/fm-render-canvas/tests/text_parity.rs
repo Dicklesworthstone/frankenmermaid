@@ -505,8 +505,12 @@ fn class_member_types_and_classifiers_reach_the_canvas_as_they_reach_the_svg() {
         // row builders at once. These literals are the CONTRACT the canvas is checked against, so
         // they move with it; the assertion below still fails closed if the SVG arm stops emitting
         // them.
-        "+area()* : float",
-        "+load()$ : Shape",
+        // ⚠️ NO `*` AND NO `$` (bd-r2gll). mermaid's `getDisplayDetails()` returns
+        // `+area() : float` and carries the classifier as `cssStyle: font-style:italic;`, so the
+        // marker left the TEXT in every backend that can express a style. These literals moved with
+        // that change; the SVG control below still fails closed if the SVG arm stops emitting them.
+        "+area() : float",
+        "+load() : Shape",
     ] {
         assert!(
             svg.contains(row),
@@ -531,6 +535,21 @@ fn class_member_types_and_classifiers_reach_the_canvas_as_they_reach_the_svg() {
             .any(|text| text.starts_with("+String name")
                 && (text.contains('*') || text.contains('$'))),
         "an attribute row gained a method classifier: {texts:?}"
+    );
+
+    // ⚠️ AND NO ROW MAY CARRY THE RAW MARKER AT ALL, in either backend. Without this the change
+    // could regress to appending the character and every positive assertion above would still hold
+    // — they only ever look for the presence of the classifier-free row, which a longer string
+    // containing it does not satisfy on the canvas but DOES satisfy on `svg.contains`.
+    assert!(
+        !svg.contains("+area()*") && !svg.contains("+load()$"),
+        "the SVG still draws the literal classifier character"
+    );
+    assert!(
+        !texts
+            .iter()
+            .any(|text| text.contains('*') || text.contains('$')),
+        "the canvas still draws the literal classifier character: {texts:?}"
     );
 }
 

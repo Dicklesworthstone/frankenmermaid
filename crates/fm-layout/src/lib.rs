@@ -11558,13 +11558,10 @@ fn class_member_row_width(
     // The renderers draw generics rewritten (`List~int~` -> `List<int>`), so measure the rewritten
     // row: the substitution is character-for-character but `<`/`>` and `~` are not the same width.
     row.push_str(&fm_core::class_member_display_name(&member.name, is_method));
-    if is_method {
-        if member.is_abstract {
-            row.push('*');
-        } else if member.is_static {
-            row.push('$');
-        }
-    }
+    // ⚠️ NO CLASSIFIER CHARACTER (bd-r2gll). The renderers carry a method's `$`/`*` as a STYLE —
+    // `text-decoration:underline` / `font-style:italic`, as mermaid does — not as a byte in the row
+    // text, so measuring one here would size every static and abstract row one character too wide.
+    // This string and the drawn string move together or the box stops matching its contents.
     if let Some(ref return_type) = member.return_type {
         // ` : ` matches what the renderers draw (bd-ci658). This string is what the BOX IS SIZED
         // FROM, so it has to move in the same commit as they do or the row is measured one

@@ -2946,6 +2946,21 @@ impl TermRenderer {
                 break;
             }
             let vis = visibility_symbol(method.visibility);
+            // ⚠️ THIS BACKEND DELIBERATELY KEEPS THE LITERAL CHARACTER (bd-r2gll), and it is the one
+            // arm of the five that does. Everywhere else the classifier became a STYLE, matching
+            // mermaid: `text-decoration:underline` for static, `font-style:italic` for abstract,
+            // with no `$`/`*` in the drawn text.
+            //
+            // A terminal grid cannot express either. `TermRenderResult.output` is a plain `String`
+            // of cells with no ANSI in it anywhere in this renderer, so calling
+            // `class_member_classifier_css` here would mean discarding its answer and drawing
+            // nothing — silently losing the static/abstract distinction rather than rendering it
+            // differently. Keeping the marker preserves the information in the only channel this
+            // backend has. mermaid has no terminal target, so nothing is diverging FROM anything.
+            //
+            // This is why the row text is built here rather than shared: the string genuinely
+            // differs between backends, and `fm_layout::class_member_row_width` measures the
+            // classifier-free form the SVG and canvas draw.
             let suffix = if method.is_abstract {
                 "*"
             } else if method.is_static {
