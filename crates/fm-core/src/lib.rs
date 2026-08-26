@@ -5959,6 +5959,40 @@ pub struct DeckManifest {
     pub node_slide_index: BTreeMap<String, Vec<String>>,
 }
 
+/// Whether deck manifests are emitted for this diagram family.
+///
+/// A manifest references SVG elements by id, so it exists ONLY for families whose SVG
+/// renderer emits per-node addressable groups (`fm-node-*` with `data-id`). The chart-style
+/// special render paths (pie, quadrant, xyChart, sankey, gantt, packet) draw their content
+/// without per-node groups — a deck over them would reference elements that do not exist.
+/// The list lives here (not in fm-render-svg) so the parser's semantic pass can warn without
+/// a renderer dependency; fm-render-svg's supported-family contract test is the proof that
+/// every family listed here really does emit per-node ids.
+#[must_use]
+pub const fn deck_manifest_supported(diagram_type: DiagramType) -> bool {
+    matches!(
+        diagram_type,
+        DiagramType::Flowchart
+            | DiagramType::Class
+            | DiagramType::State
+            | DiagramType::Er
+            | DiagramType::C4Context
+            | DiagramType::C4Container
+            | DiagramType::C4Component
+            | DiagramType::C4Dynamic
+            | DiagramType::C4Deployment
+            | DiagramType::ArchitectureBeta
+            | DiagramType::Requirement
+            | DiagramType::Mindmap
+            | DiagramType::Sequence
+            | DiagramType::GitGraph
+            | DiagramType::Timeline
+            | DiagramType::Journey
+            | DiagramType::Kanban
+            | DiagramType::BlockBeta
+    )
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MermaidTextRange {

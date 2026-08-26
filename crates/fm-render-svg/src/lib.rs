@@ -13,6 +13,7 @@
 mod a11y;
 mod attributes;
 pub mod cga_transform;
+mod deck;
 mod defs;
 mod document;
 mod element;
@@ -26,6 +27,7 @@ pub use a11y::{
     describe_node,
 };
 pub use attributes::{Attribute, AttributeValue, Attributes};
+pub use deck::{deck_manifest, render_svg_with_deck};
 pub use defs::{ArrowheadMarker, DefsBuilder, Filter, Gradient, GradientStop, MarkerOrient};
 pub use document::SvgDocument;
 pub use element::{Element, ElementKind};

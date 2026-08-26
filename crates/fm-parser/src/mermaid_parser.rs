@@ -12843,6 +12843,18 @@ fn validate_deck_semantics(builder: &mut IrBuilder) {
         ));
     }
 
+    if !fm_core::deck_manifest_supported(builder.ir().diagram_type) {
+        builder.add_diagnostic(deck_semantic_warning(
+            format!(
+                "deck: diagram family '{:?}' has no addressable elements; no deck manifest \
+                 will be emitted",
+                builder.ir().diagram_type
+            ),
+            deck.span,
+            None,
+        ));
+    }
+
     // Resolve a selector and emit the unknown-selector warning (with a did-you-mean when a
     // candidate sits within Levenshtein distance 2). Returns the members it contributes.
     let resolve_with_warnings =
