@@ -159,3 +159,108 @@ fn cluster_rect(svg: &str) -> Option<String> {
         .find(|element| element.contains("fm-cluster"))
         .map(|element| format!("<rect{element}>"))
 }
+
+// ── The label half of a `style` directive (styles2String parity) ───────────────────────────────
+
+/// A `style` directive on a subgraph is TWO styles, and mermaid says exactly which is which.
+///
+/// REFERENCE, read out of the pinned mermaid 11.15.0 bundle rather than assumed. `styles2String`
+/// partitions the declaration list with an `isLabelStyle` predicate:
+///
+/// ```text
+/// isLabelStyle = p => p === "color" || p === "font-size" || p === "font-family"
+///   || p === "font-weight" || p === "font-style" || p === "text-decoration"
+///   || p === "text-align" || p === "text-transform" || p === "line-height"
+///   || p === "letter-spacing" || p === "word-spacing" || p === "text-shadow"
+///   || p === "text-overflow" || p === "white-space" || p === "word-wrap"
+///   || p === "word-break" || p === "overflow-wrap" || p === "hyphens"
+///
+/// styles2String = e => { ... t.forEach(s => { let l = s[0];
+///     isLabelStyle(l) ? r.push(...)      // -> labelStyles, applied to the LABEL
+///                     : i.push(...) })   // -> nodeStyles,  applied to the SHAPE
+///   ... return { labelStyles: r.join(";"), nodeStyles: i.join(";") } }
+/// ```
+///
+/// and its own db confirms the input side: for `style one fill:#ff0000,color:#123456` the group
+/// node carries `cssStyles: ["fill:#ff0000", "color:#123456"]`, which that function then splits.
+///
+/// We drew ALL of it on the `<rect>`. CSS `color` does nothing on a rect, so the title silently
+/// kept the theme colour and the author's declaration was inert. The NODE path in this renderer
+/// already did the partition (`split_style_properties`, which also maps `color` -> `fill` because
+/// SVG text needs `fill`); the cluster path was its unported sibling.
+const SPLIT: &str = "flowchart TD\n  subgraph one[One]\n    a[A]\n  end\n  \
+                     style one fill:#ff0000,color:#123456,stroke-width:4px\n";
+
+/// Extract the tag text of the first element whose attributes contain `needle`.
+fn element_containing<'a>(svg: &'a str, tag: &str, needle: &str) -> &'a str {
+    let mut rest = svg;
+    while let Some(start) = rest.find(tag) {
+        rest = &rest[start..];
+        let end = rest.find('>').expect("unterminated element") + 1;
+        let element = &rest[..end];
+        if element.contains(needle) {
+            return element;
+        }
+        rest = &rest[end..];
+    }
+    panic!("no {tag} element containing {needle} in:\n{svg}");
+}
+
+#[test]
+fn a_label_property_styles_the_title_and_not_the_box() {
+    let svg = fm_render_svg::render_svg(&fm_parser::parse(SPLIT).ir);
+    let rect = element_containing(&svg, "<rect", "fm-cluster");
+    let label = element_containing(&svg, "<text", "fm-cluster-label");
+
+    // The shape keeps the shape properties.
+    assert!(
+        rect.contains("fill:#ff0000") && rect.contains("stroke-width:4px"),
+        "the cluster rect lost its shape properties: {rect}"
+    );
+    // ⚠️ THE NEGATIVE HALF, and the one that fails on the old behaviour: `color` must NOT be on the
+    // rect. Asserting only that the label got it would pass while the rect still carried a dead
+    // `color` declaration, which is precisely what shipped.
+    assert!(
+        !rect.contains("color:"),
+        "`color` is a LABEL property and does nothing on a rect, but the rect carries it: {rect}"
+    );
+    // The label gets it, as `fill` — SVG text has no `color` presentation attribute.
+    assert!(
+        label.contains("fill:#123456"),
+        "the declared label colour never reached the cluster title: {label}"
+    );
+    // ...and must not inherit the shape's properties.
+    assert!(
+        !label.contains("#ff0000") && !label.contains("stroke-width"),
+        "shape properties leaked onto the cluster label: {label}"
+    );
+}
+
+/// CONTROL for the mapping direction: `color` must arrive as `fill`, not as a literal `color`.
+///
+/// An implementation that split the list correctly but forwarded the property name verbatim would
+/// pass every assertion above except this one, and would still render an unstyled title.
+#[test]
+fn the_label_colour_is_mapped_to_fill_not_left_as_color() {
+    let svg = fm_render_svg::render_svg(&fm_parser::parse(SPLIT).ir);
+    let label = element_containing(&svg, "<text", "fm-cluster-label");
+
+    assert!(
+        !label.contains("color:#123456"),
+        "the label kept the CSS property name `color`, which SVG text ignores: {label}"
+    );
+}
+
+/// A shape-only declaration must leave the label with no inline style at all — otherwise every
+/// styled cluster gains an empty `style=""` and the split is doing something on inputs it should
+/// not touch.
+#[test]
+fn a_shape_only_style_leaves_the_label_alone() {
+    let svg = fm_render_svg::render_svg(&fm_parser::parse(STYLED).ir);
+    let label = element_containing(&svg, "<text", "fm-cluster-label");
+
+    assert!(
+        !label.contains("style="),
+        "a fill-only subgraph style put an inline style on the label: {label}"
+    );
+}

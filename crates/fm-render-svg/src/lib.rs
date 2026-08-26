@@ -2880,10 +2880,27 @@ fn resolve_node_inline_styles(
 ///
 /// Returns `None` when nothing was declared, so the caller keeps the theme fill rather than a
 /// colour resolved from an empty map.
-fn resolve_cluster_inline_style(ir: &MermaidDiagramIr, cluster_index: usize) -> Option<String> {
+/// The shape half and the label half of `style <subgraph> ...`, split the way mermaid splits it.
+///
+/// ⚠️ A `style` DIRECTIVE IS TWO STYLES, NOT ONE. mermaid partitions the declaration list in
+/// `styles2String`: every property its `isLabelStyle` predicate accepts goes to `labelStyles` and
+/// is applied to the label, and everything else goes to `nodeStyles` and is applied to the shape.
+/// So `style one fill:#ff0000,color:#123456` paints the container red AND the title `#123456`.
+///
+/// This renderer already did exactly that for NODES — `split_style_properties` — and the cluster
+/// path was its asymmetric sibling: it merged every property into one string and put the lot on the
+/// `<rect>`. `color` on a rect does nothing, so a cluster title styled by its author silently kept
+/// the theme colour. The node path is also where the `color` -> `fill` mapping lives, which SVG
+/// text needs and CSS `color` does not provide.
+///
+/// Returns `(shape_css, label_css)`.
+fn resolve_cluster_inline_styles(
+    ir: &MermaidDiagramIr,
+    cluster_index: usize,
+) -> (Option<String>, Option<String>) {
     use fm_core::IrStyleTarget;
     if ir.style_refs.is_empty() {
-        return None;
+        return (None, None);
     }
 
     let mut merged = BTreeMap::new();
@@ -2895,7 +2912,8 @@ fn resolve_cluster_inline_style(ir: &MermaidDiagramIr, cluster_index: usize) -> 
         }
     }
 
-    style_map_to_css(&merged)
+    let (shape, text) = split_style_properties(&merged);
+    (style_map_to_css(&shape), style_map_to_css(&text))
 }
 
 fn resolve_edge_inline_style(ir: &MermaidDiagramIr, edge_index: usize) -> Option<String> {
@@ -4496,7 +4514,8 @@ fn render_layout_to_svg(
             .class("fm-cluster");
         // Resolved BEFORE the theme's fill-opacity, because whether the author declared a fill
         // decides whether that opacity applies at all.
-        let declared_cluster_style = resolve_cluster_inline_style(ir, cluster.cluster_index);
+        let (declared_cluster_style, declared_cluster_label_style) =
+            resolve_cluster_inline_styles(ir, cluster.cluster_index);
         // ⚠️ THE THEME'S CLUSTER FILL-OPACITY IS NOT APPLIED TO A DECLARED FILL. `0.08` exists to
         // make an UNSTYLED container a faint tint behind its contents. Applying it to a colour the
         // author asked for renders that colour at 8% -- `style one fill:#ff0000` came out as a
@@ -4584,6 +4603,14 @@ fn render_layout_to_svg(
                     .fill(&label_color)
                     .class("fm-cluster-label")
                     .build();
+                // The label half of the author's `style` directive, applied here rather than to the
+                // rect. Inline `style` beats both the `fill` attribute above and the
+                // `.fm-cluster-label` rule, so a declared `color` wins over the theme exactly as a
+                // declared `fill` wins on the shape.
+                let text = match declared_cluster_label_style.as_deref() {
+                    Some(css) => text.attr("style", css),
+                    None => text,
+                };
                 let text = if config.include_source_spans {
                     apply_span_metadata(text, cluster.span)
                 } else {
