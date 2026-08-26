@@ -1,0 +1,20 @@
+erDiagram
+%%{deck: {
+  slides: [
+    { id: 'everything', nodes: ['*'], reveal: 'auto' },
+    { id: 'orders', nodes: ['CUSTOMER', 'ORDER'], edges: 'touching' },
+  ],
+}}%%
+  CUSTOMER {
+    string name PK
+    string email
+  }
+  ORDER {
+    int id PK
+    string sku
+  }
+  ITEM {
+    int id PK
+  }
+  CUSTOMER ||--o{ ORDER : places
+  ORDER ||--|{ ITEM : contains

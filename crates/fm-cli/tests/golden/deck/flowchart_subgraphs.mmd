@@ -1,0 +1,17 @@
+flowchart LR
+%%{deck: {
+  title: 'Subgraph tour',
+  tips: { core1: 'the heart of it' },
+  slides: [
+    { id: 'intro', title: 'Entry', caption: 'where it starts', nodes: ['start', 'gate'] },
+    { id: 'core', title: 'The core', nodes: ['subgraph:core'], reveal: [['core2'], ['core3']] },
+    { id: 'all', nodes: ['*'], edges: 'none' },
+  ],
+}}%%
+  start[Start] --> gate{Gate}
+  gate -->|yes| core1
+  subgraph core [Core Region]
+    core1[One] --> core2[Two]
+    core2 --> core3[Three]
+  end
+  core3 --> done([Done])

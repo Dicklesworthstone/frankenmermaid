@@ -1,0 +1,13 @@
+stateDiagram-v2
+%%{deck: {
+  slides: [
+    { id: 'happy', title: 'Happy path', nodes: ['Idle', 'Busy', 'Done'], reveal: 'auto' },
+    { id: 'errors', nodes: ['Busy', 'Failed'], edges: 'touching' },
+  ],
+}}%%
+  [*] --> Idle
+  Idle --> Busy: start
+  Busy --> Done: ok
+  Busy --> Failed: boom
+  Failed --> Idle: retry
+  Done --> [*]

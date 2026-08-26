@@ -1,0 +1,11 @@
+flowchart TD
+%%{deck: {
+  slides: [
+    { id: 'loop', title: 'The retry loop', nodes: ['fetch', 'check', 'retry'], reveal: 'auto' },
+    { id: 'exit', nodes: ['check', 'done'] },
+  ],
+}}%%
+  fetch[Fetch] --> check{OK?}
+  check -->|no| retry[Backoff]
+  retry --> fetch
+  check -->|yes| done[Done]

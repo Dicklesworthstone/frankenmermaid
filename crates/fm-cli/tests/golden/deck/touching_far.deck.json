@@ -1,0 +1,79 @@
+{
+  "schemaVersion": "1.0.0",
+  "generator": "frankenmermaid",
+  "diagramType": "Flowchart",
+  "viewBox": {
+    "x": 0.0,
+    "y": 0.0,
+    "width": 1474.23,
+    "height": 258.5
+  },
+  "options": {
+    "fitMargin": 150.0,
+    "zoomMax": 1.4,
+    "dimOpacity": 0.07,
+    "autoAdvanceMs": 0
+  },
+  "slides": [
+    {
+      "id": "left",
+      "title": "The near end",
+      "bounds": {
+        "x": 92.0,
+        "y": 100.0,
+        "width": 348.15,
+        "height": 66.5
+      },
+      "fitMargin": 150.0,
+      "zoomMax": 1.4,
+      "nodes": [
+        {
+          "index": 0,
+          "sourceId": "a",
+          "elementId": "fm-node-a-0",
+          "step": 0
+        },
+        {
+          "index": 1,
+          "sourceId": "b",
+          "elementId": "fm-node-b-1",
+          "step": 0
+        }
+      ],
+      "edges": [
+        {
+          "index": 0,
+          "elementId": "fm-edge-0",
+          "step": 0,
+          "touching": false
+        },
+        {
+          "index": 1,
+          "elementId": "fm-edge-1",
+          "step": 0,
+          "touching": true
+        },
+        {
+          "index": 5,
+          "elementId": "fm-edge-5",
+          "step": 0,
+          "touching": true
+        }
+      ],
+      "maxStep": 0
+    }
+  ],
+  "overview": {
+    "enabled": true,
+    "title": "Overview",
+    "tour": true
+  },
+  "nodeSlideIndex": {
+    "fm-node-a-0": [
+      "left"
+    ],
+    "fm-node-b-1": [
+      "left"
+    ]
+  }
+}

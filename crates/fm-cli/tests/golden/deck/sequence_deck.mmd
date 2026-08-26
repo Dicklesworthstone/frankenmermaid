@@ -1,0 +1,14 @@
+sequenceDiagram
+%%{deck: {
+  slides: [
+    { id: 'handshake', nodes: ['alice', 'bob'], reveal: 'auto' },
+    { id: 'server', nodes: ['bob', 'server'], edges: 'touching' },
+  ],
+}}%%
+  participant alice
+  participant bob
+  participant server
+  alice->>bob: hello
+  bob->>server: forward
+  server-->>bob: ack
+  bob-->>alice: done

@@ -1,0 +1,12 @@
+flowchart LR
+%%{deck: {
+  slides: [
+    { id: 'left', title: 'The near end', nodes: ['a', 'b'], edges: 'touching' },
+  ],
+}}%%
+  a[Near A] --> b[Near B]
+  b --> c[Mid C]
+  c --> d[Mid D]
+  d --> e[Far E]
+  e --> f[Very Far F]
+  b --> f

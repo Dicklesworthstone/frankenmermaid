@@ -1,0 +1,15 @@
+flowchart LR
+%%{deck: {
+  slides: [
+    { id: 'tight', title: 'Just one node', nodes: ['m1'], edges: 'touching' },
+    { id: 'whole', nodes: ['subgraph:big'] },
+  ],
+}}%%
+  subgraph big [A Large Region]
+    m1[Target] --> m2[Two]
+    m2 --> m3[Three]
+    m3 --> m4[Four]
+    m4 --> m5[Five]
+  end
+  m5 --> far[Far Away]
+  far --> m1

@@ -1,0 +1,14 @@
+C4Context
+%%{deck: {
+  slides: [
+    { id: 'people', nodes: ['user', 'admin'] },
+    { id: 'systems', nodes: ['web', 'db'], reveal: [['db']] },
+  ],
+}}%%
+  Person(user, "User", "A person")
+  Person(admin, "Admin", "Operates it")
+  System(web, "Web App", "Serves pages")
+  SystemDb(db, "Database", "Stores data")
+  Rel(user, web, "Uses")
+  Rel(admin, web, "Configures")
+  Rel(web, db, "Reads/writes")

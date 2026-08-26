@@ -85,6 +85,9 @@ mimalloc = { version = "0.1", default-features = false }
 criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3.25"
 fm-render-canvas.workspace = true
+# Deck-manifest property suites (bd-xj5nc): totality, cross-artifact element-id consistency,
+# bounds/step invariants over generated decks. Same version as the other proptest consumers.
+proptest = "1.6.0"
 # Cargo unifies dev-dependency features into test and bench builds only, so `debug_test.rs` keeps
 # its JSON subscriber while the shipped binary drops `tracing-serde` (bd-53p4).
 tracing-subscriber = { workspace = true, features = ["json"] }

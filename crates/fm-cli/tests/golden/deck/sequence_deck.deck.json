@@ -1,0 +1,130 @@
+{
+  "schemaVersion": "1.0.0",
+  "generator": "frankenmermaid",
+  "diagramType": "Sequence",
+  "viewBox": {
+    "x": 0.0,
+    "y": 0.0,
+    "width": 718.25,
+    "height": 806.5
+  },
+  "options": {
+    "fitMargin": 150.0,
+    "zoomMax": 1.4,
+    "dimOpacity": 0.07,
+    "autoAdvanceMs": 0
+  },
+  "slides": [
+    {
+      "id": "handshake",
+      "title": "handshake",
+      "bounds": {
+        "x": 40.0,
+        "y": 40.0,
+        "width": 363.35,
+        "height": 546.5
+      },
+      "fitMargin": 150.0,
+      "zoomMax": 1.4,
+      "nodes": [
+        {
+          "index": 0,
+          "sourceId": "alice",
+          "elementId": "fm-node-alice-0",
+          "step": 0
+        },
+        {
+          "index": 1,
+          "sourceId": "bob",
+          "elementId": "fm-node-bob-1",
+          "step": 0
+        }
+      ],
+      "edges": [
+        {
+          "index": 0,
+          "elementId": "fm-edge-0",
+          "step": 0,
+          "touching": false
+        },
+        {
+          "index": 3,
+          "elementId": "fm-edge-3",
+          "step": 0,
+          "touching": false
+        }
+      ],
+      "maxStep": 0
+    },
+    {
+      "id": "server",
+      "title": "server",
+      "bounds": {
+        "x": 303.35,
+        "y": 40.0,
+        "width": 374.9,
+        "height": 426.5
+      },
+      "fitMargin": 150.0,
+      "zoomMax": 1.4,
+      "nodes": [
+        {
+          "index": 1,
+          "sourceId": "bob",
+          "elementId": "fm-node-bob-1",
+          "step": 0
+        },
+        {
+          "index": 2,
+          "sourceId": "server",
+          "elementId": "fm-node-server-2",
+          "step": 0
+        }
+      ],
+      "edges": [
+        {
+          "index": 0,
+          "elementId": "fm-edge-0",
+          "step": 0,
+          "touching": true
+        },
+        {
+          "index": 1,
+          "elementId": "fm-edge-1",
+          "step": 0,
+          "touching": false
+        },
+        {
+          "index": 2,
+          "elementId": "fm-edge-2",
+          "step": 0,
+          "touching": false
+        },
+        {
+          "index": 3,
+          "elementId": "fm-edge-3",
+          "step": 0,
+          "touching": true
+        }
+      ],
+      "maxStep": 0
+    }
+  ],
+  "overview": {
+    "enabled": true,
+    "title": "Overview",
+    "tour": true
+  },
+  "nodeSlideIndex": {
+    "fm-node-alice-0": [
+      "handshake"
+    ],
+    "fm-node-bob-1": [
+      "handshake",
+      "server"
+    ],
+    "fm-node-server-2": [
+      "server"
+    ]
+  }
+}
