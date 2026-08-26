@@ -5774,6 +5774,191 @@ impl Default for IrDeckOverview {
     }
 }
 
+// ── Deck manifest (the renderer-agnostic presentation contract) ────────
+
+/// The deck manifest schema version. Semver-as-string so external players can gate; within
+/// the 1.x line every change is ADDITIVE ONLY — removing or renaming a field is a major bump.
+pub const DECK_MANIFEST_SCHEMA_VERSION: &str = "1.0.0";
+
+/// A rectangle in SVG viewBox space, rounded to two decimals at build time.
+///
+/// ViewBox space — not raw layout space — because the runtime pins the rendered SVG so one
+/// user unit equals one CSS pixel; manifest consumers never re-derive the renderer's private
+/// padding/title/legend offsets.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct DeckRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Deck-wide presentation knobs, resolved from the directive (defaults applied).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeckManifestOptions {
+    /// ViewBox-space padding the runtime applies around a slide's tight `bounds` when fitting.
+    pub fit_margin: f32,
+    /// Maximum CSS pixels per SVG user unit when fitting (caps how far a tiny slide zooms in).
+    pub zoom_max: f32,
+    /// Opacity for elements outside the current scene, already clamped to [0, 1].
+    pub dim_opacity: f32,
+    /// Kiosk autoplay interval in milliseconds; 0 disables autoplay.
+    pub auto_advance_ms: u32,
+}
+
+impl Default for DeckManifestOptions {
+    fn default() -> Self {
+        Self {
+            fit_margin: 150.0,
+            zoom_max: 1.4,
+            dim_opacity: 0.07,
+            auto_advance_ms: 0,
+        }
+    }
+}
+
+/// One member node of a slide.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeckManifestNode {
+    /// Index into the IR's `nodes` vector.
+    pub index: usize,
+    /// The author's node id (what `data-id` carries in the SVG).
+    pub source_id: String,
+    /// The stable SVG element id (`fm-node-{sanitized}-{index}`) — the join key with the SVG.
+    pub element_id: String,
+    /// Reveal step: 0 = visible from slide entry, k reveals on the k-th advance.
+    pub step: usize,
+    /// Merged tooltip: the deck's `tips` entry wins over IR interaction tooltip; `None` when
+    /// neither exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tooltip: Option<String>,
+}
+
+/// One included edge of a slide (derived by the slide's edge policy, never authored).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeckManifestEdge {
+    /// Index into the IR's `edges` vector.
+    pub index: usize,
+    /// The stable SVG element id (`fm-edge-{index}`).
+    pub element_id: String,
+    /// Derived step: max of its endpoints' steps (on-slide endpoint only for touching edges).
+    pub step: usize,
+    /// `true` when the far endpoint is off-slide (`edges: "touching"`): runtimes render it at
+    /// half-dim and it never influences the slide's camera bounds.
+    pub touching: bool,
+}
+
+/// One included cluster of a slide (any cluster with at least one member node on the slide).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeckManifestCluster {
+    /// Index into the layout's cluster list.
+    pub index: usize,
+    /// The stable SVG element id (`fm-cluster-{index}`).
+    pub element_id: String,
+    /// Derived step: min of its in-slide members' steps (a cluster box appears with its first
+    /// member, never as an empty box).
+    pub step: usize,
+    /// `true` when EVERY member of the cluster is on the slide — only such clusters steer the
+    /// camera; partially-contained ones render half-dim as context.
+    pub camera_contained: bool,
+}
+
+/// Precomputed reveal list for one step, in the exact stagger order runtimes replay: nodes by
+/// (rank, node index), then edges by index, then clusters by index.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeckManifestStep {
+    /// 1-based step number (step 0 elements are visible at slide entry and appear in no list).
+    pub step: usize,
+    pub element_ids: Vec<String>,
+}
+
+/// One slide scene: membership, reveal steps, and the tight camera rectangle.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeckManifestSlide {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub caption: String,
+    /// TIGHT union (viewBox space) of member node boxes, fully-contained cluster boxes, and
+    /// induced-edge points. The runtime applies `fit_margin`/`zoom_max` itself because the fit
+    /// depends on the viewer's pixel viewport, which the engine cannot know.
+    pub bounds: DeckRect,
+    /// Resolved margin for this slide (slide override or deck default).
+    pub fit_margin: f32,
+    /// Resolved zoom cap for this slide (slide override or deck default).
+    pub zoom_max: f32,
+    /// Member nodes, sorted by IR node index.
+    pub nodes: Vec<DeckManifestNode>,
+    /// Included edges, sorted by IR edge index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<DeckManifestEdge>,
+    /// Included clusters, sorted by layout cluster index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clusters: Vec<DeckManifestCluster>,
+    /// Highest step number; 0 means the slide has no reveals.
+    pub max_step: usize,
+    /// Per-step reveal lists for steps 1..=max_step (every list non-empty by construction).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<DeckManifestStep>,
+}
+
+/// The auto-appended overview scene: the whole diagram, optionally with a window-replay tour.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeckManifestOverview {
+    pub enabled: bool,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub caption: String,
+    /// Replay each slide's `bounds` window with an animated border rect; slide rects double as
+    /// a clickable table of contents.
+    pub tour: bool,
+}
+
+impl Default for DeckManifestOverview {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            title: "Overview".to_string(),
+            caption: String::new(),
+            tour: true,
+        }
+    }
+}
+
+/// The renderer-agnostic presentation contract (epic bd-z7g6k, schema bd-3f8ox).
+///
+/// Produced in the SAME parse+layout invocation as the SVG it addresses, so the `element_id`
+/// join keys cannot drift. Deterministic by construction: a pure function of (source, config)
+/// with `BTreeMap` collections, index-sorted lists, and 2-decimal coordinate rounding —
+/// byte-identical across runs and safe to commit as a golden artifact.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeckManifest {
+    /// [`DECK_MANIFEST_SCHEMA_VERSION`]; additive-only within 1.x.
+    pub schema_version: String,
+    /// Always `"frankenmermaid"` — lets multi-tool players identify the producer.
+    pub generator: String,
+    pub diagram_type: DiagramType,
+    /// Deck title from the directive, when authored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The rendered SVG's full viewBox — equals the `viewBox` attribute on the paired SVG.
+    pub view_box: DeckRect,
+    pub options: DeckManifestOptions,
+    pub slides: Vec<DeckManifestSlide>,
+    pub overview: DeckManifestOverview,
+    /// elementId → ids of the slides containing that element, in slide order. Powers
+    /// click-a-dimmed-node-to-travel in O(1). `BTreeMap` for deterministic serialization.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub node_slide_index: BTreeMap<String, Vec<String>>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MermaidTextRange {
@@ -6609,32 +6794,36 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        ALLOWED_STYLE_PROPERTIES_REFERENCE, ArrowType, DegradationContext, DegradationOperator,
-        Diagnostic, DiagnosticCategory, DiagnosticSeverity, DiagramPalettePreset, DiagramType,
-        EdgeMap, FragmentAlternative, FragmentKind, GanttDate, GanttExclude, GanttTaskType,
-        GanttTickInterval, GraphDirection, IrActivation, IrAttributeKey, IrCluster, IrClusterId,
-        IrDeck, IrDeckEdgePolicy, IrDeckOptions, IrDeckOverview, IrDeckReveal, IrDeckSlide, IrEdge,
-        IrEdgeKind, IrEndpoint, IrEntityAttribute, IrGanttMeta, IrGanttSection, IrGanttTask,
-        IrGraphCluster, IrGraphEdge, IrGraphNode, IrInlineStyle, IrLabel, IrLabelId,
-        IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup, IrPort, IrPortId,
-        IrPortSideHint, IrSequenceAutonumberRange, IrSequenceFragment, IrSequenceMeta,
-        IrSequenceNote, IrStyleDef, IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyAxis,
-        IrXyChartMeta, IrXySeries, IrXySeriesKind, LifecycleEventKind, MERMAID_SCHEMA_VERSION,
-        MermaidBudgetLedger, MermaidConfig, MermaidDecisionWeight, MermaidDegradationPlan,
-        MermaidDiagramIr, MermaidError, MermaidErrorCode, MermaidFallbackAction,
-        MermaidFallbackPolicy, MermaidFidelity, MermaidGlyphMode, MermaidGuardReport,
-        MermaidLayoutDecisionAlternative, MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord,
-        MermaidLensBinding, MermaidLensEdit, MermaidLensEditResult, MermaidLensError,
-        MermaidNativePressureSignals, MermaidPressureReport, MermaidPressureTier,
-        MermaidQualityMode, MermaidSanitizeMode, MermaidSourceMap, MermaidSourceMapEntry,
-        MermaidSourceMapKind, MermaidSupportLevel, MermaidTextRange, MermaidWarningCode,
-        MermaidWasmPressureSignals, NodeMap, NodeSet, NodeShape, NotePosition, Position, Span,
-        StructuredDiagnostic, apply_lens_edit, build_lens_bindings, capability_matrix,
-        capability_matrix_json_pretty, capability_readme_supported_diagram_types_markdown,
-        capability_readme_surface_markdown, documented_diagram_types, is_allowed_style_property,
-        is_safe_link_target, mermaid_layout_guard_observability, parse_mermaid_js_config_value,
-        parse_style_string, parse_style_string_with_rejections, resolve_span_text_range,
-        sanitize_style_value, scale_budget, to_init_parse,
+        ALLOWED_STYLE_PROPERTIES_REFERENCE, ArrowType, DECK_MANIFEST_SCHEMA_VERSION, DeckManifest,
+        DeckManifestCluster, DeckManifestEdge, DeckManifestNode, DeckManifestOptions,
+        DeckManifestOverview, DeckManifestSlide, DeckManifestStep, DeckRect, DegradationContext,
+        DegradationOperator, Diagnostic, DiagnosticCategory, DiagnosticSeverity,
+        DiagramPalettePreset, DiagramType, EdgeMap, FragmentAlternative, FragmentKind, GanttDate,
+        GanttExclude, GanttTaskType, GanttTickInterval, GraphDirection, IrActivation,
+        IrAttributeKey, IrCluster, IrClusterId, IrDeck, IrDeckEdgePolicy, IrDeckOptions,
+        IrDeckOverview, IrDeckReveal, IrDeckSlide, IrEdge, IrEdgeKind, IrEndpoint,
+        IrEntityAttribute, IrGanttMeta, IrGanttSection, IrGanttTask, IrGraphCluster, IrGraphEdge,
+        IrGraphNode, IrInlineStyle, IrLabel, IrLabelId, IrLifecycleEvent, IrNode, IrNodeId,
+        IrNodeKind, IrParticipantGroup, IrPort, IrPortId, IrPortSideHint,
+        IrSequenceAutonumberRange, IrSequenceFragment, IrSequenceMeta, IrSequenceNote, IrStyleDef,
+        IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries,
+        IrXySeriesKind, LifecycleEventKind, MERMAID_SCHEMA_VERSION, MermaidBudgetLedger,
+        MermaidConfig, MermaidDecisionWeight, MermaidDegradationPlan, MermaidDiagramIr,
+        MermaidError, MermaidErrorCode, MermaidFallbackAction, MermaidFallbackPolicy,
+        MermaidFidelity, MermaidGlyphMode, MermaidGuardReport, MermaidLayoutDecisionAlternative,
+        MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidLensBinding,
+        MermaidLensEdit, MermaidLensEditResult, MermaidLensError, MermaidNativePressureSignals,
+        MermaidPressureReport, MermaidPressureTier, MermaidQualityMode, MermaidSanitizeMode,
+        MermaidSourceMap, MermaidSourceMapEntry, MermaidSourceMapKind, MermaidSupportLevel,
+        MermaidTextRange, MermaidWarningCode, MermaidWasmPressureSignals, NodeMap, NodeSet,
+        NodeShape, NotePosition, Position, Span, StructuredDiagnostic, apply_lens_edit,
+        build_lens_bindings, capability_matrix, capability_matrix_json_pretty,
+        capability_readme_supported_diagram_types_markdown, capability_readme_surface_markdown,
+        documented_diagram_types, is_allowed_style_property, is_safe_link_target,
+        mermaid_cluster_element_id, mermaid_edge_element_id, mermaid_layout_guard_observability,
+        mermaid_node_element_id, parse_mermaid_js_config_value, parse_style_string,
+        parse_style_string_with_rejections, resolve_span_text_range, sanitize_style_value,
+        scale_budget, to_init_parse,
     };
 
     fn sample_span(line: u32, start_col: u32, end_col: u32) -> Span {
@@ -6704,6 +6893,167 @@ mod tests {
         );
         assert!(decoded.deck.is_none());
         assert_eq!(decoded, ir);
+    }
+
+    fn sample_deck_manifest() -> DeckManifest {
+        let mut node_slide_index = BTreeMap::new();
+        node_slide_index.insert(
+            "fm-node-parser-3".to_string(),
+            vec!["intro".to_string(), "layout".to_string()],
+        );
+        DeckManifest {
+            schema_version: DECK_MANIFEST_SCHEMA_VERSION.to_string(),
+            generator: "frankenmermaid".to_string(),
+            diagram_type: DiagramType::Flowchart,
+            title: Some("How it works".to_string()),
+            view_box: DeckRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1892.4,
+                height: 1104.0,
+            },
+            options: DeckManifestOptions {
+                fit_margin: 140.0,
+                ..DeckManifestOptions::default()
+            },
+            slides: vec![DeckManifestSlide {
+                id: "intro".to_string(),
+                title: "One shared IR".to_string(),
+                caption: "every parser writes it".to_string(),
+                bounds: DeckRect {
+                    x: 40.0,
+                    y: 262.5,
+                    width: 612.2,
+                    height: 341.0,
+                },
+                fit_margin: 140.0,
+                zoom_max: 1.4,
+                nodes: vec![
+                    DeckManifestNode {
+                        index: 0,
+                        source_id: "src".to_string(),
+                        element_id: mermaid_node_element_id("src", 0),
+                        step: 0,
+                        tooltip: None,
+                    },
+                    DeckManifestNode {
+                        index: 3,
+                        source_id: "parser".to_string(),
+                        element_id: mermaid_node_element_id("parser", 3),
+                        step: 1,
+                        tooltip: Some("Never panics.".to_string()),
+                    },
+                ],
+                edges: vec![DeckManifestEdge {
+                    index: 2,
+                    element_id: mermaid_edge_element_id(2),
+                    step: 1,
+                    touching: false,
+                }],
+                clusters: vec![DeckManifestCluster {
+                    index: 0,
+                    element_id: mermaid_cluster_element_id(0),
+                    step: 0,
+                    camera_contained: true,
+                }],
+                max_step: 1,
+                steps: vec![DeckManifestStep {
+                    step: 1,
+                    element_ids: vec![
+                        mermaid_node_element_id("parser", 3),
+                        mermaid_edge_element_id(2),
+                    ],
+                }],
+            }],
+            overview: DeckManifestOverview::default(),
+            node_slide_index,
+        }
+    }
+
+    /// Round-trip plus the element-id join contract: manifest ids come from the SAME fm-core
+    /// functions the SVG renderer uses (bd-3f8ox).
+    #[test]
+    fn deck_manifest_roundtrip_and_element_id_join() {
+        let manifest = sample_deck_manifest();
+        let encoded = serde_json::to_string(&manifest).expect("serialize manifest");
+        let decoded: DeckManifest = serde_json::from_str(&encoded).expect("deserialize manifest");
+        assert_eq!(decoded, manifest);
+        assert_eq!(manifest.slides[0].nodes[1].element_id, "fm-node-parser-3");
+        assert_eq!(manifest.slides[0].edges[0].element_id, "fm-edge-2");
+        assert_eq!(manifest.slides[0].clusters[0].element_id, "fm-cluster-0");
+    }
+
+    /// SCHEMA STABILITY (bd-3f8ox): the serialized field names ARE the external contract —
+    /// third-party players build against them, and within 1.x changes must be additive only.
+    /// A rename fails here as a red diff instead of shipping as a silent break.
+    #[test]
+    fn deck_manifest_field_names_are_the_frozen_contract() {
+        let manifest = sample_deck_manifest();
+        let value = serde_json::to_value(&manifest).expect("serialize manifest");
+        let object = value.as_object().expect("manifest is an object");
+        // serde_json::Value sorts object keys, so the frozen contract is the NAME SET
+        // (declaration order is not part of the JSON contract). Expected lists are sorted.
+        let top_level: Vec<&str> = object.keys().map(String::as_str).collect();
+        assert_eq!(
+            top_level,
+            [
+                "diagramType",
+                "generator",
+                "nodeSlideIndex",
+                "options",
+                "overview",
+                "schemaVersion",
+                "slides",
+                "title",
+                "viewBox",
+            ]
+        );
+        let slide = value["slides"][0].as_object().expect("slide is an object");
+        let slide_keys: Vec<&str> = slide.keys().map(String::as_str).collect();
+        assert_eq!(
+            slide_keys,
+            [
+                "bounds",
+                "caption",
+                "clusters",
+                "edges",
+                "fitMargin",
+                "id",
+                "maxStep",
+                "nodes",
+                "steps",
+                "title",
+                "zoomMax",
+            ]
+        );
+        assert_eq!(
+            value["options"]
+                .as_object()
+                .expect("options object")
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["autoAdvanceMs", "dimOpacity", "fitMargin", "zoomMax"]
+        );
+        assert_eq!(
+            value["slides"][0]["nodes"][1]
+                .as_object()
+                .expect("node object")
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["elementId", "index", "sourceId", "step", "tooltip"]
+        );
+        assert_eq!(
+            value["slides"][0]["clusters"][0]
+                .as_object()
+                .expect("cluster object")
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["cameraContained", "elementId", "index", "step"]
+        );
+        assert_eq!(manifest.schema_version, "1.0.0");
     }
 
     #[test]
