@@ -709,6 +709,7 @@
         <a href="#pipeline" class="hover:text-emerald-400 transition">Pipeline IR</a>
         <a href="#gallery" class="hover:text-emerald-400 transition">Gallery</a>
         <a href="#install" class="hover:text-emerald-400 transition">Install</a>
+        <a href="#deck" class="hover:text-emerald-400 transition">Deck</a>
       </nav>
 
       <!-- Quick Actions -->
@@ -761,6 +762,10 @@
         <a href="#gallery" class="mobile-nav-link p-3 rounded-xl hover:bg-emerald-500/15 hover:text-emerald-300 flex items-center justify-between transition border border-transparent hover:border-emerald-500/30">
           <span>🖼️ Specimen Gallery</span>
           <span class="text-[10px] text-slate-400 font-normal">Catalogue</span>
+        </a>
+        <a href="#deck" class="mobile-nav-link p-3 rounded-xl hover:bg-emerald-500/15 hover:text-emerald-300 flex items-center justify-between transition border border-transparent hover:border-emerald-500/30">
+          <span>🎬 Graph Deck</span>
+          <span class="text-[10px] text-slate-400 font-normal">Graph presentations</span>
         </a>
         <a href="#install" class="mobile-nav-link p-3 rounded-xl hover:bg-emerald-500/15 hover:text-emerald-300 flex items-center justify-between transition border border-transparent hover:border-emerald-500/30">
           <span>📦 Install &amp; CLI</span>
@@ -2473,6 +2478,7 @@
         <a href="https://github.com/Dicklesworthstone/frankenmermaid" target="_blank" rel="noopener" class="hover:text-emerald-400 transition">GitHub</a>
         <a href="https://frankenmermaid.pages.dev/" class="hover:text-emerald-400 transition">Live Showcase</a>
         <a href="https://github.com/Dicklesworthstone/frankenmermaid/blob/main/LICENSE" target="_blank" rel="noopener" class="hover:text-emerald-400 transition">License Terms</a>
+        <a href="#deck" class="hover:text-emerald-400 transition">Graph Deck</a>
         <a href="#top" class="hover:text-emerald-400 transition">Back to Top ↑</a>
       </div>
     </div>
@@ -6522,6 +6528,12 @@ Shared IR,Terminal ANSI,20`
       const stage = document.getElementById("deck-stage");
       if (!stage) return;
       deckMounted = true;
+      // Read the deep-link BEFORE mounting: the mount's own enterScene(0) fires
+      // onSlideChange, which rewrites the ?deck-slide= param.
+      const requestedScene = Number.parseInt(
+        new URLSearchParams(location.search).get("deck-slide") ?? "",
+        10
+      );
       try {
         const output = frankenRuntime.renderDeck(DECK_DEMO_SOURCE, { theme: "dark" });
         if (!output || !output.manifest) {
@@ -6540,9 +6552,21 @@ Shared IR,Terminal ANSI,20`
             nextBtn: document.getElementById("deck-next"),
             overviewBtn: document.getElementById("deck-overview-btn"),
           },
+          // URL state (bd-eswho): ?deck-slide=N deep-links a scene, matching the page's
+          // existing URL-state pattern; replaceState keeps back-button behavior sane.
+          onSlideChange: (index) => {
+            try {
+              const url = new URL(location.href);
+              url.searchParams.set("deck-slide", String(index));
+              history.replaceState(null, "", url);
+            } catch (e) {}
+          },
         });
         const svgEl = stage.querySelector(".fm-deck-viewport svg");
         if (svgEl) applyThemeVarsToElement(svgEl, "dark");
+        if (Number.isInteger(requestedScene) && requestedScene > 0) {
+          deckInstance.go(requestedScene);
+        }
       } catch (e) {
         deckMounted = false;
         stage.innerHTML = `<div class="absolute inset-0 flex items-center justify-center p-8 text-center">
@@ -6561,6 +6585,26 @@ Shared IR,Terminal ANSI,20`
     function initDeckSection() {
       const section = document.getElementById("deck");
       if (!section) return;
+      // Open in Theater: the demo deck is a first-class editable document (bd-eswho). The
+      // deck section keeps working afterward — the runtime resolves elements scoped to its
+      // own SVG, so the theater holding the same diagram cannot poison its element map.
+      document.getElementById("deck-open-theater")?.addEventListener("click", () => {
+        if (!els.input) return;
+        els.input.value = DECK_DEMO_SOURCE;
+        if (els.familyChip) els.familyChip.textContent = "FLOWCHART";
+        document.getElementById("playground")?.scrollIntoView({ behavior: motionBehavior() });
+        refreshEditor();
+        scheduleRender(true);
+        // (setMobilePane lives in setupEvents' closure; on mobile the pane switcher is one
+        // tap away and the scroll already lands the visitor in the theater.)
+      });
+      // A ?deck-slide= deep link means the visitor came FOR the deck: mount eagerly so
+      // go() has something to land on.
+      const wantsDeck = new URLSearchParams(location.search).has("deck-slide");
+      if (wantsDeck) {
+        mountDeckSection();
+        return;
+      }
       // Lazy mount: the deck must not compete with above-the-fold work (same philosophy as
       // the gallery miniature queue).
       if (typeof IntersectionObserver === "function") {
