@@ -6,11 +6,11 @@ use std::sync::Arc;
 use chumsky::prelude::*;
 use fm_core::{
     ArchitectureSide, ArrowType, Diagnostic, DiagnosticCategory, DiagramType, GanttDate,
-    GanttExclude, GanttTaskType, GanttTickInterval, GraphDirection, IrAttributeKey, IrC4NodeMeta,
-    IrConstraint, IrDeck, IrDeckEdgePolicy, IrDeckReveal, IrDeckSlide, IrGanttMeta, IrGanttSection,
-    IrGanttTask, IrLabelSegment, IrNodeId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind,
-    MermaidParseMode, MermaidSupportLevel, NodeShape, Position, Span, is_safe_link_target,
-    parse_mermaid_js_config_value, to_init_parse,
+    GanttExclude, GanttTaskFlags, GanttTaskType, GanttTickInterval, GraphDirection, IrAttributeKey,
+    IrC4NodeMeta, IrConstraint, IrDeck, IrDeckEdgePolicy, IrDeckReveal, IrDeckSlide, IrGanttMeta,
+    IrGanttSection, IrGanttTask, IrLabelSegment, IrNodeId, IrXyAxis, IrXyChartMeta, IrXySeries,
+    IrXySeriesKind, MermaidParseMode, MermaidSupportLevel, NodeShape, Position, Span,
+    is_safe_link_target, parse_mermaid_js_config_value, to_init_parse,
 };
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
@@ -7717,15 +7717,8 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
             }
         }
 
-        let mut classes = Vec::new();
-        match parsed_meta.task_type {
-            GanttTaskType::Done => classes.push("gantt-done"),
-            GanttTaskType::Active => classes.push("gantt-active"),
-            GanttTaskType::Critical => classes.push("gantt-critical"),
-            GanttTaskType::Milestone => classes.push("gantt-milestone"),
-            GanttTaskType::Normal => {}
-        }
-        for class_name in classes {
+        // EVERY class the tags earn, not just the primary type's (bd-124ew).
+        for class_name in parsed_meta.flags.css_classes() {
             builder.add_class_to_node(&task_id, class_name, span);
         }
 
@@ -7738,7 +7731,7 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
             end: parsed_meta.end,
             depends_on: parsed_meta.depends_on,
             progress: parsed_meta.progress,
-            task_type: parsed_meta.task_type,
+            flags: parsed_meta.flags,
         });
     }
 
@@ -7821,7 +7814,7 @@ struct ParsedGanttTaskMeta {
     end: Option<GanttDate>,
     depends_on: Vec<String>,
     progress: Option<f32>,
-    task_type: GanttTaskType,
+    flags: GanttTaskFlags,
     /// Date tokens that did NOT match the declared `dateFormat` and were only parsed by the ISO
     /// fallback (bd-v9zd). Collected here rather than warned about in place because this function
     /// has no builder; the caller emits the diagnostic.
@@ -7839,20 +7832,23 @@ fn parse_gantt_task_metadata(raw_meta: &str, date_format: Option<&str>) -> Parse
         // Case-insensitive keyword match without allocating a lowercased copy of every token — the
         // vast majority (ids, dates, `Nd` durations) match nothing. `eq_ignore_ascii_case` is identical
         // to the old `token.to_ascii_lowercase()` then `match as_str()` (both exact case-insensitive).
+        // SET, never overwrite (bd-124ew). These four tags are independent in mermaid, so
+        // `:crit, done` must leave BOTH set; assigning a single enum here is what silently threw
+        // the critical marking away.
         if token.eq_ignore_ascii_case("milestone") {
-            parsed.task_type = GanttTaskType::Milestone;
+            parsed.flags.milestone = true;
             continue;
         }
         if token.eq_ignore_ascii_case("active") {
-            parsed.task_type = GanttTaskType::Active;
+            parsed.flags.active = true;
             continue;
         }
         if token.eq_ignore_ascii_case("done") {
-            parsed.task_type = GanttTaskType::Done;
+            parsed.flags.done = true;
             continue;
         }
         if token.eq_ignore_ascii_case("crit") || token.eq_ignore_ascii_case("critical") {
-            parsed.task_type = GanttTaskType::Critical;
+            parsed.flags.crit = true;
             continue;
         }
 
@@ -14939,7 +14935,7 @@ mod tests {
     use chumsky::Parser;
     use fm_core::{
         ArrowType, DiagnosticCategory, DiagnosticSeverity, DiagramType, GanttDate, GanttExclude,
-        GanttTaskType, GanttTickInterval, GraphDirection, IrEndpoint, IrLabelSegment,
+        GanttTickInterval, GraphDirection, IrEndpoint, IrLabelSegment,
         IrXySeriesKind, MermaidParseMode, NodeShape,
     };
 
@@ -21141,7 +21137,7 @@ Rel_Back(db, app, "Responds")"#,
             "gantt\n  title Plan\n  section S1\n  Milestone1 :milestone, m1, 2024-06-01, 0d";
         let parsed = parse_mermaid(input);
         let gantt_meta = parsed.ir.gantt_meta.as_ref().expect("gantt meta");
-        assert_eq!(gantt_meta.tasks[0].task_type, GanttTaskType::Milestone);
+        assert_eq!(gantt_meta.tasks[0].flags.primary_type(), fm_core::GanttTaskType::Milestone);
         assert_eq!(gantt_meta.tasks[0].task_id.as_deref(), Some("m1"));
         assert_eq!(gantt_meta.tasks[0].end, Some(GanttDate::DurationDays(0)));
     }
@@ -21151,8 +21147,8 @@ Rel_Back(db, app, "Responds")"#,
         let input = "gantt\n  section S1\n  Done task :done, d1, 2024-01-01, 10d\n  Active task :active, a1, 2024-01-11, 10d\n  Future task :f1, after a1, 5d";
         let parsed = parse_mermaid(input);
         let gantt_meta = parsed.ir.gantt_meta.as_ref().expect("gantt meta");
-        assert_eq!(gantt_meta.tasks[0].task_type, GanttTaskType::Done);
-        assert_eq!(gantt_meta.tasks[1].task_type, GanttTaskType::Active);
+        assert_eq!(gantt_meta.tasks[0].flags.primary_type(), fm_core::GanttTaskType::Done);
+        assert_eq!(gantt_meta.tasks[1].flags.primary_type(), fm_core::GanttTaskType::Active);
         assert_eq!(gantt_meta.tasks[2].depends_on, vec!["a1".to_string()]);
         let done_node = &parsed.ir.nodes[gantt_meta.tasks[0].node.0];
         let active_node = &parsed.ir.nodes[gantt_meta.tasks[1].node.0];
@@ -21190,7 +21186,7 @@ Rel_Back(db, app, "Responds")"#,
                 GanttExclude::Dates(vec!["2026-02-14".to_string(), "2026-02-15".to_string()])
             ]
         );
-        assert_eq!(gantt_meta.tasks[0].task_type, GanttTaskType::Critical);
+        assert_eq!(gantt_meta.tasks[0].flags.primary_type(), fm_core::GanttTaskType::Critical);
         assert_eq!(
             gantt_meta.tasks[0].end,
             Some(GanttDate::Absolute("2026-02-12".to_string()))

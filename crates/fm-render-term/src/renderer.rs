@@ -3361,9 +3361,9 @@ fn render_gantt_cell(
                     bar_origin,
                     (bar_origin + bar_area_width / 2).max(bar_origin + 1),
                 ));
-            let bar_char = if matches!(task.task_type, GanttTaskType::Critical) {
+            let bar_char = if matches!(task.flags.primary_type(), GanttTaskType::Critical) {
                 '\u{2593}' // ▓
-            } else if matches!(task.task_type, GanttTaskType::Done) {
+            } else if matches!(task.flags.primary_type(), GanttTaskType::Done) {
                 '\u{2591}' // ░
             } else {
                 '\u{2588}' // █
@@ -3553,7 +3553,7 @@ fn render_quadrant_cell(
 mod tests {
     use super::*;
     use fm_core::{
-        DiagramType, GanttDate, GanttTaskType, IrEdge, IrEndpoint, IrGanttMeta, IrGanttSection,
+        DiagramType, GanttDate, IrEdge, IrEndpoint, IrGanttMeta, IrGanttSection,
         IrGanttTask, IrLabel, IrLabelId, IrNode, IrNodeId,
     };
     use fm_layout::{
@@ -4367,7 +4367,7 @@ mod tests {
                 task_id: Some("build_1".to_string()),
                 start: Some(GanttDate::Absolute("2026-02-01".to_string())),
                 end: Some(GanttDate::DurationDays(2)),
-                task_type: GanttTaskType::Done,
+                flags: fm_core::GanttTaskFlags { done: true, ..Default::default() },
                 ..Default::default()
             },
             IrGanttTask {
@@ -4384,7 +4384,7 @@ mod tests {
             tasks.push(IrGanttTask {
                 node: IrNodeId(index % 2),
                 section_idx: 0,
-                task_type: GanttTaskType::Normal,
+                flags: fm_core::GanttTaskFlags::default(),
                 ..Default::default()
             });
         }

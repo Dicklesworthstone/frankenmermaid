@@ -5896,13 +5896,10 @@ fn gantt_bar_accessible_name(label: &str, task: Option<&fm_core::IrGanttTask>) -
     }
     // The TYPE is carried only by the bar's fill colour, so a reader who cannot see the colour has
     // no other source for it. `Normal` is the default and adds nothing.
-    match task.task_type {
-        fm_core::GanttTaskType::Critical => name.push_str(", critical"),
-        fm_core::GanttTaskType::Active => name.push_str(", active"),
-        fm_core::GanttTaskType::Done => name.push_str(", done"),
-        fm_core::GanttTaskType::Milestone => name.push_str(", milestone"),
-        fm_core::GanttTaskType::Normal => {}
-    }
+    // EVERY tag, not just the primary type (bd-124ew). A `:crit, done` bar used to announce only
+    // ", done", so a reader who cannot see the fill colour lost the critical marking entirely —
+    // the same information the fill was already losing.
+    name.push_str(&task.flags.accessible_suffix());
     // ⚠️ `progress` is a FRACTION, not a percentage: `50%` parses to `0.5`
     // (`parse_gantt_progress` divides by 100). Formatting it directly as `{:.0}%` announced
     // "0% complete" for a task that is HALF DONE — a wrong number, which is worse than no number,
@@ -6261,11 +6258,13 @@ fn render_gantt_svg(
             // a link is actually emitted, so an ordinary chart streams byte-identically.
             let task_bytes_start = task_svg.len();
 
-            let task_type = gantt_meta
+            let task_flags = gantt_meta
                 .tasks
                 .get(node_idx)
-                .map(|t| &t.task_type)
-                .unwrap_or(&fm_core::GanttTaskType::Normal);
+                .map(|t| t.flags)
+                .unwrap_or_default();
+            let task_type = task_flags.primary_type();
+            let task_type = &task_type;
             let fill = task_color(task_type);
             let is_milestone = matches!(task_type, fm_core::GanttTaskType::Milestone);
 

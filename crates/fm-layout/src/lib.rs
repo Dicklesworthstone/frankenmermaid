@@ -7145,7 +7145,7 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
         explicit_starts[task_idx] = gantt_task_absolute_start(task);
         durations[task_idx] = gantt_task_duration_days(task, inclusive_end_dates);
         milestones[task_idx] =
-            matches!(task.task_type, GanttTaskType::Milestone) || durations[task_idx] == 0;
+            matches!(task.flags.primary_type(), GanttTaskType::Milestone) || durations[task_idx] == 0;
         if let Some(task_id) = task.task_id.as_ref() {
             task_id_to_idx.entry(task_id.as_str()).or_insert(task_idx);
         }
@@ -7931,7 +7931,7 @@ fn gantt_task_duration_days(task: &fm_core::IrGanttTask, inclusive_end_dates: bo
             }
         }
         Some(GanttDate::AfterTask(_)) => 1,
-        None => i32::from(!matches!(task.task_type, GanttTaskType::Milestone)),
+        None => i32::from(!matches!(task.flags.primary_type(), GanttTaskType::Milestone)),
     }
 }
 

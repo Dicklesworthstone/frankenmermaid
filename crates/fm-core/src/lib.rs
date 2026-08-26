@@ -4951,6 +4951,88 @@ pub enum GanttTaskType {
     Milestone,
 }
 
+/// Every tag a gantt task carries, as mermaid carries them: four INDEPENDENT flags (bd-124ew).
+///
+/// `:crit, done` is a completed task on the critical path, and mermaid keeps both — its gantt db
+/// threads `active` / `done` / `crit` / `milestone` through to the renderer as separate fields. A
+/// single enum can only keep the last tag the parser recognised, so the critical marking vanished
+/// from a bar that was also `done`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+pub struct GanttTaskFlags {
+    pub crit: bool,
+    pub done: bool,
+    pub active: bool,
+    pub milestone: bool,
+}
+
+impl GanttTaskFlags {
+    /// The single visual type the bar fill is chosen from.
+    ///
+    /// DERIVED, so the flags stay the one source of truth. The precedence reproduces what the old
+    /// last-tag-wins parser produced for every single-tag row, which is what keeps the goldens
+    /// still: a lone tag maps to itself, and `Normal` when there is none. What changes is only that
+    /// a combination no longer DISCARDS the other tags — they remain readable on the flags, and the
+    /// renderer draws a critical border and names every tag in the accessible label.
+    #[must_use]
+    pub const fn primary_type(self) -> GanttTaskType {
+        if self.milestone {
+            GanttTaskType::Milestone
+        } else if self.done {
+            GanttTaskType::Done
+        } else if self.active {
+            GanttTaskType::Active
+        } else if self.crit {
+            GanttTaskType::Critical
+        } else {
+            GanttTaskType::Normal
+        }
+    }
+
+    /// Every CSS class this task's tags earn, most general first.
+    ///
+    /// ALL of them, not just the primary type's: `:crit, done` is `gantt-critical gantt-done`, which
+    /// is how mermaid applies its own classes and what lets an author's `classDef` reach either.
+    #[must_use]
+    pub fn css_classes(self) -> Vec<&'static str> {
+        let mut classes = Vec::new();
+        if self.crit {
+            classes.push("gantt-critical");
+        }
+        if self.done {
+            classes.push("gantt-done");
+        }
+        if self.active {
+            classes.push("gantt-active");
+        }
+        if self.milestone {
+            classes.push("gantt-milestone");
+        }
+        classes
+    }
+
+    /// The tags appended to a bar's accessible name, in a fixed order.
+    ///
+    /// The bar's tags are carried ONLY by its fill colour, so a reader who cannot see the colour has
+    /// no other source for them — which is exactly why dropping `crit` from a done task mattered
+    /// twice over.
+    #[must_use]
+    pub fn accessible_suffix(self) -> String {
+        let mut suffix = String::new();
+        for (flag, name) in [
+            (self.crit, "critical"),
+            (self.active, "active"),
+            (self.done, "done"),
+            (self.milestone, "milestone"),
+        ] {
+            if flag {
+                suffix.push_str(", ");
+                suffix.push_str(name);
+            }
+        }
+        suffix
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum GanttDate {
     Absolute(String),
@@ -4989,8 +5071,10 @@ pub struct IrGanttTask {
     pub depends_on: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<f32>,
-    #[serde(default, skip_serializing_if = "is_default_gantt_task_type")]
-    pub task_type: GanttTaskType,
+    #[serde(default, skip_serializing_if = "is_default_gantt_task_flags")]
+    /// The task's tags. `task_type` is derived from these via `GanttTaskFlags::primary_type`;
+    /// these are the source of truth, so a combination like `:crit, done` keeps both (bd-124ew).
+    pub flags: GanttTaskFlags,
 }
 
 /// Gantt-diagram-specific metadata that extends the generic IR.
@@ -5022,8 +5106,8 @@ pub struct IrGanttMeta {
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
-const fn is_default_gantt_task_type(value: &GanttTaskType) -> bool {
-    matches!(value, GanttTaskType::Normal)
+const fn is_default_gantt_task_flags(value: &GanttTaskFlags) -> bool {
+    !value.crit && !value.done && !value.active && !value.milestone
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -6892,7 +6976,7 @@ mod tests {
         DeckManifestOverview, DeckManifestSlide, DeckManifestStep, DeckRect, DegradationContext,
         DegradationOperator, Diagnostic, DiagnosticCategory, DiagnosticSeverity,
         DiagramPalettePreset, DiagramType, EdgeMap, FragmentAlternative, FragmentKind, GanttDate,
-        GanttExclude, GanttTaskType, GanttTickInterval, GraphDirection, IrActivation,
+        GanttExclude, GanttTaskFlags, GanttTaskType, GanttTickInterval, GraphDirection, IrActivation,
         IrAttributeKey, IrCluster, IrClusterId, IrDeck, IrDeckEdgePolicy, IrDeckOptions,
         IrDeckOverview, IrDeckReveal, IrDeckSlide, IrEdge, IrEdgeKind, IrEndpoint,
         IrEntityAttribute, IrGanttMeta, IrGanttSection, IrGanttTask, IrGraphCluster, IrGraphEdge,
@@ -11163,7 +11247,7 @@ mod tests {
                 end: Some(GanttDate::DurationDays(2)),
                 depends_on: Vec::new(),
                 progress: Some(0.5),
-                task_type: GanttTaskType::Done,
+                flags: crate::GanttTaskFlags { done: true, ..Default::default() },
             }],
         };
 

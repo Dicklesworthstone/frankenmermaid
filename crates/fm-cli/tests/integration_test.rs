@@ -2484,7 +2484,7 @@ fn gantt_extended_meta_flows_through_parse_and_layout() {
             GanttExclude::Dates(vec!["2026-02-10".to_string()])
         ]
     );
-    assert_eq!(gantt_meta.tasks[0].task_type, GanttTaskType::Active);
+    assert_eq!(gantt_meta.tasks[0].flags.primary_type(), fm_core::GanttTaskType::Active);
     assert_eq!(
         gantt_meta.tasks[0].start,
         Some(GanttDate::Absolute("2026-02-06".to_string()))
