@@ -1104,17 +1104,29 @@ fn prune_marker_selectors(css: &str, is_live: &dyn Fn(&str) -> bool) -> Option<S
     let mut out = String::with_capacity(css.len());
     let mut i = 0;
     let mut seg_start = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'{' {
+    // SIMD BRACE SCANS. Both walks used to step one byte at a time over the whole stylesheet — the
+    // outer one hunting `{`, the inner one tracking `{`/`}` depth through each body. A themed
+    // stylesheet is ~9 KB holding on the order of eighty braces, so ~99% of those iterations were a
+    // compare that found nothing, and the pass showed up at 3.80% self on `docs_site_50`.
+    // `memchr`/`memchr2` find exactly the same bytes in the same order, so the segmentation — and
+    // the output — is unchanged; only the bytes in between stop being visited individually.
+    while let Some(offset) = memchr::memchr(b'{', &bytes[i..]) {
+        {
+            i += offset;
             let selectors = &css[seg_start..i];
             // Body = the balanced `{ … }` (track depth so a nested at-rule body is one unit).
             let mut depth = 1;
             let mut j = i + 1;
-            while j < bytes.len() && depth > 0 {
-                match bytes[j] {
-                    b'{' => depth += 1,
-                    b'}' => depth -= 1,
-                    _ => {}
+            while depth > 0 {
+                let Some(hit) = memchr::memchr2(b'{', b'}', &bytes[j..]) else {
+                    j = bytes.len();
+                    break;
+                };
+                j += hit;
+                if bytes[j] == b'{' {
+                    depth += 1;
+                } else {
+                    depth -= 1;
                 }
                 j += 1;
             }
@@ -1143,8 +1155,6 @@ fn prune_marker_selectors(css: &str, is_live: &dyn Fn(&str) -> bool) -> Option<S
             }
             i = j;
             seg_start = j;
-        } else {
-            i += 1;
         }
     }
     out.push_str(&css[seg_start..]);
