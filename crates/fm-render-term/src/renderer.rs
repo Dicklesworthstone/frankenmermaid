@@ -2929,7 +2929,7 @@ impl TermRenderer {
             if row >= max_content_row {
                 break;
             }
-            let vis = visibility_char(attr.visibility);
+            let vis = visibility_symbol(attr.visibility);
             let text = format!(
                 "{vis}{}",
                 fm_core::class_member_display_name(&attr.name, false)
@@ -2949,7 +2949,7 @@ impl TermRenderer {
             if row >= max_content_row {
                 break;
             }
-            let vis = visibility_char(method.visibility);
+            let vis = visibility_symbol(method.visibility);
             let suffix = if method.is_abstract {
                 "*"
             } else if method.is_static {
@@ -2973,12 +2973,13 @@ impl TermRenderer {
 }
 
 /// Map ClassVisibility to its UML symbol.
-fn visibility_char(vis: fm_core::ClassVisibility) -> char {
+fn visibility_symbol(vis: fm_core::ClassVisibility) -> &'static str {
     match vis {
-        fm_core::ClassVisibility::Public => '+',
-        fm_core::ClassVisibility::Private => '-',
-        fm_core::ClassVisibility::Protected => '#',
-        fm_core::ClassVisibility::Package => '~',
+        fm_core::ClassVisibility::Unmarked => "",
+        fm_core::ClassVisibility::Public => "+",
+        fm_core::ClassVisibility::Private => "-",
+        fm_core::ClassVisibility::Protected => "#",
+        fm_core::ClassVisibility::Package => "~",
     }
 }
 

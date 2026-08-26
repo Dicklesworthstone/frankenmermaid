@@ -33,9 +33,8 @@
 //!
 //! NOT ASSERTED: mermaid's ` : ` spacing around a method return type (it writes `+f() : T`, we
 //! write `+f(): T`) and its EMPTY visibility for an unmarked member (it draws `name`, we draw
-//! `+name`). Both are real, separately filed divergences; folding them in here would make this test
-//! fail for reasons that have nothing to do with generics. Say it rather than let the silence read
-//! as coverage.
+//! `+name`). The latter is covered by its own parity test below; folding it into the generated
+//! generic fixture would make the generic differential fail for a separate reason.
 
 use std::{fs, path::Path};
 
@@ -77,6 +76,7 @@ fn fixture() -> Vec<Row> {
 
 fn visibility_symbol(vis: fm_core::ClassVisibility) -> &'static str {
     match vis {
+        fm_core::ClassVisibility::Unmarked => "",
         fm_core::ClassVisibility::Public => "+",
         fm_core::ClassVisibility::Private => "-",
         fm_core::ClassVisibility::Protected => "#",
@@ -101,6 +101,52 @@ fn only_attribute(member: &str) -> fm_core::IrClassMember {
         meta.methods
     );
     meta.attributes[0].clone()
+}
+
+/// Mermaid preserves the absence of a visibility marker. This needs both halves: restoring the old
+/// default would draw `+plainField`, while suppressing every marker would make an explicit public
+/// member wrong in the opposite direction.
+#[test]
+fn unmarked_visibility_is_empty_but_explicit_public_stays_plus() {
+    let ir = fm_parser::parse(
+        "classDiagram\nclass Foo {\n  plainField\n  +publicField\n  plainMethod()\n  +publicMethod()\n}\n",
+    )
+    .ir;
+    let meta = ir
+        .nodes
+        .iter()
+        .find_map(|node| node.class_meta.as_deref())
+        .expect("class metadata");
+    assert_eq!(
+        meta.attributes[0].visibility,
+        fm_core::ClassVisibility::Unmarked,
+        "a member without a marker must retain that absence in the IR"
+    );
+    assert_eq!(
+        meta.attributes[1].visibility,
+        fm_core::ClassVisibility::Public,
+        "the explicit + marker must remain public"
+    );
+
+    let svg = fm_render_svg::render_svg(&ir);
+    let runs = text_runs(&svg);
+    for expected in [
+        "plainField",
+        "+publicField",
+        "plainMethod()",
+        "+publicMethod()",
+    ] {
+        assert!(
+            runs.iter().any(|run| run == expected),
+            "class box did not draw {expected:?}; runs were {runs:?}"
+        );
+    }
+    assert!(
+        !runs
+            .iter()
+            .any(|run| run == "+plainField" || run == "+plainMethod()"),
+        "an unmarked member acquired a public marker: {runs:?}"
+    );
 }
 
 #[test]

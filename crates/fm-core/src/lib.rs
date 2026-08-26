@@ -1401,6 +1401,7 @@ pub fn class_member_display_name(name: &str, is_method: bool) -> Cow<'_, str> {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub enum ClassVisibility {
     #[default]
+    Unmarked,
     Public,
     Private,
     Protected,

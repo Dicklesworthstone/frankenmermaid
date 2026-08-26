@@ -3581,12 +3581,13 @@ fn with_canvas_dash_f64<T>(dash: &[f32], use_dash: impl FnOnce(&[f64]) -> T) -> 
     }
 }
 
-fn class_vis_char(vis: fm_core::ClassVisibility) -> char {
+fn class_vis_symbol(vis: fm_core::ClassVisibility) -> &'static str {
     match vis {
-        fm_core::ClassVisibility::Public => '+',
-        fm_core::ClassVisibility::Private => '-',
-        fm_core::ClassVisibility::Protected => '#',
-        fm_core::ClassVisibility::Package => '~',
+        fm_core::ClassVisibility::Unmarked => "",
+        fm_core::ClassVisibility::Public => "+",
+        fm_core::ClassVisibility::Private => "-",
+        fm_core::ClassVisibility::Protected => "#",
+        fm_core::ClassVisibility::Package => "~",
     }
 }
 
@@ -3607,7 +3608,7 @@ fn class_vis_char(vis: fm_core::ClassVisibility) -> char {
 /// attribute path likewise appends a type but never a suffix.
 fn class_member_row(member: &fm_core::IrClassMember, is_method: bool) -> String {
     let mut row = String::with_capacity(member.name.len() + 8);
-    row.push(class_vis_char(member.visibility));
+    row.push_str(class_vis_symbol(member.visibility));
     row.push_str(&fm_core::class_member_display_name(&member.name, is_method));
     if is_method {
         if member.is_abstract {

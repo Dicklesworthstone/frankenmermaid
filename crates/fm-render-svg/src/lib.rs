@@ -12347,6 +12347,7 @@ fn c4_legend_entries(ir: &MermaidDiagramIr) -> Vec<(&'static str, &'static str)>
 
 fn visibility_symbol(vis: fm_core::ClassVisibility) -> &'static str {
     match vis {
+        fm_core::ClassVisibility::Unmarked => "",
         fm_core::ClassVisibility::Public => "+",
         fm_core::ClassVisibility::Private => "-",
         fm_core::ClassVisibility::Protected => "#",

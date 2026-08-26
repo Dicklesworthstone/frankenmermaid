@@ -4184,7 +4184,7 @@ fn parse_class_member(trimmed: &str) -> Option<fm_core::IrClassMember> {
         Some(b'-') => (fm_core::ClassVisibility::Private, &trimmed[1..]),
         Some(b'#') => (fm_core::ClassVisibility::Protected, &trimmed[1..]),
         Some(b'~') => (fm_core::ClassVisibility::Package, &trimmed[1..]),
-        _ => (fm_core::ClassVisibility::Public, trimmed),
+        _ => (fm_core::ClassVisibility::Unmarked, trimmed),
     };
 
     let rest = trim_fast(rest);
@@ -17879,24 +17879,28 @@ Rel_Back(db, app, "Responds")"#,
 
     #[test]
     fn class_member_visibility_markers() {
-        let input = "classDiagram\n  class Foo {\n    +pub_attr\n    -priv_attr\n    #prot_attr\n    ~pkg_attr\n  }";
+        let input = "classDiagram\n  class Foo {\n    plain_attr\n    +pub_attr\n    -priv_attr\n    #prot_attr\n    ~pkg_attr\n  }";
         let parsed = parse_mermaid(input);
         let foo = parsed.ir.nodes.iter().find(|n| n.id == "Foo").unwrap();
         let meta = foo.class_meta.as_ref().expect("class_meta");
         assert_eq!(
             meta.attributes[0].visibility,
-            fm_core::ClassVisibility::Public
+            fm_core::ClassVisibility::Unmarked
         );
         assert_eq!(
             meta.attributes[1].visibility,
-            fm_core::ClassVisibility::Private
+            fm_core::ClassVisibility::Public
         );
         assert_eq!(
             meta.attributes[2].visibility,
-            fm_core::ClassVisibility::Protected
+            fm_core::ClassVisibility::Private
         );
         assert_eq!(
             meta.attributes[3].visibility,
+            fm_core::ClassVisibility::Protected
+        );
+        assert_eq!(
+            meta.attributes[4].visibility,
             fm_core::ClassVisibility::Package
         );
     }

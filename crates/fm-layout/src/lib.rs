@@ -11530,11 +11530,12 @@ fn class_member_row_width(
     metrics: &fm_core::FontMetrics,
 ) -> f32 {
     let mut row = String::with_capacity(member.name.len() + 8);
-    row.push(match member.visibility {
-        fm_core::ClassVisibility::Public => '+',
-        fm_core::ClassVisibility::Private => '-',
-        fm_core::ClassVisibility::Protected => '#',
-        fm_core::ClassVisibility::Package => '~',
+    row.push_str(match member.visibility {
+        fm_core::ClassVisibility::Unmarked => "",
+        fm_core::ClassVisibility::Public => "+",
+        fm_core::ClassVisibility::Private => "-",
+        fm_core::ClassVisibility::Protected => "#",
+        fm_core::ClassVisibility::Package => "~",
     });
     // The renderers draw generics rewritten (`List~int~` -> `List<int>`), so measure the rewritten
     // row: the substitution is character-for-character but `<`/`>` and `~` are not the same width.
