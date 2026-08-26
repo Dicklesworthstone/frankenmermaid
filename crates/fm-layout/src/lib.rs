@@ -1883,6 +1883,9 @@ fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> boo
         style_refs,
         style_defs,
         meta,
+        // Deck directives are consumed strictly after layout. Retitling a slide must re-render
+        // without invalidating geometry or this layout memo.
+        deck: _,
         sequence_meta,
         gantt_meta,
         xy_chart_meta,
@@ -18632,12 +18635,12 @@ mod tests {
     };
     use fm_core::{
         ArrowType, DiagramType, GanttDate, GanttExclude, GraphDirection, IrCluster, IrClusterId,
-        IrConstraint, IrEdge, IrEndpoint, IrGanttMeta, IrGanttSection, IrGanttTask, IrGraphCluster,
-        IrGraphEdge, IrGraphNode, IrLabel, IrLabelId, IrLifecycleEvent, IrNode, IrNodeId,
-        IrParticipantGroup, IrPieMeta, IrPieSlice, IrSequenceMeta, IrSequenceNote, IrSubgraph,
-        IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind, MermaidBudgetLedger,
-        MermaidDiagramIr, MermaidPressureReport, MermaidPressureTier, MermaidSourceMapKind,
-        NodeShape, Span,
+        IrConstraint, IrDeck, IrEdge, IrEndpoint, IrGanttMeta, IrGanttSection, IrGanttTask,
+        IrGraphCluster, IrGraphEdge, IrGraphNode, IrLabel, IrLabelId, IrLifecycleEvent, IrNode,
+        IrNodeId, IrParticipantGroup, IrPieMeta, IrPieSlice, IrSequenceMeta, IrSequenceNote,
+        IrSubgraph, IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind,
+        MermaidBudgetLedger, MermaidDiagramIr, MermaidPressureReport, MermaidPressureTier,
+        MermaidSourceMapKind, NodeShape, Span,
     };
     use fm_parser::parse;
     use good_lp::SolutionStatus;
@@ -19441,6 +19444,39 @@ mod tests {
         assert!(second.trace.incremental.cache_hit);
         assert_eq!(second.trace.incremental.query_type, "layout_memoized_reuse");
         assert_eq!(second.trace.incremental.recomputed_nodes, 0);
+    }
+
+    #[test]
+    fn incremental_layout_engine_reuses_geometry_when_only_deck_changes() {
+        let baseline = sample_ir();
+        let mut engine = IncrementalLayoutEngine::default();
+        let config = super::LayoutConfig::default();
+
+        let first = engine.layout_diagram_traced_with_config_and_guardrails(
+            &baseline,
+            LayoutAlgorithm::Auto,
+            config.clone(),
+            LayoutGuardrails::default(),
+        );
+
+        let mut deck_edited = baseline.clone();
+        deck_edited.deck = Some(Box::new(IrDeck {
+            title: Some("Retitled without re-layout".to_string()),
+            ..IrDeck::default()
+        }));
+        let second = engine.layout_diagram_traced_with_config_and_guardrails(
+            &deck_edited,
+            LayoutAlgorithm::Auto,
+            config,
+            LayoutGuardrails::default(),
+        );
+
+        assert_eq!(second.layout, first.layout);
+        assert!(
+            second.trace.incremental.cache_hit,
+            "a deck-only edit must not invalidate layout geometry"
+        );
+        assert_eq!(second.trace.incremental.query_type, "layout_memoized_reuse");
     }
 
     #[test]

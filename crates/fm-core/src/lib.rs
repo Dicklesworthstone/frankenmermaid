@@ -5259,6 +5259,9 @@ pub struct MermaidDiagramIr {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub style_defs: Vec<IrStyleDef>,
     pub meta: MermaidDiagramMeta,
+    /// Raw presentation-deck directives, resolved after parsing so deck edits do not change graph IR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deck: Option<Box<IrDeck>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence_meta: Option<IrSequenceMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5312,6 +5315,7 @@ impl MermaidDiagramIr {
                 acc_title: None,
                 acc_descr: None,
             },
+            deck: None,
             sequence_meta: None,
             gantt_meta: None,
             xy_chart_meta: None,
@@ -5634,6 +5638,99 @@ pub struct MermaidSourceMapEntry {
 pub struct MermaidSourceMap {
     pub diagram_type: DiagramType,
     pub entries: Vec<MermaidSourceMapEntry>,
+}
+
+// ── Graph deck directives ──────────────────────────────────────────────
+
+/// Raw presentation-deck definition from a `%%{deck: …}%%` directive.
+///
+/// Selectors stay unresolved because directives are parsed before the diagram body. Semantic
+/// validation and manifest construction resolve them against the completed diagram instead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct IrDeck {
+    pub title: Option<String>,
+    pub options: IrDeckOptions,
+    /// Deck-scoped tooltips keyed by authored node id. A `BTreeMap` keeps serialized output stable.
+    pub tips: BTreeMap<String, String>,
+    pub slides: Vec<IrDeckSlide>,
+    pub overview: IrDeckOverview,
+    /// Span of the first deck directive block for deck-level diagnostics.
+    pub span: Span,
+}
+
+/// Deck-wide camera and playback settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IrDeckOptions {
+    pub fit_margin: f32,
+    pub zoom_max: f32,
+    pub dim_opacity: f32,
+    pub auto_advance_ms: u32,
+}
+
+impl Default for IrDeckOptions {
+    fn default() -> Self {
+        Self {
+            fit_margin: 150.0,
+            zoom_max: 1.4,
+            dim_opacity: 0.07,
+            auto_advance_ms: 0,
+        }
+    }
+}
+
+/// One authored presentation scene over the diagram.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct IrDeckSlide {
+    pub id: String,
+    /// Defaults to `id` when the directive is parsed.
+    pub title: String,
+    pub caption: String,
+    /// Unresolved node or subgraph selectors in authored order.
+    pub nodes: Vec<String>,
+    pub reveal: IrDeckReveal,
+    pub edges: IrDeckEdgePolicy,
+    pub fit_margin: Option<f32>,
+    pub zoom_max: Option<f32>,
+    pub span: Span,
+}
+
+/// How a slide exposes its resolved node members.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub enum IrDeckReveal {
+    #[default]
+    None,
+    Auto,
+    Groups(Vec<Vec<String>>),
+}
+
+/// Which edges a slide includes after its node selectors resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum IrDeckEdgePolicy {
+    #[default]
+    Induced,
+    Touching,
+    None,
+}
+
+/// Overview-scene configuration for a presentation deck.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IrDeckOverview {
+    pub enabled: bool,
+    pub title: String,
+    pub caption: String,
+    pub tour: bool,
+}
+
+impl Default for IrDeckOverview {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            title: "Overview".to_string(),
+            caption: String::new(),
+            tour: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -6475,8 +6572,9 @@ mod tests {
         Diagnostic, DiagnosticCategory, DiagnosticSeverity, DiagramPalettePreset, DiagramType,
         EdgeMap, FragmentAlternative, FragmentKind, GanttDate, GanttExclude, GanttTaskType,
         GanttTickInterval, GraphDirection, IrActivation, IrAttributeKey, IrCluster, IrClusterId,
-        IrEdge, IrEdgeKind, IrEndpoint, IrEntityAttribute, IrGanttMeta, IrGanttSection,
-        IrGanttTask, IrGraphCluster, IrGraphEdge, IrGraphNode, IrInlineStyle, IrLabel, IrLabelId,
+        IrDeck, IrDeckEdgePolicy, IrDeckOptions, IrDeckOverview, IrDeckReveal, IrDeckSlide, IrEdge,
+        IrEdgeKind, IrEndpoint, IrEntityAttribute, IrGanttMeta, IrGanttSection, IrGanttTask,
+        IrGraphCluster, IrGraphEdge, IrGraphNode, IrInlineStyle, IrLabel, IrLabelId,
         IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup, IrPort, IrPortId,
         IrPortSideHint, IrSequenceAutonumberRange, IrSequenceFragment, IrSequenceMeta,
         IrSequenceNote, IrStyleDef, IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyAxis,
@@ -6550,6 +6648,89 @@ mod tests {
         assert!(ir.graph.clusters.is_empty());
         assert!(ir.graph.subgraphs.is_empty());
         assert_eq!(ir.diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn deckless_ir_omits_deck_from_its_serialized_contract() {
+        let ir = MermaidDiagramIr::empty(DiagramType::Flowchart);
+        let encoded = serde_json::to_string(&ir).expect("serialize deckless ir");
+        let decoded: MermaidDiagramIr =
+            serde_json::from_str(&encoded).expect("deserialize deckless ir");
+
+        assert!(
+            !encoded.contains("\"deck\""),
+            "a deckless IR changed its serialized contract: {encoded}"
+        );
+        assert!(decoded.deck.is_none());
+        assert_eq!(decoded, ir);
+    }
+
+    #[test]
+    fn deck_ir_roundtrip_covers_every_reveal_and_edge_policy() {
+        let deck = IrDeck {
+            title: Some("Architecture tour".to_string()),
+            options: IrDeckOptions {
+                fit_margin: 175.0,
+                zoom_max: 1.2,
+                dim_opacity: 0.15,
+                auto_advance_ms: 4_000,
+            },
+            tips: BTreeMap::from([
+                ("parser".to_string(), "Turns text into IR".to_string()),
+                ("renderer".to_string(), "Draws the final scene".to_string()),
+            ]),
+            slides: vec![
+                IrDeckSlide {
+                    id: "intro".to_string(),
+                    title: "Introduction".to_string(),
+                    caption: "The first scene".to_string(),
+                    nodes: vec!["parser".to_string(), "renderer".to_string()],
+                    reveal: IrDeckReveal::Groups(vec![
+                        vec!["parser".to_string()],
+                        vec!["renderer".to_string(), "cluster:render".to_string()],
+                    ]),
+                    edges: IrDeckEdgePolicy::Induced,
+                    fit_margin: Some(125.0),
+                    zoom_max: Some(1.1),
+                    span: sample_span(2, 1, 42),
+                },
+                IrDeckSlide {
+                    id: "auto".to_string(),
+                    title: "Automatic reveals".to_string(),
+                    caption: String::new(),
+                    nodes: vec!["*".to_string()],
+                    reveal: IrDeckReveal::Auto,
+                    edges: IrDeckEdgePolicy::Touching,
+                    ..IrDeckSlide::default()
+                },
+                IrDeckSlide {
+                    id: "overview".to_string(),
+                    title: "All at once".to_string(),
+                    caption: String::new(),
+                    nodes: Vec::new(),
+                    reveal: IrDeckReveal::None,
+                    edges: IrDeckEdgePolicy::None,
+                    ..IrDeckSlide::default()
+                },
+            ],
+            overview: IrDeckOverview {
+                enabled: false,
+                title: "Wrap-up".to_string(),
+                caption: "A final caption".to_string(),
+                tour: false,
+            },
+            span: sample_span(1, 1, 19),
+        };
+
+        let encoded = serde_json::to_string(&deck).expect("serialize deck");
+        let decoded: IrDeck = serde_json::from_str(&encoded).expect("deserialize deck");
+
+        assert_eq!(decoded, deck);
+        assert!(encoded.contains("\"induced\""));
+        assert!(encoded.contains("\"touching\""));
+        assert!(encoded.contains("\"none\""));
+        assert_eq!(IrDeckOptions::default().fit_margin, 150.0);
+        assert_eq!(IrDeckOverview::default().title, "Overview");
     }
 
     #[test]
