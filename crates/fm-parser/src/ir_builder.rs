@@ -1044,9 +1044,16 @@ impl IrBuilder {
         let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
             return;
         };
-        node.class_meta
-            .get_or_insert_with(|| Box::new(IrClassNodeMeta::default()))
-            .stereotype = Some(stereotype);
+        // FIRST ANNOTATION WINS (bd-dezf6). mermaid keeps every annotation in an array but its
+        // class renderer draws only `annotations[0]`, so on `<<interface>> Foo` followed by
+        // `<<abstract>> Foo` it shows `interface`. Overwriting here made us show `abstract` — the
+        // wrong one of the two, not merely one of two.
+        let meta = node
+            .class_meta
+            .get_or_insert_with(|| Box::new(IrClassNodeMeta::default()));
+        if meta.stereotype.is_none() {
+            meta.stereotype = Some(stereotype);
+        }
     }
 
     /// Set the stereotype of the class block currently open.
@@ -1060,9 +1067,13 @@ impl IrBuilder {
         let Some(node) = self.ir.nodes.get_mut(node_id.0) else {
             return;
         };
-        node.class_meta
-            .get_or_insert_with(|| Box::new(IrClassNodeMeta::default()))
-            .stereotype = Some(stereotype);
+        // First annotation wins here too (bd-dezf6) — the in-block spelling reaches the same field.
+        let meta = node
+            .class_meta
+            .get_or_insert_with(|| Box::new(IrClassNodeMeta::default()));
+        if meta.stereotype.is_none() {
+            meta.stereotype = Some(stereotype);
+        }
     }
 
     pub(crate) fn set_class_generics(&mut self, class_name: &str, generics: Vec<String>) {
