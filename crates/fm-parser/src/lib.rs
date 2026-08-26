@@ -3500,6 +3500,40 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
         assert!(result.confidence > 0.9);
     }
 
+    /// Regression: a legacy `graph TD` header with `{ }` inside a quoted node label used to be
+    /// rerouted to the DOT parser, which silently dropped every bracket label and rendered bare
+    /// IDs. The Mermaid header must win, and the labels must survive intact.
+    #[test]
+    fn graph_td_header_with_braces_in_label_stays_mermaid() {
+        let input = "graph TD\n  A[\"captures {binding} tokens\"] --> B[\"done\"]";
+
+        let detected = detect_type_with_confidence(input);
+        assert_eq!(detected.diagram_type, DiagramType::Flowchart);
+        assert_eq!(detected.method, DetectionMethod::ExactKeyword);
+
+        let result = parse(input);
+        assert_eq!(result.detection_method, DetectionMethod::ExactKeyword);
+        assert_eq!(result.ir.nodes.len(), 2);
+        assert_eq!(result.ir.edges.len(), 1);
+        let labels: Vec<&str> = result
+            .ir
+            .nodes
+            .iter()
+            .map(|node| {
+                let label_id = node.label.expect("every bracket label must be retained");
+                result.ir.labels[label_id.0].text.as_str()
+            })
+            .collect();
+        assert_eq!(labels, ["captures {binding} tokens", "done"]);
+    }
+
+    #[test]
+    fn dot_graph_named_like_a_mermaid_direction_is_still_dot() {
+        let result = detect_type_with_confidence("graph TD { a -- b; }");
+        assert_eq!(result.diagram_type, DiagramType::Flowchart);
+        assert_eq!(result.method, DetectionMethod::DotFormat);
+    }
+
     #[test]
     fn detection_fallback_for_unknown() {
         let result = detect_type_with_confidence("some random text\nmore text");

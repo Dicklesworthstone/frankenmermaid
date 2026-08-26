@@ -20,7 +20,7 @@ pub fn looks_like_dot(input: &str) -> bool {
         return false;
     }
     // Every DOT header is `graph` / `digraph` / `strict [di]graph` — all contain "graph", and DOT
-    // keywords are case-insensitive (`dot_header_kind` lowercases the first line). So a real DOT file
+    // keywords are case-insensitive (`dot_header_kind` matches them case-insensitively). So a real DOT file
     // ALWAYS contains "graph" somewhere in its raw text. Class/state diagrams have `{ }` braces but no
     // `graph` keyword, so this cheap substring pre-guard short-circuits the expensive
     // `strip_all_comments` (whole-input `Vec<char>` collect + rescan) that dominated their detection.
@@ -32,7 +32,12 @@ pub fn looks_like_dot(input: &str) -> bool {
     if dot_header_kind(cleaned.as_ref()).is_none() {
         return false;
     }
-    cleaned.contains('{') && cleaned.contains('}')
+    // `dot_header_kind` proved the body-opening `{` sits where the grammar puts it. The body must
+    // also CLOSE: a well-formed DOT file ends with the body's closing `}` (modulo whitespace).
+    // This resolves the residual `graph`-header ambiguity: `graph\n  A{decision} --> B` parses as
+    // a DOT header (graph named `A`) up to the brace, but a Mermaid flowchart keeps writing
+    // statements after its brace-shaped node, so the text does not end on `}`.
+    cleaned.trim_end().ends_with('}')
 }
 
 /// Case-insensitive ASCII substring test (`needle` is a short ASCII literal). Scans byte windows,
@@ -865,38 +870,113 @@ fn strip_all_comments_slow(input: &str) -> String {
     output
 }
 
+/// Classify the leading DOT header of comment-stripped input.
+///
+/// Returns `Some(true)` for `digraph`, `Some(false)` for `graph`, and `None` when the input does
+/// not open with a DOT header. The DOT grammar is `[strict] (graph | digraph) [ID] '{' ...`, so
+/// the header is recognised only when the body-opening `{` actually follows the optional graph
+/// name — possibly on a later line, since DOT is whitespace-insensitive. Checking the keyword
+/// alone is not enough: Mermaid's legacy `graph TD` header shares the `graph` keyword, and a
+/// flowchart whose *labels* contain braces (`A["uses {binding}"]`) must not be reclassified as
+/// DOT just because a brace exists somewhere in the text. Requiring the brace at the grammar's
+/// position is what tells the two apart: `graph TD {` is a DOT graph named `TD`, while
+/// `graph TD\nA[...]` is Mermaid.
 fn dot_header_kind(cleaned_input: &str) -> Option<bool> {
-    let first_line = cleaned_input
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())?;
-    let lower = first_line.to_ascii_lowercase();
-    let mut cursor = lower.as_str();
-    if let Some(rest) = cursor.strip_prefix("strict") {
-        if rest.is_empty() || !rest.chars().next().is_some_and(char::is_whitespace) {
+    let mut cursor = cleaned_input.trim_start();
+    if let Some(rest) = strip_dot_keyword(cursor, "strict") {
+        // `strict` must be its own word; `strict{` / `strictdigraph` are not headers.
+        if !rest.starts_with(char::is_whitespace) {
             return None;
         }
         cursor = rest.trim_start();
     }
-    if starts_with_keyword(cursor, "digraph") {
-        return Some(true);
-    }
-    if starts_with_keyword(cursor, "graph") {
-        return Some(false);
-    }
-    None
+    let (directed, rest) = if let Some(rest) = strip_dot_keyword(cursor, "digraph") {
+        (true, rest)
+    } else if let Some(rest) = strip_dot_keyword(cursor, "graph") {
+        (false, rest)
+    } else {
+        return None;
+    };
+    let after_id = skip_dot_id(rest.trim_start())?;
+    after_id.trim_start().starts_with('{').then_some(directed)
 }
 
-fn starts_with_keyword(line: &str, keyword: &str) -> bool {
-    let Some(rest) = line.strip_prefix(keyword) else {
-        return false;
-    };
-    if rest.is_empty() {
-        return true;
+/// Strip a case-insensitive DOT keyword from the front of `text`, requiring a token boundary
+/// after it so that `graphTD` or `digraphs` are not mistaken for `graph` / `digraph`.
+fn strip_dot_keyword<'a>(text: &'a str, keyword: &str) -> Option<&'a str> {
+    let head = text.as_bytes().get(..keyword.len())?;
+    if !head.eq_ignore_ascii_case(keyword.as_bytes()) {
+        return None;
     }
-    rest.chars()
+    let rest = &text[keyword.len()..];
+    let boundary = rest
+        .chars()
         .next()
-        .is_some_and(|ch| ch.is_whitespace() || ch == '{')
+        .is_none_or(|ch| !(ch.is_alphanumeric() || ch == '_'));
+    boundary.then_some(rest)
+}
+
+/// Skip an optional DOT `ID` at the front of `text` and return what follows it.
+///
+/// A DOT `ID` is one of: an identifier / numeral (letters, digits, `_`, plus `.` and `-` for
+/// numerals), a double-quoted string (with `\"` escapes), or an HTML string delimited by balanced
+/// `<` `>`. An absent `ID` returns `text` unchanged; an unterminated quoted or HTML `ID` returns
+/// `None` because no well-formed DOT header can follow it.
+fn skip_dot_id(text: &str) -> Option<&str> {
+    let mut chars = text.char_indices();
+    match chars.next() {
+        Some((_, '"')) => {
+            let mut remainder = skip_dot_quoted_string(text)?;
+            // DOT permits `"a" + "b"` concatenation of quoted IDs; every operand must be quoted.
+            while let Some(next) = remainder.trim_start().strip_prefix('+') {
+                remainder = skip_dot_quoted_string(next.trim_start())?;
+            }
+            Some(remainder)
+        }
+        Some((_, '<')) => {
+            let mut depth = 1_usize;
+            for (idx, ch) in chars {
+                match ch {
+                    '<' => depth += 1,
+                    '>' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(&text[idx + 1..]);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        _ => {
+            let end = text
+                .char_indices()
+                .find(|(_, ch)| !(ch.is_alphanumeric() || matches!(ch, '_' | '.' | '-')))
+                .map_or(text.len(), |(idx, _)| idx);
+            Some(&text[end..])
+        }
+    }
+}
+
+/// Skip one double-quoted DOT string (with `\"` escapes) at the front of `text`, returning what
+/// follows the closing quote. `None` when `text` does not start with `"` or the string never ends.
+fn skip_dot_quoted_string(text: &str) -> Option<&str> {
+    let mut chars = text.char_indices();
+    if !matches!(chars.next(), Some((_, '"'))) {
+        return None;
+    }
+    let mut escaped = false;
+    for (idx, ch) in chars {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return Some(&text[idx + 1..]);
+        }
+    }
+    None
 }
 
 /// Everything a statement parser needs from the enclosing scope.
@@ -2069,6 +2149,45 @@ mod tests {
         assert!(looks_like_dot("digraph{ a -> b; }"));
         assert!(looks_like_dot("strict digraph{ a -> b; }"));
         assert!(looks_like_dot("graph{ a -- b; }"));
+    }
+
+    /// Regression for the `graph TD` + brace-in-label misdetection: a Mermaid legacy header must
+    /// stay Mermaid even when a node label contains `{ }`, because the DOT body brace has to
+    /// follow the header's optional graph name, not appear somewhere inside a label.
+    #[test]
+    fn mermaid_graph_header_with_braces_in_labels_is_not_dot() {
+        assert!(!looks_like_dot(
+            "graph TD\n  A[\"captures {binding} tokens\"] --> B[\"done\"]"
+        ));
+        assert!(!looks_like_dot("graph LR;\n  A{decision} --> B"));
+        assert!(!looks_like_dot("graph\n  A{decision} --> B"));
+        assert!(!looks_like_dot(
+            "graph TB\n  subgraph one\n    A[\"{x}\"] --> B\n  end"
+        ));
+        assert!(!looks_like_dot("GRAPH TD\n  A --> B{yes?}"));
+    }
+
+    #[test]
+    fn dot_header_still_detected_with_mermaid_looking_graph_names() {
+        // A DOT graph may legitimately be *named* TD/LR: the body brace is what decides.
+        assert!(looks_like_dot("graph TD { a -- b; }"));
+        assert!(looks_like_dot("digraph LR\n{\n  a -> b;\n}"));
+        assert!(looks_like_dot("strict graph\n  G\n{ a -- b; }"));
+        assert!(looks_like_dot("digraph 42 { a -> b; }"));
+        assert!(looks_like_dot("digraph \"name {brace}\" { a -> b; }"));
+        assert!(looks_like_dot("digraph \"esc \\\" quote\" { a -> b; }"));
+        assert!(looks_like_dot("digraph \"multi\" + \"part\" { a -> b; }"));
+        assert!(looks_like_dot("digraph <<b>{name}</b>> { a -> b; }"));
+    }
+
+    #[test]
+    fn dot_header_rejects_keyword_fragments_and_unterminated_names() {
+        assert!(!looks_like_dot("graphTD { a -- b; }"));
+        assert!(!looks_like_dot("strictdigraph { a -> b; }"));
+        assert!(!looks_like_dot("strict{ a -> b; }"));
+        assert!(!looks_like_dot("digraph \"unterminated { a -> b; }"));
+        assert!(!looks_like_dot("digraph <unterminated { a -> b; }"));
+        assert!(!looks_like_dot("digraph G; { a -> b; }"));
     }
 
     #[test]
