@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>deck_runtime fixture</title>
+<!--
+  Manual test page for crates/fm-cli/src/deck_runtime.js (bd-lnca7).
+
+  Serve the repo root (python3 -m http.server) and open
+  /crates/fm-cli/tests/fixtures/deck_runtime_fixture.html — the hand-written manifest below
+  matches the DeckManifest 1.0.0 schema and the hand-authored SVG carries the same element
+  ids, so every runtime behavior is exercisable without the WASM engine:
+
+  fit + tween + park · steps forward/back (b reveals at step 1 on slide 1) · dim/half/hidden ·
+  overview tour with the clickable rect · freecam (drag/wheel/pinch) + Escape · click the
+  dimmed d-node while on slide 1 to travel to slide 2 · tooltip on node a · fullscreen (f) ·
+  Home/End · reduced-motion (toggle in devtools rendering tab) · destroy() leak check via the
+  button (no listeners left; rAF cancelled).
+-->
+<style>
+  body { margin: 0; font: 13px system-ui; background: #0a0f0c; color: #cde; }
+  #deck-stage { position: relative; overflow: hidden; width: 90vw; height: 70vh;
+    margin: 16px auto; border: 1px solid #2a4; border-radius: 12px; background: #04120b;
+    outline: none; }
+  #bar { display: flex; gap: 8px; justify-content: center; align-items: center; }
+  #deck-dots i { display: inline-block; width: 8px; height: 8px; border-radius: 99px;
+    background: #333; margin: 0 3px; cursor: pointer; }
+  #deck-dots i[data-active] { background: #34d399; }
+  button { background: #123; color: #cde; border: 1px solid #2a4; border-radius: 6px;
+    padding: 6px 12px; cursor: pointer; }
+</style>
+</head>
+<body>
+<div id="deck-stage" tabindex="0"></div>
+<div id="bar">
+  <span id="deck-num"></span>
+  <strong id="deck-title"></strong>
+  <em id="deck-caption"></em>
+  <span id="deck-dots"></span>
+  <button id="prev">‹</button>
+  <button id="next">›</button>
+  <button id="ov">whole graph</button>
+  <button id="kill">destroy()</button>
+</div>
+
+<script src="../../src/deck_runtime.js"></script>
+<script>
+"use strict";
+/* Hand-authored SVG: ids match the manifest exactly (the join-key contract). */
+var SVG =
+  '<svg viewBox="0 0 900 500" xmlns="http://www.w3.org/2000/svg">' +
+  '<rect id="fm-cluster-0" x="380" y="60" width="480" height="380" rx="10" fill="#123a26" stroke="#2a6"/>' +
+  '<path id="fm-edge-0" d="M 160 120 L 420 120" stroke="#7c9" stroke-width="2" fill="none"/>' +
+  '<path id="fm-edge-1" d="M 500 140 L 500 260" stroke="#7c9" stroke-width="2" fill="none"/>' +
+  '<path id="fm-edge-2" d="M 540 280 L 720 280" stroke="#7c9" stroke-width="2" fill="none"/>' +
+  '<path id="fm-edge-3" d="M 740 300 L 740 380 L 180 380 L 160 140" stroke="#7c9" stroke-width="2" fill="none"/>' +
+  '<g id="fm-node-a-0" data-id="a"><rect x="60" y="90" width="100" height="52" rx="8" fill="#1c4" /><text x="110" y="122" text-anchor="middle">a</text></g>' +
+  '<g id="fm-node-b-1" data-id="b"><rect x="420" y="94" width="100" height="52" rx="8" fill="#2c5"/><text x="470" y="126" text-anchor="middle">b</text></g>' +
+  '<g id="fm-node-c-2" data-id="c"><rect x="450" y="254" width="100" height="52" rx="8" fill="#3c6"/><text x="500" y="286" text-anchor="middle">c</text></g>' +
+  '<g id="fm-node-d-3" data-id="d"><rect x="700" y="254" width="100" height="52" rx="8" fill="#4c7"/><text x="750" y="286" text-anchor="middle">d</text></g>' +
+  "</svg>";
+
+/* Hand-written DeckManifest 1.0.0. Slide 1: a + b (b at step 1; a→b edge follows). Slide 2:
+   the cluster {b, c, d} fully contained, with the a→b edge touching. */
+var MANIFEST = {
+  schemaVersion: "1.0.0",
+  generator: "fixture",
+  diagramType: "flowchart",
+  title: "deck_runtime fixture",
+  viewBox: { x: 0, y: 0, width: 900, height: 500 },
+  options: { fitMargin: 80, zoomMax: 1.6, dimOpacity: 0.08, autoAdvanceMs: 0 },
+  slides: [
+    {
+      id: "intro",
+      title: "The start",
+      caption: "b reveals on the first advance",
+      bounds: { x: 60, y: 90, width: 460, height: 56 },
+      fitMargin: 80,
+      zoomMax: 1.6,
+      nodes: [
+        { index: 0, sourceId: "a", elementId: "fm-node-a-0", step: 0, tooltip: "the entry point" },
+        { index: 1, sourceId: "b", elementId: "fm-node-b-1", step: 1, tooltip: null }
+      ],
+      edges: [{ index: 0, elementId: "fm-edge-0", step: 1, touching: false }],
+      clusters: [{ index: 0, elementId: "fm-cluster-0", step: 1, cameraContained: false }],
+      maxStep: 1,
+      steps: [{ step: 1, elementIds: ["fm-node-b-1", "fm-edge-0", "fm-cluster-0"] }]
+    },
+    {
+      id: "core",
+      title: "The core cluster",
+      caption: "fully contained; the a edge only touches",
+      bounds: { x: 380, y: 60, width: 480, height: 380 },
+      fitMargin: 80,
+      zoomMax: 1.6,
+      nodes: [
+        { index: 1, sourceId: "b", elementId: "fm-node-b-1", step: 0, tooltip: null },
+        { index: 2, sourceId: "c", elementId: "fm-node-c-2", step: 0, tooltip: null },
+        { index: 3, sourceId: "d", elementId: "fm-node-d-3", step: 0, tooltip: null }
+      ],
+      edges: [
+        { index: 0, elementId: "fm-edge-0", step: 0, touching: true },
+        { index: 1, elementId: "fm-edge-1", step: 0, touching: false },
+        { index: 2, elementId: "fm-edge-2", step: 0, touching: false }
+      ],
+      clusters: [{ index: 0, elementId: "fm-cluster-0", step: 0, cameraContained: true }],
+      maxStep: 0,
+      steps: []
+    }
+  ],
+  overview: { enabled: true, title: "One graph", caption: "the tour rect is clickable", tour: true },
+  nodeSlideIndex: {
+    "fm-node-a-0": ["intro"],
+    "fm-node-b-1": ["intro", "core"],
+    "fm-node-c-2": ["core"],
+    "fm-node-d-3": ["core"]
+  }
+};
+
+var deck = window.FmDeckRuntime.mount({
+  stage: document.getElementById("deck-stage"),
+  svg: SVG,
+  manifest: MANIFEST,
+  ui: {
+    num: document.getElementById("deck-num"),
+    title: document.getElementById("deck-title"),
+    caption: document.getElementById("deck-caption"),
+    dots: document.getElementById("deck-dots"),
+    prevBtn: document.getElementById("prev"),
+    nextBtn: document.getElementById("next"),
+    overviewBtn: document.getElementById("ov")
+  },
+  onSlideChange: function (index, slide) {
+    console.log("scene", index, slide ? slide.id : "(overview)");
+  }
+});
+document.getElementById("kill").addEventListener("click", function () {
+  deck.destroy();
+  console.log("destroyed — verify no rAF/listeners remain in the performance panel");
+});
+document.getElementById("deck-stage").focus();
+</script>
+</body>
+</html>
