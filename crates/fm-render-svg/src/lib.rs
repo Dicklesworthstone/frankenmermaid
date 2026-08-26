@@ -6770,11 +6770,12 @@ fn render_pie_svg(
         let lx = cx + label_radius * mid_angle.cos();
         let ly = cy + label_radius * mid_angle.sin();
         let pct = (value / total) * 100.0;
-        let label_text = if pie_meta.show_data {
-            format!("{}: {:.0} ({:.1}%)", slice.label, value, pct)
-        } else {
-            slice.label.clone()
-        };
+        // ⚠️ THE SLICE IS LABELLED WITH ITS PERCENTAGE, as mermaid labels it. We drew the slice NAME
+        // and no percentage at all, so `pie "Apples" : 40` rendered `Apples` where mermaid renders
+        // `40%`. Measured on the pinned 11.15.0 bundle: 40/30/30 -> "40%","30%","30%"; 1/1/1 ->
+        // three "33%"; 2/1 -> "67%","33%". The name is not lost — the legend beside the chart
+        // carries it, which is also where mermaid puts it.
+        let label_text = pie_percent_label(pct);
         let anchor = if mid_angle.cos() < -0.1 {
             "end"
         } else if mid_angle.cos() > 0.1 {
@@ -6895,6 +6896,19 @@ fn render_pie_svg(
 ///
 /// Gated on `text_alternatives`, matching `uniform_a11y`'s `<title>` component: with a11y off the
 /// shape closes exactly as it did before, so that configuration is byte-identical.
+/// Format a pie slice's share the way mermaid labels it: a whole percent with a `%` suffix.
+///
+/// ⚠️ HALF ROUNDS AWAY FROM ZERO, NOT TO EVEN, and that is the whole reason this is a function.
+/// mermaid rounds in JavaScript, where `Math.round(12.5)` is `13`. Rust's `{:.0}` rounds half to
+/// EVEN and renders the same value as `12`. Measured against the bundle to be sure rather than
+/// reasoned about: `pie "A":1 "B":7` draws `13%` and `88%`, and 3/8 draws `38%`.
+///
+/// The difference shows up only on an exact half, which is why a `{:.0}` implementation passes every
+/// obvious fixture — 40/30/30, 1/1/1, 2/1 — and fails one input in a hundred.
+fn pie_percent_label(percent: f32) -> String {
+    format!("{}%", (f64::from(percent) + 0.5).floor() as i64)
+}
+
 fn write_pie_slice_accessible_name(
     out: &mut String,
     text_alternatives: bool,
