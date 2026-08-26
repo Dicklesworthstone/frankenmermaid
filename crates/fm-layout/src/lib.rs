@@ -7212,20 +7212,27 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
     }
 
     let min_start_day = start_days.iter().copied().min().unwrap_or(base_start_day);
-    let max_last_day = start_days
+    // ⚠️ THE AXIS RUNS TO THE CHART'S END BOUNDARY, NOT TO THE LAST OCCUPIED DAY (bd-pqp2f).
+    // `max_last_day` is `start + duration - 1`, the last day a bar covers, which is the right
+    // quantity for the BARS and one short for the AXIS. mermaid draws a tick on the exclusive end:
+    // `Design 2026-01-01, 3d` then `Build after a1, 4d` ends on 2026-01-08, and mermaid labels it
+    // while we stopped at 2026-01-07.
+    //
+    // `total_span_days` reaches exactly two places — the published `last_day` and the tick range
+    // below — so widening it moves the axis and nothing else; bar geometry is derived from
+    // `start_days`/`durations` directly.
+    //
+    // The `.max(1)` floor is why a ONE-DAY task already drew two ticks: its occupied span is 0 and
+    // the floor lifted it to 1, which happens to equal the end boundary. That case was right by
+    // accident and stays right by construction now.
+    let max_end_day = start_days
         .iter()
         .copied()
         .zip(durations.iter().copied())
-        .map(|(start, duration)| {
-            if duration > 0 {
-                start.saturating_add(duration.saturating_sub(1))
-            } else {
-                start
-            }
-        })
+        .map(|(start, duration)| start.saturating_add(duration.max(1)))
         .max()
         .unwrap_or(min_start_day);
-    let total_span_days = usize::try_from((max_last_day - min_start_day).max(1)).unwrap_or(1);
+    let total_span_days = usize::try_from((max_end_day - min_start_day).max(1)).unwrap_or(1);
 
     let mut section_base_y = 0.0_f32;
     let mut per_section_counts = vec![0_usize; section_count];
@@ -21158,11 +21165,12 @@ mod tests {
         let layout = layout_diagram_gantt(&ir);
         let ticks = &layout.extensions.axis_ticks;
 
-        // One tick per day of the span, inclusive of both ends: 2026-01-01 through 2026-01-07 is a
-        // 6-day span, so 7 ticks. Neither an empty axis nor a tick per pixel.
+        // One tick per day from the first start through the chart's END BOUNDARY: a task starting
+        // 2026-01-01 and running 7 days occupies through 01-07 and ends 01-08, so 8 ticks
+        // (bd-pqp2f). Neither an empty axis nor a tick per pixel.
         assert_eq!(
             ticks.len(),
-            7,
+            8,
             "expected one tick per day over the inclusive span, got {:?}",
             ticks.iter().map(|t| t.label.as_str()).collect::<Vec<_>>()
         );
@@ -21248,9 +21256,12 @@ mod tests {
     #[test]
     fn gantt_axis_format_rewrites_every_tick_label() {
         let formatted = gantt_axis_probe("2026-01-01", 3, Some("%m/%d"), None, None);
+        // ⚠️ ONE MORE TICK THAN BEFORE, and it is the chart's END BOUNDARY (bd-pqp2f). The
+        // axis used to stop at the last day a bar OCCUPIED; mermaid labels the exclusive end,
+        // measured on gantt_basic where it draws 2026-01-08 and we drew through 2026-01-07.
         assert_eq!(
             tick_labels(&formatted),
-            vec!["01/01", "01/02", "01/03"],
+            vec!["01/01", "01/02", "01/03", "01/04"],
             "axisFormat %m/%d must produce month/day labels"
         );
 
@@ -21259,7 +21270,7 @@ mod tests {
         let plain = gantt_axis_probe("2026-01-01", 3, None, None, None);
         assert_eq!(
             tick_labels(&plain),
-            vec!["2026-01-01", "2026-01-02", "2026-01-03"],
+            vec!["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"],
             "with no axisFormat the tick label must stay ISO"
         );
         assert_eq!(
@@ -21317,9 +21328,12 @@ mod tests {
             Some(fm_core::GanttTickInterval::Month),
             None,
         );
+        // ⚠️ ONE MORE TICK THAN BEFORE, and it is the chart's END BOUNDARY (bd-pqp2f). The
+        // axis used to stop at the last day a bar OCCUPIED; mermaid labels the exclusive end,
+        // measured on gantt_basic where it draws 2026-01-08 and we drew through 2026-01-07.
         assert_eq!(
             tick_labels(&monthly),
-            vec!["2026-01-01", "2026-02-01", "2026-03-01"],
+            vec!["2026-01-01", "2026-02-01", "2026-03-01", "2026-04-01"],
             "tickInterval 1month must emit one tick per month start"
         );
         // Positions must still be the real day offsets, not a re-spaced row: Feb 1 is 31 days in
@@ -21338,7 +21352,8 @@ mod tests {
 
         // Non-vacuity: the same span with no directive is still one tick per day.
         let daily = gantt_axis_probe("2026-01-01", 90, None, None, None);
-        assert_eq!(daily.extensions.axis_ticks.len(), 90);
+        // 90 occupied days plus the end boundary (bd-pqp2f).
+        assert_eq!(daily.extensions.axis_ticks.len(), 91);
 
         // A span containing NO boundary must not lose its axis entirely — six days cross no
         // first-of-month, and silently emitting nothing would undo bd-trsd for exactly the
@@ -21468,7 +21483,10 @@ mod tests {
         assert!(task_3.bounds.center().y > task_1.bounds.center().y);
         assert!((task_1.bounds.center().y - task_2.bounds.center().y).abs() > 10.0);
         assert_eq!(layout.extensions.bands.len(), 2);
-        assert_eq!(layout.extensions.axis_ticks.len(), 5);
+        // ⚠️ ONE MORE TICK THAN BEFORE, and it is the chart's END BOUNDARY (bd-pqp2f). The
+        // axis used to stop at the last day a bar OCCUPIED; mermaid labels the exclusive end,
+        // measured on gantt_basic where it draws 2026-01-08 and we drew through 2026-01-07.
+        assert_eq!(layout.extensions.axis_ticks.len(), 6);
         assert_eq!(layout.extensions.axis_ticks[0].label, "2026-02-01");
     }
 

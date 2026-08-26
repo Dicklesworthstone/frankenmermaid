@@ -18832,10 +18832,13 @@ marker#arrow-open path {
                 &svg[from..from + svg[from..].find('<').unwrap()]
             })
             .collect();
+        // ⚠️ EIGHT, NOT SEVEN, and the extra one is the chart's END BOUNDARY (bd-pqp2f). The axis
+        // used to stop at the last day a bar OCCUPIED; mermaid labels the exclusive end — measured
+        // on `gantt_basic`, where it draws 2026-01-08 and we drew only through 2026-01-07.
         assert_eq!(
             tick_labels.len(),
-            7,
-            "expected 7 daily ticks over a 6-day span, got {tick_labels:?}"
+            8,
+            "expected a daily tick per day through the chart end, got {tick_labels:?}"
         );
         assert!(
             tick_labels.contains(&"2026-01-01") && tick_labels.contains(&"2026-01-04"),
