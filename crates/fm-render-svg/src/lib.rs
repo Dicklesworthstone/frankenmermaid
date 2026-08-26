@@ -9113,6 +9113,10 @@ fn render_node_into(
         // gitGraph commits, which draw an id in mermaid.
         ir_node.map_or("", |node| ir.node_display_text(node))
     };
+    // A sankey node additionally carries its throughput on a second line, as mermaid draws it.
+    // Owned, so it must outlive the borrow above; `None` for every other diagram type.
+    let sankey_label = sankey_node_label(ir, node_box.node_index);
+    let raw_label_text = sankey_label.as_deref().unwrap_or(raw_label_text);
     let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
     let node_font_size = detail.node_font_size;
     let label_may_overflow = label_text.lines().any(|line| {
@@ -9680,6 +9684,10 @@ fn render_node(
         // gitGraph commits, which draw an id in mermaid.
         ir_node.map_or("", |node| ir.node_display_text(node))
     };
+    // A sankey node additionally carries its throughput on a second line, as mermaid draws it.
+    // Owned, so it must outlive the borrow above; `None` for every other diagram type.
+    let sankey_label = sankey_node_label(ir, node_box.node_index);
+    let raw_label_text = sankey_label.as_deref().unwrap_or(raw_label_text);
     let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
     let node_font_size = detail.node_font_size;
     let label_may_overflow = label_text.lines().any(|line| {
@@ -12485,6 +12493,55 @@ struct EdgeRenderContext<'a> {
     /// re-scanned `ir.edges` and re-parsed every flow value on every edge: O(E^2) float parses to
     /// produce E widths. Computing it once with the context makes the render O(E).
     sankey_widest_flow: Option<f32>,
+}
+
+/// A sankey node's label: its name, then its throughput on the next line, as mermaid labels it.
+///
+/// ⚠️ THE TOTAL IS THE MAX OF INFLOW AND OUTFLOW, NOT THE SUM, and not either side alone. Measured
+/// on the pinned 11.15.0 bundle with `A,M,10` / `M,B,3`: mermaid draws `M\n10`. The sum would be
+/// 13 and the outflow 3, so a node that does not conserve flow distinguishes all three rules —
+/// every balanced diagram makes them agree, which is why the differential fixture carries an
+/// unbalanced one.
+///
+/// The number is formatted plainly: `A,B,1.5` / `A,C,2.25` gives `A\n3.75`, with no padding and no
+/// trailing zeros.
+fn sankey_node_label(ir: &MermaidDiagramIr, node_index: usize) -> Option<String> {
+    if ir.diagram_type != DiagramType::Sankey {
+        return None;
+    }
+    let node = ir.nodes.get(node_index)?;
+    let mut inflow = 0.0_f32;
+    let mut outflow = 0.0_f32;
+    for edge in &ir.edges {
+        let Some(value) = sankey_flow_value(ir, edge) else {
+            continue;
+        };
+        if edge.to == fm_core::IrEndpoint::Node(fm_core::IrNodeId(node_index)) {
+            inflow += value;
+        }
+        if edge.from == fm_core::IrEndpoint::Node(fm_core::IrNodeId(node_index)) {
+            outflow += value;
+        }
+    }
+    let total = inflow.max(outflow);
+    if total <= 0.0 {
+        return None;
+    }
+    Some(format!(
+        "{}\n{}",
+        ir.node_display_text(node),
+        format_sankey_total(total)
+    ))
+}
+
+/// Plain decimal, no trailing zeros: 150 renders `150`, 3.75 renders `3.75`.
+fn format_sankey_total(total: f32) -> String {
+    if (total.fract()).abs() < f32::EPSILON {
+        format!("{}", total as i64)
+    } else {
+        let text = format!("{total}");
+        text
+    }
 }
 
 /// Value carried by a sankey flow, which `parse_sankey` stores as the edge LABEL.

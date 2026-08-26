@@ -67,7 +67,12 @@ function textRuns(svg) {
     const close = rest.indexOf('</text>');
     if (close < 0) break;
     const inner = rest.slice(open + 1, close);
+    // ⚠️ A MULTI-LINE LABEL IS ONE `<text>` HOLDING A `<tspan>` PER LINE, so the tspan boundary IS a
+    // newline. Stripping the tags without putting one back joins `A` and `10` into `A10` and
+    // reports a false divergence against mermaid's `A\n10` — which it did, on every sankey node,
+    // until this line existed.
     const plain = inner
+      .replace(/<\/tspan>\s*<tspan[^>]*>/g, '\n')
       .replace(/<[^>]*>/g, '')
       .replace(/&lt;/g, '<')
       .replace(/&gt;/g, '>')
