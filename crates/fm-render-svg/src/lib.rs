@@ -4099,6 +4099,31 @@ fn render_layout_to_svg(
         );
     }
 
+    // The journey ACTOR LEGEND, which mermaid draws and we drew nowhere (bd-mq273).
+    //
+    // Measured on the pinned 11.15.0 bundle, `journey_basic` gives the run order
+    // ["System","User","Browse","Visit homepage",…,"User Shopping Journey"] — the actors come FIRST,
+    // each exactly once, and SORTED rather than in source order: `One: 3: Zed` then `Two: 4: Alpha`
+    // draws ["Alpha","Zed"]. A step naming several actors contributes each of them separately, so
+    // `One: 3: Bob, Ann` draws ["Ann","Bob"].
+    //
+    // ⚠️ FROM `journey_meta`, NOT FROM THE `journey-actor-*` CLASSES. Those are CSS-normalized, so a
+    // legend built from them would draw `Big_Corp` for an author who wrote `Big Corp` — the same
+    // defect the accessible name carried until this change.
+    for actor in journey_actor_legend(ir) {
+        doc = doc.child(
+            TextBuilder::new(&actor.name)
+                .x(padding + actor.offset_x)
+                .y(padding + config.font_size * 2.0 + 12.0)
+                .anchor(TextAnchor::Start)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                .font_size(config.font_size - 2.0)
+                .fill(&theme.colors.text)
+                .class("fm-journey-actor")
+                .build(),
+        );
+    }
+
     // Stream all bands (sequence lifelines / journey sections / xychart columns) into ONE raw fragment
     // instead of building N `<g><rect/></g>` element trees as separate `doc.child`ren. Byte-identical:
     // `write_layout_band_into` emits the same bytes `render_layout_band(..).write_to_string` does, and the
@@ -7729,6 +7754,46 @@ fn xychart_y_ticks(min: f32, max: f32) -> Vec<f32> {
     } else {
         ticks
     }
+}
+
+/// One entry of the journey actor legend: the actor's name and where it sits on the legend row.
+pub(crate) struct JourneyLegendEntry {
+    pub(crate) name: String,
+    pub(crate) offset_x: f32,
+}
+
+/// The actors a journey declares, deduplicated and sorted, as mermaid lists them (bd-mq273).
+///
+/// Empty for every other diagram type, and for a journey whose steps name no actor — an empty legend
+/// row must not reserve space or draw a stray separator.
+fn journey_actor_legend(ir: &MermaidDiagramIr) -> Vec<JourneyLegendEntry> {
+    if ir.diagram_type != DiagramType::Journey {
+        return Vec::new();
+    }
+    let mut names: Vec<&str> = ir
+        .nodes
+        .iter()
+        .filter_map(|node| node.journey_meta.as_deref())
+        .flat_map(|meta| meta.actors.iter().map(String::as_str))
+        .collect();
+    // Sorted then deduped, which is the order mermaid draws them in and NOT source order.
+    names.sort_unstable();
+    names.dedup();
+
+    let mut offset = 0.0_f32;
+    names
+        .into_iter()
+        .map(|name| {
+            let entry = JourneyLegendEntry {
+                name: name.to_string(),
+                offset_x: offset,
+            };
+            // Advance by the name's own width so entries do not overlap; the constant is the same
+            // average-character estimate the rest of this renderer sizes text with.
+            offset += (name.chars().count() as f32).mul_add(8.0, 24.0);
+            entry
+        })
+        .collect()
 }
 
 fn format_xychart_tick_value(value: f32) -> String {

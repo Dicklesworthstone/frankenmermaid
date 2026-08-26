@@ -1566,6 +1566,21 @@ pub struct IrClassMember {
     pub is_abstract: bool,
 }
 
+/// A journey step's actors, as the AUTHOR wrote them (bd-mq273).
+///
+/// ⚠️ THE CSS CLASSES CANNOT CARRY THIS, which is the whole reason the field exists. The parser also
+/// records each actor as `journey-actor-<name>` for styling, and a class name may not contain a
+/// space — `normalize_compound_identifier` turns `Big Corp` into `Big_Corp`. Anything that recovers
+/// the actor from that class therefore announces or draws an underscore the author never typed, and
+/// `Big_Corp` is indistinguishable from a genuine underscore, so the mapping cannot be undone.
+///
+/// The classes stay for styling. Text that a reader or a screen reader sees comes from here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+pub struct IrJourneyNodeMeta {
+    /// Actors in source order, each exactly as written, already split on `,` and trimmed.
+    pub actors: Vec<String>,
+}
+
 /// Stereotype annotation for a class (e.g., `<<interface>>`, `<<abstract>>`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ClassStereotype {
@@ -1660,6 +1675,10 @@ pub struct IrNode {
     /// Requirement-diagram metadata (type, id, text, risk, verifymethod). Boxed — see `class_meta`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requirement_meta: Option<Box<IrRequirementNodeMeta>>,
+    /// Journey step actors as the author wrote them (bd-mq273). Boxed like its siblings so a node
+    /// in any other diagram family pays one null pointer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journey_meta: Option<Box<IrJourneyNodeMeta>>,
     /// C4-diagram-specific metadata (element type, technology, description). Boxed — see `class_meta`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub c4_meta: Option<Box<IrC4NodeMeta>>,

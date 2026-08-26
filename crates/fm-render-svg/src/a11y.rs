@@ -266,14 +266,16 @@ pub fn journey_step_description_suffix(node: &IrNode) -> String {
         suffix.push_str(", score ");
         suffix.push_str(score);
     }
-    // The bare `journey-actor` marker only flags THAT a step has actors; `strip_prefix` leaves it as
-    // an empty string, which would announce an actor with no name.
+    // ⚠️ THE ACTORS COME FROM `journey_meta`, NOT FROM THE CLASSES (bd-mq273). Deriving them by
+    // stripping `journey-actor-` announced the CSS-normalized spelling: an author who wrote
+    // `Big Corp` heard `Big_Corp`, because a class name cannot contain a space. That mapping is not
+    // reversible either — a genuine underscore is indistinguishable from a normalized one — so the
+    // parser records the raw names separately and this reads those.
     let actors: Vec<&str> = node
-        .classes
-        .iter()
-        .filter_map(|class| class.strip_prefix("journey-actor-"))
-        .filter(|actor| !actor.is_empty())
-        .collect();
+        .journey_meta
+        .as_deref()
+        .map(|meta| meta.actors.iter().map(String::as_str).collect())
+        .unwrap_or_default();
     if !actors.is_empty() {
         suffix.push_str(", actors: ");
         suffix.push_str(&actors.join(", "));

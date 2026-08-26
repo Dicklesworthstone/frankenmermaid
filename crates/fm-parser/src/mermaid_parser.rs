@@ -6832,6 +6832,7 @@ fn add_journey_actor_classes(
     };
 
     let mut has_actor_class = false;
+    let mut actors: Vec<String> = Vec::new();
     for actor in actors_raw
         .split(',')
         .filter_map(|actor| clean_label(Some(actor)))
@@ -6842,6 +6843,15 @@ fn add_journey_actor_classes(
         }
         let actor_class = format!("journey-actor-{}", normalize_compound_identifier(&actor));
         builder.add_class_to_node_id(step_node, &actor_class);
+        // ⚠️ THE RAW NAME IS KEPT SEPARATELY, because the class above cannot hold it. A CSS class
+        // may not contain a space, so `normalize_compound_identifier` turns `Big Corp` into
+        // `Big_Corp` — and anything that recovers the actor by stripping the `journey-actor-`
+        // prefix then announces or draws an underscore the author never typed. That is exactly what
+        // the accessible name did before this field existed (bd-mq273): `actors: Big_Corp`.
+        actors.push(actor);
+    }
+    if !actors.is_empty() {
+        builder.set_journey_actors(step_node, actors);
     }
 }
 
