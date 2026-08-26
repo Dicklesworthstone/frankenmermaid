@@ -79,7 +79,12 @@ fn parsed(meta: &str) -> fm_core::GanttTaskFlags {
     let source = format!("gantt\n    dateFormat YYYY-MM-DD\n    section S\n    Task :{meta}\n");
     let ir = fm_parser::parse(&source).ir;
     let gantt = ir.gantt_meta.as_ref().expect("gantt metadata");
-    assert_eq!(gantt.tasks.len(), 1, "{meta:?} produced {} tasks", gantt.tasks.len());
+    assert_eq!(
+        gantt.tasks.len(),
+        1,
+        "{meta:?} produced {} tasks",
+        gantt.tasks.len()
+    );
     gantt.tasks[0].flags
 }
 
@@ -119,17 +124,32 @@ fn the_fixture_rejects_a_last_tag_wins_model() {
     // `crit, done` and `done, crit` carry the same tags in mermaid. Under last-tag-wins they cannot,
     // because the model has nowhere to put the tag that is not last.
     for (first, second) in [
-        ("crit, done, t5, 2026-01-01, 5d", "done, crit, t6, 2026-01-01, 5d"),
-        ("crit, active, t7, 2026-01-01, 5d", "active, crit, t8, 2026-01-01, 5d"),
+        (
+            "crit, done, t5, 2026-01-01, 5d",
+            "done, crit, t6, 2026-01-01, 5d",
+        ),
+        (
+            "crit, active, t7, 2026-01-01, 5d",
+            "active, crit, t8, 2026-01-01, 5d",
+        ),
     ] {
-        let a = rows.iter().find(|row| row.meta == first).expect("ordered pair in fixture");
-        let b = rows.iter().find(|row| row.meta == second).expect("ordered pair in fixture");
+        let a = rows
+            .iter()
+            .find(|row| row.meta == first)
+            .expect("ordered pair in fixture");
+        let b = rows
+            .iter()
+            .find(|row| row.meta == second)
+            .expect("ordered pair in fixture");
         assert_eq!(
             (a.crit, a.done, a.active, a.milestone),
             (b.crit, b.done, b.active, b.milestone),
             "the incumbent is order-sensitive here, so this pair cannot discriminate"
         );
-        let count = [a.crit, a.done, a.active, a.milestone].iter().filter(|f| **f).count();
+        let count = [a.crit, a.done, a.active, a.milestone]
+            .iter()
+            .filter(|f| **f)
+            .count();
         assert!(count > 1, "{first:?} is not actually a combination");
     }
 }

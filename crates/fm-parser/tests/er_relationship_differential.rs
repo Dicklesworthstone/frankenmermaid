@@ -90,7 +90,8 @@ fn every_spelling_puts_each_cardinality_on_the_end_mermaid_puts_it() {
         let (left, right) = fm_core::parse_er_cardinality(&row.token);
         // THE SWAP IS HERE AND IT IS DELIBERATE: mermaid's `cardB` is the LEFT marker and its
         // `cardA` is the RIGHT one.
-        let (expected_left, expected_right) = (our_spelling(&row.card_b), our_spelling(&row.card_a));
+        let (expected_left, expected_right) =
+            (our_spelling(&row.card_b), our_spelling(&row.card_a));
         if (left, right) != (expected_left, expected_right) {
             divergent.push(format!(
                 "{:?}: ours ({left:?}, {right:?}), mermaid ({expected_left:?}, {expected_right:?})",

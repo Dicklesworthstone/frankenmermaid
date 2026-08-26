@@ -9066,17 +9066,10 @@ fn render_node_into(
     let raw_label_text = if placeholder_space_node {
         ""
     } else {
-        label_id
-            .and_then(|lid| ir.labels.get(lid.0))
-            .map(|l| l.text.as_str())
-            .or_else(|| {
-                ir_node.and_then(|node| match node.shape {
-                    NodeShape::DoubleCircle if node.label.is_none() => None,
-                    NodeShape::FilledCircle | NodeShape::HorizontalBar => None,
-                    _ => Some(node.id.as_str()),
-                })
-            })
-            .unwrap_or("")
+        // ⚠️ Shared with fm-layout, which SIZES the box from the same call (bd-3cj8v). A local copy
+        // of this rule here drifted from layout's and reproduced a state-diagram id suppression on
+        // gitGraph commits, which draw an id in mermaid.
+        ir_node.map_or("", |node| ir.node_display_text(node))
     };
     let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
     let node_font_size = detail.node_font_size;
@@ -9640,17 +9633,10 @@ fn render_node(
     let raw_label_text = if placeholder_space_node {
         ""
     } else {
-        label_id
-            .and_then(|lid| ir.labels.get(lid.0))
-            .map(|l| l.text.as_str())
-            .or_else(|| {
-                ir_node.and_then(|node| match node.shape {
-                    NodeShape::DoubleCircle if node.label.is_none() => None,
-                    NodeShape::FilledCircle | NodeShape::HorizontalBar => None,
-                    _ => Some(node.id.as_str()),
-                })
-            })
-            .unwrap_or("")
+        // ⚠️ Shared with fm-layout, which SIZES the box from the same call (bd-3cj8v). A local copy
+        // of this rule here drifted from layout's and reproduced a state-diagram id suppression on
+        // gitGraph commits, which draw an id in mermaid.
+        ir_node.map_or("", |node| ir.node_display_text(node))
     };
     let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
     let node_font_size = detail.node_font_size;

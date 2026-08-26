@@ -9753,9 +9753,40 @@ fn parse_gitgraph_direction(header: &str) -> Option<GraphDirection> {
     None
 }
 
+/// Compose the text a git commit node displays: its id, then its message, then every tag (bd-3cj8v).
+///
+/// ⚠️ THE ID HAS TO BE IN HERE. A node's label REPLACES its id at render time — it does not
+/// accompany it — so the previous `[{tag}]` label made the commit id unreachable: `commit id: "two"
+/// tag: "stable"` drew `[stable]` and `two` appeared nowhere in the SVG. mermaid draws both, from
+/// two separate text elements (`commit-label` holding `t.id`, plus one `tag-label` per tag). We
+/// draw one text per node, so the id and the flags are composed into it instead.
+///
+/// Returns `None` when there is nothing to add, which leaves the label unset and lets the renderer's
+/// id fallback do the work — the plain-`commit` path allocates no label at all.
+fn git_commit_label(commit_id: &str, msg: Option<&str>, tags: &[String]) -> Option<String> {
+    if msg.is_none() && tags.is_empty() {
+        return None;
+    }
+    // id + " " + msg + one " [tag]" per tag.
+    let extra =
+        msg.map_or(0, |m| m.len() + 1) + tags.iter().map(|tag| tag.len() + 3).sum::<usize>();
+    let mut label = String::with_capacity(commit_id.len() + extra);
+    label.push_str(commit_id);
+    if let Some(msg) = msg {
+        label.push(' ');
+        label.push_str(msg);
+    }
+    for tag in tags {
+        label.push_str(" [");
+        label.push_str(tag);
+        label.push(']');
+    }
+    Some(label)
+}
+
 /// Parse a commit command and its options.
 ///
-/// Syntax: `commit [id: "id"] [msg: "message"] [tag: "tag"] [type: NORMAL|REVERSE|HIGHLIGHT]`
+/// Syntax: `commit [id: "id"] [msg: "message"] [tag: "tag"]... [type: NORMAL|REVERSE|HIGHLIGHT]`
 fn parse_git_commit(
     options: GitCommitOptions,
     line_number: usize,
@@ -9768,13 +9799,7 @@ fn parse_git_commit(
     // Determine commit ID
     let commit_id = options.id.unwrap_or_else(|| state.next_commit_id());
 
-    // Build label from message and/or tag
-    let label = match (&options.msg, &options.tag) {
-        (Some(msg), Some(tag)) => Some(format!("{msg} [{tag}]")),
-        (Some(msg), None) => Some(msg.clone()),
-        (None, Some(tag)) => Some(format!("[{tag}]")),
-        (None, None) => None,
-    };
+    let label = git_commit_label(&commit_id, options.msg.as_deref(), &options.tags);
 
     // Map commit type to shape: REVERSE uses filled circle, HIGHLIGHT uses double circle.
     let shape = match options.commit_type.as_deref() {
@@ -9843,14 +9868,20 @@ fn tag_git_commit_branch(
 struct GitCommitOptions {
     id: Option<String>,
     msg: Option<String>,
-    tag: Option<String>,
+    /// ⚠️ A LIST, because `tag:` may be written more than once on one commit (bd-3cj8v).
+    /// mermaid's db stores `tags: string[]` and its renderer draws one flag per entry
+    /// (`for (let u of t.tags.reverse())`). Holding a single `Option<String>` made the last
+    /// `tag:` clause overwrite the earlier ones, so `commit tag: "v1.0" tag: "stable"` dropped
+    /// `v1.0` from the output entirely with no diagnostic.
+    tags: Vec<String>,
     commit_type: Option<String>,
 }
 
 struct GitMergeOptions {
     branch: String,
     id: Option<String>,
-    tag: Option<String>,
+    /// A list for the same reason as [`GitCommitOptions::tags`] — `merge` accepts repeated `tag:`.
+    tags: Vec<String>,
 }
 
 /// Split `dev order: 2` into the branch NAME and the order value (bd-p6sgt).
@@ -9874,7 +9905,7 @@ fn parse_git_commit_options(rest: &str) -> GitCommitOptions {
     let mut options = GitCommitOptions {
         id: None,
         msg: None,
-        tag: None,
+        tags: Vec::new(),
         commit_type: None,
     };
 
@@ -9906,11 +9937,11 @@ fn parse_git_commit_options(rest: &str) -> GitCommitOptions {
             continue;
         }
 
-        // Try to match tag: "value"
+        // Try to match tag: "value" — PUSH, never assign; a commit may carry several tags.
         if let Some(rest_after_tag) = remaining.strip_prefix("tag:")
             && let Some((value, rest)) = extract_quoted_or_word(rest_after_tag.trim_start())
         {
-            options.tag = Some(value);
+            options.tags.push(value);
             remaining = rest;
             continue;
         }
@@ -10074,7 +10105,7 @@ fn parse_git_merge(
     let GitMergeOptions {
         branch: branch_name,
         id,
-        tag,
+        tags,
     } = options;
 
     // Get the head of the branch being merged
@@ -10088,9 +10119,15 @@ fn parse_git_merge(
     };
 
     let merge_id = id.unwrap_or_else(|| state.next_commit_id());
-    let label = tag.unwrap_or_else(|| format!("merge {branch_name}"));
+    // ⚠️ TWO LABELS, ONE VARIABLE USED TO SERVE BOTH (bd-3cj8v). The node text and the edge text
+    // were the same string, so a `tag:` on a merge silently became the EDGE's label and displaced
+    // both the merge id and `merge <branch>`. They answer different questions: the node shows what
+    // mermaid shows on a commit (its id, plus a flag per tag), the edge says what the merge was.
+    let node_label = git_commit_label(&merge_id, None, &tags);
+    let edge_label = format!("merge {branch_name}");
 
-    let Some(merge_node) = builder.intern_node(&merge_id, Some(&label), NodeShape::Circle, span)
+    let Some(merge_node) =
+        builder.intern_node(&merge_id, node_label.as_deref(), NodeShape::Circle, span)
     else {
         return;
     };
@@ -10103,7 +10140,7 @@ fn parse_git_merge(
         merge_source,
         merge_node,
         ArrowType::DottedArrow,
-        Some(&label),
+        Some(&edge_label),
         span,
     );
 
@@ -10126,7 +10163,7 @@ fn parse_git_merge_options(spec: &str) -> Option<GitMergeOptions> {
     let mut options = GitMergeOptions {
         branch,
         id: None,
-        tag: None,
+        tags: Vec::new(),
     };
 
     let mut remaining = parts.next().unwrap_or_default().trim();
@@ -10141,10 +10178,11 @@ fn parse_git_merge_options(spec: &str) -> Option<GitMergeOptions> {
             continue;
         }
 
+        // PUSH, never assign — `merge` accepts repeated `tag:` exactly as `commit` does.
         if let Some(rest_after_tag) = remaining.strip_prefix("tag:")
             && let Some((value, rest)) = extract_quoted_or_word(rest_after_tag.trim_start())
         {
-            options.tag = Some(value);
+            options.tags.push(value);
             remaining = rest;
             continue;
         }
@@ -14935,8 +14973,8 @@ mod tests {
     use chumsky::Parser;
     use fm_core::{
         ArrowType, DiagnosticCategory, DiagnosticSeverity, DiagramType, GanttDate, GanttExclude,
-        GanttTickInterval, GraphDirection, IrEndpoint, IrLabelSegment,
-        IrXySeriesKind, MermaidParseMode, NodeShape,
+        GanttTickInterval, GraphDirection, IrEndpoint, IrLabelSegment, IrXySeriesKind,
+        MermaidParseMode, NodeShape,
     };
 
     use super::{
@@ -17899,18 +17937,22 @@ commit msg: "Fix bug" tag: "v1.0.1""#,
         assert_eq!(parsed.ir.diagram_type, DiagramType::GitGraph);
         assert_eq!(parsed.ir.nodes.len(), 2);
 
-        // Labels should include tags
+        // ⚠️ THE ID LEADS, and this test used to assert it away (bd-3cj8v). A label REPLACES the id
+        // at render time rather than accompanying it, so the old expectations — `[v1.0.0]` and
+        // `Fix bug [v1.0.1]` — described output in which the commit ids were unreachable. mermaid
+        // draws the id for every commit (`.attr("class","commit-label").text(t.id)`) plus a
+        // separate flag per tag; we compose the same information into the one text we draw.
         let label1 = parsed.ir.nodes[0]
             .label
             .and_then(|id| parsed.ir.labels.get(id.0))
             .map(|l| l.text.as_str());
-        assert_eq!(label1, Some("[v1.0.0]"));
+        assert_eq!(label1, Some("commit_1 [v1.0.0]"));
 
         let label2 = parsed.ir.nodes[1]
             .label
             .and_then(|id| parsed.ir.labels.get(id.0))
             .map(|l| l.text.as_str());
-        assert_eq!(label2, Some("Fix bug [v1.0.1]"));
+        assert_eq!(label2, Some("commit_2 Fix bug [v1.0.1]"));
     }
 
     #[test]
@@ -17973,14 +18015,19 @@ merge develop id: merge1 tag: release",
             .label
             .and_then(|id| parsed.ir.labels.get(id.0))
             .map(|label| label.text.as_str());
-        assert_eq!(merge_label, Some("release"));
+        // ⚠️ THE NODE AND THE EDGE ANSWER DIFFERENT QUESTIONS, and one string used to serve both
+        // (bd-3cj8v). A `tag:` on a merge became the EDGE's label and displaced both the merge id
+        // and `merge <branch>`, so this test asserted `release` twice and neither `merge1` nor the
+        // branch name appeared anywhere. The node now shows what mermaid shows on a commit — its
+        // id, plus a flag per tag — and the edge says what the merge actually was.
+        assert_eq!(merge_label, Some("merge1 [release]"));
         assert!(
             parsed.ir.edges.iter().any(|edge| {
                 edge.label
                     .and_then(|id| parsed.ir.labels.get(id.0))
-                    .is_some_and(|label| label.text == "release")
+                    .is_some_and(|label| label.text == "merge develop")
             }),
-            "merge source edge should keep tag label"
+            "merge source edge should say which branch was merged"
         );
     }
 
@@ -21137,7 +21184,10 @@ Rel_Back(db, app, "Responds")"#,
             "gantt\n  title Plan\n  section S1\n  Milestone1 :milestone, m1, 2024-06-01, 0d";
         let parsed = parse_mermaid(input);
         let gantt_meta = parsed.ir.gantt_meta.as_ref().expect("gantt meta");
-        assert_eq!(gantt_meta.tasks[0].flags.primary_type(), fm_core::GanttTaskType::Milestone);
+        assert_eq!(
+            gantt_meta.tasks[0].flags.primary_type(),
+            fm_core::GanttTaskType::Milestone
+        );
         assert_eq!(gantt_meta.tasks[0].task_id.as_deref(), Some("m1"));
         assert_eq!(gantt_meta.tasks[0].end, Some(GanttDate::DurationDays(0)));
     }
@@ -21147,8 +21197,14 @@ Rel_Back(db, app, "Responds")"#,
         let input = "gantt\n  section S1\n  Done task :done, d1, 2024-01-01, 10d\n  Active task :active, a1, 2024-01-11, 10d\n  Future task :f1, after a1, 5d";
         let parsed = parse_mermaid(input);
         let gantt_meta = parsed.ir.gantt_meta.as_ref().expect("gantt meta");
-        assert_eq!(gantt_meta.tasks[0].flags.primary_type(), fm_core::GanttTaskType::Done);
-        assert_eq!(gantt_meta.tasks[1].flags.primary_type(), fm_core::GanttTaskType::Active);
+        assert_eq!(
+            gantt_meta.tasks[0].flags.primary_type(),
+            fm_core::GanttTaskType::Done
+        );
+        assert_eq!(
+            gantt_meta.tasks[1].flags.primary_type(),
+            fm_core::GanttTaskType::Active
+        );
         assert_eq!(gantt_meta.tasks[2].depends_on, vec!["a1".to_string()]);
         let done_node = &parsed.ir.nodes[gantt_meta.tasks[0].node.0];
         let active_node = &parsed.ir.nodes[gantt_meta.tasks[1].node.0];
@@ -21186,7 +21242,10 @@ Rel_Back(db, app, "Responds")"#,
                 GanttExclude::Dates(vec!["2026-02-14".to_string(), "2026-02-15".to_string()])
             ]
         );
-        assert_eq!(gantt_meta.tasks[0].flags.primary_type(), fm_core::GanttTaskType::Critical);
+        assert_eq!(
+            gantt_meta.tasks[0].flags.primary_type(),
+            fm_core::GanttTaskType::Critical
+        );
         assert_eq!(
             gantt_meta.tasks[0].end,
             Some(GanttDate::Absolute("2026-02-12".to_string()))

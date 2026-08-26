@@ -3,9 +3,8 @@
 //! These tests verify the end-to-end flow from parsing to layout to rendering.
 
 use fm_core::{
-    DiagramType, GanttDate, GanttExclude, GanttTaskType, GanttTickInterval, GraphDirection,
-    MermaidLensBinding, MermaidLensEdit, MermaidSourceMap, MermaidTier, apply_lens_edit,
-    build_lens_bindings,
+    DiagramType, GanttDate, GanttExclude, GanttTickInterval, GraphDirection, MermaidLensBinding,
+    MermaidLensEdit, MermaidSourceMap, MermaidTier, apply_lens_edit, build_lens_bindings,
 };
 use fm_layout::{
     IncrementalLayoutEngine, IncrementalLayoutSession, LayoutAlgorithm, LayoutConfig,
@@ -2484,7 +2483,10 @@ fn gantt_extended_meta_flows_through_parse_and_layout() {
             GanttExclude::Dates(vec!["2026-02-10".to_string()])
         ]
     );
-    assert_eq!(gantt_meta.tasks[0].flags.primary_type(), fm_core::GanttTaskType::Active);
+    assert_eq!(
+        gantt_meta.tasks[0].flags.primary_type(),
+        fm_core::GanttTaskType::Active
+    );
     assert_eq!(
         gantt_meta.tasks[0].start,
         Some(GanttDate::Absolute("2026-02-06".to_string()))

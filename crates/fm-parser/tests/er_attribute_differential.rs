@@ -40,7 +40,8 @@ struct Row {
 }
 
 fn fixture() -> Vec<Row> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mermaid_er_attributes.tsv");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mermaid_er_attributes.tsv");
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("fixture {} unreadable: {err}", path.display()));
     let rows: Vec<Row> = text
@@ -66,7 +67,10 @@ fn fixture() -> Vec<Row> {
         "fixture has no composite-key rows — it cannot pin bd-nryyc"
     );
     assert!(
-        rows.iter().filter(|row| row.keys.is_empty() && row.verdict == "PARSED").count() >= 4,
+        rows.iter()
+            .filter(|row| row.keys.is_empty() && row.verdict == "PARSED")
+            .count()
+            >= 4,
         "fixture has no key-less rows — it cannot catch a key parser that fires too often"
     );
     rows
@@ -95,7 +99,10 @@ fn every_attribute_parses_the_way_mermaid_parses_it() {
         }
         compared += 1;
         let Some((data_type, name, keys, comment)) = parsed(&row.attribute) else {
-            divergent.push(format!("{:?}: we parsed no attribute at all", row.attribute));
+            divergent.push(format!(
+                "{:?}: we parsed no attribute at all",
+                row.attribute
+            ));
             continue;
         };
         // Keys case-insensitively; see the header note on `string d pk`.
@@ -110,7 +117,10 @@ fn every_attribute_parses_the_way_mermaid_parses_it() {
             ));
         }
     }
-    assert!(compared >= 14, "only {compared} rows were actually compared");
+    assert!(
+        compared >= 14,
+        "only {compared} rows were actually compared"
+    );
     assert!(
         divergent.is_empty(),
         "{} attribute(s) diverge from mermaid 11.15.0:\n  {}",
@@ -124,16 +134,17 @@ fn every_attribute_parses_the_way_mermaid_parses_it() {
 #[test]
 fn the_fixture_rejects_a_single_key_implementation() {
     let rows = fixture();
-    for (name, pick) in [
-        ("first-key-wins", 0_usize),
-        ("last-key-wins", usize::MAX),
-    ] {
+    for (name, pick) in [("first-key-wins", 0_usize), ("last-key-wins", usize::MAX)] {
         let caught = rows
             .iter()
             .filter(|row| row.verdict == "PARSED" && !row.keys.is_empty())
             .filter(|row| {
                 let keys: Vec<&str> = row.keys.split(',').collect();
-                let chosen = if pick == 0 { keys[0] } else { keys[keys.len() - 1] };
+                let chosen = if pick == 0 {
+                    keys[0]
+                } else {
+                    keys[keys.len() - 1]
+                };
                 chosen != row.keys
             })
             .count();
@@ -161,7 +172,12 @@ fn a_comma_inside_a_comment_is_not_a_key_list() {
 fn a_rendered_entity_draws_every_key_in_one_token() {
     let source = "erDiagram\n A {\n  string a PK, FK\n  string b PK,FK\n }\n";
     let ir = fm_parser::parse(source).ir;
-    let attributes = &ir.nodes.iter().find(|node| !node.members.is_empty()).expect("entity").members;
+    let attributes = &ir
+        .nodes
+        .iter()
+        .find(|node| !node.members.is_empty())
+        .expect("entity")
+        .members;
     assert_eq!(attributes.len(), 2);
     for attribute in attributes {
         assert_eq!(attribute.key_prefix(), "PK,FK ", "{:?}", attribute.name);

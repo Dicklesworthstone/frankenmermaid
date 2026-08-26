@@ -1,0 +1,33 @@
+spec	verdict	id	message	tags	type
+id: "c0"	PARSED	c0		[]	0
+id: "c1" type: NORMAL	PARSED	c1		[]	0
+id: "c2" type: REVERSE	PARSED	c2		[]	1
+id: "c3" type: HIGHLIGHT	PARSED	c3		[]	2
+id: "c4" msg: "ship it"	PARSED	c4	ship it	[]	0
+id: "c5" msg: "ship it" type: NORMAL	PARSED	c5	ship it	[]	0
+id: "c6" msg: "ship it" type: REVERSE	PARSED	c6	ship it	[]	1
+id: "c7" msg: "ship it" type: HIGHLIGHT	PARSED	c7	ship it	[]	2
+id: "c8" tag: "v1.0"	PARSED	c8		["v1.0"]	0
+id: "c9" tag: "v1.0" type: NORMAL	PARSED	c9		["v1.0"]	0
+id: "c10" tag: "v1.0" type: REVERSE	PARSED	c10		["v1.0"]	1
+id: "c11" tag: "v1.0" type: HIGHLIGHT	PARSED	c11		["v1.0"]	2
+id: "c12" msg: "ship it" tag: "v1.0"	PARSED	c12	ship it	["v1.0"]	0
+id: "c13" msg: "ship it" tag: "v1.0" type: NORMAL	PARSED	c13	ship it	["v1.0"]	0
+id: "c14" msg: "ship it" tag: "v1.0" type: REVERSE	PARSED	c14	ship it	["v1.0"]	1
+id: "c15" msg: "ship it" tag: "v1.0" type: HIGHLIGHT	PARSED	c15	ship it	["v1.0"]	2
+id: "c16" tag: "v1.0" tag: "stable"	PARSED	c16		["v1.0","stable"]	0
+id: "c17" tag: "v1.0" tag: "stable" type: NORMAL	PARSED	c17		["v1.0","stable"]	0
+id: "c18" tag: "v1.0" tag: "stable" type: REVERSE	PARSED	c18		["v1.0","stable"]	1
+id: "c19" tag: "v1.0" tag: "stable" type: HIGHLIGHT	PARSED	c19		["v1.0","stable"]	2
+id: "c20" msg: "ship it" tag: "v1.0" tag: "stable"	PARSED	c20	ship it	["v1.0","stable"]	0
+id: "c21" msg: "ship it" tag: "v1.0" tag: "stable" type: NORMAL	PARSED	c21	ship it	["v1.0","stable"]	0
+id: "c22" msg: "ship it" tag: "v1.0" tag: "stable" type: REVERSE	PARSED	c22	ship it	["v1.0","stable"]	1
+id: "c23" msg: "ship it" tag: "v1.0" tag: "stable" type: HIGHLIGHT	PARSED	c23	ship it	["v1.0","stable"]	2
+id: "c24" tag: "v1.0" tag: "stable" tag: "lts"	PARSED	c24		["v1.0","stable","lts"]	0
+id: "c25" tag: "v1.0" tag: "stable" tag: "lts" type: NORMAL	PARSED	c25		["v1.0","stable","lts"]	0
+id: "c26" tag: "v1.0" tag: "stable" tag: "lts" type: REVERSE	PARSED	c26		["v1.0","stable","lts"]	1
+id: "c27" tag: "v1.0" tag: "stable" tag: "lts" type: HIGHLIGHT	PARSED	c27		["v1.0","stable","lts"]	2
+id: "c28" msg: "ship it" tag: "v1.0" tag: "stable" tag: "lts"	PARSED	c28	ship it	["v1.0","stable","lts"]	0
+id: "c29" msg: "ship it" tag: "v1.0" tag: "stable" tag: "lts" type: NORMAL	PARSED	c29	ship it	["v1.0","stable","lts"]	0
+id: "c30" msg: "ship it" tag: "v1.0" tag: "stable" tag: "lts" type: REVERSE	PARSED	c30	ship it	["v1.0","stable","lts"]	1
+id: "c31" msg: "ship it" tag: "v1.0" tag: "stable" tag: "lts" type: HIGHLIGHT	PARSED	c31	ship it	["v1.0","stable","lts"]	2

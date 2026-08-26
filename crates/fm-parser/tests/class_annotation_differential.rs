@@ -42,9 +42,8 @@ fn stereotype_of(source: &str) -> Option<ClassStereotype> {
 #[test]
 fn the_first_annotation_is_the_one_drawn() {
     // mermaid: annotations ['interface','abstract'], renderer draws annotations[0] = interface.
-    let stereotype = stereotype_of(
-        "classDiagram\nclass Foo\n<<interface>> Foo\n<<abstract>> Foo\nFoo : +x\n",
-    );
+    let stereotype =
+        stereotype_of("classDiagram\nclass Foo\n<<interface>> Foo\n<<abstract>> Foo\nFoo : +x\n");
     assert_eq!(
         stereotype,
         Some(ClassStereotype::Interface),
@@ -56,9 +55,8 @@ fn the_first_annotation_is_the_one_drawn() {
 /// that simply always reported `Interface`.
 #[test]
 fn the_reverse_order_draws_the_other_one() {
-    let stereotype = stereotype_of(
-        "classDiagram\nclass Foo\n<<abstract>> Foo\n<<interface>> Foo\nFoo : +x\n",
-    );
+    let stereotype =
+        stereotype_of("classDiagram\nclass Foo\n<<abstract>> Foo\n<<interface>> Foo\nFoo : +x\n");
     assert_eq!(stereotype, Some(ClassStereotype::Abstract));
 }
 
@@ -75,9 +73,8 @@ fn last_annotation_wins_disagrees_with_the_incumbent() {
         "the fixture ordering is symmetric, so it cannot tell first-wins from last-wins"
     );
     // And the shipping parser must agree with first-wins, not last-wins.
-    let stereotype = stereotype_of(
-        "classDiagram\nclass Foo\n<<interface>> Foo\n<<abstract>> Foo\nFoo : +x\n",
-    );
+    let stereotype =
+        stereotype_of("classDiagram\nclass Foo\n<<interface>> Foo\n<<abstract>> Foo\nFoo : +x\n");
     assert_eq!(stereotype, Some(ClassStereotype::Interface));
     assert_ne!(stereotype, Some(ClassStereotype::Abstract));
 }
@@ -87,9 +84,18 @@ fn last_annotation_wins_disagrees_with_the_incumbent() {
 #[test]
 fn a_single_annotation_still_reaches_the_class() {
     for (source, expected) in [
-        ("classDiagram\nclass Foo\n<<interface>> Foo\n", ClassStereotype::Interface),
-        ("classDiagram\nclass Foo\n<<abstract>> Foo\n", ClassStereotype::Abstract),
-        ("classDiagram\nclass Foo {\n<<interface>>\n+x\n}\n", ClassStereotype::Interface),
+        (
+            "classDiagram\nclass Foo\n<<interface>> Foo\n",
+            ClassStereotype::Interface,
+        ),
+        (
+            "classDiagram\nclass Foo\n<<abstract>> Foo\n",
+            ClassStereotype::Abstract,
+        ),
+        (
+            "classDiagram\nclass Foo {\n<<interface>>\n+x\n}\n",
+            ClassStereotype::Interface,
+        ),
     ] {
         assert_eq!(stereotype_of(source), Some(expected), "{source:?}");
     }

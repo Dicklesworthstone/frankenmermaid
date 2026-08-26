@@ -3553,8 +3553,8 @@ fn render_quadrant_cell(
 mod tests {
     use super::*;
     use fm_core::{
-        DiagramType, GanttDate, IrEdge, IrEndpoint, IrGanttMeta, IrGanttSection,
-        IrGanttTask, IrLabel, IrLabelId, IrNode, IrNodeId,
+        DiagramType, GanttDate, IrEdge, IrEndpoint, IrGanttMeta, IrGanttSection, IrGanttTask,
+        IrLabel, IrLabelId, IrNode, IrNodeId,
     };
     use fm_layout::{
         LayoutActivationBar, LayoutClusterBox, LayoutExtensions, LayoutNodeBox, LayoutRect,
@@ -4367,7 +4367,10 @@ mod tests {
                 task_id: Some("build_1".to_string()),
                 start: Some(GanttDate::Absolute("2026-02-01".to_string())),
                 end: Some(GanttDate::DurationDays(2)),
-                flags: fm_core::GanttTaskFlags { done: true, ..Default::default() },
+                flags: fm_core::GanttTaskFlags {
+                    done: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             IrGanttTask {

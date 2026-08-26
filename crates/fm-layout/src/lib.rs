@@ -7144,8 +7144,8 @@ fn layout_diagram_gantt_from_meta(ir: &MermaidDiagramIr, gantt_meta: &IrGanttMet
     for (task_idx, task) in gantt_meta.tasks.iter().enumerate() {
         explicit_starts[task_idx] = gantt_task_absolute_start(task);
         durations[task_idx] = gantt_task_duration_days(task, inclusive_end_dates);
-        milestones[task_idx] =
-            matches!(task.flags.primary_type(), GanttTaskType::Milestone) || durations[task_idx] == 0;
+        milestones[task_idx] = matches!(task.flags.primary_type(), GanttTaskType::Milestone)
+            || durations[task_idx] == 0;
         if let Some(task_id) = task.task_id.as_ref() {
             task_id_to_idx.entry(task_id.as_str()).or_insert(task_idx);
         }
@@ -7931,7 +7931,10 @@ fn gantt_task_duration_days(task: &fm_core::IrGanttTask, inclusive_end_dates: bo
             }
         }
         Some(GanttDate::AfterTask(_)) => 1,
-        None => i32::from(!matches!(task.flags.primary_type(), GanttTaskType::Milestone)),
+        None => i32::from(!matches!(
+            task.flags.primary_type(),
+            GanttTaskType::Milestone
+        )),
     }
 }
 
@@ -11036,7 +11039,22 @@ fn compute_node_size(
     let text = display_node_label_ref(ir, node);
 
     match node.shape {
-        fm_core::NodeShape::FilledCircle => (20.0, 20.0),
+        // ⚠️ ASYMMETRIC SIBLINGS. `DoubleCircle` below already sizes to its text when it has any,
+        // and `FilledCircle` was pinned at 20x20 unconditionally — fine while both shapes only ever
+        // appeared as label-less state pseudo-states, wrong the moment gitGraph's `type: REVERSE`
+        // commits started displaying their ids (bd-3cj8v). The dot stayed 20px and the id was
+        // elided to `th…` INSIDE it. Same branch as the sibling, same reason.
+        fm_core::NodeShape::FilledCircle => {
+            if text.is_empty() {
+                (20.0, 20.0)
+            } else {
+                let (label_width, label_height) = metrics.estimate_dimensions(text);
+                (
+                    (label_width + 52.0).max(42.0),
+                    (label_height + 30.0).max(42.0),
+                )
+            }
+        }
         fm_core::NodeShape::DoubleCircle => {
             if text.is_empty() {
                 (24.0, 24.0)
@@ -11653,17 +11671,13 @@ fn display_node_label(ir: &MermaidDiagramIr, node: &IrNode) -> String {
 /// text, the node id, or empty — all borrowable from `ir`/`node` — so callers that only READ it (text
 /// measurement, hashing) need not clone. Byte-identical content to `display_node_label`; the owning
 /// version just `.to_string()`s this for callers that store the result.
+///
+/// ⚠️ THE RULE ITSELF LIVES IN `fm_core` and is shared with fm-render-svg on purpose (bd-3cj8v).
+/// Layout SIZES the box from this string and the renderer PAINTS from it; a local copy here drifted
+/// from the renderer's and dropped explicit labels on filled circles, so a tagged `type: REVERSE`
+/// commit was measured empty and drawn with text.
 fn display_node_label_ref<'a>(ir: &'a MermaidDiagramIr, node: &'a IrNode) -> &'a str {
-    let explicit = node
-        .label
-        .and_then(|label_id| ir.labels.get(label_id.0))
-        .map(|value| value.text.as_str());
-
-    match node.shape {
-        fm_core::NodeShape::FilledCircle | fm_core::NodeShape::HorizontalBar => "",
-        fm_core::NodeShape::DoubleCircle if explicit.is_none() => "",
-        _ => explicit.unwrap_or(node.id.as_str()),
-    }
+    ir.node_display_text(node)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
