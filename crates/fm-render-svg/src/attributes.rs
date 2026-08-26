@@ -568,10 +568,13 @@ pub(crate) fn write_escaped_text<W: fmt::Write>(f: &mut W, s: &str) -> fmt::Resu
     f.write_str(&s[start..])
 }
 
-/// Escape special characters in XML text content.
-#[cfg(test)]
+/// Escape special characters in XML/HTML text content.
+///
+/// Promoted from a test-only helper for the CLI's deck HTML template (bd-ey2nh): every
+/// deck-authored string the template interpolates (titles, captions) is untrusted input and
+/// must pass through the same escaping discipline the SVG renderer applies internally.
 #[must_use]
-fn escape_xml_text(s: &str) -> String {
+pub fn escape_xml_text(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let _ = write_escaped_text(&mut result, s);
     result

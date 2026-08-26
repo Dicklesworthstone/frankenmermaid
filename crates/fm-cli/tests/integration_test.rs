@@ -4727,3 +4727,173 @@ fn packet_row_straddling_field_renders_one_box_per_row() {
         "row-aligned fields must not be split"
     );
 }
+
+// ── deck subcommand (bd-ey2nh) ────────────────────────────────────────
+
+const DECK_FIXTURE: &str = "flowchart LR\n%%{deck: {\n  title: 'Tour',\n  slides: [\n    { id: 's1', nodes: ['a', 'b'], reveal: [['b']] },\n    { id: 's2', nodes: ['c'] },\n  ],\n}}%%\n  a --> b\n  b --> c\n";
+
+fn write_deck_fixture(dir: &TempDir) -> std::path::PathBuf {
+    let path = dir.path().join("deck.mmd");
+    std::fs::write(&path, DECK_FIXTURE).expect("write fixture");
+    path
+}
+
+#[test]
+fn deck_subcommand_emits_standalone_html_and_manifest() {
+    let dir = TempDir::new().expect("tempdir");
+    let input = write_deck_fixture(&dir);
+    let html_path = dir.path().join("talk.html");
+    let manifest_path = dir.path().join("deck.json");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fm-cli"))
+        .args([
+            "deck",
+            input.to_str().unwrap(),
+            "-o",
+            html_path.to_str().unwrap(),
+            "--manifest-out",
+            manifest_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run deck");
+    assert!(
+        output.status.success(),
+        "deck failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let html = std::fs::read_to_string(&html_path).expect("read html");
+    assert!(html.contains("<svg"), "html must embed the rendered SVG");
+    assert!(
+        html.contains("id=\"deck-manifest\""),
+        "html must embed the manifest JSON block"
+    );
+    assert!(
+        html.contains("frankenmermaid deck runtime"),
+        "html must inline the presentation runtime"
+    );
+    assert!(
+        html.contains("<title>Tour</title>"),
+        "deck title escaped into <title>"
+    );
+    // The </script>-breakout guard must be live in the embedded payloads.
+    assert!(
+        !html.replace("<\\/", "").contains("</script>\n  a"),
+        "guard sanity"
+    );
+
+    let manifest: fm_core::DeckManifest =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).expect("read manifest"))
+            .expect("manifest parses");
+    assert_eq!(manifest.slides.len(), 2);
+    // Every manifest node element id appears verbatim in the embedded SVG.
+    for slide in &manifest.slides {
+        for node in &slide.nodes {
+            assert!(
+                html.contains(&node.element_id),
+                "missing {}",
+                node.element_id
+            );
+        }
+    }
+}
+
+#[test]
+fn deck_and_render_manifest_artifacts_are_byte_identical() {
+    let dir = TempDir::new().expect("tempdir");
+    let input = write_deck_fixture(&dir);
+    let via_deck = dir.path().join("via_deck.json");
+    let via_render = dir.path().join("via_render.json");
+    let svg_out = dir.path().join("out.svg");
+
+    let status = Command::new(env!("CARGO_BIN_EXE_fm-cli"))
+        .args([
+            "deck",
+            input.to_str().unwrap(),
+            "--format",
+            "json",
+            "--pretty",
+            "-o",
+            "/dev/null",
+            "--manifest-out",
+            via_deck.to_str().unwrap(),
+        ])
+        .status()
+        .expect("run deck");
+    assert!(status.success());
+
+    let status = Command::new(env!("CARGO_BIN_EXE_fm-cli"))
+        .args([
+            "render",
+            input.to_str().unwrap(),
+            "--format",
+            "svg",
+            "--output",
+            svg_out.to_str().unwrap(),
+            "--deck-manifest-out",
+            via_render.to_str().unwrap(),
+        ])
+        .status()
+        .expect("run render");
+    assert!(status.success());
+
+    // The C2 one-parse/one-layout guarantee at the CLI layer: both paths flow through the
+    // same render pipeline with the same svg_config, so the artifacts cannot differ.
+    assert_eq!(
+        std::fs::read_to_string(&via_deck).expect("deck artifact"),
+        std::fs::read_to_string(&via_render).expect("render artifact"),
+    );
+}
+
+#[test]
+fn deck_subcommand_exit_codes_are_actionable() {
+    let dir = TempDir::new().expect("tempdir");
+    // Deckless input: hard error with the actionable message.
+    let deckless = dir.path().join("plain.mmd");
+    std::fs::write(&deckless, "flowchart LR\n  a --> b\n").expect("write");
+    let output = Command::new(env!("CARGO_BIN_EXE_fm-cli"))
+        .args(["deck", deckless.to_str().unwrap()])
+        .output()
+        .expect("run deck");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no %%{deck"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // render --deck-manifest-out on deckless input: same intent, same hard error (a silent
+    // skip would leave stale artifacts in batch pipelines).
+    let manifest_path = dir.path().join("never.json");
+    let svg_out = dir.path().join("never.svg");
+    let output = Command::new(env!("CARGO_BIN_EXE_fm-cli"))
+        .args([
+            "render",
+            deckless.to_str().unwrap(),
+            "--format",
+            "svg",
+            "--output",
+            svg_out.to_str().unwrap(),
+            "--deck-manifest-out",
+            manifest_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run render");
+    assert!(!output.status.success());
+    assert!(!manifest_path.exists(), "no stale artifact may be written");
+
+    // --deck-manifest-out is SVG-only.
+    let output = Command::new(env!("CARGO_BIN_EXE_fm-cli"))
+        .args([
+            "render",
+            deckless.to_str().unwrap(),
+            "--format",
+            "term",
+            "--deck-manifest-out",
+            manifest_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run render");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("only supported with --format svg"),);
+}

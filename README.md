@@ -32,6 +32,7 @@ all seven.
 <!-- BEGIN GENERATED: runtime-capability-metadata -->
 | Surface | Status | Evidence |
 |---------|--------|----------|
+| CLI deck command emitting a standalone HTML presentation | Implemented | 2 evidence refs |
 | CLI detect command | Implemented | 2 evidence refs |
 | CLI parse command with IR JSON evidence | Implemented | 1 evidence refs |
 | CLI SVG rendering | Implemented | 1 evidence refs |

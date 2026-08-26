@@ -633,6 +633,35 @@ fn documented_diagram_type_claims() -> Vec<CapabilityClaim> {
 fn surface_capability_claims() -> Vec<CapabilityClaim> {
     vec![
         CapabilityClaim {
+            id: String::from("surface/cli-deck"),
+            category: String::from("surface"),
+            title: String::from("CLI deck command emitting a standalone HTML presentation"),
+            status: CapabilityStatus::Implemented,
+            advertised_in: vec![String::from("README.md#command-reference")],
+            code_paths: vec![
+                String::from("crates/fm-cli/src/main.rs::Command::Deck"),
+                String::from("crates/fm-cli/src/main.rs::cmd_deck"),
+                String::from("crates/fm-render-svg/src/deck.rs::deck_manifest"),
+            ],
+            evidence: vec![
+                CapabilityEvidence {
+                    kind: String::from("test"),
+                    reference: String::from(
+                        "crates/fm-cli/tests/integration_test.rs::deck_subcommand_emits_standalone_html_and_manifest",
+                    ),
+                    note: Some(String::from(
+                        "HTML contains SVG + manifest + runtime; deck/render manifest byte-equality",
+                    )),
+                },
+                CapabilityEvidence {
+                    kind: String::from("code_path"),
+                    reference: String::from("crates/fm-cli/src/deck_template.html"),
+                    note: None,
+                },
+            ],
+            notes: vec![],
+        },
+        CapabilityClaim {
             id: String::from("surface/cli-detect"),
             category: String::from("surface"),
             title: String::from("CLI detect command"),

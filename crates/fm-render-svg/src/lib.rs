@@ -26,7 +26,7 @@ pub use a11y::{
     A11yConfig, accessibility_css, describe_diagram, describe_diagram_with_layout, describe_edge,
     describe_node,
 };
-pub use attributes::{Attribute, AttributeValue, Attributes};
+pub use attributes::{Attribute, AttributeValue, Attributes, escape_xml_text};
 pub use deck::{deck_manifest, render_svg_with_deck};
 pub use defs::{ArrowheadMarker, DefsBuilder, Filter, Gradient, GradientStop, MarkerOrient};
 pub use document::SvgDocument;

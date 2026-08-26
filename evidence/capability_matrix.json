@@ -3,7 +3,7 @@
   "project": "frankenmermaid",
   "status_counts": {
     "experimental": 1,
-    "implemented": 33,
+    "implemented": 34,
     "partial": 2
   },
   "claims": [
@@ -678,6 +678,33 @@
       "notes": [
         "README advertises this family; current code marks it as full capability"
       ]
+    },
+    {
+      "id": "surface/cli-deck",
+      "category": "surface",
+      "title": "CLI deck command emitting a standalone HTML presentation",
+      "status": "implemented",
+      "advertised_in": [
+        "README.md#command-reference"
+      ],
+      "code_paths": [
+        "crates/fm-cli/src/main.rs::Command::Deck",
+        "crates/fm-cli/src/main.rs::cmd_deck",
+        "crates/fm-render-svg/src/deck.rs::deck_manifest"
+      ],
+      "evidence": [
+        {
+          "kind": "test",
+          "reference": "crates/fm-cli/tests/integration_test.rs::deck_subcommand_emits_standalone_html_and_manifest",
+          "note": "HTML contains SVG + manifest + runtime; deck/render manifest byte-equality"
+        },
+        {
+          "kind": "code_path",
+          "reference": "crates/fm-cli/src/deck_template.html",
+          "note": null
+        }
+      ],
+      "notes": []
     },
     {
       "id": "surface/cli-detect",

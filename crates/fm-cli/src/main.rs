@@ -194,6 +194,11 @@ enum Command {
         #[arg(long)]
         source_map_out: Option<String>,
 
+        /// Optional JSON artifact path for the deck manifest (requires a %%{deck: …}%%
+        /// directive in the input and --format svg).
+        #[arg(long)]
+        deck_manifest_out: Option<String>,
+
         /// FNX integration mode (auto=feature-detect, enabled=force on, disabled=force off).
         #[arg(long, value_enum, default_value = "auto")]
         fnx_mode: FnxModeArg,
@@ -492,6 +497,46 @@ enum Command {
         fnx_fallback: FnxFallbackArg,
     },
 
+    /// Turn a diagram with a %%{deck: …}%% directive into a presentation: a self-contained
+    /// HTML deck (default) or the raw deck manifest JSON.
+    Deck {
+        /// Input file path or "-" for stdin.
+        #[arg(default_value = "-")]
+        input: String,
+
+        /// Output artifact kind: a self-contained presentation HTML, or the manifest JSON.
+        #[arg(long, value_enum, default_value = "html")]
+        format: DeckFormatArg,
+
+        /// Output path ("-" or omitted writes to stdout).
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// Additionally write the deck manifest JSON artifact to this path.
+        #[arg(long)]
+        manifest_out: Option<String>,
+
+        /// Theme preset for the rendered diagram (and the HTML chrome's colors).
+        #[arg(short, long)]
+        theme: Option<String>,
+
+        /// Parser support contract mode.
+        #[arg(long, value_enum)]
+        parse_mode: Option<ParseModeArg>,
+
+        /// Requested layout algorithm family.
+        #[arg(long, value_enum)]
+        layout_algorithm: Option<LayoutAlgorithmArg>,
+
+        /// Base font size in pixels for text measurement and rendering.
+        #[arg(long)]
+        font_size: Option<f32>,
+
+        /// Pretty-print the manifest JSON (json format / --manifest-out only).
+        #[arg(long)]
+        pretty: bool,
+    },
+
     /// Emit the executable capability claim matrix as JSON.
     Capabilities {
         /// Pretty-print JSON output.
@@ -620,6 +665,17 @@ enum ValidateOutputFormat {
     Json,
     /// Pretty-printed JSON.
     Pretty,
+}
+
+/// `deck` output kinds. A DEDICATED enum rather than an extension of the render
+/// `OutputFormat`: deck's formats share nothing with svg/png/term, and cross-contaminating
+/// the enums would put `html` on `render`'s surface (bd-ey2nh).
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum DeckFormatArg {
+    /// Self-contained presentation HTML (SVG + manifest + runtime inline).
+    Html,
+    /// The deck manifest JSON only.
+    Json,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -1067,6 +1123,9 @@ fn fnx_results_hash(parts: &[&str]) -> String {
 struct RenderOutcome {
     rendered: Vec<u8>,
     render_result: Option<RenderResult>,
+    /// Present when the caller requested deck capture (`deck_capture` /
+    /// `--deck-manifest-out`) and the diagram produced one.
+    deck_manifest: Option<fm_core::DeckManifest>,
     /// Whether the layout came from an incremental engine's memo rather than a full recompute.
     /// Always `false` on the one-shot CLI path, which passes no engine (bd-kgi4).
     ///
@@ -2877,6 +2936,13 @@ struct RenderCommandOptions<'a> {
     show_minimap: bool,
     embed_source_spans: bool,
     source_map_out: Option<&'a str>,
+    /// Write the deck manifest JSON artifact here (SVG format only; deckless input errors —
+    /// the flag expresses deck intent and a silent skip would leave stale files in batch
+    /// pipelines). Follows the `--source-map-out` pattern (bd-ey2nh).
+    deck_manifest_out: Option<&'a str>,
+    /// Return the deck manifest on the `RenderOutcome` (the `deck` subcommand's path) even
+    /// when no artifact file was requested.
+    deck_capture: bool,
     dimensions: (Option<u32>, Option<u32>),
     json_output: bool,
     // FNX integration controls
@@ -2925,6 +2991,24 @@ struct ValidateCommandOptions<'a> {
     fnx_mode: FnxModeArg,
     fnx_projection: FnxProjectionArg,
     fnx_fallback: FnxFallbackArg,
+}
+
+#[derive(Debug, Clone)]
+struct DeckCommandOptions<'a> {
+    format: DeckFormatArg,
+    output: Option<&'a str>,
+    manifest_out: Option<&'a str>,
+    theme: &'a str,
+    parse_mode: MermaidParseMode,
+    parser_config: ParserConfig,
+    layout_algorithm: LayoutAlgorithm,
+    layout_config: LayoutConfig,
+    font_size: Option<f32>,
+    max_input_bytes: usize,
+    svg_base_config: SvgRenderConfig,
+    term_base_config: TermRenderConfig,
+    show_back_edges: bool,
+    pretty: bool,
 }
 
 /// Result of detecting diagram type.
@@ -3220,6 +3304,7 @@ fn run() -> Result<()> {
             embed_source_spans,
             no_embed_source_spans,
             source_map_out,
+            deck_manifest_out,
             fnx_mode,
             fnx_projection,
             fnx_fallback,
@@ -3266,6 +3351,8 @@ fn run() -> Result<()> {
                         embed_source_spans || format == OutputFormat::Svg
                     },
                     source_map_out: source_map_out.as_deref(),
+                    deck_manifest_out: deck_manifest_out.as_deref(),
+                    deck_capture: false,
                     dimensions: (width, height),
                     json_output: json,
                     fnx_mode,
@@ -3330,6 +3417,8 @@ fn run() -> Result<()> {
                 show_minimap,
                 embed_source_spans: format == OutputFormat::Svg,
                 source_map_out: None,
+                deck_manifest_out: None,
+                deck_capture: false,
                 dimensions: (None, None),
                 json_output: false,
                 fnx_mode,
@@ -3494,6 +3583,42 @@ fn run() -> Result<()> {
             },
         ),
 
+        Command::Deck {
+            input,
+            format,
+            output,
+            manifest_out,
+            theme,
+            parse_mode,
+            layout_algorithm,
+            font_size,
+            pretty,
+        } => {
+            let theme = resolve_theme_name(theme, &loaded_config.file);
+            cmd_deck(
+                &input,
+                DeckCommandOptions {
+                    format,
+                    output: output.as_deref(),
+                    manifest_out: manifest_out.as_deref(),
+                    theme: &theme,
+                    parse_mode: resolve_parse_mode(parse_mode, &loaded_config.file),
+                    parser_config,
+                    layout_algorithm: resolve_layout_algorithm(
+                        layout_algorithm,
+                        &loaded_config.file,
+                    )?,
+                    layout_config: build_layout_config(&loaded_config.file, font_size)?,
+                    font_size,
+                    max_input_bytes,
+                    svg_base_config: build_base_svg_render_config(&loaded_config.file)?,
+                    term_base_config: build_base_term_render_config(&loaded_config.file)?,
+                    show_back_edges: resolve_show_back_edges(&loaded_config.file),
+                    pretty,
+                },
+            )
+        }
+
         Command::Capabilities { pretty, output } => cmd_capabilities(pretty, output.as_deref()),
 
         Command::DeterminismManifest => cmd_determinism_manifest(),
@@ -3565,6 +3690,8 @@ fn run() -> Result<()> {
                 show_minimap,
                 embed_source_spans: format == OutputFormat::Svg,
                 source_map_out: None,
+                deck_manifest_out: None,
+                deck_capture: false,
                 dimensions: (None, None),
                 json_output: false,
                 fnx_mode: FnxModeArg::Auto,
@@ -4974,7 +5101,15 @@ fn render_parsed_ir_with_pressure(
         dimensions: options.dimensions,
         degradation: guard_report.degradation.clone(),
     };
-    let (rendered, actual_width, actual_height) = if options.format == OutputFormat::Svg
+    let capture_deck = options.deck_capture || options.deck_manifest_out.is_some();
+    if options.deck_manifest_out.is_some() && ir.deck.is_none() {
+        anyhow::bail!(
+            "--deck-manifest-out: input has no %%{{deck: …}}%% directive; see 'Graph decks' \
+             in the README"
+        );
+    }
+    let (rendered, actual_width, actual_height, deck_manifest) = if options.format
+        == OutputFormat::Svg
         && options.show_back_edges
         && let Some((renderer, certified_prefix)) = batch_renderer
     {
@@ -4987,10 +5122,27 @@ fn render_parsed_ir_with_pressure(
         svg_config.apply_degradation(&guard_report.degradation);
         let svg = renderer.render_borrowed(ir, Arc::clone(layout), &svg_config, certified_prefix);
         let (width, height) = extract_svg_dimensions(&svg);
-        (svg.into_bytes(), width, height)
+        let deck_manifest = if capture_deck {
+            fm_render_svg::deck_manifest(ir, layout, &svg_config)
+        } else {
+            None
+        };
+        (svg.into_bytes(), width, height, deck_manifest)
     } else {
-        render_format(ir, layout, options.format, surface_options())?
+        render_format(ir, layout, options.format, surface_options(), capture_deck)?
     };
+    if let Some(path) = options.deck_manifest_out {
+        let manifest = deck_manifest.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--deck-manifest-out: no deck manifest was produced (unsupported diagram \
+                 family, or no slide resolved to any member; see the validate diagnostics)"
+            )
+        })?;
+        let artifact = serde_json::to_string_pretty(manifest)?;
+        std::fs::write(path, artifact)
+            .with_context(|| format!("Failed to write deck manifest file: {path}"))?;
+        info!("Wrote deck manifest artifact to: {path}");
+    }
     let render_time = render_start.elapsed();
     budget_broker.record_render(render_time.as_millis().min(u128::from(u64::MAX)) as u64);
 
@@ -5117,6 +5269,7 @@ fn render_parsed_ir_with_pressure(
     Ok(RenderOutcome {
         rendered,
         render_result,
+        deck_manifest,
         layout_cache_hit,
     })
 }
@@ -5268,6 +5421,8 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
         show_minimap,
         embed_source_spans,
         source_map_out,
+        deck_manifest_out,
+        deck_capture,
         dimensions,
         json_output,
         fnx_mode,
@@ -5280,6 +5435,9 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
     }
     if source_map_out.is_some() && format != OutputFormat::Svg {
         anyhow::bail!("--source-map-out is only supported with --format svg");
+    }
+    if deck_manifest_out.is_some() && format != OutputFormat::Svg {
+        anyhow::bail!("--deck-manifest-out is only supported with --format svg");
     }
     if matches!(fnx_mode, FnxModeArg::Enabled)
         && !cfg!(all(
@@ -5326,6 +5484,8 @@ fn cmd_render(input: &str, options: RenderCommandOptions<'_>) -> Result<()> {
             show_minimap,
             embed_source_spans,
             source_map_out,
+            deck_manifest_out,
+            deck_capture,
             dimensions: (width, height),
             json_output,
             fnx_mode,
@@ -7553,12 +7713,25 @@ fn ascii_term_config(base: TermRenderConfig) -> TermRenderConfig {
     }
 }
 
+/// A rendered surface: artifact bytes, optional pixel dimensions, and — when deck capture
+/// was requested on the SVG path — the deck manifest built from the exact render config.
+type RenderedSurface = (
+    Vec<u8>,
+    Option<u32>,
+    Option<u32>,
+    Option<fm_core::DeckManifest>,
+);
+
 fn render_format(
     ir: &MermaidDiagramIr,
     layout: &fm_layout::DiagramLayout,
     format: OutputFormat,
     options: RenderSurfaceOptions<'_>,
-) -> Result<(Vec<u8>, Option<u32>, Option<u32>)> {
+    // Compute the deck manifest alongside the SVG (bd-ey2nh). A parameter rather than a
+    // second entry point so the manifest is built from EXACTLY the svg_config this render
+    // used — the deck/render byte-equality guarantee depends on it.
+    capture_deck: bool,
+) -> Result<RenderedSurface> {
     let RenderSurfaceOptions {
         theme,
         font_size,
@@ -7577,10 +7750,14 @@ fn render_format(
             let mut svg_config =
                 build_svg_render_config(&svg_base_config, theme, font_size, embed_source_spans);
             svg_config.apply_degradation(&degradation);
-            let svg = render_svg_with_layout(ir, render_layout, &svg_config);
+            let (svg, deck_manifest) = if capture_deck {
+                fm_render_svg::render_svg_with_deck(ir, render_layout, &svg_config)
+            } else {
+                (render_svg_with_layout(ir, render_layout, &svg_config), None)
+            };
             // Extract dimensions from SVG if available
             let (w, h) = extract_svg_dimensions(&svg);
-            Ok((svg.into_bytes(), w, h))
+            Ok((svg.into_bytes(), w, h, deck_manifest))
         }
 
         OutputFormat::Png => {
@@ -7593,7 +7770,7 @@ fn render_format(
                 let svg = render_svg_with_layout(ir, render_layout, &svg_config);
                 let svg = resolve_svg_custom_properties_for_rasterization(&svg);
                 let (png, px_width, px_height) = svg_to_png(&svg, width, height)?;
-                Ok((png, Some(px_width), Some(px_height)))
+                Ok((png, Some(px_width), Some(px_height), None))
             }
 
             #[cfg(not(feature = "png"))]
@@ -7636,6 +7813,7 @@ fn render_format(
                 output.into_bytes(),
                 Some(u32::try_from(result.width).unwrap_or(u32::MAX)),
                 Some(u32::try_from(result.height).unwrap_or(u32::MAX)),
+                None,
             ))
         }
 
@@ -7670,6 +7848,7 @@ fn render_format(
                 output.into_bytes(),
                 Some(u32::try_from(result.width).unwrap_or(u32::MAX)),
                 Some(u32::try_from(result.height).unwrap_or(u32::MAX)),
+                None,
             ))
         }
     }
@@ -8194,6 +8373,125 @@ fn diff_use_colors(color: ColorChoice, writing_to_stdout: bool) -> bool {
 // =============================================================================
 // Command: validate
 // =============================================================================
+
+/// The presentation runtime, embedded at compile time so a `deck` HTML artifact can never
+/// drift from the runtime version the binary shipped with (bd-ey2nh / D10).
+const DECK_RUNTIME_JS: &str = include_str!("deck_runtime.js");
+/// The neutral standalone-presentation chrome; placeholders filled by plain replacement.
+const DECK_TEMPLATE_HTML: &str = include_str!("deck_template.html");
+
+/// Escape a string destined for the inside of an inline `<script>` block: the standard
+/// `</script>`-breakout guard. The payloads are already valid JS/JSON string content; only
+/// the HTML parser's early-termination sequence needs neutralizing.
+fn guard_inline_script(payload: &str) -> String {
+    payload.replace("</", "<\\/")
+}
+
+/// Turn a diagram with a deck directive into a presentation artifact (epic bd-z7g6k).
+///
+/// Runs the SAME render pipeline as `render` (`render_source` with `deck_capture`), so
+/// `deck --manifest-out` and `render --deck-manifest-out` are byte-identical by construction
+/// — the one-parse/one-layout guarantee at the CLI layer.
+fn cmd_deck(input: &str, options: DeckCommandOptions<'_>) -> Result<()> {
+    let DeckCommandOptions {
+        format,
+        output,
+        manifest_out,
+        theme,
+        parse_mode,
+        parser_config,
+        layout_algorithm,
+        layout_config,
+        font_size,
+        max_input_bytes,
+        svg_base_config,
+        term_base_config,
+        show_back_edges,
+        pretty,
+    } = options;
+
+    let source = load_input(input, max_input_bytes)?;
+    // The user explicitly asked for a deck; a slideless page would violate least surprise.
+    // (`render` stays lenient on deckless input — the asymmetry is deliberate.) A cheap
+    // textual pre-check gives the actionable message without a second parse.
+    if !source.contains("%%{") || !source.to_ascii_lowercase().contains("deck") {
+        anyhow::bail!("input has no %%{{deck: …}}%% directive; see 'Graph decks' in the README");
+    }
+
+    let outcome = render_source(
+        &source,
+        &RenderCommandOptions {
+            parse_mode,
+            parser_config,
+            layout_algorithm,
+            layout_config,
+            format: OutputFormat::Svg,
+            theme,
+            font_size,
+            output: None,
+            max_input_bytes,
+            svg_base_config,
+            term_base_config,
+            show_back_edges,
+            show_minimap: false,
+            embed_source_spans: false,
+            source_map_out: None,
+            deck_manifest_out: None,
+            deck_capture: true,
+            dimensions: (None, None),
+            json_output: false,
+            fnx_mode: FnxModeArg::Auto,
+            fnx_projection: FnxProjectionArg::Undirected,
+            fnx_fallback: FnxFallbackArg::Graceful,
+        },
+    )?;
+    let Some(manifest) = outcome.deck_manifest else {
+        anyhow::bail!(
+            "the deck produced no usable manifest (every slide resolved to zero members, or \
+             this diagram family has no addressable elements); run `fm-cli validate` on the \
+             input for the specific deck diagnostics"
+        );
+    };
+
+    let manifest_json = if pretty {
+        serde_json::to_string_pretty(&manifest)?
+    } else {
+        serde_json::to_string(&manifest)?
+    };
+    if let Some(path) = manifest_out {
+        std::fs::write(path, &manifest_json)
+            .with_context(|| format!("Failed to write deck manifest file: {path}"))?;
+        info!("Wrote deck manifest artifact to: {path}");
+    }
+
+    match format {
+        DeckFormatArg::Json => write_output(output, &manifest_json),
+        DeckFormatArg::Html => {
+            let svg =
+                String::from_utf8(outcome.rendered).context("rendered SVG was not valid UTF-8")?;
+            let colors = fm_render_svg::ThemeColors::from_preset(resolve_theme_preset(
+                theme,
+                ThemePreset::Default,
+            ));
+            let title = manifest
+                .title
+                .clone()
+                .unwrap_or_else(|| "frankenmermaid deck".to_string());
+            // The SVG travels as a JS string literal (serde_json escaping is valid JS),
+            // manifest JSON inside an application/json block; both get the </script guard.
+            let svg_js_string = guard_inline_script(&serde_json::to_string(&svg)?);
+            let manifest_block = guard_inline_script(&manifest_json);
+            let html = DECK_TEMPLATE_HTML
+                .replace("{{TITLE}}", &fm_render_svg::escape_xml_text(&title))
+                .replace("{{BG}}", &colors.background)
+                .replace("{{FG}}", &colors.text)
+                .replace("{{MANIFEST_JSON}}", &manifest_block)
+                .replace("{{RUNTIME_JS}}", DECK_RUNTIME_JS)
+                .replace("{{SVG_JS_STRING}}", &svg_js_string);
+            write_output(output, &html)
+        }
+    }
+}
 
 fn cmd_validate(input: &str, options: ValidateCommandOptions<'_>) -> Result<()> {
     let ValidateCommandOptions {
@@ -9119,7 +9417,7 @@ mod render_tests {
         empty_layout.clusters.clear();
         empty_layout.cycle_clusters.clear();
 
-        let (rendered, _, _) = render_format(
+        let (rendered, _, _, _) = render_format(
             &parsed.ir,
             &empty_layout,
             OutputFormat::Term,
@@ -9134,6 +9432,7 @@ mod render_tests {
                 dimensions: (Some(80), Some(24)),
                 degradation: fm_core::MermaidDegradationPlan::default(),
             },
+            false,
         )
         .expect("terminal render should succeed");
 
@@ -9261,6 +9560,8 @@ mod render_tests {
             show_minimap: false,
             embed_source_spans: true,
             source_map_out: Some(source_map_path_str.as_str()),
+            deck_manifest_out: None,
+            deck_capture: false,
             dimensions: (None, None),
             json_output: true,
             fnx_mode: FnxModeArg::Auto,
