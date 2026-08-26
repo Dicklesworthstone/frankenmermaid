@@ -11551,7 +11551,10 @@ fn class_member_row_width(
         }
     }
     if let Some(ref return_type) = member.return_type {
-        row.push_str(": ");
+        // ` : ` matches what the renderers draw (bd-ci658). This string is what the BOX IS SIZED
+        // FROM, so it has to move in the same commit as they do or the row is measured one
+        // character narrower than it is drawn.
+        row.push_str(" : ");
         row.push_str(&fm_core::parse_generic_types(return_type));
     }
     // Rows render at `font_size * 0.9`; `metrics` measures at full size, so scale the estimate down.

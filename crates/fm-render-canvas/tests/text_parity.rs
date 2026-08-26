@@ -501,8 +501,12 @@ fn class_member_types_and_classifiers_reach_the_canvas_as_they_reach_the_svg() {
     for row in [
         "+String name",
         "-id int",
-        "+area()*: float",
-        "+load()$: Shape",
+        // ' : ', not ': ' — bd-ci658 moved the return-type tail to mermaid's spelling in all five
+        // row builders at once. These literals are the CONTRACT the canvas is checked against, so
+        // they move with it; the assertion below still fails closed if the SVG arm stops emitting
+        // them.
+        "+area()* : float",
+        "+load()$ : Shape",
     ] {
         assert!(
             svg.contains(row),

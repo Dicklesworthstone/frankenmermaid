@@ -7809,10 +7809,13 @@ fn write_class_compartments_into(
         } else {
             ""
         };
+        // ` : T`, not `: T` (bd-ci658). Measured on the pinned bundle: mermaid's
+        // `getDisplayDetails()` builds the tail as `' : ' + parseGenericTypes(returnType)`, so a
+        // typed method row differed from the incumbent by one character in every class diagram.
         let ret = method
             .return_type
             .as_deref()
-            .map(|t| format!(": {}", fm_core::parse_generic_types(t)))
+            .map(|t| format!(" : {}", fm_core::parse_generic_types(t)))
             .unwrap_or_default();
         let text = format!(
             "{vis}{}{suffix}{ret}",
@@ -11256,10 +11259,13 @@ fn render_class_compartments(
         } else {
             ""
         };
+        // ` : T`, not `: T` (bd-ci658). Measured on the pinned bundle: mermaid's
+        // `getDisplayDetails()` builds the tail as `' : ' + parseGenericTypes(returnType)`, so a
+        // typed method row differed from the incumbent by one character in every class diagram.
         let ret = method
             .return_type
             .as_deref()
-            .map(|t| format!(": {}", fm_core::parse_generic_types(t)))
+            .map(|t| format!(" : {}", fm_core::parse_generic_types(t)))
             .unwrap_or_default();
         let text = format!(
             "{vis}{}{suffix}{ret}",

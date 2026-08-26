@@ -2957,10 +2957,12 @@ impl TermRenderer {
             } else {
                 ""
             };
+            // ` : `, matching the SVG and canvas backends and the width the layout computed
+            // for this row (bd-ci658).
             let ret = method
                 .return_type
                 .as_deref()
-                .map(|t| format!(": {}", fm_core::parse_generic_types(t)))
+                .map(|t| format!(" : {}", fm_core::parse_generic_types(t)))
                 .unwrap_or_default();
             let text = format!(
                 "{vis}{}{suffix}{ret}",

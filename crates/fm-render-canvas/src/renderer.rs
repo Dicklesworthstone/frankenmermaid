@@ -3618,7 +3618,9 @@ fn class_member_row(member: &fm_core::IrClassMember, is_method: bool) -> String 
         }
     }
     if let Some(ref return_type) = member.return_type {
-        row.push_str(": ");
+        // ` : `, as mermaid draws it and as `fm_layout::class_member_row_width` measures it
+        // (bd-ci658).
+        row.push_str(" : ");
         row.push_str(&fm_core::parse_generic_types(return_type));
     }
     row
