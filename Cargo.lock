@@ -909,6 +909,7 @@ dependencies = [
  "fm-render-term",
  "mimalloc",
  "notify",
+ "proptest",
  "rayon",
  "resvg",
  "serde",
