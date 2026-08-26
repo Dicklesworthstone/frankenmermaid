@@ -224,3 +224,37 @@ fn an_unknown_element_id_is_an_error() {
         "an unknown element id was accepted, so a typo would silently do nothing"
     );
 }
+
+/// A multi-line `%%{deck: …}%%` block must survive lens round-trips byte-for-byte (bd-z2pkg).
+///
+/// GetPut: the snapshot hands back the decked source unchanged. PutGet-adjacent: a rename edit
+/// elsewhere in the diagram leaves the entire block — including its interior JSON5 lines, which
+/// classify as one directive region rather than body text — exactly as authored.
+#[test]
+fn a_multiline_deck_block_survives_lens_round_trips_byte_for_byte() {
+    const DECKED: &str = "flowchart TD\n%%{deck: {\n  title: \"Tour\",\n  slides: [\n    { id: \"s1\", nodes: [\"a\"] },\n  ],\n}}%%\n  a[Alpha] --> b[Beta]\n";
+    const DECK_BLOCK: &str = "%%{deck: {\n  title: \"Tour\",\n  slides: [\n    { id: \"s1\", nodes: [\"a\"] },\n  ],\n}}%%";
+
+    let snapshot = build_parse_lens(DECKED);
+    assert_eq!(
+        snapshot.original_source(),
+        DECKED,
+        "GetPut: the snapshot altered a decked source"
+    );
+
+    let element_id = first_node_binding(DECKED);
+    let response = apply_parse_lens_edit(
+        DECKED,
+        &MermaidLensEdit {
+            element_id,
+            replacement: String::from("Renamed"),
+        },
+    )
+    .expect("editing a bound element in a decked source should succeed");
+    let updated = &response.result.updated_source;
+    assert!(
+        updated.contains(DECK_BLOCK),
+        "the multi-line deck block was not preserved byte-for-byte:\n{updated}"
+    );
+    assert!(updated.contains("Renamed"), "the edit itself was lost");
+}
