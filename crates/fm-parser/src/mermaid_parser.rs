@@ -10428,11 +10428,47 @@ struct SequenceMessageData {
     deactivate: bool,
 }
 
+/// Walk a matched sequence operator's start LEFTWARDS over an immediately preceding dash run.
+///
+/// `SEQUENCE_OPERATORS` lists arrow SPELLINGS, and the dash run in front of the head marker is
+/// unbounded, so any fixed table is a bound the grammar does not have. `find_operator_core` scans
+/// left to right: on `A --->> B` nothing matches at the first dash, the scan slides right until the
+/// trailing `-->>` matches, and the leading dashes stay on the LEFT-HAND SIDE, where
+/// `normalize_identifier` turns them into the phantom participant `A_-` (bd-u4jiy).
+///
+/// That is the severe failure, not a cosmetic one: the message is not mis-styled, it is MIS-WIRED,
+/// hanging off a lifeline the author never wrote while their real one stands empty. It is the same
+/// defect the flowchart side fixed in bd-lrl48 / bd-92b6 (`A o=== B` building a node `A_o`), and the
+/// sequence table never got the same treatment.
+///
+/// The spelling is still ACCEPTED. mermaid rejects `--->>` and aborts the document; this parser
+/// recovers, which is its contract and already the documented posture for the flowchart tokens
+/// mermaid refuses. Recovering must not mean inventing a participant.
+///
+/// GATED ON THE MATCHED OPERATOR beginning with `-`, so `<<->>`, `/|-`, `\\-` and the other
+/// non-dash-initial spellings are untouched. The walk stops at the first non-dash byte, so an actor
+/// whose own name ends in a dash keeps it when a separator intervenes (`A- ->> B` extends nothing),
+/// and `A--->>B` with no spaces at all still resolves to `A`.
+fn extend_sequence_dash_run(statement: &str, operator_idx: usize, operator: &str) -> usize {
+    if !operator.starts_with('-') {
+        return operator_idx;
+    }
+    let bytes = statement.as_bytes();
+    let mut start = operator_idx;
+    while start > 0 && bytes[start - 1] == b'-' {
+        start -= 1;
+    }
+    start
+}
+
 fn parse_sequence_message_ast(statement: &str) -> Option<SequenceMessageData> {
     // Pass the precomputed const gate (skip the per-call gate rebuild — the hot cost here).
     let (operator_idx, operator, arrow) =
         find_operator_core(statement, 0, &SEQUENCE_OPERATORS, SEQUENCE_OP_GATE)?;
-    let left = trim_fast(&statement[..operator_idx]);
+    // Only the SOURCE side moves: the operator's own length is unchanged, so `right` is computed
+    // from the position the table matched at, exactly as before.
+    let source_end = extend_sequence_dash_run(statement, operator_idx, operator);
+    let left = trim_fast(&statement[..source_end]);
     let right = trim_fast(&statement[operator_idx + operator.len()..]);
     if left.is_empty() || right.is_empty() {
         return None;
