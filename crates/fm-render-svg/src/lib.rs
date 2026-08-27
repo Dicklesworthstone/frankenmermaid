@@ -9086,8 +9086,13 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
     let subtitle_font_size = clamp_font_size(font_size * 0.75, config.min_font_size);
     let mut text_y = y + h * 0.25 + font_size * 0.35;
     if let Some(req_type) = meta.requirement_type.as_deref() {
-        // Stream `«{type}»` — «/» are non-XML-special, so this is byte-identical to escaping the
-        // `format!("\u{00ab}{req_type}\u{00bb}")` whole, without the per-node String.
+        // ⚠️ `<<Type>>`, NOT `«keyword»`, and both halves changed. mermaid draws
+        // `` `<<${n.type}>>` `` with ASCII angles — the same wrapper this renderer already uses for a
+        // CLASS stereotype — and `n.type` is the DISPLAY name from its `RequirementType` table, not
+        // the authored keyword. We drew `«functionalRequirement»` where mermaid draws
+        // `<<Functional Requirement>>`: wrong words inside a wrapper we spell differently from our
+        // own class path. `>` IS XML-special, so the escaper writes the whole thing.
+        let req_type = fm_core::requirement_type_display(req_type);
         write_req_subtitle_body_into(
             out,
             cx,
@@ -9098,9 +9103,9 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
             &colors.text,
             "fm-req-type-label",
             |f| {
-                f.push('\u{00ab}');
+                let _ = write_escaped_text(f, "<<");
                 let _ = write_escaped_text(f, req_type);
-                f.push('\u{00bb}');
+                let _ = write_escaped_text(f, ">>");
             },
         );
         text_y += font_size * 0.85;
@@ -10747,7 +10752,8 @@ fn render_node(
             let stream_req_subtitles =
                 config.embed_theme_css && !emit_classdef_classes && text_style.is_none();
             if let Some(ref req_type) = req_meta.requirement_type {
-                let type_label = format!("\u{00ab}{req_type}\u{00bb}");
+                // Same contract as the streaming path above: mermaid's display name, ASCII angles.
+                let type_label = format!("<<{}>>", fm_core::requirement_type_display(req_type));
                 if stream_req_subtitles {
                     let mut f = String::new();
                     write_req_subtitle_into(

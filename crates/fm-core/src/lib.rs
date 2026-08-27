@@ -5454,6 +5454,40 @@ impl IrGitGraphMeta {
     }
 }
 
+/// The display name mermaid gives a requirement's type (bd-…req).
+///
+/// ⚠️ THE KEYWORD IS NOT THE LABEL. mermaid keeps a `RequirementType` table mapping each authored
+/// keyword to a spaced, title-cased string, and draws THAT:
+///
+/// ```text
+///   requirement            -> Requirement
+///   functionalRequirement  -> Functional Requirement
+///   interfaceRequirement   -> Interface Requirement
+///   performanceRequirement -> Performance Requirement
+///   physicalRequirement    -> Physical Requirement
+///   designConstraint       -> Design Constraint
+/// ```
+///
+/// Transcribed from the pinned 11.15.0 bundle's own `this.RequirementType = {…}`, and confirmed
+/// against its db: `functionalRequirement LoginReq { … }` stores `type: "Functional Requirement"`.
+/// We drew the raw keyword, so a reader saw `functionalRequirement` where mermaid shows
+/// `Functional Requirement`.
+///
+/// An unrecognised keyword is returned unchanged rather than mangled — a future mermaid type this
+/// table has not learned yet should still display what the author wrote.
+#[must_use]
+pub fn requirement_type_display(raw: &str) -> &str {
+    match raw.trim() {
+        "requirement" => "Requirement",
+        "functionalRequirement" => "Functional Requirement",
+        "interfaceRequirement" => "Interface Requirement",
+        "performanceRequirement" => "Performance Requirement",
+        "physicalRequirement" => "Physical Requirement",
+        "designConstraint" => "Design Constraint",
+        other => other,
+    }
+}
+
 /// Requirement-diagram-specific metadata for a node.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct IrRequirementNodeMeta {
