@@ -199,6 +199,10 @@ pub struct IrBuilder {
     edge_index_by_id: FxHashMap<String, usize>,
     cluster_index_by_key: FxHashMap<String, usize>,
     subgraph_index_by_key: FxHashMap<String, usize>,
+    /// Flowchart only: subgraph public id -> the node id an endpoint naming it resolves to, for
+    /// subgraphs declared LATER in the document than the edge naming them (bd-dw2a9). Empty for
+    /// every other diagram type, so their paths pay one hash miss.
+    flow_forward_subgraph_members: FxHashMap<String, String>,
     /// O(1) membership dedup for `(cluster_index, node_id)` / `(subgraph_index, node_id)` — the
     /// `cluster.members`/`subgraph.members` Vecs are append-only and grow to the subgraph size, so
     /// the old `members.contains(&id)` linear dedup-on-insert was O(subgraph²) (measured ~58% of a
@@ -543,6 +547,7 @@ impl IrBuilder {
             edge_index_by_id: FxHashMap::default(),
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
+            flow_forward_subgraph_members: FxHashMap::default(),
             cluster_member_set: FxHashSet::default(),
             subgraph_member_set: FxHashSet::default(),
             label_index: LabelIndex::default(),
@@ -590,6 +595,7 @@ impl IrBuilder {
             edge_index_by_id: FxHashMap::default(),
             cluster_index_by_key: FxHashMap::default(),
             subgraph_index_by_key: FxHashMap::default(),
+            flow_forward_subgraph_members: FxHashMap::default(),
             cluster_member_set: FxHashSet::default(),
             subgraph_member_set: FxHashSet::default(),
             label_index: LabelIndex::with_capacity(estimated_labels),
@@ -2027,6 +2033,34 @@ impl IrBuilder {
             .and_then(|subgraph| subgraph.members.first().copied())
     }
 
+    /// Seed the forward-reference map for one flowchart document, before any of it is lowered.
+    ///
+    /// Built by the parser from the already-parsed item tree, which is why this is a plain setter:
+    /// the whole point of bd-dw2a9 is that the answer is knowable BEFORE lowering starts.
+    pub(crate) fn set_flow_forward_subgraph_members(&mut self, map: FxHashMap<String, String>) {
+        self.flow_forward_subgraph_members = map;
+    }
+
+    /// The node an edge endpoint naming a subgraph resolves to, whichever order they were written in.
+    ///
+    /// ⚠️ THIS IS THE HALF `subgraph_endpoint_member` CANNOT ANSWER (bd-dw2a9). That one reads
+    /// `graph.subgraphs`, so it only sees subgraphs ALREADY lowered — a forward reference names one
+    /// that does not exist yet, and fell through to interning a phantom box. The second lookup uses
+    /// the pre-scan map and interns the member itself, which is legal precisely because the member
+    /// would be interned by the subgraph body a moment later anyway: the edge only moves it earlier.
+    ///
+    /// This is why this bead's own "BLOCKED ON MISSING INFRASTRUCTURE" note was wrong. It assumed
+    /// the only route was a post-lowering pass that REMOVED the phantom, which would mean remapping
+    /// every `IrNodeId` in edges, cluster and subgraph members and both id maps. Nothing is removed
+    /// here because nothing wrong is ever created.
+    pub(crate) fn resolve_subgraph_endpoint(&mut self, id: &str, span: Span) -> Option<IrNodeId> {
+        if let Some(member) = self.subgraph_endpoint_member(id) {
+            return Some(member);
+        }
+        let target = self.flow_forward_subgraph_members.get(id.trim())?.clone();
+        self.intern_node_auto_normalized(&target, None, NodeShape::Rect, span, false)
+    }
+
     pub(crate) fn intern_edge_endpoint_pretrimmed(
         &mut self,
         id: &str,
@@ -2035,7 +2069,7 @@ impl IrBuilder {
         // ⚠️ THE GUARD SITS ON THE PATH THAT ACTUALLY RUNS. `s1 --> s2` is a "simple" edge and comes
         // through here, not through `intern_flow_ast_node`; guarding only that one leaves the
         // phantom exactly where it was while every slow-path test passes.
-        if let Some(member) = self.subgraph_endpoint_member(id) {
+        if let Some(member) = self.resolve_subgraph_endpoint(id, span) {
             return Some(member);
         }
         self.intern_node_auto_normalized(id, None, NodeShape::Rect, span, false)

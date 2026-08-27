@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use chumsky::prelude::*;
+use rustc_hash::{FxHashMap, FxHashSet};
 use fm_core::{
     ArchitectureSide, ArrowType, Diagnostic, DiagnosticCategory, DiagramType, EdgeAnimation,
     GanttDate, GanttExclude, GanttTaskFlags, GanttTickInterval, GraphDirection, IrAttributeKey,
@@ -1405,7 +1406,7 @@ fn lower_flow_document_item(
             // mirror of that arm, so a standalone `s1[Box]` naming an existing subgraph reaches HERE
             // and nowhere else — guarding only the other site fixed `s1[Box] --> B` and left the
             // bare `s1[Box]` statement still drawing a third box.
-            let node_id = if let Some(member) = builder.subgraph_endpoint_member(id) {
+            let node_id = if let Some(member) = builder.resolve_subgraph_endpoint(id, span) {
                 Some(member)
             } else if is_dangling_placeholder_node_id(id) {
                 builder.intern_placeholder_node(id, span)
@@ -1523,6 +1524,111 @@ fn flow_ast_declares_content(ast: &FlowAst) -> bool {
     }
 }
 
+/// The node id an endpoint naming this subgraph should resolve to: its first interned member.
+///
+/// "First member" is the same choice `subgraph_endpoint_member` makes for a subgraph that was
+/// already lowered (bd-pfibz), so a forward and a backward reference to the same subgraph land on
+/// the same node. An EMPTY nested subgraph contributes ITSELF, because an empty subgraph is a node
+/// (bd-kat55) — and it is then the first thing its parent contains.
+fn flow_body_first_node_id<'a>(body: &'a [FlowDocumentItem<'a>]) -> Option<&'a str> {
+    for item in body {
+        match item {
+            FlowDocumentItem::FastNode { id, .. } => return Some(id),
+            FlowDocumentItem::FastEdge { from, .. } => return Some(from),
+            FlowDocumentItem::Statements { asts, .. } => {
+                for ast in asts {
+                    match ast {
+                        FlowAst::Node(node) => return Some(node.id.as_str()),
+                        FlowAst::Edge { from, .. } => return Some(from.id.as_str()),
+                        FlowAst::Direction(_)
+                        | FlowAst::ClassAssign { .. }
+                        | FlowAst::ClickDirective { .. }
+                        | FlowAst::EdgeAnimation { .. }
+                        | FlowAst::StyleOrLinkStyle
+                        | FlowAst::ClassDef => {}
+                    }
+                }
+            }
+            FlowDocumentItem::Subgraph { id, body, .. } => {
+                if !flow_body_declares_content(body) {
+                    return Some(id.as_str());
+                }
+                if let Some(first) = flow_body_first_node_id(body) {
+                    return Some(first);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Collect `subgraph id -> first member id` over the whole document, nested subgraphs included.
+fn collect_flow_subgraph_first_members(
+    items: &[FlowDocumentItem<'_>],
+    out: &mut FxHashMap<String, String>,
+) {
+    for item in items {
+        if let FlowDocumentItem::Subgraph { id, body, .. } = item {
+            // An empty subgraph is a node, not a group, so it is deliberately absent from the map:
+            // an endpoint naming it must intern it under its own id (bd-kat55).
+            if flow_body_declares_content(body)
+                && let Some(first) = flow_body_first_node_id(body)
+            {
+                // First declaration wins, matching `ensure_subgraph`'s treatment of a repeated id.
+                out.entry(id.clone()).or_insert_with(|| first.to_string());
+            }
+            collect_flow_subgraph_first_members(body, out);
+        }
+    }
+}
+
+/// `subgraph id -> the node an endpoint naming it resolves to`, for the whole document (bd-dw2a9).
+///
+/// ⚠️ THE VALUES ARE RESOLVED TRANSITIVELY, AND THAT IS MEASURED, NOT DEFENSIVE. Against the pinned
+/// mermaid 11.15.0 bundle in Chromium 151:
+///
+/// ```text
+///   s1 --> X
+///   subgraph s1
+///     s2 --> Y      <- s1's first member is itself a forward reference
+///   end
+///   subgraph s2
+///     Z
+///   end
+/// ```
+///
+/// renders 3 nodes (`Z`, `Y`, `X`) and 2 clusters: the reference resolves `s1` through `s2` to `Z`.
+/// A single hop would have interned a phantom `s2` and drawn 4.
+///
+/// ⚠️ A CYCLE KEEPS THE RAW ID rather than looping. `subgraph s1 { s1 --> Q }` maps `s1` to itself;
+/// mermaid REFUSES that input outright ("Setting s1 as parent of s1 would create a cycle") while we
+/// render it, so falling back to the raw id preserves our existing, more permissive output instead
+/// of inventing a third behaviour neither engine has.
+fn flow_forward_subgraph_members(items: &[FlowDocumentItem<'_>]) -> FxHashMap<String, String> {
+    let mut raw: FxHashMap<String, String> = FxHashMap::default();
+    collect_flow_subgraph_first_members(items, &mut raw);
+    if raw.is_empty() {
+        return raw;
+    }
+
+    let mut resolved: FxHashMap<String, String> = FxHashMap::default();
+    let mut seen: FxHashSet<&str> = FxHashSet::default();
+    for (key, first) in &raw {
+        seen.clear();
+        seen.insert(key.as_str());
+        let mut target = first.as_str();
+        // Bounded by the number of subgraphs: every hop consumes one unvisited key.
+        while let Some(next) = raw.get(target) {
+            if !seen.insert(target) {
+                break;
+            }
+            target = next.as_str();
+        }
+        resolved.insert(key.clone(), target.to_string());
+    }
+    resolved
+}
+
 /// A nested subgraph always counts as content: an empty one becomes a node, a non-empty one
 /// contributes its own members to every enclosing group, so either way the parent is not empty.
 fn flow_body_declares_content(body: &[FlowDocumentItem<'_>]) -> bool {
@@ -1588,6 +1694,7 @@ impl CompiledFlowchartPrefix {
         for warning in document.warnings {
             builder.add_warning(warning);
         }
+        builder.set_flow_forward_subgraph_members(flow_forward_subgraph_members(&document.items));
         for item in document.items {
             lower_flow_document_item(item, &mut builder, &[], &[]);
         }
@@ -1830,6 +1937,7 @@ fn parse_flowchart_with_line_offset(input: &str, line_offset: usize, builder: &m
     for warning in &document.warnings {
         builder.add_warning(warning.clone());
     }
+    builder.set_flow_forward_subgraph_members(flow_forward_subgraph_members(&document.items));
     for item in document.items {
         lower_flow_document_item(item, builder, &[], &[]);
     }
@@ -3360,7 +3468,7 @@ fn intern_flow_ast_node(
     // case was fixed. The guard sits at the flowchart sites rather than inside
     // `intern_node_label`: that is shared with sequence, ER and requirement, where a `box` or an
     // entity could collide with a participant name and be swallowed.
-    if let Some(member) = builder.subgraph_endpoint_member(&node.id) {
+    if let Some(member) = builder.resolve_subgraph_endpoint(&node.id, span) {
         return Some(member);
     }
     let node_id = if is_dangling_placeholder_node_id(&node.id) {
