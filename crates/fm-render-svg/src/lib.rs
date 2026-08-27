@@ -8262,7 +8262,6 @@ fn write_er_entity_into(
     // Attribute list.
     let mut attr_y = y + header_height + attr_font_size * 0.9;
     for attr in &node.members {
-        let key_prefix = attr.key_prefix();
         let font_weight = if attr.keys.is_empty() {
             "normal"
         } else {
@@ -8279,25 +8278,12 @@ fn write_er_entity_into(
         f.push_str("\" fill=\"");
         let _ = write_escaped_attr(f, fill);
         f.push_str("\" class=\"fm-er-attribute\">");
-        // `attr_text = format!("{key_prefix}{data_type} {name}")`, escaped in pieces (identical bytes).
-        f.push_str(&key_prefix);
-        let _ = write_escaped_text(f, &attr.data_type);
-        f.push(' ');
-        let _ = write_escaped_text(f, &attr.name);
-        // The COMMENT was parsed and thrown away (bd-jerh). `IrEntityAttribute::comment` is
-        // populated by the parser and was read by no renderer and no layout code, so
-        // `A { string name "the name" }` rendered BYTE-IDENTICAL to the same entity without it.
-        // mermaid draws it: its ER renderer measures the comment into a text element classed
-        // `attribute-comment` and folds the width into the row.
-        //
-        // Appended to this row rather than given a column of its own, because this renderer draws
-        // one text run per attribute; a real fourth column would need the row split into measured
-        // cells, which is a larger change than the dropped content justifies. `er_attribute_row_width`
-        // measures the SAME concatenation, so the widest row still fits inside the box.
-        if let Some(comment) = attr.comment.as_deref().filter(|text| !text.is_empty()) {
-            f.push(' ');
-            let _ = write_escaped_text(f, comment);
-        }
+        // Shared composition — see `IrEntityAttribute::display_row`: type, name, key, comment, in
+        // mermaid's own column order. Escaped whole rather than in pieces now that one call builds it.
+        let _ = write_escaped_text(f, &attr.display_row());
+        // The COMMENT (bd-jerh) is now part of `display_row` rather than appended here: it is
+        // mermaid's fourth column and belongs with the other three. It is still concatenated rather
+        // than given a real cell — that is the open half of bd-xxvch.
         f.push_str("</text>");
         attr_y += attr_font_size * 1.3;
     }
@@ -10999,7 +10985,6 @@ fn render_node(
                 // Attribute list
                 let mut attr_y = y + header_height + attr_font_size * 0.9;
                 for attr in &node.members {
-                    let key_prefix = attr.key_prefix();
                     // ⚠️ THE COMMENT BELONGS HERE TOO, and its absence was an asymmetric sibling:
                     // the streaming writer appended it and this `Element` path did not, so
                     // `USER { string name "the display name" }` drew the comment under the default
@@ -11009,11 +10994,7 @@ fn render_node(
                     // Layout was already on the streaming path's side: `er_attribute_row_width`
                     // measures the concatenation INCLUDING the comment, so this path was reserving
                     // width for a string it then refused to draw.
-                    let mut attr_text = format!("{key_prefix}{} {}", attr.data_type, attr.name);
-                    if let Some(comment) = attr.comment.as_deref().filter(|text| !text.is_empty()) {
-                        attr_text.push(' ');
-                        attr_text.push_str(comment);
-                    }
+                    let attr_text = attr.display_row();
                     let font_weight = if attr.keys.is_empty() {
                         "normal"
                     } else {

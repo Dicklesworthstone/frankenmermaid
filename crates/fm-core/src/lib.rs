@@ -1377,6 +1377,64 @@ impl IrEntityAttribute {
             }
         }
     }
+
+    /// The attribute's fields in the order mermaid lays them out: type, name, key, comment.
+    ///
+    /// ⚠️ ONE COMPOSITION, FIVE CONSUMERS. This string was built independently in both fm-render-svg
+    /// writers, in fm-render-canvas, in fm-render-term, and in fm-layout's `er_attribute_row_width`
+    /// — five copies of the same five lines. They had already drifted once: the streaming SVG writer
+    /// appended the comment and the `Element` writer did not, so whether an author's comment appeared
+    /// depended on `embed_theme_css`. Unifying here is what stops the next drift, and it is a
+    /// precondition for splitting the row into real cells (bd-xxvch), because the cells must be in
+    /// this order too.
+    ///
+    /// ⚠️ THE ORDER IS mermaid's, AND IT IS NOT THE ONE WE USED. Measured in Chromium 151 against the
+    /// pinned 11.15.0 bundle, an attribute renders as column cells at fixed offsets:
+    ///
+    /// ```text
+    ///   int    x=29     id     x=93    PK   x=158     y=68
+    ///   string x=29     name   x=93                   y=111
+    ///   string x=29     email  x=93    UK   x=158     y=154
+    /// ```
+    ///
+    /// so the key comes LAST. We led with it — `PK int id` — putting the modifier where mermaid puts
+    /// the type. This returns `int id PK`.
+    ///
+    /// ⚠️ STILL ONE STRING, NOT CELLS. mermaid draws three separate text elements; we draw one run.
+    /// That remains the open half of bd-xxvch and is deliberately not pretended away here: fixing the
+    /// ORDER is complete and testable on its own, fixing the FUSION needs per-column measurement
+    /// across all five consumers at once.
+    #[must_use]
+    pub fn display_row(&self) -> String {
+        // `key_prefix` carries a TRAILING space for its historical leading position; trimmed here
+        // because the key now follows the name rather than preceding the type.
+        let key = self.key_prefix();
+        let key = key.trim_end();
+        let comment = self.comment.as_deref().filter(|text| !text.is_empty());
+        let mut row = String::with_capacity(
+            self.data_type.len() + self.name.len() + key.len() + comment.map_or(0, str::len) + 3,
+        );
+        row.push_str(&self.data_type);
+        if !self.name.is_empty() {
+            if !row.is_empty() {
+                row.push(' ');
+            }
+            row.push_str(&self.name);
+        }
+        if !key.is_empty() {
+            if !row.is_empty() {
+                row.push(' ');
+            }
+            row.push_str(key);
+        }
+        if let Some(text) = comment {
+            if !row.is_empty() {
+                row.push(' ');
+            }
+            row.push_str(text);
+        }
+        row
+    }
 }
 
 // ── Class-diagram member types ─────────────────────────────────────────

@@ -2385,19 +2385,10 @@ impl Canvas2dRenderer {
                         // Out of box: stop rather than draw rows past the entity.
                         break;
                     }
-                    // List-aware since bd-nryyc: one attribute may carry several key modifiers.
-                    let key_prefix = attr.key_prefix();
-                    let mut text = String::with_capacity(
-                        key_prefix.len() + attr.data_type.len() + attr.name.len() + 1,
-                    );
-                    text.push_str(&key_prefix);
-                    text.push_str(&attr.data_type);
-                    text.push(' ');
-                    text.push_str(&attr.name);
-                    if let Some(comment) = attr.comment.as_deref().filter(|c| !c.is_empty()) {
-                        text.push(' ');
-                        text.push_str(comment);
-                    }
+                    // One composition, shared with both SVG writers, the terminal and the layout
+                    // width helper: `IrEntityAttribute::display_row`. Five hand-rolled copies had
+                    // already drifted once over whether the comment is drawn.
+                    let text = attr.display_row();
                     ctx.fill_text(&text, x + padding, cursor_y);
                     self.draw_calls += 1;
                     *labels_drawn += 1;

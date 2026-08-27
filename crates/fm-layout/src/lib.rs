@@ -11518,28 +11518,11 @@ fn er_attribute_row_width(
     node_font_size: f32,
     metrics: &fm_core::FontMetrics,
 ) -> f32 {
-    // One call, not a sixth copy of the match: this string is what the BOX IS SIZED FROM, so it
-    // has to be the string the renderers draw, composite keys and all (bd-nryyc).
-    let prefix = attr.key_prefix();
-    // Capacity covers the comment too (bd-jerh): the renderer appends ` {comment}` when present, and
-    // a row measured without it under-sizes the box by exactly the comment's width — which spills the
-    // widest row outside the entity rather than clipping it, per this fn's own contract above.
-    let comment = attr.comment.as_deref().filter(|text| !text.is_empty());
-    let mut row = String::with_capacity(
-        prefix.len()
-            + attr.data_type.len()
-            + attr.name.len()
-            + 1
-            + comment.map_or(0, |text| text.len() + 1),
-    );
-    row.push_str(&prefix);
-    row.push_str(&attr.data_type);
-    row.push(' ');
-    row.push_str(&attr.name);
-    if let Some(text) = comment {
-        row.push(' ');
-        row.push_str(text);
-    }
+    // ⚠️ THE BOX IS SIZED FROM THE STRING THE RENDERERS DRAW, so it calls the same one they do:
+    // `IrEntityAttribute::display_row`. This used to be a sixth hand-rolled copy of the same
+    // composition; measuring a different string than the renderer draws is how a row spills outside
+    // its entity (bd-nryyc for composite keys, bd-jerh for the comment).
+    let row = attr.display_row();
     // `metrics` measures at its own font size; rows render at `attr_font_size`. Scale the estimate by
     // the ratio rather than assuming the nominal 0.8, so the clamp floor is honoured here too.
     let scale = if node_font_size > 0.0 {

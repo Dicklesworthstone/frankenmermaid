@@ -2835,19 +2835,8 @@ impl TermRenderer {
                 // Out of box: stop rather than spill rows into whatever is laid out below.
                 break;
             }
-            // List-aware since bd-nryyc: one attribute may carry several key modifiers.
-            let key_prefix = attr.key_prefix();
-            let mut text = String::with_capacity(
-                key_prefix.len() + attr.data_type.len() + attr.name.len() + 1,
-            );
-            text.push_str(&key_prefix);
-            text.push_str(&attr.data_type);
-            text.push(' ');
-            text.push_str(&attr.name);
-            if let Some(comment) = attr.comment.as_deref().filter(|c| !c.is_empty()) {
-                text.push(' ');
-                text.push_str(comment);
-            }
+            // Shared composition — see `IrEntityAttribute::display_row`.
+            let text = attr.display_row();
             write_text(grid, row, x + 1, &self.truncate_label(&text), inner_w);
             row += 1;
         }
