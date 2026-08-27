@@ -37,7 +37,53 @@ pub fn looks_like_dot(input: &str) -> bool {
     // This resolves the residual `graph`-header ambiguity: `graph\n  A{decision} --> B` parses as
     // a DOT header (graph named `A`) up to the brace, but a Mermaid flowchart keeps writing
     // statements after its brace-shaped node, so the text does not end on `}`.
-    cleaned.trim_end().ends_with('}')
+    let trimmed = cleaned.trim_end();
+    if trimmed.ends_with('}') {
+        return true;
+    }
+    // ⚠️ A TRAILING `%%{…}%%` DIRECTIVE IS NOT A GRAPH STATEMENT (bd-pdz8z). `strip_all_comments`
+    // removes DOT's own comment forms and knows nothing about Mermaid's, so any directive appended
+    // to a DOT document left the text ending in `%%` and this check said "not DOT". The document
+    // then went to the Mermaid parser, which is far worse than the deck leak that surfaced it:
+    // measured on `digraph G { a -> b }` plus one directive, the graph came back with ONE node
+    // instead of two — the edge and a node were simply gone.
+    //
+    // Re-checking after dropping trailing directive lines makes a metadata directive unable to
+    // change WHAT KIND of graph the document is, which is the property that was actually broken.
+    // It cannot loosen the disambiguation above: `graph\n  A{decision} --> B` still ends on `B`
+    // once its directives are dropped, so it is still not DOT.
+    //
+    // Reached only when the cheap check has already failed, so the common case — a real DOT file
+    // ending on its brace, or anything that is not DOT at all — pays nothing for this.
+    strip_trailing_mermaid_directives(trimmed).ends_with('}')
+}
+
+/// The input with any trailing Mermaid `%%…%%` directive lines removed.
+///
+/// ⚠️ SHARED BY DETECTION AND PARSING, deliberately. `looks_like_dot` uses it to decide the document
+/// ends on its body brace, and `parse_dot` uses it so `extract_body` — which spans the FIRST `{` to
+/// the LAST `}` — does not swallow the braces inside `%%{deck: {…}}%%`. Two copies of "where does
+/// this document end" is exactly how detection and parsing come to disagree: with only the
+/// detection half fixed, `digraph G { a -> b }` plus one directive was correctly routed to the DOT
+/// parser and then came back with SEVEN nodes instead of two.
+///
+/// A directive is recognised by its `%%` delimiters at either end of the line: an opening line
+/// starts with `%%`, and the closing line of a multi-line directive ends with `%%` without starting
+/// with it (`}}%%`). Blank lines between them go too. Nothing else is dropped, so a real graph
+/// statement can never be trimmed away.
+fn strip_trailing_mermaid_directives(input: &str) -> &str {
+    let mut rest = input.trim_end();
+    loop {
+        let line = rest.lines().next_back().unwrap_or("").trim();
+        if !(line.starts_with("%%") || line.ends_with("%%")) {
+            return rest;
+        }
+        let Some(cut) = rest.rfind('\n') else {
+            // The whole remaining text is directive.
+            return "";
+        };
+        rest = rest[..cut].trim_end();
+    }
 }
 
 /// Case-insensitive ASCII substring test (`needle` is a short ASCII literal). Scans byte windows,
@@ -51,6 +97,11 @@ fn contains_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
 #[must_use]
 pub fn parse_dot(input: &str) -> ParseResult {
     let mut builder = IrBuilder::new(DiagramType::Flowchart);
+    // Trailing Mermaid directives are not graph statements, and `extract_body` below spans the
+    // first `{` to the LAST `}` — so a `%%{deck: {…}}%%` tail would extend the body over its own
+    // braces and invent nodes out of the directive's text (bd-pdz8z). Same helper detection used to
+    // decide this is DOT at all, so the two cannot disagree about where the document ends.
+    let input = strip_trailing_mermaid_directives(input);
     let cleaned = strip_all_comments_cow(input);
     let cleaned = cleaned.as_ref();
     let directed = is_directed_graph_cleaned(cleaned);
