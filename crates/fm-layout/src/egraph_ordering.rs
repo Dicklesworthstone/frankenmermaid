@@ -380,6 +380,16 @@ pub(crate) struct FixedLayerCrossings {
     /// both the clearing store and the bytes a query scan has to touch.
     counts: Vec<u32>,
     flat: bool,
+    /// Occupancy bitsets, one per repetition level: `levels[k]` has a bit set for each position
+    /// occupied at least `k + 1` times. Empty when the stack is not used.
+    ///
+    /// ⚠️ THIS IS THE SAME TRICK AS `distinct`, GENERALISED. A node with several edges to the fixed
+    /// layer contributes its position more than once, which a single bitset cannot represent — that
+    /// is why the repeat-carrying counters kept a per-position count and a scan. Stacking one word
+    /// per repetition level restores the popcount: items strictly after `position` are the sum of
+    /// `(levels[k] >> position).count_ones()` over the levels, and the stack is only as deep as the
+    /// busiest node's edge count.
+    levels: Vec<u64>,
     /// Every entry of `grouped` is a distinct moving node, so no position is ever occupied twice.
     ///
     /// ⚠️ THIS IS A PROPERTY OF THE EDGE SET, NOT OF THE CANDIDATE. `positions` is a bijection from
@@ -391,6 +401,10 @@ pub(crate) struct FixedLayerCrossings {
 
 /// Widest moving layer that uses the flat occupancy counter instead of the Fenwick tree.
 const FLAT_COUNT_MAX_WIDTH: usize = 64;
+
+/// Deepest repetition the bitset stack will carry. A query walks every level, so the stack only
+/// beats the occupancy scan while it stays short; deeper edge multiplicities keep the counts.
+const MAX_BITSET_LEVELS: usize = 4;
 
 impl FixedLayerCrossings {
     /// Bucket `edges` by the fixed layer's positions, or `None` when the moving layer's node-id
@@ -468,17 +482,20 @@ impl FixedLayerCrossings {
         // One pass over `grouped`, once per construction, against a scratch bitset over the moving
         // layer's node-id domain. `grouped` holds one entry per EDGE, so a node with several edges
         // to the fixed layer repeats and disqualifies the bitset path for this side.
-        let distinct = flat && {
-            let mut seen = vec![false; positions.len()];
-            let mut unique = true;
-            for &node_id in &grouped {
-                if seen[node_id] {
-                    unique = false;
-                    break;
-                }
-                seen[node_id] = true;
-            }
-            unique
+        // One pass over `grouped` gives BOTH facts: whether any node repeats, and how deep the
+        // deepest repetition goes. The depth bounds the bitset stack; past the cap the per-query
+        // loop would cost more than the scan it replaces, so those keep the occupancy counts.
+        let mut repeats = vec![0_u32; positions.len()];
+        let mut max_repeat = 0_u32;
+        for &node_id in &grouped {
+            repeats[node_id] += 1;
+            max_repeat = max_repeat.max(repeats[node_id]);
+        }
+        let distinct = flat && max_repeat <= 1;
+        let level_count = if flat && max_repeat > 1 && max_repeat as usize <= MAX_BITSET_LEVELS {
+            max_repeat as usize
+        } else {
+            0
         };
         Some(Self {
             grouped,
@@ -496,6 +513,7 @@ impl FixedLayerCrossings {
             },
             flat,
             distinct,
+            levels: vec![0_u64; level_count],
         })
     }
 
@@ -623,6 +641,53 @@ impl FixedLayerCrossings {
             for &node_id in &self.grouped[self.offsets[group_count - 1]..self.offsets[group_count]]
             {
                 inversions += (mask >> positions[node_id]).count_ones() as usize;
+            }
+
+            return inversions;
+        }
+
+        // Repeats, but few enough that a short stack of words still beats scanning counts.
+        if !self.levels.is_empty() {
+            let levels = &mut self.levels;
+            for word in levels.iter_mut() {
+                *word = 0;
+            }
+
+            let first_end = self.offsets[1];
+            for &node_id in &self.grouped[self.offsets[0]..first_end] {
+                insert_level(levels, positions[node_id]);
+            }
+
+            for window in self.offsets[1..group_count].windows(2) {
+                let (Some(&start), Some(&end)) = (window.first(), window.get(1)) else {
+                    continue;
+                };
+                let group = &self.grouped[start..end];
+                for &node_id in group {
+                    let position = positions[node_id];
+                    // ⚠️ `>> position` THEN `>> 1`, NOT `>> (position + 1)`: the latter overflows at
+                    // position 63, and the extra shift is what EXCLUDES the queried position itself.
+                    // In the distinct path bit `position` is provably clear so the exclusion is
+                    // free; here a node's own earlier occurrence sits on that very bit, and counting
+                    // it would score two items at the SAME position as an inversion. The randomised
+                    // differential test caught exactly that (case 2: 1 against an expected 0).
+                    inversions += levels
+                        .iter()
+                        .map(|word| ((word >> position) >> 1).count_ones() as usize)
+                        .sum::<usize>();
+                }
+                for &node_id in group {
+                    insert_level(levels, positions[node_id]);
+                }
+            }
+
+            for &node_id in &self.grouped[self.offsets[group_count - 1]..self.offsets[group_count]]
+            {
+                let position = positions[node_id];
+                inversions += levels
+                    .iter()
+                    .map(|word| ((word >> position) >> 1).count_ones() as usize)
+                    .sum::<usize>();
             }
 
             return inversions;
@@ -770,6 +835,22 @@ impl<'a> LayerScorer<'a> {
             (None, None) => {}
         }
         total
+    }
+}
+
+/// Record one more occupant of `position` in the level stack.
+///
+/// The occupant lands in the lowest level whose bit is still clear, so level `k` always holds the
+/// positions occupied at least `k + 1` times and every level stays a plain occupancy word. The stack
+/// is sized to the deepest repetition at construction, so the loop always finds a free level.
+#[inline]
+fn insert_level(levels: &mut [u64], position: usize) {
+    let bit = 1_u64 << position;
+    for word in levels.iter_mut() {
+        if *word & bit == 0 {
+            *word |= bit;
+            return;
+        }
     }
 }
 
