@@ -554,6 +554,7 @@ pub fn parse_mermaid_with_detection_and_config(
         DiagramType::BlockBeta => parse_block_beta(content, &mut builder),
         DiagramType::Kanban => parse_kanban(content, &mut builder),
         DiagramType::Treemap => parse_treemap(content, &mut builder),
+        DiagramType::Radar => parse_radar(content, &mut builder),
         DiagramType::Unknown => {
             apply_unknown_contract(content, &mut builder, parse_mode);
         }
@@ -587,7 +588,12 @@ pub fn parse_mermaid_with_detection_and_config(
         .ir_mut()
         .treemap_meta
         .as_ref()
-        .is_some_and(|meta| !meta.nodes.is_empty());
+        .is_some_and(|meta| !meta.nodes.is_empty())
+        || builder
+            .ir_mut()
+            .radar_meta
+            .as_ref()
+            .is_some_and(|meta| !meta.axes.is_empty());
     if builder.node_count() == 0 && builder.edge_count() == 0 && !carried_by_meta {
         // The unimplemented-TYPE message is NOT emitted here. `unsupported_upstream_keyword` in
         // lib.rs already names those at DETECTION, and its warning reaches this builder through the
@@ -6956,6 +6962,149 @@ fn add_journey_actor_classes(
 ///
 /// Uses an explicit indent STACK rather than dividing by a step width, because a step width is
 /// exactly the assumption the two-space/four-space measurement disproves.
+/// Parse a `radar-beta` document: a wheel of axes and one closed curve per series.
+///
+/// GRAMMAR MEASURED against the pinned mermaid 11.15.0 bundle in Chromium 151
+/// (`scratchpad/radar_probe.mjs`), every form below accepted by it:
+///
+/// * `axis a, b, c` and `axis a["Alpha"], b["Beta"]` — identifiers with optional display labels.
+/// * `curve x{1,2,3}` and `curve x["Ex"]{1,2,3}`.
+/// * `min`, `max`, `ticks`, `graticule circle|polygon`, `showLegend true|false`, `title`.
+///
+/// `min`/`max` are SCALE bounds, not display bounds: `min 1` over `{1,2,3}` measurably puts the
+/// first vertex at the origin. That is why they are stored and applied in
+/// [`fm_core::IrRadarMeta::radius_fraction`] rather than used to filter anything here.
+fn parse_radar(content: &str, builder: &mut IrBuilder) {
+    let mut meta = fm_core::IrRadarMeta::default();
+    let mut title = None;
+
+    for (line_number, raw_line) in content.lines().enumerate() {
+        let trimmed = trim_fast(raw_line);
+        if trimmed.is_empty() || trimmed.starts_with("%%") {
+            continue;
+        }
+        let lowered = trimmed.to_ascii_lowercase();
+        if lowered.starts_with("radar-beta") || lowered == "radar" {
+            continue;
+        }
+        let span = span_for(line_number, raw_line);
+
+        if let Some(rest) = trimmed.strip_prefix("title ") {
+            title = Some(trim_fast(rest).to_string());
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("axis ") {
+            for entry in split_metadata_pairs(rest) {
+                let entry = trim_fast(entry);
+                if entry.is_empty() {
+                    continue;
+                }
+                let (id, label) = parse_radar_named_entry(entry);
+                meta.axes.push(fm_core::IrRadarAxis {
+                    id: id.to_string(),
+                    label,
+                    span,
+                });
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("curve ") {
+            if let Some(curve) = parse_radar_curve(trim_fast(rest), span) {
+                meta.curves.push(curve);
+            } else {
+                builder.add_warning(format!(
+                    "radar curve on line {} has no {{values}} block: {trimmed}",
+                    line_number + 1
+                ));
+            }
+            continue;
+        }
+        // Scalar options. `showLegend` is matched case-insensitively on its own because that is how
+        // the document spells it, while every other keyword here is lower case.
+        if let Some(rest) = lowered.strip_prefix("showlegend") {
+            meta.show_legend = !trim_fast(rest).eq_ignore_ascii_case("false");
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("graticule ") {
+            meta.graticule = if trim_fast(rest).eq_ignore_ascii_case("polygon") {
+                fm_core::RadarGraticule::Polygon
+            } else {
+                fm_core::RadarGraticule::Circle
+            };
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("min ") {
+            meta.min = trim_fast(rest).parse().ok();
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("max ") {
+            meta.max = trim_fast(rest).parse().ok();
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("ticks ") {
+            meta.ticks = trim_fast(rest).parse().ok();
+            continue;
+        }
+        builder.add_warning(format!(
+            "radar line {} is not an axis, curve or option: {trimmed}",
+            line_number + 1
+        ));
+    }
+
+    if meta.axes.is_empty() {
+        builder.add_warning("radar declared no axes".to_string());
+    }
+    if let Some(title) = title {
+        builder.ir_mut().meta.title = Some(title);
+    }
+    builder.ir_mut().radar_meta = Some(meta);
+}
+
+/// Split `name` or `name["Display"]` into its identifier and optional display label.
+fn parse_radar_named_entry(entry: &str) -> (&str, Option<String>) {
+    let Some(open) = entry.find('[') else {
+        return (entry, None);
+    };
+    let id = trim_fast(&entry[..open]);
+    let label = entry[open + 1..]
+        .rfind(']')
+        .map(|close| &entry[open + 1..open + 1 + close])
+        .map(|raw| {
+            trim_fast(raw)
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string()
+        })
+        .filter(|label| !label.is_empty());
+    (id, label)
+}
+
+/// Parse one `curve x{1,2,3}` / `curve x["Ex"]{1,2,3}` entry.
+///
+/// Returns `None` when there is no `{…}` block at all, which is the one shape that is not a curve
+/// however it is spelled — the caller turns that into a warning rather than an empty series, since
+/// an empty series would draw a curve collapsed onto the origin and look like real data.
+fn parse_radar_curve(text: &str, span: Span) -> Option<fm_core::IrRadarCurve> {
+    let open = text.find('{')?;
+    let close = text.rfind('}')?;
+    if close < open {
+        return None;
+    }
+    let (id, label) = parse_radar_named_entry(trim_fast(&text[..open]));
+    let values = text[open + 1..close]
+        .split(',')
+        .map(trim_fast)
+        .filter(|v| !v.is_empty())
+        .filter_map(|v| v.parse::<f64>().ok())
+        .collect();
+    Some(fm_core::IrRadarCurve {
+        id: id.to_string(),
+        label,
+        values,
+        span,
+    })
+}
+
 fn parse_treemap(content: &str, builder: &mut IrBuilder) {
     let mut meta = fm_core::IrTreemapMeta::default();
     let mut title = None;
@@ -23141,7 +23290,10 @@ Rel_Back(db, app, "Responds")"#,
         // `treemap`/`treemap-beta` WERE HERE and are not any more: bd-9ghyo implemented the family,
         // so naming it unimplemented is now the wrong answer. `an_implemented_type_is_never_named_
         // as_unimplemented` in lib.rs asserts the opposite for it.
-        for (header, canonical) in [("radar-beta", "radar"), ("venn-beta", "venn")] {
+        // `radar-beta` WAS HERE and is not any more: bd-sk4dv implemented the family. The BARE
+        // `radar` spelling is still unimplemented and still names `radar-beta` back, which is
+        // now a spelling that actually renders — asserted in lib.rs.
+        for (header, canonical) in [("venn-beta", "venn"), ("wardley-beta", "wardley")] {
             let parsed = parse_mermaid(&format!("{header}\n  \"A\": 1\n"));
 
             // Layer-AGNOSTIC on purpose: this asserts the user-visible outcome, not which function

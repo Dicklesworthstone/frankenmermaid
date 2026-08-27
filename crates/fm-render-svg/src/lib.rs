@@ -4416,6 +4416,12 @@ fn render_layout_to_svg(
         );
     }
 
+    // The radar wheel (bd-sk4dv). `None` for every other diagram type.
+    if layout.extensions.radar.is_some() {
+        let mut radar_svg = String::new();
+        write_radar_into(&mut radar_svg, ir, layout, offset_x, offset_y, config);
+        doc = doc.child(Element::raw_svg(radar_svg));
+    }
     // Treemap tiles (bd-9ghyo). Empty for every other diagram type, so this costs nothing
     // elsewhere. Drawn BEFORE the bands block because a treemap has no bands and no nodes — the
     // tiles are the whole diagram.
@@ -5573,6 +5579,214 @@ fn layout_svg_capacity_hint(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> us
 /// label is rare (journey sections / xychart columns; sequence lifelines are unlabelled), so it reuses the
 /// exact `TextBuilder` `Element` written in place — no from-scratch text replication. Lets the bands loop
 /// stream N group+rect `Element`s into one raw fragment instead of N `doc.child` element trees.
+/// The curve palette, cycled per series.
+const RADAR_PALETTE: [&str; 6] = [
+    "#8686ff", "#ffff78", "#d7ff86", "#ff86c8", "#86e0ff", "#ffc386",
+];
+
+/// The cardinal-spline tension that reproduces upstream's smoothing EXACTLY.
+///
+/// MEASURED, not guessed. For `axis a,b,c / curve x{1,2,3}` the pinned 11.15.0 bundle emits
+/// control points `(73.612, -108.5)` and `(217.372, 57.5)` on the first segment. A closed cardinal
+/// spline places them at `P_i + (P_{i+1} - P_{i-1}) * k` and `P_{i+1} - (P_{i+2} - P_i) * k`;
+/// solving either coordinate of either point gives k = 0.17, and that same k then reproduces every
+/// remaining control point in the path to the digit.
+const RADAR_CURVE_TENSION: f32 = 0.17;
+
+/// Draw a `radar-beta` wheel: graticule, spokes, axis labels, one closed curve per series, legend.
+fn write_radar_into(
+    out: &mut String,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+) {
+    use crate::attributes::{write_escaped_text, write_number_into};
+    let (Some(radar), Some(meta)) = (layout.extensions.radar.as_ref(), ir.radar_meta.as_ref())
+    else {
+        return;
+    };
+    let theme = resolve_theme(Some(ir), config);
+    let colors = &theme.colors;
+    let cx = radar.center.x + offset_x;
+    let cy = radar.center.y + offset_y;
+
+    out.push_str("<g class=\"fm-radar\">");
+
+    // Graticule. In polygon mode the rings are n-gons through the axis directions rather than
+    // circles — and, measured, that option changes the CURVE too (handled below).
+    for &ring in &radar.rings {
+        match meta.graticule {
+            fm_core::RadarGraticule::Circle => {
+                out.push_str("<circle class=\"fm-radar-graticule\" cx=\"");
+                let _ = write_number_into(out, cx);
+                out.push_str("\" cy=\"");
+                let _ = write_number_into(out, cy);
+                out.push_str("\" r=\"");
+                let _ = write_number_into(out, ring);
+                out.push_str("\" fill=\"#dedede\" fill-opacity=\"0.3\" stroke=\"#dedede\" stroke-width=\"1\"/>");
+            }
+            fm_core::RadarGraticule::Polygon => {
+                out.push_str("<polygon class=\"fm-radar-graticule\" points=\"");
+                for (index, axis) in radar.axes.iter().enumerate() {
+                    if index > 0 {
+                        out.push(' ');
+                    }
+                    let _ = write_number_into(out, ring.mul_add(axis.angle.cos(), cx));
+                    out.push(',');
+                    let _ = write_number_into(out, ring.mul_add(axis.angle.sin(), cy));
+                }
+                out.push_str("\" fill=\"#dedede\" fill-opacity=\"0.3\" stroke=\"#dedede\" stroke-width=\"1\"/>");
+            }
+        }
+    }
+
+    // Spokes and their labels.
+    for (index, axis) in radar.axes.iter().enumerate() {
+        out.push_str("<line class=\"fm-radar-axis\" x1=\"");
+        let _ = write_number_into(out, cx);
+        out.push_str("\" y1=\"");
+        let _ = write_number_into(out, cy);
+        out.push_str("\" x2=\"");
+        let _ = write_number_into(out, axis.tip.x + offset_x);
+        out.push_str("\" y2=\"");
+        let _ = write_number_into(out, axis.tip.y + offset_y);
+        out.push_str("\" stroke=\"");
+        out.push_str(&colors.node_stroke);
+        out.push_str("\" stroke-width=\"2\"/>");
+
+        if let Some(declared) = meta.axes.get(index) {
+            out.push_str("<text class=\"fm-radar-axis-label\" x=\"");
+            let _ = write_number_into(out, axis.label_anchor.x + offset_x);
+            out.push_str("\" y=\"");
+            let _ = write_number_into(out, axis.label_anchor.y + offset_y);
+            out.push_str(
+                "\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-size=\"12\" fill=\"",
+            );
+            let _ = crate::attributes::write_escaped_attr(out, &colors.text);
+            out.push_str("\">");
+            let _ = write_escaped_text(out, declared.display());
+            out.push_str("</text>");
+        }
+    }
+
+    // One closed curve per series.
+    for laid in &radar.curves {
+        let fill = RADAR_PALETTE[laid.curve % RADAR_PALETTE.len()];
+        let shifted: Vec<(f32, f32)> = laid
+            .points
+            .iter()
+            .map(|p| (p.x + offset_x, p.y + offset_y))
+            .collect();
+        if shifted.is_empty() {
+            continue;
+        }
+        out.push_str("<path class=\"fm-radar-curve fm-radar-curve-");
+        let _ = crate::attributes::AttributeValue::Integer(laid.curve as i32).write_value(out);
+        out.push_str("\" d=\"");
+        write_radar_curve_path_into(out, &shifted, meta.graticule);
+        out.push_str("\" fill=\"");
+        out.push_str(fill);
+        out.push_str("\" fill-opacity=\"0.5\" stroke=\"");
+        out.push_str(fill);
+        out.push_str("\" stroke-width=\"2\"/>");
+    }
+
+    // Legend, one row per series. Suppressed by `showLegend false`.
+    if meta.show_legend {
+        let legend_x = cx + radar.outer_radius * 0.875;
+        let legend_y = cy - radar.outer_radius * 0.875;
+        for (index, curve) in meta.curves.iter().enumerate() {
+            let row = legend_y + index as f32 * 20.0;
+            let fill = RADAR_PALETTE[index % RADAR_PALETTE.len()];
+            out.push_str("<rect class=\"fm-radar-legend-box\" x=\"");
+            let _ = write_number_into(out, legend_x);
+            out.push_str("\" y=\"");
+            let _ = write_number_into(out, row);
+            out.push_str("\" width=\"12\" height=\"12\" fill=\"");
+            out.push_str(fill);
+            out.push_str("\" fill-opacity=\"0.5\" stroke=\"");
+            out.push_str(fill);
+            out.push_str("\"/>");
+            out.push_str("<text class=\"fm-radar-legend-label\" x=\"");
+            let _ = write_number_into(out, legend_x + 16.0);
+            out.push_str("\" y=\"");
+            let _ = write_number_into(out, row + 6.0);
+            out.push_str("\" dominant-baseline=\"middle\" font-size=\"12\" fill=\"");
+            let _ = crate::attributes::write_escaped_attr(out, &colors.text);
+            out.push_str("\">");
+            let _ = write_escaped_text(out, curve.display());
+            out.push_str("</text>");
+        }
+    }
+
+    out.push_str("</g>");
+}
+
+/// Write a closed series outline through `points`.
+///
+/// ⚠️ THE GRATICULE OPTION DECIDES THE INTERPOLATION, which is not what its name suggests.
+/// Measured: with `graticule polygon` upstream emits the series as straight segments, and with the
+/// default rings it emits a smoothed path. Drawing the smooth form in both would put a curve
+/// through a diagram whose author asked for straight edges.
+fn write_radar_curve_path_into(
+    out: &mut String,
+    points: &[(f32, f32)],
+    graticule: fm_core::RadarGraticule,
+) {
+    use crate::attributes::write_number_into;
+    let count = points.len();
+    out.push('M');
+    let _ = write_number_into(out, points[0].0);
+    out.push(',');
+    let _ = write_number_into(out, points[0].1);
+    if count < 3 || graticule == fm_core::RadarGraticule::Polygon {
+        for point in &points[1..] {
+            out.push('L');
+            let _ = write_number_into(out, point.0);
+            out.push(',');
+            let _ = write_number_into(out, point.1);
+        }
+        out.push('Z');
+        return;
+    }
+
+    // Closed cardinal spline, the construction upstream's control points solve to exactly:
+    //   C1_i = P_i     + (P_{i+1} - P_{i-1}) * k
+    //   C2_i = P_{i+1} - (P_{i+2} - P_i)     * k
+    // with every index taken modulo the ring, so the last segment closes back onto P_0 with the
+    // same continuity as the interior ones.
+    let k = RADAR_CURVE_TENSION;
+    for index in 0..count {
+        let previous = points[(index + count - 1) % count];
+        let current = points[index];
+        let next = points[(index + 1) % count];
+        let after = points[(index + 2) % count];
+        let c1 = (
+            (next.0 - previous.0).mul_add(k, current.0),
+            (next.1 - previous.1).mul_add(k, current.1),
+        );
+        let c2 = (
+            (after.0 - current.0).mul_add(-k, next.0),
+            (after.1 - current.1).mul_add(-k, next.1),
+        );
+        out.push('C');
+        let _ = write_number_into(out, c1.0);
+        out.push(',');
+        let _ = write_number_into(out, c1.1);
+        out.push(' ');
+        let _ = write_number_into(out, c2.0);
+        out.push(',');
+        let _ = write_number_into(out, c2.1);
+        out.push(' ');
+        let _ = write_number_into(out, next.0);
+        out.push(',');
+        let _ = write_number_into(out, next.1);
+    }
+    out.push('Z');
+}
+
 /// The treemap palette, cycled per SECTION.
 const TREEMAP_PALETTE: [&str; 6] = [
     "#8686ff", "#ffff78", "#d7ff86", "#ff86c8", "#86e0ff", "#ffc386",

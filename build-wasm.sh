@@ -30,7 +30,21 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none"
 # bead: routing serialization through serde_json + JSON.parse instead of serde_wasm_bindgen
 # recovered only 254 raw bytes (reverted for API uniformity) — the cost is the feature's
 # resolution logic, not the serializer. Headroom after raise: ~10K.
-MAX_GZIP_BYTES=$((680 * 1024))
+#
+# Raised 680K -> 690K on 2026-08-27 for the radar-beta diagram family (bd-sk4dv). MEASURED across
+# this session's three builds, so the cost is attributed rather than assumed:
+#   686057 gzip  before treemap
+#   691733 gzip  after treemap  (+5676, and it PASSED under the 680K ceiling — no raise needed)
+#   697170 gzip  after radar    (+5437, 850 bytes over the ceiling, i.e. 0.12%)
+# So this raise is attributable to radar alone: a whole diagram family — parser, polar layout,
+# cardinal-spline renderer — for 5.3K gzip. wasm-opt already runs -Oz --converge, so this is real
+# code size, not slack. Headroom after raise: ~9.2K.
+#
+# ⚠️ RAISED IN THE COMMIT THAT NEEDED IT, which is what the three raises above also did, and it is
+# stated here rather than left to be inferred from a diff. The ceiling is a resource ratchet with a
+# measured-justification procedure, not a correctness gate to be quietly relaxed — if a future
+# change cannot say what it cost and why, it should shrink instead of raising.
+MAX_GZIP_BYTES=$((690 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'

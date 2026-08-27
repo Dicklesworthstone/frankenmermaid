@@ -1505,6 +1505,17 @@ fn exact_diagram_type_with(
         Some(DiagramType::C4Deployment)
     } else if matches(line, "kanban") {
         Some(DiagramType::Kanban)
+    } else if line
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("radar-beta")
+    {
+        // ⚠️ `radar-beta` ONLY, and deliberately not `matches(line, "radar")`. A bare `radar` is
+        // REJECTED by the pinned 11.15.0 bundle ("No diagram type detected matching given
+        // configuration for text: radar"), and `unsupported_upstream_keyword` already answers for
+        // it by naming the `-beta` spelling that works. Accepting the bare form here would render a
+        // document mermaid refuses AND silence the message that tells the author the right name.
+        Some(DiagramType::Radar)
     } else if matches(line, "treemap") {
         // Catches the bare `treemap` and `treemap-beta` alike, the way `matches` already folds
         // `block`/`block-beta`. Both spellings PARSE upstream and both report `treemap` from
@@ -1548,6 +1559,7 @@ const DIAGRAM_KEYWORDS: &[(&str, DiagramType)] = &[
     ("xychart", DiagramType::XyChart),
     ("kanban", DiagramType::Kanban),
     ("treemap", DiagramType::Treemap),
+    ("radar-beta", DiagramType::Radar),
     ("block", DiagramType::BlockBeta),
     ("packet", DiagramType::PacketBeta),
     ("architecture", DiagramType::ArchitectureBeta),
@@ -2823,6 +2835,7 @@ mod tests {
             "C4Deployment",
             "kanban",
             "treemap",
+            "radar-beta",
         ];
 
         for header in headers {
@@ -4111,7 +4124,6 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
     fn an_unimplemented_upstream_type_is_named_rather_than_blamed_on_syntax() {
         for (source, expected) in [
             ("radar\n  title Skills\n  ds1 [10, 20, 30]\n", "radar"),
-            ("radar-beta\n  axis a, b\n", "radar"),
             ("ishikawa\n  Problem\n", "ishikawa"),
             ("eventmodeling\n  x\n", "eventmodeling"),
             ("info\n", "info"),
@@ -4141,12 +4153,22 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
     /// family we now render. This closes the loop the same way the shape tables do.
     #[test]
     fn an_implemented_type_is_never_named_as_unimplemented() {
-        for source in [
-            "treemap\n\"Root\"\n    \"A\": 10\n",
-            "treemap-beta\n\"Root\"\n    \"A\": 10\n",
+        for (source, expected) in [
+            (
+                "treemap\n\"Root\"\n    \"A\": 10\n",
+                fm_core::DiagramType::Treemap,
+            ),
+            (
+                "treemap-beta\n\"Root\"\n    \"A\": 10\n",
+                fm_core::DiagramType::Treemap,
+            ),
+            (
+                "radar-beta\n  axis a, b, c\n  curve x{1,2,3}\n",
+                fm_core::DiagramType::Radar,
+            ),
         ] {
             let detected = super::detect_type_with_confidence(source);
-            assert_eq!(detected.diagram_type, fm_core::DiagramType::Treemap);
+            assert_eq!(detected.diagram_type, expected);
             assert!(
                 !detected
                     .warnings
@@ -4610,7 +4632,6 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
     #[test]
     fn the_unimplemented_type_message_names_a_spelling_mermaid_accepts() {
         for (source, expected) in [
-            ("radar-beta\n  Item\n", "radar-beta"),
             ("radar\n  Item\n", "radar-beta"),
             ("venn-beta\n  Item\n", "venn-beta"),
             ("wardley-beta\n  Item\n", "wardley-beta"),

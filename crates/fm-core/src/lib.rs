@@ -327,6 +327,7 @@ pub enum DiagramType {
     C4Deployment,
     Kanban,
     Treemap,
+    Radar,
     #[default]
     Unknown,
 }
@@ -360,6 +361,7 @@ impl DiagramType {
             Self::C4Deployment => "C4Deployment",
             Self::Kanban => "kanban",
             Self::Treemap => "treemap",
+            Self::Radar => "radar-beta",
             Self::Unknown => "unknown",
         }
     }
@@ -390,7 +392,8 @@ impl DiagramType {
             | Self::Pie
             | Self::XyChart
             | Self::Kanban
-            | Self::Treemap => MermaidSupportLevel::Supported,
+            | Self::Treemap
+            | Self::Radar => MermaidSupportLevel::Supported,
             Self::Sequence => MermaidSupportLevel::Partial,
             Self::Unknown => MermaidSupportLevel::Unsupported,
         }
@@ -422,7 +425,8 @@ impl DiagramType {
             | Self::Pie
             | Self::XyChart
             | Self::Kanban
-            | Self::Treemap => "full",
+            | Self::Treemap
+            | Self::Radar => "full",
             Self::Sequence => "partial",
             Self::Unknown => "unknown",
         }
@@ -5970,6 +5974,162 @@ pub struct IrXySeries {
     pub nodes: Vec<IrNodeId>,
 }
 
+/// A `radar-beta` diagram: one closed curve per series over a wheel of axes (bd-sk4dv).
+///
+/// MEASURED against the pinned mermaid 11.15.0 bundle in Chromium 151
+/// (`scratchpad/radar_probe.mjs`). The facts this shape has to carry:
+///
+/// * The wheel is 700x700 with its origin at the CENTRE and an outer radius of 300.
+/// * Axis `i` of `n` points at `-90 + i * 360/n` degrees, so axis 0 is straight up and the rest
+///   run clockwise. Four axes measured exactly `-90, 0, 90, 180`.
+/// * A value maps to a radius by `(v - min) / (max - min) * 300`. `min` defaults to 0 and `max`
+///   to the largest value in the document, which is why `{1,2,3}` and `{2,4,6}` render
+///   BYTE-IDENTICALLY — the scale is a pure ratio, not an absolute.
+/// * ⚠️ `min` IS PART OF THE FORMULA, not a display bound. `min 1` over `{1,2,3}` measurably puts
+///   the first vertex at the ORIGIN, which `v / max` cannot produce.
+/// * The graticule is `ticks` rings at `300 * i / ticks`, defaulting to 5 (measured 60, 120, 180,
+///   240, 300).
+///
+/// Note `radar-beta` is the only spelling: a bare `radar` is REJECTED upstream.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IrRadarMeta {
+    /// Axis names in declaration order, which is also the order they are placed clockwise.
+    pub axes: Vec<IrRadarAxis>,
+    /// One closed curve per series.
+    pub curves: Vec<IrRadarCurve>,
+    /// Declared `min`, the value that maps to the origin. Absent means 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    /// Declared `max`, the value that maps to the outer ring. Absent means the largest value seen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    /// Declared `ticks`, the number of graticule rings. Absent means 5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticks: Option<u32>,
+    /// Whether the graticule is drawn as rings or as polygons.
+    pub graticule: RadarGraticule,
+    /// Whether the per-curve legend is drawn. `showLegend false` suppresses it.
+    pub show_legend: bool,
+}
+
+/// ⚠️ HAND-WRITTEN BECAUSE `show_legend` MUST DEFAULT TO TRUE. Deriving `Default` gives `false`,
+/// which is the opposite of upstream: the legend is drawn unless the document writes
+/// `showLegend false` (measured — suppressing it is what removes the series name from the output).
+/// A derived default would have silently dropped the legend from every radar that did not ask for
+/// it, which is exactly the diagram that wants one.
+impl Default for IrRadarMeta {
+    fn default() -> Self {
+        Self {
+            axes: Vec::new(),
+            curves: Vec::new(),
+            min: None,
+            max: None,
+            ticks: None,
+            graticule: RadarGraticule::default(),
+            show_legend: true,
+        }
+    }
+}
+
+impl IrRadarMeta {
+    /// The value that maps to the origin.
+    #[must_use]
+    pub fn scale_min(&self) -> f64 {
+        self.min.unwrap_or(0.0)
+    }
+
+    /// The value that maps to the outer ring: the declared `max`, else the largest value present.
+    ///
+    /// Falls back to `scale_min() + 1.0` rather than to 0 when there is nothing to measure, so the
+    /// denominator in [`Self::radius_fraction`] can never be zero and a valueless document draws a
+    /// collapsed curve instead of a NaN one.
+    #[must_use]
+    pub fn scale_max(&self) -> f64 {
+        if let Some(max) = self.max {
+            return max;
+        }
+        let observed = self
+            .curves
+            .iter()
+            .flat_map(|curve| curve.values.iter().copied())
+            .fold(f64::NEG_INFINITY, f64::max);
+        if observed.is_finite() {
+            observed
+        } else {
+            self.scale_min() + 1.0
+        }
+    }
+
+    /// Where `value` sits between the origin (0.0) and the outer ring (1.0).
+    #[must_use]
+    pub fn radius_fraction(&self, value: f64) -> f64 {
+        let min = self.scale_min();
+        let span = self.scale_max() - min;
+        if span <= 0.0 {
+            return 0.0;
+        }
+        ((value - min) / span).clamp(0.0, 1.0)
+    }
+
+    /// Ring count, defaulting to the 5 upstream draws.
+    #[must_use]
+    pub fn tick_count(&self) -> u32 {
+        self.ticks.filter(|&t| t > 0).unwrap_or(5)
+    }
+}
+
+/// One axis of a radar wheel.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct IrRadarAxis {
+    /// The identifier, as written.
+    pub id: String,
+    /// The `axis a["Alpha"]` display label, when one was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub span: Span,
+}
+
+impl IrRadarAxis {
+    /// What is drawn beside the axis: the display label if present, else the identifier.
+    #[must_use]
+    pub fn display(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.id)
+    }
+}
+
+/// One series: a value per axis, drawn as a closed curve.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct IrRadarCurve {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub values: Vec<f64>,
+    pub span: Span,
+}
+
+impl IrRadarCurve {
+    /// What the legend shows: the display label if present, else the identifier.
+    #[must_use]
+    pub fn display(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.id)
+    }
+}
+
+/// How a radar's background grid is drawn.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RadarGraticule {
+    /// Concentric rings — upstream's default.
+    #[default]
+    Circle,
+    /// Concentric n-gons through the axis points, from `graticule polygon`.
+    ///
+    /// ⚠️ THIS ALSO CHANGES THE CURVE. Measured: in polygon mode the series is emitted as a
+    /// `<polygon>` of straight segments, not as the smoothed path circle mode draws. The option
+    /// reads like it is only about the background and is not.
+    Polygon,
+}
+
 /// A `treemap` diagram: a tree whose leaf values become rectangle AREAS (bd-9ghyo).
 ///
 /// MEASURED against the pinned mermaid 11.15.0 bundle in Chromium 151
@@ -6414,6 +6574,9 @@ pub struct MermaidDiagramIr {
     /// The `treemap` tree, when this is a treemap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub treemap_meta: Option<IrTreemapMeta>,
+    /// The `radar-beta` wheel, when this is a radar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radar_meta: Option<IrRadarMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pie_meta: Option<IrPieMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6466,6 +6629,7 @@ impl MermaidDiagramIr {
             gantt_meta: None,
             xy_chart_meta: None,
             treemap_meta: None,
+            radar_meta: None,
             pie_meta: None,
             quadrant_meta: None,
             packet_meta: None,

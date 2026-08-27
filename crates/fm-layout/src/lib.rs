@@ -773,6 +773,7 @@ pub enum LayoutAlgorithm {
     Packet,
     Architecture,
     Treemap,
+    Radar,
 }
 
 impl LayoutAlgorithm {
@@ -798,6 +799,7 @@ impl LayoutAlgorithm {
             Self::Packet => "packet",
             Self::Architecture => "architecture",
             Self::Treemap => "treemap",
+            Self::Radar => "radar",
         }
     }
 }
@@ -1892,6 +1894,7 @@ fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> boo
         gantt_meta,
         xy_chart_meta,
         treemap_meta,
+        radar_meta,
         pie_meta,
         quadrant_meta,
         packet_meta,
@@ -1918,6 +1921,7 @@ fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> boo
         && *gantt_meta == current.gantt_meta
         && *xy_chart_meta == current.xy_chart_meta
         && *treemap_meta == current.treemap_meta
+        && *radar_meta == current.radar_meta
         && *pie_meta == current.pie_meta
         && *quadrant_meta == current.quadrant_meta
         && *packet_meta == current.packet_meta
@@ -2099,6 +2103,8 @@ pub struct LayoutExtensions {
     pub bands: Vec<LayoutBand>,
     /// Squarified `treemap` rectangles, outermost first (bd-9ghyo).
     pub treemap_tiles: Vec<LayoutTreemapTile>,
+    /// The resolved `radar-beta` wheel, when this is a radar (bd-sk4dv).
+    pub radar: Option<LayoutRadar>,
     pub axis_ticks: Vec<LayoutAxisTick>,
     /// Gantt has one unconditional bottom axis and an optional top axis.
     pub gantt_axis_rows: Vec<LayoutGanttAxisRow>,
@@ -2222,6 +2228,45 @@ pub struct LayoutActivationBar {
     pub depth: usize,
     /// The bounding rectangle of the bar on the lifeline.
     pub bounds: LayoutRect,
+}
+
+/// A resolved `radar-beta` wheel: where every axis points and where every curve's vertices sit.
+///
+/// Geometry MEASURED from the pinned mermaid 11.15.0 bundle in Chromium 151: a 700x700 canvas with
+/// the origin at its centre and an outer radius of 300, axis `i` of `n` at `-90 + i * 360/n`
+/// degrees, and axis labels 15px beyond the outer ring.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutRadar {
+    /// Centre of the wheel in layout coordinates.
+    pub center: LayoutPoint,
+    /// Distance from the centre to the outermost ring.
+    pub outer_radius: f32,
+    /// Radii of the graticule rings, innermost first.
+    pub rings: Vec<f32>,
+    /// One entry per declared axis, in declaration order.
+    pub axes: Vec<LayoutRadarAxis>,
+    /// One entry per declared curve, in declaration order.
+    pub curves: Vec<LayoutRadarCurve>,
+}
+
+/// One spoke of a radar wheel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutRadarAxis {
+    /// Outer end of the spoke.
+    pub tip: LayoutPoint,
+    /// Where the axis label is anchored, 15px beyond the tip.
+    pub label_anchor: LayoutPoint,
+    /// The spoke's angle in radians, measured the SVG way (y down, 0 = east).
+    pub angle: f32,
+}
+
+/// One series of a radar wheel, as the closed ring of points its curve passes through.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutRadarCurve {
+    /// Index into `IrRadarMeta.curves`.
+    pub curve: usize,
+    /// One vertex per axis, in axis order.
+    pub points: Vec<LayoutPoint>,
 }
 
 /// One rectangle of a `treemap`, produced by the squarified tiler (bd-9ghyo).
@@ -3466,6 +3511,7 @@ fn compute_traced_layout_with_config_and_guardrails(
         LayoutAlgorithm::GitGraph => layout_diagram_gitgraph_traced(ir),
         LayoutAlgorithm::Architecture => layout_diagram_architecture_traced(ir),
         LayoutAlgorithm::Treemap => layout_diagram_treemap_traced(ir),
+        LayoutAlgorithm::Radar => layout_diagram_radar_traced(ir),
     };
     // State notes are attached HERE, after the dispatch match rather than inside one algorithm, for
     // two reasons: a state diagram can land on Sugiyama, Force, Tree or Radial depending on config
@@ -4229,6 +4275,7 @@ fn preferred_layout_algorithm_with_config(
         DiagramType::GitGraph => LayoutAlgorithm::GitGraph,
         DiagramType::PacketBeta => LayoutAlgorithm::Packet,
         DiagramType::Treemap => LayoutAlgorithm::Treemap,
+        DiagramType::Radar => LayoutAlgorithm::Radar,
         // The specialization is conditional ON THE INPUT, not on the diagram type alone: the
         // direction-aware placement has nothing to honour when no edge declares a side, so an
         // architecture-beta diagram written without `a:R --> L:b` keeps falling through to the
@@ -4463,6 +4510,7 @@ const fn algorithm_available_for_diagram(
         LayoutAlgorithm::Packet => matches!(diagram_type, DiagramType::PacketBeta),
         LayoutAlgorithm::Architecture => matches!(diagram_type, DiagramType::ArchitectureBeta),
         LayoutAlgorithm::Treemap => matches!(diagram_type, DiagramType::Treemap),
+        LayoutAlgorithm::Radar => matches!(diagram_type, DiagramType::Radar),
     }
 }
 
@@ -4649,7 +4697,9 @@ fn estimate_layout_cost(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> La
         | LayoutAlgorithm::Architecture
         | LayoutAlgorithm::Packet
         // Squarify is a single descending-sorted pass per sibling group: cheap and linear.
-        | LayoutAlgorithm::Treemap => LayoutCostEstimate {
+        | LayoutAlgorithm::Treemap
+        // Polar placement is one trig call per vertex.
+        | LayoutAlgorithm::Radar => LayoutCostEstimate {
             time_ms: nodes
                 .saturating_mul(3)
                 .saturating_add(edges.saturating_mul(2))
@@ -6887,6 +6937,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             extensions: LayoutExtensions {
                 bands: lifeline_bands,
                 treemap_tiles: Vec::new(),
+                radar: None,
                 gantt_day_axis: None,
                 axis_ticks: Vec::new(),
                 gantt_axis_rows: Vec::new(),
@@ -9497,6 +9548,114 @@ fn architecture_place(
     }
     occupied.insert(target, node);
     cell[node] = Some(target);
+}
+
+/// The radar wheel's geometry, MEASURED from the pinned mermaid 11.15.0 bundle in Chromium 151:
+/// a 700x700 canvas, origin at the centre, outer ring at 300, axis labels 15px beyond it.
+const RADAR_SIZE: f32 = 700.0;
+const RADAR_OUTER_RADIUS: f32 = 300.0;
+const RADAR_LABEL_GAP: f32 = 15.0;
+
+/// Lay out a `radar-beta` wheel.
+fn layout_diagram_radar_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    let trace = LayoutTrace::default();
+    let canvas = LayoutRect {
+        x: 0.0,
+        y: 0.0,
+        width: RADAR_SIZE,
+        height: RADAR_SIZE,
+    };
+    let center = LayoutPoint {
+        x: RADAR_SIZE / 2.0,
+        y: RADAR_SIZE / 2.0,
+    };
+
+    let radar = ir.radar_meta.as_ref().map(|meta| {
+        let axis_count = meta.axes.len().max(1);
+        let angles: Vec<f32> = (0..meta.axes.len())
+            .map(|index| radar_axis_angle(index, axis_count))
+            .collect();
+
+        let ticks = meta.tick_count();
+        let rings = (1..=ticks)
+            .map(|ring| RADAR_OUTER_RADIUS * ring as f32 / ticks as f32)
+            .collect();
+
+        let axes = angles
+            .iter()
+            .map(|&angle| LayoutRadarAxis {
+                tip: radar_point(center, angle, RADAR_OUTER_RADIUS),
+                label_anchor: radar_point(center, angle, RADAR_OUTER_RADIUS + RADAR_LABEL_GAP),
+                angle,
+            })
+            .collect();
+
+        let curves = meta
+            .curves
+            .iter()
+            .enumerate()
+            .map(|(index, curve)| LayoutRadarCurve {
+                curve: index,
+                // One vertex per AXIS, not per value: a series with fewer values than axes still
+                // has to close, and upstream draws the missing ones at the origin rather than
+                // leaving a gap in the ring.
+                points: angles
+                    .iter()
+                    .enumerate()
+                    .map(|(axis, &angle)| {
+                        let value = curve.values.get(axis).copied().unwrap_or(meta.scale_min());
+                        let radius = RADAR_OUTER_RADIUS * meta.radius_fraction(value) as f32;
+                        radar_point(center, angle, radius)
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        LayoutRadar {
+            center,
+            outer_radius: RADAR_OUTER_RADIUS,
+            rings,
+            axes,
+            curves,
+        }
+    });
+
+    let axis_count = radar.as_ref().map_or(0, |r| r.axes.len());
+    TracedLayout {
+        layout: Arc::new(DiagramLayout {
+            nodes: Vec::new(),
+            clusters: Vec::new(),
+            cycle_clusters: Vec::new(),
+            edges: Vec::new(),
+            bounds: canvas,
+            stats: LayoutStats {
+                node_count: axis_count,
+                ..LayoutStats::default()
+            },
+            extensions: LayoutExtensions {
+                radar,
+                ..LayoutExtensions::default()
+            },
+            dirty_regions: Vec::new(),
+        }),
+        trace,
+    }
+}
+
+/// The angle of axis `index` of `count`, in SVG radians (y down, 0 = east).
+///
+/// Axis 0 points straight UP and the rest run clockwise, which is what `-90 deg` plus a positive
+/// step gives in a y-down space. Measured on four axes: exactly -90, 0, 90, 180 degrees.
+fn radar_axis_angle(index: usize, count: usize) -> f32 {
+    let step = std::f32::consts::TAU / count as f32;
+    -std::f32::consts::FRAC_PI_2 + index as f32 * step
+}
+
+fn radar_point(center: LayoutPoint, angle: f32, radius: f32) -> LayoutPoint {
+    LayoutPoint {
+        x: radius.mul_add(angle.cos(), center.x),
+        y: radius.mul_add(angle.sin(), center.y),
+    }
 }
 
 /// Height of a section's title band, and the padding inside every section.
@@ -18494,7 +18653,8 @@ fn layout_decision_confidence_permille(
                 | LayoutAlgorithm::GitGraph
                 | LayoutAlgorithm::Architecture
                 | LayoutAlgorithm::Packet
-                | LayoutAlgorithm::Treemap => 900,
+                | LayoutAlgorithm::Treemap
+                | LayoutAlgorithm::Radar => 900,
                 LayoutAlgorithm::Tree if metrics.is_tree_like => 880,
                 LayoutAlgorithm::Force if metrics.is_dense || metrics.back_edge_count > 0 => 760,
                 LayoutAlgorithm::Sugiyama => 820,
