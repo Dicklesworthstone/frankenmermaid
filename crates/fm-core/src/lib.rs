@@ -10902,6 +10902,7 @@ mod tests {
             grid_span: 1,
             span: sample_span(1, 1, 1),
             c4_boundary_type: None,
+            classes: Vec::new(),
         };
         let single = IrCluster {
             id: IrClusterId(1),
@@ -10910,6 +10911,7 @@ mod tests {
             grid_span: 1,
             span: sample_span(4, 1, 4),
             c4_boundary_type: None,
+            classes: Vec::new(),
         };
 
         assert!(empty.members.is_empty());
@@ -12047,6 +12049,7 @@ mod tests {
             grid_span: 0,
             span: Span::default(),
             c4_boundary_type: None,
+            classes: Vec::new(),
         });
         assert_eq!(ir.clusters[0].members.len(), 2);
         assert_eq!(ir.clusters[0].members[0], IrNodeId(0));

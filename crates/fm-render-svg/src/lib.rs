@@ -16545,6 +16545,7 @@ mod tests {
             grid_span: 1,
             span: Span::default(),
             c4_boundary_type: None,
+            classes: Vec::new(),
         });
         ir
     }
@@ -16676,6 +16677,7 @@ mod tests {
             grid_span: 2,
             span: Span::default(),
             c4_boundary_type: None,
+            classes: Vec::new(),
         });
         ir.graph.clusters.push(IrGraphCluster {
             cluster_id: IrClusterId(0),
@@ -20150,6 +20152,7 @@ marker#arrow-open path {
             grid_span: 1,
             span: cluster_span,
             c4_boundary_type: None,
+            classes: Vec::new(),
         });
 
         let config = SvgRenderConfig {
