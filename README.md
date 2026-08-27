@@ -2954,15 +2954,15 @@ A typical `fm-cli render input.mmd --format svg` output has this structure (elid
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg"
      viewBox="0 0 672 317"
-     role="img"
-     aria-labelledby="diagram-title diagram-desc"
+     role="graphics-document document"
+     aria-roledescription="flowchart-v2"
      data-nodes="4" data-edges="4"
      data-fm-diagram-type="flowchart"
      data-fm-layout-algorithm="sugiyama"
      data-fm-theme="default">
 
-  <title id="diagram-title">Process flow</title>
-  <desc id="diagram-desc">Flowchart with 4 nodes and 4 edges. Starts at "Start", ends at "End".</desc>
+  <title>Process flow</title>
+  <desc>Flowchart with 4 nodes and 4 edges. Starts at "Start", ends at "End".</desc>
 
   <defs>
     <linearGradient id="fm-grad-node-default-v">…</linearGradient>

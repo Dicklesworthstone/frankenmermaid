@@ -179,7 +179,11 @@ fn explicit_config_enables_svg_effects_and_accessibility() {
     assert!(svg.contains("drop-shadow("));
     assert!(svg.contains("<linearGradient") || svg.contains("<radialGradient"));
     assert!(svg.contains("aria-label="));
-    assert!(svg.contains("role=\"img\""));
+    // The root announces a navigable graphics document naming its family, not a flat image — an
+    // `img` root would hide every `aria-label` asserted on the line above (bd-6odk2).
+    assert!(!svg.contains("role=\"img\""));
+    assert!(svg.contains("role=\"graphics-document document\""));
+    assert!(svg.contains("aria-roledescription=\"flowchart-v2\""));
 }
 
 #[test]

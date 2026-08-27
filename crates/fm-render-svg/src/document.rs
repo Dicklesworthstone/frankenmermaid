@@ -86,12 +86,31 @@ impl SvgDocument {
         self
     }
 
-    /// Add accessibility attributes (title and description).
+    /// Add accessibility attributes: the title, the description, and what kind of diagram this is.
+    ///
+    /// ⚠️ `role="graphics-document document"`, NOT `role="img"`, and the difference is not cosmetic.
+    /// This renderer emits `role="graphics-symbol"` with an `aria-label` and `tabindex="0"` on every
+    /// node — content meant to be navigated. `img` declares the whole subtree a single flat picture,
+    /// and assistive technology does not expose the descendants of one, so all of that per-node work
+    /// was unreachable. The two tokens are what the pinned mermaid 11.15.0 bundle emits: the
+    /// graphics role, plus the generic `document` fallback for readers that do not implement the
+    /// WAI-ARIA Graphics Module.
+    ///
+    /// `aria-roledescription` is what lets a reader say "flowchart" rather than "graphic": without
+    /// it every diagram this crate produces announced identically, whatever it was (bd-6odk2).
     #[must_use]
-    pub fn accessible(mut self, title: impl Into<String>, desc: impl Into<String>) -> Self {
+    pub fn accessible(
+        mut self,
+        title: impl Into<String>,
+        desc: impl Into<String>,
+        roledescription: &str,
+    ) -> Self {
         self.title = Some(title.into());
         self.desc = Some(desc.into());
-        self.attrs = self.attrs.set("role", "img");
+        self.attrs = self.attrs.set("role", "graphics-document document");
+        if !roledescription.is_empty() {
+            self.attrs = self.attrs.set("aria-roledescription", roledescription);
+        }
         self
     }
 
@@ -289,7 +308,7 @@ mod tests {
         let doc = SvgDocument::new()
             .viewbox(0.0, 0.0, 100.0, 100.0)
             .responsive()
-            .accessible("Title", "Description")
+            .accessible("Title", "Description", "flowchart-v2")
             .child(Element::rect().x(1.0).y(2.0).width(3.0).height(4.0));
 
         assert_eq!(doc.to_string(), doc.to_string_with_capacity(64 * 1024));
@@ -305,11 +324,25 @@ mod tests {
 
     #[test]
     fn adds_accessibility() {
-        let doc = SvgDocument::new().accessible("My Title", "My Description");
+        let doc = SvgDocument::new().accessible("My Title", "My Description", "sequence");
         let svg = doc.to_string();
-        assert!(svg.contains("role=\"img\""));
+        // `img` would declare the subtree a flat picture and hide the labelled children the
+        // renderer emits below this root; see `accessible` for the measurement (bd-6odk2).
+        assert!(!svg.contains("role=\"img\""));
+        assert!(svg.contains("role=\"graphics-document document\""));
+        assert!(svg.contains("aria-roledescription=\"sequence\""));
         assert!(svg.contains("<title>My Title</title>"));
         assert!(svg.contains("<desc>My Description</desc>"));
+    }
+
+    #[test]
+    fn an_empty_roledescription_leaves_the_attribute_off() {
+        let svg = SvgDocument::new().accessible("T", "D", "").to_string();
+        assert!(svg.contains("role=\"graphics-document document\""));
+        assert!(
+            !svg.contains("aria-roledescription"),
+            "an unknown family was announced as something rather than left unsaid: {svg}"
+        );
     }
 
     #[test]
@@ -324,7 +357,7 @@ mod tests {
 
     #[test]
     fn escapes_title_and_desc() {
-        let doc = SvgDocument::new().accessible("A & B", "X < Y > Z");
+        let doc = SvgDocument::new().accessible("A & B", "X < Y > Z", "class");
         let svg = doc.to_string();
         assert!(svg.contains("<title>A &amp; B</title>"));
         assert!(svg.contains("<desc>X &lt; Y > Z</desc>"));

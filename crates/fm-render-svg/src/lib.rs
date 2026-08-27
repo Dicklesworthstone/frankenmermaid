@@ -1851,7 +1851,14 @@ fn render_scene_document_with_ir(
                 "Target-agnostic render scene with {group_count} groups, {path_count} paths, and {text_count} text items"
             )
         });
-        doc = doc.accessible(title, desc);
+        // A scene can arrive without its IR, and then the diagram type is genuinely unknown. An
+        // empty string suppresses the attribute rather than announcing a guess: no
+        // `aria-roledescription` means a reader falls back to the role, which is true, where a
+        // wrong one is a confident lie.
+        let roledescription = ir.map_or("", |diagram_ir| {
+            diagram_ir.diagram_type.aria_roledescription()
+        });
+        doc = doc.accessible(title, desc, roledescription);
     }
 
     if let Some(title) = visible_title {
@@ -4080,7 +4087,7 @@ fn render_layout_to_svg(
                 ir.edges.len()
             )
         });
-        doc = doc.accessible(title, desc);
+        doc = doc.accessible(title, desc, ir.diagram_type.aria_roledescription());
     }
 
     for class in &config.root_classes {
@@ -18241,7 +18248,9 @@ mod tests {
     fn includes_accessibility() {
         let ir = MermaidDiagramIr::empty(DiagramType::Class);
         let svg = render_svg(&ir);
-        assert!(svg.contains("role=\"img\""));
+        assert!(!svg.contains("role=\"img\""));
+        assert!(svg.contains("role=\"graphics-document document\""));
+        assert!(svg.contains("aria-roledescription=\"class\""));
         assert!(svg.contains("<title>"));
         assert!(svg.contains("<desc>"));
     }

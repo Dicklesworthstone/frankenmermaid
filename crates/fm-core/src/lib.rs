@@ -368,6 +368,51 @@ impl DiagramType {
         }
     }
 
+    /// The `aria-roledescription` a screen reader announces for this diagram type (bd-6odk2).
+    ///
+    /// ⚠️ MEASURED FROM THE PINNED 11.15.0 BUNDLE, NOT DERIVED FROM [`Self::as_str`]. All 23
+    /// families were read out of a Chromium render, and six of them disagree with our own spelling:
+    /// flowchart is `flowchart-v2`, state is `stateDiagram`, block-beta is `block`, packet-beta is
+    /// `packet`, architecture-beta is `architecture`, radar-beta is `radar`, and every C4 variant
+    /// collapses to `c4`. Deriving this from `as_str()` would have produced six wrong announcements
+    /// that no rendering test could see.
+    #[must_use]
+    pub const fn aria_roledescription(self) -> &'static str {
+        match self {
+            Self::Flowchart => "flowchart-v2",
+            Self::Sequence => "sequence",
+            Self::Class => "class",
+            Self::State => "stateDiagram",
+            Self::Er => "er",
+            Self::Gantt => "gantt",
+            Self::Pie => "pie",
+            Self::Journey => "journey",
+            Self::Mindmap => "mindmap",
+            Self::Timeline => "timeline",
+            Self::QuadrantChart => "quadrantChart",
+            Self::Requirement => "requirement",
+            Self::Sankey => "sankey",
+            Self::XyChart => "xychart",
+            Self::BlockBeta => "block",
+            Self::PacketBeta => "packet",
+            Self::ArchitectureBeta => "architecture",
+            Self::Kanban => "kanban",
+            // Every C4 variant announces as one family upstream, which is the honest answer: they
+            // are one notation at different zoom levels, not five diagram types.
+            Self::C4Context
+            | Self::C4Container
+            | Self::C4Component
+            | Self::C4Dynamic
+            | Self::C4Deployment => "c4",
+            Self::Treemap => "treemap",
+            Self::Radar => "radar",
+            Self::Info => "info",
+            Self::GitGraph => "gitGraph",
+            // Nothing upstream to match; the generic term is better than a guess at a family name.
+            Self::Unknown => "diagram",
+        }
+    }
+
     #[must_use]
     pub const fn support_level(self) -> MermaidSupportLevel {
         match self {
