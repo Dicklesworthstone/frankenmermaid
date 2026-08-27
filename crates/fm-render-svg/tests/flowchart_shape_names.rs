@@ -160,7 +160,8 @@ fn aliases_missing_from_already_mapped_shapes_now_resolve() {
 /// ⚠️ NAMES LEAVE THIS LIST BY BEING IMPLEMENTED, not by being excused, and the list is REFILLED
 /// rather than allowed to shrink.
 ///
-/// `join` went first (`NodeShape::HorizontalBar`), then `card`/`notch-rect`/`start` (bd-7ls21).
+/// `join` went first (`NodeShape::HorizontalBar`), then `card`/`notch-rect`/`start`, then
+/// `doc`/`document` (bd-7ls21).
 /// Asserting an implemented name is reported as unimplemented would assert something false — but
 /// simply deleting entries would quietly weaken the check, so each departure is replaced by another
 /// name still in `UNIMPLEMENTED_UPSTREAM_SHAPES`. Six entries in, six entries out.
@@ -170,7 +171,7 @@ fn aliases_missing_from_already_mapped_shapes_now_resolve() {
 /// assert that the names they implemented no longer warn AND that unbuilt ones still do.
 #[test]
 fn a_real_but_unbuilt_shape_name_is_not_called_a_typo() {
-    for name in ["doc", "hourglass", "text", "brace", "document", "bolt"] {
+    for name in ["bang", "hourglass", "text", "brace", "curv-trap", "bolt"] {
         let warning = warning_for(name);
         assert!(
             warning.contains("does not implement yet"),

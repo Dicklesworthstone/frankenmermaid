@@ -166,6 +166,43 @@ fn each_new_shape_draws_its_measured_silhouette() {
         "lin-cyl has no second rim: {}",
         silhouette(&lined_cylinder)
     );
+
+    // Straight top and sides, then two quadratics: 0.80h at the right edge, control at 1.06h.
+    let document = render("doc");
+    assert!(
+        document
+            .contains("M92 92 L192 92 L192 145.20 Q167 147.86,142 155.18 Q117 162.49,92 151.85 Z"),
+        "doc has no wavy bottom edge: {}",
+        silhouette(&document)
+    );
+}
+
+/// The document's wave must actually BE a wave, not a flattened bottom.
+///
+/// This guards something subtler than falling back to `Rect`: a document whose two quadratics were
+/// flattened onto the baseline is still a closed path, still contains curve commands, and still
+/// differs from a rect element — so "is it a path?" and "does it differ from rect?" both pass. What
+/// makes it a document is that the bottom dips BELOW the box and rises ABOVE it.
+#[test]
+fn the_document_bottom_leaves_the_baseline_in_both_directions() {
+    let document = render("doc");
+    // The box is y = 92..158.50. The trough control reaches 1.06h (162.49), below the bottom edge;
+    // the right corner sits at 0.80h (145.20), above it.
+    assert!(
+        document.contains("162.49"),
+        "the wave never dips below the box, so it is not a document: {}",
+        silhouette(&document)
+    );
+    assert!(
+        document.contains("192 145.20"),
+        "the right edge does not rise above the bottom, so the wave has no crest: {}",
+        silhouette(&document)
+    );
+    assert_ne!(
+        silhouette(&document),
+        silhouette(&render("rect")),
+        "the document renders identically to a rectangle"
+    );
 }
 
 /// ⚠️ A FOLD IS NOT A CUT. `tag-rect` keeps its whole rectangle and draws a triangle OVER the
@@ -347,6 +384,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
         "h-cyl",
         "tag-rect",
         "lin-cyl",
+        "doc",
     ] {
         let sig = silhouette(&render(shape));
         assert!(!sig.is_empty(), "{shape} drew no geometry at all");
@@ -364,7 +402,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
 /// name that resolves to nothing tells an author to fix a spelling that was already correct.
 #[test]
 fn every_published_alias_draws_the_same_shape() {
-    let groups: [(&str, &[&str]); 11] = [
+    let groups: [(&str, &[&str]); 12] = [
         ("notch-rect", &["card", "notched-rectangle"]),
         (
             "lin-rect",
@@ -390,6 +428,7 @@ fn every_published_alias_draws_the_same_shape() {
             &["tagged-rectangle", "tag-proc", "tagged-process"],
         ),
         ("lin-cyl", &["lined-cylinder", "disk"]),
+        ("doc", &["document"]),
     ];
     for (short, aliases) in groups {
         let expected = silhouette(&render(short));
@@ -437,6 +476,8 @@ fn implemented_names_stop_warning_and_others_do_not() {
         "tagged-process",
         "lin-cyl",
         "disk",
+        "doc",
+        "document",
     ] {
         assert!(
             warnings(name).is_empty(),
@@ -444,7 +485,8 @@ fn implemented_names_stop_warning_and_others_do_not() {
             warnings(name)
         );
     }
-    for name in ["hourglass", "brace", "bolt", "doc"] {
+    // `doc` left this list by being implemented; `bang` replaces it so the list keeps its size.
+    for name in ["hourglass", "brace", "bolt", "bang"] {
         assert!(
             !warnings(name).is_empty(),
             "`{name}` is still unimplemented and must still warn"
@@ -490,6 +532,7 @@ fn each_new_shape_has_an_accessible_description() {
         ("h-cyl", "horizontal cylinder"),
         ("tag-rect", "tagged rectangle"),
         ("lin-cyl", "lined cylinder"),
+        ("doc", "document"),
     ] {
         assert!(
             render(shape).contains(want),

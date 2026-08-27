@@ -1209,6 +1209,25 @@ pub enum NodeShape {
     /// an extra arc at twice the ellipse radius. Its relationship to [`NodeShape::Cylinder`] is
     /// exactly [`NodeShape::LinedRect`]'s to a plain rectangle: same body, one added rule.
     LinedCylinder,
+    /// mermaid's `doc` / `document`: a rectangle whose BOTTOM EDGE IS A WAVE.
+    ///
+    /// Measured in Chromium 151 against the pinned 11.15.0 bundle by SAMPLING the rendered path with
+    /// `getPointAtLength` — the `d` is ~5 KB of rough.js cubics and the wave is real geometry there,
+    /// not a sketch overlay, so it cannot be read off as vertices. Sampled at 48 points over a bbox
+    /// of `x -20.34..20.34, y -30.37..37.13` (40.67 x 67.5):
+    ///
+    /// ```text
+    ///   left edge meets the wave at   (-20.34, 30.38)   = 0.90 of the height
+    ///   the wave TROUGHS at           ( -7.5,  36.9)     ~ 1.00, at x ~ 0.26 w
+    ///   and CRESTS at the right edge  ( 20.34, 23.9)     ~ 0.80
+    /// ```
+    ///
+    /// ⚠️ THE CURVE IS AN APPROXIMATION AND THE ERROR WAS MEASURED, NOT ESTIMATED. Two quadratics
+    /// reproduce the extremes; sampling BOTH engines' rendered paths at 200 points and comparing the
+    /// bottom profile bucketed by x gives a worst deviation of **2.5% of the shape's height** (at
+    /// x = 0.8 w), with most buckets under 1%. Matching mermaid's cubics byte for byte would mean
+    /// reproducing rough.js, which this renderer does not do for any shape.
+    Document,
 }
 
 /// Radius of [`NodeShape::SmallCircle`], in user units.

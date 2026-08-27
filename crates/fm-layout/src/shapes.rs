@@ -116,6 +116,10 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
         // cylinder is a cylinder with one extra rim, so it shares `cylinder_path` exactly.
         NodeShape::TaggedRect => rounded_rect_path(bounds, 0.0),
         NodeShape::LinedCylinder => cylinder_path(bounds),
+        // The document's wave dips BELOW its box and crests above the bottom edge, so neither the
+        // box nor a tighter outline is a clean superset. The box is the conservative choice: an
+        // edge stops on the nominal bottom rather than inside the trough.
+        NodeShape::Document => rounded_rect_path(bounds, 0.0),
     }
 }
 

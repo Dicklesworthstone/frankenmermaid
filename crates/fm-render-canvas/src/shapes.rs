@@ -46,6 +46,7 @@ pub fn draw_shape<C: Canvas2dContext>(
         // plain cylinder, its extra rim being interior detail.
         NodeShape::TaggedRect => draw_tagged_rect(ctx, x, y, width, height),
         NodeShape::LinedCylinder => draw_cylinder(ctx, x, y, width, height),
+        NodeShape::Document => draw_document(ctx, x, y, width, height),
         NodeShape::Rect => draw_rect(ctx, x, y, width, height, 0.0),
         NodeShape::Rounded => draw_rect(ctx, x, y, width, height, 4.0),
         NodeShape::Stadium => draw_stadium(ctx, x, y, width, height),
@@ -345,6 +346,21 @@ fn draw_triangle<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64
     ctx.move_to(cx, y);
     ctx.line_to(x + w, y + h);
     ctx.line_to(x, y + h);
+    ctx.close_path();
+    ctx.fill();
+    ctx.stroke();
+}
+
+/// Draw a rectangle with a wavy bottom edge — mermaid's `doc` (bd-7ls21).
+///
+/// The same two-quadratic approximation of the measured wave the SVG path uses.
+fn draw_document<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    ctx.begin_path();
+    ctx.move_to(x, y);
+    ctx.line_to(x + w, y);
+    ctx.line_to(x + w, y + h * 0.80);
+    ctx.quadratic_curve_to(x + w * 0.75, y + h * 0.84, x + w * 0.5, y + h * 0.95);
+    ctx.quadratic_curve_to(x + w * 0.25, y + h * 1.06, x, y + h * 0.90);
     ctx.close_path();
     ctx.fill();
     ctx.stroke();
