@@ -380,6 +380,13 @@ pub(crate) struct FixedLayerCrossings {
     /// both the clearing store and the bytes a query scan has to touch.
     counts: Vec<u32>,
     flat: bool,
+    /// Every entry of `grouped` is a distinct moving node, so no position is ever occupied twice.
+    ///
+    /// ⚠️ THIS IS A PROPERTY OF THE EDGE SET, NOT OF THE CANDIDATE. `positions` is a bijection from
+    /// the moving layer's nodes onto `0..width`, so distinct node ids imply distinct positions for
+    /// EVERY candidate ordering. It is therefore decided once here rather than re-tested per call —
+    /// which is what makes the occupancy bitset below legal at all.
+    distinct: bool,
 }
 
 /// Widest moving layer that uses the flat occupancy counter instead of the Fenwick tree.
@@ -458,6 +465,21 @@ impl FixedLayerCrossings {
         // for a contiguous scan to beat a pointer-chasing walk. 64 is where that trade is safely on
         // the right side; wider layers keep the tree. Decided ONCE here, never per call.
         let flat = moving.len() <= FLAT_COUNT_MAX_WIDTH;
+        // One pass over `grouped`, once per construction, against a scratch bitset over the moving
+        // layer's node-id domain. `grouped` holds one entry per EDGE, so a node with several edges
+        // to the fixed layer repeats and disqualifies the bitset path for this side.
+        let distinct = flat && {
+            let mut seen = vec![false; positions.len()];
+            let mut unique = true;
+            for &node_id in &grouped {
+                if seen[node_id] {
+                    unique = false;
+                    break;
+                }
+                seen[node_id] = true;
+            }
+            unique
+        };
         Some(Self {
             grouped,
             offsets,
@@ -473,6 +495,7 @@ impl FixedLayerCrossings {
                 Vec::new()
             },
             flat,
+            distinct,
         })
     }
 
@@ -486,6 +509,14 @@ impl FixedLayerCrossings {
     /// Exists so tests drive the same path production does rather than a convenience wrapper that
     /// rebuilds the map per call — a fixture reaching the counter by its own route cannot prove the
     /// route the scorer uses.
+    /// Whether this counter took the occupancy-bitset path. Test-only: the randomised differential
+    /// test asserts BOTH paths were exercised, so a gate that silently stopped firing cannot pass
+    /// as coverage.
+    #[cfg(test)]
+    pub(crate) fn is_distinct(&self) -> bool {
+        self.distinct
+    }
+
     #[cfg(test)]
     pub(crate) fn position_map(&self, moving: &[usize]) -> Vec<usize> {
         let mut positions = vec![0_usize; self.position_domain];
@@ -557,6 +588,46 @@ impl FixedLayerCrossings {
         // position more than once. Measured, only 53.85% of calls have all-distinct positions, so a
         // bitset would need a second path for the other 46% and would silently miscount if it did
         // not. Occupancy counts carry multiplicity for free.
+        // ⚠️ WHEN NO POSITION CAN REPEAT, OCCUPANCY IS ONE WORD AND A QUERY IS ONE popcount.
+        // `above` — the two-sided scan this replaces — measures 10.88% cumulative of the whole ER
+        // catalog job on its own (b1e9abc2, non-LTO, 9,408 samples), which is half of the counter.
+        // A scan of ~width/4 adds becomes `mask >> (position + 1)` plus `count_ones`, and an update
+        // becomes one `or`.
+        //
+        // Measured: 53.85% of calls run against an edge set with no repeated endpoint, so the other
+        // 46% keep the occupancy counts. Both paths are exercised by
+        // `bitset_and_counts_paths_agree_with_the_reference`.
+        if self.distinct {
+            let mut mask = 0_u64;
+
+            let first_end = self.offsets[1];
+            for &node_id in &self.grouped[self.offsets[0]..first_end] {
+                mask |= 1_u64 << positions[node_id];
+            }
+
+            for window in self.offsets[1..group_count].windows(2) {
+                let (Some(&start), Some(&end)) = (window.first(), window.get(1)) else {
+                    continue;
+                };
+                let group = &self.grouped[start..end];
+                for &node_id in group {
+                    // Shifting by `position + 1` would overflow at the last position; shift the
+                    // whole word right instead so only strictly-later positions survive.
+                    inversions += (mask >> positions[node_id]).count_ones() as usize;
+                }
+                for &node_id in group {
+                    mask |= 1_u64 << positions[node_id];
+                }
+            }
+
+            for &node_id in &self.grouped[self.offsets[group_count - 1]..self.offsets[group_count]]
+            {
+                inversions += (mask >> positions[node_id]).count_ones() as usize;
+            }
+
+            return inversions;
+        }
+
         if self.flat {
             let first_end = self.offsets[1];
             for &node_id in &self.grouped[self.offsets[0]..first_end] {
@@ -1391,6 +1462,8 @@ mod tests {
             usize::try_from(state >> 33).unwrap_or(0) % bound.max(1)
         };
 
+        let mut saw_distinct = false;
+        let mut saw_repeated = false;
         for case in 0..400 {
             let upper_len = 1 + next(9);
             let lower_len = 1 + next(9);
@@ -1418,6 +1491,14 @@ mod tests {
             let from_upper =
                 FixedLayerCrossings::new(&upper.order, &lower.order, &edges.edges, true).map(
                     |mut counter| {
+                        // ⚠️ RECORD WHICH PATH RAN. The bitset path only applies when no endpoint
+                        // repeats, so a differential test that happened to generate only one shape
+                        // would prove nothing about the other; both flags are asserted below.
+                        if counter.is_distinct() {
+                            saw_distinct = true;
+                        } else {
+                            saw_repeated = true;
+                        }
                         let positions = counter.position_map(&lower.order);
                         counter.count_at_positions(&positions)
                     },
@@ -1454,6 +1535,15 @@ mod tests {
                 );
             }
         }
+
+        assert!(
+            saw_distinct,
+            "the occupancy-bitset path never ran: this test no longer covers it"
+        );
+        assert!(
+            saw_repeated,
+            "the occupancy-counts path never ran: this test no longer covers it"
+        );
     }
 
     /// The candidate list EXACTLY as `candidate_orderings` built it before the sort and dedup were
