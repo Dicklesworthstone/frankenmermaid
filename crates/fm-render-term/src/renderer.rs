@@ -1995,6 +1995,26 @@ impl TermRenderer {
                 for (offset, ch) in text.chars().enumerate() {
                     lines[row][start + offset] = ch;
                 }
+
+                // ⚠️ NO C4 BOUNDARY TYPE ROW HERE, and that is a MEASURED decision rather than an
+                // oversight — see the bead filed alongside `3c000e9b`.
+                //
+                // mermaid draws a boundary as two rows (label, then its bracketed type) and both the
+                // SVG and canvas arms now do the same. I implemented the terminal twin here, writing
+                // `[SYSTEM]` into `row + 1` under the same blank-cell discipline the title uses, and
+                // then measured it: it NEVER lands. Not at width 80, 160 or 240, on a single
+                // boundary or on three nested ones.
+                //
+                // The reason is structural, not a tuning problem. A cluster's first interior row is
+                // the title row, and the first CONTAINED box starts on the next one, so `row + 1`
+                // holds that box's top border in every C4 layout this surface produces. The guard
+                // refuses, correctly — a type row that overwrote a nested boundary's border would be
+                // a worse outcome than the missing row.
+                //
+                // Shipping that code would have been worse than shipping nothing: it reads as
+                // terminal support for a channel that can never appear. Making the row fit needs
+                // LAYOUT to reserve a second caption row for a captioned boundary, which is a
+                // fm-layout change and not a renderer one.
             }
         }
 

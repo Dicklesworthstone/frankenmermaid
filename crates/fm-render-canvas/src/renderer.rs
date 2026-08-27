@@ -861,6 +861,28 @@ impl Canvas2dRenderer {
                 ctx.set_text_baseline(TextBaseline::Top);
                 ctx.fill_text(title_text, x + 8.0, y + 4.0);
                 self.draw_calls += 1;
+
+                // THE C4 BOUNDARY TYPE ROW, which mermaid draws beneath the label and the SVG arm
+                // already draws. Nested inside the title branch on purpose: mermaid emits the type
+                // only as the second row of a captioned boundary, so a boundary with no label to
+                // sit under should not show a bracketed type floating on its own.
+                //
+                // The IR stores mermaid's bare token and each renderer adds the brackets, exactly
+                // as mermaid does — its `drawInsideBoundary` rewrites `l.type.text` to
+                // `"[" + l.type.text + "]"` before `drawBoundary` draws it.
+                if let Some(boundary_type) = ir
+                    .clusters
+                    .get(cluster_box.cluster_index)
+                    .and_then(|ir_cluster| ir_cluster.c4_boundary_type.as_deref())
+                    .filter(|value| !value.is_empty())
+                {
+                    ctx.fill_text(
+                        &format!("[{boundary_type}]"),
+                        x + 8.0,
+                        y + 4.0 + self.config.font_size * 1.25,
+                    );
+                    self.draw_calls += 1;
+                }
             }
 
             if cluster_opacity.is_some() {
