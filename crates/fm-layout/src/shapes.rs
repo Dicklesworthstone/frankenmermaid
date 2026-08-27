@@ -119,7 +119,7 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
         // The document's wave dips BELOW its box and crests above the bottom edge, so neither the
         // box nor a tighter outline is a clean superset. The box is the conservative choice: an
         // edge stops on the nominal bottom rather than inside the trough.
-        NodeShape::Document => rounded_rect_path(bounds, 0.0),
+        NodeShape::Document | NodeShape::LinedDocument => rounded_rect_path(bounds, 0.0),
     }
 }
 

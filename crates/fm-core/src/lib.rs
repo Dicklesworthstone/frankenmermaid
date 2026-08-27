@@ -1228,6 +1228,18 @@ pub enum NodeShape {
     /// x = 0.8 w), with most buckets under 1%. Matching mermaid's cubics byte for byte would mean
     /// reproducing rough.js, which this renderer does not do for any shape.
     Document,
+    /// mermaid's `lin-doc` / `lined-document`: a [`NodeShape::Document`] with a VERTICAL RULE near
+    /// the left edge.
+    ///
+    /// Measured by sampling in Chromium 151 against the pinned 11.15.0 bundle: the outline is the
+    /// document wave over a bbox of `x -22.37..22.37, y -30.37..37.13`, with a straight rule at
+    /// `x = -20.34` running from the top down to `y = 33.32`.
+    ///
+    /// ⚠️ THE RULE'S INSET IS NOT [`NodeShape::LinedRect`]'S. mermaid WIDENS the document by 2.03 on
+    /// each side rather than insetting the rule, so the rule lands 2.03 in from the left — 0.045 of
+    /// the widened width, against the lined rectangle's 0.14. Reusing the rectangle's ratio would
+    /// have put the rule three times too far in.
+    LinedDocument,
 }
 
 /// Radius of [`NodeShape::SmallCircle`], in user units.

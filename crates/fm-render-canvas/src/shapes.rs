@@ -47,6 +47,8 @@ pub fn draw_shape<C: Canvas2dContext>(
         NodeShape::TaggedRect => draw_tagged_rect(ctx, x, y, width, height),
         NodeShape::LinedCylinder => draw_cylinder(ctx, x, y, width, height),
         NodeShape::Document => draw_document(ctx, x, y, width, height),
+        // The rule is interior detail; canvas draws the document body without it.
+        NodeShape::LinedDocument => draw_document(ctx, x, y, width, height),
         NodeShape::Rect => draw_rect(ctx, x, y, width, height, 0.0),
         NodeShape::Rounded => draw_rect(ctx, x, y, width, height, 4.0),
         NodeShape::Stadium => draw_stadium(ctx, x, y, width, height),

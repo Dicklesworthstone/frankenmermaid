@@ -175,6 +175,58 @@ fn each_new_shape_draws_its_measured_silhouette() {
         "doc has no wavy bottom edge: {}",
         silhouette(&document)
     );
+
+    // The document body plus a rule 0.045 w in from the left (96.50), down to 0.94 h (154.51).
+    let lined_document = render("lin-doc");
+    assert!(
+        lined_document.contains("M96.50 92 L96.50 154.51"),
+        "lin-doc has no vertical rule: {}",
+        silhouette(&lined_document)
+    );
+}
+
+/// The lined document's rule sits where MERMAID puts it, not where the lined RECTANGLE's does.
+///
+/// mermaid widens the document by 2.03 on each side instead of insetting the rule, so the rule lands
+/// 0.045 of the width in — against `lin-rect`'s 0.14. Porting the rectangle's ratio by analogy would
+/// have placed it three times too far in, and nothing about the resulting picture would look wrong
+/// enough to notice; only the measurement says so.
+#[test]
+fn the_lined_document_rule_is_not_the_lined_rectangle_rule() {
+    let lined_document = render("lin-doc");
+    let lined_rect = render("lin-rect");
+    assert!(
+        lined_document.contains("M96.50 92"),
+        "the document rule moved off its measured inset: {}",
+        silhouette(&lined_document)
+    );
+    assert!(
+        lined_rect.contains("M106 92"),
+        "the rectangle rule moved off its measured inset: {}",
+        silhouette(&lined_rect)
+    );
+    assert_ne!(
+        silhouette(&lined_document),
+        silhouette(&lined_rect),
+        "the lined document and lined rectangle render identically"
+    );
+}
+
+/// And the rule is ADDITIVE: strip it and a `lin-doc` is a `doc`.
+#[test]
+fn the_lined_document_is_the_plain_one_plus_a_rule() {
+    let plain = render("doc");
+    let lined = render("lin-doc");
+    assert!(
+        !plain.contains("M96.50 92 L96.50 154.51"),
+        "the plain document grew a rule: {}",
+        silhouette(&plain)
+    );
+    assert_ne!(
+        silhouette(&plain),
+        silhouette(&lined),
+        "the plain and lined documents render identically"
+    );
 }
 
 /// The document's wave must actually BE a wave, not a flattened bottom.
@@ -385,6 +437,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
         "tag-rect",
         "lin-cyl",
         "doc",
+        "lin-doc",
     ] {
         let sig = silhouette(&render(shape));
         assert!(!sig.is_empty(), "{shape} drew no geometry at all");
@@ -402,7 +455,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
 /// name that resolves to nothing tells an author to fix a spelling that was already correct.
 #[test]
 fn every_published_alias_draws_the_same_shape() {
-    let groups: [(&str, &[&str]); 12] = [
+    let groups: [(&str, &[&str]); 13] = [
         ("notch-rect", &["card", "notched-rectangle"]),
         (
             "lin-rect",
@@ -429,6 +482,7 @@ fn every_published_alias_draws_the_same_shape() {
         ),
         ("lin-cyl", &["lined-cylinder", "disk"]),
         ("doc", &["document"]),
+        ("lin-doc", &["lined-document"]),
     ];
     for (short, aliases) in groups {
         let expected = silhouette(&render(short));
@@ -478,6 +532,8 @@ fn implemented_names_stop_warning_and_others_do_not() {
         "disk",
         "doc",
         "document",
+        "lin-doc",
+        "lined-document",
     ] {
         assert!(
             warnings(name).is_empty(),
@@ -533,6 +589,7 @@ fn each_new_shape_has_an_accessible_description() {
         ("tag-rect", "tagged rectangle"),
         ("lin-cyl", "lined cylinder"),
         ("doc", "document"),
+        ("lin-doc", "lined document"),
     ] {
         assert!(
             render(shape).contains(want),

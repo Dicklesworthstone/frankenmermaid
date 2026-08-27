@@ -11143,6 +11143,26 @@ fn render_node(
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
+        NodeShape::LinedDocument => {
+            // The document outline plus a vertical rule 0.045 of the width in from the left, running
+            // to 0.94h — both ratios measured, and the inset deliberately NOT `LinedRect`'s 0.14.
+            let rule = x + w * 0.045;
+            let path = PathBuilder::new()
+                .move_to(x, y)
+                .line_to(x + w, y)
+                .line_to(x + w, y + h * 0.80)
+                .quadratic_to(x + w * 0.75, y + h * 0.84, x + w * 0.5, y + h * 0.95)
+                .quadratic_to(x + w * 0.25, y + h * 1.06, x, y + h * 0.90)
+                .close()
+                .move_to(rule, y)
+                .line_to(rule, y + h * 0.94)
+                .build();
+            Element::path()
+                .d(&path)
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
         NodeShape::TaggedRect => {
             // The box stays WHOLE and the fold is drawn over it — `NotchedRect` is the one that cuts.
             // Both subpaths live in one `d` so the fold inherits the shape's stroke.
@@ -13274,6 +13294,7 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
         NodeShape::TaggedRect => "fm-node-shape-tagged-rect",
         NodeShape::LinedCylinder => "fm-node-shape-lined-cylinder",
         NodeShape::Document => "fm-node-shape-document",
+        NodeShape::LinedDocument => "fm-node-shape-lined-document",
         NodeShape::Rect => "fm-node-shape-rect",
         NodeShape::Rounded => "fm-node-shape-rounded",
         NodeShape::Stadium => "fm-node-shape-stadium",
