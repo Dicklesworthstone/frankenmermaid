@@ -1,5 +1,36 @@
 # Negative Evidence Ledger — frankenmermaid perf swarm
 
+### REJECT: presizing `Attributes`' vector — it never regrows, and the flowchart family never builds one (2026-08-27)
+
+- **The premise, and why it looked sound.** After f10740fd fixed the class-value growth,
+  frame-pointer attribution still showed `Attributes::set::<&str, f32>` at 1.03% with 0.45% inside
+  `do_reserve_and_handle`, and `set::<&str, &str>` at 0.61%. `push_attr` reserves 12 slots on the
+  first push, so reallocation there should mean elements carrying MORE than 12 attributes.
+- **Measured, and the premise is false.** Instrumenting `push_attr` over the ER catalog job:
+
+      pushes 1,540,000   first_push_frac 0.1535   grow_frac 0.0000   mean_attrs 3.93   max_attrs 9
+
+  **`grow_frac` is exactly zero**: the vector never grows past its reserve, because nine attributes
+  is the most any element carries. The `do_reserve_and_handle` samples are the INITIAL `reserve(12)`
+  on a fresh, zero-capacity vector — the same code path, but an allocation, not a regrowth. There is
+  no reallocation here to remove, so there is no lever of the shape I went looking for.
+- **⚠️ AND `reserve(12)` IS ~3x THE TYPICAL NEED.** Mean attributes per element is 3.93 and the
+  maximum observed is 9, so twelve slots is generous for every element and never necessary for most.
+  Shrinking the constant is NOT obviously a win — the cost is one allocation per attribute-carrying
+  element, not the bytes — and it was not measured. What the numbers DO justify is the next lever:
+  **15.35% of pushes are a first push, i.e. ~236,000 heap allocations per 20-rep pass purely for
+  attribute vectors**, and inline storage for <= 9 attributes would remove all of them. That is a
+  change to a core type used everywhere and wants its own measurement, not a drive-by.
+- **⚠️ THE FLOWCHART FAMILY NEVER ENTERS THIS CODE AT ALL.** The probe printed nothing for
+  `flowchart_large_500`: the flowchart streaming fast path (9bc7a29) writes fragments directly and
+  builds no `Attributes` — `Attributes::new()` appears zero times in the flowchart render path. This
+  supersedes the explanation given in f10740fd for that commit's flowchart null: the reason is not
+  "fewer than 5,000 class appends", it is that the builder is bypassed entirely. Anything measured
+  on `Attributes` is a non-flowchart lever by construction, and flowchart is the largest family.
+- **Verdict: REJECT the presize, KEEP the sizing.** Do not re-derive "elements must exceed 12
+  attributes" from the `do_reserve_and_handle` frames — that frame appears for a first allocation
+  too, and the growth fraction is zero.
+
 ### REJECT: bounding the post-pass CSS searches to the `<style>` block — right in principle, worth nothing measured (2026-08-27)
 
 - **The shape looked exactly like a defect this file already records fixing.** `strip_unused_state_css`
