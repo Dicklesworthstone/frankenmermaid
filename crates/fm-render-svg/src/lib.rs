@@ -11143,6 +11143,28 @@ fn render_node(
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
+        NodeShape::StackedRect => {
+            // Three plain rectangles, offsets 5/50.67 and 5/64 of the measured stacked bbox. Same
+            // back-to-front order and fill requirement as `StackedDocument`.
+            let offset_x = w * 0.099;
+            let offset_y = h * 0.078;
+            let leaf_w = w - offset_x * 2.0;
+            let leaf_h = h - offset_y * 2.0;
+            let mut group = Element::group();
+            for step in (0..3).rev() {
+                group = group.child(
+                    Element::rect()
+                        .x(x + offset_x * step as f32)
+                        .y(y + offset_y * (2 - step) as f32)
+                        .width(leaf_w)
+                        .height(leaf_h)
+                        .fill(&colors.node_fill)
+                        .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                        .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
+                );
+            }
+            group
+        }
         NodeShape::StackedDocument => {
             // Three documents, each 2 offsets smaller than the box, stepped back-to-front. Offsets
             // are the measured 10/60.67 and 17/101.93 of the stacked bbox.
@@ -13394,6 +13416,7 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
         NodeShape::Flag => "fm-node-shape-flag",
         NodeShape::HalfRoundedRect => "fm-node-shape-half-rounded-rect",
         NodeShape::StackedDocument => "fm-node-shape-stacked-document",
+        NodeShape::StackedRect => "fm-node-shape-stacked-rect",
         NodeShape::Rect => "fm-node-shape-rect",
         NodeShape::Rounded => "fm-node-shape-rounded",
         NodeShape::Stadium => "fm-node-shape-stadium",

@@ -131,7 +131,7 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
         NodeShape::HalfRoundedRect => rounded_rect_path(bounds, 0.0),
         // The stack fills its box corner to corner between the back and front copies, so the box is
         // the right boundary; an edge stopping on it lands on one of the three outlines.
-        NodeShape::StackedDocument => rounded_rect_path(bounds, 0.0),
+        NodeShape::StackedDocument | NodeShape::StackedRect => rounded_rect_path(bounds, 0.0),
     }
 }
 

@@ -219,6 +219,51 @@ fn each_new_shape_draws_its_measured_silhouette() {
             silhouette(&stacked)
         );
     }
+
+    // Three plain cards, offsets 0.099 w and 0.078 h, back top-right to front bottom-left.
+    let stacked_rect = render("st-rect");
+    for corner in [
+        "x=\"111.80\" y=\"92\"",
+        "x=\"101.90\" y=\"97.19\"",
+        "x=\"92\" y=\"102.37\"",
+    ] {
+        assert!(
+            stacked_rect.contains(corner),
+            "st-rect is missing the card at {corner}: {}",
+            silhouette(&stacked_rect)
+        );
+    }
+}
+
+/// ⚠️ THE STACKED RECTANGLE IS THREE CARDS, AND THE COUNT CAME FROM COORDINATES.
+///
+/// mermaid's rendered `d` for this shape splits into TWENTY-FIVE subpaths, because rough.js draws
+/// every edge as two jittered strokes — counting subpaths would say twenty-five cards. The geometry
+/// settles it instead: a base card 40.67 wide stepped by 5 gives 40.67 + 2 x 5 = 50.67, the measured
+/// bbox. Drawing one card leaves a plain rectangle, which this bead's differs-from-Rect rule would
+/// actually CATCH — but drawing two leaves something stacked, non-rectangular, and wrong, which it
+/// would not.
+#[test]
+fn the_stacked_rectangle_is_three_offset_cards() {
+    let stacked_rect = render("st-rect");
+    let cards = stacked_rect.matches("<rect ").count();
+    assert_eq!(
+        cards,
+        3,
+        "expected exactly three stacked cards, found {cards}: {}",
+        silhouette(&stacked_rect)
+    );
+    assert_ne!(
+        silhouette(&stacked_rect),
+        silhouette(&render("rect")),
+        "the stacked rectangle renders identically to a single rectangle"
+    );
+    // And it is not the stacked DOCUMENT — same arrangement, different leaf shape.
+    assert_ne!(
+        silhouette(&stacked_rect),
+        silhouette(&render("docs")),
+        "the stacked rectangle renders identically to the stacked document"
+    );
 }
 
 /// ⚠️ THE STACK IS THREE COPIES, AND THE COUNT IS ARITHMETIC RATHER THAN TASTE.
@@ -601,6 +646,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
         "flag",
         "delay",
         "docs",
+        "st-rect",
     ] {
         let sig = silhouette(&render(shape));
         assert!(!sig.is_empty(), "{shape} drew no geometry at all");
@@ -618,7 +664,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
 /// name that resolves to nothing tells an author to fix a spelling that was already correct.
 #[test]
 fn every_published_alias_draws_the_same_shape() {
-    let groups: [(&str, &[&str]); 17] = [
+    let groups: [(&str, &[&str]); 18] = [
         ("notch-rect", &["card", "notched-rectangle"]),
         (
             "lin-rect",
@@ -650,6 +696,7 @@ fn every_published_alias_draws_the_same_shape() {
         ("flag", &["paper-tape"]),
         ("delay", &["half-rounded-rectangle"]),
         ("docs", &["documents", "st-doc", "stacked-document"]),
+        ("st-rect", &["procs", "processes", "stacked-rectangle"]),
     ];
     for (short, aliases) in groups {
         let expected = silhouette(&render(short));
@@ -709,6 +756,8 @@ fn implemented_names_stop_warning_and_others_do_not() {
         "half-rounded-rectangle",
         "docs",
         "stacked-document",
+        "st-rect",
+        "processes",
     ] {
         assert!(
             warnings(name).is_empty(),
@@ -774,6 +823,7 @@ fn each_new_shape_has_an_accessible_description() {
         ("flag", "flag"),
         ("delay", "half-rounded rectangle"),
         ("docs", "stacked documents"),
+        ("st-rect", "stacked rectangles"),
     ] {
         assert!(
             render(shape).contains(want),

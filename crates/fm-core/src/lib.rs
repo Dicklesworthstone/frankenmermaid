@@ -1303,6 +1303,17 @@ pub enum NodeShape {
     /// depth — while still being three paths, still not a rectangle, and still passing any count-based
     /// check.
     StackedDocument,
+    /// mermaid's `st-rect` / `processes`: THREE plain rectangles, offset back to front.
+    ///
+    /// ⚠️ THE COUNT CAME FROM COORDINATES, NOT FROM COUNTING SUBPATHS. The rendered `d` splits into
+    /// TWENTY-FIVE subpaths, because rough.js draws every edge as two jittered strokes — counting
+    /// them would suggest twenty-five cards. What settles it is the geometry: distinct corners sit at
+    /// x = -25.34, -20.34, -15.34 and 15.34, 20.34, 25.34, giving a base card 40.67 wide (the
+    /// standard card width) with steps of 5, and 40.67 + 2 x 5 = 50.67 is the measured bbox exactly.
+    ///
+    /// Same arrangement as [`NodeShape::StackedDocument`]: back copy top RIGHT, front bottom LEFT,
+    /// each filled so the front occludes the back.
+    StackedRect,
 }
 
 /// Radius of [`NodeShape::SmallCircle`], in user units.
