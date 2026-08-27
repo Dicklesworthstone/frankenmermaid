@@ -1842,6 +1842,50 @@ fn journey_task_scores_are_distinguishable_in_the_output() {
     );
 }
 
+/// Bit range per packet field name, read from the IR rather than scraped from the drawn label.
+///
+/// ⚠️ THE RANGE IS NO LONGER IN THE LABEL, deliberately. mermaid draws a field as three runs — name,
+/// start bit, end bit — so the range is a scale marking beside the box, not text inside it. These
+/// guards used to recover it by parsing `"Source Port[0-15]"`, which coupled a GEOMETRY check to a
+/// LABEL FORMAT: the moment the label matched the incumbent, three geometry tests failed for a
+/// reason that had nothing to do with geometry.
+///
+/// `IrPacketField` has carried `start_bit`/`end_bit` all along. Reading those is the structural
+/// source and is immune to how the field is drawn.
+fn packet_bits_by_label(fixture: &str) -> std::collections::BTreeMap<String, (u32, u32)> {
+    let source = std::fs::read_to_string(golden_dir().join(format!("{fixture}.mmd")))
+        .unwrap_or_else(|err| panic!("fixture {fixture}.mmd unreadable: {err}"));
+    packet_bits_from_source(&source, fixture)
+}
+
+/// Same, for a diagram written inline rather than read from `golden/`.
+fn packet_bits_from_source(
+    source: &str,
+    what: &str,
+) -> std::collections::BTreeMap<String, (u32, u32)> {
+    let ir = fm_parser::parse(source).ir;
+    let meta = ir
+        .packet_meta
+        .as_ref()
+        .unwrap_or_else(|| panic!("{what} has no packet metadata"));
+    let mut out = std::collections::BTreeMap::new();
+    for field in &meta.fields {
+        let Some(node) = ir.nodes.get(field.node.0) else {
+            continue;
+        };
+        let label = node
+            .label
+            .and_then(|id| ir.labels.get(id.0))
+            .map_or_else(|| node.id.clone(), |label| label.text.clone());
+        out.insert(label, (field.start_bit, field.end_bit));
+    }
+    assert!(
+        !out.is_empty(),
+        "{what} produced no packet fields; the guards below would judge nothing"
+    );
+    out
+}
+
 /// packet-beta field widths must be proportional to their bit ranges (bd-iicc).
 ///
 /// IGNORED because it FAILS against a real defect, filed as bd-51tz: widths track LABEL TEXT instead
@@ -1863,25 +1907,19 @@ fn packet_field_widths_are_proportional_to_bit_ranges() {
     let centres = node_centres(&svg);
 
     // (label, bits, width), with bits derived from the trailing "[start-end]" in the label.
+    let bits = packet_bits_by_label("packet_basic");
     let mut fields: Vec<(String, f32, f32)> = Vec::new();
     for (label, _, _, width) in &centres {
-        let open = label.rfind('[');
+        let range = bits.get(label.as_str()).copied();
         assert!(
-            open.is_some(),
-            "packet field {label:?} has no [start-end] range in its rendered label"
+            range.is_some(),
+            "packet field {label:?} is drawn but carries no bit range in the IR"
         );
-        let open = open.unwrap_or(0);
-        let range = &label[open + 1..label.len().saturating_sub(1)];
-        let split = range.split_once('-');
-        assert!(
-            split.is_some(),
-            "packet field {label:?} range {range:?} is not start-end"
-        );
-        let (lo, hi) = split.unwrap_or(("0", "0"));
-        let (lo, hi) = (lo.trim().parse::<i64>(), hi.trim().parse::<i64>());
+        let (lo, hi) = range.unwrap_or((0, 0));
+        let (lo, hi): (Result<i64, ()>, Result<i64, ()>) = (Ok(i64::from(lo)), Ok(i64::from(hi)));
         assert!(
             lo.is_ok() && hi.is_ok(),
-            "packet field {label:?} range {range:?} is not numeric"
+            "packet field {label:?} range is not numeric"
         );
         let bits = (hi.unwrap_or(0) - lo.unwrap_or(0) + 1) as f32;
         fields.push((label.clone(), bits, *width));
@@ -1929,25 +1967,20 @@ fn packet_field_widths_are_proportional_to_bit_ranges() {
 /// from the output rather than restating a table that could drift from the fixture. A label whose
 /// range cannot be read is a hard error: a guard that silently judged fewer fields than the diagram
 /// declares would pass a renderer that dropped one.
-fn packet_fields(svg: &str) -> Vec<(String, u32, u32, f32, f32, f32)> {
+fn packet_fields(svg: &str, source: &str) -> Vec<(String, u32, u32, f32, f32, f32)> {
+    let bits = packet_bits_from_source(source, "inline packet source");
     let mut fields = Vec::new();
     for (label, cx, cy, width) in node_centres(svg) {
-        let open = label.rfind('[');
+        let range = bits.get(label.as_str()).copied();
         assert!(
-            open.is_some(),
-            "packet field {label:?} has no [start-end] range in its rendered label"
+            range.is_some(),
+            "packet field {label:?} is drawn but carries no bit range in the IR"
         );
-        let range = &label[open.unwrap_or(0) + 1..label.len().saturating_sub(1)];
-        let split = range.split_once('-');
-        assert!(
-            split.is_some(),
-            "packet field {label:?} range {range:?} is not start-end"
-        );
-        let (lo, hi) = split.unwrap_or(("", ""));
-        let (lo, hi) = (lo.trim().parse::<u32>(), hi.trim().parse::<u32>());
+        let (lo, hi) = range.unwrap_or((0, 0));
+        let (lo, hi): (Result<u32, ()>, Result<u32, ()>) = (Ok(lo), Ok(hi));
         assert!(
             lo.is_ok() && hi.is_ok(),
-            "packet field {label:?} range {range:?} is not numeric"
+            "packet field {label:?} range is not numeric"
         );
         fields.push((
             label.clone(),
@@ -1981,7 +2014,10 @@ fn packet_fields_start_at_their_bit_offset_and_rows_wrap_every_32_bits() {
         !svg.contains("transform="),
         "a transform would make these coordinates non-final"
     );
-    let fields = packet_fields(&svg);
+    let fields = packet_fields(
+        &svg,
+        &std::fs::read_to_string(golden_dir().join("packet_basic.mmd")).expect("fixture"),
+    );
     assert!(
         fields.len() >= 8,
         "expected the fixture's 8 packet fields, read {} — the guard is judging fewer fields than \
@@ -2084,8 +2120,8 @@ fn packet_field_geometry_does_not_depend_on_field_names() {
     let terse_svg = render_svg_with_config(&parse(terse).ir, &SvgRenderConfig::default());
     let verbose_svg = render_svg_with_config(&parse(verbose).ir, &SvgRenderConfig::default());
 
-    let terse_fields = packet_fields(&terse_svg);
-    let verbose_fields = packet_fields(&verbose_svg);
+    let terse_fields = packet_fields(&terse_svg, terse);
+    let verbose_fields = packet_fields(&verbose_svg, verbose);
     assert_eq!(
         terse_fields.len(),
         4,

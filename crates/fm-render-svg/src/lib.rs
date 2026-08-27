@@ -4099,6 +4099,54 @@ fn render_layout_to_svg(
         );
     }
 
+    // PACKET BIT MARKINGS. mermaid labels each field with its name and, separately, the first and
+    // last bit of its range — `0-3: "A"` draws ["A","0","3"] — so the numbers read as a scale beside
+    // the field rather than as text inside it.
+    //
+    // ⚠️ A SINGLE-BIT FIELD GETS ONE NUMBER, NOT TWO. `0: "Flag"` draws ["Flag","0"], measured on the
+    // pinned bundle. Emitting both ends unconditionally would print `0` twice on every one-bit flag,
+    // which every multi-bit fixture agrees with and no single-bit one does.
+    if let Some(packet_meta) = ir.packet_meta.as_ref() {
+        for field in &packet_meta.fields {
+            let Some(node_box) = layout
+                .nodes
+                .iter()
+                .find(|candidate| candidate.node_index == field.node.0)
+            else {
+                continue;
+            };
+            let bit_y = node_box.bounds.y + offset_y - 4.0;
+            let mut marks: Vec<(f32, TextAnchor, u32)> = vec![(
+                node_box.bounds.x + offset_x,
+                TextAnchor::Start,
+                field.start_bit,
+            )];
+            if field.end_bit != field.start_bit {
+                marks.push((
+                    node_box.bounds.x + offset_x + node_box.bounds.width,
+                    TextAnchor::End,
+                    field.end_bit,
+                ));
+            }
+            for (x, anchor, bit) in marks {
+                doc = doc.child(
+                    TextBuilder::new(&bit.to_string())
+                        .x(x)
+                        .y(bit_y)
+                        .anchor(anchor)
+                        .font_family_unless_embedded_css(
+                            &config.font_family,
+                            config.embed_theme_css,
+                        )
+                        .font_size(config.font_size - 4.0)
+                        .fill(&theme.colors.text)
+                        .class("fm-packet-bit")
+                        .build(),
+                );
+            }
+        }
+    }
+
     // The journey ACTOR LEGEND, which mermaid draws and we drew nowhere (bd-mq273).
     //
     // Measured on the pinned 11.15.0 bundle, `journey_basic` gives the run order

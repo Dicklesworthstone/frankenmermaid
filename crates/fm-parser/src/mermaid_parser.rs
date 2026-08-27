@@ -7324,11 +7324,15 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
                 .trim();
             if !label.is_empty() {
                 let field_id = format!("pkt-field-{field_index}");
-                let display_label = if range.contains('-') {
-                    format!("{label}\n[{range}]")
-                } else {
-                    label.to_string()
-                };
+                // ⚠️ THE BIT RANGE IS NOT PART OF THE LABEL (bd-…packet). mermaid draws a field as
+                // THREE text runs — the name, the start bit and the end bit — placed at the field's
+                // edges: `0-3: "A"` gives ["A","0","3"]. We baked `A\n[0-3]` into the name, so the
+                // numbers were text inside the box instead of scale markings beside it, and the
+                // range appeared twice for any reader who also saw the axis.
+                //
+                // The range is already recorded structurally on `IrPacketField`, which is where the
+                // renderer now reads it from.
+                let display_label = label.to_string();
 
                 if let Some(node_id) =
                     builder.intern_node(&field_id, Some(&display_label), NodeShape::Rect, span)
