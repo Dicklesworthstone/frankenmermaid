@@ -90,10 +90,12 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
         // rather than its double frame. A lined rectangle's rule and a notched rectangle's cut are
         // interior detail; only the notch actually changes the silhouette, and it does so by
         // REMOVING area, so a full box is the conservative boundary an edge can safely stop at.
-        NodeShape::NotchedRect | NodeShape::LinedRect => rounded_rect_path(bounds, 0.0),
+        NodeShape::NotchedRect | NodeShape::LinedRect | NodeShape::DividedRect => {
+            rounded_rect_path(bounds, 0.0)
+        }
         // The small circle is a fixed-radius marker, but its BOUNDS still come from layout, so the
         // boundary follows the bounds like every other round shape.
-        NodeShape::SmallCircle => polygon_ellipse_path(bounds, 24),
+        NodeShape::SmallCircle | NodeShape::FramedCircle => polygon_ellipse_path(bounds, 24),
     }
 }
 

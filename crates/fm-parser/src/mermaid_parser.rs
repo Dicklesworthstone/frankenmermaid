@@ -2446,6 +2446,8 @@ fn flowchart_metadata_shape(name: &str) -> Option<NodeShape> {
             NodeShape::LinedRect
         }
         "sm-circ" | "small-circle" | "start" => NodeShape::SmallCircle,
+        "div-rect" | "div-proc" | "divided-rectangle" | "divided-process" => NodeShape::DividedRect,
+        "fr-circ" | "framed-circle" | "stop" => NodeShape::FramedCircle,
         _ => return None,
     })
 }
@@ -2504,7 +2506,7 @@ fn split_metadata_pairs(body: &str) -> Vec<&str> {
 /// list of shortNames alone can only ever answer for the half of authors who happened to pick one.
 /// Every entry below is a name the pinned 11.15.0 registry publishes as author-facing syntax
 /// (`shortName` or `aliases`); internal aliases like `rect_left_inv_arrow` are deliberately absent.
-const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 67] = [
+const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 60] = [
     "bang",
     "bolt",
     "bow-rect",
@@ -2524,10 +2526,6 @@ const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 67] = [
     "delay",
     "disk",
     "display",
-    "div-proc",
-    "div-rect",
-    "divided-process",
-    "divided-rectangle",
     "doc",
     "docs",
     "document",
@@ -2535,8 +2533,6 @@ const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 67] = [
     "flag",
     "flip-tri",
     "flipped-triangle",
-    "fr-circ",
-    "framed-circle",
     "h-cyl",
     "half-rounded-rectangle",
     "horizontal-cylinder",
@@ -2561,7 +2557,6 @@ const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 67] = [
     "st-rect",
     "stacked-document",
     "stacked-rectangle",
-    "stop",
     "stored-data",
     "tag-doc",
     "tag-proc",

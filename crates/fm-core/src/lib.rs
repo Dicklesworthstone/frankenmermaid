@@ -1140,6 +1140,25 @@ pub enum NodeShape {
     /// Measured: `<circle class="state-start" r="7">`. The fixed radius is the point — it is a
     /// start marker, so it must not grow with the text the way [`NodeShape::Circle`] does.
     SmallCircle,
+    /// mermaid's `div-rect` / `divided-process`: a rectangle with a HORIZONTAL rule near the top,
+    /// giving it a header band.
+    ///
+    /// Measured in Chromium 151 against the pinned 11.15.0 bundle:
+    /// `M-12.84 -15.6 L12.84 -15.6 L12.84 23.4 L-12.84 23.4 L-12.84 -23.4 L12.84 -23.4 L12.84 -15.6`
+    /// — the box runs y -23.4..23.4 and the rule sits at y = -15.6, so the band is 7.8 of 46.8, one
+    /// SIXTH of the height. Held as a ratio rather than 7.8 units because the box is label-sized.
+    ///
+    /// ⚠️ NOT the same shape as [`NodeShape::LinedRect`], whose rule is VERTICAL and near the left.
+    /// mermaid publishes both and they read differently; collapsing them would be bd-vfxu again.
+    DividedRect,
+    /// mermaid's `fr-circ` / `stop`: two concentric circles, an end marker.
+    ///
+    /// Measured: an outer circle of r=7 and an inner of r=2.5, both carrying the theme's node fill
+    /// and stroke — the inner one is a RING, not a filled dot.
+    ///
+    /// ⚠️ NOT [`NodeShape::DoubleCircle`], which sizes both rings to the label. Both radii here are
+    /// FIXED, for the same reason [`NodeShape::SmallCircle`]'s is: it is a terminal marker.
+    FramedCircle,
 }
 
 /// Radius of [`NodeShape::SmallCircle`], in user units.
@@ -1148,6 +1167,18 @@ pub enum NodeShape {
 /// derived from the label, because the shape is a start marker — one that grew with its text would
 /// stop reading as a marker.
 pub const SMALL_CIRCLE_RADIUS: f32 = 7.0;
+
+/// Inner radius of [`NodeShape::FramedCircle`], in user units; the outer ring reuses
+/// [`SMALL_CIRCLE_RADIUS`].
+///
+/// Measured from mermaid 11.15.0's `fr-circ`: concentric paths starting at `M7 0` and `M2.5 0`.
+pub const FRAMED_CIRCLE_INNER_RADIUS: f32 = 2.5;
+
+/// Fraction of [`NodeShape::DividedRect`]'s height taken by its header band.
+///
+/// Measured from mermaid 11.15.0's `div-rect`: a box spanning y -23.4..23.4 with its rule at
+/// y = -15.6, i.e. 7.8 of 46.8.
+pub const DIVIDED_RECT_HEADER_RATIO: f32 = 1.0 / 6.0;
 
 /// Fraction of a node's width that slanted shapes inset their horizontal edges by.
 ///

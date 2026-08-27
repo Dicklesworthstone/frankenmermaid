@@ -29,8 +29,10 @@ pub fn draw_shape<C: Canvas2dContext>(
         // to without them. Unlike the ER crow's feet (bd-hh0o7), a plain box here is not a FALSE
         // statement — it is the same family of shape, just undecorated. The small circle does draw
         // correctly, since a circle is a primitive canvas has.
-        NodeShape::NotchedRect | NodeShape::LinedRect => draw_rect(ctx, x, y, width, height, 0.0),
-        NodeShape::SmallCircle => draw_circle(ctx, x, y, width, height),
+        NodeShape::NotchedRect | NodeShape::LinedRect | NodeShape::DividedRect => {
+            draw_rect(ctx, x, y, width, height, 0.0)
+        }
+        NodeShape::SmallCircle | NodeShape::FramedCircle => draw_circle(ctx, x, y, width, height),
         NodeShape::Rect => draw_rect(ctx, x, y, width, height, 0.0),
         NodeShape::Rounded => draw_rect(ctx, x, y, width, height, 4.0),
         NodeShape::Stadium => draw_stadium(ctx, x, y, width, height),

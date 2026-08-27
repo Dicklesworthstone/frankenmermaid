@@ -9,6 +9,12 @@
 //!   lin-rect    "M-20.34 -27 L28.34 -27 L28.34 27 L-28.34 27 L-28.34 -27 L-20.34 -27 L-20.34 27"
 //!               a box x -28.34..28.34 plus a VERTICAL RULE at x = -20.34, 8 in from the left
 //!   sm-circ     <circle class="state-start" r="7">   a FIXED-radius marker, not label-sized
+//!   div-rect    "M-12.84 -15.6 L12.84 -15.6 L12.84 23.4 L-12.84 23.4 L-12.84 -23.4
+//!                L12.84 -23.4 L12.84 -15.6"
+//!               a box y -23.4..23.4 with a HORIZONTAL rule at y=-15.6 — 7.8 of 46.8,
+//!               one SIXTH of the height, so it is held as a ratio not a constant
+//!   fr-circ     concentric paths from "M7 0" and "M2.5 0", both carrying the theme
+//!               node fill and stroke — two RINGS, not a ring around a filled dot
 //! ```
 //!
 //! ⚠️ MERMAID'S SECOND PATH IS NOT GEOMETRY. These go through rough.js, whose sketch overlay
@@ -26,30 +32,37 @@ fn render(shape: &str) -> String {
     fm_render_svg::render_svg(&fm_parser::parse(&source).ir)
 }
 
-/// The first shape element drawn for the node, with paint stripped.
+/// EVERY shape element in the document, reduced to its GEOMETRY attributes.
+///
+/// ⚠️ ATTRIBUTE VALUES CONTAIN SPACES, so this cannot be a `split_whitespace` filter. The first
+/// version of this helper was exactly that, and `d="M92 92 L192 …"` reduced to the single token
+/// `d="M92` — which made every path-based shape compare EQUAL and turned the distinctness test below
+/// into a check on the first coordinate. It passed only because the shapes happened to start at
+/// different points. Values are parsed to their closing quote instead.
+///
+/// ⚠️ AND IT MUST COLLECT EVERY ELEMENT, NOT THE FIRST. `fr-circ`'s outer ring is identical to
+/// `sm-circ` — the whole difference is its SECOND circle, so a first-element helper reported the two
+/// as the same shape. Anything that distinguishes shapes by one element cannot see a shape whose
+/// identity is in its second.
 fn silhouette(svg: &str) -> String {
+    let mut out = Vec::new();
     for tag in ["<path ", "<circle ", "<rect ", "<polygon "] {
-        if let Some(at) = svg.find(tag) {
-            let rest = &svg[at..];
-            let end = rest.find('>').unwrap_or(rest.len());
-            let raw = &rest[..end];
-            if raw.contains("fm-node-gradient") || tag == "<path " || tag == "<polygon " {
-                // Keep geometry attributes only; fills/strokes are theme, not shape.
-                return raw
-                    .split_whitespace()
-                    .filter(|part| {
-                        part.starts_with("d=")
-                            || part.starts_with("points=")
-                            || part.starts_with("r=")
-                            || part.starts_with("width=")
-                            || part.starts_with("height=")
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
+        let mut rest = svg;
+        while let Some(at) = rest.find(tag) {
+            rest = &rest[at + tag.len()..];
+            let raw = &rest[..rest.find('>').unwrap_or(rest.len())];
+            for name in ["d=", "points=", "r=", "width=", "height="] {
+                let needle = format!("{name}\"");
+                if let Some(start) = raw.find(&needle) {
+                    let value_at = start + needle.len();
+                    if let Some(len) = raw[value_at..].find('"') {
+                        out.push(format!("{name}{}", &raw[value_at..value_at + len]));
+                    }
+                }
             }
         }
     }
-    String::new()
+    out.join("|")
 }
 
 #[test]
@@ -74,6 +87,60 @@ fn each_new_shape_draws_its_measured_silhouette() {
         "sm-circ is not a fixed radius-7 circle: {}",
         silhouette(&small)
     );
+
+    // The rule sits one sixth down: 66.50 * 1/6 = 11.08 below the box top at y=92.
+    let divided = render("div-rect");
+    assert!(
+        divided.contains("M92 103.08 L192 103.08"),
+        "div-rect drew no horizontal header rule: {}",
+        silhouette(&divided)
+    );
+
+    let framed = render("fr-circ");
+    assert!(
+        framed.contains("r=\"7\"") && framed.contains("r=\"2.50\""),
+        "fr-circ is not two concentric fixed rings: {framed}"
+    );
+}
+
+/// ⚠️ THE TWO RULED RECTANGLES MUST NOT COLLAPSE INTO EACH OTHER. `lin-rect` rules VERTICALLY near
+/// the left; `div-rect` rules HORIZONTALLY near the top. mermaid publishes both and they read
+/// differently, so an implementation that drew one rule for both would satisfy every "is there a
+/// rule?" assertion while making two published names draw one picture.
+#[test]
+fn the_vertical_and_horizontal_rules_are_different_shapes() {
+    let lined = render("lin-rect");
+    let divided = render("div-rect");
+    assert!(
+        lined.contains("M106 92 L106 158.50"),
+        "lin-rect lost its VERTICAL rule"
+    );
+    assert!(
+        divided.contains("M92 103.08 L192 103.08"),
+        "div-rect lost its HORIZONTAL rule"
+    );
+    assert_ne!(
+        silhouette(&lined),
+        silhouette(&divided),
+        "the vertically and horizontally ruled rectangles render identically"
+    );
+}
+
+/// ⚠️ AND THE FRAMED CIRCLE IS NOT THE DOUBLE CIRCLE. `fr-circ` is a fixed-radius terminal marker
+/// (7 and 2.5); `(((x)))` sizes both rings to its label. Collapsing them would make a marker grow
+/// with its text, which is the bd-vfxu failure in the other direction.
+#[test]
+fn the_framed_circle_is_not_the_label_sized_double_circle() {
+    let framed = render("fr-circ");
+    let double = fm_render_svg::render_svg(&fm_parser::parse("flowchart TD\n  A(((Double)))\n").ir);
+    assert!(
+        framed.contains("r=\"7\"") && framed.contains("r=\"2.50\""),
+        "fr-circ lost a fixed ring"
+    );
+    assert!(
+        !double.contains("r=\"2.50\""),
+        "the label-sized double circle picked up the framed circle's fixed inner radius"
+    );
 }
 
 /// ⚠️ THE NEGATIVE CASE A WRONG IMPLEMENTATION FAILS.
@@ -89,7 +156,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
     assert!(!rect.is_empty(), "the control drew nothing");
 
     let mut seen = vec![("rect", rect)];
-    for shape in ["notch-rect", "lin-rect", "sm-circ"] {
+    for shape in ["notch-rect", "lin-rect", "sm-circ", "div-rect", "fr-circ"] {
         let sig = silhouette(&render(shape));
         assert!(!sig.is_empty(), "{shape} drew no geometry at all");
         for (other, other_sig) in &seen {
@@ -106,7 +173,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
 /// name that resolves to nothing tells an author to fix a spelling that was already correct.
 #[test]
 fn every_published_alias_draws_the_same_shape() {
-    let groups: [(&str, &[&str]); 3] = [
+    let groups: [(&str, &[&str]); 5] = [
         ("notch-rect", &["card", "notched-rectangle"]),
         (
             "lin-rect",
@@ -118,6 +185,11 @@ fn every_published_alias_draws_the_same_shape() {
             ],
         ),
         ("sm-circ", &["small-circle", "start"]),
+        (
+            "div-rect",
+            &["div-proc", "divided-rectangle", "divided-process"],
+        ),
+        ("fr-circ", &["framed-circle", "stop"]),
     ];
     for (short, aliases) in groups {
         let expected = silhouette(&render(short));
@@ -149,6 +221,10 @@ fn implemented_names_stop_warning_and_others_do_not() {
         "shaded-process",
         "sm-circ",
         "start",
+        "div-rect",
+        "divided-process",
+        "fr-circ",
+        "stop",
     ] {
         assert!(
             warnings(name).is_empty(),
@@ -194,6 +270,8 @@ fn each_new_shape_has_an_accessible_description() {
         ("notch-rect", "notched rectangle"),
         ("lin-rect", "lined rectangle"),
         ("sm-circ", "small circle"),
+        ("div-rect", "divided rectangle"),
+        ("fr-circ", "framed circle"),
     ] {
         assert!(
             render(shape).contains(want),

@@ -11065,6 +11065,50 @@ fn render_node(
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
+        NodeShape::FramedCircle => {
+            // Concentric rings at FIXED radii 7 and 2.5. Distinct from `DoubleCircle`, whose rings
+            // are label-sized: this is a terminal marker and must not grow with its text. The inner
+            // ring is stroked and filled like the outer one — mermaid reports the theme node fill on
+            // both, so it is a ring rather than the solid dot a state `[*]` end draws.
+            Element::group()
+                .child(
+                    Element::circle()
+                        .cx(cx)
+                        .cy(cy)
+                        .r(fm_core::SMALL_CIRCLE_RADIUS)
+                        .fill(&colors.node_fill)
+                        .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                        .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
+                )
+                .child(
+                    Element::circle()
+                        .cx(cx)
+                        .cy(cy)
+                        .r(fm_core::FRAMED_CIRCLE_INNER_RADIUS)
+                        .fill(&colors.node_fill)
+                        .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                        .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
+                )
+        }
+        NodeShape::DividedRect => {
+            // Box plus a HORIZONTAL rule one sixth down, drawn as one path so the rule inherits the
+            // shape's stroke. The vertical twin is `LinedRect`; keeping them distinct is the point.
+            let band = h * fm_core::DIVIDED_RECT_HEADER_RATIO;
+            let path = PathBuilder::new()
+                .move_to(x, y)
+                .line_to(x + w, y)
+                .line_to(x + w, y + h)
+                .line_to(x, y + h)
+                .line_to(x, y)
+                .move_to(x, y + band)
+                .line_to(x + w, y + band)
+                .build();
+            Element::path()
+                .d(&path)
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
     };
 
     let shape_elem = maybe_add_class(shape_elem, "fm-node-shape", emit_classdef_classes);
@@ -13089,6 +13133,8 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
         NodeShape::NotchedRect => "fm-node-shape-notched-rect",
         NodeShape::LinedRect => "fm-node-shape-lined-rect",
         NodeShape::SmallCircle => "fm-node-shape-small-circle",
+        NodeShape::DividedRect => "fm-node-shape-divided-rect",
+        NodeShape::FramedCircle => "fm-node-shape-framed-circle",
         NodeShape::Rect => "fm-node-shape-rect",
         NodeShape::Rounded => "fm-node-shape-rounded",
         NodeShape::Stadium => "fm-node-shape-stadium",
