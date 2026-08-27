@@ -1090,10 +1090,15 @@ fn path_endpoints(d: &str) -> Result<(Point, Point), String> {
 fn strip_inner_tags(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut depth = 0usize;
+    // ⚠️ `>` CLOSES A TAG ONLY WHEN ONE IS OPEN. `>` is legal, and common, as literal CONTENT: the
+    // renderer escapes `<` (to `&lt;`) but leaves `>` alone, so a drawn `<<satisfies>>` arrives here
+    // as `&lt;&lt;satisfies>>`. Decrementing on every `>` silently ate the closing angles and the
+    // helper returned `&lt;&lt;satisfies` — a truncation that reads as a renderer defect and is a
+    // defect in this reader. Guarding on `depth > 0` keeps unbalanced content intact.
     for ch in raw.chars() {
         match ch {
             '<' => depth += 1,
-            '>' => depth = depth.saturating_sub(1),
+            '>' if depth > 0 => depth -= 1,
             c if depth == 0 => out.push(c),
             _ => {}
         }
@@ -3298,7 +3303,19 @@ fn requirement_relationships_run_from_source_to_target() {
     let on_boundary = point_on_box_boundary;
 
     for (src, kind, dst) in &declared {
-        let matching: Vec<_> = edges.iter().filter(|(label, ..)| label == kind).collect();
+        // ⚠️ THE DRAWN LABEL IS `<<kind>>`, NOT `kind`. mermaid stores the wrapped string on a
+        // requirement relationship (`label: `<<${n.type}>>``) and we now match it, so this reader
+        // has to wrap the keyword it parsed out of the fixture before comparing. `labelled_edges`
+        // returns the label with `<`/`>` still ESCAPED, which is why the needle is built from the
+        // entity form rather than from literal angle brackets.
+        // The renderer escapes `<` but not `>`, so the drawn label reaches the reader as
+        // `&lt;&lt;satisfies>>` — half entity, half literal. Build the needle in that exact form
+        // rather than from either pure spelling.
+        let drawn_kind = format!("&lt;&lt;{kind}>>");
+        let matching: Vec<_> = edges
+            .iter()
+            .filter(|(label, ..)| label == &drawn_kind)
+            .collect();
         assert_eq!(
             matching.len(),
             1,

@@ -9158,15 +9158,40 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
     // the two above: declared by the author, dropped before the IR, drawn by nothing. They join this
     // table rather than getting their own block so an element's rows stack with a requirement's in
     // one order, and so a future row cannot forget the `text_y` advance below.
+    // ⚠️ ONE ROW PER FIELD, IN mermaid's ORDER, WITH mermaid's LABELS. Its requirement renderer emits
+    // each as an independent line and nothing is ever joined:
+    //
+    // ```text
+    //   `ID: ${n.requirementId}`     `Text: ${n.text}`
+    //   `Risk: ${n.risk}`            `Verification: ${n.verifyMethod}`      <- a requirement
+    //   `Type: ${a.type}`            `Doc Ref: ${a.docRef}`                 <- an element
+    // ```
+    //
+    // Two divergences lived here and both were found by rendering the incumbent in Chromium and
+    // diffing drawn text (`scripts/headtohead/chromium_text_diff.mjs`):
+    //
+    //   * risk and verification were fused into ONE row, `Risk: High | Verify: Test`, a separator
+    //     mermaid never draws;
+    //   * the labels were `Verify:` and `Doc:` where mermaid writes `Verification:` and `Doc Ref:`.
+    //
+    // A node carries either the requirement fields or the element fields, never both, so one table in
+    // this order reproduces both orders. Folding risk and verification in here rather than leaving
+    // them in their own block is also what stops a future row forgetting the `text_y` advance below.
     for (prefix, value, class) in [
         ("ID: ", meta.req_id.as_deref(), "fm-req-id"),
         ("Text: ", meta.text.as_deref(), "fm-req-text"),
+        ("Risk: ", meta.risk.as_deref(), "fm-req-metadata"),
+        (
+            "Verification: ",
+            meta.verify_method.as_deref(),
+            "fm-req-metadata",
+        ),
         (
             "Type: ",
             meta.element_type.as_deref(),
             "fm-req-element-type",
         ),
-        ("Doc: ", meta.doc_ref.as_deref(), "fm-req-docref"),
+        ("Doc Ref: ", meta.doc_ref.as_deref(), "fm-req-docref"),
     ] {
         let Some(value) = value else { continue };
         write_req_subtitle_body_into(
@@ -9184,62 +9209,6 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
             },
         );
         text_y += font_size * 0.85;
-    }
-
-    // Stream `Risk: …[ | Verify: …]` — the fixed labels hold no XML specials, so streaming the parts is
-    // byte-identical to escaping the old joined `format!` whole, without the per-node String alloc.
-    match (meta.risk.as_deref(), meta.verify_method.as_deref()) {
-        (Some(risk), Some(verify_method)) => {
-            write_req_subtitle_body_into(
-                out,
-                cx,
-                text_y,
-                subtitle_font_size,
-                "",
-                " opacity=\"0.7\"",
-                &colors.text,
-                "fm-req-metadata",
-                |f| {
-                    f.push_str("Risk: ");
-                    let _ = write_escaped_text(f, risk);
-                    f.push_str(" | Verify: ");
-                    let _ = write_escaped_text(f, verify_method);
-                },
-            );
-        }
-        (Some(risk), None) => {
-            write_req_subtitle_body_into(
-                out,
-                cx,
-                text_y,
-                subtitle_font_size,
-                "",
-                " opacity=\"0.7\"",
-                &colors.text,
-                "fm-req-metadata",
-                |f| {
-                    f.push_str("Risk: ");
-                    let _ = write_escaped_text(f, risk);
-                },
-            );
-        }
-        (None, Some(verify_method)) => {
-            write_req_subtitle_body_into(
-                out,
-                cx,
-                text_y,
-                subtitle_font_size,
-                "",
-                " opacity=\"0.7\"",
-                &colors.text,
-                "fm-req-metadata",
-                |f| {
-                    f.push_str("Verify: ");
-                    let _ = write_escaped_text(f, verify_method);
-                },
-            );
-        }
-        (None, None) => {}
     }
 
     if A11Y {
@@ -10838,11 +10807,29 @@ fn render_node(
             group = group.child(text_elem);
             text_y += node_font_size * 0.85;
 
-            // `ID:` / `Text:` rows — see the fast writer's comment (bd-f3tc). Kept in lockstep with
-            // it: same order, same classes, same `opacity 0.7`, same cursor advance.
+            // The field rows — see the fast writer's comment for the reference. Kept in lockstep with
+            // it: same order, same labels, same classes, same `opacity 0.7`, same cursor advance.
+            //
+            // ⚠️ THE LOCKSTEP HAD ALREADY BROKEN, and the comment claiming it is how that went
+            // unnoticed. This copy carried only `ID:` and `Text:`; the `Type:` and `Doc Ref:` rows an
+            // ELEMENT declares existed solely in the fast writer, so which fields a requirement
+            // diagram drew depended on which path it happened to take. Both tables are now the same
+            // six rows in mermaid's order.
             for (prefix, value, class) in [
                 ("ID: ", req_meta.req_id.as_deref(), "fm-req-id"),
                 ("Text: ", req_meta.text.as_deref(), "fm-req-text"),
+                ("Risk: ", req_meta.risk.as_deref(), "fm-req-metadata"),
+                (
+                    "Verification: ",
+                    req_meta.verify_method.as_deref(),
+                    "fm-req-metadata",
+                ),
+                (
+                    "Type: ",
+                    req_meta.element_type.as_deref(),
+                    "fm-req-element-type",
+                ),
+                ("Doc Ref: ", req_meta.doc_ref.as_deref(), "fm-req-docref"),
             ] {
                 let Some(value) = value else { continue };
                 let row = format!("{prefix}{value}");
@@ -10882,53 +10869,6 @@ fn render_node(
                     group = group.child(row_elem);
                 }
                 text_y += node_font_size * 0.85;
-            }
-
-            // Risk + verify method subtitle
-            let mut info_parts = Vec::new();
-            if let Some(ref risk) = req_meta.risk {
-                info_parts.push(format!("Risk: {risk}"));
-            }
-            if let Some(ref vm) = req_meta.verify_method {
-                info_parts.push(format!("Verify: {vm}"));
-            }
-            if !info_parts.is_empty() {
-                let info_text = info_parts.join(" | ");
-                if stream_req_subtitles {
-                    let mut f = String::new();
-                    write_req_subtitle_into(
-                        &mut f,
-                        cx,
-                        text_y,
-                        subtitle_font_size,
-                        "",
-                        " opacity=\"0.7\"",
-                        &colors.text,
-                        "fm-req-metadata",
-                        &info_text,
-                    );
-                    group = group.child(Element::raw_svg(f));
-                } else {
-                    let mut meta_elem = Element::text()
-                        .x(cx)
-                        .y(text_y)
-                        .content(&info_text)
-                        .attr("text-anchor", "middle")
-                        .attr("dominant-baseline", "central")
-                        .attr_num("font-size", subtitle_font_size)
-                        .font_family_unless_embedded_css(
-                            &config.font_family,
-                            config.embed_theme_css,
-                        )
-                        .fill(&colors.text)
-                        .attr("opacity", "0.7")
-                        .class("fm-req-metadata");
-                    meta_elem = apply_label_class(meta_elem);
-                    if let Some(style) = text_style.as_deref() {
-                        meta_elem = meta_elem.attr("style", style);
-                    }
-                    group = group.child(meta_elem);
-                }
             }
         } else if let Some(node) = ir_node
             && !node.members.is_empty()

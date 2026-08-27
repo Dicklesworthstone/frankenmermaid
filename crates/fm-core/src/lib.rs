@@ -5502,6 +5502,19 @@ pub fn requirement_type_display(raw: &str) -> &str {
         "performanceRequirement" => "Performance Requirement",
         "physicalRequirement" => "Physical Requirement",
         "designConstraint" => "Design Constraint",
+        // ⚠️ NOT A REQUIREMENT TYPE, AND DELIBERATELY IN THIS TABLE. An `element` block is the other
+        // kind of node a requirement diagram declares, and mermaid does not run it through the table
+        // above at all — it draws a hardcoded literal, capitalised:
+        //
+        // ```text
+        //   u ? $u(m, `&lt;&lt;${n.type}&gt;&gt;`, …)      // a requirement: its display name
+        //     : $u(m, "&lt;&lt;Element&gt;&gt;", …)         // an element: this exact string
+        // ```
+        //
+        // We echoed the authored keyword and drew `<<element>>`. Routing it here keeps ONE place
+        // that answers "what goes inside the angles", which is what stopped the requirement half
+        // drifting; a second branch in the renderer would be a place for the two to disagree.
+        "element" => "Element",
         other => other,
     }
 }

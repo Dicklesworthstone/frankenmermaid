@@ -6417,6 +6417,29 @@ fn parse_requirement_relation(
     let to = builder.intern_node(&right_id, None, NodeShape::Rect, span);
     match (from, to) {
         (Some(from_id), Some(to_id)) => {
+            // ⚠️ `<<satisfies>>`, NOT `satisfies`. mermaid wraps a requirement relationship's type
+            // in ASCII angles and stores the WRAPPED string as the edge's label:
+            //
+            // ```text
+            //   label: `&lt;&lt;${n.type}&gt;&gt;`, classes: "relationshipLine"
+            // ```
+            //
+            // We drew the bare keyword. Found by rendering the incumbent in Chromium and diffing
+            // drawn text — this family has no head-to-head corpus item and will not render under
+            // jsdom, so nothing cheaper could see it.
+            //
+            // Wrapped HERE rather than in the renderer, matching where the incumbent keeps it: the
+            // edge label is a channel every diagram type shares, and a requirement-only `<<…>>`
+            // branch in the edge writer would put a diagram-type test on the hot path for all of
+            // them.
+            let wrapped;
+            let relation_label = match relation_label {
+                Some(rel_type) => {
+                    wrapped = format!("<<{rel_type}>>");
+                    Some(wrapped.as_str())
+                }
+                None => None,
+            };
             builder.push_edge(from_id, to_id, arrow, relation_label, span);
             true
         }
@@ -23782,7 +23805,9 @@ Rel_Back(db, app, "Responds")"#,
             .label
             .and_then(|lid| parsed.ir.labels.get(lid.0))
             .map(|l| l.text.as_str());
-        assert_eq!(label_text, Some("satisfies"));
+        // mermaid stores the WRAPPED string on the edge (`label: `<<${n.type}>>``), so the IR carries
+        // what is drawn rather than the bare keyword.
+        assert_eq!(label_text, Some("<<satisfies>>"));
     }
 
     #[test]
