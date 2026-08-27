@@ -4,15 +4,15 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use chumsky::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
 use fm_core::{
-    ArchitectureSide, ArrowType, Diagnostic, DiagnosticCategory, DiagramType, EdgeAnimation,
-    GanttDate, GanttExclude, GanttTaskFlags, GanttTickInterval, GraphDirection, IrAttributeKey,
-    IrC4NodeMeta, IrConstraint, IrDeck, IrDeckEdgePolicy, IrDeckReveal, IrDeckSlide, IrGanttMeta,
-    IrGanttSection, IrGanttTask, IrLabelSegment, IrNodeId, IrXyAxis, IrXyChartMeta, IrXySeries,
-    IrXySeriesKind, MermaidParseMode, MermaidSupportLevel, NodeShape, Position, Span,
-    is_safe_link_target, parse_mermaid_js_config_value, to_init_parse,
+    ArchitectureSide, ArrowType, C4RelationshipDirection, Diagnostic, DiagnosticCategory,
+    DiagramType, EdgeAnimation, GanttDate, GanttExclude, GanttTaskFlags, GanttTickInterval,
+    GraphDirection, IrAttributeKey, IrC4NodeMeta, IrConstraint, IrDeck, IrDeckEdgePolicy,
+    IrDeckReveal, IrDeckSlide, IrGanttMeta, IrGanttSection, IrGanttTask, IrLabelSegment, IrNodeId,
+    IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind, MermaidParseMode, MermaidSupportLevel,
+    NodeShape, Position, Span, is_safe_link_target, parse_mermaid_js_config_value, to_init_parse,
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -15080,21 +15080,18 @@ fn parse_c4_relationship(
         builder.set_last_edge_technology(technology);
     }
     if let Some(direction) = c4_forced_relationship_direction(function_name) {
-        builder.add_warning(format!(
-            "C4 relationship `{function_name}` requests {direction} routing, but directional C4 relationship layout is not yet supported; rendered as an unconstrained relationship"
-        ));
+        builder.set_last_edge_c4_direction(direction);
     }
     true
 }
 
-/// Direction macros carry a layout constraint in Mermaid's C4 grammar. We retain the relationship
-/// itself, but must name the missing constraint until the layout engine can honour it.
-fn c4_forced_relationship_direction(function_name: &str) -> Option<&'static str> {
+/// Direction macros carry one of C4's four closed layout constraints.
+fn c4_forced_relationship_direction(function_name: &str) -> Option<C4RelationshipDirection> {
     match function_name {
-        "Rel_U" | "Rel_Up" => Some("upward"),
-        "Rel_D" | "Rel_Down" => Some("downward"),
-        "Rel_L" | "Rel_Left" => Some("leftward"),
-        "Rel_R" | "Rel_Right" => Some("rightward"),
+        "Rel_U" | "Rel_Up" => Some(C4RelationshipDirection::Up),
+        "Rel_D" | "Rel_Down" => Some(C4RelationshipDirection::Down),
+        "Rel_L" | "Rel_Left" => Some(C4RelationshipDirection::Left),
+        "Rel_R" | "Rel_Right" => Some(C4RelationshipDirection::Right),
         _ => None,
     }
 }
@@ -16192,9 +16189,9 @@ mod tests {
 
     use chumsky::Parser;
     use fm_core::{
-        ArrowType, DiagnosticCategory, DiagnosticSeverity, DiagramType, GanttDate, GanttExclude,
-        GanttTickInterval, GraphDirection, IrEndpoint, IrLabelSegment, IrXySeriesKind,
-        MermaidParseMode, NodeShape,
+        ArrowType, C4RelationshipDirection, DiagnosticCategory, DiagnosticSeverity, DiagramType,
+        GanttDate, GanttExclude, GanttTickInterval, GraphDirection, IrEndpoint, IrLabelSegment,
+        IrXySeriesKind, MermaidParseMode, NodeShape,
     };
 
     use super::{
@@ -22822,12 +22819,9 @@ Rel_Back(db, app, "Responds")"#,
         }
     }
 
-    /// A forced-direction C4 relationship must not silently pretend that its direction was honoured.
-    ///
-    /// The relationship remains useful and is retained, but the layout has no per-edge direction
-    /// constraint today. A warning is therefore required until that capability exists.
+    /// Directional C4 relationship macros retain their closed placement constraint in the IR.
     #[test]
-    fn c4_forced_direction_relationships_name_the_unapplied_layout_constraint() {
+    fn c4_forced_direction_relationships_reach_the_ir_without_a_stale_warning() {
         let forced = parse_mermaid(
             "C4Context\n  Person(a, \"A\")\n  System(b, \"B\")\n  Rel_Up(a, b, \"uses\")",
         );
@@ -22837,17 +22831,23 @@ Rel_Back(db, app, "Responds")"#,
             "CONTROL FAILED: the relationship itself was dropped: {:?}",
             forced.warnings
         );
+        assert_eq!(
+            forced.ir.edges[0].c4_direction(),
+            Some(C4RelationshipDirection::Up),
+            "the directional macro was parsed as a relationship but lost its placement constraint"
+        );
         assert!(
-            forced
+            !forced
                 .warnings
                 .iter()
-                .any(|warning| warning.contains("Rel_Up") && warning.contains("upward routing")),
-            "the unapplied forced direction was dropped in silence: {:?}",
+                .any(|warning| warning.contains("directional C4 relationship layout")),
+            "a supported directional relationship retained the old unsupported-capability warning: {:?}",
             forced.warnings
         );
 
-        // Negative control: a plain relationship requests no directional layout constraint, so warning
-        // on every C4 edge would be just as misleading as silently accepting the forced form.
+        // Negative control: a plain relationship requests no directional layout constraint. A
+        // naive implementation that marks every C4 edge as directional would make the layout move
+        // ordinary relationships just because the diagram happens to be C4.
         let plain = parse_mermaid(
             "C4Context\n  Person(a, \"A\")\n  System(b, \"B\")\n  Rel(a, b, \"uses\")",
         );
@@ -22856,13 +22856,10 @@ Rel_Back(db, app, "Responds")"#,
             1,
             "CONTROL FAILED: plain relationship missing"
         );
-        assert!(
-            !plain
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("relationship layout is not yet supported")),
-            "a direction-free relationship produced a forced-direction warning: {:?}",
-            plain.warnings
+        assert_eq!(
+            plain.ir.edges[0].c4_direction(),
+            None,
+            "a plain C4 relationship acquired a forced placement direction"
         );
     }
 

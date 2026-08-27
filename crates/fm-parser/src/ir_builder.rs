@@ -4,15 +4,16 @@ use std::collections::hash_map::Entry;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use fm_core::{
-    ArchitectureSide, ArrowType, ClassMemberKind, ClassStereotype, Diagnostic, DiagnosticCategory,
-    DiagramType, EdgeAnimation, FragmentAlternative, FragmentKind, GraphDirection, IrActivation,
-    IrAttributeKey, IrC4NodeMeta, IrClassMember, IrClassNodeMeta, IrCluster, IrClusterId,
-    IrConstraint, IrEdge, IrEdgeKind, IrEndpoint, IrEntityAttribute, IrGanttMeta, IrGraphCluster,
-    IrGraphEdge, IrGraphNode, IrLabel, IrLabelId, IrLabelSegment, IrLifecycleEvent, IrNode,
-    IrNodeId, IrNodeKind, IrParticipantGroup, IrSequenceAutonumberRange, IrSequenceFragment,
-    IrSequenceMeta, IrSequenceNote, IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId,
-    IrXyChartMeta, LifecycleEventKind, MermaidDiagramIr, MermaidError, MermaidParseMode,
-    MermaidSanitizeMode, MermaidWarning, MermaidWarningCode, NodeShape, NotePosition, Span,
+    ArchitectureSide, ArrowType, C4RelationshipDirection, ClassMemberKind, ClassStereotype,
+    Diagnostic, DiagnosticCategory, DiagramType, EdgeAnimation, FragmentAlternative, FragmentKind,
+    GraphDirection, IrActivation, IrAttributeKey, IrC4NodeMeta, IrClassMember, IrClassNodeMeta,
+    IrCluster, IrClusterId, IrConstraint, IrEdge, IrEdgeKind, IrEndpoint, IrEntityAttribute,
+    IrGanttMeta, IrGraphCluster, IrGraphEdge, IrGraphNode, IrLabel, IrLabelId, IrLabelSegment,
+    IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup, IrSequenceAutonumberRange,
+    IrSequenceFragment, IrSequenceMeta, IrSequenceNote, IrStyleRef, IrStyleTarget, IrSubgraph,
+    IrSubgraphId, IrXyChartMeta, LifecycleEventKind, MermaidDiagramIr, MermaidError,
+    MermaidParseMode, MermaidSanitizeMode, MermaidWarning, MermaidWarningCode, NodeShape,
+    NotePosition, Span,
 };
 
 use crate::mermaid_parser::trim_fast;
@@ -2610,6 +2611,16 @@ impl IrBuilder {
         }
         if let Some(edge) = self.ir.edges.last_mut() {
             edge.extras_mut().technology = Some(Box::from(technology));
+        }
+    }
+
+    /// Record the placement direction carried by a C4 directional relationship macro.
+    pub(crate) fn set_last_edge_c4_direction(&mut self, direction: C4RelationshipDirection) {
+        if let Some(edge_index) = self.ir.edges.len().checked_sub(1) {
+            self.mark_reusable_prefix_edge_dirty(edge_index);
+        }
+        if let Some(edge) = self.ir.edges.last_mut() {
+            edge.extras_mut().c4_direction = Some(direction);
         }
     }
 

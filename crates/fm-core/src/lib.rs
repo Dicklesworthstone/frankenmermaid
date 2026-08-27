@@ -2499,6 +2499,9 @@ pub struct IrEdgeExtras {
     /// Declared target side of an architecture-beta edge: the `L` in `a:R --> L:b`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_side: Option<ArchitectureSide>,
+    /// Requested direction of a C4 relationship such as `Rel_Up(a, b, "uses")`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub c4_direction: Option<C4RelationshipDirection>,
 }
 
 /// How fast an opted-in edge marches, from mermaid 11's `edgeId@{ animate: … }` statement.
@@ -2562,6 +2565,19 @@ pub enum ArchitectureSide {
     Right,
     Top,
     Bottom,
+}
+
+/// A placement direction declared by a C4 relationship macro.
+///
+/// `Rel_Up` and its short alias `Rel_U` are layout constraints, not names for distinct edge
+/// kinds. Keeping the closed four-value grammar in the IR lets the layout engine honour it without
+/// reparsing the macro name or treating author-provided text as a direction.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum C4RelationshipDirection {
+    Up,
+    Down,
+    Left,
+    Right,
 }
 
 impl ArchitectureSide {
@@ -2657,6 +2673,12 @@ impl IrEdge {
     #[must_use]
     pub fn target_side(&self) -> Option<ArchitectureSide> {
         self.extras.as_ref().and_then(|e| e.target_side)
+    }
+    /// Requested C4 relationship placement direction, if this edge came from a directional
+    /// relationship macro.
+    #[must_use]
+    pub fn c4_direction(&self) -> Option<C4RelationshipDirection> {
+        self.extras.as_ref().and_then(|e| e.c4_direction)
     }
     /// Mutable access to the diagram-specific extras, allocating the box on first use.
     pub fn extras_mut(&mut self) -> &mut IrEdgeExtras {
