@@ -13786,12 +13786,12 @@ fn parse_c4_fast_rel(arguments: [&str; 4], span: Span, builder: &mut IrBuilder) 
     } else {
         clean_label(Some(arguments[3]))
     };
-    let combined_label = match (label, technology) {
-        (Some(label), Some(technology)) => Some(format!("{label} [{technology}]")),
-        (Some(label), None) => Some(label),
-        (None, Some(technology)) => Some(format!("[{technology}]")),
-        (None, None) => None,
-    };
+    // ⚠️ THE TECHNOLOGY IS ITS OWN ROW — see `IrEdgeExtras::technology`. It used to be folded into
+    // the label as `Uses [HTTPS]`, one run mermaid never draws; its `drawRels` emits the label and
+    // then `"[" + techn + "]"` as a separate italic text below it. Kept in lockstep with the slow
+    // path in `parse_c4_relationship`.
+    let edge_label = label;
+    let edge_technology = technology;
 
     let Some(from_node) = builder.intern_node(&from_id, Some(&from_id), NodeShape::Rect, span)
     else {
@@ -13804,9 +13804,12 @@ fn parse_c4_fast_rel(arguments: [&str; 4], span: Span, builder: &mut IrBuilder) 
         from_node,
         to_node,
         ArrowType::Arrow,
-        combined_label.as_deref(),
+        edge_label.as_deref(),
         span,
     );
+    if let Some(technology) = edge_technology.as_deref() {
+        builder.set_last_edge_technology(technology);
+    }
     true
 }
 
@@ -13927,19 +13930,19 @@ fn parse_c4_relationship(
     let label = clean_label(arguments.get(2).map(String::as_str));
     let technology = clean_label(arguments.get(3).map(String::as_str));
     let description = clean_label(arguments.get(4).map(String::as_str));
-    let combined_label = match (label, technology, description) {
-        (Some(label), Some(technology), Some(description)) => {
-            Some(format!("{label} [{technology}] - {description}"))
-        }
-        (Some(label), Some(technology), None) => Some(format!("{label} [{technology}]")),
-        (Some(label), None, Some(description)) => Some(format!("{label} - {description}")),
-        (Some(label), None, None) => Some(label),
-        (None, Some(technology), Some(description)) => {
-            Some(format!("[{technology}] - {description}"))
-        }
-        (None, Some(technology), None) => Some(format!("[{technology}]")),
-        (None, None, Some(description)) => Some(description),
-        (None, None, None) => None,
+    // ⚠️ THE TECHNOLOGY LEAVES THE LABEL — see `IrEdgeExtras::technology` and the fast path in
+    // `parse_c4_fast_rel`, which this stays in lockstep with. mermaid's `drawRels` draws the label
+    // and then `"[" + techn + "]"` as its own italic text one row lower; folding them into
+    // `Uses [HTTPS]` produced a run neither engine draws.
+    //
+    // The DESCRIPTION is deliberately left joined. mermaid's relationship drawer emits only the
+    // label and the technology, so there is no measured reference for a third row here, and
+    // inventing one would be a guess dressed as parity.
+    let combined_label = match (label, description) {
+        (Some(label), Some(description)) => Some(format!("{label} - {description}")),
+        (Some(label), None) => Some(label),
+        (None, Some(description)) => Some(description),
+        (None, None) => None,
     };
 
     let Some(from_node) = builder.intern_node(&from_id, Some(&from_id), NodeShape::Rect, span)
@@ -13969,6 +13972,9 @@ fn parse_c4_relationship(
         combined_label.as_deref(),
         span,
     );
+    if let Some(technology) = technology.as_deref() {
+        builder.set_last_edge_technology(technology);
+    }
     true
 }
 
@@ -18412,7 +18418,17 @@ Rel(customer, core, "Uses", "HTTPS")"#,
             .label
             .and_then(|label_id| parsed.ir.labels.get(label_id.0))
             .map(|label| label.text.as_str());
-        assert_eq!(edge_label, Some("Uses [HTTPS]"));
+        // The technology is no longer fused into the label: mermaid draws it as a separate italic
+        // row, so it rides on the edge's extras and the label is the label alone.
+        assert_eq!(edge_label, Some("Uses"));
+        assert_eq!(
+            parsed.ir.edges[0]
+                .extras
+                .as_ref()
+                .and_then(|extras| extras.technology.as_deref()),
+            Some("HTTPS"),
+            "the technology must still reach the IR, just not inside the label"
+        );
     }
 
     #[test]

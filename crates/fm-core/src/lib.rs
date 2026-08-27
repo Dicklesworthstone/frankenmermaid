@@ -1835,6 +1835,17 @@ pub struct IrEdgeExtras {
     /// Action on a state transition (e.g., `cleanup()`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<Box<str>>,
+    /// A C4 relationship's technology, drawn as its OWN row beneath the label.
+    ///
+    /// ⚠️ A SEPARATE ROW, NOT PART OF THE LABEL. mermaid's `drawRels` emits two text elements: the
+    /// label, then `"[" + techn + "]"` on its own, one message-font-size plus five pixels lower and
+    /// in italic. We concatenated them into `Uses [HTTPS]`, a single run mermaid never draws — which
+    /// also meant the technology inherited the label's weight and position instead of its own.
+    ///
+    /// Kept out of the label text rather than split back apart in the renderer: a marker inside a
+    /// user-visible string is a thing an author can type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub technology: Option<Box<str>>,
     /// Declared source side of an architecture-beta edge: the `R` in `a:R --> L:b`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_side: Option<ArchitectureSide>,

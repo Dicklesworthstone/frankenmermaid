@@ -142,7 +142,17 @@ Rel(customer, api, "Uses", "HTTPS")"#;
         .label
         .and_then(|label_id| parse_result.ir.labels.get(label_id.0))
         .map(|label| label.text.as_str());
-    assert_eq!(edge_label, Some("Uses [HTTPS]"));
+    // The technology is drawn as its own italic row, as mermaid draws it, so it rides on the edge's
+    // extras rather than being fused into the label.
+    assert_eq!(edge_label, Some("Uses"));
+    assert_eq!(
+        parse_result.ir.edges[0]
+            .extras
+            .as_ref()
+            .and_then(|extras| extras.technology.as_deref()),
+        Some("HTTPS"),
+        "the technology must still reach the IR, just not inside the label"
+    );
 
     let layout = layout_diagram(&parse_result.ir);
     let svg = render_svg_with_config(

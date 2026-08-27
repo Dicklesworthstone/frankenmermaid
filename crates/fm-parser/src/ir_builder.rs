@@ -2478,6 +2478,21 @@ impl IrBuilder {
         }
     }
 
+    /// Record a C4 relationship's technology on the most recently pushed edge.
+    ///
+    /// Kept off the label so the renderer can draw it as the separate italic row mermaid draws.
+    pub(crate) fn set_last_edge_technology(&mut self, technology: &str) {
+        if technology.is_empty() {
+            return;
+        }
+        if let Some(edge_index) = self.ir.edges.len().checked_sub(1) {
+            self.mark_reusable_prefix_edge_dirty(edge_index);
+        }
+        if let Some(edge) = self.ir.edges.last_mut() {
+            edge.extras_mut().technology = Some(Box::from(technology));
+        }
+    }
+
     /// Set the declared architecture-beta placement sides on the most recently pushed edge.
     ///
     /// The `mark_reusable_prefix_edge_dirty` call is not decoration: every other edge mutator here

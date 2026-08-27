@@ -13496,6 +13496,15 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             && marker_start.is_none()
             && base_dasharray.is_none()
             && !label_str.contains('\n')
+            // ⚠️ THE FAST FRAGMENT DRAWS EXACTLY ONE TEXT ELEMENT, so an edge carrying a C4
+            // technology must not take it — the second row would be silently dropped and the
+            // fragment's "byte-identical to the slow path" contract would quietly stop holding.
+            // Gating here keeps the fast path's shape assumption true rather than teaching it a
+            // case it was never meant to cover.
+            && ir_edge
+                .and_then(|edge| edge.extras.as_ref())
+                .and_then(|extras| extras.technology.as_deref())
+                .is_none()
             && resolve_edge_inline_style(ir, edge_index).is_none()
             && let Some(marker_end_val) = marker_end
             && let Some(edge) = ir_edge
@@ -13666,6 +13675,32 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
                 .class("edge-label")
                 .build(),
         );
+
+        // A C4 relationship's TECHNOLOGY, drawn as its own italic row beneath the label.
+        //
+        // mermaid's `drawRels` emits two text elements, not one string: the label, then
+        // `"[" + s.techn.text + "]"` at `… + messageFontSize + 5`, with `{"font-style":"italic"}`.
+        // We used to fold it into the label as `Uses [HTTPS]`, a run neither engine ever draws, and
+        // the technology inherited the label's upright weight and position. The offset and the
+        // italic here mirror the incumbent; the brackets are added at draw time so the IR keeps the
+        // author's bare string (see `IrEdgeExtras::technology`).
+        if let Some(technology) = ir_edge
+            .and_then(|edge| edge.extras.as_ref())
+            .and_then(|extras| extras.technology.as_deref())
+        {
+            group = group.child(
+                TextBuilder::new(&format!("[{technology}]"))
+                    .x(lx)
+                    .y(start_y + label_font_size + 5.0)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                    .font_size(label_font_size)
+                    .anchor(TextAnchor::Middle)
+                    .fill(&colors.text)
+                    .class("edge-label")
+                    .build()
+                    .attr("font-style", "italic"),
+            );
+        }
 
         // Add title element for text alternatives
         if config.a11y.text_alternatives
@@ -13846,6 +13881,16 @@ fn render_edge_body_into(
         // regressed lean flowchart/state ~1% (the old `aria_labels` flag used to short-circuit here).
         && detail.show_edge_labels
         && ir_edge.is_some_and(|e| e.label.is_some())
+        // ⚠️ THE SECOND FAST PATH, GATED FOR THE SAME REASON AS THE FIRST. `write_labeled_edge_
+        // fragment_into` streams exactly one text element, so a C4 relationship carrying a
+        // technology has to fall through to the `Element` path that can draw the second row.
+        // Gating only the other fast path left this one live: the CLI agreed with the incumbent
+        // while `render_svg` silently dropped `[HTTPS]`, which is the asymmetric-sibling failure in
+        // its purest form — same fix, two writers, one of them missed.
+        && ir_edge
+            .and_then(|edge| edge.extras.as_ref())
+            .and_then(|extras| extras.technology.as_deref())
+            .is_none()
         && config.embed_theme_css
         && let Some(a11y) = uniform_a11y(&config.a11y)
         && !config.animations_enabled

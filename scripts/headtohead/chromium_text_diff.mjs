@@ -200,11 +200,19 @@ for (const [index, file] of files.entries()) {
       // for requirement and mindmap: a probe failure impersonating a total engine failure.
       const runs = [];
       for (const el of host.querySelectorAll('text, foreignObject')) {
-        // A <text> nested inside a <foreignObject> would otherwise be counted twice.
+        // A <text> nested inside a <foreignObject> — or a <foreignObject> inside another — would
+        // otherwise be counted twice.
         if (el.tagName.toLowerCase() === 'text' && el.closest('foreignObject')) continue;
+        if (el.tagName.toLowerCase() === 'foreignObject' && el.parentElement?.closest('foreignObject')) continue;
         let text;
         if (el.tagName.toLowerCase() === 'text') {
-          const spans = [...el.querySelectorAll('tspan')];
+          // LEAF TSPANS ONLY. mermaid nests them (text-outer-tspan wrapping text-inner-tspan), so
+          // collecting every descendant yields the label once per LEVEL and joins it to itself --
+          // "API Gateway API Gateway" -- which reads as a duplicated-label defect and is this reader
+          // counting the same text twice. A leaf is a real drawn line; a wrapper is not. Same shape
+          // as the nested-div trap below.
+          // NOTE: no backticks in this comment. It lives inside a template literal.
+          const spans = [...el.querySelectorAll('tspan')].filter((t) => !t.querySelector('tspan'));
           text = (spans.length > 0 ? spans.map((t) => t.textContent).join('\\n') : el.textContent);
         } else {
           // ⚠️ DO NOT COLLECT NESTED ELEMENTS SEPARATELY. An HTML label is a div wrapping a span
