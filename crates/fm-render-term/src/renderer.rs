@@ -158,6 +158,96 @@ const fn edge_marker_ends(arrow: ArrowType) -> (bool, bool) {
     }
 }
 
+/// Cell rows a C4 boundary's caption needs beyond its border: the label row and the bracketed
+/// type row (bd-c23yq).
+///
+/// TWO, and only for a boundary that HAS a type. mermaid draws a boundary as label-then-type and
+/// both the SVG and canvas arms do; the terminal drew only the label because there was nowhere to
+/// put the second row.
+const C4_CAPTION_ROWS: usize = 2;
+
+/// One braille cell is two sub-pixels wide and FOUR tall, so a cell row is four canvas rows.
+const CANVAS_ROWS_PER_CELL: usize = 4;
+
+/// How far, in CELL rows, a node must be pushed down to clear the caption of the C4 boundary it
+/// sits in — and how much taller that boundary must be drawn so the push costs it no content.
+///
+/// ⚠️ CELL SPACE, NOT PIXELS, and that is the whole reason two earlier attempts failed. This
+/// surface scales the diagram to fit its row count, so growing a box upstream is cancelled by the
+/// scale it induces. The reservation therefore has to be applied where the rows actually exist.
+///
+/// ⚠️ THE PUSH IS `1 + CAPTION_ROWS`, NOT `CAPTION_ROWS`. A contained node's box top currently
+/// lands on the SAME cell row as its boundary's, so the caption has to clear the node's own top
+/// BORDER as well as the rows it needs. Measured: a two-row push put `[SYSTEM]` exactly on that
+/// border and the blank-cell guard refused it, which is the same symptom the first attempt at this
+/// bead recorded and attributed to the overlay instead.
+fn c4_caption_push(ir: &MermaidDiagramIr, cluster: &fm_core::IrCluster) -> usize {
+    let _ = ir;
+    if cluster.c4_boundary_type.is_some() {
+        1 + C4_CAPTION_ROWS
+    } else {
+        0
+    }
+}
+
+/// The push that applies to each node index: the SUM over every captioned boundary containing it.
+///
+/// ⚠️ SUM, NOT MAX. `IrCluster::members` is transitive, so a node two boundaries deep appears in
+/// both member lists — and both captions are drawn above it, so it must clear both. Taking the max
+/// was tried and measured: with nested boundaries the inner `Core` and `[SYSTEM]` had nowhere to go
+/// and only the outer `[ENTERPRISE]` appeared.
+fn c4_node_pushes(ir: &MermaidDiagramIr) -> std::collections::HashMap<usize, usize> {
+    let mut pushes: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for cluster in &ir.clusters {
+        let push = c4_caption_push(ir, cluster);
+        if push == 0 {
+            continue;
+        }
+        for member in &cluster.members {
+            *pushes.entry(member.0).or_insert(0) += push;
+        }
+    }
+    pushes
+}
+
+/// The push that applies to each laid-out cluster box: the sum over its captioned ANCESTORS.
+///
+/// ⚠️ ANCESTRY IS INFERRED FROM GEOMETRY, because `IrCluster` carries no parent. A boundary drawn
+/// strictly inside another is nested in it, which is exactly what the layout has already decided by
+/// placing it there. Strict containment on both axes, so a boundary is never treated as its own
+/// ancestor and two side-by-side boundaries never nest.
+fn c4_cluster_pushes(
+    ir: &MermaidDiagramIr,
+    clusters: &[fm_layout::LayoutClusterBox],
+) -> std::collections::HashMap<usize, usize> {
+    let mut pushes: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for (index, inner) in clusters.iter().enumerate() {
+        let mut total = 0_usize;
+        for (other, outer) in clusters.iter().enumerate() {
+            if other == index {
+                continue;
+            }
+            let contains = outer.bounds.x <= inner.bounds.x
+                && outer.bounds.y <= inner.bounds.y
+                && outer.bounds.x + outer.bounds.width >= inner.bounds.x + inner.bounds.width
+                && outer.bounds.y + outer.bounds.height >= inner.bounds.y + inner.bounds.height
+                && (outer.bounds.width > inner.bounds.width
+                    || outer.bounds.height > inner.bounds.height);
+            if !contains {
+                continue;
+            }
+            total += ir
+                .clusters
+                .get(outer.cluster_index)
+                .map_or(0, |cluster| c4_caption_push(ir, cluster));
+        }
+        if total > 0 {
+            pushes.insert(index, total);
+        }
+    }
+    pushes
+}
+
 impl TermRenderer {
     /// Create a new renderer with resolved configuration.
     #[must_use]
@@ -304,16 +394,27 @@ impl TermRenderer {
         let padding_x = self.config.padding * mult_x;
         let padding_y = self.config.padding * mult_y;
 
+        // C4 boundary caption reservations, in cell rows (bd-c23yq). Empty for every diagram
+        // that has no captioned boundary, so every other family draws exactly as before.
+        let caption_pushes = c4_node_pushes(ir);
+
         // Render clusters.
         if self.config.show_clusters {
-            for cluster_box in &layout.clusters {
+            let ancestor_pushes = c4_cluster_pushes(ir, &layout.clusters);
+            for (index, cluster_box) in layout.clusters.iter().enumerate() {
+                let own = ir
+                    .clusters
+                    .get(cluster_box.cluster_index)
+                    .map_or(0, |cluster| c4_caption_push(ir, cluster));
+                let inherited = ancestor_pushes.get(&index).copied().unwrap_or(0);
                 self.render_cluster_canvas(
                     &mut canvas,
                     cluster_box,
                     pixel_scale_x,
                     pixel_scale_y,
                     padding_x,
-                    padding_y,
+                    padding_y + inherited * CANVAS_ROWS_PER_CELL,
+                    own,
                 );
             }
         }
@@ -621,9 +722,14 @@ impl TermRenderer {
                 pixel_scale_y,
                 padding_x,
                 padding_y,
+                caption_pushes
+                    .get(&node_box.node_index)
+                    .copied()
+                    .unwrap_or(0),
             );
         }
         for node_box in &layout.extensions.sequence_mirror_headers {
+            // Sequence mirror headers are never inside a C4 boundary, so no push applies.
             self.render_node_canvas(
                 &mut canvas,
                 ir,
@@ -632,6 +738,7 @@ impl TermRenderer {
                 pixel_scale_y,
                 padding_x,
                 padding_y,
+                0,
             );
         }
 
@@ -1286,6 +1393,7 @@ impl TermRenderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_cluster_canvas(
         &self,
         canvas: &mut Canvas,
@@ -1294,11 +1402,15 @@ impl TermRenderer {
         scale_y: f32,
         padding_x: usize,
         padding_y: usize,
+        // Cell rows this boundary's caption reserves, which it must also GROW BY so the push
+        // applied to its members costs it no content (bd-c23yq).
+        caption_push: usize,
     ) {
         let x = (cluster_box.bounds.x * scale_x) as usize + padding_x;
         let y = (cluster_box.bounds.y * scale_y) as usize + padding_y;
         let w = (cluster_box.bounds.width * scale_x) as usize;
-        let h = (cluster_box.bounds.height * scale_y) as usize;
+        let h =
+            (cluster_box.bounds.height * scale_y) as usize + caption_push * CANVAS_ROWS_PER_CELL;
 
         if w > 2 && h > 2 {
             canvas.draw_rect(x, y, w, h);
@@ -1333,6 +1445,10 @@ impl TermRenderer {
         scale_y: f32,
         padding_x: usize,
         padding_y: usize,
+        // Cell rows this node is pushed down to clear its C4 boundary's caption (bd-c23yq). Zero
+        // for every node that is not inside a captioned boundary, which is every node in every
+        // other diagram type — so nothing else moves.
+        caption_push: usize,
     ) {
         let ir_node = ir.nodes.get(node_box.node_index);
         if ir_node.is_some_and(is_block_beta_space_node) {
@@ -1340,8 +1456,16 @@ impl TermRenderer {
         }
 
         let x = (node_box.bounds.x * scale_x) as usize + padding_x;
-        let y = (node_box.bounds.y * scale_y) as usize + padding_y;
+        // Pushed in CANVAS rows, four per cell row, so the shift lands on a cell boundary and the
+        // node's border does not straddle two rows.
+        let y = (node_box.bounds.y * scale_y) as usize
+            + padding_y
+            + caption_push * CANVAS_ROWS_PER_CELL;
         let w = (node_box.bounds.width * scale_x) as usize;
+        // Height is NOT reduced by the push. Shrinking it was tried and measured: the node's own
+        // content rows stop fitting `max_content_row` and `Alice` / `<<person>>` vanished from the
+        // output entirely — a caption bought with the contained content is not a fix. The boundary
+        // grows instead, below.
         let h = (node_box.bounds.height * scale_y) as usize;
 
         let shape = ir_node.map(|n| n.shape).unwrap_or(NodeShape::Rect);
@@ -2032,7 +2156,12 @@ impl TermRenderer {
         // a nested cluster's border — a name that overwrote the content it names is a worse outcome
         // than the missing name this fixes.
         if self.config.show_clusters {
-            for cluster_box in &layout.clusters {
+            // The same ancestor reservation the canvas pass applied, so a nested boundary's caption
+            // is written at the row its box was actually drawn at (bd-c23yq). Without it the inner
+            // `Core` and `[SYSTEM]` were written at the un-pushed row, where the blank-cell guard
+            // correctly refused them — the outer boundary's own caption was already there.
+            let overlay_ancestor_pushes = c4_cluster_pushes(ir, &layout.clusters);
+            for (cluster_order, cluster_box) in layout.clusters.iter().enumerate() {
                 let title = cluster_box
                     .title
                     .as_deref()
@@ -2048,6 +2177,10 @@ impl TermRenderer {
                     continue;
                 }
                 let (x, y, w, h) = self.bounds_to_cells(&cluster_box.bounds, scale_x, scale_y);
+                let y = y + overlay_ancestor_pushes
+                    .get(&cluster_order)
+                    .copied()
+                    .unwrap_or(0);
                 // `h < 3` has no interior row at all, and `w < 3` no room between the side borders.
                 if w < 3 || h < 3 {
                     continue;
@@ -2077,8 +2210,44 @@ impl TermRenderer {
                     lines[row][start + offset] = ch;
                 }
 
-                // ⚠️ NO C4 BOUNDARY TYPE ROW HERE, and that is a MEASURED decision recorded on
-                // bd-c23yq rather than an oversight.
+                // THE C4 BOUNDARY TYPE, on its own row beneath the label (bd-c23yq).
+                //
+                // mermaid draws a boundary as label-then-type and both the SVG and canvas arms do.
+                // The terminal could not, because a contained node's box began on the very row the
+                // type needed. It now begins `C4_CAPTION_ROWS + 1` rows lower — the `+ 1` clears the
+                // node's own top border, which a two-row reservation measurably did not and which
+                // is why the first attempt at this concluded the row was unreachable.
+                //
+                // Still written under the blank-cell guard: if anything did reach this row the type
+                // yields, because a type that overwrote a node border would trade one piece of
+                // dropped content for another.
+                if let Some(kind) = ir
+                    .clusters
+                    .get(cluster_box.cluster_index)
+                    .and_then(|cluster| cluster.c4_boundary_type.as_deref())
+                {
+                    let type_row = row + 1;
+                    let type_text: String = format!("[{kind}]")
+                        .chars()
+                        .take(w.saturating_sub(2))
+                        .collect();
+                    if type_row < lines.len() && !type_text.is_empty() {
+                        let free = type_text.chars().enumerate().all(|(offset, _)| {
+                            let col = start + offset;
+                            col < cell_width
+                                && lines[type_row]
+                                    .get(col)
+                                    .is_some_and(|cell| *cell == ' ' || *cell == '\u{2800}')
+                        });
+                        if free {
+                            for (offset, ch) in type_text.chars().enumerate() {
+                                lines[type_row][start + offset] = ch;
+                            }
+                        }
+                    }
+                }
+
+                // ⚠️ HISTORY, kept because it records two measured dead ends and their causes.
                 //
                 // mermaid draws a boundary as two rows (label, then its bracketed type) and both the
                 // SVG and canvas arms do the same. TWO attempts at the terminal twin were written,
@@ -2124,8 +2293,15 @@ impl TermRenderer {
         };
 
         // Overlay node labels.
+        // Same reservation the canvas pass applied, so the text follows the box it belongs to
+        // rather than staying where the box used to be (bd-c23yq).
+        let overlay_caption_pushes = c4_node_pushes(ir);
         for node_box in &layout.nodes {
             let (x, y, w, h) = self.bounds_to_cells(&node_box.bounds, scale_x, scale_y);
+            let y = y + overlay_caption_pushes
+                .get(&node_box.node_index)
+                .copied()
+                .unwrap_or(0);
             let ir_node = ir.nodes.get(node_box.node_index);
 
             if ir_node.is_some_and(is_block_beta_space_node) {
