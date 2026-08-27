@@ -321,7 +321,9 @@ fn stereotype_requirement_and_c4_reach_the_canvas() {
         "the C4 description never reached the canvas: {c4:?}"
     );
     assert!(
-        c4.iter().any(|t| t.contains("Person")),
+        // mermaid stores and draws the raw type token, so the stereotype is `<<person>>` — checking
+        // for the capitalised macro name would pass on a renderer that echoed the author's spelling.
+        c4.iter().any(|t| t.contains("<<person>>")),
         "the C4 element type never reached the canvas: {c4:?}"
     );
 }

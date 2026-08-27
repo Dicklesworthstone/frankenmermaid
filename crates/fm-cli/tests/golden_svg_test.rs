@@ -3042,11 +3042,11 @@ fn path_extent_parses_absolute_commands_and_refuses_the_rest() {
 ///
 /// `node_centres` cannot serve these guards, and the reason is the trap this file keeps hitting. It
 /// keys a node on its first non-empty text run, and a requirement node's first run is the type header
-/// `«requirement»`, not the name — so looking up "AuthReq" through it would report
+/// `<<Requirement>>`, not the name — so looking up "AuthReq" through it would report
 /// "AuthReq not rendered". That is absence standing in for a key mismatch, it reads exactly like a
 /// layout defect, and it is not one. Node groups carry `data-id="AuthReq"` / `data-id="user"`, the
 /// name AS DECLARED IN THE SOURCE, so key on that instead. C4 uses the same reader for the same
-/// reason: a C4 node's first run is `<<Person>>`, not its alias.
+/// reason: a C4 node's first run is `<<person>>`, not its alias.
 ///
 /// Everything this cannot read is a hard error naming the group: a group with no `data-id`, no
 /// `<rect>`, or a `<text>` whose content or `font-size` cannot be extracted. A guard that silently

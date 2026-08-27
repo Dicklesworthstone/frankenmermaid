@@ -13630,7 +13630,11 @@ fn parse_c4_fast_context_call(
     if let Some(arguments) = c4_fast_arguments(line, "Person") {
         return parse_c4_fast_node(
             arguments,
-            "Person",
+            // ⚠️ ASYMMETRIC SIBLING. This fast path and `c4_node_meta` below both decide the type
+            // string, so both have to carry mermaid's spelling or the answer depends on which path
+            // a line happens to take. `c4_fast_arguments` requires `(` immediately after the name,
+            // so `Person_Ext(` cannot reach here — the variants all fall through to the table.
+            "person",
             NodeShape::Rounded,
             &["c4", "c4-person"],
             span,
@@ -13642,7 +13646,7 @@ fn parse_c4_fast_context_call(
     if let Some(arguments) = c4_fast_arguments(line, "System") {
         return parse_c4_fast_node(
             arguments,
-            "System",
+            "system",
             NodeShape::Rect,
             &["c4", "c4-system"],
             span,
@@ -13841,14 +13845,36 @@ fn c4_node_classes(function_name: &str) -> &'static [&'static str] {
 }
 
 fn c4_node_meta(function_name: &str, arguments: &[String]) -> IrC4NodeMeta {
+    // ⚠️ THE VARIANT IS THE INFORMATION, and it used to be thrown away here. All six System
+    // spellings collapsed to `"System"`, so `System_Ext(email, …)` and `System(web, …)` rendered
+    // IDENTICALLY — the external boundary, the database and the queue simply vanished. mermaid keeps
+    // twenty distinct strings and draws each one verbatim: its renderer is
+    // `.text("<<" + t.typeC4Shape.text + ">>")`, and its grammar calls
+    // `addPersonOrSystem("external_system", …)` for `System_Ext`.
+    //
+    // The technology/description ARGUMENT INDICES still key off the base family — those are a
+    // property of the macro's arity, not of the variant — which is why the two are separated below.
     let (element_type, technology_index, description_index) = match function_name {
-        "Person" | "Person_Ext" => ("Person", None, Some(2)),
-        "System" | "System_Ext" | "SystemDb" | "SystemDb_Ext" | "SystemQueue"
-        | "SystemQueue_Ext" => ("System", None, Some(2)),
-        "Container" | "Container_Ext" | "ContainerDb" | "ContainerDb_Ext" | "ContainerQueue"
-        | "ContainerQueue_Ext" => ("Container", Some(2), Some(3)),
-        "Component" | "Component_Ext" | "ComponentDb" | "ComponentDb_Ext" | "ComponentQueue"
-        | "ComponentQueue_Ext" => ("Component", Some(2), Some(3)),
+        "Person" => ("person", None, Some(2)),
+        "Person_Ext" => ("external_person", None, Some(2)),
+        "System" => ("system", None, Some(2)),
+        "System_Ext" => ("external_system", None, Some(2)),
+        "SystemDb" => ("system_db", None, Some(2)),
+        "SystemDb_Ext" => ("external_system_db", None, Some(2)),
+        "SystemQueue" => ("system_queue", None, Some(2)),
+        "SystemQueue_Ext" => ("external_system_queue", None, Some(2)),
+        "Container" => ("container", Some(2), Some(3)),
+        "Container_Ext" => ("external_container", Some(2), Some(3)),
+        "ContainerDb" => ("container_db", Some(2), Some(3)),
+        "ContainerDb_Ext" => ("external_container_db", Some(2), Some(3)),
+        "ContainerQueue" => ("container_queue", Some(2), Some(3)),
+        "ContainerQueue_Ext" => ("external_container_queue", Some(2), Some(3)),
+        "Component" => ("component", Some(2), Some(3)),
+        "Component_Ext" => ("external_component", Some(2), Some(3)),
+        "ComponentDb" => ("component_db", Some(2), Some(3)),
+        "ComponentDb_Ext" => ("external_component_db", Some(2), Some(3)),
+        "ComponentQueue" => ("component_queue", Some(2), Some(3)),
+        "ComponentQueue_Ext" => ("external_component_queue", Some(2), Some(3)),
         _ => ("C4", None, None),
     };
 
@@ -18372,7 +18398,8 @@ Container(api, "Payments API", "Rust", "Handles payment requests")"#,
             .find(|node| node.id == "api")
             .expect("api node");
         let c4_meta = api.c4_meta.as_ref().expect("c4 metadata");
-        assert_eq!(c4_meta.element_type, "Container");
+        // mermaid's own stored type string, which is what its renderer draws verbatim.
+        assert_eq!(c4_meta.element_type, "container");
         assert_eq!(c4_meta.technology.as_deref(), Some("Rust"));
         assert_eq!(
             c4_meta.description.as_deref(),

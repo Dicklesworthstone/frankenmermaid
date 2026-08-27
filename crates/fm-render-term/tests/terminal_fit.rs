@@ -681,7 +681,8 @@ fn c4_element_details_reach_terminal_output() {
         "the description never reached the terminal:\n{out}"
     );
     assert!(
-        out.contains("Person"),
+        // `<<person>>`, mermaid's own stored token, not the capitalised macro name the author typed.
+        out.contains("<<person>>"),
         "the element type never reached the terminal:\n{out}"
     );
 }
