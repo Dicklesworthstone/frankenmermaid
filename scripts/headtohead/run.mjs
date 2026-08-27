@@ -276,6 +276,21 @@ function validExclusiveHostClaim(value) {
   );
 }
 
+// A booking reference is required for parse mode and thread sweeps, but this driver only checks
+// its syntax. Do not emit it under a name that makes a typed string look like verified ownership.
+// Agent Mail remains advisory here: an unavailable store must not turn an otherwise valid
+// measurement attempt into a harness crash, and a present store is not consulted by this process.
+function exclusiveHostClaimVerification(value) {
+  return validExclusiveHostClaim(value) ? 'format-only' : 'not-provided';
+}
+
+function exclusiveHostClaimProvenance(value) {
+  return {
+    exclusive_host_claim_reference: value,
+    exclusive_host_claim_verification: exclusiveHostClaimVerification(value),
+  };
+}
+
 /**
  * Pick the least-busy CPU. Pinning the (single-threaded) frankenmermaid runner to one quiet core
  * removes migration jitter. It is also the *conservative* choice for the comparison: mermaid keeps
@@ -1768,7 +1783,13 @@ if (has('self-test')) {
   }
   const livePowerPolicy = cpuPowerPolicy();
   const liveIsa = cpuIsa();
-  if (!validCpuPowerPolicy(livePowerPolicy) || !validCpuIsa(liveIsa)) {
+  // Self-tests exercise pure classification and serialization controls. Runtime measurements still
+  // reject incomplete live provenance below, but the test suite must not depend on the host's
+  // current governor mix before it can reach those controls.
+  if (
+    !has('self-test') &&
+    (!validCpuPowerPolicy(livePowerPolicy) || !validCpuIsa(liveIsa))
+  ) {
     throw new Error(
       `live CPU power/ISA provenance is incomplete: ` +
       `${JSON.stringify({ power_policy: livePowerPolicy, isa: liveIsa })}`,
@@ -1870,13 +1891,21 @@ if (has('self-test')) {
   ) {
     throw new Error('host-wide admission phase sequence regression');
   }
+  const arbitraryClaimProvenance = exclusiveHostClaimProvenance('trj-booking:999999999');
+  const absentClaimProvenance = exclusiveHostClaimProvenance(null);
   if (
     !validExclusiveHostClaim('trj-booking:1234') ||
     validExclusiveHostClaim('other-host:1234') ||
     validExclusiveHostClaim('trj-booking') ||
-    validExclusiveHostClaim('trj-booking:0')
+    validExclusiveHostClaim('trj-booking:0') ||
+    // A plausible but nonexistent id cannot be presented as an Agent Mail verification.
+    !['format-only'].includes(arbitraryClaimProvenance.exclusive_host_claim_verification) ||
+    !['trj-booking:999999999'].includes(arbitraryClaimProvenance.exclusive_host_claim_reference) ||
+    Object.hasOwn(arbitraryClaimProvenance, 'exclusive_host_claim') ||
+    !['not-provided'].includes(absentClaimProvenance.exclusive_host_claim_verification) ||
+    ![null].includes(absentClaimProvenance.exclusive_host_claim_reference)
   ) {
-    throw new Error('exclusive-host claim validation regression');
+    throw new Error('exclusive-host claim provenance regression');
   }
   const validThreads = {
     worker_threads: 4,
@@ -2665,7 +2694,7 @@ env.thread_sweep = threadSweep.length > 0
   ? {
       threads: threadSweep,
       local_machine_required: true,
-      exclusive_host_claim: exclusiveHostClaim,
+      ...exclusiveHostClaimProvenance(exclusiveHostClaim),
       host_wide_quiescence_required: true,
       host_wide_maximum_busy_fraction: HOST_WIDE_MAX_BUSY_FRACTION,
       host_wide_sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
@@ -2688,7 +2717,7 @@ env.thread_sweep = threadSweep.length > 0
 env.parse_admission = measurementMode === 'parse'
   ? {
       boundary: 'public_parse_validate',
-      exclusive_host_claim: exclusiveHostClaim,
+      ...exclusiveHostClaimProvenance(exclusiveHostClaim),
       host_wide_quiescence_required: true,
       host_wide_maximum_busy_fraction: HOST_WIDE_MAX_BUSY_FRACTION,
       host_wide_sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
@@ -2862,7 +2891,7 @@ function requireHostWideQuiescence(label) {
       attempt,
       observed_at: new Date().toISOString(),
       sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
-      exclusive_host_claim: exclusiveHostClaim,
+      ...exclusiveHostClaimProvenance(exclusiveHostClaim),
       requirement: 'all affinity CPUs must remain at or below the fixed busy-fraction ceiling',
       power_policy_valid: livePowerPolicyValid,
       power_policy_matches_baseline: powerPolicyMatchesBaseline,
@@ -3424,7 +3453,7 @@ function rowHostWideExclusivity(threads) {
   });
   return {
     verdict: checks.every((check) => check.verdict === 'clear') ? 'clear' : 'blocked',
-    exclusive_host_claim: exclusiveHostClaim,
+    ...exclusiveHostClaimProvenance(exclusiveHostClaim),
     maximum_busy_fraction: HOST_WIDE_MAX_BUSY_FRACTION,
     sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
     maximum_admission_attempts: HOST_WIDE_QUIET_MAX_ATTEMPTS,
@@ -4007,8 +4036,10 @@ const hostWideExclusivity = {
     finalHostWideChecks.every((check) => check?.verdict === 'clear')
       ? 'clear'
       : 'blocked',
-  exclusive_host_claim: exclusiveHostClaim,
-  claim_reference_format: threadSweep.length > 0 ? 'trj-booking:<Agent-Mail-CLAIM-message-id>' : null,
+  ...exclusiveHostClaimProvenance(exclusiveHostClaim),
+  claim_reference_format: exclusiveHostClaim === null
+    ? null
+    : 'trj-booking:<Agent-Mail-CLAIM-message-id>',
   complete_host_cpuset: env.affinity_cpus.length === env.logical_threads,
   maximum_busy_fraction: HOST_WIDE_MAX_BUSY_FRACTION,
   sample_ms: HOST_WIDE_QUIET_SAMPLE_MS,
@@ -4251,7 +4282,8 @@ if (summary.thread_sweep) {
   console.log(
     `  host-wide exclusivity: ${summary.thread_sweep.host_wide_exclusivity.verdict} ` +
     `(${summary.thread_sweep.host_wide_exclusivity.checks.length} pre-phase checks, ` +
-    `claim ${summary.thread_sweep.host_wide_exclusivity.exclusive_host_claim})`,
+    `claim ${summary.thread_sweep.host_wide_exclusivity.exclusive_host_claim_reference} ` +
+      `(${summary.thread_sweep.host_wide_exclusivity.exclusive_host_claim_verification}))`,
   );
   console.log('');
 }
