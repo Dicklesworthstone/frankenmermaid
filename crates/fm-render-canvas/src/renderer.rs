@@ -2567,7 +2567,6 @@ impl Canvas2dRenderer {
                 // the comment when present, so all three renderers say the same thing.
                 let line_h = self.config.font_size * 1.3;
                 let member_font = self.config.font_size * 0.9;
-                let padding = 6.0;
 
                 ctx.set_fill_style(label_fill);
                 ctx.set_text_baseline(TextBaseline::Middle);
@@ -2598,23 +2597,92 @@ impl Canvas2dRenderer {
                 self.draw_calls += 1;
                 cursor_y += member_font * 0.5;
 
+                ctx.set_text_align(TextAlign::Left);
+                // ER attribute cells at shared COLUMN offsets (bd-jbrzc), not one fused run.
+                //
+                // ⚠️ THE BOX IS SIZED FROM THE COLUMN GEOMETRY. fm-layout measures an entity with
+                // `fm_core::er_cell_columns`, so a surface drawing fused rows is measured by a rule
+                // it does not follow: the reserved width goes unused and the fields do not line up,
+                // while the SVG surface — sized by the same rule — aligns them. Measured on the
+                // skew fixture `T { verylongtypename a / t verylongattributename PK }`: SVG puts
+                // both second cells at x=195.39, the canvas put them wherever the first cell
+                // happened to end.
+                //
+                // ⚠️ THE OFFSETS COME FROM `fm_core::er_cell_columns`, NOT FROM LOCAL ARITHMETIC.
+                // That helper exists precisely so layout and every renderer agree; a hand-rolled
+                // copy here is how a cell ends up drawn outside the box that was sized for it.
+                // ⚠️ THE ATTRIBUTE FONT IS `* 0.8`, NOT THIS SURFACE'S USUAL `* 0.9`, and the
+                // difference is not cosmetic. fm-layout sizes the entity box with
+                // `attr_font_size = node_font_size * 0.8` (floored at 8.0) and fm-render-svg draws
+                // at the same, so a canvas measuring its columns at 0.9 builds a table ~12% wider
+                // than the box it must fit in. Measured on the skew fixture the moment the columns
+                // went in: `PK` landed at x=297.9 against a box ending at 257.68 — the same
+                // sixty-pixel spill fm-layout's own comment records from the SVG side, reproduced
+                // here because the fused row had been hiding the font disagreement all along (a
+                // fused row is never wider than the columns, so it fits a box it does not match).
+                let metrics = self.config.font_metrics();
+                let metrics_size = metrics.font_size();
+                // ⚠️ DERIVED FROM `metrics.font_size()`, NOT FROM `self.config.font_size`. fm-layout
+                // sizes the box with `node_font_size = metrics.font_size()`, so measuring from a
+                // different base produces a different scale and therefore different columns — which
+                // is what put `PK` 13px outside the box on the first attempt at this fix.
+                let attr_font = (f64::from(metrics_size) * 0.8).max(f64::from(ER_ATTR_FONT_FLOOR));
+                let scale = if metrics_size > 0.0 {
+                    (attr_font / f64::from(metrics_size)) as f32
+                } else {
+                    1.0
+                };
+                let (cell_offsets, _right_edge) = fm_core::er_cell_columns(
+                    &node.members,
+                    &metrics,
+                    scale,
+                    fm_core::er_cell_gutter(attr_font as f32),
+                );
+                // ⚠️ THE TEXT IS DRAWN AT THE FONT THE COLUMNS WERE MEASURED AT. This block used to
+                // set the class-compartment member font (`config.font_size * 0.9` = 12.6) while the
+                // columns are built at the ER attribute font (`* 0.8` = 11.2) — so every glyph was
+                // ~12% wider than the column reserved for it and `verylongtypename` overran its own
+                // gutter into the name column. Invisible while the row was one fused run, because a
+                // fused run has no columns to overrun. A declared font override still wins, as it
+                // does everywhere else on this surface.
                 match declared_member_font.as_deref() {
                     Some(font) => ctx.set_font(font),
-                    None => ctx.set_font(class_fonts.1.as_str()),
+                    None => ctx.set_font(&format!("{attr_font}px {}", self.config.font_family)),
                 }
-                ctx.set_text_align(TextAlign::Left);
                 for attr in &node.members {
                     if cursor_y > y + h - member_font * 0.5 {
                         // Out of box: stop rather than draw rows past the entity.
                         break;
                     }
-                    // One composition, shared with both SVG writers, the terminal and the layout
-                    // width helper: `IrEntityAttribute::display_row`. Five hand-rolled copies had
-                    // already drifted once over whether the comment is drawn.
-                    let text = attr.display_row();
-                    ctx.fill_text(&text, x + padding, cursor_y);
-                    self.draw_calls += 1;
-                    *labels_drawn += 1;
+                    // Same four cells, in the same order, as both SVG writers use.
+                    let key = attr.key_cell();
+                    let cells: [&str; 4] = [
+                        attr.data_type.as_str(),
+                        attr.name.as_str(),
+                        key.as_ref(),
+                        attr.comment.as_deref().unwrap_or(""),
+                    ];
+                    let mut drew_any = false;
+                    for (index, cell) in cells.iter().enumerate() {
+                        if cell.is_empty() {
+                            continue;
+                        }
+                        // ⚠️ ANCHORED AT `x + 8.0`, NOT `x + padding`. fm-layout reserves exactly
+                        // eight pixels on each side (`row_width + 16.0`) and both SVG writers draw
+                        // from `x + 8.0`; starting two pixels earlier would shift every column and
+                        // leave ten on the right, which is the kind of slack that hides a real
+                        // overflow until the widest entity comes along.
+                        ctx.fill_text(
+                            cell,
+                            x + ER_ROW_PADDING + f64::from(cell_offsets[index]),
+                            cursor_y,
+                        );
+                        self.draw_calls += 1;
+                        drew_any = true;
+                    }
+                    if drew_any {
+                        *labels_drawn += 1;
+                    }
                     cursor_y += member_font * 1.2;
                 }
             } else if let Some((node, meta)) =
@@ -2923,6 +2991,17 @@ impl Canvas2dRenderer {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Left inset of an ER attribute row, mirroring the `row_width + 16.0` fm-layout reserves and the
+/// `x + 8.0` both SVG writers draw from.
+const ER_ROW_PADDING: f64 = 8.0;
+
+/// Lower bound on the ER attribute font size, mirroring `fm-layout`'s `ER_ATTR_FONT_FLOOR`.
+///
+/// Duplicated as a literal rather than imported because fm-layout keeps it private; the value is
+/// load-bearing in one direction only — it raises the size, which widens the box, so a disagreement
+/// here over-sizes rather than spills.
+const ER_ATTR_FONT_FLOOR: f32 = 8.0;
+
 fn draw_marker_primitive<C: Canvas2dContext>(
     ctx: &mut C,
     marker: MarkerKind,

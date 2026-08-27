@@ -3013,16 +3013,96 @@ impl TermRenderer {
             row += 1;
         }
 
+        // ER attribute cells at shared CHARACTER columns when they fit, fused otherwise (bd-jbrzc).
+        //
+        // ⚠️ CHARACTER COLUMNS, NOT `fm_core::er_cell_columns`. That helper returns PIXEL offsets
+        // measured from proportional font metrics, which is the right answer for SVG and canvas and
+        // a meaningless one on a grid where every glyph occupies exactly one cell. Reusing it here
+        // would be sharing a name rather than a rule.
+        //
+        // ⚠️ AND THE TWO MEASURES HAVE NO GUARANTEED RELATIONSHIP. The box's cell width comes from
+        // scaling a PIXEL width that was itself sized from pixel columns; character columns count
+        // characters. Text made of wide glyphs measures large in pixels and small in characters,
+        // and narrow glyphs the reverse — so a document exists for which aligned columns do not fit
+        // a box that the pixel columns fit fine. Hence the guard: align when there is room, and
+        // otherwise draw exactly what this surface drew before, which shows the start of every
+        // field rather than a truncated first column. Measured on the bead's skew fixture
+        // `T { verylongtypename a / t verylongattributename PK }`: 41 columns needed against 54
+        // available, so that one aligns.
+        let (offsets, columns_width) = Self::er_character_columns(&node.members);
+        let columns_fit = columns_width <= inner_w;
+
         for attr in &node.members {
             if row >= max_content_row {
                 // Out of box: stop rather than spill rows into whatever is laid out below.
                 break;
             }
-            // Shared composition — see `IrEntityAttribute::display_row`.
-            let text = attr.display_row();
-            write_text(grid, row, x + 1, &self.truncate_label(&text), inner_w);
+            if columns_fit {
+                let key = attr.key_cell();
+                let cells: [&str; 4] = [
+                    attr.data_type.as_str(),
+                    attr.name.as_str(),
+                    key.as_ref(),
+                    attr.comment.as_deref().unwrap_or(""),
+                ];
+                for (index, cell) in cells.iter().enumerate() {
+                    if cell.is_empty() {
+                        continue;
+                    }
+                    write_text(
+                        grid,
+                        row,
+                        x + 1 + offsets[index],
+                        cell,
+                        inner_w.saturating_sub(offsets[index]),
+                    );
+                }
+            } else {
+                // Shared composition — see `IrEntityAttribute::display_row`.
+                let text = attr.display_row();
+                write_text(grid, row, x + 1, &self.truncate_label(&text), inner_w);
+            }
             row += 1;
         }
+    }
+
+    /// Character-cell column offsets for an ER entity's attributes, and the total width they need.
+    ///
+    /// ⚠️ CHARACTERS, NOT `fm_core::er_cell_columns`. That helper returns PIXEL offsets from
+    /// proportional font metrics — the right answer for SVG and canvas, and a meaningless one on a grid
+    /// where every glyph occupies exactly one cell. Reusing it here would share a name rather than a
+    /// rule.
+    ///
+    /// Extracted from the drawing loop so the fits-or-fuse decision can be tested directly. The
+    /// fallback it feeds could not be reached from any rendered fixture tried — narrow glyphs, wide
+    /// glyphs, long comments, and six attributes all fit — so a rendering test cannot cover it, and an
+    /// untestable branch is exactly what this bead warns against shipping.
+    pub(crate) fn er_character_columns(
+        members: &[fm_core::IrEntityAttribute],
+    ) -> ([usize; 4], usize) {
+        let mut widths = [0_usize; 4];
+        for attr in members {
+            let key = attr.key_cell();
+            let cells: [&str; 4] = [
+                attr.data_type.as_str(),
+                attr.name.as_str(),
+                key.as_ref(),
+                attr.comment.as_deref().unwrap_or(""),
+            ];
+            for (index, cell) in cells.iter().enumerate() {
+                widths[index] = widths[index].max(cell.chars().count());
+            }
+        }
+        let mut offsets = [0_usize; 4];
+        let mut cursor = 0_usize;
+        for index in 0..4 {
+            offsets[index] = cursor;
+            if widths[index] > 0 {
+                cursor += widths[index] + 1;
+            }
+        }
+        // `cursor` overshoots by one trailing gutter, which no cell occupies.
+        (offsets, cursor.saturating_sub(1))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3772,6 +3852,90 @@ fn render_quadrant_cell(
         if x < cell_width && y < cell_height {
             buffer.set(x, y, point_chars[i % point_chars.len()]);
         }
+    }
+}
+
+#[cfg(test)]
+mod er_character_column_tests {
+    use super::TermRenderer;
+
+    /// `pk` selects the two-character `PK` cell; anything else leaves the key column empty, which
+    /// is what `key_cell` returns for `IrAttributeKey::None`.
+    fn attr(
+        data_type: &str,
+        name: &str,
+        pk: bool,
+        comment: Option<&str>,
+    ) -> fm_core::IrEntityAttribute {
+        fm_core::IrEntityAttribute {
+            data_type: data_type.to_string(),
+            name: name.to_string(),
+            keys: if pk {
+                vec![fm_core::IrAttributeKey::Pk]
+            } else {
+                Vec::new()
+            },
+            comment: comment.map(str::to_string),
+        }
+    }
+
+    /// The widths come from the WIDEST cell in each column across every attribute, which is the
+    /// whole reason a skewed entity lays out wider than any single row measures.
+    #[test]
+    fn columns_take_the_widest_cell_in_each_column() {
+        let members = [
+            attr("verylongtypename", "a", false, None),
+            attr("t", "verylongattributename", true, None),
+        ];
+        let (offsets, width) = TermRenderer::er_character_columns(&members);
+        // type 16, gutter 1, name 21, gutter 1, key 2 = 41 columns.
+        assert_eq!(offsets, [0, 17, 39, 42]);
+        assert_eq!(width, 41);
+    }
+
+    /// An empty column takes no space and no gutter — otherwise every entity without comments
+    /// would reserve a comment column and the fits-or-fuse decision would be made on phantom width.
+    #[test]
+    fn an_empty_column_costs_nothing() {
+        let members = [attr("string", "name", false, None)];
+        let (offsets, width) = TermRenderer::er_character_columns(&members);
+        assert_eq!(offsets[0], 0);
+        assert_eq!(
+            offsets[1], 7,
+            "the name column should follow `string` plus one gutter"
+        );
+        // No key and no comment, so both later columns sit at the end and add nothing.
+        assert_eq!(width, 6 + 1 + 4, "an absent key or comment widened the row");
+    }
+
+    /// THE FALLBACK'S ARITHMETIC, which no rendered fixture reaches.
+    ///
+    /// Narrow glyphs, wide glyphs, long comments and six attributes all FIT the box on this
+    /// surface, so the fused branch cannot be exercised through a render — and an untested branch
+    /// is exactly what this bead warns against shipping. What the branch keys on is this width
+    /// against the box's interior, so the width is what gets tested directly.
+    #[test]
+    fn a_wide_entity_reports_a_width_that_can_exceed_a_box() {
+        let members = [attr(
+            &"t".repeat(40),
+            &"n".repeat(40),
+            true,
+            Some(&"c".repeat(40)),
+        )];
+        let (_offsets, width) = TermRenderer::er_character_columns(&members);
+        assert_eq!(width, 40 + 1 + 40 + 1 + 2 + 1 + 40);
+        assert!(
+            width > 80,
+            "a 123-column entity must report more than any ordinary terminal interior"
+        );
+    }
+
+    /// An entity with no attributes reports no width, so the decision is not made on a stray gutter.
+    #[test]
+    fn an_entity_with_no_attributes_has_no_width() {
+        let (offsets, width) = TermRenderer::er_character_columns(&[]);
+        assert_eq!(offsets, [0, 0, 0, 0]);
+        assert_eq!(width, 0);
     }
 }
 
