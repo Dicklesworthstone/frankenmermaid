@@ -8210,10 +8210,16 @@ fn lookup_centrality_tier(
 /// structural class like `fm-cluster-c4`. Matching mermaid's bare form on clusters while nodes stay
 /// prefixed would be a new asymmetry in place of the one being fixed.
 ///
-/// Second, MULTIPLE CLASSES ARE SPACE-SEPARATED. Measured: `class one hot,big` makes mermaid emit
-/// `<g class="cluster hot,big">` — a single comma-joined token, which is not two CSS classes and
-/// matches neither `.hot` nor `.big`. Its own node path gets that right (`node default hot big`), so
-/// this is a defect on the cluster path rather than a convention to reproduce. One marker per class.
+/// Second, AN UNRESOLVED CLASS NAME IS NOT EMITTED. mermaid's `setClass` pushes the name whether or
+/// not a `classDef` declares it; this parser warns and ignores it instead, and emitting a marker for
+/// a name it just said it ignored would contradict that warning.
+///
+/// ⚠️ AND A COMMA IS NOT A CLASS SEPARATOR HERE, which is easy to get backwards. `class one hot,big`
+/// makes mermaid emit `<g class="cluster hot,big">`, and that is NOT mermaid mis-joining two
+/// classes: its `setClass(t, r)` splits the TARGET list `t` on commas and takes `r` as one name, so
+/// that line means "apply the class named `hot,big` to `one`". No `classDef` declares it, so nothing
+/// is styled. Several classes on one cluster are written as several `class` lines, which yields
+/// `fm-cluster-user-hot fm-cluster-user-big` here and both declarations in the inline style.
 ///
 /// ⚠️ NO GENERATED CSS RULE STANDS BEHIND THESE, AND THAT IS CORRECT HERE. The node path emits
 /// `.fm-node-user-{slug} .fm-node-shape { … }` rules because the node's paint is delivered BY that
