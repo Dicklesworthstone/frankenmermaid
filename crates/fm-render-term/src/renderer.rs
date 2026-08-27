@@ -354,12 +354,13 @@ impl TermRenderer {
         }
 
         self.render_generic_diagram_title(&mut buffer.cells, cell_width, ir);
-        let output = buffer.to_output_string();
+        let mut output = buffer.to_output_string();
+        let (legend_rows, legend_width) = append_c4_legend(&mut output, ir);
 
         TermRenderResult {
             output,
-            width: cell_width,
-            height: cell_height,
+            width: cell_width.max(legend_width),
+            height: cell_height + legend_rows,
             tier: self.config.tier,
             render_mode: self.config.render_mode,
             node_count: layout.nodes.len(),
@@ -745,7 +746,7 @@ impl TermRenderer {
         // Render the canvas straight to its char grid (skipping the String the overlay would re-parse)
         // and overlay labels.
         let base_grid = canvas.render_char_grid();
-        let output = self.overlay_labels(
+        let mut output = self.overlay_labels(
             base_grid,
             ir,
             layout,
@@ -754,11 +755,12 @@ impl TermRenderer {
             scale_x,
             scale_y,
         );
+        let (legend_rows, legend_width) = append_c4_legend(&mut output, ir);
 
         TermRenderResult {
             output,
-            width: cell_width,
-            height: cell_height,
+            width: cell_width.max(legend_width),
+            height: cell_height + legend_rows,
             tier: self.config.tier,
             render_mode: self.config.render_mode,
             node_count: layout.nodes.len(),
@@ -3623,6 +3625,83 @@ fn format_terminal_treemap_value(value: f64) -> String {
         let text = format!("{value:.4}");
         text.trim_end_matches('0').trim_end_matches('.').to_string()
     }
+}
+
+/// Append the C4 legend below the fixed terminal grid.
+///
+/// Unlike SVG, a terminal renderer cannot enlarge a completed diagram grid without changing its
+/// scale and overwriting content. A footer preserves the grid exactly, remains visible at any
+/// viewport size, and reports its extra rows through [`TermRenderResult`].
+fn append_c4_legend(output: &mut String, ir: &MermaidDiagramIr) -> (usize, usize) {
+    if !terminal_c4_legend_enabled(ir) {
+        return (0, 0);
+    }
+
+    let entries = terminal_c4_legend_entries(ir);
+    let rows = entries.len() + 2;
+    let mut width = "C4 Legend".chars().count();
+    output.push_str("\n\nC4 Legend");
+    for entry in &entries {
+        width = width.max(entry.chars().count());
+        output.push('\n');
+        output.push_str(entry);
+    }
+    (rows, width)
+}
+
+fn terminal_c4_legend_enabled(ir: &MermaidDiagramIr) -> bool {
+    matches!(
+        ir.diagram_type,
+        fm_core::DiagramType::C4Context
+            | fm_core::DiagramType::C4Container
+            | fm_core::DiagramType::C4Component
+            | fm_core::DiagramType::C4Dynamic
+            | fm_core::DiagramType::C4Deployment
+    ) && ir.meta.c4_show_legend
+}
+
+fn terminal_c4_legend_entries(ir: &MermaidDiagramIr) -> Vec<&'static str> {
+    let has_class = |needle: &str| {
+        ir.nodes
+            .iter()
+            .flat_map(|node| node.classes.iter())
+            .any(|class_name| class_name == needle)
+    };
+    let has_boundary = ir.clusters.iter().any(|cluster| {
+        cluster
+            .title
+            .and_then(|label_id| ir.labels.get(label_id.0))
+            .is_some_and(|label| {
+                label.text.contains("Boundary") || label.text.contains("Deployment_Node")
+            })
+    });
+
+    let mut entries = Vec::new();
+    if has_class("c4-person") {
+        entries.push("◉ Person");
+    }
+    if has_class("c4-system") {
+        entries.push("▭ System");
+    }
+    if has_class("c4-container") {
+        entries.push("▣ Container");
+    }
+    if has_class("c4-component") {
+        entries.push("◫ Component");
+    }
+    if has_class("c4-database") {
+        entries.push("◌ Database");
+    }
+    if has_class("c4-queue") {
+        entries.push("▱ Queue");
+    }
+    if has_class("c4-external") {
+        entries.push("╌ External");
+    }
+    if has_boundary {
+        entries.push("⬚ Boundary");
+    }
+    entries
 }
 
 fn generic_terminal_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {

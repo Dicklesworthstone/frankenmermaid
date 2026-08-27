@@ -687,6 +687,69 @@ fn c4_element_details_reach_terminal_output() {
     );
 }
 
+/// `SHOW_LEGEND()` is a C4 rendering directive, not SVG-only metadata.
+///
+/// The terminal grid cannot be widened after layout without overwriting it, so the renderer
+/// exposes the legend as a footer and reports those rows in its dimensions.
+#[test]
+fn c4_show_legend_reaches_terminal_output() {
+    let ir = fm_parser::parse(
+        "C4Context\n  SHOW_LEGEND()\n  Person(customer, \"Customer\")\n  System(store, \"Store\")\n",
+    )
+    .ir;
+    assert!(
+        ir.meta.c4_show_legend,
+        "CONTROL FAILED: SHOW_LEGEND() did not reach the IR"
+    );
+
+    let result = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60);
+    assert!(
+        result.output.contains("C4 Legend"),
+        "the C4 legend heading is missing:\n{}",
+        result.output
+    );
+    for entry in ["◉ Person", "▭ System"] {
+        assert!(
+            result.output.contains(entry),
+            "the C4 legend is missing {entry:?}:\n{}",
+            result.output
+        );
+    }
+    assert_eq!(
+        result.height,
+        result.output.lines().count(),
+        "the result dimensions omit the legend footer"
+    );
+}
+
+/// `HIDE_LEGEND()` must override the C4 default rather than unconditionally emitting a footer.
+///
+/// A renderer that always appends the new legend would pass the positive case above, so this is
+/// the directive-level negative case.
+#[test]
+fn c4_hide_legend_keeps_terminal_output_legend_free() {
+    let ir = fm_parser::parse(
+        "C4Context\n  HIDE_LEGEND()\n  Person(customer, \"Customer\")\n  System(store, \"Store\")\n",
+    )
+    .ir;
+    assert!(
+        !ir.meta.c4_show_legend,
+        "CONTROL FAILED: HIDE_LEGEND() did not disable the IR flag"
+    );
+
+    let result = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60);
+    assert!(
+        !result.output.contains("C4 Legend"),
+        "the terminal rendered a legend despite HIDE_LEGEND():\n{}",
+        result.output
+    );
+    assert_eq!(
+        result.height,
+        result.output.lines().count(),
+        "the hidden legend unexpectedly changed the reported dimensions"
+    );
+}
+
 /// CONTROL: the neighbours in the same node loop still render.
 ///
 /// The C4 branch sits after the requirement branch, which sits after the ER branch. Each is gated on
