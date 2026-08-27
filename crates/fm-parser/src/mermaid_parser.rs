@@ -15079,7 +15079,24 @@ fn parse_c4_relationship(
     if let Some(technology) = technology.as_deref() {
         builder.set_last_edge_technology(technology);
     }
+    if let Some(direction) = c4_forced_relationship_direction(function_name) {
+        builder.add_warning(format!(
+            "C4 relationship `{function_name}` requests {direction} routing, but directional C4 relationship layout is not yet supported; rendered as an unconstrained relationship"
+        ));
+    }
     true
+}
+
+/// Direction macros carry a layout constraint in Mermaid's C4 grammar. We retain the relationship
+/// itself, but must name the missing constraint until the layout engine can honour it.
+fn c4_forced_relationship_direction(function_name: &str) -> Option<&'static str> {
+    match function_name {
+        "Rel_U" | "Rel_Up" => Some("upward"),
+        "Rel_D" | "Rel_Down" => Some("downward"),
+        "Rel_L" | "Rel_Left" => Some("leftward"),
+        "Rel_R" | "Rel_Right" => Some("rightward"),
+        _ => None,
+    }
 }
 
 /// `function_name` is a parameter again, and this time it is load-bearing: the macro NAMES the
@@ -22795,17 +22812,57 @@ Rel_Back(db, app, "Responds")"#,
     /// CONTROL: the SHORT forms are unchanged. They were the only ones that worked before, so a
     /// change that swapped one spelling for the other would pass the test above.
     #[test]
-    fn c4_short_form_direction_macros_still_draw_relationships() {
+fn c4_short_form_direction_macros_still_draw_relationships() {
         for macro_name in ["Rel_U", "Rel_D", "Rel_L", "Rel_R"] {
             let input = format!(
                 "C4Context\n  Person(a, \"A\")\n  System(b, \"B\")\n  {macro_name}(a, b, \"uses\")"
             );
             let parsed = parse_mermaid(&input);
             assert_eq!(parsed.ir.edges.len(), 1, "{macro_name} stopped working");
-        }
     }
+}
 
-    /// `Node(...) { … }` is mermaid's short spelling of `Deployment_Node` and must open a boundary.
+/// A forced-direction C4 relationship must not silently pretend that its direction was honoured.
+///
+/// The relationship remains useful and is retained, but the layout has no per-edge direction
+/// constraint today. A warning is therefore required until that capability exists.
+#[test]
+fn c4_forced_direction_relationships_name_the_unapplied_layout_constraint() {
+    let forced = parse_mermaid(
+        "C4Context\n  Person(a, \"A\")\n  System(b, \"B\")\n  Rel_Up(a, b, \"uses\")",
+    );
+    assert_eq!(
+        forced.ir.edges.len(),
+        1,
+        "CONTROL FAILED: the relationship itself was dropped: {:?}",
+        forced.warnings
+    );
+    assert!(
+        forced
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Rel_Up") && warning.contains("upward routing")),
+        "the unapplied forced direction was dropped in silence: {:?}",
+        forced.warnings
+    );
+
+    // Negative control: a plain relationship requests no directional layout constraint, so warning
+    // on every C4 edge would be just as misleading as silently accepting the forced form.
+    let plain = parse_mermaid(
+        "C4Context\n  Person(a, \"A\")\n  System(b, \"B\")\n  Rel(a, b, \"uses\")",
+    );
+    assert_eq!(plain.ir.edges.len(), 1, "CONTROL FAILED: plain relationship missing");
+    assert!(
+        !plain
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("relationship layout is not yet supported")),
+        "a direction-free relationship produced a forced-direction warning: {:?}",
+        plain.warnings
+    );
+}
+
+/// `Node(...) { … }` is mermaid's short spelling of `Deployment_Node` and must open a boundary.
     ///
     /// Without it the block never opened, so the container AND everything nested inside it were
     /// lost — not just the one line.
