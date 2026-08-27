@@ -432,6 +432,87 @@ impl TermRenderer {
             }
         }
 
+        // TREEMAP tiles and the RADAR wheel (bd-dw450). Both families put their whole diagram in a
+        // layout extension that only fm-render-svg read, so a `treemap` or `radar-beta` document
+        // rendered to the terminal as a completely BLANK canvas — no error, no warning, nothing to
+        // suggest the diagram had been understood perfectly one layer earlier.
+        //
+        // Drawn here, in the geometry pass, for the same reason bands are: this is where layout
+        // coordinates become canvas pixels. The labels go on in `overlay_labels` with the rest of
+        // the text.
+        for tile in &layout.extensions.treemap_tiles {
+            let tx = (tile.bounds.x * pixel_scale_x) as isize + padding_x as isize;
+            let ty = (tile.bounds.y * pixel_scale_y) as isize + padding_y as isize;
+            let tw = (tile.bounds.width * pixel_scale_x) as isize;
+            let th = (tile.bounds.height * pixel_scale_y) as isize;
+            if tw <= 0 || th <= 0 {
+                continue;
+            }
+            // Outline only, never a fill: a treemap nests, so filling a section would bury every
+            // child it contains under its own parent.
+            canvas.draw_line(tx, ty, tx + tw, ty);
+            canvas.draw_line(tx, ty + th, tx + tw, ty + th);
+            canvas.draw_line(tx, ty, tx, ty + th);
+            canvas.draw_line(tx + tw, ty, tx + tw, ty + th);
+        }
+
+        if let Some(radar) = layout.extensions.radar.as_ref() {
+            let to_cell = |x: f32, y: f32| {
+                (
+                    (x * pixel_scale_x) as isize + padding_x as isize,
+                    (y * pixel_scale_y) as isize + padding_y as isize,
+                )
+            };
+            let (cx, cy) = to_cell(radar.center.x, radar.center.y);
+
+            // Graticule. Sampled as a closed polyline rather than drawn as a shape, because the
+            // canvas has straight segments and nothing else — 48 samples is well past the point
+            // where a braille cell can tell a circle from a polygon.
+            let ring_samples = 48_usize;
+            for &ring in &radar.rings {
+                let mut previous: Option<(isize, isize)> = None;
+                let mut first: Option<(isize, isize)> = None;
+                for step in 0..ring_samples {
+                    let angle = std::f32::consts::TAU * step as f32 / ring_samples as f32;
+                    let point = to_cell(
+                        ring.mul_add(angle.cos(), radar.center.x),
+                        ring.mul_add(angle.sin(), radar.center.y),
+                    );
+                    if let Some((px, py)) = previous {
+                        canvas.draw_line(px, py, point.0, point.1);
+                    } else {
+                        first = Some(point);
+                    }
+                    previous = Some(point);
+                }
+                if let (Some((px, py)), Some((fx, fy))) = (previous, first) {
+                    canvas.draw_line(px, py, fx, fy);
+                }
+            }
+
+            // Spokes.
+            for axis in &radar.axes {
+                let (tx, ty) = to_cell(axis.tip.x, axis.tip.y);
+                canvas.draw_line(cx, cy, tx, ty);
+            }
+
+            // Each series, closed. Straight segments here even though SVG smooths the default
+            // graticule: a cubic through three braille cells is the same three cells, so spending
+            // the arithmetic would buy nothing and the vertices are what carry the data.
+            for curve in &radar.curves {
+                let points: Vec<(isize, isize)> = curve
+                    .points
+                    .iter()
+                    .map(|point| to_cell(point.x, point.y))
+                    .collect();
+                for index in 0..points.len() {
+                    let (x0, y0) = points[index];
+                    let (x1, y1) = points[(index + 1) % points.len()];
+                    canvas.draw_line(x0, y0, x1, y1);
+                }
+            }
+        }
+
         // The gantt TODAY MARKER: a vertical line across the chart at the supplied date (bd-t1jj).
         //
         // `extensions.gantt_day_axis` is the only thing that answers "where is a given DATE on this
@@ -2374,6 +2455,108 @@ impl TermRenderer {
             }
         }
 
+        // TREEMAP and RADAR text (bd-dw450). The geometry pass drew their boxes, rings and spokes;
+        // without this the terminal shows a diagram whose every label is missing, which is only a
+        // little better than the blank canvas it used to show.
+        //
+        // Every write goes through `write_if_blank`, which refuses to overwrite an occupied cell.
+        // That is the rule the band and cluster overlays already work under, and for the same
+        // reason: an overlay that displaces content trades a missing label for a corrupted diagram.
+        let write_if_blank = |lines: &mut Vec<Vec<char>>, row: usize, col: usize, text: &str| {
+            let chars: Vec<char> = text.chars().collect();
+            if chars.is_empty() || row >= lines.len() || col + chars.len() > cell_width {
+                return false;
+            }
+            // The canvas fills empty cells with the BLANK BRAILLE PATTERN, not a space, so a
+            // space-only check reads every empty cell as occupied.
+            let clear = (0..chars.len()).all(|offset| {
+                lines[row]
+                    .get(col + offset)
+                    .is_some_and(|cell| *cell == ' ' || *cell == '\u{2800}')
+            });
+            if !clear {
+                return false;
+            }
+            for (offset, ch) in chars.into_iter().enumerate() {
+                lines[row][col + offset] = ch;
+            }
+            true
+        };
+
+        if let Some(meta) = ir.treemap_meta.as_ref() {
+            for tile in &layout.extensions.treemap_tiles {
+                let Some(item) = meta.nodes.get(tile.node) else {
+                    continue;
+                };
+                let (x, y, w, h) = self.bounds_to_cells(&tile.bounds, scale_x, scale_y);
+                let caption = self.truncate_label(&format!(
+                    "{} {}",
+                    item.label,
+                    format_terminal_treemap_value(tile.value)
+                ));
+                let width = caption.chars().count();
+                if width + 2 > w {
+                    continue;
+                }
+                // A LEAF is captioned at its centre and a SECTION just inside its top edge, which
+                // is where each one has room: a section's middle is full of its children.
+                let (row, col) = if tile.is_leaf {
+                    (y + h / 2, x + (w.saturating_sub(width)) / 2)
+                } else {
+                    (y + 1, x + 1)
+                };
+                write_if_blank(&mut lines, row, col, &caption);
+            }
+        }
+
+        if let Some((meta, radar)) = ir.radar_meta.as_ref().zip(layout.extensions.radar.as_ref()) {
+            for (index, axis) in radar.axes.iter().enumerate() {
+                let Some(declared) = meta.axes.get(index) else {
+                    continue;
+                };
+                let (ax, ay) = self.point_to_cells(&axis.label_anchor, scale_x, scale_y);
+                let caption = self.truncate_label(declared.display());
+                let width = caption.chars().count();
+                // Centre the caption on the anchor, then pull it back inside the grid rather than
+                // dropping it: an axis label sits at the extreme of the wheel by construction, so
+                // "off the edge" is the normal case, not an error case.
+                let col = ax
+                    .saturating_sub(width / 2)
+                    .min(cell_width.saturating_sub(width));
+
+                // ⚠️ ONE CANDIDATE ROW IS NOT ENOUGH, and the anchor row is the WORST single bet.
+                // Measured: the label sits 15 layout units beyond the spoke's tip, which at terminal
+                // resolution is less than one cell — so it lands on the spoke's own last cell, the
+                // blank guard correctly refuses, and the label is dropped. The topmost axis of a
+                // three-axis wheel went missing entirely that way while the other two, whose spokes
+                // end mid-cell, were fine.
+                //
+                // So STEP AWAY FROM THE CENTRE until a clear row is found: away is where there is
+                // nothing left to collide with, and it is the direction the label already points.
+                // Same shape as the band overlay's row scan, and for the same reason.
+                let outward: isize = if axis.label_anchor.y < radar.center.y {
+                    -1
+                } else {
+                    1
+                };
+                for attempt in 0..3_isize {
+                    let Ok(row) = usize::try_from(ay as isize + outward * attempt) else {
+                        break;
+                    };
+                    if write_if_blank(&mut lines, row, col, &caption) {
+                        break;
+                    }
+                }
+            }
+            if meta.show_legend {
+                for (index, curve) in meta.curves.iter().enumerate() {
+                    let caption = self.truncate_label(curve.display());
+                    let row = 1 + index;
+                    write_if_blank(&mut lines, row, 1, &caption);
+                }
+            }
+        }
+
         if let Some(title) = generic_terminal_diagram_title(ir)
             && let Some(first_line) = lines.first_mut()
         {
@@ -3171,6 +3354,19 @@ fn is_block_beta_space_node(node: &fm_core::IrNode) -> bool {
             .classes
             .iter()
             .any(|class_name| class_name.eq_ignore_ascii_case("block-beta-space"))
+}
+
+/// Render a treemap value for a terminal caption: no trailing zeros on a whole number.
+///
+/// Deliberately the same rule the SVG renderer applies, so the two surfaces never disagree about
+/// what a value IS — a `30` here and a `30.0` there would read as two different numbers.
+fn format_terminal_treemap_value(value: f64) -> String {
+    if (value - value.round()).abs() < 1e-9 {
+        format!("{}", value.round() as i64)
+    } else {
+        let text = format!("{value:.4}");
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
 }
 
 fn generic_terminal_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {

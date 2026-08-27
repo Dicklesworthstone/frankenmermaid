@@ -250,6 +250,11 @@ impl Canvas2dRenderer {
 
         // Draw layout bands (sequence lifelines, gantt sections, etc.)
         self.draw_bands(layout, ir.diagram_type, ctx, offset_x, offset_y);
+        // Treemap tiles and the radar wheel (bd-dw450): both families keep their whole
+        // diagram in a layout extension only fm-render-svg read, so the canvas drew nothing
+        // at all for them. Both calls return immediately for every other diagram type.
+        self.draw_treemap(ir, layout, ctx, offset_x, offset_y);
+        self.draw_radar(ir, layout, ctx, offset_x, offset_y);
 
         // Draw the time/category axis (gantt dates, xychart categories).
         self.draw_axis_ticks(layout, ctx, offset_x, offset_y);
@@ -1014,7 +1019,178 @@ impl Canvas2dRenderer {
             TextAlign::Center,
         );
     }
+}
 
+/// The radar series palette, matching the SVG surface so one diagram is not two colour schemes.
+const RADAR_CANVAS_PALETTE: [&str; 6] = [
+    "#8686ff", "#ffff78", "#d7ff86", "#ff86c8", "#86e0ff", "#ffc386",
+];
+
+/// Render a treemap value for a canvas caption: no trailing zeros on a whole number.
+///
+/// Deliberately the same rule the SVG and terminal surfaces apply, so the three never disagree
+/// about what a value IS — a `30` on one surface and `30.0` on another reads as two numbers.
+fn format_canvas_treemap_value(value: f64) -> String {
+    if (value - value.round()).abs() < 1e-9 {
+        format!("{}", value.round() as i64)
+    } else {
+        let text = format!("{value:.4}");
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+impl Canvas2dRenderer {
+    /// Draw `treemap` tiles: a nested outline per tile with its label and value (bd-dw450).
+    ///
+    /// Outlines rather than fills, because a treemap nests: filling a section would bury every
+    /// child it contains under its own parent. The SVG surface can layer translucent fills to say
+    /// the same thing; here the outline carries it unambiguously.
+    fn draw_treemap<C: Canvas2dContext>(
+        &mut self,
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) {
+        let Some(meta) = ir.treemap_meta.as_ref() else {
+            return;
+        };
+        if layout.extensions.treemap_tiles.is_empty() {
+            return;
+        }
+        let label_font = format!("{}px {}", self.config.font_size, self.config.font_family);
+        for tile in &layout.extensions.treemap_tiles {
+            let Some(item) = meta.nodes.get(tile.node) else {
+                continue;
+            };
+            let x = f64::from(tile.bounds.x) + offset_x;
+            let y = f64::from(tile.bounds.y) + offset_y;
+            let w = f64::from(tile.bounds.width);
+            let h = f64::from(tile.bounds.height);
+            if w <= 0.0 || h <= 0.0 {
+                continue;
+            }
+            ctx.set_stroke_style(&self.config.node_stroke);
+            ctx.set_line_width(1.0);
+            ctx.stroke_rect(x, y, w, h);
+            self.draw_calls += 1;
+
+            let caption = format!("{} {}", item.label, format_canvas_treemap_value(tile.value));
+            ctx.set_font(&label_font);
+            ctx.set_fill_style(&self.config.label_color);
+            // A leaf is captioned at its centre; a section just inside its top edge, where a
+            // container has room that its middle does not.
+            if tile.is_leaf {
+                ctx.set_text_align(TextAlign::Center);
+                ctx.set_text_baseline(TextBaseline::Middle);
+                ctx.fill_text(&caption, x + w / 2.0, y + h / 2.0);
+            } else {
+                ctx.set_text_align(TextAlign::Left);
+                ctx.set_text_baseline(TextBaseline::Top);
+                ctx.fill_text(&caption, x + 4.0, y + 2.0);
+            }
+            self.draw_calls += 1;
+        }
+    }
+
+    /// Draw a `radar-beta` wheel: graticule, spokes, axis labels and one closed curve per series.
+    fn draw_radar<C: Canvas2dContext>(
+        &mut self,
+        ir: &MermaidDiagramIr,
+        layout: &DiagramLayout,
+        ctx: &mut C,
+        offset_x: f64,
+        offset_y: f64,
+    ) {
+        let (Some(meta), Some(radar)) = (ir.radar_meta.as_ref(), layout.extensions.radar.as_ref())
+        else {
+            return;
+        };
+        let cx = f64::from(radar.center.x) + offset_x;
+        let cy = f64::from(radar.center.y) + offset_y;
+
+        // Graticule. `arc` draws the ring form directly; the polygon form walks the axis directions,
+        // because `graticule polygon` measurably changes the grid AND the curve upstream.
+        ctx.set_stroke_style(&self.config.node_stroke);
+        ctx.set_line_width(1.0);
+        for &ring in &radar.rings {
+            let ring = f64::from(ring);
+            ctx.begin_path();
+            match meta.graticule {
+                fm_core::RadarGraticule::Circle => {
+                    ctx.arc(cx, cy, ring, 0.0, std::f64::consts::TAU);
+                }
+                fm_core::RadarGraticule::Polygon => {
+                    for (index, axis) in radar.axes.iter().enumerate() {
+                        let angle = f64::from(axis.angle);
+                        let (x, y) = (ring.mul_add(angle.cos(), cx), ring.mul_add(angle.sin(), cy));
+                        if index == 0 {
+                            ctx.move_to(x, y);
+                        } else {
+                            ctx.line_to(x, y);
+                        }
+                    }
+                    ctx.close_path();
+                }
+            }
+            ctx.stroke();
+            self.draw_calls += 1;
+        }
+
+        // Spokes, then their labels.
+        let label_font = format!("{}px {}", self.config.font_size, self.config.font_family);
+        for (index, axis) in radar.axes.iter().enumerate() {
+            ctx.begin_path();
+            ctx.move_to(cx, cy);
+            ctx.line_to(
+                f64::from(axis.tip.x) + offset_x,
+                f64::from(axis.tip.y) + offset_y,
+            );
+            ctx.stroke();
+            self.draw_calls += 1;
+
+            if let Some(declared) = meta.axes.get(index) {
+                ctx.set_font(&label_font);
+                ctx.set_fill_style(&self.config.label_color);
+                ctx.set_text_align(TextAlign::Center);
+                ctx.set_text_baseline(TextBaseline::Middle);
+                ctx.fill_text(
+                    declared.display(),
+                    f64::from(axis.label_anchor.x) + offset_x,
+                    f64::from(axis.label_anchor.y) + offset_y,
+                );
+                self.draw_calls += 1;
+            }
+        }
+
+        // One closed outline per series.
+        for laid in &radar.curves {
+            if laid.points.is_empty() {
+                continue;
+            }
+            let fill = RADAR_CANVAS_PALETTE[laid.curve % RADAR_CANVAS_PALETTE.len()];
+            ctx.set_stroke_style(fill);
+            ctx.set_line_width(2.0);
+            ctx.begin_path();
+            for (index, point) in laid.points.iter().enumerate() {
+                let x = f64::from(point.x) + offset_x;
+                let y = f64::from(point.y) + offset_y;
+                if index == 0 {
+                    ctx.move_to(x, y);
+                } else {
+                    ctx.line_to(x, y);
+                }
+            }
+            ctx.close_path();
+            ctx.stroke();
+            self.draw_calls += 1;
+        }
+        ctx.set_line_width(1.0);
+    }
+}
+
+impl Canvas2dRenderer {
     fn draw_bands<C: Canvas2dContext>(
         &mut self,
         layout: &DiagramLayout,

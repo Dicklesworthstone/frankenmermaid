@@ -1201,6 +1201,14 @@ pub struct GpuRenderPlan {
     pub band_lane_segments: Vec<GpuEdgeSegment>,
     pub band_section_instances: Vec<GpuNodeInstance>,
     pub band_column_segments: Vec<GpuEdgeSegment>,
+    /// One rect instance per `treemap` tile (bd-dw450).
+    ///
+    /// Outlines, not fills: a treemap nests, so a filled section would bury every child inside it.
+    /// The instance carries a transparent fill and a visible stroke to say that on the GPU path.
+    pub treemap_tile_instances: Vec<GpuNodeInstance>,
+    /// Graticule rings, spokes and series outlines of a `radar-beta` wheel, as line segments
+    /// (bd-dw450). Rings are sampled polylines — the segment pipeline has no arc primitive.
+    pub radar_segments: Vec<GpuEdgeSegment>,
     /// Gantt and xychart axis tick marks, as non-edge line segments (bd-adabx).
     ///
     /// The Canvas2D pass draws these after bands and before the other extension furniture. They
@@ -1348,6 +1356,79 @@ impl GpuRenderPlan {
 
         // BANDS (bd-adabx). Keep the three Canvas2D primitives distinct: lanes are dashed
         // centre-lines, sections are filled rectangles, and columns are right-edge separators.
+        // TREEMAP tiles and the RADAR wheel (bd-dw450). Both families keep their whole diagram in
+        // a layout extension that only fm-render-svg read, so the GPU plan emitted nothing for them
+        // and a `treemap` or `radar-beta` document reached the WebGPU surface as an empty scene.
+        let mut treemap_tile_instances = Vec::new();
+        for (tile_index, tile) in layout.extensions.treemap_tiles.iter().enumerate() {
+            if tile.bounds.width <= 0.0 || tile.bounds.height <= 0.0 {
+                continue;
+            }
+            treemap_tile_instances.push(GpuNodeInstance {
+                center: [
+                    tile.bounds.x + (tile.bounds.width * 0.5),
+                    tile.bounds.y + (tile.bounds.height * 0.5),
+                ],
+                half_extent: [tile.bounds.width * 0.5, tile.bounds.height * 0.5],
+                fill: [0.0, 0.0, 0.0, 0.0],
+                stroke: DEFAULT_NODE_STROKE_RGBA,
+                stroke_width: BAND_STROKE_WIDTH,
+                shape: GpuNodeShape::Rect as u32,
+                node_index: u32::try_from(tile_index).unwrap_or(u32::MAX),
+            });
+        }
+
+        let mut radar_segments = Vec::new();
+        if let Some(radar) = layout.extensions.radar.as_ref() {
+            let mut segment = |from: [f32; 2], to: [f32; 2]| {
+                radar_segments.push(GpuEdgeSegment {
+                    from,
+                    to,
+                    edge_index: NO_EDGE_INDEX,
+                    color: DEFAULT_NODE_STROKE_RGBA,
+                    dash_phase: 0.0,
+                    // Solid: a radar's rings, spokes and series are all continuous strokes, unlike
+                    // a sequence lifeline which is the dashed member of this family.
+                    dash: [0.0, 0.0],
+                    width: BAND_STROKE_WIDTH,
+                });
+            };
+            // Rings, sampled. 48 samples is the same count the terminal surface uses, so the two
+            // rasterisations of one wheel cannot disagree about how round it is.
+            const RING_SAMPLES: usize = 48;
+            for &ring in &radar.rings {
+                let mut previous: Option<[f32; 2]> = None;
+                let mut first: Option<[f32; 2]> = None;
+                for step in 0..RING_SAMPLES {
+                    #[allow(clippy::cast_precision_loss)]
+                    let angle = std::f32::consts::TAU * step as f32 / RING_SAMPLES as f32;
+                    let point = [
+                        ring.mul_add(angle.cos(), radar.center.x),
+                        ring.mul_add(angle.sin(), radar.center.y),
+                    ];
+                    if let Some(previous) = previous {
+                        segment(previous, point);
+                    } else {
+                        first = Some(point);
+                    }
+                    previous = Some(point);
+                }
+                if let (Some(previous), Some(first)) = (previous, first) {
+                    segment(previous, first);
+                }
+            }
+            for axis in &radar.axes {
+                segment([radar.center.x, radar.center.y], [axis.tip.x, axis.tip.y]);
+            }
+            for curve in &radar.curves {
+                for index in 0..curve.points.len() {
+                    let from = curve.points[index];
+                    let to = curve.points[(index + 1) % curve.points.len()];
+                    segment([from.x, from.y], [to.x, to.y]);
+                }
+            }
+        }
+
         let mut band_lane_segments = Vec::new();
         let mut band_section_instances = Vec::new();
         let mut band_column_segments = Vec::new();
@@ -2388,6 +2469,8 @@ impl GpuRenderPlan {
             cluster_instances,
             band_lane_segments,
             band_section_instances,
+            treemap_tile_instances,
+            radar_segments,
             band_column_segments,
             axis_tick_segments,
             cluster_divider_segments,
@@ -4988,6 +5071,13 @@ mod tests {
             "draw_sequence_notes",
             "draw_state_notes",
             "draw_bands",
+            // bd-dw450: both carry to the GPU plan as `treemap_tile_instances` and
+            // `radar_segments`. This guard is what caught them being unregistered — adding the two
+            // canvas draw sources without the plan side would otherwise have shipped a canvas that
+            // draws two families the GPU path silently omits, which is exactly the asymmetry this
+            // bead exists to remove.
+            "draw_treemap",
+            "draw_radar",
             "draw_axis_ticks",
             "draw_packet_field_continuations",
             "draw_quadrant_axis_labels",
