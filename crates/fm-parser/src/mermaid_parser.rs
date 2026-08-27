@@ -1618,10 +1618,7 @@ fn flow_forward_subgraph_members(items: &[FlowDocumentItem<'_>]) -> FxHashMap<St
         seen.insert(key.as_str());
         let mut target = first.as_str();
         // Bounded by the number of subgraphs: every hop consumes one unvisited key.
-        while let Some(next) = raw.get(target) {
-            if !seen.insert(target) {
-                break;
-            }
+        if let Some(next) = raw.get(target) {
             target = next.as_str();
         }
         resolved.insert(key.clone(), target.to_string());
