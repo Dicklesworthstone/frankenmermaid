@@ -8264,13 +8264,16 @@ pub fn layout_diagram_sankey_traced(ir: &MermaidDiagramIr) -> TracedLayout {
         .keys()
         .copied()
         .filter_map(|rank| {
-            layout_band_for_rank(
-                &*layout,
-                rank,
-                LayoutBandKind::Column,
-                format!("column {}", rank + 1),
-                20.0,
-            )
+            // ⚠️ THE COLUMN BANDS CARRY NO CAPTION. `column 1` / `column 2` was a name this function
+            // INVENTED from the rank index — nothing the author wrote, and nothing mermaid draws.
+            // A sankey's columns are a consequence of the flow graph, not a labelled axis, so a
+            // generated positional name is a machine-facing token dressed as a heading.
+            //
+            // Measured against the pinned bundle in Chromium: the three `column N` runs were surplus
+            // on our side with no counterpart. The BANDS stay — they tint each rank — only the
+            // generated caption goes. Same shape as the block-beta group id and the journey section
+            // repeat.
+            layout_band_for_rank(&*layout, rank, LayoutBandKind::Column, String::new(), 20.0)
         })
         .collect();
     traced
