@@ -224,6 +224,7 @@ pub fn describe_node(node: &IrNode, ir: &MermaidDiagramIr) -> String {
         fm_core::NodeShape::CurvedTrapezoid => "curved trapezoid",
         fm_core::NodeShape::TaggedDocument => "tagged document",
         fm_core::NodeShape::BowTieRect => "stored data block",
+        fm_core::NodeShape::Hourglass => "hourglass",
         fm_core::NodeShape::Rect => "rectangle",
         fm_core::NodeShape::Rounded => "rounded rectangle",
         fm_core::NodeShape::Stadium => "stadium shape",

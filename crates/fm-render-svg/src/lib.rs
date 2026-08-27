@@ -11143,6 +11143,22 @@ fn render_node(
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
+        NodeShape::Hourglass => {
+            // Self-crossing quadrilateral: the crossing at the centre makes the two lobes, and the
+            // nonzero fill rule fills both from this one subpath.
+            let path = PathBuilder::new()
+                .move_to(x, y)
+                .line_to(x + w, y)
+                .line_to(x, y + h)
+                .line_to(x + w, y + h)
+                .close()
+                .build();
+            Element::path()
+                .d(&path)
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
         NodeShape::BowTieRect => {
             // Both sides arc the same way. Semi-axes are the chord-to-apex distances measured above:
             // 0.138 w on the left (bulging out) and 0.101 w on the right (cutting in).
@@ -13506,6 +13522,7 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
         NodeShape::CurvedTrapezoid => "fm-node-shape-curved-trapezoid",
         NodeShape::TaggedDocument => "fm-node-shape-tagged-document",
         NodeShape::BowTieRect => "fm-node-shape-bow-tie-rect",
+        NodeShape::Hourglass => "fm-node-shape-hourglass",
         NodeShape::Rect => "fm-node-shape-rect",
         NodeShape::Rounded => "fm-node-shape-rounded",
         NodeShape::Stadium => "fm-node-shape-stadium",

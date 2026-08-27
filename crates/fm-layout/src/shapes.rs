@@ -85,6 +85,9 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
         // The curved trapezoid reaches the box edges at its bulges and is narrow elsewhere; the box
         // is the conservative stop and its own outline would be fiddly for little gain.
         NodeShape::CurvedTrapezoid | NodeShape::BowTieRect => rounded_rect_path(bounds, 0.0),
+        // The hourglass is sparse — two lobes with an empty waist — so its own outline is a
+        // better edge stop than the box, the same call the bolt and the burst take.
+        NodeShape::Hourglass => hourglass_path(bounds),
         NodeShape::Bang => {
             star_path_with_ratio(bounds, fm_core::BANG_POINTS, fm_core::BANG_INNER_RATIO)
         }
@@ -351,6 +354,22 @@ pub fn triangle_path(bounds: LayoutRect) -> Vec<PathCmd> {
         PathCmd::MoveTo { x: cx, y },
         PathCmd::LineTo { x: x + w, y: y + h },
         PathCmd::LineTo { x, y: y + h },
+        PathCmd::Close,
+    ]
+}
+
+/// [`NodeShape::Hourglass`]'s boundary: the self-crossing bowtie.
+#[must_use]
+pub fn hourglass_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let x = bounds.x;
+    let y = bounds.y;
+    let w = bounds.width;
+    let h = bounds.height;
+    vec![
+        PathCmd::MoveTo { x, y },
+        PathCmd::LineTo { x: x + w, y },
+        PathCmd::LineTo { x, y: y + h },
+        PathCmd::LineTo { x: x + w, y: y + h },
         PathCmd::Close,
     ]
 }

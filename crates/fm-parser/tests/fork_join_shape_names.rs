@@ -82,7 +82,7 @@ fn a_still_unimplemented_shape_still_warns() {
     // bd-7ls21, and therefore never going to be implemented here. Every other name in this list has
     // had to be swapped out the moment someone implemented it, three lists at a time; these two
     // cannot be. The third entry rotates and is expected to churn.
-    for name in ["win-pane", "datastore", "hourglass"] {
+    for name in ["win-pane", "datastore", "brace"] {
         assert!(
             !warnings(&format!("flowchart TD\n  A@{{ shape: {name} }}\n")).is_empty(),
             "`shape: {name}` is still unimplemented and must still warn"

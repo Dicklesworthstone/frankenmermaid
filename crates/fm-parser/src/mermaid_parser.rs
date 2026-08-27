@@ -2465,6 +2465,7 @@ fn flowchart_metadata_shape(name: &str) -> Option<NodeShape> {
         "curv-trap" | "curved-trapezoid" | "display" => NodeShape::CurvedTrapezoid,
         "tag-doc" | "tagged-document" => NodeShape::TaggedDocument,
         "bow-rect" | "bow-tie-rectangle" | "stored-data" => NodeShape::BowTieRect,
+        "hourglass" | "collate" => NodeShape::Hourglass,
         _ => return None,
     })
 }
@@ -2523,16 +2524,14 @@ fn split_metadata_pairs(body: &str) -> Vec<&str> {
 /// list of shortNames alone can only ever answer for the half of authors who happened to pick one.
 /// Every entry below is a name the pinned 11.15.0 registry publishes as author-facing syntax
 /// (`shortName` or `aliases`); internal aliases like `rect_left_inv_arrow` are deliberately absent.
-const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 13] = [
+const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 11] = [
     "brace",
     "brace-l",
     "brace-r",
     "braces",
-    "collate",
     "comment",
     "data-store",
     "datastore",
-    "hourglass",
     "internal-storage",
     "text",
     "win-pane",
@@ -20688,17 +20687,19 @@ Rel_Back(db, app, "Responds")"#,
     /// nothing pointing at why. Every other unrecognised-input path in this parser already warns.
     #[test]
     fn an_unimplemented_shape_name_warns_and_keeps_the_shape() {
-        // `hourglass`, not `notch-rect`: the latter is IMPLEMENTED as of bd-7ls21, so asserting it
-        // warns would assert something false. Any name still in UNIMPLEMENTED_UPSTREAM_SHAPES
-        // exercises this identically -- what is pinned is the message and the recovery, not which
-        // shape happens to be unbuilt this week.
-        let parsed = parse_mermaid("flowchart LR\n  A@{ shape: hourglass }\n  B[Plain]\n");
+        // `brace`, not `notch-rect` or `hourglass`: both of those are IMPLEMENTED as of bd-7ls21,
+        // so asserting they warn would assert something false. Any name still in
+        // UNIMPLEMENTED_UPSTREAM_SHAPES exercises this identically -- what is pinned is the message
+        // and the recovery, not which shape happens to be unbuilt this week. `brace` is the safest
+        // anchor left: it is a margin ornament rather than a node container and is recommended for
+        // closure as out-of-scope, so it is unlikely to become implemented and invalidate this.
+        let parsed = parse_mermaid("flowchart LR\n  A@{ shape: brace }\n  B[Plain]\n");
 
         assert!(
             parsed
                 .warnings
                 .iter()
-                .any(|warning| warning.contains("hourglass") && warning.contains("not implement")),
+                .any(|warning| warning.contains("brace") && warning.contains("not implement")),
             "an unimplemented shape passed in silence; warnings: {:?}",
             parsed.warnings
         );

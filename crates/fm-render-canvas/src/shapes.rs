@@ -59,6 +59,7 @@ pub fn draw_shape<C: Canvas2dContext>(
         // The document body; the fold is interior detail this surface omits.
         NodeShape::TaggedDocument => draw_document(ctx, x, y, width, height),
         NodeShape::BowTieRect => draw_bow_tie_rect(ctx, x, y, width, height),
+        NodeShape::Hourglass => draw_hourglass(ctx, x, y, width, height),
         NodeShape::Rect => draw_rect(ctx, x, y, width, height, 0.0),
         NodeShape::Rounded => draw_rect(ctx, x, y, width, height, 4.0),
         NodeShape::Stadium => draw_stadium(ctx, x, y, width, height),
@@ -358,6 +359,20 @@ fn draw_triangle<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64
     ctx.move_to(cx, y);
     ctx.line_to(x + w, y + h);
     ctx.line_to(x, y + h);
+    ctx.close_path();
+    ctx.fill();
+    ctx.stroke();
+}
+
+/// Draw two triangles meeting point-to-point — mermaid's `hourglass` (bd-7ls21).
+///
+/// One self-crossing path, so the nonzero fill rule fills both lobes without a seam at the waist.
+fn draw_hourglass<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    ctx.begin_path();
+    ctx.move_to(x, y);
+    ctx.line_to(x + w, y);
+    ctx.line_to(x, y + h);
+    ctx.line_to(x + w, y + h);
     ctx.close_path();
     ctx.fill();
     ctx.stroke();

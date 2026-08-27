@@ -267,6 +267,48 @@ fn each_new_shape_draws_its_measured_silhouette() {
         "bow-rect does not curve both sides: {}",
         silhouette(&stored)
     );
+
+    // Self-crossing bowtie: top-left, top-right, bottom-LEFT, bottom-right, closed.
+    let glass = render("hourglass");
+    assert!(
+        glass.contains("M92 92 L192 92 L92 158.50 L192 158.50 Z"),
+        "hourglass is not the self-crossing bowtie: {}",
+        silhouette(&glass)
+    );
+}
+
+/// The hourglass is ONE self-crossing path, and the crossing is the shape.
+///
+/// Visit the same four corners in reading order — top-left, top-right, bottom-right, bottom-left —
+/// and the path stops crossing: it becomes a plain rectangle outline drawn as a `path`, which is
+/// still four points, still closed, and still not a `rect` element. This bead's differs-from-Rect
+/// rule compares the drawn geometry, so it would catch that particular slip; what it would NOT catch
+/// is the other repair, splitting the figure into two separate triangles, which leaves two filled
+/// lobes that look right and seam at the waist.
+///
+/// So this pins the ORDER: the third point is the bottom-LEFT corner, which is what makes the edges
+/// cross.
+#[test]
+fn the_hourglass_path_crosses_itself() {
+    let glass = render("hourglass");
+    // Third vertex is x=92 (left), not x=192 — that inversion is the crossing.
+    assert!(
+        glass.contains("L192 92 L92 158.50 L192 158.50"),
+        "the hourglass corners are in rectangle order, so the waist is gone: {}",
+        silhouette(&glass)
+    );
+    // One subpath, not two triangles.
+    assert_eq!(
+        glass.matches("M92 92 L192 92 L92 158.50").count(),
+        1,
+        "the hourglass was split into separate lobes: {}",
+        silhouette(&glass)
+    );
+    assert_ne!(
+        silhouette(&glass),
+        silhouette(&render("rect")),
+        "the hourglass renders identically to a rectangle"
+    );
 }
 
 /// The stored-data block's two sides bow the SAME way, which is what lets the blocks tile.
@@ -819,6 +861,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
         "curv-trap",
         "tag-doc",
         "bow-rect",
+        "hourglass",
     ] {
         let sig = silhouette(&render(shape));
         assert!(!sig.is_empty(), "{shape} drew no geometry at all");
@@ -836,7 +879,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
 /// name that resolves to nothing tells an author to fix a spelling that was already correct.
 #[test]
 fn every_published_alias_draws_the_same_shape() {
-    let groups: [(&str, &[&str]); 21] = [
+    let groups: [(&str, &[&str]); 22] = [
         ("notch-rect", &["card", "notched-rectangle"]),
         (
             "lin-rect",
@@ -872,6 +915,7 @@ fn every_published_alias_draws_the_same_shape() {
         ("curv-trap", &["curved-trapezoid", "display"]),
         ("tag-doc", &["tagged-document"]),
         ("bow-rect", &["bow-tie-rectangle", "stored-data"]),
+        ("hourglass", &["collate"]),
     ];
     // `bang` publishes only its own name, so it has no alias row.
     for (short, aliases) in groups {
@@ -949,7 +993,7 @@ fn implemented_names_stop_warning_and_others_do_not() {
     // bd-7ls21, and therefore never going to be implemented here. Every other name in this list has
     // had to be swapped out the moment someone implemented it, three lists at a time; these two
     // cannot be. The third entry rotates and is expected to churn.
-    for name in ["win-pane", "datastore", "hourglass", "brace"] {
+    for name in ["win-pane", "datastore", "brace", "brace-l"] {
         assert!(
             !warnings(name).is_empty(),
             "`{name}` is still unimplemented and must still warn"
@@ -1006,6 +1050,7 @@ fn each_new_shape_has_an_accessible_description() {
         ("curv-trap", "curved trapezoid"),
         ("tag-doc", "tagged document"),
         ("bow-rect", "stored data block"),
+        ("hourglass", "hourglass"),
     ] {
         assert!(
             render(shape).contains(want),

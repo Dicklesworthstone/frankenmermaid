@@ -1390,6 +1390,21 @@ pub enum NodeShape {
     /// actually lands (~0.978 w). Moving both bottom endpoints 0.03 w right brings it to **2.5%**,
     /// with nine of eleven buckets at or under 1%.
     BowTieRect,
+    /// mermaid's `hourglass` / `collate`: two triangles meeting point-to-point.
+    ///
+    /// Measured by sampling in Chromium 151 against the pinned 11.15.0 bundle over a SQUARE bbox of
+    /// 30 x 30. The outline is a self-crossing quadrilateral — `(0,0)` to `(w,0)` to `(0,h)` to
+    /// `(w,h)` and closed — whose crossing at the centre is what produces the two triangles.
+    ///
+    /// ⚠️ IT IS DRAWN AS ONE SELF-CROSSING PATH, NOT TWO TRIANGLES, and the distinction is not
+    /// cosmetic: with the default nonzero fill rule the single path fills both lobes, while two
+    /// separate triangles would need their own fills and would show a seam at the waist.
+    ///
+    /// ⚠️ THIS SHAPE WAS MISSING FROM bd-7ls21's OWN WORKLIST. The bead enumerated 25 unimplemented
+    /// names and `hourglass` was not among them, even though it warns and renders as a rectangle
+    /// like the rest. It surfaced only on re-sweeping the full 44-name registry after the listed
+    /// work was done — an enumeration is not a proof of completeness.
+    Hourglass,
 }
 
 /// Radius of [`NodeShape::SmallCircle`], in user units.

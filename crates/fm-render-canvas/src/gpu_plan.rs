@@ -38,7 +38,7 @@ impl From<NodeShape> for GpuNodeShape {
             | NodeShape::TaggedRect
             | NodeShape::Document
             | NodeShape::LinedDocument => Self::Rect,
-            NodeShape::LightningBolt | NodeShape::Bang => Self::Polygon,
+            NodeShape::LightningBolt | NodeShape::Bang | NodeShape::Hourglass => Self::Polygon,
             NodeShape::CurvedTrapezoid | NodeShape::TaggedDocument | NodeShape::BowTieRect => {
                 Self::Rect
             }
