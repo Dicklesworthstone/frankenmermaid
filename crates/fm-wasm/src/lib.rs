@@ -984,7 +984,13 @@ where
 {
     #[cfg(target_arch = "wasm32")]
     {
-        serde_wasm_bindgen::to_value(value)
+        // Maps must cross the boundary as plain objects: the published TS contract declares
+        // `Record<string, …>` (nodeSlideIndex, nodeGeometry, edgeEndpoints), and
+        // serde_wasm_bindgen's default JS `Map` output made `manifest.nodeSlideIndex[id]`
+        // silently undefined in every consumer (bd-tm1q7).
+        use serde_wasm_bindgen::Serializer;
+        value
+            .serialize(&Serializer::new().serialize_maps_as_objects(true))
             .map_err(|err| js_error(format!("failed to serialize response: {err}")))
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -1622,11 +1628,18 @@ export interface DeckManifestOverview {
   enabled: boolean; title: string; caption?: string; tour: boolean;
 }
 
+/** One edge's endpoint node element ids — the live-edge join for morphing runtimes (1.1.0). */
+export interface DeckEdgeEndpoints { fromElementId: string; toElementId: string; }
+
 /** The renderer-agnostic presentation contract; additive-only within 1.x. */
 export interface DeckManifest {
   schemaVersion: string; generator: string; diagramType: string; title?: string;
   viewBox: DeckRect; options: DeckManifestOptions; slides: DeckManifestSlide[];
   overview: DeckManifestOverview; nodeSlideIndex?: Record<string, string[]>;
+  /** Home rect per laid-out node (viewBox space), whole diagram (1.1.0). */
+  nodeGeometry?: Record<string, DeckRect>;
+  /** Edge elementId -> endpoint node element ids (1.1.0). */
+  edgeEndpoints?: Record<string, DeckEdgeEndpoints>;
 }
 
 /** renderDeck() result: svg + manifest (null when no deck) + structured deck diagnostics. */
@@ -3595,7 +3608,7 @@ mod tests {
         let output = render_deck(DECKED_INPUT, None).expect("render_deck");
         assert!(output.svg.starts_with("<svg"));
         let manifest = output.manifest.expect("manifest present");
-        assert_eq!(manifest.schema_version, "1.0.0");
+        assert_eq!(manifest.schema_version, "1.1.0");
         assert_eq!(manifest.slides.len(), 2);
         assert_eq!(manifest.slides[0].id, "s1");
         assert_eq!(manifest.slides[0].max_step, 1);
@@ -4229,7 +4242,7 @@ mod tests {
         // before it can masquerade as a cross-target floating-point difference. Rebuild from the
         // same source revision, then update this digest and the per-fixture digests together after
         // reviewing every generated artifact.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0xc29e_5ed5_e74e_089b;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x327b_5513_4650_a071;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),

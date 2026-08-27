@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "1.0.0",
+  "schemaVersion": "1.1.0",
   "generator": "frankenmermaid",
   "diagramType": "State",
   "viewBox": {
@@ -151,5 +151,69 @@
     "fm-node-idle-1": [
       "happy"
     ]
+  },
+  "nodeGeometry": {
+    "fm-node-busy-2": {
+      "x": 186.15,
+      "y": 92.0,
+      "width": 105.0,
+      "height": 66.5
+    },
+    "fm-node-done-3": {
+      "x": 92.0,
+      "y": 278.5,
+      "width": 105.0,
+      "height": 66.5
+    },
+    "fm-node-failed-4": {
+      "x": 280.3,
+      "y": 278.5,
+      "width": 111.6,
+      "height": 66.5
+    },
+    "fm-node-idle-1": {
+      "x": 280.3,
+      "y": 465.0,
+      "width": 100.0,
+      "height": 66.5
+    },
+    "fm-node-state-end-5": {
+      "x": 92.0,
+      "y": 465.0,
+      "width": 24.0,
+      "height": 24.0
+    },
+    "fm-node-state-start-0": {
+      "x": 328.65,
+      "y": 92.0,
+      "width": 20.0,
+      "height": 20.0
+    }
+  },
+  "edgeEndpoints": {
+    "fm-edge-0": {
+      "fromElementId": "fm-node-state-start-0",
+      "toElementId": "fm-node-idle-1"
+    },
+    "fm-edge-1": {
+      "fromElementId": "fm-node-idle-1",
+      "toElementId": "fm-node-busy-2"
+    },
+    "fm-edge-2": {
+      "fromElementId": "fm-node-busy-2",
+      "toElementId": "fm-node-done-3"
+    },
+    "fm-edge-3": {
+      "fromElementId": "fm-node-busy-2",
+      "toElementId": "fm-node-failed-4"
+    },
+    "fm-edge-4": {
+      "fromElementId": "fm-node-failed-4",
+      "toElementId": "fm-node-idle-1"
+    },
+    "fm-edge-5": {
+      "fromElementId": "fm-node-done-3",
+      "toElementId": "fm-node-state-end-5"
+    }
   }
 }

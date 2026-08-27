@@ -18,10 +18,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use fm_core::{
-    DECK_MANIFEST_SCHEMA_VERSION, DeckManifest, DeckManifestCluster, DeckManifestEdge,
-    DeckManifestNode, DeckManifestOptions, DeckManifestOverview, DeckManifestSlide,
-    DeckManifestStep, DeckRect, IrDeck, IrDeckEdgePolicy, IrDeckReveal, MermaidDiagramIr,
-    deck_manifest_supported, mermaid_cluster_element_id, mermaid_edge_element_id,
+    DECK_MANIFEST_SCHEMA_VERSION, DeckEdgeEndpoints, DeckManifest, DeckManifestCluster,
+    DeckManifestEdge, DeckManifestNode, DeckManifestOptions, DeckManifestOverview,
+    DeckManifestSlide, DeckManifestStep, DeckRect, IrDeck, IrDeckEdgePolicy, IrDeckReveal,
+    MermaidDiagramIr, deck_manifest_supported, mermaid_cluster_element_id, mermaid_edge_element_id,
     mermaid_node_element_id,
 };
 use fm_layout::{DiagramLayout, LayoutRect};
@@ -396,6 +396,7 @@ fn round2(value: f32) -> f32 {
 /// Phase 2: project resolved scenes into viewBox space and assemble the serde manifest.
 pub(crate) fn project_manifest(
     ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
     scenes: Vec<ResolvedScene>,
     frame: &SvgFrame,
 ) -> DeckManifest {
@@ -406,6 +407,37 @@ pub(crate) fn project_manifest(
         width: round2(rect.width),
         height: round2(rect.height),
     };
+
+    // Whole-diagram geometry joins (schema 1.1.0): a morphing runtime animates EVERY node —
+    // off-slide members glide out past the camera window — and redraws each edge between its
+    // endpoints' live positions, so it needs home rects and endpoint ids for the full graph,
+    // not just slide members.
+    let mut node_geometry: BTreeMap<String, DeckRect> = BTreeMap::new();
+    let mut element_id_by_node: BTreeMap<usize, String> = BTreeMap::new();
+    for node_box in &layout.nodes {
+        let Some(node) = ir.nodes.get(node_box.node_index) else {
+            continue;
+        };
+        let element_id = mermaid_node_element_id(&node.id, node_box.node_index);
+        node_geometry.insert(element_id.clone(), project_rect(node_box.bounds));
+        element_id_by_node.insert(node_box.node_index, element_id);
+    }
+    let mut edge_endpoints: BTreeMap<String, DeckEdgeEndpoints> = BTreeMap::new();
+    for (edge_index, edge) in ir.edges.iter().enumerate() {
+        let endpoint = |end| {
+            ir.resolve_endpoint_node(end)
+                .and_then(|node_id| element_id_by_node.get(&node_id.0))
+        };
+        if let (Some(from), Some(to)) = (endpoint(edge.from), endpoint(edge.to)) {
+            edge_endpoints.insert(
+                mermaid_edge_element_id(edge_index),
+                DeckEdgeEndpoints {
+                    from_element_id: from.clone(),
+                    to_element_id: to.clone(),
+                },
+            );
+        }
+    }
 
     let mut node_slide_index: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut slides = Vec::with_capacity(scenes.len());
@@ -519,6 +551,8 @@ pub(crate) fn project_manifest(
             tour: deck.overview.tour,
         },
         node_slide_index,
+        node_geometry,
+        edge_endpoints,
     }
 }
 
@@ -536,7 +570,7 @@ pub fn deck_manifest(
     }
     let scenes = resolve_scenes(ir, layout)?;
     let frame = svg_frame(ir, layout, config);
-    Some(project_manifest(ir, scenes, &frame))
+    Some(project_manifest(ir, layout, scenes, &frame))
 }
 
 /// Render SVG and manifest from one shared layout and one shared frame computation — the
@@ -566,6 +600,58 @@ mod tests {
 
     fn decked_flowchart() -> &'static str {
         "flowchart LR\n%%{deck: {\n  title: 'Tour',\n  tips: { a: 'the start' },\n  slides: [\n    { id: 's1', title: 'Start', nodes: ['a', 'b'], reveal: [['b']] },\n    { id: 's2', nodes: ['subgraph:core'], edges: 'touching' },\n  ],\n}}%%\n  a --> b\n  subgraph core\n    b --> c\n    c --> d\n  end\n"
+    }
+
+    /// Schema 1.1.0 morphing joins: every laid-out node has home geometry inside the SVG
+    /// viewBox, and every edge's endpoints name node element ids that geometry covers — the
+    /// exact invariants the morphing runtime relies on to fly nodes and re-anchor edges.
+    #[test]
+    fn geometry_and_endpoint_joins_cover_the_whole_graph() {
+        let parsed = fm_parser::parse(decked_flowchart());
+        let layout = layout_diagram(&parsed.ir);
+        let manifest =
+            deck_manifest(&parsed.ir, &layout, &SvgRenderConfig::default()).expect("manifest");
+
+        assert_eq!(
+            manifest.node_geometry.len(),
+            layout.nodes.len(),
+            "every laid-out node carries home geometry"
+        );
+        for (element_id, rect) in &manifest.node_geometry {
+            assert!(element_id.starts_with("fm-node-"));
+            assert!(rect.width > 0.0 && rect.height > 0.0);
+            assert!(
+                rect.x >= 0.0
+                    && rect.y >= 0.0
+                    && rect.x + rect.width <= manifest.view_box.width
+                    && rect.y + rect.height <= manifest.view_box.height,
+                "node rect {element_id} escapes the viewBox"
+            );
+        }
+        assert_eq!(
+            manifest.edge_endpoints.len(),
+            parsed.ir.edges.len(),
+            "every IR edge in this fixture has two laid-out endpoints"
+        );
+        for (element_id, endpoints) in &manifest.edge_endpoints {
+            assert!(element_id.starts_with("fm-edge-"));
+            assert!(
+                manifest
+                    .node_geometry
+                    .contains_key(&endpoints.from_element_id)
+                    && manifest
+                        .node_geometry
+                        .contains_key(&endpoints.to_element_id),
+                "edge {element_id} references a node without geometry"
+            );
+        }
+        // Slide members are a subset of the geometry map — the runtime can always find a
+        // member's home rect.
+        for slide in &manifest.slides {
+            for node in &slide.nodes {
+                assert!(manifest.node_geometry.contains_key(&node.element_id));
+            }
+        }
     }
 
     #[test]

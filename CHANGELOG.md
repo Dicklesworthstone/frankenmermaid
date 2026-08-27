@@ -70,6 +70,23 @@ The CLI shipped concurrent multi-diagram `render-batch` and reused renders acros
 - [`1228089e`](https://github.com/Dicklesworthstone/frankenmermaid/commit/1228089ec7cf7fbdb8fd930dcccaf972c9b48a32) — relocate `FEATURE_PARITY.md`, `UPGRADE_LOG.md`, and `EXISTING_FRANKENTUI_MERMAID_STRUCTURE.md` into `docs/planning/`; move `update_evidence.rs` into `scripts/`.
 - [`7b43c1fb`](https://github.com/Dicklesworthstone/frankenmermaid/commit/7b43c1fbfb2414b8672070790905316aa4e25a82) — move `CRATES_IO_PUBLISHING.md` to [`docs/CRATES_IO_PUBLISHING.md`](https://github.com/Dicklesworthstone/frankenmermaid/blob/main/docs/CRATES_IO_PUBLISHING.md).
 
+### Graph-deck morphing — the graph rearranges live (2026-08-27, bd-tm1q7)
+
+Deck presentations now morph the way graphcon-deck does instead of only panning a static
+picture. Manifest schema **1.1.0** adds two additive joins — `nodeGeometry` (home rect per
+laid-out node, whole diagram) and `edgeEndpoints` (edge id → endpoint node element ids) —
+and the runtime uses them to run a continuous world: every node floats on a per-node sine
+bob, off-slide nodes glide out past the fitted camera window (ray-scaled push-out, eased
+per frame), reveal steps fly nodes home while they fade in, edges are redrawn every frame
+as live paths between their endpoints' border points (engine paths park; labels ride the
+midpoint; arrow markers carry over), member nodes drag with spring-back, and the overview
+tour reshuffles the graph around each toured window. The loop is
+IntersectionObserver-gated (an off-screen deck burns zero frames) and the whole mode
+degrades to the previous static choreography under `prefers-reduced-motion` or a pre-1.1
+manifest. Behavioral coverage: `scripts/deck_runtime_e2e.py` grew to 32 headless checks
+(morph class, live edge layer, push-out displacement, float-only members, parked engine
+paths, drag + spring-back).
+
 ### Graph decks — presentations from a diagram (2026-08-26, epic bd-z7g6k)
 
 A graphcon-deck-inspired presentation mode (credit:

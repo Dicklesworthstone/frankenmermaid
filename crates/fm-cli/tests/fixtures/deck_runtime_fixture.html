@@ -15,7 +15,9 @@
   overview tour with the clickable rect · freecam (drag/wheel/pinch) + Escape · click the
   dimmed d-node while on slide 1 to travel to slide 2 · tooltip on node a · fullscreen (f) ·
   Home/End · reduced-motion (toggle in devtools rendering tab) · destroy() leak check via the
-  button (no listeners left; rAF cancelled).
+  button (no listeners left; rAF cancelled) · MORPH: all nodes bob; on slide 1, c/d glide out
+  past the window and their edges stretch after them; advancing reveals b flying home; drag
+  node a and release to watch it spring back; the tour rearranges the graph per stop.
 -->
 <style>
   body { margin: 0; font: 13px system-ui; background: #0a0f0c; color: #cde; }
@@ -60,10 +62,12 @@ var SVG =
   '<g id="fm-node-d-3" data-id="d"><rect x="700" y="254" width="100" height="52" rx="8" fill="#4c7"/><text x="750" y="286" text-anchor="middle">d</text></g>' +
   "</svg>";
 
-/* Hand-written DeckManifest 1.0.0. Slide 1: a + b (b at step 1; a→b edge follows). Slide 2:
-   the cluster {b, c, d} fully contained, with the a→b edge touching. */
+/* Hand-written DeckManifest 1.1.0. Slide 1: a + b (b at step 1; a→b edge follows). Slide 2:
+   the cluster {b, c, d} fully contained, with the a→b edge touching. nodeGeometry +
+   edgeEndpoints (1.1.0) arm MORPH MODE: nodes float, exiles glide out past the camera
+   window, live edges track their endpoints, member nodes drag with spring-back. */
 var MANIFEST = {
-  schemaVersion: "1.0.0",
+  schemaVersion: "1.1.0",
   generator: "fixture",
   diagramType: "flowchart",
   title: "deck_runtime fixture",
@@ -114,6 +118,18 @@ var MANIFEST = {
     "fm-node-b-1": ["intro", "core"],
     "fm-node-c-2": ["core"],
     "fm-node-d-3": ["core"]
+  },
+  nodeGeometry: {
+    "fm-node-a-0": { x: 60, y: 90, width: 100, height: 52 },
+    "fm-node-b-1": { x: 420, y: 94, width: 100, height: 52 },
+    "fm-node-c-2": { x: 450, y: 254, width: 100, height: 52 },
+    "fm-node-d-3": { x: 700, y: 254, width: 100, height: 52 }
+  },
+  edgeEndpoints: {
+    "fm-edge-0": { fromElementId: "fm-node-a-0", toElementId: "fm-node-b-1" },
+    "fm-edge-1": { fromElementId: "fm-node-b-1", toElementId: "fm-node-c-2" },
+    "fm-edge-2": { fromElementId: "fm-node-c-2", toElementId: "fm-node-d-3" },
+    "fm-edge-3": { fromElementId: "fm-node-d-3", toElementId: "fm-node-a-0" }
   }
 };
 

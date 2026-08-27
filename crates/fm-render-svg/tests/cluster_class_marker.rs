@@ -102,9 +102,9 @@ fn an_undeclared_class_name_is_not_emitted() {
     );
     assert!(
         parsed
-            .diagnostics
+            .warnings
             .iter()
-            .any(|d| d.message.contains("nosuchclass")),
+            .any(|warning| warning.contains("nosuchclass")),
         "the ignored class produced no warning, so it vanished in silence"
     );
 }

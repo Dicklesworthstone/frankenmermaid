@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "1.0.0",
+  "schemaVersion": "1.1.0",
   "generator": "frankenmermaid",
   "diagramType": "Flowchart",
   "viewBox": {
@@ -140,5 +140,49 @@
     "fm-node-retry-2": [
       "loop"
     ]
+  },
+  "nodeGeometry": {
+    "fm-node-check-1": {
+      "x": 189.04,
+      "y": 92.0,
+      "width": 100.0,
+      "height": 66.5
+    },
+    "fm-node-done-3": {
+      "x": 286.08,
+      "y": 278.5,
+      "width": 105.0,
+      "height": 66.5
+    },
+    "fm-node-fetch-0": {
+      "x": 92.0,
+      "y": 465.0,
+      "width": 109.95,
+      "height": 66.5
+    },
+    "fm-node-retry-2": {
+      "x": 92.0,
+      "y": 278.5,
+      "width": 123.15,
+      "height": 66.5
+    }
+  },
+  "edgeEndpoints": {
+    "fm-edge-0": {
+      "fromElementId": "fm-node-fetch-0",
+      "toElementId": "fm-node-check-1"
+    },
+    "fm-edge-1": {
+      "fromElementId": "fm-node-check-1",
+      "toElementId": "fm-node-retry-2"
+    },
+    "fm-edge-2": {
+      "fromElementId": "fm-node-retry-2",
+      "toElementId": "fm-node-fetch-0"
+    },
+    "fm-edge-3": {
+      "fromElementId": "fm-node-check-1",
+      "toElementId": "fm-node-done-3"
+    }
   }
 }

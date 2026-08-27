@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "1.0.0",
+  "schemaVersion": "1.1.0",
   "generator": "frankenmermaid",
   "diagramType": "Sequence",
   "viewBox": {
@@ -126,5 +126,43 @@
     "fm-node-server-2": [
       "server"
     ]
+  },
+  "nodeGeometry": {
+    "fm-node-alice-0": {
+      "x": 40.0,
+      "y": 40.0,
+      "width": 103.35,
+      "height": 66.5
+    },
+    "fm-node-bob-1": {
+      "x": 303.35,
+      "y": 40.0,
+      "width": 100.0,
+      "height": 66.5
+    },
+    "fm-node-server-2": {
+      "x": 563.35,
+      "y": 40.0,
+      "width": 114.9,
+      "height": 66.5
+    }
+  },
+  "edgeEndpoints": {
+    "fm-edge-0": {
+      "fromElementId": "fm-node-alice-0",
+      "toElementId": "fm-node-bob-1"
+    },
+    "fm-edge-1": {
+      "fromElementId": "fm-node-bob-1",
+      "toElementId": "fm-node-server-2"
+    },
+    "fm-edge-2": {
+      "fromElementId": "fm-node-server-2",
+      "toElementId": "fm-node-bob-1"
+    },
+    "fm-edge-3": {
+      "fromElementId": "fm-node-bob-1",
+      "toElementId": "fm-node-alice-0"
+    }
   }
 }

@@ -1,6 +1,6 @@
 //! Golden deck-manifest corpus + property suites (bd-xj5nc, epic bd-z7g6k).
 //!
-//! The manifest is an EXTERNAL contract (schema 1.0.0, additive-only within 1.x): third-party
+//! The manifest is an EXTERNAL contract (schema 1.1.0, additive-only within 1.x): third-party
 //! players build against its field semantics, and the showcase/CLI embed it verbatim. These
 //! goldens pin full manifest JSON per fixture — discovered from disk with a minimum-count
 //! floor (the `golden_layout_test` lesson: hand-listed corpora rot silently) — plus one full
@@ -142,7 +142,7 @@ fn deck_manifests_match_checked_in_goldens() {
 fn deck_golden_corpus_satisfies_manifest_invariants() {
     for case in case_ids() {
         let (_, manifest, _) = manifest_for_case(&case);
-        assert_eq!(manifest.schema_version, "1.0.0");
+        assert_eq!(manifest.schema_version, "1.1.0");
         for slide in &manifest.slides {
             // Bounds within the viewBox (small epsilon for 2dp rounding).
             assert!(slide.bounds.x >= manifest.view_box.x - 0.01, "{case}");
@@ -160,6 +160,27 @@ fn deck_golden_corpus_satisfies_manifest_invariants() {
                 slide.id
             );
             assert_manifest_step_invariants(&case, slide);
+            // Morph joins (1.1.0): every slide member has home geometry.
+            for node in &slide.nodes {
+                assert!(
+                    manifest.node_geometry.contains_key(&node.element_id),
+                    "{case}/{}: {} missing from nodeGeometry",
+                    slide.id,
+                    node.element_id
+                );
+            }
+        }
+        // Every edge endpoint names a node the geometry map covers.
+        for (edge_id, endpoints) in &manifest.edge_endpoints {
+            assert!(
+                manifest
+                    .node_geometry
+                    .contains_key(&endpoints.from_element_id)
+                    && manifest
+                        .node_geometry
+                        .contains_key(&endpoints.to_element_id),
+                "{case}: {edge_id} endpoints missing from nodeGeometry"
+            );
         }
     }
 }

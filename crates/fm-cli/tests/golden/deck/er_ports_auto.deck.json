@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "1.0.0",
+  "schemaVersion": "1.1.0",
   "generator": "frankenmermaid",
   "diagramType": "Er",
   "viewBox": {
@@ -137,5 +137,35 @@
       "everything",
       "orders"
     ]
+  },
+  "nodeGeometry": {
+    "fm-node-customer-0": {
+      "x": 92.0,
+      "y": 92.0,
+      "width": 142.13,
+      "height": 66.5
+    },
+    "fm-node-item-2": {
+      "x": 92.0,
+      "y": 465.0,
+      "width": 105.83,
+      "height": 66.5
+    },
+    "fm-node-order-1": {
+      "x": 92.0,
+      "y": 278.5,
+      "width": 113.25,
+      "height": 66.5
+    }
+  },
+  "edgeEndpoints": {
+    "fm-edge-0": {
+      "fromElementId": "fm-node-customer-0",
+      "toElementId": "fm-node-order-1"
+    },
+    "fm-edge-1": {
+      "fromElementId": "fm-node-order-1",
+      "toElementId": "fm-node-item-2"
+    }
   }
 }

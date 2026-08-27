@@ -1436,10 +1436,17 @@ T5a/T5b; T8 into T8a/T8b; T2a extracted from T2).
 
 ## Part XVII — Non-goals and future work
 
-1. **Push-out choreography + per-node float** — v2 experiment behind `options.pushOut` /
-   `options.floatAmp`, using per-element wrapper `<g>` nodes inserted at mount (avoids the
-   attribute-transform conflict). Do it only with a measured frame-time budget on a
-   1,000-node diagram.
+1. **Push-out choreography + per-node float** — SHIPPED 2026-08-27 (bd-tm1q7), after user
+   review flagged that the static-camera v1 looked nothing like graphcon's morphing. Two
+   deviations from this entry's sketch: (a) no wrapper `<g>` needed — the SVG renderer
+   emits zero `transform` attributes on node groups, so the runtime sets them directly;
+   (b) no opt-in flag — morph is the default wherever manifest 1.1.0's `nodeGeometry` /
+   `edgeEndpoints` joins exist, with `prefers-reduced-motion` (and pre-1.1 manifests)
+   falling back to the static choreography. Edges are redrawn per frame as live paths
+   between endpoint border points (engine paths park hidden; labels ride a group
+   translate; arrowhead markers carry over); the loop is IntersectionObserver-gated so an
+   off-screen deck still burns zero frames. The 1,000-node frame-time budget remains
+   unmeasured — revisit if a deck that large ever exists.
 2. **Deck editing UI** (drag-a-node, reorder slides) — belongs to the lens system: a slide
    edit is a `%%{deck:…}%%` text edit, which `parseLens` can already express; a
    "add selected nodes to slide" theater tool is the natural follow-up.

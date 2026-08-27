@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "1.0.0",
+  "schemaVersion": "1.1.0",
   "generator": "frankenmermaid",
   "diagramType": "C4Context",
   "viewBox": {
@@ -105,5 +105,45 @@
     "fm-node-web-2": [
       "systems"
     ]
+  },
+  "nodeGeometry": {
+    "fm-node-admin-1": {
+      "x": 277.83,
+      "y": 92.0,
+      "width": 109.95,
+      "height": 66.5
+    },
+    "fm-node-db-3": {
+      "x": 184.91,
+      "y": 465.0,
+      "width": 134.7,
+      "height": 66.5
+    },
+    "fm-node-user-0": {
+      "x": 92.0,
+      "y": 92.0,
+      "width": 101.7,
+      "height": 66.5
+    },
+    "fm-node-web-2": {
+      "x": 184.91,
+      "y": 278.5,
+      "width": 129.75,
+      "height": 66.5
+    }
+  },
+  "edgeEndpoints": {
+    "fm-edge-0": {
+      "fromElementId": "fm-node-user-0",
+      "toElementId": "fm-node-web-2"
+    },
+    "fm-edge-1": {
+      "fromElementId": "fm-node-admin-1",
+      "toElementId": "fm-node-web-2"
+    },
+    "fm-edge-2": {
+      "fromElementId": "fm-node-web-2",
+      "toElementId": "fm-node-db-3"
+    }
   }
 }
