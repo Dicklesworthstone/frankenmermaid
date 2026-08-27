@@ -2364,6 +2364,33 @@ fn is_non_node_directive_statement(statement: &str) -> bool {
         || followed_by_space("callback")
 }
 
+/// True for a DIAGRAM-LEVEL directive that is extracted centrally and must never become content.
+///
+/// ⚠️ THE POINT IS THE RENDERED OUTPUT, NOT THE WARNING. `direction TB` and `title X` were reaching
+/// the node parsers of six families and being DRAWN — a box captioned with the author's own
+/// directive, sitting in the diagram, exactly the phantom bd-871ka found for
+/// `hide empty description` and bd-9x8r for `shape:`. Measured against the pinned mermaid 11.15.0
+/// bundle, four of those six disagree with the reference outright: class, er and timeline parse
+/// `direction` and draw nothing, and packet does the same for `title` (bd-92kw1).
+///
+/// ⚠️ NARROWER THAN [`is_non_node_directive_statement`] ON PURPOSE, in the other direction. That one
+/// also swallows `click`/`link`/`callback`/`style`, which some paths parse into real items —
+/// swallowing a directive a path already handles is a regression, not a fix, and bd-ij0f broke eight
+/// click tests that way. These two are safe everywhere they are used below because every caller
+/// either has no concept of them or honours them explicitly before this is reached.
+///
+/// ⚠️ AND `block-beta` DELIBERATELY DOES NOT USE THIS. mermaid's block renderer DRAWS a stray
+/// `direction` line as a block — measured, both engines agree — so adding the skip there would
+/// replace agreement with a divergence.
+fn is_diagram_level_directive_statement(statement: &str) -> bool {
+    let statement = trim_fast(statement);
+    ["direction", "title"].iter().any(|name| {
+        statement
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+    })
+}
+
 /// True for an accessibility directive only — `accTitle:` / `accDescr:` / `accDescr {` (bd-7oyz).
 ///
 /// Deliberately NARROWER than `is_non_node_directive_statement`. Paths differ in which directives
@@ -4092,6 +4119,18 @@ fn parse_class(input: &str, builder: &mut IrBuilder) {
         }
 
         if trimmed.starts_with("classDiagram") {
+            continue;
+        }
+
+        // ⚠️ HONOURED, NOT MERELY SKIPPED (bd-92kw1). `direction` is documented mermaid syntax in
+        // this family, and the reference parses it and draws NOTHING — measured in Chromium 151
+        // against the pinned 11.15.0 bundle. We were drawing a box captioned `direction TB`. Setting
+        // the direction is what the line MEANS, so consuming it silently would fix the phantom and
+        // still ignore the author; `state` has done it this way since bd-ij0f.
+        if trimmed.starts_with("direction ")
+            && let Some(direction) = parse_graph_direction(trimmed)
+        {
+            builder.set_direction(direction);
             continue;
         }
 
@@ -5830,6 +5869,13 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
         if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
             continue;
         }
+        // ⚠️ AND `direction`/`title` ARE NOT CONTENT EITHER (bd-92kw1). This family has no direction
+        // concept and its title is promoted into diagram meta by a shared pass, so both lines were
+        // falling through to the node parser and being DRAWN — a box captioned with the author's own
+        // directive. Consumed rather than honoured: there is nothing here for a direction to mean.
+        if is_diagram_level_directive_statement(trimmed) {
+            continue;
+        }
 
         // Handle icon directive (::icon(...)) - applies to last node
         if trimmed.starts_with("::icon(") {
@@ -6134,6 +6180,18 @@ fn parse_er(input: &str, builder: &mut IrBuilder) {
         }
 
         if trimmed == "erDiagram" {
+            continue;
+        }
+
+        // ⚠️ HONOURED, NOT MERELY SKIPPED (bd-92kw1). `direction` is documented mermaid syntax in
+        // this family, and the reference parses it and draws NOTHING — measured in Chromium 151
+        // against the pinned 11.15.0 bundle. We were drawing a box captioned `direction TB`. Setting
+        // the direction is what the line MEANS, so consuming it silently would fix the phantom and
+        // still ignore the author; `state` has done it this way since bd-ij0f.
+        if trimmed.starts_with("direction ")
+            && let Some(direction) = parse_graph_direction(trimmed)
+        {
+            builder.set_direction(direction);
             continue;
         }
 
@@ -6825,6 +6883,13 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
         // the broader `is_non_node_directive_statement` also matches `title`, which other paths
         // promote into diagram meta.
         if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
+            continue;
+        }
+        // ⚠️ AND `direction`/`title` ARE NOT CONTENT EITHER (bd-92kw1). This family has no direction
+        // concept and its title is promoted into diagram meta by a shared pass, so both lines were
+        // falling through to the node parser and being DRAWN — a box captioned with the author's own
+        // directive. Consumed rather than honoured: there is nothing here for a direction to mean.
+        if is_diagram_level_directive_statement(trimmed) {
             continue;
         }
 
@@ -7554,6 +7619,13 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
         if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
             continue;
         }
+        // ⚠️ AND `direction`/`title` ARE NOT CONTENT EITHER (bd-92kw1). This family has no direction
+        // concept and its title is promoted into diagram meta by a shared pass, so both lines were
+        // falling through to the node parser and being DRAWN — a box captioned with the author's own
+        // directive. Consumed rather than honoured: there is nothing here for a direction to mean.
+        if is_diagram_level_directive_statement(trimmed) {
+            continue;
+        }
 
         if let Some(title_text) = trimmed.strip_prefix("title ") {
             if let Some(title) = clean_label(Some(title_text)) {
@@ -7766,6 +7838,14 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
         //
         // As everywhere else, `extract_accessibility_directives` has already taken the value.
         if is_accessibility_directive_statement(trimmed) {
+            continue;
+        }
+
+        // ⚠️ AND `direction`/`title` ARE NOT CONTENT EITHER (bd-92kw1). This family has no direction
+        // concept and its title is promoted into diagram meta by a shared pass, so both lines were
+        // falling through to the node parser and being DRAWN — a box captioned with the author's own
+        // directive. Consumed rather than honoured: there is nothing here for a direction to mean.
+        if is_diagram_level_directive_statement(trimmed) {
             continue;
         }
 
