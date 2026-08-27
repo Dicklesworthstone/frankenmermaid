@@ -3300,6 +3300,14 @@ fn parse_sequence(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        // ⚠️ CONSUMED, NOT PARSED: `extract_accessibility_directives` has ALREADY taken this line's
+        // value into `ir.meta` before this loop runs, so the directive works — the value reaches
+        // `<title>`/`<desc>` in every family. All this loop was adding was a warning calling a
+        // working directive unsupported (bd-xym5x).
+        if is_accessibility_directive_statement(trimmed) {
+            continue;
+        }
+
         let Some(statement) = parse_sequence_statement(trimmed) else {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported sequence syntax: {trimmed}"
@@ -5774,6 +5782,14 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        // ⚠️ CONSUMED, NOT PARSED: `extract_accessibility_directives` has ALREADY taken this line's
+        // value into `ir.meta` before this loop runs, so the directive works — the value reaches
+        // `<title>`/`<desc>` in every family. All this loop was adding was a warning calling a
+        // working directive unsupported (bd-xym5x).
+        if is_accessibility_directive_statement(trimmed) {
+            continue;
+        }
+
         builder.add_warning(format!(
             "Line {line_number}: unsupported requirement syntax: {trimmed}"
         ));
@@ -7096,6 +7112,13 @@ fn parse_radar(content: &str, builder: &mut IrBuilder) {
             meta.ticks = trim_fast(rest).parse().ok();
             continue;
         }
+        // ⚠️ CONSUMED, NOT PARSED: `extract_accessibility_directives` has ALREADY taken this line's
+        // value into `ir.meta` before this loop runs, so the directive works — the value reaches
+        // `<title>`/`<desc>` in every family. All this loop was adding was a warning calling a
+        // working directive unsupported (bd-xym5x).
+        if is_accessibility_directive_statement(trimmed) {
+            continue;
+        }
         builder.add_warning(format!(
             "radar line {} is not an axis, curve or option: {trimmed}",
             line_number + 1
@@ -7187,6 +7210,14 @@ fn parse_treemap(content: &str, builder: &mut IrBuilder) {
         }
         // `classDef`/`class` styling lines are collected by the shared style pass, not here.
         if trimmed.starts_with("classDef") || trimmed.starts_with("class ") {
+            continue;
+        }
+
+        // ⚠️ CONSUMED, NOT PARSED: `extract_accessibility_directives` has ALREADY taken this line's
+        // value into `ir.meta` before this loop runs, so the directive works — the value reaches
+        // `<title>`/`<desc>` in every family. All this loop was adding was a warning calling a
+        // working directive unsupported (bd-xym5x).
+        if is_accessibility_directive_statement(trimmed) {
             continue;
         }
 
@@ -7724,6 +7755,17 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
         }
 
         if trimmed.starts_with("packet-beta") {
+            continue;
+        }
+
+        // ⚠️ PACKET IS THE NINTH FAMILY, AND ITS MESSAGE IS WHY IT WAS NEARLY MISSED (bd-xym5x).
+        // The discovery sweep filtered warnings for the strings `accTitle`/`accDescr`, and packet
+        // reports `packet field range "accTitle" is not a bit range` — the directive reaches the
+        // `split_once(':')` field parser as a bit range, so the message is about a RANGE and the
+        // family did not show up as one of the eight. A wording-independent differential found it.
+        //
+        // As everywhere else, `extract_accessibility_directives` has already taken the value.
+        if is_accessibility_directive_statement(trimmed) {
             continue;
         }
 
@@ -8832,6 +8874,14 @@ fn parse_xychart(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        // ⚠️ CONSUMED, NOT PARSED: `extract_accessibility_directives` has ALREADY taken this line's
+        // value into `ir.meta` before this loop runs, so the directive works — the value reaches
+        // `<title>`/`<desc>` in every family. All this loop was adding was a warning calling a
+        // working directive unsupported (bd-xym5x).
+        if is_accessibility_directive_statement(trimmed) {
+            continue;
+        }
+
         let Some((series_kind, series_name, raw_values)) = parse_xychart_series(trimmed) else {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported xychart syntax: {trimmed}"
@@ -8968,6 +9018,21 @@ fn parse_sankey(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        // ⚠️ SANKEY IS THE ONE FAMILY WHERE THE REFERENCE DISAGREES, AND WE ACCEPT ANYWAY.
+        // mermaid 11.15.0's sankey grammar REJECTS `accTitle:` outright — measured, a hard parse
+        // error where the other twenty families render it into `<title>`/`<desc>`. We honour it
+        // here for the same reason the other twenty do: this parser is best-effort and the value
+        // has already been extracted into `ir.meta`, so refusing the line would mean dropping an
+        // accessibility title we are holding. What must not survive is calling it UNSUPPORTED while
+        // honouring it (bd-xym5x).
+        // `extract_accessibility_directives` has ALREADY taken this line's
+        // value into `ir.meta` before this loop runs, so the directive works — the value reaches
+        // `<title>`/`<desc>` in every family. All this loop was adding was a warning calling a
+        // working directive unsupported (bd-xym5x).
+        if is_accessibility_directive_statement(trimmed) {
+            continue;
+        }
+
         let Some((source, target, value)) = parse_sankey_record(trimmed) else {
             builder.add_warning(format!(
                 "Line {line_number}: unsupported sankey syntax: {trimmed}"
@@ -9073,6 +9138,14 @@ fn parse_c4(input: &str, builder: &mut IrBuilder) {
 
         let span = span_for(line_number, raw_line);
         if parse_c4_fast_context_call(trimmed, span, &boundary_stack, builder) {
+            continue;
+        }
+
+        // ⚠️ CONSUMED, NOT PARSED: `extract_accessibility_directives` has ALREADY taken this line's
+        // value into `ir.meta` before this loop runs, so the directive works — the value reaches
+        // `<title>`/`<desc>` in every family. All this loop was adding was a warning calling a
+        // working directive unsupported (bd-xym5x).
+        if is_accessibility_directive_statement(trimmed) {
             continue;
         }
 
@@ -10067,6 +10140,14 @@ fn parse_gitgraph(input: &str, builder: &mut IrBuilder) {
                 }
                 Err(message) => builder.add_warning(format!("Line {line_number}: {message}")),
             }
+            continue;
+        }
+
+        // ⚠️ CONSUMED, NOT PARSED: `extract_accessibility_directives` has ALREADY taken this line's
+        // value into `ir.meta` before this loop runs, so the directive works — the value reaches
+        // `<title>`/`<desc>` in every family. All this loop was adding was a warning calling a
+        // working directive unsupported (bd-xym5x).
+        if is_accessibility_directive_statement(trimmed) {
             continue;
         }
 
