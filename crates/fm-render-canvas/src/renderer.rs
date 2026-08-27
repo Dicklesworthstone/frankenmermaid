@@ -281,7 +281,7 @@ impl Canvas2dRenderer {
         self.draw_sequence_lifecycle_markers(layout, ctx, offset_x, offset_y);
 
         // Draw sequence notes and fragments.
-        self.draw_sequence_fragments(layout, ctx, offset_x, offset_y);
+        self.draw_sequence_fragments(layout, ir, ctx, offset_x, offset_y);
         self.draw_sequence_notes(layout, ctx, offset_x, offset_y, &mut labels_drawn);
 
         // Draw pie chart wedges if this is a pie diagram.
@@ -1852,13 +1852,14 @@ impl Canvas2dRenderer {
     fn draw_sequence_fragments<C: Canvas2dContext>(
         &mut self,
         layout: &DiagramLayout,
+        ir: &MermaidDiagramIr,
         ctx: &mut C,
         offset_x: f64,
         offset_y: f64,
     ) {
         let mut fragment_font = None;
 
-        for fragment in &layout.extensions.sequence_fragments {
+        for (fragment_index, fragment) in layout.extensions.sequence_fragments.iter().enumerate() {
             let x = f64::from(fragment.bounds.x) + offset_x;
             let y = f64::from(fragment.bounds.y) + offset_y;
             let w = f64::from(fragment.bounds.width);
@@ -1906,6 +1907,57 @@ impl Canvas2dRenderer {
                 ctx.fill_text(&label, x + 6.0, y + 4.0);
             }
             self.draw_calls += 3;
+
+            // An `else`/`and` branch is part of the sequence's meaning, not decoration. Layout
+            // preserves the branch's first message edge, so place its divider at the same lead from
+            // that message that the frame has from its own first message. A fixed frame fraction
+            // drifts when branches contain different numbers of messages.
+            let Some(ir_fragment) = ir
+                .sequence_meta
+                .as_ref()
+                .and_then(|meta| meta.fragments.get(fragment_index))
+            else {
+                continue;
+            };
+            let message_y = |edge_index: usize| {
+                layout
+                    .edges
+                    .iter()
+                    .find(|edge| edge.edge_index == edge_index)
+                    .and_then(|edge| edge.points.first())
+                    .map(|point| f64::from(point.y) + offset_y)
+            };
+            let lead = message_y(ir_fragment.start_edge).map_or(0.0, |first_y| first_y - y);
+            for alternative in &ir_fragment.alternatives {
+                let Some(branch_y) = message_y(alternative.start_edge) else {
+                    continue;
+                };
+                let divider_y = branch_y - lead;
+                ctx.set_stroke_style(&self.config.node_stroke);
+                ctx.set_line_width(1.0);
+                ctx.set_line_dash(&[4.0, 4.0]);
+                ctx.begin_path();
+                ctx.move_to(x, divider_y);
+                ctx.line_to(x + w, divider_y);
+                ctx.stroke();
+                ctx.set_line_dash(&[]);
+                self.draw_calls += 1;
+
+                if !alternative.label.is_empty() {
+                    let fragment_font = fragment_font
+                        .get_or_insert_with(|| sequence_fragment_font_css(&self.config));
+                    ctx.set_fill_style(&self.config.label_color);
+                    ctx.set_font(fragment_font.as_str());
+                    ctx.set_text_align(TextAlign::Left);
+                    ctx.set_text_baseline(TextBaseline::Bottom);
+                    ctx.fill_text(
+                        &format!("[{}]", alternative.label),
+                        x + 6.0,
+                        divider_y - 3.0,
+                    );
+                    self.draw_calls += 1;
+                }
+            }
         }
     }
 
@@ -5445,6 +5497,119 @@ mod tests {
         assert_eq!(
             alpha_draws, 1,
             "a label was drawn more than once, suggesting the axis pass ran for a diagram with no axis"
+        );
+    }
+
+    /// A Canvas sequence `alt` must show both branches, rather than presenting one undivided frame.
+    ///
+    /// The alternative's `start_edge` is intentionally not at the midpoint of this frame: the first
+    /// branch has two messages and the second has one. This rejects an implementation that guesses a
+    /// divider from the frame height instead of deriving it from the message geometry layout published.
+    #[test]
+    fn canvas_draws_sequence_alt_branch_divider_and_condition() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n    A->>B: start\n    alt is ok\n        A->>B: yes\n        A->>B: yes2\n    else is bad\n        A->>B: no\n    end",
+        )
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let fragment = layout.extensions.sequence_fragments.first().expect(
+            "CONTROL FAILED: this source produced no sequence fragment, so it cannot exercise the canvas branch renderer",
+        );
+        let ir_fragment = ir
+            .sequence_meta
+            .as_ref()
+            .and_then(|meta| meta.fragments.first())
+            .expect("CONTROL FAILED: the parser did not preserve the sequence fragment");
+        let alternative = ir_fragment
+            .alternatives
+            .first()
+            .expect("CONTROL FAILED: this alt has no else branch to render");
+        assert_eq!(alternative.label, "is bad");
+
+        let message_y = |edge_index: usize| {
+            layout
+                .edges
+                .iter()
+                .find(|edge| edge.edge_index == edge_index)
+                .and_then(|edge| edge.points.first())
+                .map(|point| f64::from(point.y) - f64::from(layout.bounds.y))
+                .unwrap_or_else(|| panic!("layout published no message edge {edge_index}"))
+        };
+        let frame_y = f64::from(fragment.bounds.y) - f64::from(layout.bounds.y);
+        let divider_y =
+            message_y(alternative.start_edge) - (message_y(ir_fragment.start_edge) - frame_y);
+        let frame_x = f64::from(fragment.bounds.x) - f64::from(layout.bounds.x);
+        let frame_right = frame_x + f64::from(fragment.bounds.width);
+
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            ..Default::default()
+        };
+        let mut ctx = MockCanvas2dContext::new(1200.0, 800.0);
+        let mut renderer = Canvas2dRenderer::new(config);
+        let _ = renderer.render(&layout, &ir, &mut ctx);
+        let ops = ctx.operations();
+
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, DrawOperation::FillText(text, _, _) if text == "[is bad]")),
+            "the else condition never reached the Canvas operation stream"
+        );
+        assert!(
+            ops.windows(2).any(|pair| match (&pair[0], &pair[1]) {
+                (DrawOperation::MoveTo(x0, y0), DrawOperation::LineTo(x1, y1)) => {
+                    (*x0 - frame_x).abs() < 0.01
+                        && (*x1 - frame_right).abs() < 0.01
+                        && (*y0 - divider_y).abs() < 0.01
+                        && (*y1 - divider_y).abs() < 0.01
+                }
+                _ => false,
+            }),
+            "the branch divider was not drawn at the geometry-derived location"
+        );
+    }
+
+    /// A fragment without an alternative must not acquire a meaningless branch divider.
+    #[test]
+    fn canvas_draws_no_sequence_branch_divider_without_an_alternative() {
+        let ir = fm_parser::parse(
+            "sequenceDiagram\n    A->>B: start\n    alt is ok\n        A->>B: yes\n    end",
+        )
+        .ir;
+        let layout = fm_layout::layout_diagram(&ir);
+        let fragment = layout.extensions.sequence_fragments.first().expect(
+            "CONTROL FAILED: this source produced no sequence fragment, so the absence assertion is vacuous",
+        );
+        assert!(
+            ir.sequence_meta.as_ref().is_some_and(|meta| meta
+                .fragments
+                .first()
+                .is_some_and(|item| item.alternatives.is_empty())),
+            "CONTROL FAILED: this source unexpectedly has an alternative"
+        );
+
+        let config = CanvasRenderConfig {
+            auto_fit: false,
+            padding: 0.0,
+            ..Default::default()
+        };
+        let frame_x = f64::from(fragment.bounds.x) - f64::from(layout.bounds.x);
+        let frame_right = frame_x + f64::from(fragment.bounds.width);
+        let mut ctx = MockCanvas2dContext::new(1200.0, 800.0);
+        let mut renderer = Canvas2dRenderer::new(config);
+        let _ = renderer.render(&layout, &ir, &mut ctx);
+
+        assert!(
+            !ctx.operations()
+                .windows(2)
+                .any(|pair| match (&pair[0], &pair[1]) {
+                    (DrawOperation::MoveTo(x0, _), DrawOperation::LineTo(x1, _)) => {
+                        (*x0 - frame_x).abs() < 0.01 && (*x1 - frame_right).abs() < 0.01
+                    }
+                    _ => false,
+                }),
+            "a fragment without an else branch drew a full-width divider"
         );
     }
 
