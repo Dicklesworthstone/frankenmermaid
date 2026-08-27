@@ -2445,6 +2445,79 @@ pub fn parse_er_cardinality(notation: &str) -> (&'static str, &'static str) {
     )
 }
 
+/// One end of an ER relationship as the SHAPE mermaid draws there (bd-dun16).
+///
+/// ⚠️ THIS IS NOT [`parse_er_cardinality`]'S LABEL, AND THE DIFFERENCE IS THE WHOLE POINT. That
+/// function answers "what does this side read as", for a `0..*` text run. mermaid draws no such text
+/// — it encodes the cardinality as a CROW'S-FOOT MARKER on the relationship line, one of exactly
+/// four shapes. Measured in Chromium 151 against the pinned 11.15.0 bundle, which declares
+/// `er-onlyOne`, `er-zeroOrOne`, `er-oneOrMore` and `er-zeroOrMore`, each in a start and an end form.
+///
+/// The label mapping deliberately collapses cases this must keep apart: it degrades an unrecognised
+/// marker containing `{` to `*`, which is right for a text label and wrong for a shape, because
+/// there is no "approximately a crow's foot". An unrecognised end therefore yields `None` here and
+/// draws no marker, rather than guessing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ErCardinality {
+    /// `||` — two bars.
+    ExactlyOne,
+    /// `|o` / `o|` — a circle and a bar.
+    ZeroOrOne,
+    /// `}|` / `|{` — a crow's foot and a bar.
+    OneOrMore,
+    /// `}o` / `o{` — a crow's foot and a circle.
+    ZeroOrMore,
+}
+
+impl ErCardinality {
+    /// The `er-*` stem mermaid names this shape by; the renderer appends `Start`/`End`.
+    #[must_use]
+    pub const fn marker_stem(self) -> &'static str {
+        match self {
+            Self::ExactlyOne => "er-onlyOne",
+            Self::ZeroOrOne => "er-zeroOrOne",
+            Self::OneOrMore => "er-oneOrMore",
+            Self::ZeroOrMore => "er-zeroOrMore",
+        }
+    }
+}
+
+/// Split an ER notation into the two marker SHAPES it declares, as `(source, target)` (bd-dun16).
+///
+/// `}o--o|` draws a zero-or-more foot on the left and a zero-or-one circle-and-bar on the right.
+#[must_use]
+pub fn parse_er_cardinality_forms(
+    notation: &str,
+) -> (Option<ErCardinality>, Option<ErCardinality>) {
+    let Some(connector) = notation
+        .find("--")
+        .or_else(|| notation.find(".."))
+        .or_else(|| notation.find("=="))
+    else {
+        return (None, None);
+    };
+
+    (
+        er_marker_form(notation[..connector].trim()),
+        er_marker_form(notation[connector + 2..].trim()),
+    )
+}
+
+/// One end of an ER notation as a marker shape, or `None` when it names none.
+///
+/// ⚠️ NO FALLBACK ARM, unlike [`er_marker_label`]. A shape is drawn or it is not; inventing a crow's
+/// foot for a notation this table has not seen would put a false cardinality on the diagram, which is
+/// worse than drawing nothing.
+fn er_marker_form(marker: &str) -> Option<ErCardinality> {
+    match marker {
+        "||" => Some(ErCardinality::ExactlyOne),
+        "o|" | "|o" => Some(ErCardinality::ZeroOrOne),
+        "o{" | "}o" => Some(ErCardinality::ZeroOrMore),
+        "|{" | "}|" => Some(ErCardinality::OneOrMore),
+        _ => None,
+    }
+}
+
 /// One end of an ER notation as a human-readable cardinality (bd-2h3pp).
 ///
 /// The fallbacks below the exact arms are deliberate: an unrecognised marker that still contains a

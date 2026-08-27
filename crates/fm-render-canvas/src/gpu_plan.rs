@@ -351,6 +351,18 @@ impl From<MarkerKind> for GpuMarkerKind {
             | MarkerKind::ThickArrow
             | MarkerKind::DottedArrow
             | MarkerKind::Open => Self::Arrow,
+            // ⚠️ REACHED ONLY IF THE COLLECTOR'S FILTER IS REMOVED. `collect_scene_markers` drops ER
+            // cardinality kinds before they get here, because there is no crow's-foot glyph in the
+            // shader's marker set. The arm exists so that adding one is a deliberate edit rather
+            // than a silent fall-through to `Arrow`, which would draw a false cardinality.
+            MarkerKind::ErOnlyOneStart
+            | MarkerKind::ErOnlyOneEnd
+            | MarkerKind::ErZeroOrOneStart
+            | MarkerKind::ErZeroOrOneEnd
+            | MarkerKind::ErOneOrMoreStart
+            | MarkerKind::ErOneOrMoreEnd
+            | MarkerKind::ErZeroOrMoreStart
+            | MarkerKind::ErZeroOrMoreEnd => Self::Arrow,
         }
     }
 }
@@ -2409,7 +2421,11 @@ fn collect_scene_markers(group: &RenderGroup, markers: &mut Vec<GpuArrowheadInst
                     .as_ref()
                     .and_then(|stroke| parse_paint_rgba(&stroke.color))
                     .unwrap_or(DEFAULT_EDGE_STROKE_RGBA);
+                // ER crow's-foot shapes are skipped, not mapped: the shader's marker set has no glyph
+                // for them, and `GpuMarkerKind`'s fallback is `Arrow` — an arrowhead in a crow's
+                // foot's place states a cardinality the source never declared (bd-dun16).
                 if path.marker_start != MarkerKind::None
+                    && !path.marker_start.is_er_cardinality()
                     && let Some((position, angle)) = path_marker_start(&path.commands)
                 {
                     markers.push(scene_marker_instance(
@@ -2420,6 +2436,7 @@ fn collect_scene_markers(group: &RenderGroup, markers: &mut Vec<GpuArrowheadInst
                     ));
                 }
                 if path.marker_end != MarkerKind::None
+                    && !path.marker_end.is_er_cardinality()
                     && let Some((position, angle)) = path_marker_end(&path.commands)
                 {
                     let angle = if path.marker_end == MarkerKind::TriangleOpenStart {

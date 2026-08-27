@@ -2542,6 +2542,51 @@ pub enum MarkerKind {
     /// point faces out of the path rather than into it.
     TriangleOpenStart,
     Open,
+    /// ER crow's-foot cardinality (bd-dun16). Each shape needs BOTH a start and an end variant: the
+    /// glyph is not symmetric and SVG's `orient="auto"` rotates a marker without mirroring it, so
+    /// reusing one def at the other end draws the bar where the foot belongs. mermaid declares the
+    /// same eight, verified in Chromium 151 against the pinned 11.15.0 bundle.
+    ErOnlyOneStart,
+    ErOnlyOneEnd,
+    ErZeroOrOneStart,
+    ErZeroOrOneEnd,
+    ErOneOrMoreStart,
+    ErOneOrMoreEnd,
+    ErZeroOrMoreStart,
+    ErZeroOrMoreEnd,
+}
+
+impl MarkerKind {
+    /// Whether this is one of the eight ER crow's-foot shapes.
+    ///
+    /// ⚠️ SURFACES THAT CANNOT DRAW THESE MUST DRAW NOTHING, never fall through to an arrowhead. An
+    /// arrowhead in a crow's foot's place does not read as "cardinality unavailable", it reads as a
+    /// DIFFERENT cardinality — the diagram states something false rather than something incomplete.
+    #[must_use]
+    pub const fn is_er_cardinality(self) -> bool {
+        matches!(
+            self,
+            Self::ErOnlyOneStart
+                | Self::ErOnlyOneEnd
+                | Self::ErZeroOrOneStart
+                | Self::ErZeroOrOneEnd
+                | Self::ErOneOrMoreStart
+                | Self::ErOneOrMoreEnd
+                | Self::ErZeroOrMoreStart
+                | Self::ErZeroOrMoreEnd
+        )
+    }
+
+    /// The start-slot and end-slot markers for an ER cardinality shape.
+    #[must_use]
+    pub const fn er_pair(cardinality: fm_core::ErCardinality) -> (Self, Self) {
+        match cardinality {
+            fm_core::ErCardinality::ExactlyOne => (Self::ErOnlyOneStart, Self::ErOnlyOneEnd),
+            fm_core::ErCardinality::ZeroOrOne => (Self::ErZeroOrOneStart, Self::ErZeroOrOneEnd),
+            fm_core::ErCardinality::OneOrMore => (Self::ErOneOrMoreStart, Self::ErOneOrMoreEnd),
+            fm_core::ErCardinality::ZeroOrMore => (Self::ErZeroOrMoreStart, Self::ErZeroOrMoreEnd),
+        }
+    }
 }
 
 /// A path primitive in the shared render IR.
@@ -2810,7 +2855,21 @@ fn build_edge_layer(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> RenderGrou
         let mut marker_start = MarkerKind::None;
 
         if let Some(ir_edge) = ir.edges.get(edge.edge_index) {
-            if edge.reversed {
+            // ⚠️ ER CARDINALITY IS DECIDED FIRST AND WINS, because an ER relationship carries an
+            // `arrow` too and the arm below would put a flowchart arrowhead on it. mermaid draws no
+            // arrowhead on a relationship line at all — the crow's-foot markers ARE its end
+            // decoration (bd-dun16). A notation naming no shape on a side leaves that side bare.
+            let er_forms = ir_edge
+                .er_notation()
+                .map(fm_core::parse_er_cardinality_forms);
+            if let Some((left, right)) = er_forms {
+                if let Some(left) = left {
+                    marker_start = MarkerKind::er_pair(left).0;
+                }
+                if let Some(right) = right {
+                    marker_end = MarkerKind::er_pair(right).1;
+                }
+            } else if edge.reversed {
                 stroke.dash_array = vec![4.0, 4.0];
                 stroke.color = String::from("#94a3b8");
                 marker_end = MarkerKind::Open;

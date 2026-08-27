@@ -2711,6 +2711,18 @@ fn draw_marker_primitive<C: Canvas2dContext>(
 ) -> usize {
     match marker {
         MarkerKind::None => 0,
+        // ER crow's-foot cardinality (bd-dun16) is drawn by the SVG renderer only. Canvas2D has no
+        // glyph for these eight shapes yet, and drawing SOMETHING here would be worse than drawing
+        // nothing: an arrowhead where a crow's foot belongs asserts a cardinality the source never
+        // declared. Tracked separately rather than approximated.
+        MarkerKind::ErOnlyOneStart
+        | MarkerKind::ErOnlyOneEnd
+        | MarkerKind::ErZeroOrOneStart
+        | MarkerKind::ErZeroOrOneEnd
+        | MarkerKind::ErOneOrMoreStart
+        | MarkerKind::ErOneOrMoreEnd
+        | MarkerKind::ErZeroOrMoreStart
+        | MarkerKind::ErZeroOrMoreEnd => 0,
         MarkerKind::Circle => {
             draw_circle_marker(ctx, x, y, 4.0, node_fill, stroke_color);
             1

@@ -1909,7 +1909,17 @@ fn render_scene_document_with_ir(
     // `emit_fancy_markers`, memoized for the default theme (see `marker_defs_body`). Streamed in the
     // markers slot so the output is byte-identical to the per-marker `.marker()` children it replaces,
     // skipping the ~1-6 µs of Element construction + serialization rebuilt on every render.
-    defs = defs.raw_markers(marker_defs_body(edge_color, emit_fancy_markers));
+    let arrow_markers = marker_defs_body(edge_color, emit_fancy_markers);
+    // See the twin site in the main renderer: ER cardinality markers ride alongside the mask-driven
+    // arrowhead defs rather than inside the mask.
+    let er_markers = ir
+        .map(|d| er_marker_defs_body(d, edge_color))
+        .unwrap_or_default();
+    defs = defs.raw_markers(if er_markers.is_empty() {
+        arrow_markers
+    } else {
+        Cow::Owned(format!("{arrow_markers}{er_markers}"))
+    });
 
     let mut clip_defs = Vec::new();
     let mut clip_id_counter = 0usize;
@@ -2059,7 +2069,193 @@ fn map_marker_kind(kind: fm_layout::MarkerKind) -> &'static str {
         MarkerKind::TriangleOpen => "url(#arrow-triangle-open)",
         MarkerKind::TriangleOpenStart => "url(#start-arrow-triangle-open)",
         MarkerKind::Open => "url(#arrow-open)",
+        MarkerKind::ErOnlyOneStart => "url(#er-onlyOneStart)",
+        MarkerKind::ErOnlyOneEnd => "url(#er-onlyOneEnd)",
+        MarkerKind::ErZeroOrOneStart => "url(#er-zeroOrOneStart)",
+        MarkerKind::ErZeroOrOneEnd => "url(#er-zeroOrOneEnd)",
+        MarkerKind::ErOneOrMoreStart => "url(#er-oneOrMoreStart)",
+        MarkerKind::ErOneOrMoreEnd => "url(#er-oneOrMoreEnd)",
+        MarkerKind::ErZeroOrMoreStart => "url(#er-zeroOrMoreStart)",
+        MarkerKind::ErZeroOrMoreEnd => "url(#er-zeroOrMoreEnd)",
     }
+}
+
+/// The `url(#…)` marker pair an ER relationship declares, as `(start, end)`, or `None` for any edge
+/// that is not an ER relationship naming at least one cardinality (bd-dun16).
+///
+/// ⚠️ ONE HELPER FOR BOTH EDGE WRITERS. `render_edge` and `render_edge_body_into` each derive their
+/// own `(marker_start, marker_end)` from `ArrowType`, and an ER relationship carries `ArrowType::Line`
+/// — so both would draw a bare line. Overriding in only one is the asymmetric-sibling defect this
+/// file has produced repeatedly: the fast path handles an unlabelled relationship and the slow path
+/// handles a labelled one, so a one-sided fix draws crow's feet until someone writes `A ||--o{ B : r`.
+fn er_cardinality_marker_urls(
+    ir_edge: Option<&fm_core::IrEdge>,
+) -> Option<(&'static str, &'static str)> {
+    let notation = ir_edge?.er_notation()?;
+    let (left, right) = fm_core::parse_er_cardinality_forms(notation);
+    if left.is_none() && right.is_none() {
+        return None;
+    }
+    Some((
+        left.map_or("", |form| {
+            map_marker_kind(fm_layout::MarkerKind::er_pair(form).0)
+        }),
+        right.map_or("", |form| {
+            map_marker_kind(fm_layout::MarkerKind::er_pair(form).1)
+        }),
+    ))
+}
+
+/// The `<marker>` defs for ER crow's-foot cardinality, in mermaid's own geometry (bd-dun16).
+///
+/// ⚠️ EVERY NUMBER HERE WAS READ OUT OF A CHROMIUM RENDER of the pinned 11.15.0 bundle, not derived.
+/// The asymmetry between the start and end forms is real and load-bearing: `onlyOneStart` draws its
+/// bars at x=9,15 with `refX=0`, while `onlyOneEnd` draws them at x=3,9 with `refX=18`. SVG's
+/// `orient="auto"` rotates a marker but never mirrors it, so a single def used at both ends puts the
+/// crow's foot on the wrong side of the line.
+///
+/// ⚠️ ONLY THE USED FORMS ARE EMITTED, WHICH IS A DELIBERATE DIVERGENCE. mermaid declares all eight
+/// on every ER diagram; this renderer holds a dead-defs invariant — every declared id must appear as
+/// a `url(#id)` reference — and `strip_unused_markers` enforces it. Emitting eight defs to reference
+/// two would break that invariant and ship ~1.5 KB of markup that draws nothing, so the caller emits
+/// exactly the shapes the diagram uses.
+///
+/// ⚠️ THE CIRCLE IS FILLED WHITE, NOT HOLLOW, and that was measured rather than assumed. The "zero"
+/// bubble sits ON the relationship line; `fill="none"` lets the line run straight through it and the
+/// glyph stops reading as a bubble at all. Chromium reports `fill: rgb(255, 255, 255)` on every one
+/// of mermaid's four circles.
+///
+/// ⚠️ `markerUnits="userSpaceOnUse"` IS A DELIBERATE DIVERGENCE, and the only one here. mermaid sets
+/// no `markerUnits`, taking SVG's `strokeWidth` default — which is equivalent for mermaid because its
+/// relationship line is 1px. Ours is 1.5, so inheriting that default would draw every glyph at 1.5x
+/// the reference size. Pinning user-space units reproduces the drawn geometry, which is the thing
+/// being matched.
+/// The ER cardinality `<marker>` defs this diagram actually references, in a stable order.
+///
+/// ⚠️ IT DERIVES THE SHAPES THROUGH THE SAME TWO FUNCTIONS LAYOUT USES —
+/// `fm_core::parse_er_cardinality_forms` and `fm_layout::MarkerKind::er_pair`. A second hand-rolled
+/// notation table here is exactly the forked-helper drift that bd-nryyc, bd-jerh and bd-2h3pp were
+/// each an instance of; if the two disagreed the document would declare one marker and reference
+/// another, and `strip_unused_markers` would silently delete the def, leaving the line bare.
+fn er_marker_defs_body(ir: &MermaidDiagramIr, color: &str) -> String {
+    if ir.diagram_type != fm_core::DiagramType::Er {
+        return String::new();
+    }
+    let mut used: Vec<fm_layout::MarkerKind> = Vec::new();
+    for edge in &ir.edges {
+        let Some(notation) = edge.er_notation() else {
+            continue;
+        };
+        let (left, right) = fm_core::parse_er_cardinality_forms(notation);
+        for kind in [
+            left.map(|form| fm_layout::MarkerKind::er_pair(form).0),
+            right.map(|form| fm_layout::MarkerKind::er_pair(form).1),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !used.contains(&kind) {
+                used.push(kind);
+            }
+        }
+    }
+    let mut body = String::new();
+    for kind in used {
+        if let Some(def) = er_marker_def(kind, color) {
+            body.push_str(&def);
+        }
+    }
+    body
+}
+
+fn er_marker_def(kind: fm_layout::MarkerKind, color: &str) -> Option<String> {
+    use fm_layout::MarkerKind;
+    let stroke = |d: &str| format!("<path fill=\"none\" stroke=\"{color}\" d=\"{d}\"/>");
+    let bubble = |cx: u32, cy: u32| {
+        format!("<circle cx=\"{cx}\" cy=\"{cy}\" r=\"6\" fill=\"#ffffff\" stroke=\"{color}\"/>")
+    };
+
+    // (id, markerWidth, markerHeight, refX, refY, body) — every number read out of a Chromium render.
+    let (id, w, h, ref_x, ref_y, body) = match kind {
+        MarkerKind::ErOnlyOneStart => (
+            "er-onlyOneStart",
+            18,
+            18,
+            0,
+            9,
+            stroke("M9,0 L9,18 M15,0 L15,18"),
+        ),
+        MarkerKind::ErOnlyOneEnd => (
+            "er-onlyOneEnd",
+            18,
+            18,
+            18,
+            9,
+            stroke("M3,0 L3,18 M9,0 L9,18"),
+        ),
+        MarkerKind::ErZeroOrOneStart => (
+            "er-zeroOrOneStart",
+            30,
+            18,
+            0,
+            9,
+            format!("{}{}", bubble(21, 9), stroke("M9,0 L9,18")),
+        ),
+        MarkerKind::ErZeroOrOneEnd => (
+            "er-zeroOrOneEnd",
+            30,
+            18,
+            30,
+            9,
+            format!("{}{}", bubble(9, 9), stroke("M21,0 L21,18")),
+        ),
+        MarkerKind::ErOneOrMoreStart => (
+            "er-oneOrMoreStart",
+            45,
+            36,
+            18,
+            18,
+            stroke("M0,18 Q 18,0 36,18 Q 18,36 0,18 M42,9 L42,27"),
+        ),
+        MarkerKind::ErOneOrMoreEnd => (
+            "er-oneOrMoreEnd",
+            45,
+            36,
+            27,
+            18,
+            stroke("M3,9 L3,27 M9,18 Q27,0 45,18 Q27,36 9,18"),
+        ),
+        MarkerKind::ErZeroOrMoreStart => (
+            "er-zeroOrMoreStart",
+            57,
+            36,
+            18,
+            18,
+            format!(
+                "{}{}",
+                bubble(48, 18),
+                stroke("M0,18 Q18,0 36,18 Q18,36 0,18")
+            ),
+        ),
+        MarkerKind::ErZeroOrMoreEnd => (
+            "er-zeroOrMoreEnd",
+            57,
+            36,
+            39,
+            18,
+            format!(
+                "{}{}",
+                bubble(9, 18),
+                stroke("M21,18 Q39,0 57,18 Q39,36 21,18")
+            ),
+        ),
+        _ => return None,
+    };
+
+    Some(format!(
+        "<marker id=\"{id}\" refX=\"{ref_x}\" refY=\"{ref_y}\" markerWidth=\"{w}\" \
+         markerHeight=\"{h}\" markerUnits=\"userSpaceOnUse\" orient=\"auto\">{body}</marker>"
+    ))
 }
 
 fn render_scene_text(
@@ -3894,10 +4090,19 @@ fn render_layout_to_svg(
     // `emit_fancy_markers`, memoized for the default theme (see `marker_defs_body`). Streamed in the
     // markers slot so the output is byte-identical to the per-marker `.marker()` children it replaces,
     // skipping the ~1-6 µs of Element construction + serialization rebuilt on every render.
-    defs = defs.raw_markers(known_live_marker_mask.map_or_else(
+    let arrow_markers = known_live_marker_mask.map_or_else(
         || marker_defs_body(edge_color, emit_fancy_markers),
         |mask| marker_defs_body_for_mask(edge_color, mask),
-    ));
+    );
+    // ER crow's-foot cardinality markers (bd-dun16) are appended rather than folded into the mask:
+    // the mask is a `u16` with 15 of 16 bits already spoken for, and these defs are emitted only for
+    // the shapes the diagram references, so there is nothing for the mask's strip pass to prune.
+    let er_markers = er_marker_defs_body(ir, edge_color);
+    defs = defs.raw_markers(if er_markers.is_empty() {
+        arrow_markers
+    } else {
+        Cow::Owned(format!("{arrow_markers}{er_markers}"))
+    });
 
     // Add drop shadow filter if enabled. Skip the `<filter id="drop-shadow">` def when the theme
     // CSS is embedded: its only referrer is the inline `filter="url(#drop-shadow)"` on node shapes,
@@ -13513,6 +13718,18 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         }
     };
 
+    // The slow path's twin of the fast path's override: an ER relationship's ends are its
+    // cardinality, and it arrives here as `ArrowType::Line` with no markers (bd-dun16). This is the
+    // path a LABELLED relationship takes — `A ||--o{ B : places` — so omitting it here would draw
+    // crow's feet on bare relationships and nothing on labelled ones.
+    let (marker_start, marker_end) =
+        er_cardinality_marker_urls(ir_edge).map_or((marker_start, marker_end), |(start, end)| {
+            (
+                (!start.is_empty()).then_some(start),
+                (!end.is_empty()).then_some(end),
+            )
+        });
+
     let stroke_width =
         sankey_flow_stroke_width(ir, ir_edge, sankey_widest).unwrap_or(match arrow {
             ArrowType::ThickArrow
@@ -14471,6 +14688,12 @@ fn render_edge_body_into(
     // the arrow match, so it overrides whichever arm ran and leaves every other diagram type on
     // exactly the width it had before.
     let stroke_width = sankey_flow_stroke_width(ir, ir_edge, sankey_widest).unwrap_or(stroke_width);
+    // An ER relationship's ends are its CARDINALITY, not an arrowhead. It reaches the match above as
+    // `ArrowType::Line` and comes out bare, so the crow's-foot pair is applied here for the same
+    // reason the sankey width is: after the arrow match, overriding whichever arm ran, leaving every
+    // other diagram type untouched (bd-dun16).
+    let (marker_start, marker_end) =
+        er_cardinality_marker_urls(ir_edge).unwrap_or((marker_start, marker_end));
     // Was `text_alternatives && aria_labels && keyboard_nav`. The fragment writer now has a lean
     // (a11y-off) shape too, so the gate accepts a11y that is uniformly on OR uniformly off and dispatches
     // to the matching monomorphization. Mixed combinations (e.g. `A11yConfig::minimal()`) still take the
