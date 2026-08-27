@@ -2682,6 +2682,48 @@ mod tests {
         }
     }
 
+    /// ⚠️ A PREFIX MAY NOT BE REUSED WHEN THE SUFFIX ANSWERS A QUESTION THE PREFIX ASKED (bd-dw2a9).
+    ///
+    /// The forward-reference fix resolves an edge endpoint naming a subgraph using a pre-scan of the
+    /// document being lowered. The prefix compiler lowers the PREFIX as its own document, so its
+    /// pre-scan cannot see a subgraph the suffix declares — and `S0-->Late` inside the prefix would
+    /// resolve one way in a batch parse and another in a full parse.
+    ///
+    /// The batch parse must equal the full parse for every input, whether that is achieved by
+    /// refusing the prefix or by resolving it identically. This test asserts the OUTCOME, so it
+    /// cannot be satisfied by a refusal that quietly changes the diagram.
+    #[test]
+    fn batch_prefix_forward_reference_into_the_suffix_matches_a_full_parse() {
+        let shared = concat!(
+            "flowchart LR\n",
+            "  subgraph Shared[\"Shared ingestion platform for the batch\"]\n",
+            "    S0[\"Receive and validate events\"]\n",
+            "    S0-->Late\n",
+            "  end\n",
+        );
+        let inputs = [
+            format!("{shared}  subgraph Late\n    L0[Later]\n  end\n  L0-->A\n"),
+            format!("{shared}  subgraph Late\n    L0[Later]\n  end\n  L0-->B\n"),
+        ];
+        let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan =
+            FlowchartBatchParsePlan::new(&refs, MermaidParseMode::Compat, &ParserConfig::default());
+        let mut scratch = FlowchartBatchParseScratch::default();
+
+        for (index, input) in inputs.iter().enumerate() {
+            plan.with_parse_scratch(index, input, &mut scratch, |actual| {
+                let expected = parse(input);
+                assert_eq!(
+                    actual.ir.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+                    expected.ir.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+                    "batch parse of input {index} disagrees with a full parse"
+                );
+                assert_eq!(actual.ir, &expected.ir);
+                eprintln!("PREFIX_REUSED={}", actual.reusable_prefix.is_some());
+            });
+        }
+    }
+
     #[test]
     fn batch_scratch_restores_full_prefix_after_a_mutating_suffix() {
         let shared = concat!(
