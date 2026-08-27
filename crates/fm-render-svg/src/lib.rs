@@ -4380,13 +4380,29 @@ fn render_layout_to_svg(
             fm_core::FragmentKind::Break => "break",
             fm_core::FragmentKind::Rect => "rect",
         };
-        let label_text = if fragment.label.is_empty() {
-            kind_label.to_string()
-        } else {
-            format!("{kind_label} [{}]", fragment.label)
-        };
+        // ⚠️ THE KEYWORD AND THE CONDITION ARE TWO ELEMENTS, NOT ONE STRING. We drew
+        // `alt [Valid credentials]`, a run mermaid never emits. Its `drawLoop` writes them
+        // separately, with different classes, positions and alignment:
+        //
+        // ```text
+        //   g.text = r;        g.x = t.startx;  g.y = t.starty;   g.class = "labelText"
+        //   g.text = t.title;  g.x = t.startx + labelBoxWidth/2 + (t.stopx - t.startx)/2;
+        //                      g.y = t.starty + boxMargin + boxTextMargin;
+        //                      g.class = "loopText";  g.anchor = "middle"
+        // ```
+        //
+        // So the keyword sits in the small tab at the top-left and the condition is CENTRED across
+        // the fragment below it. Fusing them put the condition inside the tab, which also made the
+        // tab grow to fit a whole sentence.
+        //
+        // Found by `scripts/headtohead/chromium_text_diff.mjs`, which reported
+        // `mermaid draws, we do not: ["alt","[Valid credentials]"]` against
+        // `we draw, mermaid does not: ["alt [Valid credentials]"]`. The `else` branch already
+        // matched, so the fusion was the whole of the divergence.
+        let label_text = kind_label.to_string();
+        let condition_text = (!fragment.label.is_empty()).then(|| format!("[{}]", fragment.label));
 
-        // Label background tab.
+        // Label background tab. Sized to the KEYWORD alone now, which is what makes it a tab.
         let label_width = label_text.len() as f32 * config.avg_char_width + 16.0;
         let label_height = config.font_size + 8.0;
         doc = doc.child(
@@ -4412,6 +4428,27 @@ fn render_layout_to_svg(
                 .fill(&theme.colors.text)
                 .class("fm-sequence-fragment-label"),
         );
+
+        // The CONDITION, centred across the fragment beneath the tab — mermaid's `loopText`.
+        //
+        // Its own class rather than a second `fm-sequence-fragment-label`: the two carry different
+        // meanings and mermaid styles them differently (`labelText` is the bold keyword tab,
+        // `loopText` the plain condition), so a shared class would make them impossible to theme
+        // apart and would let a selector meant for one silently catch the other.
+        if let Some(condition_text) = condition_text.as_deref() {
+            doc = doc.child(
+                Element::text()
+                    .x(fx + fw / 2.0)
+                    .y(fy + label_height + config.font_size * 0.75)
+                    .content(condition_text)
+                    .attr("text-anchor", "middle")
+                    .attr("dominant-baseline", "middle")
+                    .attr_num("font-size", config.font_size * 0.75)
+                    .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                    .fill(&theme.colors.text)
+                    .class("fm-sequence-fragment-condition"),
+            );
+        }
 
         // Branch dividers: the `else` of an alt, the `and` of a par, the `option` of a critical.
         //
@@ -18804,7 +18841,7 @@ marker#arrow-open path {
         // Both conditions reach the document. A test that only checked for a divider would pass
         // while the second condition was still being dropped.
         assert!(
-            svg.contains("alt [is ok]"),
+            svg.contains(">alt<") && svg.contains(">[is ok]<"),
             "the fragment's own condition must still be drawn"
         );
         assert_eq!(
@@ -20608,7 +20645,7 @@ marker#arrow-open path {
             "missing fragment label class"
         );
         assert!(
-            svg.contains("loop [Every minute]"),
+            svg.contains(">loop<") && svg.contains(">[Every minute]<"),
             "missing loop label text"
         );
     }
@@ -20629,7 +20666,10 @@ marker#arrow-open path {
             svg.contains("fm-sequence-fragment"),
             "missing fragment class"
         );
-        assert!(svg.contains("alt [success]"), "missing alt label text");
+        // The keyword and the condition are SEPARATE runs, as mermaid draws them; asserting the
+        // fused `alt [success]` would pin the very defect that split them apart.
+        assert!(svg.contains(">alt<"), "missing alt keyword run");
+        assert!(svg.contains(">[success]<"), "missing alt condition run");
     }
 
     #[test]
@@ -20737,7 +20777,10 @@ marker#arrow-open path {
             svg.contains("fm-sequence-fragment-label-bg"),
             "should have label background"
         );
-        assert!(svg.contains("loop [3 times]"), "should render label text");
+        assert!(
+            svg.contains(">loop<") && svg.contains(">[3 times]<"),
+            "should render the keyword and the condition as separate runs"
+        );
     }
 
     // ─── E2E smoke tests for all 24 diagram types ───
