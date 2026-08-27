@@ -1666,64 +1666,27 @@ fn resolve_theme(ir: Option<&MermaidDiagramIr>, config: &SvgRenderConfig) -> The
     theme
 }
 
-/// The `.fm-cluster*` theme CSS block, captured EXACTLY as `Theme::to_svg_style` emits it. When a
-/// diagram has no clusters these selectors match no element, so stripping the block is byte-identical
-/// rendering while shrinking the fixed ~9 KB `<style>` (clusters ≈ 532 B). Kept as an exact constant
-/// so a drift (CSS edit) makes `strip_unused_theme_css` a safe NO-OP (it matches nothing → no strip),
-/// never a corruption. See docs/NEGATIVE_EVIDENCE.md (CSS dead-weight lever).
-const CLUSTER_THEME_CSS: &str = ".fm-cluster {\n  fill: var(--fm-cluster-fill);\n  stroke: var(--fm-cluster-stroke);\n  stroke-width: 1;\n  stroke-dasharray: 4 4;\n  rx: 10;\n  ry: 10;\n}\n.fm-cluster-label {\n  fill: var(--fm-cluster-label-color);\n  font-weight: 600;\n  font-size: 0.85em;\n  letter-spacing: 0.01em;\n}\n.fm-cluster-c4 {\n  fill: var(--fm-cluster-c4-fill);\n  stroke: var(--fm-cluster-c4-stroke);\n  stroke-dasharray: none;\n}\n.fm-cluster-swimlane {\n  fill: var(--fm-cluster-swimlane-fill);\n  stroke: var(--fm-cluster-swimlane-stroke);\n  stroke-dasharray: none;\n}\n";
-
-/// The special-node-shape theme CSS block (`note`/`cloud`/`cylinder`/`star`/`pentagon`), captured
-/// EXACTLY as `Theme::to_svg_style` emits it. Stripped when the diagram uses none of those shapes
-/// (the common rect/diamond/round/stadium case). Same byte-identical, safe-no-op-if-drifts contract
-/// as `CLUSTER_THEME_CSS`.
-const NODE_SHAPE_THEME_CSS: &str = ".fm-node.fm-node-shape-note path,\n.fm-node.fm-node-shape-note rect {\n  fill: var(--fm-node-fill);\n  fill: color-mix(in srgb, #fef3c7 40%, var(--fm-node-fill));\n}\n.fm-node.fm-node-shape-cloud path {\n  fill: var(--fm-node-fill);\n  fill: color-mix(in srgb, var(--fm-accent-2) 15%, var(--fm-node-fill));\n}\n.fm-node.fm-node-shape-cylinder path {\n  fill: var(--fm-node-fill);\n  fill: color-mix(in srgb, var(--fm-accent-1) 12%, var(--fm-node-fill));\n}\n.fm-node.fm-node-shape-star path,\n.fm-node.fm-node-shape-pentagon path {\n  stroke-width: 1.8;\n}\n";
-
-/// Remove the first occurrence of `block` from `css` in place. Equivalent to
-/// `*css = css.replace(block, "")` for every theme rule block here, because each is emitted EXACTLY
-/// once by `Theme::to_svg_style` (so "first occurrence" == "all occurrences"), but allocation-free:
-/// `str::replace` always heap-allocates a fresh String and copies the retained bytes into it, whereas
-/// `drain` shifts only the tail left in place. On the common flowchart (no clusters / special shapes /
-/// dashed-or-thick edges) all four blocks strip, so this turns 4 fixed-size String allocations +
-/// full-buffer copies per render into 4 tail memmoves — a pure fixed-overhead cut that matters most on
-/// the small diagrams where the ~9 KB `<style>` dominates output. A non-matching block is a no-op
-/// (search → `None`), preserving the safe-if-drifts contract of the block constants.
-///
-/// The search uses a PRECOMPUTED `memchr::memmem::Finder` (SIMD), not `str::find` nor one-shot
-/// `memmem::find`: `str::find`'s Two-Way `StrSearcher::new` needle-table setup measured ~3.3% of flowchart
-/// render across the 4 long (~300-500 B) block needles, and even one-shot `memmem::find` rebuilds a
-/// two-way `Searcher::new` (~2.5%) every call. Building one `Finder` per block ONCE (process-global
-/// `OnceLock`) moves that setup off the per-render path entirely; only the SIMD scan remains. The
-/// returned first-match byte offset is identical to `str::find`, so the `drain` is byte-identical.
-fn strip_css_block(
-    css: &mut String,
-    cell: &OnceLock<memchr::memmem::Finder<'static>>,
-    block: &'static str,
-) {
-    let finder = cell.get_or_init(|| memchr::memmem::Finder::new(block.as_bytes()));
-    if let Some(pos) = finder.find(css.as_bytes()) {
-        css.drain(pos..pos + block.len());
-    }
+/// Drop one exact stylesheet range, retaining its end marker. Marker pairs deliberately sit on
+/// rule boundaries, so a CSS layout drift is a safe no-op rather than a partial declaration edit.
+fn strip_css_range(css: &mut String, start: &str, end: &str) {
+    let Some(start_at) = memchr::memmem::find(css.as_bytes(), start.as_bytes()) else {
+        return;
+    };
+    let Some(end_at) = memchr::memmem::find(&css.as_bytes()[start_at..], end.as_bytes()) else {
+        return;
+    };
+    css.drain(start_at..start_at + end_at);
 }
-
-/// The `:root` cluster-only custom properties — dead when there are no clusters (they feed only the
-/// stripped cluster rules). Named so its `strip_css_block` finder can be a `OnceLock` like the others.
-const CLUSTER_VARS_THEME_CSS: &str = "  --fm-cluster-label-color: var(--fm-text-color);\n  --fm-cluster-c4-fill: var(--fm-cluster-fill);\n  --fm-cluster-c4-stroke: var(--fm-cluster-stroke);\n  --fm-cluster-swimlane-fill: var(--fm-cluster-fill);\n  --fm-cluster-swimlane-stroke: var(--fm-cluster-stroke);\n";
 
 /// Drop theme CSS rule blocks the diagram cannot use — the cluster block when there are no clusters,
 /// and the special-node-shape block when none of those shapes are present. Byte-identical rendering
 /// (the removed selectors match nothing); safe by construction (a non-matching constant is a no-op).
 fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
-    static CLUSTER_F: OnceLock<memchr::memmem::Finder<'static>> = OnceLock::new();
-    static CLUSTER_VARS_F: OnceLock<memchr::memmem::Finder<'static>> = OnceLock::new();
-    static NODE_SHAPE_F: OnceLock<memchr::memmem::Finder<'static>> = OnceLock::new();
-    static EDGE_STYLE_F: OnceLock<memchr::memmem::Finder<'static>> = OnceLock::new();
-    static EDGE_ANIMATION_F: OnceLock<memchr::memmem::Finder<'static>> = OnceLock::new();
     if !ir.is_some_and(|ir| !ir.clusters.is_empty()) {
-        strip_css_block(css, &CLUSTER_F, CLUSTER_THEME_CSS);
+        strip_css_range(css, ".fm-cluster{", ".fm-label{");
         // The `:root` cluster-only custom properties feed ONLY the stripped cluster rules, so they
         // are dead too when there are no clusters. Same exact-substring / safe-no-op contract.
-        strip_css_block(css, &CLUSTER_VARS_F, CLUSTER_VARS_THEME_CSS);
+        strip_css_range(css, "--fm-cluster-label-color:", "--fm-surface-shadow:");
     }
     let has_special_shapes = ir.is_some_and(|ir| {
         ir.nodes.iter().any(|node| {
@@ -1738,7 +1701,7 @@ fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
         })
     });
     if !has_special_shapes {
-        strip_css_block(css, &NODE_SHAPE_F, NODE_SHAPE_THEME_CSS);
+        strip_css_range(css, ".fm-node.fm-node-shape-note path,", ".fm-edge{");
     }
     // `.fm-edge-dashed`/`.fm-edge-thick` style only dotted/thick arrows. The arrow lists below are
     // copied VERBATIM from `render_edge`'s `style_class` match so detection cannot drift from the
@@ -1775,39 +1738,15 @@ fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
         })
     });
     if !has_dashed_or_thick {
-        strip_css_block(css, &EDGE_STYLE_F, EDGE_STYLE_THEME_CSS);
+        strip_css_range(css, ".fm-edge-dashed{", ".fm-edge-animation-fast,");
     }
     // The per-edge march block is the DEADEST of them all: `edgeId@{ animate: … }` is an explicit
     // opt-in almost no diagram writes, so on every other diagram this is ~470 B of rules matching
     // nothing. Same exact-substring / safe-no-op-if-drifts contract as the blocks above.
     if !ir.is_some_and(|ir| ir.edges.iter().any(|e| e.animation().is_some())) {
-        strip_css_block(css, &EDGE_ANIMATION_F, EDGE_ANIMATION_THEME_CSS);
+        strip_css_range(css, ".fm-edge-animation-fast,", ".fm-edge-back{");
     }
 }
-
-/// The per-edge march rules backing `edgeId@{ animate: … }` — captured EXACTLY as
-/// `Theme::to_svg_style` emits them, stripped when no edge opted in.
-///
-/// The declarations are upstream's, MEASURED from the pinned mermaid 11.15.0 bundle in Chromium
-/// 151: `.edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash
-/// 20s linear infinite;stroke-linecap:round;}`, the same again at 50s for `-slow`, and `@keyframes
-/// dash{to{stroke-dashoffset:0;}}`. See [`fm_core::EdgeAnimation`] for the full measurement.
-///
-/// Two deliberate departures, both documented where they are made rather than in the payload:
-/// the keyframes are named `fm-edge-dash-march` (upstream's bare `dash` is far too likely to
-/// collide inside a host page), and a `prefers-reduced-motion` carve-out upstream does not have is
-/// appended — it changes nothing for a viewer who has not asked to reduce motion.
-///
-/// ⚠️ THE RATIONALE LIVES HERE, NOT IN THE CSS. It was first written as a comment inside the style
-/// block, which put 1235 bytes of prose into EVERY SVG this renderer emits — the minifier keeps
-/// comments, and a diagram with no animated edge would have carried the whole explanation of a
-/// feature it does not use.
-const EDGE_ANIMATION_THEME_CSS: &str = ".fm-edge-animation-fast,\n.fm-edge-animation-slow {\n  stroke-dasharray: 9 5 !important;\n  stroke-dashoffset: 900;\n  stroke-linecap: round;\n}\n.fm-edge-animation-fast {\n  animation: fm-edge-dash-march 20s linear infinite;\n}\n.fm-edge-animation-slow {\n  animation: fm-edge-dash-march 50s linear infinite;\n}\n@keyframes fm-edge-dash-march {\n  to { stroke-dashoffset: 0; }\n}\n@media (prefers-reduced-motion: reduce) {\n  .fm-edge-animation-fast,\n  .fm-edge-animation-slow {\n    animation: none !important;\n  }\n}\n";
-
-/// The `.fm-edge-dashed` + `.fm-edge-thick`(+`:hover`) theme rules — captured EXACTLY as
-/// `Theme::to_svg_style` emits them — stripped when no edge uses a dotted/thick arrow. Same
-/// byte-identical, safe-no-op-if-drifts contract as the other blocks.
-const EDGE_STYLE_THEME_CSS: &str = ".fm-edge-dashed {\n  stroke-dasharray: 5 5;\n}\n.fm-edge-thick {\n  stroke-width: 2.25;\n}\n.fm-edge-thick:hover {\n  stroke-width: 3.0;\n}\n";
 
 fn render_scene_document_with_ir(
     scene: &RenderScene,
@@ -2805,6 +2744,11 @@ pub(crate) fn sanitize_svg_paint(value: &str) -> Option<String> {
 }
 
 fn is_css_named_color(value: &str) -> bool {
+    fm_core::is_css_named_color(value)
+}
+
+#[cfg(test)]
+fn legacy_is_css_named_color(value: &str) -> bool {
     matches!(
         value,
         "aliceblue"
@@ -3466,58 +3410,7 @@ fn animation_css(config: &SvgRenderConfig) -> String {
     let transition_seconds = config.animation_duration_ms as f32 / 1000.0;
     let flow_seconds = config.flow_animation_duration_ms as f32 / 1000.0;
     format!(
-        ".fm-animations-enabled {{\n\
-  --fm-anim-duration: {transition_seconds:.2}s;\n\
-  --fm-stagger-ms: {stagger_ms}ms;\n\
-  --fm-flow-duration: {flow_seconds:.2}s;\n\
-}}\n\
-.fm-animations-enabled .fm-node,\n\
-.fm-animations-enabled .fm-edge,\n\
-.fm-animations-enabled .fm-edge-labeled {{\n\
-  animation: fm-enter-diagram var(--fm-anim-duration) ease-out both;\n\
-  animation-delay: calc(var(--fm-enter-order, 0) * var(--fm-stagger-ms));\n\
-  transition: transform var(--fm-anim-duration) ease, opacity var(--fm-anim-duration) ease, filter var(--fm-anim-duration) ease, stroke var(--fm-anim-duration) ease;\n\
-}}\n\
-.fm-animations-enabled .fm-node {{\n\
-  transform-box: fill-box;\n\
-  transform-origin: center;\n\
-}}\n\
-.fm-animations-enabled .fm-node:hover {{\n\
-  transform: scale({hover_scale:.3});\n\
-}}\n\
-.fm-animations-enabled .fm-node-highlighted {{\n\
-  animation: fm-enter-diagram var(--fm-anim-duration) ease-out both,\n\
-             fm-node-pulse calc(var(--fm-anim-duration) * 2.8) ease-in-out infinite;\n\
-  animation-delay: calc(var(--fm-enter-order, 0) * var(--fm-stagger-ms)), calc(var(--fm-enter-order, 0) * var(--fm-stagger-ms) + var(--fm-anim-duration));\n\
-}}\n\
-.fm-animations-enabled .fm-edge-dashed,\n\
-.fm-animations-enabled .fm-edge-flow-animated {{\n\
-  stroke-dasharray: {dash_pattern};\n\
-  animation: fm-enter-diagram var(--fm-anim-duration) ease-out both,\n\
-             fm-edge-flow var(--fm-flow-duration) linear infinite;\n\
-  animation-delay: calc(var(--fm-enter-order, 0) * var(--fm-stagger-ms)), 0s;\n\
-}}\n\
-@keyframes fm-enter-diagram {{\n\
-  0% {{ opacity: 0; transform: translateY(8px); }}\n\
-  100% {{ opacity: 1; transform: translateY(0); }}\n\
-}}\n\
-@keyframes fm-edge-flow {{\n\
-  from {{ stroke-dashoffset: 0; }}\n\
-  to {{ stroke-dashoffset: -28; }}\n\
-}}\n\
-@keyframes fm-node-pulse {{\n\
-  0%, 100% {{ opacity: 1; }}\n\
-  50% {{ opacity: 0.82; }}\n\
-}}\n\
-@media (prefers-reduced-motion: reduce) {{\n\
-  .fm-animations-enabled .fm-node,\n\
-  .fm-animations-enabled .fm-edge,\n\
-  .fm-animations-enabled .fm-edge-labeled {{\n\
-    animation: none !important;\n\
-    transition: none !important;\n\
-    transform: none !important;\n\
-  }}\n\
-}}\n",
+        ".fm-animations-enabled{{--fm-anim-duration:{transition_seconds:.2}s;--fm-stagger-ms:{stagger_ms}ms;--fm-flow-duration:{flow_seconds:.2}s}}.fm-animations-enabled .fm-node,.fm-animations-enabled .fm-edge,.fm-animations-enabled .fm-edge-labeled{{animation:fm-enter-diagram var(--fm-anim-duration) ease-out both;animation-delay:calc(var(--fm-enter-order,0)*var(--fm-stagger-ms));transition:transform var(--fm-anim-duration) ease,opacity var(--fm-anim-duration) ease,filter var(--fm-anim-duration) ease,stroke var(--fm-anim-duration) ease}}.fm-animations-enabled .fm-node{{transform-box:fill-box;transform-origin:center}}.fm-animations-enabled .fm-node:hover{{transform:scale({hover_scale:.3})}}.fm-animations-enabled .fm-node-highlighted{{animation:fm-enter-diagram var(--fm-anim-duration) ease-out both,fm-node-pulse calc(var(--fm-anim-duration)*2.8) ease-in-out infinite;animation-delay:calc(var(--fm-enter-order,0)*var(--fm-stagger-ms)),calc(var(--fm-enter-order,0)*var(--fm-stagger-ms) + var(--fm-anim-duration))}}.fm-animations-enabled .fm-edge-dashed,.fm-animations-enabled .fm-edge-flow-animated{{stroke-dasharray:{dash_pattern};animation:fm-enter-diagram var(--fm-anim-duration) ease-out both,fm-edge-flow var(--fm-flow-duration) linear infinite;animation-delay:calc(var(--fm-enter-order,0)*var(--fm-stagger-ms)),0s}}@keyframes fm-enter-diagram{{0%{{opacity:0;transform:translateY(8px)}}100%{{opacity:1;transform:translateY(0)}}}}@keyframes fm-edge-flow{{from{{stroke-dashoffset:0}}to{{stroke-dashoffset:-28}}}}@keyframes fm-node-pulse{{0%,100%{{opacity:1}}50%{{opacity:.82}}}}@media (prefers-reduced-motion:reduce){{.fm-animations-enabled .fm-node,.fm-animations-enabled .fm-edge,.fm-animations-enabled .fm-edge-labeled{{animation:none!important;transition:none!important;transform:none!important}}}}",
         stagger_ms = config.animation_stagger_ms,
         dash_pattern = config.flow_dash_pattern
     )
@@ -16043,6 +15936,19 @@ fn endpoint_accessible_label<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_css_color_catalogue_matches_the_legacy_svg_oracle() {
+        for value in [
+            "aliceblue",
+            "rebeccapurple",
+            "transparent",
+            "yellowgreen",
+            "not-a-color",
+        ] {
+            assert_eq!(is_css_named_color(value), legacy_is_css_named_color(value));
+        }
+    }
 
     fn frame_test_layout(x: f32, y: f32, width: f32, height: f32) -> DiagramLayout {
         DiagramLayout {

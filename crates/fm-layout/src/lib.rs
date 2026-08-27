@@ -14975,6 +14975,7 @@ fn solve_constraint_coordinates(
     ))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn resolve_constraint_nodes(
     node_ids: &[String],
     id_to_index: &BTreeMap<&str, usize>,
@@ -14995,6 +14996,7 @@ fn resolve_constraint_nodes(
 ///
 /// Multiple declarations for a pair compose by taking the largest gap. A `BTreeMap` gives the MIP
 /// columns a stable order and makes the resulting coordinate tie-breaking reproducible.
+#[cfg(not(target_arch = "wasm32"))]
 fn collect_non_overlap_pairs(
     ir: &MermaidDiagramIr,
     id_to_index: &BTreeMap<&str, usize>,
@@ -15036,6 +15038,7 @@ fn collect_non_overlap_pairs(
 /// rectangle extents and requested gaps bounds every useful move from that placement. Scaling that
 /// finite envelope leaves inactive branches non-binding without smuggling a machine-dependent stop
 /// or a magic diagram-size constant into the MIP.
+#[cfg(not(target_arch = "wasm32"))]
 fn non_overlap_big_m(nodes: &[LayoutNodeBox], pairs: &[(usize, usize, f64)]) -> f64 {
     let coordinate_extent = nodes.iter().fold(1.0_f64, |extent, node| {
         extent
@@ -15050,6 +15053,7 @@ fn non_overlap_big_m(nodes: &[LayoutNodeBox], pairs: &[(usize, usize, f64)]) -> 
     (envelope * 4.0).max(1.0)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn in_rank_gap(node: &LayoutNodeBox, spacing: LayoutSpacing, horizontal_ranks: bool) -> f64 {
     let extent = if horizontal_ranks {
         node.bounds.height
@@ -15059,6 +15063,7 @@ fn in_rank_gap(node: &LayoutNodeBox, spacing: LayoutSpacing, horizontal_ranks: b
     f64::from(extent + spacing.node_spacing)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn min_length_gap(
     node: &LayoutNodeBox,
     min_len: usize,
@@ -15074,6 +15079,7 @@ fn min_length_gap(
     f64::from(base_gap * min_len.max(1) as f32)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn recompute_in_rank_orders(nodes: &mut [LayoutNodeBox], horizontal_ranks: bool) {
     let mut by_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for node in nodes.iter() {

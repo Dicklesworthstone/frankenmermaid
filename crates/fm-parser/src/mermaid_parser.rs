@@ -4133,6 +4133,12 @@ fn consume_css_function(value: &str) -> Option<usize> {
 }
 
 fn is_css_named_color(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    fm_core::is_css_named_color(&lower)
+}
+
+#[cfg(test)]
+fn legacy_is_css_named_color(value: &str) -> bool {
     matches!(
         value.to_ascii_lowercase().as_str(),
         "aliceblue"
@@ -16054,6 +16060,22 @@ fn is_comment(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shared_css_color_catalogue_matches_the_legacy_parser_oracle() {
+        for value in [
+            "AliceBlue",
+            "RebeccaPurple",
+            "TRANSPARENT",
+            "YellowGreen",
+            "not-a-color",
+        ] {
+            assert_eq!(
+                super::is_css_named_color(value),
+                super::legacy_is_css_named_color(value)
+            );
+        }
+    }
+
     /// `parse_class_assignment_ast` must DECLINE a statement whose bracket label ran past the
     /// whitespace it splits on (bd-lfrlx).
     ///

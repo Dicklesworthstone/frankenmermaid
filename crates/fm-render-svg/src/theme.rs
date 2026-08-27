@@ -544,21 +544,12 @@ impl Theme {
 
         let (svg_bg_style, cluster_dash) = if shadows {
             (
-                r#"svg {
-  shape-rendering: geometricPrecision;
-  background: var(--fm-bg);
-  background-image:
-    radial-gradient(ellipse at 20% 0%, color-mix(in srgb, var(--fm-accent-1) 3%, transparent) 0%, transparent 50%),
-    linear-gradient(180deg, var(--fm-bg) 0%, color-mix(in srgb, var(--fm-bg) 97%, var(--fm-node-stroke) 3%) 100%);
-}"#,
+                "svg{shape-rendering:geometricPrecision;background:var(--fm-bg);background-image:radial-gradient(ellipse at 20% 0%,color-mix(in srgb,var(--fm-accent-1) 3%,transparent) 0%,transparent 50%),linear-gradient(180deg,var(--fm-bg) 0%,color-mix(in srgb,var(--fm-bg) 97%,var(--fm-node-stroke) 3%) 100%)}",
                 "4 4",
             )
         } else {
             (
-                r#"svg {
-  shape-rendering: geometricPrecision;
-  background: var(--fm-bg);
-}"#,
+                "svg{shape-rendering:geometricPrecision;background:var(--fm-bg)}",
                 "none",
             )
         };
@@ -566,243 +557,7 @@ impl Theme {
         // Add utility classes
         let _ = write!(
             css,
-            r#"
-svg {{
-  --fm-edge-muted: var(--fm-cluster-stroke);
-  --fm-edge-label-bg: var(--fm-bg);
-  --fm-edge-label-border: var(--fm-cluster-stroke);
-  --fm-edge-label-text: var(--fm-text-color);
-  --fm-cluster-label-color: var(--fm-text-color);
-  --fm-cluster-c4-fill: var(--fm-cluster-fill);
-  --fm-cluster-c4-stroke: var(--fm-cluster-stroke);
-  --fm-cluster-swimlane-fill: var(--fm-cluster-fill);
-  --fm-cluster-swimlane-stroke: var(--fm-cluster-stroke);
-  --fm-surface-shadow: rgba(15, 23, 42, 0.08);
-}}
-{svg_bg_style}
-.fm-node {{
-  isolation: isolate;
-  --fm-node-accent: var(--fm-node-stroke);
-  --fm-node-hover-accent: var(--fm-edge-color);
-}}
-.fm-node rect,
-.fm-node path,
-.fm-node circle,
-.fm-node ellipse,
-.fm-node polygon {{
-  fill: var(--fm-node-fill);
-  stroke: var(--fm-node-accent);
-  stroke-width: 1.25;
-  vector-effect: non-scaling-stroke;
-  shape-rendering: geometricPrecision;
-  {shadow_filter}
-  transition: fill 150ms ease, stroke 150ms ease, filter 150ms ease;
-}}
-.fm-node.fm-node-user-mindmap-no-border rect,
-.fm-node.fm-node-user-mindmap-no-border path,
-.fm-node.fm-node-user-mindmap-no-border polygon {{
-  stroke: none;
-}}
-.fm-node line {{
-  stroke: var(--fm-node-accent);
-  stroke-width: 1.25;
-  vector-effect: non-scaling-stroke;
-}}
-.fm-node text {{
-  fill: var(--fm-text-color);
-  font-weight: 500;
-  letter-spacing: -0.015em;
-  text-rendering: optimizeLegibility;
-  font-feature-settings: "kern" 1, "liga" 1, "calt" 1;
-}}
-.fm-node:hover rect,
-.fm-node:hover path,
-.fm-node:hover circle,
-.fm-node:hover ellipse,
-.fm-node:hover polygon {{
-  stroke: var(--fm-node-hover-accent);
-  {hover_shadow_filter}
-}}
-.fm-node-accent-1 {{
-  --fm-node-accent: var(--fm-node-stroke);
-  --fm-node-accent: color-mix(in srgb, var(--fm-accent-1) 50%, var(--fm-node-stroke));
-  --fm-node-hover-accent: var(--fm-accent-1);
-}}
-.fm-node-accent-2 {{
-  --fm-node-accent: var(--fm-node-stroke);
-  --fm-node-accent: color-mix(in srgb, var(--fm-accent-2) 50%, var(--fm-node-stroke));
-  --fm-node-hover-accent: var(--fm-accent-2);
-}}
-.fm-node-accent-3 {{
-  --fm-node-accent: var(--fm-node-stroke);
-  --fm-node-accent: color-mix(in srgb, var(--fm-accent-3) 50%, var(--fm-node-stroke));
-  --fm-node-hover-accent: var(--fm-accent-3);
-}}
-.fm-node-accent-4 {{
-  --fm-node-accent: var(--fm-node-stroke);
-  --fm-node-accent: color-mix(in srgb, var(--fm-accent-4) 50%, var(--fm-node-stroke));
-  --fm-node-hover-accent: var(--fm-accent-4);
-}}
-.fm-node-accent-5 {{
-  --fm-node-accent: var(--fm-node-stroke);
-  --fm-node-accent: color-mix(in srgb, var(--fm-accent-5) 50%, var(--fm-node-stroke));
-  --fm-node-hover-accent: var(--fm-accent-5);
-}}
-.fm-node-accent-6 {{
-  --fm-node-accent: var(--fm-node-stroke);
-  --fm-node-accent: color-mix(in srgb, var(--fm-accent-6) 50%, var(--fm-node-stroke));
-  --fm-node-hover-accent: var(--fm-accent-6);
-}}
-.fm-node-accent-7 {{
-  --fm-node-accent: var(--fm-node-stroke);
-  --fm-node-accent: color-mix(in srgb, var(--fm-accent-7) 50%, var(--fm-node-stroke));
-  --fm-node-hover-accent: var(--fm-accent-7);
-}}
-.fm-node-accent-8 {{
-  --fm-node-accent: var(--fm-node-stroke);
-  --fm-node-accent: color-mix(in srgb, var(--fm-accent-8) 50%, var(--fm-node-stroke));
-  --fm-node-hover-accent: var(--fm-accent-8);
-}}
-.fm-node.fm-node-shape-note path,
-.fm-node.fm-node-shape-note rect {{
-  fill: var(--fm-node-fill);
-  fill: color-mix(in srgb, #fef3c7 40%, var(--fm-node-fill));
-}}
-.fm-node.fm-node-shape-cloud path {{
-  fill: var(--fm-node-fill);
-  fill: color-mix(in srgb, var(--fm-accent-2) 15%, var(--fm-node-fill));
-}}
-.fm-node.fm-node-shape-cylinder path {{
-  fill: var(--fm-node-fill);
-  fill: color-mix(in srgb, var(--fm-accent-1) 12%, var(--fm-node-fill));
-}}
-.fm-node.fm-node-shape-star path,
-.fm-node.fm-node-shape-pentagon path {{
-  stroke-width: 1.8;
-}}
-.fm-edge {{
-  fill: none;
-  stroke: var(--fm-edge-color);
-  stroke-width: 1.5;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  vector-effect: non-scaling-stroke;
-  paint-order: stroke;
-  transition: stroke 150ms ease, opacity 150ms ease, stroke-width 150ms ease;
-  cursor: default;
-}}
-.fm-edge:hover {{
-  stroke: var(--fm-accent-1);
-  stroke-width: 2.25;
-  opacity: 1;
-}}
-.fm-edge-solid {{
-  stroke-dasharray: none;
-}}
-.fm-edge-dashed {{
-  stroke-dasharray: 5 5;
-}}
-.fm-edge-thick {{
-  stroke-width: 2.25;
-}}
-.fm-edge-thick:hover {{
-  stroke-width: 3.0;
-}}
-.fm-edge-animation-fast,
-.fm-edge-animation-slow {{
-  stroke-dasharray: 9 5 !important;
-  stroke-dashoffset: 900;
-  stroke-linecap: round;
-}}
-.fm-edge-animation-fast {{
-  animation: fm-edge-dash-march 20s linear infinite;
-}}
-.fm-edge-animation-slow {{
-  animation: fm-edge-dash-march 50s linear infinite;
-}}
-@keyframes fm-edge-dash-march {{
-  to {{ stroke-dashoffset: 0; }}
-}}
-@media (prefers-reduced-motion: reduce) {{
-  .fm-edge-animation-fast,
-  .fm-edge-animation-slow {{
-    animation: none !important;
-  }}
-}}
-.fm-edge-back {{
-  stroke: var(--fm-edge-muted);
-  opacity: 0.8;
-  stroke-dasharray: 4 4;
-}}
-marker#arrow-end path,
-marker#arrow-filled path,
-marker#arrow-circle path,
-marker#arrow-diamond path {{
-  fill: var(--fm-edge-color);
-  stroke: none;
-  transition: fill 150ms ease;
-}}
-.fm-edge:hover ~ marker#arrow-end path,
-.fm-edge:hover ~ marker#arrow-filled path,
-.fm-edge:hover ~ marker#arrow-circle path,
-.fm-edge:hover ~ marker#arrow-diamond path {{
-  fill: var(--fm-accent-1);
-}}
-marker#arrow-open path {{
-  stroke: var(--fm-edge-muted);
-  fill: none;
-  stroke-width: 1.5;
-  transition: stroke 150ms ease;
-}}
-marker#arrow-cross path {{
-  stroke: var(--fm-edge-color);
-  fill: none;
-  stroke-width: 1.5;
-  transition: stroke 150ms ease;
-}}
-.fm-cluster {{
-  fill: var(--fm-cluster-fill);
-  stroke: var(--fm-cluster-stroke);
-  stroke-width: 1;
-  stroke-dasharray: {cluster_dash};
-  rx: 10;
-  ry: 10;
-}}
-.fm-cluster-label {{
-  fill: var(--fm-cluster-label-color);
-  font-weight: 600;
-  font-size: 0.85em;
-  letter-spacing: 0.01em;
-}}
-.fm-cluster-c4 {{
-  fill: var(--fm-cluster-c4-fill);
-  stroke: var(--fm-cluster-c4-stroke);
-  stroke-dasharray: none;
-}}
-.fm-cluster-swimlane {{
-  fill: var(--fm-cluster-swimlane-fill);
-  stroke: var(--fm-cluster-swimlane-stroke);
-  stroke-dasharray: none;
-}}
-.fm-label {{
-  fill: var(--fm-text-color);
-}}
-@media (prefers-reduced-motion: reduce) {{
-  .fm-node rect,
-  .fm-node path,
-  .fm-node circle,
-  .fm-node ellipse,
-  .fm-node polygon,
-  .fm-edge {{
-    transition: none;
-    transform: none;
-  }}
-}}
-.fm-node:focus-visible {{
-  outline: 2px solid var(--fm-accent-1);
-  outline-offset: 3px;
-}}
-"#
+            r#"svg{{--fm-edge-muted:var(--fm-cluster-stroke);--fm-edge-label-bg:var(--fm-bg);--fm-edge-label-border:var(--fm-cluster-stroke);--fm-edge-label-text:var(--fm-text-color);--fm-cluster-label-color:var(--fm-text-color);--fm-cluster-c4-fill:var(--fm-cluster-fill);--fm-cluster-c4-stroke:var(--fm-cluster-stroke);--fm-cluster-swimlane-fill:var(--fm-cluster-fill);--fm-cluster-swimlane-stroke:var(--fm-cluster-stroke);--fm-surface-shadow:rgba(15,23,42,.08)}}{svg_bg_style}.fm-node{{isolation:isolate;--fm-node-accent:var(--fm-node-stroke);--fm-node-hover-accent:var(--fm-edge-color)}}.fm-node rect,.fm-node path,.fm-node circle,.fm-node ellipse,.fm-node polygon{{fill:var(--fm-node-fill);stroke:var(--fm-node-accent);stroke-width:1.25;vector-effect:non-scaling-stroke;shape-rendering:geometricPrecision;{shadow_filter}transition:fill 150ms ease,stroke 150ms ease,filter 150ms ease}}.fm-node.fm-node-user-mindmap-no-border rect,.fm-node.fm-node-user-mindmap-no-border path,.fm-node.fm-node-user-mindmap-no-border polygon{{stroke:none}}.fm-node line{{stroke:var(--fm-node-accent);stroke-width:1.25;vector-effect:non-scaling-stroke}}.fm-node text{{fill:var(--fm-text-color);font-weight:500;letter-spacing:-.015em;text-rendering:optimizeLegibility;font-feature-settings:"kern" 1,"liga" 1,"calt" 1}}.fm-node:hover rect,.fm-node:hover path,.fm-node:hover circle,.fm-node:hover ellipse,.fm-node:hover polygon{{stroke:var(--fm-node-hover-accent);{hover_shadow_filter}}}.fm-node-accent-1{{--fm-node-accent:var(--fm-node-stroke);--fm-node-accent:color-mix(in srgb,var(--fm-accent-1) 50%,var(--fm-node-stroke));--fm-node-hover-accent:var(--fm-accent-1)}}.fm-node-accent-2{{--fm-node-accent:var(--fm-node-stroke);--fm-node-accent:color-mix(in srgb,var(--fm-accent-2) 50%,var(--fm-node-stroke));--fm-node-hover-accent:var(--fm-accent-2)}}.fm-node-accent-3{{--fm-node-accent:var(--fm-node-stroke);--fm-node-accent:color-mix(in srgb,var(--fm-accent-3) 50%,var(--fm-node-stroke));--fm-node-hover-accent:var(--fm-accent-3)}}.fm-node-accent-4{{--fm-node-accent:var(--fm-node-stroke);--fm-node-accent:color-mix(in srgb,var(--fm-accent-4) 50%,var(--fm-node-stroke));--fm-node-hover-accent:var(--fm-accent-4)}}.fm-node-accent-5{{--fm-node-accent:var(--fm-node-stroke);--fm-node-accent:color-mix(in srgb,var(--fm-accent-5) 50%,var(--fm-node-stroke));--fm-node-hover-accent:var(--fm-accent-5)}}.fm-node-accent-6{{--fm-node-accent:var(--fm-node-stroke);--fm-node-accent:color-mix(in srgb,var(--fm-accent-6) 50%,var(--fm-node-stroke));--fm-node-hover-accent:var(--fm-accent-6)}}.fm-node-accent-7{{--fm-node-accent:var(--fm-node-stroke);--fm-node-accent:color-mix(in srgb,var(--fm-accent-7) 50%,var(--fm-node-stroke));--fm-node-hover-accent:var(--fm-accent-7)}}.fm-node-accent-8{{--fm-node-accent:var(--fm-node-stroke);--fm-node-accent:color-mix(in srgb,var(--fm-accent-8) 50%,var(--fm-node-stroke));--fm-node-hover-accent:var(--fm-accent-8)}}.fm-node.fm-node-shape-note path,.fm-node.fm-node-shape-note rect{{fill:var(--fm-node-fill);fill:color-mix(in srgb,#fef3c7 40%,var(--fm-node-fill))}}.fm-node.fm-node-shape-cloud path{{fill:var(--fm-node-fill);fill:color-mix(in srgb,var(--fm-accent-2) 15%,var(--fm-node-fill))}}.fm-node.fm-node-shape-cylinder path{{fill:var(--fm-node-fill);fill:color-mix(in srgb,var(--fm-accent-1) 12%,var(--fm-node-fill))}}.fm-node.fm-node-shape-star path,.fm-node.fm-node-shape-pentagon path{{stroke-width:1.8}}.fm-edge{{fill:none;stroke:var(--fm-edge-color);stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke;paint-order:stroke;transition:stroke 150ms ease,opacity 150ms ease,stroke-width 150ms ease;cursor:default}}.fm-edge:hover{{stroke:var(--fm-accent-1);stroke-width:2.25;opacity:1}}.fm-edge-solid{{stroke-dasharray:none}}.fm-edge-dashed{{stroke-dasharray:5 5}}.fm-edge-thick{{stroke-width:2.25}}.fm-edge-thick:hover{{stroke-width:3}}.fm-edge-animation-fast,.fm-edge-animation-slow{{stroke-dasharray:9 5!important;stroke-dashoffset:900;stroke-linecap:round}}.fm-edge-animation-fast{{animation:fm-edge-dash-march 20s linear infinite}}.fm-edge-animation-slow{{animation:fm-edge-dash-march 50s linear infinite}}@keyframes fm-edge-dash-march{{to{{stroke-dashoffset:0}}}}@media (prefers-reduced-motion:reduce){{.fm-edge-animation-fast,.fm-edge-animation-slow{{animation:none!important}}}}.fm-edge-back{{stroke:var(--fm-edge-muted);opacity:.8;stroke-dasharray:4 4}}marker#arrow-end path,marker#arrow-filled path,marker#arrow-circle path,marker#arrow-diamond path{{fill:var(--fm-edge-color);stroke:none;transition:fill 150ms ease}}.fm-edge:hover~marker#arrow-end path,.fm-edge:hover~marker#arrow-filled path,.fm-edge:hover~marker#arrow-circle path,.fm-edge:hover~marker#arrow-diamond path{{fill:var(--fm-accent-1)}}marker#arrow-open path{{stroke:var(--fm-edge-muted);fill:none;stroke-width:1.5;transition:stroke 150ms ease}}marker#arrow-cross path{{stroke:var(--fm-edge-color);fill:none;stroke-width:1.5;transition:stroke 150ms ease}}.fm-cluster{{fill:var(--fm-cluster-fill);stroke:var(--fm-cluster-stroke);stroke-width:1;stroke-dasharray:{cluster_dash};rx:10;ry:10}}.fm-cluster-label{{fill:var(--fm-cluster-label-color);font-weight:600;font-size:.85em;letter-spacing:.01em}}.fm-cluster-c4{{fill:var(--fm-cluster-c4-fill);stroke:var(--fm-cluster-c4-stroke);stroke-dasharray:none}}.fm-cluster-swimlane{{fill:var(--fm-cluster-swimlane-fill);stroke:var(--fm-cluster-swimlane-stroke);stroke-dasharray:none}}.fm-label{{fill:var(--fm-text-color)}}@media (prefers-reduced-motion:reduce){{.fm-node rect,.fm-node path,.fm-node circle,.fm-node ellipse,.fm-node polygon,.fm-edge{{transition:none;transform:none}}}}.fm-node:focus-visible{{outline:2px solid var(--fm-accent-1);outline-offset:3px}}"#
         );
 
         // Edge-label rules apply only to `.fm-edge-labeled`/`.edge-label` elements, emitted only
@@ -1024,9 +779,9 @@ mod tests {
     fn theme_generates_complete_style() {
         let theme = Theme::from_preset(ThemePreset::Default);
         let style = theme.to_svg_style(true, true);
-        assert!(style.contains("svg {\n  --fm-bg:"));
+        assert!(style.contains("svg{--fm-bg:"));
         assert!(
-            !style.contains(":root {\n  --fm-bg:"),
+            !style.contains(":root{--fm-bg:"),
             "embedded theme variables must stay scoped to their SVG instead of leaking into the \
              host document"
         );

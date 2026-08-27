@@ -3317,6 +3317,21 @@ pub fn is_allowed_style_property(property: &str) -> bool {
     )
 }
 
+/// Whether a lowercase ASCII CSS color keyword is accepted by Mermaid style syntax.
+///
+/// Keeping this vocabulary in the core crate prevents every parser and renderer consumer from
+/// embedding an independent copy in the WASM module. Callers that accept authored text must
+/// lowercase it before this lookup; preserving the authored spelling is their responsibility.
+#[must_use]
+#[inline(never)]
+pub fn is_css_named_color(value: &str) -> bool {
+    const CSS_NAMED_COLORS: &str = "aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue blueviolet brown burlywood cadetblue chartreuse chocolate coral cornflowerblue cornsilk crimson cyan darkblue darkcyan darkgoldenrod darkgray darkgreen darkgrey darkkhaki darkmagenta darkolivegreen darkorange darkorchid darkred darksalmon darkseagreen darkslateblue darkslategray darkslategrey darkturquoise darkviolet deeppink deepskyblue dimgray dimgrey dodgerblue firebrick floralwhite forestgreen fuchsia gainsboro ghostwhite gold goldenrod gray green greenyellow grey honeydew hotpink indianred indigo ivory khaki lavender lavenderblush lawngreen lemonchiffon lightblue lightcoral lightcyan lightgoldenrodyellow lightgray lightgreen lightgrey lightpink lightsalmon lightseagreen lightskyblue lightslategray lightslategrey lightsteelblue lightyellow lime limegreen linen magenta maroon mediumaquamarine mediumblue mediumorchid mediumpurple mediumseagreen mediumslateblue mediumspringgreen mediumturquoise mediumvioletred midnightblue mintcream mistyrose moccasin navajowhite navy oldlace olive olivedrab orange orangered orchid palegoldenrod palegreen paleturquoise palevioletred papayawhip peachpuff peru pink plum powderblue purple rebeccapurple red rosybrown royalblue saddlebrown salmon sandybrown seagreen seashell sienna silver skyblue slateblue slategray slategrey snow springgreen steelblue tan teal thistle tomato transparent turquoise violet wheat white whitesmoke yellow yellowgreen";
+
+    CSS_NAMED_COLORS
+        .split_ascii_whitespace()
+        .any(|color| color == value)
+}
+
 /// Sanitize a CSS-like value for safe inclusion in SVG.
 ///
 /// Rejects values containing `url(`, `javascript:`, event-handler patterns

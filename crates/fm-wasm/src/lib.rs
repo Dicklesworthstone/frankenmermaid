@@ -1066,11 +1066,7 @@ fn merge_svg_config(
 
     let theme_name = overrides.theme.as_deref().or(theme_override);
     if let Some(name) = theme_name {
-        let preset = name.parse::<ThemePreset>().map_err(|err| {
-            format!(
-                "invalid theme '{name}': {err}; expected one of default,mermaid,dark,forest,neutral,corporate,neon,pastel,high-contrast,monochrome,blueprint"
-            )
-        })?;
+        let preset = parse_theme_preset(name)?;
         merged.theme = preset;
         if preset == ThemePreset::Mermaid {
             merged.cluster_fill_opacity = 1.0;
@@ -1170,15 +1166,15 @@ fn requested_theme_preset(overrides: &RuntimeInitConfig) -> Result<Option<ThemeP
         .theme
         .as_deref()
         .or(overrides.theme.as_deref());
-    theme_name
-        .map(|name| {
-            name.parse::<ThemePreset>().map_err(|err| {
-                format!(
-                    "invalid theme '{name}': {err}; expected one of default,mermaid,dark,forest,neutral,corporate,neon,pastel,high-contrast,monochrome,blueprint"
-                )
-            })
-        })
-        .transpose()
+    theme_name.map(parse_theme_preset).transpose()
+}
+
+fn parse_theme_preset(theme: &str) -> Result<ThemePreset, String> {
+    theme.parse::<ThemePreset>().map_err(|err| {
+        format!(
+            "invalid theme '{theme}': {err}; expected one of default,mermaid,dark,forest,neutral,corporate,neon,pastel,high-contrast,monochrome,blueprint"
+        )
+    })
 }
 
 fn merge_renderer_kind(
@@ -2479,11 +2475,7 @@ impl Diagram {
     #[wasm_bindgen(js_name = setTheme)]
     pub fn set_theme(&mut self, theme: &str) -> Result<(), JsValue> {
         self.ensure_alive()?;
-        let preset = theme.parse::<ThemePreset>().map_err(|err| {
-            js_error(format!(
-                "invalid theme '{theme}': {err}; expected one of default,mermaid,dark,forest,neutral,corporate,neon,pastel,high-contrast,monochrome,blueprint"
-            ))
-        })?;
+        let preset = parse_theme_preset(theme).map_err(js_error)?;
         let overrides = SvgConfigOverrides {
             theme: Some(theme.to_string()),
             ..SvgConfigOverrides::default()
@@ -2565,9 +2557,9 @@ mod tests {
         apply_budget_svg_simplifications, apply_canvas_theme_preset, build_diagram_geometry,
         build_webgpu_plan, canvas_font_size_px, collect_source_spans, handle_worker_message,
         hit_test_layout_edge, hit_test_layout_node, merge_canvas_config, merge_pressure_config,
-        merge_renderer_kind, merge_svg_config, read_runtime_config, render, render_deck,
-        render_svg_js, render_worker_request, requested_theme_preset, resolve_renderer,
-        write_runtime_config,
+        merge_renderer_kind, merge_svg_config, parse_theme_preset, read_runtime_config, render,
+        render_deck, render_svg_js, render_worker_request, requested_theme_preset,
+        resolve_renderer, write_runtime_config,
     };
     use fm_core::{
         MermaidBudgetLedger, MermaidGuardReport, MermaidLensBinding, MermaidLensEdit,
@@ -3082,6 +3074,16 @@ mod tests {
 
         let preset = requested_theme_preset(&overrides).expect("theme should parse");
         assert_eq!(preset, Some(ThemePreset::Dark));
+    }
+
+    #[test]
+    fn shared_theme_parser_preserves_the_public_invalid_theme_error() {
+        let error = parse_theme_preset("not-a-theme").expect_err("invalid theme must fail");
+
+        assert_eq!(
+            error,
+            "invalid theme 'not-a-theme': unknown theme preset: not-a-theme; expected one of default,mermaid,dark,forest,neutral,corporate,neon,pastel,high-contrast,monochrome,blueprint"
+        );
     }
 
     #[test]

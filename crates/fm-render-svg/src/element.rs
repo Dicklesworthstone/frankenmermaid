@@ -111,6 +111,7 @@ pub struct Element {
 #[derive(Debug, Clone)]
 enum ElementText {
     Text(String),
+    #[cfg(not(target_arch = "wasm32"))]
     RawParts(Vec<String>),
 }
 
@@ -127,6 +128,7 @@ impl Element {
     }
 
     /// Create a raw SVG fragment from ordered chunks emitted by this crate's own serializer.
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub(crate) fn raw_svg_parts(parts: Vec<String>) -> Self {
         Self {
@@ -627,6 +629,7 @@ impl Element {
             if let Some(ref raw_svg) = self.text_content {
                 match raw_svg {
                     ElementText::Text(raw_svg) => output.push_str(raw_svg),
+                    #[cfg(not(target_arch = "wasm32"))]
                     ElementText::RawParts(parts) => {
                         for part in parts {
                             output.push_str(part);
