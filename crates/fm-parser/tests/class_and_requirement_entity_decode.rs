@@ -7,12 +7,12 @@
 //! Measured as drawn text in a Chromium 151 render of the pinned mermaid 11.15.0 bundle, both
 //! engines read through the same DOM: the reference decodes both, we drew them raw.
 //!
-//! ⚠️ THE SWEEP FOUND A SECOND, DIFFERENT DEFECT AND IT IS NOT FIXED HERE. `subgraph "Plain Title"`
-//! comes out as the identifier `Plain_Title` — spaces turned to underscores — and
-//! `subgraph "x&amp;y"` collapses to `x`. That is the quoted title being normalized as an ID rather
-//! than kept as a label, which is a different fault from a missing decode and a more visible one;
-//! `subgraph one["Plain Title"]` is unaffected. It is filed rather than folded in, and pinned below
-//! so the follow-up starts from an assertion.
+//! ⚠️ THE SWEEP FOUND A SECOND, DIFFERENT DEFECT, FILED RATHER THAN FOLDED IN, AND SINCE FIXED.
+//! `subgraph "Plain Title"` came out as the identifier `Plain_Title` and `subgraph "x&amp;y"` as
+//! `x` — the quoted title run through the ID normalizer, a different fault from a missing decode.
+//! It went out as bd-chz77 with the BROKEN value pinned below; that pin then failed when bd-chz77
+//! landed, forcing this note to be updated rather than left stale. Its subject now lives in
+//! `quoted_subgraph_title.rs`.
 //!
 //! ⚠️ THE RETURN TYPE IS DECODED TOO, THOUGH THE BEAD NAMED ONLY THE MEMBER NAME. It is drawn beside
 //! the name from the same parse, and fixing one of a drawn pair is the asymmetric-sibling shape this
@@ -140,17 +140,18 @@ fn text_with_no_entity_is_unchanged() {
     }
 }
 
-/// ⚠️ THE SECOND DEFECT THE SWEEP FOUND, PINNED RATHER THAN LEFT UNRECORDED.
+/// ⚠️ THE SECOND DEFECT THE SWEEP FOUND — NOW FIXED, AND THE PIN IS WHY THIS NOTE IS ACCURATE.
 ///
-/// `subgraph "Plain Title"` is normalized as an IDENTIFIER, so its spaces become underscores and
-/// `subgraph "x&amp;y"` collapses to `x`. The bracketed form `subgraph one["Plain Title"]` is fine,
-/// which is why this went unnoticed. It is a different fault from a missing decode — the title is
-/// being run through the wrong normalizer entirely — and it is filed separately.
+/// `subgraph "Plain Title"` used to be normalized as an IDENTIFIER: spaces became underscores and
+/// `subgraph "x&amp;y"` collapsed to `x`. It was filed as bd-chz77 rather than folded in here, and
+/// this test pinned the BROKEN value so the follow-up would start from an assertion.
 ///
-/// Asserted at its CURRENT value so the follow-up fails here and has to update the note, the way
-/// bd-j06n2's pin forced bd-idjwr's.
+/// bd-chz77 then made a wholly-quoted body a TITLE, and this test failed with "that is an
+/// improvement — update this test rather than deleting it". Its subject now lives in
+/// `quoted_subgraph_title.rs`; what remains here is the assertion that the two defects stayed
+/// separate — the entity decode this bead fixed did NOT quietly depend on that change.
 #[test]
-fn a_quoted_subgraph_title_is_still_id_normalized() {
+fn a_quoted_subgraph_title_keeps_its_text() {
     let arrow = "-->";
     let parsed = fm_parser::parse(&format!(
         "flowchart LR\n  subgraph \"Plain Title\"\n    A {arrow} B\n  end\n"
@@ -164,8 +165,7 @@ fn a_quoted_subgraph_title_is_still_id_normalized() {
         .map(|l| l.text.clone())
         .expect("the subgraph has a title");
     assert_eq!(
-        title, "Plain_Title",
-        "the quoted subgraph title is no longer id-normalized. That is an improvement — update \
-         this test and the notes in this file rather than deleting them"
+        title, "Plain Title",
+        "the quoted subgraph title is id-normalized again"
     );
 }

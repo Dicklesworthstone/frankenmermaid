@@ -3336,6 +3336,28 @@ fn parse_subgraph_statement_raw(
         }
     }
 
+    // ⚠️ A BODY THAT IS ENTIRELY ONE QUOTED STRING IS A TITLE, NOT AN ID (bd-chz77).
+    // `subgraph "Plain Title"` fell through to the id/title splitter below, which took the quoted
+    // text as the ID and found no remainder to use as a title — so the cluster was captioned with
+    // `normalize_identifier`'s output and the author saw `Plain_Title`, spaces turned to
+    // underscores. `subgraph "x&amp;y"` collapsed to `x` the same way, the entity mangled by a
+    // normalizer meant for identifiers.
+    //
+    // The bracketed form `subgraph one["Plain Title"]` was always right, which is why this went
+    // unnoticed: it takes the explicit-label branch above.
+    //
+    // The id is still DERIVED from the same text — a cluster needs a key, and deriving it keeps
+    // `subgraph "A"` addressable as `A` — but the title now goes through `normalize_subgraph_title`,
+    // which is `clean_label` and therefore decodes entities like every other drawn label.
+    if let Some((quoted, remainder)) = extract_quoted_value(body)
+        && remainder.trim().is_empty()
+    {
+        let key = normalize_identifier(&quoted);
+        if !key.is_empty() {
+            return Some((key, normalize_subgraph_title(&quoted)));
+        }
+    }
+
     // Mermaid commonly supports `subgraph <id> <title>` and
     // `subgraph <id> "<title>"`. Use robust quoted extraction to handle
     // spaces and escapes in either field.
