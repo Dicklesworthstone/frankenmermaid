@@ -5762,6 +5762,20 @@ fn write_er_cardinality_labels_into(
             // in the canvas would have been the forked-helper drift this repo keeps getting bitten
             // by, so the logic moved to the IR — it is a fact about the notation, not about drawing.
             let (left_label, right_label) = fm_core::parse_er_cardinality(notation);
+            // ⚠️ SUPPRESSED PER SIDE, AND ONLY WHERE A MARKER ACTUALLY CARRIES THE CARDINALITY
+            // (bd-m2t99). mermaid draws no cardinality text at all — it draws crow's-foot markers,
+            // which this renderer now does too (bd-dun16), so the label became a duplicate: er_basic
+            // drew 17 text runs to the incumbent's 13, and the four extra were these.
+            //
+            // But it is NOT an unconditional deletion, because the two mappings do not cover the same
+            // inputs. `parse_er_cardinality` has fallback arms — an unrecognised marker containing
+            // `{` degrades to `*` — while `parse_er_cardinality_forms` deliberately has none, since
+            // there is no "approximately a crow's foot". A notation the SHAPE table does not know
+            // therefore draws no marker, and deleting its label too would drop the cardinality from
+            // the document entirely. Text is the fallback carrier for exactly those sides.
+            let (left_form, right_form) = fm_core::parse_er_cardinality_forms(notation);
+            let left_label = if left_form.is_some() { "" } else { left_label };
+            let right_label = if right_form.is_some() { "" } else { right_label };
             let font_size = config.font_size * 0.7;
             if !left_label.is_empty() {
                 let p = &edge_path.points[0];

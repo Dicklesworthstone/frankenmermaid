@@ -97,7 +97,6 @@ function ourBoundaryRows(text) {
     .map((m) => m[2].replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim())
     .filter((run) => run.startsWith('[') && run.endsWith(']'));
 }
-
 const rows = [];
 for (const macro of MACROS) {
   const text = diagram(macro);
@@ -132,7 +131,6 @@ for (const declaration of BOUNDARIES) {
   const mine = ourBoundaryRows(text)[0] ?? '<none>';
   rows.push({ macro: declaration, theirs, ours: mine, agree: theirs === mine });
 }
-
 const width = Math.max(...rows.map((r) => r.macro.length));
 for (const row of rows) {
   const mark = row.agree ? 'AGREE  ' : 'DIVERGE';

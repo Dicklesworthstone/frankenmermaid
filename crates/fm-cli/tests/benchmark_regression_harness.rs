@@ -406,13 +406,8 @@ fn segments_intersect(p1: (f64, f64), p2: (f64, f64), p3: (f64, f64), p4: (f64, 
 
     const EPS: f64 = 1e-9;
 
-    if ((d1 > EPS && d2 < -EPS) || (d1 < -EPS && d2 > EPS))
+    ((d1 > EPS && d2 < -EPS) || (d1 < -EPS && d2 > EPS))
         && ((d3 > EPS && d4 < -EPS) || (d3 < -EPS && d4 > EPS))
-    {
-        return true;
-    }
-
-    false
 }
 
 fn direction(p1: (f64, f64), p2: (f64, f64), p3: (f64, f64)) -> f64 {

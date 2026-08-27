@@ -2220,7 +2220,6 @@ impl IrBuilder {
             cluster.c4_boundary_type = Some(boundary_type.to_string());
         }
     }
-
     pub(crate) fn add_class_to_node_id(&mut self, node_id: IrNodeId, class_name: &str) {
         let normalized_class = trim_fast(class_name);
         if normalized_class.is_empty() {
