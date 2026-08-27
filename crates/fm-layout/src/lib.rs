@@ -18074,6 +18074,28 @@ fn build_cluster_boxes(
         return Vec::new();
     }
 
+    // ⚠️ THE MEMBER LOOKUP WAS A LINEAR SCAN OVER EVERY NODE, ONCE PER CLUSTER MEMBER — so this
+    // function cost O(clusters x members x nodes) and dominated any diagram built from subgraphs.
+    // Measured on the `arch_200x50` corpus (200 subgraphs of 50 services): `build_cluster_boxes` was
+    // **63.96% self** of the whole job, roughly 200 x 50 x 10,000 comparisons. Nothing in the medium
+    // flowchart/ER/sequence corpora shows it, because those carry a handful of clusters at most.
+    //
+    // `node_index` is a dense index, so one pass builds a direct lookup. First-wins is preserved
+    // deliberately: `find` returned the FIRST box with a matching index, so a duplicate index (which
+    // should not occur) keeps resolving to the same box it did before.
+    let index_capacity = nodes
+        .iter()
+        .map(|node_box| node_box.node_index)
+        .max()
+        .map_or(0, |max| max + 1);
+    let mut box_by_index: Vec<Option<&LayoutNodeBox>> = vec![None; index_capacity];
+    for node_box in nodes {
+        let slot = &mut box_by_index[node_box.node_index];
+        if slot.is_none() {
+            *slot = Some(node_box);
+        }
+    }
+
     // Step 1: Compute initial raw bounds for each cluster from its direct/all members.
     let mut cluster_bounds: Vec<Option<(f32, f32, f32, f32)>> =
         Vec::with_capacity(ir.clusters.len());
@@ -18084,7 +18106,7 @@ fn build_cluster_boxes(
         let mut max_y = f32::NEG_INFINITY;
 
         for member in &cluster.members {
-            if let Some(node_box) = nodes.iter().find(|n| n.node_index == member.0) {
+            if let Some(node_box) = box_by_index.get(member.0).copied().flatten() {
                 min_x = min_x.min(node_box.bounds.x);
                 min_y = min_y.min(node_box.bounds.y);
                 max_x = max_x.max(node_box.bounds.x + node_box.bounds.width);
