@@ -326,6 +326,7 @@ pub enum DiagramType {
     C4Dynamic,
     C4Deployment,
     Kanban,
+    Treemap,
     #[default]
     Unknown,
 }
@@ -358,6 +359,7 @@ impl DiagramType {
             Self::C4Dynamic => "C4Dynamic",
             Self::C4Deployment => "C4Deployment",
             Self::Kanban => "kanban",
+            Self::Treemap => "treemap",
             Self::Unknown => "unknown",
         }
     }
@@ -387,7 +389,8 @@ impl DiagramType {
             | Self::C4Deployment
             | Self::Pie
             | Self::XyChart
-            | Self::Kanban => MermaidSupportLevel::Supported,
+            | Self::Kanban
+            | Self::Treemap => MermaidSupportLevel::Supported,
             Self::Sequence => MermaidSupportLevel::Partial,
             Self::Unknown => MermaidSupportLevel::Unsupported,
         }
@@ -418,7 +421,8 @@ impl DiagramType {
             | Self::C4Deployment
             | Self::Pie
             | Self::XyChart
-            | Self::Kanban => "full",
+            | Self::Kanban
+            | Self::Treemap => "full",
             Self::Sequence => "partial",
             Self::Unknown => "unknown",
         }
@@ -5966,6 +5970,89 @@ pub struct IrXySeries {
     pub nodes: Vec<IrNodeId>,
 }
 
+/// A `treemap` diagram: a tree whose leaf values become rectangle AREAS (bd-9ghyo).
+///
+/// MEASURED against the pinned mermaid 11.15.0 bundle in Chromium 151
+/// (`scratchpad/treemap_probe.mjs`). The facts this shape has to carry:
+///
+/// * Leaves are laid out so AREA is proportional to value. Two leaves of 10 and 20 in a 960x310
+///   box came out 313x310 and 637x310 — areas 97030 and 197470, a ratio of 2.035 against the
+///   nominal 2.0, the difference being the 10px gutter between them.
+/// * Children are drawn LARGEST FIRST. Source order `A: 10` then `B: 20` renders B leftmost.
+/// * An internal node's value is the SUM of its descendants — `10.5` + `4.25` displayed `14.75`
+///   on the section header, never a declared number of its own.
+/// * Nesting is by INDENTATION, and it is relative: two-space and four-space indentation of the
+///   same document produced byte-identical output.
+///
+/// Stored as a flat arena with parent/child indices rather than a nested `Box` tree: the layout
+/// walks it depth-first and the renderer walks it in the same order, so an index is a stable name
+/// for a node that both passes can agree on without cloning subtrees.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct IrTreemapMeta {
+    /// Every node, in DOCUMENT order.
+    pub nodes: Vec<IrTreemapItem>,
+    /// Indices of the outermost nodes.
+    pub roots: Vec<usize>,
+}
+
+impl IrTreemapMeta {
+    /// The value of node `index`: its own if it declared one, otherwise the sum of its descendants.
+    ///
+    /// ⚠️ NOT `children.map(value).sum()` — that is only correct one level down. A section whose
+    /// children are themselves sections has no leaf children at all, and the shallow sum would make
+    /// it zero. The deep-nest case measured upstream (`R` > `G` > `H` > `x: 5`) shows every one of
+    /// those three headers displaying `5`, which only a recursive sum produces.
+    ///
+    /// A node that declared its own value is a LEAF even when the document indents lines beneath
+    /// it: upstream measurably draws `"Root": 99` with an indented `"A": 10` as two SIBLING leaves
+    /// totalling 109, not as a parent of 99 containing a child of 10.
+    #[must_use]
+    pub fn value_of(&self, index: usize) -> f64 {
+        let Some(item) = self.nodes.get(index) else {
+            return 0.0;
+        };
+        if let Some(value) = item.value {
+            return value;
+        }
+        item.children.iter().map(|&c| self.value_of(c)).sum()
+    }
+}
+
+/// One node of an [`IrTreemapMeta`] tree.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct IrTreemapItem {
+    /// The quoted label. mermaid REQUIRES the quotes: `Root` unquoted is a parse error
+    /// ("Expecting token of type 'EOF'"), measured against the pinned bundle.
+    pub label: String,
+    /// The declared value, present only on a leaf.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    /// Nesting depth, 0 for an outermost node.
+    pub depth: u32,
+    /// Index of the enclosing node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<usize>,
+    /// Indices of enclosed nodes, in document order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<usize>,
+    /// `:::class` names attached to this node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub classes: Vec<String>,
+    /// Where the declaring line was.
+    pub span: Span,
+}
+
+impl IrTreemapItem {
+    /// Is this node drawn as a filled rectangle rather than a titled container?
+    ///
+    /// Keyed on the DECLARED VALUE, not on `children.is_empty()`, because upstream keys on it too:
+    /// `"Root": 99` followed by indented lines is drawn as a leaf.
+    #[must_use]
+    pub const fn is_leaf(&self) -> bool {
+        self.value.is_some() || self.children.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct IrXyChartMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6324,6 +6411,9 @@ pub struct MermaidDiagramIr {
     pub gantt_meta: Option<IrGanttMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub xy_chart_meta: Option<IrXyChartMeta>,
+    /// The `treemap` tree, when this is a treemap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub treemap_meta: Option<IrTreemapMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pie_meta: Option<IrPieMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6375,6 +6465,7 @@ impl MermaidDiagramIr {
             sequence_meta: None,
             gantt_meta: None,
             xy_chart_meta: None,
+            treemap_meta: None,
             pie_meta: None,
             quadrant_meta: None,
             packet_meta: None,

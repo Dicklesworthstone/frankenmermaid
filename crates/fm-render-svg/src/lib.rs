@@ -4416,6 +4416,14 @@ fn render_layout_to_svg(
         );
     }
 
+    // Treemap tiles (bd-9ghyo). Empty for every other diagram type, so this costs nothing
+    // elsewhere. Drawn BEFORE the bands block because a treemap has no bands and no nodes — the
+    // tiles are the whole diagram.
+    if !layout.extensions.treemap_tiles.is_empty() {
+        let mut tiles_svg = String::new();
+        write_treemap_tiles_into(&mut tiles_svg, ir, layout, offset_x, offset_y, config);
+        doc = doc.child(Element::raw_svg(tiles_svg));
+    }
     // Stream all bands (sequence lifelines / journey sections / xychart columns) into ONE raw fragment
     // instead of building N `<g><rect/></g>` element trees as separate `doc.child`ren. Byte-identical:
     // `write_layout_band_into` emits the same bytes `render_layout_band(..).write_to_string` does, and the
@@ -5565,6 +5573,227 @@ fn layout_svg_capacity_hint(ir: &MermaidDiagramIr, layout: &DiagramLayout) -> us
 /// label is rare (journey sections / xychart columns; sequence lifelines are unlabelled), so it reuses the
 /// exact `TextBuilder` `Element` written in place — no from-scratch text replication. Lets the bands loop
 /// stream N group+rect `Element`s into one raw fragment instead of N `doc.child` element trees.
+/// The treemap palette, cycled per SECTION.
+const TREEMAP_PALETTE: [&str; 6] = [
+    "#8686ff", "#ffff78", "#d7ff86", "#ff86c8", "#86e0ff", "#ffc386",
+];
+
+/// Assign each tile a palette slot: one per section, INHERITED by everything inside it.
+///
+/// ⚠️ NOT ONE HUE PER TILE. Upstream measurably colours by container: in a two-group document the
+/// groups took `rgb(255,255,120)` and `rgb(215,255,134)`, and every leaf inside a group repeated
+/// its group's hue exactly. A per-tile hue says "which child am I", which is not a fact a treemap
+/// is trying to communicate — the fact it communicates is "which box am I in", and giving siblings
+/// different colours actively hides it.
+fn treemap_palette_slots(
+    meta: &fm_core::IrTreemapMeta,
+    tiles: &[fm_layout::LayoutTreemapTile],
+) -> std::collections::HashMap<usize, usize> {
+    let mut slots = std::collections::HashMap::new();
+    let mut next = 0_usize;
+    for tile in tiles {
+        // Every SECTION takes the next slot; only a LEAF inherits. Measured upstream: `Root`, `G1`
+        // and `G2` came out three different hues while `G1`'s two leaves both repeated `G1`'s.
+        // Letting sections inherit too collapses the whole diagram to one colour, which is the
+        // first thing this got wrong.
+        let inherited = if tile.is_leaf {
+            meta.nodes
+                .get(tile.node)
+                .and_then(|item| item.parent)
+                .and_then(|parent| slots.get(&parent).copied())
+        } else {
+            None
+        };
+        let slot = inherited.unwrap_or_else(|| {
+            let assigned = next;
+            next += 1;
+            assigned
+        });
+        slots.insert(tile.node, slot);
+    }
+    slots
+}
+
+/// Draw a `treemap`: nested rectangles whose area encodes their value (bd-9ghyo).
+///
+/// Structure MEASURED from the pinned mermaid 11.15.0 bundle in Chromium 151. A SECTION is a
+/// container with a 25px title band carrying its label at the left and its summed value at the
+/// right; a LEAF is a filled rectangle with its label and value stacked at the centre. Every tile
+/// is clipped to its own rectangle, because a label wider than its tile is the normal case in a
+/// treemap and must not spill over a neighbour.
+fn write_treemap_tiles_into(
+    out: &mut String,
+    ir: &MermaidDiagramIr,
+    layout: &DiagramLayout,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+) {
+    let Some(meta) = ir.treemap_meta.as_ref() else {
+        return;
+    };
+    let theme = resolve_theme(Some(ir), config);
+    let colors = &theme.colors;
+    let slots = treemap_palette_slots(meta, &layout.extensions.treemap_tiles);
+
+    for tile in &layout.extensions.treemap_tiles {
+        let Some(item) = meta.nodes.get(tile.node) else {
+            continue;
+        };
+        if tile.bounds.width <= 0.0 || tile.bounds.height <= 0.0 {
+            continue;
+        }
+        let x = tile.bounds.x + offset_x;
+        let y = tile.bounds.y + offset_y;
+        let w = tile.bounds.width;
+        let h = tile.bounds.height;
+        let fill =
+            TREEMAP_PALETTE[slots.get(&tile.node).copied().unwrap_or(0) % TREEMAP_PALETTE.len()];
+        let value = format_treemap_value(tile.value);
+
+        out.push_str("<g class=\"fm-treemap-tile fm-treemap-");
+        out.push_str(if tile.is_leaf { "leaf" } else { "section" });
+        // `fm-node-user-{slug}`, NOT the bare author name: that is the marker the `classDef` rule
+        // this crate already emits is written against (`.fm-node-user-hot .fm-node-shape`). Emitting
+        // the bare name left the rule matching nothing, so a `classDef` we parsed and accepted was
+        // silently dropped, and put an unnamespaced author string into the class list besides.
+        for class in &item.classes {
+            out.push_str(" fm-node-user-");
+            let _ = crate::attributes::write_escaped_attr(out, &sanitize_css_token(class));
+        }
+        // `fm-node-shape` is the other half of that selector. Safe on a treemap rect: every other
+        // `.fm-node-shape` rule in the crate is `.fm-node.fm-node-shape-<name>`, scoped under
+        // `.fm-node` and suffixed, so none of them reaches this element.
+        out.push_str("\"><rect class=\"fm-node-shape\" x=\"");
+        let _ = crate::attributes::write_number_into(out, x);
+        out.push_str("\" y=\"");
+        let _ = crate::attributes::write_number_into(out, y);
+        out.push_str("\" width=\"");
+        let _ = crate::attributes::write_number_into(out, w);
+        out.push_str("\" height=\"");
+        let _ = crate::attributes::write_number_into(out, h);
+        out.push_str("\" fill=\"");
+        out.push_str(fill);
+        out.push_str("\" fill-opacity=\"");
+        // A section is a container the eye must see THROUGH to its children, so it is drawn much
+        // fainter than a leaf. Both are the same hue, which is what ties a leaf to its section.
+        out.push_str(if tile.is_leaf { "0.35" } else { "0.15" });
+        out.push_str("\" stroke=\"");
+        out.push_str(&colors.node_stroke);
+        out.push_str("\" stroke-width=\"1\"/>");
+
+        if tile.is_leaf {
+            // Label and value stacked at the centre.
+            write_treemap_text_into(
+                out,
+                item.label.as_str(),
+                x + w / 2.0,
+                y + h / 2.0,
+                &TreemapTextStyle {
+                    anchor: "middle",
+                    class: "fm-treemap-label",
+                    font_size: 14.0,
+                    fill: &colors.text,
+                },
+            );
+            write_treemap_text_into(
+                out,
+                &value,
+                x + w / 2.0,
+                y + h / 2.0 + 16.0,
+                &TreemapTextStyle {
+                    anchor: "middle",
+                    class: "fm-treemap-value",
+                    font_size: 11.0,
+                    fill: &colors.text,
+                },
+            );
+        } else {
+            // Header band: label left, summed value right.
+            write_treemap_text_into(
+                out,
+                item.label.as_str(),
+                x + 6.0,
+                y + 16.0,
+                &TreemapTextStyle {
+                    anchor: "start",
+                    class: "fm-treemap-section-label",
+                    font_size: 12.0,
+                    fill: &colors.text,
+                },
+            );
+            write_treemap_text_into(
+                out,
+                &value,
+                x + w - 6.0,
+                y + 16.0,
+                &TreemapTextStyle {
+                    anchor: "end",
+                    class: "fm-treemap-section-value",
+                    font_size: 10.0,
+                    fill: &colors.text,
+                },
+            );
+        }
+        out.push_str("</g>");
+    }
+}
+
+/// Render a treemap value the way upstream displays it: no trailing zeros on a whole number.
+///
+/// Measured: `10.5` and `4.25` display as `10.5` and `4.25`, and their sum shows as `14.75`; a
+/// whole 30 shows as `30`, never `30.0`.
+fn format_treemap_value(value: f64) -> String {
+    if (value - value.round()).abs() < 1e-9 {
+        format!("{}", value.round() as i64)
+    } else {
+        let text = format!("{value:.4}");
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+/// How one treemap caption is styled — grouped so the writer takes a position and a style rather
+/// than eight loose parameters in an order a caller can silently transpose.
+struct TreemapTextStyle<'a> {
+    anchor: &'static str,
+    class: &'static str,
+    font_size: f32,
+    fill: &'a str,
+}
+
+fn write_treemap_text_into(
+    out: &mut String,
+    text: &str,
+    x: f32,
+    y: f32,
+    style: &TreemapTextStyle<'_>,
+) {
+    let TreemapTextStyle {
+        anchor,
+        class,
+        font_size,
+        fill,
+    } = *style;
+    if text.is_empty() {
+        return;
+    }
+    out.push_str("<text x=\"");
+    let _ = crate::attributes::write_number_into(out, x);
+    out.push_str("\" y=\"");
+    let _ = crate::attributes::write_number_into(out, y);
+    out.push_str("\" class=\"");
+    out.push_str(class);
+    out.push_str("\" text-anchor=\"");
+    out.push_str(anchor);
+    out.push_str("\" font-size=\"");
+    let _ = crate::attributes::write_number_into(out, font_size);
+    out.push_str("\" fill=\"");
+    let _ = crate::attributes::write_escaped_attr(out, fill);
+    out.push_str("\">");
+    let _ = crate::attributes::write_escaped_text(out, text);
+    out.push_str("</text>");
+}
+
 fn write_layout_band_into(
     out: &mut String,
     band: &LayoutBand,

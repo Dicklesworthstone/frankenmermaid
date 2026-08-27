@@ -1415,7 +1415,10 @@ fn unsupported_upstream_keyword(first_line: &str) -> Option<&'static str> {
     // discriminates at all.
     match head.as_str() {
         // Accepted bare AND with `-beta`, so the bare spelling is the honest name.
-        "treemap" => Some("treemap"),
+        //
+        // ⚠️ `treemap` WAS HERE AND IS NOT ANY MORE (bd-9ghyo). This list means "your syntax is
+        // right, we have not built this type"; leaving an implemented type in it tells an author
+        // their working diagram is unsupported. The same rule the shape tables live under.
         "info" => Some("info"),
         "eventmodeling" => Some("eventmodeling"),
         // Accepted bare only, once it has content. Reported by BeigeHill and re-verified here.
@@ -1502,6 +1505,11 @@ fn exact_diagram_type_with(
         Some(DiagramType::C4Deployment)
     } else if matches(line, "kanban") {
         Some(DiagramType::Kanban)
+    } else if matches(line, "treemap") {
+        // Catches the bare `treemap` and `treemap-beta` alike, the way `matches` already folds
+        // `block`/`block-beta`. Both spellings PARSE upstream and both report `treemap` from
+        // `detectType`, measured against the pinned 11.15.0 bundle.
+        Some(DiagramType::Treemap)
     } else {
         None
     }
@@ -1539,6 +1547,7 @@ const DIAGRAM_KEYWORDS: &[(&str, DiagramType)] = &[
     ("sankey", DiagramType::Sankey),
     ("xychart", DiagramType::XyChart),
     ("kanban", DiagramType::Kanban),
+    ("treemap", DiagramType::Treemap),
     ("block", DiagramType::BlockBeta),
     ("packet", DiagramType::PacketBeta),
     ("architecture", DiagramType::ArchitectureBeta),
@@ -2813,6 +2822,7 @@ mod tests {
             "C4Dynamic",
             "C4Deployment",
             "kanban",
+            "treemap",
         ];
 
         for header in headers {
@@ -4102,7 +4112,6 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
         for (source, expected) in [
             ("radar\n  title Skills\n  ds1 [10, 20, 30]\n", "radar"),
             ("radar-beta\n  axis a, b\n", "radar"),
-            ("treemap\n  root\n    child 5\n", "treemap"),
             ("ishikawa\n  Problem\n", "ishikawa"),
             ("eventmodeling\n  x\n", "eventmodeling"),
             ("info\n", "info"),
@@ -4119,6 +4128,32 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             assert!(
                 !joined.contains("Could not detect"),
                 "{source:?} still reports the generic message: {joined:?}"
+            );
+        }
+    }
+
+    /// CONTROL: an IMPLEMENTED type is never named as unimplemented (bd-9ghyo).
+    ///
+    /// The converse of the test above, and the half that was missing. `unsupported_upstream_keyword`
+    /// means "your syntax is right, we have not built this type"; leaving an entry there after the
+    /// type is built tells an author their working diagram is unsupported, and nothing detected that
+    /// — building `treemap` turned three passing tests into assertions that we do NOT support a
+    /// family we now render. This closes the loop the same way the shape tables do.
+    #[test]
+    fn an_implemented_type_is_never_named_as_unimplemented() {
+        for source in [
+            "treemap\n\"Root\"\n    \"A\": 10\n",
+            "treemap-beta\n\"Root\"\n    \"A\": 10\n",
+        ] {
+            let detected = super::detect_type_with_confidence(source);
+            assert_eq!(detected.diagram_type, fm_core::DiagramType::Treemap);
+            assert!(
+                !detected
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("does not implement")),
+                "an implemented type was reported unimplemented: {:?}",
+                detected.warnings
             );
         }
     }
@@ -4580,7 +4615,6 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             ("venn-beta\n  Item\n", "venn-beta"),
             ("wardley-beta\n  Item\n", "wardley-beta"),
             ("treeView-beta\n  Item\n", "treeView-beta"),
-            ("treemap\n  Item\n", "treemap"),
             ("ishikawa\n  Item\n", "ishikawa"),
         ] {
             let detected = super::detect_type_with_confidence(source);

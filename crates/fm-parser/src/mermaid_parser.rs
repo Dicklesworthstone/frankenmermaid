@@ -553,6 +553,7 @@ pub fn parse_mermaid_with_detection_and_config(
         DiagramType::GitGraph => parse_gitgraph(content, &mut builder),
         DiagramType::BlockBeta => parse_block_beta(content, &mut builder),
         DiagramType::Kanban => parse_kanban(content, &mut builder),
+        DiagramType::Treemap => parse_treemap(content, &mut builder),
         DiagramType::Unknown => {
             apply_unknown_contract(content, &mut builder, parse_mode);
         }
@@ -579,7 +580,15 @@ pub fn parse_mermaid_with_detection_and_config(
     // diagram, purely for diagnostics — resolution results are never stored.
     validate_deck_semantics(&mut builder);
 
-    if builder.node_count() == 0 && builder.edge_count() == 0 {
+    // A treemap holds its whole diagram in `treemap_meta` and declares no nodes or edges, so the
+    // generic emptiness check would report every valid treemap as unparseable. Keyed on the meta
+    // being POPULATED rather than on the diagram type, so an actually-empty treemap still warns.
+    let carried_by_meta = builder
+        .ir_mut()
+        .treemap_meta
+        .as_ref()
+        .is_some_and(|meta| !meta.nodes.is_empty());
+    if builder.node_count() == 0 && builder.edge_count() == 0 && !carried_by_meta {
         // The unimplemented-TYPE message is NOT emitted here. `unsupported_upstream_keyword` in
         // lib.rs already names those at DETECTION, and its warning reaches this builder through the
         // `detection.warnings` loop above — so a second, differently-worded message from this site
@@ -6930,6 +6939,140 @@ fn add_journey_actor_classes(
 // ---------------------------------------------------------------------------
 // Kanban board parser
 // ---------------------------------------------------------------------------
+
+/// Parse a `treemap` document: an indentation tree of quoted labels with numeric leaf values.
+///
+/// GRAMMAR MEASURED against the pinned mermaid 11.15.0 bundle in Chromium 151
+/// (`scratchpad/treemap_probe.mjs`), not inferred from the docs:
+///
+/// * `"Label"` opens a section; `"Label": 12` declares a leaf worth 12.
+/// * ⚠️ THE QUOTES ARE REQUIRED. A bare `Root` is a SYNTAX ERROR upstream ("Expecting token of
+///   type 'EOF' but found `Root`"), so accepting it would make us render documents mermaid
+///   refuses — the failure mode where an author's diagram works here and breaks everywhere else.
+/// * Nesting is by RELATIVE indentation, not a fixed step: the same document indented two spaces
+///   and four spaces rendered byte-identically.
+/// * `title X` sets the chart title.
+/// * Values may be fractional (`10.5`, `4.25`).
+///
+/// Uses an explicit indent STACK rather than dividing by a step width, because a step width is
+/// exactly the assumption the two-space/four-space measurement disproves.
+fn parse_treemap(content: &str, builder: &mut IrBuilder) {
+    let mut meta = fm_core::IrTreemapMeta::default();
+    let mut title = None;
+    // (indent columns, node index) for each open ancestor, outermost first.
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+
+    for (line_number, raw_line) in content.lines().enumerate() {
+        let line = raw_line.trim_end();
+        let trimmed = trim_fast(line);
+        if trimmed.is_empty() || trimmed.starts_with("%%") {
+            continue;
+        }
+        let span = span_for(line_number, raw_line);
+
+        // The header reaches this parser as ordinary content, exactly as it does for `parse_kanban`.
+        // Without this it fails the quoted-label check and warns about the author's own header.
+        if trimmed == "treemap"
+            || trimmed.starts_with("treemap ")
+            || trimmed.starts_with("treemap-beta")
+        {
+            continue;
+        }
+
+        // The title goes to `ir.meta.title`, which every renderer already draws, rather than to a
+        // second field of our own that only a treemap-aware renderer would know to look at.
+        if let Some(rest) = trimmed.strip_prefix("title ") {
+            title = Some(trim_fast(rest).to_string());
+            continue;
+        }
+        // `classDef`/`class` styling lines are collected by the shared style pass, not here.
+        if trimmed.starts_with("classDef") || trimmed.starts_with("class ") {
+            continue;
+        }
+
+        let indent = line.len() - line.trim_start().len();
+        let Some(parsed) = parse_treemap_entry(trimmed) else {
+            builder.add_warning(format!(
+                "treemap line {} is not a quoted label: {trimmed}",
+                line_number + 1
+            ));
+            continue;
+        };
+
+        // Pop every ancestor that is not strictly less indented than this line. A node declaring
+        // its own value is a LEAF, so it never becomes an ancestor (measured: `"Root": 99` with
+        // indented lines beneath draws Root and those lines as SIBLINGS).
+        while stack.last().is_some_and(|&(col, _)| col >= indent) {
+            stack.pop();
+        }
+        let parent = stack.last().map(|&(_, index)| index);
+        let depth = u32::try_from(stack.len()).unwrap_or(u32::MAX);
+
+        let index = meta.nodes.len();
+        meta.nodes.push(fm_core::IrTreemapItem {
+            label: parsed.label,
+            value: parsed.value,
+            depth,
+            parent,
+            children: Vec::new(),
+            classes: parsed.classes,
+            span,
+        });
+        match parent {
+            Some(p) => meta.nodes[p].children.push(index),
+            None => meta.roots.push(index),
+        }
+        if parsed.value.is_none() {
+            stack.push((indent, index));
+        }
+    }
+
+    if meta.nodes.is_empty() {
+        builder.add_warning("treemap declared no nodes".to_string());
+    }
+    if let Some(title) = title {
+        builder.ir_mut().meta.title = Some(title);
+    }
+    builder.ir_mut().treemap_meta = Some(meta);
+}
+
+/// One parsed `"Label"` / `"Label": value` / `"Label": value:::class` entry.
+struct TreemapEntry {
+    label: String,
+    value: Option<f64>,
+    classes: Vec<String>,
+}
+
+/// Split a treemap entry line, returning `None` when it is not a quoted label at all.
+fn parse_treemap_entry(text: &str) -> Option<TreemapEntry> {
+    let rest = text.strip_prefix('"')?;
+    let close = rest.find('"')?;
+    let label = rest[..close].to_string();
+    let mut tail = trim_fast(&rest[close + 1..]);
+
+    let mut classes = Vec::new();
+    if let Some(at) = tail.find(":::") {
+        classes = tail[at + 3..]
+            .split(',')
+            .map(trim_fast)
+            .filter(|c| !c.is_empty())
+            .map(str::to_string)
+            .collect();
+        tail = trim_fast(&tail[..at]);
+    }
+
+    let value = tail
+        .strip_prefix(':')
+        .map(trim_fast)
+        .filter(|v| !v.is_empty())
+        .and_then(|v| v.parse::<f64>().ok());
+
+    Some(TreemapEntry {
+        label,
+        value,
+        classes,
+    })
+}
 
 fn parse_kanban(input: &str, builder: &mut IrBuilder) {
     let mut current_column: Option<usize> = None;
@@ -22995,11 +23138,10 @@ Rel_Back(db, app, "Responds")"#,
         // but the surviving matcher in lib.rs does not list it yet and that file belongs to another
         // session. Adding the case here before the entry exists would be a test asserting a feature
         // nobody wrote. Tracked on bd-8z4fk.
-        for (header, canonical) in [
-            ("treemap", "treemap"),
-            ("treemap-beta", "treemap"),
-            ("radar-beta", "radar"),
-        ] {
+        // `treemap`/`treemap-beta` WERE HERE and are not any more: bd-9ghyo implemented the family,
+        // so naming it unimplemented is now the wrong answer. `an_implemented_type_is_never_named_
+        // as_unimplemented` in lib.rs asserts the opposite for it.
+        for (header, canonical) in [("radar-beta", "radar"), ("venn-beta", "venn")] {
             let parsed = parse_mermaid(&format!("{header}\n  \"A\": 1\n"));
 
             // Layer-AGNOSTIC on purpose: this asserts the user-visible outcome, not which function

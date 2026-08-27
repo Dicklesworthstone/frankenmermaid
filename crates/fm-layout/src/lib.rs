@@ -772,6 +772,7 @@ pub enum LayoutAlgorithm {
     GitGraph,
     Packet,
     Architecture,
+    Treemap,
 }
 
 impl LayoutAlgorithm {
@@ -796,6 +797,7 @@ impl LayoutAlgorithm {
             Self::GitGraph => "gitgraph",
             Self::Packet => "packet",
             Self::Architecture => "architecture",
+            Self::Treemap => "treemap",
         }
     }
 }
@@ -1889,6 +1891,7 @@ fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> boo
         sequence_meta,
         gantt_meta,
         xy_chart_meta,
+        treemap_meta,
         pie_meta,
         quadrant_meta,
         packet_meta,
@@ -1914,6 +1917,7 @@ fn memo_ir_equal(previous: &MermaidDiagramIr, current: &MermaidDiagramIr) -> boo
         && *sequence_meta == current.sequence_meta
         && *gantt_meta == current.gantt_meta
         && *xy_chart_meta == current.xy_chart_meta
+        && *treemap_meta == current.treemap_meta
         && *pie_meta == current.pie_meta
         && *quadrant_meta == current.quadrant_meta
         && *packet_meta == current.packet_meta
@@ -2093,6 +2097,8 @@ pub struct NodeCentrality {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LayoutExtensions {
     pub bands: Vec<LayoutBand>,
+    /// Squarified `treemap` rectangles, outermost first (bd-9ghyo).
+    pub treemap_tiles: Vec<LayoutTreemapTile>,
     pub axis_ticks: Vec<LayoutAxisTick>,
     /// Gantt has one unconditional bottom axis and an optional top axis.
     pub gantt_axis_rows: Vec<LayoutGanttAxisRow>,
@@ -2216,6 +2222,25 @@ pub struct LayoutActivationBar {
     pub depth: usize,
     /// The bounding rectangle of the bar on the lifeline.
     pub bounds: LayoutRect,
+}
+
+/// One rectangle of a `treemap`, produced by the squarified tiler (bd-9ghyo).
+///
+/// Carries the arena `node` index rather than a copy of the tree, so the renderer resolves label,
+/// value and classes from the SAME `IrTreemapMeta` the layout read — a copy here is how a tile and
+/// its node come to disagree about which node it is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutTreemapTile {
+    /// Index into `IrTreemapMeta.nodes`.
+    pub node: usize,
+    /// The tile's rectangle, INCLUDING its section header band when it has one.
+    pub bounds: LayoutRect,
+    /// Nesting depth, 0 for an outermost tile.
+    pub depth: u32,
+    /// The value this tile's area encodes: its own, or the sum of its descendants.
+    pub value: f64,
+    /// Drawn as a filled leaf rather than a titled container.
+    pub is_leaf: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3440,6 +3465,7 @@ fn compute_traced_layout_with_config_and_guardrails(
         LayoutAlgorithm::Quadrant => layout_diagram_quadrant_traced(ir),
         LayoutAlgorithm::GitGraph => layout_diagram_gitgraph_traced(ir),
         LayoutAlgorithm::Architecture => layout_diagram_architecture_traced(ir),
+        LayoutAlgorithm::Treemap => layout_diagram_treemap_traced(ir),
     };
     // State notes are attached HERE, after the dispatch match rather than inside one algorithm, for
     // two reasons: a state diagram can land on Sugiyama, Force, Tree or Radial depending on config
@@ -4202,6 +4228,7 @@ fn preferred_layout_algorithm_with_config(
         DiagramType::QuadrantChart => LayoutAlgorithm::Quadrant,
         DiagramType::GitGraph => LayoutAlgorithm::GitGraph,
         DiagramType::PacketBeta => LayoutAlgorithm::Packet,
+        DiagramType::Treemap => LayoutAlgorithm::Treemap,
         // The specialization is conditional ON THE INPUT, not on the diagram type alone: the
         // direction-aware placement has nothing to honour when no edge declares a side, so an
         // architecture-beta diagram written without `a:R --> L:b` keeps falling through to the
@@ -4435,6 +4462,7 @@ const fn algorithm_available_for_diagram(
         LayoutAlgorithm::GitGraph => matches!(diagram_type, DiagramType::GitGraph),
         LayoutAlgorithm::Packet => matches!(diagram_type, DiagramType::PacketBeta),
         LayoutAlgorithm::Architecture => matches!(diagram_type, DiagramType::ArchitectureBeta),
+        LayoutAlgorithm::Treemap => matches!(diagram_type, DiagramType::Treemap),
     }
 }
 
@@ -4619,7 +4647,9 @@ fn estimate_layout_cost(ir: &MermaidDiagramIr, algorithm: LayoutAlgorithm) -> La
         | LayoutAlgorithm::Quadrant
         | LayoutAlgorithm::GitGraph
         | LayoutAlgorithm::Architecture
-        | LayoutAlgorithm::Packet => LayoutCostEstimate {
+        | LayoutAlgorithm::Packet
+        // Squarify is a single descending-sorted pass per sibling group: cheap and linear.
+        | LayoutAlgorithm::Treemap => LayoutCostEstimate {
             time_ms: nodes
                 .saturating_mul(3)
                 .saturating_add(edges.saturating_mul(2))
@@ -6856,6 +6886,7 @@ pub fn layout_diagram_sequence_traced(ir: &MermaidDiagramIr) -> TracedLayout {
             stats,
             extensions: LayoutExtensions {
                 bands: lifeline_bands,
+                treemap_tiles: Vec::new(),
                 gantt_day_axis: None,
                 axis_ticks: Vec::new(),
                 gantt_axis_rows: Vec::new(),
@@ -9466,6 +9497,237 @@ fn architecture_place(
     }
     occupied.insert(target, node);
     cell[node] = Some(target);
+}
+
+/// Height of a section's title band, and the padding inside every section.
+///
+/// MEASURED from the pinned mermaid 11.15.0 bundle in Chromium 151: a section at `translate(10,35)`
+/// sized 980x355 placed its children from x=20, y=70 to x=980, y=380 — a 10px inset on the left,
+/// right and bottom, and 25 (header) + 10 on top. Siblings were separated by a 10px gutter
+/// (`637 + 10 + 313 = 960`).
+const TREEMAP_HEADER_HEIGHT: f32 = 25.0;
+const TREEMAP_PADDING: f32 = 10.0;
+const TREEMAP_GUTTER: f32 = 10.0;
+
+/// The canvas a treemap is tiled into. Upstream's default, measured: a 1000x400 content box.
+///
+/// A treemap has no intrinsic size — every rectangle is a FRACTION of its parent — so the outer box
+/// has to come from somewhere, and matching upstream's default keeps a side-by-side comparison
+/// meaningful.
+const TREEMAP_WIDTH: f32 = 1000.0;
+const TREEMAP_HEIGHT: f32 = 400.0;
+
+/// Lay out a `treemap`: nested rectangles whose AREA is proportional to value.
+fn layout_diagram_treemap_traced(ir: &MermaidDiagramIr) -> TracedLayout {
+    let trace = LayoutTrace::default();
+    let canvas = LayoutRect {
+        x: 0.0,
+        y: 0.0,
+        width: TREEMAP_WIDTH,
+        height: TREEMAP_HEIGHT,
+    };
+    let mut tiles = Vec::new();
+    if let Some(meta) = ir.treemap_meta.as_ref() {
+        tile_treemap_children(meta, &meta.roots, canvas, 0, &mut tiles);
+    }
+    let tile_count = tiles.len();
+    TracedLayout {
+        layout: Arc::new(DiagramLayout {
+            nodes: Vec::new(),
+            clusters: Vec::new(),
+            cycle_clusters: Vec::new(),
+            edges: Vec::new(),
+            bounds: canvas,
+            stats: LayoutStats {
+                node_count: tile_count,
+                ..LayoutStats::default()
+            },
+            extensions: LayoutExtensions {
+                treemap_tiles: tiles,
+                ..LayoutExtensions::default()
+            },
+            dirty_regions: Vec::new(),
+        }),
+        trace,
+    }
+}
+
+/// Tile `children` into `area`, then recurse into every child that is a section.
+fn tile_treemap_children(
+    meta: &fm_core::IrTreemapMeta,
+    children: &[usize],
+    area: LayoutRect,
+    depth: u32,
+    out: &mut Vec<LayoutTreemapTile>,
+) {
+    if children.is_empty() || area.width <= 0.0 || area.height <= 0.0 {
+        return;
+    }
+    // Largest first, which is what upstream draws: source order `A: 10` then `B: 20` renders B
+    // leftmost. Ties break on the arena index so the result is deterministic, which sorting by a
+    // float alone is not.
+    let mut ordered: Vec<(usize, f64)> = children
+        .iter()
+        .map(|&index| (index, meta.value_of(index)))
+        .filter(|&(_, value)| value > 0.0)
+        .collect();
+    ordered.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    if ordered.is_empty() {
+        return;
+    }
+
+    for (index, rect, value) in squarify(&ordered, area) {
+        let is_leaf = meta
+            .nodes
+            .get(index)
+            .is_some_and(fm_core::IrTreemapItem::is_leaf);
+        out.push(LayoutTreemapTile {
+            node: index,
+            bounds: rect,
+            depth,
+            value,
+            is_leaf,
+        });
+        if is_leaf {
+            continue;
+        }
+        // A section gives up its header band and a uniform inset before its children are tiled.
+        let inner = LayoutRect {
+            x: rect.x + TREEMAP_PADDING,
+            y: rect.y + TREEMAP_HEADER_HEIGHT + TREEMAP_PADDING,
+            width: rect.width - TREEMAP_PADDING * 2.0,
+            height: rect.height - TREEMAP_HEADER_HEIGHT - TREEMAP_PADDING * 2.0,
+        };
+        if let Some(item) = meta.nodes.get(index) {
+            tile_treemap_children(meta, &item.children, inner, depth + 1, out);
+        }
+    }
+}
+
+/// The squarified treemap of Bruls, Huizing and van Wijk: fill the SHORTER side of the remaining
+/// box with a row of siblings, extending the row while doing so improves the worst aspect ratio in
+/// it.
+///
+/// Area proportionality is the invariant this exists to provide, and it holds exactly before the
+/// gutter is applied: a row is given `row_sum / remaining` of the remaining area, and is then
+/// divided along its length in proportion again.
+///
+/// ⚠️ THE GUTTER IS AN INSET, NOT A SUBTRACTION FROM THE SHARE. Taking the gutter out of the row
+/// length before dividing makes each tile's area depend on how many siblings it happens to have,
+/// which is the proportionality this function promises. Insetting each finished tile leaves the
+/// ratios intact to within the inset, and it is also what upstream measurably does: 10 and 20 in a
+/// 960x310 box came out 313x310 and 637x310, an area ratio of 2.035 — exactly what a uniform inset
+/// of a clean 320/640 split produces, and not what subtracting a gutter first produces.
+///
+/// The inset is CAPPED at a fifth of the tile, so a tile far smaller than the gutter still has a
+/// visible rectangle instead of being inset out of existence. A 1-against-100 split gives the small
+/// tile about 9px of width; a flat 5px inset per side would leave it nothing at all.
+fn squarify(items: &[(usize, f64)], area: LayoutRect) -> Vec<(usize, LayoutRect, f64)> {
+    let mut out = Vec::with_capacity(items.len());
+    let mut rest = area;
+    let mut remaining: f64 = items.iter().map(|&(_, v)| v).sum();
+    let mut start = 0_usize;
+
+    while start < items.len() && remaining > 0.0 && rest.width > 0.0 && rest.height > 0.0 {
+        // Rows run along the shorter side, which is what keeps the tiles square-ish.
+        let horizontal = rest.width <= rest.height;
+        let side = f64::from(if horizontal { rest.width } else { rest.height });
+        let rest_area = f64::from(rest.width) * f64::from(rest.height);
+        if side <= 0.0 || rest_area <= 0.0 {
+            break;
+        }
+
+        let mut end = start + 1;
+        let mut row_sum = items[start].1;
+        let mut best = row_worst_ratio(&items[start..end], row_sum, side, rest_area, remaining);
+        while end < items.len() {
+            let next_sum = row_sum + items[end].1;
+            let candidate =
+                row_worst_ratio(&items[start..=end], next_sum, side, rest_area, remaining);
+            if candidate > best {
+                break;
+            }
+            best = candidate;
+            row_sum = next_sum;
+            end += 1;
+        }
+
+        let row = &items[start..end];
+        let row_area = rest_area * (row_sum / remaining);
+        let thickness = (row_area / side) as f32;
+
+        let mut cursor = if horizontal { rest.x } else { rest.y };
+        for &(index, value) in row {
+            let extent = (side * (value / row_sum)) as f32;
+            let rect = if horizontal {
+                LayoutRect {
+                    x: cursor,
+                    y: rest.y,
+                    width: extent,
+                    height: thickness,
+                }
+            } else {
+                LayoutRect {
+                    x: rest.x,
+                    y: cursor,
+                    width: thickness,
+                    height: extent,
+                }
+            };
+            out.push((index, inset_tile(rect), value));
+            cursor += extent;
+        }
+
+        if horizontal {
+            rest.y += thickness;
+            rest.height = (rest.height - thickness).max(0.0);
+        } else {
+            rest.x += thickness;
+            rest.width = (rest.width - thickness).max(0.0);
+        }
+        remaining -= row_sum;
+        start = end;
+    }
+    out
+}
+
+/// Shrink a tile to leave the gutter between it and its neighbours.
+fn inset_tile(rect: LayoutRect) -> LayoutRect {
+    let half = TREEMAP_GUTTER / 2.0;
+    let inset = half.min(rect.width * 0.2).min(rect.height * 0.2).max(0.0);
+    LayoutRect {
+        x: rect.x + inset,
+        y: rect.y + inset,
+        width: (rect.width - inset * 2.0).max(0.0),
+        height: (rect.height - inset * 2.0).max(0.0),
+    }
+}
+
+/// The worst (furthest from square) aspect ratio a row would have — the quantity squarify minimises.
+fn row_worst_ratio(
+    row: &[(usize, f64)],
+    row_sum: f64,
+    side: f64,
+    rest_area: f64,
+    remaining: f64,
+) -> f64 {
+    if row_sum <= 0.0 || side <= 0.0 || remaining <= 0.0 || rest_area <= 0.0 {
+        return f64::INFINITY;
+    }
+    let thickness = (rest_area * (row_sum / remaining)) / side;
+    if thickness <= 0.0 {
+        return f64::INFINITY;
+    }
+    row.iter()
+        .map(|&(_, value)| {
+            let extent = side * (value / row_sum);
+            if extent <= 0.0 {
+                f64::INFINITY
+            } else {
+                (thickness / extent).max(extent / thickness)
+            }
+        })
+        .fold(0.0_f64, f64::max)
 }
 
 /// Place architecture-beta services from their DECLARED edge directions (bd-zce4).
@@ -18231,7 +18493,8 @@ fn layout_decision_confidence_permille(
                 | LayoutAlgorithm::Quadrant
                 | LayoutAlgorithm::GitGraph
                 | LayoutAlgorithm::Architecture
-                | LayoutAlgorithm::Packet => 900,
+                | LayoutAlgorithm::Packet
+                | LayoutAlgorithm::Treemap => 900,
                 LayoutAlgorithm::Tree if metrics.is_tree_like => 880,
                 LayoutAlgorithm::Force if metrics.is_dense || metrics.back_edge_count > 0 => 760,
                 LayoutAlgorithm::Sugiyama => 820,
