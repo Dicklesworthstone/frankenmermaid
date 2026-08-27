@@ -110,8 +110,9 @@
       ],
       "svg_contains": [
         "class=\"fm-cluster\"",
-        "class=\"fm-cluster-label\"",
-        "fm-node-block-beta",
+        "fm-node-block-beta"
+      ],
+      "svg_not_contains": [
         "inner1"
       ]
     }

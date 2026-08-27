@@ -9420,7 +9420,17 @@ fn lower_block_beta_document_item(
             body,
         } => {
             let span = span_for(*line_number, source_line);
-            let Some(cluster_index) = builder.ensure_cluster(id, Some(id), span) else {
+            // ⚠️ NO TITLE. A block-beta group is `block:ID` (optionally `:columns`) and has NO label
+            // syntax — `BlockBetaDocumentItem::Group` carries no label field, because there is
+            // nothing to carry. Passing the ID as the title made the renderer caption the container
+            // with its own identifier, so `block:header:3` drew the word `header` above its
+            // contents. mermaid draws no caption there at all.
+            //
+            // Same family as the requirement `<<element>>` header and the journey actor legend: a
+            // machine-facing token reaching a reader because a display slot wanted a value and the
+            // id was the nearest one to hand. Measured against the pinned bundle in Chromium —
+            // incumbent 4 drawn runs against our 6, the surplus being exactly `header` and `footer`.
+            let Some(cluster_index) = builder.ensure_cluster(id, None, span) else {
                 builder.add_warning(format!(
                     "Line {line_number}: invalid block-beta group identifier: {}",
                     source_line.trim()
@@ -9431,7 +9441,10 @@ fn lower_block_beta_document_item(
             let Some(subgraph_index) = builder.ensure_subgraph(
                 id,
                 id,
-                Some(id),
+                // Kept in lockstep with the cluster above: the same identifier, and the same absence
+                // of a title. Leaving it here would put the id back on any surface that captions a
+                // subgraph rather than a cluster.
+                None,
                 span,
                 parent_subgraph,
                 Some(cluster_index),
