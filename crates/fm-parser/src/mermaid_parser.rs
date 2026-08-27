@@ -2392,6 +2392,27 @@ const INTERACTION_DIRECTIVES: [&str; 4] = ["click", "link", "callback", "cssClas
 /// The three the flowchart path does NOT parse — `INTERACTION_DIRECTIVES` minus `click`.
 const UNPARSED_INTERACTION_DIRECTIVES: [&str; 3] = ["link", "callback", "cssClass"];
 
+/// The interaction directives `journey` must NOT swallow, because the reference draws them here.
+///
+/// ⚠️ MEASURED AS EXACT DRAWN TEXT, NOT AS A SUBSTRING MATCH (bd-umqc6). mermaid's journey takes
+/// `click A "https://example.com"` as a TASK and captions it `click A "https` — truncated at the
+/// URL's own colon, because a journey line is `text: score: actors`. We produce the identical
+/// caption. That is real agreement rather than two manglings that merely share a substring, which
+/// is what a `contains("click A")` check could not have told apart.
+///
+/// So `click` and `link` stay content here, and only the two the reference refuses are guarded.
+const JOURNEY_INTERACTION_DIRECTIVES: [&str; 2] = ["callback", "cssClass"];
+
+/// The same for `timeline`, which inverts journey's answer.
+///
+/// ⚠️ THE TWO FAMILIES DISAGREE WITH EACH OTHER, AND THAT IS THE REFERENCE'S DOING. A timeline line
+/// is `period : event`, so `cssClass "A" mine` — no colon — is taken as a PERIOD and drawn, while
+/// `click A "url"` is refused; journey's colon-bearing URL makes it the other way round. There is no
+/// rule behind it to implement, only two grammars' accidents, so this is a MEASURED LIST and not a
+/// derived one. Reproducing the accident itself, by sniffing the line for colons, would be
+/// conformance metastasis.
+const TIMELINE_INTERACTION_DIRECTIVES: [&str; 3] = ["click", "link", "callback"];
+
 /// True when `statement` opens with one of `keywords` used as a DIRECTIVE — keyword, then space.
 ///
 /// ⚠️ ONE FUNCTION WITH AN EXPLICIT LIST PER CALL SITE, NOT TWO NEAR-IDENTICAL PREDICATES. The lists
@@ -6939,6 +6960,16 @@ fn parse_journey(input: &str, builder: &mut IrBuilder) {
         if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
             continue;
         }
+
+        // ⚠️ AND THE INTERACTION DIRECTIVES THE REFERENCE REFUSES HERE (bd-umqc6). This family takes
+        // an unrecognised line as content, which is right — mermaid does the same, and drawing what
+        // it draws is the compatibility promise. But the ones it REFUSES were becoming a phantom
+        // task captioned with the author's own directive, with no reference behaviour to match. The
+        // list is narrower than `INTERACTION_DIRECTIVES` for exactly the cells where the two engines
+        // already agree; see the constant for the measurement.
+        if starts_with_directive_keyword(trimmed, &JOURNEY_INTERACTION_DIRECTIVES) {
+            continue;
+        }
         // ⚠️ AND `direction`/`title` ARE NOT CONTENT EITHER (bd-92kw1). This family has no direction
         // concept and its title is promoted into diagram meta by a shared pass, so both lines were
         // falling through to the node parser and being DRAWN — a box captioned with the author's own
@@ -7671,6 +7702,16 @@ fn parse_timeline(input: &str, builder: &mut IrBuilder) {
         // `is_non_graph_statement` is safe to add because it matches style/classDef/linkStyle ONLY
         // (bd-t2fp): `style A fill:#f9f` was interning both `style_A_fill` and a stray `f9f`.
         if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
+            continue;
+        }
+
+        // ⚠️ AND THE INTERACTION DIRECTIVES THE REFERENCE REFUSES HERE (bd-umqc6). This family takes
+        // an unrecognised line as content, which is right — mermaid does the same, and drawing what
+        // it draws is the compatibility promise. But the ones it REFUSES were becoming a phantom
+        // task captioned with the author's own directive, with no reference behaviour to match. The
+        // list is narrower than `INTERACTION_DIRECTIVES` for exactly the cells where the two engines
+        // already agree; see the constant for the measurement.
+        if starts_with_directive_keyword(trimmed, &TIMELINE_INTERACTION_DIRECTIVES) {
             continue;
         }
         // ⚠️ AND `direction`/`title` ARE NOT CONTENT EITHER (bd-92kw1). This family has no direction
