@@ -15311,13 +15311,25 @@ fn write_sequence_number_into(
         return;
     };
 
+    let number_x = start.x + context.offset_x;
+    let number_y = f32::midpoint(start.y, end.y) + context.offset_y - 8.0;
+
+    // Mermaid 11.15.0 anchors a filled `sequencenumber` marker behind every emitted number.  Keep
+    // the decoration beside the number writer so the guard is identical: a sequence message without
+    // an autonumber value emits neither element.  The text uses `dominant-baseline="central"`, so
+    // its y coordinate is already its visual center (unlike Mermaid's baseline-plus-four spelling).
+    out.push_str("<circle cx=\"");
+    let _ = crate::attributes::write_number_into(out, number_x);
+    out.push_str("\" cy=\"");
+    let _ = crate::attributes::write_number_into(out, number_y);
+    out.push_str("\" r=\"6\" fill=\"");
+    let _ = crate::attributes::write_escaped_attr(out, &context.colors.edge);
+    out.push_str("\" class=\"fm-sequence-number-background\"/>");
+
     out.push_str("<text x=\"");
-    let _ = crate::attributes::write_number_into(out, start.x + context.offset_x);
+    let _ = crate::attributes::write_number_into(out, number_x);
     out.push_str("\" y=\"");
-    let _ = crate::attributes::write_number_into(
-        out,
-        f32::midpoint(start.y, end.y) + context.offset_y - 8.0,
-    );
+    let _ = crate::attributes::write_number_into(out, number_y);
     // THEMED, and it was not when this element first landed (bd-7hgxu). `fm-sequence-number` was
     // emitted with no `fill` and no CSS rule anywhere in the crate, so the number fell back to the
     // SVG default of black — invisible against a dark theme's background, on a diagram whose every
@@ -21584,6 +21596,93 @@ marker#arrow-open path {
         assert!(
             !svg.contains(">10 Ping<") && !svg.contains(">15 Pong<"),
             "a prefixed label survived alongside the number element, so both forms are emitted"
+        );
+    }
+
+    #[test]
+    fn sequence_autonumber_renders_a_circle_behind_its_digits() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Sequence);
+        ir.sequence_meta = Some(IrSequenceMeta {
+            autonumber: true,
+            ..Default::default()
+        });
+        ir.labels.push(fm_core::IrLabel {
+            text: "Ping".to_string(),
+            ..Default::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "Alice".to_string(),
+            ..Default::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "Bob".to_string(),
+            ..Default::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            label: Some(fm_core::IrLabelId(0)),
+            ..Default::default()
+        });
+
+        let svg = render_svg(&ir);
+        let circle_at = svg
+            .find("class=\"fm-sequence-number-background\"")
+            .expect("an autonumber needs its filled background circle");
+        let circle_start = svg[..circle_at]
+            .rfind("<circle")
+            .expect("the autonumber background class must be on a circle");
+        let circle_end = svg[circle_start..]
+            .find("/>")
+            .map(|end| circle_start + end + 2)
+            .expect("the autonumber background circle must be self-closing");
+        let circle = &svg[circle_start..circle_end];
+        let number_at = svg
+            .find("class=\"fm-sequence-number\">1</text>")
+            .expect("fixture control: the autonumber text is emitted");
+
+        assert!(
+            circle.contains("r=\"6\""),
+            "wrong number-circle radius: {circle}"
+        );
+        assert!(
+            circle_start < number_at,
+            "the circle must be painted before the digits so it stays behind them"
+        );
+    }
+
+    #[test]
+    fn sequence_messages_without_autonumber_do_not_gain_number_circles() {
+        let mut ir = MermaidDiagramIr::empty(DiagramType::Sequence);
+        ir.labels.push(fm_core::IrLabel {
+            text: "Ping".to_string(),
+            ..Default::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "Alice".to_string(),
+            ..Default::default()
+        });
+        ir.nodes.push(IrNode {
+            id: "Bob".to_string(),
+            ..Default::default()
+        });
+        ir.edges.push(IrEdge {
+            from: IrEndpoint::Node(IrNodeId(0)),
+            to: IrEndpoint::Node(IrNodeId(1)),
+            arrow: ArrowType::Arrow,
+            label: Some(fm_core::IrLabelId(0)),
+            ..Default::default()
+        });
+
+        let svg = render_svg(&ir);
+        assert!(
+            svg.contains(">Ping</text>"),
+            "fixture control: the message renders"
+        );
+        assert!(
+            !svg.contains("fm-sequence-number-background"),
+            "an ordinary sequence message must not gain an autonumber circle"
         );
     }
 
