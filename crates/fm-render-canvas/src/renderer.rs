@@ -14,7 +14,7 @@ use fm_layout::{
     RenderClip, RenderGroup, RenderItem, RenderPath, RenderScene, RenderSource, RenderText,
     RenderTransform, StrokeStyle, TextAlign as IrTextAlign, TextBaseline as IrTextBaseline,
 };
-use std::collections::BTreeSet;
+use std::{borrow::Cow, collections::BTreeSet};
 
 /// Configuration for Canvas2D rendering.
 #[derive(Debug, Clone)]
@@ -2171,6 +2171,14 @@ impl Canvas2dRenderer {
                 && let Some(label) = ir.labels.get(label_id.0)
                 && points.len() >= 2
             {
+                // C4Dynamic relationship labels are numbered at render time, matching Mermaid's
+                // `drawRels` behavior and the SVG renderer. The IR keeps the author's label
+                // untouched, so the same graph can still render unnumbered in C4Context.
+                let label_text: Cow<'_, str> = if ir.diagram_type == DiagramType::C4Dynamic {
+                    Cow::Owned(format!("{}: {}", edge_path.edge_index + 1, label.text))
+                } else {
+                    Cow::Borrowed(&label.text)
+                };
                 let label_offset = self.config.font_size * 0.8;
                 let (lx, ly) = if points.len() == 4 {
                     let p1 = &points[1];
@@ -2216,8 +2224,8 @@ impl Canvas2dRenderer {
                 // multi-line label (`\n`) needs the split (it's re-read for max-width + count + per-line
                 // draw). Byte-identical: for a `\n`-free label the sole `lines()` item IS `label.text`,
                 // `total_height == line_height`, and `start_y == ly`.
-                if !label.text.contains('\n') {
-                    let label_width = ctx.measure_text(&label.text).width + 8.0;
+                if !label_text.contains('\n') {
+                    let label_width = ctx.measure_text(&label_text).width + 8.0;
                     let label_height = line_height + 4.0;
 
                     ctx.set_fill_style(&self.config.node_fill);
@@ -2242,12 +2250,12 @@ impl Canvas2dRenderer {
                     }
                     ctx.set_text_align(TextAlign::Center);
                     ctx.set_text_baseline(TextBaseline::Middle);
-                    ctx.fill_text(&label.text, lx, ly);
+                    ctx.fill_text(&label_text, lx, ly);
                     self.draw_calls += 1;
                     *labels_drawn += 1;
                 } else {
                     // Background for label
-                    let lines: Vec<&str> = label.text.lines().collect();
+                    let lines: Vec<&str> = label_text.lines().collect();
                     let mut max_text_width = 0.0_f64;
                     for line in &lines {
                         let text_metrics = ctx.measure_text(line);

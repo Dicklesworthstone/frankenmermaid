@@ -328,6 +328,50 @@ fn stereotype_requirement_and_c4_reach_the_canvas() {
     );
 }
 
+/// Mermaid numbers C4Dynamic relationships in declaration order; Canvas must not discard that
+/// semantic distinction while SVG retains it (bd-5k51.1).
+#[test]
+fn c4_dynamic_relationships_are_numbered_on_the_canvas() {
+    let ir = fm_parser::parse(
+        "C4Dynamic\n  Person(a, \"A\")\n  System(b, \"B\")\n  Rel(a, b, \"First step\")\n  Rel(b, a, \"Second step\")\n",
+    )
+    .ir;
+    let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+    render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let texts = drawn_text(&format!("{:?}", context.operations()));
+
+    assert!(
+        texts.iter().any(|text| text == "1: First step"),
+        "the first dynamic relationship was not numbered: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|text| text == "2: Second step"),
+        "the second dynamic relationship was not numbered: {texts:?}"
+    );
+}
+
+/// CONTROL: C4Context uses the same relationship syntax but Mermaid does not number it. A naive
+/// prefix on every C4 relationship would satisfy the dynamic case while changing another diagram.
+#[test]
+fn c4_context_relationships_remain_unnumbered_on_the_canvas() {
+    let ir = fm_parser::parse(
+        "C4Context\n  Person(a, \"A\")\n  System(b, \"B\")\n  Rel(a, b, \"Request\")\n",
+    )
+    .ir;
+    let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+    render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let texts = drawn_text(&format!("{:?}", context.operations()));
+
+    assert!(
+        texts.iter().any(|text| text == "Request"),
+        "the C4Context relationship label is missing: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|text| text == "1: Request"),
+        "C4Context relationship was incorrectly numbered: {texts:?}"
+    );
+}
+
 /// CONTROL: plain nodes still take the single-label path.
 ///
 /// Three new `else if` arms were inserted before the standard fallback, each gated on a different
