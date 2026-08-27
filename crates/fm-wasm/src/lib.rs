@@ -23,21 +23,22 @@ use fm_core::cga::{CgaLineSegment, CgaPoint, CgaRect};
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use fm_core::mermaid_layout_guard_observability;
 use fm_core::{
-    Diagnostic, MermaidBudgetLedger, MermaidLayoutDecisionExplanation, MermaidLinkMode,
-    MermaidWasmPressureSignals,
+    Diagnostic, MermaidBudgetLedger, MermaidDiagramIr, MermaidLayoutDecisionExplanation,
+    MermaidLinkMode, MermaidWasmPressureSignals,
 };
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use fm_core::{MermaidSourceMap, MermaidSourceMapKind, Span};
 #[cfg(any(not(target_arch = "wasm32"), test))]
 use fm_layout::build_layout_guard_report_with_pressure;
+use fm_layout::layout_lens::{LayoutLens, LayoutLensError, LayoutLensSnapshot};
 use fm_layout::{
     LayoutConfig, LayoutGuardrails, TracedLayout, build_layout_decision_explanation,
     layout_diagram_traced, layout_diagram_traced_with_config,
     layout_diagram_traced_with_config_and_guardrails,
 };
 use fm_parser::{
-    apply_parse_lens_delete, apply_parse_lens_edit, apply_parse_lens_insert_line_after,
-    build_parse_lens, detect_type_with_confidence, parse,
+    FlowchartParseLens, FlowchartParseLensError, apply_parse_lens_delete, apply_parse_lens_edit,
+    apply_parse_lens_insert_line_after, build_parse_lens, detect_type_with_confidence, parse,
 };
 #[cfg(target_arch = "wasm32")]
 use fm_render_canvas::render_to_canvas_with_layout;
@@ -169,6 +170,111 @@ struct RuntimeConfig {
     svg: SvgRenderConfig,
     canvas: CanvasRenderConfig,
     pressure: MermaidWasmPressureSignals,
+}
+
+/// A source-to-layout lens for a flowchart editor.
+///
+/// This composes the formatting-preserving parser lens with the ordering-preserving layout lens:
+/// label and source edits produce a new source snapshot and a freshly derived layout. A rank-order
+/// drag is intentionally refused until the parser lens can faithfully re-emit structural IR order;
+/// returning the original text for that edit would make an editor report a change that vanishes on
+/// the next parse.
+#[derive(Debug, Clone)]
+pub struct DiagramLens {
+    parse: FlowchartParseLens,
+    layout: LayoutLens,
+    config: LayoutConfig,
+}
+
+/// The distinct failure modes of the composed source/layout lens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiagramLensError {
+    Parse(FlowchartParseLensError),
+    Layout(LayoutLensError),
+    LayoutEditCannotBeReemitted,
+}
+
+impl std::fmt::Display for DiagramLensError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Parse(error) => error.fmt(formatter),
+            Self::Layout(error) => error.fmt(formatter),
+            Self::LayoutEditCannotBeReemitted => formatter.write_str(
+                "the formatting-preserving ParseLens cannot yet re-emit a structural layout edit",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DiagramLensError {}
+
+impl From<FlowchartParseLensError> for DiagramLensError {
+    fn from(error: FlowchartParseLensError) -> Self {
+        Self::Parse(error)
+    }
+}
+
+impl From<LayoutLensError> for DiagramLensError {
+    fn from(error: LayoutLensError) -> Self {
+        Self::Layout(error)
+    }
+}
+
+impl DiagramLens {
+    /// Parse and lay out a flowchart, retaining both complements for later safe putback.
+    pub fn from_source(input: &str, config: LayoutConfig) -> Result<Self, DiagramLensError> {
+        let parse = FlowchartParseLens::parse(input)?;
+        let layout = LayoutLens::new(parse.ir(), config.clone())?;
+        Ok(Self {
+            parse,
+            layout,
+            config,
+        })
+    }
+
+    /// The exact source that supplied this source/layout snapshot.
+    #[must_use]
+    pub fn source(&self) -> &str {
+        self.parse.original_source()
+    }
+
+    /// The immutable semantic graph read from [`Self::source`].
+    #[must_use]
+    pub fn ir(&self) -> &MermaidDiagramIr {
+        self.parse.ir()
+    }
+
+    /// The positioned graph a diagram editor can display.
+    #[must_use]
+    pub fn positioned_graph(&self) -> &LayoutLensSnapshot {
+        self.layout.get()
+    }
+
+    /// Apply a label-only semantic edit, then derive a fresh source and positioned graph.
+    pub fn put_ir(&self, edited: &MermaidDiagramIr) -> Result<Self, DiagramLensError> {
+        let source = self.parse.put(edited)?;
+        Self::from_source(&source, self.config.clone())
+    }
+
+    /// Apply an in-rank diagram edit only when its resulting IR can be faithfully re-emitted.
+    ///
+    /// `LayoutLens` itself can produce an order-adjusted IR, but the current `FlowchartParseLens`
+    /// deliberately rejects structural edits. Keep that boundary explicit rather than pretending a
+    /// source update occurred while returning the original source text.
+    pub fn put_layout(&self, edited: &LayoutLensSnapshot) -> Result<Self, DiagramLensError> {
+        let edited_ir = self.layout.put(edited)?;
+        match self.parse.put(&edited_ir) {
+            Ok(source) => Self::from_source(&source, self.config.clone()),
+            Err(FlowchartParseLensError::UnsupportedIrChange) => {
+                Err(Self::layout_reemission_error())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn layout_reemission_error() -> DiagramLensError {
+        DiagramLensError::LayoutEditCannotBeReemitted
+    }
 }
 
 /// A browser-consumable description of the primitive sets prepared for WebGPU.
@@ -2550,16 +2656,16 @@ impl Diagram {
 #[cfg(test)]
 mod tests {
     use super::{
-        CanvasConfigOverrides, LayoutRuntimeSummary, PressureConfigOverrides, RuntimeConfig,
-        RuntimeInitConfig, SvgConfigOverrides, ThemePreset, WasmHitRegion, WebGpuPlanSummary,
-        WebRendererKind, WorkerRenderAction, WorkerRenderCoordinator, WorkerRenderMessage,
-        WorkerRenderRequest, WorkerRenderResponse, align_canvas_typography_with_svg,
-        apply_budget_svg_simplifications, apply_canvas_theme_preset, build_diagram_geometry,
-        build_webgpu_plan, canvas_font_size_px, collect_source_spans, handle_worker_message,
-        hit_test_layout_edge, hit_test_layout_node, merge_canvas_config, merge_pressure_config,
-        merge_renderer_kind, merge_svg_config, parse_theme_preset, read_runtime_config, render,
-        render_deck, render_svg_js, render_worker_request, requested_theme_preset,
-        resolve_renderer, write_runtime_config,
+        CanvasConfigOverrides, DiagramLens, DiagramLensError, LayoutRuntimeSummary,
+        PressureConfigOverrides, RuntimeConfig, RuntimeInitConfig, SvgConfigOverrides, ThemePreset,
+        WasmHitRegion, WebGpuPlanSummary, WebRendererKind, WorkerRenderAction,
+        WorkerRenderCoordinator, WorkerRenderMessage, WorkerRenderRequest, WorkerRenderResponse,
+        align_canvas_typography_with_svg, apply_budget_svg_simplifications,
+        apply_canvas_theme_preset, build_diagram_geometry, build_webgpu_plan, canvas_font_size_px,
+        collect_source_spans, handle_worker_message, hit_test_layout_edge, hit_test_layout_node,
+        merge_canvas_config, merge_pressure_config, merge_renderer_kind, merge_svg_config,
+        parse_theme_preset, read_runtime_config, render, render_deck, render_svg_js,
+        render_worker_request, requested_theme_preset, resolve_renderer, write_runtime_config,
     };
     use fm_core::{
         MermaidBudgetLedger, MermaidGuardReport, MermaidLensBinding, MermaidLensEdit,
@@ -4219,6 +4325,108 @@ mod tests {
     /// env -u CARGO_TARGET_DIR bash build-wasm.sh
     /// node scripts/wasm_cross_target_digest.mjs
     /// ```
+    #[test]
+    fn diagram_lens_reemits_a_label_edit_and_refreshes_its_positioned_graph() {
+        let lens = DiagramLens::from_source(
+            "flowchart TB\n  A[Alpha] --> B[Bravo]\n  A --> C[Charlie]\n",
+            LayoutConfig::default(),
+        )
+        .expect("flowchart lens");
+        let mut edited = lens.ir().clone();
+        let label = edited
+            .nodes
+            .iter()
+            .find(|node| node.id == "B")
+            .and_then(|node| node.label)
+            .expect("B has an explicit label");
+        edited.labels[label.0].text = "Bravo renamed".to_string();
+
+        let updated = lens.put_ir(&edited).expect("label edit is re-emittable");
+        assert!(updated.source().contains("B[Bravo renamed]"));
+        assert_eq!(
+            updated
+                .ir()
+                .labels
+                .iter()
+                .map(|label| label.text.as_str())
+                .collect::<Vec<_>>(),
+            edited
+                .labels
+                .iter()
+                .map(|label| label.text.as_str())
+                .collect::<Vec<_>>(),
+            "put must reparse the edited label text"
+        );
+        assert_eq!(
+            updated
+                .ir()
+                .edges
+                .iter()
+                .map(|edge| (&edge.from, &edge.to, &edge.arrow, &edge.label))
+                .collect::<Vec<_>>(),
+            edited
+                .edges
+                .iter()
+                .map(|edge| (&edge.from, &edge.to, &edge.arrow, &edge.label))
+                .collect::<Vec<_>>(),
+            "put must preserve topology"
+        );
+        assert_eq!(
+            updated.positioned_graph().nodes.len(),
+            edited.nodes.len(),
+            "the replacement source must be laid out again, not paired with the stale geometry"
+        );
+    }
+
+    #[test]
+    fn diagram_lens_refuses_a_drag_that_the_parse_lens_cannot_reemit() {
+        let lens = DiagramLens::from_source(
+            "flowchart TB\n  A[Alpha] --> B[Bravo]\n  A --> C[Charlie]\n",
+            LayoutConfig::default(),
+        )
+        .expect("flowchart lens");
+        let original_source = lens.source().to_string();
+        let mut dragged = lens.positioned_graph().clone();
+        let sibling_rank = dragged
+            .nodes
+            .iter()
+            .map(|node| node.rank)
+            .find(|rank| {
+                dragged
+                    .nodes
+                    .iter()
+                    .filter(|node| node.rank == *rank)
+                    .count()
+                    >= 2
+            })
+            .expect("fixture has a sibling rank");
+        let mut sibling_ids: Vec<String> = dragged
+            .nodes
+            .iter()
+            .filter(|node| node.rank == sibling_rank)
+            .map(|node| node.node_id.clone())
+            .collect();
+        sibling_ids.reverse();
+        for (index, node_id) in sibling_ids.iter().enumerate() {
+            dragged
+                .nodes
+                .iter_mut()
+                .find(|node| &node.node_id == node_id)
+                .expect("sibling exists")
+                .center
+                .x = (index as f32) * 100.0;
+        }
+
+        assert!(
+            matches!(
+                lens.put_layout(&dragged),
+                Err(DiagramLensError::LayoutEditCannotBeReemitted)
+            ),
+            "returning the old source would falsely report that a drag persisted"
+        );
+        assert_eq!(lens.source(), original_source);
+    }
+
     #[test]
     fn x86_64_and_wasm32_render_the_same_bytes() {
         let _serial = config_guard();
