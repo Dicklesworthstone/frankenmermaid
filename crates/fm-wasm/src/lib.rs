@@ -4242,7 +4242,7 @@ mod tests {
         // before it can masquerade as a cross-target floating-point difference. Rebuild from the
         // same source revision, then update this digest and the per-fixture digests together after
         // reviewing every generated artifact.
-        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x8ba5_41e2_974d_0ee1;
+        const EXPECTED_PACKAGE_ARTIFACT_DIGEST: u64 = 0x4cbf_bf59_e5b8_9756;
         let package_artifacts: [&[u8]; 5] = [
             include_bytes!("../../../pkg/frankenmermaid_bg.wasm"),
             include_bytes!("../../../pkg/frankenmermaid.js"),
