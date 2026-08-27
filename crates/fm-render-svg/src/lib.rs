@@ -4178,9 +4178,30 @@ fn render_layout_to_svg(
     // concatenated children serialize identically to the same sequence of `doc.child`ren. For sequence
     // diagrams these lifeline bands are the LAST per-item Element-build loop (nodes + messages stream).
     if !layout.extensions.bands.is_empty() {
+        // ⚠️ A JOURNEY'S LANE BANDS ARE COLOUR STRIPS, NOT CAPTIONS. Layout emits ONE Lane band per
+        // TASK and labels each with its SECTION name, so a seven-task journey drew `Browse` four
+        // times and `Purchase` five — while the section name is already drawn once, correctly, as
+        // the cluster label. mermaid draws each section name exactly once.
+        //
+        // Measured: incumbent 12 runs against our 19, the surplus being exactly the seven repeats.
+        // The bands themselves stay — they are what tints each task by section — only the repeated
+        // caption goes.
+        //
+        // Scoped to journey rather than to `LayoutBandKind::Lane` in general, because a gitgraph's
+        // lane band label is the ONLY carrier of its branch name; suppressing that would delete
+        // information instead of duplication. And scoped to this renderer: the terminal draws
+        // journey lanes FROM these bands (its cluster overlay does not cover them), so emptying the
+        // label upstream in layout would have taken the section names off that surface entirely.
+        let suppress_lane_labels = ir.diagram_type == fm_core::DiagramType::Journey;
         let mut bands_svg = String::new();
         for band in &layout.extensions.bands {
-            write_layout_band_into(&mut bands_svg, band, offset_x, offset_y, config);
+            if suppress_lane_labels && band.kind == fm_layout::LayoutBandKind::Lane {
+                let mut unlabelled = band.clone();
+                unlabelled.label.clear();
+                write_layout_band_into(&mut bands_svg, &unlabelled, offset_x, offset_y, config);
+            } else {
+                write_layout_band_into(&mut bands_svg, band, offset_x, offset_y, config);
+            }
         }
         doc = doc.child(Element::raw_svg(bands_svg));
     }

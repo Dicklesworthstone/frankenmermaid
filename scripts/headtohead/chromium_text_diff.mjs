@@ -194,6 +194,12 @@ for (const [index, file] of files.entries()) {
       const { svg } = await mermaid.render(${JSON.stringify(`probe${index}`)}, ${JSON.stringify(source)});
       const host = document.createElement('div');
       host.innerHTML = svg;
+      // ⚠️ ATTACHED TO THE DOCUMENT ON PURPOSE, so computed styles are real. mermaid emits BOTH a
+      // <foreignObject> HTML label AND a fallback <text> for the same content and hides one of them
+      // -- journey draws every task and section twice in the markup, exactly once on screen. A
+      // detached subtree has no computed style, so a visibility filter would be inert there and the
+      // probe would keep reporting the hidden twin as a run mermaid draws and we omit.
+      document.body.appendChild(host);
       // ⚠️ NOT JUST <text>. With htmlLabels on — mermaid's DEFAULT for several families — labels are
       // rendered as HTML inside <foreignObject>, and a <text>-only sweep reports the diagram as
       // having drawn NOTHING. That is how this probe first accused mermaid of drawing no text at all
@@ -204,6 +210,11 @@ for (const [index, file] of files.entries()) {
         // otherwise be counted twice.
         if (el.tagName.toLowerCase() === 'text' && el.closest('foreignObject')) continue;
         if (el.tagName.toLowerCase() === 'foreignObject' && el.parentElement?.closest('foreignObject')) continue;
+        // Only what a reader can actually SEE. This is the whole reason for attaching the host
+        // above: it is how the hidden half of mermaid's dual label path gets excluded.
+        const style = getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+        if (el.getClientRects().length === 0) continue;
         let text;
         if (el.tagName.toLowerCase() === 'text') {
           // LEAF TSPANS ONLY. mermaid nests them (text-outer-tspan wrapping text-inner-tspan), so
@@ -228,6 +239,7 @@ for (const [index, file] of files.entries()) {
         text = text.trim();
         if (text) runs.push(text);
       }
+      host.remove();
       return runs;
     })()`);
   } catch (error) {
@@ -258,6 +270,19 @@ for (const [index, file] of files.entries()) {
   }
 
   console.log(`DIVERGE        ${name.padEnd(28)}`);
+  // ⚠️ `--dump` PRINTS BOTH SIDES IN FULL, and triage needs it more often than it looks. A
+  // multiset difference reports only the SURPLUS on each side, so a run drawn once by us and twice
+  // by mermaid appears under "mermaid draws, we do not" — reading exactly like a run we omit
+  // entirely, when in fact we draw it and the count differs. That misread cost a filing once
+  // already; the counts settle it.
+  if (argv.includes('--dump')) {
+    const tally = (xs) => [...xs.reduce((m, x) => m.set(x, (m.get(x) ?? 0) + 1), new Map())]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([text, n]) => (n > 1 ? `${JSON.stringify(text)}x${n}` : JSON.stringify(text)))
+      .join(' ');
+    console.log(`    incumbent (${theirs.length}): ${tally(theirs)}`);
+    console.log(`    ours      (${mine.runs.length}): ${tally(mine.runs)}`);
+  }
   if (squashed.onlyTheirs.length) console.log(`    mermaid draws, we do not: ${JSON.stringify(squashed.onlyTheirs.slice(0, 12))}`);
   if (squashed.onlyMine.length) console.log(`    we draw, mermaid does not: ${JSON.stringify(squashed.onlyMine.slice(0, 12))}`);
   diverge += 1;
