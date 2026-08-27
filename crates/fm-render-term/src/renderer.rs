@@ -2471,6 +2471,11 @@ impl TermRenderer {
         }
 
         // Overlay edge labels.
+        //
+        // Edges in opposite directions often share a geometric midpoint. Keep a separate record
+        // of label rectangles so the later relationship does not overwrite an earlier one (for
+        // example, turning `1: Place order` and `2: Confirm order` into `1:2: Confirm order`).
+        let mut edge_label_rects = Vec::new();
         for edge_path in &layout.edges {
             if edge_path.points.len() < 2 {
                 continue;
@@ -2485,6 +2490,11 @@ impl TermRenderer {
                     .and_then(|meta| meta.autonumber_value(edge_path.edge_index))
                 {
                     format!("{number} {base_label}")
+                } else if ir.diagram_type == fm_core::DiagramType::C4Dynamic {
+                    // C4Dynamic diagrams use the declaration order as part of their meaning:
+                    // Mermaid numbers each relationship while drawing it, leaving the parsed label
+                    // unchanged so the same relationship syntax remains bare in C4Context.
+                    format!("{}: {base_label}", edge_path.edge_index + 1)
                 } else {
                     base_label
                 };
@@ -2507,24 +2517,43 @@ impl TermRenderer {
                     self.point_to_cells(&edge_path.points[mid_idx], scale_x, scale_y)
                 };
 
-                let start_y = mid_y.saturating_sub(label_lines.len() / 2);
+                let label_width = label_lines
+                    .iter()
+                    .map(|line| line.chars().count())
+                    .max()
+                    .unwrap_or(0);
+                let preferred_y = mid_y.saturating_sub(label_lines.len() / 2);
+                let (label_x, start_y) = place_edge_label(
+                    &edge_label_rects,
+                    mid_x,
+                    preferred_y,
+                    label_width,
+                    label_lines.len(),
+                    cell_width,
+                    lines.len(),
+                );
 
                 for (i, line) in label_lines.iter().enumerate() {
                     // Iterate chars directly (see the node-label loops above): `chars().count()` for the
                     // centering width, `chars().enumerate()` for placement — no per-line Vec allocation.
-                    let label_len = line.chars().count();
-                    let label_x = mid_x.saturating_sub(label_len / 2);
+                    let line_x = mid_x.saturating_sub(line.chars().count() / 2);
                     let label_y = start_y + i;
 
                     if label_y < lines.len() {
                         for (j, ch) in line.chars().enumerate() {
-                            let col = label_x + j;
+                            let col = line_x + j;
                             if col < cell_width && col < lines[label_y].len() {
                                 lines[label_y][col] = ch;
                             }
                         }
                     }
                 }
+                edge_label_rects.push((
+                    label_x,
+                    start_y,
+                    label_x.saturating_add(label_width).min(cell_width),
+                    start_y.saturating_add(label_lines.len()).min(lines.len()),
+                ));
             }
 
             // CARDINALITIES reach the canvas too (bd-o2wf).
@@ -3647,6 +3676,47 @@ fn append_c4_legend(output: &mut String, ir: &MermaidDiagramIr) -> (usize, usize
         output.push_str(entry);
     }
     (rows, width)
+}
+
+/// Place an edge label near its path midpoint without overwriting another edge label.
+///
+/// The candidate order is stable: midpoint first, then alternating rows above and below it. When
+/// no free row exists, preserve the historical midpoint placement rather than dropping the label.
+fn place_edge_label(
+    occupied: &[(usize, usize, usize, usize)],
+    midpoint_x: usize,
+    preferred_y: usize,
+    label_width: usize,
+    label_height: usize,
+    cell_width: usize,
+    cell_height: usize,
+) -> (usize, usize) {
+    let label_x = midpoint_x.saturating_sub(label_width / 2);
+    let label_right = label_x.saturating_add(label_width).min(cell_width);
+
+    for offset in 0..cell_height {
+        let candidate_y = match offset {
+            0 => preferred_y,
+            offset if offset % 2 == 1 => match preferred_y.checked_sub(offset.div_ceil(2)) {
+                Some(y) => y,
+                None => continue,
+            },
+            offset => preferred_y.saturating_add(offset / 2),
+        };
+        let candidate_bottom = candidate_y.saturating_add(label_height);
+        if candidate_bottom > cell_height {
+            continue;
+        }
+
+        let overlaps = occupied.iter().any(|&(left, top, right, bottom)| {
+            label_x < right && left < label_right && candidate_y < bottom && top < candidate_bottom
+        });
+        if !overlaps {
+            return (label_x, candidate_y);
+        }
+    }
+
+    (label_x, preferred_y)
 }
 
 fn terminal_c4_legend_enabled(ir: &MermaidDiagramIr) -> bool {

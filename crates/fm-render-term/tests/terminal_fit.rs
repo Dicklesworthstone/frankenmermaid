@@ -750,6 +750,61 @@ fn c4_hide_legend_keeps_terminal_output_legend_free() {
     );
 }
 
+/// C4Dynamic's relationship order is semantics, so terminal output must retain Mermaid's
+/// declaration-order prefixes just as SVG and Canvas do.
+#[test]
+fn c4_dynamic_relationships_keep_declaration_order_in_terminal() {
+    let ir = fm_parser::parse(
+        "C4Dynamic\n  Person(customer, \"Customer\")\n  System(store, \"Store\")\n  Rel(customer, store, \"Place order\")\n  Rel(store, customer, \"Confirm order\")\n",
+    )
+    .ir;
+    assert_eq!(
+        ir.diagram_type,
+        DiagramType::C4Dynamic,
+        "CONTROL FAILED: this fixture did not parse as C4Dynamic"
+    );
+    assert_eq!(
+        ir.edges.len(),
+        2,
+        "CONTROL FAILED: expected two relationships"
+    );
+
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+    for label in ["1: Place order", "2: Confirm order"] {
+        assert!(
+            out.contains(label),
+            "the ordered C4Dynamic relationship label {label:?} is missing:\n{out}"
+        );
+    }
+}
+
+/// The same relationship syntax in C4Context is deliberately unnumbered.
+///
+/// This rejects a naive implementation that prefixes every C4 edge label, which would make the
+/// positive C4Dynamic case pass while corrupting context diagrams.
+#[test]
+fn c4_context_relationships_remain_unnumbered_in_terminal() {
+    let ir = fm_parser::parse(
+        "C4Context\n  Person(customer, \"Customer\")\n  System(store, \"Store\")\n  Rel(customer, store, \"Place order\")\n",
+    )
+    .ir;
+    assert_eq!(
+        ir.diagram_type,
+        DiagramType::C4Context,
+        "CONTROL FAILED: this fixture did not parse as C4Context"
+    );
+
+    let out = render_term_with_config(&ir, &TermRenderConfig::rich(), 200, 60).output;
+    assert!(
+        out.contains("Place order"),
+        "CONTROL FAILED: the relationship label itself is absent:\n{out}"
+    );
+    assert!(
+        !out.contains("1: Place order"),
+        "C4Context relationship was incorrectly numbered:\n{out}"
+    );
+}
+
 /// CONTROL: the neighbours in the same node loop still render.
 ///
 /// The C4 branch sits after the requirement branch, which sits after the ER branch. Each is gated on
