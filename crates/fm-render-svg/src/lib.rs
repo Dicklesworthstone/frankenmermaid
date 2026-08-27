@@ -9877,6 +9877,20 @@ fn render_node(
     let raw_label_text = sankey_label.as_deref().unwrap_or(raw_label_text);
     let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
     let node_font_size = detail.node_font_size;
+    // ⚠️ A PACKET FIELD IS NEVER ELLIPSIZED, because its box width is the PROTOCOL, not a layout
+    // choice. `fit_node_label_text` shrinks a label to 10px and then cuts it, which is right for a
+    // node whose box was sized for its text — and wrong for a one-bit field, whose width is fixed at
+    // one bit by the diagram's own semantics. `0: "Flag"` drew `Fl…` at 10px; mermaid draws `Flag`
+    // and lets it overflow. Losing the field's NAME to keep it inside a box the author never chose
+    // is the worse trade, and the name is the only thing identifying the field.
+    let unbounded_label_width = ir.diagram_type == DiagramType::PacketBeta;
+    let fit_width = |available: f32| {
+        if unbounded_label_width {
+            f32::MAX
+        } else {
+            available
+        }
+    };
     let label_may_overflow = label_text.lines().any(|line| {
         line.chars().count() as f32
             * config.avg_char_width
@@ -10347,7 +10361,7 @@ fn render_node(
                     cx,
                     cy + node_font_size / 3.0,
                     node_font_size,
-                    (w - 16.0).max(node_font_size),
+                    fit_width((w - 16.0).max(node_font_size)),
                     (h - 16.0).max(node_font_size),
                     config,
                     colors,
@@ -10589,7 +10603,7 @@ fn render_node(
                     cx,
                     cy + node_font_size / 3.0,
                     node_font_size,
-                    (w * 0.8).max(node_font_size),
+                    fit_width((w * 0.8).max(node_font_size)),
                     (h * 0.8).max(node_font_size),
                     config,
                     colors,
@@ -10784,7 +10798,7 @@ fn render_node(
                 cx,
                 text_y,
                 node_font_size,
-                (w - 20.0).max(node_font_size),
+                fit_width((w - 20.0).max(node_font_size)),
                 (h - 20.0).max(node_font_size),
                 config,
                 colors,
@@ -11016,7 +11030,7 @@ fn render_node(
                 content_left + (content_width / 2.0),
                 start_y,
                 node_font_size,
-                (content_width - 16.0).max(node_font_size),
+                fit_width((content_width - 16.0).max(node_font_size)),
                 (content_height - 16.0).max(node_font_size),
                 config,
                 colors,

@@ -20,10 +20,12 @@
 //! twice on every one-bit flag, and every multi-bit fixture agrees with that wrong rule — including
 //! the project's own `packet_basic`, whose eight fields all span more than one bit.
 //!
-//! NOT FIXED HERE, and filed separately: a single-bit field's box is too narrow for its name, so
-//! `0: "Flag"` draws `Fl…` at a shrunken font size. That is a pre-existing eliding defect on the
-//! narrow-box path — the label was already the bare name before this change — and it is why
-//! `drawn_text_diff` still reports a divergence for a one-bit fixture.
+//! ⚠️ THE SAME CHANGE HAD TO STOP ELLIPSIZING THESE LABELS. `fit_node_label_text` shrinks a label to
+//! 10px and then cuts it, which is right for a node whose box was sized for its text and wrong for a
+//! packet field, whose width is fixed at `bits x bitWidth` by the diagram's own semantics. A one-bit
+//! field drew `Fl…` at 10px where mermaid draws `Flag` and lets it overflow. Losing the field's NAME
+//! to keep it inside a box the author never chose is the worse trade — the name is the only thing
+//! identifying the field — so packet labels are exempt from the fit.
 
 /// Every `<text>` leaf, in document order.
 fn runs(source: &str) -> Vec<String> {
@@ -98,5 +100,37 @@ fn only_packet_diagrams_gain_bit_markings() {
     assert!(
         !svg.contains("fm-packet-bit"),
         "a flowchart emitted packet bit markings"
+    );
+}
+
+/// ⚠️ A ONE-BIT FIELD KEEPS ITS WHOLE NAME. Its box is one bit wide, so the generic fit shrank the
+/// label to 10px and then ellipsized it to `Fl…`. mermaid draws `Flag` and lets it overflow; a box
+/// width dictated by the protocol is not a reason to destroy the field's identity.
+#[test]
+fn a_narrow_field_is_not_ellipsized() {
+    let drawn = runs("packet-beta\n0: \"Flag\"\n1-7: \"Rest\"\n");
+    assert!(
+        drawn.iter().any(|run| run == "Flag"),
+        "the one-bit field's name was cut to fit its box: {drawn:?}"
+    );
+    assert!(
+        !drawn.iter().any(|run| run.contains('\u{2026}')),
+        "a packet field label was ellipsized: {drawn:?}"
+    );
+}
+
+/// CONTROL: the exemption is scoped to packet. A long flowchart label in a small box must still be
+/// fitted, or this would have traded one family's correctness for every other family's layout.
+#[test]
+fn other_diagrams_still_fit_their_labels() {
+    let svg = fm_render_svg::render_svg(
+        &fm_parser::parse(
+            "flowchart LR\n  A[\"an extremely long node label that cannot possibly fit\"]-->B\n",
+        )
+        .ir,
+    );
+    assert!(
+        svg.contains('\u{2026}') || svg.contains("<tspan"),
+        "a long flowchart label was neither wrapped nor ellipsized, so the packet exemption leaked"
     );
 }
