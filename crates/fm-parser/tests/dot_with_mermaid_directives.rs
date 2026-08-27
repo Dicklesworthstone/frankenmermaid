@@ -1,4 +1,4 @@
-//! A Mermaid directive appended to a DOT document must not change what the document IS (bd-pdz8z).
+//! A Mermaid directive on a DOT document must not change what the document IS (bd-pdz8z, bd-mqmx2).
 //!
 //! THE SYMPTOM THAT SURFACED IT was narrow: `deck_directive_is_inert_on_dot_input` asserted a
 //! `%%{deck: …}%%` directive stays inert on DOT input, and it had been RED on main. The cause is
@@ -25,6 +25,13 @@
 //! extended the body and it came back with SEVEN nodes. Detection and parsing now share one
 //! `strip_trailing_mermaid_directives`, because two answers to "where does this document end" is
 //! precisely how they came to disagree.
+//!
+//! bd-mqmx2 is the same defect at the other end. A document opening with `%%{init: …}%%` — which
+//! Mermaid documents routinely do — lost its DOT header to the scan and went the same way: ONE node
+//! and ZERO edges. And routing it correctly was not enough on its own, because the DOT branch never
+//! applied init directives at all, so a correctly-routed document would have had its directive
+//! silently ignored instead. Trading one quiet drop for another is not a fix, so `parse_dot` now
+//! runs the init pass against the original text.
 
 use fm_core::DiagramType;
 use fm_parser::{DetectionMethod, detect_type_with_confidence, parse};
@@ -164,4 +171,112 @@ fn plain_dot_is_unchanged() {
     let commented = parse("digraph G {\n  // an edge\n  a -> b\n}\n");
     assert_eq!(commented.ir.nodes.len(), 2);
     assert_eq!(commented.ir.edges.len(), 1);
+}
+
+/// THE bd-mqmx2 CASE: a LEADING directive must not re-route the document either.
+///
+/// Mermaid documents routinely open with `%%{init: …}%%`, so this is the placement a user is most
+/// likely to write. Before the fix it cost the graph an edge and a node, exactly as a trailing one
+/// did — the two ends failed for the same reason and had to stop being two questions.
+#[test]
+fn a_leading_directive_does_not_change_the_detected_format() {
+    for source in [
+        "%%{init: {'theme':'dark'}}%%\n",
+        "%%{deck: {slides: [{id: 's', nodes: ['a']}]}}%%\n",
+        "%%{init: {'theme':'dark'}}%%\n%%{deck: {slides: []}}%%\n",
+    ]
+    .map(|head| format!("{head}{PLAIN}"))
+    {
+        let detected = detect_type_with_confidence(&source);
+        assert_eq!(
+            detected.method,
+            DetectionMethod::DotFormat,
+            "a leading directive re-routed the document away from DOT: {source:?}"
+        );
+    }
+}
+
+/// And the graph survives a leading directive, which is the half that actually mattered.
+#[test]
+fn a_leading_directive_does_not_destroy_the_graph() {
+    let baseline = parse(PLAIN);
+    for head in [
+        "%%{init: {'theme':'dark'}}%%\n",
+        "%%{deck: {slides: [{id: 's', nodes: ['a']}]}}%%\n",
+    ] {
+        let parsed = parse(&format!("{head}{PLAIN}"));
+        assert_eq!(
+            parsed.ir.nodes.len(),
+            baseline.ir.nodes.len(),
+            "a leading directive changed the node count: {head:?}"
+        );
+        assert_eq!(
+            parsed.ir.edges.len(),
+            baseline.ir.edges.len(),
+            "a leading directive changed the edge count: {head:?}"
+        );
+    }
+}
+
+/// ⚠️ THE DIRECTIVE MUST STILL DO SOMETHING.
+///
+/// Routing the document to the DOT parser is only half the fix. The DOT branch applied no init
+/// directives at all, so a correctly-routed document would have had its `%%{init: …}%%` silently
+/// ignored — one quiet drop swapped for another, and a change that looks right in a node count
+/// while losing what the user asked for. Asserted at BOTH placements, since the point is that
+/// placement no longer matters.
+#[test]
+fn an_init_directive_applies_to_a_dot_document_at_either_end() {
+    for source in [
+        format!("%%{{init: {{'theme':'dark'}}}}%%\n{PLAIN}"),
+        format!("{PLAIN}%%{{init: {{'theme':'dark'}}}}%%\n"),
+    ] {
+        let parsed = parse(&source);
+        assert_eq!(
+            parsed.ir.nodes.len(),
+            2,
+            "the graph did not survive: {source:?}"
+        );
+        assert_eq!(
+            parsed.ir.meta.theme_overrides.theme.as_deref(),
+            Some("dark"),
+            "the init directive was ignored on the DOT path: {source:?}"
+        );
+    }
+}
+
+/// A LEADING deck directive is still inert, the same as a trailing one.
+///
+/// Init applying does not mean every directive applies: the deck is a Mermaid-only concept and the
+/// DOT bridge has no slides. The negative half of the test above.
+#[test]
+fn a_leading_deck_directive_is_still_inert() {
+    let parsed = parse(&format!(
+        "%%{{deck: {{slides: [{{id: 's', nodes: ['a']}}]}}}}%%\n{PLAIN}"
+    ));
+    assert_eq!(parsed.detection_method, DetectionMethod::DotFormat);
+    assert!(
+        parsed.ir.deck.is_none(),
+        "a leading deck directive reached ir.deck on DOT input"
+    );
+}
+
+/// ⚠️ A LEADING DIRECTIVE MUST NOT MAKE A MERMAID DOCUMENT LOOK LIKE DOT.
+///
+/// The counterpart to the brace-shaped-node control above, for the other end. Skipping leading
+/// directives widens what the header scan can see, so this is where that could have gone wrong.
+#[test]
+fn a_leading_directive_does_not_turn_mermaid_into_dot() {
+    for source in [
+        "%%{init: {'theme':'dark'}}%%\ngraph\n  A{decision} --> B\n",
+        "%%{init: {'theme':'dark'}}%%\nclassDiagram\n  class A { }\n",
+        "%%{init: {'theme':'dark'}}%%\nflowchart TD\n  a --> b\n",
+    ] {
+        let detected = detect_type_with_confidence(source);
+        assert_ne!(
+            detected.method,
+            DetectionMethod::DotFormat,
+            "a leading directive made a Mermaid document look like DOT: {source:?}"
+        );
+    }
 }

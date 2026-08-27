@@ -12585,7 +12585,10 @@ fn parse_xychart_series(line: &str) -> Option<(&str, Option<String>, &str)> {
     Some((series_kind, series_name, values))
 }
 
-fn parse_init_directives(input: &str, builder: &mut IrBuilder) {
+/// `pub(crate)` so the DOT bridge can apply the same init directives (bd-mqmx2). A DOT document
+/// may carry `%%{init: …}%%` exactly as a Mermaid one does, and routing it correctly to `parse_dot`
+/// would otherwise mean the directive is silently ignored — trading one silent drop for another.
+pub(crate) fn parse_init_directives(input: &str, builder: &mut IrBuilder) {
     // Init directives are `%%{ ... }%%` blocks; if that marker never appears there is
     // nothing to parse, so skip the per-line scan (run on every parse). Output-identical:
     // `extract_config_directive_payload` only matches lines containing `%%{`.
