@@ -304,6 +304,7 @@ impl Canvas2dRenderer {
         if self.draw_generic_diagram_title(ctx, ir, canvas_width) {
             labels_drawn += 1;
         }
+        labels_drawn += self.draw_c4_legend(ctx, ir, canvas_width, canvas_height);
 
         CanvasRenderResult {
             draw_calls: self.draw_calls,
@@ -342,6 +343,77 @@ impl Canvas2dRenderer {
         );
         self.draw_calls += 1;
         true
+    }
+
+    /// Draw the C4 legend requested by `SHOW_LEGEND()`.
+    ///
+    /// SVG reserves extra diagram-space height for this panel. Canvas owns a fixed viewport, so
+    /// placing it after restoring the viewport transform makes it a screen-space overlay instead:
+    /// it stays visible when auto-fit changes scale and it does not alter node/edge coordinates.
+    /// The entries intentionally use the same role classes and glyphs as the SVG legend.
+    fn draw_c4_legend<C: Canvas2dContext>(
+        &mut self,
+        ctx: &mut C,
+        ir: &MermaidDiagramIr,
+        canvas_width: f64,
+        canvas_height: f64,
+    ) -> usize {
+        if !canvas_c4_legend_enabled(ir) {
+            return 0;
+        }
+
+        let entries = canvas_c4_legend_entries(ir);
+        let padding = self.config.padding.max(8.0);
+        let box_width = (canvas_width - padding * 2.0).clamp(0.0, 320.0);
+        let box_height = (canvas_height - padding * 2.0).clamp(0.0, 128.0);
+        if box_width == 0.0 || box_height == 0.0 {
+            return 0;
+        }
+        let x = padding;
+        let y = canvas_height - padding - box_height;
+
+        ctx.set_fill_style("rgba(248,249,250,0.96)");
+        ctx.fill_rect(x, y, box_width, box_height);
+        ctx.set_stroke_style(&self.config.cluster_stroke);
+        ctx.set_line_width(1.0);
+        ctx.stroke_rect(x, y, box_width, box_height);
+        self.draw_calls += 2;
+
+        ctx.set_fill_style(&self.config.label_color);
+        ctx.set_font(&format!(
+            "600 {}px {}",
+            self.config.font_size * 0.82,
+            self.config.font_family
+        ));
+        ctx.set_text_align(TextAlign::Left);
+        ctx.set_text_baseline(TextBaseline::Top);
+        ctx.fill_text("C4 Legend", x + 14.0, y + 12.0);
+        self.draw_calls += 1;
+
+        let left_x = x + 14.0;
+        let right_x = x + box_width / 2.0 + 8.0;
+        let mut left_y = y + 36.0;
+        let mut right_y = y + 36.0;
+        ctx.set_font(&format!(
+            "{}px {}",
+            self.config.font_size * 0.72,
+            self.config.font_family
+        ));
+        for (index, entry) in entries.iter().enumerate() {
+            let (entry_x, entry_y) = if index % 2 == 0 {
+                let position = (left_x, left_y);
+                left_y += 18.0;
+                position
+            } else {
+                let position = (right_x, right_y);
+                right_y += 18.0;
+                position
+            };
+            ctx.fill_text(entry, entry_x, entry_y);
+            self.draw_calls += 1;
+        }
+
+        entries.len() + 1
     }
 
     /// Render a target-agnostic render scene to a Canvas2D context.
@@ -4005,6 +4077,61 @@ fn generic_canvas_diagram_title(ir: &MermaidDiagramIr) -> Option<&str> {
     // The canvas backend has dedicated pie chart rendering. Gantt/xy/quadrant still use
     // the generic node/edge path, so the generic title fallback remains enabled.
     ir.meta.title.as_deref()
+}
+
+fn canvas_c4_legend_enabled(ir: &MermaidDiagramIr) -> bool {
+    matches!(
+        ir.diagram_type,
+        DiagramType::C4Context
+            | DiagramType::C4Container
+            | DiagramType::C4Component
+            | DiagramType::C4Dynamic
+            | DiagramType::C4Deployment
+    ) && ir.meta.c4_show_legend
+}
+
+fn canvas_c4_legend_entries(ir: &MermaidDiagramIr) -> Vec<&'static str> {
+    let has_class = |needle: &str| {
+        ir.nodes
+            .iter()
+            .flat_map(|node| node.classes.iter())
+            .any(|class_name| class_name == needle)
+    };
+    let has_boundary = ir.clusters.iter().any(|cluster| {
+        cluster
+            .title
+            .and_then(|label_id| ir.labels.get(label_id.0))
+            .is_some_and(|label| {
+                label.text.contains("Boundary") || label.text.contains("Deployment_Node")
+            })
+    });
+
+    let mut entries = Vec::new();
+    if has_class("c4-person") {
+        entries.push("◉ Person");
+    }
+    if has_class("c4-system") {
+        entries.push("▭ System");
+    }
+    if has_class("c4-container") {
+        entries.push("▣ Container");
+    }
+    if has_class("c4-component") {
+        entries.push("◫ Component");
+    }
+    if has_class("c4-database") {
+        entries.push("◌ Database");
+    }
+    if has_class("c4-queue") {
+        entries.push("▱ Queue");
+    }
+    if has_class("c4-external") {
+        entries.push("╌ External");
+    }
+    if has_boundary {
+        entries.push("⬚ Boundary");
+    }
+    entries
 }
 
 #[cfg(test)]

@@ -372,6 +372,50 @@ fn c4_context_relationships_remain_unnumbered_on_the_canvas() {
     );
 }
 
+/// `SHOW_LEGEND()` is part of C4's visible contract. The parser retains that request in IR and
+/// SVG renders it; Canvas must not silently discard it on the browser/WASM path (bd-5k51.1).
+#[test]
+fn c4_show_legend_reaches_the_canvas() {
+    let ir = fm_parser::parse(
+        "C4Context\n  SHOW_LEGEND()\n  Person(person, \"Customer\")\n  System(system, \"Store\")\n",
+    )
+    .ir;
+    let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+    render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let texts = drawn_text(&format!("{:?}", context.operations()));
+
+    assert!(
+        texts.iter().any(|text| text == "C4 Legend"),
+        "the requested C4 legend was not drawn: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|text| text == "◉ Person"),
+        "the Person legend entry was not drawn: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|text| text == "▭ System"),
+        "the System legend entry was not drawn: {texts:?}"
+    );
+}
+
+/// CONTROL: a C4 diagram without `SHOW_LEGEND()` must not receive an unsolicited overlay.
+/// A naive implementation that draws the legend for every C4 diagram would pass the positive case.
+#[test]
+fn c4_hide_legend_remains_absent_on_the_canvas() {
+    let ir = fm_parser::parse(
+        "C4Context\n  HIDE_LEGEND()\n  Person(person, \"Customer\")\n  System(system, \"Store\")\n",
+    )
+    .ir;
+    let mut context = MockCanvas2dContext::new(1200.0, 900.0);
+    render_to_canvas(&ir, &mut context, &CanvasRenderConfig::default());
+    let texts = drawn_text(&format!("{:?}", context.operations()));
+
+    assert!(
+        !texts.iter().any(|text| text == "C4 Legend"),
+        "Canvas drew a C4 legend that the source hid: {texts:?}"
+    );
+}
+
 /// CONTROL: plain nodes still take the single-label path.
 ///
 /// Three new `else if` arms were inserted before the standard fallback, each gated on a different
