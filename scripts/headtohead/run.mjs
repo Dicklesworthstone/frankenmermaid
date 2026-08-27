@@ -970,14 +970,26 @@ function balancedSquareArmValues(slots) {
   return values;
 }
 
-function validRchBuildProvenance(builder, base, cleanOverlay) {
+const BUILD_METHODS = new Set(['local', 'rch']);
+
+function validBuildProvenance(method, builder, base, cleanOverlay) {
   return (
+    BUILD_METHODS.has(method) &&
     typeof builder === 'string' &&
     builder.trim().length > 0 &&
     typeof base === 'string' &&
     /^[0-9a-f]{40}$/.test(base) &&
     cleanOverlay === true
   );
+}
+
+function buildProvenanceRecord(method, builder, base, cleanOverlay) {
+  return {
+    method,
+    builder,
+    base,
+    clean_overlay: cleanOverlay,
+  };
 }
 
 function validHostTopology(record) {
@@ -2026,12 +2038,18 @@ if (has('self-test')) {
     throw new Error('timed full-render work-policy admission regression');
   }
   if (
-    !validRchBuildProvenance('hz1', 'a'.repeat(40), true) ||
-    validRchBuildProvenance('', 'a'.repeat(40), true) ||
-    validRchBuildProvenance('hz1', 'a'.repeat(39), true) ||
-    validRchBuildProvenance('hz1', 'a'.repeat(40), false)
+    !validBuildProvenance('rch', 'hz1', 'a'.repeat(40), true) ||
+    !validBuildProvenance('local', 'thinkstation1', 'a'.repeat(40), true) ||
+    validBuildProvenance('remote', 'hz1', 'a'.repeat(40), true) ||
+    validBuildProvenance('local', '', 'a'.repeat(40), true) ||
+    validBuildProvenance('rch', 'hz1', 'a'.repeat(39), true) ||
+    validBuildProvenance('rch', 'hz1', 'a'.repeat(40), false)
   ) {
-    throw new Error('RCH exact-base clean-overlay provenance validation regression');
+    throw new Error('build-method exact-base clean-overlay provenance validation regression');
+  }
+  const localBuild = buildProvenanceRecord('local', 'thinkstation1', 'a'.repeat(40), true);
+  if (localBuild.method !== 'local' || localBuild.method === 'rch') {
+    throw new Error('a local measurement ELF must never be stamped as an RCH build');
   }
   const semanticRecord = {
     status: 'ok',
@@ -2520,6 +2538,7 @@ function positiveIntList(raw) {
 const threadSweep = positiveIntList(arg('thread-sweep'));
 const exclusiveHostClaim = arg('exclusive-host-claim');
 const allowOversubscription = has('allow-oversubscription');
+const fmBuildMethod = arg('fm-build-method');
 const fmBuilder = arg('fm-builder');
 const fmBuildBase = arg('fm-build-base');
 const fmBuildCleanOverlay = has('fm-build-clean-overlay');
@@ -2553,11 +2572,11 @@ if (measurementMode === 'parse' && !validExclusiveHostClaim(exclusiveHostClaim))
 }
 if (
   measurementMode === 'parse' &&
-  !validRchBuildProvenance(fmBuilder, fmBuildBase, fmBuildCleanOverlay)
+  !validBuildProvenance(fmBuildMethod, fmBuilder, fmBuildBase, fmBuildCleanOverlay)
 ) {
   console.error(
-    '[run] --mode parse requires --fm-builder <rch-worker-id>, --fm-build-base <40-hex commit>, '
-      + 'and --fm-build-clean-overlay',
+    '[run] --mode parse requires --fm-build-method <local|rch>, --fm-builder <host-or-worker-id>, '
+      + '--fm-build-base <40-hex commit>, and --fm-build-clean-overlay',
   );
   process.exit(2);
 }
@@ -2734,6 +2753,7 @@ env.parse_admission = measurementMode === 'parse'
     }
   : null;
 env.fm_builder = fmBuilder;
+env.fm_build_method = fmBuildMethod;
 env.fm_build_base = fmBuildBase;
 env.fm_build_clean_overlay = fmBuildCleanOverlay;
 
@@ -3560,14 +3580,15 @@ for (const { item, threads } of measurements) {
     // Same expression as `workerThreadsActuallyUsed` falls back to, hoisted so the two cannot drift.
     fm_worker_threads_requested: workerThreadsRequested,
     fm_builder: fmBuilder,
+    fm_build_method: fmBuildMethod,
     fm_build_base: fmBuildBase,
     fm_build_clean_overlay: fmBuildCleanOverlay,
-    fm_build: {
-      tool: 'rch exec',
-      worker: fmBuilder,
-      base: fmBuildBase,
-      clean_overlay: fmBuildCleanOverlay,
-    },
+    fm_build: buildProvenanceRecord(
+      fmBuildMethod,
+      fmBuilder,
+      fmBuildBase,
+      fmBuildCleanOverlay,
+    ),
     host_wide_exclusivity: rowHostWideExclusivity(threads),
     host: {
       identity: env.host_identity,

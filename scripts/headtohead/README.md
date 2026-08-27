@@ -69,6 +69,7 @@ node scripts/headtohead/run.mjs \
 node scripts/headtohead/run.mjs \
   --fm-bin target/release/examples/headtohead \
   --mode parse \
+  --fm-build-method rch \
   --fm-builder "${FM_H2H_BUILDER}" \
   --fm-build-base "${FM_H2H_BUILD_BASE}" \
   --fm-build-clean-overlay \
@@ -112,7 +113,7 @@ Useful flags: `--mode render|parse` (default `render`),
 `--js-budget-scale 0.1` (shrink the mermaid wall budgets for a smoke run), `--skip-mermaid`,
 `--thread-sweep 1,2,4,8,16,32,64,96,128`,
 `--allow-oversubscription` (required when requested workers exceed visible logical CPUs),
-`--fm-builder <rch-worker-id>`,
+`--fm-build-method <local|rch>`, `--fm-builder <host-or-worker-id>`,
 `--fm-build-base <40-hex-commit>`, `--fm-build-clean-overlay`,
 `--exclusive-host-claim trj-booking:<claim-message-id>`, `--pin-cpu auto|N|off`,
 `--out <dir>`, `--update-pins`, `--allow-unverified-output` (permit a run whose rows have no passing
