@@ -1996,11 +1996,48 @@ impl IrBuilder {
     /// Intern a flowchart fast-path edge endpoint (label-less Rect node) whose id is already
     /// `trim_ascii`'d and `is_fast_flow_identifier`-validated (pure ASCII, no whitespace) — so
     /// `trim_fast(id) == id`. Interns through the normalized core to skip that redundant trim.
+    /// The member an edge endpoint naming a SUBGRAPH should attach to (bd-pfibz).
+    ///
+    /// ⚠️ IT LOOKS THE ID UP IN `graph.subgraphs`, NOT IN `cluster_index_by_key`, AND THAT IS THE
+    /// WHOLE BUG. Two earlier attempts at this fix were placed correctly and looked up the wrong
+    /// key: a cluster is registered under `flow_subgraph_lookup_key`, which is `"{id}@title:{title}"`
+    /// whenever a title exists — and `subgraph s1` DEFAULTS its title to its own id (bd-ka77), so
+    /// the key is `s1@title:s1` and never `s1`. `IrSubgraph::key` is the public id, so this is the
+    /// map that can answer the question the author asked.
+    ///
+    /// ⚠️ AND IT RESOLVES TO A MEMBER, NOT TO THE SUBGRAPH, WHICH IS A STATED LIMIT. `IrEndpoint`
+    /// has no cluster or subgraph variant, and adding one means exhaustive matches through fm-layout
+    /// and all three renderers — the cost the realization dash declined for the same reason. An edge
+    /// to the first member draws between the right two regions rather than between their boundaries:
+    /// geometry that differs from the reference, where inventing a box differs from the AUTHOR.
+    ///
+    /// An empty subgraph has no member to stand in for it, so it falls through to the old behaviour.
+    pub(crate) fn subgraph_endpoint_member(&self, id: &str) -> Option<IrNodeId> {
+        // A subgraph-free diagram pays one `is_empty` check; the scan below is over subgraphs, of
+        // which a diagram has a handful, not over nodes.
+        if self.ir.graph.subgraphs.is_empty() {
+            return None;
+        }
+        let key = id.trim();
+        self.ir
+            .graph
+            .subgraphs
+            .iter()
+            .find(|subgraph| subgraph.key == key)
+            .and_then(|subgraph| subgraph.members.first().copied())
+    }
+
     pub(crate) fn intern_edge_endpoint_pretrimmed(
         &mut self,
         id: &str,
         span: Span,
     ) -> Option<IrNodeId> {
+        // ⚠️ THE GUARD SITS ON THE PATH THAT ACTUALLY RUNS. `s1 --> s2` is a "simple" edge and comes
+        // through here, not through `intern_flow_ast_node`; guarding only that one leaves the
+        // phantom exactly where it was while every slow-path test passes.
+        if let Some(member) = self.subgraph_endpoint_member(id) {
+            return Some(member);
+        }
         self.intern_node_auto_normalized(id, None, NodeShape::Rect, span, false)
     }
 
