@@ -1,5 +1,40 @@
 # Negative Evidence Ledger — frankenmermaid perf swarm
 
+### REJECT, NOT ATTEMPTED: incremental crossing deltas for candidate moves — only 14.7% of candidates qualify (2026-08-27)
+
+- **The idea.** `FixedLayerCrossings::count_at_positions` is still the top symbol of the ER catalog
+  job at **21.69% self** (b1e9abc2, non-LTO, `perf -F 999 --call-graph=dwarf`, 9,408 samples) after
+  three landed levers (ffe2fd33 −4.13%, 2c5dde2b −3.45%, b1e9abc2 −1.24%). Every candidate ordering
+  differs from `best` by ONE move, yet each is scored by recounting all inversions from scratch, so
+  the obvious next step is a per-move crossing delta.
+- **Why it is not worth building.** A closed-form delta is cheap only for an adjacent `Swap`, where
+  the change is confined to edges incident to the two swapped nodes. `Relocate` and `Rotate` permute
+  a whole range and have no comparable formula. Instrumented move mix over the scored candidates:
+
+      swap 14.74%   relocate 19.00%   rotate 66.26%
+
+  A swap-only fast path therefore covers under a sixth of the candidates, capping the win at roughly
+  3% of the job, and buys it with an incremental counter that has to stay exactly consistent with the
+  full recount on every other path — the failure mode being a silently mis-scored layout rather than
+  a slower one.
+- **Verdict: REJECT on the measured mix.** Retry only if the generator's mix moves toward swaps, or
+  if a delta is found for range rotations. Re-measure the mix first; it is one counter in
+  `optimize_layer_ordering`'s candidate loop and takes one build.
+
+### REJECT: deduplicating the candidate move list — 0.14% of moves are duplicates (2026-08-27)
+
+- **The idea.** `collect_candidate_moves` pushes a `Relocate` for the upper median AND one for the
+  lower median of each node, so a node whose two medians agree yields the same `{from, to}` twice and
+  the duplicate is scored twice. 9b26d60d had already found a real win by deleting redundant work in
+  this same loop, so the shape was plausible.
+- **Measured.** Over 6,000 refinement rounds on `schema_catalog_25`, the generator emits **107.16
+  moves per round** of which **99.86% are already unique**: `dup_frac = 0.0014`, all of them the
+  expected duplicate relocations. Deduplicating would remove 0.14% of candidate scorings — about
+  0.03% of the job — and pay for it with a dedup pass over ~107 items on every round.
+- **Verdict: REJECT.** The redundancy is real but three orders of magnitude too small to pay for its
+  own removal. Do not re-derive this from the code shape: the two median sources look like they
+  should collide far more often than they do.
+
 ### REJECT: dense single-ID endpoint slot is slower (2026-07-22)
 
 - **Third numeric-index variant:** direct `Vec<Option<IrNodeId>>` slots for canonical `N<number>` edge
