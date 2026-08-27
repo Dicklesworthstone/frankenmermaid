@@ -4517,10 +4517,20 @@ fn render_layout_to_svg(
             })
             .unwrap_or("");
 
-        let is_c4_boundary = title_text.contains("System_Boundary")
-            || title_text.contains("Container_Boundary")
-            || title_text.contains("Enterprise_Boundary")
-            || title_text.contains("Deployment_Node");
+        // ⚠️ THIS USED TO BE A TITLE-STRING MATCH AND IT HAD BEEN DEAD FOR SOME TIME. It asked
+        // whether the title CONTAINED `System_Boundary` / `Container_Boundary` /
+        // `Enterprise_Boundary` / `Deployment_Node`, which was true back when the parser titled a
+        // boundary with a reconstruction of its own source syntax. bd-039t replaced that with the
+        // author's label — correctly — and this predicate silently became permanently false. Every
+        // C4 boundary then lost its dedicated fill, stroke, dash and corner radius, and
+        // `fm-cluster-c4` was applied to ZERO elements while its rule stayed in the stylesheet.
+        // Measured before the change: `c4_container`, `c4_deployment`, `c4_component` and
+        // `c4_basic` each emitted 0 elements carrying the class.
+        //
+        // The IR now carries the boundary type as data, so the question is asked of the parse
+        // rather than of a display string that another change is free to reword.
+        let c4_boundary_type = ir_cluster.and_then(|c| c.c4_boundary_type.as_deref());
+        let is_c4_boundary = c4_boundary_type.is_some();
 
         let is_swimlane = title_text.starts_with("swimlane:")
             || title_text.contains("section ")
@@ -4634,28 +4644,12 @@ fn render_layout_to_svg(
 
         // Cluster label if present
         if detail.show_cluster_labels && !title_text.is_empty() {
-            // For C4 boundaries, strip the boundary type prefix for display. A boundary carries
-            // exactly ONE of these type keywords, so the old 4-chained `String::replace` allocated a
-            // full fresh copy for each of the (typically 3) absent needles — pure alloc+memcpy waste.
-            // Gate each removal on `contains` and only allocate when the needle is actually present;
-            // byte-identical (an absent-needle `replace` returns an identical copy) with the same
-            // left-to-right application order, but ≤1 allocation instead of 4.
-            let display_title = if is_c4_boundary {
-                let mut stripped = std::borrow::Cow::Borrowed(title_text);
-                for keyword in [
-                    "System_Boundary",
-                    "Container_Boundary",
-                    "Enterprise_Boundary",
-                    "Deployment_Node",
-                ] {
-                    if stripped.contains(keyword) {
-                        stripped = std::borrow::Cow::Owned(stripped.replace(keyword, ""));
-                    }
-                }
-                stripped
-                    .trim_matches(|c: char| c == '(' || c == ')' || c == ',' || c.is_whitespace())
-                    .to_string()
-            } else if is_swimlane && title_text.starts_with("swimlane:") {
+            // The C4 branch that used to live here stripped `System_Boundary` / `Container_Boundary`
+            // / `Enterprise_Boundary` / `Deployment_Node` and surrounding punctuation back out of
+            // the title. It was cleaning up a title the parser stopped producing at bd-039t, and it
+            // could only ever run when `is_c4_boundary` was true — which, as the note above records,
+            // it never was. A C4 boundary's title is now simply the author's label, like any other.
+            let display_title = if is_swimlane && title_text.starts_with("swimlane:") {
                 title_text.trim_start_matches("swimlane:").to_string()
             } else if is_swimlane && title_text.starts_with("section ") {
                 title_text.trim_start_matches("section ").to_string()
@@ -4687,6 +4681,36 @@ fn render_layout_to_svg(
                 };
                 doc = doc.child(text);
             }
+        }
+
+        // THE BOUNDARY TYPE ROW, which mermaid draws and we did not.
+        //
+        // `drawInsideBoundary` rewrites the stored type to `"[" + type + "]"` and `drawBoundary`
+        // draws it through the same text helper as the label, one row below. The brackets are added
+        // HERE rather than stored in the IR so the IR keeps mermaid's own token — see
+        // `IrCluster::c4_boundary_type`.
+        //
+        // Drawn whenever the type exists, matching mermaid's `t.type && t.type.text !== ""`. It is
+        // gated on `show_cluster_labels` for the same reason the label above is: a detail level that
+        // suppresses cluster captions should not leave a bracketed type floating alone.
+        if detail.show_cluster_labels
+            && let Some(boundary_type) = c4_boundary_type
+            && !boundary_type.is_empty()
+        {
+            let text = TextBuilder::new(&format!("[{boundary_type}]"))
+                .x(cluster.bounds.x + offset_x + 8.0)
+                .y(cluster.bounds.y + offset_y + 16.0 + detail.cluster_font_size * 1.25)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                .font_size(detail.cluster_font_size)
+                .fill(&label_color)
+                .class("fm-cluster-type-label")
+                .build();
+            let text = if config.include_source_spans {
+                apply_span_metadata(text, cluster.span)
+            } else {
+                text
+            };
+            doc = doc.child(text);
         }
     }
 
@@ -16081,6 +16105,7 @@ mod tests {
             members: vec![IrNodeId(0), IrNodeId(1)],
             grid_span: 1,
             span: Span::default(),
+            c4_boundary_type: None,
         });
         ir
     }
@@ -16211,6 +16236,7 @@ mod tests {
             members: vec![IrNodeId(0), IrNodeId(1)],
             grid_span: 2,
             span: Span::default(),
+            c4_boundary_type: None,
         });
         ir.graph.clusters.push(IrGraphCluster {
             cluster_id: IrClusterId(0),
@@ -19665,6 +19691,7 @@ marker#arrow-open path {
             members: vec![IrNodeId(0), IrNodeId(1)],
             grid_span: 1,
             span: cluster_span,
+            c4_boundary_type: None,
         });
 
         let config = SvgRenderConfig {

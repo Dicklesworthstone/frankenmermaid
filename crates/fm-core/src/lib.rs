@@ -1970,6 +1970,24 @@ pub struct IrCluster {
     pub members: Vec<IrNodeId>,
     pub grid_span: usize,
     pub span: Span,
+    /// The C4 boundary type mermaid draws as a second row beneath the boundary's label.
+    ///
+    /// ⚠️ THIS IS DRAWN TEXT, not styling metadata, and that distinction is the whole reason the
+    /// field exists. mermaid's `drawInsideBoundary` rewrites the stored type into `"[" + type + "]"`
+    /// and `drawBoundary` then passes it to the same text helper it uses for the label, so
+    /// `System_Boundary(sb, "Sys")` renders TWO rows — `Sys`, then `[SYSTEM]`. Verified in Chromium
+    /// 151 against the pinned 11.15.0 bundle, not inferred from the source.
+    ///
+    /// Held as mermaid's own token so the renderer can bracket it, because mermaid's tokens are NOT
+    /// case-consistent and normalising them would be wrong: the three named macros yield uppercase
+    /// (`SYSTEM`, `CONTAINER`, `ENTERPRISE`) while the generic `Boundary` and `Node` families yield
+    /// lowercase (`system`, `node`). An author-supplied third argument passes through verbatim.
+    ///
+    /// `Some` marks the cluster as a C4 boundary. That replaces a detector that matched
+    /// `title.contains("System_Boundary")` — a title format bd-039t deleted, which left the check
+    /// permanently false and `fm-cluster-c4` applied to zero elements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub c4_boundary_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -10600,6 +10618,7 @@ mod tests {
             members: Vec::new(),
             grid_span: 1,
             span: sample_span(1, 1, 1),
+            c4_boundary_type: None,
         };
         let single = IrCluster {
             id: IrClusterId(1),
@@ -10607,6 +10626,7 @@ mod tests {
             members: vec![IrNodeId(9)],
             grid_span: 1,
             span: sample_span(4, 1, 4),
+            c4_boundary_type: None,
         };
 
         assert!(empty.members.is_empty());
@@ -11743,6 +11763,7 @@ mod tests {
             members: vec![IrNodeId(0), IrNodeId(1)],
             grid_span: 0,
             span: Span::default(),
+            c4_boundary_type: None,
         });
         assert_eq!(ir.clusters[0].members.len(), 2);
         assert_eq!(ir.clusters[0].members[0], IrNodeId(0));

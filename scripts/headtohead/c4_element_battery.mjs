@@ -58,6 +58,46 @@ function ours(text) {
   return runs[0] ?? '<none>';
 }
 
+/// Every boundary macro, with the arity that decides whether a third argument means anything.
+///
+/// ⚠️ THE db STORES THE BARE TOKEN AND mermaid DRAWS IT BRACKETED. `drawInsideBoundary` rewrites
+/// `l.type.text` to `"[" + l.type.text + "]"` before `drawBoundary` draws it, so the comparison adds
+/// the brackets to the db's value rather than pretending the db already has them. Confirmed end to
+/// end in Chromium 151: `Sys / [SYSTEM]`, `Generic / [custom]`, `DN3 / [Ubuntu]`.
+const BOUNDARIES = [
+  'System_Boundary(b, "L")',
+  'Container_Boundary(b, "L")',
+  'Enterprise_Boundary(b, "L")',
+  'Boundary(b, "L")',
+  'Boundary(b, "L", "custom")',
+  'Node(b, "L")',
+  'Node_L(b, "L")',
+  'Node_R(b, "L")',
+  'Deployment_Node(b, "L")',
+  'Deployment_Node(b, "L", "Ubuntu")',
+  // The three named macros IGNORE a third argument; the Node family takes it. Both are checked
+  // because an implementation that read it uniformly passes every row above.
+  'System_Boundary(b, "L", "third")',
+  'Node_L(b, "L", "third")',
+];
+
+const boundaryDiagram = (declaration) =>
+  `C4Context\n    title T\n    ${declaration} {\n      Person(a, "A")\n    }\n`;
+
+/** The bracketed rows our renderer draws on a CLUSTER element. */
+function ourBoundaryRows(text) {
+  let svg;
+  try {
+    svg = execFileSync(FM_CLI, ['render', '-f', 'svg', '-'], { input: text, encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+  } catch {
+    return ['<FM-DNF>'];
+  }
+  return [...svg.matchAll(/<text([^>]*)>(.*?)<\/text>/gs)]
+    .filter((m) => m[1].includes('fm-cluster'))
+    .map((m) => m[2].replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim())
+    .filter((run) => run.startsWith('[') && run.endsWith(']'));
+}
+
 const rows = [];
 for (const macro of MACROS) {
   const text = diagram(macro);
@@ -73,6 +113,24 @@ for (const macro of MACROS) {
   }
   const mine = ours(text);
   rows.push({ macro, theirs, ours: mine, agree: theirs === mine });
+}
+
+for (const declaration of BOUNDARIES) {
+  const text = boundaryDiagram(declaration);
+  let theirs;
+  try {
+    await mermaid.parse(text);
+    const parsed = await mermaid.mermaidAPI.getDiagramFromText(text);
+    const db = parsed.db ?? parsed.getDB();
+    // `global` is mermaid's implicit root boundary and is never drawn (`l.alias !== "global"`).
+    const boundaries = (db.getBoundarys?.() ?? []).filter((b) => b.alias !== 'global');
+    const type = boundaries[0]?.type?.text ?? '';
+    theirs = type === '' ? '<no type>' : `[${type}]`;
+  } catch (error) {
+    theirs = `<INCUMBENT-DNF: ${String(error?.message ?? error).split('\n')[0]}>`;
+  }
+  const mine = ourBoundaryRows(text)[0] ?? '<none>';
+  rows.push({ macro: declaration, theirs, ours: mine, agree: theirs === mine });
 }
 
 const width = Math.max(...rows.map((r) => r.macro.length));

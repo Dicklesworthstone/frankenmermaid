@@ -1784,6 +1784,8 @@ impl IrBuilder {
             members: Vec::new(),
             grid_span: 1,
             span,
+            // Set afterwards by the C4 boundary path; an ordinary subgraph has no boundary type.
+            c4_boundary_type: None,
         });
         self.ir.graph.clusters.push(IrGraphCluster {
             cluster_id: IrClusterId(cluster_index),
@@ -2199,6 +2201,23 @@ impl IrBuilder {
         }
         if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
             node.journey_meta = Some(Box::new(fm_core::IrJourneyNodeMeta { actors }));
+        }
+    }
+
+    /// Record the C4 boundary type mermaid draws beneath a boundary's label.
+    ///
+    /// Stored as mermaid's own token; the renderer adds the `[…]` mermaid wraps it in, exactly as
+    /// mermaid does — its `drawInsideBoundary` brackets the string and `drawBoundary` draws it.
+    pub(crate) fn set_cluster_c4_boundary_type(
+        &mut self,
+        cluster_index: usize,
+        boundary_type: &str,
+    ) {
+        if boundary_type.is_empty() {
+            return;
+        }
+        if let Some(cluster) = self.ir.clusters.get_mut(cluster_index) {
+            cluster.c4_boundary_type = Some(boundary_type.to_string());
         }
     }
 

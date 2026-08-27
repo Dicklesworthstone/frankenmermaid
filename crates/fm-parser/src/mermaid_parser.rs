@@ -8721,6 +8721,7 @@ fn parse_c4(input: &str, builder: &mut IrBuilder) {
                 }
 
                 let Some(boundary) = parse_c4_boundary(
+                    &function_name,
                     &arguments,
                     span,
                     boundary_stack
@@ -13948,61 +13949,64 @@ fn parse_c4_relationship(
     true
 }
 
-/// `function_name` is deliberately NOT a parameter any more: it was used for exactly one thing, the
-/// reconstructed `System_Boundary(alias, label)` title that bd-039t removed, so keeping it would be
-/// an unused argument.
+/// `function_name` is a parameter again, and this time it is load-bearing: the macro NAMES the
+/// boundary's type, and mermaid draws that type.
 ///
-/// ⚠️ FOLLOW-UP, stated because dropping it loses something real: the boundary KIND (System /
-/// Container / Enterprise / Deployment_Node) is now recorded nowhere in the IR. mermaid keeps it and
-/// uses it for STYLING rather than as text, so not drawing it matches the incumbent — but if we ever
-/// want that styling, the kind needs an IR field, not a resurrected title string.
-///
-/// MEASURED FIELD COVERAGE for the C4 element macros, so the follow-up above has numbers next to
-/// it. One macro per diagram, unique sentinel per field, checked against the rendered SVG:
+/// ⚠️ THIS OVERTURNS A PRIOR "PARITY, NOT A GAP" FINDING RECORDED HERE, so the refutation is worth
+/// as much as the rule. That note reasoned that `drawBoundary` "references `.type` six times and
+/// emits NO bracketed field at all; its `.type` uses are styling and shape selection, not text",
+/// and concluded the incumbent does not draw a boundary's type. The bracketing is real — it just
+/// does not happen in `drawBoundary`. It happens one frame up, in its caller
+/// `drawInsideBoundary`, which MUTATES the stored value before the drawer ever sees it:
 ///
 /// ```text
-/// Person, System                 label ✓  desc ✓                (no type argument)
-/// Container, ContainerDb,
-/// Component                      label ✓  type ✓  desc ✓
-/// Rel                            label ✓  type ✓
-/// Deployment_Node                label ✓  type ✗                <- its type is dropped
+///   if (l.type && l.type.text !== "") { l.type.text = "[" + l.type.text + "]"; ... }
 /// ```
 ///
-/// All 22 macros the parser recognises DO render their label — none is dead. `Deployment_Node` is
-/// the one element whose type argument reaches nothing, and it is the one element routed through
-/// `parse_c4_boundary`, which takes `(alias, label)` and ignores the rest. That is consistent with
-/// treating it as a boundary and inconsistent with `Container`, which renders the same argument.
+/// and `drawBoundary` then hands `t.type.text` to the same text helper it uses one line earlier for
+/// `t.label.text`. Auditing the drawer alone and finding no bracket literal is exactly how a
+/// correct-looking search reaches a wrong answer: the evidence was in a different function.
 ///
-/// EVIDENCE SINCE GATHERED, and it points AWAY from this being a divergence. mermaid 11.15.0 has
-/// two draw paths, and only one of them writes a type as text:
-///
-///   * the C4 SHAPE drawer writes the bold label, then `"[" + type + "]"`, then `"[" + techn + "]"`
-///     — this is what puts `[Java]` under a Container, and matches what we already render
-///   * the BOUNDARY drawer (`drawBoundary`) references `.type` six times and emits NO bracketed
-///     field at all; its `.type` uses are styling and shape selection, not text
-///
-/// A `Deployment_Node` contains children and is drawn as a boundary, so on this reading the
-/// incumbent does not write its type either and our behaviour matches. That is the same conclusion
-/// the note above reaches for the boundary KIND, arrived at independently.
-///
-/// ROUTING NOW CONFIRMED, which was the missing half. `addDeploymentNode` in the bundle is boundary
-/// machinery and nothing else:
+/// ⚠️ SETTLED BY THE ORACLE THE OLD NOTE ITSELF NAMED — "the only stronger evidence would be a
+/// Chromium render". C4 renders under neither cheap oracle (no head-to-head corpus item; its
+/// renderer will not run under jsdom), so the pinned bundle was driven in Chromium 151 over CDP.
+/// Drawn runs, verbatim:
 ///
 /// ```text
-/// u.nodeType = e, u.parentBoundary = Xa, u.wrap = Wh(), gl = Xa, Xa = t, Vh.push(gl)
+///   Sys / [SYSTEM]      Cont / [CONTAINER]      Corp / [ENTERPRISE]
+///   Generic / [custom]  DN / [node]             DN3 / [Ubuntu]
 /// ```
 ///
-/// It pushes onto the same boundary parse stack `Vh` that `popBoundaryParseStack` pops, and sets
-/// `parentBoundary`. So a `Deployment_Node` is stored as a BOUNDARY and drawn by `drawBoundary` —
-/// the drawer that emits no bracketed field. Both halves agree: the incumbent does not write a
-/// Deployment_Node's type as text, and neither do we.
+/// So every boundary draws a second row and we drew none of them.
 ///
-/// PARITY, then, not a gap. The only stronger evidence would be a Chromium render, and it would be
-/// confirming something the source now says unambiguously on both the routing and the drawing side.
-/// Recorded at length because the field probe that raised it produced a table with a single ✗ in
-/// it, which is exactly the shape that gets filed as a defect without anyone checking the
-/// reference.
+/// MEASURED ARITY, because the macros do not agree on whether a third argument means anything:
+///
+/// ```text
+/// System_Boundary / Container_Boundary / Enterprise_Boundary   3rd arg IGNORED, type is constant
+/// Boundary                                                      3rd arg is the type, else `system`
+/// Node / Node_L / Node_R / Deployment_Node                      3rd arg is the type, else `node`
+/// ```
+///
+/// A 1-argument form is a parse error in mermaid, so the label fallback below is for our own
+/// best-effort recovery, not a case the incumbent accepts.
+fn c4_boundary_type(function_name: &str, third_argument: Option<&str>) -> String {
+    // ⚠️ THE CASE IS mermaid's, AND IT IS NOT CONSISTENT. The three named macros yield UPPERCASE
+    // constants while the generic families yield lowercase. Normalising either way would look
+    // tidier and would be wrong — this is drawn text, so it has to match byte for byte.
+    let explicit = || clean_label(third_argument).filter(|value| !value.is_empty());
+    match function_name {
+        "System_Boundary" => "SYSTEM".to_string(),
+        "Container_Boundary" => "CONTAINER".to_string(),
+        "Enterprise_Boundary" => "ENTERPRISE".to_string(),
+        "Boundary" => explicit().unwrap_or_else(|| "system".to_string()),
+        // `Node`, `Node_L` and `Node_R` are mermaid's short spellings of `Deployment_Node` and share
+        // its default.
+        _ => explicit().unwrap_or_else(|| "node".to_string()),
+    }
+}
+
 fn parse_c4_boundary(
+    function_name: &str,
     arguments: &[String],
     span: Span,
     parent_subgraph: Option<usize>,
@@ -14028,6 +14032,10 @@ fn parse_c4_boundary(
     // `display_label` already falls back to the alias, which is what mermaid shows too.
     let title = display_label;
     let cluster_index = builder.ensure_cluster(&boundary_key, Some(&title), span)?;
+    builder.set_cluster_c4_boundary_type(
+        cluster_index,
+        &c4_boundary_type(function_name, arguments.get(2).map(String::as_str)),
+    );
     let subgraph_index = builder.ensure_subgraph(
         &boundary_key,
         &boundary_key,

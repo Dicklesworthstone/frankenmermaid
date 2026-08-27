@@ -23885,6 +23885,7 @@ mod tests {
             members: vec![IrNodeId(0), IrNodeId(1)],
             grid_span: 1,
             span: fm_core::Span::default(),
+            c4_boundary_type: None,
         });
         ir.clusters.push(IrCluster {
             id: IrClusterId(1),
@@ -23892,6 +23893,7 @@ mod tests {
             members: vec![IrNodeId(2), IrNodeId(3)],
             grid_span: 1,
             span: fm_core::Span::default(),
+            c4_boundary_type: None,
         });
 
         let layout = layout_diagram_force(&ir);
@@ -24292,6 +24294,7 @@ mod tests {
             members: vec![IrNodeId(0)],
             grid_span: 1,
             span: cluster_span,
+            c4_boundary_type: None,
         });
         ir.graph.clusters.push(IrGraphCluster {
             cluster_id: IrClusterId(0),
