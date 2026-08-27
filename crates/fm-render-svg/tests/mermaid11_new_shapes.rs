@@ -183,6 +183,37 @@ fn each_new_shape_draws_its_measured_silhouette() {
         "lin-doc has no vertical rule: {}",
         silhouette(&lined_document)
     );
+
+    // Six vertices, the two waists at 0.55h (128.57) and 0.45h (121.93).
+    let lightning = render("bolt");
+    assert!(
+        lightning.contains(
+            "M192 92 L94.30 128.57 L150.60 128.57 L92 158.50 L189.70 121.93 L133.40 121.93 Z"
+        ),
+        "bolt is not the measured six-vertex zigzag: {}",
+        silhouette(&lightning)
+    );
+}
+
+/// The bolt's two waists sit at DIFFERENT heights, and that asymmetry is the whole shape.
+///
+/// Equalise them and the six vertices collapse into a wedge — still six points, still a closed
+/// polygon, still different from a rect element, so both "is it a polygon?" and this bead's
+/// differs-from-Rect rule pass while the picture stops being a lightning bolt. The same gap the
+/// flattened document exposed, in a straight-edged shape.
+#[test]
+fn the_bolt_waists_are_at_different_heights() {
+    let lightning = render("bolt");
+    assert!(
+        lightning.contains("128.57") && lightning.contains("121.93"),
+        "the bolt's two waists collapsed onto one height, making it a wedge: {}",
+        silhouette(&lightning)
+    );
+    assert_ne!(
+        silhouette(&lightning),
+        silhouette(&render("rect")),
+        "the bolt renders identically to a rectangle"
+    );
 }
 
 /// The lined document's rule sits where MERMAID puts it, not where the lined RECTANGLE's does.
@@ -438,6 +469,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
         "lin-cyl",
         "doc",
         "lin-doc",
+        "bolt",
     ] {
         let sig = silhouette(&render(shape));
         assert!(!sig.is_empty(), "{shape} drew no geometry at all");
@@ -455,7 +487,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
 /// name that resolves to nothing tells an author to fix a spelling that was already correct.
 #[test]
 fn every_published_alias_draws_the_same_shape() {
-    let groups: [(&str, &[&str]); 13] = [
+    let groups: [(&str, &[&str]); 14] = [
         ("notch-rect", &["card", "notched-rectangle"]),
         (
             "lin-rect",
@@ -483,6 +515,7 @@ fn every_published_alias_draws_the_same_shape() {
         ("lin-cyl", &["lined-cylinder", "disk"]),
         ("doc", &["document"]),
         ("lin-doc", &["lined-document"]),
+        ("bolt", &["lightning-bolt", "com-link"]),
     ];
     for (short, aliases) in groups {
         let expected = silhouette(&render(short));
@@ -534,6 +567,8 @@ fn implemented_names_stop_warning_and_others_do_not() {
         "document",
         "lin-doc",
         "lined-document",
+        "bolt",
+        "com-link",
     ] {
         assert!(
             warnings(name).is_empty(),
@@ -542,7 +577,8 @@ fn implemented_names_stop_warning_and_others_do_not() {
         );
     }
     // `doc` left this list by being implemented; `bang` replaces it so the list keeps its size.
-    for name in ["hourglass", "brace", "bolt", "bang"] {
+    // `bolt` left this list by being implemented; `flag` replaces it so the size holds.
+    for name in ["hourglass", "brace", "flag", "bang"] {
         assert!(
             !warnings(name).is_empty(),
             "`{name}` is still unimplemented and must still warn"
@@ -590,6 +626,7 @@ fn each_new_shape_has_an_accessible_description() {
         ("lin-cyl", "lined cylinder"),
         ("doc", "document"),
         ("lin-doc", "lined document"),
+        ("bolt", "lightning bolt"),
     ] {
         assert!(
             render(shape).contains(want),

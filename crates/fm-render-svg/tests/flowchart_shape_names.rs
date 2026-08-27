@@ -171,7 +171,7 @@ fn aliases_missing_from_already_mapped_shapes_now_resolve() {
 /// assert that the names they implemented no longer warn AND that unbuilt ones still do.
 #[test]
 fn a_real_but_unbuilt_shape_name_is_not_called_a_typo() {
-    for name in ["bang", "hourglass", "text", "brace", "curv-trap", "bolt"] {
+    for name in ["bang", "hourglass", "text", "brace", "curv-trap", "flag"] {
         let warning = warning_for(name);
         assert!(
             warning.contains("does not implement yet"),

@@ -11143,6 +11143,24 @@ fn render_node(
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
+        NodeShape::LightningBolt => {
+            // Six vertices, measured. The two waist edges sit at DIFFERENT heights (0.55 and 0.45);
+            // equalising them turns the bolt into a wedge.
+            let path = PathBuilder::new()
+                .move_to(x + w, y)
+                .line_to(x + w * 0.023, y + h * 0.55)
+                .line_to(x + w * 0.586, y + h * 0.55)
+                .line_to(x, y + h)
+                .line_to(x + w * 0.977, y + h * 0.45)
+                .line_to(x + w * 0.414, y + h * 0.45)
+                .close()
+                .build();
+            Element::path()
+                .d(&path)
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
         NodeShape::LinedDocument => {
             // The document outline plus a vertical rule 0.045 of the width in from the left, running
             // to 0.94h — both ratios measured, and the inset deliberately NOT `LinedRect`'s 0.14.
@@ -13295,6 +13313,7 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
         NodeShape::LinedCylinder => "fm-node-shape-lined-cylinder",
         NodeShape::Document => "fm-node-shape-document",
         NodeShape::LinedDocument => "fm-node-shape-lined-document",
+        NodeShape::LightningBolt => "fm-node-shape-lightning-bolt",
         NodeShape::Rect => "fm-node-shape-rect",
         NodeShape::Rounded => "fm-node-shape-rounded",
         NodeShape::Stadium => "fm-node-shape-stadium",

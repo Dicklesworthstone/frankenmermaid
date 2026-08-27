@@ -77,7 +77,8 @@ fn a_still_unimplemented_shape_still_warns() {
             "`shape: {name}` is implemented now and must not warn"
         );
     }
-    for name in ["hourglass", "brace", "bolt"] {
+    // `bolt` left this list by being implemented (bd-7ls21); `flag` replaces it.
+    for name in ["hourglass", "brace", "flag"] {
         assert!(
             !warnings(&format!("flowchart TD\n  A@{{ shape: {name} }}\n")).is_empty(),
             "`shape: {name}` is still unimplemented and must still warn"

@@ -49,6 +49,7 @@ pub fn draw_shape<C: Canvas2dContext>(
         NodeShape::Document => draw_document(ctx, x, y, width, height),
         // The rule is interior detail; canvas draws the document body without it.
         NodeShape::LinedDocument => draw_document(ctx, x, y, width, height),
+        NodeShape::LightningBolt => draw_lightning_bolt(ctx, x, y, width, height),
         NodeShape::Rect => draw_rect(ctx, x, y, width, height, 0.0),
         NodeShape::Rounded => draw_rect(ctx, x, y, width, height, 4.0),
         NodeShape::Stadium => draw_stadium(ctx, x, y, width, height),
@@ -348,6 +349,20 @@ fn draw_triangle<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64
     ctx.move_to(cx, y);
     ctx.line_to(x + w, y + h);
     ctx.line_to(x, y + h);
+    ctx.close_path();
+    ctx.fill();
+    ctx.stroke();
+}
+
+/// Draw a lightning bolt — mermaid's `bolt` (bd-7ls21). Same six measured vertices as the SVG path.
+fn draw_lightning_bolt<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    ctx.begin_path();
+    ctx.move_to(x + w, y);
+    ctx.line_to(x + w * 0.023, y + h * 0.55);
+    ctx.line_to(x + w * 0.586, y + h * 0.55);
+    ctx.line_to(x, y + h);
+    ctx.line_to(x + w * 0.977, y + h * 0.45);
+    ctx.line_to(x + w * 0.414, y + h * 0.45);
     ctx.close_path();
     ctx.fill();
     ctx.stroke();

@@ -215,6 +215,7 @@ pub fn describe_node(node: &IrNode, ir: &MermaidDiagramIr) -> String {
         fm_core::NodeShape::LinedCylinder => "lined cylinder",
         fm_core::NodeShape::Document => "document",
         fm_core::NodeShape::LinedDocument => "lined document",
+        fm_core::NodeShape::LightningBolt => "lightning bolt",
         fm_core::NodeShape::Rect => "rectangle",
         fm_core::NodeShape::Rounded => "rounded rectangle",
         fm_core::NodeShape::Stadium => "stadium shape",

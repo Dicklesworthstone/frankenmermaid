@@ -120,6 +120,9 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
         // box nor a tighter outline is a clean superset. The box is the conservative choice: an
         // edge stops on the nominal bottom rather than inside the trough.
         NodeShape::Document | NodeShape::LinedDocument => rounded_rect_path(bounds, 0.0),
+        // The bolt is mostly empty box — a full-box boundary would let edges stop far from any ink.
+        // Its own outline is the right stop, and unlike the cylinder there is no rotation subtlety.
+        NodeShape::LightningBolt => lightning_bolt_path(bounds),
     }
 }
 
@@ -330,6 +333,39 @@ pub fn triangle_path(bounds: LayoutRect) -> Vec<PathCmd> {
         PathCmd::MoveTo { x: cx, y },
         PathCmd::LineTo { x: x + w, y: y + h },
         PathCmd::LineTo { x, y: y + h },
+        PathCmd::Close,
+    ]
+}
+
+/// [`NodeShape::LightningBolt`]'s boundary: the bolt's own six-vertex outline.
+///
+/// Given rather than a box because the bolt leaves most of its box EMPTY — a box boundary would stop
+/// edges in white space on either side of the zigzag.
+#[must_use]
+pub fn lightning_bolt_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let x = bounds.x;
+    let y = bounds.y;
+    let w = bounds.width;
+    let h = bounds.height;
+    vec![
+        PathCmd::MoveTo { x: x + w, y },
+        PathCmd::LineTo {
+            x: x + w * 0.023,
+            y: y + h * 0.55,
+        },
+        PathCmd::LineTo {
+            x: x + w * 0.586,
+            y: y + h * 0.55,
+        },
+        PathCmd::LineTo { x, y: y + h },
+        PathCmd::LineTo {
+            x: x + w * 0.977,
+            y: y + h * 0.45,
+        },
+        PathCmd::LineTo {
+            x: x + w * 0.414,
+            y: y + h * 0.45,
+        },
         PathCmd::Close,
     ]
 }

@@ -1240,6 +1240,25 @@ pub enum NodeShape {
     /// the widened width, against the lined rectangle's 0.14. Reusing the rectangle's ratio would
     /// have put the rule three times too far in.
     LinedDocument,
+    /// mermaid's `bolt` / `com-link`: a lightning bolt, a six-vertex zigzag.
+    ///
+    /// Measured by sampling in Chromium 151 against the pinned 11.15.0 bundle over a bbox of
+    /// 35 x 70, normalised to the box:
+    ///
+    /// ```text
+    ///   (1.000 w, 0.00 h)   top right
+    ///   (0.023 w, 0.55 h)   down-left to the waist
+    ///   (0.586 w, 0.55 h)   right along the waist
+    ///   (0.000 w, 1.00 h)   down-left to the point
+    ///   (0.977 w, 0.45 h)   back up-right
+    ///   (0.414 w, 0.45 h)   left along the upper waist
+    /// ```
+    ///
+    /// ⚠️ THE TWO WAIST EDGES ARE AT DIFFERENT HEIGHTS (0.55 and 0.45) and that asymmetry is the
+    /// whole shape — a bolt drawn with one waist height is a plain arrow-like wedge. mermaid's is
+    /// naturally TALL (35 x 70); drawn into this renderer's wider node box it stretches, exactly as
+    /// `Triangle` and the other non-boxy shapes already do.
+    LightningBolt,
 }
 
 /// Radius of [`NodeShape::SmallCircle`], in user units.
