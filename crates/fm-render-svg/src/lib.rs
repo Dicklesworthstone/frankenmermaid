@@ -10991,7 +10991,20 @@ fn render_node(
                 let mut attr_y = y + header_height + attr_font_size * 0.9;
                 for attr in &node.members {
                     let key_prefix = attr.key_prefix();
-                    let attr_text = format!("{key_prefix}{} {}", attr.data_type, attr.name);
+                    // ⚠️ THE COMMENT BELONGS HERE TOO, and its absence was an asymmetric sibling:
+                    // the streaming writer appended it and this `Element` path did not, so
+                    // `USER { string name "the display name" }` drew the comment under the default
+                    // config and DROPPED it whenever `embed_theme_css` was off — a rendering switch
+                    // with nothing to do with content deciding whether the author's text appears.
+                    //
+                    // Layout was already on the streaming path's side: `er_attribute_row_width`
+                    // measures the concatenation INCLUDING the comment, so this path was reserving
+                    // width for a string it then refused to draw.
+                    let mut attr_text = format!("{key_prefix}{} {}", attr.data_type, attr.name);
+                    if let Some(comment) = attr.comment.as_deref().filter(|text| !text.is_empty()) {
+                        attr_text.push(' ');
+                        attr_text.push_str(comment);
+                    }
                     let font_weight = if attr.keys.is_empty() {
                         "normal"
                     } else {
