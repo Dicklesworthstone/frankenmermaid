@@ -14160,6 +14160,54 @@ impl<'a> Iterator for SplitStatements<'a> {
 // u8 specialization is `memchr` — measurably SLOWER than a scalar scan on these short per-line
 // haystacks (see the scalar-scan win / ByteLines reject in NEGATIVE_EVIDENCE). Keep the scalar form.
 #[allow(clippy::manual_contains)]
+/// True when the `;` at `semicolon` closes an entity this parser would DECODE, rather than ending a
+/// statement.
+///
+/// ⚠️ A `;` IS BOTH MERMAID'S STATEMENT SEPARATOR AND THE LAST BYTE OF EVERY ENTITY, and
+/// `split_statements` knew only the first meaning (bd-idjwr). It is quote- and bracket-aware, so
+/// `A["a &amp; b"]` and `A[a &amp; b]` were safe — the `;` sits inside a quote or inside `[ ]`. Every
+/// context with NEITHER was shredded, and the pieces became diagram content:
+///
+/// ```text
+///   A --|a &amp; b| B     became four fragments; `|a`, `amp` and `b| B` were interned as NODES
+///   s1 : a &amp; b         became `a &amp` plus a second item `b`
+///   s1 : C#35;44 x         became `C#35` plus `44 x`
+/// ```
+///
+/// ⚠️ IT ASKS THE DECODER RATHER THAN MATCHING A SHAPE, and that is the point. mermaid writes
+/// entities BOTH as `&amp;` and as a bare `#35;`, so a rule keyed on a leading `&` fixes the first
+/// row above and leaves the third — which is exactly what the first version of this predicate did.
+/// Widening it to "or a leading `#`" would then have stopped splitting `a #b; c`, which is not an
+/// entity at all. Handing the token to [`decode_mermaid_entity_token`] means the splitter and the
+/// decoder cannot disagree about what an entity is: whatever the decode pass would turn into a
+/// character, this pass leaves alone, and everything else still separates statements.
+fn closes_entity_token(line: &str, semicolon: usize) -> bool {
+    let bytes = line.as_bytes();
+    // Entity names are short (`&thetasym;` is the longest this decodes); the cap keeps the scan O(1)
+    // per `;` instead of walking back over a whole line that has no opener at all.
+    let lower_bound = semicolon.saturating_sub(12);
+    let mut index = semicolon;
+    while index > lower_bound {
+        index -= 1;
+        match bytes[index] {
+            // `&amp;` — the token excludes the `&`, matching `decode_mermaid_entities`.
+            b'&' => return decode_mermaid_entity_token(&line[index + 1..semicolon]).is_some(),
+            // `#35;` — a bare numeric code, where the `#` is PART of the token.
+            b'#' => return decode_mermaid_entity_token(&line[index..semicolon]).is_some(),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' => {}
+            _ => return false,
+        }
+    }
+    false
+}
+
+// ⚠️ `clippy::manual_contains` WANTS `<[u8]>::contains` FOR THE `;` PRESCAN BELOW, AND THE
+// MEASUREMENT SAYS NO. `contains` on a byte slice is memchr-specialized, and this scans one short
+// source line (tens of bytes) per statement — the regime where memchr's per-call SIMD setup loses to
+// a compiler-vectorized scalar scan. `docs/NEGATIVE_EVIDENCE.md` banks the same reject for `\n` in
+// `ByteLines::next` (+0.26% parse REGRESSION, 2026-07-12). Taking the lint's advice here would
+// overturn a banked measurement on style grounds.
+#[allow(clippy::manual_contains)]
 fn split_statements(line: &str) -> SplitStatements<'_> {
     // Statements are separated by `;` (outside quotes/brackets). When the line contains no `;` at all it
     // is a single statement, so skip the quote/bracket-aware scan AND the `Vec` allocation — yield the
@@ -14205,7 +14253,12 @@ fn split_statements(line: &str) -> SplitStatements<'_> {
             brace_depth = brace_depth.saturating_add(1);
         } else if c == '}' {
             brace_depth = brace_depth.saturating_sub(1);
-        } else if c == ';' && square_depth == 0 && paren_depth == 0 && brace_depth == 0 {
+        } else if c == ';'
+            && square_depth == 0
+            && paren_depth == 0
+            && brace_depth == 0
+            && !closes_entity_token(line, i)
+        {
             let segment = line[current_start..i].trim();
             if !segment.is_empty() {
                 statements.push(segment);

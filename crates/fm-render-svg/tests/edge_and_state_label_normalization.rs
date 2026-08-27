@@ -26,11 +26,12 @@
 //!
 //! A state description went through NEITHER function and needed its own route.
 //!
-//! ⚠️ ONE STATE CASE IS STILL WRONG AND IS NOT THIS BEAD'S DEFECT. `s1 : a &amp; b` comes out as
-//! `a &amp` — TRUNCATED — because the `;` inside the entity is taken as a statement separator before
-//! any label normalizer sees the text. That is data loss in the statement splitter, a different and
-//! deeper bug than a missing decode, and it is filed rather than patched here. The test below pins
-//! the truncation so the follow-up has a starting assertion and nobody mistakes it for fixed.
+//! ⚠️ ONE STATE CASE WAS STILL WRONG WHEN THIS LANDED, AND IS NOW FIXED. `s1 : a &amp; b` came out
+//! as `a &amp` — TRUNCATED — because the `;` inside the entity was taken as a statement separator
+//! before any label normalizer saw the text: data loss in the splitter, a different and deeper bug
+//! than a missing decode. It was filed as bd-idjwr rather than patched here, and the test below
+//! pinned the BROKEN behaviour. bd-idjwr's fix then made that test fail with an instruction to
+//! update it, which is what the pin was for — the follow-up could not land quietly.
 
 fn label_texts(source: &str) -> Vec<String> {
     let ir = fm_parser::parse(source).ir;
@@ -156,16 +157,19 @@ fn stacked_state_descriptions_are_each_normalized_and_both_kept() {
     );
 }
 
-/// ⚠️ THE KNOWN-BAD CASE, PINNED RATHER THAN LEFT UNRECORDED.
+/// ⚠️ THE ONCE-KNOWN-BAD CASE, NOW FIXED — AND THE PIN IS WHY THIS NOTE IS ACCURATE.
 ///
-/// `s1 : a &amp; b` loses everything after the `;`, because the statement splitter treats it as a
-/// separator before any label normalizer runs. That is a different bug from the one this bead fixed
-/// — data loss in splitting, not a missing decode — and it is filed separately.
+/// When bd-j06n2 landed, `s1 : a &amp; b` came out as `a &amp`, truncated, because the `;` inside
+/// the entity was taken as a statement separator before any label normalizer saw the text. That was
+/// filed as bd-idjwr rather than patched, and this test pinned the BROKEN behaviour so the follow-up
+/// would start from an assertion.
 ///
-/// Asserted so that fixing it fails HERE and forces the note to be updated, rather than quietly
-/// absorbing a case nobody wrote down.
+/// bd-idjwr then made `split_statements` ask the entity decoder whether a `;` closes a token, and
+/// this test FAILED with "that is an improvement — update this test rather than deleting it". Which
+/// is exactly what a pin on known-bad behaviour is for: the fix could not land quietly, and the note
+/// could not go stale.
 #[test]
-fn a_semicolon_entity_in_a_state_description_is_still_truncated() {
+fn a_semicolon_entity_in_a_state_description_is_no_longer_truncated() {
     let parsed = fm_parser::parse("stateDiagram-v2\n  s1 : a &amp; b\n");
     let text = parsed
         .ir
@@ -177,9 +181,13 @@ fn a_semicolon_entity_in_a_state_description_is_still_truncated() {
         .map(|l| l.text.clone())
         .expect("state s1 has a description");
     assert_eq!(
-        text, "a &amp",
-        "the `;`-as-separator truncation is fixed. That is an improvement — update this test and \
-         the notes in this file rather than deleting them"
+        text, "a & b",
+        "the entity `;` truncation is back: the description lost its tail"
+    );
+    assert_eq!(
+        parsed.ir.nodes.len(),
+        1,
+        "the truncated tail was interned as a second state"
     );
 }
 
