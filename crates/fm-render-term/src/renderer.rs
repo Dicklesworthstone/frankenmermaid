@@ -1996,25 +1996,31 @@ impl TermRenderer {
                     lines[row][start + offset] = ch;
                 }
 
-                // ⚠️ NO C4 BOUNDARY TYPE ROW HERE, and that is a MEASURED decision rather than an
-                // oversight — see the bead filed alongside `3c000e9b`.
+                // ⚠️ NO C4 BOUNDARY TYPE ROW HERE, and that is a MEASURED decision recorded on
+                // bd-c23yq rather than an oversight.
                 //
                 // mermaid draws a boundary as two rows (label, then its bracketed type) and both the
-                // SVG and canvas arms now do the same. I implemented the terminal twin here, writing
-                // `[SYSTEM]` into `row + 1` under the same blank-cell discipline the title uses, and
-                // then measured it: it NEVER lands. Not at width 80, 160 or 240, on a single
-                // boundary or on three nested ones.
+                // SVG and canvas arms do the same. TWO attempts at the terminal twin were written,
+                // measured, and reverted:
                 //
-                // The reason is structural, not a tuning problem. A cluster's first interior row is
-                // the title row, and the first CONTAINED box starts on the next one, so `row + 1`
-                // holds that box's top border in every C4 layout this surface produces. The guard
-                // refuses, correctly — a type row that overwrote a nested boundary's border would be
-                // a worse outcome than the missing row.
+                //   1. Write `[SYSTEM]` into `row + 1` under the blank-cell guard above. Never drew
+                //      anything at width 80, 160 or 240 -- the guard refused every time.
+                //   2. Additionally reserve a caption row in fm-layout, which is what the incumbent
+                //      does (`drawInsideBoundary` advances its cursor past the type before placing
+                //      any child). That made the row REACH `lines` -- instrumented and confirmed
+                //      written -- and it still did not survive to the output.
                 //
-                // Shipping that code would have been worse than shipping nothing: it reads as
-                // terminal support for a channel that can never appear. Making the row fit needs
-                // LAYOUT to reserve a second caption row for a captioned boundary, which is a
-                // fm-layout change and not a renderer one.
+                // THE REASON, measured rather than reasoned: the node overlay runs AFTER this one
+                // and does not check what it paints over. A C4 node draws a name header, a divider
+                // and its type rows, and that divider lands exactly on the caption band, so the
+                // written `[SYSTEM]` is overwritten before the frame is emitted. Where a boundary
+                // contains only other BOUNDARIES the row does survive -- `[ENTERPRISE]` and
+                // `[custom]` appeared at widths 160 and 240 -- which is how partial, inconsistent
+                // coverage would have shipped had this not been checked per-fixture.
+                //
+                // A correct fix has to give the caption its own cell rows in the TERMINAL's own
+                // coordinate space and offset node drawing accordingly; reserving pixels upstream
+                // cannot do it, because this surface scales the whole diagram to fit its row count.
             }
         }
 
