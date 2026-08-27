@@ -366,9 +366,20 @@ pub(crate) struct FixedLayerCrossings {
     /// Position map over the moving layer's node-id domain. Every candidate is a permutation of
     /// the same node set, so this is fully overwritten per score and never needs clearing.
     positions: Vec<usize>,
-    /// Fenwick tree over moving-layer positions; all zero between scores.
+    /// Fenwick tree over moving-layer positions; all zero between scores. Empty when
+    /// [`Self::flat`] is set.
     fenwick: Vec<usize>,
+    /// Inversion counter for narrow layers: one occupancy count per position, prefix-summed on
+    /// demand. Empty when [`Self::flat`] is clear.
+    ///
+    /// `u32` rather than `usize`: the value is an edge count, and halving the element width halves
+    /// both the clearing store and the bytes a query scan has to touch.
+    counts: Vec<u32>,
+    flat: bool,
 }
+
+/// Widest moving layer that uses the flat occupancy counter instead of the Fenwick tree.
+const FLAT_COUNT_MAX_WIDTH: usize = 64;
 
 impl FixedLayerCrossings {
     /// Bucket `edges` by the fixed layer's positions, or `None` when the moving layer's node-id
@@ -438,12 +449,45 @@ impl FixedLayerCrossings {
             cursor[fixed_position] += 1;
         }
 
+        // ⚠️ THE FLAT PATH IS GATED ON LAYER WIDTH, NOT ON THE CORPUS. Its per-query cost is O(width)
+        // against the Fenwick tree's O(log width), so it only wins while the layer is narrow enough
+        // for a contiguous scan to beat a pointer-chasing walk. 64 is where that trade is safely on
+        // the right side; wider layers keep the tree. Decided ONCE here, never per call.
+        let flat = moving.len() <= FLAT_COUNT_MAX_WIDTH;
         Some(Self {
             grouped,
             offsets,
             positions,
-            fenwick: vec![0_usize; moving.len().saturating_add(1)],
+            fenwick: if flat {
+                Vec::new()
+            } else {
+                vec![0_usize; moving.len().saturating_add(1)]
+            },
+            counts: if flat {
+                vec![0_u32; moving.len()]
+            } else {
+                Vec::new()
+            },
+            flat,
         })
+    }
+
+    /// Inserted items strictly after `position`, summing whichever end of `counts` is shorter.
+    ///
+    /// ⚠️ SUMMING ONLY THE LOW END MEASURED A 2.24% LOSS on the whole ER job (A/B 1.022395 against
+    /// an A/A null of 1.000151). A position sits at the middle of the layer on average, so a
+    /// one-sided scan costs ~n/2 adds per query and gave back more than the O(1) update saved. Both
+    /// ends are ~n/4 on average, which is what makes the flat counter competitive with the tree at
+    /// all.
+    #[inline]
+    fn above(&self, position: usize, seen: usize) -> usize {
+        let width = self.counts.len();
+        if position * 2 >= width {
+            self.counts[position + 1..].iter().sum::<u32>() as usize
+        } else {
+            let at_or_before: u32 = self.counts[..=position].iter().sum();
+            seen - at_or_before as usize
+        }
     }
 
     /// Crossings against the fixed layer for one candidate ordering of the moving layer.
@@ -481,6 +525,47 @@ impl FixedLayerCrossings {
 
         let mut seen = 0_usize;
         let mut inversions = 0_usize;
+
+        // ⚠️ THE COUNTER IS A FLAT ARRAY, NOT A TREE, WHENEVER THE LAYER IS NARROW. Measured on the
+        // ER catalog job: the moving layer is 20.15 nodes wide on average and NEVER wider than 64,
+        // so the Fenwick tree spends an O(log n) pointer-chasing walk per operation on a domain that
+        // fits in a couple of cache lines. Against that, an update becomes ONE increment and a query
+        // becomes a contiguous scan the compiler can vectorise.
+        //
+        // A `u64` bitset with `count_ones` would be faster still, and is WRONG here: `grouped` holds
+        // one entry per EDGE, so a node with several edges to the fixed layer contributes the same
+        // position more than once. Measured, only 53.85% of calls have all-distinct positions, so a
+        // bitset would need a second path for the other 46% and would silently miscount if it did
+        // not. Occupancy counts carry multiplicity for free.
+        if self.flat {
+            let first_end = self.offsets[1];
+            for &node_id in &self.grouped[self.offsets[0]..first_end] {
+                self.counts[self.positions[node_id]] += 1;
+            }
+            seen += first_end - self.offsets[0];
+
+            for window in self.offsets[1..group_count].windows(2) {
+                let (Some(&start), Some(&end)) = (window.first(), window.get(1)) else {
+                    continue;
+                };
+                let group = &self.grouped[start..end];
+                for &node_id in group {
+                    inversions += self.above(self.positions[node_id], seen);
+                }
+                for &node_id in group {
+                    self.counts[self.positions[node_id]] += 1;
+                }
+                seen += group.len();
+            }
+
+            for &node_id in &self.grouped[self.offsets[group_count - 1]..self.offsets[group_count]]
+            {
+                inversions += self.above(self.positions[node_id], seen);
+            }
+
+            self.counts.fill(0);
+            return inversions;
+        }
 
         // First group: updates only.
         let first_end = self.offsets[1];
