@@ -7644,13 +7644,19 @@ fn strip_kanban_metadata(text: &str) -> (&str, KanbanMetadata) {
 }
 
 fn parse_kanban_item(text: &str) -> (String, String) {
+    // ⚠️ THE LABEL GOES THROUGH THE SHARED NORMALIZER (bd-kmtia). Both arms below used to build it
+    // with a bare `to_string()`, so a kanban card was the one label site that saw neither the
+    // `<br>` conversion nor the entity decode — `one<br/>two` was drawn with the tag showing while
+    // the same text in a flowchart node drew two lines.
+    let normalize = |raw: &str| clean_label(Some(raw)).unwrap_or_else(|| raw.to_string());
+
     // Try to parse id[Label] syntax.
     if let Some(bracket_start) = text.find('[')
         && let Some(bracket_end) = text.rfind(']')
         && bracket_end > bracket_start
     {
         let id = text[..bracket_start].trim().to_string();
-        let label = text[bracket_start + 1..bracket_end].trim().to_string();
+        let label = normalize(text[bracket_start + 1..bracket_end].trim());
         if !id.is_empty() && !label.is_empty() {
             return (id, label);
         }
@@ -7658,8 +7664,9 @@ fn parse_kanban_item(text: &str) -> (String, String) {
             return (normalize_compound_identifier(&label), label);
         }
     }
-    // Plain text: use normalized form as ID.
-    let label = text.to_string();
+    // Plain text: use normalized form as ID. The ID is derived from the RAW text, not the
+    // normalized label — a card's identity must not shift when its `<br/>` becomes a newline.
+    let label = normalize(text);
     let id = normalize_compound_identifier(text);
     (id, label)
 }
@@ -12663,15 +12670,20 @@ fn parse_label_pretrimmed(raw: &str) -> Option<ParsedLabel> {
 }
 
 fn parse_label_inner(raw: &str, pretrimmed: bool) -> Option<ParsedLabel> {
-    // Fast path: a label with no surrounding quotes (`"` `'`), markdown backtick, or HTML entity
-    // (`&` `#`) reduces to a plain trimmed copy -- the quote-stripping, markdown, and entity-decode
-    // passes below all leave it unchanged. Byte-identical: for such a label the full path also ends
-    // at `Some(ParsedLabel::plain(raw.trim()))` (or `None` when empty). Skips ~3 redundant
-    // `trim`/`trim_matches` scans + the two-`find` entity decode per label (parse_label runs once
-    // per node label; doc-parse is ~49% of flowchart parse).
+    // Fast path: a label with no surrounding quotes (`"` `'`), markdown backtick, HTML entity
+    // (`&` `#`), or line-break tag (`<`) reduces to a plain trimmed copy -- the quote-stripping,
+    // markdown, `<br>` and entity-decode passes below all leave it unchanged. Byte-identical: for
+    // such a label the full path also ends at `Some(ParsedLabel::plain(raw.trim()))` (or `None` when
+    // empty). Skips ~3 redundant `trim`/`trim_matches` scans + the two-`find` entity decode per
+    // label (parse_label runs once per node label; doc-parse is ~49% of flowchart parse).
+    //
+    // ⚠️ `<` JOINED THIS SET WITH THE `<br>` FIX (bd-kmtia). Without it the fast path returns
+    // `one<br/>two` verbatim and the conversion below is never reached — the guard would have made
+    // the fix inert in the common case while every slow-path test passed. `<` in a label is rare
+    // enough that the fast path still fires for essentially every real label.
     if !raw
         .bytes()
-        .any(|byte| matches!(byte, b'"' | b'\'' | b'`' | b'&' | b'#'))
+        .any(|byte| matches!(byte, b'"' | b'\'' | b'`' | b'&' | b'#' | b'<'))
     {
         // `trim_fast` == `str::trim` byte-for-byte but skips the `char::is_whitespace` CharSearcher.
         // When the caller already trimmed (`pretrimmed`), `trim_fast(raw) == raw`, so skip it entirely
@@ -12704,7 +12716,17 @@ fn parse_label_inner(raw: &str, pretrimmed: bool) -> Option<ParsedLabel> {
         return Some(ParsedLabel { text, segments });
     }
 
-    let decoded = decode_mermaid_entities(without_quotes.trim());
+    // ⚠️ THE SAME CONVERSION AS THE MARKDOWN BRANCH ABOVE (bd-kmtia). `replace_br_with_newlines` has
+    // existed and been correct all along; it was reached from the markdown-string branch of this
+    // very function and from sequence messages, and from nowhere else. So `A["one<br/>two"]` drew
+    // the tag as literal text while ``A["`one<br/>two`"]`` — the same label in backticks — drew two
+    // lines. Two branches of one normalizer disagreeing about the same input is the asymmetric-
+    // sibling shape this parser keeps producing.
+    //
+    // Measured in Chromium 151 against the pinned mermaid 11.15.0 bundle: `<br/>` was drawn as
+    // literal text in 17 of 18 label sites, and the reference joins it in 9 of them.
+    let with_line_breaks = replace_br_with_newlines(without_quotes.trim());
+    let decoded = decode_mermaid_entities(&with_line_breaks);
     if decoded.is_empty() {
         None
     } else {
