@@ -1,5 +1,35 @@
 # Negative Evidence Ledger — frankenmermaid perf swarm
 
+### REJECT: sizing the SVG capacity hint for ER attribute rows — the hint IS 2x under and fixing it changes nothing (2026-08-27)
+
+- **The defect is real.** `layout_svg_capacity_hint` counts nodes, edges, clusters and a list of
+  auxiliary items, and counts entity attribute rows NOWHERE. Measured on `schema_catalog_25`, per
+  document: **15 nodes, 14 edges, 0 clusters, and 117.6 attribute rows**, giving a hint of
+  **46,505 bytes** for an actual output of **91,632 bytes** (2,290,799 over 25 documents). The hint
+  is under by ~2x, so the output String must grow at least once. Unaccounted bytes divided by the
+  rows that produce them come to ~384 each.
+- **Why it looked like the lever.** Cumulative attribution at 0474dbf4 put `__memmove_avx` at 5.83%
+  and `__memcpy_avx` at 5.88%, with `RawVecInner::finish_grow` 2.13%, `Global::grow` 1.68% and
+  `_mi_theap_realloc_zero` 2.37% — i.e. several percent of the job in reallocation, and a 2x-under
+  hint on a 92 KB document is the obvious source.
+- **Measured: NOTHING.** Adding a `member_rows * 384` term (arms built from a clean worktree
+  differing only by that term, ELF hashes self-reported, base != cand, null == base, load1 17.04
+  before and 14.61 after with no spike):
+
+      A/B (cand/base)  median 0.999862  range 0.999335-0.999998  n=9
+      A/A null         median 1.000043  range 0.999881-1.000314  n=9
+
+  The ranges OVERLAP. The effect is ~0.014% against a null half-width of ~0.02% — no effect at all,
+  and outputs were byte-identical.
+- **What that refutes.** The realloc traffic is NOT the output document growing. Something else owns
+  those copies; the obvious candidate was wrong and is now excluded. The renderer reuses buffers
+  across renders, so a per-render capacity hint is very likely amortised away.
+- **Verdict: REJECT the change, KEEP the finding.** The hint really is 2x under for ER and correcting
+  it buys nothing measurable, so it is not worth the extra O(nodes) pass. Do NOT re-derive this from
+  the arithmetic — the estimate looks badly wrong, and being badly wrong turns out not to matter.
+  Anyone attacking the 5.8% memmove should start by ATTRIBUTING it, not by assuming the output
+  String; dwarf unwinding stops at the libc frame, so that attribution needs a different instrument.
+
 ### REJECT, NOT ATTEMPTED: incremental crossing deltas for candidate moves — only 14.7% of candidates qualify (2026-08-27)
 
 - **The idea.** `FixedLayerCrossings::count_at_positions` is still the top symbol of the ER catalog
