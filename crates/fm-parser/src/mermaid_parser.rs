@@ -1445,6 +1445,32 @@ fn lower_flow_document_item(
             body,
         } => {
             let span = span_for(line_number, source_line);
+
+            // ⚠️ AN EMPTY SUBGRAPH IS A NODE, NOT A CLUSTER (bd-kat55). Measured against the pinned
+            // mermaid 11.15.0 bundle in Chromium 151: `subgraph s1 … end` with nothing in it renders
+            // as an ordinary rect vertex with id `s1` and NO cluster at all — the same markup as a
+            // plain `s1[Title]` vertex, right down to the shape. The bead was filed saying the
+            // reference merely DROPS the cluster; it also gains a node, and the tests assert both,
+            // because dropping the cluster alone would leave the diagram a box short.
+            //
+            // The predicate runs on the AST BEFORE the cluster exists, which is what keeps this
+            // simple: deciding after lowering would mean unwinding a cluster, a subgraph, both key
+            // maps, the parent's child list and the reuse-dirty marks. `flow_body_declares_content`
+            // is exhaustive over `FlowAst`, so a new statement kind cannot silently default to
+            // "empty" and start deleting people's subgraphs.
+            if !flow_body_declares_content(&body) {
+                let label = clean_label(title.as_deref()).map(ParsedLabel::plain);
+                if let Some(node_id) =
+                    builder.intern_node_label_owned(&id, label, NodeShape::Rect, span)
+                {
+                    // Added to the ENCLOSING groups, so `outer { inner {} }` makes `inner` a node
+                    // inside `outer` — and therefore makes `outer` non-empty, which is exactly what
+                    // the reference draws (node `inner`, cluster `outer`).
+                    add_node_to_active_groups(builder, active_clusters, active_subgraphs, node_id);
+                }
+                return;
+            }
+
             let lookup_key = flow_subgraph_lookup_key(&id, title.as_deref());
             let Some(cluster_index) = builder.ensure_cluster(&lookup_key, title.as_deref(), span)
             else {
@@ -1472,6 +1498,40 @@ fn lower_flow_document_item(
             }
         }
     }
+}
+
+/// Does this subgraph body intern at least one node?
+///
+/// The question the reference answers by rendering: an empty `subgraph` becomes a vertex, a
+/// non-empty one becomes a cluster (bd-kat55). Measured, every body that interns nothing behaves
+/// identically — blank, comment-only, `direction TB`, `class A red`, `style A fill:#f00` — so the
+/// predicate is "does lowering produce a node", not a list of blessed keywords.
+///
+/// ⚠️ EXHAUSTIVE OVER `FlowAst` ON PURPOSE, no `_` arm. Every `false` below is a statement this
+/// file's own lowering proves non-interning (`ClassAssign` and `ClickDirective` both skip unknown
+/// ids by design — see their arms in `lower_flow_ast`). A new variant added later must be
+/// classified here rather than defaulting to "this subgraph is empty, delete it".
+fn flow_ast_declares_content(ast: &FlowAst) -> bool {
+    match ast {
+        FlowAst::Node(_) | FlowAst::Edge { .. } => true,
+        FlowAst::Direction(_)
+        | FlowAst::ClassAssign { .. }
+        | FlowAst::ClickDirective { .. }
+        | FlowAst::EdgeAnimation { .. }
+        | FlowAst::StyleOrLinkStyle
+        | FlowAst::ClassDef => false,
+    }
+}
+
+/// A nested subgraph always counts as content: an empty one becomes a node, a non-empty one
+/// contributes its own members to every enclosing group, so either way the parent is not empty.
+fn flow_body_declares_content(body: &[FlowDocumentItem<'_>]) -> bool {
+    body.iter().any(|item| match item {
+        FlowDocumentItem::FastEdge { .. }
+        | FlowDocumentItem::FastNode { .. }
+        | FlowDocumentItem::Subgraph { .. } => true,
+        FlowDocumentItem::Statements { asts, .. } => asts.iter().any(flow_ast_declares_content),
+    })
 }
 
 fn flow_subgraph_lookup_key(id: &str, title: Option<&str>) -> String {
@@ -22649,8 +22709,26 @@ Rel_Back(db, app, "Responds")"#,
         let parsed = parse_mermaid(&input);
         // Should parse without panicking.
         assert_eq!(parsed.ir.diagram_type, DiagramType::Flowchart);
-        // Ordinary nesting stays below the cap and keeps every level.
-        assert_eq!(parsed.ir.graph.subgraphs.len(), 20);
+        // Ordinary nesting stays below the cap and keeps every level — but the INNERMOST level has
+        // nothing in it, and an empty subgraph is a node (bd-kat55), so 20 blocks yield 19 nested
+        // subgraphs wrapping one node. This expectation used to read `20`, which encoded our own
+        // defect; measured in Chromium 151 against the pinned mermaid 11.15.0 bundle, this exact
+        // input renders 19 clusters and a single vertex captioned `sg19` (and 2 blocks give 1
+        // cluster + `sg1`, 3 give 2 + `sg2`).
+        //
+        // The node is asserted as well as the count: "19" alone would also be satisfied by simply
+        // LOSING the innermost level, which is the failure this test was written to catch.
+        assert_eq!(parsed.ir.graph.subgraphs.len(), 19);
+        assert_eq!(
+            parsed
+                .ir
+                .nodes
+                .iter()
+                .map(|n| n.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sg19"],
+            "the innermost empty subgraph was dropped instead of becoming a node"
+        );
     }
 
     /// Build `nesting` nested `subgraph` blocks around a single `X --> Y` edge, with no

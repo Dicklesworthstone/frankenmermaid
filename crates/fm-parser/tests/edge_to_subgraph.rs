@@ -26,8 +26,10 @@
 //! ```text
 //!   edge BEFORE the subgraph   forward reference: the subgraph does not exist at intern time,
 //!                              so the phantom is still created (reference: 2 nodes, ours 4)
-//!   empty subgraph             we keep a cluster the reference drops entirely — a CLUSTER
-//!                              difference, unrelated to this fix and pre-existing
+//!   empty subgraph             FIXED SINCE, as bd-kat55 — and the note filed here was wrong in
+//!                              the same way bd-honvo's was. The reference does not just drop the
+//!                              cluster, it renders the empty subgraph AS A NODE. Recorded here as
+//!                              a cluster-only difference, it would have been "fixed" a box short
 //!   s1[Box] with subgraph s1   FIXED SINCE, as bd-honvo. It was pinned here at the broken value,
 //!                              that pin failed when the follow-up landed, and the note had to be
 //!                              updated rather than left stale. Note the bead was filed saying the
