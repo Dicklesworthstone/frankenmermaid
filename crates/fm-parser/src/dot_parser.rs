@@ -892,10 +892,9 @@ fn dot_header_kind(cleaned_input: &str) -> Option<bool> {
     }
     let (directed, rest) = if let Some(rest) = strip_dot_keyword(cursor, "digraph") {
         (true, rest)
-    } else if let Some(rest) = strip_dot_keyword(cursor, "graph") {
-        (false, rest)
     } else {
-        return None;
+        let rest = strip_dot_keyword(cursor, "graph")?;
+        (false, rest)
     };
     let after_id = skip_dot_id(rest.trim_start())?;
     after_id.trim_start().starts_with('{').then_some(directed)
