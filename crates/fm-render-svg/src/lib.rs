@@ -11143,6 +11143,23 @@ fn render_node(
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
+        NodeShape::BowTieRect => {
+            // Both sides arc the same way. Semi-axes are the chord-to-apex distances measured above:
+            // 0.138 w on the left (bulging out) and 0.101 w on the right (cutting in).
+            let path = PathBuilder::new()
+                .move_to(x + w * 0.179, y)
+                .line_to(x + w, y)
+                .arc_to(w * 0.101, h * 0.5, 0.0, false, false, x + w * 0.978, y + h)
+                .line_to(x + w * 0.157, y + h)
+                .arc_to(w * 0.138, h * 0.5, 0.0, false, false, x + w * 0.179, y)
+                .close()
+                .build();
+            Element::path()
+                .d(&path)
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
         NodeShape::TaggedDocument => {
             // Document outline, then the fold. The fold's base is the SAME curve as the outline
             // beneath it: the first wave quadratic split at t = 0.364 gives control (0.909 w,
@@ -13488,6 +13505,7 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
         NodeShape::Bang => "fm-node-shape-bang",
         NodeShape::CurvedTrapezoid => "fm-node-shape-curved-trapezoid",
         NodeShape::TaggedDocument => "fm-node-shape-tagged-document",
+        NodeShape::BowTieRect => "fm-node-shape-bow-tie-rect",
         NodeShape::Rect => "fm-node-shape-rect",
         NodeShape::Rounded => "fm-node-shape-rounded",
         NodeShape::Stadium => "fm-node-shape-stadium",

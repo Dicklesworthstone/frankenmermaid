@@ -1366,6 +1366,30 @@ pub enum NodeShape {
     /// literally the same curve as the outline beneath it. Drawing a straight base instead leaves a
     /// visible sliver between fold and outline that grows with node width.
     TaggedDocument,
+    /// mermaid's `bow-rect` / `stored-data`: straight top and bottom, with BOTH sides curving the
+    /// SAME way — the left bulging out and the right cut in by a matching amount, so blocks tile.
+    ///
+    /// Measured by sampling in Chromium 151 against the pinned 11.15.0 bundle over a bbox of
+    /// 46.6 x 39, normalised to the box:
+    ///
+    /// ```text
+    ///   top edge      x 0.179 w .. 1.000 w at y = 0
+    ///   left side     bulges OUT to x 0.000 w at y 0.514 h
+    ///   bottom edge   x 0.127 w .. 0.948 w at y = h
+    ///   right side    curves IN to x 0.873 w at y 0.486 h
+    /// ```
+    ///
+    /// ⚠️ THE NAME IS MISLEADING AND THE MEASUREMENT SETTLES IT. "Bow tie" suggests two sides pinched
+    /// toward each other; they are not. Both sides bow the SAME direction — that is what makes this a
+    /// stored-data block that tiles against its neighbour, and why the published alias is
+    /// `stored-data`. A symmetric pinch would be a different shape entirely.
+    ///
+    /// ⚠️ FIT MEASURED, AND THE FIRST ATTEMPT WAS 5.5% OFF. Comparing both engines' outlines by
+    /// radial profile put the initial endpoints at 5.5% of the width at worst, concentrated at the
+    /// bottom-right where the sampled bottom edge (0.948 w) sat left of where mermaid's right arc
+    /// actually lands (~0.978 w). Moving both bottom endpoints 0.03 w right brings it to **2.5%**,
+    /// with nine of eleven buckets at or under 1%.
+    BowTieRect,
 }
 
 /// Radius of [`NodeShape::SmallCircle`], in user units.

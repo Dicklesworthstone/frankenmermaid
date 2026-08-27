@@ -259,6 +259,44 @@ fn each_new_shape_draws_its_measured_silhouette() {
         "tag-doc has no fold: {}",
         silhouette(&tagged_doc)
     );
+
+    // Straight top and bottom, both sides arcing the SAME way: 0.101 w right, 0.138 w left.
+    let stored = render("bow-rect");
+    assert!(
+        stored.contains("A10.10 33.25") && stored.contains("A13.80 33.25"),
+        "bow-rect does not curve both sides: {}",
+        silhouette(&stored)
+    );
+}
+
+/// The stored-data block's two sides bow the SAME way, which is what lets the blocks tile.
+///
+/// The name says "bow tie", which suggests a symmetric pinch — two sides curving toward each other.
+/// The measurement says otherwise: the left bulges out to 0.000 w and the right cuts in to 0.873 w,
+/// both leftward. A pinched version is still a closed curved shape that is not a rectangle, so this
+/// bead's differs-from-Rect rule passes on it while the block stops tiling.
+///
+/// Both arcs carry sweep flag 0 — the same rotational direction — which is the machine-checkable
+/// form of "same way", and the two radii differ, which rules out a symmetric shape.
+#[test]
+fn the_stored_data_block_bows_both_sides_the_same_way() {
+    let stored = render("bow-rect");
+    assert_eq!(
+        stored.matches("33.25 0 0 0 ").count(),
+        2,
+        "the two sides do not share a sweep direction, so the block no longer tiles: {}",
+        silhouette(&stored)
+    );
+    assert!(
+        stored.contains("A10.10 33.25") && stored.contains("A13.80 33.25"),
+        "the two sides have the same radius, so the shape became symmetric: {}",
+        silhouette(&stored)
+    );
+    assert_ne!(
+        silhouette(&stored),
+        silhouette(&render("rect")),
+        "the stored data block renders identically to a rectangle"
+    );
 }
 
 /// ⚠️ THE FOLD'S BASE IS THE OUTLINE'S OWN CURVE, NOT A STRAIGHT LINE.
@@ -780,6 +818,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
         "bang",
         "curv-trap",
         "tag-doc",
+        "bow-rect",
     ] {
         let sig = silhouette(&render(shape));
         assert!(!sig.is_empty(), "{shape} drew no geometry at all");
@@ -797,7 +836,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
 /// name that resolves to nothing tells an author to fix a spelling that was already correct.
 #[test]
 fn every_published_alias_draws_the_same_shape() {
-    let groups: [(&str, &[&str]); 20] = [
+    let groups: [(&str, &[&str]); 21] = [
         ("notch-rect", &["card", "notched-rectangle"]),
         (
             "lin-rect",
@@ -832,6 +871,7 @@ fn every_published_alias_draws_the_same_shape() {
         ("st-rect", &["procs", "processes", "stacked-rectangle"]),
         ("curv-trap", &["curved-trapezoid", "display"]),
         ("tag-doc", &["tagged-document"]),
+        ("bow-rect", &["bow-tie-rectangle", "stored-data"]),
     ];
     // `bang` publishes only its own name, so it has no alias row.
     for (short, aliases) in groups {
@@ -909,7 +949,7 @@ fn implemented_names_stop_warning_and_others_do_not() {
     // bd-7ls21, and therefore never going to be implemented here. Every other name in this list has
     // had to be swapped out the moment someone implemented it, three lists at a time; these two
     // cannot be. The third entry rotates and is expected to churn.
-    for name in ["win-pane", "datastore", "hourglass", "bow-rect"] {
+    for name in ["win-pane", "datastore", "hourglass", "brace"] {
         assert!(
             !warnings(name).is_empty(),
             "`{name}` is still unimplemented and must still warn"
@@ -965,6 +1005,7 @@ fn each_new_shape_has_an_accessible_description() {
         ("bang", "starburst"),
         ("curv-trap", "curved trapezoid"),
         ("tag-doc", "tagged document"),
+        ("bow-rect", "stored data block"),
     ] {
         assert!(
             render(shape).contains(want),

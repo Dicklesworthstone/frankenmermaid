@@ -58,6 +58,7 @@ pub fn draw_shape<C: Canvas2dContext>(
         NodeShape::CurvedTrapezoid => draw_curved_trapezoid(ctx, x, y, width, height),
         // The document body; the fold is interior detail this surface omits.
         NodeShape::TaggedDocument => draw_document(ctx, x, y, width, height),
+        NodeShape::BowTieRect => draw_bow_tie_rect(ctx, x, y, width, height),
         NodeShape::Rect => draw_rect(ctx, x, y, width, height, 0.0),
         NodeShape::Rounded => draw_rect(ctx, x, y, width, height, 4.0),
         NodeShape::Stadium => draw_stadium(ctx, x, y, width, height),
@@ -357,6 +358,35 @@ fn draw_triangle<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64
     ctx.move_to(cx, y);
     ctx.line_to(x + w, y + h);
     ctx.line_to(x, y + h);
+    ctx.close_path();
+    ctx.fill();
+    ctx.stroke();
+}
+
+/// Draw the stored-data block — mermaid's `bow-rect` (bd-7ls21).
+///
+/// Both sides bow the SAME way so the blocks tile; cubics stand in for the SVG path's arcs.
+fn draw_bow_tie_rect<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    ctx.begin_path();
+    ctx.move_to(x + w * 0.179, y);
+    ctx.line_to(x + w, y);
+    ctx.bezier_curve_to(
+        x + w * 0.887,
+        y + h * 0.15,
+        x + w * 0.873,
+        y + h * 0.85,
+        x + w * 0.948,
+        y + h,
+    );
+    ctx.line_to(x + w * 0.127, y + h);
+    ctx.bezier_curve_to(
+        x + w * 0.010,
+        y + h * 0.85,
+        x - w * 0.010,
+        y + h * 0.15,
+        x + w * 0.179,
+        y,
+    );
     ctx.close_path();
     ctx.fill();
     ctx.stroke();
