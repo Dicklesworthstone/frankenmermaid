@@ -126,7 +126,9 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
         // The document's wave dips BELOW its box and crests above the bottom edge, so neither the
         // box nor a tighter outline is a clean superset. The box is the conservative choice: an
         // edge stops on the nominal bottom rather than inside the trough.
-        NodeShape::Document | NodeShape::LinedDocument => rounded_rect_path(bounds, 0.0),
+        NodeShape::Document | NodeShape::LinedDocument | NodeShape::TaggedDocument => {
+            rounded_rect_path(bounds, 0.0)
+        }
         // The bolt is mostly empty box — a full-box boundary would let edges stop far from any ink.
         // Its own outline is the right stop, and unlike the cylinder there is no rotation subtlety.
         NodeShape::LightningBolt => lightning_bolt_path(bounds),

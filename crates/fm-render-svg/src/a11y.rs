@@ -222,6 +222,7 @@ pub fn describe_node(node: &IrNode, ir: &MermaidDiagramIr) -> String {
         fm_core::NodeShape::StackedRect => "stacked rectangles",
         fm_core::NodeShape::Bang => "starburst",
         fm_core::NodeShape::CurvedTrapezoid => "curved trapezoid",
+        fm_core::NodeShape::TaggedDocument => "tagged document",
         fm_core::NodeShape::Rect => "rectangle",
         fm_core::NodeShape::Rounded => "rounded rectangle",
         fm_core::NodeShape::Stadium => "stadium shape",

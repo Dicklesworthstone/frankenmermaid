@@ -11143,6 +11143,29 @@ fn render_node(
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
+        NodeShape::TaggedDocument => {
+            // Document outline, then the fold. The fold's base is the SAME curve as the outline
+            // beneath it: the first wave quadratic split at t = 0.364 gives control (0.909 w,
+            // 0.8146 h) and endpoint (0.818 w, 0.8384 h).
+            let path = PathBuilder::new()
+                .move_to(x, y)
+                .line_to(x + w, y)
+                .line_to(x + w, y + h * 0.80)
+                .quadratic_to(x + w * 0.75, y + h * 0.84, x + w * 0.5, y + h * 0.95)
+                .quadratic_to(x + w * 0.25, y + h * 1.06, x, y + h * 0.90)
+                .close()
+                .move_to(x + w * 0.818, y + h * 0.8384)
+                .line_to(x + w, y + h * 0.58)
+                .line_to(x + w, y + h * 0.80)
+                .quadratic_to(x + w * 0.909, y + h * 0.8146, x + w * 0.818, y + h * 0.8384)
+                .close()
+                .build();
+            Element::path()
+                .d(&path)
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
         NodeShape::CurvedTrapezoid => {
             // Quadratic controls chosen so each curve's t=0.5 midpoint lands on the measured apex:
             // C = 2M - (P0 + P2)/2. Both land outside the box, which is expected for arcs this deep.
@@ -13464,6 +13487,7 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
         NodeShape::StackedRect => "fm-node-shape-stacked-rect",
         NodeShape::Bang => "fm-node-shape-bang",
         NodeShape::CurvedTrapezoid => "fm-node-shape-curved-trapezoid",
+        NodeShape::TaggedDocument => "fm-node-shape-tagged-document",
         NodeShape::Rect => "fm-node-shape-rect",
         NodeShape::Rounded => "fm-node-shape-rounded",
         NodeShape::Stadium => "fm-node-shape-stadium",

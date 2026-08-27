@@ -1349,6 +1349,23 @@ pub enum NodeShape {
     /// Elliptical arcs whose horizontal semi-axis is the chord-to-apex distance bring that to
     /// **1.9%**, with eight of eleven buckets at or under 0.4%.
     CurvedTrapezoid,
+    /// mermaid's `tag-doc` / `tagged-document`: a [`NodeShape::Document`] with a fold at its
+    /// bottom-right, whose lower edge FOLLOWS THE DOCUMENT'S OWN WAVE.
+    ///
+    /// Measured in Chromium 151 against the pinned 11.15.0 bundle by isolating the fold's own
+    /// sub-path (index 2 of the node's four paths — outline, outline overlay, fold, fold overlay).
+    /// Normalised to the box, the fold runs `(0.818 w, 0.822 h)` up to `(1.000 w, 0.580 h)`, down the
+    /// right edge to `(1.000 w, 0.813 h)`, and back along the wave.
+    ///
+    /// ⚠️ IT IS NOT [`NodeShape::TaggedRect`]'S FOLD. That one is a square 45-degree corner on a
+    /// straight edge; this one is roughly 1:2 and its base is curved. Reusing the rectangle's fold
+    /// would leave the fold floating off the document's wavy bottom.
+    ///
+    /// ⚠️ AND THE BASE IS NOT APPROXIMATED — the wave quadratic is SPLIT at the fold's left edge
+    /// (de Casteljau at t = 0.364, since x runs linearly along that curve) so the fold's underside is
+    /// literally the same curve as the outline beneath it. Drawing a straight base instead leaves a
+    /// visible sliver between fold and outline that grows with node width.
+    TaggedDocument,
 }
 
 /// Radius of [`NodeShape::SmallCircle`], in user units.

@@ -250,6 +250,59 @@ fn each_new_shape_draws_its_measured_silhouette() {
         "curv-trap does not bulge on both sides: {}",
         silhouette(&crt)
     );
+
+    // Document outline, then the fold, whose base rejoins the outline at (173.80, 147.75).
+    let tagged_doc = render("tag-doc");
+    assert!(
+        tagged_doc
+            .contains("M173.80 147.75 L192 130.57 L192 145.20 Q182.90 146.17,173.80 147.75 Z"),
+        "tag-doc has no fold: {}",
+        silhouette(&tagged_doc)
+    );
+}
+
+/// ⚠️ THE FOLD'S BASE IS THE OUTLINE'S OWN CURVE, NOT A STRAIGHT LINE.
+///
+/// The document's wave quadratic is split at the fold's left edge, so the fold's underside is
+/// literally the same curve as the outline beneath it. A straight base leaves a sliver between the
+/// two that widens with the node — and a sliver is still a closed fold, still not a rectangle, so
+/// this bead's differs-from-Rect rule passes on it.
+///
+/// The split point is checked by construction: the outline's first quadratic evaluated at t = 0.364
+/// is (173.80, 147.75), which is exactly where the fold's base begins and ends.
+#[test]
+fn the_tagged_document_fold_sits_on_the_wave() {
+    let tagged_doc = render("tag-doc");
+    let plain_doc = render("doc");
+
+    // The outline is shared verbatim with the plain document.
+    let outline = "M92 92 L192 92 L192 145.20 Q167 147.86,142 155.18 Q117 162.49,92 151.85 Z";
+    assert!(
+        tagged_doc.contains(outline) && plain_doc.contains(outline),
+        "the tagged document's outline diverged from the plain one"
+    );
+    // The fold's base is a QUADRATIC, not a line, and it starts and ends on the outline.
+    assert!(
+        tagged_doc.contains("Q182.90 146.17,173.80 147.75 Z"),
+        "the fold's base is not the split wave curve: {}",
+        silhouette(&tagged_doc)
+    );
+    assert_ne!(
+        silhouette(&tagged_doc),
+        silhouette(&plain_doc),
+        "the tagged document renders identically to a plain document"
+    );
+    assert_ne!(
+        silhouette(&tagged_doc),
+        silhouette(&render("rect")),
+        "the tagged document renders identically to a rectangle"
+    );
+    // And it is NOT the tagged RECTANGLE's square fold.
+    assert_ne!(
+        silhouette(&tagged_doc),
+        silhouette(&render("tag-rect")),
+        "the tagged document reuses the tagged rectangle's fold"
+    );
 }
 
 /// ⚠️ THE CURVED TRAPEZOID'S TWO SIDES BULGE BY DIFFERENT AMOUNTS, which is measured, not assumed.
@@ -726,6 +779,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
         "st-rect",
         "bang",
         "curv-trap",
+        "tag-doc",
     ] {
         let sig = silhouette(&render(shape));
         assert!(!sig.is_empty(), "{shape} drew no geometry at all");
@@ -743,7 +797,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
 /// name that resolves to nothing tells an author to fix a spelling that was already correct.
 #[test]
 fn every_published_alias_draws_the_same_shape() {
-    let groups: [(&str, &[&str]); 19] = [
+    let groups: [(&str, &[&str]); 20] = [
         ("notch-rect", &["card", "notched-rectangle"]),
         (
             "lin-rect",
@@ -777,6 +831,7 @@ fn every_published_alias_draws_the_same_shape() {
         ("docs", &["documents", "st-doc", "stacked-document"]),
         ("st-rect", &["procs", "processes", "stacked-rectangle"]),
         ("curv-trap", &["curved-trapezoid", "display"]),
+        ("tag-doc", &["tagged-document"]),
     ];
     // `bang` publishes only its own name, so it has no alias row.
     for (short, aliases) in groups {
@@ -909,6 +964,7 @@ fn each_new_shape_has_an_accessible_description() {
         ("st-rect", "stacked rectangles"),
         ("bang", "starburst"),
         ("curv-trap", "curved trapezoid"),
+        ("tag-doc", "tagged document"),
     ] {
         assert!(
             render(shape).contains(want),

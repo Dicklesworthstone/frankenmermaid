@@ -56,6 +56,8 @@ pub fn draw_shape<C: Canvas2dContext>(
         NodeShape::StackedRect => draw_stacked_rect(ctx, x, y, width, height),
         NodeShape::Bang => draw_bang(ctx, x, y, width, height),
         NodeShape::CurvedTrapezoid => draw_curved_trapezoid(ctx, x, y, width, height),
+        // The document body; the fold is interior detail this surface omits.
+        NodeShape::TaggedDocument => draw_document(ctx, x, y, width, height),
         NodeShape::Rect => draw_rect(ctx, x, y, width, height, 0.0),
         NodeShape::Rounded => draw_rect(ctx, x, y, width, height, 4.0),
         NodeShape::Stadium => draw_stadium(ctx, x, y, width, height),
