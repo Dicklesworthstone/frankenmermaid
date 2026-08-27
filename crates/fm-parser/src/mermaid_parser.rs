@@ -1967,15 +1967,33 @@ fn parse_flowchart_document_items<'a>(
         // bd-ij0f: `title My Flow` was still interned as `title_My_Flow` after bd-0di8 covered the
         // accessibility pair.
         //
-        // ⚠️ ONLY `title` here, deliberately. The flowchart path already HANDLES the rest —
-        // classDef/style/linkStyle via `is_non_graph_statement`, and click/link/callback as real
-        // `FlowAst::ClickDirective` items. Applying the whole shared predicate on this path
-        // swallowed those before they were parsed and broke eight click tests; a guard belongs only
-        // where the path would otherwise intern a phantom.
+        // ⚠️ ONLY `title` here, deliberately. The flowchart path already HANDLES
+        // classDef/style/linkStyle via `is_non_graph_statement`, and `click …` as a real
+        // `FlowAst::ClickDirective`. Applying the whole shared predicate on this path swallowed
+        // `click` before it was parsed and broke eight click tests; a guard belongs only where the
+        // path would otherwise intern a phantom.
+        //
+        // ⚠️ THIS COMMENT USED TO CLAIM click/link/callback WERE ALL HANDLED HERE, AND ONLY `click`
+        // EVER WAS (bd-rnc6l). Both grammars are `just("click")`, so a bare `link A "url"` or
+        // `callback A fn "tip"` fell through to the node parser and was DRAWN. The guard for those
+        // three is immediately below.
         if trimmed
             .strip_prefix("title")
             .is_some_and(|rest| rest.starts_with(char::is_whitespace))
         {
+            continue;
+        }
+        // ⚠️ AND `click`'s THREE SIBLINGS, which this path does NOT parse (bd-rnc6l). The comment
+        // above says click/link/callback arrive as `FlowAst::ClickDirective`; that is true of the
+        // `click …` spellings only — the grammar is `just("click")`. A bare `link A "url"`,
+        // `callback A fn "tip"` or `cssClass "A" mine` fell straight through to the node parser and
+        // was DRAWN as a box captioned with the directive. mermaid rejects all three outright,
+        // measured in Chromium 151 against the pinned 11.15.0 bundle, with and without the
+        // `classDef` the cssClass docs pair it with — so the box is ours alone.
+        //
+        // `click` is deliberately NOT in this list: swallowing it here is exactly what broke eight
+        // click tests in bd-ij0f.
+        if starts_with_directive_keyword(trimmed, &UNPARSED_INTERACTION_DIRECTIVES) {
             continue;
         }
         if let Some(rest) = flowchart_accessibility_directive(trimmed) {
@@ -2362,6 +2380,34 @@ fn is_non_node_directive_statement(statement: &str) -> bool {
         || followed_by_space("click")
         || followed_by_space("link")
         || followed_by_space("callback")
+}
+
+/// The interaction directives, as author-facing first tokens.
+///
+/// `click` is separated from the rest because the flowchart path PARSES it into a real
+/// `FlowAst::ClickDirective`, and swallowing it before that broke eight click tests once already
+/// (bd-ij0f). Every other family reaches these lines with nothing to do but ignore them.
+const INTERACTION_DIRECTIVES: [&str; 4] = ["click", "link", "callback", "cssClass"];
+
+/// The three the flowchart path does NOT parse — `INTERACTION_DIRECTIVES` minus `click`.
+const UNPARSED_INTERACTION_DIRECTIVES: [&str; 3] = ["link", "callback", "cssClass"];
+
+/// True when `statement` opens with one of `keywords` used as a DIRECTIVE — keyword, then space.
+///
+/// ⚠️ ONE FUNCTION WITH AN EXPLICIT LIST PER CALL SITE, NOT TWO NEAR-IDENTICAL PREDICATES. The lists
+/// genuinely differ by family (see `INTERACTION_DIRECTIVES`), and a second copy of this matcher is
+/// how the duplicated-helper defects in this parser have started — one copy gets fixed, its fork
+/// does not.
+///
+/// ⚠️ AND IT KEYS ON THE KEYWORD PLUS WHITESPACE, never on a bare prefix, so `linkage` and
+/// `clickable` are still node ids.
+fn starts_with_directive_keyword(statement: &str, keywords: &[&str]) -> bool {
+    let statement = trim_fast(statement);
+    keywords.iter().any(|name| {
+        statement
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+    })
 }
 
 /// True for a DIAGRAM-LEVEL directive that is extracted centrally and must never become content.
@@ -5869,6 +5915,14 @@ fn parse_mindmap(input: &str, builder: &mut IrBuilder) {
         if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
             continue;
         }
+
+        // ⚠️ AND AN INTERACTION DIRECTIVE IS NOT CONTENT (bd-rnc6l). `click`/`link`/`callback`/
+        // `cssClass` have no meaning in this family and were being DRAWN as a box captioned with
+        // the author's own directive. mermaid rejects the line outright; a best-effort parser
+        // ignores it, which is not the same as painting it.
+        if starts_with_directive_keyword(trimmed, &INTERACTION_DIRECTIVES) {
+            continue;
+        }
         // ⚠️ AND `direction`/`title` ARE NOT CONTENT EITHER (bd-92kw1). This family has no direction
         // concept and its title is promoted into diagram meta by a shared pass, so both lines were
         // falling through to the node parser and being DRAWN — a box captioned with the author's own
@@ -7841,6 +7895,14 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        // ⚠️ AND AN INTERACTION DIRECTIVE IS NOT CONTENT (bd-rnc6l). `click`/`link`/`callback`/
+        // `cssClass` have no meaning in this family and were being DRAWN as a box captioned with
+        // the author's own directive. mermaid rejects the line outright; a best-effort parser
+        // ignores it, which is not the same as painting it.
+        if starts_with_directive_keyword(trimmed, &INTERACTION_DIRECTIVES) {
+            continue;
+        }
+
         // ⚠️ AND `direction`/`title` ARE NOT CONTENT EITHER (bd-92kw1). This family has no direction
         // concept and its title is promoted into diagram meta by a shared pass, so both lines were
         // falling through to the node parser and being DRAWN — a box captioned with the author's own
@@ -8088,6 +8150,16 @@ fn parse_gantt(input: &str, builder: &mut IrBuilder) {
         // a visible gantt TASK. Worst of the family: the phantom carries the author's
         // accessibility text as its own accessible name, so assistive tech announces it too.
         if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
+            continue;
+        }
+
+        // ⚠️ AND AN INTERACTION DIRECTIVE IS NOT CONTENT (bd-rnc6l) — EXCEPT `click`, WHICH THIS
+        // FAMILY PARSES. gantt has real click support (`gantt_click_support.rs`: href, tooltip,
+        // callback, and a click declared before its task), so the shorter list is used here for the
+        // same reason as on the flowchart path. Guarding all four swallowed `click` before the gantt
+        // handler saw it and failed four of those tests — the bd-ij0f regression, in a second
+        // family. `link`/`callback`/`cssClass` have no meaning here and were being DRAWN.
+        if starts_with_directive_keyword(trimmed, &UNPARSED_INTERACTION_DIRECTIVES) {
             continue;
         }
 
@@ -8684,6 +8756,14 @@ fn parse_pie(input: &str, builder: &mut IrBuilder) {
             continue;
         }
 
+        // ⚠️ AND AN INTERACTION DIRECTIVE IS NOT CONTENT (bd-rnc6l). `click`/`link`/`callback`/
+        // `cssClass` have no meaning in this family and were being DRAWN as a box captioned with
+        // the author's own directive. mermaid rejects the line outright; a best-effort parser
+        // ignores it, which is not the same as painting it.
+        if starts_with_directive_keyword(trimmed, &INTERACTION_DIRECTIVES) {
+            continue;
+        }
+
         // Header line — may include "showData" and/or "title ..." on the same line.
         if trimmed.starts_with("pie") {
             if trimmed.contains("showData") {
@@ -8779,6 +8859,14 @@ fn parse_quadrant(input: &str, builder: &mut IrBuilder) {
         // a visible quadrant POINT. Worst of the family: the phantom carries the author's
         // accessibility text as its own accessible name, so assistive tech announces it too.
         if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
+            continue;
+        }
+
+        // ⚠️ AND AN INTERACTION DIRECTIVE IS NOT CONTENT (bd-rnc6l). `click`/`link`/`callback`/
+        // `cssClass` have no meaning in this family and were being DRAWN as a box captioned with
+        // the author's own directive. mermaid rejects the line outright; a best-effort parser
+        // ignores it, which is not the same as painting it.
+        if starts_with_directive_keyword(trimmed, &INTERACTION_DIRECTIVES) {
             continue;
         }
 
@@ -9783,6 +9871,14 @@ fn parse_block_beta_document_items(
         // bd-7oyz / bd-t2fp: `accTitle: T` interned BOTH `accTitle` and the title text `T` as
         // blocks; `style A fill:#f9f` was split on whitespace into TWO blocks, `style` and `fill`.
         if is_accessibility_directive_statement(trimmed) || is_non_graph_statement(trimmed) {
+            continue;
+        }
+
+        // ⚠️ AND AN INTERACTION DIRECTIVE IS NOT CONTENT (bd-rnc6l). `click`/`link`/`callback`/
+        // `cssClass` have no meaning in this family and were being DRAWN as a box captioned with
+        // the author's own directive. mermaid rejects the line outright; a best-effort parser
+        // ignores it, which is not the same as painting it.
+        if starts_with_directive_keyword(trimmed, &INTERACTION_DIRECTIVES) {
             continue;
         }
 
