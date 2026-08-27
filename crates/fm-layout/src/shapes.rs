@@ -82,6 +82,9 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
         NodeShape::Pentagon => polygon_path(bounds, 5, -std::f32::consts::FRAC_PI_2),
         NodeShape::Star => star_path(bounds, 5),
         // The burst is sparse like the bolt, so its own outline is the boundary rather than a box.
+        // The curved trapezoid reaches the box edges at its bulges and is narrow elsewhere; the box
+        // is the conservative stop and its own outline would be fiddly for little gain.
+        NodeShape::CurvedTrapezoid => rounded_rect_path(bounds, 0.0),
         NodeShape::Bang => {
             star_path_with_ratio(bounds, fm_core::BANG_POINTS, fm_core::BANG_INNER_RATIO)
         }

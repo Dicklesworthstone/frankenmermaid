@@ -242,6 +242,45 @@ fn each_new_shape_draws_its_measured_silhouette() {
         "bang is not a 14-point star: {}",
         silhouette(&burst)
     );
+
+    // Narrow flat top and bottom, both sides arcs. Semi-axes 0.547 w and 0.276 w.
+    let crt = render("curv-trap");
+    assert!(
+        crt.contains("A54.70 33.25") && crt.contains("A27.60 33.25"),
+        "curv-trap does not bulge on both sides: {}",
+        silhouette(&crt)
+    );
+}
+
+/// ⚠️ THE CURVED TRAPEZOID'S TWO SIDES BULGE BY DIFFERENT AMOUNTS, which is measured, not assumed.
+///
+/// The right semi-axis is 0.547 w and the left 0.276 w — very nearly 2:1. A symmetric barrel, the
+/// obvious reading of "curved trapezoid", is a closed curved shape that is not a rectangle, so this
+/// bead's differs-from-Rect rule passes on it while the silhouette is wrong. The two radii differing
+/// is what this pins.
+#[test]
+fn the_curved_trapezoid_bulges_asymmetrically() {
+    let crt = render("curv-trap");
+    assert!(
+        crt.contains("A54.70 33.25"),
+        "the deep right bulge is gone: {}",
+        silhouette(&crt)
+    );
+    assert!(
+        crt.contains("A27.60 33.25"),
+        "the shallow left bulge is gone: {}",
+        silhouette(&crt)
+    );
+    assert!(
+        !crt.contains("A54.70 33.25 0 0 1 ") || crt.matches("A54.70").count() == 1,
+        "the right radius is used twice, so the shape became symmetric: {}",
+        silhouette(&crt)
+    );
+    assert_ne!(
+        silhouette(&crt),
+        silhouette(&render("rect")),
+        "the curved trapezoid renders identically to a rectangle"
+    );
 }
 
 /// ⚠️ THE BURST'S POINT COUNT AND ITS INNER RATIO BOTH CARRY THE SHAPE.
@@ -686,6 +725,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
         "docs",
         "st-rect",
         "bang",
+        "curv-trap",
     ] {
         let sig = silhouette(&render(shape));
         assert!(!sig.is_empty(), "{shape} drew no geometry at all");
@@ -703,7 +743,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
 /// name that resolves to nothing tells an author to fix a spelling that was already correct.
 #[test]
 fn every_published_alias_draws_the_same_shape() {
-    let groups: [(&str, &[&str]); 18] = [
+    let groups: [(&str, &[&str]); 19] = [
         ("notch-rect", &["card", "notched-rectangle"]),
         (
             "lin-rect",
@@ -736,6 +776,7 @@ fn every_published_alias_draws_the_same_shape() {
         ("delay", &["half-rounded-rectangle"]),
         ("docs", &["documents", "st-doc", "stacked-document"]),
         ("st-rect", &["procs", "processes", "stacked-rectangle"]),
+        ("curv-trap", &["curved-trapezoid", "display"]),
     ];
     // `bang` publishes only its own name, so it has no alias row.
     for (short, aliases) in groups {
@@ -799,6 +840,7 @@ fn implemented_names_stop_warning_and_others_do_not() {
         "st-rect",
         "processes",
         "bang",
+        "curv-trap",
     ] {
         assert!(
             warnings(name).is_empty(),
@@ -866,6 +908,7 @@ fn each_new_shape_has_an_accessible_description() {
         ("docs", "stacked documents"),
         ("st-rect", "stacked rectangles"),
         ("bang", "starburst"),
+        ("curv-trap", "curved trapezoid"),
     ] {
         assert!(
             render(shape).contains(want),

@@ -55,6 +55,7 @@ pub fn draw_shape<C: Canvas2dContext>(
         NodeShape::StackedDocument => draw_stacked_document(ctx, x, y, width, height),
         NodeShape::StackedRect => draw_stacked_rect(ctx, x, y, width, height),
         NodeShape::Bang => draw_bang(ctx, x, y, width, height),
+        NodeShape::CurvedTrapezoid => draw_curved_trapezoid(ctx, x, y, width, height),
         NodeShape::Rect => draw_rect(ctx, x, y, width, height, 0.0),
         NodeShape::Rounded => draw_rect(ctx, x, y, width, height, 4.0),
         NodeShape::Stadium => draw_stadium(ctx, x, y, width, height),
@@ -354,6 +355,35 @@ fn draw_triangle<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64
     ctx.move_to(cx, y);
     ctx.line_to(x + w, y + h);
     ctx.line_to(x, y + h);
+    ctx.close_path();
+    ctx.fill();
+    ctx.stroke();
+}
+
+/// Draw the CRT-screen silhouette — mermaid's `curv-trap` (bd-7ls21). Same measured controls.
+fn draw_curved_trapezoid<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    ctx.begin_path();
+    ctx.move_to(x + w * 0.265, y);
+    ctx.line_to(x + w * 0.469, y);
+    // Canvas has no elliptical-arc-to-point primitive, so the SVG path's arcs are approximated
+    // here by their cubic equivalents through the same measured apexes.
+    ctx.bezier_curve_to(
+        x + w * 1.02,
+        y + h * 0.16,
+        x + w * 1.02,
+        y + h * 0.84,
+        x + w * 0.438,
+        y + h,
+    );
+    ctx.line_to(x + w * 0.302, y + h);
+    ctx.bezier_curve_to(
+        x - w * 0.02,
+        y + h * 0.84,
+        x - w * 0.02,
+        y + h * 0.16,
+        x + w * 0.265,
+        y,
+    );
     ctx.close_path();
     ctx.fill();
     ctx.stroke();

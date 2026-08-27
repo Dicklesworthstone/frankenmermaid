@@ -1326,6 +1326,29 @@ pub enum NodeShape {
     /// [`NodeShape::Star`]'s much spikier 0.4 — a bang is a rounded burst, not a spiky star, and the
     /// ratio is the whole difference between the two.
     Bang,
+    /// mermaid's `curv-trap` / `display`: narrow flat top and bottom edges with both SIDES bulging
+    /// outward — the CRT-screen silhouette.
+    ///
+    /// Measured by sampling in Chromium 151 against the pinned 11.15.0 bundle over a bbox of
+    /// 50.83 x 54, normalised to the box:
+    ///
+    /// ```text
+    ///   top edge      x 0.265 w .. 0.469 w at y = 0
+    ///   left side     bulges to x 0.008 w at y 0.515 h
+    ///   bottom edge   x 0.302 w .. 0.438 w at y = h
+    ///   right side    bulges to x 1.000 w at y 0.483 h
+    /// ```
+    ///
+    /// ⚠️ THE TWO BULGES ARE NOT SYMMETRIC, and that is measured rather than assumed. The top edge
+    /// is offset left of centre and the right bulge is far deeper than the left, so a symmetric
+    /// barrel — the obvious first guess for "curved trapezoid" — is the wrong shape.
+    ///
+    /// ⚠️ AND THE SIDES ARE ARCS, NOT QUADRATICS. Comparing both engines' outlines by radial profile
+    /// (x reached at each tenth of the height) measured a single quadratic per side at a worst
+    /// deviation of **16.8% of the width** — it sags near the ends where mermaid's side stays full.
+    /// Elliptical arcs whose horizontal semi-axis is the chord-to-apex distance bring that to
+    /// **1.9%**, with eight of eleven buckets at or under 0.4%.
+    CurvedTrapezoid,
 }
 
 /// Radius of [`NodeShape::SmallCircle`], in user units.

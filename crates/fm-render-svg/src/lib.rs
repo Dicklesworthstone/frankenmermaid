@@ -11143,6 +11143,27 @@ fn render_node(
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
+        NodeShape::CurvedTrapezoid => {
+            // Quadratic controls chosen so each curve's t=0.5 midpoint lands on the measured apex:
+            // C = 2M - (P0 + P2)/2. Both land outside the box, which is expected for arcs this deep.
+            // ⚠️ ARCS, NOT QUADRATICS. A single quadratic per side was measured at 16.8% worst
+            // deviation from the reference profile — it sags near the ends where mermaid's side
+            // stays full. Elliptical arcs whose horizontal semi-axis is the chord-to-apex distance
+            // hold that fullness; the error after the change is recorded on `NodeShape::CurvedTrapezoid`.
+            let path = PathBuilder::new()
+                .move_to(x + w * 0.265, y)
+                .line_to(x + w * 0.469, y)
+                .arc_to(w * 0.547, h * 0.5, 0.0, false, true, x + w * 0.438, y + h)
+                .line_to(x + w * 0.302, y + h)
+                .arc_to(w * 0.276, h * 0.5, 0.0, false, true, x + w * 0.265, y)
+                .close()
+                .build();
+            Element::path()
+                .d(&path)
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
         NodeShape::Bang => {
             // 14 points at a 0.616 inner ratio — see `NodeShape::Bang` for how both were measured.
             let outer_r = w.min(h) / 2.0;
@@ -13442,6 +13463,7 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
         NodeShape::StackedDocument => "fm-node-shape-stacked-document",
         NodeShape::StackedRect => "fm-node-shape-stacked-rect",
         NodeShape::Bang => "fm-node-shape-bang",
+        NodeShape::CurvedTrapezoid => "fm-node-shape-curved-trapezoid",
         NodeShape::Rect => "fm-node-shape-rect",
         NodeShape::Rounded => "fm-node-shape-rounded",
         NodeShape::Stadium => "fm-node-shape-stadium",
