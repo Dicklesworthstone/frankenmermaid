@@ -63,12 +63,33 @@ fn fork_is_not_the_default_rectangle() {
     );
 }
 
-/// ⚠️ AND THE WARNING MUST STOP FOR THESE TWO ONLY.
+/// ⚠️ AND THE WARNING MUST STOP ONLY FOR NAMES THAT ARE REALLY DRAWN.
 ///
 /// Removing a name from `UNIMPLEMENTED_UPSTREAM_SHAPES` is a one-line edit that could just as easily
-/// have emptied the list or broken the lookup. A genuinely unimplemented name must STILL warn, or
-/// this change traded a wrong shape for a silent one — which is worse, and is the property bd-xfmm
-/// spent a whole bead establishing.
+/// have emptied the list or broken the lookup. A name this renderer does NOT draw must still warn,
+/// or the change traded a wrong shape for a silent one — worse, and the property bd-xfmm spent a
+/// whole bead establishing.
+///
+/// ⚠️ THIS TEST PREVIOUSLY ANCHORED ON A MEASUREMENT THAT WAS WRONG, AND THE ERROR IS WORTH KEEPING
+/// VISIBLE. It pinned `win-pane` and `datastore` as "confirmed non-shapes … mermaid publishes and
+/// draws as a PLAIN RECTANGLE … therefore never going to be implemented here", and both halves were
+/// false:
+///
+/// ```text
+///   win-pane   a box PLUS a horizontal and a vertical rule, at a fixed 10-unit inset — two
+///              paths, not one rect. A probe that reads the node's first <rect> finds only the
+///              invisible label container and reports a plain box
+///   datastore  really is a plain <rect> in the DOM, and really is not a rectangle on screen:
+///              stroke-dasharray="{width} {height}" erases both sides, leaving the top and
+///              bottom edges of an open-ended box
+/// ```
+///
+/// Both are drawn now (bd-7ls21). The lesson is the one the note itself was reaching for and got
+/// backwards: "measured" has to mean measured through the same channel the shape lives in, and
+/// `datastore`'s lives in a STYLE attribute where no geometry probe would ever look.
+///
+/// So the anchor is no longer a name expected to stay unbuilt — the registry has none left. It is
+/// the unknown-name path, which cannot be implemented away.
 #[test]
 fn a_still_unimplemented_shape_still_warns() {
     for name in ["fork", "join"] {
@@ -77,17 +98,26 @@ fn a_still_unimplemented_shape_still_warns() {
             "`shape: {name}` is implemented now and must not warn"
         );
     }
-    // ⚠️ ANCHORED ON THE TWO CONFIRMED NON-SHAPES, deliberately. `win-pane` and `datastore` are
-    // names mermaid 11.15.0 publishes and draws as a PLAIN RECTANGLE — measured, recorded on
-    // bd-7ls21, and therefore never going to be implemented here. Every other name in this list has
-    // had to be swapped out the moment someone implemented it, three lists at a time; these two
-    // cannot be. The third entry rotates and is expected to churn.
-    for name in ["win-pane", "datastore", "brace"] {
+    // The six that used to anchor this test, on the other side of the ledger now.
+    for name in [
+        "win-pane",
+        "datastore",
+        "text",
+        "brace",
+        "brace-r",
+        "braces",
+    ] {
         assert!(
-            !warnings(&format!("flowchart TD\n  A@{{ shape: {name} }}\n")).is_empty(),
-            "`shape: {name}` is still unimplemented and must still warn"
+            warnings(&format!("flowchart TD\n  A@{{ shape: {name} }}\n")).is_empty(),
+            "`shape: {name}` is implemented now and must not warn"
         );
     }
+    // A name that is not in the registry at all still warns, so the diagnostic did not go quiet
+    // along with the list.
+    assert!(
+        !warnings("flowchart TD\n  A@{ shape: not-in-any-registry }\n").is_empty(),
+        "the shape diagnostic stopped firing entirely"
+    );
 }
 
 /// CONTROL: an unknown name is still reported, so the allowlist edit did not turn the whole

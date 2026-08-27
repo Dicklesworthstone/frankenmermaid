@@ -987,16 +987,18 @@ fn implemented_names_stop_warning_and_others_do_not() {
             warnings(name)
         );
     }
-    // `doc` left this list by being implemented; `bang` replaces it so the list keeps its size.
-    // ⚠️ ANCHORED ON THE TWO CONFIRMED NON-SHAPES, deliberately. `win-pane` and `datastore` are
-    // names mermaid 11.15.0 publishes and draws as a PLAIN RECTANGLE — measured, recorded on
-    // bd-7ls21, and therefore never going to be implemented here. Every other name in this list has
-    // had to be swapped out the moment someone implemented it, three lists at a time; these two
-    // cannot be. The third entry rotates and is expected to churn.
+    // ⚠️ THE "STILL UNIMPLEMENTED" HALF IS GONE BECAUSE THERE IS NOTHING LEFT IN IT (bd-7ls21).
+    // It used to read `["win-pane", "datastore", "brace", "brace-l"]`, described as "the two
+    // confirmed non-shapes … mermaid publishes and draws as a PLAIN RECTANGLE … therefore never
+    // going to be implemented here". That measurement was wrong: `win-pane` draws a box PLUS two
+    // rules, and `datastore` draws a rect whose SIDES ARE ERASED by a stroke-dasharray of exactly
+    // (width, height) — invisible to any probe reading geometry rather than computed style. All
+    // four are drawn now, and every author-facing name in the pinned registry is mapped.
     for name in ["win-pane", "datastore", "brace", "brace-l"] {
         assert!(
-            !warnings(name).is_empty(),
-            "`{name}` is still unimplemented and must still warn"
+            warnings(name).is_empty(),
+            "`{name}` is implemented now and must not warn: {:?}",
+            warnings(name)
         );
     }
     assert!(

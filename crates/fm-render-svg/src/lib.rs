@@ -11988,6 +11988,74 @@ fn render_node(
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
+        NodeShape::WindowPane => {
+            // Box plus a horizontal rule `inset` below the top and a vertical rule `inset` right of
+            // the left, drawn as one path so both rules inherit the shape's stroke.
+            //
+            // The inset is FIXED (mermaid's own `on = 10`), so it is clamped rather than scaled: on
+            // a node small enough that 10 units would put a rule past the far edge, the panes would
+            // cross each other instead of nesting.
+            let inset_x = fm_core::WINDOW_PANE_INSET.min(w * 0.4);
+            let inset_y = fm_core::WINDOW_PANE_INSET.min(h * 0.4);
+            let path = PathBuilder::new()
+                .move_to(x, y)
+                .line_to(x + w, y)
+                .line_to(x + w, y + h)
+                .line_to(x, y + h)
+                .line_to(x, y)
+                .move_to(x, y + inset_y)
+                .line_to(x + w, y + inset_y)
+                .move_to(x + inset_x, y)
+                .line_to(x + inset_x, y + h)
+                .build();
+            Element::path()
+                .d(&path)
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
+        NodeShape::DataStore => {
+            // Top and bottom edges only, over the usual fill.
+            //
+            // ⚠️ TWO ELEMENTS, BECAUSE ONE PATH CANNOT DO IT. The fill needs a closed rectangle and
+            // the stroke needs two open segments; a single path either strokes all four edges or
+            // fills nothing. mermaid reaches the same silhouette from the other direction, by
+            // dashing a plain rect at exactly (width, height) so the side runs land in the gaps.
+            let edges = PathBuilder::new()
+                .move_to(x, y)
+                .line_to(x + w, y)
+                .move_to(x, y + h)
+                .line_to(x + w, y + h)
+                .build();
+            Element::group()
+                .child(
+                    Element::rect()
+                        .x(x)
+                        .y(y)
+                        .width(w)
+                        .height(h)
+                        .fill(&colors.node_fill)
+                        .attr("stroke", "none"),
+                )
+                .child(
+                    Element::path()
+                        .d(&edges)
+                        .fill("none")
+                        .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                        .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
+                )
+        }
+        NodeShape::TextBlock => {
+            // No outline and no fill: the label alone. The empty group keeps every downstream step
+            // — the shape class, the a11y title, the node id — working exactly as for a drawn shape,
+            // so a text block is a node in every respect except that nothing is painted.
+            Element::group()
+        }
+        NodeShape::BraceLeft => brace_element(x, y, w, h, true, colors, config),
+        NodeShape::BraceRight => brace_element(x, y, w, h, false, colors, config),
+        NodeShape::Braces => Element::group()
+            .child(brace_element(x, y, w, h, true, colors, config))
+            .child(brace_element(x, y, w, h, false, colors, config)),
         NodeShape::DividedRect => {
             // Box plus a HORIZONTAL rule one sixth down, drawn as one path so the rule inherits the
             // shape's stroke. The vertical twin is `LinedRect`; keeping them distinct is the point.
@@ -14021,6 +14089,57 @@ fn visibility_symbol(vis: fm_core::ClassVisibility) -> &'static str {
     }
 }
 
+/// One curly brace, drawn down the left or right edge of `(x, y, w, h)`.
+///
+/// mermaid builds this from quarter-circle arcs of radius `f` around the label box: a point at the
+/// top, in to a straight run one radius from the edge, out to a middle spur at two radii, back in,
+/// and a mirrored point at the bottom. The arm is `2f` wide.
+///
+/// ⚠️ THE SPUR IS WHAT MAKES IT A BRACE. Drop it and the same six segments read as a parenthesis,
+/// which is the shape a reader would call "a curve down the side of the text" either way.
+fn brace_element(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    on_left: bool,
+    colors: &ThemeColors,
+    config: &SvgRenderConfig,
+) -> Element {
+    // `f = max(5, d * 0.1)`, then held to a quarter of the box so a short node cannot fold the
+    // brace's own arcs through each other.
+    let f = (h * fm_core::BRACE_RADIUS_RATIO)
+        .max(fm_core::BRACE_MIN_RADIUS)
+        .min(h * 0.25)
+        .min(w * 0.25);
+    // `edge` is the tip column the brace points from, and `dir` sends the arm inward or outward.
+    let (edge, dir) = if on_left {
+        (x + 2.0 * f, -1.0)
+    } else {
+        (x + w - 2.0 * f, 1.0)
+    };
+    let spine = edge + dir * f;
+    let spur = edge + dir * 2.0 * f;
+    let mid = y + h / 2.0;
+    // Each arc turns a quarter circle; the sweep flips with the side, which is exactly what makes
+    // the right brace the MIRROR of the left rather than a translation of it.
+    let out = on_left;
+    let path = PathBuilder::new()
+        .move_to(edge, y)
+        .arc_to(f, f, 0.0, false, out, spine, y + f)
+        .line_to(spine, mid - f)
+        .arc_to(f, f, 0.0, false, !out, spur, mid)
+        .arc_to(f, f, 0.0, false, !out, spine, mid + f)
+        .line_to(spine, y + h - f)
+        .arc_to(f, f, 0.0, false, out, edge, y + h)
+        .build();
+    Element::path()
+        .d(&path)
+        .fill("none")
+        .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+        .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+}
+
 const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
     use fm_core::NodeShape;
     match shape {
@@ -14031,6 +14150,12 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
         NodeShape::NotchedRect => "fm-node-shape-notched-rect",
         NodeShape::LinedRect => "fm-node-shape-lined-rect",
         NodeShape::SmallCircle => "fm-node-shape-small-circle",
+        NodeShape::WindowPane => "fm-node-shape-window-pane",
+        NodeShape::DataStore => "fm-node-shape-data-store",
+        NodeShape::TextBlock => "fm-node-shape-text-block",
+        NodeShape::BraceLeft => "fm-node-shape-brace-left",
+        NodeShape::BraceRight => "fm-node-shape-brace-right",
+        NodeShape::Braces => "fm-node-shape-braces",
         NodeShape::DividedRect => "fm-node-shape-divided-rect",
         NodeShape::FramedCircle => "fm-node-shape-framed-circle",
         NodeShape::FlippedTriangle => "fm-node-shape-flipped-triangle",

@@ -33,6 +33,21 @@ pub fn draw_shape<C: Canvas2dContext>(
         NodeShape::NotchedRect | NodeShape::LinedRect | NodeShape::DividedRect => {
             draw_rect(ctx, x, y, width, height, 0.0)
         }
+        // bd-7ls21's last batch. Unlike the notched and lined rectangles above, these are NOT
+        // reduced to a box: canvas has every primitive each one needs, so drawing the box instead
+        // would be a choice to ship the wrong shape rather than a limit of the surface.
+        NodeShape::WindowPane => draw_window_pane(ctx, x, y, width, height),
+        NodeShape::DataStore => draw_data_store(ctx, x, y, width, height),
+        // ⚠️ A TEXT BLOCK PAINTS NOTHING, and the empty arm is the implementation. Falling through
+        // to `draw_rect` would put a box around a shape whose entire definition is the absence of
+        // one — and every "did it render?" assertion would still pass.
+        NodeShape::TextBlock => {}
+        NodeShape::BraceLeft => draw_brace(ctx, x, y, width, height, true),
+        NodeShape::BraceRight => draw_brace(ctx, x, y, width, height, false),
+        NodeShape::Braces => {
+            draw_brace(ctx, x, y, width, height, true);
+            draw_brace(ctx, x, y, width, height, false);
+        }
         NodeShape::SmallCircle | NodeShape::FramedCircle => draw_circle(ctx, x, y, width, height),
         // The pentagon reduces to its box; the flipped triangle is drawn properly, since canvas has
         // the primitives for it and an UPSIDE-DOWN triangle would be a different shape, not a
@@ -903,6 +918,84 @@ pub fn draw_cross_marker<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, size: 
     ctx.begin_path();
     ctx.move_to(x + size / 2.0, y - size / 2.0);
     ctx.line_to(x - size / 2.0, y + size / 2.0);
+    ctx.stroke();
+}
+
+/// mermaid's `win-pane`: the box plus a horizontal rule below the top and a vertical rule right of
+/// the left, both at a FIXED inset (see [`fm_core::WINDOW_PANE_INSET`]).
+fn draw_window_pane<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    draw_rect(ctx, x, y, w, h, 0.0);
+    let inset_x = f64::from(fm_core::WINDOW_PANE_INSET).min(w * 0.4);
+    let inset_y = f64::from(fm_core::WINDOW_PANE_INSET).min(h * 0.4);
+    ctx.begin_path();
+    ctx.move_to(x, y + inset_y);
+    ctx.line_to(x + w, y + inset_y);
+    ctx.move_to(x + inset_x, y);
+    ctx.line_to(x + inset_x, y + h);
+    ctx.stroke();
+}
+
+/// mermaid's `datastore`: the fill of a rectangle with only its TOP AND BOTTOM edges stroked.
+///
+/// The fill and the stroke are separate paths on purpose — one path cannot fill a box while
+/// stroking two of its four edges, which is the same constraint the SVG renderer meets by emitting
+/// a group rather than a single element.
+fn draw_data_store<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    ctx.begin_path();
+    ctx.rect(x, y, w, h);
+    ctx.fill();
+    ctx.begin_path();
+    ctx.move_to(x, y);
+    ctx.line_to(x + w, y);
+    ctx.move_to(x, y + h);
+    ctx.line_to(x + w, y + h);
+    ctx.stroke();
+}
+
+/// One curly brace down the left or right edge, matching the SVG renderer's `brace_element`.
+///
+/// Quarter-circle arcs of radius `f`, a straight spine one radius in, and a middle spur at two —
+/// the spur is what separates a brace from a parenthesis. Stroked and never filled: mermaid's own
+/// handler passes `fill: "none"`, and a filled brace would paint the label's background over it.
+fn draw_brace<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64, on_left: bool) {
+    use std::f64::consts::{FRAC_PI_2, PI};
+
+    let f = (h * f64::from(fm_core::BRACE_RADIUS_RATIO))
+        .max(f64::from(fm_core::BRACE_MIN_RADIUS))
+        .min(h * 0.25)
+        .min(w * 0.25);
+    let (edge, dir) = if on_left {
+        (x + 2.0 * f, -1.0)
+    } else {
+        (x + w - 2.0 * f, 1.0)
+    };
+    let spine = edge + dir * f;
+    let spur = edge + dir * 2.0 * f;
+    let mid = y + h / 2.0;
+    // Arc angles are written from the side that owns them rather than mirrored arithmetically: on
+    // the left the arm opens toward -x, so every centre and sweep is the reflection of the right's.
+    let (top_from, top_to) = if on_left {
+        (-FRAC_PI_2, 0.0)
+    } else {
+        (-FRAC_PI_2, -PI)
+    };
+    ctx.begin_path();
+    ctx.move_to(edge, y);
+    ctx.arc(spine, y + f, f, top_from, top_to);
+    ctx.move_to(spine, y + f);
+    ctx.line_to(spine, mid - f);
+    ctx.arc(spur, mid - f, f, if on_left { PI } else { 0.0 }, FRAC_PI_2);
+    ctx.move_to(spur, mid);
+    ctx.arc(spur, mid + f, f, -FRAC_PI_2, if on_left { PI } else { 0.0 });
+    ctx.move_to(spine, mid + f);
+    ctx.line_to(spine, y + h - f);
+    ctx.arc(
+        spine,
+        y + h - f,
+        f,
+        if on_left { 0.0 } else { -PI },
+        FRAC_PI_2,
+    );
     ctx.stroke();
 }
 

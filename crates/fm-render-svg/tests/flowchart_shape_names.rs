@@ -157,34 +157,52 @@ fn aliases_missing_from_already_mapped_shapes_now_resolve() {
 /// "we have not built this" and "check your spelling" send an author to different fixes, so a name
 /// in the wrong bucket actively misleads. `card` and `notch-rect` are the SAME shape under two
 /// published names and must give the SAME verdict; before this they gave opposite ones.
-/// ⚠️ NAMES LEAVE THIS LIST BY BEING IMPLEMENTED, not by being excused, and the list is REFILLED
-/// rather than allowed to shrink.
+/// ⚠️ NAMES LEAVE THIS LIST BY BEING IMPLEMENTED, not by being excused — and the list is now EMPTY,
+/// so this test can no longer be about the message it was written for.
 ///
 /// `join` went first (`NodeShape::HorizontalBar`), then `card`/`notch-rect`/`start`, then
-/// `doc`/`document` (bd-7ls21).
-/// Asserting an implemented name is reported as unimplemented would assert something false — but
-/// simply deleting entries would quietly weaken the check, so each departure is replaced by another
-/// name still in `UNIMPLEMENTED_UPSTREAM_SHAPES`. Six entries in, six entries out.
+/// `doc`/`document`, and finally these six (bd-7ls21). Every previous round REFILLED the list rather
+/// than letting it shrink, because deleting entries would quietly weaken the check. This round has
+/// nothing to refill it with: every author-facing name the pinned 11.15.0 registry publishes is
+/// drawn.
 ///
-/// The typo control below is untouched, and the two new-shape suites
-/// (`fm-parser/tests/fork_join_shape_names.rs`, `fm-render-svg/tests/mermaid11_new_shapes.rs`) each
-/// assert that the names they implemented no longer warn AND that unbuilt ones still do.
+/// ⚠️ SO THE ASSERTION IS INVERTED RATHER THAN DELETED, AND IT IS STRICTLY STRONGER. It used to say
+/// these six get the "not built yet" message instead of "check your spelling" — a claim about
+/// wording. It now says each of them DRAWS, and draws something of its own: six distinct shape
+/// classes, no warning. A weakened version of this test would have been to drop it, and the shape
+/// classes are the thing dropping it would have stopped checking.
+///
+/// The typo control below is untouched — that half cannot be implemented away, and it is what still
+/// proves the split exists at all.
 #[test]
-fn a_real_but_unbuilt_shape_name_is_not_called_a_typo() {
-    for name in [
-        "win-pane",
-        "datastore",
-        "text",
-        "brace",
-        "brace-r",
-        "brace-l",
+fn the_last_unbuilt_shape_names_are_drawn_and_distinct() {
+    let mut classes = Vec::new();
+    for (name, expected) in [
+        ("win-pane", "fm-node-shape-window-pane"),
+        ("datastore", "fm-node-shape-data-store"),
+        ("text", "fm-node-shape-text-block"),
+        ("brace", "fm-node-shape-brace-left"),
+        ("brace-r", "fm-node-shape-brace-right"),
+        ("braces", "fm-node-shape-braces"),
     ] {
-        let warning = warning_for(name);
+        assert_eq!(
+            shaped(name),
+            expected,
+            "`shape: {name}` drew the wrong shape"
+        );
         assert!(
-            warning.contains("does not implement yet"),
-            "`{name}` is a real mermaid 11 name but was reported as a typo: {warning}"
+            !classes.contains(&expected),
+            "`{name}` reuses another name's shape class"
+        );
+        classes.push(expected);
+
+        let source = format!("flowchart LR\n  A@{{ shape: {name} }}\n  A --> B\n");
+        assert!(
+            fm_parser::parse(&source).warnings.is_empty(),
+            "`{name}` is drawn but still warns"
         );
     }
+    assert_eq!(classes.len(), 6, "a name dropped out of this check");
 }
 
 /// CONTROL: a name the registry does not publish is still called unrecognised.

@@ -1462,6 +1462,70 @@ pub enum NodeShape {
     /// like the rest. It surfaced only on re-sweeping the full 44-name registry after the listed
     /// work was done — an enumeration is not a proof of completeness.
     Hourglass,
+    /// mermaid's `win-pane` / `window-pane` / `internal-storage`: a rectangle divided into panes by
+    /// one horizontal and one vertical rule near the top-left corner.
+    ///
+    /// ⚠️ THE INSET IS A FIXED 10 UNITS, NOT A FRACTION OF THE BOX, and it was confirmed twice
+    /// rather than inferred. The pinned 11.15.0 bundle computes the outline from a module constant
+    /// `on = 10`, emitting `M m-10,g-10 … M m-10,g L m+f,g M m,g-10 L m,g+p` — the rules sit exactly
+    /// `on` from the top and left edges whatever the label. Sampling a Chromium 151 render of a
+    /// 58.67 x 64 node independently put them at 0.170 w and 0.156 h, i.e. 9.97 and 9.98.
+    ///
+    /// A ratio would have been the natural guess and is wrong in the direction that matters: this
+    /// renderer's boxes are wider than mermaid's, so a ratio grows the small pane into a quadrant.
+    WindowPane,
+    /// mermaid's `datastore` / `data-store`: an open-ended rectangle — TOP AND BOTTOM EDGES ONLY,
+    /// no sides, filled as usual.
+    ///
+    /// ⚠️ THE SIDES ARE MISSING BY CONSTRUCTION, WHICH IS WHY THIS LOOKS LIKE A PLAIN RECT UNTIL YOU
+    /// READ THE STYLE. mermaid draws an ordinary `<rect>` and then sets
+    /// `stroke-dasharray="{width} {height}"` on it: the dash pattern draws `width` (the top edge),
+    /// skips `height` (the right edge), draws `width` (the bottom), skips `height` (the left).
+    /// Measured in Chromium 151 on a 78.67 x 54 node, the attribute reads `78.671875 54` exactly.
+    ///
+    /// A geometry-only probe reports this shape as `rect.basic label-container` with an unremarkable
+    /// bounding box and nothing else — I first recorded it as "mermaid draws a plain rectangle here"
+    /// and only the computed style showed otherwise. Shape is not always in the `d`.
+    DataStore,
+    /// mermaid's `text`: the label with NO outline and NO fill at all.
+    ///
+    /// Measured in Chromium 151 against the pinned 11.15.0 bundle: `<rect class="text">` with
+    /// computed `fill: none` and `stroke-width: 0px`, sized to the label like any other node.
+    ///
+    /// ⚠️ THE ABSENCE IS THE SHAPE. Every "does it render?" assertion passes when a text block is
+    /// drawn as a rectangle, because a rectangle is what it would be if the feature did nothing —
+    /// which is exactly the silent-fallback failure bd-vfxu named. The discriminating question is
+    /// whether the box is DRAWN, not whether the node exists.
+    TextBlock,
+    /// mermaid's `brace` / `comment` / `brace-l`: a curly brace to the LEFT of the label, with no
+    /// box around it.
+    ///
+    /// Read out of the pinned 11.15.0 bundle's own `curlyBraceLeft`, which builds the outline from
+    /// quarter-circle arcs of radius `f = max(5, d * 0.1)` around a label box `h` x `d`: a point at
+    /// the top, in to a straight run at one radius, out to a middle spur at two radii, back in, and
+    /// a mirrored point at the bottom. Confirmed by a Chromium 151 render of `comment`, whose brace
+    /// path measures 10.00 wide by 49.00 tall against a 38.67-wide label hull — an arm of exactly
+    /// `2f` with `f = 5`.
+    ///
+    /// ⚠️ THE MIDDLE SPUR IS THE SHAPE. Without it this is a parenthesis, and both are "a curve down
+    /// the side of the text".
+    ///
+    /// ⚠️ AND THE LABEL SITS CENTRED IN THE BOX HERE, WHERE MERMAID CENTRES IT IN THE LABEL BOX
+    /// BESIDE THE BRACE. Measured rather than waved at: this renderer pads a node by 36 units each
+    /// side against an arm of about 5, so the brace lands inside the padding and clear of the text,
+    /// and the difference is that our label reads about half an arm off-centre.
+    BraceLeft,
+    /// mermaid's `brace-r`: the mirror of [`NodeShape::BraceLeft`], to the RIGHT of the label.
+    ///
+    /// mermaid publishes it as a separate shape with its own handler (`curlyBraceRight`, built from
+    /// the unmirrored point generator where the left brace uses the negating one), so drawing one
+    /// for the other would put the comment on the wrong side of what it annotates.
+    BraceRight,
+    /// mermaid's `braces`: a [`NodeShape::BraceLeft`] and a [`NodeShape::BraceRight`] together.
+    ///
+    /// A third handler in the registry rather than a flag on either brace, and it renders three
+    /// paths where the single braces render two.
+    Braces,
 }
 
 /// Radius of [`NodeShape::SmallCircle`], in user units.
@@ -1476,6 +1540,23 @@ pub const SMALL_CIRCLE_RADIUS: f32 = 7.0;
 ///
 /// Measured from mermaid 11.15.0's `fr-circ`: concentric paths starting at `M7 0` and `M2.5 0`.
 pub const FRAMED_CIRCLE_INNER_RADIUS: f32 = 2.5;
+
+/// Inset of both [`NodeShape::WindowPane`] rules from the box's top and left edges, in user units.
+///
+/// Measured from mermaid 11.15.0's `win-pane`, whose handler carries this as a module constant
+/// (`on = 10`) and offsets both rules by it. FIXED rather than proportional — see the variant's own
+/// note for why a ratio is the wrong guess here.
+pub const WINDOW_PANE_INSET: f32 = 10.0;
+
+/// Radius of the quarter-circle arcs in [`NodeShape::BraceLeft`] and [`NodeShape::BraceRight`], as
+/// a fraction of the box height, and the floor it is clamped to.
+///
+/// Measured from mermaid 11.15.0's `curlyBraceLeft`: `f = Math.max(5, d * 0.1)`. The brace's arm is
+/// `2f` wide and its middle spur reaches the full `2f`.
+pub const BRACE_RADIUS_RATIO: f32 = 0.1;
+
+/// Floor for [`BRACE_RADIUS_RATIO`], in user units — mermaid's `Math.max(5, …)`.
+pub const BRACE_MIN_RADIUS: f32 = 5.0;
 
 /// Fraction of [`NodeShape::DividedRect`]'s height taken by its header band.
 ///

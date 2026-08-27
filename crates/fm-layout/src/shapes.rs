@@ -88,6 +88,18 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
         // The hourglass is sparse — two lobes with an empty waist — so its own outline is a
         // better edge stop than the box, the same call the bolt and the burst take.
         NodeShape::Hourglass => hourglass_path(bounds),
+        // bd-7ls21's last batch. The window pane and the data store are full boxes whose extra
+        // rules are INTERIOR detail, so the box is their exact boundary, not a conservative one.
+        NodeShape::WindowPane | NodeShape::DataStore => rounded_rect_path(bounds, 0.0),
+        // A text block paints nothing, so an edge has no outline to stop at and the box is the only
+        // honest answer: it is where the LABEL is, which is what an arrow to a text block points at.
+        NodeShape::TextBlock => rounded_rect_path(bounds, 0.0),
+        // The braces are sparse in the extreme — a stroke down one edge and nothing else — but the
+        // box is still the right stop, for the same reason as the text block: the thing an edge is
+        // aimed at is the commented label, not the bracket beside it.
+        NodeShape::BraceLeft | NodeShape::BraceRight | NodeShape::Braces => {
+            rounded_rect_path(bounds, 0.0)
+        }
         NodeShape::Bang => {
             star_path_with_ratio(bounds, fm_core::BANG_POINTS, fm_core::BANG_INNER_RATIO)
         }

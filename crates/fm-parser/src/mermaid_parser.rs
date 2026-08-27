@@ -2479,6 +2479,18 @@ fn flowchart_metadata_shape(name: &str) -> Option<NodeShape> {
         "fork" | "join" => NodeShape::HorizontalBar,
         // ── mermaid 11 shapes drawn for the first time (bd-7ls21) ─────────────────────────────
         // Aliases taken verbatim from the pinned 11.15.0 shape registry, not invented.
+        // ── the last of the registry's unimplemented names (bd-7ls21) ────────────────────────
+        // These six silhouettes were the whole remainder of `UNIMPLEMENTED_UPSTREAM_SHAPES`, so the
+        // list is now empty and every author-facing shape name the pinned 11.15.0 registry
+        // publishes maps to a drawn shape.
+        "win-pane" | "window-pane" | "internal-storage" => NodeShape::WindowPane,
+        "datastore" | "data-store" => NodeShape::DataStore,
+        "text" => NodeShape::TextBlock,
+        // `comment` and `brace-l` are ALIASES of `brace` in the registry, not shapes of their own;
+        // `brace-r` and `braces` each have their own handler and are separate arms below.
+        "brace" | "comment" | "brace-l" => NodeShape::BraceLeft,
+        "brace-r" => NodeShape::BraceRight,
+        "braces" => NodeShape::Braces,
         "notch-rect" | "card" | "notched-rectangle" => NodeShape::NotchedRect,
         "lin-rect" | "lined-rectangle" | "lined-process" | "lin-proc" | "shaded-process" => {
             NodeShape::LinedRect
@@ -2562,19 +2574,14 @@ fn split_metadata_pairs(body: &str) -> Vec<&str> {
 /// list of shortNames alone can only ever answer for the half of authors who happened to pick one.
 /// Every entry below is a name the pinned 11.15.0 registry publishes as author-facing syntax
 /// (`shortName` or `aliases`); internal aliases like `rect_left_inv_arrow` are deliberately absent.
-const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 11] = [
-    "brace",
-    "brace-l",
-    "brace-r",
-    "braces",
-    "comment",
-    "data-store",
-    "datastore",
-    "internal-storage",
-    "text",
-    "win-pane",
-    "window-pane",
-];
+///
+/// ⚠️ IT IS NOW EMPTY, AND EMPTY IS A REAL STATE RATHER THAN A DELETED FEATURE. Every author-facing
+/// name the pinned 11.15.0 registry publishes maps to a drawn shape (bd-7ls21), so there is nothing
+/// left for this arm of [`unimplemented_shape_warning`] to say. The constant and its arm stay
+/// because the next mermaid release will add names — emptying the list is the milestone, removing
+/// the mechanism would mean the next unknown name gets the "check your spelling" message instead of
+/// the honest "not built yet" one.
+const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 0] = [];
 
 /// Message for a `shape:` name that [`flowchart_metadata_shape`] does not map.
 ///
@@ -2582,7 +2589,19 @@ const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 11] = [
 /// shape -- because the consequence is the part the author cannot see: the diagram still renders,
 /// just as the wrong shape.
 fn unimplemented_shape_warning(name: &str) -> String {
-    if UNIMPLEMENTED_UPSTREAM_SHAPES.contains(&name) {
+    shape_warning_against(name, &UNIMPLEMENTED_UPSTREAM_SHAPES)
+}
+
+/// The message itself, against an EXPLICIT list of unbuilt names.
+///
+/// ⚠️ THE LIST IS A PARAMETER SO THE "NOT BUILT YET" ARM STAYS PROVABLE WHILE
+/// [`UNIMPLEMENTED_UPSTREAM_SHAPES`] IS EMPTY (bd-7ls21). With every published name now drawn, no
+/// real input can reach that arm, and the test that used to pin it did so by naming a shape it
+/// expected to stay unbuilt — which stopped being true the moment `brace` was implemented. Pinning
+/// the message through a supplied list tests the branch without asserting anything false about
+/// which shapes exist.
+fn shape_warning_against(name: &str, unimplemented: &[&str]) -> String {
+    if unimplemented.contains(&name) {
         format!(
             "shape '{name}' is a mermaid 11 shape this renderer does not implement yet; \
              the node kept its previous shape"
@@ -21092,25 +21111,37 @@ Rel_Back(db, app, "Responds")"#,
     /// `flowchart_metadata_shape` returns None for a name it does not know and the caller keeps the
     /// node's existing shape, so `A@{ shape: notch-rect }` rendered as a plain rectangle with
     /// nothing pointing at why. Every other unrecognised-input path in this parser already warns.
+    ///
+    /// ⚠️ THIS NO LONGER GOES THROUGH A LIVE SHAPE NAME, AND IT CANNOT. bd-7ls21 finished the
+    /// worklist, so `UNIMPLEMENTED_UPSTREAM_SHAPES` is empty and NO input reaches this arm. The
+    /// previous version picked `brace` and reasoned that a margin ornament was "unlikely to become
+    /// implemented" — the shape drawn in the very commit that empties the list. Naming a supposedly
+    /// safe example is the failure this rewrite removes: the message is pinned against a supplied
+    /// list, so the branch stays proven for the next mermaid release without asserting anything
+    /// false about today.
     #[test]
     fn an_unimplemented_shape_name_warns_and_keeps_the_shape() {
-        // `brace`, not `notch-rect` or `hourglass`: both of those are IMPLEMENTED as of bd-7ls21,
-        // so asserting they warn would assert something false. Any name still in
-        // UNIMPLEMENTED_UPSTREAM_SHAPES exercises this identically -- what is pinned is the message
-        // and the recovery, not which shape happens to be unbuilt this week. `brace` is the safest
-        // anchor left: it is a margin ornament rather than a node container and is recommended for
-        // closure as out-of-scope, so it is unlikely to become implemented and invalidate this.
-        let parsed = parse_mermaid("flowchart LR\n  A@{ shape: brace }\n  B[Plain]\n");
-
+        let message = super::shape_warning_against("some-future-shape", &["some-future-shape"]);
         assert!(
-            parsed
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("brace") && warning.contains("not implement")),
-            "an unimplemented shape passed in silence; warnings: {:?}",
-            parsed.warnings
+            message.contains("some-future-shape") && message.contains("not implement"),
+            "the unimplemented arm lost its message: {message}"
         );
-        // Permissive recovery: the node is still declared, under its own id.
+        assert!(
+            message.contains("kept its previous shape"),
+            "the message does not state the consequence: {message}"
+        );
+
+        // And a name that is NOT on the supplied list takes the other arm, so the two are really
+        // distinguished rather than both falling through to one string.
+        let other = super::shape_warning_against("some-future-shape", &[]);
+        assert_ne!(
+            other, message,
+            "both arms produce the same message, so the distinction is decorative"
+        );
+        assert!(other.contains("not a recognised shape name"), "{other}");
+
+        // Permissive recovery through the live path: an unknown shape still declares its node.
+        let parsed = parse_mermaid("flowchart LR\n  A@{ shape: some-future-shape }\n  B[Plain]\n");
         let ids: Vec<&str> = parsed.ir.nodes.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(ids, vec!["A", "B"], "the warning cost us the node");
     }
@@ -21155,6 +21186,11 @@ Rel_Back(db, app, "Responds")"#,
     /// about another list rots the moment someone implements one of the shapes: the warning would
     /// go on calling it unimplemented. This is the check that a table naming a nonexistent case
     /// is a permanent hole nobody sees.
+    ///
+    /// ⚠️ THE LIST IS EMPTY, SO THIS LOOP RUNS ZERO TIMES AND THE ASSERTION BELOW SAYS SO. A `for`
+    /// over an empty list passes for the same reason it would pass if someone deleted the list's
+    /// contents by accident — the guard has to distinguish "nothing left to check" from "nothing
+    /// being checked", which is the vacuous-gate family (bd-7ls21).
     #[test]
     fn every_unimplemented_shape_is_really_unimplemented() {
         for name in super::UNIMPLEMENTED_UPSTREAM_SHAPES {
@@ -21163,6 +21199,11 @@ Rel_Back(db, app, "Responds")"#,
                 "{name} is implemented but still listed as unimplemented"
             );
         }
+        assert!(
+            super::UNIMPLEMENTED_UPSTREAM_SHAPES.is_empty(),
+            "the list gained entries; this loop is no longer vacuous and this assertion \
+             should be replaced by whatever the new entries are"
+        );
     }
 
     /// bd-9x8r: `A@{ shape: rect, label: "Shaped" }` must declare node A, not a node named after

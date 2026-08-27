@@ -42,6 +42,16 @@ impl From<NodeShape> for GpuNodeShape {
             NodeShape::CurvedTrapezoid | NodeShape::TaggedDocument | NodeShape::BowTieRect => {
                 Self::Rect
             }
+            // bd-7ls21's last batch. The window pane and the data store ARE rectangles with
+            // interior detail; the braces and the text block have no rectangle in them at all, but
+            // the shader has no primitive for a bracket and none for "draw nothing", and the box is
+            // where the node's label sits either way. Named separately from the arm above so the
+            // reduction is not read as an equivalence.
+            NodeShape::WindowPane | NodeShape::DataStore => Self::Rect,
+            NodeShape::TextBlock
+            | NodeShape::BraceLeft
+            | NodeShape::BraceRight
+            | NodeShape::Braces => Self::Rect,
             NodeShape::Flag => Self::Rect,
             NodeShape::HalfRoundedRect => Self::RoundedRect,
             NodeShape::StackedDocument | NodeShape::StackedRect => Self::Rect,
