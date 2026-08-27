@@ -1276,6 +1276,18 @@ pub enum NodeShape {
     /// [`NodeShape::Document`]; one with both waved in the SAME phase is a parallelogram-ish ribbon.
     /// The shape is the phase relationship, not the presence of curves.
     Flag,
+    /// mermaid's `delay` / `half-rounded-rectangle`: a rectangle whose RIGHT END is a semicircle.
+    ///
+    /// Measured by sampling in Chromium 151 against the pinned 11.15.0 bundle over a bbox of
+    /// `x -22.5..22.49, y -27..27` (44.99 x 54): the straight top runs to x = -4.29 and the outline
+    /// then bulges right to x = 22.45 at mid-height before returning. The radius is exactly HALF THE
+    /// HEIGHT — 22.5 - 27 = -4.5 predicts the measured -4.29 — so the cap is a true semicircle and
+    /// the straight portion is `w - h/2` long.
+    ///
+    /// ⚠️ THE RADIUS IS DERIVED FROM THE HEIGHT, NOT A FRACTION OF THE WIDTH. A wide, short node
+    /// keeps a small round cap; a fraction-of-width radius would balloon it into a lozenge, and on a
+    /// square node the two rules coincide, so the difference only shows on the shapes that matter.
+    HalfRoundedRect,
 }
 
 /// Radius of [`NodeShape::SmallCircle`], in user units.

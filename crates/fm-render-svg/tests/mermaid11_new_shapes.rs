@@ -201,6 +201,48 @@ fn each_new_shape_draws_its_measured_silhouette() {
         "flag does not wave both edges: {}",
         silhouette(&banner)
     );
+
+    // Straight to w - h/2 (158.75), then a semicircle of radius h/2 (33.25).
+    let half_rounded = render("delay");
+    assert!(
+        half_rounded.contains("M92 92 L158.75 92 A33.25 33.25 0 0 1 158.75 158.50 L92 158.50 Z"),
+        "delay is not a rectangle with a semicircular right end: {}",
+        silhouette(&half_rounded)
+    );
+}
+
+/// ⚠️ ONLY ONE END IS ROUNDED, which is what separates `delay` from `stadium`.
+///
+/// A stadium rounds BOTH ends; a delay rounds the right only. Both are "a rectangle with rounded
+/// something", both differ from a plain rect element, and both are a single closed shape — so this
+/// bead's differs-from-Rect rule passes on either. The left edge is the discriminator: the delay's
+/// runs straight from corner to corner, the stadium's does not exist at all.
+#[test]
+fn the_delay_rounds_only_its_right_end() {
+    let half_rounded = render("delay");
+    let stadium = render("stadium");
+    assert!(
+        half_rounded.contains("L92 158.50 Z"),
+        "the delay lost its straight left edge, so both ends are rounded: {}",
+        silhouette(&half_rounded)
+    );
+    // The stadium is a rect with a corner radius, not a path — a delay drawn that way would round
+    // both ends.
+    assert!(
+        stadium.contains("rx=\"33.25\""),
+        "the stadium is no longer a both-ends-rounded rect: {}",
+        silhouette(&stadium)
+    );
+    assert_ne!(
+        silhouette(&half_rounded),
+        silhouette(&stadium),
+        "the delay and the stadium render identically"
+    );
+    assert_ne!(
+        silhouette(&half_rounded),
+        silhouette(&render("rect")),
+        "the delay renders identically to a rectangle"
+    );
 }
 
 /// The flag's two waves must run in OPPOSITE phase, which is what makes it a banner.
@@ -512,6 +554,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
         "lin-doc",
         "bolt",
         "flag",
+        "delay",
     ] {
         let sig = silhouette(&render(shape));
         assert!(!sig.is_empty(), "{shape} drew no geometry at all");
@@ -529,7 +572,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
 /// name that resolves to nothing tells an author to fix a spelling that was already correct.
 #[test]
 fn every_published_alias_draws_the_same_shape() {
-    let groups: [(&str, &[&str]); 15] = [
+    let groups: [(&str, &[&str]); 16] = [
         ("notch-rect", &["card", "notched-rectangle"]),
         (
             "lin-rect",
@@ -559,6 +602,7 @@ fn every_published_alias_draws_the_same_shape() {
         ("lin-doc", &["lined-document"]),
         ("bolt", &["lightning-bolt", "com-link"]),
         ("flag", &["paper-tape"]),
+        ("delay", &["half-rounded-rectangle"]),
     ];
     for (short, aliases) in groups {
         let expected = silhouette(&render(short));
@@ -614,6 +658,8 @@ fn implemented_names_stop_warning_and_others_do_not() {
         "com-link",
         "flag",
         "paper-tape",
+        "delay",
+        "half-rounded-rectangle",
     ] {
         assert!(
             warnings(name).is_empty(),
@@ -677,6 +723,7 @@ fn each_new_shape_has_an_accessible_description() {
         ("lin-doc", "lined document"),
         ("bolt", "lightning bolt"),
         ("flag", "flag"),
+        ("delay", "half-rounded rectangle"),
     ] {
         assert!(
             render(shape).contains(want),

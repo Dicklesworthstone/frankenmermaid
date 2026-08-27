@@ -51,6 +51,7 @@ pub fn draw_shape<C: Canvas2dContext>(
         NodeShape::LinedDocument => draw_document(ctx, x, y, width, height),
         NodeShape::LightningBolt => draw_lightning_bolt(ctx, x, y, width, height),
         NodeShape::Flag => draw_flag(ctx, x, y, width, height),
+        NodeShape::HalfRoundedRect => draw_half_rounded_rect(ctx, x, y, width, height),
         NodeShape::Rect => draw_rect(ctx, x, y, width, height, 0.0),
         NodeShape::Rounded => draw_rect(ctx, x, y, width, height, 4.0),
         NodeShape::Stadium => draw_stadium(ctx, x, y, width, height),
@@ -349,6 +350,23 @@ fn draw_triangle<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64
     ctx.begin_path();
     ctx.move_to(cx, y);
     ctx.line_to(x + w, y + h);
+    ctx.line_to(x, y + h);
+    ctx.close_path();
+    ctx.fill();
+    ctx.stroke();
+}
+
+/// Draw a rectangle with a semicircular right end — mermaid's `delay` (bd-7ls21).
+///
+/// The radius is half the HEIGHT, matching the measurement; a width fraction would balloon the cap
+/// on a wide node.
+fn draw_half_rounded_rect<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    let radius = (h / 2.0).min(w / 2.0);
+
+    ctx.begin_path();
+    ctx.move_to(x, y);
+    ctx.line_to(x + w - radius, y);
+    ctx.arc(x + w - radius, y + radius, radius, -PI / 2.0, PI / 2.0);
     ctx.line_to(x, y + h);
     ctx.close_path();
     ctx.fill();

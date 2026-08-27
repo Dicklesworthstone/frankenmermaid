@@ -126,6 +126,9 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
         // The flag mostly fills its box (only the wave crests cut in), so the box is the right
         // conservative boundary — the opposite call from the bolt, which is sparse.
         NodeShape::Flag => rounded_rect_path(bounds, 0.0),
+        // The half-rounded rectangle fills its box except for the two corners the cap rounds off,
+        // so the box is a close superset and the right conservative boundary.
+        NodeShape::HalfRoundedRect => rounded_rect_path(bounds, 0.0),
     }
 }
 

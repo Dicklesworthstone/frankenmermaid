@@ -40,6 +40,7 @@ impl From<NodeShape> for GpuNodeShape {
             | NodeShape::LinedDocument => Self::Rect,
             NodeShape::LightningBolt => Self::Polygon,
             NodeShape::Flag => Self::Rect,
+            NodeShape::HalfRoundedRect => Self::RoundedRect,
             NodeShape::LinedCylinder => Self::Cylinder,
             NodeShape::SmallCircle | NodeShape::FramedCircle => Self::Circle,
             NodeShape::Rounded | NodeShape::Stadium | NodeShape::Subroutine => Self::RoundedRect,

@@ -11143,6 +11143,23 @@ fn render_node(
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
+        NodeShape::HalfRoundedRect => {
+            // Straight for `w - h/2`, then a true semicircle of radius `h/2` capping the right end.
+            // `min` keeps a very wide cap from swallowing the straight portion on a squat node.
+            let radius = (h / 2.0).min(w / 2.0);
+            let path = PathBuilder::new()
+                .move_to(x, y)
+                .line_to(x + w - radius, y)
+                .arc_to(radius, radius, 0.0, false, true, x + w - radius, y + h)
+                .line_to(x, y + h)
+                .close()
+                .build();
+            Element::path()
+                .d(&path)
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
         NodeShape::Flag => {
             // Bottom wave left-to-right, up the right side, top wave right-to-left in OPPOSITE
             // phase. Control points chosen so each quadratic's midpoint lands on the measured
@@ -13334,6 +13351,7 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
         NodeShape::LinedDocument => "fm-node-shape-lined-document",
         NodeShape::LightningBolt => "fm-node-shape-lightning-bolt",
         NodeShape::Flag => "fm-node-shape-flag",
+        NodeShape::HalfRoundedRect => "fm-node-shape-half-rounded-rect",
         NodeShape::Rect => "fm-node-shape-rect",
         NodeShape::Rounded => "fm-node-shape-rounded",
         NodeShape::Stadium => "fm-node-shape-stadium",

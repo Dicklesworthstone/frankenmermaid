@@ -2458,6 +2458,7 @@ fn flowchart_metadata_shape(name: &str) -> Option<NodeShape> {
         "lin-doc" | "lined-document" => NodeShape::LinedDocument,
         "bolt" | "lightning-bolt" | "com-link" => NodeShape::LightningBolt,
         "flag" | "paper-tape" => NodeShape::Flag,
+        "delay" | "half-rounded-rectangle" => NodeShape::HalfRoundedRect,
         _ => return None,
     })
 }
@@ -2516,7 +2517,7 @@ fn split_metadata_pairs(body: &str) -> Vec<&str> {
 /// list of shortNames alone can only ever answer for the half of authors who happened to pick one.
 /// Every entry below is a name the pinned 11.15.0 registry publishes as author-facing syntax
 /// (`shortName` or `aliases`); internal aliases like `rect_left_inv_arrow` are deliberately absent.
-const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 32] = [
+const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 30] = [
     "bang",
     "bow-rect",
     "bow-tie-rectangle",
@@ -2530,11 +2531,9 @@ const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 32] = [
     "curved-trapezoid",
     "data-store",
     "datastore",
-    "delay",
     "display",
     "docs",
     "documents",
-    "half-rounded-rectangle",
     "hourglass",
     "internal-storage",
     "processes",
