@@ -3,11 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>frankenmermaid — The Monster Diagram Engine</title>
+  <title>frankenmermaid · The Monster Diagram Engine</title>
   <meta name="description" content="A Rust-first, Mermaid-compatible diagram engine with intent-aware parsing, 15 layout algorithms, deterministic output, and SVG / terminal / Canvas2D / WASM renderers from a single intermediate representation.">
   <meta name="theme-color" content="#020a06">
   <link rel="canonical" href="https://frankenmermaid.com/">
-  <meta property="og:title" content="frankenmermaid — The Monster Diagram Engine">
+  <meta property="og:title" content="frankenmermaid · The Monster Diagram Engine">
   <meta property="og:description" content="Mermaid → deterministic SVG, Canvas2D, and terminal rendering from one auditable Rust core. 15 layout algorithms. Zero unsafe code. Rendered live in your browser via WASM.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://frankenmermaid.com/">
@@ -15,7 +15,7 @@
   <meta property="og:image:width" content="1280">
   <meta property="og:image:height" content="640">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="frankenmermaid — The Monster Diagram Engine">
+  <meta name="twitter:title" content="frankenmermaid · The Monster Diagram Engine">
   <meta name="twitter:description" content="Mermaid → deterministic SVG, Canvas2D, and terminal rendering from one auditable Rust core. 15 layout algorithms. Zero unsafe code.">
   <meta name="twitter:image" content="https://frankenmermaid.com/gh_og_share_image.png">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23020a06'/%3E%3Crect width='64' height='64' rx='14' fill='none' stroke='%2310b981' stroke-opacity='0.5' stroke-width='2'/%3E%3Ctext x='32' y='44' font-family='monospace' font-size='36' font-weight='900' fill='%2334d399' text-anchor='middle'%3E🧜%3C/text%3E%3C/svg%3E">
@@ -826,7 +826,7 @@
           
           <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-[10px] sm:text-xs font-mono font-bold text-emerald-400 max-w-full">
             <span class="h-2 w-2 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
-            <span class="break-words">PURE RUST CORE · ZERO NODE.JS · WASM CERTIFIED</span>
+            <span class="break-words">PURE RUST CORE · ZERO NODE.JS · WASM IN YOUR BROWSER</span>
           </div>
 
           <h1 class="text-3xl sm:text-5xl lg:text-7xl font-black tracking-tight text-white leading-tight break-words max-w-full">
@@ -920,7 +920,7 @@
           The Operating <span class="text-emerald-400">Theater</span>.
         </h2>
         <p class="text-slate-300 max-w-3xl mx-auto text-base md:text-lg">
-          Type Mermaid with performant real-time syntax highlighting on the left. The WebAssembly engine computes deterministic layouts and renders vector SVG or Canvas2D on the right in sub-millisecond frames.
+          Type Mermaid on the left, with syntax highlighting as you go. The WebAssembly engine parses, lays out, and renders SVG or Canvas2D on the right in under a millisecond.
         </p>
       </div>
 
@@ -1191,10 +1191,10 @@
               <div id="view-proof-container" class="flex-1 hidden flex-col p-6 bg-[#020804] space-y-4">
                 <div class="flex items-center justify-between">
                   <h4 class="text-xs font-black uppercase tracking-widest text-emerald-400 font-mono">Bit-for-Byte Determinism Proof</h4>
-                  <span class="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] text-emerald-300 font-mono font-bold">100% Guaranteed</span>
+                  <span class="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] text-emerald-300 font-mono font-bold">SHA-256 Verified</span>
                 </div>
                 <p class="text-xs text-slate-300 leading-relaxed">
-                  The determinism checker executes repeated WASM render passes on your source code and computes SHA-256 digests over the raw output bytes. Zero non-deterministic entropy allowed.
+                  The determinism checker runs repeated WASM render passes on your source and computes SHA-256 digests over the raw output bytes; any nondeterminism shows up as a digest mismatch.
                 </p>
                 <div class="flex items-center gap-3">
                   <button id="determinism-run" type="button" class="px-5 py-2 rounded-xl bg-emerald-500 text-black font-black text-xs hover:bg-white transition">
@@ -1315,7 +1315,7 @@
           Engine <span class="text-emerald-400">Head-to-Head</span>.
         </h2>
         <p class="text-slate-300 max-w-3xl mx-auto text-base md:text-lg">
-          Why we rebuilt diagram rendering from bare metal: sub-millisecond WASM execution, zero Node.js/Chromium dependencies, 100% deterministic layouts, and native multi-surface output.
+          Why we rebuilt diagram rendering in Rust: sub-millisecond WASM execution, zero Node.js or Chromium dependencies, 100% deterministic layouts, and native multi-surface output.
         </p>
       </div>
 
@@ -1329,7 +1329,7 @@
             <span class="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">Up to 300x Faster</span>
           </div>
           <h3 class="text-lg font-black text-white mb-1">Sub-Millisecond WASM</h3>
-          <p class="text-sm text-slate-300">Renders in <strong>0.3ms – 0.9ms</strong>. Zero DOM reflows, no browser thread starvation, and true 60fps typing responsiveness.</p>
+          <p class="text-sm text-slate-300">Renders in <strong>0.3ms – 0.9ms</strong>. Zero DOM reflows, no browser thread starvation, and 60fps typing responsiveness.</p>
         </div>
 
         <div class="glass-card rounded-2xl p-6 border border-emerald-500/30 bg-emerald-950/20 shadow-lg relative overflow-hidden group">
@@ -1378,8 +1378,8 @@
               <span class="rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-0.5 text-xs font-black text-emerald-300 font-mono uppercase tracking-widest animate-pulse">⚡ LIVE BROWSER BENCHMARK</span>
               <span class="text-xs text-slate-400 font-mono hidden sm:inline">10 Heavy Enterprise Diagrams · Cold Start to Finish</span>
             </div>
-            <h3 class="text-2xl sm:text-4xl font-black text-white tracking-tight">Feel The <span class="text-emerald-400">Speed</span>.</h3>
-            <p class="mt-1 text-sm md:text-base text-slate-300 max-w-2xl">Watch frankenmermaid (pure Rust WASM) race head-to-head in real time against mermaid.js running live in your browser.</p>
+            <h3 class="text-2xl sm:text-4xl font-black text-white tracking-tight">The Live <span class="text-emerald-400">Drag Race</span>.</h3>
+            <p class="mt-1 text-sm md:text-base text-slate-300 max-w-2xl">frankenmermaid (Rust WASM) and mermaid.js render the same ten diagrams in your browser, timed as they run.</p>
           </div>
 
           <div class="flex flex-wrap items-center gap-3">
@@ -1481,10 +1481,10 @@
             <span id="race-victory-badge">FRANKENMERMAID VICTORY</span>
           </div>
           <h4 id="race-victory-title" class="text-3xl sm:text-5xl font-black text-white tracking-tight">
-            FrankenMermaid is <span id="race-victory-multiplier" class="text-emerald-400 underline decoration-emerald-400/50 underline-offset-8">200x Faster</span>!
+            frankenmermaid is <span id="race-victory-multiplier" class="text-emerald-400 underline decoration-emerald-400/50 underline-offset-8">200x Faster</span>
           </h4>
           <p id="race-victory-subtitle" class="mt-3 text-base sm:text-lg text-slate-200 max-w-3xl mx-auto">
-            Rendered all 10 complex enterprise diagrams in <span id="race-victory-fm-time" class="text-emerald-300 font-mono font-bold">11.4ms</span> vs <span id="race-victory-m-time" class="text-amber-300 font-mono font-bold">2,380.2ms</span> for mermaid.js with zero UI freeze.
+            Rendered all 10 diagrams in <span id="race-victory-fm-time" class="text-emerald-300 font-mono font-bold">11.4ms</span> vs <span id="race-victory-m-time" class="text-amber-300 font-mono font-bold">2,380.2ms</span> for mermaid.js, with no UI freeze.
           </p>
         </div>
 
@@ -1568,8 +1568,8 @@
           <div class="flex items-start sm:items-center gap-2.5">
             <span class="text-lg">⚖️</span>
             <div class="text-slate-200 text-[11px] sm:text-xs leading-relaxed">
-              <strong class="text-white font-bold">Apples-to-Apples Parity or Modern Elevation:</strong>
-              Select <span class="text-emerald-400 font-mono font-bold">🎯 1:1 Mermaid Parity</span> to test exact Mermaid.js color palettes (<span class="font-mono text-indigo-300">#ECECFF</span>/<span class="font-mono text-purple-300">#9370DB</span>) with 150x faster WASM execution, or toggle <span class="text-emerald-400 font-mono font-bold">✨ FrankenModern</span> for tactile drop-shadows, obsidian glass cards, and neon vector highlights.
+              <strong class="text-white font-bold">Two comparison modes:</strong>
+              Select <span class="text-emerald-400 font-mono font-bold">🎯 1:1 Mermaid Parity</span> to compare against mermaid.js's exact color palette (<span class="font-mono text-indigo-300">#ECECFF</span>/<span class="font-mono text-purple-300">#9370DB</span>), or toggle <span class="text-emerald-400 font-mono font-bold">✨ FrankenModern</span> for drop-shadows, obsidian glass cards, and neon vector highlights.
             </div>
           </div>
         </div>
@@ -1991,7 +1991,7 @@
         <!-- Feature Checklist -->
         <div class="mt-6 flex flex-col md:flex-row md:items-center justify-between gap-4 pt-4 border-t border-emerald-500/10">
           <div id="spotlight-why" class="text-xs text-slate-400 font-mono">
-            Best recovery-and-operations proof. Dense but readable routing, explicit decision diamonds, and production-grade hierarchy.
+            Dense but readable routing, explicit decision diamonds, and nested recovery subgraphs.
           </div>
           <div id="feature-strip" class="flex flex-wrap items-center gap-3">
             <span class="text-xs text-emerald-400 font-mono">✓ Deterministic</span>
@@ -2016,7 +2016,7 @@
           15 Specialized <span class="text-emerald-400">Layout Engines</span>.
         </h2>
         <p class="text-slate-300 max-w-3xl mx-auto text-base md:text-lg">
-          Instead of forcing every diagram into generic graphviz DOT, frankenmermaid implements 15 dedicated geometry solvers engineered for deterministic stability, zero float drift, and specialized domain aesthetics.
+          Rather than pushing every diagram through one generic DOT layout, frankenmermaid implements 15 dedicated geometry solvers, each matched to a diagram family's conventions, all deterministic with zero float drift.
         </p>
       </div>
 
@@ -2287,7 +2287,7 @@
             </div>
             <h3 class="text-lg font-black text-white group-hover:text-emerald-300 transition">Hierarchical Tree Embedding</h3>
             <p class="text-xs text-slate-300 mt-2 leading-relaxed">
-              Linear-time contour merging and subtree centering producing aesthetic compact tree diagrams with guaranteed minimum sibling spacing.
+              Linear-time contour merging and subtree centering producing compact tree diagrams with guaranteed minimum sibling spacing.
             </p>
           </div>
           <div class="mt-5 pt-4 border-t border-emerald-500/15 flex items-center justify-between">
@@ -2308,7 +2308,7 @@
           <span class="h-px w-8 bg-emerald-500/40"></span>
         </div>
         <h2 class="text-4xl md:text-6xl font-black tracking-tight text-white mb-4">
-          One <span class="text-emerald-400">IR</span>. Every Target.
+          One IR, <span class="text-emerald-400">Four Renderers</span>.
         </h2>
         <p class="text-slate-300 max-w-3xl mx-auto text-base md:text-lg">
           Parse once, compute deterministic geometry, and emit to SVG, Canvas2D, Terminal ANSI, or WASM from a single intermediate representation.
@@ -2452,12 +2452,13 @@
           <span class="h-px w-8 bg-emerald-500/40"></span>
         </div>
         <h2 class="text-4xl md:text-6xl font-black tracking-tight text-white mb-4">
-          One Graph. <span class="text-emerald-400">Every Story</span>.
+          The Graph <span class="text-emerald-400">Deck</span>.
         </h2>
         <p class="text-slate-300 max-w-3xl mx-auto text-base md:text-lg">
-          graphcon-deck-style guided presentations, computed — not hand-placed. One Mermaid source,
-          deterministic camera choreography, and a manifest you can golden-test. The engine below is
-          presenting itself.
+          Add a <code class="font-mono text-emerald-300">%%{deck: …}%%</code> directive to a Mermaid
+          file and the engine builds a guided presentation from the computed layout: the camera fits
+          each slide while off-slide nodes glide out of frame, and the whole thing is a
+          golden-testable manifest. Below, the engine presents its own pipeline.
         </p>
       </div>
 
@@ -2491,9 +2492,9 @@
           drag to pan · scroll to zoom · click a dimmed node to travel
         </p>
         <p class="mt-2 pt-3 border-t border-emerald-500/10 font-mono text-[10px] text-slate-600">
-          Presentation model inspired by
+          Presentation model from
           <a href="https://github.com/yoheinakajima/graphcon-deck" target="_blank" rel="noopener" class="text-slate-500 hover:text-emerald-400 underline transition">graphcon-deck</a>
-          by Yohei Nakajima — reimagined with computed layout, deterministic manifests, and reveal
+          by Yohei Nakajima, rebuilt here on computed layout, deterministic manifests, and reveal
           steps derived from the layout engine's ranks.
         </p>
       </div>
@@ -3891,7 +3892,7 @@ Shared IR,Terminal ANSI,20`
       if (titleEl) titleEl.textContent = sample.label;
       if (catEl) catEl.textContent = sample.category.toUpperCase();
       if (descEl) descEl.textContent = sample.summary;
-      if (whyEl) whyEl.textContent = sample.whyMatters || `High-performance ${sample.category} rendering with deterministic geometry and sub-millisecond compile times.`;
+      if (whyEl) whyEl.textContent = sample.whyMatters || `${sample.category} rendering with deterministic geometry, byte-identical across runs.`;
       if (counterEl) counterEl.textContent = `${String(currentSpotlightIndex + 1).padStart(2, '0')} / ${String(DIAGRAM_SAMPLES.length).padStart(2, '0')}`;
       if (sourceEl) sourceEl.textContent = sample.code;
 
@@ -5674,31 +5675,31 @@ Shared IR,Terminal ANSI,20`
     ir: 'One shared IR: every parser writes it, every renderer reads it.',
     dispatch: '15 deterministic algorithms, auto-selected per diagram type.',
     svg: 'Themeable, accessible SVG with stable element ids.',
-    wasm: 'The same engine, compiled to WebAssembly - it rendered this deck.',
-    manifest: 'Member sets, camera rects, and reveal steps - golden-testable JSON.'
+    wasm: 'The same engine compiled to WebAssembly; it rendered this deck.',
+    manifest: 'Member sets, camera rects, and reveal steps in golden-testable JSON.'
   },
   slides: [
-    { id: 'source', title: 'It starts with text',
-      caption: 'plain Mermaid syntax, plus one deck directive',
+    { id: 'source', title: 'The source',
+      caption: 'Mermaid syntax plus one deck directive',
       nodes: ['src', 'directive'] },
-    { id: 'parsing', title: 'Parsing never gives up',
-      caption: 'detection, fuzzy matching, recovery - malformed input degrades, it does not crash',
+    { id: 'parsing', title: 'Best-effort parsing',
+      caption: 'detection, fuzzy matching, and recovery; malformed input degrades with diagnostics',
       nodes: ['src', 'subgraph:parsing'], reveal: 'auto', edges: 'touching' },
     { id: 'ir', title: 'One shared IR',
-      caption: 'parse once, render everywhere',
+      caption: 'one data structure feeds every renderer',
       nodes: ['parser', 'ir', 'diag'], reveal: [['ir'], ['diag']] },
     { id: 'layout', title: 'Deterministic layout',
-      caption: 'same input, same bytes - byte-identical output is a design goal',
+      caption: 'same input, same bytes: output is byte-identical by design',
       nodes: ['ir', 'subgraph:layout'], reveal: 'auto', edges: 'touching' },
     { id: 'render', title: 'Four render targets',
       caption: 'SVG, terminal, Canvas2D, and WASM from the same geometry',
       nodes: ['subgraph:targets', 'scene'], reveal: 'auto' },
     { id: 'deck', title: 'The deck you are watching',
-      caption: 'this presentation is a deck manifest computed by the engine, over this very diagram',
+      caption: 'a manifest the engine computed over this same diagram',
       nodes: ['svg', 'wasm', 'manifest', 'runtime'], reveal: [['manifest'], ['runtime']] }
   ],
-  overview: { title: 'One graph, every story',
-    caption: 'the whole pipeline at once - the moving window replays each slide' }
+  overview: { title: 'The whole pipeline',
+    caption: 'zoomed out, the moving window replays each slide' }
 }}%%
   src[.mmd source] --> detect
   directive[deck directive] --> detect

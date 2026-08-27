@@ -40,11 +40,21 @@ RUST_SIZE_FLAGS="-Zlocation-detail=none -Zfmt-debug=none"
 # cardinal-spline renderer — for 5.3K gzip. wasm-opt already runs -Oz --converge, so this is real
 # code size, not slack. Headroom after raise: ~9.2K.
 #
-# ⚠️ RAISED IN THE COMMIT THAT NEEDED IT, which is what the three raises above also did, and it is
+# Raised 690K -> 700K on 2026-08-27 while repairing a stale pkg/: the committed package had been
+# rebuilt from a pre-morph tree (schema 1.0.0, no nodeGeometry/edgeEndpoints, Map-typed manifest
+# fields), so a fresh build of the ACTUAL head was the first honest measurement in several
+# features' worth of landings. Measured: 708507 gzip, 1937 bytes (0.27%) over the 690K ceiling.
+# Attribution: the morph manifest joins were already inside the ceiling at 684717 on their own
+# build; the remainder is the parser wave that landed against the stale pkg without paying here —
+# transitive forward-declared subgraph endpoints (bd-dw2a9), empty-subgraph-as-rect (bd-kat55),
+# labelled-endpoint subgraph resolution (bd-honvo), and cluster classDef propagation (bd-6cdzy).
+# wasm-opt still runs -Oz --converge. Headroom after raise: ~8.3K.
+#
+# ⚠️ RAISED IN THE COMMIT THAT NEEDED IT, which is what the raises above also did, and it is
 # stated here rather than left to be inferred from a diff. The ceiling is a resource ratchet with a
 # measured-justification procedure, not a correctness gate to be quietly relaxed — if a future
 # change cannot say what it cost and why, it should shrink instead of raising.
-MAX_GZIP_BYTES=$((690 * 1024))
+MAX_GZIP_BYTES=$((700 * 1024))
 
 compute_source_sha256() {
   python3 - "$ROOT_DIR" <<'PY'
