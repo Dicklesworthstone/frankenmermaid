@@ -4229,12 +4229,28 @@ fn render_layout_to_svg(
     // Byte-identical: `write_layout_axis_tick_into` emits the same bytes as
     // `render_layout_axis_tick(..).write_to_string`, and concatenated children serialize identically.
     if !layout.extensions.axis_ticks.is_empty() {
+        // ⚠️ A TIMELINE'S TICKS CARRY NO LABEL, because its period is already drawn as a heading.
+        // Timeline layout emits one axis tick per PERIOD and labels it with that period's text, so
+        // `2020` was drawn twice — once here at the top and once as the heading above its events.
+        // mermaid draws each period exactly ONCE and has no separate axis label row; a timeline is
+        // not a chart with a numeric axis.
+        //
+        // Measured: incumbent 8 drawn runs against our 11, the surplus being exactly the three
+        // repeated years. The tick MARKS stay — only the duplicated caption goes — which is the same
+        // shape as the journey section-label fix and is scoped the same way, by diagram type, so
+        // gantt and xychart axis labels (the other users of this loop) keep theirs.
+        let suppress_tick_labels = ir.diagram_type == fm_core::DiagramType::Timeline;
         let mut ticks_svg = String::new();
         let tick_y = layout.bounds.y + offset_y - 12.0;
         for tick in &layout.extensions.axis_ticks {
+            let label = if suppress_tick_labels {
+                ""
+            } else {
+                tick.label.as_str()
+            };
             write_layout_axis_tick_into(
                 &mut ticks_svg,
-                tick.label.as_str(),
+                label,
                 tick.position + offset_x,
                 tick_y,
                 config,
@@ -6957,7 +6973,7 @@ fn render_pie_svg(
 
     let legend_x = chart_left + chart_width + chart_gap;
     let legend_y = chart_top + 12.0;
-    let legend_height = (pie_meta.slices.len() as f32 * 24.0 + 44.0).max(64.0);
+    let legend_height = (pie_meta.slices.len() as f32 * 24.0 + 28.0).max(64.0);
 
     pie_svg.push_str("<g class=\"fm-pie-legend\"><rect x=\"");
     let _ = crate::attributes::write_number_into(&mut pie_svg, legend_x);
@@ -6974,23 +6990,16 @@ fn render_pie_svg(
     pie_svg.push_str("\" stroke=\"");
     let _ = write_escaped_attr(&mut pie_svg, &theme.colors.node_stroke);
     pie_svg.push_str("\" stroke-width=\"1.2\" class=\"fm-pie-legend-box\"/>");
-    write_pie_text_into(
-        &mut pie_svg,
-        legend_x + 14.0,
-        legend_y + 18.0,
-        "start",
-        false,
-        family,
-        embed,
-        clamp_font_size(config.font_size * 0.82, config.min_font_size),
-        true,
-        text_fill,
-        "fm-pie-legend-title",
-        "Legend",
-    );
+    // ⚠️ NO "Legend" CAPTION. mermaid's pie legend is the swatch rows and nothing else — it never
+    // draws a heading over them, and ours was a run the incumbent has no analogue for. Measured
+    // against the pinned bundle in Chromium: every other pie run matched exactly ("30%" twice,
+    // "40%", the three slice names and the title); `Legend` was the sole surplus.
+    //
+    // The rows move up by the caption's allotment and the box shrinks to match, so removing the text
+    // does not leave a band of empty padding where it used to sit.
 
     for (index, slice) in pie_meta.slices.iter().enumerate() {
-        let row_y = legend_y + 34.0 + index as f32 * 24.0;
+        let row_y = legend_y + 18.0 + index as f32 * 24.0;
         let color = accent_colors[index % accent_colors.len()];
         let pct = (slice.value.max(0.0) / total) * 100.0;
         let entry_label = if pie_meta.show_data {
