@@ -1718,6 +1718,7 @@ fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
     static CLUSTER_VARS_F: OnceLock<memchr::memmem::Finder<'static>> = OnceLock::new();
     static NODE_SHAPE_F: OnceLock<memchr::memmem::Finder<'static>> = OnceLock::new();
     static EDGE_STYLE_F: OnceLock<memchr::memmem::Finder<'static>> = OnceLock::new();
+    static EDGE_ANIMATION_F: OnceLock<memchr::memmem::Finder<'static>> = OnceLock::new();
     if !ir.is_some_and(|ir| !ir.clusters.is_empty()) {
         strip_css_block(css, &CLUSTER_F, CLUSTER_THEME_CSS);
         // The `:root` cluster-only custom properties feed ONLY the stripped cluster rules, so they
@@ -1776,7 +1777,32 @@ fn strip_unused_theme_css(css: &mut String, ir: Option<&MermaidDiagramIr>) {
     if !has_dashed_or_thick {
         strip_css_block(css, &EDGE_STYLE_F, EDGE_STYLE_THEME_CSS);
     }
+    // The per-edge march block is the DEADEST of them all: `edgeId@{ animate: … }` is an explicit
+    // opt-in almost no diagram writes, so on every other diagram this is ~470 B of rules matching
+    // nothing. Same exact-substring / safe-no-op-if-drifts contract as the blocks above.
+    if !ir.is_some_and(|ir| ir.edges.iter().any(|e| e.animation().is_some())) {
+        strip_css_block(css, &EDGE_ANIMATION_F, EDGE_ANIMATION_THEME_CSS);
+    }
 }
+
+/// The per-edge march rules backing `edgeId@{ animate: … }` — captured EXACTLY as
+/// `Theme::to_svg_style` emits them, stripped when no edge opted in.
+///
+/// The declarations are upstream's, MEASURED from the pinned mermaid 11.15.0 bundle in Chromium
+/// 151: `.edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash
+/// 20s linear infinite;stroke-linecap:round;}`, the same again at 50s for `-slow`, and `@keyframes
+/// dash{to{stroke-dashoffset:0;}}`. See [`fm_core::EdgeAnimation`] for the full measurement.
+///
+/// Two deliberate departures, both documented where they are made rather than in the payload:
+/// the keyframes are named `fm-edge-dash-march` (upstream's bare `dash` is far too likely to
+/// collide inside a host page), and a `prefers-reduced-motion` carve-out upstream does not have is
+/// appended — it changes nothing for a viewer who has not asked to reduce motion.
+///
+/// ⚠️ THE RATIONALE LIVES HERE, NOT IN THE CSS. It was first written as a comment inside the style
+/// block, which put 1235 bytes of prose into EVERY SVG this renderer emits — the minifier keeps
+/// comments, and a diagram with no animated edge would have carried the whole explanation of a
+/// feature it does not use.
+const EDGE_ANIMATION_THEME_CSS: &str = ".fm-edge-animation-fast,\n.fm-edge-animation-slow {\n  stroke-dasharray: 9 5 !important;\n  stroke-dashoffset: 900;\n  stroke-linecap: round;\n}\n.fm-edge-animation-fast {\n  animation: fm-edge-dash-march 20s linear infinite;\n}\n.fm-edge-animation-slow {\n  animation: fm-edge-dash-march 50s linear infinite;\n}\n@keyframes fm-edge-dash-march {\n  to { stroke-dashoffset: 0; }\n}\n@media (prefers-reduced-motion: reduce) {\n  .fm-edge-animation-fast,\n  .fm-edge-animation-slow {\n    animation: none !important;\n  }\n}\n";
 
 /// The `.fm-edge-dashed` + `.fm-edge-thick`(+`:hover`) theme rules — captured EXACTLY as
 /// `Theme::to_svg_style` emits them — stripped when no edge uses a dotted/thick arrow. Same
@@ -3413,6 +3439,19 @@ fn ir_may_emit_state_classes(ir: &MermaidDiagramIr) -> bool {
                 || class.eq_ignore_ascii_case("block-beta-space")
         })
     })
+}
+
+/// The marker class an opted-in edge carries — our spelling of upstream's `edge-animation-*`.
+///
+/// A `const fn` over the enum rather than a formatted string: the two names are the only two the
+/// stylesheet defines, and the whole reason [`fm_core::EdgeAnimation`] is an enum instead of the
+/// raw author text is to keep author text out of a class name (see its doc comment for the
+/// measurement).
+const fn edge_animation_class(animation: fm_core::EdgeAnimation) -> &'static str {
+    match animation {
+        fm_core::EdgeAnimation::Fast => "fm-edge-animation-fast",
+        fm_core::EdgeAnimation::Slow => "fm-edge-animation-slow",
+    }
 }
 
 fn animation_css(config: &SvgRenderConfig) -> String {
@@ -14124,6 +14163,12 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
     let ir_edge = ir.edges.get(edge_index);
     let arrow = ir_edge.map_or(ArrowType::Arrow, |e| e.arrow);
     let is_back_edge = edge_path.reversed;
+    // `edgeId@{ animate: … }` opt-in. Resolved once because it gates the raw-fragment fast path
+    // below and is applied on the `Element` path; a second lookup is how a gate and its emission
+    // drift apart.
+    let animation_class = ir_edge
+        .and_then(|edge| edge.animation())
+        .map(edge_animation_class);
 
     // Back-edges get special treatment: dashed + muted color
     let (base_dasharray, marker_start, marker_end, base_color): (
@@ -14382,6 +14427,8 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         && !is_back_edge
         && config.embed_theme_css
         && !config.animations_enabled
+        // Every fragment writer emits exactly two classes; an animated edge carries a third.
+        && animation_class.is_none()
         && !config.include_source_spans
         && config.a11y.text_alternatives
         && config.a11y.aria_labels
@@ -14434,6 +14481,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             && config.a11y.keyboard_nav
             && config.a11y.text_alternatives
             && !config.animations_enabled
+            && animation_class.is_none()
             && !config.include_source_spans
             && !is_back_edge
             && arrow == ArrowType::Arrow
@@ -14491,6 +14539,7 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
         && !is_back_edge
         && config.embed_theme_css
         && !config.animations_enabled
+        && animation_class.is_none()
         && !config.include_source_spans
         && config.a11y.text_alternatives
         && ir_edge.is_some()
@@ -14519,6 +14568,13 @@ fn render_edge(edge_path: &LayoutEdgePath, context: &EdgeRenderContext<'_>) -> E
             .attr_int("data-fm-edge-id", edge_index as i32);
         if config.animations_enabled && base_dasharray.is_some() {
             elem = elem.class("fm-edge-flow-animated");
+        }
+        // NOT gated on `config.animations_enabled`, unlike `fm-edge-flow-animated` above. That knob
+        // governs the whole-diagram entrance/flow effects the RENDERER offers; this one is a
+        // per-edge opt-in the AUTHOR wrote into the source, and upstream honours it with no global
+        // switch of any kind.
+        if let Some(animation) = animation_class {
+            elem = elem.class(animation);
         }
 
         // Apply inline style from linkStyle directives if present.
@@ -14802,6 +14858,11 @@ fn render_edge_body_into(
     let ir_edge = ir.edges.get(edge_index);
     let arrow = ir_edge.map_or(ArrowType::Arrow, |edge| edge.arrow);
     let is_back_edge = edge_path.reversed;
+    // `edgeId@{ animate: … }` opt-in. Resolved once here because it gates BOTH fast paths and is
+    // applied on the slow one; a second lookup is how the gate and the emission drift apart.
+    let animation_class = ir_edge
+        .and_then(|edge| edge.animation())
+        .map(edge_animation_class);
 
     // Stream the labeled-`Arrow` fast fragment straight into `out` instead of falling through to
     // `render_edge(..).write_to_string(out)`, which builds the fragment String + an `Element::raw_svg`
@@ -14838,6 +14899,10 @@ fn render_edge_body_into(
         && config.embed_theme_css
         && let Some(a11y) = uniform_a11y(&config.a11y)
         && !config.animations_enabled
+        // An animated edge carries a THIRD class, and both fragment writers emit exactly two.
+        // Deferring to the `Element` path costs a fast path on an edge that opted into an infinite
+        // CSS animation; keeping it here would cost the animation.
+        && animation_class.is_none()
         && !config.include_source_spans
         && let Some(edge) = ir_edge
         && let Some((label_text, lx, ly)) =
@@ -15277,6 +15342,11 @@ fn render_edge_body_into(
     if !edge_path.reversed
         && config.embed_theme_css
         && !config.animations_enabled
+        // THE SIXTH AND LAST FRAGMENT PATH. This is the one the default config actually takes for a
+        // plain unlabeled flowchart edge, and gating the other five while missing this one made the
+        // opt-in work under the CLI (source spans on -> slow path) and silently vanish under
+        // `SvgRenderConfig::default()`. Every fragment writer emits exactly two classes.
+        && animation_class.is_none()
         && !config.include_source_spans
         && let Some(a11y) = uniform_a11y(&config.a11y)
         && !(detail.show_edge_labels && ir_edge.and_then(|edge| edge.label).is_some())

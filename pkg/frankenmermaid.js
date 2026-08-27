@@ -876,6 +876,9 @@ function __wbg_get_imports() {
             const ret = getObject(arg0).push(getObject(arg1));
             return ret;
         },
+        __wbg_quadraticCurveTo_c461b48b1c826818: function(arg0, arg1, arg2, arg3, arg4) {
+            getObject(arg0).quadraticCurveTo(arg1, arg2, arg3, arg4);
+        },
         __wbg_rect_cbf18d19ffd5b10a: function(arg0, arg1, arg2, arg3, arg4) {
             getObject(arg0).rect(arg1, arg2, arg3, arg4);
         },

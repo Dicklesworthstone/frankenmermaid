@@ -2338,6 +2338,12 @@ pub struct IrEdgeExtras {
     /// Action on a state transition (e.g., `cleanup()`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<Box<str>>,
+    /// The speed an `edgeId@{ animate: … }` statement asked this edge to march at (bd-euyt4).
+    ///
+    /// `None` on every edge that did not opt in, which is nearly all of them — the reason this
+    /// lives in [`IrEdgeExtras`] rather than inline on [`IrEdge`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation: Option<EdgeAnimation>,
     /// A C4 relationship's technology, drawn as its OWN row beneath the label.
     ///
     /// ⚠️ A SEPARATE ROW, NOT PART OF THE LABEL. mermaid's `drawRels` emits two text elements: the
@@ -2355,6 +2361,53 @@ pub struct IrEdgeExtras {
     /// Declared target side of an architecture-beta edge: the `L` in `a:R --> L:b`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_side: Option<ArchitectureSide>,
+}
+
+/// How fast an opted-in edge marches, from mermaid 11's `edgeId@{ animate: … }` statement.
+///
+/// MEASURED against the pinned 11.15.0 bundle in Chromium 151 (`edge_css_probe.mjs`). Upstream
+/// attaches the class `edge-animation-fast` / `edge-animation-slow` to the edge `<path>`, and its
+/// own stylesheet backs those two names with:
+///
+/// ```text
+/// .edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;
+///                      animation:dash 20s linear infinite;stroke-linecap:round;}
+/// .edge-animation-slow{ ... same, 50s ... }
+/// @keyframes dash{to{stroke-dashoffset:0;}}
+/// ```
+///
+/// so the two speeds differ ONLY in duration — 20s versus 50s over the same 900px dashoffset
+/// march. Computed style on the animated path confirmed it: `stroke-dasharray: 9px, 5px`,
+/// `animation-name: dash`, `animation-duration: 20s`/`50s`, `iteration-count: infinite`,
+/// `timing-function: linear`; an un-animated edge reads `0px` / `none` / `0s` / `1` / `ease`.
+///
+/// ⚠️ TWO VARIANTS, NOT A FREE-FORM STRING, even though upstream interpolates the raw value
+/// (`animation: turbo` measurably yields `edge-animation-turbo`). Upstream defines rules for
+/// exactly these two names, so `turbo` gets a class no stylesheet matches and renders as a plain
+/// unanimated edge. An enum reproduces the RENDERED result upstream produces for every input while
+/// refusing to interpolate author text into a class name, and it makes the un-styleable third case
+/// something the parser can name in a warning instead of silently emitting dead markup.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum EdgeAnimation {
+    /// `animate: true` or `animation: fast` — a 20s march upstream.
+    Fast,
+    /// `animation: slow` — the same march over 50s.
+    Slow,
+}
+
+impl EdgeAnimation {
+    /// The speed this edge marches at, in seconds for one full dashoffset cycle.
+    ///
+    /// The two numbers upstream ships; kept beside the variants so a renderer cannot invent a
+    /// third duration without editing the type that documents where they came from.
+    #[must_use]
+    pub const fn duration_seconds(self) -> u32 {
+        match self {
+            Self::Fast => 20,
+            Self::Slow => 50,
+        }
+    }
 }
 
 /// A declared edge side in an architecture-beta diagram (`a:R --> L:b`).
@@ -2448,6 +2501,14 @@ impl IrEdge {
     #[must_use]
     pub fn action(&self) -> Option<&str> {
         self.extras.as_ref().and_then(|e| e.action.as_deref())
+    }
+    /// The march speed this edge opted into via `edgeId@{ animate: … }`, if any.
+    #[must_use]
+    pub const fn animation(&self) -> Option<EdgeAnimation> {
+        match &self.extras {
+            Some(extras) => extras.animation,
+            None => None,
+        }
     }
     /// Declared architecture-beta source side, if any.
     #[must_use]

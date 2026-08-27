@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use chumsky::prelude::*;
 use fm_core::{
-    ArchitectureSide, ArrowType, Diagnostic, DiagnosticCategory, DiagramType, GanttDate,
-    GanttExclude, GanttTaskFlags, GanttTickInterval, GraphDirection, IrAttributeKey, IrC4NodeMeta,
-    IrConstraint, IrDeck, IrDeckEdgePolicy, IrDeckReveal, IrDeckSlide, IrGanttMeta, IrGanttSection,
-    IrGanttTask, IrLabelSegment, IrNodeId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind,
-    MermaidParseMode, MermaidSupportLevel, NodeShape, Position, Span, is_safe_link_target,
-    parse_mermaid_js_config_value, to_init_parse,
+    ArchitectureSide, ArrowType, Diagnostic, DiagnosticCategory, DiagramType, EdgeAnimation,
+    GanttDate, GanttExclude, GanttTaskFlags, GanttTickInterval, GraphDirection, IrAttributeKey,
+    IrC4NodeMeta, IrConstraint, IrDeck, IrDeckEdgePolicy, IrDeckReveal, IrDeckSlide, IrGanttMeta,
+    IrGanttSection, IrGanttTask, IrLabelSegment, IrNodeId, IrXyAxis, IrXyChartMeta, IrXySeries,
+    IrXySeriesKind, MermaidParseMode, MermaidSupportLevel, NodeShape, Position, Span,
+    is_safe_link_target, parse_mermaid_js_config_value, to_init_parse,
 };
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
@@ -742,6 +742,15 @@ enum FlowAst {
         link_target: Option<String>,
         is_callback: bool,
     },
+    /// `edgeId@{ animate: … }` — a march speed for an ALREADY-DECLARED edge.
+    ///
+    /// A statement, not a field on [`FlowAst::Edge`], because upstream applies it by id lookup
+    /// after the fact: measured against the pinned 11.15.0 bundle, the same metadata written one
+    /// line EARLIER than its edge animates nothing at all.
+    EdgeAnimation {
+        id: String,
+        animation: EdgeAnimation,
+    },
     StyleOrLinkStyle,
     ClassDef,
 }
@@ -1223,6 +1232,9 @@ fn lower_flow_ast(
                 line_number,
                 span,
             );
+        }
+        FlowAst::EdgeAnimation { id, animation } => {
+            builder.set_edge_animation(id, *animation);
         }
         FlowAst::StyleOrLinkStyle | FlowAst::ClassDef => {
             // Intentionally skipped — same as the hand-written parser
@@ -2267,10 +2279,16 @@ fn parse_flowchart_statement_asts(
     // `id@{ shape: …, label: … }` before the generic node token parse (bd-9x8r): otherwise the whole
     // directive is interned as one node whose displayed name is the directive text.
     if let Some(handled) = parse_flowchart_node_metadata(statement, config, warnings) {
-        // `Some(None)` = recognised as `@{…}` metadata but describing no node, so nothing is
-        // declared. Returning an empty statement list is what stops the generic fallback below
-        // from interning the directive text (bd-yrxu).
-        return Some(handled.map_or_else(Vec::new, |node| vec![FlowAst::Node(node)]));
+        // `Nothing` = recognised as `@{…}` metadata but declaring no node and addressing no edge.
+        // Returning an empty statement list is what stops the generic fallback below from interning
+        // the directive text (bd-yrxu).
+        return Some(match handled {
+            FlowMetadata::Node(node) => vec![FlowAst::Node(*node)],
+            FlowMetadata::EdgeAnimation { id, animation } => {
+                vec![FlowAst::EdgeAnimation { id, animation }]
+            }
+            FlowMetadata::Nothing => Vec::new(),
+        });
     }
 
     if let Some(node) = parse_node_token_with_config(statement, config) {
@@ -2554,11 +2572,49 @@ fn unimplemented_shape_warning(name: &str) -> String {
     }
 }
 
+/// What a recognised `id@{ … }` statement turned out to describe.
+///
+/// Three outcomes rather than two because the statement's `id` addresses two different namespaces:
+/// a node it DECLARES, or an edge it merely REFERS to. The old `Option<Option<FlowAstNode>>` could
+/// only say "a node" or "nothing", so an edge statement had to be filed under "nothing".
+enum FlowMetadata {
+    /// The statement declared a node.
+    Node(Box<FlowAstNode>),
+    /// The statement named an edge and asked it to march.
+    EdgeAnimation {
+        id: String,
+        animation: EdgeAnimation,
+    },
+    /// Recognised `@{…}` metadata that declares nothing and addresses nothing.
+    Nothing,
+}
+
+/// Map one `animate:` / `animation:` value to a march speed (bd-euyt4).
+///
+/// MEASURED upstream (pinned 11.15.0, Chromium 151): `animate: true` and `animation: fast` both
+/// produce `edge-animation-fast`; `animation: slow` produces `edge-animation-slow`; `animate:
+/// false` produces no animation class at all.
+///
+/// `Err(())` means the value is one upstream would interpolate into a class name it does not
+/// style — `animation: turbo` measurably yields `edge-animation-turbo`, which no rule matches, so
+/// upstream draws a plain edge. We draw the same plain edge and say why, the same split
+/// [`unimplemented_shape_warning`] makes for an unmapped `shape:` name.
+fn parse_edge_animation_value(key: &str, value: &str) -> Result<Option<EdgeAnimation>, ()> {
+    let lowered = value.to_ascii_lowercase();
+    match (key, lowered.as_str()) {
+        ("animate", "true") | ("animation", "fast") => Ok(Some(EdgeAnimation::Fast)),
+        ("animation", "slow") => Ok(Some(EdgeAnimation::Slow)),
+        // `animate: false` is a real, spelled-out opt-OUT, not a typo: no animation, no warning.
+        ("animate", "false") => Ok(None),
+        _ => Err(()),
+    }
+}
+
 fn parse_flowchart_node_metadata(
     statement: &str,
     config: &ParserConfig,
     warnings: &mut Vec<String>,
-) -> Option<Option<FlowAstNode>> {
+) -> Option<FlowMetadata> {
     let at_pos = statement.find("@{")?;
     let close = statement.rfind('}')?;
     if close < at_pos + 2 || !trim_fast(&statement[close + 1..]).is_empty() {
@@ -2578,6 +2634,11 @@ fn parse_flowchart_node_metadata(
     // (bd-yrxu). Recognising the statement but emitting nothing is the honest outcome: we cannot
     // attach the metadata to its edge without an edge-id concept, but we can stop inventing a node.
     let mut saw_node_key = false;
+    // The march speed an `animate:`/`animation:` key asked for, and whether such a key was present
+    // at all — `animate: false` sets the flag while leaving the speed `None`, so it stays a
+    // recognised statement rather than falling through to be interned as a node.
+    let mut animation = None;
+    let mut saw_animation_key = false;
     for pair in split_metadata_pairs(&statement[at_pos + 2..close]) {
         let Some((key, value)) = pair.split_once(':') else {
             continue;
@@ -2602,19 +2663,38 @@ fn parse_flowchart_node_metadata(
                     label = Some(ParsedLabel::plain(value));
                 }
             }
+            key @ ("animate" | "animation") => {
+                saw_animation_key = true;
+                match parse_edge_animation_value(key, value) {
+                    Ok(speed) => animation = speed,
+                    Err(()) => warnings.push(format!(
+                        "edge animation '{value}' is not a speed this renderer draws; \
+                         the edge is drawn unanimated"
+                    )),
+                }
+            }
             _ => {}
         }
     }
-    if !saw_node_key {
-        return Some(None);
+    // A node key WINS over an animation key on the same statement. `animate:` addresses the edge
+    // namespace, so on a statement that also declares a node the id is a node id, which no edge
+    // can be registered under — routing it to the edge map could only ever miss.
+    if saw_node_key {
+        return Some(FlowMetadata::Node(Box::new(FlowAstNode {
+            id: base.id,
+            label,
+            icon: base.icon,
+            shape,
+            classes: base.classes,
+        })));
     }
-    Some(Some(FlowAstNode {
-        id: base.id,
-        label,
-        icon: base.icon,
-        shape,
-        classes: base.classes,
-    }))
+    if saw_animation_key && let Some(animation) = animation {
+        return Some(FlowMetadata::EdgeAnimation {
+            id: id.to_string(),
+            animation,
+        });
+    }
+    Some(FlowMetadata::Nothing)
 }
 
 /// Does this statement carry a dash/dot run the FAST tables cannot classify (bd-6s6sx)?

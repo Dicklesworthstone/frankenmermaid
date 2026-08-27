@@ -5,14 +5,14 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use fm_core::{
     ArchitectureSide, ArrowType, ClassMemberKind, ClassStereotype, Diagnostic, DiagnosticCategory,
-    DiagramType, FragmentAlternative, FragmentKind, GraphDirection, IrActivation, IrAttributeKey,
-    IrC4NodeMeta, IrClassMember, IrClassNodeMeta, IrCluster, IrClusterId, IrConstraint, IrEdge,
-    IrEdgeKind, IrEndpoint, IrEntityAttribute, IrGanttMeta, IrGraphCluster, IrGraphEdge,
-    IrGraphNode, IrLabel, IrLabelId, IrLabelSegment, IrLifecycleEvent, IrNode, IrNodeId,
-    IrNodeKind, IrParticipantGroup, IrSequenceAutonumberRange, IrSequenceFragment, IrSequenceMeta,
-    IrSequenceNote, IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyChartMeta,
-    LifecycleEventKind, MermaidDiagramIr, MermaidError, MermaidParseMode, MermaidSanitizeMode,
-    MermaidWarning, MermaidWarningCode, NodeShape, NotePosition, Span,
+    DiagramType, EdgeAnimation, FragmentAlternative, FragmentKind, GraphDirection, IrActivation,
+    IrAttributeKey, IrC4NodeMeta, IrClassMember, IrClassNodeMeta, IrCluster, IrClusterId,
+    IrConstraint, IrEdge, IrEdgeKind, IrEndpoint, IrEntityAttribute, IrGanttMeta, IrGraphCluster,
+    IrGraphEdge, IrGraphNode, IrLabel, IrLabelId, IrLabelSegment, IrLifecycleEvent, IrNode,
+    IrNodeId, IrNodeKind, IrParticipantGroup, IrSequenceAutonumberRange, IrSequenceFragment,
+    IrSequenceMeta, IrSequenceNote, IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId,
+    IrXyChartMeta, LifecycleEventKind, MermaidDiagramIr, MermaidError, MermaidParseMode,
+    MermaidSanitizeMode, MermaidWarning, MermaidWarningCode, NodeShape, NotePosition, Span,
 };
 
 use crate::mermaid_parser::trim_fast;
@@ -2448,6 +2448,28 @@ impl IrBuilder {
         self.edge_index_by_id
             .entry(edge_id.to_string())
             .or_insert(edge_index);
+    }
+
+    /// Attach a march speed to the edge previously registered under `edge_id`.
+    ///
+    /// A miss is a NO-OP, and that is upstream's behaviour, not a convenience: measured against
+    /// the pinned 11.15.0 bundle, `zz@{ animate: true }` naming no declared edge renders an
+    /// ordinary diagram with no animation and no error. Two further measured properties fall out
+    /// of routing through `edge_index_by_id`, which stores the FIRST edge to claim an id:
+    ///
+    /// * `e1@{ … }` written BEFORE `A e1@--> B` animates nothing — the map has no entry yet.
+    /// * when two edges both declare `e1`, only the first is animated.
+    ///
+    /// Both were measured upstream, and both are consequences of the existing first-match map
+    /// rather than rules restated here, which is why this function has no ordering logic of its own.
+    pub(crate) fn set_edge_animation(&mut self, edge_id: &str, animation: EdgeAnimation) {
+        let Some(edge_index) = self.edge_index_by_id(edge_id) else {
+            return;
+        };
+        self.mark_reusable_prefix_edge_dirty(edge_index);
+        if let Some(edge) = self.ir.edges.get_mut(edge_index) {
+            edge.extras_mut().animation = Some(animation);
+        }
     }
 
     /// Set the ER cardinality notation on the last-pushed edge.

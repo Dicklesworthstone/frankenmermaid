@@ -708,6 +708,27 @@ svg {{
 .fm-edge-thick:hover {{
   stroke-width: 3.0;
 }}
+.fm-edge-animation-fast,
+.fm-edge-animation-slow {{
+  stroke-dasharray: 9 5 !important;
+  stroke-dashoffset: 900;
+  stroke-linecap: round;
+}}
+.fm-edge-animation-fast {{
+  animation: fm-edge-dash-march 20s linear infinite;
+}}
+.fm-edge-animation-slow {{
+  animation: fm-edge-dash-march 50s linear infinite;
+}}
+@keyframes fm-edge-dash-march {{
+  to {{ stroke-dashoffset: 0; }}
+}}
+@media (prefers-reduced-motion: reduce) {{
+  .fm-edge-animation-fast,
+  .fm-edge-animation-slow {{
+    animation: none !important;
+  }}
+}}
 .fm-edge-back {{
   stroke: var(--fm-edge-muted);
   opacity: 0.8;
