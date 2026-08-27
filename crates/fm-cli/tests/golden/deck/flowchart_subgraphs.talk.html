@@ -417,12 +417,39 @@ esc guided camera · drag pan · scroll zoom · click a dimmed node to travel</d
       };
     }
 
+    // graphcon's computeFit skips hidden nodes: the camera frames what is VISIBLE at the
+    // current step and zooms out as reveals land, instead of framing voids where
+    // still-hidden members will eventually appear. Needs home geometry (morph manifests);
+    // slides without it, and edge/cluster-only extents, fall back to the engine bounds.
+    function visibleMemberBounds(sceneIndex) {
+      if (!morphEnabled || isOverview(sceneIndex)) return null;
+      var slide = manifest.slides[sceneIndex];
+      var x0 = Infinity;
+      var y0 = Infinity;
+      var x1 = -Infinity;
+      var y1 = -Infinity;
+      var any = false;
+      slide.nodes.forEach(function (node) {
+        if (node.step > state.step) return;
+        var rect = geometryOf[node.elementId];
+        if (!rect) return;
+        any = true;
+        x0 = Math.min(x0, rect.x);
+        y0 = Math.min(y0, rect.y);
+        x1 = Math.max(x1, rect.x + rect.width);
+        y1 = Math.max(y1, rect.y + rect.height);
+      });
+      if (!any) return null;
+      return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+    }
+
     function sceneCameraTarget(sceneIndex) {
       if (isOverview(sceneIndex)) {
         return fitTarget(manifest.viewBox, manifest.options.fitMargin, manifest.options.zoomMax);
       }
       var slide = manifest.slides[sceneIndex];
-      return fitTarget(slide.bounds, slide.fitMargin, slide.zoomMax);
+      var bounds = visibleMemberBounds(sceneIndex) || slide.bounds;
+      return fitTarget(bounds, slide.fitMargin, slide.zoomMax);
     }
 
     function applyCamera() {

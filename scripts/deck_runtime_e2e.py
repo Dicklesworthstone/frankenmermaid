@@ -7,7 +7,7 @@ focus classes, staggered step reveals, slide navigation, overview tour rect (pre
 animation), click-a-dimmed-node travel, stage-scoped keyboard, tooltip toggle, freecam +
 Escape, leak-free destroy(), and MORPH MODE (bd-tm1q7): the morphing class, live edge
 layer, push-out exile of off-slide nodes, float-only members, parked engine paths, and
-drag spring-back. 32 checks; exit 0 = all pass.
+drag spring-back. 33 checks; exit 0 = all pass.
 
 OPT-IN tooling, not a default gate: requires a Python with playwright + a downloaded
 chromium (any venv works: /path/to/venv/bin/python scripts/deck_runtime_e2e.py). The
@@ -70,9 +70,10 @@ with sync_playwright() as p:
         except Exception:
             return -1.0
     d_tf = page.eval_on_selector("#fm-node-d-3", "el => el.getAttribute('transform') || ''")
-    # d's full-ease exile for this geometry is ~168 units (ray-scaled just past the
-    # window + margin); 100 proves push-out is acting, distinct from the ±7 float bob.
-    check("off-slide d pushed out past the window", push_mag(d_tf) > 100, d_tf)
+    # With visible-member camera fit, the intro window is tight around node a and d is
+    # ALREADY outside it — the push-out ray short-circuits (graphcon's m >= 1 branch) and
+    # d stays home, floating only. The positive push assertion lives on slide 2 below.
+    check("outside-the-window d floats in place", 0 <= push_mag(d_tf) < 30, d_tf)
     a_tf = page.eval_on_selector("#fm-node-a-0", "el => el.getAttribute('transform') || ''")
     check("member a stays near home (float only)", 0 <= push_mag(a_tf) < 30, a_tf)
     live_d = page.eval_on_selector(".fm-deck-live path", "el => el.getAttribute('d') || ''")
@@ -97,8 +98,12 @@ with sync_playwright() as p:
     check("advance reveals b (staggered)", not hid_b)
     check("counter step advanced", "1/1" in page.inner_text("#deck-num"))
 
-    page.click("#next"); page.wait_for_timeout(700)
+    page.click("#next"); page.wait_for_timeout(1000)
     check("second advance changes slide", page.inner_text("#deck-title").strip() == "The core cluster")
+    # On slide 2 (b, c, d home team), off-slide a sits INSIDE the fitted window's reach
+    # and must be ray-pushed out past it (full-ease exile ~100 units for this geometry).
+    a_push = push_mag(page.eval_on_selector("#fm-node-a-0", "el => el.getAttribute('transform') || ''"))
+    check("off-slide a pushed out of slide 2's window", a_push > 50, a_push)
     half_e0 = page.eval_on_selector("#fm-edge-0", "el => el.classList.contains('fm-deck-half')")
     dim_a = page.eval_on_selector("#fm-node-a-0", "el => el.classList.contains('fm-deck-dim')")
     half_cl = page.eval_on_selector("#fm-cluster-0", "el => el.classList.contains('fm-deck-half')")

@@ -2469,7 +2469,7 @@
         <div class="franken-bolt -right-1.5 -bottom-1.5"></div>
 
         <div id="deck-stage" tabindex="0" class="pan-zoom-container relative overflow-hidden rounded-2xl
-             border border-emerald-500/15 bg-[#020704] h-[420px] md:h-[560px]
+             border border-emerald-500/15 bg-[#020704] h-[460px] md:h-[640px]
              focus:outline-none focus:ring-1 focus:ring-emerald-500/40">
           <div id="deck-card" class="absolute left-4 bottom-4 z-10 max-w-[min(520px,70%)] pointer-events-none">
             <div id="deck-num" class="font-mono text-[10px] text-emerald-500/70 uppercase tracking-widest"></div>
@@ -5669,66 +5669,132 @@ Shared IR,Terminal ANSI,20`
     // >>> deck-demo-source:start
     const DECK_DEMO_SOURCE = `flowchart LR
 %%{deck: {
-  title: 'How frankenmermaid works',
+  title: 'frankenmermaid, presented by itself',
+  options: { fitMargin: 120, zoomMax: 1.5, dimOpacity: 0.22 },
   tips: {
-    parser: 'Five-tier detection, fuzzy keyword matching, and recovery that never panics.',
-    ir: 'One shared IR: every parser writes it, every renderer reads it.',
-    dispatch: '15 deterministic algorithms, auto-selected per diagram type.',
-    svg: 'Themeable, accessible SVG with stable element ids.',
-    wasm: 'The same engine compiled to WebAssembly; it rendered this deck.',
-    manifest: 'Member sets, camera rects, and reveal steps in golden-testable JSON.'
+    fm: 'A Mermaid-compatible diagram engine written in Rust. This page runs it as WebAssembly.',
+    mjs: 'mermaid-cli pulls Node, Puppeteer, and a 350MB headless Chromium to render one SVG.',
+    detect: 'Five detection strategies, ending in a DOT-format probe for Graphviz interop.',
+    recover: 'Malformed input degrades into a diagram plus diagnostics. It does not crash.',
+    ir: 'MermaidDiagramIr: every parser writes it, every layout and renderer reads it.',
+    fam: 'flowchart, sequence, class, state, ER, gantt, git, mindmap, C4, sankey, kanban, radar and more.',
+    hub: 'Each family gets geometry built for its conventions, not a generic ranking pass.',
+    sha: 'Same input, same bytes, on x86, ARM, and WASM. Try the proof runner in the theater above.',
+    wasm: 'The exact binary running on this page. It parsed, laid out, and rendered this deck.',
+    manifest: 'Member sets, home geometry, camera rects, and reveal steps as golden-testable JSON.',
+    runtime: 'A zero-dependency script animating what you are watching right now.'
   },
   slides: [
-    { id: 'source', title: 'The source',
-      caption: 'Mermaid syntax plus one deck directive',
-      nodes: ['src', 'directive'] },
-    { id: 'parsing', title: 'Best-effort parsing',
-      caption: 'detection, fuzzy matching, and recovery; malformed input degrades with diagnostics',
-      nodes: ['src', 'subgraph:parsing'], reveal: 'auto', edges: 'touching' },
+    { id: 'hello', title: 'frankenmermaid',
+      caption: 'a Mermaid-compatible diagram engine, rebuilt in Rust',
+      nodes: ['fm', 'subgraph:pitch'], fitMargin: 160 },
+    { id: 'oldway', title: 'The old way',
+      caption: 'rendering one diagram should not need a browser',
+      nodes: ['subgraph:oldway'], reveal: [['dom'], ['chromium'], ['jitter']],
+      edges: 'touching' },
+    { id: 'parse', title: 'Best-effort parsing',
+      caption: 'detect, fuzzy-match, recover, build; diagnostics instead of crashes',
+      nodes: ['subgraph:parse'], reveal: 'auto', edges: 'touching' },
+    { id: 'families', title: '24 diagram families',
+      caption: 'one parser front door, one IR behind it',
+      nodes: ['subgraph:families'], reveal: 'auto', fitMargin: 90 },
     { id: 'ir', title: 'One shared IR',
-      caption: 'one data structure feeds every renderer',
-      nodes: ['parser', 'ir', 'diag'], reveal: [['ir'], ['diag']] },
-    { id: 'layout', title: 'Deterministic layout',
-      caption: 'same input, same bytes: output is byte-identical by design',
-      nodes: ['ir', 'subgraph:layout'], reveal: 'auto', edges: 'touching' },
-    { id: 'render', title: 'Four render targets',
-      caption: 'SVG, terminal, Canvas2D, and WASM from the same geometry',
-      nodes: ['subgraph:targets', 'scene'], reveal: 'auto' },
-    { id: 'deck', title: 'The deck you are watching',
-      caption: 'a manifest the engine computed over this same diagram',
-      nodes: ['svg', 'wasm', 'manifest', 'runtime'], reveal: [['manifest'], ['runtime']] }
+      caption: 'the center of gravity: everything writes it or reads it',
+      nodes: ['build', 'ir', 'diag'], edges: 'touching', fitMargin: 170 },
+    { id: 'solvers', title: '15 layout solvers',
+      caption: 'geometry per family, deterministic by construction',
+      nodes: ['subgraph:solvers'], reveal: 'auto', fitMargin: 90 },
+    { id: 'targets', title: 'Four render targets',
+      caption: 'the same computed scene, drawn four ways',
+      nodes: ['scene', 'subgraph:targets'], reveal: [['svg'], ['term'], ['canvas'], ['wasm']] },
+    { id: 'proof', title: 'Deterministic to the byte',
+      caption: 'SHA-256 identical output across architectures, verifiable above',
+      nodes: ['subgraph:proof'], reveal: 'auto', edges: 'touching' },
+    { id: 'meta', title: 'This deck is the engine',
+      caption: 'directive in, manifest out, runtime on top; no slides were hand-placed',
+      nodes: ['wasm', 'subgraph:meta'], reveal: [['manifest'], ['runtime']], edges: 'touching' }
   ],
-  overview: { title: 'The whole pipeline',
-    caption: 'zoomed out, the moving window replays each slide' }
+  overview: { title: 'The whole talk',
+    caption: 'zoomed out, the moving window replays every slide' }
 }}%%
-  src[.mmd source] --> detect
-  directive[deck directive] --> detect
-  subgraph parsing [fm-parser]
-    detect[type detection] --> fuzzy[fuzzy matching]
+  fm([frankenmermaid])
+  subgraph pitch [the pitch]
+    rust([pure Rust core])
+    nodeps([zero runtime deps])
+    anywhere([one binary, any OS])
+  end
+  fm --- rust
+  fm --- nodeps
+  fm --- anywhere
+  subgraph oldway [the old way]
+    mjs[mermaid.js] --> dom[needs a live DOM]
+    mjs --> chromium[(350MB Chromium)]
+    mjs --> jitter{layout jitter in CI}
+  end
+  fm -.->|replaces| mjs
+  subgraph parse [fm-parser]
+    detect[type detection] --> fuzzy[fuzzy keywords]
     fuzzy --> recover[error recovery]
-    recover --> parser[IR builder]
+    recover --> build[[IR builder]]
+    build --> diag[/diagnostics/]
   end
-  parser --> ir[(MermaidDiagramIr)]
-  parser --> diag[/diagnostics/]
-  subgraph layout [fm-layout]
-    dispatch[auto dispatch] --> cycles[cycle breaking]
-    cycles --> ranks[rank assignment]
-    ranks --> coords[Brandes-Koepf coords]
-    coords --> routing[edge routing]
+  fm ==> detect
+  subgraph families [24 families]
+    fam{{24 families}}
+    fam --- f1([flowchart]) --- f2([sequence]) --- f3([class])
+    fam --- f4([state]) --- f5([ER]) --- f6([gantt])
+    fam --- f7([gitGraph]) --- f8([mindmap]) --- f9([C4])
+    fam --- f10([sankey]) --- f11([kanban]) --- f12([radar])
   end
-  ir --> dispatch
-  routing --> scene[render scene]
+  detect --> fam
+  subgraph solvers [fm-layout]
+    hub{{15 solvers}}
+    hub --- s1([Sugiyama DAG]) --- s2([Barnes-Hut force])
+    hub --- s3([radial rings]) --- s4([Reingold-Tilford])
+    hub --- s5([git lanes]) --- s6([critical path])
+    hub --- s7([A-star grid router]) --- s8([sankey weaver])
+  end
+  build --> ir[(one shared IR)]
+  ir ==> hub
+  fam -.-> ir
+  hub --> scene[render scene]
   subgraph targets [render targets]
     svg[fm-render-svg]
     term[fm-render-term]
     canvas[fm-render-canvas]
+    wasm[[fm-wasm]]
   end
   scene --> svg
   scene --> term
   scene --> canvas
-  svg --> wasm[[fm-wasm]]
-  wasm --> manifest{{deck manifest}}
-  manifest --> runtime([deck runtime])`;
+  svg --> wasm
+  subgraph proof [determinism]
+    sha{{SHA-256}}
+    sha --- bytes([byte-identical output])
+    sha --- ci([snapshot-safe CI])
+  end
+  scene -->|hashed| sha
+  subgraph meta [the deck]
+    manifest{{deck manifest}} --> runtime([this presentation])
+  end
+  wasm ==>|reads the directive| manifest
+  classDef hubs fill:#022c22,stroke:#34d399,stroke-width:2px,color:#a7f3d0
+  classDef pitchc fill:#052e16,stroke:#4ade80,color:#bbf7d0
+  classDef oldc fill:#2a0a0a,stroke:#f87171,color:#fecaca
+  classDef parsec fill:#082f49,stroke:#38bdf8,color:#bae6fd
+  classDef famc fill:#2e1065,stroke:#a78bfa,color:#ddd6fe
+  classDef solverc fill:#431407,stroke:#fb923c,color:#fed7aa
+  classDef proofc fill:#1a2e05,stroke:#a3e635,color:#d9f99d
+  classDef metac fill:#500724,stroke:#f472b6,color:#fbcfe8
+  class fm,ir,scene hubs
+  class rust,nodeps,anywhere pitchc
+  class mjs,dom,chromium,jitter oldc
+  class detect,fuzzy,recover,build,diag parsec
+  class fam,f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12 famc
+  class hub,s1,s2,s3,s4,s5,s6,s7,s8 solverc
+  class sha,bytes,ci proofc
+  class manifest,runtime metac
+  class svg,term,canvas,wasm hubs`;
     // >>> deck-demo-source:end
 
     // Canonical runtime: crates/fm-cli/src/deck_runtime.js. This block must stay
@@ -6099,12 +6165,39 @@ Shared IR,Terminal ANSI,20`
       };
     }
 
+    // graphcon's computeFit skips hidden nodes: the camera frames what is VISIBLE at the
+    // current step and zooms out as reveals land, instead of framing voids where
+    // still-hidden members will eventually appear. Needs home geometry (morph manifests);
+    // slides without it, and edge/cluster-only extents, fall back to the engine bounds.
+    function visibleMemberBounds(sceneIndex) {
+      if (!morphEnabled || isOverview(sceneIndex)) return null;
+      var slide = manifest.slides[sceneIndex];
+      var x0 = Infinity;
+      var y0 = Infinity;
+      var x1 = -Infinity;
+      var y1 = -Infinity;
+      var any = false;
+      slide.nodes.forEach(function (node) {
+        if (node.step > state.step) return;
+        var rect = geometryOf[node.elementId];
+        if (!rect) return;
+        any = true;
+        x0 = Math.min(x0, rect.x);
+        y0 = Math.min(y0, rect.y);
+        x1 = Math.max(x1, rect.x + rect.width);
+        y1 = Math.max(y1, rect.y + rect.height);
+      });
+      if (!any) return null;
+      return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+    }
+
     function sceneCameraTarget(sceneIndex) {
       if (isOverview(sceneIndex)) {
         return fitTarget(manifest.viewBox, manifest.options.fitMargin, manifest.options.zoomMax);
       }
       var slide = manifest.slides[sceneIndex];
-      return fitTarget(slide.bounds, slide.fitMargin, slide.zoomMax);
+      var bounds = visibleMemberBounds(sceneIndex) || slide.bounds;
+      return fitTarget(bounds, slide.fitMargin, slide.zoomMax);
     }
 
     function applyCamera() {
@@ -6917,7 +7010,12 @@ Shared IR,Terminal ANSI,20`
           },
         });
         const svgEl = stage.querySelector(".fm-deck-viewport svg");
-        if (svgEl) applyThemeVarsToElement(svgEl, "dark");
+        if (svgEl) {
+          applyThemeVarsToElement(svgEl, "dark");
+          // The deck world floats on the stage: a transparent diagram background keeps the
+          // camera from ever revealing the SVG's own edge as a color seam.
+          svgEl.style.setProperty("--fm-bg", "transparent");
+        }
         if (Number.isInteger(requestedScene) && requestedScene > 0) {
           deckInstance.go(requestedScene);
         }
