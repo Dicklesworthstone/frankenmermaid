@@ -8240,31 +8240,15 @@ fn er_cell_columns(
     } else {
         1.0
     };
-    let mut widths = [0.0_f32; 4];
-    for attr in &node.members {
-        let key = attr.key_cell();
-        let cells: [&str; 4] = [
-            attr.data_type.as_str(),
-            attr.name.as_str(),
-            key.as_ref(),
-            attr.comment.as_deref().unwrap_or(""),
-        ];
-        for (index, cell) in cells.iter().enumerate() {
-            if !cell.is_empty() {
-                widths[index] = widths[index].max(metrics.estimate_width(cell) * scale);
-            }
-        }
-    }
-    // One space-ish gutter between columns, matching the single space the joined row used to carry.
-    let gutter = attr_font_size * 0.5;
-    let mut offsets = [0.0_f32; 4];
-    let mut cursor = 0.0_f32;
-    for index in 0..4 {
-        offsets[index] = cursor;
-        if widths[index] > 0.0 {
-            cursor += widths[index] + gutter;
-        }
-    }
+    // ⚠️ ONE DEFINITION, SHARED WITH LAYOUT. `fm-layout` sizes the entity box from exactly this
+    // geometry; a second copy here is how a cell ends up drawn outside its own box. See
+    // `fm_core::er_cell_columns`.
+    let (offsets, _right_edge) = fm_core::er_cell_columns(
+        &node.members,
+        &metrics,
+        scale,
+        fm_core::er_cell_gutter(attr_font_size),
+    );
     offsets
 }
 

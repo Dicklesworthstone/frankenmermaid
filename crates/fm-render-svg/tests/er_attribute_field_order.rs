@@ -18,11 +18,17 @@
 //!
 //! ⚠️ THE REAL CHANGE IS THAT THERE IS NOW ONE COMPOSITION. `IrEntityAttribute::display_row` replaces
 //! five hand-rolled copies of the same five lines — both fm-render-svg writers, fm-render-canvas,
-//! fm-render-term, and fm-layout's `er_attribute_row_width`. They had ALREADY drifted: the streaming
-//! SVG writer appended the attribute comment and the `Element` writer did not, so whether an author's
+//! fm-render-term, and fm-layout's box measurement. They had ALREADY drifted: the streaming SVG
+//! writer appended the attribute comment and the `Element` writer did not, so whether an author's
 //! comment appeared depended on `embed_theme_css`. Five copies of a rule is five chances to disagree;
 //! the layout copy is the one that decides how wide the entity box is, so a disagreement there spills
 //! a row outside its own entity.
+//!
+//! ⚠️ AND THE CELL SPLIT MOVED THAT MEASUREMENT. Columns are built from the widest cell in each column
+//! across every attribute, so the box can no longer be sized by folding per-row widths — layout and
+//! the renderers now share `fm_core::er_cell_columns`. `cells_stay_inside_the_entity_box_when_the_
+//! columns_skew` is the control that caught the spill this split introduced, and it is the ONLY test
+//! here that catches it: the other six pass with the box mis-sized.
 
 fn attribute_rows(embed_theme_css: bool, source: &str) -> Vec<String> {
     let ir = fm_parser::parse(source).ir;
@@ -107,6 +113,95 @@ fn a_composite_key_stays_one_token_and_stays_last() {
         vec!["string", "a", "PK,FK"],
         "a composite key must remain ONE comma-joined cell in the final position"
     );
+}
+
+/// One drawn attribute cell: its x, its baseline y, and its text.
+type Cell = (f32, f32, String);
+
+/// The entity box, as `(left, width)`.
+type EntityBox = (f32, f32);
+
+/// Every drawn cell plus the entity box that must contain them all.
+fn cells_and_box(source: &str) -> (Vec<Cell>, EntityBox) {
+    let ir = fm_parser::parse(source).ir;
+    let svg =
+        fm_render_svg::render_svg_with_config(&ir, &fm_render_svg::SvgRenderConfig::default());
+
+    let number = |chunk: &str, name: &str| -> f32 {
+        let needle = format!("{name}=\"");
+        let at = chunk.find(&needle).expect("attribute present") + needle.len();
+        chunk[at..][..chunk[at..].find('"').expect("closing quote")]
+            .parse()
+            .expect("numeric attribute")
+    };
+
+    let mut cells = Vec::new();
+    for chunk in svg.split("<text ").skip(1) {
+        if !chunk.contains("class=\"fm-er-attribute\">") {
+            continue;
+        }
+        let open = chunk.find('>').expect("tag close");
+        let text = &chunk[open + 1..][..chunk[open + 1..].find('<').expect("text close")];
+        cells.push((number(chunk, "x"), number(chunk, "y"), text.to_string()));
+    }
+
+    let rect = svg.split("<rect ").nth(1).expect("the entity box");
+    (cells, (number(rect, "x"), number(rect, "width")))
+}
+
+/// ⚠️ THE CONTAINMENT CONTROL bd-xxvch asks for, and the one that caught a real spill this change
+/// introduced. Columns are built from the widest cell in each column ACROSS EVERY ATTRIBUTE, so an
+/// entity whose widest type and widest name belong to DIFFERENT attributes lays out wider than any
+/// single row measures. Layout used to size the box by folding the fused row widths, and this
+/// fixture is the shape that separates the two: measured before `fm_core::er_cell_columns` was
+/// shared with layout, the box ended at x=250.56 and `PK` was drawn at x=310.20 — sixty pixels
+/// outside its own entity.
+///
+/// er_basic cannot catch this: there the widest type and widest name belong to the same attribute,
+/// so the fused fold and the column geometry agree by accident.
+#[test]
+fn cells_stay_inside_the_entity_box_when_the_columns_skew() {
+    let source = "erDiagram\n    T {\n        verylongtypename a\n        t verylongattributename PK\n    }\n";
+    let (cells, (left, width)) = cells_and_box(source);
+    assert_eq!(
+        cells.len(),
+        5,
+        "the fixture must draw five cells: {cells:?}"
+    );
+    // Rows are left-anchored at `left + 8`; layout mirrors that padding on the right.
+    for (x, _, text) in &cells {
+        assert!(
+            *x >= left + 8.0 && *x <= left + width - 8.0,
+            "cell {text:?} is drawn at x={x}, outside its entity box {left}..{}",
+            left + width
+        );
+    }
+}
+
+/// ⚠️ THE OTHER HALF OF bd-xxvch'S REQUIRED CONTROL: `int id PK` must be THREE runs at STRICTLY
+/// INCREASING x, and a keyless attribute exactly TWO. Asserting only that the three strings appear
+/// somewhere passes on a fused row, which is the state this change had to leave.
+#[test]
+fn a_row_is_separate_runs_at_strictly_increasing_x() {
+    let (cells, _) = cells_and_box(ENTITY);
+    // A row is one baseline; key it as text so the grouping does not depend on float ordering.
+    let mut by_row: std::collections::BTreeMap<String, Vec<f32>> =
+        std::collections::BTreeMap::new();
+    for (x, y, _) in &cells {
+        by_row.entry(format!("{y:.2}")).or_default().push(*x);
+    }
+    let counts: Vec<usize> = by_row.values().map(Vec::len).collect();
+    assert_eq!(
+        counts,
+        vec![3, 2, 3],
+        "int/id/PK is three runs, string/name is two, string/email/UK is three: {by_row:?}"
+    );
+    for (baseline, xs) in &by_row {
+        assert!(
+            xs.windows(2).all(|pair| pair[1] > pair[0]),
+            "row {baseline} draws its cells at non-increasing x: {xs:?}"
+        );
+    }
 }
 
 /// CONTROL: an attribute with no key draws no stray separator where the key would have been.

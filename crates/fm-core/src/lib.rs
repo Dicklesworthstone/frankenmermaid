@@ -1496,6 +1496,63 @@ impl IrEntityAttribute {
     }
 }
 
+/// One space-ish gutter between attribute columns, matching the single space the fused row carried.
+/// Layout and every cell-drawing renderer must pass this same value into [`er_cell_columns`].
+#[must_use]
+pub fn er_cell_gutter(attr_font_size: f32) -> f32 {
+    attr_font_size * 0.5
+}
+
+/// Column geometry for one entity's attribute cells: the x offset of each of the four columns
+/// relative to the first cell's left edge, and the total width out to the right edge of the last
+/// non-empty column.
+///
+/// ⚠️ **THIS LIVES HERE BECAUSE LAYOUT AND THE RENDERERS MUST AGREE ON IT.** The entity box is sized
+/// by `fm-layout`; the cells are placed by the renderers. Sizing the box from the widest *fused* row
+/// while drawing *columns* is not a rounding disagreement — the columns are built from the widest
+/// cell in each column across every attribute, so an entity whose widest type and widest name belong
+/// to different attributes lays out wider than any single row measures. Observed, before this was
+/// shared, on `T { verylongtypename a / t verylongattributename PK }`: the box ended at x=250.56 and
+/// the `PK` cell was drawn at x=310.20, sixty pixels outside its own entity. That is the same class
+/// of defect as bd-nryyc and bd-jerh, which is why there is exactly one definition of it.
+///
+/// `scale` converts `metrics`' own font size to the size the cells actually render at; `gutter` is
+/// [`er_cell_gutter`].
+#[must_use]
+pub fn er_cell_columns(
+    members: &[IrEntityAttribute],
+    metrics: &FontMetrics,
+    scale: f32,
+    gutter: f32,
+) -> ([f32; 4], f32) {
+    let mut widths = [0.0_f32; 4];
+    for attr in members {
+        let key = attr.key_cell();
+        let cells: [&str; 4] = [
+            attr.data_type.as_str(),
+            attr.name.as_str(),
+            key.as_ref(),
+            attr.comment.as_deref().unwrap_or(""),
+        ];
+        for (index, cell) in cells.iter().enumerate() {
+            if !cell.is_empty() {
+                widths[index] = widths[index].max(metrics.estimate_width(cell) * scale);
+            }
+        }
+    }
+    let mut offsets = [0.0_f32; 4];
+    let mut cursor = 0.0_f32;
+    let mut right_edge = 0.0_f32;
+    for index in 0..4 {
+        offsets[index] = cursor;
+        if widths[index] > 0.0 {
+            right_edge = cursor + widths[index];
+            cursor = right_edge + gutter;
+        }
+    }
+    (offsets, right_edge)
+}
+
 // ── Class-diagram member types ─────────────────────────────────────────
 
 /// Rewrite mermaid's `~T~` generic-type spelling into the `<T>` a class body actually displays.

@@ -11496,11 +11496,23 @@ fn er_compartment_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> O
 
     // Rows are left-anchored at `x + 8.0`; mirror that padding on the right so the widest row stays
     // inside the box.
-    let row_width = node
-        .members
-        .iter()
-        .map(|attr| er_attribute_row_width(attr, attr_font_size, node_font_size, metrics))
-        .fold(0.0_f32, f32::max);
+    // ⚠️ THE BOX IS SIZED FROM THE COLUMN GEOMETRY, NOT FROM THE WIDEST FUSED ROW. The renderers draw
+    // one cell per field at columns built from the widest cell in each column ACROSS EVERY
+    // ATTRIBUTE, so an entity whose widest type and widest name belong to different attributes lays
+    // out wider than any single row measures. Measured on
+    // `T { verylongtypename a / t verylongattributename PK }` while this still folded row widths: the
+    // box ended at x=250.56 and `PK` was drawn at x=310.20 — sixty pixels outside its own entity.
+    let scale = if node_font_size > 0.0 {
+        attr_font_size / node_font_size
+    } else {
+        1.0
+    };
+    let (_offsets, row_width) = fm_core::er_cell_columns(
+        &node.members,
+        metrics,
+        scale,
+        fm_core::er_cell_gutter(attr_font_size),
+    );
 
     Some((row_width + 16.0, height))
 }
@@ -11509,29 +11521,6 @@ fn er_compartment_dimensions(node: &IrNode, metrics: &fm_core::FontMetrics) -> O
 /// Layout cannot see the render config, and the clamp only ever raises the size (raising the row
 /// pitch), so assuming the floor applies is the direction that over-sizes rather than spills.
 const ER_ATTR_FONT_FLOOR: f32 = 8.0;
-
-/// Width of one rendered ER attribute row. Mirrors the renderer's row text:
-/// `{key_prefix}{data_type} {name}` where the prefix is `"PK "`/`"FK "`/`"UK "` or empty.
-fn er_attribute_row_width(
-    attr: &fm_core::IrEntityAttribute,
-    attr_font_size: f32,
-    node_font_size: f32,
-    metrics: &fm_core::FontMetrics,
-) -> f32 {
-    // ⚠️ THE BOX IS SIZED FROM THE STRING THE RENDERERS DRAW, so it calls the same one they do:
-    // `IrEntityAttribute::display_row`. This used to be a sixth hand-rolled copy of the same
-    // composition; measuring a different string than the renderer draws is how a row spills outside
-    // its entity (bd-nryyc for composite keys, bd-jerh for the comment).
-    let row = attr.display_row();
-    // `metrics` measures at its own font size; rows render at `attr_font_size`. Scale the estimate by
-    // the ratio rather than assuming the nominal 0.8, so the clamp floor is honoured here too.
-    let scale = if node_font_size > 0.0 {
-        attr_font_size / node_font_size
-    } else {
-        1.0
-    };
-    metrics.estimate_dimensions(&row).0 * scale
-}
 
 /// Width of one rendered member row. Mirrors the renderer's row text: a visibility symbol, the member
 /// name, a `*`/`$` suffix for abstract/static methods, and a `": {return_type}"` tail.
@@ -29760,9 +29749,9 @@ mod tests {
 
     /// An ER attribute COMMENT must widen the entity box (bd-jerh).
     ///
-    /// The renderer appends the comment to the attribute row. If `er_attribute_row_width` does not
-    /// measure it, the widest row is wider than the box holding it — and per that fn's own contract,
-    /// under-sizing does not clip, it SPILLS the row into the diagram.
+    /// The renderer draws the comment as the FOURTH attribute column. If `fm_core::er_cell_columns`
+    /// does not measure it, the cells run wider than the box holding them — and under-sizing does not
+    /// clip, it SPILLS the row into the diagram.
     ///
     /// The IR is hand-built because fm-parser is not a dependency of this crate. That is safe HERE,
     /// unlike the kanban case in bd-u3fo: this exercises `compute_node_sizes`, a pure function of the
