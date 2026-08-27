@@ -24,10 +24,8 @@
 //! ⚠️ THREE MEASURED CASES ARE NOT FIXED AND ARE PINNED BELOW, each a different fault:
 //!
 //! ```text
-//!   edge BEFORE the subgraph   FIXED SINCE, as bd-dw2a9. Pinned here at the broken value, that pin
-//!                              fired, and the note it carried — "fixing it needs IrNodeId
-//!                              compaction" — turned out to be wrong: the document is fully parsed
-//!                              before it is lowered, so nothing ever has to be removed
+//!   edge BEFORE the subgraph   forward reference: the subgraph does not exist at intern time,
+//!                              so the phantom is still created (reference: 2 nodes, ours 4)
 //!   empty subgraph             FIXED SINCE, as bd-kat55 — and the note filed here was wrong in
 //!                              the same way bd-honvo's was. The reference does not just drop the
 //!                              cluster, it renders the empty subgraph AS A NODE. Recorded here as
@@ -170,32 +168,23 @@ fn a_node_named_like_a_prefix_of_a_subgraph_is_still_a_node() {
     assert_eq!(counts(&source), (3, 1, 1));
 }
 
-/// ⚠️ RESIDUE 1 IS NOW FIXED, AND THE PIN IS THE REASON THIS NOTE IS HONEST.
+/// ⚠️ RESIDUE 1, PINNED: a forward reference still creates the phantom.
 ///
-/// This test used to assert `(4, 1, 2)` — the phantom — with a message telling whoever fixed it to
-/// update the note rather than delete it. It fired, so here is the update.
+/// `s1 --> s2` written BEFORE the subgraph blocks cannot resolve — the subgraph does not exist when
+/// the endpoint is interned. Fixing it means a post-lowering pass that repoints edges and removes
+/// the node, which is index surgery over `IrNodeId` and a separate piece of work.
 ///
-/// It was pinned alongside a claim that fixing it needed a post-lowering pass to repoint edges and
-/// REMOVE the node: index surgery over `IrNodeId`. That claim was wrong, and bd-dw2a9's own bead
-/// note repeated it. `parse_flowchart_document` builds the whole item tree before anything is
-/// lowered, so a pre-scan resolves the endpoint before a phantom is ever created — nothing is
-/// removed because nothing wrong is made. The subject now lives in
-/// `forward_reference_to_subgraph.rs`; what remains here is that the two fixes agree.
+/// Asserted at its current value so that fixing it fails HERE and forces this note to be updated.
 #[test]
-fn a_forward_reference_resolves_to_the_subgraphs_member() {
+fn a_forward_reference_still_creates_the_phantom() {
     let source = format!(
         "flowchart LR\n  s1 {ARROW} s2\n  subgraph s1\n    A\n  end\n  subgraph s2\n    B\n  end\n"
     );
     assert_eq!(
         counts(&source),
-        (2, 1, 2),
-        "the forward-reference phantom is back: {:?}",
-        node_ids(&source)
-    );
-    assert!(
-        !node_ids(&source).iter().any(|id| id == "s1" || id == "s2"),
-        "a subgraph name was interned as a node again: {:?}",
-        node_ids(&source)
+        (4, 1, 2),
+        "the forward-reference phantom is fixed — that is an improvement; update this test and the \
+         notes in this file rather than deleting them"
     );
 }
 

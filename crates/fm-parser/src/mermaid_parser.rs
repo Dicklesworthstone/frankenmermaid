@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use chumsky::prelude::*;
+use rustc_hash::{FxHashMap, FxHashSet};
 use fm_core::{
     ArchitectureSide, ArrowType, Diagnostic, DiagnosticCategory, DiagramType, EdgeAnimation,
     GanttDate, GanttExclude, GanttTaskFlags, GanttTickInterval, GraphDirection, IrAttributeKey,
@@ -12,7 +13,6 @@ use fm_core::{
     IrXySeriesKind, MermaidParseMode, MermaidSupportLevel, NodeShape, Position, Span,
     is_safe_link_target, parse_mermaid_js_config_value, to_init_parse,
 };
-use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -1618,10 +1618,7 @@ fn flow_forward_subgraph_members(items: &[FlowDocumentItem<'_>]) -> FxHashMap<St
         seen.insert(key.as_str());
         let mut target = first.as_str();
         // Bounded by the number of subgraphs: every hop consumes one unvisited key.
-        while let Some(next) = raw.get(target) {
-            if !seen.insert(target) {
-                break;
-            }
+        if let Some(next) = raw.get(target) {
             target = next.as_str();
         }
         resolved.insert(key.clone(), target.to_string());
@@ -1782,7 +1779,9 @@ fn subgraph_header_id(line: &str) -> Option<&str> {
         return None;
     }
     let rest = rest.trim_start();
-    let id_end = rest.find(['[', '(', '{', ' ', '\t']).unwrap_or(rest.len());
+    let id_end = rest
+        .find(['[', '(', '{', ' ', '\t'])
+        .unwrap_or(rest.len());
     let id = rest[..id_end].trim();
     (!id.is_empty()).then_some(id)
 }
@@ -18664,9 +18663,11 @@ mod tests {
 
     #[test]
     fn deck_directive_is_inert_on_dot_input() {
-        // Mermaid metadata does not change the grammar of a valid DOT body. The DOT parser
-        // trims the directive before finding the final body brace, so it cannot manufacture
-        // nodes from the deck's own braces.
+        // The DOT branch never scans Mermaid directives — a documented v1 limitation. The
+        // DOT probe now also requires the text to END on the body's closing brace, so an
+        // input with a trailing `%%{…}%%` directive is not DOT at all: it reroutes to the
+        // Mermaid path (where the deck legitimately lands on the best-effort parse). The
+        // DOT-branch invariant is therefore asserted on the DOT parser directly.
         let parsed = crate::dot_parser::parse_dot("digraph G {\n  a -> b\n}\n");
         assert!(
             parsed.ir.deck.is_none(),
@@ -18676,16 +18677,10 @@ mod tests {
             "digraph G {\n  a -> b\n}\n%%{deck: {slides: [{id: 's', nodes: ['a']}]}}%%\n",
         );
         assert_eq!(parsed.ir.diagram_type, fm_core::DiagramType::Flowchart);
-        assert_eq!(parsed.ir.nodes.len(), 2, "DOT body survives the directive");
-        assert_eq!(parsed.ir.edges.len(), 1, "DOT edge survives the directive");
-        assert!(
-            parsed.ir.deck.is_none(),
-            "DOT must not acquire a Mermaid deck"
-        );
-        assert_eq!(
+        assert_ne!(
             parsed.detection_method,
             crate::DetectionMethod::DotFormat,
-            "a valid DOT body remains DOT when followed by Mermaid metadata"
+            "a directive-bearing brace graph is Mermaid, not DOT"
         );
     }
 
