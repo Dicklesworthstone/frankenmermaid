@@ -1416,10 +1416,10 @@ fn unsupported_upstream_keyword(first_line: &str) -> Option<&'static str> {
     match head.as_str() {
         // Accepted bare AND with `-beta`, so the bare spelling is the honest name.
         //
-        // ⚠️ `treemap` WAS HERE AND IS NOT ANY MORE (bd-9ghyo). This list means "your syntax is
-        // right, we have not built this type"; leaving an implemented type in it tells an author
-        // their working diagram is unsupported. The same rule the shape tables live under.
-        "info" => Some("info"),
+        // ⚠️ `treemap` AND `info` WERE HERE AND ARE NOT ANY MORE (bd-9ghyo, bd-a3tmn). This list
+        // means "your syntax is right, we have not built this type"; leaving an implemented type in
+        // it tells an author their working diagram is unsupported. Same rule the shape tables live
+        // under, and `an_implemented_type_is_never_named_as_unimplemented` pins it.
         "eventmodeling" => Some("eventmodeling"),
         // Accepted bare only, once it has content. Reported by BeigeHill and re-verified here.
         "ishikawa" => Some("ishikawa"),
@@ -1516,6 +1516,10 @@ fn exact_diagram_type_with(
         // it by naming the `-beta` spelling that works. Accepting the bare form here would render a
         // document mermaid refuses AND silence the message that tells the author the right name.
         Some(DiagramType::Radar)
+    } else if matches(line, "info") {
+        // mermaid's `info` renders exactly one thing: the renderer's own version. Accepted as its
+        // own type so it stops being reported as a low-confidence flowchart (bd-a3tmn).
+        Some(DiagramType::Info)
     } else if matches(line, "treemap") {
         // Catches the bare `treemap` and `treemap-beta` alike, the way `matches` already folds
         // `block`/`block-beta`. Both spellings PARSE upstream and both report `treemap` from
@@ -1559,6 +1563,7 @@ const DIAGRAM_KEYWORDS: &[(&str, DiagramType)] = &[
     ("xychart", DiagramType::XyChart),
     ("kanban", DiagramType::Kanban),
     ("treemap", DiagramType::Treemap),
+    ("info", DiagramType::Info),
     ("radar-beta", DiagramType::Radar),
     ("block", DiagramType::BlockBeta),
     ("packet", DiagramType::PacketBeta),
@@ -2836,6 +2841,7 @@ mod tests {
             "kanban",
             "treemap",
             "radar-beta",
+            "info",
         ];
 
         for header in headers {
@@ -4126,7 +4132,6 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
             ("radar\n  title Skills\n  ds1 [10, 20, 30]\n", "radar"),
             ("ishikawa\n  Problem\n", "ishikawa"),
             ("eventmodeling\n  x\n", "eventmodeling"),
-            ("info\n", "info"),
             ("treeView-beta\n  root\n", "treeView"),
             ("venn-beta\n  a\n", "venn"),
             ("wardley-beta\n  a\n", "wardley"),
@@ -4166,6 +4171,7 @@ create participant Carol\n  Bob->>Carol: spawn\n  destroy Carol\n  Carol->>Bob: 
                 "radar-beta\n  axis a, b, c\n  curve x{1,2,3}\n",
                 fm_core::DiagramType::Radar,
             ),
+            ("info\n", fm_core::DiagramType::Info),
         ] {
             let detected = super::detect_type_with_confidence(source);
             assert_eq!(detected.diagram_type, expected);

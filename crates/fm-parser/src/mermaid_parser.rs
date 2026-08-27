@@ -555,6 +555,7 @@ pub fn parse_mermaid_with_detection_and_config(
         DiagramType::Kanban => parse_kanban(content, &mut builder),
         DiagramType::Treemap => parse_treemap(content, &mut builder),
         DiagramType::Radar => parse_radar(content, &mut builder),
+        DiagramType::Info => parse_info(content, &mut builder),
         DiagramType::Unknown => {
             apply_unknown_contract(content, &mut builder, parse_mode);
         }
@@ -584,11 +585,15 @@ pub fn parse_mermaid_with_detection_and_config(
     // A treemap holds its whole diagram in `treemap_meta` and declares no nodes or edges, so the
     // generic emptiness check would report every valid treemap as unparseable. Keyed on the meta
     // being POPULATED rather than on the diagram type, so an actually-empty treemap still warns.
-    let carried_by_meta = builder
-        .ir_mut()
-        .treemap_meta
-        .as_ref()
-        .is_some_and(|meta| !meta.nodes.is_empty())
+    // An `info` diagram declares no nodes and no edges by construction — its whole content is
+    // the renderer's version, resolved at render time — so the generic emptiness check below would
+    // report every valid one as unparseable.
+    let carried_by_meta = diagram_type == DiagramType::Info
+        || builder
+            .ir_mut()
+            .treemap_meta
+            .as_ref()
+            .is_some_and(|meta| !meta.nodes.is_empty())
         || builder
             .ir_mut()
             .radar_meta
@@ -6974,6 +6979,33 @@ fn add_journey_actor_classes(
 /// `min`/`max` are SCALE bounds, not display bounds: `min 1` over `{1,2,3}` measurably puts the
 /// first vertex at the origin. That is why they are stored and applied in
 /// [`fm_core::IrRadarMeta::radius_fraction`] rather than used to filter anything here.
+/// Parse an `info` document (bd-a3tmn).
+///
+/// MEASURED against the pinned mermaid 11.15.0 bundle in Chromium 151: the whole diagram is ONE
+/// text run — the renderer's own version, `v11.15.0`, at (100, 40) in 32px centred type. There is
+/// nothing in the source to read beyond the header, and the legacy `showInfo` keyword renders
+/// identically, so it is consumed rather than warned about.
+///
+/// The version is resolved at RENDER time, not stored here: it is a property of the renderer rather
+/// than of the document, and baking it into the IR would let a cached IR outlive the version it
+/// claims to describe.
+fn parse_info(content: &str, builder: &mut IrBuilder) {
+    for (line_number, raw_line) in content.lines().enumerate() {
+        let trimmed = trim_fast(raw_line);
+        if trimmed.is_empty() || trimmed.starts_with("%%") {
+            continue;
+        }
+        let lowered = trimmed.to_ascii_lowercase();
+        if lowered == "info" || lowered.starts_with("info ") || lowered == "showinfo" {
+            continue;
+        }
+        builder.add_warning(format!(
+            "info line {} is not part of an info diagram: {trimmed}",
+            line_number + 1
+        ));
+    }
+}
+
 fn parse_radar(content: &str, builder: &mut IrBuilder) {
     let mut meta = fm_core::IrRadarMeta::default();
     let mut title = None;

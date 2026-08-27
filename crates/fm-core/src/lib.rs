@@ -328,6 +328,7 @@ pub enum DiagramType {
     Kanban,
     Treemap,
     Radar,
+    Info,
     #[default]
     Unknown,
 }
@@ -362,6 +363,7 @@ impl DiagramType {
             Self::Kanban => "kanban",
             Self::Treemap => "treemap",
             Self::Radar => "radar-beta",
+            Self::Info => "info",
             Self::Unknown => "unknown",
         }
     }
@@ -393,7 +395,8 @@ impl DiagramType {
             | Self::XyChart
             | Self::Kanban
             | Self::Treemap
-            | Self::Radar => MermaidSupportLevel::Supported,
+            | Self::Radar
+            | Self::Info => MermaidSupportLevel::Supported,
             Self::Sequence => MermaidSupportLevel::Partial,
             Self::Unknown => MermaidSupportLevel::Unsupported,
         }
@@ -426,7 +429,8 @@ impl DiagramType {
             | Self::XyChart
             | Self::Kanban
             | Self::Treemap
-            | Self::Radar => "full",
+            | Self::Radar
+            | Self::Info => "full",
             Self::Sequence => "partial",
             Self::Unknown => "unknown",
         }

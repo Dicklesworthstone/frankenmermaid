@@ -4416,6 +4416,12 @@ fn render_layout_to_svg(
         );
     }
 
+    // The `info` diagram (bd-a3tmn): one text run, the renderer's own version.
+    if ir.diagram_type == fm_core::DiagramType::Info {
+        let mut info_svg = String::new();
+        write_info_version_into(&mut info_svg, ir, offset_x, offset_y, config);
+        doc = doc.child(Element::raw_svg(info_svg));
+    }
     // The radar wheel (bd-sk4dv). `None` for every other diagram type.
     if layout.extensions.radar.is_some() {
         let mut radar_svg = String::new();
@@ -5785,6 +5791,39 @@ fn write_radar_curve_path_into(
         let _ = write_number_into(out, next.1);
     }
     out.push('Z');
+}
+
+/// The version an `info` diagram reports.
+///
+/// ⚠️ OURS, NOT MERMAID'S. mermaid's `info` renders `v11.15.0` — its own version — and the diagram's
+/// whole purpose is "tell me what rendered this". Echoing mermaid's number would make every
+/// frankenmermaid render claim to be mermaid, which is the one answer this diagram must not give.
+fn info_version_text() -> String {
+    format!("v{}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Draw an `info` diagram: a single centred version string (bd-a3tmn).
+///
+/// Geometry MEASURED from the pinned mermaid 11.15.0 bundle in Chromium 151: one `<text>` at
+/// (100, 40), 32px, `text-anchor: middle`, class `version`.
+fn write_info_version_into(
+    out: &mut String,
+    ir: &MermaidDiagramIr,
+    offset_x: f32,
+    offset_y: f32,
+    config: &SvgRenderConfig,
+) {
+    use crate::attributes::{write_escaped_attr, write_escaped_text, write_number_into};
+    let theme = resolve_theme(Some(ir), config);
+    out.push_str("<text class=\"fm-info-version\" x=\"");
+    let _ = write_number_into(out, 100.0 + offset_x);
+    out.push_str("\" y=\"");
+    let _ = write_number_into(out, 40.0 + offset_y);
+    out.push_str("\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-size=\"32\" fill=\"");
+    let _ = write_escaped_attr(out, &theme.colors.text);
+    out.push_str("\">");
+    let _ = write_escaped_text(out, &info_version_text());
+    out.push_str("</text>");
 }
 
 /// The treemap palette, cycled per SECTION.
