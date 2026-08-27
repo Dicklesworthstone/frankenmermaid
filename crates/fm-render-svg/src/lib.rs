@@ -11090,6 +11090,40 @@ fn render_node(
                         .stroke_width_unless_embedded_css(1.6, config.embed_theme_css),
                 )
         }
+        NodeShape::FlippedTriangle => {
+            // Full-width top edge, apex at the bottom centre — the inverse of `Triangle`.
+            let path = PathBuilder::new()
+                .move_to(x, y)
+                .line_to(x + w, y)
+                .line_to(x + w / 2.0, y + h)
+                .close()
+                .build();
+            Element::path()
+                .d(&path)
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
+        NodeShape::NotchedPentagon => {
+            // BOTH top corners cut, a tenth of the width by a fifth of the height each. `NotchedRect`
+            // cuts only the top-left and does so at 45°; keeping them distinct is the point.
+            let cut_x = w * fm_core::NOTCHED_PENTAGON_CUT_X_RATIO;
+            let cut_y = h * fm_core::NOTCHED_PENTAGON_CUT_Y_RATIO;
+            let path = PathBuilder::new()
+                .move_to(x + cut_x, y)
+                .line_to(x + w - cut_x, y)
+                .line_to(x + w, y + cut_y)
+                .line_to(x + w, y + h)
+                .line_to(x, y + h)
+                .line_to(x, y + cut_y)
+                .close()
+                .build();
+            Element::path()
+                .d(&path)
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
         NodeShape::DividedRect => {
             // Box plus a HORIZONTAL rule one sixth down, drawn as one path so the rule inherits the
             // shape's stroke. The vertical twin is `LinedRect`; keeping them distinct is the point.
@@ -13135,6 +13169,8 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
         NodeShape::SmallCircle => "fm-node-shape-small-circle",
         NodeShape::DividedRect => "fm-node-shape-divided-rect",
         NodeShape::FramedCircle => "fm-node-shape-framed-circle",
+        NodeShape::FlippedTriangle => "fm-node-shape-flipped-triangle",
+        NodeShape::NotchedPentagon => "fm-node-shape-notched-pentagon",
         NodeShape::Rect => "fm-node-shape-rect",
         NodeShape::Rounded => "fm-node-shape-rounded",
         NodeShape::Stadium => "fm-node-shape-stadium",

@@ -15,6 +15,12 @@
 //!               one SIXTH of the height, so it is held as a ratio not a constant
 //!   fr-circ     concentric paths from "M7 0" and "M2.5 0", both carrying the theme
 //!               node fill and stroke — two RINGS, not a ring around a filled dot
+//!   flip-tri    vertices (0,-49.671875) (49.671875,-49.671875) (24.8359375,0)
+//!               a full-width TOP edge with the apex pointing DOWN
+//!   notch-pent  vertices (-16.26875,-27) (16.26875,-27) (20.3359375,-16.2)
+//!               (20.3359375,27) (-20.3359375,27) (-20.3359375,-16.2)
+//!               a 40.67x54 box with BOTH top corners cut, 4.07 by 10.8 each —
+//!               a tenth of the width by a fifth of the height
 //! ```
 //!
 //! ⚠️ MERMAID'S SECOND PATH IS NOT GEOMETRY. These go through rough.js, whose sketch overlay
@@ -101,6 +107,60 @@ fn each_new_shape_draws_its_measured_silhouette() {
         framed.contains("r=\"7\"") && framed.contains("r=\"2.50\""),
         "fr-circ is not two concentric fixed rings: {framed}"
     );
+
+    // Full-width top edge (92..192 at y=92), apex at the bottom centre (142, 158.50).
+    let flipped = render("flip-tri");
+    assert!(
+        flipped.contains("M92 92 L192 92 L142 158.50 Z"),
+        "flip-tri does not point downward: {}",
+        silhouette(&flipped)
+    );
+
+    // Cuts of 100*0.1 = 10 horizontally and 66.50*0.2 = 13.30 vertically, on BOTH top corners.
+    let pentagon = render("notch-pent");
+    assert!(
+        pentagon.contains("M102 92 L182 92 L192 105.30 L192 158.50 L92 158.50 L92 105.30 Z"),
+        "notch-pent did not cut both top corners: {}",
+        silhouette(&pentagon)
+    );
+}
+
+/// ⚠️ THE TWO TRIANGLES POINT OPPOSITE WAYS, and this is the assertion that catches a mirror bug.
+///
+/// `tri` points UP, `flip-tri` points DOWN. Drawing one for the other keeps the same three vertices
+/// and the same bounding box, so a test comparing vertex COUNT, area, or "is it a triangle?" cannot
+/// see it — the diagram just renders a `manual-file` marker upside down.
+#[test]
+fn the_flipped_triangle_is_not_the_upward_one() {
+    let up = render("tri");
+    let down = render("flip-tri");
+    assert!(
+        up.contains("M142 92") || up.contains("142 92"),
+        "the upward triangle no longer starts at its top apex: {}",
+        silhouette(&up)
+    );
+    assert!(
+        down.contains("M92 92 L192 92"),
+        "the flipped triangle no longer starts along its top edge: {}",
+        silhouette(&down)
+    );
+    assert_ne!(
+        silhouette(&up),
+        silhouette(&down),
+        "the upward and downward triangles render identically"
+    );
+}
+
+/// ⚠️ AND THE TWO NOTCHED SHAPES CUT DIFFERENT CORNERS. `notch-rect` cuts ONE (top-left, at 45°);
+/// `notch-pent` cuts BOTH top corners at a shallower angle. Two published names, two silhouettes.
+#[test]
+fn the_notched_rectangle_and_pentagon_are_different_shapes() {
+    let rect_notch = silhouette(&render("notch-rect"));
+    let pent = silhouette(&render("notch-pent"));
+    assert_ne!(
+        rect_notch, pent,
+        "the one-corner and two-corner notches render identically"
+    );
 }
 
 /// ⚠️ THE TWO RULED RECTANGLES MUST NOT COLLAPSE INTO EACH OTHER. `lin-rect` rules VERTICALLY near
@@ -156,7 +216,15 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
     assert!(!rect.is_empty(), "the control drew nothing");
 
     let mut seen = vec![("rect", rect)];
-    for shape in ["notch-rect", "lin-rect", "sm-circ", "div-rect", "fr-circ"] {
+    for shape in [
+        "notch-rect",
+        "lin-rect",
+        "sm-circ",
+        "div-rect",
+        "fr-circ",
+        "flip-tri",
+        "notch-pent",
+    ] {
         let sig = silhouette(&render(shape));
         assert!(!sig.is_empty(), "{shape} drew no geometry at all");
         for (other, other_sig) in &seen {
@@ -173,7 +241,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
 /// name that resolves to nothing tells an author to fix a spelling that was already correct.
 #[test]
 fn every_published_alias_draws_the_same_shape() {
-    let groups: [(&str, &[&str]); 5] = [
+    let groups: [(&str, &[&str]); 7] = [
         ("notch-rect", &["card", "notched-rectangle"]),
         (
             "lin-rect",
@@ -190,6 +258,8 @@ fn every_published_alias_draws_the_same_shape() {
             &["div-proc", "divided-rectangle", "divided-process"],
         ),
         ("fr-circ", &["framed-circle", "stop"]),
+        ("flip-tri", &["flipped-triangle", "manual-file"]),
+        ("notch-pent", &["notched-pentagon", "loop-limit"]),
     ];
     for (short, aliases) in groups {
         let expected = silhouette(&render(short));
@@ -225,6 +295,10 @@ fn implemented_names_stop_warning_and_others_do_not() {
         "divided-process",
         "fr-circ",
         "stop",
+        "flip-tri",
+        "manual-file",
+        "notch-pent",
+        "loop-limit",
     ] {
         assert!(
             warnings(name).is_empty(),
@@ -272,6 +346,8 @@ fn each_new_shape_has_an_accessible_description() {
         ("sm-circ", "small circle"),
         ("div-rect", "divided rectangle"),
         ("fr-circ", "framed circle"),
+        ("flip-tri", "downward triangle"),
+        ("notch-pent", "notched pentagon"),
     ] {
         assert!(
             render(shape).contains(want),

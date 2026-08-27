@@ -33,6 +33,11 @@ pub fn draw_shape<C: Canvas2dContext>(
             draw_rect(ctx, x, y, width, height, 0.0)
         }
         NodeShape::SmallCircle | NodeShape::FramedCircle => draw_circle(ctx, x, y, width, height),
+        // The pentagon reduces to its box; the flipped triangle is drawn properly, since canvas has
+        // the primitives for it and an UPSIDE-DOWN triangle would be a different shape, not a
+        // simplified one.
+        NodeShape::NotchedPentagon => draw_rect(ctx, x, y, width, height, 0.0),
+        NodeShape::FlippedTriangle => draw_flipped_triangle(ctx, x, y, width, height),
         NodeShape::Rect => draw_rect(ctx, x, y, width, height, 0.0),
         NodeShape::Rounded => draw_rect(ctx, x, y, width, height, 4.0),
         NodeShape::Stadium => draw_stadium(ctx, x, y, width, height),
@@ -332,6 +337,22 @@ fn draw_triangle<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64
     ctx.move_to(cx, y);
     ctx.line_to(x + w, y + h);
     ctx.line_to(x, y + h);
+    ctx.close_path();
+    ctx.fill();
+    ctx.stroke();
+}
+
+/// Draw a downward-pointing triangle — mermaid's `flip-tri` (bd-7ls21).
+///
+/// The vertical mirror of [`draw_triangle`], written out rather than derived: an upside-down
+/// triangle is a DIFFERENT shape, not a variant, and mermaid publishes both names.
+fn draw_flipped_triangle<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    let cx = x + w / 2.0;
+
+    ctx.begin_path();
+    ctx.move_to(x, y);
+    ctx.line_to(x + w, y);
+    ctx.line_to(cx, y + h);
     ctx.close_path();
     ctx.fill();
     ctx.stroke();

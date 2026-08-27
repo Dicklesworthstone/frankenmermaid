@@ -2448,6 +2448,8 @@ fn flowchart_metadata_shape(name: &str) -> Option<NodeShape> {
         "sm-circ" | "small-circle" | "start" => NodeShape::SmallCircle,
         "div-rect" | "div-proc" | "divided-rectangle" | "divided-process" => NodeShape::DividedRect,
         "fr-circ" | "framed-circle" | "stop" => NodeShape::FramedCircle,
+        "flip-tri" | "flipped-triangle" | "manual-file" => NodeShape::FlippedTriangle,
+        "notch-pent" | "notched-pentagon" | "loop-limit" => NodeShape::NotchedPentagon,
         _ => return None,
     })
 }
@@ -2506,7 +2508,7 @@ fn split_metadata_pairs(body: &str) -> Vec<&str> {
 /// list of shortNames alone can only ever answer for the half of authors who happened to pick one.
 /// Every entry below is a name the pinned 11.15.0 registry publishes as author-facing syntax
 /// (`shortName` or `aliases`); internal aliases like `rect_left_inv_arrow` are deliberately absent.
-const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 60] = [
+const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 54] = [
     "bang",
     "bolt",
     "bow-rect",
@@ -2531,8 +2533,6 @@ const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 60] = [
     "document",
     "documents",
     "flag",
-    "flip-tri",
-    "flipped-triangle",
     "h-cyl",
     "half-rounded-rectangle",
     "horizontal-cylinder",
@@ -2543,11 +2543,7 @@ const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 60] = [
     "lin-doc",
     "lined-cylinder",
     "lined-document",
-    "loop-limit",
-    "manual-file",
     "manual-input",
-    "notch-pent",
-    "notched-pentagon",
     "paper-tape",
     "processes",
     "procs",

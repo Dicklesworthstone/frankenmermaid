@@ -207,6 +207,8 @@ pub fn describe_node(node: &IrNode, ir: &MermaidDiagramIr) -> String {
         fm_core::NodeShape::SmallCircle => "small circle",
         fm_core::NodeShape::DividedRect => "divided rectangle",
         fm_core::NodeShape::FramedCircle => "framed circle",
+        fm_core::NodeShape::FlippedTriangle => "downward triangle",
+        fm_core::NodeShape::NotchedPentagon => "notched pentagon",
         fm_core::NodeShape::Rect => "rectangle",
         fm_core::NodeShape::Rounded => "rounded rectangle",
         fm_core::NodeShape::Stadium => "stadium shape",

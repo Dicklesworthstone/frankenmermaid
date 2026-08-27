@@ -1159,6 +1159,26 @@ pub enum NodeShape {
     /// ⚠️ NOT [`NodeShape::DoubleCircle`], which sizes both rings to the label. Both radii here are
     /// FIXED, for the same reason [`NodeShape::SmallCircle`]'s is: it is a terminal marker.
     FramedCircle,
+    /// mermaid's `flip-tri` / `manual-file`: a triangle with a horizontal TOP edge and its apex
+    /// pointing DOWN.
+    ///
+    /// Measured in Chromium 151 against the pinned 11.15.0 bundle — vertices `(0, -49.671875)`,
+    /// `(49.671875, -49.671875)`, `(24.8359375, 0)`: the top edge spans the full width and the apex
+    /// sits at the bottom centre.
+    ///
+    /// ⚠️ THE INVERSE of [`NodeShape::Triangle`], which points UP. mermaid publishes both, and a
+    /// renderer that drew one for the other would put a `manual-file` marker upside down.
+    FlippedTriangle,
+    /// mermaid's `notch-pent` / `loop-limit`: a rectangle with BOTH TOP CORNERS cut at an angle.
+    ///
+    /// Measured — vertices `(-16.26875, -27) (16.26875, -27) (20.3359375, -16.2) (20.3359375, 27)
+    /// (-20.3359375, 27) (-20.3359375, -16.2)`: the box is 40.67 x 54 and each cut runs 4.07
+    /// horizontally by 10.8 vertically, i.e. a tenth of the width by a fifth of the height. Held as
+    /// ratios because the box is label-sized.
+    ///
+    /// ⚠️ NOT [`NodeShape::NotchedRect`], which cuts ONE corner (the top-left) at 45°. Two published
+    /// names, two silhouettes.
+    NotchedPentagon,
 }
 
 /// Radius of [`NodeShape::SmallCircle`], in user units.
@@ -1179,6 +1199,14 @@ pub const FRAMED_CIRCLE_INNER_RADIUS: f32 = 2.5;
 /// Measured from mermaid 11.15.0's `div-rect`: a box spanning y -23.4..23.4 with its rule at
 /// y = -15.6, i.e. 7.8 of 46.8.
 pub const DIVIDED_RECT_HEADER_RATIO: f32 = 1.0 / 6.0;
+
+/// Horizontal and vertical extent of each corner cut on [`NodeShape::NotchedPentagon`], as a
+/// fraction of the box's width and height.
+///
+/// Measured from mermaid 11.15.0's `notch-pent`: a 40.67 x 54 box whose cuts run 4.07 by 10.8.
+pub const NOTCHED_PENTAGON_CUT_X_RATIO: f32 = 0.1;
+/// See [`NOTCHED_PENTAGON_CUT_X_RATIO`].
+pub const NOTCHED_PENTAGON_CUT_Y_RATIO: f32 = 0.2;
 
 /// Fraction of a node's width that slanted shapes inset their horizontal edges by.
 ///

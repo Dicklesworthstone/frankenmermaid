@@ -74,6 +74,11 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
         NodeShape::Asymmetric => asymmetric_path(bounds),
         NodeShape::Note => note_path(bounds),
         NodeShape::Triangle => triangle_path(bounds),
+        // bd-7ls21. The flipped triangle gets its OWN boundary rather than reusing `triangle_path`:
+        // the two fill opposite halves of the box, so sharing one would clip edges into empty space.
+        // The notched pentagon takes the conservative full box, its cuts only REMOVING area.
+        NodeShape::FlippedTriangle => flipped_triangle_path(bounds),
+        NodeShape::NotchedPentagon => rounded_rect_path(bounds, 0.0),
         NodeShape::Pentagon => polygon_path(bounds, 5, -std::f32::consts::FRAC_PI_2),
         NodeShape::Star => star_path(bounds, 5),
         NodeShape::Cloud => cloud_path(bounds),
@@ -306,6 +311,29 @@ pub fn triangle_path(bounds: LayoutRect) -> Vec<PathCmd> {
         PathCmd::MoveTo { x: cx, y },
         PathCmd::LineTo { x: x + w, y: y + h },
         PathCmd::LineTo { x, y: y + h },
+        PathCmd::Close,
+    ]
+}
+
+/// [`NodeShape::FlippedTriangle`]'s boundary: full-width top edge, apex at the bottom centre.
+///
+/// ⚠️ NOT `triangle_path` MIRRORED BY ACCIDENT — it is a genuinely different boundary. The upward
+/// triangle fills the BOTTOM of its box and the flipped one fills the TOP, so reusing either for the
+/// other puts an edge's clip point in the empty half. That is invisible in a shape test and shows up
+/// only as an arrow ending in white space.
+#[must_use]
+pub fn flipped_triangle_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let x = bounds.x;
+    let y = bounds.y;
+    let w = bounds.width;
+    let h = bounds.height;
+    vec![
+        PathCmd::MoveTo { x, y },
+        PathCmd::LineTo { x: x + w, y },
+        PathCmd::LineTo {
+            x: x + w / 2.0,
+            y: y + h,
+        },
         PathCmd::Close,
     ]
 }
