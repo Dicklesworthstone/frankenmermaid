@@ -110,11 +110,11 @@ fn bench_ir(nodes_per_subgraph: usize) -> MermaidDiagramIr {
         span: Span::at_line(2, 1),
         direction: None,
     });
-    for node_index in 0..nodes_per_subgraph {
-        ir.graph.nodes[node_index].subgraphs.push(IrSubgraphId(0));
+    for node in &mut ir.graph.nodes[..nodes_per_subgraph] {
+        node.subgraphs.push(IrSubgraphId(0));
     }
-    for node_index in nodes_per_subgraph..total {
-        ir.graph.nodes[node_index].subgraphs.push(IrSubgraphId(1));
+    for node in &mut ir.graph.nodes[nodes_per_subgraph..total] {
+        node.subgraphs.push(IrSubgraphId(1));
     }
 
     ir

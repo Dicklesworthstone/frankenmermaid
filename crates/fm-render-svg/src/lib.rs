@@ -5762,20 +5762,25 @@ fn write_er_cardinality_labels_into(
             // in the canvas would have been the forked-helper drift this repo keeps getting bitten
             // by, so the logic moved to the IR — it is a fact about the notation, not about drawing.
             let (left_label, right_label) = fm_core::parse_er_cardinality(notation);
-            // ⚠️ SUPPRESSED PER SIDE, AND ONLY WHERE A MARKER ACTUALLY CARRIES THE CARDINALITY
-            // (bd-m2t99). mermaid draws no cardinality text at all — it draws crow's-foot markers,
-            // which this renderer now does too (bd-dun16), so the label became a duplicate: er_basic
-            // drew 17 text runs to the incumbent's 13, and the four extra were these.
+            // ⚠️ THIS TEXT DUPLICATES THE CROW'S-FOOT MARKERS AND IS DRAWN ANYWAY. bd-m2t99 is
+            // BLOCKED, not merely unfinished, and this comment is here so the next person does not
+            // spend the afternoon rediscovering why.
             //
-            // But it is NOT an unconditional deletion, because the two mappings do not cover the same
-            // inputs. `parse_er_cardinality` has fallback arms — an unrecognised marker containing
-            // `{` degrades to `*` — while `parse_er_cardinality_forms` deliberately has none, since
-            // there is no "approximately a crow's foot". A notation the SHAPE table does not know
-            // therefore draws no marker, and deleting its label too would drop the cardinality from
-            // the document entirely. Text is the fallback carrier for exactly those sides.
-            let (left_form, right_form) = fm_core::parse_er_cardinality_forms(notation);
-            let left_label = if left_form.is_some() { "" } else { left_label };
-            let right_label = if right_form.is_some() { "" } else { right_label };
+            // mermaid draws no cardinality text at all — it encodes cardinality as markers, which
+            // this renderer now draws too (bd-dun16). So er_basic reports 17 drawn text runs against
+            // the incumbent's 13, and the four extra are these labels. Suppressing them is two lines,
+            // and those two lines were written, measured green (chromium_text_diff.mjs er_basic:
+            // AGREE, 13 runs, full text parity) and then REVERTED.
+            //
+            // WHAT STOPS IT: `the_three_renderers_agree_on_declared_text` in fm-cli. The terminal is
+            // a character grid and can never carry a marker, so the moment SVG stops drawing this
+            // text the three surfaces no longer agree on it — permanently, not until some follow-up
+            // lands. That gate is CORRECT; the divergence it reports is real, and editing it to let
+            // this through would be weakening a gate to land a change.
+            //
+            // WHAT IT NEEDS: a decision on whether one datum may be carried by DIFFERENT means on
+            // different surfaces (a shape on SVG, text on a terminal). That is bd-5k51.1's
+            // "backend-specific legitimate differences" question and does not belong in a renderer.
             let font_size = config.font_size * 0.7;
             if !left_label.is_empty() {
                 let p = &edge_path.points[0];

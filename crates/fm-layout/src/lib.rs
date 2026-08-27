@@ -19086,7 +19086,6 @@ mod tests {
             label: "subgraph:api".to_string(),
             node_indexes: [0, 1].into_iter().collect(),
             #[allow(clippy::iter_on_single_items)]
-            #[allow(clippy::iter_on_single_items)]
             edge_indexes: [0].into_iter().collect(),
             subgraph_indexes: [0].into_iter().collect(),
             depends_on: BTreeSet::new(),
@@ -19244,11 +19243,11 @@ mod tests {
             span: Span::at_line(2, 1),
             direction: None,
         });
-        for node_index in 0..nodes_per_subgraph {
-            ir.graph.nodes[node_index].subgraphs.push(IrSubgraphId(0));
+        for node in &mut ir.graph.nodes[..nodes_per_subgraph] {
+            node.subgraphs.push(IrSubgraphId(0));
         }
-        for node_index in nodes_per_subgraph..total {
-            ir.graph.nodes[node_index].subgraphs.push(IrSubgraphId(1));
+        for node in &mut ir.graph.nodes[nodes_per_subgraph..total] {
+            node.subgraphs.push(IrSubgraphId(1));
         }
         ir
     }
@@ -20137,11 +20136,11 @@ mod tests {
             span: Span::at_line(2, 1),
             direction: None,
         });
-        for node_index in 0..nodes_per_subgraph {
-            ir.graph.nodes[node_index].subgraphs.push(IrSubgraphId(0));
+        for node in &mut ir.graph.nodes[..nodes_per_subgraph] {
+            node.subgraphs.push(IrSubgraphId(0));
         }
-        for node_index in nodes_per_subgraph..total {
-            ir.graph.nodes[node_index].subgraphs.push(IrSubgraphId(1));
+        for node in &mut ir.graph.nodes[nodes_per_subgraph..total] {
+            node.subgraphs.push(IrSubgraphId(1));
         }
         ir
     }
