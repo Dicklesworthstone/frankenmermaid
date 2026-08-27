@@ -4003,6 +4003,21 @@ quality.
   measurement.
 
 
+### BLOCKED: sequence_20 host-admission precheck refused before an H2H invocation (2026-08-27)
+
+- **Bead:** `bd-8557`. **No ratio is claimed and none was produced.** Command:
+  `scripts/headtohead/measure_chain.sh --only sequence_20 --mode parse --dry-run`.
+- **Observed:** `/data` had **160G** free, then the precheck refused because the live incumbent-adjacent
+  host was already running `python3 benches/vs_pandas_harness.py` at **112% CPU**. Exit **4** is the
+  harness's competing-benchmark refusal; no build, equivalence pass, Rust arm, or Mermaid arm began.
+- **Controls and provenance:** no same-invocation A/A null and no executing ELF SHA exist, because the
+  admission gate stopped before either timed process was launched. The old local
+  `target/release/examples/headtohead` SHA (`efa4c340e84b1734740f0179f90da10079e5bbdf5b49b0155740fb0d70ec9a69`)
+  was deliberately not used: it is keyed to an older revision and cannot represent current `HEAD`.
+- **Verdict:** **REJECTED PRECONDITION, not a performance result.** Do not turn this into a ratio or
+  bypass the precheck; retry only in a genuinely clear host window with a freshly built current-HEAD
+  ELF, linked equivalence proof, and the harness's own same-invocation controls.
+
 ### BLOCKED: sequence_20 re-measurement refused by host admission, 493/900 attempts (2026-08-16)
 - **Bead:** `bd-8557`. **No ratio is claimed and none was produced.** This records a fully
   provenanced attempt that the admission gate refused, so the next agent does not repeat the setup.
