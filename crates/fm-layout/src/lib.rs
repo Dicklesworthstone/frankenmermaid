@@ -16276,6 +16276,12 @@ fn build_pair_node_edges(
 struct RankNeighbourCrossings {
     upper: Option<crate::egraph_ordering::FixedLayerCrossings>,
     lower: Option<crate::egraph_ordering::FixedLayerCrossings>,
+    /// Position map shared by both sides, reused across calls.
+    ///
+    /// ⚠️ A LOCAL `vec![]` HERE WOULD TRADE ONE DUPLICATED PASS FOR ONE ALLOCATION PER CALL, which
+    /// is not the trade this change is making. It is fully overwritten per call, so it never needs
+    /// clearing, only growing.
+    positions: Vec<usize>,
 }
 
 impl RankNeighbourCrossings {
@@ -16309,14 +16315,41 @@ impl RankNeighbourCrossings {
         pair_edges: &FxHashMap<(usize, usize), Vec<(usize, usize)>>,
     ) -> usize {
         let moving = ordering_by_rank.get(&rank).map_or(&[][..], Vec::as_slice);
-        let upper = match self.upper.as_mut() {
-            Some(counter) => counter.count(moving),
+        // ⚠️ THE SECOND SITE PAYING THE SAME DUPLICATED PASS. Both sides are handed the same
+        // `moving`, and each counter used to rewrite its own identical position map. Built once
+        // here for the same reason `LayerScorer::score` builds it once.
+        let domain = self
+            .upper
+            .as_ref()
+            .map(|counter| counter.position_domain())
+            .unwrap_or(0)
+            .max(
+                self.lower
+                    .as_ref()
+                    .map(|counter| counter.position_domain())
+                    .unwrap_or(0),
+            );
+        if self.positions.len() < domain {
+            self.positions.resize(domain, 0);
+        }
+        for (position, &node_id) in moving.iter().enumerate() {
+            if node_id < domain {
+                self.positions[node_id] = position;
+            }
+        }
+        let Self {
+            upper: upper_counter,
+            lower: lower_counter,
+            positions,
+        } = self;
+        let upper = match upper_counter.as_mut() {
+            Some(counter) => counter.count_at_positions(positions),
             None => rank.checked_sub(1).map_or(0, |upper_rank| {
                 pair_crossings(upper_rank, rank, ordering_by_rank, pair_edges)
             }),
         };
-        let lower = match self.lower.as_mut() {
-            Some(counter) => counter.count(moving),
+        let lower = match lower_counter.as_mut() {
+            Some(counter) => counter.count_at_positions(positions),
             None => pair_crossings(rank, rank.saturating_add(1), ordering_by_rank, pair_edges),
         };
         upper.saturating_add(lower)
