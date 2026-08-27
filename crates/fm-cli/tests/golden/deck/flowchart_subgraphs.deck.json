@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "1.0.0",
+  "schemaVersion": "1.1.0",
   "generator": "frankenmermaid",
   "diagramType": "Flowchart",
   "title": "Subgraph tour",
@@ -214,5 +214,65 @@
       "intro",
       "all"
     ]
+  },
+  "nodeGeometry": {
+    "fm-node-core1-2": {
+      "x": 537.05,
+      "y": 144.0,
+      "width": 100.0,
+      "height": 66.5
+    },
+    "fm-node-core2-3": {
+      "x": 757.05,
+      "y": 144.0,
+      "width": 100.0,
+      "height": 66.5
+    },
+    "fm-node-core3-4": {
+      "x": 977.05,
+      "y": 144.0,
+      "width": 109.95,
+      "height": 66.5
+    },
+    "fm-node-done-5": {
+      "x": 1207.0,
+      "y": 144.0,
+      "width": 105.0,
+      "height": 66.5
+    },
+    "fm-node-gate-1": {
+      "x": 315.35,
+      "y": 144.0,
+      "width": 101.7,
+      "height": 66.5
+    },
+    "fm-node-start-0": {
+      "x": 92.0,
+      "y": 144.0,
+      "width": 103.35,
+      "height": 66.5
+    }
+  },
+  "edgeEndpoints": {
+    "fm-edge-0": {
+      "fromElementId": "fm-node-start-0",
+      "toElementId": "fm-node-gate-1"
+    },
+    "fm-edge-1": {
+      "fromElementId": "fm-node-gate-1",
+      "toElementId": "fm-node-core1-2"
+    },
+    "fm-edge-2": {
+      "fromElementId": "fm-node-core1-2",
+      "toElementId": "fm-node-core2-3"
+    },
+    "fm-edge-3": {
+      "fromElementId": "fm-node-core2-3",
+      "toElementId": "fm-node-core3-4"
+    },
+    "fm-edge-4": {
+      "fromElementId": "fm-node-core3-4",
+      "toElementId": "fm-node-done-5"
+    }
   }
 }

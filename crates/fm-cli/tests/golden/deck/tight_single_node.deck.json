@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "1.0.0",
+  "schemaVersion": "1.1.0",
   "generator": "frankenmermaid",
   "diagramType": "Flowchart",
   "viewBox": {
@@ -160,5 +160,69 @@
     "fm-node-m5-4": [
       "whole"
     ]
+  },
+  "nodeGeometry": {
+    "fm-node-far-5": {
+      "x": 92.0,
+      "y": 144.0,
+      "width": 132.23,
+      "height": 66.5
+    },
+    "fm-node-m1-0": {
+      "x": 344.23,
+      "y": 144.0,
+      "width": 114.9,
+      "height": 66.5
+    },
+    "fm-node-m2-1": {
+      "x": 579.13,
+      "y": 144.0,
+      "width": 100.0,
+      "height": 66.5
+    },
+    "fm-node-m3-2": {
+      "x": 799.13,
+      "y": 144.0,
+      "width": 109.95,
+      "height": 66.5
+    },
+    "fm-node-m4-3": {
+      "x": 1029.07,
+      "y": 144.0,
+      "width": 101.7,
+      "height": 66.5
+    },
+    "fm-node-m5-4": {
+      "x": 1250.78,
+      "y": 144.0,
+      "width": 100.05,
+      "height": 66.5
+    }
+  },
+  "edgeEndpoints": {
+    "fm-edge-0": {
+      "fromElementId": "fm-node-m1-0",
+      "toElementId": "fm-node-m2-1"
+    },
+    "fm-edge-1": {
+      "fromElementId": "fm-node-m2-1",
+      "toElementId": "fm-node-m3-2"
+    },
+    "fm-edge-2": {
+      "fromElementId": "fm-node-m3-2",
+      "toElementId": "fm-node-m4-3"
+    },
+    "fm-edge-3": {
+      "fromElementId": "fm-node-m4-3",
+      "toElementId": "fm-node-m5-4"
+    },
+    "fm-edge-4": {
+      "fromElementId": "fm-node-m5-4",
+      "toElementId": "fm-node-far-5"
+    },
+    "fm-edge-5": {
+      "fromElementId": "fm-node-far-5",
+      "toElementId": "fm-node-m1-0"
+    }
   }
 }

@@ -7228,7 +7228,8 @@ impl Default for IrDeckOverview {
 
 /// The deck manifest schema version. Semver-as-string so external players can gate; within
 /// the 1.x line every change is ADDITIVE ONLY — removing or renaming a field is a major bump.
-pub const DECK_MANIFEST_SCHEMA_VERSION: &str = "1.0.0";
+/// 1.1.0 added `nodeGeometry` and `edgeEndpoints` (the morphing-runtime joins).
+pub const DECK_MANIFEST_SCHEMA_VERSION: &str = "1.1.0";
 
 /// A rectangle in SVG viewBox space, rounded to two decimals at build time.
 ///
@@ -7358,6 +7359,18 @@ pub struct DeckManifestSlide {
     pub steps: Vec<DeckManifestStep>,
 }
 
+/// The two endpoint node element ids of one rendered edge — the join that lets a morphing
+/// runtime redraw the edge live between its endpoints' animated positions (graphcon-deck
+/// parity: edges follow their nodes every frame instead of staying baked into static paths).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeckEdgeEndpoints {
+    /// Element id of the source node (`fm-node-{sanitized}-{index}`).
+    pub from_element_id: String,
+    /// Element id of the target node.
+    pub to_element_id: String,
+}
+
 /// The auto-appended overview scene: the whole diagram, optionally with a window-replay tour.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeckManifestOverview {
@@ -7407,6 +7420,15 @@ pub struct DeckManifest {
     /// click-a-dimmed-node-to-travel in O(1). `BTreeMap` for deterministic serialization.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub node_slide_index: BTreeMap<String, Vec<String>>,
+    /// elementId → tight node rect (viewBox space) for EVERY laid-out node in the diagram,
+    /// not just slide members: a morphing runtime animates off-slide nodes too (push-out
+    /// glide), and needs their home geometry without measuring the DOM. Additive in 1.1.0.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub node_geometry: BTreeMap<String, DeckRect>,
+    /// Edge elementId → its endpoint node element ids, for every IR edge whose endpoints
+    /// both have layout geometry (the only edges a runtime can re-anchor). Additive in 1.1.0.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub edge_endpoints: BTreeMap<String, DeckEdgeEndpoints>,
 }
 
 /// Whether deck manifests are emitted for this diagram family.
@@ -8278,35 +8300,36 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        ALLOWED_STYLE_PROPERTIES_REFERENCE, ArrowType, DECK_MANIFEST_SCHEMA_VERSION, DeckManifest,
-        DeckManifestCluster, DeckManifestEdge, DeckManifestNode, DeckManifestOptions,
-        DeckManifestOverview, DeckManifestSlide, DeckManifestStep, DeckRect, DegradationContext,
-        DegradationOperator, Diagnostic, DiagnosticCategory, DiagnosticSeverity,
-        DiagramPalettePreset, DiagramType, EdgeMap, FragmentAlternative, FragmentKind, GanttDate,
-        GanttExclude, GanttTickInterval, GraphDirection, IrActivation, IrAttributeKey, IrCluster,
-        IrClusterId, IrDeck, IrDeckEdgePolicy, IrDeckOptions, IrDeckOverview, IrDeckReveal,
-        IrDeckSlide, IrEdge, IrEdgeKind, IrEndpoint, IrEntityAttribute, IrGanttMeta,
-        IrGanttSection, IrGanttTask, IrGraphCluster, IrGraphEdge, IrGraphNode, IrInlineStyle,
-        IrLabel, IrLabelId, IrLifecycleEvent, IrNode, IrNodeId, IrNodeKind, IrParticipantGroup,
-        IrPort, IrPortId, IrPortSideHint, IrSequenceAutonumberRange, IrSequenceFragment,
-        IrSequenceMeta, IrSequenceNote, IrStyleDef, IrStyleRef, IrStyleTarget, IrSubgraph,
-        IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries, IrXySeriesKind, LifecycleEventKind,
-        MERMAID_SCHEMA_VERSION, MermaidBudgetLedger, MermaidConfig, MermaidDecisionWeight,
-        MermaidDegradationPlan, MermaidDiagramIr, MermaidError, MermaidErrorCode,
-        MermaidFallbackAction, MermaidFallbackPolicy, MermaidFidelity, MermaidGlyphMode,
-        MermaidGuardReport, MermaidLayoutDecisionAlternative, MermaidLayoutDecisionLedger,
-        MermaidLayoutDecisionRecord, MermaidLensBinding, MermaidLensEdit, MermaidLensEditResult,
-        MermaidLensError, MermaidNativePressureSignals, MermaidPressureReport, MermaidPressureTier,
-        MermaidQualityMode, MermaidSanitizeMode, MermaidSourceMap, MermaidSourceMapEntry,
-        MermaidSourceMapKind, MermaidSupportLevel, MermaidTextRange, MermaidWarningCode,
-        MermaidWasmPressureSignals, NodeMap, NodeSet, NodeShape, NotePosition, Position, Span,
-        StructuredDiagnostic, apply_lens_edit, build_lens_bindings, capability_matrix,
-        capability_matrix_json_pretty, capability_readme_supported_diagram_types_markdown,
-        capability_readme_surface_markdown, documented_diagram_types, is_allowed_style_property,
-        is_safe_link_target, mermaid_cluster_element_id, mermaid_edge_element_id,
-        mermaid_layout_guard_observability, mermaid_node_element_id, parse_mermaid_js_config_value,
-        parse_style_string, parse_style_string_with_rejections, resolve_span_text_range,
-        sanitize_style_value, scale_budget, to_init_parse,
+        ALLOWED_STYLE_PROPERTIES_REFERENCE, ArrowType, DECK_MANIFEST_SCHEMA_VERSION,
+        DeckEdgeEndpoints, DeckManifest, DeckManifestCluster, DeckManifestEdge, DeckManifestNode,
+        DeckManifestOptions, DeckManifestOverview, DeckManifestSlide, DeckManifestStep, DeckRect,
+        DegradationContext, DegradationOperator, Diagnostic, DiagnosticCategory,
+        DiagnosticSeverity, DiagramPalettePreset, DiagramType, EdgeMap, FragmentAlternative,
+        FragmentKind, GanttDate, GanttExclude, GanttTickInterval, GraphDirection, IrActivation,
+        IrAttributeKey, IrCluster, IrClusterId, IrDeck, IrDeckEdgePolicy, IrDeckOptions,
+        IrDeckOverview, IrDeckReveal, IrDeckSlide, IrEdge, IrEdgeKind, IrEndpoint,
+        IrEntityAttribute, IrGanttMeta, IrGanttSection, IrGanttTask, IrGraphCluster, IrGraphEdge,
+        IrGraphNode, IrInlineStyle, IrLabel, IrLabelId, IrLifecycleEvent, IrNode, IrNodeId,
+        IrNodeKind, IrParticipantGroup, IrPort, IrPortId, IrPortSideHint,
+        IrSequenceAutonumberRange, IrSequenceFragment, IrSequenceMeta, IrSequenceNote, IrStyleDef,
+        IrStyleRef, IrStyleTarget, IrSubgraph, IrSubgraphId, IrXyAxis, IrXyChartMeta, IrXySeries,
+        IrXySeriesKind, LifecycleEventKind, MERMAID_SCHEMA_VERSION, MermaidBudgetLedger,
+        MermaidConfig, MermaidDecisionWeight, MermaidDegradationPlan, MermaidDiagramIr,
+        MermaidError, MermaidErrorCode, MermaidFallbackAction, MermaidFallbackPolicy,
+        MermaidFidelity, MermaidGlyphMode, MermaidGuardReport, MermaidLayoutDecisionAlternative,
+        MermaidLayoutDecisionLedger, MermaidLayoutDecisionRecord, MermaidLensBinding,
+        MermaidLensEdit, MermaidLensEditResult, MermaidLensError, MermaidNativePressureSignals,
+        MermaidPressureReport, MermaidPressureTier, MermaidQualityMode, MermaidSanitizeMode,
+        MermaidSourceMap, MermaidSourceMapEntry, MermaidSourceMapKind, MermaidSupportLevel,
+        MermaidTextRange, MermaidWarningCode, MermaidWasmPressureSignals, NodeMap, NodeSet,
+        NodeShape, NotePosition, Position, Span, StructuredDiagnostic, apply_lens_edit,
+        build_lens_bindings, capability_matrix, capability_matrix_json_pretty,
+        capability_readme_supported_diagram_types_markdown, capability_readme_surface_markdown,
+        documented_diagram_types, is_allowed_style_property, is_safe_link_target,
+        mermaid_cluster_element_id, mermaid_edge_element_id, mermaid_layout_guard_observability,
+        mermaid_node_element_id, parse_mermaid_js_config_value, parse_style_string,
+        parse_style_string_with_rejections, resolve_span_text_range, sanitize_style_value,
+        scale_budget, to_init_parse,
     };
 
     fn sample_span(line: u32, start_col: u32, end_col: u32) -> Span {
@@ -8450,6 +8473,33 @@ mod tests {
             }],
             overview: DeckManifestOverview::default(),
             node_slide_index,
+            node_geometry: BTreeMap::from([
+                (
+                    mermaid_node_element_id("src", 0),
+                    DeckRect {
+                        x: 40.0,
+                        y: 262.5,
+                        width: 180.0,
+                        height: 64.0,
+                    },
+                ),
+                (
+                    mermaid_node_element_id("parser", 3),
+                    DeckRect {
+                        x: 420.0,
+                        y: 262.5,
+                        width: 232.2,
+                        height: 64.0,
+                    },
+                ),
+            ]),
+            edge_endpoints: BTreeMap::from([(
+                mermaid_edge_element_id(2),
+                DeckEdgeEndpoints {
+                    from_element_id: mermaid_node_element_id("src", 0),
+                    to_element_id: mermaid_node_element_id("parser", 3),
+                },
+            )]),
         }
     }
 
@@ -8481,7 +8531,9 @@ mod tests {
             top_level,
             [
                 "diagramType",
+                "edgeEndpoints",
                 "generator",
+                "nodeGeometry",
                 "nodeSlideIndex",
                 "options",
                 "overview",
@@ -8536,7 +8588,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["cameraContained", "elementId", "index", "step"]
         );
-        assert_eq!(manifest.schema_version, "1.0.0");
+        assert_eq!(
+            value["edgeEndpoints"]["fm-edge-2"]
+                .as_object()
+                .expect("edge endpoints object")
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["fromElementId", "toElementId"]
+        );
+        assert_eq!(manifest.schema_version, "1.1.0");
     }
 
     #[test]

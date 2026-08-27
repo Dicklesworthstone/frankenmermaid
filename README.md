@@ -542,12 +542,16 @@ The showcase's structural-edit toolbar runs entirely on the lens system. The sam
 ## Graph decks — presentations from a diagram
 
 Add a `%%{deck: …}%%` directive to any graph-family diagram and frankenmermaid turns it into
-a guided presentation: each slide is a camera move over the one rendered SVG, with non-members
-dimmed, reveal steps advancing on keypress, and a zoomed-out finale that replays every slide's
-window. The presentation model is inspired by
-[graphcon-deck](https://github.com/yoheinakajima/graphcon-deck) by Yohei Nakajima — reimagined
-so that positions come from the deterministic layout engine instead of being hand-placed, and
-the whole presentation is a machine-checkable artifact.
+a guided presentation in which the graph itself rearranges: every node floats freely, each
+slide's camera fits its members while every off-slide node glides out past the window edge,
+edges stretch live between their moving endpoints, reveal steps fly new nodes in on keypress,
+member nodes can be dragged (they spring back), and a zoomed-out finale replays every slide's
+window while the graph reshuffles around the touring frame. The presentation model is
+[graphcon-deck](https://github.com/yoheinakajima/graphcon-deck) by Yohei Nakajima —
+reimagined so that positions come from the deterministic layout engine instead of being
+hand-placed, and the whole presentation is a machine-checkable artifact. Under
+`prefers-reduced-motion` the same deck plays as static camera cuts with dim/reveal
+choreography and no motion.
 
 ```bash
 frankenmermaid deck talk.mmd -o talk.html     # self-contained presentation (SVG + manifest + runtime)

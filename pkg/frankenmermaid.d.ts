@@ -33,11 +33,18 @@ export interface DeckManifestOverview {
     enabled: boolean; title: string; caption?: string; tour: boolean;
 }
 
+/** One edge's endpoint node element ids — the live-edge join for morphing runtimes (1.1.0). */
+export interface DeckEdgeEndpoints { fromElementId: string; toElementId: string; }
+
 /** The renderer-agnostic presentation contract; additive-only within 1.x. */
 export interface DeckManifest {
     schemaVersion: string; generator: string; diagramType: string; title?: string;
     viewBox: DeckRect; options: DeckManifestOptions; slides: DeckManifestSlide[];
     overview: DeckManifestOverview; nodeSlideIndex?: Record<string, string[]>;
+    /** Home rect per laid-out node (viewBox space), whole diagram (1.1.0). */
+    nodeGeometry?: Record<string, DeckRect>;
+    /** Edge elementId -> endpoint node element ids (1.1.0). */
+    edgeEndpoints?: Record<string, DeckEdgeEndpoints>;
 }
 
 /** renderDeck() result: svg + manifest (null when no deck) + structured deck diagnostics. */

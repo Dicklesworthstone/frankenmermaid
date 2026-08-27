@@ -5,7 +5,9 @@ Drives crates/fm-cli/tests/fixtures/deck_runtime_fixture.html in headless Chromi
 asserts the full runtime contract: mount + SVG pinning, camera transform, dim/half/hidden
 focus classes, staggered step reveals, slide navigation, overview tour rect (presence +
 animation), click-a-dimmed-node travel, stage-scoped keyboard, tooltip toggle, freecam +
-Escape, and leak-free destroy(). 24 checks; exit 0 = all pass.
+Escape, leak-free destroy(), and MORPH MODE (bd-tm1q7): the morphing class, live edge
+layer, push-out exile of off-slide nodes, float-only members, parked engine paths, and
+drag spring-back. 32 checks; exit 0 = all pass.
 
 OPT-IN tooling, not a default gate: requires a Python with playwright + a downloaded
 chromium (any venv works: /path/to/venv/bin/python scripts/deck_runtime_e2e.py). The
@@ -54,6 +56,41 @@ with sync_playwright() as p:
     check("scene 0: off-slide d dimmed", dim_d)
     check("scene 0: step-1 b hidden", hid_b)
     check("counter shows steps", page.inner_text("#deck-num").strip() == "01 / 03 · 0/1", page.inner_text("#deck-num"))
+
+    # Morph mode (manifest 1.1.0): the graph itself rearranges — graphcon parity (bd-tm1q7)
+    page.wait_for_timeout(900)  # let the 6%/frame push easing act
+    check("morphing class armed", page.eval_on_selector(
+        ".fm-deck-viewport", "el => el.classList.contains('fm-deck-morphing')"))
+    check("live edge layer with 4 paths", page.locator(".fm-deck-live path").count() == 4)
+
+    def push_mag(tf):
+        try:
+            parts = tf.replace("translate(", "").replace(")", "").split()
+            return abs(float(parts[0])) + abs(float(parts[1]))
+        except Exception:
+            return -1.0
+    d_tf = page.eval_on_selector("#fm-node-d-3", "el => el.getAttribute('transform') || ''")
+    # d's full-ease exile for this geometry is ~168 units (ray-scaled just past the
+    # window + margin); 100 proves push-out is acting, distinct from the ±7 float bob.
+    check("off-slide d pushed out past the window", push_mag(d_tf) > 100, d_tf)
+    a_tf = page.eval_on_selector("#fm-node-a-0", "el => el.getAttribute('transform') || ''")
+    check("member a stays near home (float only)", 0 <= push_mag(a_tf) < 30, a_tf)
+    live_d = page.eval_on_selector(".fm-deck-live path", "el => el.getAttribute('d') || ''")
+    check("live edges carry path data", live_d.startswith("M "), live_d)
+    parked = page.eval_on_selector(
+        "#fm-edge-0",
+        "el => (el.tagName === 'path' ? el : el.querySelector('path'))"
+        ".classList.contains('fm-deck-parked')")
+    check("engine edge path parked", parked)
+    # Drag member a and release: it follows the pointer, then springs back home.
+    box = page.eval_on_selector("#fm-node-a-0", "el => { const r = el.getBoundingClientRect(); return {x: r.x + r.width / 2, y: r.y + r.height / 2}; }")
+    page.mouse.move(box["x"], box["y"]); page.mouse.down()
+    page.mouse.move(box["x"] + 120, box["y"] + 60, steps=5); page.wait_for_timeout(120)
+    dragged = push_mag(page.eval_on_selector("#fm-node-a-0", "el => el.getAttribute('transform') || ''"))
+    page.mouse.up(); page.wait_for_timeout(900)
+    settled = push_mag(page.eval_on_selector("#fm-node-a-0", "el => el.getAttribute('transform') || ''"))
+    check("drag moves member node", dragged > 60, dragged)
+    check("release springs it back home", 0 <= settled < 30, settled)
 
     page.click("#next"); page.wait_for_timeout(600)
     hid_b = page.eval_on_selector("#fm-node-b-1", "el => el.classList.contains('fm-deck-hidden')")
