@@ -1,5 +1,45 @@
 # Negative Evidence Ledger — frankenmermaid perf swarm
 
+### REJECT: bounding the post-pass CSS searches to the `<style>` block — right in principle, worth nothing measured (2026-08-27)
+
+- **The shape looked exactly like a defect this file already records fixing.** `strip_unused_state_css`
+  locates its region with up to four `memmem::find` calls over `svg.as_bytes()` — from byte 0 to the
+  end of the document — and `strip_unused_accent_css` does up to eight more, one per unused accent
+  palette. Every needle is a CSS rule, so it can only live before `body_start`, which the function
+  has already computed. `memmem::find` on an ABSENT needle reads everything before returning `None`,
+  and the needles ARE absent: `.fm-node-inactive { opacity:` appears in **0 of 41 goldens**. This is
+  the same absent-needle shape `scan_body_fm_node_classes` was written to fix for the 13 body needles.
+- **Measured: NOTHING, on three families.** Bounding all twelve searches to `..body_start` (arms from
+  a clean worktree differing only by these two functions, ELF hashes self-reported, base != cand,
+  null == base, load1 13.31 before / 15.63 after):
+
+      schema_catalog_25    A/B 0.999949 [0.999750,1.000421]  null 0.999974 [0.999684,1.000340]
+      flowchart_large_500  A/B 0.999994 [0.998931,1.002559]  null 1.000102 [0.998768,1.001209]
+      sequence_20          A/B 0.999666 [0.998909,1.000812]  null 1.000018 [0.998875,1.001268]
+
+  Every A/B range overlaps its null. Outputs byte-identical on all three.
+- **WHY, instrumented rather than guessed.** Counting entries to `strip_unused_state_css` per corpus:
+
+      er_corpus    entered 2,300x — 40% return at the 100 KB size gate, 0% at `state_used`,
+                   60% reach the region finds, mean document 50,278 bytes when they do
+      fc_corpus    entered 0x
+      seq_corpus   entered 0x
+
+  The pass NEVER RUNS for flowchart or sequence, so any lever inside it is inert there by
+  construction. On ER it does run, but SIMD substring search costs roughly one instruction per 32
+  bytes, so ~1,380 reaching calls x 4 needles x 50 KB is on the order of 0.1% of the job — at or
+  under the resolution of the instruction null, and bounding removes only the part past `<style>`.
+- **Verdict: REJECT the change, and note the reachability.** The bound is strictly tighter and
+  strictly safer (a body label containing one of these selector literals could previously match, and
+  the region strip would then edit the BODY) — it is simply not a performance lever. Anyone measuring
+  render post-passes should FIRST check the pass runs on their corpus at all: two of the three
+  families here never enter it.
+- **⚠️ And this does not explain `packedpair::Finder::find_impl` at 4.11%.** That symbol is prominent
+  on the ER profile while these finds account for ~0.1%, so the substring search is overwhelmingly
+  somewhere else. Two attempts to attribute libc/memchr leaves by call graph have now failed
+  (`--call-graph=dwarf` and `dwarf,32768` both stop at the leaf); that attribution needs a different
+  instrument, not another hypothesis.
+
 ### REJECT: sizing the SVG capacity hint for ER attribute rows — the hint IS 2x under and fixing it changes nothing (2026-08-27)
 
 - **The defect is real.** `layout_svg_capacity_hint` counts nodes, edges, clusters and a list of
