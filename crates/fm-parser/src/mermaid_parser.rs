@@ -1401,7 +1401,13 @@ fn lower_flow_document_item(
             // value so the owned `label` is MOVED into the interner (no `String` clone; see
             // `intern_node_label_owned`) instead of being cloned from a borrow.
             let span = span_for(line_number, source_line);
-            let node_id = if is_dangling_placeholder_node_id(id) {
+            // ⚠️ AND THE SAME SUBGRAPH GUARD AS `intern_flow_ast_node` (bd-honvo). This is the fast
+            // mirror of that arm, so a standalone `s1[Box]` naming an existing subgraph reaches HERE
+            // and nowhere else — guarding only the other site fixed `s1[Box] --> B` and left the
+            // bare `s1[Box]` statement still drawing a third box.
+            let node_id = if let Some(member) = builder.subgraph_endpoint_member(id) {
+                Some(member)
+            } else if is_dangling_placeholder_node_id(id) {
                 builder.intern_placeholder_node(id, span)
             } else {
                 builder.intern_node_label_owned(id, label, NodeShape::Rect, span)
@@ -3277,6 +3283,25 @@ fn intern_flow_ast_node(
         && warn_if_label_holds_unmatched_bracket(builder, &label.text, span)
     {
         return None;
+    }
+    // ⚠️ A NAME THAT IS ALREADY A SUBGRAPH IS THAT SUBGRAPH, LABEL AND ALL (bd-honvo). bd-pfibz
+    // covered the bare `s1 --> s2` spelling on the fast path; `s1[Box]` carries a label and comes
+    // through here, where it interned a THIRD node captioned `Box` beside the cluster called `s1`.
+    //
+    // ⚠️ THE LABEL IS DISCARDED, AND THAT IS MEASURED RATHER THAN ASSUMED. The bead was filed saying
+    // the reference RE-LABELS the subgraph; a Chromium 151 render of the pinned 11.15.0 bundle says
+    // otherwise — the cluster keeps its own title (`s1`, or `Original` when one was given) and no
+    // `Box` is drawn anywhere. The bead's title was corrected to match.
+    //
+    // The reference behaves identically whether `s1[Box]` is an edge endpoint or a standalone
+    // statement, so BOTH are guarded — but not both here. A standalone node has its own fast
+    // lowering path (the `FlowAst::Node` mirror in `lower_flow_ast_fast`) that never reaches this
+    // function, and guarding only this one left the standalone case drawing `Box` while the edge
+    // case was fixed. The guard sits at the flowchart sites rather than inside
+    // `intern_node_label`: that is shared with sequence, ER and requirement, where a `box` or an
+    // entity could collide with a participant name and be swallowed.
+    if let Some(member) = builder.subgraph_endpoint_member(&node.id) {
+        return Some(member);
     }
     let node_id = if is_dangling_placeholder_node_id(&node.id) {
         builder.intern_placeholder_node(&node.id, span)?

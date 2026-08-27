@@ -28,9 +28,11 @@
 //!                              so the phantom is still created (reference: 2 nodes, ours 4)
 //!   empty subgraph             we keep a cluster the reference drops entirely — a CLUSTER
 //!                              difference, unrelated to this fix and pre-existing
-//!   s1[Box] with subgraph s1   a labelled endpoint reusing the name: the reference re-labels the
-//!                              subgraph, we add a node. Deliberately outside the guard, which
-//!                              requires an endpoint with no label of its own
+//!   s1[Box] with subgraph s1   FIXED SINCE, as bd-honvo. It was pinned here at the broken value,
+//!                              that pin failed when the follow-up landed, and the note had to be
+//!                              updated rather than left stale. Note the bead was filed saying the
+//!                              reference RE-LABELS the subgraph; measuring showed it DISCARDS the
+//!                              label, and the bead's title was corrected before any code changed
 //! ```
 
 const ARROW: &str = "-->";
@@ -184,17 +186,27 @@ fn a_forward_reference_still_creates_the_phantom() {
     );
 }
 
-/// ⚠️ RESIDUE 2, PINNED: a labelled endpoint reusing a subgraph's name still adds a node.
+/// ⚠️ RESIDUE 2 IS NOW FIXED, AND THE PIN IS WHY THIS NOTE IS ACCURATE.
 ///
-/// `s1[Box]` is a node DECLARATION that happens to reuse the name, and the guard deliberately
-/// requires an endpoint with no label of its own — rewriting it would drop the author's box. The
-/// reference instead re-labels the subgraph. Which behaviour is right is a separate decision.
+/// When bd-pfibz landed, `s1[Box]` reusing a subgraph's name still added a node: the guard required
+/// an endpoint with no label of its own. That was filed as bd-honvo and pinned HERE at the broken
+/// value, so the follow-up could not land quietly — and it failed with an instruction to update
+/// rather than delete it.
+///
+/// bd-honvo then measured what the reference actually does (it DISCARDS the label; it does not
+/// re-label the subgraph, which is what that bead was filed claiming) and guarded both the
+/// edge-endpoint and the standalone-statement paths. Its subject now lives in
+/// `labelled_subgraph_name.rs`; what remains here is the assertion that the two fixes agree.
 #[test]
-fn a_labelled_endpoint_reusing_the_name_still_adds_a_node() {
+fn a_labelled_endpoint_reusing_the_name_resolves_to_the_subgraph() {
     let source = format!("flowchart LR\n  subgraph s1\n    A\n  end\n  s1[Box] {ARROW} B\n");
     assert_eq!(
         counts(&source),
-        (3, 1, 1),
-        "the labelled-endpoint case changed; the reference draws 2 nodes here — update the notes"
+        (2, 1, 1),
+        "the labelled-endpoint phantom is back"
+    );
+    assert!(
+        !node_ids(&source).iter().any(|id| id == "s1"),
+        "the subgraph name was interned as a node again"
     );
 }
