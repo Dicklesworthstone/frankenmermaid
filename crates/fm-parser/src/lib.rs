@@ -2718,8 +2718,18 @@ mod tests {
             plan.with_parse_scratch(index, input, &mut scratch, |actual| {
                 let expected = parse(input);
                 assert_eq!(
-                    actual.ir.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
-                    expected.ir.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+                    actual
+                        .ir
+                        .nodes
+                        .iter()
+                        .map(|n| n.id.as_str())
+                        .collect::<Vec<_>>(),
+                    expected
+                        .ir
+                        .nodes
+                        .iter()
+                        .map(|n| n.id.as_str())
+                        .collect::<Vec<_>>(),
                     "batch parse of input {index} disagrees with a full parse"
                 );
                 assert_eq!(actual.ir, &expected.ir);
@@ -2727,6 +2737,45 @@ mod tests {
                 // `batch_plan_reuses_builder_allocations_without_changing_parse_output` matters as
                 // its companion: that one asserts an ordinary batch still reuses its prefix, so a
                 // guard that refused everything would be caught there rather than here.
+            });
+        }
+    }
+
+    /// ⚠️ THE REFUSAL MUST BE ABOUT AN IDENTIFIER, NOT A SUBSTRING.
+    ///
+    /// The suffix declares `Late`, and the prefix contains the word `Lately` — which mentions those
+    /// four letters and refers to nothing. A substring test would refuse this prefix and quietly
+    /// cost the batch optimization on any diagram whose prose happens to contain a later id.
+    ///
+    /// Written because a negative-control arm that replaced the identifier-boundary check with an
+    /// unconditional `true` broke NOTHING: over-refusal is invisible unless a test asserts that a
+    /// safe prefix is still reused. This is that test.
+    #[test]
+    fn batch_prefix_is_still_reused_when_a_suffix_id_only_appears_as_a_substring() {
+        let shared = concat!(
+            "flowchart LR\n",
+            "  subgraph Shared[\"Shared ingestion platform for the batch\"]\n",
+            "    S0[\"Lately received and validated events\"]\n",
+            "    S0-->S1[\"Normalize\"]\n",
+            "  end\n",
+        );
+        let inputs = [
+            format!("{shared}  subgraph Late\n    L0[\"Later one\"]\n  end\n  L0-->A\n"),
+            format!("{shared}  subgraph Late\n    L0[\"Later two\"]\n  end\n  L0-->B\n"),
+        ];
+        let refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let plan =
+            FlowchartBatchParsePlan::new(&refs, MermaidParseMode::Compat, &ParserConfig::default());
+        let mut scratch = FlowchartBatchParseScratch::default();
+
+        for (index, input) in inputs.iter().enumerate() {
+            plan.with_parse_scratch(index, input, &mut scratch, |actual| {
+                let expected = parse(input);
+                assert_eq!(actual.ir, &expected.ir);
+                assert!(
+                    actual.reusable_prefix.is_some(),
+                    "input {index}: a safe prefix was refused because `Lately` contains `Late`"
+                );
             });
         }
     }

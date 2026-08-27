@@ -4,7 +4,6 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use chumsky::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
 use fm_core::{
     ArchitectureSide, ArrowType, Diagnostic, DiagnosticCategory, DiagramType, EdgeAnimation,
     GanttDate, GanttExclude, GanttTaskFlags, GanttTickInterval, GraphDirection, IrAttributeKey,
@@ -13,6 +12,7 @@ use fm_core::{
     IrXySeriesKind, MermaidParseMode, MermaidSupportLevel, NodeShape, Position, Span,
     is_safe_link_target, parse_mermaid_js_config_value, to_init_parse,
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -1618,7 +1618,10 @@ fn flow_forward_subgraph_members(items: &[FlowDocumentItem<'_>]) -> FxHashMap<St
         seen.insert(key.as_str());
         let mut target = first.as_str();
         // Bounded by the number of subgraphs: every hop consumes one unvisited key.
-        if let Some(next) = raw.get(target) {
+        while let Some(next) = raw.get(target) {
+            if !seen.insert(target) {
+                break;
+            }
             target = next.as_str();
         }
         resolved.insert(key.clone(), target.to_string());
@@ -1779,9 +1782,7 @@ fn subgraph_header_id(line: &str) -> Option<&str> {
         return None;
     }
     let rest = rest.trim_start();
-    let id_end = rest
-        .find(['[', '(', '{', ' ', '\t'])
-        .unwrap_or(rest.len());
+    let id_end = rest.find(['[', '(', '{', ' ', '\t']).unwrap_or(rest.len());
     let id = rest[..id_end].trim();
     (!id.is_empty()).then_some(id)
 }
