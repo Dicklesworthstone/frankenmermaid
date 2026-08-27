@@ -10,11 +10,11 @@
 //!   string x=29     email  x=93    UK   x=158     y=154
 //! ```
 //!
-//! ⚠️ THIS FIXES THE ORDER, NOT THE FUSION, and the distinction is deliberate. mermaid draws three
-//! separate text elements; we still draw one run (`int id PK`). Splitting the row into real cells
-//! needs per-column measurement agreed across all five consumers at once and is the open half of
-//! bd-xxvch. Fixing the order is complete and testable on its own, and the cells will need this
-//! order anyway.
+//! THE FUSION IS FIXED TOO. Both SVG writers now emit ONE TEXT ELEMENT PER FIELD at shared column
+//! offsets (`er_cell_columns`), so `int id PK` is three runs as mermaid draws it. er_basic's
+//! attribute cells now match the incumbent exactly — its only remaining surplus is the cardinality
+//! text, which is a separate question (mermaid encodes cardinality as crow's-foot MARKERS and we
+//! draw none, so our text is the only carrier we have).
 //!
 //! ⚠️ THE REAL CHANGE IS THAT THERE IS NOW ONE COMPOSITION. `IrEntityAttribute::display_row` replaces
 //! five hand-rolled copies of the same five lines — both fm-render-svg writers, fm-render-canvas,
@@ -53,15 +53,13 @@ fn attribute_rows(embed_theme_css: bool, source: &str) -> Vec<String> {
 const ENTITY: &str = "erDiagram\n    USER {\n        int id PK\n        string name\n        string email UK\n    }\n";
 
 #[test]
-fn the_key_is_drawn_after_the_name_not_before_the_type() {
+fn each_field_is_its_own_cell_in_mermaids_order() {
     let rows = attribute_rows(true, ENTITY);
-    assert!(
-        rows.iter().any(|row| row == "int id PK"),
-        "the fields must read type, name, key; drew {rows:?}"
-    );
-    assert!(
-        rows.iter().any(|row| row == "string email UK"),
-        "the fields must read type, name, key; drew {rows:?}"
+    // Three attributes: (int,id,PK), (string,name), (string,email,UK) => 8 cells.
+    assert_eq!(
+        rows,
+        vec!["int", "id", "PK", "string", "name", "string", "email", "UK"],
+        "each field must be its own run, in type/name/key order"
     );
 }
 
@@ -72,10 +70,15 @@ fn the_key_is_drawn_after_the_name_not_before_the_type() {
 fn the_key_first_spelling_is_never_drawn() {
     let rows = attribute_rows(true, ENTITY);
     assert!(
-        !rows
-            .iter()
-            .any(|row| row.starts_with("PK ") || row.starts_with("UK ")),
-        "an attribute still leads with its key modifier: {rows:?}"
+        !rows.iter().any(|row| row.contains(' ')),
+        "a row is still fused into one run instead of separate cells: {rows:?}"
+    );
+    // The key must FOLLOW its name, never precede its type.
+    let key_at = rows.iter().position(|row| row == "PK").expect("PK cell");
+    let name_at = rows.iter().position(|row| row == "id").expect("id cell");
+    assert!(
+        key_at > name_at,
+        "the key cell precedes the name it belongs to: {rows:?}"
     );
 }
 
@@ -83,22 +86,14 @@ fn the_key_first_spelling_is_never_drawn() {
 /// whole point of collapsing five copies into one. Checked through both SVG paths, which is where the
 /// drift actually happened.
 #[test]
-fn both_svg_paths_render_exactly_display_row() {
-    let ir = fm_parser::parse(ENTITY).ir;
-    let expected: Vec<String> = ir
-        .nodes
-        .iter()
-        .flat_map(|node| node.members.iter())
-        .map(fm_core::IrEntityAttribute::display_row)
-        .collect();
-    assert!(!expected.is_empty(), "the fixture declared no attributes");
-    for embed_theme_css in [true, false] {
-        assert_eq!(
-            attribute_rows(embed_theme_css, ENTITY),
-            expected,
-            "embed_theme_css={embed_theme_css}: the drawn rows differ from display_row"
-        );
-    }
+fn both_svg_paths_draw_identical_cells() {
+    let streaming = attribute_rows(true, ENTITY);
+    assert!(!streaming.is_empty(), "the fixture drew no attribute cells");
+    assert_eq!(
+        streaming,
+        attribute_rows(false, ENTITY),
+        "the streaming and Element ER writers disagree about the drawn cells"
+    );
 }
 
 /// CONTROL for a COMPOSITE key, which is why `key_prefix` exists at all: `PK, FK` is one token
@@ -109,8 +104,8 @@ fn a_composite_key_stays_one_token_and_stays_last() {
     let rows = attribute_rows(true, source);
     assert_eq!(
         rows,
-        vec!["string a PK,FK".to_string()],
-        "a composite key must remain one comma-joined token in the final position"
+        vec!["string", "a", "PK,FK"],
+        "a composite key must remain ONE comma-joined cell in the final position"
     );
 }
 
@@ -118,12 +113,14 @@ fn a_composite_key_stays_one_token_and_stays_last() {
 #[test]
 fn an_attribute_without_a_key_has_no_trailing_gap() {
     let rows = attribute_rows(true, ENTITY);
+    // `string name` contributes exactly two cells and no empty key cell.
     assert!(
-        rows.iter().any(|row| row == "string name"),
-        "an unkeyed attribute must draw exactly its type and name: {rows:?}"
+        rows.iter().all(|row| !row.is_empty()),
+        "an empty cell was emitted where a field is absent: {rows:?}"
     );
-    assert!(
-        !rows.iter().any(|row| row.ends_with(' ')),
-        "a row ends with a dangling separator: {rows:?}"
+    assert_eq!(
+        rows.iter().filter(|row| row.as_str() == "string").count(),
+        2,
+        "both string-typed attributes must contribute a type cell: {rows:?}"
     );
 }

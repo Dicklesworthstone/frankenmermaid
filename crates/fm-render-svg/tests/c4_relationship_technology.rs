@@ -63,8 +63,7 @@ fn runs(source: &str) -> Vec<String> {
     out
 }
 
-const WITH_TECHNOLOGY: &str =
-    "C4Context\n    title T\n    Person(a, \"A\")\n    System(b, \"B\")\n    Rel(a, b, \"Uses\", \"HTTPS\")\n";
+const WITH_TECHNOLOGY: &str = "C4Context\n    title T\n    Person(a, \"A\")\n    System(b, \"B\")\n    Rel(a, b, \"Uses\", \"HTTPS\")\n";
 
 #[test]
 fn the_label_and_the_technology_are_separate_runs() {

@@ -1406,34 +1406,93 @@ impl IrEntityAttribute {
     /// across all five consumers at once.
     #[must_use]
     pub fn display_row(&self) -> String {
-        // `key_prefix` carries a TRAILING space for its historical leading position; trimmed here
-        // because the key now follows the name rather than preceding the type.
-        let key = self.key_prefix();
-        let key = key.trim_end();
-        let comment = self.comment.as_deref().filter(|text| !text.is_empty());
-        let mut row = String::with_capacity(
-            self.data_type.len() + self.name.len() + key.len() + comment.map_or(0, str::len) + 3,
-        );
-        row.push_str(&self.data_type);
-        if !self.name.is_empty() {
+        // ⚠️ THE KEY COMES FROM `key_cell`, NOT `display_cells`. The borrowed cell form cannot build
+        // the comma-joined composite `PK,FK` and returns "" for it, so joining `display_cells`
+        // directly would DROP a junction table's key — reintroducing bd-nryyc exactly. Composing
+        // from `key_cell` keeps the row lossless; a cell-drawing renderer must do the same.
+        let key = self.key_cell();
+        let cells: [&str; 4] = [
+            self.data_type.as_str(),
+            self.name.as_str(),
+            key.as_ref(),
+            self.comment.as_deref().unwrap_or(""),
+        ];
+        let mut row = String::new();
+        for cell in cells {
+            if cell.is_empty() {
+                continue;
+            }
             if !row.is_empty() {
                 row.push(' ');
             }
-            row.push_str(&self.name);
-        }
-        if !key.is_empty() {
-            if !row.is_empty() {
-                row.push(' ');
-            }
-            row.push_str(key);
-        }
-        if let Some(text) = comment {
-            if !row.is_empty() {
-                row.push(' ');
-            }
-            row.push_str(text);
+            row.push_str(cell);
         }
         row
+    }
+
+    /// The attribute's four cells in mermaid's column order: type, name, key, comment.
+    ///
+    /// ⚠️ THE CELLS ARE THE DEFINITION; `display_row` is their space-joined form. Keeping the row a
+    /// DERIVED value is the point: a renderer that draws cells and a renderer that draws one string
+    /// cannot disagree about content, only about layout. Splitting the row into real columns
+    /// (bd-xxvch) is a change of PRESENTATION from here, not of meaning.
+    ///
+    /// An absent cell is the empty string rather than a missing entry, so the columns keep their
+    /// positions — mermaid leaves the key column blank for an unkeyed attribute rather than shifting
+    /// the name into it.
+    #[must_use]
+    pub fn display_cells(&self) -> [&str; 4] {
+        // `key_prefix` carries a TRAILING space from its historical leading position; the cell form
+        // has no separator of its own.
+        let key = match self.keys.as_slice() {
+            [] => "",
+            [IrAttributeKey::Pk] => "PK",
+            [IrAttributeKey::Fk] => "FK",
+            [IrAttributeKey::Uk] => "UK",
+            [IrAttributeKey::None] => "",
+            // A composite key allocates in `key_prefix`; the borrowed cell form cannot, so the
+            // caller that needs it goes through `composite_key_cell`.
+            _ => "",
+        };
+        [
+            self.data_type.as_str(),
+            self.name.as_str(),
+            key,
+            self.comment.as_deref().unwrap_or(""),
+        ]
+    }
+
+    /// The key cell as an owned string, including the comma-joined composite form.
+    ///
+    /// `display_cells` borrows and therefore cannot build `PK,FK`; this is the allocating companion
+    /// for the (rare) composite case, and it is what `display_row` and any cell-drawing renderer must
+    /// use so a junction table's key is not silently dropped — the defect bd-nryyc was filed for.
+    #[must_use]
+    pub fn key_cell(&self) -> Cow<'_, str> {
+        match self.keys.as_slice() {
+            [] | [IrAttributeKey::None] => Cow::Borrowed(""),
+            [single] => Cow::Borrowed(match single {
+                IrAttributeKey::Pk => "PK",
+                IrAttributeKey::Fk => "FK",
+                IrAttributeKey::Uk => "UK",
+                IrAttributeKey::None => "",
+            }),
+            many => {
+                let mut out = String::with_capacity(many.len() * 3);
+                for (index, key) in many.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(match key {
+                        IrAttributeKey::Pk => "PK",
+                        IrAttributeKey::Fk => "FK",
+                        IrAttributeKey::Uk => "UK",
+                        IrAttributeKey::None => "",
+                    });
+                }
+                Cow::Owned(out)
+            }
+        }
     }
 }
 

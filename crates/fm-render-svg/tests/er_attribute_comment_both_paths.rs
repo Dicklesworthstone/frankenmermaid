@@ -31,10 +31,9 @@
 //!   string x=29  email x=93    UK  x=158    y=154
 //! ```
 //!
-//! Matching that means splitting the row into measured cells across both SVG writers, the canvas and
-//! terminal renderers, and `er_attribute_row_width` — a cross-cutting change filed separately with
-//! those numbers rather than half-done here. This file pins only that the two SVG paths agree, which
-//! is a precondition for that work and a defect on its own.
+//! Both SVG writers now DO draw those cells, and the comment is mermaid's fourth column rather than
+//! a suffix on a fused row. This file still pins the property that mattered here: the two SVG paths
+//! agree with each other, whatever they draw.
 
 fn attribute_rows(embed_theme_css: bool) -> Vec<String> {
     let ir = fm_parser::parse("erDiagram\n    USER {\n        string name \"the display name\"\n        int id PK\n    }\n").ir;
@@ -90,13 +89,14 @@ fn both_svg_paths_draw_identical_attribute_rows() {
 #[test]
 fn the_reader_actually_finds_the_rows() {
     let rows = attribute_rows(true);
+    // Cells now, not rows: (string, name, "the display name") + (int, id, PK) = 6.
     assert_eq!(
         rows.len(),
-        2,
-        "two attributes were declared, so two rows must be read: {rows:?}"
+        6,
+        "two attributes were declared, so six cells must be read: {rows:?}"
     );
     assert!(
-        rows.iter().any(|row| row.contains("id")),
+        rows.iter().any(|row| row == "id"),
         "the uncommented attribute is missing: {rows:?}"
     );
 }

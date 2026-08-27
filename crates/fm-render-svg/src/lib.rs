@@ -8217,6 +8217,60 @@ fn write_class_compartments_into(
 /// branch's fast path, mirroring [`write_class_compartments_into`]; replaces ~2 + N `Element`s per
 /// entity (~400 for a 40-entity diagram) with one raw fragment.
 #[allow(clippy::too_many_arguments)]
+/// Left offsets of an ER attribute's four column cells, relative to the row's left edge.
+///
+/// Computed ONCE per entity from the widest cell in each column, so every row's cells line up — the
+/// property that makes a column a column. An empty column contributes no width and no gutter, which
+/// is why an entity with no keys and no comments is exactly as wide as its type and name need.
+///
+/// ⚠️ MEASURED HERE, NOT IN LAYOUT, and that asymmetry is deliberate. fm-layout sizes the entity BOX
+/// and deliberately over-estimates (it assumes the render font floor it cannot see), so its width is
+/// an upper bound rather than the exact figure. Placing cells needs the exact figure, and the
+/// renderer is the only side that knows the real font size. The two agree in the only way that
+/// matters: layout's box is at least as wide as the cells drawn inside it.
+fn er_cell_columns(
+    node: &fm_core::IrNode,
+    attr_font_size: f32,
+    config: &SvgRenderConfig,
+) -> [f32; 4] {
+    let metrics = config.font_metrics();
+    let metrics_size = metrics.font_size();
+    let scale = if metrics_size > 0.0 {
+        attr_font_size / metrics_size
+    } else {
+        1.0
+    };
+    let mut widths = [0.0_f32; 4];
+    for attr in &node.members {
+        let key = attr.key_cell();
+        let cells: [&str; 4] = [
+            attr.data_type.as_str(),
+            attr.name.as_str(),
+            key.as_ref(),
+            attr.comment.as_deref().unwrap_or(""),
+        ];
+        for (index, cell) in cells.iter().enumerate() {
+            if !cell.is_empty() {
+                widths[index] = widths[index].max(metrics.estimate_width(cell) * scale);
+            }
+        }
+    }
+    // One space-ish gutter between columns, matching the single space the joined row used to carry.
+    let gutter = attr_font_size * 0.5;
+    let mut offsets = [0.0_f32; 4];
+    let mut cursor = 0.0_f32;
+    for index in 0..4 {
+        offsets[index] = cursor;
+        if widths[index] > 0.0 {
+            cursor += widths[index] + gutter;
+        }
+    }
+    offsets
+}
+
+// `config` joined the signature so the cell columns can be measured with the same font metrics the
+// text is drawn at; the sibling streaming writers in this file carry the same allow.
+#[allow(clippy::too_many_arguments)]
 fn write_er_entity_into(
     f: &mut String,
     node: &fm_core::IrNode,
@@ -8259,7 +8313,20 @@ fn write_er_entity_into(
     // `stroke_width(0.8)` serializes via `write_number_into` -> two decimals ("0.80"), NOT "0.8".
     f.push_str("\" stroke-width=\"0.80\"/>");
 
-    // Attribute list.
+    // Attribute list, drawn as COLUMN CELLS (bd-xxvch).
+    //
+    // ⚠️ mermaid EMITS ONE TEXT ELEMENT PER FIELD, not one per row. Measured in Chromium 151 against
+    // the pinned 11.15.0 bundle, `int id PK` renders as three elements at fixed column offsets:
+    //
+    // ```text
+    //   int    x=29     id     x=93    PK   x=158     y=68
+    //   string x=29     name   x=93                   y=111
+    //   string x=29     email  x=93    UK   x=158     y=154
+    // ```
+    //
+    // The key column stays put when an attribute has no key — the name does NOT slide into it — so
+    // the offsets are computed once for the whole entity from the widest cell in each column.
+    let cell_columns = er_cell_columns(node, attr_font_size, config);
     let mut attr_y = y + header_height + attr_font_size * 0.9;
     for attr in &node.members {
         let font_weight = if attr.keys.is_empty() {
@@ -8267,24 +8334,34 @@ fn write_er_entity_into(
         } else {
             "bold"
         };
-        f.push_str("<text x=\"");
-        let _ = write_number_into(f, x + 8.0);
-        f.push_str("\" y=\"");
-        let _ = write_number_into(f, attr_y);
-        f.push_str("\" text-anchor=\"start\" dominant-baseline=\"central\" font-size=\"");
-        let _ = write_number_into(f, attr_font_size);
-        f.push_str("\" font-weight=\"");
-        f.push_str(font_weight);
-        f.push_str("\" fill=\"");
-        let _ = write_escaped_attr(f, fill);
-        f.push_str("\" class=\"fm-er-attribute\">");
-        // Shared composition — see `IrEntityAttribute::display_row`: type, name, key, comment, in
-        // mermaid's own column order. Escaped whole rather than in pieces now that one call builds it.
-        let _ = write_escaped_text(f, &attr.display_row());
-        // The COMMENT (bd-jerh) is now part of `display_row` rather than appended here: it is
-        // mermaid's fourth column and belongs with the other three. It is still concatenated rather
-        // than given a real cell — that is the open half of bd-xxvch.
-        f.push_str("</text>");
+        // ⚠️ THE KEY CELL COMES FROM `key_cell`, which is the only form that can build a composite
+        // `PK,FK`. Reading the borrowed `display_cells` key here would drop a junction table's key
+        // exactly as bd-nryyc did.
+        let key = attr.key_cell();
+        let cells: [&str; 4] = [
+            attr.data_type.as_str(),
+            attr.name.as_str(),
+            key.as_ref(),
+            attr.comment.as_deref().unwrap_or(""),
+        ];
+        for (index, cell) in cells.iter().enumerate() {
+            if cell.is_empty() {
+                continue;
+            }
+            f.push_str("<text x=\"");
+            let _ = write_number_into(f, x + 8.0 + cell_columns[index]);
+            f.push_str("\" y=\"");
+            let _ = write_number_into(f, attr_y);
+            f.push_str("\" text-anchor=\"start\" dominant-baseline=\"central\" font-size=\"");
+            let _ = write_number_into(f, attr_font_size);
+            f.push_str("\" font-weight=\"");
+            f.push_str(font_weight);
+            f.push_str("\" fill=\"");
+            let _ = write_escaped_attr(f, fill);
+            f.push_str("\" class=\"fm-er-attribute\">");
+            let _ = write_escaped_text(f, cell);
+            f.push_str("</text>");
+        }
         attr_y += attr_font_size * 1.3;
     }
 }
@@ -10984,41 +11061,46 @@ fn render_node(
 
                 // Attribute list
                 let mut attr_y = y + header_height + attr_font_size * 0.9;
+                let cell_columns = er_cell_columns(node, attr_font_size, config);
                 for attr in &node.members {
-                    // ⚠️ THE COMMENT BELONGS HERE TOO, and its absence was an asymmetric sibling:
-                    // the streaming writer appended it and this `Element` path did not, so
-                    // `USER { string name "the display name" }` drew the comment under the default
-                    // config and DROPPED it whenever `embed_theme_css` was off — a rendering switch
-                    // with nothing to do with content deciding whether the author's text appears.
-                    //
-                    // Layout was already on the streaming path's side: `er_attribute_row_width`
-                    // measures the concatenation INCLUDING the comment, so this path was reserving
-                    // width for a string it then refused to draw.
-                    let attr_text = attr.display_row();
                     let font_weight = if attr.keys.is_empty() {
                         "normal"
                     } else {
                         "bold"
                     };
-                    let mut attr_elem = Element::text()
-                        .x(x + 8.0)
-                        .y(attr_y)
-                        .content(&attr_text)
-                        .attr("text-anchor", "start")
-                        .attr("dominant-baseline", "central")
-                        .attr_num("font-size", attr_font_size)
-                        .attr("font-weight", font_weight)
-                        .font_family_unless_embedded_css(
-                            &config.font_family,
-                            config.embed_theme_css,
-                        )
-                        .fill(&colors.text)
-                        .class("fm-er-attribute");
-                    attr_elem = apply_label_class(attr_elem);
-                    if let Some(style) = text_style.as_deref() {
-                        attr_elem = attr_elem.attr("style", style);
+                    // Column cells, in lockstep with the streaming writer — see `er_cell_columns`.
+                    // The key comes from `key_cell` so a composite `PK,FK` survives (bd-nryyc).
+                    let key = attr.key_cell();
+                    let cells: [&str; 4] = [
+                        attr.data_type.as_str(),
+                        attr.name.as_str(),
+                        key.as_ref(),
+                        attr.comment.as_deref().unwrap_or(""),
+                    ];
+                    for (index, cell) in cells.iter().enumerate() {
+                        if cell.is_empty() {
+                            continue;
+                        }
+                        let mut attr_elem = Element::text()
+                            .x(x + 8.0 + cell_columns[index])
+                            .y(attr_y)
+                            .content(*cell)
+                            .attr("text-anchor", "start")
+                            .attr("dominant-baseline", "central")
+                            .attr_num("font-size", attr_font_size)
+                            .attr("font-weight", font_weight)
+                            .font_family_unless_embedded_css(
+                                &config.font_family,
+                                config.embed_theme_css,
+                            )
+                            .fill(&colors.text)
+                            .class("fm-er-attribute");
+                        attr_elem = apply_label_class(attr_elem);
+                        if let Some(style) = text_style.as_deref() {
+                            attr_elem = attr_elem.attr("style", style);
+                        }
+                        group = group.child(attr_elem);
                     }
-                    group = group.child(attr_elem);
                     attr_y += attr_font_size * 1.3;
                 }
             }
@@ -18665,6 +18747,7 @@ marker#arrow-open path {
             );
 
             let mut rows = 0_usize;
+            let mut baselines: Vec<f32> = Vec::new();
             for chunk in group.split("<text ").skip(1) {
                 if !chunk.contains("class=\"fm-er-attribute\"") {
                     continue;
@@ -18682,9 +18765,27 @@ marker#arrow-open path {
                     baseline - half_glyph,
                     baseline + half_glyph
                 );
+                // ⚠️ COUNT ROWS BY BASELINE, NOT BY ELEMENT. Since bd-xxvch an attribute is drawn as
+                // COLUMN CELLS — one `<text>` per field — so counting elements counts cells and this
+                // assertion would read "2 rows" for a single two-cell attribute. A row is a distinct
+                // `y`, which is exactly what the original check meant and what the box must contain.
+                if !baselines
+                    .iter()
+                    .any(|seen: &f32| (seen - baseline).abs() < 0.01)
+                {
+                    baselines.push(baseline);
+                }
                 rows += 1;
             }
-            assert_eq!(rows, count, "{count}: not every attribute row was emitted");
+            assert!(
+                rows >= count,
+                "{count}: attribute cells are missing entirely"
+            );
+            assert_eq!(
+                baselines.len(),
+                count,
+                "{count}: not every attribute row was emitted"
+            );
         }
     }
 
