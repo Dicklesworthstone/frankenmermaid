@@ -1699,6 +1699,7 @@ impl IrBuilder {
             menu_links: Vec::new(),
             class_meta: None,
             requirement_meta: None,
+            journey_meta: None,
             c4_meta: None,
             inline_style: None,
         };
@@ -2136,6 +2137,7 @@ impl IrBuilder {
             menu_links: Vec::new(),
             class_meta: None,
             requirement_meta: None,
+            journey_meta: None,
             c4_meta: None,
             inline_style: None,
         });
@@ -2184,6 +2186,19 @@ impl IrBuilder {
         self.mark_reusable_prefix_node_dirty(node_id);
         if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
             node.classes.push(normalized_class.to_string());
+        }
+    }
+
+    /// Record a journey step's actors as the author wrote them (bd-mq273).
+    ///
+    /// Separate from the `journey-actor-*` classes beside it: those are a STYLING hook and are
+    /// normalized for CSS, so they cannot round-trip a name containing a space.
+    pub(crate) fn set_journey_actors(&mut self, node_id: IrNodeId, actors: Vec<String>) {
+        if actors.is_empty() {
+            return;
+        }
+        if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
+            node.journey_meta = Some(Box::new(fm_core::IrJourneyNodeMeta { actors }));
         }
     }
 

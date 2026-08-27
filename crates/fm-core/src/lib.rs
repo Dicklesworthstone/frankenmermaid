@@ -1566,6 +1566,21 @@ pub struct IrClassMember {
     pub is_abstract: bool,
 }
 
+/// A journey step's actors, as the AUTHOR wrote them (bd-mq273).
+///
+/// ⚠️ THE CSS CLASSES CANNOT CARRY THIS, which is the whole reason the field exists. The parser also
+/// records each actor as `journey-actor-<name>` for styling, and a class name may not contain a
+/// space — `normalize_compound_identifier` turns `Big Corp` into `Big_Corp`. Anything that recovers
+/// the actor from that class therefore announces or draws an underscore the author never typed, and
+/// `Big_Corp` is indistinguishable from a genuine underscore, so the mapping cannot be undone.
+///
+/// The classes stay for styling. Text that a reader or a screen reader sees comes from here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+pub struct IrJourneyNodeMeta {
+    /// Actors in source order, each exactly as written, already split on `,` and trimmed.
+    pub actors: Vec<String>,
+}
+
 /// Stereotype annotation for a class (e.g., `<<interface>>`, `<<abstract>>`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ClassStereotype {
@@ -1660,6 +1675,10 @@ pub struct IrNode {
     /// Requirement-diagram metadata (type, id, text, risk, verifymethod). Boxed — see `class_meta`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requirement_meta: Option<Box<IrRequirementNodeMeta>>,
+    /// Journey step actors as the author wrote them (bd-mq273). Boxed like its siblings so a node
+    /// in any other diagram family pays one null pointer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journey_meta: Option<Box<IrJourneyNodeMeta>>,
     /// C4-diagram-specific metadata (element type, technology, description). Boxed — see `class_meta`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub c4_meta: Option<Box<IrC4NodeMeta>>,
@@ -5432,6 +5451,40 @@ impl IrGitGraphMeta {
     #[must_use]
     pub fn lane_of(&self, node_index: usize) -> usize {
         self.commit_lanes.get(&node_index).copied().unwrap_or(0)
+    }
+}
+
+/// The display name mermaid gives a requirement's type (bd-…req).
+///
+/// ⚠️ THE KEYWORD IS NOT THE LABEL. mermaid keeps a `RequirementType` table mapping each authored
+/// keyword to a spaced, title-cased string, and draws THAT:
+///
+/// ```text
+///   requirement            -> Requirement
+///   functionalRequirement  -> Functional Requirement
+///   interfaceRequirement   -> Interface Requirement
+///   performanceRequirement -> Performance Requirement
+///   physicalRequirement    -> Physical Requirement
+///   designConstraint       -> Design Constraint
+/// ```
+///
+/// Transcribed from the pinned 11.15.0 bundle's own `this.RequirementType = {…}`, and confirmed
+/// against its db: `functionalRequirement LoginReq { … }` stores `type: "Functional Requirement"`.
+/// We drew the raw keyword, so a reader saw `functionalRequirement` where mermaid shows
+/// `Functional Requirement`.
+///
+/// An unrecognised keyword is returned unchanged rather than mangled — a future mermaid type this
+/// table has not learned yet should still display what the author wrote.
+#[must_use]
+pub fn requirement_type_display(raw: &str) -> &str {
+    match raw.trim() {
+        "requirement" => "Requirement",
+        "functionalRequirement" => "Functional Requirement",
+        "interfaceRequirement" => "Interface Requirement",
+        "performanceRequirement" => "Performance Requirement",
+        "physicalRequirement" => "Physical Requirement",
+        "designConstraint" => "Design Constraint",
+        other => other,
     }
 }
 

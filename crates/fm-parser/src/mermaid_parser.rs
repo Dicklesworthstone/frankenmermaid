@@ -6832,6 +6832,7 @@ fn add_journey_actor_classes(
     };
 
     let mut has_actor_class = false;
+    let mut actors: Vec<String> = Vec::new();
     for actor in actors_raw
         .split(',')
         .filter_map(|actor| clean_label(Some(actor)))
@@ -6842,6 +6843,15 @@ fn add_journey_actor_classes(
         }
         let actor_class = format!("journey-actor-{}", normalize_compound_identifier(&actor));
         builder.add_class_to_node_id(step_node, &actor_class);
+        // ⚠️ THE RAW NAME IS KEPT SEPARATELY, because the class above cannot hold it. A CSS class
+        // may not contain a space, so `normalize_compound_identifier` turns `Big Corp` into
+        // `Big_Corp` — and anything that recovers the actor by stripping the `journey-actor-`
+        // prefix then announces or draws an underscore the author never typed. That is exactly what
+        // the accessible name did before this field existed (bd-mq273): `actors: Big_Corp`.
+        actors.push(actor);
+    }
+    if !actors.is_empty() {
+        builder.set_journey_actors(step_node, actors);
     }
 }
 
@@ -7314,11 +7324,15 @@ fn parse_packet(input: &str, builder: &mut IrBuilder) {
                 .trim();
             if !label.is_empty() {
                 let field_id = format!("pkt-field-{field_index}");
-                let display_label = if range.contains('-') {
-                    format!("{label}\n[{range}]")
-                } else {
-                    label.to_string()
-                };
+                // ⚠️ THE BIT RANGE IS NOT PART OF THE LABEL (bd-…packet). mermaid draws a field as
+                // THREE text runs — the name, the start bit and the end bit — placed at the field's
+                // edges: `0-3: "A"` gives ["A","0","3"]. We baked `A\n[0-3]` into the name, so the
+                // numbers were text inside the box instead of scale markings beside it, and the
+                // range appeared twice for any reader who also saw the axis.
+                //
+                // The range is already recorded structurally on `IrPacketField`, which is where the
+                // renderer now reads it from.
+                let display_label = label.to_string();
 
                 if let Some(node_id) =
                     builder.intern_node(&field_id, Some(&display_label), NodeShape::Rect, span)
@@ -13616,7 +13630,8 @@ fn parse_c4_fast_context_call(
     if let Some(arguments) = c4_fast_arguments(line, "Person") {
         return parse_c4_fast_node(
             arguments,
-            "Person",
+            // mermaid's own type string, matching the slow path's table (bd-…c4).
+            "person",
             NodeShape::Rounded,
             &["c4", "c4-person"],
             span,
@@ -13628,7 +13643,7 @@ fn parse_c4_fast_context_call(
     if let Some(arguments) = c4_fast_arguments(line, "System") {
         return parse_c4_fast_node(
             arguments,
-            "System",
+            "system",
             NodeShape::Rect,
             &["c4", "c4-system"],
             span,
@@ -13827,14 +13842,36 @@ fn c4_node_classes(function_name: &str) -> &'static [&'static str] {
 }
 
 fn c4_node_meta(function_name: &str, arguments: &[String]) -> IrC4NodeMeta {
+    // ⚠️ THE VARIANT IS THE INFORMATION, and it used to be thrown away here. All six System
+    // spellings collapsed to `"System"`, so `System_Ext(email, …)` and `System(web, …)` rendered
+    // IDENTICALLY — the external boundary, the database and the queue simply vanished. mermaid keeps
+    // twenty distinct strings and draws each one verbatim: its renderer is
+    // `.text("<<" + t.typeC4Shape.text + ">>")`, and its grammar calls
+    // `addPersonOrSystem("external_system", …)` for `System_Ext`.
+    //
+    // The technology/description ARGUMENT INDICES still key off the base family — those are a
+    // property of the macro's arity, not of the variant — which is why the two are separated below.
     let (element_type, technology_index, description_index) = match function_name {
-        "Person" | "Person_Ext" => ("Person", None, Some(2)),
-        "System" | "System_Ext" | "SystemDb" | "SystemDb_Ext" | "SystemQueue"
-        | "SystemQueue_Ext" => ("System", None, Some(2)),
-        "Container" | "Container_Ext" | "ContainerDb" | "ContainerDb_Ext" | "ContainerQueue"
-        | "ContainerQueue_Ext" => ("Container", Some(2), Some(3)),
-        "Component" | "Component_Ext" | "ComponentDb" | "ComponentDb_Ext" | "ComponentQueue"
-        | "ComponentQueue_Ext" => ("Component", Some(2), Some(3)),
+        "Person" => ("person", None, Some(2)),
+        "Person_Ext" => ("external_person", None, Some(2)),
+        "System" => ("system", None, Some(2)),
+        "System_Ext" => ("external_system", None, Some(2)),
+        "SystemDb" => ("system_db", None, Some(2)),
+        "SystemDb_Ext" => ("external_system_db", None, Some(2)),
+        "SystemQueue" => ("system_queue", None, Some(2)),
+        "SystemQueue_Ext" => ("external_system_queue", None, Some(2)),
+        "Container" => ("container", Some(2), Some(3)),
+        "Container_Ext" => ("external_container", Some(2), Some(3)),
+        "ContainerDb" => ("container_db", Some(2), Some(3)),
+        "ContainerDb_Ext" => ("external_container_db", Some(2), Some(3)),
+        "ContainerQueue" => ("container_queue", Some(2), Some(3)),
+        "ContainerQueue_Ext" => ("external_container_queue", Some(2), Some(3)),
+        "Component" => ("component", Some(2), Some(3)),
+        "Component_Ext" => ("external_component", Some(2), Some(3)),
+        "ComponentDb" => ("component_db", Some(2), Some(3)),
+        "ComponentDb_Ext" => ("external_component_db", Some(2), Some(3)),
+        "ComponentQueue" => ("component_queue", Some(2), Some(3)),
+        "ComponentQueue_Ext" => ("external_component_queue", Some(2), Some(3)),
         _ => ("C4", None, None),
     };
 

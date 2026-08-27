@@ -4099,6 +4099,79 @@ fn render_layout_to_svg(
         );
     }
 
+    // PACKET BIT MARKINGS. mermaid labels each field with its name and, separately, the first and
+    // last bit of its range — `0-3: "A"` draws ["A","0","3"] — so the numbers read as a scale beside
+    // the field rather than as text inside it.
+    //
+    // ⚠️ A SINGLE-BIT FIELD GETS ONE NUMBER, NOT TWO. `0: "Flag"` draws ["Flag","0"], measured on the
+    // pinned bundle. Emitting both ends unconditionally would print `0` twice on every one-bit flag,
+    // which every multi-bit fixture agrees with and no single-bit one does.
+    if let Some(packet_meta) = ir.packet_meta.as_ref() {
+        for field in &packet_meta.fields {
+            let Some(node_box) = layout
+                .nodes
+                .iter()
+                .find(|candidate| candidate.node_index == field.node.0)
+            else {
+                continue;
+            };
+            let bit_y = node_box.bounds.y + offset_y - 4.0;
+            let mut marks: Vec<(f32, TextAnchor, u32)> = vec![(
+                node_box.bounds.x + offset_x,
+                TextAnchor::Start,
+                field.start_bit,
+            )];
+            if field.end_bit != field.start_bit {
+                marks.push((
+                    node_box.bounds.x + offset_x + node_box.bounds.width,
+                    TextAnchor::End,
+                    field.end_bit,
+                ));
+            }
+            for (x, anchor, bit) in marks {
+                doc = doc.child(
+                    TextBuilder::new(&bit.to_string())
+                        .x(x)
+                        .y(bit_y)
+                        .anchor(anchor)
+                        .font_family_unless_embedded_css(
+                            &config.font_family,
+                            config.embed_theme_css,
+                        )
+                        .font_size(config.font_size - 4.0)
+                        .fill(&theme.colors.text)
+                        .class("fm-packet-bit")
+                        .build(),
+                );
+            }
+        }
+    }
+
+    // The journey ACTOR LEGEND, which mermaid draws and we drew nowhere (bd-mq273).
+    //
+    // Measured on the pinned 11.15.0 bundle, `journey_basic` gives the run order
+    // ["System","User","Browse","Visit homepage",…,"User Shopping Journey"] — the actors come FIRST,
+    // each exactly once, and SORTED rather than in source order: `One: 3: Zed` then `Two: 4: Alpha`
+    // draws ["Alpha","Zed"]. A step naming several actors contributes each of them separately, so
+    // `One: 3: Bob, Ann` draws ["Ann","Bob"].
+    //
+    // ⚠️ FROM `journey_meta`, NOT FROM THE `journey-actor-*` CLASSES. Those are CSS-normalized, so a
+    // legend built from them would draw `Big_Corp` for an author who wrote `Big Corp` — the same
+    // defect the accessible name carried until this change.
+    for actor in journey_actor_legend(ir) {
+        doc = doc.child(
+            TextBuilder::new(&actor.name)
+                .x(padding + actor.offset_x)
+                .y(padding + config.font_size * 2.0 + 12.0)
+                .anchor(TextAnchor::Start)
+                .font_family_unless_embedded_css(&config.font_family, config.embed_theme_css)
+                .font_size(config.font_size - 2.0)
+                .fill(&theme.colors.text)
+                .class("fm-journey-actor")
+                .build(),
+        );
+    }
+
     // Stream all bands (sequence lifelines / journey sections / xychart columns) into ONE raw fragment
     // instead of building N `<g><rect/></g>` element trees as separate `doc.child`ren. Byte-identical:
     // `write_layout_band_into` emits the same bytes `render_layout_band(..).write_to_string` does, and the
@@ -6989,10 +7062,14 @@ fn render_xychart_svg(
             .class("fm-xychart-plot"),
     );
 
-    for tick_index in 0..=4 {
-        let tick_ratio = tick_index as f32 / 4.0;
+    // Nice tick values, not quarter points (see `xychart_nice_step`).
+    for tick_value in xychart_y_ticks(y_min, y_max) {
+        let tick_ratio = if (y_max - y_min).abs() > f32::EPSILON {
+            (tick_value - y_min) / (y_max - y_min)
+        } else {
+            0.0
+        };
         let tick_y = plot_y + plot_bounds.height - (plot_bounds.height * tick_ratio);
-        let tick_value = y_min + (y_max - y_min) * tick_ratio;
         doc = doc.child(
             Element::line()
                 .x1(plot_x)
@@ -7169,8 +7246,14 @@ fn render_xychart_svg(
 
     // Tick marks at axis edges (small lines at each grid level and category center).
     let tick_len = 5.0_f32;
-    for tick_index in 0..=4_u32 {
-        let frac = tick_index as f32 / 4.0;
+    // The SAME values the labels use — a tick mark beside a different set of labels is worse than
+    // no tick mark, and these two loops previously agreed only because both hardcoded quarters.
+    for tick_value in xychart_y_ticks(y_min, y_max) {
+        let frac = if (y_max - y_min).abs() > f32::EPSILON {
+            (tick_value - y_min) / (y_max - y_min)
+        } else {
+            0.0
+        };
         let y = plot_bottom - frac * plot_bounds.height;
         doc = doc.child(
             Element::line()
@@ -7655,6 +7738,110 @@ fn write_xychart_mark_accessible_name(
         }
         None => out.push_str("/>"),
     }
+}
+
+/// The "nice" y-axis step mermaid uses: d3's `tickStep(min, max, 10)`.
+///
+/// MERMAID DOES NOT DIVIDE THE RANGE, IT SNAPS TO 1/2/5 x 10^k. We emitted five ticks at quarter
+/// points, so `y-axis 4000 --> 11000` labelled 5750 and 9250 — values that appear nowhere on a
+/// chart anyone would draw by hand. Measured across six ranges on the pinned 11.15.0 bundle, every
+/// one of which this reproduces exactly:
+///
+/// ```text
+///   0 -> 10        step 1        0 -> 100        step 10
+///   0 -> 1         step 0.1      0 -> 7          step 0.5
+///   100 -> 900     step 100      4000 -> 11000   step 500
+/// ```
+///
+/// The thresholds are d3's own — sqrt(50), sqrt(10), sqrt(2) — and they are not round numbers.
+/// `0 -> 7` is the case that needs them: the raw step is 0.7, whose error 7.0 sits between sqrt(10)
+/// and sqrt(50), so the factor is 5 and the step 0.5. A rule using 7.5 as the cutoff picks 1.0
+/// there and still agrees with mermaid on all five other ranges.
+fn xychart_nice_step(min: f32, max: f32) -> f64 {
+    const COUNT: f64 = 10.0;
+    let span = f64::from(max) - f64::from(min);
+    if !span.is_finite() || span <= 0.0 {
+        return 0.0;
+    }
+    let raw = span / COUNT;
+    let power = raw.log10().floor();
+    let error = raw / 10.0_f64.powf(power);
+    let factor = if error >= 50.0_f64.sqrt() {
+        10.0
+    } else if error >= 10.0_f64.sqrt() {
+        5.0
+    } else if error >= 2.0_f64.sqrt() {
+        2.0
+    } else {
+        1.0
+    };
+    10.0_f64.powf(power) * factor
+}
+
+/// The y values mermaid labels, ascending: every multiple of the nice step inside `[min, max]`.
+///
+/// Falls back to the endpoints when the range is degenerate or the step would produce an absurd
+/// number of ticks, so a malformed axis cannot spin here.
+fn xychart_y_ticks(min: f32, max: f32) -> Vec<f32> {
+    let step = xychart_nice_step(min, max);
+    if step <= 0.0 {
+        return vec![min];
+    }
+    let first = (f64::from(min) / step).ceil();
+    let last = (f64::from(max) / step).floor();
+    let count = last - first;
+    if !count.is_finite() || count < 0.0 || count > 200.0 {
+        return vec![min, max];
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let ticks: Vec<f32> = (0..=(count as i64))
+        .map(|index| ((first + index as f64) * step) as f32)
+        .collect();
+    if ticks.is_empty() {
+        vec![min, max]
+    } else {
+        ticks
+    }
+}
+
+/// One entry of the journey actor legend: the actor's name and where it sits on the legend row.
+pub(crate) struct JourneyLegendEntry {
+    pub(crate) name: String,
+    pub(crate) offset_x: f32,
+}
+
+/// The actors a journey declares, deduplicated and sorted, as mermaid lists them (bd-mq273).
+///
+/// Empty for every other diagram type, and for a journey whose steps name no actor — an empty legend
+/// row must not reserve space or draw a stray separator.
+fn journey_actor_legend(ir: &MermaidDiagramIr) -> Vec<JourneyLegendEntry> {
+    if ir.diagram_type != DiagramType::Journey {
+        return Vec::new();
+    }
+    let mut names: Vec<&str> = ir
+        .nodes
+        .iter()
+        .filter_map(|node| node.journey_meta.as_deref())
+        .flat_map(|meta| meta.actors.iter().map(String::as_str))
+        .collect();
+    // Sorted then deduped, which is the order mermaid draws them in and NOT source order.
+    names.sort_unstable();
+    names.dedup();
+
+    let mut offset = 0.0_f32;
+    names
+        .into_iter()
+        .map(|name| {
+            let entry = JourneyLegendEntry {
+                name: name.to_string(),
+                offset_x: offset,
+            };
+            // Advance by the name's own width so entries do not overlap; the constant is the same
+            // average-character estimate the rest of this renderer sizes text with.
+            offset += (name.chars().count() as f32).mul_add(8.0, 24.0);
+            entry
+        })
+        .collect()
 }
 
 fn format_xychart_tick_value(value: f32) -> String {
@@ -8899,8 +9086,13 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
     let subtitle_font_size = clamp_font_size(font_size * 0.75, config.min_font_size);
     let mut text_y = y + h * 0.25 + font_size * 0.35;
     if let Some(req_type) = meta.requirement_type.as_deref() {
-        // Stream `«{type}»` — «/» are non-XML-special, so this is byte-identical to escaping the
-        // `format!("\u{00ab}{req_type}\u{00bb}")` whole, without the per-node String.
+        // ⚠️ `<<Type>>`, NOT `«keyword»`, and both halves changed. mermaid draws
+        // `` `<<${n.type}>>` `` with ASCII angles — the same wrapper this renderer already uses for a
+        // CLASS stereotype — and `n.type` is the DISPLAY name from its `RequirementType` table, not
+        // the authored keyword. We drew `«functionalRequirement»` where mermaid draws
+        // `<<Functional Requirement>>`: wrong words inside a wrapper we spell differently from our
+        // own class path. `>` IS XML-special, so the escaper writes the whole thing.
+        let req_type = fm_core::requirement_type_display(req_type);
         write_req_subtitle_body_into(
             out,
             cx,
@@ -8911,9 +9103,9 @@ fn write_requirement_node_fragment_into<const A11Y: bool>(
             &colors.text,
             "fm-req-type-label",
             |f| {
-                f.push('\u{00ab}');
+                let _ = write_escaped_text(f, "<<");
                 let _ = write_escaped_text(f, req_type);
-                f.push('\u{00bb}');
+                let _ = write_escaped_text(f, ">>");
             },
         );
         text_y += font_size * 0.85;
@@ -9690,6 +9882,20 @@ fn render_node(
     let raw_label_text = sankey_label.as_deref().unwrap_or(raw_label_text);
     let label_text = truncate_label(raw_label_text, detail.node_label_max_chars);
     let node_font_size = detail.node_font_size;
+    // ⚠️ A PACKET FIELD IS NEVER ELLIPSIZED, because its box width is the PROTOCOL, not a layout
+    // choice. `fit_node_label_text` shrinks a label to 10px and then cuts it, which is right for a
+    // node whose box was sized for its text — and wrong for a one-bit field, whose width is fixed at
+    // one bit by the diagram's own semantics. `0: "Flag"` drew `Fl…` at 10px; mermaid draws `Flag`
+    // and lets it overflow. Losing the field's NAME to keep it inside a box the author never chose
+    // is the worse trade, and the name is the only thing identifying the field.
+    let unbounded_label_width = ir.diagram_type == DiagramType::PacketBeta;
+    let fit_width = |available: f32| {
+        if unbounded_label_width {
+            f32::MAX
+        } else {
+            available
+        }
+    };
     let label_may_overflow = label_text.lines().any(|line| {
         line.chars().count() as f32
             * config.avg_char_width
@@ -10160,7 +10366,7 @@ fn render_node(
                     cx,
                     cy + node_font_size / 3.0,
                     node_font_size,
-                    (w - 16.0).max(node_font_size),
+                    fit_width((w - 16.0).max(node_font_size)),
                     (h - 16.0).max(node_font_size),
                     config,
                     colors,
@@ -10402,7 +10608,7 @@ fn render_node(
                     cx,
                     cy + node_font_size / 3.0,
                     node_font_size,
-                    (w * 0.8).max(node_font_size),
+                    fit_width((w * 0.8).max(node_font_size)),
                     (h * 0.8).max(node_font_size),
                     config,
                     colors,
@@ -10546,7 +10752,8 @@ fn render_node(
             let stream_req_subtitles =
                 config.embed_theme_css && !emit_classdef_classes && text_style.is_none();
             if let Some(ref req_type) = req_meta.requirement_type {
-                let type_label = format!("\u{00ab}{req_type}\u{00bb}");
+                // Same contract as the streaming path above: mermaid's display name, ASCII angles.
+                let type_label = format!("<<{}>>", fm_core::requirement_type_display(req_type));
                 if stream_req_subtitles {
                     let mut f = String::new();
                     write_req_subtitle_into(
@@ -10597,7 +10804,7 @@ fn render_node(
                 cx,
                 text_y,
                 node_font_size,
-                (w - 20.0).max(node_font_size),
+                fit_width((w - 20.0).max(node_font_size)),
                 (h - 20.0).max(node_font_size),
                 config,
                 colors,
@@ -10829,7 +11036,7 @@ fn render_node(
                 content_left + (content_width / 2.0),
                 start_y,
                 node_font_size,
-                (content_width - 16.0).max(node_font_size),
+                fit_width((content_width - 16.0).max(node_font_size)),
                 (content_height - 16.0).max(node_font_size),
                 config,
                 colors,
@@ -18758,10 +18965,13 @@ marker#arrow-open path {
                 &svg[from..from + svg[from..].find('<').unwrap()]
             })
             .collect();
+        // ⚠️ EIGHT, NOT SEVEN, and the extra one is the chart's END BOUNDARY (bd-pqp2f). The axis
+        // used to stop at the last day a bar OCCUPIED; mermaid labels the exclusive end — measured
+        // on `gantt_basic`, where it draws 2026-01-08 and we drew only through 2026-01-07.
         assert_eq!(
             tick_labels.len(),
-            7,
-            "expected 7 daily ticks over a 6-day span, got {tick_labels:?}"
+            8,
+            "expected a daily tick per day through the chart end, got {tick_labels:?}"
         );
         assert!(
             tick_labels.contains(&"2026-01-01") && tick_labels.contains(&"2026-01-04"),
