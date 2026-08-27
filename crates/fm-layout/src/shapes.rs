@@ -101,6 +101,16 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
         // The small circle is a fixed-radius marker, but its BOUNDS still come from layout, so the
         // boundary follows the bounds like every other round shape.
         NodeShape::SmallCircle | NodeShape::FramedCircle => polygon_ellipse_path(bounds, 24),
+        // bd-7ls21. The sloped rectangle gets its OWN boundary — its top edge is not horizontal, so
+        // a full box would let an edge stop inside the empty wedge above the slope.
+        NodeShape::SlopedRect => sloped_rect_path(bounds),
+        // ⚠️ The horizontal cylinder takes the conservative BOX, and deliberately does NOT reuse
+        // `cylinder_path`: that one is the VERTICAL capsule, whose caps are on the top and bottom.
+        // Reusing it would be the `FlippedTriangle` mistake — a boundary rotated ninety degrees away
+        // from the drawn shape. A box is a superset of the capsule, so an edge stops slightly early
+        // rather than in the wrong place; a rotated capsule builder would be strictly better and is
+        // the obvious follow-up.
+        NodeShape::HorizontalCylinder => rounded_rect_path(bounds, 0.0),
     }
 }
 
@@ -309,6 +319,26 @@ pub fn triangle_path(bounds: LayoutRect) -> Vec<PathCmd> {
     let cx = x + w / 2.0;
     vec![
         PathCmd::MoveTo { x: cx, y },
+        PathCmd::LineTo { x: x + w, y: y + h },
+        PathCmd::LineTo { x, y: y + h },
+        PathCmd::Close,
+    ]
+}
+
+/// [`NodeShape::SlopedRect`]'s boundary: bottom edge full width, top edge sloping UP to the right.
+///
+/// The top-left corner drops `SLOPED_RECT_DROP_RATIO` of the height, matching the drawn shape, so an
+/// edge arriving from the upper left stops on the slope rather than in the empty wedge above it.
+#[must_use]
+pub fn sloped_rect_path(bounds: LayoutRect) -> Vec<PathCmd> {
+    let x = bounds.x;
+    let y = bounds.y;
+    let w = bounds.width;
+    let h = bounds.height;
+    let drop = h * fm_core::SLOPED_RECT_DROP_RATIO;
+    vec![
+        PathCmd::MoveTo { x, y: y + drop },
+        PathCmd::LineTo { x: x + w, y },
         PathCmd::LineTo { x: x + w, y: y + h },
         PathCmd::LineTo { x, y: y + h },
         PathCmd::Close,

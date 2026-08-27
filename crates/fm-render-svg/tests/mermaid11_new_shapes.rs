@@ -21,6 +21,11 @@
 //!               (20.3359375,27) (-20.3359375,27) (-20.3359375,-16.2)
 //!               a 40.67x54 box with BOTH top corners cut, 4.07 by 10.8 each —
 //!               a tenth of the width by a fifth of the height
+//!   sl-rect     vertices (-20.3359375,-27) (-20.3359375,27) (20.3359375,27)
+//!               (20.3359375,-54): the top edge SLOPES UP to the right, the
+//!               top-left corner sitting 27 of that 81-unit span below the top
+//!   h-cyl       arcs "a5.031948881789138,15.75 0,0,1" capping a body of 23.2 —
+//!               `Cylinder` rotated a quarter turn, inner arc on the LEFT end
 //! ```
 //!
 //! ⚠️ MERMAID'S SECOND PATH IS NOT GEOMETRY. These go through rough.js, whose sketch overlay
@@ -123,6 +128,49 @@ fn each_new_shape_draws_its_measured_silhouette() {
         "notch-pent did not cut both top corners: {}",
         silhouette(&pentagon)
     );
+
+    // Top-left drops 66.50/3 = 22.17 below the box top at y=92.
+    let sloped = render("sl-rect");
+    assert!(
+        sloped.contains("M92 114.17 L192 92 L192 158.50 L92 158.50 Z"),
+        "sl-rect has no sloping top edge: {}",
+        silhouette(&sloped)
+    );
+
+    // Caps on the LEFT and RIGHT ends: rx = 100*0.1 = 10, ry = 66.50/2 = 33.25.
+    let horizontal = render("h-cyl");
+    assert!(
+        horizontal.contains("A10 33.25"),
+        "h-cyl is not capped on its ends: {}",
+        silhouette(&horizontal)
+    );
+}
+
+/// ⚠️ THE CYLINDER MUST NOT BE THE VERTICAL ONE ROTATED BY ACCIDENT — or worse, reused outright.
+///
+/// `cyl` caps TOP and BOTTOM (`A50 6.65`, radii wide-and-flat); `h-cyl` caps LEFT and RIGHT
+/// (`A10 33.25`, narrow-and-tall). Both are capsules with the same bounding box and the same command
+/// sequence, so a test asserting "it has arcs" or "it is a closed path" passes on either. The radii
+/// are what distinguish them.
+#[test]
+fn the_horizontal_cylinder_is_not_the_vertical_one() {
+    let vertical = render("cyl");
+    let horizontal = render("h-cyl");
+    assert!(
+        vertical.contains("A50 6.65"),
+        "the vertical cylinder lost its wide flat caps: {}",
+        silhouette(&vertical)
+    );
+    assert!(
+        horizontal.contains("A10 33.25"),
+        "the horizontal cylinder lost its tall narrow caps: {}",
+        silhouette(&horizontal)
+    );
+    assert_ne!(
+        silhouette(&vertical),
+        silhouette(&horizontal),
+        "the two cylinder orientations render identically"
+    );
 }
 
 /// ⚠️ THE TWO TRIANGLES POINT OPPOSITE WAYS, and this is the assertion that catches a mirror bug.
@@ -224,6 +272,8 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
         "fr-circ",
         "flip-tri",
         "notch-pent",
+        "sl-rect",
+        "h-cyl",
     ] {
         let sig = silhouette(&render(shape));
         assert!(!sig.is_empty(), "{shape} drew no geometry at all");
@@ -241,7 +291,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
 /// name that resolves to nothing tells an author to fix a spelling that was already correct.
 #[test]
 fn every_published_alias_draws_the_same_shape() {
-    let groups: [(&str, &[&str]); 7] = [
+    let groups: [(&str, &[&str]); 9] = [
         ("notch-rect", &["card", "notched-rectangle"]),
         (
             "lin-rect",
@@ -260,6 +310,8 @@ fn every_published_alias_draws_the_same_shape() {
         ("fr-circ", &["framed-circle", "stop"]),
         ("flip-tri", &["flipped-triangle", "manual-file"]),
         ("notch-pent", &["notched-pentagon", "loop-limit"]),
+        ("sl-rect", &["sloped-rectangle", "manual-input"]),
+        ("h-cyl", &["horizontal-cylinder", "das"]),
     ];
     for (short, aliases) in groups {
         let expected = silhouette(&render(short));
@@ -299,6 +351,10 @@ fn implemented_names_stop_warning_and_others_do_not() {
         "manual-file",
         "notch-pent",
         "loop-limit",
+        "sl-rect",
+        "manual-input",
+        "h-cyl",
+        "das",
     ] {
         assert!(
             warnings(name).is_empty(),
@@ -348,6 +404,8 @@ fn each_new_shape_has_an_accessible_description() {
         ("fr-circ", "framed circle"),
         ("flip-tri", "downward triangle"),
         ("notch-pent", "notched pentagon"),
+        ("sl-rect", "sloped rectangle"),
+        ("h-cyl", "horizontal cylinder"),
     ] {
         assert!(
             render(shape).contains(want),

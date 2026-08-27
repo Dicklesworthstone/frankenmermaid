@@ -1179,6 +1179,19 @@ pub enum NodeShape {
     /// ⚠️ NOT [`NodeShape::NotchedRect`], which cuts ONE corner (the top-left) at 45°. Two published
     /// names, two silhouettes.
     NotchedPentagon,
+    /// mermaid's `sl-rect` / `manual-input`: a rectangle whose TOP EDGE SLOPES UP to the right.
+    ///
+    /// Measured in Chromium 151 against the pinned 11.15.0 bundle — vertices `(-20.3359375, -27)
+    /// (-20.3359375, 27) (20.3359375, 27) (20.3359375, -54)`: the drawn shape spans y -54..27, and
+    /// its top-LEFT corner sits at -27, a THIRD of that 81-unit span below the top-right corner.
+    /// Held as a ratio because the box is label-sized.
+    SlopedRect,
+    /// mermaid's `h-cyl` / `das`: a cylinder lying on its SIDE.
+    ///
+    /// Measured — arcs of `a5.031948881789138,15.75 0,0,1` capping a body of length 23.2: the same
+    /// capsule as [`NodeShape::Cylinder`] rotated a quarter turn, with the inner arc on the LEFT end
+    /// rather than the top.
+    HorizontalCylinder,
 }
 
 /// Radius of [`NodeShape::SmallCircle`], in user units.
@@ -1207,6 +1220,12 @@ pub const DIVIDED_RECT_HEADER_RATIO: f32 = 1.0 / 6.0;
 pub const NOTCHED_PENTAGON_CUT_X_RATIO: f32 = 0.1;
 /// See [`NOTCHED_PENTAGON_CUT_X_RATIO`].
 pub const NOTCHED_PENTAGON_CUT_Y_RATIO: f32 = 0.2;
+
+/// How far down [`NodeShape::SlopedRect`]'s top-LEFT corner sits, as a fraction of the box height.
+///
+/// Measured from mermaid 11.15.0's `sl-rect`: the shape spans y -54..27 (81 units) with its
+/// top-left corner at y=-27, i.e. 27 of 81.
+pub const SLOPED_RECT_DROP_RATIO: f32 = 1.0 / 3.0;
 
 /// Fraction of a node's width that slanted shapes inset their horizontal edges by.
 ///

@@ -2450,6 +2450,8 @@ fn flowchart_metadata_shape(name: &str) -> Option<NodeShape> {
         "fr-circ" | "framed-circle" | "stop" => NodeShape::FramedCircle,
         "flip-tri" | "flipped-triangle" | "manual-file" => NodeShape::FlippedTriangle,
         "notch-pent" | "notched-pentagon" | "loop-limit" => NodeShape::NotchedPentagon,
+        "sl-rect" | "sloped-rectangle" | "manual-input" => NodeShape::SlopedRect,
+        "h-cyl" | "horizontal-cylinder" | "das" => NodeShape::HorizontalCylinder,
         _ => return None,
     })
 }
@@ -2508,7 +2510,7 @@ fn split_metadata_pairs(body: &str) -> Vec<&str> {
 /// list of shortNames alone can only ever answer for the half of authors who happened to pick one.
 /// Every entry below is a name the pinned 11.15.0 registry publishes as author-facing syntax
 /// (`shortName` or `aliases`); internal aliases like `rect_left_inv_arrow` are deliberately absent.
-const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 54] = [
+const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 48] = [
     "bang",
     "bolt",
     "bow-rect",
@@ -2522,7 +2524,6 @@ const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 54] = [
     "comment",
     "curv-trap",
     "curved-trapezoid",
-    "das",
     "data-store",
     "datastore",
     "delay",
@@ -2533,9 +2534,7 @@ const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 54] = [
     "document",
     "documents",
     "flag",
-    "h-cyl",
     "half-rounded-rectangle",
-    "horizontal-cylinder",
     "hourglass",
     "internal-storage",
     "lightning-bolt",
@@ -2543,12 +2542,9 @@ const UNIMPLEMENTED_UPSTREAM_SHAPES: [&str; 54] = [
     "lin-doc",
     "lined-cylinder",
     "lined-document",
-    "manual-input",
     "paper-tape",
     "processes",
     "procs",
-    "sl-rect",
-    "sloped-rectangle",
     "st-doc",
     "st-rect",
     "stacked-document",

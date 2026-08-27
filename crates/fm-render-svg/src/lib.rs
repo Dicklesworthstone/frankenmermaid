@@ -11124,6 +11124,43 @@ fn render_node(
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
+        NodeShape::SlopedRect => {
+            // Top edge rises left-to-right: the left corner drops a third of the height, the right
+            // corner sits flush with the top.
+            let drop = h * fm_core::SLOPED_RECT_DROP_RATIO;
+            let path = PathBuilder::new()
+                .move_to(x, y + drop)
+                .line_to(x + w, y)
+                .line_to(x + w, y + h)
+                .line_to(x, y + h)
+                .close()
+                .build();
+            Element::path()
+                .d(&path)
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
+        NodeShape::HorizontalCylinder => {
+            // `Cylinder` rotated a quarter turn: the elliptical caps are on the LEFT and RIGHT ends,
+            // and the inner arc that suggests the near rim is on the left rather than the top.
+            let rx = w * 0.1;
+            let path = PathBuilder::new()
+                .move_to(x + rx, y)
+                .line_to(x + w - rx, y)
+                .arc_to(rx, h / 2.0, 0.0, false, true, x + w - rx, y + h)
+                .line_to(x + rx, y + h)
+                .arc_to(rx, h / 2.0, 0.0, false, true, x + rx, y)
+                .close()
+                .move_to(x + rx, y)
+                .arc_to(rx, h / 2.0, 0.0, false, false, x + rx, y + h)
+                .build();
+            Element::path()
+                .d(&path)
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
         NodeShape::DividedRect => {
             // Box plus a HORIZONTAL rule one sixth down, drawn as one path so the rule inherits the
             // shape's stroke. The vertical twin is `LinedRect`; keeping them distinct is the point.
@@ -13171,6 +13208,8 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
         NodeShape::FramedCircle => "fm-node-shape-framed-circle",
         NodeShape::FlippedTriangle => "fm-node-shape-flipped-triangle",
         NodeShape::NotchedPentagon => "fm-node-shape-notched-pentagon",
+        NodeShape::SlopedRect => "fm-node-shape-sloped-rect",
+        NodeShape::HorizontalCylinder => "fm-node-shape-horizontal-cylinder",
         NodeShape::Rect => "fm-node-shape-rect",
         NodeShape::Rounded => "fm-node-shape-rounded",
         NodeShape::Stadium => "fm-node-shape-stadium",

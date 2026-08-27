@@ -33,7 +33,8 @@ impl From<NodeShape> for GpuNodeShape {
             | NodeShape::NotchedRect
             | NodeShape::LinedRect
             | NodeShape::DividedRect
-            | NodeShape::NotchedPentagon => Self::Rect,
+            | NodeShape::NotchedPentagon
+            | NodeShape::HorizontalCylinder => Self::Rect,
             NodeShape::SmallCircle | NodeShape::FramedCircle => Self::Circle,
             NodeShape::Rounded | NodeShape::Stadium | NodeShape::Subroutine => Self::RoundedRect,
             NodeShape::Circle | NodeShape::FilledCircle | NodeShape::DoubleCircle => Self::Circle,
@@ -47,6 +48,7 @@ impl From<NodeShape> for GpuNodeShape {
             | NodeShape::InvParallelogram
             | NodeShape::Triangle
             | NodeShape::FlippedTriangle
+            | NodeShape::SlopedRect
             | NodeShape::Pentagon
             | NodeShape::Star
             | NodeShape::Cloud

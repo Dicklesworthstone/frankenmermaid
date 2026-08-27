@@ -38,6 +38,10 @@ pub fn draw_shape<C: Canvas2dContext>(
         // simplified one.
         NodeShape::NotchedPentagon => draw_rect(ctx, x, y, width, height, 0.0),
         NodeShape::FlippedTriangle => draw_flipped_triangle(ctx, x, y, width, height),
+        // The sloped top is drawable with the primitives canvas has; the horizontal cylinder
+        // reduces to its box, as the notched shapes do.
+        NodeShape::SlopedRect => draw_sloped_rect(ctx, x, y, width, height),
+        NodeShape::HorizontalCylinder => draw_rect(ctx, x, y, width, height, 0.0),
         NodeShape::Rect => draw_rect(ctx, x, y, width, height, 0.0),
         NodeShape::Rounded => draw_rect(ctx, x, y, width, height, 4.0),
         NodeShape::Stadium => draw_stadium(ctx, x, y, width, height),
@@ -335,6 +339,20 @@ fn draw_triangle<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64
 
     ctx.begin_path();
     ctx.move_to(cx, y);
+    ctx.line_to(x + w, y + h);
+    ctx.line_to(x, y + h);
+    ctx.close_path();
+    ctx.fill();
+    ctx.stroke();
+}
+
+/// Draw a rectangle whose top edge slopes up to the right — mermaid's `sl-rect` (bd-7ls21).
+fn draw_sloped_rect<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    let drop = h * f64::from(fm_core::SLOPED_RECT_DROP_RATIO);
+
+    ctx.begin_path();
+    ctx.move_to(x, y + drop);
+    ctx.line_to(x + w, y);
     ctx.line_to(x + w, y + h);
     ctx.line_to(x, y + h);
     ctx.close_path();
