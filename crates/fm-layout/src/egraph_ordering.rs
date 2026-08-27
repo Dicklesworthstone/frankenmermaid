@@ -457,22 +457,47 @@ impl FixedLayerCrossings {
 
         let mut seen = 0_usize;
         let mut inversions = 0_usize;
-        for window in self.offsets.windows(2) {
+        // ⚠️ THE FIRST GROUP'S QUERIES AND THE LAST GROUP'S UPDATES ARE DEAD, and both were being
+        // paid on every candidate ordering. This is the hottest loop in the worst incumbent ratio we
+        // have (the ER catalog job): `count` inlines into `optimize_layer_ordering`, which is 21.77%
+        // self on a 6,676-sample non-LTO profile, and `fenwick_sum`/`fenwick_add` are its top source
+        // lines (527/528/535/536/537).
+        //
+        //   * FIRST GROUP: `seen` is 0 and the tree is all zeros, so every term is `0 - 0`. The
+        //     queries cannot contribute an inversion, only `fenwick_sum`'s O(log n) walk.
+        //   * LAST GROUP: nothing queries the tree after it — the loop ends and the tree is cleared
+        //     — so its `fenwick_add` walks update numbers no one reads.
+        //
+        // This is work removal, not a heuristic: the counts are unchanged for every input, which is
+        // why the arms below are gated on byte-identical output rather than on a plausibility
+        // argument. The saving scales with group size, so it is largest exactly where the loop is
+        // hottest (few, fat groups) and merely free where it is not.
+        let group_count = self.offsets.len().saturating_sub(1);
+        for (index, window) in self.offsets.windows(2).enumerate() {
             let (Some(&start), Some(&end)) = (window.first(), window.get(1)) else {
                 continue;
             };
             let group = &self.grouped[start..end];
-            for &node_id in group {
-                let position = self.positions[node_id];
-                inversions += seen - fenwick_sum(&self.fenwick, position + 1);
+            if index > 0 {
+                for &node_id in group {
+                    let position = self.positions[node_id];
+                    inversions += seen - fenwick_sum(&self.fenwick, position + 1);
+                }
             }
-            for &node_id in group {
-                fenwick_add(&mut self.fenwick, self.positions[node_id] + 1);
+            if index + 1 < group_count {
+                for &node_id in group {
+                    fenwick_add(&mut self.fenwick, self.positions[node_id] + 1);
+                }
             }
             seen += group.len();
         }
 
-        self.fenwick.fill(0);
+        // Only groups before the last one wrote to the tree, so with fewer than two groups there is
+        // nothing to clear and the memset is skipped along with the updates that would have dirtied
+        // it.
+        if group_count > 1 {
+            self.fenwick.fill(0);
+        }
         inversions
     }
 }
