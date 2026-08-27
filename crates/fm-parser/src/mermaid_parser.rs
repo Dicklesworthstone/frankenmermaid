@@ -94,7 +94,7 @@ const SEQUENCE_OPERATORS: [(&str, ArrowType); 26] = [
 // prefix, so they must precede the bare `--` or it matches first and swallows the trailing marker
 // byte into the endpoint — which is exactly the bd-92b6 defect: `C3 o-- C4` matched `--` at the `-`,
 // leaving `C3 o` as the source and normalizing it into the phantom node `C3-o`.
-const CLASS_OPERATORS: [(&str, ArrowType); 13] = [
+const CLASS_OPERATORS: [(&str, ArrowType); 14] = [
     ("<|--", ArrowType::Inheritance),
     ("--|>", ArrowType::InheritanceReverse),
     // UML REALIZATION — `Impl ..|> Interface` / `Interface <|.. Impl`. No operator in this table
@@ -119,6 +119,15 @@ const CLASS_OPERATORS: [(&str, ArrowType); 13] = [
     ("<|..", ArrowType::Inheritance),
     ("..>", ArrowType::DottedArrow),
     ("<..", ArrowType::DottedArrow),
+    // UML ASSOCIATION POINTING LEFT — `A <-- B`. It was absent from this table, so the scan fell
+    // through to the bare `--` and produced `Line`: an association with NO ARROWHEAD, drawn
+    // identically to the plain `A -- B` link beside it. Two declared relationship forms, one
+    // picture — the defect bd-vfxu named for node shapes, in a class diagram's edges (bd-lfucm).
+    //
+    // ⚠️ IT IS THE MIRROR OF `-->`, NOT A NEW HEAD, so it maps to the same `Arrow` and is SWAPPED
+    // at the lowering site — exactly as `<..` is against `..>`. Mapping it to `Arrow` without the
+    // swap would point the head at B and say the opposite of what the author wrote.
+    ("<--", ArrowType::Arrow),
     ("o--", ArrowType::Aggregation),
     ("*--", ArrowType::Composition),
     ("--o", ArrowType::AggregationReverse),
@@ -4867,7 +4876,10 @@ fn parse_class_statements(line: &str, config: &ParserConfig) -> Option<Vec<Class
             // labels attached to the original ends would trade one wrong picture for another.
             let class_operator =
                 find_operator(edge_input, &CLASS_OPERATORS, CLASS_OP_GATE).map(|(_, op, _)| op);
-            let reversed_dependency = class_operator == Some("<..");
+            // `<..` and `<--` are the left-pointing spellings of `..>` and `-->`: same head, swapped
+            // endpoints. Adding `<--` here without the table entry above (or the reverse) leaves an
+            // association pointing the wrong way, which is worse than the missing head it replaces.
+            let reversed_dependency = matches!(class_operator, Some("<.." | "<--"));
             // UML REALIZATION is a DASHED line with a hollow triangle. bd-u9hcc gave `..|>`/`<|..`
             // the correct head and direction by mapping them onto Inheritance/InheritanceReverse,
             // and recorded the remaining loss honestly: without the dash a realization renders
