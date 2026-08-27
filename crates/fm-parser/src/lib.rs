@@ -2719,7 +2719,12 @@ mod tests {
                     "batch parse of input {index} disagrees with a full parse"
                 );
                 assert_eq!(actual.ir, &expected.ir);
-                eprintln!("PREFIX_REUSED={}", actual.reusable_prefix.is_some());
+                eprintln!(
+                    "PREFIX_REUSED={} batch={:?} full={:?}",
+                    actual.reusable_prefix.is_some(),
+                    actual.ir.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+                    expected.ir.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>()
+                );
             });
         }
     }
