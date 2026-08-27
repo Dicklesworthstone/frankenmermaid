@@ -4495,7 +4495,10 @@ fn parse_class_member(trimmed: &str) -> Option<fm_core::IrClassMember> {
             if after_paren.is_empty() {
                 (rest, None)
             } else {
-                (&rest[..=paren_end], Some(after_paren.to_string()))
+                (
+                    &rest[..=paren_end],
+                    Some(decode_mermaid_entities(after_paren)),
+                )
             }
         } else {
             (rest, None)
@@ -4504,7 +4507,13 @@ fn parse_class_member(trimmed: &str) -> Option<fm_core::IrClassMember> {
         (rest, None)
     };
 
-    let name = name_part.to_string();
+    // ⚠️ DECODED HERE, LIKE EVERY OTHER TEXT THE READER SEES (bd-rbwov). A member name is drawn in
+    // the class box, so `+x&amp;y` was showing the author the entity rather than the `&` it denotes
+    // — this path builds its text with a bare `to_string()` and never reached
+    // `decode_mermaid_entities`. The return type gets the same treatment: it is drawn beside the
+    // name, and leaving one of the pair encoded is the asymmetric-sibling shape this parser keeps
+    // producing.
+    let name = decode_mermaid_entities(name_part);
 
     let kind = if is_method {
         fm_core::ClassMemberKind::Method
@@ -5830,11 +5839,17 @@ fn parse_requirement(input: &str, builder: &mut IrBuilder) {
                 // surrounding double-quote pair so quoted sources render without literal
                 // quotes, matching mermaid.js.
                 let raw = trim_fast(rest);
-                let value = if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
-                    raw[1..raw.len() - 1].to_string()
-                } else {
-                    raw.to_string()
-                };
+                // ⚠️ AND DECODED (bd-rbwov). Every one of these fields is drawn in the requirement
+                // box, and this arm built them with a bare `to_string()`, so `text: x&amp;y` put the
+                // entity on screen. The decode goes after the quote strip, matching the order the
+                // shared label normalizer uses.
+                let value = decode_mermaid_entities(
+                    if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
+                        &raw[1..raw.len() - 1]
+                    } else {
+                        raw
+                    },
+                );
                 match field {
                     "id" => meta.req_id = Some(value),
                     "text" => meta.text = Some(value),
