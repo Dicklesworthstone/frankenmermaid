@@ -1,5 +1,36 @@
 # Negative Evidence Ledger — frankenmermaid perf swarm
 
+### REJECT: inline (small-vec) storage for `Attributes` — blocked by the CONSUMING builder, with the arithmetic (2026-08-27)
+
+- **This is the lever the previous entry pointed at**, so it gets a verdict rather than another
+  pointer: ~236,000 heap allocations per 20-rep pass exist purely to hold attribute vectors, and
+  inline storage would remove all of them.
+- **⚠️ CORRECTION TO THE PREVIOUS ENTRY: attributes per element is ~6.5, not 3.93.** The 3.93 figure
+  was `mean_idx`, the mean PUSH INDEX (a push onto a k-attribute element contributes 1..k, so the
+  mean index is (k+1)/2). The element count is `pushes * first_push_frac` = 1,540,000 * 0.1535 =
+  236,000, giving **1,540,000 / 236,000 = 6.5 attributes per element**, and (k+1)/2 = 3.93 gives
+  k = 6.9 independently. Sizing an inline array at 4 — which the mislabelled number invites — would
+  spill to the heap for most elements and buy nothing.
+- **Measured sizes:** `Attribute` = **48 bytes**, `AttributeValue` = 24, `Cow<'static, str>` = 24,
+  and `Attributes` itself is **24 bytes** today (exactly its `Vec`).
+- **Why it cannot pay in this API.** `Attributes` is a CONSUMING builder — every `set`/`class` takes
+  `mut self` and returns `Self` — so the struct is moved once per attribute. Inline capacity for the
+  observed maximum of 9 makes it 9*48 + 8 = **440 bytes**, and 1.54M builder steps per pass then move
+  440 bytes each (~678 MB) where they now move 24 (~37 MB). Against that, 236,000 allocations at a
+  few tens of instructions each is single-digit millions of instructions. The extra movement is the
+  larger term by roughly 2-4x even before accounting for the register pressure.
+- **The real blocker is the calling convention, not the storage.** Inline storage only pays once the
+  builder stops moving the struct per attribute — i.e. `&mut self` methods, or a sink that writes
+  attributes straight out. Those two changes have to move together; doing the smallvec half alone is
+  a predictable loss. That is the prerequisite to record, and it is a large API change across the
+  renderer's call sites.
+- **⚠️ METHOD NOTE: a frame-pointer profile is for ATTRIBUTION, not for self-time.** The
+  `-C force-frame-pointers=yes` build that made these call chains readable reports
+  `count_at_positions` at 20.59% where the ordinary non-LTO build reports 14.43% on the same corpus.
+  Pick targets from the normal build; use the fp build to find out who calls the leaf.
+- **Verdict: REJECT the smallvec conversion on its own.** Not attempted, because the arithmetic above
+  is decisive and the change is invasive; re-open it only together with a non-consuming builder.
+
 ### REJECT: presizing `Attributes`' vector — it never regrows, and the flowchart family never builds one (2026-08-27)
 
 - **The premise, and why it looked sound.** After f10740fd fixed the class-value growth,
