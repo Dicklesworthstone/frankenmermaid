@@ -2173,6 +2173,18 @@ pub struct IrCluster {
     /// permanently false and `fm-cluster-c4` applied to zero elements.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub c4_boundary_type: Option<String>,
+    /// Author-declared `classDef` names applied to this cluster via `class <subgraph> <name>`
+    /// (bd-6cdzy).
+    ///
+    /// ⚠️ THIS IS THE NAME, NOT THE PAINT, and the distinction is why the field is needed at all.
+    /// The resolved CSS already reaches the renderers as an `IrStyleTarget::Cluster` style ref
+    /// (bd-xfmm), so a styled subgraph is painted correctly without this. What was lost is the
+    /// name, which is the hook an author's OWN stylesheet targets — measured in Chromium 151
+    /// against the pinned mermaid 11.15.0 bundle, mermaid emits it on the cluster group
+    /// (`<g class="cluster hot">`) exactly as it does on a node (`<g class="node default hot">`).
+    /// Without it the same `classDef` reached nodes and not subgraphs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub classes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

@@ -1786,6 +1786,8 @@ impl IrBuilder {
             span,
             // Set afterwards by the C4 boundary path; an ordinary subgraph has no boundary type.
             c4_boundary_type: None,
+            // Filled afterwards by `add_class_to_cluster`, once `classDef`s are resolved (bd-6cdzy).
+            classes: Vec::new(),
         });
         self.ir.graph.clusters.push(IrGraphCluster {
             cluster_id: IrClusterId(cluster_index),
@@ -2188,6 +2190,27 @@ impl IrBuilder {
         self.mark_reusable_prefix_node_dirty(node_id);
         if let Some(node) = self.ir.nodes.get_mut(node_id.0) {
             node.classes.push(normalized_class.to_string());
+        }
+    }
+
+    /// Record a `classDef` name applied to a CLUSTER by `class <subgraph> <name>` (bd-6cdzy).
+    ///
+    /// The cluster twin of [`Self::add_class_to_node`], deduping the same way, because `class one
+    /// hot` twice must not emit the marker twice. Takes the cluster INDEX rather than a key: the
+    /// caller has already resolved it through `cluster_index_by_key`, and re-resolving here would be
+    /// a second lookup that could disagree with the one that produced the style ref.
+    pub(crate) fn add_class_to_cluster(&mut self, cluster_index: usize, class_name: &str) {
+        let normalized_class = trim_fast(class_name);
+        if normalized_class.is_empty() {
+            return;
+        }
+        if let Some(cluster) = self.ir.clusters.get_mut(cluster_index)
+            && !cluster
+                .classes
+                .iter()
+                .any(|existing| existing == normalized_class)
+        {
+            cluster.classes.push(normalized_class.to_string());
         }
     }
 

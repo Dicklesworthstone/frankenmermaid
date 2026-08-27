@@ -14812,6 +14812,12 @@ fn extract_style_directives(input: &str, builder: &mut IrBuilder) {
     for (cluster_index, class_name, span) in cluster_classes {
         if let Some(css) = builder.class_style_css(&class_name) {
             builder.push_style_ref(fm_core::IrStyleTarget::Cluster(cluster_index), css, span);
+            // ⚠️ AND THE NAME, WHICH THE CSS DOES NOT CARRY (bd-6cdzy). The style ref above paints
+            // the cluster; it says nothing about which `classDef` did it, so an author's own
+            // stylesheet targeting `.hot` reached nodes and not subgraphs. Recorded only on the
+            // resolving branch, matching the `else` below: a name no `classDef` declares is warned
+            // about and ignored, and emitting a marker for it would contradict that warning.
+            builder.add_class_to_cluster(cluster_index, &class_name);
         } else {
             builder.add_warning(format!(
                 "class directive references `{class_name}`, which no classDef declares; the class \

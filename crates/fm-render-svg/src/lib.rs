@@ -4870,6 +4870,12 @@ fn render_layout_to_svg(
                 config.rounded_corners
             })
             .class("fm-cluster");
+        // The author's own `classDef` names, as mermaid emits them on the cluster group (bd-6cdzy).
+        // Appended right after the base class and BEFORE `fm-cluster-c4`/`fm-cluster-swimlane`, so a
+        // structural class stays last exactly as it does on the node path.
+        for marker in cluster_user_class_markers(ir, cluster.cluster_index) {
+            rect = rect.class(&marker);
+        }
         // Resolved BEFORE the theme's fill-opacity, because whether the author declared a fill
         // decides whether that opacity applies at all.
         let (declared_cluster_style, declared_cluster_label_style) =
@@ -8183,6 +8189,55 @@ fn lookup_centrality_tier(
 /// Used only via the `common_node_fast` gate, which guarantees none of `render_node`'s conditional
 /// classes/children/post-processing apply, so this is the entire node. Skips four `Element` builds +
 /// their `Attributes` Vecs + `write_into` walks — the per-node construction is ~60% of wide render.
+/// The `fm-cluster-user-{sanitized}` marker classes for a cluster's author-declared `classDef` names
+/// (bd-6cdzy).
+///
+/// REFERENCE BEHAVIOR, measured in Chromium 151 against the pinned mermaid 11.15.0 bundle:
+///
+/// ```text
+///   class one hot          <g class="cluster hot">          <- subgraph
+///   class a   hot          <g class="node default hot">     <- node, for comparison
+///   (no class)             <g class="cluster">
+/// ```
+///
+/// The same `classDef` reached a node here and not a subgraph, so an author's own stylesheet
+/// targeting `.hot` applied to half their diagram.
+///
+/// ⚠️ TWO DELIBERATE DIFFERENCES FROM THE REFERENCE, both stated rather than silently taken.
+///
+/// First, the name is PREFIXED. mermaid emits the bare `hot`; this renderer namespaces every
+/// author-supplied class (`fm-node-user-hot` on nodes) so an author's class can never collide with a
+/// structural class like `fm-cluster-c4`. Matching mermaid's bare form on clusters while nodes stay
+/// prefixed would be a new asymmetry in place of the one being fixed.
+///
+/// Second, MULTIPLE CLASSES ARE SPACE-SEPARATED. Measured: `class one hot,big` makes mermaid emit
+/// `<g class="cluster hot,big">` — a single comma-joined token, which is not two CSS classes and
+/// matches neither `.hot` nor `.big`. Its own node path gets that right (`node default hot big`), so
+/// this is a defect on the cluster path rather than a convention to reproduce. One marker per class.
+///
+/// ⚠️ NO GENERATED CSS RULE STANDS BEHIND THESE, AND THAT IS CORRECT HERE. The node path emits
+/// `.fm-node-user-{slug} .fm-node-shape { … }` rules because the node's paint is delivered BY that
+/// rule. A cluster's paint arrives as an inline `style` attribute on the rect instead (bd-xfmm), so
+/// the marker carries no styling load — it exists solely as a hook for the author's own CSS, which
+/// is exactly what mermaid's bare class is for. This is therefore NOT the lib.rs:3320 defect, where
+/// a class was emitted that the renderer's own stylesheet was supposed to target and did not:
+/// `a_cluster_marker_class_is_not_load_bearing` pins that the paint survives without it.
+fn cluster_user_class_markers(ir: &MermaidDiagramIr, cluster_index: usize) -> Vec<String> {
+    let Some(cluster) = ir.clusters.get(cluster_index) else {
+        return Vec::new();
+    };
+    cluster
+        .classes
+        .iter()
+        .filter(|class| !class.is_empty())
+        .map(|class| {
+            let mut marker = String::from("fm-cluster-user-");
+            write_sanitized_css_token_into(&mut marker, class);
+            marker
+        })
+        .collect()
+}
+
 /// The ` fm-node-user-{sanitized}` class suffix the slow path appends for a node's custom classes, but
 /// ONLY when every class is "simple" — none triggers a state/border keyword (highlight/inactive/dashed/
 /// double) or a special class that changes the node's rendered fill/stroke/structure. Returns `None` when
