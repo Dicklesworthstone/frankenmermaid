@@ -220,6 +220,7 @@ pub fn describe_node(node: &IrNode, ir: &MermaidDiagramIr) -> String {
         fm_core::NodeShape::HalfRoundedRect => "half-rounded rectangle",
         fm_core::NodeShape::StackedDocument => "stacked documents",
         fm_core::NodeShape::StackedRect => "stacked rectangles",
+        fm_core::NodeShape::Bang => "starburst",
         fm_core::NodeShape::Rect => "rectangle",
         fm_core::NodeShape::Rounded => "rounded rectangle",
         fm_core::NodeShape::Stadium => "stadium shape",

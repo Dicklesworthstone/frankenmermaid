@@ -81,6 +81,10 @@ pub fn node_path(bounds: LayoutRect, shape: NodeShape) -> Vec<PathCmd> {
         NodeShape::NotchedPentagon => rounded_rect_path(bounds, 0.0),
         NodeShape::Pentagon => polygon_path(bounds, 5, -std::f32::consts::FRAC_PI_2),
         NodeShape::Star => star_path(bounds, 5),
+        // The burst is sparse like the bolt, so its own outline is the boundary rather than a box.
+        NodeShape::Bang => {
+            star_path_with_ratio(bounds, fm_core::BANG_POINTS, fm_core::BANG_INNER_RATIO)
+        }
         NodeShape::Cloud => cloud_path(bounds),
         NodeShape::Tag => tag_path(bounds),
         NodeShape::Subroutine => {
@@ -449,10 +453,19 @@ pub fn polygon_path(bounds: LayoutRect, sides: usize, angle_offset: f32) -> Vec<
 
 #[must_use]
 pub fn star_path(bounds: LayoutRect, points: usize) -> Vec<PathCmd> {
+    star_path_with_ratio(bounds, points, 0.4)
+}
+
+/// A star with an explicit inner-to-outer radius ratio.
+///
+/// Split out for `bang` (bd-7ls21), whose 0.616 makes a rounded burst where `Star`'s 0.4 makes a
+/// spiky one. `star_path` keeps its 0.4 so no existing shape moves.
+#[must_use]
+pub fn star_path_with_ratio(bounds: LayoutRect, points: usize, inner_ratio: f32) -> Vec<PathCmd> {
     let cx = bounds.x + (bounds.width / 2.0);
     let cy = bounds.y + (bounds.height / 2.0);
     let outer_r = bounds.width.min(bounds.height) / 2.0;
-    let inner_r = outer_r * 0.4;
+    let inner_r = outer_r * inner_ratio;
     let angle_offset = -std::f32::consts::FRAC_PI_2;
     let total_points = points * 2;
     let mut cmds = Vec::with_capacity(total_points + 1);

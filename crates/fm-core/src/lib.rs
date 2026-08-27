@@ -1314,6 +1314,18 @@ pub enum NodeShape {
     /// Same arrangement as [`NodeShape::StackedDocument`]: back copy top RIGHT, front bottom LEFT,
     /// each filled so the front occludes the back.
     StackedRect,
+    /// mermaid's `bang`: a starburst — a FOURTEEN-pointed star.
+    ///
+    /// ⚠️ THE POINT COUNT CAME FROM PITCH, NOT FROM COUNTING SPIKES. Sampling the rendered path at
+    /// 400 points in Chromium 151 against the pinned 11.15.0 bundle, bucketing radius-from-centre by
+    /// angle, and taking local maxima gives 14 lobes at a consistent pitch of ~25.7 degrees —
+    /// 360 / 14 = 25.71. Counting spikes off a coarse sample undercounts them, which is the mistake
+    /// `st-rect` taught.
+    ///
+    /// The inner radius is 0.616 of the outer (measured 38.79 against 62.99), against
+    /// [`NodeShape::Star`]'s much spikier 0.4 — a bang is a rounded burst, not a spiky star, and the
+    /// ratio is the whole difference between the two.
+    Bang,
 }
 
 /// Radius of [`NodeShape::SmallCircle`], in user units.
@@ -1354,6 +1366,14 @@ pub const SLOPED_RECT_DROP_RATIO: f32 = 1.0 / 3.0;
 /// Measured from mermaid 11.15.0's `tag-rect`: a 10.8 by 10.8 triangle on a box of height 54. Equal
 /// on both axes is what makes the fold read as a 45-degree turn-up rather than a slanted cut.
 pub const TAGGED_RECT_FOLD_RATIO: f32 = 0.2;
+
+/// Number of points on [`NodeShape::Bang`], and its inner-to-outer radius ratio.
+///
+/// Measured from mermaid 11.15.0's `bang`: 14 lobes at ~25.7 degree pitch, inner radius 38.79
+/// against an outer 62.99.
+pub const BANG_POINTS: usize = 14;
+/// See [`BANG_POINTS`].
+pub const BANG_INNER_RATIO: f32 = 0.616;
 
 /// Fraction of a node's width that slanted shapes inset their horizontal edges by.
 ///

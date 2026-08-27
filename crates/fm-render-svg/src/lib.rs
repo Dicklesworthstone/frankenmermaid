@@ -11143,6 +11143,30 @@ fn render_node(
                 .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
                 .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
         }
+        NodeShape::Bang => {
+            // 14 points at a 0.616 inner ratio — see `NodeShape::Bang` for how both were measured.
+            let outer_r = w.min(h) / 2.0;
+            let inner_r = outer_r * fm_core::BANG_INNER_RATIO;
+            let mut path = PathBuilder::new();
+            let total = fm_core::BANG_POINTS * 2;
+            for index in 0..total {
+                let r = if index % 2 == 0 { outer_r } else { inner_r };
+                let angle = -std::f32::consts::FRAC_PI_2
+                    + (index as f32) * std::f32::consts::PI / (fm_core::BANG_POINTS as f32);
+                let px = cx + r * angle.cos();
+                let py = cy + r * angle.sin();
+                if index == 0 {
+                    path = path.move_to(px, py);
+                } else {
+                    path = path.line_to(px, py);
+                }
+            }
+            Element::path()
+                .d(&path.close().build())
+                .fill(&colors.node_fill)
+                .stroke_unless_embedded_css(&colors.node_stroke, config.embed_theme_css)
+                .stroke_width_unless_embedded_css(1.6, config.embed_theme_css)
+        }
         NodeShape::StackedRect => {
             // Three plain rectangles, offsets 5/50.67 and 5/64 of the measured stacked bbox. Same
             // back-to-front order and fill requirement as `StackedDocument`.
@@ -13417,6 +13441,7 @@ const fn node_shape_css_class(shape: fm_core::NodeShape) -> &'static str {
         NodeShape::HalfRoundedRect => "fm-node-shape-half-rounded-rect",
         NodeShape::StackedDocument => "fm-node-shape-stacked-document",
         NodeShape::StackedRect => "fm-node-shape-stacked-rect",
+        NodeShape::Bang => "fm-node-shape-bang",
         NodeShape::Rect => "fm-node-shape-rect",
         NodeShape::Rounded => "fm-node-shape-rounded",
         NodeShape::Stadium => "fm-node-shape-stadium",

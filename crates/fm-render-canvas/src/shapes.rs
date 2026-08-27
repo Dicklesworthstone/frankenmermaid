@@ -54,6 +54,7 @@ pub fn draw_shape<C: Canvas2dContext>(
         NodeShape::HalfRoundedRect => draw_half_rounded_rect(ctx, x, y, width, height),
         NodeShape::StackedDocument => draw_stacked_document(ctx, x, y, width, height),
         NodeShape::StackedRect => draw_stacked_rect(ctx, x, y, width, height),
+        NodeShape::Bang => draw_bang(ctx, x, y, width, height),
         NodeShape::Rect => draw_rect(ctx, x, y, width, height, 0.0),
         NodeShape::Rounded => draw_rect(ctx, x, y, width, height, 4.0),
         NodeShape::Stadium => draw_stadium(ctx, x, y, width, height),
@@ -353,6 +354,33 @@ fn draw_triangle<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64
     ctx.move_to(cx, y);
     ctx.line_to(x + w, y + h);
     ctx.line_to(x, y + h);
+    ctx.close_path();
+    ctx.fill();
+    ctx.stroke();
+}
+
+/// Draw a 14-pointed starburst — mermaid's `bang` (bd-7ls21).
+///
+/// Point count and inner ratio both measured; see `NodeShape::Bang`.
+fn draw_bang<C: Canvas2dContext>(ctx: &mut C, x: f64, y: f64, w: f64, h: f64) {
+    let cx = x + w / 2.0;
+    let cy = y + h / 2.0;
+    let outer_r = w.min(h) / 2.0;
+    let inner_r = outer_r * f64::from(fm_core::BANG_INNER_RATIO);
+    let total = fm_core::BANG_POINTS * 2;
+
+    ctx.begin_path();
+    for index in 0..total {
+        let r = if index % 2 == 0 { outer_r } else { inner_r };
+        let angle = -PI / 2.0 + (index as f64) * PI / (fm_core::BANG_POINTS as f64);
+        let px = cx + r * angle.cos();
+        let py = cy + r * angle.sin();
+        if index == 0 {
+            ctx.move_to(px, py);
+        } else {
+            ctx.line_to(px, py);
+        }
+    }
     ctx.close_path();
     ctx.fill();
     ctx.stroke();

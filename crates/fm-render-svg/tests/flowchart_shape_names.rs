@@ -177,7 +177,7 @@ fn a_real_but_unbuilt_shape_name_is_not_called_a_typo() {
         "text",
         "brace",
         "curv-trap",
-        "bang",
+        "bow-rect",
     ] {
         let warning = warning_for(name);
         assert!(

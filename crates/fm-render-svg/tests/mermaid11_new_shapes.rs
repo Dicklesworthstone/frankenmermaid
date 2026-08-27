@@ -233,6 +233,44 @@ fn each_new_shape_draws_its_measured_silhouette() {
             silhouette(&stacked_rect)
         );
     }
+
+    // 14 points alternating outer/inner => 28 line segments after the initial move.
+    let burst = render("bang");
+    assert_eq!(
+        burst.matches(" L").count(),
+        28,
+        "bang is not a 14-point star: {}",
+        silhouette(&burst)
+    );
+}
+
+/// ⚠️ THE BURST'S POINT COUNT AND ITS INNER RATIO BOTH CARRY THE SHAPE.
+///
+/// 14 points at a 0.616 inner radius reads as a rounded burst; the same 14 points at `Star`'s 0.4
+/// reads as a spiky star, and 5 points at 0.616 reads as a blob. Either mistake leaves a closed
+/// star-ish polygon that is not a rectangle, so this bead's differs-from-Rect rule passes on both.
+/// The count is asserted above; this pins that the burst is NOT our existing `Star`.
+#[test]
+fn the_bang_is_not_the_five_pointed_star() {
+    let burst = render("bang");
+    let star =
+        fm_render_svg::render_svg(&fm_parser::parse("flowchart TD\n  A@{ shape: star }\n").ir);
+    assert_eq!(
+        burst.matches(" L").count(),
+        28,
+        "the burst lost its 14 points: {}",
+        silhouette(&burst)
+    );
+    assert_ne!(
+        silhouette(&burst),
+        silhouette(&star),
+        "the bang renders identically to the five-pointed star"
+    );
+    assert_ne!(
+        silhouette(&burst),
+        silhouette(&render("rect")),
+        "the bang renders identically to a rectangle"
+    );
 }
 
 /// ⚠️ THE STACKED RECTANGLE IS THREE CARDS, AND THE COUNT CAME FROM COORDINATES.
@@ -647,6 +685,7 @@ fn the_new_shapes_differ_from_a_rectangle_and_from_each_other() {
         "delay",
         "docs",
         "st-rect",
+        "bang",
     ] {
         let sig = silhouette(&render(shape));
         assert!(!sig.is_empty(), "{shape} drew no geometry at all");
@@ -698,6 +737,7 @@ fn every_published_alias_draws_the_same_shape() {
         ("docs", &["documents", "st-doc", "stacked-document"]),
         ("st-rect", &["procs", "processes", "stacked-rectangle"]),
     ];
+    // `bang` publishes only its own name, so it has no alias row.
     for (short, aliases) in groups {
         let expected = silhouette(&render(short));
         for alias in aliases {
@@ -758,6 +798,7 @@ fn implemented_names_stop_warning_and_others_do_not() {
         "stacked-document",
         "st-rect",
         "processes",
+        "bang",
     ] {
         assert!(
             warnings(name).is_empty(),
@@ -771,7 +812,7 @@ fn implemented_names_stop_warning_and_others_do_not() {
     // bd-7ls21, and therefore never going to be implemented here. Every other name in this list has
     // had to be swapped out the moment someone implemented it, three lists at a time; these two
     // cannot be. The third entry rotates and is expected to churn.
-    for name in ["win-pane", "datastore", "hourglass", "bang"] {
+    for name in ["win-pane", "datastore", "hourglass", "bow-rect"] {
         assert!(
             !warnings(name).is_empty(),
             "`{name}` is still unimplemented and must still warn"
@@ -824,6 +865,7 @@ fn each_new_shape_has_an_accessible_description() {
         ("delay", "half-rounded rectangle"),
         ("docs", "stacked documents"),
         ("st-rect", "stacked rectangles"),
+        ("bang", "starburst"),
     ] {
         assert!(
             render(shape).contains(want),
